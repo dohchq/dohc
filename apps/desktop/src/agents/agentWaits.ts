@@ -34,10 +34,13 @@ export function createAgentWaits(onChange: (agentIds: string[]) => void, holdMs 
           onChange(listening());
           return;
         }
-        holds.set(agentId, setTimeout(() => {
-          holds.delete(agentId);
-          onChange(listening());
-        }, holdMs));
+        holds.set(
+          agentId,
+          setTimeout(() => {
+            holds.delete(agentId);
+            onChange(listening());
+          }, holdMs),
+        );
       };
     },
   };

@@ -5,10 +5,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../../src/workspaces/workspaceSettings";
 import { canonicalWorkspaceRoot } from "../../src/workspaces/createWorkspaceFolder";
-import {
-  createTestScratch,
-  removeTestScratch,
-} from "../../src/workspaces/testTemp";
+import { createTestScratch, removeTestScratch } from "../../src/workspaces/testTemp";
 import { waitForPaintedFrames } from "./desktopApp";
 
 export interface TempWorkspace {
@@ -114,11 +111,9 @@ export async function seedWorkspaceSettings(
   const dir = join(workspace.rootPath, ".dohc", "local");
   await mkdir(dir, { recursive: true });
   // dohc reads a settings file only if no other user can write it.
-  await writeFile(
-    join(dir, "settings.local.json"),
-    `${JSON.stringify(settings, null, 2)}\n`,
-    { mode: 0o600 },
-  );
+  await writeFile(join(dir, "settings.local.json"), `${JSON.stringify(settings, null, 2)}\n`, {
+    mode: 0o600,
+  });
 }
 
 // Seeds.dohc/manifest.json with a known workspace id before launch so a
@@ -138,11 +133,7 @@ export async function seedWorkspaceManifest(
   await mkdir(dir, { recursive: true });
   await writeFile(
     join(dir, "manifest.json"),
-    `${JSON.stringify(
-      { version: 1, workspaceId, ...SEEDED_WORKSPACE_SHAPE },
-      null,
-      2,
-    )}\n`,
+    `${JSON.stringify({ version: 1, workspaceId, ...SEEDED_WORKSPACE_SHAPE }, null, 2)}\n`,
   );
 }
 
@@ -160,7 +151,7 @@ export async function createSiblingWorkspaceDir(
 // Pre-seeds the hermetic registry (dohc-workspaces.json under the test home)
 // so the app launches with multiple known workspaces and the titlebar
 // switcher can move between them. An entry's optional `remote` marks the
-// workspace as cloud-synced (the 0P sync specs seed it so the relay engine
+// workspace as cloud-synced (the sync specs seed it so the relay engine
 // attaches at open without driving the enable-sync UI, which has its own
 // coverage).
 export async function seedWorkspaceRegistry(
@@ -253,9 +244,7 @@ function cssString(value: string): string {
 }
 
 export function explorerRow(page: Page, path: string) {
-  return page.locator(
-    `[data-testid="tree-row"][data-path=${cssString(path)}]`,
-  );
+  return page.locator(`[data-testid="tree-row"][data-path=${cssString(path)}]`);
 }
 
 /**
@@ -265,20 +254,23 @@ export function explorerRow(page: Page, path: string) {
  */
 export async function openRecordAsPage(page: Page, name: string): Promise<void> {
   await page.getByRole("button", { name: `Open ${name}`, exact: true }).click();
-  await page.getByTestId("collection-record-panel").getByRole("button", { name: "Open as page", exact: true }).click();
+  await page
+    .getByTestId("collection-record-panel")
+    .getByRole("button", { name: "Open as page", exact: true })
+    .click();
 }
 
 export async function waitForWorkspaceReady(page: Page): Promise<void> {
-  await expect(page.getByTestId("workspace-shell")).toHaveAttribute(
-    "data-ready",
-    "true",
-  );
+  await expect(page.getByTestId("workspace-shell")).toHaveAttribute("data-ready", "true");
 }
 
 // An opened folder starts in Restricted Mode, where dohc starts no agent and
 // runs no app code. This trusts it the way a person does: Restricted Mode in
 // the title bar, then Trust workspace in main's dialog, answered here.
-export async function trustOpenWorkspace(desktop: { app: ElectronApplication; page: Page }): Promise<void> {
+export async function trustOpenWorkspace(desktop: {
+  app: ElectronApplication;
+  page: Page;
+}): Promise<void> {
   await desktop.app.evaluate(({ dialog }) => {
     const ask = dialog.showMessageBox;
     dialog.showMessageBox = (async () => {
@@ -295,7 +287,12 @@ export async function trustOpenWorkspace(desktop: { app: ElectronApplication; pa
 // Collections, as a workspace from before dohc kept that record does. The
 // test keeps them on this desktop, as its person would, before using them.
 export async function keepCollectionsHere(page: Page, workspaceId: string): Promise<void> {
-  expect(await page.evaluate(id => window.dohcDesktop!.keepCollectionsHere({ workspaceId: id }), workspaceId)).toEqual({ kept: true });
+  expect(
+    await page.evaluate(
+      (id) => window.dohcDesktop!.keepCollectionsHere({ workspaceId: id }),
+      workspaceId,
+    ),
+  ).toEqual({ kept: true });
 }
 
 export async function openWorkspaceFromFirstRun(
@@ -303,7 +300,9 @@ export async function openWorkspaceFromFirstRun(
   workspace: Pick<TempWorkspace, "rootPath">,
 ): Promise<WorkspaceSummary> {
   const shell = page.getByTestId("workspace-shell");
-  const openFolder = page.getByTestId("workspace-manager").getByRole("button", { name: "Open folder", exact: true });
+  const openFolder = page
+    .getByTestId("workspace-manager")
+    .getByRole("button", { name: "Open folder", exact: true });
   let surface: "shell" | "first-run";
   try {
     surface = await Promise.race([
@@ -341,37 +340,29 @@ export async function showExplorerFiles(page: Page): Promise<void> {
   await expect(files).toHaveAttribute("aria-selected", "true");
 }
 
-/** Switches the Explorer to Home, where Pinned, Pages, Collections and Apps live. */
+/** Switches the Explorer to Home, where Apps, Pinned, Pages and Collections live. */
 export async function openExplorerHome(page: Page): Promise<void> {
   await openExplorerView(page);
   await page.getByTestId("explorer-mode-home").click();
   await expect(page.getByTestId("explorer-home")).toBeVisible();
 }
 
-export async function activeWorkspace(
-  page: Page,
-  rootPath: string,
-): Promise<WorkspaceSummary> {
+export async function activeWorkspace(page: Page, rootPath: string): Promise<WorkspaceSummary> {
   // The registry stores a workspace by its real path in the app's forward-slash
   // form. Scratch roots can lead through links (macOS /tmp, Windows 8.3 names).
   const expected = canonicalWorkspaceRoot(rootPath);
-  const workspace = await page.waitForFunction(
-    async (expectedRootPath) => {
-      const api = (window as unknown as {
+  const workspace = await page.waitForFunction(async (expectedRootPath) => {
+    const api = (
+      window as unknown as {
         dohcDesktop?: {
           getWorkspaceRegistry(): Promise<{ workspaces: WorkspaceSummary[] }>;
         };
-      }).dohcDesktop;
-      if (!api) return null;
-      const registry = await api.getWorkspaceRegistry();
-      return (
-        registry.workspaces.find(
-          (entry) => entry.rootPath === expectedRootPath,
-        ) ?? null
-      );
-    },
-    expected,
-  );
+      }
+    ).dohcDesktop;
+    if (!api) return null;
+    const registry = await api.getWorkspaceRegistry();
+    return registry.workspaces.find((entry) => entry.rootPath === expectedRootPath) ?? null;
+  }, expected);
   const value = await workspace.jsonValue();
   if (!value) throw new Error(`Workspace was not registered: ${rootPath}`);
   return value;
@@ -385,14 +376,16 @@ export async function waitForWorkspaceFile(
   assertSafeRelativePath(path);
   await page.waitForFunction(
     async ({ expectedPath, id }) => {
-      const api = (window as unknown as {
-        dohcDesktop?: {
-          listWorkspaceFiles(payload: { workspaceId: string }): Promise<{
-            files: Array<{ path: string }>;
-            folders?: string[];
-          }>;
-        };
-      }).dohcDesktop;
+      const api = (
+        window as unknown as {
+          dohcDesktop?: {
+            listWorkspaceFiles(payload: { workspaceId: string }): Promise<{
+              files: Array<{ path: string }>;
+              folders?: string[];
+            }>;
+          };
+        }
+      ).dohcDesktop;
       if (!api) return false;
       const result = await api.listWorkspaceFiles({ workspaceId: id });
       return (
@@ -413,13 +406,15 @@ export async function waitForFileObjectId(
 ): Promise<void> {
   await page.waitForFunction(
     async ({ id, filePath }) => {
-      const api = (window as unknown as {
-        dohcDesktop?: {
-          listFileChats(payload: { workspaceId: string; path: string }): Promise<{
-            fileObjectId: string | null;
-          }>;
-        };
-      }).dohcDesktop;
+      const api = (
+        window as unknown as {
+          dohcDesktop?: {
+            listFileChats(payload: { workspaceId: string; path: string }): Promise<{
+              fileObjectId: string | null;
+            }>;
+          };
+        }
+      ).dohcDesktop;
       if (!api) return false;
       const result = await api.listFileChats({ workspaceId: id, path: filePath });
       return result.fileObjectId !== null;
@@ -430,15 +425,10 @@ export async function waitForFileObjectId(
 
 function ancestorsOf(path: string): string[] {
   const segments = path.split("/");
-  return segments
-    .slice(0, -1)
-    .map((_, index) => segments.slice(0, index + 1).join("/"));
+  return segments.slice(0, -1).map((_, index) => segments.slice(0, index + 1).join("/"));
 }
 
-export async function revealExplorerPath(
-  page: Page,
-  path: string,
-): Promise<void> {
+export async function revealExplorerPath(page: Page, path: string): Promise<void> {
   assertSafeRelativePath(path);
   await openExplorerView(page);
   await showExplorerFiles(page);
@@ -498,9 +488,6 @@ export async function openChatsView(page: Page): Promise<Locator> {
   return panel;
 }
 
-export async function expectVisibleContent(
-  page: Page,
-  text: string | RegExp,
-): Promise<void> {
+export async function expectVisibleContent(page: Page, text: string | RegExp): Promise<void> {
   await expect(page.getByText(text).first()).toBeVisible();
 }

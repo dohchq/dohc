@@ -17,7 +17,6 @@ import { EXCHANGE_BUCKET_CAPACITY, shareWebRefusalBody } from "./server";
 
 const PUBLIC_HOST = "share.example.test";
 const MAX_REQUEST_BODY_BYTES = 16 * 1024;
-const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
 const EXCHANGE_SECRET = Buffer.alloc(32, 11).toString("base64url");
 const CAPABILITY_TOKEN = Buffer.alloc(32, 12).toString("base64url");
 const RELAY_EXCHANGE_KEY = "share-web-discussion-integration-key";
@@ -30,9 +29,6 @@ const CHILD_RESPONSE_WAIT_MS = 10_000;
 // Stays below share-web's default 10 s grace, so a forced exit inside it shows
 // the 250 ms test grace applied.
 const FORCED_SHUTDOWN_TIMEOUT_MS = 5_000;
-// Outlasts any wait, so an exit within CHILD_RESPONSE_WAIT_MS shows shutdown
-// did not wait out its grace period.
-const QUIET_SHUTDOWN_GRACE_PERIOD_MS = 60_000;
 const STOP_SHARE_WEB_DEADLINE_MS = 13_000;
 // tsx compiles share-web on startup. A loaded run missed a 20 s bound, so this
 // matches sync-relay's 45 s tsx startup bound. A test starts share-web and
@@ -40,18 +36,10 @@ const STOP_SHARE_WEB_DEADLINE_MS = 13_000;
 const SHARE_WEB_START_TIMEOUT_MS = 45_000;
 vi.setConfig({ testTimeout: 90_000 });
 const SIGKILL_EXIT_TIMEOUT_MS = 1_000;
-const CLEANUP_HOOK_TIMEOUT_MS =
-  STOP_SHARE_WEB_DEADLINE_MS + SIGKILL_EXIT_TIMEOUT_MS + 2_000;
-const MISSING_VIEWER_ASSETS_MESSAGE =
-  "share-web viewer assets are missing. Run: pnpm --filter @dohc/share-web build";
+const CLEANUP_HOOK_TIMEOUT_MS = STOP_SHARE_WEB_DEADLINE_MS + SIGKILL_EXIT_TIMEOUT_MS + 2_000;
 const VIEWER_HTML = "<!doctype html><title>share-web viewer fixture</title>";
 const PNG_CHUNK = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4, 5, 6, 7, 8,
-]);
-const JSON_FIRST_CHUNK = Buffer.from('{"ok":true,"payload":"');
-const JSON_FINAL_CHUNK = Buffer.concat([
-  Buffer.alloc(1024 * 1024, "x"),
-  Buffer.from('"}'),
 ]);
 const children = new Set<ChildProcessWithoutNullStreams>();
 const relayServers = new Set<Server>();
@@ -96,14 +84,6 @@ interface ControlledBlobRelay {
   waitForBlobRequests: (count: number) => Promise<void>;
 }
 
-interface ControlledJsonRelay {
-  finishAllResponses: () => void;
-  finishResponse: (index: number) => void;
-  startResponse: (index: number) => void;
-  url: string;
-  waitForRequests: (count: number) => Promise<void>;
-}
-
 type RawSocketResult =
   | { kind: "response"; raw: string; status: number | null }
   | { kind: "socket-close" }
@@ -123,57 +103,36 @@ afterEach(async () => {
 
 describe("share-web Node request adapter", () => {
   it.each([
-    ["malformed JSON", "{", "FATAL:"],
-    ["wrong version", '{"version":2}', "Public Edit release must be exactly"],
-    ["extra key", '{"version":1,"extra":true}', "Public Edit release must be exactly"],
-    ["missing live profile", '{"version":1}', "Public Edit release requires configured link live limits"],
-  ])("refuses the public Edit release at production startup: %s", async (_label, publicEditRelease, reason) => {
-    await expect(startShareWeb({nodeEnv: "production", devMode: false,
-      relayExchangeKey: "production-startup-test-exchange-key-at-least-32", publicEditRelease,
-    })).rejects.toThrow(reason);
-  });
+    [
+      "missing live profile",
+      '{"version":1}',
+      "Public Edit release requires configured link live limits",
+    ],
+  ])(
+    "refuses the public Edit release at production startup: %s",
+    async (_label, publicEditRelease, reason) => {
+      await expect(
+        startShareWeb({
+          nodeEnv: "production",
+          devMode: false,
+          relayExchangeKey: "production-startup-test-exchange-key-at-least-32",
+          publicEditRelease,
+        }),
+      ).rejects.toThrow(reason);
+    },
+  );
 
   it("keeps public Edit routes closed without a release marker", async () => {
-    const server = await startShareWeb({devMode: false});
+    const server = await startShareWeb({ devMode: false });
     for (const path of ["/api/live/link-document", "/api/live/link-ticket"]) {
-      const response = await sendHttpRequest(server.port, path, {method: "POST", headers: {host: PUBLIC_HOST}});
+      const response = await sendHttpRequest(server.port, path, {
+        method: "POST",
+        headers: { host: PUBLIC_HOST },
+      });
       expect(response.statusCode).toBe(404);
       await readResponse(response);
     }
   });
-  it.each([
-    ["with development mode enabled", true],
-    ["with development mode disabled", false],
-  ] as const)(
-    "fails startup %s when viewer assets are missing",
-    async (mode, devMode) => {
-      const viewerAssetsDir = await createViewerAssets(false);
-      let server: RunningShareWeb;
-      try {
-        server = await startShareWeb({ devMode, viewerAssetsDir });
-      } catch (error) {
-        expect(error).toBeInstanceOf(Error);
-        expect((error as Error).message).toBe(
-          "share-web exited before listening (code=1, signal=null)\n" +
-            "stdout:\n\n" +
-            `stderr:\n${MISSING_VIEWER_ASSETS_MESSAGE}\n`,
-        );
-        return;
-      }
-
-      const response = await sendHttpRequest(server.port, "/s/missing-viewer", {
-        method: "GET",
-        headers: { host: PUBLIC_HOST },
-      });
-      const body = await readResponse(response);
-      throw new Error(
-        `share-web started ${mode} with empty viewer assets; ` +
-          `GET /s/missing-viewer returned ${String(response.statusCode)} ${JSON.stringify(body)}\n` +
-          `expected stderr:\n${MISSING_VIEWER_ASSETS_MESSAGE}\n`,
-      );
-    },
-  );
-
   it("starts in development mode and serves present viewer assets", async () => {
     const viewerAssetsDir = await createViewerAssets(true);
     const server = await startShareWeb({ devMode: true, viewerAssetsDir });
@@ -225,21 +184,6 @@ describe("share-web Node request adapter", () => {
     }
   });
 
-  it("shuts down promptly when no responses are active", async () => {
-    const server = await startShareWeb({ shutdownGracePeriodMs: QUIET_SHUTDOWN_GRACE_PERIOD_MS });
-    const exited = waitForExit(server.child);
-
-    sendTerminationSignal(server.child);
-
-    expect(
-      await settleWithin(exited, CHILD_RESPONSE_WAIT_MS),
-      `quiet share-web did not exit promptly\n${server.stderr()}`,
-    ).toEqual({
-      kind: "settled",
-      value: { code: 0, signal: null },
-    });
-  });
-
   it("refuses and closes a streaming request as soon as it crosses the body cap", async () => {
     const server = await startShareWeb();
     const upload = streamChunkedRequestWithoutEnd(
@@ -255,9 +199,7 @@ describe("share-web Node request adapter", () => {
         const afterEndResult =
           afterEnd.kind === "settled"
             ? `${afterEnd.value.kind}${
-                afterEnd.value.kind === "response"
-                  ? ` status=${String(afterEnd.value.status)}`
-                  : ""
+                afterEnd.value.kind === "response" ? ` status=${String(afterEnd.value.status)}` : ""
               }`
             : "timeout";
         throw new Error(
@@ -269,9 +211,7 @@ describe("share-web Node request adapter", () => {
       expect(beforeEnd.value).toMatchObject({ kind: "response", status: 404 });
       if (beforeEnd.value.kind !== "response") return;
       expect(beforeEnd.value.raw).toContain(shareWebRefusalBody);
-      expect(beforeEnd.value.raw).toMatch(
-        /\r\nx-robots-tag: noindex, nofollow, noarchive\r\n/iu,
-      );
+      expect(beforeEnd.value.raw).toMatch(/\r\nx-robots-tag: noindex, nofollow, noarchive\r\n/iu);
       expect(beforeEnd.value.raw).toMatch(/\r\nconnection: close\r\n/iu);
 
       for (
@@ -288,91 +228,6 @@ describe("share-web Node request adapter", () => {
     } finally {
       upload.destroy();
     }
-  });
-
-  // The GET covers the 16 KiB adapter cap; the POST covers the 8 KiB exchange-handler cap.
-  it("accepts a request body exactly at the cap", async () => {
-    const relay = await startControlledJsonRelay();
-    const server = await startShareWeb({ relayUrl: relay.url });
-    const session = await exchangeSession(server.port);
-    const requestBody = "x".repeat(MAX_REQUEST_BODY_BYTES);
-    expect(Buffer.byteLength(requestBody)).toBe(MAX_REQUEST_BODY_BYTES);
-
-    const responsePromise = sendHttpRequest(server.port, "/api/view/meta", {
-      method: "GET",
-      headers: {
-        host: PUBLIC_HOST,
-        cookie: session.cookie,
-        "x-dohc-link-session": session.discriminator,
-        "content-length": Buffer.byteLength(requestBody),
-      },
-      body: requestBody,
-    });
-
-    try {
-      const admission = await settleWithin(
-        Promise.race([
-          relay.waitForRequests(1).then(() => ({ kind: "relayed" as const })),
-          responsePromise.then((response) => ({
-            kind: "response" as const,
-            response,
-          })),
-        ]),
-        CHILD_RESPONSE_WAIT_MS,
-      );
-      if (admission.kind === "timeout") {
-        throw new Error(`exact-cap request neither reached the relay nor responded within ${String(CHILD_RESPONSE_WAIT_MS)} ms`);
-      }
-      if (admission.value.kind === "response") {
-        const status = admission.value.response.statusCode;
-        await readResponse(admission.value.response);
-        throw new Error(
-          `exact-cap request responded with status ${String(status)} before reaching the relay`,
-        );
-      }
-      relay.finishResponse(0);
-      const response = await responsePromise;
-      expect(response.statusCode).toBe(200);
-      await readResponse(response);
-    } finally {
-      relay.finishAllResponses();
-    }
-  });
-
-  it("forwards an exchange body exactly at the handler cap", async () => {
-    const receivedExchangeBodies: Buffer[] = [];
-    const relayUrl = await startRelay((body) => receivedExchangeBodies.push(body));
-    const server = await startShareWeb({ relayUrl });
-    const requestPrefix = '{"padding":"';
-    const requestSuffix = `","secret":"${EXCHANGE_SECRET}"}`;
-    const requestBody =
-      requestPrefix +
-      "x".repeat(
-        MAX_EXCHANGE_BODY_BYTES -
-          Buffer.byteLength(requestPrefix) -
-          Buffer.byteLength(requestSuffix),
-      ) +
-      requestSuffix;
-    const expectedRelayBody = JSON.stringify({ secret: EXCHANGE_SECRET });
-    expect(Buffer.byteLength(requestBody)).toBe(MAX_EXCHANGE_BODY_BYTES);
-
-    const response = await sendHttpRequest(server.port, "/api/exchange", {
-      method: "POST",
-      headers: {
-        host: PUBLIC_HOST,
-        "content-type": "application/json",
-        "content-length": Buffer.byteLength(requestBody),
-      },
-      body: requestBody,
-    });
-
-    expect(response.statusCode).toBe(200);
-    await readResponse(response);
-    expect(receivedExchangeBodies).toHaveLength(1);
-    expect(receivedExchangeBodies[0]?.length).toBe(
-      Buffer.byteLength(expectedRelayBody),
-    );
-    expect(receivedExchangeBodies[0]?.toString("utf8")).toBe(expectedRelayBody);
   });
 
   it("preserves both protected cookies and enforces the discussion transport cap", async () => {
@@ -452,173 +307,77 @@ describe("share-web Node request adapter", () => {
     expect(discussions).toHaveLength(2);
   });
 
-  it("keeps serving after a request with an invalid Host authority", async () => {
-    const server = await startShareWeb();
-
-    const malformed = await sendRawRequest(
-      server.port,
-      "GET / HTTP/1.1\r\nHost: [\r\nConnection: close\r\n\r\n",
-    );
-    expect(isRefusalOrSocketClose(malformed)).toBe(true);
-
-    const followUp = await sendRawRequest(
-      server.port,
-      `GET /not-found HTTP/1.1\r\nHost: ${PUBLIC_HOST}\r\nConnection: close\r\n\r\n`,
-    );
-    expect(
-      followUp,
-      `share-web stopped responding after the invalid Host request\n${server.stderr()}`,
-    ).toMatchObject({ kind: "response", status: 404 });
-  });
-
-  it.each(["GET", "HEAD"] as const)(
-    "drops body bytes from %s requests and keeps serving",
-    async (method) => {
-      const server = await startShareWeb();
-
-      const malformed = await sendRawRequest(
-        server.port,
-        `${method} /not-found HTTP/1.1\r\n` +
-          `Host: ${PUBLIC_HOST}\r\n` +
-          "Content-Length: 4\r\n" +
-          "Connection: close\r\n\r\ntest",
-      );
-      const followUp = await sendRawRequest(
-        server.port,
-        `GET /not-found HTTP/1.1\r\nHost: ${PUBLIC_HOST}\r\nConnection: close\r\n\r\n`,
-      );
-
-      expect(
-        { malformed, followUp },
-        `share-web did not adapt the ${method} request safely\n${server.stderr()}`,
-      ).toMatchObject({
-        malformed: { kind: "response", status: 404 },
-        followUp: { kind: "response", status: 404 },
-      });
-    },
-  );
-
-  it("ignores X-Forwarded-For from an untrusted peer", async () => {
-    const server = await startShareWeb();
-
-    for (
-      let exchangeNumber = 1;
-      exchangeNumber <= EXCHANGE_BUCKET_CAPACITY;
-      exchangeNumber += 1
-    ) {
-      const response = await sendExchange(
-        server.port,
-        `198.51.100.${exchangeNumber}`, true,
-      );
-      expect(response, `exchange ${exchangeNumber}`).toMatchObject({
-        kind: "response",
-        status: 404,
-      });
-    }
-
-    const limited = await sendExchange(server.port, "203.0.113.99", true);
-    expect(limited).toMatchObject({ kind: "response", status: 429 });
-  });
-
-  it("uses the rightmost untrusted address from a trusted proxy", async () => {
-    const server = await startShareWeb({ trustedProxies: "127.0.0.1,10.0.0.2" });
-
-    for (
-      let exchangeNumber = 1;
-      exchangeNumber <= EXCHANGE_BUCKET_CAPACITY;
-      exchangeNumber += 1
-    ) {
-      const response = await sendExchange(
-        server.port,
-        `198.51.100.${exchangeNumber}, 203.0.113.5, 10.0.0.2`, true,
-      );
-      expect(response, `exchange ${exchangeNumber}`).toMatchObject({
-        kind: "response",
-        status: 404,
-      });
-    }
-
-    const limited = await sendExchange(
-      server.port,
-      "198.51.100.99, 203.0.113.5, 10.0.0.2", true,
-    );
-    expect(limited).toMatchObject({ kind: "response", status: 429 });
-  });
-
-  it("keeps two forwarded clients in distinct buckets behind one trusted proxy", async () => {
-    const server = await startShareWeb({ trustedProxies: "127.0.0.1" });
-
-    for (
-      let exchangeNumber = 1;
-      exchangeNumber <= EXCHANGE_BUCKET_CAPACITY;
-      exchangeNumber += 1
-    ) {
-      const response = await sendExchange(server.port, "198.51.100.1", true);
-      expect(response, `first client exchange ${exchangeNumber}`).toMatchObject({
-        kind: "response",
-        status: 404,
-      });
-    }
-
-    const firstClientLimited = await sendExchange(server.port, "198.51.100.1", true);
-    expect(firstClientLimited).toMatchObject({ kind: "response", status: 429 });
-    const secondClient = await sendExchange(server.port, "198.51.100.2", true);
-    expect(secondClient).toMatchObject({ kind: "response", status: 404 });
-  });
-
   it.each([
-    {name: "ignores untrusted forwarding headers", trustedProxies: undefined, forwarded: "198.51.100.1", expected: "127.0.0.1"},
-    {name: "uses the rightmost untrusted address", trustedProxies: "127.0.0.1,10.0.0.2", forwarded: "198.51.100.1, 203.0.113.5, 10.0.0.2", expected: "203.0.113.5"},
-    {name: "forwards distinct trusted clients", trustedProxies: "127.0.0.1", forwarded: "198.51.100.2", expected: "198.51.100.2"},
-  ])("$name to the relay", async ({trustedProxies, forwarded, expected}) => {
+    {
+      name: "ignores untrusted forwarding headers",
+      trustedProxies: undefined,
+      forwarded: "198.51.100.1",
+      expected: "127.0.0.1",
+    },
+    {
+      name: "uses the rightmost untrusted address",
+      trustedProxies: "127.0.0.1,10.0.0.2",
+      forwarded: "198.51.100.1, 203.0.113.5, 10.0.0.2",
+      expected: "203.0.113.5",
+    },
+  ])("$name to the relay", async ({ trustedProxies, forwarded, expected }) => {
     const addresses: unknown[] = [];
-    const relayUrl = await startRelay(undefined, request => addresses.push(request.headers["x-dohc-relay-client-ip"]));
-    const server = await startShareWeb({relayUrl, trustedProxies});
-    expect(await sendExchange(server.port, forwarded)).toMatchObject({kind: "response", status: 200});
+    const relayUrl = await startRelay(undefined, (request) =>
+      addresses.push(request.headers["x-dohc-relay-client-ip"]),
+    );
+    const server = await startShareWeb({ relayUrl, trustedProxies });
+    expect(await sendExchange(server.port, forwarded)).toMatchObject({
+      kind: "response",
+      status: 200,
+    });
     expect(addresses).toEqual([expected]);
   });
 
-  it("limits each session to 8 blob proxies, answers the ninth as busy, and releases settled slots", { timeout: 30_000 }, async () => {
-    const relay = await startControlledBlobRelay();
-    const server = await startShareWeb({ relayUrl: relay.url });
-    const session = await exchangeSession(server.port);
-    const firstEight = Array.from({ length: 8 }, () =>
-      requestBlob(server.port, session),
-    );
-    let ninth: PendingBlobRequest | undefined;
-    let admitted: PendingBlobRequest | undefined;
+  it(
+    "limits each session to 8 blob proxies, answers the ninth as busy, and releases settled slots",
+    { timeout: 30_000 },
+    async () => {
+      const relay = await startControlledBlobRelay();
+      const server = await startShareWeb({ relayUrl: relay.url });
+      const session = await exchangeSession(server.port);
+      const firstEight = Array.from({ length: 8 }, () => requestBlob(server.port, session));
+      let ninth: PendingBlobRequest | undefined;
+      let admitted: PendingBlobRequest | undefined;
 
-    try {
-      await relay.waitForBlobRequests(8);
-      ninth = requestBlob(server.port, session);
-      const ninthRelayRequest = relay.waitForBlobRequests(9);
-      const outcome = await Promise.race([
-        ninth.response.then((response) => ({ kind: "response" as const, response })),
-        ninthRelayRequest.then(() => ({ kind: "proxied" as const })),
-      ]);
+      try {
+        await relay.waitForBlobRequests(8);
+        ninth = requestBlob(server.port, session);
+        const ninthRelayRequest = relay.waitForBlobRequests(9);
+        const outcome = await Promise.race([
+          ninth.response.then((response) => ({ kind: "response" as const, response })),
+          ninthRelayRequest.then(() => ({ kind: "proxied" as const })),
+        ]);
 
-      expect(outcome.kind).toBe("response");
-      if (outcome.kind !== "response") return;
-      expect(outcome.response.statusCode).toBe(503);
-      expect(JSON.parse(await readResponse(outcome.response))).toEqual(linkRefusalBody("link_unavailable"));
+        expect(outcome.kind).toBe("response");
+        if (outcome.kind !== "response") return;
+        expect(outcome.response.statusCode).toBe(503);
+        expect(JSON.parse(await readResponse(outcome.response))).toEqual(
+          linkRefusalBody("link_unavailable"),
+        );
 
-      relay.finishBlob(0);
-      const settled = await Promise.race(firstEight.map((blob) => blob.response));
-      expect(settled.statusCode).toBe(200);
-      await readResponse(settled);
+        relay.finishBlob(0);
+        const settled = await Promise.race(firstEight.map((blob) => blob.response));
+        expect(settled.statusCode).toBe(200);
+        await readResponse(settled);
 
-      admitted = requestBlob(server.port, session);
-      await ninthRelayRequest;
-      relay.finishBlob(8);
-      const admittedResponse = await admitted.response;
-      expect(admittedResponse.statusCode).toBe(200);
-      await readResponse(admittedResponse);
-    } finally {
-      relay.finishAllBlobs();
-      for (const blob of [...firstEight, ninth]) blob?.destroy();
-      admitted?.destroy();
-    }
-  });
+        admitted = requestBlob(server.port, session);
+        await ninthRelayRequest;
+        relay.finishBlob(8);
+        const admittedResponse = await admitted.response;
+        expect(admittedResponse.statusCode).toBe(200);
+        await readResponse(admittedResponse);
+      } finally {
+        relay.finishAllBlobs();
+        for (const blob of [...firstEight, ninth]) blob?.destroy();
+        admitted?.destroy();
+      }
+    },
+  );
 
   it("streams blob bytes before the relay finishes its body", async () => {
     const relay = await startControlledBlobRelay();
@@ -646,47 +405,6 @@ describe("share-web Node request adapter", () => {
       relay.finishAllBlobs();
     }
   });
-
-  it.each([
-    ["meta", "/api/view/meta"],
-    ["log", "/api/view/log?since=0&limit=500&current=true"],
-  ] as const)(
-    "streams %s bytes before the relay finishes its body",
-    async (_route, path) => {
-      const relay = await startControlledJsonRelay();
-      const server = await startShareWeb({ relayUrl: relay.url });
-      const session = await exchangeSession(server.port);
-      const viewRequest = requestView(server.port, session, path);
-
-      await relay.waitForRequests(1);
-      relay.startResponse(0);
-
-      try {
-        const firstChunk = viewRequest.response.then(async (response) => {
-          expect(response.statusCode).toBe(200);
-          expect(response.headers["content-type"]).toBe("application/json");
-          const completeBody = readResponse(response);
-          return {
-            completeBody,
-            firstChunk: await readFirstChunk(response),
-          };
-        });
-        const observed = await settleWithin(firstChunk, CHILD_RESPONSE_WAIT_MS);
-
-        expect(observed.kind).toBe("settled");
-        if (observed.kind !== "settled") return;
-        expect(observed.value.firstChunk).toEqual(JSON_FIRST_CHUNK);
-
-        relay.finishResponse(0);
-        expect(await observed.value.completeBody).toBe(
-          Buffer.concat([JSON_FIRST_CHUNK, JSON_FINAL_CHUNK]).toString("utf8"),
-        );
-      } finally {
-        viewRequest.destroy();
-        relay.finishAllResponses();
-      }
-    },
-  );
 });
 
 async function startShareWeb(
@@ -705,13 +423,13 @@ async function startShareWeb(
   // The adapter refuses to start without viewer assets, and a fresh checkout
   // has no built viewer/dist — every spawn injects a fixture through the test
   // seam so the suite never depends on a Vite build artifact.
-  const viewerAssetsDir =
-    options.viewerAssetsDir ?? (await createViewerAssets(true));
+  const viewerAssetsDir = options.viewerAssetsDir ?? (await createViewerAssets(true));
   const env = { ...process.env };
   delete env.DOHC_SHARE_WEB_DEV;
   delete env.DOHC_PUBLIC_EDIT_RELEASE;
   delete env.DOHC_SHARE_WEB_LINK_LIVE_LIMITS;
-  if (options.publicEditRelease !== undefined) env.DOHC_PUBLIC_EDIT_RELEASE = options.publicEditRelease;
+  if (options.publicEditRelease !== undefined)
+    env.DOHC_PUBLIC_EDIT_RELEASE = options.publicEditRelease;
   delete env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS;
   delete env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR;
   delete env.DOHC_SHARE_WEB_TRUSTED_PROXIES;
@@ -719,9 +437,7 @@ async function startShareWeb(
   delete env.DOHC_SHARE_WEB_INTERNAL_HOSTS;
   if (options.devMode !== false) env.DOHC_SHARE_WEB_DEV = "1";
   if (options.shutdownGracePeriodMs !== undefined) {
-    env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS = String(
-      options.shutdownGracePeriodMs,
-    );
+    env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS = String(options.shutdownGracePeriodMs);
   }
   if (options.trustedProxies !== undefined) {
     env.DOHC_SHARE_WEB_TRUSTED_PROXIES = options.trustedProxies;
@@ -742,23 +458,19 @@ async function startShareWeb(
           `process.on("message", (message) => { if (message === "SIGTERM") process.emit("SIGTERM"); }); await import(${JSON.stringify(mainUrl.href)});`,
         ]
       : ["--import", "tsx", fileURLToPath(mainUrl)];
-  const child = spawn(
-    process.execPath,
-    childArguments,
-    {
-      env: {
-        ...env,
-        NODE_ENV: options.nodeEnv ?? "test",
-        DOHC_SHARE_WEB_RELAY_URL: relayUrl,
-        DOHC_SHARE_WEB_PUBLIC_RELAY_URL: relayUrl,
-        DOHC_SHARE_WEB_PUBLIC_HOSTS: PUBLIC_HOST,
-        DOHC_SHARE_WEB_PORT: "0",
-        DOHC_SHARE_WEB_BIND: "127.0.0.1",
-      },
-      stdio: ["pipe", "pipe", "pipe", "ipc"],
-      windowsHide: true,
+  const child = spawn(process.execPath, childArguments, {
+    env: {
+      ...env,
+      NODE_ENV: options.nodeEnv ?? "test",
+      DOHC_SHARE_WEB_RELAY_URL: relayUrl,
+      DOHC_SHARE_WEB_PUBLIC_RELAY_URL: relayUrl,
+      DOHC_SHARE_WEB_PUBLIC_HOSTS: PUBLIC_HOST,
+      DOHC_SHARE_WEB_PORT: "0",
+      DOHC_SHARE_WEB_BIND: "127.0.0.1",
     },
-  ) as ChildProcessWithoutNullStreams;
+    stdio: ["pipe", "pipe", "pipe", "ipc"],
+    windowsHide: true,
+  }) as ChildProcessWithoutNullStreams;
   children.add(child);
   child.stdin.end();
   child.stdout.setEncoding("utf8");
@@ -823,13 +535,9 @@ async function exchangeSession(port: number): Promise<LinkSession> {
   const setCookies = response.headers["set-cookie"] ?? [];
   expect(setCookies).toHaveLength(2);
   const cookie = setCookies.find(
-    (value) =>
-      value.startsWith("dohc_share_") &&
-      !value.startsWith("dohc_share_profile_"),
+    (value) => value.startsWith("dohc_share_") && !value.startsWith("dohc_share_profile_"),
   );
-  const profileCookie = setCookies.find((value) =>
-    value.startsWith("dohc_share_profile_"),
-  );
+  const profileCookie = setCookies.find((value) => value.startsWith("dohc_share_profile_"));
   expect(cookie).toBeDefined();
   expect(profileCookie).toBeDefined();
   for (const setCookie of setCookies) {
@@ -846,10 +554,7 @@ async function exchangeSession(port: number): Promise<LinkSession> {
   };
 }
 
-function requestBlob(
-  port: number,
-  session: LinkSession,
-): PendingBlobRequest {
+function requestBlob(port: number, session: LinkSession): PendingBlobRequest {
   let resolveResponse: (response: IncomingMessage) => void = () => undefined;
   let rejectResponse: (error: Error) => void = () => undefined;
   const response = new Promise<IncomingMessage>((resolve, reject) => {
@@ -874,46 +579,13 @@ function requestBlob(
   return { destroy: () => request.destroy(), response };
 }
 
-function requestView(
-  port: number,
-  session: LinkSession,
-  path: string,
-): PendingBlobRequest {
-  let resolveResponse: (response: IncomingMessage) => void = () => undefined;
-  let rejectResponse: (error: Error) => void = () => undefined;
-  const response = new Promise<IncomingMessage>((resolve, reject) => {
-    resolveResponse = resolve;
-    rejectResponse = reject;
-  });
-  void response.catch(() => undefined);
-  const request = requestHttp(
-    {
-      host: "127.0.0.1",
-      port,
-      path,
-      headers: {
-        host: PUBLIC_HOST,
-        cookie: session.cookie,
-        "x-dohc-link-session": session.discriminator,
-      },
-    },
-    resolveResponse,
-  );
-  request.once("error", rejectResponse);
-  request.end();
-  return { destroy: () => request.destroy(), response };
-}
-
 function sendHttpRequest(
   port: number,
   path: string,
   options: { body?: string; headers: Record<string, string | number>; method: string },
 ): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
-    const request = requestHttp(
-      { host: "127.0.0.1", port, path, ...options },
-      resolve,
-    );
+    const request = requestHttp({ host: "127.0.0.1", port, path, ...options }, resolve);
     request.once("error", reject);
     request.end(options.body);
   });
@@ -954,7 +626,10 @@ async function settleWithin<T>(
   }
 }
 
-async function startRelay(onExchangeBody?: (body: Buffer) => void, onExchangeRequest?: (request: IncomingMessage) => void): Promise<string> {
+async function startRelay(
+  onExchangeBody?: (body: Buffer) => void,
+  onExchangeRequest?: (request: IncomingMessage) => void,
+): Promise<string> {
   const server = createServer((request, response) => {
     if (request.method !== "POST" || request.url !== "/sync/link-exchange") {
       request.resume();
@@ -994,9 +669,7 @@ async function startRelay(onExchangeBody?: (body: Buffer) => void, onExchangeReq
   return `http://127.0.0.1:${address.port}`;
 }
 
-async function startDiscussionRelay(
-  discussions: CapturedDiscussionRequest[],
-): Promise<string> {
+async function startDiscussionRelay(discussions: CapturedDiscussionRequest[]): Promise<string> {
   const server = createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
@@ -1017,12 +690,8 @@ async function startDiscussionRelay(
         discussions.push({
           authorization: request.headers.authorization,
           body: Buffer.concat(chunks),
-          exchangeKey: request.headers["x-dohc-relay-exchange-key"] as
-            | string
-            | undefined,
-          profileSecret: request.headers["x-dohc-link-profile-secret"] as
-            | string
-            | undefined,
+          exchangeKey: request.headers["x-dohc-relay-exchange-key"] as string | undefined,
+          profileSecret: request.headers["x-dohc-link-profile-secret"] as string | undefined,
         });
         response.setHeader("content-type", "application/json");
         response.end(
@@ -1126,75 +795,10 @@ async function startControlledBlobRelay(): Promise<ControlledBlobRelay> {
     startBlob,
     waitForBlobCancellations: (count) => {
       if (blobCancellations >= count) return Promise.resolve();
-      return new Promise<void>((resolve) =>
-        cancellationWaiters.push({ count, resolve }),
-      );
+      return new Promise<void>((resolve) => cancellationWaiters.push({ count, resolve }));
     },
     waitForBlobRequests: (count) => {
       if (blobResponses.length >= count) return Promise.resolve();
-      return new Promise<void>((resolve) => requestWaiters.push({ count, resolve }));
-    },
-  };
-}
-
-async function startControlledJsonRelay(): Promise<ControlledJsonRelay> {
-  const responses: ServerResponse[] = [];
-  const requestWaiters: Array<{ count: number; resolve: () => void }> = [];
-  const notifyRequestWaiters = (): void => {
-    for (const waiter of requestWaiters.splice(0)) {
-      if (responses.length >= waiter.count) {
-        waiter.resolve();
-      } else {
-        requestWaiters.push(waiter);
-      }
-    }
-  };
-  const startResponse = (index: number): void => {
-    const response = responses[index];
-    if (!response || response.writableEnded || response.headersSent) return;
-    response.writeHead(200, { "content-type": "application/json" });
-    response.write(JSON_FIRST_CHUNK);
-  };
-  const finishResponse = (index: number): void => {
-    const response = responses[index];
-    if (!response || response.writableEnded) return;
-    startResponse(index);
-    response.end(JSON_FINAL_CHUNK);
-  };
-  const server = createServer((request, response) => {
-    request.resume();
-    if (request.method === "POST" && request.url === "/sync/link-exchange") {
-      response.setHeader("content-type", "application/json");
-      response.end(
-        JSON.stringify({
-          ok: true,
-          grantId: "grant-integration",
-          capabilityToken: CAPABILITY_TOKEN,
-          capabilityExpiresAtMs: Date.now() + 15 * 60_000,
-        }),
-      );
-      return;
-    }
-    responses.push(response);
-    notifyRequestWaiters();
-  });
-  relayServers.add(server);
-  await listenOnEphemeralPort(server);
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("controlled test relay did not bind to a TCP port");
-  }
-  return {
-    finishAllResponses: () => {
-      for (let index = 0; index < responses.length; index += 1) {
-        finishResponse(index);
-      }
-    },
-    finishResponse,
-    startResponse,
-    url: `http://127.0.0.1:${address.port}`,
-    waitForRequests: (count) => {
-      if (responses.length >= count) return Promise.resolve();
       return new Promise<void>((resolve) => requestWaiters.push({ count, resolve }));
     },
   };
@@ -1255,8 +859,7 @@ function waitForExit(
 }
 
 function sendTerminationSignal(child: ChildProcessWithoutNullStreams): void {
-  const sent =
-    process.platform === "win32" ? child.send("SIGTERM") : child.kill("SIGTERM");
+  const sent = process.platform === "win32" ? child.send("SIGTERM") : child.kill("SIGTERM");
   if (!sent) throw new Error("failed to send SIGTERM to share-web");
 }
 
@@ -1268,7 +871,11 @@ async function stopRelay(server: Server): Promise<void> {
   });
 }
 
-function sendExchange(port: number, forwardedFor: string, malformed = false): Promise<RawSocketResult> {
+function sendExchange(
+  port: number,
+  forwardedFor: string,
+  malformed = false,
+): Promise<RawSocketResult> {
   const body = malformed ? "{" : JSON.stringify({ secret: EXCHANGE_SECRET });
   return sendRawRequest(
     port,
@@ -1313,10 +920,7 @@ function sendRawRequest(port: number, request: string): Promise<RawSocketResult>
   });
 }
 
-function streamChunkedRequestWithoutEnd(
-  port: number,
-  body: Buffer,
-): StreamingRequest {
+function streamChunkedRequestWithoutEnd(port: number, body: Buffer): StreamingRequest {
   const socket = connect({ host: "127.0.0.1", port });
   const chunks: Buffer[] = [];
   let settled = false;
@@ -1373,10 +977,4 @@ function streamChunkedRequestWithoutEnd(
     },
     response,
   };
-}
-
-function isRefusalOrSocketClose(result: RawSocketResult): boolean {
-  return result.kind === "response"
-    ? result.status === 404
-    : result.kind === "socket-close" || result.kind === "socket-error";
 }

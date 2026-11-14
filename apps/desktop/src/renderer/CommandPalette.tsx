@@ -66,9 +66,7 @@ export function CommandPalette(props: {
 
   // Keep the keyboard-selected row visible inside the scrolling list.
   useEffect(() => {
-    listRef.current
-      ?.querySelector('[aria-selected="true"]')
-      ?.scrollIntoView({ block: "nearest" });
+    listRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
   }, [selected]);
 
   function runCommand(command: Command | undefined) {
@@ -82,7 +80,10 @@ export function CommandPalette(props: {
       onClose={props.onClose}
       panelProps={{
         onKeyDown: (event) => {
-          if (matchShellShortcut(event.nativeEvent, window.dohcDesktop?.platform) === (props.toggleShortcut ?? "command-palette")) {
+          if (
+            matchShellShortcut(event.nativeEvent, window.dohcDesktop?.platform) ===
+            (props.toggleShortcut ?? "command-palette")
+          ) {
             event.preventDefault();
             props.onClose();
           }
@@ -162,15 +163,21 @@ export function CommandPalette(props: {
         </ul>
         <div className="flex items-center gap-3 border-t border-line px-3.5 py-2 text-[10px] text-subtle">
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-sans">{shortcutText("palette-move", window.dohcDesktop?.platform)}</kbd>
+            <kbd className="rounded border border-line bg-bg px-1 font-sans">
+              {shortcutText("palette-move", window.dohcDesktop?.platform)}
+            </kbd>
             navigate
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-sans">{shortcutText("palette-accept", window.dohcDesktop?.platform)}</kbd>
+            <kbd className="rounded border border-line bg-bg px-1 font-sans">
+              {shortcutText("palette-accept", window.dohcDesktop?.platform)}
+            </kbd>
             open
           </span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-line bg-bg px-1 font-sans">{shortcutText("palette-dismiss", window.dohcDesktop?.platform)}</kbd>
+            <kbd className="rounded border border-line bg-bg px-1 font-sans">
+              {shortcutText("palette-dismiss", window.dohcDesktop?.platform)}
+            </kbd>
             dismiss
           </span>
         </div>

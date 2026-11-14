@@ -12,7 +12,9 @@ import { createWorkspaceTrust, folderIdentity, WorkspaceRestrictedError } from "
 // spawn throws, so a command that got past every check shows as one call.
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
-  spawn: vi.fn(() => { throw new Error("spawned"); }),
+  spawn: vi.fn(() => {
+    throw new Error("spawned");
+  }),
 }));
 
 // Holds the runner inside its path resolution, the await before spawn.
@@ -21,7 +23,9 @@ vi.mock("./workspaceRealPath", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./workspaceRealPath")>();
   return {
     ...actual,
-    assertResolvedWorkspacePath: async (...args: Parameters<typeof actual.assertResolvedWorkspacePath>) => {
+    assertResolvedWorkspacePath: async (
+      ...args: Parameters<typeof actual.assertResolvedWorkspacePath>
+    ) => {
       if (resolving) {
         resolving.reached.resolve();
         await resolving.release.promise;
@@ -55,21 +59,42 @@ async function harness(identifyGate?: { reached: Deferred<void>; release: Deferr
   const known = { folder: await folderIdentity(workspaceRoot) };
   await trust.trust(workspace, known);
   const execute = createAppPreviewExecution({
-    shareViewFiles: { read: async () => { throw new Error("unused"); } },
+    shareViewFiles: {
+      read: async () => {
+        throw new Error("unused");
+      },
+    },
     shareViewFilesTargetForPath: async () => null,
     assertMayRunAppCode: (target) => trust.assertTrusted(target),
   });
   const app: SitePackageInfo = {
-    root: "portal", title: "Portal", kind: "package", confidence: "high",
-    entryPath: null, configPath: null, packagePath: "portal/package.json", packageManager: null,
-    scripts: { dev: "node server.js", build: "node build.js" }, configuredScripts: {}, configuredPreviewMode: null,
-    configuredBuildOutput: null, buildOutputs: ["portal/dist"], sourceFiles: ["portal/package.json"],
-    shareManifest: { ok: false, reason: "no-runnable-artifact" }, diagnostics: [], authority: { kind: "workspace" },
+    root: "portal",
+    title: "Portal",
+    kind: "package",
+    confidence: "high",
+    entryPath: null,
+    configPath: null,
+    packagePath: "portal/package.json",
+    packageManager: null,
+    scripts: { dev: "node server.js", build: "node build.js" },
+    configuredScripts: {},
+    configuredPreviewMode: null,
+    configuredBuildOutput: null,
+    buildOutputs: ["portal/dist"],
+    sourceFiles: ["portal/package.json"],
+    shareManifest: { ok: false, reason: "no-runnable-artifact" },
+    diagnostics: [],
+    authority: { kind: "workspace" },
   };
   const run = (mode: "dev" | "build") => {
     const input: SitePreviewExecutionInput = {
-      workspaceId: "trip", workspaceRoot, site: app, mode,
-      sharedView: false, signal: new AbortController().signal, isCurrent: () => true,
+      workspaceId: "trip",
+      workspaceRoot,
+      site: app,
+      mode,
+      sharedView: false,
+      signal: new AbortController().signal,
+      isCurrent: () => true,
     };
     return execute(input);
   };
@@ -85,26 +110,32 @@ describe("a revoke during the start of an app command", () => {
     expect(spawn).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["dev", "build"] as const)("stops %s at spawn when the revoke lands during path resolution", async (mode) => {
-    const h = await harness();
-    resolving = gate();
-    const started = h.run(mode);
-    await resolving.reached.promise;
-    h.trust.revoke("trip");
-    resolving.release.resolve();
-    await expect(started).rejects.toThrow(WorkspaceRestrictedError);
-    expect(spawn).not.toHaveBeenCalled();
-  });
+  it.each(["dev", "build"] as const)(
+    "stops %s at spawn when the revoke lands during path resolution",
+    async (mode) => {
+      const h = await harness();
+      resolving = gate();
+      const started = h.run(mode);
+      await resolving.reached.promise;
+      h.trust.revoke("trip");
+      resolving.release.resolve();
+      await expect(started).rejects.toThrow(WorkspaceRestrictedError);
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
 
-  it.each(["dev", "build"] as const)("stops %s when the revoke lands during the folder identity lookup", async (mode) => {
-    const identifying = gate();
-    const h = await harness(identifying);
-    // The grant was written with a known folder, so this lookup is the check's.
-    const started = h.run(mode);
-    await identifying.reached.promise;
-    h.trust.revoke("trip");
-    identifying.release.resolve();
-    await expect(started).rejects.toThrow(WorkspaceRestrictedError);
-    expect(spawn).not.toHaveBeenCalled();
-  });
+  it.each(["dev", "build"] as const)(
+    "stops %s when the revoke lands during the folder identity lookup",
+    async (mode) => {
+      const identifying = gate();
+      const h = await harness(identifying);
+      // The grant was written with a known folder, so this lookup is the check's.
+      const started = h.run(mode);
+      await identifying.reached.promise;
+      h.trust.revoke("trip");
+      identifying.release.resolve();
+      await expect(started).rejects.toThrow(WorkspaceRestrictedError);
+      expect(spawn).not.toHaveBeenCalled();
+    },
+  );
 });

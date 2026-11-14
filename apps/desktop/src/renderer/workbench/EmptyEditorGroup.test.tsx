@@ -9,10 +9,12 @@ import { EmptyEditorGroup } from "./EmptyEditorGroup";
 
 afterEach(cleanup);
 
-// File tiles carry the kind registry's names, except a Markdown file, which
-// the start surface calls a Page.
 const DOCUMENT = "Page";
-const LABELS = { markdown: DOCUMENT, collection: "Collection", drawing: FILE_KIND_RECORDS.drawing.name };
+const LABELS = {
+  markdown: DOCUMENT,
+  collection: "Collection",
+  drawing: FILE_KIND_RECORDS.drawing.name,
+};
 
 const FILES = [
   { path: "a.md", kind: "file" as const },
@@ -34,29 +36,38 @@ function renderStart(overrides: Partial<Parameters<typeof EmptyEditorGroup>[0]> 
 }
 
 describe("start surface tiles", () => {
-  it.each(["markdown", "collection", "drawing"] as const)("runs the %s action from its tile", async (kind) => {
-    const { create } = renderStart();
-    fireEvent.click(screen.getByRole("button", { name: LABELS[kind] }));
-    expect(create[kind]).toHaveBeenCalledOnce();
-    for (const other of Object.keys(create) as (keyof typeof create)[]) {
-      if (other !== kind) expect(create[other]).not.toHaveBeenCalled();
-    }
-  });
+  it.each(["markdown", "collection", "drawing"] as const)(
+    "runs the %s action from its tile",
+    async (kind) => {
+      const { create } = renderStart();
+      fireEvent.click(screen.getByRole("button", { name: LABELS[kind] }));
+      expect(create[kind]).toHaveBeenCalledOnce();
+      for (const other of Object.keys(create) as (keyof typeof create)[]) {
+        if (other !== kind) expect(create[other]).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it("shows only the kinds the workspace can make, in order", () => {
     renderStart({ create: { drawing: vi.fn(), markdown: vi.fn() } });
-    expect(screen.getAllByRole("button").map((tile) => tile.textContent)).toEqual([`${DOCUMENT}Ctrl N`, LABELS.drawing]);
+    expect(screen.getAllByRole("button").map((tile) => tile.textContent)).toEqual([
+      `${DOCUMENT}Ctrl N`,
+      LABELS.drawing,
+    ]);
   });
 
   it.each([
     ["win32", "Ctrl N", "Control+N"],
     ["darwin", "⌘N", "Meta+N"],
-  ])("labels the document tile with the registry's new-file chord on %s", (platform, text, aria) => {
-    renderStart({ platform });
-    const tile = screen.getByRole("button", { name: DOCUMENT });
-    expect(tile.textContent).toBe(`${DOCUMENT}${text}`);
-    expect(tile.getAttribute("aria-keyshortcuts")).toBe(aria);
-  });
+  ])(
+    "labels the document tile with the registry's new-file chord on %s",
+    (platform, text, aria) => {
+      renderStart({ platform });
+      const tile = screen.getByRole("button", { name: DOCUMENT });
+      expect(tile.textContent).toBe(`${DOCUMENT}${text}`);
+      expect(tile.getAttribute("aria-keyshortcuts")).toBe(aria);
+    },
+  );
 
   it("follows a changed new-file binding", () => {
     const accelerators = SHORTCUTS["new-file"].accelerators;
@@ -92,7 +103,12 @@ describe("start surface tiles", () => {
 
   it("ignores presses while an action is still running", async () => {
     let finish = () => {};
-    const drawing = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const drawing = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
     const markdown = vi.fn();
     renderStart({ create: { drawing, markdown } });
 
@@ -112,10 +128,15 @@ describe("start surface tiles", () => {
 
 describe("start surface recent", () => {
   it("lists listed recent files, most recent first, by their tab names, and opens one", () => {
-    const { onOpen } = renderStart({ recent: ["sketch.excalidraw", "gone.md", "tab://collection/c1", "Lisbon trip/Trip plan.md"] });
+    const { onOpen } = renderStart({
+      recent: ["sketch.excalidraw", "gone.md", "tab://collection/c1", "Lisbon trip/Trip plan.md"],
+    });
     const recent = within(screen.getByRole("region", { name: "Recent" }));
     const rows = recent.getAllByRole("button");
-    expect(rows.map((row) => row.textContent)).toEqual([fileName("sketch.excalidraw"), fileName("Lisbon trip/Trip plan.md")]);
+    expect(rows.map((row) => row.textContent)).toEqual([
+      fileName("sketch.excalidraw"),
+      fileName("Lisbon trip/Trip plan.md"),
+    ]);
     expect(rows[1]!.title).toBe("Lisbon trip/Trip plan.md");
 
     fireEvent.click(rows[1]!);
@@ -125,7 +146,9 @@ describe("start surface recent", () => {
   it("shows at most five", () => {
     const files = Array.from({ length: 8 }, (_, index) => ({ path: `f${index}.md` }));
     renderStart({ files, recent: files.map((file) => file.path) });
-    expect(within(screen.getByRole("region", { name: "Recent" })).getAllByRole("button")).toHaveLength(5);
+    expect(
+      within(screen.getByRole("region", { name: "Recent" })).getAllByRole("button"),
+    ).toHaveLength(5);
   });
 
   it.each([
@@ -146,7 +169,9 @@ describe("start surface drop zone", () => {
     const zone = screen.getByTestId("start-drop");
     expect(zone.textContent).toBe("Drop files here to add them");
 
-    const over = createEvent.dragOver(zone, { dataTransfer: { types: ["Files"], dropEffect: "none" } });
+    const over = createEvent.dragOver(zone, {
+      dataTransfer: { types: ["Files"], dropEffect: "none" },
+    });
     fireEvent(zone, over);
     expect(over.defaultPrevented).toBe(true);
 

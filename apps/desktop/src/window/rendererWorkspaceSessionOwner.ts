@@ -18,17 +18,10 @@ export interface RendererWorkspaceSession<
   isCurrent(): boolean;
 }
 
-export interface RendererWorkspaceRetirement<
-  Sender extends RendererWorkspaceSender,
-> {
-  retireSender(
-    session: RendererWorkspaceSession<Sender>,
-  ): RendererWorkspaceSenderRetirement;
+export interface RendererWorkspaceRetirement<Sender extends RendererWorkspaceSender> {
+  retireSender(session: RendererWorkspaceSession<Sender>): RendererWorkspaceSenderRetirement;
   retireWorkspace(
-    workspace: Pick<
-      RendererWorkspaceSession<Sender>,
-      "workspaceId" | "attachmentId"
-    >,
+    workspace: Pick<RendererWorkspaceSession<Sender>, "workspaceId" | "attachmentId">,
   ): Promise<void>;
 }
 
@@ -41,9 +34,7 @@ export interface RendererWorkspaceSenderRetirement {
 
 export class RendererWorkspaceOpenSupersededError extends Error {
   constructor() {
-    super(
-      "The renderer changed workspaces before this workspace finished opening.",
-    );
+    super("The renderer changed workspaces before this workspace finished opening.");
     this.name = "RendererWorkspaceOpenSupersededError";
   }
 }
@@ -65,22 +56,16 @@ interface SenderRetirement {
   readonly completion: Promise<void>;
 }
 
-export interface RendererWorkspaceSessionOwnerOptions<
-  Sender extends RendererWorkspaceSender,
-> {
+export interface RendererWorkspaceSessionOwnerOptions<Sender extends RendererWorkspaceSender> {
   retirement: RendererWorkspaceRetirement<Sender>;
   onCleanupError?: (
-    scope:
-      | { kind: "sender"; senderId: number }
-      | { kind: "workspace"; workspaceId: string },
+    scope: { kind: "sender"; senderId: number } | { kind: "workspace"; workspaceId: string },
     error: unknown,
   ) => void;
 }
 
 /** Owns the exact renderer-to-workspace lease and its retirement ordering. */
-export class RendererWorkspaceSessionOwner<
-  Sender extends RendererWorkspaceSender,
-> {
+export class RendererWorkspaceSessionOwner<Sender extends RendererWorkspaceSender> {
   readonly #retirement: RendererWorkspaceRetirement<Sender>;
   readonly #onCleanupError: NonNullable<
     RendererWorkspaceSessionOwnerOptions<Sender>["onCleanupError"]
@@ -93,10 +78,7 @@ export class RendererWorkspaceSessionOwner<
   >();
   readonly #workspaceRetirements = new Map<symbol, Promise<void>>();
   readonly #detachedSenderRetirements = new Map<symbol, Set<Promise<void>>>();
-  readonly #sessionAborts = new WeakMap<
-    RendererWorkspaceSession<Sender>,
-    AbortController
-  >();
+  readonly #sessionAborts = new WeakMap<RendererWorkspaceSession<Sender>, AbortController>();
   #nextGeneration = 0;
 
   constructor(options: RendererWorkspaceSessionOwnerOptions<Sender>) {
@@ -118,8 +100,7 @@ export class RendererWorkspaceSessionOwner<
     }
     if (
       state.retiredRendererDocumentIds.has(rendererDocumentId) ||
-      (state.rendererDocumentId !== undefined &&
-        state.rendererDocumentId !== rendererDocumentId)
+      (state.rendererDocumentId !== undefined && state.rendererDocumentId !== rendererDocumentId)
     ) {
       throw new RendererWorkspaceOpenSupersededError();
     }
@@ -135,15 +116,11 @@ export class RendererWorkspaceSessionOwner<
       return active;
     }
 
-    const senderRetirement = active
-      ? this.#beginSenderRetirement(state, active)
-      : state.retiring;
+    const senderRetirement = active ? this.#beginSenderRetirement(state, active) : state.retiring;
     if (senderRetirement) await senderRetirement.admission;
     this.#assertOpenRequestCurrent(state, requestSequence);
 
-    const workspaceRetirement = this.#workspaceRetirements.get(
-      workspace.attachmentId,
-    );
+    const workspaceRetirement = this.#workspaceRetirements.get(workspace.attachmentId);
     if (workspaceRetirement) await workspaceRetirement;
     this.#assertOpenRequestCurrent(state, requestSequence);
 
@@ -168,7 +145,6 @@ export class RendererWorkspaceSessionOwner<
     return this.#statesBySender.get(sender)?.rendererDocumentId;
   }
 
-  /** How many sessions this renderer has been admitted. Read-only. */
   admittedCount(sender: Sender): number {
     return this.#statesBySender.get(sender)?.admitted ?? 0;
   }
@@ -178,9 +154,7 @@ export class RendererWorkspaceSessionOwner<
     rendererDocumentId: string,
   ): RendererWorkspaceSession<Sender> | undefined {
     const session = this.current(sender);
-    return session?.rendererDocumentId === rendererDocumentId
-      ? session
-      : undefined;
+    return session?.rendererDocumentId === rendererDocumentId ? session : undefined;
   }
 
   isWorkspaceOpen(workspaceId: string): boolean {
@@ -196,10 +170,7 @@ export class RendererWorkspaceSessionOwner<
     return (this.#workspaceMembers.get(attachmentId)?.members.size ?? 0) > 0;
   }
 
-  retireForReload(
-    sender: Sender,
-    rendererDocumentId: string,
-  ): Promise<boolean> {
+  retireForReload(sender: Sender, rendererDocumentId: string): Promise<boolean> {
     let state = this.#statesBySender.get(sender);
     if (!state && !sender.isDestroyed()) {
       state = this.#stateFor(sender);
@@ -209,8 +180,7 @@ export class RendererWorkspaceSessionOwner<
     }
     if (
       state.retiredRendererDocumentIds.has(rendererDocumentId) ||
-      (state.rendererDocumentId !== undefined &&
-        state.rendererDocumentId !== rendererDocumentId)
+      (state.rendererDocumentId !== undefined && state.rendererDocumentId !== rendererDocumentId)
     ) {
       return Promise.resolve(false);
     }
@@ -325,10 +295,7 @@ export class RendererWorkspaceSessionOwner<
     return session;
   }
 
-  #assertOpenRequestCurrent(
-    state: SenderState<Sender>,
-    requestSequence: number,
-  ): void {
+  #assertOpenRequestCurrent(state: SenderState<Sender>, requestSequence: number): void {
     if (
       state.destroyed ||
       state.sender.isDestroyed() ||
@@ -358,22 +325,12 @@ export class RendererWorkspaceSessionOwner<
       };
     }
 
-    const requiredForAdmission = senderRetirement.requiredForAdmission.catch(
-      (error: unknown) => {
-        this.#onCleanupError(
-          { kind: "sender", senderId: session.senderId },
-          error,
-        );
-      },
-    );
-    const detached = senderRetirement.detachedFromAdmission.catch(
-      (error: unknown) => {
-        this.#onCleanupError(
-          { kind: "sender", senderId: session.senderId },
-          error,
-        );
-      },
-    );
+    const requiredForAdmission = senderRetirement.requiredForAdmission.catch((error: unknown) => {
+      this.#onCleanupError({ kind: "sender", senderId: session.senderId }, error);
+    });
+    const detached = senderRetirement.detachedFromAdmission.catch((error: unknown) => {
+      this.#onCleanupError({ kind: "sender", senderId: session.senderId }, error);
+    });
     this.#trackDetachedSenderRetirement(session.attachmentId, detached);
 
     const admission = Promise.withResolvers<void>();
@@ -405,20 +362,13 @@ export class RendererWorkspaceSessionOwner<
     return retirement;
   }
 
-  #trackDetachedSenderRetirement(
-    attachmentId: symbol,
-    drain: Promise<void>,
-  ): void {
-    const drains =
-      this.#detachedSenderRetirements.get(attachmentId) ?? new Set();
+  #trackDetachedSenderRetirement(attachmentId: symbol, drain: Promise<void>): void {
+    const drains = this.#detachedSenderRetirements.get(attachmentId) ?? new Set();
     drains.add(drain);
     this.#detachedSenderRetirements.set(attachmentId, drains);
     void drain.finally(() => {
       drains.delete(drain);
-      if (
-        drains.size === 0 &&
-        this.#detachedSenderRetirements.get(attachmentId) === drains
-      ) {
+      if (drains.size === 0 && this.#detachedSenderRetirements.get(attachmentId) === drains) {
         this.#detachedSenderRetirements.delete(attachmentId);
       }
     });
@@ -436,10 +386,7 @@ export class RendererWorkspaceSessionOwner<
   }
 
   #retireWorkspace(
-    workspace: Pick<
-      RendererWorkspaceSession<Sender>,
-      "workspaceId" | "attachmentId"
-    >,
+    workspace: Pick<RendererWorkspaceSession<Sender>, "workspaceId" | "attachmentId">,
   ): Promise<void> {
     const existing = this.#workspaceRetirements.get(workspace.attachmentId);
     if (existing) return existing;
@@ -456,23 +403,15 @@ export class RendererWorkspaceSessionOwner<
         attachmentId: workspace.attachmentId,
       });
     } catch (error) {
-      this.#onCleanupError(
-        { kind: "workspace", workspaceId: workspace.workspaceId },
-        error,
-      );
+      this.#onCleanupError({ kind: "workspace", workspaceId: workspace.workspaceId }, error);
       workspaceDrain = Promise.resolve();
     }
     void Promise.all([workspaceDrain, ...detachedSenderDrains])
       .catch((error: unknown) => {
-        this.#onCleanupError(
-          { kind: "workspace", workspaceId: workspace.workspaceId },
-          error,
-        );
+        this.#onCleanupError({ kind: "workspace", workspaceId: workspace.workspaceId }, error);
       })
       .finally(() => {
-        if (
-          this.#workspaceRetirements.get(workspace.attachmentId) === promise
-        ) {
+        if (this.#workspaceRetirements.get(workspace.attachmentId) === promise) {
           this.#workspaceRetirements.delete(workspace.attachmentId);
         }
         resolve();

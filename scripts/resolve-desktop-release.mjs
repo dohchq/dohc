@@ -33,7 +33,9 @@ export function desktopReleaseTargets(platforms = "windows-linux") {
   if (platforms === "windows") return targets.filter((target) => target.os === "Windows");
   if (platforms === "linux") return targets.filter((target) => target.os === "Linux");
   if (platforms === "windows-linux") return targets;
-  throw new Error(`Invalid release platforms '${platforms}'. Expected windows, linux, or windows-linux.`);
+  throw new Error(
+    `Invalid release platforms '${platforms}'. Expected windows, linux, or windows-linux.`,
+  );
 }
 
 export function repoRootFromScript() {
@@ -71,9 +73,7 @@ export function defaultUtcDate(now = new Date()) {
 function normalizeChannel(channel) {
   if (channel === "stable") return "latest";
   if (channel === "latest" || channel === "nightly") return channel;
-  throw new Error(
-    `Invalid release channel '${channel}'. Expected stable, latest, or nightly.`,
-  );
+  throw new Error(`Invalid release channel '${channel}'. Expected stable, latest, or nightly.`);
 }
 
 function validateReleaseInputs({ channel, date, runNumber, runAttempt, sha }) {
@@ -107,8 +107,7 @@ function validateReleaseInputs({ channel, date, runNumber, runAttempt, sha }) {
 export async function resolveDesktopRelease(options = {}) {
   const targets = desktopReleaseTargets(options.platforms);
   const root = resolve(options.root ?? repoRootFromScript());
-  const packageVersion =
-    options.packageVersion ?? (await readDesktopPackageVersion(root));
+  const packageVersion = options.packageVersion ?? (await readDesktopPackageVersion(root));
   const explicitChannel = options.channel
     ? normalizeChannel(options.channel)
     : options.version?.includes("-nightly.")
@@ -118,9 +117,7 @@ export async function resolveDesktopRelease(options = {}) {
   if (!sha) throw new Error("Commit SHA is required for release metadata.");
   const date = options.date ?? defaultUtcDate();
   const runNumber = Number(options.runNumber ?? process.env.GITHUB_RUN_NUMBER ?? 1);
-  const runAttempt = Number(
-    options.runAttempt ?? process.env.GITHUB_RUN_ATTEMPT ?? 1,
-  );
+  const runAttempt = Number(options.runAttempt ?? process.env.GITHUB_RUN_ATTEMPT ?? 1);
   validateReleaseInputs({
     channel: explicitChannel,
     date,

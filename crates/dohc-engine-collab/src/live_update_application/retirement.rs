@@ -1,7 +1,3 @@
-//! Stop retires one exact activation. Reconciliation proves what the relay
-//! accepted from it and what this host applied, before release. Both share
-//! one validation of the activation and one representation of an adoption
-//! seed it never delivered.
 use super::owner_activations::{
     activation_by_id, current_activation, lineage_origin_id, ActivationAdoption, OwnerActivation,
 };
@@ -689,8 +685,6 @@ pub(super) fn inherited_in_chain(
     resolve_manifest(conn, namespace, doc, lineage, manifest, chain)
 }
 
-/// Each delivery of a chain's Carried manifest, resolved as
-/// [`inherited_entries`] describes, through the activations `chain` names.
 fn resolve_manifest(
     conn: &Connection,
     namespace: &str,

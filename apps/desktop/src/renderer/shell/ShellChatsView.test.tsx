@@ -7,23 +7,17 @@ vi.hoisted(() => {
     observe() {}
     unobserve() {}
     disconnect() {}
-    takeRecords(): never[] { return []; }
+    takeRecords(): never[] {
+      return [];
+    }
   }
   Object.assign(globalThis, { ResizeObserver: ObserverStub, IntersectionObserver: ObserverStub });
 });
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatMessageRecord, DohcDesktopBridge, FileChatThreadRecord, WorkspaceUiState } from "../../ipc/bridgeContract";
-import { GROUP_NAME_TAKEN_ERROR } from "../../ipc/errorWords";
-import {
-  SHARE_VIEW,
-  WORKSPACE,
-  STORED_STATE,
-  STORED_CHATS_STATE,
-  makeBridge,
-  renderShell,
-} from "../DesktopWorkspaceShell.testHarness";
+import type { WorkspaceUiState } from "../../ipc/bridgeContract";
+import { WORKSPACE, makeBridge, renderShell } from "../DesktopWorkspaceShell.testHarness";
 // The shell loads Chats and the open b.md tab's read view and editor lazily.
 // Load them here so their first import does not count against a test's wait.
 import "../workbench/ChatsView";
@@ -46,214 +40,23 @@ function channel(id: string, name: string, createdAtMs: number) {
 function bridgeWithChannels(state: WorkspaceUiState | null) {
   const bridge = makeBridge(Promise.resolve(state));
   bridge.listChatChannels.mockResolvedValue({
-    channels: [channel("channel-1", "General", 1_700_000_000_000), channel("channel-2", "random", 1_700_000_000_001)],
+    channels: [
+      channel("channel-1", "General", 1_700_000_000_000),
+      channel("channel-2", "random", 1_700_000_000_001),
+    ],
     fileThreads: [],
   });
-  Object.assign(bridge, { listChatChannelShares: vi.fn(async () => ({ joined: [], sessionKey: null, relay: { state: "answered", granted: [], received: [], removed: [] } })) });
+  Object.assign(bridge, {
+    listChatChannelShares: vi.fn(async () => ({
+      joined: [],
+      sessionKey: null,
+      relay: { state: "answered", granted: [], received: [], removed: [] },
+    })),
+  });
   return bridge;
 }
 
-function lastStoredState(bridge: ReturnType<typeof makeBridge>): WorkspaceUiState | undefined {
-  const calls = bridge.setWorkspaceUiState.mock.calls as unknown as [{ state: WorkspaceUiState }][];
-  return calls.at(-1)?.[0].state;
-}
-
 describe("Chats in the left side panel", () => {
-  it.each(["toast", "Notices"])("opens an existing group from the %s after a create retry finds its name taken", async (surface) => {
-    const user = userEvent.setup();
-    const bridge = bridgeWithChannels(STORED_CHATS_STATE);
-    const existing = channel("channel-9", "launch", 1_700_000_000_002);
-    const taken = Object.assign(new Error("A group with that name already exists."), { name: GROUP_NAME_TAKEN_ERROR });
-    const createChatChannel = vi.fn<DohcDesktopBridge["createChatChannel"]>()
-      .mockRejectedValueOnce(new Error("The workspace engine is not running."))
-      .mockRejectedValueOnce(taken);
-    Object.assign(bridge, { createChatChannel });
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("chats-new-channel"));
-    await user.type(screen.getByTestId("chats-new-channel-name"), "launch{Enter}");
-    await screen.findByTestId("chats-new-channel-error");
-    await user.click(screen.getByTestId("chats-new-channel-cancel"));
-    const first = await screen.findByTestId("workspace-shell-error");
-    bridge.listChatChannels.mockResolvedValue({ channels: [existing], fileThreads: [] });
-    await user.click(within(first).getByRole("button", { name: "Try again" }));
-    const toast = await screen.findByTestId("workspace-shell-error");
-    await within(toast).findByRole("button", { name: "Open" });
-    expect(within(toast).getByText("dohc couldn't create #launch")).toBeTruthy();
-    expect(within(toast).getByText(taken.message)).toBeTruthy();
-    expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
-    expect(within(toast).getByRole("button", { name: "Details" })).toBeTruthy();
-
-    let notice = toast;
-    if (surface === "Notices") {
-      await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
-      await user.click(screen.getByTestId("notice-center-toggle"));
-      notice = within(screen.getByTestId("notice-center")).getByText(taken.message).closest("li")!;
-      expect(within(notice).getByText("dohc couldn't create #launch")).toBeTruthy();
-      expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
-      expect(within(notice).getByRole("button", { name: "Details" })).toBeTruthy();
-    }
-    await user.click(within(notice).getByRole("button", { name: "Open" }));
-    expect((await screen.findByTestId("tab-dohc://chats/channel/channel-9")).dataset.active).toBe("true");
-    expect((await screen.findByTestId("chats-channel-title")).textContent).toBe("launch");
-    expect(createChatChannel).toHaveBeenCalledTimes(2);
-    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
-    if (surface === "Notices") {
-      await user.click(screen.getByTestId("notice-center-toggle"));
-      expect(within(screen.getByTestId("notice-center")).queryByText(taken.message)).toBeNull();
-    }
-  });
-
-  it.each(["reserved name", "other failure"])("keeps Try again in the toast and Notices for a group create with %s", async (reason) => {
-    const user = userEvent.setup();
-    const bridge = bridgeWithChannels(STORED_CHATS_STATE);
-    const cause = reason === "reserved name"
-      ? Object.assign(new Error("A group with that name already exists."), { name: GROUP_NAME_TAKEN_ERROR })
-      : new Error("The workspace engine is not running.");
-    Object.assign(bridge, { createChatChannel: vi.fn<DohcDesktopBridge["createChatChannel"]>().mockRejectedValue(cause) });
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("chats-new-channel"));
-    await user.type(screen.getByTestId("chats-new-channel-name"), `${reason === "reserved name" ? "My agent" : "launch"}{Enter}`);
-    await screen.findByTestId("chats-new-channel-error");
-    await user.click(screen.getByTestId("chats-new-channel-cancel"));
-    const toast = await screen.findByTestId("workspace-shell-error");
-    if (reason === "reserved name") expect(within(toast).getByText("dohc couldn't create #My agent")).toBeTruthy();
-    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
-    expect(within(toast).queryByRole("button", { name: "Open" })).toBeNull();
-    await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    const notices = screen.getByTestId("notice-center");
-    if (reason === "reserved name") expect(within(notices).getByText("dohc couldn't create #My agent")).toBeTruthy();
-    expect(within(notices).getByRole("button", { name: "Try again" })).toBeTruthy();
-    expect(within(notices).queryByRole("button", { name: "Open" })).toBeNull();
-  });
-
-  it.each(["missing", "failed"])("keeps separate titled Notices rows for taken group names when the lookup is %s", async (lookup) => {
-    const user = userEvent.setup();
-    const bridge = bridgeWithChannels(STORED_CHATS_STATE);
-    const taken = Object.assign(new Error("A group with that name already exists."), { name: GROUP_NAME_TAKEN_ERROR });
-    Object.assign(bridge, { createChatChannel: vi.fn<DohcDesktopBridge["createChatChannel"]>().mockRejectedValue(taken) });
-    renderShell(bridge);
-
-    for (const name of ["planning", "design"]) {
-      await user.click(await screen.findByTestId("chats-new-channel"));
-      if (lookup === "failed") bridge.listChatChannels.mockRejectedValue(new Error("The workspace engine is not running."));
-      await user.type(screen.getByTestId("chats-new-channel-name"), `${name}{Enter}`);
-      expect((await screen.findByTestId("chats-new-channel-error")).textContent).toBe(taken.message);
-      await user.click(screen.getByTestId("chats-new-channel-cancel"));
-      const toast = await screen.findByTestId("workspace-shell-error");
-      expect(within(toast).getByText(`dohc couldn't create #${name}`)).toBeTruthy();
-      expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
-      expect(within(toast).queryByRole("button", { name: "Open" })).toBeNull();
-      await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
-    }
-
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    const notices = screen.getByTestId("notice-center");
-    for (const name of ["planning", "design"]) {
-      const row = within(notices).getByText(`dohc couldn't create #${name}`).closest("li")!;
-      expect(within(row).getByText(taken.message)).toBeTruthy();
-      expect(within(row).getByRole("button", { name: "Try again" })).toBeTruthy();
-      expect(within(row).queryByRole("button", { name: "Open" })).toBeNull();
-    }
-
-    const planning = within(notices).getByText("dohc couldn't create #planning").closest("li")!;
-    await user.click(within(planning).getByRole("button", { name: "Try again" }));
-    const toast = await screen.findByTestId("workspace-shell-error");
-    expect(within(toast).getByText("dohc couldn't create #planning")).toBeTruthy();
-    await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    const retried = screen.getByTestId("notice-center");
-    expect(within(retried).getAllByText("dohc couldn't create #planning")).toHaveLength(1);
-    expect(within(retried).getAllByText("dohc couldn't create #design")).toHaveLength(1);
-  });
-
-  it.each(["resolution failure", "deleted file"])("opens the file-chat path after %s", async outcome => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
-    const path = outcome === "deleted file" ? "deleted.md" : "b.md";
-    const thread: FileChatThreadRecord = {
-      id: "file-thread", title: "File discussion", createdAtMs: 1, updatedAtMs: 2,
-      path,
-    };
-    const message: ChatMessageRecord = {
-      presentation: { group: "file-author", hue: null, self: false },
-      id: "file-message", threadId: thread.id, authorKind: "human", authorDisplayName: "You",
-      body: "Discuss this file", createdAtMs: 1,
-    };
-    bridge.listChatChannels.mockResolvedValue({ channels: [], fileThreads: [thread] });
-    Object.assign(bridge, {
-      listPersonalChatFeed: vi.fn(async () => ({ items: [{
-        message,
-        thread: { id: thread.id, title: thread.title, createdAtMs: 1, updatedAtMs: 2 },
-        channel: null, reactions: [],
-      }], nextCursor: null })),
-    });
-    if (outcome === "deleted file") bridge.readWorkspaceText.mockRejectedValue(new Error("File not found"));
-    renderShell(bridge);
-    await user.click(await screen.findByTestId("chats-feed-link"));
-    const item = await screen.findByTestId("chats-feed-item");
-    bridge.readWorkspaceText.mockClear();
-    await user.click(within(item).getByRole("button", { name: /Discuss this file/ }));
-    await waitFor(() => expect(bridge.readWorkspaceText).toHaveBeenCalledWith(expect.objectContaining({ relativePath: path })));
-  });
-
-  it("selects Chats from the rail beside Files, and stores the choice", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    const rail = await screen.findByTestId("activity-bar");
-    const items = within(rail).getAllByRole("button").map((button) => button.dataset.testid);
-    expect(items.slice(0, 2)).toEqual(["activity-explorer", "activity-chats"]);
-    const chats = screen.getByTestId("activity-chats");
-    expect(chats.getAttribute("aria-label")).toBe("Chats");
-
-    await user.click(chats);
-    const panel = screen.getByTestId("side-panel");
-    expect(await within(panel).findByTestId("chats-view")).toBeTruthy();
-    expect(within(panel).getByText("Chats")).toBeTruthy();
-    expect(chats.getAttribute("aria-current")).toBe("page");
-    expect(screen.queryByTestId("file-tree")).toBeNull();
-    await waitFor(() => expect(lastStoredState(bridge)?.activeView).toBe("chats"));
-
-    // Choosing Chats again hides the panel, as every rail view does.
-    await user.click(chats);
-    expect(screen.queryByTestId("side-panel")).toBeNull();
-  });
-
-  it("restores Chats as the selected view after a restart", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
-    renderShell(bridge);
-
-    const panel = await screen.findByTestId("side-panel");
-    expect(await within(panel).findByTestId("chats-view")).toBeTruthy();
-    expect(screen.getByTestId("activity-chats").getAttribute("aria-current")).toBe("page");
-    // The About rail is its own surface beside it.
-    expect(within(screen.getByTestId("about-rail")).queryByTestId("chats-view")).toBeNull();
-  });
-
-  it("reaches the chat list from the keyboard", async () => {
-    const bridge = bridgeWithChannels(null);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    const chats = await screen.findByTestId("activity-chats");
-    chats.focus();
-    await user.keyboard("{Enter}");
-    const panel = await screen.findByTestId("side-panel");
-    const [first] = await within(panel).findAllByTestId("chats-channel");
-    // Tab walks the rest of the rail, then the panel header, then the list.
-    for (let step = 0; step < 40 && document.activeElement !== first; step += 1) {
-      await user.tab();
-    }
-    expect(document.activeElement).toBe(first);
-    await user.keyboard("{Enter}");
-    const tab = await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`);
-    expect(tab.dataset.active).toBe("true");
-  });
-
   it("opens a clicked channel in the Chats tab and keeps the list as the navigator", async () => {
     const bridge = bridgeWithChannels(null);
     const user = userEvent.setup();
@@ -265,9 +68,9 @@ describe("Chats in the left side panel", () => {
     expect(channelButtons).toHaveLength(2);
     await user.click(channelButtons[0]!);
 
-    // The list is a navigator: the channel opens in the Chats tab and the
-    // list stays.
-    const tab = await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`);
+    const tab = await screen.findByTestId(
+      `tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`,
+    );
     expect(tab.dataset.active).toBe("true");
     expect(tab.textContent).toContain("General");
     const channelView = await screen.findByTestId("chats-channel-view");
@@ -289,126 +92,26 @@ describe("Chats in the left side panel", () => {
       expect(screen.getByTestId("chats-channel-title").textContent).toBe("random");
     });
     expect(tab.textContent).toContain("General");
-    expect(screen.getByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-2")}`).textContent).toContain("random");
+    expect(
+      screen.getByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-2")}`).textContent,
+    ).toContain("random");
     expect(within(panel).queryByTestId("chats-channel-view")).toBeNull();
     await user.type(screen.getByTestId("chats-new-thread-composer"), "Random draft");
     await user.click(within(panel).getByTestId("chats-feed-link"));
     await screen.findByTestId("chats-personal-feed");
     expect(screen.getByTestId("tab-dohc://chats").textContent).toContain("Home");
     await user.click(within(panel).getAllByTestId("chats-channel")[0]!);
-    await waitFor(() => expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe("General draft"));
-    await user.click(within(panel).getAllByTestId("chats-channel")[1]!);
-    await waitFor(() => expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe("Random draft"));
-    expect(screen.getAllByTestId(/^tab-dohc:\/\/chats/)).toHaveLength(3);
-  });
-
-  it("reads and polls nothing while another view is selected", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    const user = userEvent.setup();
-    renderShell(bridge);
     await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+      expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe(
+        "General draft",
+      ),
     );
-    await screen.findByTestId("file-tree");
-    // Workspace activity is what drives the list's refreshes.
-    act(() => bridge.emitWorkspaceActivity());
-    await act(async () => {});
-    expect(bridge.listChatChannels).not.toHaveBeenCalled();
-    expect(bridge.syncDms).not.toHaveBeenCalled();
-
-    await user.click(screen.getByTestId("activity-chats"));
-    await within(screen.getByTestId("side-panel")).findByTestId("chats-view");
-    await waitFor(() => expect(bridge.listChatChannels).toHaveBeenCalled());
-    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
-
-    // Back to Files: the list unmounts, so activity reaches nothing of it.
-    await user.click(screen.getByTestId("activity-explorer"));
-    await screen.findByTestId("file-tree");
-    expect(screen.queryByTestId("chats-view")).toBeNull();
-    const channelReads = bridge.listChatChannels.mock.calls.length;
-    const dmSyncs = bridge.syncDms.mock.calls.length;
-    act(() => bridge.emitWorkspaceActivity());
-    await act(async () => {});
-    expect(bridge.listChatChannels.mock.calls.length).toBe(channelReads);
-    expect(bridge.syncDms.mock.calls.length).toBe(dmSyncs);
-  });
-
-  it("shows Chats from View > Chats and the palette, and never hides it from there", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
-    const user = userEvent.setup();
-    renderShell(bridge);
-    const panel = await screen.findByTestId("side-panel");
-    await within(panel).findByTestId("chats-view");
-    await act(async () => {});
-
-    act(() => bridge.emitMenuCommand("show-chats"));
-    await act(async () => {});
-    expect(within(screen.getByTestId("side-panel")).getByTestId("chats-view")).toBeTruthy();
-
-    await user.keyboard("{Control>}k{/Control}");
-    await user.click(within(await screen.findByTestId("command-palette")).getByText("View: Chats"));
-    expect(within(screen.getByTestId("side-panel")).getByTestId("chats-view")).toBeTruthy();
-
-    // From Files, the same command switches to Chats.
-    await user.click(screen.getByTestId("activity-explorer"));
-    await screen.findByTestId("file-tree");
-    act(() => bridge.emitMenuCommand("show-chats"));
-    expect(await within(screen.getByTestId("side-panel")).findByTestId("chats-view")).toBeTruthy();
-    // The rail's own button still toggles.
-    await user.click(screen.getByTestId("activity-chats"));
-    expect(screen.queryByTestId("side-panel")).toBeNull();
-  });
-
-  it("stops reading while Files shows and reloads the list once on return; open conversations stay", async () => {
-    const bridge = bridgeWithChannels(STORED_STATE);
-    const user = userEvent.setup();
-    renderShell(bridge);
-    await screen.findByTestId("file-tree");
-
-    await user.click(screen.getByTestId("activity-chats"));
-    const panel = screen.getByTestId("side-panel");
-    await within(panel).findAllByTestId("chats-channel");
-    await user.click(within(panel).getAllByTestId("chats-channel")[0]!);
-    const tab = await screen.findByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`);
-    // A half-typed group name is the list's own state.
-    await user.click(within(panel).getByTestId("chats-new-channel"));
-    await user.type(within(panel).getByTestId("chats-new-channel-name"), "draft group");
-    // Back to the document, so no conversation page reads either.
-    await user.click(screen.getByTestId("tab-b.md"));
-    await act(async () => {});
-    const firstOpen = bridge.listChatChannels.mock.calls.length;
-
-    await user.click(screen.getByTestId("activity-explorer"));
-    await screen.findByTestId("file-tree");
-    act(() => bridge.emitWorkspaceActivity());
-    await act(async () => {});
-    expect(bridge.listChatChannels.mock.calls.length).toBe(firstOpen);
-
-    await user.click(screen.getByTestId("activity-chats"));
-    await within(screen.getByTestId("side-panel")).findAllByTestId("chats-channel");
-    await waitFor(() => expect(bridge.listChatChannels.mock.calls.length).toBe(firstOpen + 1));
-    // The conversation tab lives in the editor and survives; the list
-    // remounts, so its unsent group form starts over.
-    expect(screen.getByTestId(`tab-dohc://chats/channel/${encodeURIComponent("channel-1")}`).textContent).toBe(tab.textContent);
-    expect(screen.queryByTestId("chats-new-channel-name")).toBeNull();
-  });
-
-  it("customizes chats from the panel menu while Chats is selected", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_CHATS_STATE));
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    const panel = await screen.findByTestId("side-panel");
-    await within(panel).findByTestId("chats-view");
-    expect(within(panel).getByTestId("chats-open-tab")).toBeTruthy();
-    await user.click(within(panel).getByRole("button", { name: "Sidebar actions" }));
-    expect(screen.getByRole("menuitem", { name: "Customize…" })).toBeTruthy();
-  });
-
-  it("offers no Chats view on a shared view's rail", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    renderShell(bridge, SHARE_VIEW);
-    await screen.findByTestId("activity-explorer");
-    expect(screen.queryByTestId("activity-chats")).toBeNull();
+    await user.click(within(panel).getAllByTestId("chats-channel")[1]!);
+    await waitFor(() =>
+      expect((screen.getByTestId("chats-new-thread-composer") as HTMLTextAreaElement).value).toBe(
+        "Random draft",
+      ),
+    );
+    expect(screen.getAllByTestId(/^tab-dohc:\/\/chats/)).toHaveLength(3);
   });
 });

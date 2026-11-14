@@ -486,7 +486,6 @@ async fn undo_after_outside_write_at_old_path_refuses_without_stalling_capture()
     .await;
     write_file(scratch.path(), "old.md", b"Outside content KEEP.\n");
 
-    // Desktop Undo reads the operation's History page before attempting Undo.
     let started = std::time::Instant::now();
     let page = call(
         &transport,

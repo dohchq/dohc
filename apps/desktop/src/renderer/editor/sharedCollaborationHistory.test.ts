@@ -4,7 +4,10 @@ import { Editor } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Collaboration } from "@tiptap/extension-collaboration";
 import * as Y from "yjs";
-import { CollaborationHistoryInput, createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
+import {
+  CollaborationHistoryInput,
+  createCollaborationHistoryHandle,
+} from "./sharedCollaborationHistory";
 
 it("keeps each view's listeners scoped to its shared history handle", () => {
   const doc = new Y.Doc();
@@ -87,7 +90,6 @@ it("answers the menu's Undo and Redo, which arrive as beforeinput, from the docu
     expect(input("historyRedo").defaultPrevented).toBe(true);
     expect(editor.getText()).toBe("Hello");
 
-    // Typing stays with the browser and ProseMirror.
     expect(input("insertText").defaultPrevented).toBe(false);
   } finally {
     editor.destroy();
@@ -109,7 +111,12 @@ it("leaves the keyboard's Undo and Redo to the editor's keys, which raise no bef
   editor.view.dom.addEventListener("beforeinput", beforeinput);
   // jsdom is not a Mac, so Mod is Control.
   const key = (init: KeyboardEventInit) => {
-    const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, ...init });
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      ...init,
+    });
     editor.view.dom.dispatchEvent(event);
     return event;
   };

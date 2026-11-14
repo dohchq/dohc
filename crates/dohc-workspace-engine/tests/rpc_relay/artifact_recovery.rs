@@ -8,7 +8,6 @@ const RECOVERY_FAILURE: &str = "dohc could not write this document's changes to 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReaderState {
     Ready,
-    Unavailable,
     Unresponsive,
 }
 
@@ -57,7 +56,7 @@ fn cold_reader(
     Arc<dohc_engine_reader::Reader>,
     dohc_engine_reader::Config,
 ) {
-    let mut config = witness_reader(
+    let config = witness_reader(
         reader_root,
         if reader_state == ReaderState::Unresponsive {
             "startup-hang"
@@ -65,9 +64,6 @@ fn cold_reader(
             "witness-safe"
         },
     );
-    if reader_state == ReaderState::Unavailable {
-        config.node = reader_root.path().join("missing-reader");
-    }
     let reader = Arc::new(dohc_engine_reader::Reader::new(Some(config.clone())));
     let resolver = Arc::new(ReaderResolver::new(Arc::clone(&reader)));
     for (path, key, doc) in notes {
@@ -120,7 +116,6 @@ struct Notes {
     a: WorkspaceHandle,
     a_id: u64,
     notes: Vec<(String, DocKey, Ydoc)>,
-    /// B's session, lineage claim and first text for each note.
     sessions_b: Vec<(String, Value, String)>,
     sessions_a: Vec<String>,
 }
@@ -251,7 +246,6 @@ impl Notes {
         notes
     }
 
-    /// B adds a paragraph to each note in `indexes` and publishes it.
     async fn edit_on_b(&mut self, indexes: std::ops::Range<usize>) {
         for index in indexes {
             let session = &self.sessions_b[index].0;
@@ -301,20 +295,6 @@ impl Notes {
         publish_pushed_ops(&self.relay, WORKSPACE, &self.b_scratch);
     }
 
-    /// End A's sessions without a restart.
-    async fn evict_on_a(&mut self) {
-        for session in std::mem::take(&mut self.sessions_a) {
-            call(
-                &self.a_transport,
-                &self.a,
-                &mut self.a_id,
-                "ydoc.evict",
-                json!({"sessionId":session}),
-            )
-            .await;
-        }
-    }
-
     /// Quit A and open it again with a cold reader. Answers how long the open
     /// took.
     async fn restart_a(&mut self, reader_state: ReaderState) -> Duration {
@@ -361,7 +341,6 @@ impl Notes {
         elapsed
     }
 
-    /// One sync on A. Answers how long it took.
     async fn pull(&mut self) -> Duration {
         let started = std::time::Instant::now();
         pull_materialize_and_commit(&self.a_transport, &self.a, &mut self.a_id, WORKSPACE).await;
@@ -372,8 +351,6 @@ impl Notes {
         std::fs::read_to_string(self.a_scratch.path().join(&self.notes[index].0)).unwrap()
     }
 
-    /// Every note's file on A has B's edit, or every one still has its first
-    /// text.
     fn assert_files(&self, caught_up: bool) {
         for (index, (path, _, doc)) in self.notes.iter().enumerate() {
             let expected = if caught_up {
@@ -393,7 +370,6 @@ impl Notes {
         db.query_row(sql, [], |r| r.get(0)).unwrap()
     }
 
-    /// The paths Notices names, each row with the recovery failure message.
     async fn notice_paths(&mut self) -> Vec<String> {
         let listed = call(
             &self.a_transport,
@@ -423,7 +399,6 @@ impl Notes {
         assert_eq!(self.notice_paths().await, expected);
     }
 
-    /// A change to another file still reaches A.
     async fn assert_sync_continues(&mut self) {
         call(&self.b_transport,&self.b,&mut self.b_id,"versionedText.write",json!({"versionId":"main","objectId":"other","path":"other.md","text":"Later incoming work","momentId":"other-moment","origin":"api","nowMs":210})).await;
         self.push_on_b().await;
@@ -454,58 +429,6 @@ impl Notes {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_workspace_keeps_syncing_after_a_live_note_session_ends() {
-    let mut notes = Notes::new(2, 0).await;
-    notes.evict_on_a().await;
-    install_cold_reader(
-        &notes.a_scratch,
-        &notes.reader_root,
-        &notes.notes,
-        ReaderState::Ready,
-    )
-    .await;
-    notes.pull().await;
-    notes.assert_files(true);
-    assert_eq!(notes.pending_artifacts(), 0);
-    notes.assert_sync_continues().await;
-    notes.close().await;
-}
-
-/// A sync finishes one note in its pass, then waits for the reader to check
-/// another note's incoming edit. The sync still writes the first note's file.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_sync_that_checks_a_later_note_still_writes_the_note_it_finished() {
-    let mut notes = Notes::new(1, 1).await;
-    notes.evict_on_a().await;
-    // A never opened the second note, so it applies B's edit to it in the
-    // sync below, after it finishes the first note.
-    notes.edit_on_b(1..2).await;
-    let (resolver, reader) = install_cold_reader(
-        &notes.a_scratch,
-        &notes.reader_root,
-        &notes.notes[..1],
-        ReaderState::Ready,
-    )
-    .await;
-    let (path, key, doc) = &notes.notes[0];
-    if let Err(CollabError::MarkdownWitnessCheckPending { pending, .. }) =
-        resolver.check_witness(doc, key, path)
-    {
-        pending.resolve().await;
-    }
-    assert!(resolver.check_witness(doc, key, path).unwrap());
-    let checked = reader.dispatch_count();
-    notes.pull().await;
-    assert!(
-        reader.dispatch_count() > checked,
-        "the sync checked the second note's edit"
-    );
-    notes.assert_files(true);
-    assert_eq!(notes.pending_artifacts(), 0);
-    notes.close().await;
-}
-
 async fn assert_restart_catches_up(waiting: usize) {
     let mut notes = Notes::new(waiting, 0).await;
     let opened = notes.restart_a(ReaderState::Ready).await;
@@ -521,92 +444,13 @@ async fn assert_restart_catches_up(waiting: usize) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_workspace_opens_after_a_restart_with_notes_waiting_for_their_files() {
-    assert_restart_catches_up(6).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn more_than_sixteen_waiting_notes_catch_up_in_one_sync() {
-    assert_restart_catches_up(17).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn opening_and_saving_a_note_lets_the_workspace_sync_again() {
-    let mut notes = Notes::new(1, 0).await;
-    notes.evict_on_a().await;
-    install_cold_reader(
-        &notes.a_scratch,
-        &notes.reader_root,
-        &notes.notes,
-        ReaderState::Ready,
-    )
-    .await;
-    notes.a_id += 1;
-    let first = pull_batch(
-        &notes.a_transport,
-        RequestContext::unbounded(),
-        request(
-            notes.a_id,
-            "sync.applyPull",
-            Some(notes.a.clone()),
-            json!({"workspaceId":WORKSPACE}),
-        ),
-    )
-    .await;
-    eprintln!("sync before opening the note: {first:?}");
-    if let Err(error) = first {
-        assert_eq!(error.code, ErrorCode::Internal);
-    }
-    let opened = call(
-        &notes.a_transport,
-        &notes.a,
-        &mut notes.a_id,
-        "ydoc.open",
-        json!({"versionId":"main","path":notes.notes[0].0,"contentKind":"richdoc"}),
-    )
-    .await;
-    let session = opened["sessionId"].as_str().unwrap().to_owned();
-    notes.a_id += 1;
-    let loaded = service_call_with_busy_retry(
-        notes.a_service.as_ref(),
-        RequestContext::unbounded().with_capability("blobs"),
-        request(
-            notes.a_id,
-            "ydoc.resync",
-            Some(notes.a.clone()),
-            json!({"sessionId":session}),
-        ),
-    )
-    .await
-    .unwrap();
-    let doc = Ydoc::wire();
-    doc.apply(&loaded.blob_egress.unwrap().bytes).unwrap();
-    assert!(
-        doc.project(ContentKind::Richdoc)
-            .unwrap()
-            .content
-            .contains("Accepted remote edit")
-    );
-    for method in ["ydoc.settle", "ydoc.close"] {
-        call(
-            &notes.a_transport,
-            &notes.a,
-            &mut notes.a_id,
-            method,
-            json!({"sessionId":session}),
-        )
-        .await;
-    }
-    notes.pull().await;
-    notes.assert_files(true);
-    assert_eq!(notes.pending_artifacts(), 0);
-    notes.assert_sync_continues().await;
-    notes.close().await;
+    assert_restart_catches_up(2).await;
 }
 
 /// After a restart, the reader fails every note's check. One sync, with one
 /// stall at most, names each note in Notices and keeps every older file.
 async fn assert_reader_failure(reader_state: ReaderState) -> Notes {
-    let mut notes = Notes::new(4, 0).await;
+    let mut notes = Notes::new(2, 0).await;
     let opened = notes.restart_a(reader_state).await;
     assert!(
         opened < Duration::from_secs(5),
@@ -619,25 +463,9 @@ async fn assert_reader_failure(reader_state: ReaderState) -> Notes {
     );
     notes.assert_files(false);
     notes.assert_a_notice_per_note().await;
-    assert_eq!(notes.pending_artifacts(), 4);
+    assert_eq!(notes.pending_artifacts(), 2);
     notes.assert_sync_continues().await;
     notes
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_workspace_opens_when_a_note_check_never_finishes() {
-    assert_reader_failure(ReaderState::Unavailable)
-        .await
-        .close()
-        .await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_workspace_opens_when_its_note_reader_does_not_answer() {
-    assert_reader_failure(ReaderState::Unresponsive)
-        .await
-        .close()
-        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -14,10 +14,7 @@ export function createWorkspaceFileProtocolHandler<Workspace>({
       const workspace = findWorkspace(url.hostname);
       if (!workspace) return new Response("Unknown workspace", { status: 404 });
       const relPath = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
-      const { bytes, mediaType } = await readOwnedWorkspaceAsset(
-        workspace,
-        relPath,
-      );
+      const { bytes, mediaType } = await readOwnedWorkspaceAsset(workspace, relPath);
       // A Uint8Array VIEW over the Buffer's memory — not a second full copy.
       // (Node Buffers are ArrayBuffer-backed; the cast narrows the generic
       // ArrayBufferLike that TS 5.9 infers from .buffer.)

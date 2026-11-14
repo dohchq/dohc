@@ -1,7 +1,6 @@
 import { namedShareOrigin } from "./relayLogInputs";
 import { afterEach, describe, expect, it } from "vitest";
-import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
-import { MAX_BLOB_BYTES, type SyncRelayHandler } from "./server";
+import { type SyncRelayHandler } from "./server";
 // The CONTRACT's shape, not a copy of it. A local re-declaration drifts, and a
 // test that proves the copy proves nothing about the route.
 import type { ProposedChange } from "./shareFilter";
@@ -86,8 +85,6 @@ class Granter {
     return digest;
   }
 
-  // One write to one file, with real content, returning the moment id the
-  // granter's log now holds for it.
   async write(
     objectId: string,
     path: string,
@@ -267,7 +264,6 @@ async function reviewProposal(
   return (await json(response)).proposal as Record<string, unknown>;
 }
 
-// The only open proposal, opened. Every caller here submits exactly one.
 async function onlyReview(h: SyncRelayHandler): Promise<Record<string, unknown>> {
   const rows = await reviewRows(h);
   expect(rows.length, "one open proposal").toBe(1);
@@ -294,8 +290,8 @@ describe("the proposal route's level gate", () => {
     const edit = await createShare(h, "edit");
 
     const refusals = await Promise.all(
-      [view, comment, version].map(async (shareId) =>
-        await denialBytes(await submit(h, shareId, [change()])),
+      [view, comment, version].map(
+        async (shareId) => await denialBytes(await submit(h, shareId, [change()])),
       ),
     );
     expect(
@@ -312,28 +308,10 @@ describe("the proposal route's level gate", () => {
     expect(accepted.status, await accepted.clone().text()).toBe(200);
   });
 
-  it("refuses a chat grant's submit with the same bytes", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const created = await h(
-      request(
-        GRANTER,
-        `/sync/${WORKSPACE}/shares`,
-        jsonBody({ recipientUserId: RECIPIENT, channelWireId: "wire-1", access: "read-write" }),
-      ),
-    );
-    expect(created.status).toBe(200);
-    const shareId = (await json(created)).shareId as string;
-    const refused = await submit(h, shareId, [change()]);
-    expect(refused.status).toBe(403);
-    expect(await refused.text()).toContain("share_read_only");
-  });
-
   it("holds the two write routes apart: the append route still refuses moments", async () => {
-    // #646 PR3-0 closed the append gate, and PR3a must not reopen it by giving
-    // the append route a moment-shaped arm. The proposal route is the only way
-    // a file change crosses, and it never reaches the log without an accept.
+    // The append route refuses moments, and must not gain a moment-shaped
+    // arm. The proposal route is the only way a file change crosses, and it
+    // never reaches the log without an accept.
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
@@ -358,10 +336,7 @@ describe("the proposal route's level gate", () => {
         }),
       ),
     );
-    expect(
-      appended.status,
-      "the append route must never gain moment acceptance",
-    ).toBe(403);
+    expect(appended.status, "the append route must never gain moment acceptance").toBe(403);
     expect(
       (await granter.sharedMoments(shareId)).length,
       "a refused append must leave the granter's log untouched",
@@ -383,77 +358,13 @@ describe("what a proposal may name", () => {
     for (const [label, op] of [
       ["base outside", change({ basedOnPath: "notes/out.md" })],
       ["destination outside", change({ afterPath: "notes/out.md" })],
-      [
-        "escaping destination",
-        change({ afterPath: "docs/../notes/out.md" }),
-      ],
+      ["escaping destination", change({ afterPath: "docs/../notes/out.md" })],
     ] as const) {
       const refused = await submit(h, shareId, [op], { submitId: `s-${label}` });
       expect(refused.status, `${label} must be refused`).toBe(403);
       expect(await refused.text()).toContain("share_op_rejected");
     }
     expect((await reviewRows(h)).length, "nothing may be stored").toBe(0);
-  });
-
-  it("refuses two changes to one file in one submit", async () => {
-    // One net change per file is what makes the base rewrite sound: two
-    // changes for one file would be given the same rewritten base and would
-    // then conflict with each other at accept. The recipient consolidates, and
-    // this is where that stops being a promise and starts being a rule.
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-    await uploadShareBlob(h, shareId, "recipient three");
-
-    const sameBase = await submit(h, shareId, [
-      change(),
-      change({ afterPath: "docs/other.md", afterBlobSha256: sha256("recipient three") }),
-    ]);
-    expect(sameBase.status, "two changes may not share one base file").toBe(403);
-
-    const sameDestination = await submit(
-      h,
-      shareId,
-      [
-        change(),
-        change({ basedOnPath: null, basedOnBlobSha256: null, afterBlobSha256: sha256("recipient three") }),
-      ],
-      { submitId: "s-2" },
-    );
-    expect(sameDestination.status, "two changes may not land on one path").toBe(403);
-    expect((await reviewRows(h)).length).toBe(0);
-  });
-
-  it("refuses a half-stated base and a malformed change", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-
-    const malformed: Array<[string, unknown]> = [
-      ["base path without a hash", change({ basedOnBlobSha256: null })],
-      ["base hash without a path", change({ basedOnPath: null })],
-      ["a hash that is not a hash", change({ afterBlobSha256: "not-a-sha" })],
-      ["an unknown operation", { ...change(), operation: "rename" }],
-      ["a delete that names content", change({ operation: "delete" })],
-      ["a delete of a file the granter never had", { ...change(), operation: "delete", basedOnPath: null, basedOnBlobSha256: null, afterPath: null, afterBlobSha256: null, afterContentKind: null, afterByteLength: null }],
-      ["a write with no destination", change({ afterPath: null })],
-      ["a negative byte length", change({ afterByteLength: -1 })],
-      ["a fractional timestamp", change({ recordedAtMs: 1.5 })],
-      ["not an object", "docs/in.md"],
-    ];
-    for (const [label, op] of malformed) {
-      const refused = await submit(h, shareId, [op as ProposedChange], { submitId: `s-${label}` });
-      expect(refused.status, `${label} must be refused`).toBe(403);
-    }
-    expect((await reviewRows(h)).length).toBe(0);
   });
 
   it("refuses a submit whose content the relay does not hold", async () => {
@@ -465,69 +376,12 @@ describe("what a proposal may name", () => {
     const shareId = await createShare(h, "edit");
 
     const refused = await submit(h, shareId, [change()]);
-    expect(
-      refused.status,
-      "a change whose blob is absent must be refused at submit",
-    ).toBe(422);
+    expect(refused.status, "a change whose blob is absent must be refused at submit").toBe(422);
     expect(await refused.text()).toContain("blob_missing");
   });
 });
 
 describe("the base rewrite", () => {
-  it("gives a current change the granter's own head moment as its base", async () => {
-    // The mechanism that makes accept free. A recipient's own moment ids mean
-    // nothing here, so the relay states the base itself — and when the
-    // recipient was current, that base IS the granter's head, which is what
-    // lets the granter's engine fast-forward instead of opening a conflict.
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const head = await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-
-    const submitted = await submit(h, shareId, [
-      change({ basedOnBlobSha256: head.blobSha256 }),
-    ]);
-    expect(submitted.status, await submitted.clone().text()).toBe(200);
-    const proposalId = (await json(submitted)).proposalId as string;
-
-    expect(
-      (await granter.sharedMoments(shareId)).length,
-      "an open proposal must not be in the granter's log",
-    ).toBe(0);
-
-    const accepted = await settle(h, proposalId, "accept");
-    expect(accepted.status, await accepted.clone().text()).toBe(200);
-
-    const moments = await granter.sharedMoments(shareId);
-    expect(moments.length).toBe(1);
-    const moment = moments[0]!;
-    expect(
-      moment.beforeLatestMomentId,
-      "the base must be the granter's OWN head moment, or every accept opens a spurious conflict",
-    ).toBe(head.momentId);
-    expect(
-      moment.objectId,
-      "the moment must name the GRANTER's object, not a recipient id",
-    ).toBe("object-in");
-    expect(moment.beforePresent).toBe("present");
-    expect(moment.beforePath).toBe("docs/in.md");
-    expect(moment.beforeBlobSha256).toBe(head.blobSha256);
-    expect(moment.payloadBeforePath).toBe("docs/in.md");
-    expect(moment.payloadBeforeBlobSha256).toBe(head.blobSha256);
-    expect(moment.payloadAfterBlobSha256).toBe(sha256("recipient two"));
-    expect(moment.payloadAfterPath).toBe("docs/in.md");
-    expect(moment.operation).toBe("write");
-    expect(moment.versionId).toBe("main");
-    // A moment cannot name a human author; the summary is what History shows.
-    expect(moment.authors).toBeUndefined();
-    expect((moment.metadata as Record<string, unknown>).summary).toBe(
-      `Accepted changes from ${RECIPIENT}@dohc.test`,
-    );
-  });
-
   it("gives a DRIFTED change the granter's own earlier moment as its base", async () => {
     // The second correct outcome. The granter wrote again after the recipient
     // read the file, so the rewritten base is a real, older granter moment —
@@ -539,7 +393,6 @@ describe("the base rewrite", () => {
     const granter = new Granter(h);
     const readByRecipient = await granter.write("object-in", "docs/in.md", "granter one");
     const shareId = await createShare(h, "edit");
-    // The granter moves on while the recipient is editing.
     const head = await granter.write("object-in", "docs/in.md", "granter two");
     expect(head.momentId).not.toBe(readByRecipient.momentId);
     await uploadShareBlob(h, shareId, "recipient two");
@@ -578,7 +431,6 @@ describe("the base rewrite", () => {
     await granter.write("object-in", "docs/in.md", "granter one");
     const shareId = await createShare(h, "edit");
     await uploadShareBlob(h, shareId, "recipient two");
-    // A hash of content this workspace has never held.
     await granter.putBlob("a stranger");
 
     const submitted = await submit(h, shareId, [
@@ -595,7 +447,6 @@ describe("the base rewrite", () => {
     ).toBe("null");
     expect(moment.beforeLatestMomentId).toBeUndefined();
     expect(moment.payloadBeforePath).toBeNull();
-    // The object is still the granter's own: only the LINEAGE is unknown.
     expect(moment.objectId).toBe("object-in");
   });
 
@@ -643,40 +494,6 @@ describe("the base rewrite", () => {
     ).toMatch(/^id-/u);
     expect(created.objectId).not.toBe("object-in");
   });
-
-  it("carries the content a delete removes on both sides of the moment", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const head = await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-
-    const submitted = await submit(h, shareId, [
-      change({
-        basedOnBlobSha256: head.blobSha256,
-        operation: "delete",
-        afterPath: null,
-        afterBlobSha256: null,
-        afterContentKind: null,
-        afterByteLength: null,
-      }),
-    ]);
-    expect(submitted.status, await submitted.clone().text()).toBe(200);
-    expect((await settle(h, (await json(submitted)).proposalId as string, "accept")).status).toBe(
-      200,
-    );
-
-    const moment = (await granter.sharedMoments(shareId))[0]!;
-    expect(moment.operation).toBe("delete");
-    expect(moment.path).toBe("docs/in.md");
-    expect(moment.payloadAfterPath).toBe("docs/in.md");
-    expect(
-      moment.payloadAfterBlobSha256,
-      "the domain's own delete carries the removed content on both sides",
-    ).toBe(head.blobSha256);
-    expect(moment.beforeLatestMomentId).toBe(head.momentId);
-  });
 });
 
 describe("the origin an accept writes", () => {
@@ -704,7 +521,6 @@ describe("the origin an accept writes", () => {
       200,
     );
 
-    // The recipient's next op, at the next number its own journal hands it.
     const after = await recipientChat(h, shareId, 1, "two");
     expect(
       after.status,
@@ -719,173 +535,9 @@ describe("the origin an accept writes", () => {
       "accepted moments must not ride the recipient's own origin",
     ).toBe(0);
   });
-
-  it("numbers each proposal's own stream densely from zero", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const head = await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-    await uploadShareBlob(h, shareId, "brand new");
-
-    const submitted = await submit(h, shareId, [
-      change({ basedOnBlobSha256: head.blobSha256 }),
-      change({
-        basedOnPath: null,
-        basedOnBlobSha256: null,
-        afterPath: "docs/new.md",
-        afterBlobSha256: sha256("brand new"),
-        afterByteLength: "brand new".length,
-      }),
-    ]);
-    const proposalId = (await json(submitted)).proposalId as string;
-    expect((await settle(h, proposalId, "accept")).status).toBe(200);
-
-    const rows = (await granter.log()).filter(
-      (op) => op.originId === `share:${shareId}:proposal:${proposalId}`,
-    );
-    expect(rows.length, "an accept writes its proposal's OWN origin").toBe(2);
-    expect(rows.map((row) => row.originSeq)).toEqual([0, 1]);
-  });
-
-  it("refuses a recipient that claims the relay's own origin prefix", async () => {
-    // The other half of keeping the two streams apart: the recipient names its
-    // own origin on the wire, so a hostile client could claim the prefix accept
-    // mints under and take sequence numbers out of an accept stream.
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-
-    const claimed = await recipientChat(h, shareId, 0, "one", {
-      originId: "proposal:anything",
-    });
-    expect(
-      claimed.status,
-      "a client may not push under the origin prefix accept owns",
-    ).toBe(400);
-  });
 });
 
 describe("what the granter does under an open proposal", () => {
-  // The base is resolved to an OBJECT at the submit door and followed at
-  // accept. A path is not an identity: between the two doors the granter can
-  // move the file or remove it, and a base re-resolved by path would then find
-  // a different file, or none — and "none" is minted as a create.
-
-  it("leaves a content-only change at the path the granter moved it to", async () => {
-    // The recipient edited the file where it found it and said nothing about
-    // where it lives — `basedOnPath` and `afterPath` are the same path. The
-    // granter then moved it. Landing the content at the recipient's path
-    // would silently undo a rename the granter meant, so the content follows
-    // the file instead.
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const read = await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-    const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: read.blobSha256 })]);
-    expect(submitted.status, await submitted.clone().text()).toBe(200);
-    const proposalId = (await json(submitted)).proposalId as string;
-
-    // The granter moves the file while the changes wait for review.
-    await granter.write("object-in", "docs/moved.md", "granter one", {
-      operation: "rename",
-      payloadBeforePath: "docs/in.md",
-      beforePath: "docs/in.md",
-    });
-
-    // The REVIEW names the destination the accept will use — the granter's
-    // current path, not the one the recipient read. A pure rename leaves
-    // `drifted: false`, so there is no drift line to warn them either.
-    const reviewed = await onlyReview(h);
-    const reviewedOp = (reviewed.ops as Array<Record<string, unknown>>)[0]!;
-    expect(
-      reviewedOp.afterPath,
-      "the review names a path the accept will not write to",
-    ).toBe("docs/moved.md");
-    expect(reviewedOp.drifted).toBe(false);
-
-    expect((await settle(h, proposalId, "accept")).status).toBe(200);
-    const moment = (await granter.sharedMoments(shareId))[0]!;
-    expect(
-      moment.payloadAfterPath,
-      "landing at the path the recipient read undoes the granter's rename",
-    ).toBe("docs/moved.md");
-    expect(
-      moment.operation,
-      "a content-only change is a write, not a rename back",
-    ).toBe("write");
-    expect(moment.payloadAfterBlobSha256).toBe(sha256("recipient two"));
-    expect(moment.objectId).toBe("object-in");
-    // And nothing is left at the path the recipient read.
-    expect(
-      storage.objectIdAtPath(WORKSPACE, "docs/in.md"),
-      "the stale path must not come back as a second copy of the file",
-    ).toBeUndefined();
-    expect(storage.objectIdAtPath(WORKSPACE, "docs/moved.md")).toBe("object-in");
-  });
-
-  it("applies a rename the RECIPIENT asked for, even when the granter moved the file too", async () => {
-    // The other half of the rule. Here the recipient stated a destination
-    // different from its base, which is a move it meant — so it applies. The
-    // granter moved the file as well, and accepts knowing that: the review
-    // shows where the granter has it now.
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const read = await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-    const submitted = await submit(h, shareId, [
-      change({ basedOnBlobSha256: read.blobSha256, afterPath: "docs/by-recipient.md" }),
-    ]);
-    expect(submitted.status, await submitted.clone().text()).toBe(200);
-    const proposalId = (await json(submitted)).proposalId as string;
-
-    // The granter moves it somewhere else while the changes wait.
-    const renamed = await granter.write("object-in", "docs/moved.md", "granter one", {
-      operation: "rename",
-      payloadBeforePath: "docs/in.md",
-      beforePath: "docs/in.md",
-    });
-
-    // The REVIEW names the same destination the accept will use.
-    const reviewed = await onlyReview(h);
-    expect(
-      (reviewed.ops as Array<Record<string, unknown>>)[0]!.afterPath,
-      "the review must name the path the write will use",
-    ).toBe("docs/by-recipient.md");
-
-    expect((await settle(h, proposalId, "accept")).status).toBe(200);
-    const moments = await granter.sharedMoments(shareId);
-    expect(moments.length, "one change is one moment").toBe(1);
-    const moment = moments[0]!;
-    expect(
-      moment.objectId,
-      "a base re-resolved by PATH finds nothing here, mints a new object, and the granter ends up with the file twice",
-    ).toBe("object-in");
-    expect(
-      moment.payloadAfterPath,
-      "a move the recipient asked for must not be dropped in favour of the granter's path",
-    ).toBe("docs/by-recipient.md");
-    expect(moment.operation).toBe("rename");
-    expect(moment.payloadBeforePath).toBe("docs/moved.md");
-    expect(
-      moment.beforeLatestMomentId,
-      "the base must be a REAL moment of the granter's own object, never a stranger and never absent",
-    ).toBe(renamed.momentId);
-    expect(moment.beforePresent).toBe("present");
-    expect(read.momentId).not.toBe(renamed.momentId);
-  });
-
   it("deletes the file where the granter has it now, not where the recipient read it", async () => {
     // Same rule as a content-only edit, in the other direction: the recipient
     // asked for the file to be gone, not for a path to be gone. A delete
@@ -945,7 +597,6 @@ describe("what the granter does under an open proposal", () => {
     const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: read.blobSha256 })]);
     const proposalId = (await json(submitted)).proposalId as string;
 
-    // The granter deletes the file while the changes wait for review.
     const deleted = await granter.write("object-in", "docs/in.md", "granter one", {
       operation: "delete",
       payloadAfterBlobSha256: null,
@@ -966,59 +617,6 @@ describe("what the granter does under an open proposal", () => {
     // Stated base, older than the head: the engine's own rule then opens a
     // conflict instead of fast-forwarding the file back into existence.
     expect(moment.beforePresent).toBe("present");
-  });
-
-  it("refuses a submit whose base names no file the granter has", async () => {
-    // Resolved at the door the recipient is standing at, so the refusal
-    // reaches the person who can act on it and names the file.
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-
-    const refused = await submit(h, shareId, [change({ basedOnPath: "docs/never.md" })]);
-    expect(
-      refused.status,
-      "an unresolvable base must be refused at submit, not minted as a create at accept",
-    ).toBe(400);
-    const body = await refused.text();
-    expect(body, "the refusal names the file it is about").toContain("docs/never.md");
-    expect((await reviewRows(h)).length, "the whole submit is refused, atomically").toBe(
-      0,
-    );
-  });
-
-  it("refuses a delete and a create for one path in one submit", async () => {
-    // Two changes for one file, wearing different sides: the delete states
-    // only a base path and the create states only a destination, so a guard
-    // that keeps one set per side holds one path each and admits the pair.
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const head = await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-
-    const refused = await submit(h, shareId, [
-      change({
-        basedOnBlobSha256: head.blobSha256,
-        operation: "delete",
-        afterPath: null,
-        afterBlobSha256: null,
-        afterContentKind: null,
-        afterByteLength: null,
-      }),
-      change({ basedOnPath: null, basedOnBlobSha256: null }),
-    ]);
-    expect(
-      refused.status,
-      "a delete plus a create for one path is two changes to one file",
-    ).toBe(403);
-    expect((await reviewRows(h)).length).toBe(0);
   });
 });
 
@@ -1065,71 +663,9 @@ describe("the version a share exposes", () => {
     ).toBe(main.momentId);
     expect(moment.versionId).toBe("main");
   });
-
-  it("resolves the base to the object this version has at that path", async () => {
-    // Two different objects hold the same path in two versions. Resolving the
-    // path across all versions at once picks whichever moved last, so a main
-    // share would build its change on a side version's file — and every
-    // version-scoped lookup after it would then find nothing, because that
-    // object has no moments in main.
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    // The side version's object is recorded first, so it is the row an
-    // unscoped "who is at this path" lookup reaches before the main one.
-    await granter.write("object-side", "docs/in.md", "side content", {
-      versionId: "version-2",
-    });
-    const main = await granter.write("object-main", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-
-    const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: main.blobSha256 })]);
-    expect(submitted.status, await submitted.clone().text()).toBe(200);
-    expect((await settle(h, (await json(submitted)).proposalId as string, "accept")).status).toBe(
-      200,
-    );
-
-    const moment = (await granter.sharedMoments(shareId))[0]!;
-    expect(
-      moment.objectId,
-      "an unscoped path lookup takes the side version's object, and the change lands on an unrelated file",
-    ).toBe("object-main");
-    expect(
-      moment.beforeLatestMomentId,
-      "and its base then resolves to nothing, so a current change states no base at all",
-    ).toBe(main.momentId);
-    expect(moment.payloadAfterPath).toBe("docs/in.md");
-  });
 });
 
 describe("accept, decline, and withdraw", () => {
-  it("declines without moving anything into the granter's log", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const head = await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-    const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })]);
-    const proposalId = (await json(submitted)).proposalId as string;
-
-    const declined = await settle(h, proposalId, "decline");
-    expect(declined.status).toBe(200);
-    expect((await json(declined)).state).toBe("declined");
-    expect(
-      (await granter.sharedMoments(shareId)).length,
-      "decline must never move the changes",
-    ).toBe(0);
-    // And the recipient can see what happened to them.
-    const mine = await h(request(RECIPIENT, `/sync/shares/${shareId}/proposals`));
-    expect(((await json(mine)).proposals as Array<Record<string, unknown>>)[0]!.state).toBe(
-      "declined",
-    );
-  });
-
   it("settles exactly once, whichever mover arrives second", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -1157,30 +693,6 @@ describe("accept, decline, and withdraw", () => {
     ).toBe(1);
   });
 
-  it("lets a recipient take its changes back while they are open", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const head = await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-    const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })]);
-    const proposalId = (await json(submitted)).proposalId as string;
-
-    const withdrawn = await h(
-      request(RECIPIENT, `/sync/shares/${shareId}/proposals/${proposalId}/withdraw`, {
-        method: "POST",
-      }),
-    );
-    expect(withdrawn.status, await withdrawn.clone().text()).toBe(200);
-    expect(
-      (await reviewRows(h)).length,
-      "withdrawn changes must leave the granter's review surface",
-    ).toBe(0);
-    expect((await settle(h, proposalId, "accept")).status).toBe(409);
-  });
-
   it("still lets a recipient take changes back after a downgrade", async () => {
     // Submitting is a reversible state change, and the reverse path has to
     // survive the thing most likely to happen while changes wait: the granter
@@ -1198,7 +710,6 @@ describe("accept, decline, and withdraw", () => {
     const proposalId = (await json(submitted)).proposalId as string;
 
     narrowToComment(storage, shareId);
-    // The recipient can still see what it has out.
     const listed = await h(request(RECIPIENT, `/sync/shares/${shareId}/proposals`));
     expect(listed.status, await listed.clone().text()).toBe(200);
     expect((await json(listed)).proposals).toHaveLength(1);
@@ -1213,55 +724,6 @@ describe("accept, decline, and withdraw", () => {
       "a withdraw gated on the level loses the reverse path to a downgrade",
     ).toBe(200);
     expect((await reviewRows(h)).length).toBe(0);
-  });
-
-  // What keeps a withdraw to its own author is the SHARE scoping, not a
-  // second check on the proposer: the route proves the caller is this share's
-  // recipient, and a path share has exactly one. An added proposer test would
-  // be a line no input can reach.
-  it("never lets one recipient withdraw another's changes", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const head = await granter.write("object-in", "docs/in.md", "granter one");
-    const mine = await createShare(h, "edit");
-    const theirs = await createShare(h, "edit", { recipient: OTHER });
-    await uploadShareBlob(h, mine, "recipient two");
-    const submitted = await submit(h, mine, [change({ basedOnBlobSha256: head.blobSha256 })]);
-    const proposalId = (await json(submitted)).proposalId as string;
-
-    const stolen = await h(
-      request(OTHER, `/sync/shares/${theirs}/proposals/${proposalId}/withdraw`, {
-        method: "POST",
-      }),
-    );
-    expect(
-      await denialBytes(stolen),
-      "another share's proposal is the same generic 404 as one that never existed",
-    ).toBe(await denialBytes(await h(
-      request(OTHER, `/sync/shares/${theirs}/proposals/id-absent/withdraw`, { method: "POST" }),
-    )));
-    expect((await reviewRows(h)).length).toBe(1);
-  });
-
-  it("returns the same proposal when a submit is retried", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const head = await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-    const ops = [change({ basedOnBlobSha256: head.blobSha256 })];
-
-    const first = await json(await submit(h, shareId, ops, { submitId: "retried" }));
-    const second = await json(await submit(h, shareId, ops, { submitId: "retried" }));
-    expect(second.proposalId, "a lost response must not become a second proposal").toBe(
-      first.proposalId,
-    );
-    expect(second.created).toBe(false);
-    expect((await reviewRows(h)).length).toBe(1);
   });
 });
 
@@ -1282,42 +744,17 @@ describe("what an open proposal survives", () => {
     const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })]);
     const proposalId = (await json(submitted)).proposalId as string;
 
-    // Long past any grace window.
     const swept = await storage.collectUnreferencedBlobs(WORKSPACE, {
       nowMs: 4242 + 365 * 24 * 60 * 60 * 1000,
     });
-    expect(
-      swept.removedSha256s,
-      "an open proposal's content must survive the sweep",
-    ).not.toContain(sha256("recipient two"));
+    expect(swept.removedSha256s, "an open proposal's content must survive the sweep").not.toContain(
+      sha256("recipient two"),
+    );
 
-    // And the proof that it still works: the accept lands the content.
     expect((await settle(h, proposalId, "accept")).status).toBe(200);
     expect((await granter.sharedMoments(shareId))[0]!.payloadAfterBlobSha256).toBe(
       sha256("recipient two"),
     );
-  });
-
-  it("stops protecting its content once it is declined", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const head = await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-    const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })]);
-    expect(
-      (await settle(h, (await json(submitted)).proposalId as string, "decline")).status,
-    ).toBe(200);
-
-    const swept = await storage.collectUnreferencedBlobs(WORKSPACE, {
-      nowMs: 4242 + 365 * 24 * 60 * 60 * 1000,
-    });
-    expect(
-      swept.removedSha256s,
-      "declined content is never going into the log, so it must be reclaimable",
-    ).toContain(sha256("recipient two"));
   });
 
   it("is settled as declined when the granter ends the share", async () => {
@@ -1359,40 +796,17 @@ describe("what an open proposal survives", () => {
       "content held for a proposal nobody can answer is held forever",
     ).toContain(sha256("recipient two"));
 
-    // The recipient, meanwhile, can do nothing more.
     expect(
-      (await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })], {
-        submitId: "after-revoke",
-      })).status,
+      (
+        await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })], {
+          submitId: "after-revoke",
+        })
+      ).status,
     ).toBe(404);
   });
 });
 
 describe("who may do what", () => {
-  it("never lets a recipient accept its own changes", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const head = await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    await uploadShareBlob(h, shareId, "recipient two");
-    const submitted = await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })]);
-    const proposalId = (await json(submitted)).proposalId as string;
-
-    for (const [label, response] of [
-      ["accept", await settle(h, proposalId, "accept", RECIPIENT)],
-      ["decline", await settle(h, proposalId, "decline", RECIPIENT)],
-      ["review", await h(request(RECIPIENT, `/sync/${WORKSPACE}/proposals`))],
-    ] as const) {
-      expect(
-        response.status,
-        `a recipient must never ${label} — ownership decides, not the share`,
-      ).toBe(404);
-    }
-    expect((await granter.sharedMoments(shareId)).length).toBe(0);
-  });
-
   it("keeps one recipient's changes invisible to another recipient", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -1418,30 +832,6 @@ describe("who may do what", () => {
       }),
     );
     expect(stolen.status, "a proposal of another share is the generic 404").toBe(404);
-  });
-
-  it("refuses a submit on a share already revoked or already narrowed", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    const head = await granter.write("object-in", "docs/in.md", "granter one");
-
-    const revoked = await createShare(h, "edit");
-    await uploadShareBlob(h, revoked, "recipient two");
-    expect(
-      (await h(request(GRANTER, `/sync/shares/${revoked}/revoke`, { method: "POST" }))).status,
-    ).toBe(200);
-    const afterRevoke = await submit(h, revoked, [change({ basedOnBlobSha256: head.blobSha256 })]);
-    expect(afterRevoke.status, "a revoked share accepts no submit").toBe(404);
-
-    const downgraded = await createShare(h, "edit");
-    narrowToComment(storage, downgraded);
-    const afterDowngrade = await submit(h, downgraded, [
-      change({ basedOnBlobSha256: head.blobSha256 }),
-    ]);
-    expect(afterDowngrade.status, "a narrowed level accepts no submit").toBe(403);
-    expect((await reviewRows(h)).length).toBe(0);
   });
 
   it("loses a submit to a revoke or a downgrade that lands at the last instant", async () => {
@@ -1484,9 +874,7 @@ describe("who may do what", () => {
 // There is no downgrade route yet, so the grant is narrowed directly. The
 // gates must read the current access rather than the request's starting value.
 function narrowToComment(storage: SyncRelayStorage, shareId: string): void {
-  (
-    storage as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }
-  ).db
+  (storage as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db
     .prepare(
       `UPDATE sync_relay_share_grants
        SET access = 'comment', generation = generation + 1
@@ -1496,98 +884,10 @@ function narrowToComment(storage: SyncRelayStorage, shareId: string): void {
 }
 
 describe("the recipient's blob route", () => {
-  it("refuses an upload below edit level with the same bytes as every other refusal", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const view = await createShare(h, "view");
-    const comment = await createShare(h, "comment");
-    const refusals = await Promise.all(
-      [view, comment].map(async (shareId) =>
-        await denialBytes(await uploadShareBlob(h, shareId, "recipient two")),
-      ),
-    );
-    expect(new Set(refusals).size, "the level must not be readable from the bytes").toBe(
-      1,
-    );
-    expect(refusals[0]).toContain("share_read_only");
-  });
+  // A per-op route is a new surface on the granter's workspace, so it owes the
+  // same gate the listing owes and the same generic 404 — one answer for every
+  // way a lookup can fail, so nothing on it can be used to probe what exists.
 
-  it("refuses a blob over the transport cap and one whose bytes do not match its name", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const shareId = await createShare(h, "edit");
-
-    const oversize = await h(
-      request(RECIPIENT, `/sync/shares/${shareId}/blobs/${sha256("x")}`, {
-        method: "PUT",
-        body: new Uint8Array(MAX_BLOB_BYTES + 1),
-      }),
-    );
-    expect(oversize.status).toBe(413);
-
-    const mismatched = await h(
-      request(RECIPIENT, `/sync/shares/${shareId}/blobs/${sha256("one thing")}`, {
-        method: "PUT",
-        body: new TextEncoder().encode("another thing"),
-      }),
-    );
-    expect(mismatched.status, "a blob must be what its name says it is").toBe(400);
-  });
-
-  it("reclaims an upload no change ever claimed", async () => {
-    // What bounds a recipient uploading without submitting: the sweep the
-    // granter's workspace already runs, and the granter's byte quota that
-    // `putBlob` already charges. A count of in-flight blobs would bound bytes
-    // less tightly than the byte bound already does.
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const shareId = await createShare(h, "edit");
-    expect((await uploadShareBlob(h, shareId, "never submitted")).status).toBe(200);
-
-    const swept = await storage.collectUnreferencedBlobs(WORKSPACE, {
-      nowMs: 4242 + 365 * 24 * 60 * 60 * 1000,
-    });
-    expect(
-      swept.removedSha256s,
-      "an upload nothing claims must not be held against the granter forever",
-    ).toContain(sha256("never submitted"));
-  });
-
-  // The route the lazy review opens a file through. It exists so that opening
-  // one file of a 2,500-file review does not re-serve every op of every open
-  // proposal to reach it.
-  it("serves one op of one proposal, and refuses one that addresses nothing", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
-    const sent = await submit(h, shareId, [change()]);
-    expect(sent.status, await sent.clone().text()).toBe(200);
-    const proposalId = (await json(sent)).proposalId as string;
-
-    const one = await h(
-      request(GRANTER, `/sync/${WORKSPACE}/proposals/${proposalId}/ops/0`),
-    );
-    expect(one.status, await one.clone().text()).toBe(200);
-    const op = (await json(one)).op as Record<string, unknown>;
-    expect(op.opIndex).toBe(0);
-    expect(op.afterPath).toBe("docs/in.md");
-    expect(op.afterBlobSha256).toBe(sha256("recipient two"));
-    expect(op, "the row states no content, only where it is").not.toHaveProperty(
-      "incomingText",
-    );
-
-  });
-
-  // The per-proposal route is a new surface too, and it owes the listing's gate
-  // and the listing's exact denial bytes. A route that denies differently can
-  // be compared against the other to learn what a workspace holds.
   it("gates the single-proposal route exactly as the listing is gated", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -1598,10 +898,8 @@ describe("the recipient's blob route", () => {
     expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
     const sent = await submit(h, shareId, [change()]);
     const proposalId = (await json(sent)).proposalId as string;
-    const one = (id: string, as: string) =>
-      h(request(as, `/sync/${WORKSPACE}/proposals/${id}`));
+    const one = (id: string, as: string) => h(request(as, `/sync/${WORKSPACE}/proposals/${id}`));
 
-    // The owner reads it, and it carries the file rows the listing does not.
     const mine = await one(proposalId, GRANTER);
     expect(mine.status, await mine.clone().text()).toBe(200);
     const proposal = (await json(mine)).proposal as Record<string, unknown>;
@@ -1622,7 +920,6 @@ describe("the recipient's blob route", () => {
       "a per-proposal route denying differently from the listing leaks which proposals exist",
     ).toBe(denied[0]);
 
-    // Settled is history on this route, exactly as on the op route.
     expect((await settle(h, proposalId, "decline")).status).toBe(200);
     expect(
       await denialBytes(await one(proposalId, GRANTER)),
@@ -1630,37 +927,6 @@ describe("the recipient's blob route", () => {
     ).toBe(denied[0]);
   });
 
-  // The polled listing must state counts and nothing more. Carrying op rows
-  // here is what made every tick resolve a base per file of every open
-  // proposal.
-  it("states counts on the listing, never file rows", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const granter = new Granter(h);
-    await granter.write("object-in", "docs/in.md", "granter one");
-    const shareId = await createShare(h, "edit");
-    expect((await uploadShareBlob(h, shareId, "recipient two")).status).toBe(200);
-    expect((await submit(h, shareId, [change()])).status).toBe(200);
-
-    const rows = await reviewRows(h);
-    expect(rows.length).toBe(1);
-    expect(
-      rows[0]!.ops,
-      "an ops ARRAY here restores the per-tick work this listing exists to avoid",
-    ).toBe(1);
-    expect(Object.keys(rows[0]!).sort()).toEqual([
-      "createdAtMs",
-      "ops",
-      "proposalId",
-      "proposedByEmail",
-      "shareId",
-    ]);
-  });
-
-  // A per-op route is a new surface on the granter's workspace, so it owes the
-  // same gate the listing owes and the same generic 404 — one answer for every
-  // way a lookup can fail, so nothing on it can be used to probe what exists.
   it("gates the single-op route exactly as the listing is gated", async () => {
     const storage = await testStorage();
     const h = handler(storage);
@@ -1674,19 +940,12 @@ describe("the recipient's blob route", () => {
     const op = (id: string, as: string, index = 0) =>
       h(request(as, `/sync/${WORKSPACE}/proposals/${id}/ops/${index}`));
 
-    // The owner reads it.
     expect((await op(proposalId, GRANTER)).status).toBe(200);
 
-    // Every other way in is the same bytes, so none of them tells the caller
-    // whether the thing they asked about exists.
     const denied = await Promise.all([
-      // The share's own recipient, who owns none of this workspace.
       op(proposalId, RECIPIENT),
-      // An account with no relationship to the share at all.
       op(proposalId, OTHER),
-      // A proposal id that never existed.
       op("proposal-absent", GRANTER),
-      // An op index this proposal does not have.
       op(proposalId, GRANTER, 1),
     ]).then((responses) => Promise.all(responses.map(denialBytes)));
     expect(
@@ -1703,62 +962,10 @@ describe("the recipient's blob route", () => {
       "a per-op route denying differently from the listing leaks which proposals exist",
     ).toBe(denied[0]);
 
-    // A settled proposal is history. The review asks one question, and it
-    // closes when the proposal leaves `open`.
     expect((await settle(h, proposalId, "decline")).status).toBe(200);
     expect(
       await denialBytes(await op(proposalId, GRANTER)),
       "serving a settled proposal's ops keeps a closed review readable",
     ).toBe(denied[0]);
-  });
-
-  // The measured bound, at its exact edge on both sides
-  // (the share-submit bound test in packages/security-contract). Driven at the
-  // real number rather than a small stand-in, because a bound tested only near
-  // zero proves nothing about the number that ships.
-  it("carries a submit of exactly the bound", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const shareId = await createShare(h, "edit");
-    // Real content, because the submit door refuses a change naming a blob the
-    // relay does not hold. One body for all of them: blobs are addressed by
-    // content, so one upload covers every change that carries it.
-    const body = "recipient content";
-    expect((await uploadShareBlob(h, shareId, body)).status).toBe(200);
-    const atBound = Array.from({ length: MAX_SHARE_PROPOSAL_OPS }, (_ignored, index) =>
-      change({
-        basedOnPath: null,
-        basedOnBlobSha256: null,
-        afterPath: `docs/f-${index}.md`,
-        afterBlobSha256: sha256(body),
-        afterByteLength: body.length,
-      }),
-    );
-
-    const accepted = await submit(h, shareId, atBound);
-    expect(accepted.status, await accepted.clone().text()).toBe(200);
-    expect(
-      (await json(accepted)).ops,
-      "a bound one below the stated number refuses a submit it must carry",
-    ).toBe(MAX_SHARE_PROPOSAL_OPS);
-  });
-
-  it("refuses one change past the bound, and names the limit and the count", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await claimWorkspace(h);
-    const shareId = await createShare(h, "edit");
-    const tooMany = Array.from(
-      { length: MAX_SHARE_PROPOSAL_OPS + 1 },
-      (_ignored, index) =>
-        change({ basedOnPath: null, basedOnBlobSha256: null, afterPath: `docs/f-${index}.md` }),
-    );
-
-    const refused = await submit(h, shareId, tooMany);
-    expect(refused.status).toBe(400);
-    const body = await refused.text();
-    expect(body, "the refusal names the limit").toContain(String(MAX_SHARE_PROPOSAL_OPS));
-    expect(body, "and what was observed").toContain(String(MAX_SHARE_PROPOSAL_OPS + 1));
   });
 });

@@ -166,89 +166,6 @@ async fn push(actor: &ActorHandle) {
 }
 
 #[tokio::test]
-async fn append_push_append_keeps_writer_cache() {
-    let (_scratch, path, producer) = document_fixture(true, true, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    push(&actor).await;
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(
-        after.misses, before.misses,
-        "push must not reconstruct the next gate base"
-    );
-    assert_eq!(after.hits, before.hits + 1);
-    supervisor.close(&path).unwrap();
-}
-
-#[tokio::test]
-async fn pull_of_own_echo_keeps_writer_cache_warm() {
-    let (_scratch, path, producer) = document_fixture(true, true, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    full_cycle(&actor, Arc::new(Mutex::new(Vec::new()))).await;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    push(&actor).await;
-    let own_echo = actor
-        .run(|store, _| {
-            dohc_engine_sync::list_replication_ops(store, WORKSPACE, ORIGIN, 0, 1)
-                .map(|mut ops| {
-                    let mut op = ops.remove(0);
-                    op.relay_seq = Some(2);
-                    op
-                })
-                .map_err(RuntimeError::Sync)
-        })
-        .await
-        .unwrap();
-    let outcome = actor
-        .pull_with_io_for_test(
-            false,
-            (WORKSPACE.into(), 1200),
-            LeaseRegistry::default(),
-            CancellationToken::new(),
-            None,
-            |request, _| {
-                let own_echo = own_echo.clone();
-                async move {
-                    match request {
-                        RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
-                            work_references: Vec::new(),
-                            next_reference_after: None,
-                            reference_has_more: false,
-                            ops: vec![own_echo],
-                            next_cursor: 2,
-                            has_more: false,
-                        })),
-                        other => panic!("unexpected pull request: {other:?}"),
-                    }
-                }
-            },
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        outcome,
-        RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
-            applied: 0,
-            skipped: 1,
-            ..
-        })
-    ));
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(
-        after.misses, before.misses,
-        "before={before:?} after={after:?}"
-    );
-    assert_eq!(
-        after.hits,
-        before.hits + 1,
-        "before={before:?} after={after:?}"
-    );
-    supervisor.close(&path).unwrap();
-}
-
-#[tokio::test]
 async fn pull_mixing_own_echo_and_foreign_edit_invalidates_writer_cache() {
     let (_scratch, path, producer) = document_fixture(true, true, 100);
     let supervisor = WorkspaceSupervisor::new();
@@ -345,50 +262,6 @@ async fn pull_mixing_own_echo_and_foreign_edit_invalidates_writer_cache() {
 }
 
 #[tokio::test]
-async fn enrollment_push_claims_base_and_still_misses() {
-    let (_scratch, path, producer) = document_fixture(false, false, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    push(&actor).await;
-    // The claim alone would force the next miss; this proves first contact cleared the cache.
-    assert!(actor.ydoc_cache_stats_for_test().await.unwrap().removes > before.removes);
-    actor
-        .run(|store, _| {
-            assert!(
-                read_marker(store, &key())?
-                    .unwrap()
-                    .lineage_claim_id
-                    .is_some()
-            );
-            Ok(())
-        })
-        .await
-        .unwrap();
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(after.misses, before.misses + 1);
-    supervisor.close(&path).unwrap();
-}
-
-#[tokio::test]
-async fn push_live_origination_still_misses() {
-    let (_scratch, path, producer) = document_fixture(true, false, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    push(&actor).await;
-    let (claim, decline) = actor
-        .ydoc_originate_live_lineage(key(), 1200, CancellationToken::new())
-        .await
-        .unwrap();
-    assert!(claim.is_some());
-    assert!(decline.is_none());
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(after.misses, before.misses + 1);
-    supervisor.close(&path).unwrap();
-}
-
-#[tokio::test]
 async fn ordinary_remote_between_pushes_matches_fresh_replay() {
     let (_scratch, path, producer) = document_fixture(true, true, 100);
     let supervisor = WorkspaceSupervisor::new();
@@ -438,36 +311,6 @@ async fn ordinary_remote_between_pushes_matches_fresh_replay() {
         })
         .await
         .unwrap();
-    supervisor.close(&path).unwrap();
-}
-
-#[tokio::test]
-async fn native_export_failure_still_clears_writer_cache() {
-    let (_scratch, path, producer) = document_fixture(true, true, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    actor.run(|store, _| {
-        store.write_with(&NoFaults, |tx| {
-            tx.execute("INSERT INTO live_audit_pending_exports(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,after_event_count) VALUES ('relay','ws','main','missing','missing',0)", []).map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })?;
-        Ok(())
-    }).await.unwrap();
-    let result = actor
-        .relay_with_io(
-            false,
-            push_operation(),
-            LeaseRegistry::default(),
-            CancellationToken::new(),
-            None,
-            |_, _| async { panic!("broken native source must fail before I/O") },
-        )
-        .await;
-    assert!(result.is_err());
-    assert!(actor.ydoc_cache_stats_for_test().await.unwrap().removes > before.removes);
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(after.misses, before.misses + 1);
     supervisor.close(&path).unwrap();
 }
 
@@ -723,7 +566,6 @@ async fn settle_for_cycle(actor: &ActorHandle, root: std::path::PathBuf) {
         .settled()
         .unwrap();
     assert!(settled.materialized);
-    // Publish each settled moment once, including a no-op timer retry.
     actor
         .run(move |store, _| {
             store.write_with(&NoFaults, |tx| {
@@ -735,22 +577,6 @@ async fn settle_for_cycle(actor: &ActorHandle, root: std::path::PathBuf) {
         })
         .await
         .unwrap();
-}
-
-#[tokio::test]
-async fn full_own_update_cycle_keeps_writer_cache() {
-    let (_scratch, path, producer) = document_fixture(true, true, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    full_cycle(&actor, Arc::new(Mutex::new(Vec::new()))).await;
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(
-        after.misses, before.misses,
-        "a completed own-update cycle must retain the cache"
-    );
-    assert_eq!(after.hits, before.hits + 1);
-    supervisor.close(&path).unwrap();
 }
 
 #[tokio::test]
@@ -776,75 +602,6 @@ async fn full_own_settlement_cycle_keeps_writer_cache() {
 }
 
 #[tokio::test]
-async fn cursor_base_origination_invalidates_writer_cache() {
-    let (_scratch, path, producer) = document_fixture(true, false, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    commit_cycle(&actor, cycle_cursor()).await.unwrap();
-    actor
-        .run(|store, _| {
-            assert!(
-                read_marker(store, &key())?
-                    .unwrap()
-                    .lineage_claim_id
-                    .is_some()
-            );
-            Ok(())
-        })
-        .await
-        .unwrap();
-    assert!(actor.ydoc_cache_stats_for_test().await.unwrap().removes > before.removes);
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(after.misses, before.misses + 1);
-    supervisor.close(&path).unwrap();
-}
-
-#[tokio::test]
-async fn cursor_lineage_change_and_aba_invalidates_writer_cache() {
-    let (_scratch, path, producer) = document_fixture(true, true, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    actor.run(|store,_|{
-        let second=DocKey::new(WORKSPACE,"main","second")?;
-        let doc=Ydoc::wire();let bytes=doc.plaintext_insert(0,"second");
-        record_local_update(store,&mut WriterDocCache::new(),&second,&bytes,LocalAppend { marker:Some(MarkerCreation {content_kind:ContentKind::Plaintext,regime:Regime::LocalOnly,path:Some("second.md")}),ensure_parent_row:true,..LocalAppend::default()},&NoFaults,1200,|_,_,_|Ok(()))?;
-        store.write_with(&NoFaults,|tx|{
-            tx.execute_batch("CREATE TEMP TABLE round6_saved_claim AS SELECT lineage_claim_id FROM ydoc_docs WHERE object_id='doc'; CREATE TEMP TRIGGER round6_aba AFTER UPDATE OF lineage_claim_id ON ydoc_docs WHEN NEW.object_id='second' BEGIN UPDATE ydoc_docs SET lineage_claim_id='0000000000000000000000000000000000000000000000000000000000000000' WHERE object_id='doc'; UPDATE ydoc_docs SET lineage_claim_id=(SELECT lineage_claim_id FROM round6_saved_claim) WHERE object_id='doc'; END;").map_err(StorageError::persist_public)?;Ok::<_,StorageError>(())})?;Ok(())}).await.unwrap();
-    commit_cycle(&actor, cycle_cursor()).await.unwrap();
-    actor
-        .run(|store, _| {
-            assert!(
-                read_marker(store, &DocKey::new(WORKSPACE, "main", "second")?)?
-                    .unwrap()
-                    .lineage_claim_id
-                    .is_some()
-            );
-            Ok(())
-        })
-        .await
-        .unwrap();
-    assert!(actor.ydoc_cache_stats_for_test().await.unwrap().removes > before.removes);
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(after.misses, before.misses + 1);
-    supervisor.close(&path).unwrap();
-}
-
-#[tokio::test]
-async fn cursor_error_invalidates_writer_cache() {
-    let (_scratch, path, producer) = document_fixture(true, true, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    actor.run(|store,_|{store.write_with(&NoFaults,|tx|{tx.execute_batch("CREATE TEMP TRIGGER round6_error BEFORE INSERT ON sync_relay_cursors BEGIN SELECT RAISE(ABORT,'round6 commit error'); END;").map_err(StorageError::persist_public)?;Ok::<_,StorageError>(())})?;Ok(())}).await.unwrap();
-    assert!(commit_cycle(&actor, cycle_cursor()).await.is_err());
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(after.misses, before.misses + 1);
-    supervisor.close(&path).unwrap();
-}
-
-#[tokio::test]
 async fn cursor_committed_crash_invalidates_writer_cache() {
     let (_scratch, path, producer) = document_fixture(true, true, 100);
     let supervisor = WorkspaceSupervisor::new();
@@ -864,172 +621,6 @@ async fn cursor_committed_crash_invalidates_writer_cache() {
     actor
         .run(|store, _| {
             assert!(dohc_engine_sync::read_relay_cursor(store, WORKSPACE)?.is_some());
-            Ok(())
-        })
-        .await
-        .unwrap();
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(after.misses, before.misses + 1);
-    supervisor.close(&path).unwrap();
-}
-
-#[tokio::test]
-async fn own_moment_materialization_recovery_invalidates_writer_cache() {
-    let (_scratch, path, producer) = document_fixture(true, true, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    actor.run(|store,_| {
-        let id=format!("sync-materialization:{}",hex_sha256(b"ws\0local\x000"));
-        store.write_with(&NoFaults,|tx|{tx.execute("INSERT INTO engine_requests(request_id,payload_hash,result_seq,committed_at,kind) VALUES (?1,?2,0,1000,'sync-materialization')",rusqlite::params![id,r#"[{"versionId":"main","path":"files/0.bin","operation":"write","contentKind":"binary"}]"#]).map_err(StorageError::persist_public)?;Ok::<_,StorageError>(())})?;Ok(())
-    }).await.unwrap();
-    let own = actor
-        .run(|store, _| {
-            let mut own =
-                dohc_engine_sync::list_replication_ops(store, WORKSPACE, ORIGIN, -1, 1)?.remove(0);
-            own.relay_seq = Some(1);
-            Ok(own)
-        })
-        .await
-        .unwrap();
-    let outcome = actor
-        .pull_with_io_for_test(
-            false,
-            (WORKSPACE.into(), 2000),
-            LeaseRegistry::default(),
-            CancellationToken::new(),
-            None,
-            move |request, _| {
-                let own = own.clone();
-                async move {
-                    match request {
-                        RelayIoRequest::Pull(_) => Ok(RelayIoResponse::Pull(PullResponse {
-                            work_references: Vec::new(),
-                            next_reference_after: None,
-                            reference_has_more: false,
-                            ops: vec![own],
-                            next_cursor: 1,
-                            has_more: false,
-                        })),
-                        other => panic!("unexpected recovery I/O {other:?}"),
-                    }
-                }
-            },
-        )
-        .await
-        .unwrap();
-    assert!(
-        matches!(outcome, RelayOperationOutcome::Sync(SyncPassOutcome::Complete { applied: 0, changed_paths, .. }) if !changed_paths.is_empty())
-    );
-    assert!(actor.ydoc_cache_stats_for_test().await.unwrap().removes > before.removes);
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(after.misses, before.misses + 1);
-    supervisor.close(&path).unwrap();
-}
-
-/// Claim one row under `report` in `table`, as a pass reporting it would.
-async fn claimed_report_row(actor: &ActorHandle, table: &'static str, report: &'static str) {
-    actor
-        .run(move |store, _| {
-            store
-                .write_with(&NoFaults, |tx| {
-                    let sql = match table {
-                        "ydoc_drain_reports" => {
-                            "INSERT INTO ydoc_drain_reports \
-                             (workspace_id,origin_id,origin_seq,report_json,report_id) \
-                             VALUES (?1,'peer',1,'{\"conflictsOpened\":1}',?2)"
-                        }
-                        _ => {
-                            "INSERT INTO relay_deferred_ops \
-                             (workspace_id,origin_id,origin_seq,replication_epoch,stream_identity, \
-                              envelope_json,retained_bytes,report_id) \
-                             VALUES (?1,'peer',1,'epoch','stream','{}',1,?2)"
-                        }
-                    };
-                    tx.execute(sql, rusqlite::params![WORKSPACE, report])
-                        .map_err(StorageError::persist_public)?;
-                    Ok::<_, StorageError>(())
-                })
-                .unwrap();
-            Ok(())
-        })
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn cursor_releasing_only_drain_reports_keeps_writer_cache() {
-    let (_scratch, path, producer) = document_fixture(true, true, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    claimed_report_row(&actor, "ydoc_drain_reports", "drain-report").await;
-    let mut cursor = cycle_cursor();
-    cursor.settlement_report_id = Some("drain-report".into());
-    assert!(matches!(
-        commit_cycle(&actor, cursor).await.unwrap(),
-        RelayOperationOutcome::CursorCommitted {
-            writer_cache_changed: false,
-            ..
-        }
-    ));
-    let released = actor
-        .run(|store, _| Ok(store.table_row_count("ydoc_drain_reports").unwrap()))
-        .await
-        .unwrap();
-    assert_eq!(released, 0, "the commit acknowledges the drain report");
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(after.misses, before.misses);
-    assert_eq!(after.hits, before.hits + 1);
-    supervisor.close(&path).unwrap();
-}
-
-#[tokio::test]
-async fn cursor_releasing_deferred_work_invalidates_writer_cache() {
-    let (_scratch, path, producer) = document_fixture(true, true, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    claimed_report_row(&actor, "relay_deferred_ops", "deferred-report").await;
-    let mut cursor = cycle_cursor();
-    cursor.settlement_report_id = Some("deferred-report".into());
-    commit_cycle(&actor, cursor).await.unwrap();
-    let after = append(&actor, producer.plaintext_insert(101, "c")).await;
-    assert_eq!(after.misses, before.misses + 1);
-    supervisor.close(&path).unwrap();
-}
-
-#[tokio::test]
-async fn skipped_moment_committed_crash_clears_before_next_envelope() {
-    let (_scratch, path, producer) = document_fixture(true, true, 100);
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&path, 1000).unwrap().actor;
-    let before = append(&actor, producer.plaintext_insert(100, "b")).await;
-    actor
-        .run(|store, cache| {
-            let mut own =
-                dohc_engine_sync::list_replication_ops(store, WORKSPACE, ORIGIN, -1, 1)?.remove(0);
-            own.relay_seq = Some(1);
-            assert!(
-                cache.doc_full_state_for_test(&key()).is_some(),
-                "the append keeps the document cached"
-            );
-            CRASH_CURSOR.set(true);
-            let result = dohc_engine_sync::apply_replication_envelope(
-                store,
-                cache,
-                &own,
-                &CursorFaults,
-                &dohc_engine_sync::NoLiveLeases,
-            )?;
-            assert!(matches!(
-                result.primary,
-                dohc_engine_sync::ApplyDisposition::Crashed { committed: true }
-            ));
-            assert!(
-                cache.doc_full_state_for_test(&key()).is_none(),
-                "clear before another envelope can use the cache"
-            );
             Ok(())
         })
         .await

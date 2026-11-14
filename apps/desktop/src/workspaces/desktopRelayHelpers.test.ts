@@ -6,10 +6,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import { probeRelayWorkspace } from "./relayWorkspaceProbe";
 import { fetchSharedChannelInfo } from "./sharedChannelInfo";
-import {
-  ShareSelectorInvalidError,
-  fetchShareViewInfo,
-} from "./shareViewInfo";
+import { ShareSelectorInvalidError, fetchShareViewInfo } from "./shareViewInfo";
 
 function relay(fetch: typeof globalThis.fetch) {
   return {
@@ -70,9 +67,7 @@ describe("desktop relay helpers", () => {
       await expect(
         probeRelayWorkspace({
           workspaceId: "workspace-a",
-          relay: relay(
-            vi.fn<typeof globalThis.fetch>(async () => Response.json(response)),
-          ),
+          relay: relay(vi.fn<typeof globalThis.fetch>(async () => Response.json(response))),
         }),
       ).rejects.toThrow("Relay bootstrap response is invalid.");
     }
@@ -82,13 +77,17 @@ describe("desktop relay helpers", () => {
     await expect(
       probeRelayWorkspace({
         workspaceId: "workspace-a",
-        relay: relay(vi.fn<typeof globalThis.fetch>(async () => new Response(null, { status: 401 }))),
+        relay: relay(
+          vi.fn<typeof globalThis.fetch>(async () => new Response(null, { status: 401 })),
+        ),
       }),
     ).rejects.toBeInstanceOf(RelayUnauthorizedError);
     await expect(
       probeRelayWorkspace({
         workspaceId: "workspace-a",
-        relay: relay(vi.fn<typeof globalThis.fetch>(async () => new Response(null, { status: 404 }))),
+        relay: relay(
+          vi.fn<typeof globalThis.fetch>(async () => new Response(null, { status: 404 })),
+        ),
       }),
     ).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
   });
@@ -209,9 +208,7 @@ describe("desktop relay helpers", () => {
     for (const body of unreadable) {
       await expect(
         fetchShareViewInfo({
-          relay: relay(
-            vi.fn<typeof globalThis.fetch>(async () => Response.json(body)),
-          ),
+          relay: relay(vi.fn<typeof globalThis.fetch>(async () => Response.json(body))),
           shareId: "share-a",
         }),
         `a permissive fallback records ${JSON.stringify(body.selector)} as a whole-workspace grant`,
@@ -219,9 +216,6 @@ describe("desktop relay helpers", () => {
     }
   });
 
-  // A chat grant has no file selector at all. That is a known kind,
-  // not an unreadable response, so it resolves to null and the file surfaces
-  // refuse it with their own guidance.
   it("reports a chat grant as having no file selector", async () => {
     await expect(
       fetchShareViewInfo({
@@ -249,7 +243,9 @@ describe("desktop relay helpers", () => {
   it("maps unavailable shares and rejects invalid shared-channel selectors", async () => {
     await expect(
       fetchShareViewInfo({
-        relay: relay(vi.fn<typeof globalThis.fetch>(async () => new Response(null, { status: 404 }))),
+        relay: relay(
+          vi.fn<typeof globalThis.fetch>(async () => new Response(null, { status: 404 })),
+        ),
         shareId: "share-ended",
       }),
     ).rejects.toBeInstanceOf(ShareUnavailableError);

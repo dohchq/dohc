@@ -16,7 +16,9 @@ import {
 async function inView(row: Locator, list: Locator): Promise<boolean> {
   const [rowBox, listBox] = await Promise.all([row.boundingBox(), list.boundingBox()]);
   if (!rowBox || !listBox) return false;
-  return rowBox.y >= listBox.y - 0.5 && rowBox.y + rowBox.height <= listBox.y + listBox.height + 0.5;
+  return (
+    rowBox.y >= listBox.y - 0.5 && rowBox.y + rowBox.height <= listBox.y + listBox.height + 0.5
+  );
 }
 
 test("the block menu keeps the row Enter acts on in view as the keys move it", async () => {
@@ -24,17 +26,20 @@ test("the block menu keeps the row Enter acts on in view as the keys move it", a
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    await writeWorkspaceFiles(temp, [{ path: "plan.md", contents: "# Plan\n\nA paragraph to act on.\n" }]);
+    await writeWorkspaceFiles(temp, [
+      { path: "plan.md", contents: "# Plan\n\nA paragraph to act on.\n" },
+    ]);
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
-    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1300, 850));
+    await desktop.app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]?.setSize(1300, 850),
+    );
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await waitForWorkspaceFile(page, workspace.workspaceId, "plan.md");
     await explorerRow(page, "plan.md").click();
     await expect(page.getByTestId("markdown-editor")).toBeVisible({ timeout: 20_000 });
 
     await page.locator(".dohc-notion-editor > p").first().hover();
-    // The heading is block 0; hovering the paragraph shows block 1's gutter.
     const gutter = page.locator(".dohc-block-affordance").nth(1);
     await expect(gutter).toHaveClass(/\bis-visible\b/);
     const handle = gutter.locator(".dohc-block-handle");
@@ -43,17 +48,18 @@ test("the block menu keeps the row Enter acts on in view as the keys move it", a
     await expect(menu).toBeFocused();
     const text = menu.getByRole("menuitem", { name: "Text" });
     const remove = menu.getByRole("menuitem", { name: "Delete" });
-    // The list scrolls: the last row starts out of view.
     expect(await menu.evaluate((list) => list.scrollHeight > list.clientHeight)).toBe(true);
     expect(await inView(remove, menu)).toBe(false);
 
     await page.keyboard.press("End");
-    await expect(menu).toHaveAttribute("aria-activedescendant", (await remove.getAttribute("id")) ?? "");
+    await expect(menu).toHaveAttribute(
+      "aria-activedescendant",
+      (await remove.getAttribute("id")) ?? "",
+    );
     expect(await inView(remove, menu)).toBe(true);
 
     await page.keyboard.press("Home");
     expect(await inView(text, menu)).toBe(true);
-    // The first row brings its section label along.
     expect(await inView(menu.getByText("Turn into", { exact: true }), menu)).toBe(true);
 
     await page.keyboard.press("ArrowUp");

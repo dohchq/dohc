@@ -1,20 +1,23 @@
-import { lstat, mkdir, readdir, readFile, rename, symlink, unlink, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  MAX_UI_STATE_FILE_BYTES,
-  readUiStateFile,
-  writeUiStateFile,
-} from "./workspaceUiState";
+import { MAX_UI_STATE_FILE_BYTES, readUiStateFile, writeUiStateFile } from "./workspaceUiState";
 import { LocalStateUnavailableError } from "./workspaceLocalState";
 import { fakeLocalStateOpens } from "../testing/preparedLocalState";
 import type { WorkspaceUiState } from "../ipc/bridgeContract";
 
 import { createTestScratch } from "./testTemp";
 vi.mock("node:fs/promises", async () => {
-  const actual = await vi.importActual<typeof import("node:fs/promises")>(
-    "node:fs/promises",
-  );
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   return { ...actual, rename: vi.fn(actual.rename), readFile: vi.fn(actual.readFile) };
 });
 
@@ -27,12 +30,14 @@ const STATE: WorkspaceUiState = {
   activeView: "explorer",
   sidebarVisible: true,
   sidebarWidth: 240,
-  editorGroups: [{
-    id: "primary",
-    tabs: ["notes/a.md", "tab://graph"],
-    activeTab: "tab://graph",
-    size: 1,
-  }],
+  editorGroups: [
+    {
+      id: "primary",
+      tabs: ["notes/a.md", "tab://graph"],
+      activeTab: "tab://graph",
+      size: 1,
+    },
+  ],
   activeEditorGroup: "primary",
   aboutVisible: false,
   aboutWidth: 320,
@@ -43,13 +48,14 @@ const STATE: WorkspaceUiState = {
   collectionViews: {},
 };
 
-
 const engine = fakeLocalStateOpens();
 let workspaces = 0;
-// A workspace whose engine open prepared .dohc/local.
 async function openedWorkspace() {
   workspaces += 1;
-  const workspace = { workspaceId: `ui-state-${workspaces}`, rootPath: await createTestScratch("dohc-ui-state-") };
+  const workspace = {
+    workspaceId: `ui-state-${workspaces}`,
+    rootPath: await createTestScratch("dohc-ui-state-"),
+  };
   await engine.open(workspace);
   return workspace;
 }
@@ -60,7 +66,6 @@ describe("ui-state file store", () => {
     const root = workspace.rootPath;
     await writeUiStateFile(workspace, STATE);
     expect(await readUiStateFile(root)).toEqual(STATE);
-    // Pretty-printed JSON with a trailing newline, like every .dohc file.
     const raw = await readFile(join(root, ".dohc", "local", "ui-state.json"), "utf8");
     expect(raw.endsWith("\n")).toBe(true);
     expect(await readdir(join(root, ".dohc"))).toEqual(["local"]);
@@ -78,22 +83,34 @@ describe("ui-state file store", () => {
   });
 
   it("never creates .dohc/local, so an early write leaves nothing to sync", async () => {
-    const workspace = { workspaceId: "ui-state-unopened", rootPath: await createTestScratch("dohc-ui-state-") };
-    await expect(writeUiStateFile(workspace, STATE)).rejects.toBeInstanceOf(LocalStateUnavailableError);
+    const workspace = {
+      workspaceId: "ui-state-unopened",
+      rootPath: await createTestScratch("dohc-ui-state-"),
+    };
+    await expect(writeUiStateFile(workspace, STATE)).rejects.toBeInstanceOf(
+      LocalStateUnavailableError,
+    );
     expect(await lstat(join(workspace.rootPath, ".dohc")).catch(() => null)).toBeNull();
 
     // An open that could not keep the folder out of iCloud Drive leaves it empty.
     await engine.open(workspace, false);
-    await expect(writeUiStateFile(workspace, STATE)).rejects.toBeInstanceOf(LocalStateUnavailableError);
+    await expect(writeUiStateFile(workspace, STATE)).rejects.toBeInstanceOf(
+      LocalStateUnavailableError,
+    );
     expect(await readdir(join(workspace.rootPath, ".dohc", "local"))).toEqual([]);
 
-    // A write after the workspace's engine open closed changes nothing.
     await engine.open(workspace);
     await writeUiStateFile(workspace, STATE);
     engine.close(workspace);
-    await expect(writeUiStateFile(workspace, { ...STATE, sidebarWidth: 300 })).rejects.toBeInstanceOf(LocalStateUnavailableError);
+    await expect(
+      writeUiStateFile(workspace, { ...STATE, sidebarWidth: 300 }),
+    ).rejects.toBeInstanceOf(LocalStateUnavailableError);
     // On Windows nothing reads it until the next open holds the folder.
-    expect(JSON.parse(await readFile(join(workspace.rootPath, ".dohc", "local", "ui-state.json"), "utf8"))).toEqual(STATE);
+    expect(
+      JSON.parse(
+        await readFile(join(workspace.rootPath, ".dohc", "local", "ui-state.json"), "utf8"),
+      ),
+    ).toEqual(STATE);
   });
 
   it("serializes a burst of writes and leaves the latest complete state", async () => {
@@ -138,31 +155,34 @@ describe("ui-state file store", () => {
   // Another program, such as a virus scanner, can hold the file for a moment.
   // A read Windows keeps refusing is refused too, so the renderer saves no
   // defaults over the saved tabs.
-  it.each(["EBUSY", "EACCES"])("reads again while Windows refuses the file with %s, then refuses the read", async (code) => {
-    const workspace = await openedWorkspace();
-    const root = workspace.rootPath;
-    await writeUiStateFile(workspace, STATE);
-    const busy = () => Object.assign(new Error("file is busy"), { code });
-    const readMock = vi.mocked(readFile);
+  it.each(["EBUSY", "EACCES"])(
+    "reads again while Windows refuses the file with %s, then refuses the read",
+    async (code) => {
+      const workspace = await openedWorkspace();
+      const root = workspace.rootPath;
+      await writeUiStateFile(workspace, STATE);
+      const busy = () => Object.assign(new Error("file is busy"), { code });
+      const readMock = vi.mocked(readFile);
 
-    const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
-    Object.defineProperty(process, "platform", { ...descriptor, value: "win32" });
-    try {
-      readMock.mockClear();
-      readMock.mockRejectedValueOnce(busy());
+      const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+      Object.defineProperty(process, "platform", { ...descriptor, value: "win32" });
+      try {
+        readMock.mockClear();
+        readMock.mockRejectedValueOnce(busy());
+        expect(await readUiStateFile(root)).toEqual(STATE);
+        expect(readMock).toHaveBeenCalledTimes(2);
+
+        readMock.mockClear();
+        readMock.mockRejectedValue(busy());
+        await expect(readUiStateFile(root)).rejects.toMatchObject({ code });
+        expect(readMock).toHaveBeenCalledTimes(6);
+      } finally {
+        Object.defineProperty(process, "platform", descriptor);
+        readMock.mockReset();
+      }
       expect(await readUiStateFile(root)).toEqual(STATE);
-      expect(readMock).toHaveBeenCalledTimes(2);
-
-      readMock.mockClear();
-      readMock.mockRejectedValue(busy());
-      await expect(readUiStateFile(root)).rejects.toMatchObject({ code });
-      expect(readMock).toHaveBeenCalledTimes(6);
-    } finally {
-      Object.defineProperty(process, "platform", descriptor);
-      readMock.mockReset();
-    }
-    expect(await readUiStateFile(root)).toEqual(STATE);
-  });
+    },
+  );
 
   it("a missing or corrupt file reads as null, never an error", async () => {
     const workspace = await openedWorkspace();
@@ -187,24 +207,24 @@ describe("ui-state file store", () => {
     expect(await readUiStateFile(root)).toBeNull();
   });
 
-  // A malicious attached workspace can ship `.dohc` as a SYMLINK to a
-  // user-writable directory outside the workspace. Following it would land
-  // main-process metadata writes outside the boundary — both the write and
-  // the read must refuse, and nothing may appear in the symlink's target.
-  it.each([".dohc", ".dohc/local"])("refuses to write through a symlinked %s and never lands files outside", async (linked) => {
-    const workspace = await openedWorkspace();
-    const root = workspace.rootPath;
-    const outside = await createTestScratch("dohc-ui-state-");
-    if (linked === ".dohc") await mkdir(join(outside, "local"));
-    await rename(join(root, linked), join(root, "moved-aside"));
-    await symlink(outside, join(root, linked), "dir");
+  it.each([".dohc", ".dohc/local"])(
+    "refuses to write through a symlinked %s and never lands files outside",
+    async (linked) => {
+      const workspace = await openedWorkspace();
+      const root = workspace.rootPath;
+      const outside = await createTestScratch("dohc-ui-state-");
+      if (linked === ".dohc") await mkdir(join(outside, "local"));
+      await rename(join(root, linked), join(root, "moved-aside"));
+      await symlink(outside, join(root, linked), "dir");
 
-    await expect(writeUiStateFile(workspace, STATE)).rejects.toBeInstanceOf(LocalStateUnavailableError);
-    expect(await readUiStateFile(root)).toBeNull();
-    // The escape target stayed untouched: no ui-state.json, no temp files.
-    expect(await readdir(outside)).toEqual(linked === ".dohc" ? ["local"] : []);
-    if (linked === ".dohc") expect(await readdir(join(outside, "local"))).toEqual([]);
-  });
+      await expect(writeUiStateFile(workspace, STATE)).rejects.toBeInstanceOf(
+        LocalStateUnavailableError,
+      );
+      expect(await readUiStateFile(root)).toBeNull();
+      expect(await readdir(outside)).toEqual(linked === ".dohc" ? ["local"] : []);
+      if (linked === ".dohc") expect(await readdir(join(outside, "local"))).toEqual([]);
+    },
+  );
 
   it("refuses to read a symlinked ui-state file", async () => {
     const workspace = await openedWorkspace();

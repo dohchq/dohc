@@ -9,7 +9,15 @@ import { patchFrontmatter, setFrontmatterValue } from "@dohc/ydoc-projection/fro
 import { modalFocusableElements, switchModalRegion, trapModalTabKey } from "./modalFocus";
 import { announceOverlayOpen } from "./overlayStack";
 import { Smile } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import * as Y from "yjs";
 import type { Lexer } from "marked";
 import {
@@ -33,9 +41,6 @@ const BODY_FIELD = "body";
 // H1 as its title, and the title field folds into the row beside the icon.
 // Both answers read the first block alone, never the rest of the document.
 
-// The editor's own Markdown lexer, for a paragraph with an underline (see
-// markdown/firstBlock.ts). It loads with the editor's chunk, not at launch;
-// until it arrives, such a page shows its title open.
 let lexer: typeof Lexer | null = null;
 let lexerLoad: Promise<typeof Lexer> | null = null;
 function loadLexer(): Promise<typeof Lexer> {
@@ -52,7 +57,10 @@ function loadLexer(): Promise<typeof Lexer> {
 // A local page's body is the Markdown after its frontmatter. The lines to lex
 // are a string, so an edit that leaves them unchanged lexes nothing.
 function useLocalOpensWithH1(markdown: string | null): boolean {
-  const decided = useMemo(() => (markdown === null ? false : opensWithH1(markdownEditorBody(markdown))), [markdown]);
+  const decided = useMemo(
+    () => (markdown === null ? false : opensWithH1(markdownEditorBody(markdown))),
+    [markdown],
+  );
   const block = typeof decided === "string" ? decided : null;
   const [loaded, setLoaded] = useState(() => lexer);
   useEffect(() => {
@@ -69,12 +77,19 @@ function useLocalOpensWithH1(markdown: string | null): boolean {
       current = false;
     };
   }, [block, loaded]);
-  const lexed = useMemo(() => block !== null && loaded !== null && lexesAsH1(loaded, block), [block, loaded]);
+  const lexed = useMemo(
+    () => block !== null && loaded !== null && lexesAsH1(loaded, block),
+    [block, loaded],
+  );
   return typeof decided === "boolean" ? decided : lexed;
 }
 
 function isH1(node: unknown): boolean {
-  return node instanceof Y.XmlElement && node.nodeName === "heading" && Number(node.getAttribute("level")) === 1;
+  return (
+    node instanceof Y.XmlElement &&
+    node.nodeName === "heading" &&
+    Number(node.getAttribute("level")) === 1
+  );
 }
 
 // In a live document, the body fragment's first child. The fragment reports
@@ -108,10 +123,13 @@ function useLiveOpensWithH1(ydoc: Y.Doc | null): boolean {
     },
     [ydoc],
   );
-  return useSyncExternalStore(subscribe, () => (ydoc ? isH1(ydoc.getXmlFragment(BODY_FIELD).get(0)) : false));
+  return useSyncExternalStore(subscribe, () =>
+    ydoc ? isH1(ydoc.getXmlFragment(BODY_FIELD).get(0)) : false,
+  );
 }
 
-const TITLE_FIELD = "block resize-none overflow-hidden border-0 bg-transparent field-sizing-content read-only:cursor-default";
+const TITLE_FIELD =
+  "block resize-none overflow-hidden border-0 bg-transparent field-sizing-content read-only:cursor-default";
 // Its own line under the icon, as large as the drawing's title. Like the
 // body, it shows focus by its caret alone, so it draws no field edge.
 const TITLE_OPEN = `${TITLE_FIELD} w-full basis-full p-0 font-sans text-[2em] font-bold leading-[1.15] tracking-[-0.02em] text-ink placeholder:text-muted focus:shadow-none!`;
@@ -129,14 +147,86 @@ const ADD_ICON =
 // status, life) without shipping a multi-thousand-emoji database. Anything
 // outside the grid can be pasted into the free-text field below it.
 const EMOJI_CHOICES = [
-  "📄", "📝", "📓", "📔", "📚", "📖", "🗒️", "🗂️", "📁", "📌",
-  "✅", "☑️", "🔖", "🏷️", "📋", "🧾", "📊", "📈", "📉", "🗓️",
-  "💡", "🔥", "⭐", "🌟", "✨", "🎯", "🚀", "🧠", "❤️", "⚡",
-  "🎨", "🎬", "🎵", "📷", "🕹️", "🧩", "🛠️", "⚙️", "🔧", "🔨",
-  "💰", "💳", "🏦", "📦", "🛒", "🧮", "📐", "📎", "✏️", "🖊️",
-  "🌱", "🌿", "🍀", "🌍", "☀️", "🌙", "⛅", "❄️", "🔒", "🔑",
-  "🏠", "🏢", "🏝️", "🧳", "✈️", "🚗", "🍽️", "☕", "🏃", "💪",
-  "🐛", "🎓", "👤", "👥", "💬", "📣", "🔔", "❓", "❗", "⏰",
+  "📄",
+  "📝",
+  "📓",
+  "📔",
+  "📚",
+  "📖",
+  "🗒️",
+  "🗂️",
+  "📁",
+  "📌",
+  "✅",
+  "☑️",
+  "🔖",
+  "🏷️",
+  "📋",
+  "🧾",
+  "📊",
+  "📈",
+  "📉",
+  "🗓️",
+  "💡",
+  "🔥",
+  "⭐",
+  "🌟",
+  "✨",
+  "🎯",
+  "🚀",
+  "🧠",
+  "❤️",
+  "⚡",
+  "🎨",
+  "🎬",
+  "🎵",
+  "📷",
+  "🕹️",
+  "🧩",
+  "🛠️",
+  "⚙️",
+  "🔧",
+  "🔨",
+  "💰",
+  "💳",
+  "🏦",
+  "📦",
+  "🛒",
+  "🧮",
+  "📐",
+  "📎",
+  "✏️",
+  "🖊️",
+  "🌱",
+  "🌿",
+  "🍀",
+  "🌍",
+  "☀️",
+  "🌙",
+  "⛅",
+  "❄️",
+  "🔒",
+  "🔑",
+  "🏠",
+  "🏢",
+  "🏝️",
+  "🧳",
+  "✈️",
+  "🚗",
+  "🍽️",
+  "☕",
+  "🏃",
+  "💪",
+  "🐛",
+  "🎓",
+  "👤",
+  "👥",
+  "💬",
+  "📣",
+  "🔔",
+  "❓",
+  "❗",
+  "⏰",
 ] as const;
 
 // Page identity above the document body: a large title and an emoji
@@ -174,9 +264,24 @@ function oneLine(text: string): string {
 }
 
 const MIRRORED_STYLES = [
-  "boxSizing", "width", "paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth",
-  "fontFamily", "fontSize", "fontStyle", "fontWeight", "fontStretch", "fontFeatureSettings",
-  "fontVariationSettings", "letterSpacing", "wordSpacing", "lineHeight", "textTransform", "textIndent",
+  "boxSizing",
+  "width",
+  "paddingLeft",
+  "paddingRight",
+  "borderLeftWidth",
+  "borderRightWidth",
+  "fontFamily",
+  "fontSize",
+  "fontStyle",
+  "fontWeight",
+  "fontStretch",
+  "fontFeatureSettings",
+  "fontVariationSettings",
+  "letterSpacing",
+  "wordSpacing",
+  "lineHeight",
+  "textTransform",
+  "textIndent",
 ] as const;
 
 // Whether the caret is on the title's last visual line, where ArrowDown
@@ -248,7 +353,6 @@ export function PageIdentity(props: PageIdentityProps) {
   const locked = useMemo(
     () => (ydoc ? frontmatterEditsRefused(ydoc) : markdownFrontmatterEditsRefused(body)),
     // ydocRevision re-reads the document after a shared write.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [body, ydoc, ydocRevision],
   );
   const readOnly = (props.readOnly ?? false) || opening || locked;
@@ -257,7 +361,6 @@ export function PageIdentity(props: PageIdentityProps) {
     if (ydoc) return mapToObject(ydoc.getMap(FRONTMATTER_FIELD));
     return parseFrontmatter(body).meta;
     // ydocRevision re-reads the observed map after a shared write.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [body, ydoc, ydocRevision]);
 
   const title = displayFrontmatterValue(meta.title);
@@ -265,8 +368,7 @@ export function PageIdentity(props: PageIdentityProps) {
   const localOpensWithH1 = useLocalOpensWithH1(ydoc ? null : body);
   const [editRefused, setEditRefused] = useState(false);
   useEffect(() => setEditRefused(false), [ydoc, body]);
-  const icon =
-    typeof meta.icon === "string" ? meta.icon : displayFrontmatterValue(meta.icon);
+  const icon = typeof meta.icon === "string" ? meta.icon : displayFrontmatterValue(meta.icon);
 
   // Reserved-key writes go through the same pathway PropertiesPanel uses so
   // there is no second save cycle: a Y.Map transaction for collab, or a
@@ -274,7 +376,8 @@ export function PageIdentity(props: PageIdentityProps) {
   function writeField(key: "title" | "icon", value: string | undefined) {
     // An unsplittable block cannot change one property without
     // rewriting the others, so the write is refused before it starts.
-    if (readOnly || (ydoc ? frontmatterEditsRefused(ydoc) : markdownFrontmatterEditsRefused(body))) return;
+    if (readOnly || (ydoc ? frontmatterEditsRefused(ydoc) : markdownFrontmatterEditsRefused(body)))
+      return;
     try {
       if (ydoc) {
         if (value === undefined || value === "") patchFrontmatter(ydoc, new Map(), [key]);
@@ -335,7 +438,6 @@ export function PageIdentity(props: PageIdentityProps) {
       window.removeEventListener("focus", elsewhere);
     };
     // endComposition reads only refs and state setters.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [blurHeld]);
   useLayoutEffect(() => {
     const caret = titleCaret.current;
@@ -414,7 +516,12 @@ export function PageIdentity(props: PageIdentityProps) {
           joins the icon's line. */}
       <div className="dohc-page-identity__inner flex flex-wrap items-center gap-x-1 gap-y-3">
         {editRefused ? (
-          <ReadOnlyPropertiesFlag role="status" label="Title and icon are read-only" file={props.file} className="basis-full px-1.5" />
+          <ReadOnlyPropertiesFlag
+            role="status"
+            label="Title and icon are read-only"
+            file={props.file}
+            className="basis-full px-1.5"
+          />
         ) : null}
         <div className="relative min-h-5">
           {icon ? (
@@ -443,7 +550,13 @@ export function PageIdentity(props: PageIdentityProps) {
               Add icon
             </button>
           ) : opening ? (
-            <button type="button" disabled tabIndex={-1} aria-hidden className={`${ADD_ICON} invisible`}>
+            <button
+              type="button"
+              disabled
+              tabIndex={-1}
+              aria-hidden
+              className={`${ADD_ICON} invisible`}
+            >
               <Smile size={15} aria-hidden />
               Add icon
             </button>
@@ -548,7 +661,8 @@ export function PageIdentity(props: PageIdentityProps) {
             // last word; interim text is not.
             const input = event.nativeEvent;
             const interim =
-              input instanceof InputEvent && (input.isComposing || input.inputType === "insertCompositionText");
+              input instanceof InputEvent &&
+              (input.isComposing || input.inputType === "insertCompositionText");
             if (blurHeld && !interim) endComposition();
           }}
           onKeyDown={(event) => {

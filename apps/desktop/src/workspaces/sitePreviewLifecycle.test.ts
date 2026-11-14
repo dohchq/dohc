@@ -14,21 +14,14 @@ vi.mock("electron", () => ({
   },
 }));
 
-import {
-  allowLoopbackFrameOrigin,
-  isAllowedLoopbackFrameUrl,
-} from "../window/createMainWindow";
+import { allowLoopbackFrameOrigin, isAllowedLoopbackFrameUrl } from "../window/createMainWindow";
 import {
   createSitePreviewLifecycle,
   START_CANCELLED_MESSAGE,
   type SitePreviewExecution,
 } from "./sitePreviewLifecycle";
 import { deferred } from "../testing/deferred";
-import type {
-  SiteLogEntry,
-  SiteProcessHandle,
-  StaticSitePreview,
-} from "./siteRunner";
+import type { SiteLogEntry, SiteProcessHandle, StaticSitePreview } from "./siteRunner";
 
 function fakeStaticHandle(url: string) {
   const handle: StaticSitePreview = {
@@ -285,15 +278,11 @@ describe("site preview lifecycle", () => {
     });
     const server = fakeProcessHandle("http://127.0.0.1:6199/");
     await startHandle(lifecycle, server.handle);
-    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:6199/frame")).toBe(
-      true,
-    );
+    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:6199/frame")).toBe(true);
 
     server.exit();
 
-    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:6199/frame")).toBe(
-      false,
-    );
+    expect(isAllowedLoopbackFrameUrl("http://127.0.0.1:6199/frame")).toBe(false);
     await lifecycle.stopAll();
   });
 
@@ -378,9 +367,10 @@ describe("site preview lifecycle", () => {
       })
       .catch((error: unknown) => error as Error);
 
-    await expect(
-      startHandle(lifecycle, currentHandle, { senderId: 2 }),
-    ).resolves.toMatchObject({ url: currentHandle.url, exited: false });
+    await expect(startHandle(lifecycle, currentHandle, { senderId: 2 })).resolves.toMatchObject({
+      url: currentHandle.url,
+      exited: false,
+    });
 
     finishStalePreparation();
     expect(await staleStart).toBeInstanceOf(Error);
@@ -537,9 +527,7 @@ describe("site preview lifecycle", () => {
       stillRunning: async () => [],
     };
 
-    await expect(startHandle(lifecycle, handle)).rejects.toThrow(
-      "listener failed",
-    );
+    await expect(startHandle(lifecycle, handle)).rejects.toThrow("listener failed");
 
     expect(releaseOrigin).toHaveBeenCalledTimes(1);
     expect(handle.stop).toHaveBeenCalledTimes(1);
@@ -572,9 +560,7 @@ describe("site preview lifecycle", () => {
     };
     const replacement = fakeStaticHandle("http://127.0.0.1:5173/");
 
-    await expect(startHandle(lifecycle, handle)).rejects.toThrow(
-      "listener failed",
-    );
+    await expect(startHandle(lifecycle, handle)).rejects.toThrow("listener failed");
 
     expect(releaseOrigin).toHaveBeenCalledTimes(1);
     expect(handle.stop).toHaveBeenCalledTimes(1);
@@ -878,9 +864,7 @@ describe("site preview lifecycle", () => {
       })
       .catch((error: unknown) => error as Error);
 
-    await expect(
-      lifecycle.stopWorkspace("workspace-1"),
-    ).resolves.toBeUndefined();
+    await expect(lifecycle.stopWorkspace("workspace-1")).resolves.toBeUndefined();
     expect(execute).not.toHaveBeenCalled();
 
     finishPreparation();
@@ -934,14 +918,12 @@ describe("site preview lifecycle", () => {
       oldStopStarted = resolve;
     });
     let finishOldStop: () => void = () => undefined;
-    oldPreview.stop = vi.fn(
-      () => {
-        oldStopStarted();
-        return new Promise<void>((resolve) => {
-          finishOldStop = resolve;
-        });
-      },
-    );
+    oldPreview.stop = vi.fn(() => {
+      oldStopStarted();
+      return new Promise<void>((resolve) => {
+        finishOldStop = resolve;
+      });
+    });
     await startHandle(lifecycle, oldPreview);
 
     const workspaceStop = lifecycle.stopWorkspace("workspace-1");
@@ -1112,7 +1094,6 @@ describe("an app preview shown by more than one surface", () => {
       notifyReplaced,
     });
     const handles: StaticSitePreview[] = [];
-    // A start waits here when a test holds it.
     let gate: Promise<void> = Promise.resolve();
     let failNext = false;
     let failNextPrepare = false;
@@ -1124,19 +1105,17 @@ describe("an app preview shown by more than one surface", () => {
         throw new Error("no build script");
       }
       return async (): Promise<SitePreviewExecution<Result>> => {
-      await gate;
-      if (failNext) {
-        failNext = false;
-        throw new Error("build failed");
-      }
-      const handle = fakeStaticHandle(`http://127.0.0.1:${4200 + handles.length}/`);
-      handles.push(handle);
-      return { handle, result: { logs: [], mode: "" } };
+        await gate;
+        if (failNext) {
+          failNext = false;
+          throw new Error("build failed");
+        }
+        const handle = fakeStaticHandle(`http://127.0.0.1:${4200 + handles.length}/`);
+        handles.push(handle);
+        return { handle, result: { logs: [], mode: "" } };
       };
     });
     const current = new Map<number, boolean>();
-    // What a surface is answered: its preview, or that a newer start
-    // replaced its own.
     const answer = (
       holderId: string,
       input: { mode?: string; restart?: boolean; senderId?: number } = {},
@@ -1166,36 +1145,53 @@ describe("an app preview shown by more than one surface", () => {
         workspaceId: "workspace-1",
         siteRoot: "site",
       });
-    // A window closes: its session stops being current, and main lets go of
-    // what it showed.
     const close = (senderId: number) => {
       current.set(senderId, false);
       lifecycle.cancelSender(senderId);
     };
     return {
-      lifecycle, handles, prepare, answer, show, hide, close, notifyReplaced,
-      hold: (value: Promise<void>) => { gate = value; },
-      failNextStart: () => { failNext = true; },
-      failNextPrepare: () => { failNextPrepare = true; },
+      lifecycle,
+      handles,
+      prepare,
+      answer,
+      show,
+      hide,
+      close,
+      notifyReplaced,
+      hold: (value: Promise<void>) => {
+        gate = value;
+      },
+      failNextStart: () => {
+        failNext = true;
+      },
+      failNextPrepare: () => {
+        failNextPrepare = true;
+      },
       // Settles once the first start reached preparation.
       prepared: () => firstPrepare.promise,
     };
   }
 
-  it.each([["tab", "pin"], ["pin", "tab"]])("shares one preview when %s opens before %s, and stops it after both close", async (first, second) => {
-    const s = surfaces();
-    const shown = await s.show(first);
-    await expect(s.show(second)).resolves.toEqual(shown);
-    expect(s.prepare).toHaveBeenCalledOnce();
+  it.each([
+    ["tab", "pin"],
+    ["pin", "tab"],
+  ])(
+    "shares one preview when %s opens before %s, and stops it after both close",
+    async (first, second) => {
+      const s = surfaces();
+      const shown = await s.show(first);
+      await expect(s.show(second)).resolves.toEqual(shown);
+      expect(s.prepare).toHaveBeenCalledOnce();
 
-    await s.hide(first);
-    expect(s.handles[0]!.stop).not.toHaveBeenCalled();
-    expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
-    await s.hide(second);
-    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
-    expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
-    expect(s.notifyReplaced).not.toHaveBeenCalled();
-  });
+      await s.hide(first);
+      expect(s.handles[0]!.stop).not.toHaveBeenCalled();
+      expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
+      await s.hide(second);
+      expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
+      expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
+      expect(s.notifyReplaced).not.toHaveBeenCalled();
+    },
+  );
 
   it("keeps the preview when the pinned panel is switched away and back", async () => {
     const s = surfaces();
@@ -1214,39 +1210,49 @@ describe("an app preview shown by more than one surface", () => {
     expect(s.prepare).toHaveBeenCalledOnce();
   });
 
-  it.each([["pin", "tab", 1], ["tab", "pin", 2]])("tells the other surface when %s starts the preview again", async (restarting, other, otherSender) => {
-    const s = surfaces();
-    const first = await s.show("tab", { senderId: 1 });
-    await s.show("pin", { senderId: 2 });
-    const restarted = await s.show(restarting, { senderId: restarting === "tab" ? 1 : 2, restart: true });
-    expect(restarted.generation).toBeGreaterThan(first.generation);
-    expect(restarted.url).toBe(s.handles[1]!.url);
-    expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
-    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(otherSender, {
-      workspaceId: "workspace-1",
-      siteRoot: "site",
-      holderId: other,
-      generation: restarted.generation,
-      preview: restarted,
-    });
-    // Both still hold the new preview.
-    await s.hide(restarting);
-    expect(s.handles[1]!.stop).not.toHaveBeenCalled();
-    await s.hide(other);
-    expect(s.handles[1]!.stop).toHaveBeenCalledOnce();
-  });
+  it.each([
+    ["pin", "tab", 1],
+    ["tab", "pin", 2],
+  ])(
+    "tells the other surface when %s starts the preview again",
+    async (restarting, other, otherSender) => {
+      const s = surfaces();
+      const first = await s.show("tab", { senderId: 1 });
+      await s.show("pin", { senderId: 2 });
+      const restarted = await s.show(restarting, {
+        senderId: restarting === "tab" ? 1 : 2,
+        restart: true,
+      });
+      expect(restarted.generation).toBeGreaterThan(first.generation);
+      expect(restarted.url).toBe(s.handles[1]!.url);
+      expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
+      expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(otherSender, {
+        workspaceId: "workspace-1",
+        siteRoot: "site",
+        holderId: other,
+        generation: restarted.generation,
+        preview: restarted,
+      });
+      await s.hide(restarting);
+      expect(s.handles[1]!.stop).not.toHaveBeenCalled();
+      await s.hide(other);
+      expect(s.handles[1]!.stop).toHaveBeenCalledOnce();
+    },
+  );
 
   it("moves every surface to a new mode, such as the build Share starts", async () => {
     const s = surfaces();
     await s.show("tab", { mode: "dev", senderId: 1 });
     await s.show("pin", { mode: "dev", senderId: 1 });
     const built = await s.show("pin", { mode: "build", restart: true, senderId: 1 });
-    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({
-      holderId: "tab",
-      generation: built.generation,
-      preview: expect.objectContaining({ url: s.handles[1]!.url }),
-    }));
-    // The tab asking for build now shares it instead of starting again.
+    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(
+      1,
+      expect.objectContaining({
+        holderId: "tab",
+        generation: built.generation,
+        preview: expect.objectContaining({ url: s.handles[1]!.url }),
+      }),
+    );
     await expect(s.show("tab", { mode: "build" })).resolves.toEqual(built);
     expect(s.prepare).toHaveBeenCalledTimes(2);
   });
@@ -1258,11 +1264,13 @@ describe("an app preview shown by more than one surface", () => {
     s.failNextStart();
     await expect(s.show("pin", { senderId: 2, restart: true })).rejects.toThrow("build failed");
     expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
-    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({
-      holderId: "tab",
-      preview: null,
-    }));
-    // The surfaces still count: the last to let go stops what is left.
+    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(
+      1,
+      expect.objectContaining({
+        holderId: "tab",
+        preview: null,
+      }),
+    );
     await s.hide("tab");
     await s.hide("pin");
     expect(s.lifecycle.status("workspace-1", "site").running).toBe(false);
@@ -1278,13 +1286,14 @@ describe("an app preview shown by more than one surface", () => {
     release.resolve();
     await expect(tab).resolves.toEqual({ replaced: true });
     const built = await pin;
-    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(1, expect.objectContaining({
-      holderId: "tab",
-      generation: built.generation,
-      preview: built,
-    }));
-    // Whether the tab's start was cancelled or ran first, only the newer
-    // preview is left running.
+    expect(s.notifyReplaced).toHaveBeenCalledExactlyOnceWith(
+      1,
+      expect.objectContaining({
+        holderId: "tab",
+        generation: built.generation,
+        preview: built,
+      }),
+    );
     for (const handle of s.handles) {
       if (handle.url === built.url) expect(handle.stop).not.toHaveBeenCalled();
       else expect(handle.stop).toHaveBeenCalledOnce();
@@ -1299,7 +1308,6 @@ describe("an app preview shown by more than one surface", () => {
     await expect(s.show("pin", { senderId: 2, restart: true })).rejects.toThrow("no build script");
     expect(s.handles[0]!.stop).not.toHaveBeenCalled();
     expect(s.notifyReplaced).not.toHaveBeenCalled();
-    // Both surfaces still hold the preview that runs.
     await s.hide("tab");
     expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
     await s.hide("pin");
@@ -1313,8 +1321,6 @@ describe("an app preview shown by more than one surface", () => {
     s.hold(release.promise);
     const tab = s.answer("tab", { mode: "dev", senderId: 1 });
     await s.prepared();
-    // The tab's start is on its way when the pinned panel asks for a build
-    // that cannot be prepared.
     s.failNextPrepare();
     await expect(s.show("pin", { mode: "build", senderId: 2 })).rejects.toThrow("no build script");
     expect(s.notifyReplaced).not.toHaveBeenCalled();
@@ -1324,7 +1330,6 @@ describe("an app preview shown by more than one surface", () => {
     expect(shown.url).toBe(s.handles[0]!.url);
     expect(s.lifecycle.status("workspace-1", "site").running).toBe(true);
     expect(s.notifyReplaced).not.toHaveBeenCalled();
-    // The tab is the one surface holding it, so letting go stops it.
     await s.hide("tab");
     expect(s.handles[0]!.stop).toHaveBeenCalledOnce();
   });
@@ -1341,8 +1346,6 @@ describe("an app preview shown by more than one surface", () => {
     const isCurrent = s.prepare.mock.calls[0]![0];
     expect(isCurrent()).toBe(true);
     s.close(1);
-    // Execution asks this after a build finishes; the pinned panel still
-    // holds the start.
     expect(isCurrent()).toBe(true);
     s.close(2);
     expect(isCurrent()).toBe(false);

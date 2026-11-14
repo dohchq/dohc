@@ -1,6 +1,7 @@
-import { jsonResponse } from "@dohc/service-http";
+import { ClientClosedRequest, jsonResponse, RefusedRequest } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
-import {LINK_REFUSALS} from "@dohc/security-contract/link-refusal";
+import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
+import { serverLogLine } from "./serverLogWords";
 
 export const RELAY_ERROR_STATUSES = Object.freeze({
   ambiguous_selector: 400,
@@ -105,12 +106,18 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   conflict: "conflict",
   "restore-in-progress": "Stop live editing is waiting. You can keep editing.",
   "edits-pending": "Live editing didn't stop. Recent edits haven't reached the server yet.",
-  "host-diverged": "Live editing didn't stop. The server's copy of this workspace no longer matches the synced one. Contact the server's operator.",
-  "host-paused": "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.",
-  "host-no-edit-grant": "Live editing didn't stop. The server may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again.",
-  "host-moved": "Live editing didn't stop. The server may hold recent edits, but it only loads this document from {path}. Put it back there, then try again.",
-  "host-start-failed": "Live editing didn't stop. The server couldn't load this document and may hold recent edits. Contact the server's operator, then try again.",
-  "host-not-loaded": "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment.",
+  "host-diverged":
+    "Live editing didn't stop. The server's copy of this workspace no longer matches the synced one. Contact the server's operator.",
+  "host-paused":
+    "Live editing didn't stop. Recent edits haven't reached the server yet. Resume live editing to send them, then stop it.",
+  "host-no-edit-grant":
+    "Live editing didn't stop. The server may hold recent edits, but it only loads documents shared with Edit access. Share this one with Edit access again, then try again.",
+  "host-moved":
+    "Live editing didn't stop. The server may hold recent edits, but it only loads this document from {path}. Put it back there, then try again.",
+  "host-start-failed":
+    "Live editing didn't stop. The server couldn't load this document and may hold recent edits. Contact the server's operator, then try again.",
+  "host-not-loaded":
+    "Live editing didn't stop. The server hasn't loaded this document yet and may hold recent edits to it. Try again in a moment.",
   dependents_changed: "active dependent grants changed",
   discussion_limit_reached: "discussion message limit reached",
   discussion_rate_limited: "discussion message rate limit reached",
@@ -137,11 +144,15 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   notice_rate_limited: "too many notices",
   notice_refused: "notice refused",
   payload_too_large: "payload too large",
-  personal_agent_edit_needed: "This agent needs Edit to change this workspace's pages and Collections. Its owner can change that in Settings › Agents.",
-  personal_agent_not_collection: "Edit lets this agent change Collections. It can't write other files.",
-  personal_agent_out_of_reach: "This agent can't reach this workspace. Its owner can change that in Settings › Agents.",
+  personal_agent_edit_needed:
+    "This agent needs Edit to change this workspace's pages and Collections. Its owner can change that in Settings › Agents.",
+  personal_agent_not_collection:
+    "Edit lets this agent change Collections. It can't write other files.",
+  personal_agent_out_of_reach:
+    "This agent can't reach this workspace. Its owner can change that in Settings › Agents.",
   personal_agent_unavailable: "dohc can't check this agent's sign-in right now. Try again shortly.",
-  personal_agent_view_only: "This agent can read this workspace but not post in it. Its owner can change that in Settings › Agents.",
+  personal_agent_view_only:
+    "This agent can read this workspace but not post in it. Its owner can change that in Settings › Agents.",
   presence_capacity: "presence is at capacity",
   quota_exceeded: "workspace quota exceeded",
   secret_path: "path is a secret",
@@ -159,12 +170,24 @@ export const RELAY_ERROR_MESSAGES: Readonly<Record<RelayErrorCode, string>> = Ob
   unknown_chat_op: "unrecognized chat op cannot be authorship-verified",
 });
 
-export type SessionHostState = "running without this document (server copy diverged)" | "running without this document (paused)" |
-  "running without this document (no Edit grant)" | `running without this document (moved from ${string})` |
-  "couldn't start" | "starting" | "restarting" | "running, document not loaded yet";
+export type SessionHostState =
+  | "running without this document (server copy diverged)"
+  | "running without this document (paused)"
+  | "running without this document (no Edit grant)"
+  | `running without this document (moved from ${string})`
+  | "couldn't start"
+  | "starting"
+  | "restarting"
+  | "running, document not loaded yet";
 
 export type SessionHostStopRefusal = Readonly<{
-  code: "host-diverged" | "host-paused" | "host-no-edit-grant" | "host-moved" | "host-start-failed" | "host-not-loaded";
+  code:
+    | "host-diverged"
+    | "host-paused"
+    | "host-no-edit-grant"
+    | "host-moved"
+    | "host-start-failed"
+    | "host-not-loaded";
   sessionHost: SessionHostState;
   path?: string;
 }>;
@@ -180,7 +203,9 @@ export class RelayError extends Error {
     readonly sessionHost?: SessionHostState,
     readonly path?: string,
   ) {
-    super(code === "host-moved" && path !== undefined ? message.replace("{path}", () => path) : message);
+    super(
+      code === "host-moved" && path !== undefined ? message.replace("{path}", () => path) : message,
+    );
     this.statusCode = statusCode;
   }
 }
@@ -207,20 +232,42 @@ export function errorBody(code: RelayErrorCode): Response {
 /**
  * The response for a thrown value. Relay errors and the auth layer's
  * `UnauthorizedError` answer with their own status and code. Anything else
- * is unexpected (SQLite, the auth database): it is logged server-side and
- * answered with a generic 500, never with its message.
+ * is unexpected (SQLite, the auth database): the server log shows only its
+ * `serverLogLine`, and the answer is a generic 500, never its message.
  */
 export function errorResponse(error: unknown): Response {
   if (error instanceof RelayError) {
-    return jsonResponse({ ok: false, error: error.message, code: error.code,
-      ...(error.sessionHost === undefined ? {} : {sessionHost: error.sessionHost}),
-      ...(error.path === undefined ? {} : {path: error.path}) }, error.statusCode);
+    return jsonResponse(
+      {
+        ok: false,
+        error: error.message,
+        code: error.code,
+        ...(error.sessionHost === undefined ? {} : { sessionHost: error.sessionHost }),
+        ...(error.path === undefined ? {} : { path: error.path }),
+      },
+      error.statusCode,
+    );
   }
   if (error instanceof UnauthorizedError) {
     return jsonResponse({ ok: false, error: error.message, code: error.code }, error.statusCode);
   }
-  console.error("[sync-relay] unhandled error", error);
+  // A client that closed its request is not a server fault, and nobody reads this answer.
+  // guardRelayResponses logs it after all when the close was another request's.
+  if (error instanceof ClientClosedRequest) return clientClosedResponse();
+  // The server already sent its refusal of this request's body, and nobody reads this answer.
+  if (error instanceof RefusedRequest) return errorBody("internal_error");
+  console.error("[sync-relay] unhandled error", serverLogLine(error));
   return errorBody("internal_error");
+}
+
+/** The status a request line shows when the client closed the request before its answer (nginx's 499). */
+export const CLIENT_CLOSED_REQUEST = 499;
+
+export function clientClosedResponse(): Response {
+  return new Response(null, {
+    status: CLIENT_CLOSED_REQUEST,
+    headers: { "cache-control": "no-store" },
+  });
 }
 
 export function invalidLinkCapability(): RelayError {

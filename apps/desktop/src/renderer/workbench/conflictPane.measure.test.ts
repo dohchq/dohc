@@ -1,21 +1,3 @@
-// Measurement harness behind the conflict-pane preview window, the
-// sibling of unifiedDiff.measure.test.ts.
-//
-// It is not part of the normal suite: it walks the whole repository and one of
-// its numbers is wall-clock, so running it on every `pnpm test` would be slow
-// and flaky. Run it deliberately to re-measure the window:
-//
-//   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
-//
-// What IT measures, and what it cannot. A conflict side goes into one `<pre>`
-// with `whitespace-pre-wrap break-words`, so the browser lays out every
-// character before it knows the scroll height. That layout is Chromium's and
-// Node cannot time it. So the window is derived the other way round: from the
-// SIZE of representative healthy documents, set above them, so a healthy
-// conflict shows whole and never asks for "Show more". The second measurement
-// here only proves the guard itself is cheap — that slicing the window off a
-// 10 MiB side costs nothing next to painting it.
-
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -33,16 +15,15 @@ import { createTestScratchSync } from "../../workspaces/testTemp";
 
 const repoRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 
-
 // The repository's own tracked text, as the stand-in for the documents a
 // workspace holds. dohc has no user corpus yet; this is the closest honest
 // sample of hand-written and generated text files we own.
 function trackedTextFiles(): string[] {
-  const listed = execFileSync(
-    "git",
-    ["ls-files", "--", "*.md", "*.ts", "*.tsx", "*.rs"],
-    { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
-  );
+  const listed = execFileSync("git", ["ls-files", "--", "*.md", "*.ts", "*.tsx", "*.rs"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
   return listed
     .split("\n")
     .map((line) => line.trim())
@@ -77,9 +58,8 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
     let overCharWindow = 0;
     let overLineWindow = 0;
     // Files holding one line wider than the whole character window. This
-    // corpus has none — its longest line is about 19,000 characters — so the
-    // mid-line cut, and the "Show more" stall that lived in it,
-    // were structurally invisible here. The unit tests carry that shape
+    // corpus has none, because its longest line is about 19,000 characters,
+    // so it cannot show the mid-line cut. The unit tests carry that shape
     // instead; a corpus of hand-written source cannot.
     let overLongestLine = 0;
 
@@ -139,31 +119,25 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
   }, 600_000);
 });
 
-
 // The benchmark behind CONFLICT_COMBINED_EDIT_MAX_BYTES.
 //
-// That limit rejects otherwise valid combined text, so AGENTS.md wants its
-// evidence in a focused benchmark rather than a comment. The rows above cannot
-// supply it: they measure corpus sizes and preview slicing in Node, and this
-// cost is Chromium's.
+// That limit rejects otherwise valid combined text, so its evidence belongs
+// in a focused benchmark. The rows above cannot supply it: they measure
+// corpus sizes and preview slicing in Node, and this cost is Chromium's.
 //
-// IT DRIVES THE SHIPPING PATH, which is the whole point. A first version
-// assigned `textarea.value` directly and reported 26-36 ms at half a megabyte.
-// That number was fiction: it forced a whole-value write on every keystroke,
-// and the real path does not do that. A real keystroke is
-//
+// It drives the shipping path. A real keystroke is
 //   native input event -> React onChange -> applyCombinedChange -> setState
 //   -> commit -> controlled value reconciled
-//
 // and React skips the value write when the browser's own incremental edit has
 // already produced the value it wanted. So this bundles React and the real
 // `applyCombinedChange`, types with `keyboard.insertText` so the native event
-// fires, and times from that event until the DOM settles. The measured cost
-// fell by about sixty times, and the bound moved because of it.
+// fires, and times from that event until the DOM settles. Do not assign
+// `textarea.value` directly. That forces a whole-value write on every
+// keystroke and reports about sixty times the real cost.
 //
 // The bound is raised inside the bundle for the accepted ladder, so the cost
-// curve can be read past the value the product ships — otherwise the guard
-// refuses the very rows a recalibration would need.
+// curve can be read past the value the product ships. Otherwise the guard
+// refuses the rows a recalibration would need.
 //
 //   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
 //
@@ -172,7 +146,7 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
 describe.skipIf(!measuring)("combine textarea keystroke latency", () => {
   // Rolldown resolves module specifiers with forward slashes; repoRoot carries
   // native separators on Windows.
-  const posixRoot = repoRoot.split(String.fromCharCode(92)).join('/');
+  const posixRoot = repoRoot.split(String.fromCharCode(92)).join("/");
   const bundleRequire = createRequire(`${posixRoot}apps/desktop/`);
   const resolveFrom = (specifier: string) =>
     bundleRequire.resolve(specifier, { paths: [`${posixRoot}apps/desktop`] });
@@ -325,8 +299,7 @@ createRoot(document.getElementById("root")).render(createElement(Bench));
           );
           await page.waitForFunction(
             (length) =>
-              (document.getElementById("draft") as HTMLTextAreaElement).value.length ===
-              length,
+              (document.getElementById("draft") as HTMLTextAreaElement).value.length === length,
             size,
           );
           await page.focus("#draft");

@@ -5,87 +5,331 @@ import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
-import { parseAppPublicationCandidate, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES } from "@dohc/security-contract/app-publication";
+import {
+  parseAppPublicationCandidate,
+  APP_PUBLICATION_MAX_BLOB_BYTES,
+  APP_PUBLICATION_MAX_REQUEST_BYTES,
+} from "@dohc/security-contract/app-publication";
 import { APP_PUBLICATION_LIMITS } from "../workspaces/ownerAppPublication";
 import { compileClosedApp } from "../workspaces/closedAppCompiler";
-import { publicationListUnavailable, registerOwnerAppPublicationIpc } from "./ownerAppPublicationIpc";
+import {
+  publicationListUnavailable,
+  registerOwnerAppPublicationIpc,
+} from "./ownerAppPublicationIpc";
 import { OwnerAppPublicationResult } from "./ownerAppPublicationContract";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 
 const hash = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
-const prepareInput = { action: "prepare", workspaceId: "w", appRoot: "app", shareId: "s", grantId: "g" };
+const prepareInput = {
+  action: "prepare",
+  workspaceId: "w",
+  appRoot: "app",
+  shareId: "s",
+  grantId: "g",
+};
 function harness() {
   const source = new Map<string, Uint8Array>([
-    ["app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "index.js", inputs: ["index.js"], packageMap: {} }))],
+    [
+      "app/app.publish.json",
+      Buffer.from(JSON.stringify({ entryPath: "index.js", inputs: ["index.js"], packageMap: {} })),
+    ],
     ["app/index.js", Buffer.from("document.body.textContent='trip';")],
   ]);
   const controller = new AbortController();
   const workspace = { workspaceId: "w", shareView: undefined as unknown };
-  let rendererGeneration = 1, credentialGeneration = 1, current = true, captures = 0;
+  let rendererGeneration = 1,
+    credentialGeneration = 1,
+    current = true,
+    captures = 0;
   let beforeCapture: (count: number) => void = () => {};
   const requests: string[] = [];
-  const adapter = sourceCaptureAdapter(source, { onRequest(method) {
-    requests.push(method);
-    if (method === "versionedText.captureSources") beforeCapture(++captures);
-  } });
-  const credentials = { serverUrl: "https://account.example", relayUrl: "https://relay.example", userId: "owner", token: "test-only", email: "owner@example.test" };
-  const grant = { shareId: "s", grantId: "g", generation: 7, status: "active", revokedAtMs: null, selector: { paths: ["app"], versionId: null },
-    createdAtMs: 1, lastUsedAtMs: null, url: null, urlIssuedAtMs: null, dependents: [], access: "view" };
-  const publicationId = "a".repeat(64);
-  const relay = vi.fn(async (_credentials: typeof credentials, path: string, init?: RequestInit): Promise<unknown> => {
-    if (path.endsWith("/shares/links")) return { ok: true, supportedLinkAccess: ["view", "comment"], links: [grant], independentGrants: [] };
-    if (path.endsWith("/withdraw")) return { publicationId, active: false, authorityRevision: 2, owner: { workspaceId: "w" } };
-    const body = JSON.parse(String(init!.body));
-    if (path.endsWith("/collection-approval")) return { publicationId, authorityRevision: body.expectedAuthorityRevision + 1, capability: body.capability };
-    if (body.expectedGrantGeneration !== grant.generation) throw new Error("grant conflict");
-    return { publicationId, candidate: parseAppPublicationCandidate(body.candidate, APP_PUBLICATION_LIMITS), active: true, authorityRevision: 1, owner: {
-      workspaceId: "w", shareId: body.shareId, grantId: body.grantId, generation: body.expectedGrantGeneration, ownerUserId: "owner" } };
+  const adapter = sourceCaptureAdapter(source, {
+    onRequest(method) {
+      requests.push(method);
+      if (method === "versionedText.captureSources") beforeCapture(++captures);
+    },
   });
-  const relayOrUnavailable = vi.fn(async (relayCredentials: typeof credentials, path: string, init?: RequestInit): Promise<{ kind: "success"; body: unknown } | { kind: "unavailable" }> =>
-    ({ kind: "success", body: await relay(relayCredentials, path, init) }));
-  const compile = vi.fn(compileClosedApp), upload = vi.fn(async () => {}), flush = vi.fn(async () => ({ deferredWrites: [] as string[] }));
-  const remote = vi.fn(async (_workspace: typeof workspace, _options?: { allowPaused: boolean }) => ({ credentials, credentialGeneration }));
+  const credentials = {
+    serverUrl: "https://account.example",
+    relayUrl: "https://relay.example",
+    userId: "owner",
+    token: "test-only",
+    email: "owner@example.test",
+  };
+  const grant = {
+    shareId: "s",
+    grantId: "g",
+    generation: 7,
+    status: "active",
+    revokedAtMs: null,
+    selector: { paths: ["app"], versionId: null },
+    createdAtMs: 1,
+    lastUsedAtMs: null,
+    url: null,
+    urlIssuedAtMs: null,
+    dependents: [],
+    access: "view",
+  };
+  const publicationId = "a".repeat(64);
+  const relay = vi.fn(
+    async (
+      _credentials: typeof credentials,
+      path: string,
+      init?: RequestInit,
+    ): Promise<unknown> => {
+      if (path.endsWith("/shares/links"))
+        return {
+          ok: true,
+          supportedLinkAccess: ["view", "comment"],
+          links: [grant],
+          independentGrants: [],
+        };
+      if (path.endsWith("/withdraw"))
+        return { publicationId, active: false, authorityRevision: 2, owner: { workspaceId: "w" } };
+      const body = JSON.parse(String(init!.body));
+      if (path.endsWith("/collection-approval"))
+        return {
+          publicationId,
+          authorityRevision: body.expectedAuthorityRevision + 1,
+          capability: body.capability,
+        };
+      if (body.expectedGrantGeneration !== grant.generation) throw new Error("grant conflict");
+      return {
+        publicationId,
+        candidate: parseAppPublicationCandidate(body.candidate, APP_PUBLICATION_LIMITS),
+        active: true,
+        authorityRevision: 1,
+        owner: {
+          workspaceId: "w",
+          shareId: body.shareId,
+          grantId: body.grantId,
+          generation: body.expectedGrantGeneration,
+          ownerUserId: "owner",
+        },
+      };
+    },
+  );
+  const relayOrUnavailable = vi.fn(
+    async (
+      relayCredentials: typeof credentials,
+      path: string,
+      init?: RequestInit,
+    ): Promise<{ kind: "success"; body: unknown } | { kind: "unavailable" }> => ({
+      kind: "success",
+      body: await relay(relayCredentials, path, init),
+    }),
+  );
+  const compile = vi.fn(compileClosedApp),
+    upload = vi.fn(async () => {}),
+    flush = vi.fn(async () => ({ deferredWrites: [] as string[] }));
+  const remote = vi.fn(
+    async (_workspace: typeof workspace, _options?: { allowPaused: boolean }) => ({
+      credentials,
+      credentialGeneration,
+    }),
+  );
   let handler!: (event: { sender: { id: number } }, payload: unknown) => unknown;
-  registerOwnerAppPublicationIpc({ registerHandler(_channel, fn) { handler = fn; }, assertTrustedSender(event: { sender: { id: number } }) { if (event.sender.id < 0) throw new Error("untrusted"); },
-    async withRendererWorkspaceOperation(_sender, _workspaceId, _message, work) { return work({ workspace, signal: controller.signal, session: { generation: rendererGeneration }, assertCurrent() { if (!current) throw new Error("retired"); } }); },
-    remoteForWorkspace: remote, currentCredentialGeneration: () => credentialGeneration,
-    flushCapture: flush, withAdapter: async (_workspace, work) => work(adapter), compile, relayJson: relay, relayJsonOrUnavailable: relayOrUnavailable, upload });
-  const invoke = async (input: unknown, senderId = 1) => OwnerAppPublicationResult.parse(await handler({ sender: { id: senderId } }, input));
-  const prepare = async () => { const result = await invoke(prepareInput); if (result.kind !== "prepared") throw new Error("not prepared"); return result; };
-  const approve = (value: Awaited<ReturnType<typeof prepare>>, digest = value.candidateDigest) => invoke({ action: "approve", workspaceId: "w", approvalId: value.approvalId, candidateDigest: digest });
-  return { remote, source, grant, controller, workspace, requests, compile, upload, relay, relayOrUnavailable, flush, invoke, prepare, approve,
-    setBeforeCapture(fn: typeof beforeCapture) { beforeCapture = fn; }, retire() { current = false; },
-    switchRenderer() { rendererGeneration++; }, switchCredential() { credentialGeneration++; } };
+  registerOwnerAppPublicationIpc({
+    registerHandler(_channel, fn) {
+      handler = fn;
+    },
+    assertTrustedSender(event: { sender: { id: number } }) {
+      if (event.sender.id < 0) throw new Error("untrusted");
+    },
+    async withRendererWorkspaceOperation(_sender, _workspaceId, _message, work) {
+      return work({
+        workspace,
+        signal: controller.signal,
+        session: { generation: rendererGeneration },
+        assertCurrent() {
+          if (!current) throw new Error("retired");
+        },
+      });
+    },
+    remoteForWorkspace: remote,
+    currentCredentialGeneration: () => credentialGeneration,
+    flushCapture: flush,
+    withAdapter: async (_workspace, work) => work(adapter),
+    compile,
+    relayJson: relay,
+    relayJsonOrUnavailable: relayOrUnavailable,
+    upload,
+  });
+  const invoke = async (input: unknown, senderId = 1) =>
+    OwnerAppPublicationResult.parse(await handler({ sender: { id: senderId } }, input));
+  const prepare = async () => {
+    const result = await invoke(prepareInput);
+    if (result.kind !== "prepared") throw new Error("not prepared");
+    return result;
+  };
+  const approve = (value: Awaited<ReturnType<typeof prepare>>, digest = value.candidateDigest) =>
+    invoke({
+      action: "approve",
+      workspaceId: "w",
+      approvalId: value.approvalId,
+      candidateDigest: digest,
+    });
+  return {
+    remote,
+    source,
+    grant,
+    controller,
+    workspace,
+    requests,
+    compile,
+    upload,
+    relay,
+    relayOrUnavailable,
+    flush,
+    invoke,
+    prepare,
+    approve,
+    setBeforeCapture(fn: typeof beforeCapture) {
+      beforeCapture = fn;
+    },
+    retire() {
+      current = false;
+    },
+    switchRenderer() {
+      rendererGeneration++;
+    },
+    switchCredential() {
+      credentialGeneration++;
+    },
+  };
 }
 
-const collection = { kind: "collection-create", collectionPath: "app/responses", allowedFields: ["name", "destination"], requiredFields: ["destination"], readFields: ["name", "destination"] };
-const collectionSchema = "fields:\n  name:\n    type: text\n  destination:\n    type: select\n    options: [Tokyo, Manila]\n";
+const collection = {
+  kind: "collection-create",
+  collectionPath: "app/responses",
+  allowedFields: ["name", "destination"],
+  requiredFields: ["destination"],
+  readFields: ["name", "destination"],
+};
+const collectionSchema =
+  "fields:\n  name:\n    type: text\n  destination:\n    type: select\n    options: [Tokyo, Manila]\n";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 function withDataset(h: ReturnType<typeof harness>, includeRead = false) {
-  const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Responses", schemaPath: "private/schema.sql", operationsPath: "private/actions.js",
-    tables: [{ tableId: id(2), name: "Responses", sqlName: "responses", primaryKey: "id", fields: [
-      { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
-      { fieldId: id(4), name: "Name", sqlColumn: "name", type: "text", required: true, unique: false },
-    ] }], operations: [{ operationId: id(5), name: "submit", label: "Submit", tableId: id(2), kind: "create", access: "link", readOnly: false, fieldIds: [id(4)] }] };
-  if (includeRead) definition.operations.push({ operationId: id(6), name: "list", label: "List", tableId: id(2), kind: "read", access: "helper", readOnly: true, fieldIds: [id(3), id(4)] });
-  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "PRIVATE_SQL", operationSource: includeRead ? generateDatasetOperations(definition) : "PRIVATE_SOURCE" });
-  const approved = { revision, schemaSql: "PRIVATE_SQL", operationSource: includeRead ? generateDatasetOperations(definition) : "PRIVATE_SOURCE", active: true,
-    cursor: { workspaceId: "w", datasetId: id(1), hostEpoch: "epoch", approvedRevisionHash: revision.revisionSha256, revision: 0, digest: "0".repeat(64) } };
+  const definition: DatasetDefinition = {
+    formatVersion: 1,
+    datasetId: id(1),
+    name: "Responses",
+    schemaPath: "private/schema.sql",
+    operationsPath: "private/actions.js",
+    tables: [
+      {
+        tableId: id(2),
+        name: "Responses",
+        sqlName: "responses",
+        primaryKey: "id",
+        fields: [
+          {
+            fieldId: id(3),
+            name: "ID",
+            sqlColumn: "id",
+            type: "text",
+            required: true,
+            unique: true,
+          },
+          {
+            fieldId: id(4),
+            name: "Name",
+            sqlColumn: "name",
+            type: "text",
+            required: true,
+            unique: false,
+          },
+        ],
+      },
+    ],
+    operations: [
+      {
+        operationId: id(5),
+        name: "submit",
+        label: "Submit",
+        tableId: id(2),
+        kind: "create",
+        access: "link",
+        readOnly: false,
+        fieldIds: [id(4)],
+      },
+    ],
+  };
+  if (includeRead)
+    definition.operations.push({
+      operationId: id(6),
+      name: "list",
+      label: "List",
+      tableId: id(2),
+      kind: "read",
+      access: "helper",
+      readOnly: true,
+      fieldIds: [id(3), id(4)],
+    });
+  const revision = describeDatasetRevision({
+    definition,
+    revision: 1,
+    schemaSql: "PRIVATE_SQL",
+    operationSource: includeRead ? generateDatasetOperations(definition) : "PRIVATE_SOURCE",
+  });
+  const approved = {
+    revision,
+    schemaSql: "PRIVATE_SQL",
+    operationSource: includeRead ? generateDatasetOperations(definition) : "PRIVATE_SOURCE",
+    active: true,
+    cursor: {
+      workspaceId: "w",
+      datasetId: id(1),
+      hostEpoch: "epoch",
+      approvedRevisionHash: revision.revisionSha256,
+      revision: 0,
+      digest: "0".repeat(64),
+    },
+  };
   h.source.set("private/dataset.json", Buffer.from(JSON.stringify(definition)));
-  h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "index.js", inputs: ["index.js"], packageMap: {},
-    dataset: { kind: "dataset", datasetPath: "private/dataset.json", revision: 1, revisionSha256: revision.revisionSha256, operationIds: includeRead ? [id(5), id(6)] : [id(5)], createFields: [{ operationId: id(5), fieldIds: [id(4)] }] } })));
+  h.source.set(
+    "app/app.publish.json",
+    Buffer.from(
+      JSON.stringify({
+        entryPath: "index.js",
+        inputs: ["index.js"],
+        packageMap: {},
+        dataset: {
+          kind: "dataset",
+          datasetPath: "private/dataset.json",
+          revision: 1,
+          revisionSha256: revision.revisionSha256,
+          operationIds: includeRead ? [id(5), id(6)] : [id(5)],
+          createFields: [{ operationId: id(5), fieldIds: [id(4)] }],
+        },
+      }),
+    ),
+  );
   const original = h.relay.getMockImplementation()!;
   h.relay.mockImplementation(async (...args) => {
     if (args[1].endsWith("/artifacts")) return approved;
-    if (args[1].endsWith("/backend/activate")) return { publicationId: "a".repeat(64), authorityRevision: 1, datasetId: id(1) };
+    if (args[1].endsWith("/backend/activate"))
+      return { publicationId: "a".repeat(64), authorityRevision: 1, datasetId: id(1) };
     return original(...args);
   });
   return { ...h, approved };
 }
 function withCollection(h: ReturnType<typeof harness>, declaration = collection) {
-  h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "index.js", inputs: ["index.js"], packageMap: {},
-    collection: { ...declaration, collectionPath: posix.relative("app", declaration.collectionPath) } })));
+  h.source.set(
+    "app/app.publish.json",
+    Buffer.from(
+      JSON.stringify({
+        entryPath: "index.js",
+        inputs: ["index.js"],
+        packageMap: {},
+        collection: {
+          ...declaration,
+          collectionPath: posix.relative("app", declaration.collectionPath),
+        },
+      }),
+    ),
+  );
   h.source.set(`${declaration.collectionPath}/collection.yaml`, Buffer.from(collectionSchema));
   return h;
 }
@@ -94,145 +338,309 @@ describe("owner app publication", () => {
   it("prepares a shared Collection app from trusted rules and activates only its binding", async () => {
     const h = withDataset(harness());
     const prepared = await h.prepare();
-    expect(prepared.capabilities[0]).toMatchObject({ kind: "dataset", operations: [{ name: "submit", access: "link" }] });
+    expect(prepared.capabilities[0]).toMatchObject({
+      kind: "dataset",
+      operations: [{ name: "submit", access: "link" }],
+    });
     expect(prepared.sourcePaths).toEqual(["app/app.publish.json", "app/index.js"]);
     expect(await h.approve(prepared)).toMatchObject({ kind: "published", authorityRevision: 1 });
-    expect(h.relay.mock.calls.filter(call => call[1].endsWith("/artifacts"))).toHaveLength(3);
-    expect(h.relay.mock.calls.some(call => call[1].endsWith("/collection-approval") || call[1].endsWith(`/datasets/${id(1)}/activate`))).toBe(false);
+    expect(h.relay.mock.calls.filter((call) => call[1].endsWith("/artifacts"))).toHaveLength(3);
+    expect(
+      h.relay.mock.calls.some(
+        (call) =>
+          call[1].endsWith("/collection-approval") ||
+          call[1].endsWith(`/datasets/${id(1)}/activate`),
+      ),
+    ).toBe(false);
     expect(h.relay.mock.calls.at(-1)![1]).toMatch(/backend\/activate$/);
   });
   it("rejects a changed or offline dataset before uploading any public artifacts", async () => {
-    const h = withDataset(harness()), prepared = await h.prepare();
+    const h = withDataset(harness()),
+      prepared = await h.prepare();
     h.approved.active = false;
     await expect(h.approve(prepared)).rejects.toThrow(/rules changed/);
     expect(h.upload).not.toHaveBeenCalled();
-    expect(h.relay.mock.calls.some(call => call[1].endsWith("/app-publications"))).toBe(false);
+    expect(h.relay.mock.calls.some((call) => call[1].endsWith("/app-publications"))).toBe(false);
   });
   it("reports an app published without confirmed Collection access", async () => {
-    const h = withDataset(harness()), prepared = await h.prepare();
+    const h = withDataset(harness()),
+      prepared = await h.prepare();
     const original = h.relay.getMockImplementation()!;
-    h.relay.mockImplementation(async (...args) => args[1].endsWith("/backend/activate")
-      ? { publicationId: "a".repeat(64), authorityRevision: 1, datasetId: id(99) } : original(...args));
+    h.relay.mockImplementation(async (...args) =>
+      args[1].endsWith("/backend/activate")
+        ? { publicationId: "a".repeat(64), authorityRevision: 1, datasetId: id(99) }
+        : original(...args),
+    );
     await expect(h.approve(prepared)).rejects.toThrow(/app is published.*Collection access/);
   });
   it("captures and reviews the exact selected collection before granting access", async () => {
     const h = withCollection(harness());
     const prepared = await h.prepare();
-    const capability = { ...collection, schemaSha256: hash(collectionSchema), allowedFields: ["destination", "name"], readFields: ["destination", "name"] };
+    const capability = {
+      ...collection,
+      schemaSha256: hash(collectionSchema),
+      allowedFields: ["destination", "name"],
+      readFields: ["destination", "name"],
+    };
     expect(prepared.capabilities).toEqual([capability]);
     expect(prepared.sourcePaths).toContain("app/responses/collection.yaml");
-    expect(h.compile.mock.calls[0]![0].inputs.map(file => file.path)).toEqual(prepared.sourcePaths);
-    expect(h.relay.mock.calls.every(call => call[1].endsWith("/shares/links"))).toBe(true);
+    expect(h.compile.mock.calls[0]![0].inputs.map((file) => file.path)).toEqual(
+      prepared.sourcePaths,
+    );
+    expect(h.relay.mock.calls.every((call) => call[1].endsWith("/shares/links"))).toBe(true);
     expect(await h.approve(prepared)).toMatchObject({ kind: "published", authorityRevision: 2 });
     const publishBody = JSON.parse(String(h.relay.mock.calls.at(-2)![2]!.body));
     expect(publishBody.candidate.capabilities).toEqual([capability]);
-    expect(publishBody.candidate.inputs.find((file: { path: string }) => file.path.endsWith("collection.yaml")).sha256).toBe(hash(collectionSchema));
-    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({ expectedAuthorityRevision: 1, capability });
-  });
-  it.each(["outside", "malformed", "missing-field", "oversized"])("refuses %s collection schema before compiling", async kind => {
-    const h = withCollection(harness(), kind === "outside" ? { ...collection, collectionPath: "private/responses" } : collection);
-    if (kind === "malformed") h.source.set("app/responses/collection.yaml", Buffer.from("fields: ["));
-    if (kind === "missing-field") h.source.set("app/responses/collection.yaml", Buffer.from("fields:\n  name:\n    type: text\n"));
-    if (kind === "oversized") h.source.set("app/responses/collection.yaml", Buffer.alloc(65_537, 32));
-    await expect(h.prepare()).rejects.toThrow();
-    expect(h.compile).not.toHaveBeenCalled();
-    expect(h.upload).not.toHaveBeenCalled();
-    if (kind === "outside") expect(h.requests.filter(method => method === "versionedText.captureSources")).toHaveLength(1);
-  });
-  it.each(["network", "null", "mismatch"])("reports partial publication and permits retry after %s collection approval failure", async kind => {
-    const h = withCollection(harness()), prepared = await h.prepare();
-    const original = h.relay.getMockImplementation()!;
-    h.relay.mockImplementation(async (...args) => {
-      if (!args[1].endsWith("/collection-approval")) return original(...args);
-      if (kind === "network") throw new Error("404");
-      return { publicationId: "a".repeat(64), authorityRevision: 2,
-        capability: kind === "null" ? null : { ...prepared.capabilities[0], readFields: [] } };
+    expect(
+      publishBody.candidate.inputs.find((file: { path: string }) =>
+        file.path.endsWith("collection.yaml"),
+      ).sha256,
+    ).toBe(hash(collectionSchema));
+    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({
+      expectedAuthorityRevision: 1,
+      capability,
     });
-    await expect(h.approve(prepared)).rejects.toThrow("The app is published.");
-    expect(h.relay.mock.calls.filter(call => call[1].endsWith("/app-publications"))).toHaveLength(1);
-    h.relay.mockImplementation(original);
-    expect(await h.approve(await h.prepare())).toMatchObject({ kind: "published", authorityRevision: 2 });
   });
+  it.each(["outside", "malformed", "missing-field", "oversized"])(
+    "refuses %s collection schema before compiling",
+    async (kind) => {
+      const h = withCollection(
+        harness(),
+        kind === "outside" ? { ...collection, collectionPath: "private/responses" } : collection,
+      );
+      if (kind === "malformed")
+        h.source.set("app/responses/collection.yaml", Buffer.from("fields: ["));
+      if (kind === "missing-field")
+        h.source.set(
+          "app/responses/collection.yaml",
+          Buffer.from("fields:\n  name:\n    type: text\n"),
+        );
+      if (kind === "oversized")
+        h.source.set("app/responses/collection.yaml", Buffer.alloc(65_537, 32));
+      await expect(h.prepare()).rejects.toThrow();
+      expect(h.compile).not.toHaveBeenCalled();
+      expect(h.upload).not.toHaveBeenCalled();
+      if (kind === "outside")
+        expect(
+          h.requests.filter((method) => method === "versionedText.captureSources"),
+        ).toHaveLength(1);
+    },
+  );
+  it.each(["network", "null", "mismatch"])(
+    "reports partial publication and permits retry after %s collection approval failure",
+    async (kind) => {
+      const h = withCollection(harness()),
+        prepared = await h.prepare();
+      const original = h.relay.getMockImplementation()!;
+      h.relay.mockImplementation(async (...args) => {
+        if (!args[1].endsWith("/collection-approval")) return original(...args);
+        if (kind === "network") throw new Error("404");
+        return {
+          publicationId: "a".repeat(64),
+          authorityRevision: 2,
+          capability: kind === "null" ? null : { ...prepared.capabilities[0], readFields: [] },
+        };
+      });
+      await expect(h.approve(prepared)).rejects.toThrow("The app is published.");
+      expect(
+        h.relay.mock.calls.filter((call) => call[1].endsWith("/app-publications")),
+      ).toHaveLength(1);
+      h.relay.mockImplementation(original);
+      expect(await h.approve(await h.prepare())).toMatchObject({
+        kind: "published",
+        authorityRevision: 2,
+      });
+    },
+  );
   it("preserves the full collection capability when reviewing and approving reactivation", async () => {
-    const h = withCollection(harness()), prepared = await h.prepare();
+    const h = withCollection(harness()),
+      prepared = await h.prepare();
     await h.approve(prepared);
     const { candidate } = JSON.parse(String(h.relay.mock.calls.at(-2)![2]!.body));
-    const owner = { workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 7 };
-    h.relay.mockResolvedValueOnce({ publicationId: "a".repeat(64), candidate, owner, active: false, authorityRevision: 3 });
-    const reviewed = await h.invoke({ action: "reviewReactivation", workspaceId: "w", publicationId: "a".repeat(64) });
+    const owner = {
+      workspaceId: "w",
+      ownerUserId: "owner",
+      shareId: "s",
+      grantId: "g",
+      generation: 7,
+    };
+    h.relay.mockResolvedValueOnce({
+      publicationId: "a".repeat(64),
+      candidate,
+      owner,
+      active: false,
+      authorityRevision: 3,
+    });
+    const reviewed = await h.invoke({
+      action: "reviewReactivation",
+      workspaceId: "w",
+      publicationId: "a".repeat(64),
+    });
     if (reviewed.kind !== "prepared") throw new Error("Expected reviewed publication.");
     expect(reviewed.capabilities).toEqual(prepared.capabilities);
     expect(reviewed.candidateDigest).toBe(prepared.candidateDigest);
-    h.relay.mockResolvedValueOnce({ publicationId: "a".repeat(64), owner, active: true, authorityRevision: 4 });
+    h.relay.mockResolvedValueOnce({
+      publicationId: "a".repeat(64),
+      owner,
+      active: true,
+      authorityRevision: 4,
+    });
     expect(await h.approve(reviewed)).toMatchObject({ kind: "published", authorityRevision: 5 });
-    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({ expectedAuthorityRevision: 4, capability: prepared.capabilities[0] });
+    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({
+      expectedAuthorityRevision: 4,
+      capability: prepared.capabilities[0],
+    });
   });
   it("prepares exact sources without upload, then approves the displayed digest and supports withdrawal", async () => {
-    const h = harness(), prepared = await h.prepare();
-    expect(prepared).toMatchObject({ audience:{shareId:"s",grantId:"g",selector:{paths:["app"],versionId:null},access:"view"}, externalNetwork: true, capabilities: [], sourcePaths: ["app/app.publish.json", "app/index.js"] });
+    const h = harness(),
+      prepared = await h.prepare();
+    expect(prepared).toMatchObject({
+      audience: {
+        shareId: "s",
+        grantId: "g",
+        selector: { paths: ["app"], versionId: null },
+        access: "view",
+      },
+      externalNetwork: true,
+      capabilities: [],
+      sourcePaths: ["app/app.publish.json", "app/index.js"],
+    });
     expect(h.upload).not.toHaveBeenCalled();
     h.source.set("app/index.js", Buffer.from("later source edit"));
     expect(await h.approve(prepared)).toMatchObject({ kind: "published", authorityRevision: 1 });
     const body = JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body));
     expect(body.expectedGrantGeneration).toBe(7);
     expect(body.candidate.sourceRevision).toBe(prepared.sourceRevision);
-    expect(body.candidate.inputs.find((row: {path: string}) => row.path === "app/index.js").sha256).toBe(hash("document.body.textContent='trip';"));
+    expect(
+      body.candidate.inputs.find((row: { path: string }) => row.path === "app/index.js").sha256,
+    ).toBe(hash("document.body.textContent='trip';"));
     await expect(h.approve(prepared)).rejects.toThrow("expired");
-    expect(await h.invoke({ action: "withdraw", workspaceId: "w", publicationId: "a".repeat(64), expectedAuthorityRevision: 1 })).toMatchObject({ kind: "withdrawn", authorityRevision: 2 });
+    expect(
+      await h.invoke({
+        action: "withdraw",
+        workspaceId: "w",
+        publicationId: "a".repeat(64),
+        expectedAuthorityRevision: 1,
+      }),
+    ).toMatchObject({ kind: "withdrawn", authorityRevision: 2 });
   });
 
   it("revokes collection access with the current authority revision", async () => {
     const h = withCollection(harness());
-    const result = await h.invoke({ action: "revokeCollection", workspaceId: "w", publicationId: "a".repeat(64), expectedAuthorityRevision: 7 });
-    expect(result).toEqual({ kind: "collectionRevoked", publicationId: "a".repeat(64), authorityRevision: 8 });
-    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({ expectedAuthorityRevision: 7, capability: null });
-  });
-  it.each(["abort", "conflict", "retired"])("preserves %s during collection approval", async kind => {
-    const h = withCollection(harness()), prepared = await h.prepare();
-    const original = h.relay.getMockImplementation()!;
-    h.relay.mockImplementation(async (...args) => {
-      if (!args[1].endsWith("/collection-approval")) return original(...args);
-      if (kind === "abort") { h.controller.abort(); throw h.controller.signal.reason; }
-      if (kind === "retired") h.retire();
-      throw new Error("Publication authority changed.");
+    const result = await h.invoke({
+      action: "revokeCollection",
+      workspaceId: "w",
+      publicationId: "a".repeat(64),
+      expectedAuthorityRevision: 7,
     });
-    if (kind === "abort") await expect(h.approve(prepared)).rejects.toMatchObject({ name: "AbortError" });
-    else await expect(h.approve(prepared)).rejects.toThrow(kind === "retired" ? "retired" : "Publication authority changed.");
-  });
-  it.each(["wrong-id", "wrong-revision", "not-revoked", "stale", "retired"])("does not confirm %s revocation", async kind => {
-    const h = harness();
-    h.relay.mockImplementationOnce(async () => {
-      if (kind === "stale") throw new Error("Publication authority changed.");
-      if (kind === "retired") h.retire();
-      return { publicationId: (kind === "wrong-id" ? "b" : "a").repeat(64), authorityRevision: kind === "wrong-revision" ? 7 : 8, capability: kind === "not-revoked" ? collection : null };
+    expect(result).toEqual({
+      kind: "collectionRevoked",
+      publicationId: "a".repeat(64),
+      authorityRevision: 8,
     });
-    await expect(h.invoke({action:"revokeCollection",workspaceId:"w",publicationId:"a".repeat(64),expectedAuthorityRevision:7})).rejects.toThrow();
+    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({
+      expectedAuthorityRevision: 7,
+      capability: null,
+    });
   });
+  it.each(["abort", "conflict", "retired"])(
+    "preserves %s during collection approval",
+    async (kind) => {
+      const h = withCollection(harness()),
+        prepared = await h.prepare();
+      const original = h.relay.getMockImplementation()!;
+      h.relay.mockImplementation(async (...args) => {
+        if (!args[1].endsWith("/collection-approval")) return original(...args);
+        if (kind === "abort") {
+          h.controller.abort();
+          throw h.controller.signal.reason;
+        }
+        if (kind === "retired") h.retire();
+        throw new Error("Publication authority changed.");
+      });
+      if (kind === "abort")
+        await expect(h.approve(prepared)).rejects.toMatchObject({ name: "AbortError" });
+      else
+        await expect(h.approve(prepared)).rejects.toThrow(
+          kind === "retired" ? "retired" : "Publication authority changed.",
+        );
+    },
+  );
+  it.each(["wrong-id", "wrong-revision", "not-revoked", "stale", "retired"])(
+    "does not confirm %s revocation",
+    async (kind) => {
+      const h = harness();
+      h.relay.mockImplementationOnce(async () => {
+        if (kind === "stale") throw new Error("Publication authority changed.");
+        if (kind === "retired") h.retire();
+        return {
+          publicationId: (kind === "wrong-id" ? "b" : "a").repeat(64),
+          authorityRevision: kind === "wrong-revision" ? 7 : 8,
+          capability: kind === "not-revoked" ? collection : null,
+        };
+      });
+      await expect(
+        h.invoke({
+          action: "revokeCollection",
+          workspaceId: "w",
+          publicationId: "a".repeat(64),
+          expectedAuthorityRevision: 7,
+        }),
+      ).rejects.toThrow();
+    },
+  );
   it("refuses approval of a different digest before upload", async () => {
-    const h = harness(), prepared = await h.prepare();
+    const h = harness(),
+      prepared = await h.prepare();
     await expect(h.approve(prepared, "b".repeat(64))).rejects.toThrow("candidate changed");
     expect(h.upload).not.toHaveBeenCalled();
     await h.invoke({ action: "cancel", workspaceId: "w", approvalId: prepared.approvalId });
     await expect(h.approve(prepared)).rejects.toThrow("expired");
   });
   it("reviews immutable withdrawn bytes before an explicit revision-checked republish", async () => {
-    const h = harness(), first = await h.prepare(); await h.approve(first);
+    const h = harness(),
+      first = await h.prepare();
+    await h.approve(first);
     const body = JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body));
-    const owner = { workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 7 };
-    h.relay.mockResolvedValueOnce({ publicationId: "a".repeat(64), candidate: body.candidate, owner, active: false, authorityRevision: 2 });
-    const reviewed = await h.invoke({ action: "reviewReactivation", workspaceId: "w", publicationId: "a".repeat(64) });
+    const owner = {
+      workspaceId: "w",
+      ownerUserId: "owner",
+      shareId: "s",
+      grantId: "g",
+      generation: 7,
+    };
+    h.relay.mockResolvedValueOnce({
+      publicationId: "a".repeat(64),
+      candidate: body.candidate,
+      owner,
+      active: false,
+      authorityRevision: 2,
+    });
+    const reviewed = await h.invoke({
+      action: "reviewReactivation",
+      workspaceId: "w",
+      publicationId: "a".repeat(64),
+    });
     if (reviewed.kind !== "prepared") throw new Error("Expected reviewed publication.");
     expect(reviewed.candidateDigest).toBe(first.candidateDigest);
     await expect(h.approve(reviewed, "b".repeat(64))).rejects.toThrow("candidate changed");
-    h.relay.mockResolvedValueOnce({ publicationId: "a".repeat(64), owner, active: true, authorityRevision: 3 });
+    h.relay.mockResolvedValueOnce({
+      publicationId: "a".repeat(64),
+      owner,
+      active: true,
+      authorityRevision: 3,
+    });
     expect(await h.approve(reviewed)).toMatchObject({ kind: "published", authorityRevision: 3 });
     expect(h.relay.mock.calls.at(-1)![1]).toMatch(/\/reactivate$/);
-    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({ expectedAuthorityRevision: 2, agent: null });
+    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({
+      expectedAuthorityRevision: 2,
+      agent: null,
+    });
     expect(h.upload).toHaveBeenCalledOnce();
   });
   it("refuses an individual bundle above the relay blob cap before approval", async () => {
     const h = harness();
-    h.compile.mockImplementationOnce(async request => {
+    h.compile.mockImplementationOnce(async (request) => {
       const built = await compileClosedApp(request);
       built.files[0]!.byteLength = 20 * 1024 * 1024 + 1;
       return built;
@@ -240,81 +648,134 @@ describe("owner app publication", () => {
     await expect(h.prepare()).rejects.toThrow("bundle bound");
     expect(h.upload).not.toHaveBeenCalled();
   });
-  it.each(["metadata", "blob"])("refuses withdrawn publications above the %s limit before approval", async kind => {
-    const baseline = harness();
-    await baseline.approve(await baseline.prepare());
-    const { candidate } = JSON.parse(String(baseline.relay.mock.calls.at(-1)![2]!.body));
-    if (kind === "metadata") candidate.compilerIdentity.version = "x".repeat(APP_PUBLICATION_MAX_REQUEST_BYTES + 1);
-    else candidate.files[0].byteLength = APP_PUBLICATION_MAX_BLOB_BYTES + 1;
-    const h = harness();
-    h.relay.mockResolvedValueOnce({ publicationId: "a".repeat(64), candidate, active: false, authorityRevision: 2,
-      owner: { workspaceId: "w", ownerUserId: "owner", shareId: "s", grantId: "g", generation: 7 } });
-    await expect(h.invoke({ action: "reviewReactivation", workspaceId: "w", publicationId: "a".repeat(64) })).rejects.toThrow();
-    expect(h.upload).not.toHaveBeenCalled();
-    expect(h.relay).toHaveBeenCalledOnce();
-    expect(h.relay.mock.calls[0]![2]?.method).toBeUndefined();
-  });
-  it.each([-1, 0, 1])("checks the complete publication envelope at the byte limit %+i", async offset => {
-    const baseline = harness();
-    await baseline.approve(await baseline.prepare());
-    const baselineBody = String(baseline.relay.mock.calls.at(-1)![2]!.body);
-    const targetBytes = APP_PUBLICATION_MAX_REQUEST_BYTES + offset;
-    const paddingBytes = targetBytes - Buffer.byteLength(baselineBody, "utf8");
-    const h = harness();
-    h.compile.mockImplementationOnce(async request => {
-      const built = await compileClosedApp(request);
-      built.compiler.version += "x".repeat(paddingBytes);
-      return built;
-    });
-    if (offset > 0) {
-      await expect(h.prepare()).rejects.toThrow("supported publication size");
+  it.each(["metadata", "blob"])(
+    "refuses withdrawn publications above the %s limit before approval",
+    async (kind) => {
+      const baseline = harness();
+      await baseline.approve(await baseline.prepare());
+      const { candidate } = JSON.parse(String(baseline.relay.mock.calls.at(-1)![2]!.body));
+      if (kind === "metadata")
+        candidate.compilerIdentity.version = "x".repeat(APP_PUBLICATION_MAX_REQUEST_BYTES + 1);
+      else candidate.files[0].byteLength = APP_PUBLICATION_MAX_BLOB_BYTES + 1;
+      const h = harness();
+      h.relay.mockResolvedValueOnce({
+        publicationId: "a".repeat(64),
+        candidate,
+        active: false,
+        authorityRevision: 2,
+        owner: {
+          workspaceId: "w",
+          ownerUserId: "owner",
+          shareId: "s",
+          grantId: "g",
+          generation: 7,
+        },
+      });
+      await expect(
+        h.invoke({ action: "reviewReactivation", workspaceId: "w", publicationId: "a".repeat(64) }),
+      ).rejects.toThrow();
       expect(h.upload).not.toHaveBeenCalled();
-      expect(h.relay.mock.calls.every(call => call[1].endsWith("/shares/links"))).toBe(true);
-      return;
-    }
-    const prepared = await h.prepare();
-    expect(h.upload).not.toHaveBeenCalled();
-    await h.approve(prepared);
-    expect(Buffer.byteLength(String(h.relay.mock.calls.at(-1)![2]!.body), "utf8")).toBe(targetBytes);
-  });
+      expect(h.relay).toHaveBeenCalledOnce();
+      expect(h.relay.mock.calls[0]![2]?.method).toBeUndefined();
+    },
+  );
+  it.each([-1, 0, 1])(
+    "checks the complete publication envelope at the byte limit %+i",
+    async (offset) => {
+      const baseline = harness();
+      await baseline.approve(await baseline.prepare());
+      const baselineBody = String(baseline.relay.mock.calls.at(-1)![2]!.body);
+      const targetBytes = APP_PUBLICATION_MAX_REQUEST_BYTES + offset;
+      const paddingBytes = targetBytes - Buffer.byteLength(baselineBody, "utf8");
+      const h = harness();
+      h.compile.mockImplementationOnce(async (request) => {
+        const built = await compileClosedApp(request);
+        built.compiler.version += "x".repeat(paddingBytes);
+        return built;
+      });
+      if (offset > 0) {
+        await expect(h.prepare()).rejects.toThrow("supported publication size");
+        expect(h.upload).not.toHaveBeenCalled();
+        expect(h.relay.mock.calls.every((call) => call[1].endsWith("/shares/links"))).toBe(true);
+        return;
+      }
+      const prepared = await h.prepare();
+      expect(h.upload).not.toHaveBeenCalled();
+      await h.approve(prepared);
+      expect(Buffer.byteLength(String(h.relay.mock.calls.at(-1)![2]!.body), "utf8")).toBe(
+        targetBytes,
+      );
+    },
+  );
   it("refuses source declarations that change before final capture", async () => {
     const h = harness();
-    h.setBeforeCapture(count => { if (count === 2) h.source.set("app/app.publish.json", Buffer.from("{}")); });
+    h.setBeforeCapture((count) => {
+      if (count === 2) h.source.set("app/app.publish.json", Buffer.from("{}"));
+    });
     await expect(h.prepare()).rejects.toThrow("declaration changed");
     expect(h.compile).not.toHaveBeenCalled();
   });
   it("preflights all declared paths before reading their bytes", async () => {
     const h = harness();
-    h.source.set("app/app.publish.json", Buffer.from(JSON.stringify({ entryPath: "../private/index.js", inputs: ["../private/index.js"], packageMap: {} })));
+    h.source.set(
+      "app/app.publish.json",
+      Buffer.from(
+        JSON.stringify({
+          entryPath: "../private/index.js",
+          inputs: ["../private/index.js"],
+          packageMap: {},
+        }),
+      ),
+    );
     await expect(h.prepare()).rejects.toThrow("outside this link");
-    expect(h.requests.filter(method => method === "versionedText.captureSources")).toHaveLength(1);
+    expect(h.requests.filter((method) => method === "versionedText.captureSources")).toHaveLength(
+      1,
+    );
   });
-  it.each(["renderer", "credential", "physical"])("refuses approval after %s authority changes", async kind => {
-    const h = harness(), prepared = await h.prepare();
-    if (kind === "renderer") h.switchRenderer();
-    if (kind === "credential") h.switchCredential();
-    if (kind === "physical") h.controller.abort();
-    await expect(h.approve(prepared)).rejects.toThrow(kind === "physical" ? "aborted" : "expired");
-    expect(h.upload).not.toHaveBeenCalled();
-  });
+  it.each(["renderer", "credential", "physical"])(
+    "refuses approval after %s authority changes",
+    async (kind) => {
+      const h = harness(),
+        prepared = await h.prepare();
+      if (kind === "renderer") h.switchRenderer();
+      if (kind === "credential") h.switchCredential();
+      if (kind === "physical") h.controller.abort();
+      await expect(h.approve(prepared)).rejects.toThrow(
+        kind === "physical" ? "aborted" : "expired",
+      );
+      expect(h.upload).not.toHaveBeenCalled();
+    },
+  );
   it("keeps the prepared grant generation for the relay CAS", async () => {
-    const h = harness(), prepared = await h.prepare(); h.grant.generation++;
+    const h = harness(),
+      prepared = await h.prepare();
+    h.grant.generation++;
     await expect(h.approve(prepared)).rejects.toThrow("grant conflict");
   });
   it("does not publish after compiler or upload failure", async () => {
-    const h = harness(); h.compile.mockRejectedValueOnce(new Error("compiler failed"));
+    const h = harness();
+    h.compile.mockRejectedValueOnce(new Error("compiler failed"));
     await expect(h.prepare()).rejects.toThrow("compiler failed");
-    const prepared = await h.prepare(); h.upload.mockRejectedValueOnce(new Error("upload failed"));
+    const prepared = await h.prepare();
+    h.upload.mockRejectedValueOnce(new Error("upload failed"));
     await expect(h.approve(prepared)).rejects.toThrow("upload failed");
-    expect(h.relay.mock.calls.every(call => call[1].endsWith("/shares/links"))).toBe(true);
+    expect(h.relay.mock.calls.every((call) => call[1].endsWith("/shares/links"))).toBe(true);
   });
   it("refuses overlapping preparation in one window", async () => {
     const h = harness();
     let release!: () => void;
     let entered!: () => void;
-    const compiling = new Promise<void>(resolve => { entered = resolve; });
-    const blocked = new Promise<void>(resolve => { release = resolve; });
-    h.compile.mockImplementationOnce(async request => { entered(); await blocked; return compileClosedApp(request); });
+    const compiling = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.compile.mockImplementationOnce(async (request) => {
+      entered();
+      await blocked;
+      return compileClosedApp(request);
+    });
     const first = h.prepare();
     await compiling;
     await expect(h.prepare()).rejects.toThrow("already preparing");
@@ -323,20 +784,60 @@ describe("owner app publication", () => {
     await h.invoke({ action: "cancel", workspaceId: "w", approvalId: prepared.approvalId });
   });
   it("rejects received shares before credentials, capture, or compilation", async () => {
-    const h = harness(); h.workspace.shareView = { shareId: "received" };
+    const h = harness();
+    h.workspace.shareView = { shareId: "received" };
     await expect(h.prepare()).rejects.toThrow("original workspace");
-    expect(h.requests).toEqual([]); expect(h.flush).not.toHaveBeenCalled();
+    expect(h.requests).toEqual([]);
+    expect(h.flush).not.toHaveBeenCalled();
   });
   it("preserves an empty list page with a continuation and refuses another app's rows", async () => {
-    const h = harness(), cursor = "c".repeat(64);
+    const h = harness(),
+      cursor = "c".repeat(64);
     h.relay.mockResolvedValueOnce({ publications: [], nextCursor: cursor });
-    expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listed", publications: [], nextCursor: cursor });
+    expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({
+      kind: "listed",
+      publications: [],
+      nextCursor: cursor,
+    });
     expect(h.requests).toEqual([]);
-    h.relay.mockResolvedValueOnce({ publications: [{ publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "another", sourceRevision: "d".repeat(64), active: true, datasetCapability: null, collectionCapability: null, linkCurrent: true, manifestUnavailable: false }], nextCursor: null });
-    await expect(h.invoke({ action: "list", workspaceId: "w", appRoot: "app", cursor })).rejects.toThrow("another app");
-    const damaged = { publicationId: "a".repeat(64), authorityRevision: 1, shareId: "s", grantId: "g", active: true, datasetCapability: null, collectionCapability: null, linkCurrent: true, manifestUnavailable: true };
+    h.relay.mockResolvedValueOnce({
+      publications: [
+        {
+          publicationId: "a".repeat(64),
+          authorityRevision: 1,
+          shareId: "s",
+          grantId: "g",
+          appRoot: "another",
+          sourceRevision: "d".repeat(64),
+          active: true,
+          datasetCapability: null,
+          collectionCapability: null,
+          linkCurrent: true,
+          manifestUnavailable: false,
+        },
+      ],
+      nextCursor: null,
+    });
+    await expect(
+      h.invoke({ action: "list", workspaceId: "w", appRoot: "app", cursor }),
+    ).rejects.toThrow("another app");
+    const damaged = {
+      publicationId: "a".repeat(64),
+      authorityRevision: 1,
+      shareId: "s",
+      grantId: "g",
+      active: true,
+      datasetCapability: null,
+      collectionCapability: null,
+      linkCurrent: true,
+      manifestUnavailable: true,
+    };
     h.relay.mockResolvedValueOnce({ publications: [damaged], nextCursor: null });
-    expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listed", publications: [damaged], nextCursor: null });
+    expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({
+      kind: "listed",
+      publications: [damaged],
+      nextCursor: null,
+    });
   });
   it("counts only the relay's not_found 404 as a list the server does not publish", () => {
     const notFound = { ok: false, error: "Not found.", code: "not_found" };
@@ -346,37 +847,75 @@ describe("owner app publication", () => {
     expect(publicationListUnavailable(403, notFound)).toBe(false);
     expect(publicationListUnavailable(404, null)).toBe(false);
     expect(publicationListUnavailable(404, { ok: false })).toBe(false);
-    expect(publicationListUnavailable(404, { ok: false, code: "share_access_removed" })).toBe(false);
-    expect([400, 401, 409, 429, 500, 502, 503, 504].map(status => publicationListUnavailable(status, notFound))).toEqual(Array(8).fill(false));
+    expect(publicationListUnavailable(404, { ok: false, code: "share_access_removed" })).toBe(
+      false,
+    );
+    expect(
+      [400, 401, 409, 429, 500, 502, 503, 504].map((status) =>
+        publicationListUnavailable(status, notFound),
+      ),
+    ).toEqual(Array(8).fill(false));
   });
   it("answers listUnavailable when the relay says not found, and throws any other failure", async () => {
     const h = harness();
     h.relayOrUnavailable.mockResolvedValueOnce({ kind: "unavailable" });
-    expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({ kind: "listUnavailable" });
-    expect(h.relayOrUnavailable).toHaveBeenLastCalledWith(expect.anything(), "/sync/w/app-publications?appRoot=app", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(await h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).toEqual({
+      kind: "listUnavailable",
+    });
+    expect(h.relayOrUnavailable).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "/sync/w/app-publications?appRoot=app",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     h.relay.mockRejectedValueOnce(new Error("Sharing failed (503)."));
-    await expect(h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).rejects.toThrow("Sharing failed (503).");
+    await expect(h.invoke({ action: "list", workspaceId: "w", appRoot: "app" })).rejects.toThrow(
+      "Sharing failed (503).",
+    );
   });
 });
 
 it("publishes only the link read and fields explicitly selected by the owner", async () => {
-  const h = withDataset(harness(), true), prepared = await h.prepare();
+  const h = withDataset(harness(), true),
+    prepared = await h.prepare();
   const linkReads = [{ operationId: id(6), fieldIds: [id(3), id(4)] }];
-  await h.invoke({ action: "approve", workspaceId: "w", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest, linkReads });
-  const publication = h.relay.mock.calls.find(call => call[1].endsWith("/app-publications"))!;
-  expect(JSON.parse(String(publication[2]!.body)).candidate.capabilities[0].linkReads).toEqual(linkReads);
+  await h.invoke({
+    action: "approve",
+    workspaceId: "w",
+    approvalId: prepared.approvalId,
+    candidateDigest: prepared.candidateDigest,
+    linkReads,
+  });
+  const publication = h.relay.mock.calls.find((call) => call[1].endsWith("/app-publications"))!;
+  expect(JSON.parse(String(publication[2]!.body)).candidate.capabilities[0].linkReads).toEqual(
+    linkReads,
+  );
 });
 it("rejects forged link read fields before uploading publication artifacts", async () => {
-  const h = withDataset(harness(), true), prepared = await h.prepare();
-  await expect(h.invoke({ action: "approve", workspaceId: "w", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest,
-    linkReads: [{ operationId: id(6), fieldIds: [id(4)] }] })).rejects.toThrow();
+  const h = withDataset(harness(), true),
+    prepared = await h.prepare();
+  await expect(
+    h.invoke({
+      action: "approve",
+      workspaceId: "w",
+      approvalId: prepared.approvalId,
+      candidateDigest: prepared.candidateDigest,
+      linkReads: [{ operationId: id(6), fieldIds: [id(4)] }],
+    }),
+  ).rejects.toThrow();
   expect(h.upload).not.toHaveBeenCalled();
 });
 
 it("keeps the publication candidate unchanged when no read is approved", async () => {
-  const h = withDataset(harness(), true), prepared = await h.prepare();
-  await h.invoke({ action: "approve", workspaceId: "w", approvalId: prepared.approvalId, candidateDigest: prepared.candidateDigest, linkReads: [] });
-  const publication = h.relay.mock.calls.find(call => call[1].endsWith("/app-publications"))!;
+  const h = withDataset(harness(), true),
+    prepared = await h.prepare();
+  await h.invoke({
+    action: "approve",
+    workspaceId: "w",
+    approvalId: prepared.approvalId,
+    candidateDigest: prepared.candidateDigest,
+    linkReads: [],
+  });
+  const publication = h.relay.mock.calls.find((call) => call[1].endsWith("/app-publications"))!;
   const candidate = JSON.parse(String(publication[2]!.body)).candidate;
   expect(hash(JSON.stringify(candidate))).toBe(prepared.candidateDigest);
   expect(candidate.capabilities[0].operations[1]).not.toHaveProperty("fields");
@@ -399,96 +938,204 @@ it("checks relay-returned revisions directly on every publication preparation", 
     expect(forged.capabilities[0]).toMatchObject({ kind: "dataset" });
     const capability = forged.capabilities[0]!;
     if (capability.kind !== "dataset") throw new Error("Expected dataset capability");
-    expect(capability.operations.find(operation => operation.operationId === id(6))).not.toHaveProperty("fields");
+    expect(
+      capability.operations.find((operation) => operation.operationId === id(6)),
+    ).not.toHaveProperty("fields");
     expect(verify.mock.calls.every(([, lookup]) => lookup === undefined)).toBe(true);
-  } finally { verify.mockRestore(); generate.mockRestore(); }
+  } finally {
+    verify.mockRestore();
+    generate.mockRestore();
+  }
 });
 
-
 it("returns the scoped link credential only from creation and app suffixes from publication", async () => {
-  const h = harness(), original = h.relay.getMockImplementation()!;
-  h.relay.mockImplementation(async (...args) => args[1].endsWith("/shares/links") && args[2]?.method === "POST"
-    ? {ok:true,workspaceId:"w",shareId:"s",grantId:"g",selector:h.grant.selector,access:"view",generation:h.grant.generation,url:"https://relay.example/s/#secret"}
-    : original(...args));
-  const link = await h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(101)});
-  expect(link).toMatchObject({kind:"linkCreated",url:"https://relay.example/s/#secret",access:"view",selector:{paths:["app"],versionId:null},bearerWarning:expect.stringContaining("anyone who holds it")});
-  expect(JSON.parse(String(h.relay.mock.calls[0]![2]!.body))).toMatchObject({paths:["app"],access:"view",operationId:id(101)});
+  const h = harness(),
+    original = h.relay.getMockImplementation()!;
+  h.relay.mockImplementation(async (...args) =>
+    args[1].endsWith("/shares/links") && args[2]?.method === "POST"
+      ? {
+          ok: true,
+          workspaceId: "w",
+          shareId: "s",
+          grantId: "g",
+          selector: h.grant.selector,
+          access: "view",
+          generation: h.grant.generation,
+          url: "https://relay.example/s/#secret",
+        }
+      : original(...args),
+  );
+  const link = await h.invoke({
+    action: "createLink",
+    workspaceId: "w",
+    appRoot: "app",
+    operationId: id(101),
+  });
+  expect(link).toMatchObject({
+    kind: "linkCreated",
+    url: "https://relay.example/s/#secret",
+    access: "view",
+    selector: { paths: ["app"], versionId: null },
+    bearerWarning: expect.stringContaining("anyone who holds it"),
+  });
+  expect(JSON.parse(String(h.relay.mock.calls[0]![2]!.body))).toMatchObject({
+    paths: ["app"],
+    access: "view",
+    operationId: id(101),
+  });
   const result = await h.approve(await h.prepare());
-  expect(result).toMatchObject({kind:"published",appQuery:"?app="+"a".repeat(64),access:"view"});
+  expect(result).toMatchObject({
+    kind: "published",
+    appQuery: "?app=" + "a".repeat(64),
+    access: "view",
+  });
   expect(result).not.toHaveProperty("url");
   expect(result).not.toHaveProperty("urlUnavailable");
   expect(JSON.stringify(h.relay.mock.calls)).not.toContain("#secret");
-  expect(await h.approve(await h.prepare())).toMatchObject({appQuery:"?app="+"a".repeat(64)});
+  expect(await h.approve(await h.prepare())).toMatchObject({ appQuery: "?app=" + "a".repeat(64) });
 });
 
 it("keeps an existing credential entirely caller-held and reports its app suffix", async () => {
-  const h = harness(), result = await h.approve(await h.prepare());
-  expect(result).toMatchObject({kind:"published",appQuery:"?app="+"a".repeat(64),access:"view"});
+  const h = harness(),
+    result = await h.approve(await h.prepare());
+  expect(result).toMatchObject({
+    kind: "published",
+    appQuery: "?app=" + "a".repeat(64),
+    access: "view",
+  });
   expect(result).not.toHaveProperty("url");
-  await expect(h.invoke({...prepareInput, url:"https://relay.example/s/#existing"})).rejects.toThrow();
+  await expect(
+    h.invoke({ ...prepareInput, url: "https://relay.example/s/#existing" }),
+  ).rejects.toThrow();
 });
 
 it("returns the orphan grant after retry without receiving another credential", async () => {
-  const h=harness();
-  h.relay.mockResolvedValue({ok:true,workspaceId:"w",shareId:"s",grantId:"g",selector:h.grant.selector,access:"view",urlUnavailable:true});
-  expect(await h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(101)})).toMatchObject({kind:"urlUnavailable",grantId:"g",shareId:"s"});
+  const h = harness();
+  h.relay.mockResolvedValue({
+    ok: true,
+    workspaceId: "w",
+    shareId: "s",
+    grantId: "g",
+    selector: h.grant.selector,
+    access: "view",
+    urlUnavailable: true,
+  });
+  expect(
+    await h.invoke({
+      action: "createLink",
+      workspaceId: "w",
+      appRoot: "app",
+      operationId: id(101),
+    }),
+  ).toMatchObject({ kind: "urlUnavailable", grantId: "g", shareId: "s" });
 });
 
-it.each(["", ".env", "app/.env", ".dohc/secret", "shared-with-me/app"])("refuses link exposure of %s before calling the relay", async path => {
-  const h=harness();
-  await expect(h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",paths:[path],operationId:id(101)})).rejects.toThrow();
-  expect(h.relay).not.toHaveBeenCalled();
-});
+it.each(["", ".env", "app/.env", ".dohc/secret", "shared-with-me/app"])(
+  "refuses link exposure of %s before calling the relay",
+  async (path) => {
+    const h = harness();
+    await expect(
+      h.invoke({
+        action: "createLink",
+        workspaceId: "w",
+        appRoot: "app",
+        paths: [path],
+        operationId: id(101),
+      }),
+    ).rejects.toThrow();
+    expect(h.relay).not.toHaveBeenCalled();
+  },
+);
 
 it("requires the trusted original workspace for the link door", async () => {
-  const input={action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(101)};
-  const h=harness();
-  await expect(h.invoke(input,-1)).rejects.toThrow("untrusted");
-  h.workspace.shareView={};
+  const input = { action: "createLink", workspaceId: "w", appRoot: "app", operationId: id(101) };
+  const h = harness();
+  await expect(h.invoke(input, -1)).rejects.toThrow("untrusted");
+  h.workspace.shareView = {};
   await expect(h.invoke(input)).rejects.toThrow("original workspace");
   expect(h.relay).not.toHaveBeenCalled();
 });
 
-
-it("never returns a newly created credential after its grant rotates",async()=>{
-  const h=harness(),original=h.relay.getMockImplementation()!;
-  h.relay.mockImplementation(async(...args)=>args[1].endsWith("/shares/links")&&args[2]?.method==="POST"
-    ?{ok:true,workspaceId:"w",shareId:"s",grantId:"g",selector:h.grant.selector,access:"view",generation:h.grant.generation,url:"https://relay.example/s/#old"}:original(...args));
-  await h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(101)});
+it("never returns a newly created credential after its grant rotates", async () => {
+  const h = harness(),
+    original = h.relay.getMockImplementation()!;
+  h.relay.mockImplementation(async (...args) =>
+    args[1].endsWith("/shares/links") && args[2]?.method === "POST"
+      ? {
+          ok: true,
+          workspaceId: "w",
+          shareId: "s",
+          grantId: "g",
+          selector: h.grant.selector,
+          access: "view",
+          generation: h.grant.generation,
+          url: "https://relay.example/s/#old",
+        }
+      : original(...args),
+  );
+  await h.invoke({ action: "createLink", workspaceId: "w", appRoot: "app", operationId: id(101) });
   h.grant.generation++;
-  const result=await h.approve(await h.prepare());
-  expect(result).toMatchObject({kind:"published"});
+  const result = await h.approve(await h.prepare());
+  expect(result).toMatchObject({ kind: "published" });
   expect(result).not.toHaveProperty("url");
 });
 
 it("refuses owner reactivation review before loading an operator-disabled manifest", async () => {
   const h = harness();
-  h.relay.mockResolvedValueOnce({publicationId: "a".repeat(64), active: false, authorityRevision: 2,
-    owner: {workspaceId: "w", ownerUserId: "owner", generation: 7},
-    operatorTakedown: {actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing"}});
-  await expect(h.invoke({action: "reviewReactivation", workspaceId: "w", publicationId: "a".repeat(64)})).rejects.toThrow("The server operator disabled this publication. Contact the server operator.");
+  h.relay.mockResolvedValueOnce({
+    publicationId: "a".repeat(64),
+    active: false,
+    authorityRevision: 2,
+    owner: { workspaceId: "w", ownerUserId: "owner", generation: 7 },
+    operatorTakedown: { actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing" },
+  });
+  await expect(
+    h.invoke({ action: "reviewReactivation", workspaceId: "w", publicationId: "a".repeat(64) }),
+  ).rejects.toThrow("The server operator disabled this publication. Contact the server operator.");
   expect(h.compile).not.toHaveBeenCalled();
   expect(h.relay).toHaveBeenCalledTimes(1);
 });
 
 it("shows the operator message when a publish retry returns a taken-down publication", async () => {
-  const h = harness(), prepared = await h.prepare(), original = h.relay.getMockImplementation()!;
+  const h = harness(),
+    prepared = await h.prepare(),
+    original = h.relay.getMockImplementation()!;
   h.relay.mockImplementation(async (...args) => {
     const result = await original(...args);
     if (!args[1].endsWith("/app-publications")) return result;
-    return {...result as Record<string, unknown>, active: false, operatorTakedown: {actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing"}};
+    return {
+      ...(result as Record<string, unknown>),
+      active: false,
+      operatorTakedown: { actor: "operator", disabledAtMs: 30, reason: "Confirmed phishing" },
+    };
   });
-  await expect(h.approve(prepared)).rejects.toThrow("The server operator disabled this publication. Contact the server operator.");
-  expect(h.relay.mock.calls.some(call => call[1].endsWith("/reactivate"))).toBe(false);
+  await expect(h.approve(prepared)).rejects.toThrow(
+    "The server operator disabled this publication. Contact the server operator.",
+  );
+  expect(h.relay.mock.calls.some((call) => call[1].endsWith("/reactivate"))).toBe(false);
 });
 
 it("allows withdrawal while paused without publishing paused sources", async () => {
   const h = harness();
   h.remote.mockImplementation(async (_workspace, options) => {
     if (!options?.allowPaused) throw new Error("Sync this workspace before sharing.");
-    return { credentials: { serverUrl: "https://account.example", relayUrl: "https://relay.example", userId: "owner", token: "test-only", email: "owner@example.test" }, credentialGeneration: 1 };
+    return {
+      credentials: {
+        serverUrl: "https://account.example",
+        relayUrl: "https://relay.example",
+        userId: "owner",
+        token: "test-only",
+        email: "owner@example.test",
+      },
+      credentialGeneration: 1,
+    };
   });
-  const input = { action: "withdraw", workspaceId: "w", publicationId: "a".repeat(64), expectedAuthorityRevision: 1 };
+  const input = {
+    action: "withdraw",
+    workspaceId: "w",
+    publicationId: "a".repeat(64),
+    expectedAuthorityRevision: 1,
+  };
   expect(await h.invoke(input)).toMatchObject({ kind: "withdrawn" });
   expect(h.remote).toHaveBeenCalledWith(h.workspace, { allowPaused: true });
   expect(h.upload).not.toHaveBeenCalled();

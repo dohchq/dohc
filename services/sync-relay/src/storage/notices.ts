@@ -1,6 +1,9 @@
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
-import {shareAccessLabel, shareSubjectFallback} from "@dohc/security-contract/share-labels";
-import { automationFailureBodyForPermission, isSwitchedOffBody } from "@dohc/automation-executor/automation-failed-notice";
+import { shareAccessLabel, shareSubjectFallback } from "@dohc/security-contract/share-labels";
+import {
+  automationFailureBodyForPermission,
+  isSwitchedOffBody,
+} from "@dohc/automation-executor/automation-failed-notice";
 import { createHash } from "node:crypto";
 import {
   AUTOMATION_WAKE_PREFIX,
@@ -19,19 +22,19 @@ import {
   type PostableNoticeKind,
   type NoticeMark,
   type NoticeReach,
+  type NoticeScope,
   type NoticeTarget,
   type RelayNotice,
   type RelayNoticePage,
 } from "@dohc/workspace-contracts/relay";
 import { cutText } from "@dohc/workspace-contracts/names";
 import { validateUserWritePath } from "@dohc/workspace-core";
+import { hiddenFile } from "../accountFeed";
 import { badRequest, relayError, RelayError } from "../errors";
+import { notifyNoticeChange } from "../relayWriteChanges";
 import { authorizeShareGrantAction } from "../shareAuthorization";
-import {
-  fileSideOf,
-  parseStoredAnyShareSelectorJson,
-  type ShareSelector,
-} from "../shareFilter";
+import { fileSideOf, parseStoredAnyShareSelectorJson, type ShareSelector } from "../shareFilter";
+import { threadPathsInTransaction } from "./accountFeed";
 import type { StorageContext } from "./context";
 import { currentShareGrantSql, readCurrentShareGrant } from "./currentShareGrant";
 import type { SyncRelayShareRow } from "./types";
@@ -72,6 +75,8 @@ export interface ReadNoticeChangesInput {
   cursor: NoticeCursor | null;
   limit: number;
   nowMs: number;
+  // Absent reads the whole list.
+  scope?: NoticeScope;
 }
 
 // "<seq>" or, while taking the whole list, "<seq>.<snapshotHead>". Anything
@@ -81,7 +86,8 @@ export function parseNoticeCursor(value: string): NoticeCursor | null {
   if (!match) return null;
   const seq = Number(match[1]);
   const snapshotHead = match[2] === undefined ? null : Number(match[2]);
-  if (!Number.isSafeInteger(seq) || (snapshotHead !== null && !Number.isSafeInteger(snapshotHead))) return null;
+  if (!Number.isSafeInteger(seq) || (snapshotHead !== null && !Number.isSafeInteger(snapshotHead)))
+    return null;
   return { seq, snapshotHead };
 }
 
@@ -100,11 +106,13 @@ export interface MarkNoticesInput {
 
 // Where a notice sits in its recipient's list: the workspace they may see,
 // or the share they read it through.
-type Placement = { workspaceId: string; recipientShareId: null } | { workspaceId: null; recipientShareId: string };
+type Placement =
+  | { workspaceId: string; recipientShareId: null }
+  | { workspaceId: null; recipientShareId: string };
 
 const NOTICE_COLUMNS = `notice_id, change_seq, workspace_id, recipient_share_id, kind,
   sender_kind, sender_user_id, sender_label, title, body, target_json,
-  origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, removed_at_ms`;
+  origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, expires_at_ms, removed_at_ms`;
 const MARKED = "(read_at_ms IS NOT NULL OR dismissed_at_ms IS NOT NULL)";
 const UNREAD = "read_at_ms IS NULL AND dismissed_at_ms IS NULL";
 
@@ -124,15 +132,18 @@ export function noticeIdFrom(senderUserId: string, noticeId: string): string {
  * nothing.
  */
 export function postNotice(storage: StorageContext, input: PostNoticeInput): void {
-  if (input.noticeId.startsWith(AUTOMATION_WAKE_PREFIX)) throw badRequest("noticeId is reserved for agent wakes");
+  if (input.noticeId.startsWith(AUTOMATION_WAKE_PREFIX))
+    throw badRequest("noticeId is reserved for agent wakes");
   const self = input.recipientUserId === input.senderUserId;
   const noticeId = self ? input.noticeId : noticeIdFrom(input.senderUserId, input.noticeId);
-  if ([...noticeId].length > NOTICE_ID_MAX_CHARS) throw badRequest("noticeId is too long for this sender");
+  if ([...noticeId].length > NOTICE_ID_MAX_CHARS)
+    throw badRequest("noticeId is too long for this sender");
   storage.tx(() => {
     if (input.kind === "schedule-skipped") {
       const skipped = skippedScheduleNotice(noticeId, input.nowMs);
       if (skipped === null) throw badRequest("noticeId is not a skipped schedule's notice");
-      if (reclaimedFor(storage, input.recipientUserId, skipped) !== null) throw relayError("notice_refused");
+      if (reclaimedFor(storage, input.recipientUserId, skipped) !== null)
+        throw relayError("notice_refused");
     }
     const placement = self ? ownPlacement(storage, input) : sharedPlacement(storage, input);
     const existing = storage.db
@@ -144,10 +155,18 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
     makeRoom(storage, input.recipientUserId, self ? null : input.senderUserId, input.nowMs);
     let body = input.body;
     if (input.kind === "automation-failed" && isSwitchedOffBody(body)) {
-      const workspaceId = placement.workspaceId ?? storage.getShare(placement.recipientShareId)?.workspaceId;
-      const isOwner = workspaceId !== undefined && storage.workspaceIsOwnedBy(workspaceId, input.recipientUserId);
-      const canEdit = workspaceId !== undefined && (isOwner ||
-        (input.target.path !== undefined && shareReach(storage, input.recipientUserId, true).admitting(workspaceId, input.target.path) !== null));
+      const workspaceId =
+        placement.workspaceId ?? storage.getShare(placement.recipientShareId)?.workspaceId;
+      const isOwner =
+        workspaceId !== undefined && storage.workspaceIsOwnedBy(workspaceId, input.recipientUserId);
+      const canEdit =
+        workspaceId !== undefined &&
+        (isOwner ||
+          (input.target.path !== undefined &&
+            shareReach(storage, input.recipientUserId, true).admitting(
+              workspaceId,
+              input.target.path,
+            ) !== null));
       body = automationFailureBodyForPermission(body, canEdit, isOwner);
     }
     insertNotice(storage, { ...input, body, noticeId, placement });
@@ -175,32 +194,68 @@ export interface PostedAutomationWake {
 }
 
 /** Called in process by the server executor after its personal-step reach check. */
-export function postAutomationWake(storage: StorageContext, input: PostAutomationWakeInput): PostedAutomationWake {
+export function postAutomationWake(
+  storage: StorageContext,
+  input: PostAutomationWakeInput,
+): PostedAutomationWake {
   if (!isAutomationWake(input.wake)) throw badRequest("invalid automation wake");
-  const noticeId = AUTOMATION_WAKE_PREFIX + createHash("sha256")
-    .update(JSON.stringify([input.workspaceId, input.effectId])).digest("hex");
+  const noticeId =
+    AUTOMATION_WAKE_PREFIX +
+    createHash("sha256")
+      .update(JSON.stringify([input.workspaceId, input.effectId]))
+      .digest("hex");
   return storage.tx(() => {
-    if (!storage.workspaceIsOwnedBy(input.workspaceId, input.ownerUserId)) throw relayError("notice_refused");
-    if (!Number.isSafeInteger(input.startedAtMs) || input.startedAtMs > input.nowMs || input.nowMs - input.startedAtMs > AUTOMATION_WAKE_RETRY_MS) {
+    if (!storage.workspaceIsOwnedBy(input.workspaceId, input.ownerUserId))
+      throw relayError("notice_refused");
+    if (
+      !Number.isSafeInteger(input.startedAtMs) ||
+      input.startedAtMs > input.nowMs ||
+      input.nowMs - input.startedAtMs > AUTOMATION_WAKE_RETRY_MS
+    ) {
       throw badRequest("This server run is too old to send an agent wake. Start a new run.");
     }
-    const result = (): PostedAutomationWake => ({ noticeId,
-      supersededBy: (storage.db.prepare("SELECT superseded_by FROM sync_relay_automation_wake_receipts WHERE recipient_user_id = ? AND notice_id = ?")
-        .get(input.ownerUserId, noticeId)?.superseded_by as string | null | undefined) ?? null,
-      superseded: storage.db.prepare(
-      "SELECT notice_id, claim_id, key_seed FROM sync_relay_automation_wake_receipts WHERE recipient_user_id = ? AND superseded_by = ?",
-    ).all(input.ownerUserId, noticeId).map((row) => ({ noticeId: String(row.notice_id), claimId: String(row.claim_id), keySeed: String(row.key_seed) })) });
-    if (storage.db.prepare("SELECT 1 FROM sync_relay_automation_wake_receipts WHERE recipient_user_id = ? AND notice_id = ?")
-      .get(input.ownerUserId, noticeId)) return result();
-    if (storage.db.prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
-      .get(input.ownerUserId, noticeId)) return result();
+    const result = (): PostedAutomationWake => ({
+      noticeId,
+      supersededBy:
+        (storage.db
+          .prepare(
+            "SELECT superseded_by FROM sync_relay_automation_wake_receipts WHERE recipient_user_id = ? AND notice_id = ?",
+          )
+          .get(input.ownerUserId, noticeId)?.superseded_by as string | null | undefined) ?? null,
+      superseded: storage.db
+        .prepare(
+          "SELECT notice_id, claim_id, key_seed FROM sync_relay_automation_wake_receipts WHERE recipient_user_id = ? AND superseded_by = ?",
+        )
+        .all(input.ownerUserId, noticeId)
+        .map((row) => ({
+          noticeId: String(row.notice_id),
+          claimId: String(row.claim_id),
+          keySeed: String(row.key_seed),
+        })),
+    });
+    if (
+      storage.db
+        .prepare(
+          "SELECT 1 FROM sync_relay_automation_wake_receipts WHERE recipient_user_id = ? AND notice_id = ?",
+        )
+        .get(input.ownerUserId, noticeId)
+    )
+      return result();
+    if (
+      storage.db
+        .prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
+        .get(input.ownerUserId, noticeId)
+    )
+      return result();
     const nextSeq = changeSequence(storage, input.ownerUserId);
-    const older = storage.db.prepare(
-      `SELECT n.notice_id, w.claim_id, w.key_seed FROM sync_relay_notices n JOIN sync_relay_automation_wakes w
+    const older = storage.db
+      .prepare(
+        `SELECT n.notice_id, w.claim_id, w.key_seed FROM sync_relay_notices n JOIN sync_relay_automation_wakes w
        USING (recipient_user_id, notice_id) WHERE n.recipient_user_id = ? AND n.workspace_id = ?
        AND n.dismissed_at_ms IS NULL AND n.removed_at_ms IS NULL AND json_extract(w.payload_json, '$.automationId') = ?
        AND json_extract(w.payload_json, '$.body') = ?`,
-    ).all(input.ownerUserId, input.workspaceId, input.wake.automationId, input.wake.body);
+      )
+      .all(input.ownerUserId, input.workspaceId, input.wake.automationId, input.wake.body);
     const supersede = storage.db.prepare(
       `INSERT INTO sync_relay_automation_wake_receipts
        (recipient_user_id, notice_id, workspace_id, claim_id, key_seed, superseded_by, dismissed_at_ms, winner_install_id)
@@ -210,22 +265,47 @@ export function postAutomationWake(storage: StorageContext, input: PostAutomatio
       `UPDATE sync_relay_notices SET removed_at_ms = ?, body = '', target_json = NULL, expires_at_ms = ?, change_seq = ?
        WHERE recipient_user_id = ? AND notice_id = ?`,
     );
-    const removeWake = storage.db.prepare("DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
+    const removeWake = storage.db.prepare(
+      "DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?",
+    );
     for (const row of older) {
-      supersede.run(input.ownerUserId, row.notice_id, input.workspaceId, row.claim_id, row.key_seed, noticeId, input.nowMs);
-      remove.run(input.nowMs, input.nowMs + NOTICE_REMOVED_RETENTION_MS, nextSeq(), input.ownerUserId, row.notice_id);
+      supersede.run(
+        input.ownerUserId,
+        row.notice_id,
+        input.workspaceId,
+        row.claim_id,
+        row.key_seed,
+        noticeId,
+        input.nowMs,
+      );
+      remove.run(
+        input.nowMs,
+        input.nowMs + NOTICE_REMOVED_RETENTION_MS,
+        nextSeq(),
+        input.ownerUserId,
+        row.notice_id,
+      );
       removeWake.run(input.ownerUserId, row.notice_id);
     }
     sweepExpiredNotices(storage, input.ownerUserId, input.nowMs);
     makeRoom(storage, input.ownerUserId, null, input.nowMs);
     insertNotice(storage, {
-      recipientUserId: input.ownerUserId, noticeId,
+      recipientUserId: input.ownerUserId,
+      noticeId,
       placement: { workspaceId: input.workspaceId, recipientShareId: null },
-      kind: "automation-wake", senderUserId: input.ownerUserId, senderLabel: input.senderLabel,
-      title: "Your agent has work waiting", body: "Open dohc on a computer with your agent set up to run this step.",
-      target: { automation: input.wake.automationId }, originInstallId: "server", nowMs: input.nowMs,
+      kind: "automation-wake",
+      senderUserId: input.ownerUserId,
+      senderLabel: input.senderLabel,
+      title: "Your agent has work waiting",
+      body: "Open dohc on a computer with your agent set up to run this step.",
+      target: { automation: input.wake.automationId },
+      originInstallId: "server",
+      nowMs: input.nowMs,
     });
-    storage.db.prepare("INSERT INTO sync_relay_automation_wakes (recipient_user_id, notice_id, payload_json, claim_id, key_seed) VALUES (?, ?, ?, ?, ?)")
+    storage.db
+      .prepare(
+        "INSERT INTO sync_relay_automation_wakes (recipient_user_id, notice_id, payload_json, claim_id, key_seed) VALUES (?, ?, ?, ?, ?)",
+      )
       .run(input.ownerUserId, noticeId, JSON.stringify(input.wake), input.claimId, input.keySeed);
     return result();
   });
@@ -245,7 +325,13 @@ export interface NoticeShareReceivedInput {
 // a channel the owner's log does not hold yet; or settling, if the grant
 // ended.
 type ShareNoticeState =
-  | { state: "deliver"; share: SyncRelayShareRow; recipientUserId: string; access: string; title: (senderLabel: string) => string }
+  | {
+      state: "deliver";
+      share: SyncRelayShareRow;
+      recipientUserId: string;
+      access: string;
+      title: (senderLabel: string) => string;
+    }
   | { state: "wait" }
   | { state: "ended" };
 
@@ -262,7 +348,9 @@ function shareNoticeState(storage: StorageContext, grantId: string): ShareNotice
     principal: { kind: "user", userId: recipientUserId },
   }).ok;
   const title = readable ? shareReceivedTitle(storage, share) : null;
-  return title === null ? { state: "wait" } : { state: "deliver", share, recipientUserId, access: grant.access, title };
+  return title === null
+    ? { state: "wait" }
+    : { state: "deliver", share, recipientUserId, access: grant.access, title };
 }
 
 /**
@@ -275,23 +363,36 @@ export function pendingShareNotices(
   storage: StorageContext,
   recipientUserId: string,
 ): { grantId: string; granterUserId: string }[] {
-  const waiting = () => storage.db.prepare(
-    `SELECT d.grant_id FROM sync_relay_share_notice_deliveries AS d
+  const waiting = () =>
+    storage.db
+      .prepare(
+        `SELECT d.grant_id FROM sync_relay_share_notice_deliveries AS d
      JOIN sync_relay_share_grants AS g ON g.grant_id = d.grant_id
      WHERE g.principal_kind = 'user' AND g.principal_user_id = ?
      ORDER BY d.created_at_ms, d.grant_id`,
-  ).all(recipientUserId).map((row) => String(row.grant_id));
-  const states = () => waiting().map((grantId) => ({ grantId, ...shareNoticeState(storage, grantId) }));
+      )
+      .all(recipientUserId)
+      .map((row) => String(row.grant_id));
+  const states = () =>
+    waiting().map((grantId) => ({ grantId, ...shareNoticeState(storage, grantId) }));
   const now = storage.readTx(states);
   const ended = now.some((row) => row.state === "ended");
-  return (ended ? storage.tx(() => {
-    const again = states();
-    const settle = storage.db.prepare("DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = ?");
-    for (const row of again) if (row.state === "ended") settle.run(row.grantId);
-    return again;
-  }) : now).flatMap((row) => row.state === "deliver"
-    ? [{ grantId: row.grantId, granterUserId: row.share.granterUserId }]
-    : []);
+  return (
+    ended
+      ? storage.tx(() => {
+          const again = states();
+          const settle = storage.db.prepare(
+            "DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = ?",
+          );
+          for (const row of again) if (row.state === "ended") settle.run(row.grantId);
+          return again;
+        })
+      : now
+  ).flatMap((row) =>
+    row.state === "deliver"
+      ? [{ grantId: row.grantId, granterUserId: row.share.granterUserId }]
+      : [],
+  );
 }
 
 /**
@@ -301,10 +402,14 @@ export function pendingShareNotices(
  * grant still addressed to an email, or a channel the owner's log does not
  * name yet, leaves it waiting for a later attempt.
  */
-export function noticeShareReceived(storage: StorageContext, input: NoticeShareReceivedInput): void {
-  const settle = () => storage.db
-    .prepare("DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = ?")
-    .run(input.grantId);
+export function noticeShareReceived(
+  storage: StorageContext,
+  input: NoticeShareReceivedInput,
+): void {
+  const settle = () =>
+    storage.db
+      .prepare("DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = ?")
+      .run(input.grantId);
   try {
     storage.tx(() => {
       const waiting = storage.db
@@ -364,10 +469,17 @@ const SIGNED_IN_TITLE_SUFFIX = " signed in as your agent";
  * connection, so each sign-in again writes a new notice. A list with no room
  * leaves the notice out, and the sign-in still completes.
  */
-export function noticePersonalAgentSignedIn(storage: StorageContext, input: NoticePersonalAgentSignedInInput): void {
+export function noticePersonalAgentSignedIn(
+  storage: StorageContext,
+  input: NoticePersonalAgentSignedInInput,
+): void {
   const noticeId = `personal-agent-signed-in:${input.connectionId}`;
-  if (storage.db.prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
-    .get(input.ownerUserId, noticeId)) return;
+  if (
+    storage.db
+      .prepare("SELECT 1 FROM sync_relay_notices WHERE recipient_user_id = ? AND notice_id = ?")
+      .get(input.ownerUserId, noticeId)
+  )
+    return;
   sweepExpiredNotices(storage, input.ownerUserId, input.nowMs);
   try {
     makeRoom(storage, input.ownerUserId, null, input.nowMs);
@@ -392,26 +504,38 @@ export function noticePersonalAgentSignedIn(storage: StorageContext, input: Noti
 }
 
 function shareNoticeSender(full: string, email: string | null): string {
-  const name = email && full.endsWith(` (${email})`) ? full.slice(0, -email.length - 3) : full === email ? "" : full;
+  const name =
+    email && full.endsWith(` (${email})`)
+      ? full.slice(0, -email.length - 3)
+      : full === email
+        ? ""
+        : full;
   if (email && [...email].length <= NOTICE_SENDER_LABEL_MAX_CHARS) {
     const room = NOTICE_SENDER_LABEL_MAX_CHARS - [...email].length - 3;
     return name && room > 1 ? `${cutText(name, room)} (${email})` : email;
   }
-  return cutText(name && name !== "the owner" ? name : email ?? "Someone", NOTICE_SENDER_LABEL_MAX_CHARS);
+  return cutText(
+    name && name !== "the owner" ? name : (email ?? "Someone"),
+    NOTICE_SENDER_LABEL_MAX_CHARS,
+  );
 }
 
 // "Ana shared Trip with you", naming what the share holds and shortening the
 // name to fit. A direct message arrives as a message request. Null while
 // the share names a channel the owner's log does not hold yet.
-function shareReceivedTitle(storage: StorageContext, share: SyncRelayShareRow): ((senderLabel: string) => string) | null {
+function shareReceivedTitle(
+  storage: StorageContext,
+  share: SyncRelayShareRow,
+): ((senderLabel: string) => string) | null {
   const selector = parseStoredAnyShareSelectorJson(share.selectorJson);
   if (!selector) return null;
   if (!("paths" in selector)) {
     const kind = storage.findChannelCreateKind(share.workspaceId, selector.channelWireId);
-    if (kind === "dm") return senderLabel => `${senderLabel} sent you a message request`;
+    if (kind === "dm") return (senderLabel) => `${senderLabel} sent you a message request`;
     if (kind !== "channel") return null;
   }
-  const what = storage.getShareLabels(share.shareId).subjectName ?? shareSubjectFallback(selector);
+  const what =
+    storage.getShareLabels(share.shareId, "member").subjectName ?? shareSubjectFallback(selector);
   return (senderLabel) => {
     const room = NOTICE_TITLE_MAX_CHARS - [...`${senderLabel} shared  with you`].length;
     return `${senderLabel} shared ${cutText(what, room)} with you`;
@@ -434,34 +558,39 @@ interface NoticeRowInput {
 
 // Adds a row to a list that has room for it.
 function insertNotice(storage: StorageContext, row: NoticeRowInput): void {
-  storage.db.prepare(
-    `INSERT INTO sync_relay_notices (
+  storage.db
+    .prepare(
+      `INSERT INTO sync_relay_notices (
        recipient_user_id, notice_id, change_seq, workspace_id, recipient_share_id,
        kind, sender_kind, sender_user_id, sender_label, title, body, target_json,
        origin_install_id, created_at_ms, read_at_ms, dismissed_at_ms, expires_at_ms, removed_at_ms
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL)`,
-  ).run(
-    row.recipientUserId,
-    row.noticeId,
-    nextChangeSeq(storage, row.recipientUserId),
-    row.placement.workspaceId,
-    row.placement.recipientShareId,
-    row.kind,
-    NOTICE_KINDS[row.kind].senderKind,
-    row.senderUserId,
-    row.senderLabel,
-    row.title,
-    row.body,
-    JSON.stringify(row.target),
-    row.originInstallId,
-    row.nowMs,
-    row.kind === "automation-wake" ? Number.MAX_SAFE_INTEGER : row.nowMs + NOTICE_UNREAD_RETENTION_MS,
-  );
+    )
+    .run(
+      row.recipientUserId,
+      row.noticeId,
+      nextChangeSeq(storage, row.recipientUserId),
+      row.placement.workspaceId,
+      row.placement.recipientShareId,
+      row.kind,
+      NOTICE_KINDS[row.kind].senderKind,
+      row.senderUserId,
+      row.senderLabel,
+      row.title,
+      row.body,
+      JSON.stringify(row.target),
+      row.originInstallId,
+      row.nowMs,
+      row.kind === "automation-wake"
+        ? Number.MAX_SAFE_INTEGER
+        : row.nowMs + NOTICE_UNREAD_RETENTION_MS,
+    );
   // A row placed through a share was checked against the grants of this
   // moment, which a stored digest may not describe, so the next pull checks
   // access again.
   if (row.placement.recipientShareId !== null) {
-    storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = NULL WHERE recipient_user_id = ?")
+    storage.db
+      .prepare("UPDATE sync_relay_notice_lists SET reach_token = NULL WHERE recipient_user_id = ?")
       .run(row.recipientUserId);
   }
 }
@@ -478,6 +607,15 @@ function insertNotice(storage: StorageContext, row: NoticeRowInput): void {
  * whole list with `replace` set, paged under a cursor that remembers the
  * head the pull began at. That pull starts over only if a row changed after
  * it began is deleted.
+ *
+ * The phone's scope also starts the list over when a row read through a
+ * share loses its target after the cursor, or after a whole pull began. The
+ * phone may hold that row's words, and its scope can't send the row as
+ * removed: a posted row's ID is the sender's text and can name a file the
+ * phone never saw. The whole list leaves the row out, so the phone stops
+ * showing it. The restarted pull begins at the head and ends with a cursor at
+ * the head, so a row starts the list over again only after another change,
+ * such as a mark.
  */
 export function readNoticeChanges(
   storage: StorageContext,
@@ -486,74 +624,332 @@ export function readNoticeChanges(
   settleLostWakeOwnership(storage, input.recipientUserId, input.nowMs);
   settleLostReach(storage, input.recipientUserId, input.nowMs);
   return storage.readTx(() => {
-    const list = storage.db.prepare(
-      "SELECT change_seq, floor_seq FROM sync_relay_notice_lists WHERE recipient_user_id = ?",
-    ).get(input.recipientUserId);
+    const list = storage.db
+      .prepare(
+        "SELECT change_seq, floor_seq FROM sync_relay_notice_lists WHERE recipient_user_id = ?",
+      )
+      .get(input.recipientUserId);
     const head = Number(list?.change_seq ?? 0);
     const floor = Number(list?.floor_seq ?? 0);
     const cursor = input.cursor;
     // Rows past retention that no post has swept yet count as deleted.
-    const deleted = Math.max(floor, Number(storage.db.prepare(
-      `SELECT COALESCE(MAX(change_seq), 0) AS seq FROM sync_relay_notices
+    const deleted = Math.max(
+      floor,
+      Number(
+        storage.db
+          .prepare(
+            `SELECT COALESCE(MAX(change_seq), 0) AS seq FROM sync_relay_notices
        WHERE recipient_user_id = ? AND expires_at_ms <= ?`,
-    ).get(input.recipientUserId, input.nowMs)?.seq ?? 0));
+          )
+          .get(input.recipientUserId, input.nowMs)?.seq ?? 0,
+      ),
+    );
+    // Only settlement leaves a live row read through a share without a target.
+    const lostAfter = (seq: number) =>
+      input.scope === "phone" &&
+      Number(
+        storage.db
+          .prepare(
+            `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
+           WHERE recipient_user_id = ? AND change_seq > ? AND recipient_share_id IS NOT NULL
+             AND target_json IS NULL AND removed_at_ms IS NULL AND expires_at_ms > ?) AS lost`,
+          )
+          .get(input.recipientUserId, seq, input.nowMs)?.lost,
+      ) === 1;
     let replace: boolean;
     if (cursor === null) {
       replace = true;
     } else if (cursor.snapshotHead !== null) {
-      replace = cursor.snapshotHead > head || cursor.seq > head || deleted > cursor.snapshotHead;
+      replace =
+        cursor.snapshotHead > head ||
+        cursor.seq > head ||
+        deleted > cursor.snapshotHead ||
+        lostAfter(cursor.snapshotHead);
     } else {
-      replace = cursor.seq > head || cursor.seq < deleted;
+      replace = cursor.seq > head || cursor.seq < deleted || lostAfter(cursor.seq);
     }
     const since = replace ? 0 : cursor!.seq;
     const snapshotHead = replace ? head : cursor!.snapshotHead;
     // A pull taking the whole list skips tombstones from before it began:
     // the computer already dropped every row.
-    const rows = storage.db.prepare(
-      `SELECT ${NOTICE_COLUMNS} FROM sync_relay_notices
+    const rows = storage.db
+      .prepare(
+        `SELECT ${NOTICE_COLUMNS} FROM sync_relay_notices
        WHERE recipient_user_id = ? AND change_seq > ? AND expires_at_ms > ?
          AND (removed_at_ms IS NULL OR change_seq > ?)
        ORDER BY change_seq LIMIT ?`,
-    ).all(input.recipientUserId, since, input.nowMs, snapshotHead ?? 0, input.limit + 1);
+      )
+      .all(input.recipientUserId, since, input.nowMs, snapshotHead ?? 0, input.limit + 1);
     const hasMore = rows.length > input.limit;
-    const readWake = storage.db.prepare("SELECT payload_json FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
-    const notices = rows.slice(0, input.limit).map((row) => {
-      const notice = rowToNotice(row);
-      if (notice.kind === "automation-wake" && !notice.removed && notice.workspaceId !== null &&
-        storage.workspaceIsOwnedBy(notice.workspaceId, input.recipientUserId)) {
-        const payload = readWake
-          .get(input.recipientUserId, notice.noticeId);
-        if (payload) notice.wake = JSON.parse(String(payload.payload_json)) as AutomationWake;
-      }
-      return notice;
-    });
-    // Every change after the last row served is expired or replaced by a
-    // later change, so a finished pull can move its cursor to the head.
+    const scanned = rows.slice(0, input.limit).map(rowToNotice);
+    const notices =
+      input.scope === "phone"
+        ? phoneNotices(storage, input.recipientUserId, scanned)
+        : withWakes(storage, input.recipientUserId, scanned);
+    // Every change after the last row read is expired or replaced by a later
+    // change, so a finished pull can move its cursor to the head. The phone's
+    // scope moves past the rows it left out.
     const nextCursor = hasMore
-      ? formatNoticeCursor({ seq: notices.at(-1)!.changeSeq, snapshotHead })
+      ? formatNoticeCursor({ seq: scanned.at(-1)!.changeSeq, snapshotHead })
       : formatNoticeCursor({ seq: head, snapshotHead: null });
     return {
-      notices, nextCursor, hasMore, replace,
+      notices,
+      nextCursor,
+      hasMore,
+      replace,
       personalAgentsRevision: storage.personalRosterRevision(input.recipientUserId),
     };
   });
 }
 
+// The whole list gives the owner's computers each automation wake's payload.
+function withWakes(
+  storage: StorageContext,
+  recipientUserId: string,
+  notices: RelayNotice[],
+): RelayNotice[] {
+  const readWake = storage.db.prepare(
+    "SELECT payload_json FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?",
+  );
+  for (const notice of notices) {
+    if (
+      notice.kind === "automation-wake" &&
+      !notice.removed &&
+      notice.workspaceId !== null &&
+      storage.workspaceIsOwnedBy(notice.workspaceId, recipientUserId)
+    ) {
+      const payload = readWake.get(recipientUserId, notice.noticeId);
+      if (payload) notice.wake = JSON.parse(String(payload.payload_json)) as AutomationWake;
+    }
+  }
+  return notices;
+}
+
 /**
- * Sets read or dismissed once. A row already marked, removed, expired, or
- * gone is left as it is. Returns the notices this call dismissed for the
- * first time ever: a receipt outlives the row, so a notice posted again
- * after its retention is not dismissed first twice.
+ * What the phone's scope may show of each kind, by what its title and body can
+ * carry. A kind's words may name an automation, a file, or a chat on a hidden
+ * file, so the row shows only once the place they come from is confirmed:
+ * - "shown": the relay writes the words from facts no hidden file decides;
+ * - "path": the words name an automation or what it wrote, so the target must
+ *   name its Collection's path, a record in it, or its automations.yaml, and
+ *   that path must pass;
+ * - "located": the words come from a chat or a file, so the target must name a
+ *   thread or a path, and each one it names must pass;
+ * - "never": the words can't be confirmed.
+ * Every kind needs a decision here. A kind stored by a newer relay, or one
+ * missing from this list, shows as "never".
+ */
+const PHONE_NOTICE_KINDS = {
+  // Who mentioned you, and where.
+  mention: "located",
+  // The agent's name, the thread's place, and its reply's opening words.
+  "agent-run": "located",
+  // The automation's name.
+  "schedule-skipped": "path",
+  // The automation's or button's name, and the step's error.
+  "automation-failed": "path",
+  // The automation's name, and the message it wrote from its records.
+  "automation-notify": "path",
+  // The automation's name.
+  "automation-switched-off": "path",
+  // Its row names no Collection the relay can map to a path.
+  "automation-wake": "never",
+  // The granter and what they shared, which a share can only name as a tracked path or a channel.
+  "share-received": "shown",
+  // The agent's name, chosen by the owner.
+  "personal-agent-signed-in": "shown",
+} as const satisfies Record<NoticeKind, "shown" | "path" | "located" | "never">;
+
+/**
+ * The phone's scope of rows already read for the recipient. It never carries
+ * a wake payload, and it serves a row only when it can confirm the row is safe
+ * to show. It leaves out:
+ * - a row in a workspace the recipient owns with "Show on phone" off;
+ * - a row whose target reach settlement removed, which took the evidence;
+ * - a path, thread, or message target it may not look up: in a workspace the
+ *   recipient doesn't own, or through a share that doesn't admit the path.
+ *   This depends only on the recipient's own access, never on what another
+ *   account's workspace holds;
+ * - a path that doesn't normalize or is secret or ignored. In a workspace the
+ *   recipient owns, also a path whose file the relay last placed at such a
+ *   path in any version. Through a share, a path whose file the main version
+ *   no longer has at a path the share admits, which reads the same whether
+ *   it moved out, moved to a secret path, or was deleted;
+ * - a thread whose create the log doesn't hold, names a hidden path or hint,
+ *   or links a file the relay can't place or last placed at a hidden path;
+ * - a message target without its thread: the relay finds a message's thread
+ *   only by scanning its log;
+ * - a row whose kind `PHONE_NOTICE_KINDS` doesn't let it show, or whose
+ *   target doesn't name the place that kind needs to confirm its words.
+ * A removed row stays, without its title, body, sender name, or target, so a
+ * phone drops what it holds. Other rows the scope leaves out send nothing:
+ * their IDs could name what the phone never saw. A row whose target reach
+ * settlement took instead starts the list over in `readNoticeChanges`.
+ */
+function phoneNotices(
+  storage: StorageContext,
+  recipientUserId: string,
+  notices: RelayNotice[],
+): RelayNotice[] {
+  const gone = (notice: RelayNotice): RelayNotice => ({
+    ...notice,
+    title: "",
+    body: "",
+    senderLabel: "",
+    target: null,
+    removed: true,
+  });
+  const ownership = new Map<string, boolean>();
+  const owned = (workspaceId: string) => {
+    let known = ownership.get(workspaceId);
+    if (known === undefined) {
+      known = storage.workspaceIsOwnedBy(workspaceId, recipientUserId);
+      ownership.set(workspaceId, known);
+    }
+    return known;
+  };
+  const reach = shareReach(storage, recipientUserId);
+  const threads = new Map<string, boolean>();
+  const safeThread = (workspaceId: string, threadId: string) => {
+    const key = JSON.stringify([workspaceId, threadId]);
+    let known = threads.get(key);
+    if (known === undefined) {
+      const paths = threadPathsInTransaction(storage, workspaceId, threadId);
+      known =
+        paths.created &&
+        !paths.named.some(hiddenFile) &&
+        (paths.linkedObjectId === null ||
+          (paths.lastKnownPath !== null && !hiddenFile(paths.lastKnownPath)));
+      threads.set(key, known);
+    }
+    return known;
+  };
+  // The object the main version last placed at a path, even one it has since moved away.
+  const lastAtPath = storage.db.prepare(
+    `SELECT object_id FROM sync_relay_object_moments
+     WHERE workspace_id = ? AND version_id = 'main' AND path = ? ORDER BY relay_seq DESC LIMIT 1`,
+  );
+  // Where the main version has the object now; null once main deleted it. A share admits main only, so
+  // no other version may decide what a share's Notice shows.
+  const mainPathOf = storage.db.prepare(
+    `SELECT path FROM sync_relay_object_moments
+     WHERE workspace_id = ? AND object_id = ? AND version_id = 'main' ORDER BY relay_seq DESC LIMIT 1`,
+  );
+  // Through a share, `admitted` keeps a file's later place private: one that has left the share reads the
+  // same whether it moved to a secret path, moved elsewhere, or was deleted.
+  const safePath = (workspaceId: string, path: string, admitted?: (path: string) => boolean) => {
+    const validated = validateUserWritePath(path);
+    if (!validated.ok || hiddenFile(path) || hiddenFile(validated.normalized)) return false;
+    const objectId = lastAtPath.get(workspaceId, validated.normalized)?.object_id;
+    if (typeof objectId !== "string") return true;
+    if (admitted !== undefined) {
+      const now = mainPathOf.get(workspaceId, objectId)?.path;
+      return typeof now === "string" && admitted(now) && !hiddenFile(now);
+    }
+    return !hiddenFile(storage.objectLastKnownPath(workspaceId, objectId));
+  };
+  const safeTarget = (notice: RelayNotice) => {
+    const target = notice.target;
+    if (target === null) return false;
+    if (target.path === undefined && target.thread === undefined && target.message === undefined)
+      return true;
+    if (target.thread === undefined && target.message !== undefined) return false;
+    let workspaceId: string;
+    let admitted: ((path: string) => boolean) | undefined;
+    if (notice.workspaceId !== null) {
+      if (!owned(notice.workspaceId)) return false;
+      workspaceId = notice.workspaceId;
+    } else {
+      // Through a share, only a path it admits. A thread is never looked up there: an admitted path can't
+      // prove the thread is readable, and what the owner's thread holds must not decide what the phone shows.
+      const share =
+        notice.recipientShareId === null ? null : storage.getShare(notice.recipientShareId);
+      if (
+        share === null ||
+        target.path === undefined ||
+        target.thread !== undefined ||
+        !admits(reach.sidesOn(share.shareId), target.path)
+      )
+        return false;
+      workspaceId = share.workspaceId;
+      const sides = reach.sidesOn(share.shareId);
+      admitted = (path) => admits(sides, path);
+    }
+    return (
+      (target.path === undefined || safePath(workspaceId, target.path, admitted)) &&
+      (target.thread === undefined || safeThread(workspaceId, target.thread))
+    );
+  };
+  return notices.flatMap((notice) => {
+    if (notice.removed) return [gone(notice)];
+    if (
+      notice.workspaceId !== null &&
+      owned(notice.workspaceId) &&
+      !storage.showsOnPhone(recipientUserId, notice.workspaceId)
+    )
+      return [];
+    const rule = Object.hasOwn(PHONE_NOTICE_KINDS, notice.kind)
+      ? PHONE_NOTICE_KINDS[notice.kind]
+      : "never";
+    const named =
+      rule === "shown" ||
+      (rule === "path" && notice.target?.path !== undefined) ||
+      (rule === "located" &&
+        (notice.target?.path !== undefined || notice.target?.thread !== undefined));
+    return named && safeTarget(notice) ? [notice] : [];
+  });
+}
+
+/** The recipient's change head; zero for a list that never changed. */
+export function noticeHead(storage: StorageContext, recipientUserId: string): number {
+  return Number(
+    storage.db
+      .prepare("SELECT change_seq FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
+      .get(recipientUserId)?.change_seq ?? 0,
+  );
+}
+
+/**
+ * Moves the recipient's head with no row, inside the caller's transaction, for
+ * a change a read must answer before its row exists: its personal agents'
+ * revision, or a named share whose Notice the next read delivers. A waiting
+ * read then answers the new cursor.
+ */
+export function advanceNoticeHead(storage: StorageContext, recipientUserId: string): void {
+  nextChangeSeq(storage, recipientUserId);
+}
+
+/**
+ * Sets read or dismissed once, or clears one with unread or restore. A mark
+ * that would change nothing, or a row removed, expired, or gone, is left as
+ * it is. Each change starts the row's retention again, by the state it leaves:
+ * dismissed, else read, else unread. Returns the notices this call dismissed
+ * for the first time ever: a receipt outlives the row, and a restore keeps
+ * it, so a notice is never dismissed first twice.
+ *
+ * An automation wake's row stands for its waiting payload. Only a computer
+ * consuming the wake dismisses it, and no unread or restore brings back a
+ * payload a dismissal consumed, so such a mark skips the row and the rest of
+ * the batch goes on.
  */
 export function markNotices(storage: StorageContext, input: MarkNoticesInput): string[] {
   for (const mark of input.marks) {
     if (!mark.withdraw || mark.mark !== "dismissed") continue;
     // A sender can withdraw only copies they posted under this exact id.
-    const copies = storage.db.prepare(`SELECT recipient_user_id,notice_id FROM sync_relay_notices
+    const copies = storage.db
+      .prepare(`SELECT recipient_user_id,notice_id FROM sync_relay_notices
       WHERE sender_user_id=? AND notice_id=? AND recipient_user_id<>? AND dismissed_at_ms IS NULL`)
-      .all(input.recipientUserId, noticeIdFrom(input.recipientUserId, mark.noticeId), input.recipientUserId);
-    for (const copy of copies) markNotices(storage, { recipientUserId: String(copy.recipient_user_id),
-      marks: [{ noticeId: String(copy.notice_id), mark: "dismissed" }], nowMs: input.nowMs });
+      .all(
+        input.recipientUserId,
+        noticeIdFrom(input.recipientUserId, mark.noticeId),
+        input.recipientUserId,
+      );
+    for (const copy of copies)
+      markNotices(storage, {
+        recipientUserId: String(copy.recipient_user_id),
+        marks: [{ noticeId: String(copy.notice_id), mark: "dismissed" }],
+        nowMs: input.nowMs,
+      });
   }
   return storage.tx(() => {
     const nextSeq = changeSequence(storage, input.recipientUserId);
@@ -584,40 +980,98 @@ export function markNotices(storage: StorageContext, input: MarkNoticesInput): s
       `SELECT read_at_ms, dismissed_at_ms, kind, workspace_id FROM sync_relay_notices
        WHERE recipient_user_id = ? AND notice_id = ? AND expires_at_ms > ? AND removed_at_ms IS NULL`,
     );
-    const markRow = (column: string) => storage.db.prepare(
-      `UPDATE sync_relay_notices SET ${column} = ?, expires_at_ms = ?, change_seq = ?
+    const markRow = (column: string) =>
+      storage.db.prepare(
+        `UPDATE sync_relay_notices SET ${column} = ?, expires_at_ms = ?, change_seq = ?
        WHERE recipient_user_id = ? AND notice_id = ?`,
-    );
+      );
     const markRead = markRow("read_at_ms");
     const markDismissed = markRow("dismissed_at_ms");
-    const removeWake = storage.db.prepare("DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
+    const clearRow = (column: string) =>
+      storage.db.prepare(
+        `UPDATE sync_relay_notices SET expires_at_ms = ?, change_seq = ?, ${column} = NULL
+       WHERE recipient_user_id = ? AND notice_id = ?`,
+      );
+    const clearRead = clearRow("read_at_ms");
+    const clearDismissed = clearRow("dismissed_at_ms");
+    const removeWake = storage.db.prepare(
+      "DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?",
+    );
     for (const { noticeId, mark } of input.marks) {
       const wake = noticeId.startsWith(AUTOMATION_WAKE_PREFIX);
-      if (wake && mark === "dismissed" && input.installId === undefined) {
-        throw relayError("notice_refused", "Only a computer consuming this agent wake can dismiss it.");
+      if (
+        wake &&
+        (mark === "unread" ||
+          mark === "restore" ||
+          (mark === "dismissed" && input.installId === undefined))
+      )
+        continue;
+      if (mark === "unread" || mark === "restore") {
+        const row = read.get(input.recipientUserId, noticeId, input.nowMs);
+        if (!row || row.kind === "automation-wake") continue;
+        const readAt = mark === "unread" ? null : row.read_at_ms;
+        const dismissedAt = mark === "restore" ? null : row.dismissed_at_ms;
+        if (readAt === row.read_at_ms && dismissedAt === row.dismissed_at_ms) continue;
+        const retentionMs =
+          dismissedAt !== null
+            ? NOTICE_DISMISSED_RETENTION_MS
+            : readAt !== null
+              ? NOTICE_READ_RETENTION_MS
+              : NOTICE_UNREAD_RETENTION_MS;
+        (mark === "unread" ? clearRead : clearDismissed).run(
+          input.nowMs + retentionMs,
+          nextSeq(),
+          input.recipientUserId,
+          noticeId,
+        );
+        continue;
       }
       if (wake && input.installId === "server") continue;
       if (mark === "dismissed" && input.installId !== undefined && !dismissed.includes(noticeId)) {
         const held = (wake ? wakeWinner : winner).get(input.recipientUserId, noticeId);
-        if (wake && held && !storage.workspaceIsOwnedBy(String(held.workspace_id), input.recipientUserId)) throw relayError("notice_refused");
+        if (
+          wake &&
+          held &&
+          !storage.workspaceIsOwnedBy(String(held.workspace_id), input.recipientUserId)
+        )
+          throw relayError("notice_refused");
         const authorized = !wake || !!held;
-        if (held?.winner_install_id === input.installId && authorized && !floored(noticeId)) dismissed.push(noticeId);
+        if (held?.winner_install_id === input.installId && authorized && !floored(noticeId))
+          dismissed.push(noticeId);
       }
       const row = read.get(input.recipientUserId, noticeId, input.nowMs);
-      if (!row || row.dismissed_at_ms !== null || (mark === "read" && row.read_at_ms !== null)) continue;
-      if (row.kind === "automation-wake" && !storage.workspaceIsOwnedBy(String(row.workspace_id), input.recipientUserId)) {
+      if (!row || row.dismissed_at_ms !== null || (mark === "read" && row.read_at_ms !== null))
+        continue;
+      if (
+        row.kind === "automation-wake" &&
+        !storage.workspaceIsOwnedBy(String(row.workspace_id), input.recipientUserId)
+      ) {
         if (mark === "read") continue;
         throw relayError("notice_refused");
       }
-      const retentionMs = mark === "read" ? NOTICE_READ_RETENTION_MS : NOTICE_DISMISSED_RETENTION_MS;
+      const retentionMs =
+        mark === "read" ? NOTICE_READ_RETENTION_MS : NOTICE_DISMISSED_RETENTION_MS;
       (mark === "read" ? markRead : markDismissed).run(
         input.nowMs,
         wake && mark === "read" ? Number.MAX_SAFE_INTEGER : input.nowMs + retentionMs,
-        nextSeq(), input.recipientUserId, noticeId,
+        nextSeq(),
+        input.recipientUserId,
+        noticeId,
       );
-      const inserted = mark === "dismissed" && Number((wake
-        ? wakeReceipt.run(input.recipientUserId, noticeId, row.workspace_id, input.nowMs, input.installId ?? null)
-        : receipt.run(input.recipientUserId, noticeId, input.nowMs, input.installId ?? null)).changes ?? 0) === 1;
+      const inserted =
+        mark === "dismissed" &&
+        Number(
+          (wake
+            ? wakeReceipt.run(
+                input.recipientUserId,
+                noticeId,
+                row.workspace_id,
+                input.nowMs,
+                input.installId ?? null,
+              )
+            : receipt.run(input.recipientUserId, noticeId, input.nowMs, input.installId ?? null)
+          ).changes ?? 0,
+        ) === 1;
       if (mark === "dismissed" && row.kind === "automation-wake") {
         removeWake.run(input.recipientUserId, noticeId);
       }
@@ -639,14 +1093,18 @@ export const NOTICE_DISMISSAL_RECEIPTS = 10_000;
 // after its first skipped time.
 function reclaimOldReceipts(storage: StorageContext, recipientUserId: string): void {
   const { count } = storage.db
-    .prepare("SELECT count(*) AS count FROM sync_relay_notice_dismissals WHERE recipient_user_id = ?")
+    .prepare(
+      "SELECT count(*) AS count FROM sync_relay_notice_dismissals WHERE recipient_user_id = ?",
+    )
     .get(recipientUserId) as { count: number };
   const excess = Number(count) - NOTICE_DISMISSAL_RECEIPTS;
   if (excess <= 0) return;
-  const oldest = storage.db.prepare(
-    `SELECT notice_id, dismissed_at_ms FROM sync_relay_notice_dismissals
+  const oldest = storage.db
+    .prepare(
+      `SELECT notice_id, dismissed_at_ms FROM sync_relay_notice_dismissals
      WHERE recipient_user_id = ? ORDER BY dismissed_at_ms, notice_id LIMIT ?`,
-  ).all(recipientUserId, excess) as Array<{ notice_id: string; dismissed_at_ms: number }>;
+    )
+    .all(recipientUserId, excess) as Array<{ notice_id: string; dismissed_at_ms: number }>;
   const remove = storage.db.prepare(
     "DELETE FROM sync_relay_notice_dismissals WHERE recipient_user_id = ? AND notice_id = ?",
   );
@@ -661,7 +1119,8 @@ function reclaimOldReceipts(storage: StorageContext, recipientUserId: string): v
     const skipped = skippedScheduleNotice(row.notice_id, Number.MAX_SAFE_INTEGER);
     // A first skipped time a little ahead of the relay's clock can be later
     // than the dismissal: the floor covers both.
-    if (skipped) floor.run(recipientUserId, skipped.schedule, Math.max(row.dismissed_at_ms, skipped.firstMs));
+    if (skipped)
+      floor.run(recipientUserId, skipped.schedule, Math.max(row.dismissed_at_ms, skipped.firstMs));
   }
 }
 
@@ -671,10 +1130,14 @@ const SKIPPED_TIME_CLOCK_ALLOWANCE_MS = 24 * 60 * 60 * 1000;
 // schedule-skipped:<workspace>:<automation>:<first skipped ms>, as the owner's
 // computer posts it: the schedule it names and when it first skipped, a safe
 // integer no later than the relay's clock allows. Null for any other shape.
-function skippedScheduleNotice(noticeId: string, nowMs: number): { schedule: string; firstMs: number } | null {
+function skippedScheduleNotice(
+  noticeId: string,
+  nowMs: number,
+): { schedule: string; firstMs: number } | null {
   const match = /^schedule-skipped:([^:]+:.+):(0|[1-9]\d{0,15})$/u.exec(noticeId);
   const firstMs = match ? Number(match[2]) : Number.NaN;
-  if (!match || !Number.isSafeInteger(firstMs) || firstMs > nowMs + SKIPPED_TIME_CLOCK_ALLOWANCE_MS) return null;
+  if (!match || !Number.isSafeInteger(firstMs) || firstMs > nowMs + SKIPPED_TIME_CLOCK_ALLOWANCE_MS)
+    return null;
   return { schedule: match[1]!, firstMs };
 }
 
@@ -692,7 +1155,9 @@ function reclaimedFor(
        WHERE recipient_user_id = ? AND schedule_key = ?`,
     )
     .get(recipientUserId, skipped.schedule) as { reclaimed_through_ms: number } | undefined;
-  return floor !== undefined && skipped.firstMs <= floor.reclaimed_through_ms ? floor.reclaimed_through_ms : null;
+  return floor !== undefined && skipped.firstMs <= floor.reclaimed_through_ms
+    ? floor.reclaimed_through_ms
+    : null;
 }
 
 // A post to yourself is placed where you said. A share must be one you
@@ -700,8 +1165,10 @@ function reclaimedFor(
 // how someone else's share relates to yours. The target is judged at pull.
 function ownPlacement(storage: StorageContext, input: PostNoticeInput): Placement {
   const reach = input.reach;
-  if (reach.workspaceId !== undefined) return { workspaceId: reach.workspaceId, recipientShareId: null };
-  if (fileSidesOn(storage, input.senderUserId, reach.shareId) === null) throw relayError("notice_refused");
+  if (reach.workspaceId !== undefined)
+    return { workspaceId: reach.workspaceId, recipientShareId: null };
+  if (fileSidesOn(storage, input.senderUserId, reach.shareId) === null)
+    throw relayError("notice_refused");
   return { workspaceId: null, recipientShareId: reach.shareId };
 }
 
@@ -711,7 +1178,9 @@ function sharedPlacement(storage: StorageContext, input: PostNoticeInput): Place
   const validated = path === undefined ? null : validateUserWritePath(path);
   if (
     NOTICE_KINDS[input.kind].recipients !== "readers" ||
-    path === undefined || !validated?.ok || validated.normalized !== path
+    path === undefined ||
+    !validated?.ok ||
+    validated.normalized !== path
   ) {
     throw refused();
   }
@@ -720,7 +1189,8 @@ function sharedPlacement(storage: StorageContext, input: PostNoticeInput): Place
     workspaceId = input.reach.workspaceId;
     if (!storage.workspaceIsOwnedBy(workspaceId, input.senderUserId)) throw refused();
   } else {
-    if (!admits(fileSidesOn(storage, input.senderUserId, input.reach.shareId, "named"), path)) throw refused();
+    if (!admits(fileSidesOn(storage, input.senderUserId, input.reach.shareId, "named"), path))
+      throw refused();
     workspaceId = storage.getShare(input.reach.shareId)!.workspaceId;
   }
   if (storage.workspaceIsOwnedBy(workspaceId, input.recipientUserId)) {
@@ -770,7 +1240,11 @@ function holdsShareSql(shareColumn: string): string {
 }
 
 function holdsShare(storage: StorageContext, userId: string, shareId: string): boolean {
-  return Number(storage.db.prepare(`SELECT ${holdsShareSql("?")} AS held`).get(shareId, userId)?.held) === 1;
+  return (
+    Number(
+      storage.db.prepare(`SELECT ${holdsShareSql("?")} AS held`).get(shareId, userId)?.held,
+    ) === 1
+  );
 }
 
 function admits(sides: ShareSelector[] | null, path: string): boolean {
@@ -783,7 +1257,8 @@ function shareReach(storage: StorageContext, userId: string, editable = false) {
   const sides = new Map<string, ShareSelector[] | null>();
   let received: ReturnType<StorageContext["listSharesReceivedBy"]> | null = null;
   const sidesOn = (shareId: string): ShareSelector[] | null => {
-    if (!sides.has(shareId)) sides.set(shareId, fileSidesOn(storage, userId, shareId, "any", editable));
+    if (!sides.has(shareId))
+      sides.set(shareId, fileSidesOn(storage, userId, shareId, "any", editable));
     return sides.get(shareId)!;
   };
   return {
@@ -791,9 +1266,11 @@ function shareReach(storage: StorageContext, userId: string, editable = false) {
     // A share in `workspaceId` through which `userId` reads `path`, if any.
     admitting(workspaceId: string, path: string): string | null {
       received ??= storage.listSharesReceivedBy(userId);
-      const shareIds = new Set(received
-        .filter(({ share }) => share.workspaceId === workspaceId)
-        .map(({ share }) => share.shareId));
+      const shareIds = new Set(
+        received
+          .filter(({ share }) => share.workspaceId === workspaceId)
+          .map(({ share }) => share.shareId),
+      );
       for (const shareId of shareIds) {
         if (admits(sidesOn(shareId), path)) return shareId;
       }
@@ -837,10 +1314,16 @@ export function noticeReachReads(storage: StorageContext, userId: string): Notic
 }
 
 function reachToken(storage: StorageContext, userId: string): string {
-  return createHash("sha256").update(JSON.stringify(noticeReachReads(storage, userId))).digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify(noticeReachReads(storage, userId)))
+    .digest("hex");
 }
 
-function settleLostWakeOwnership(storage: StorageContext, recipientUserId: string, nowMs: number): void {
+function settleLostWakeOwnership(
+  storage: StorageContext,
+  recipientUserId: string,
+  nowMs: number,
+): void {
   const readLost = storage.db.prepare(
     `SELECT notice_id FROM sync_relay_notices n
      WHERE recipient_user_id = ? AND kind = 'automation-wake'
@@ -855,10 +1338,18 @@ function settleLostWakeOwnership(storage: StorageContext, recipientUserId: strin
       `UPDATE sync_relay_notices SET removed_at_ms = ?, body = '', target_json = NULL, expires_at_ms = ?, change_seq = ?
        WHERE recipient_user_id = ? AND notice_id = ?`,
     );
-    const removeWake = storage.db.prepare("DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
+    const removeWake = storage.db.prepare(
+      "DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?",
+    );
     const nextSeq = changeSequence(storage, recipientUserId);
     for (const row of lost) {
-      remove.run(nowMs, nowMs + NOTICE_REMOVED_RETENTION_MS, nextSeq(), recipientUserId, row.notice_id);
+      remove.run(
+        nowMs,
+        nowMs + NOTICE_REMOVED_RETENTION_MS,
+        nextSeq(),
+        recipientUserId,
+        row.notice_id,
+      );
       removeWake.run(recipientUserId, row.notice_id);
     }
   });
@@ -875,26 +1366,35 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
   const plan = storage.readTx((): "none" | "digest" | "shares" => {
     // A row whose target names a path needs the digest of everything that
     // decides what the recipient reads.
-    const withPath = storage.db.prepare(
-      `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
+    const withPath = storage.db
+      .prepare(
+        `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
          WHERE ${live} AND json_extract(target_json, '$.path') IS NOT NULL) AS present`,
-    ).get(recipientUserId, nowMs);
+      )
+      .get(recipientUserId, nowMs);
     if (Number(withPath?.present) === 1) {
-      const list = storage.db.prepare("SELECT reach_token FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
+      const list = storage.db
+        .prepare("SELECT reach_token FROM sync_relay_notice_lists WHERE recipient_user_id = ?")
         .get(recipientUserId);
-      return list !== undefined && list.reach_token !== reachToken(storage, recipientUserId) ? "digest" : "none";
+      return list !== undefined && list.reach_token !== reachToken(storage, recipientUserId)
+        ? "digest"
+        : "none";
     }
     // A row that points only at a share needs only a current grant on it.
-    const lost = storage.db.prepare(
-      `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
+    const lost = storage.db
+      .prepare(
+        `SELECT EXISTS (SELECT 1 FROM sync_relay_notices
          WHERE ${live} AND NOT ${holdsShareSql("sync_relay_notices.recipient_share_id")}) AS lost`,
-    ).get(recipientUserId, nowMs, recipientUserId);
+      )
+      .get(recipientUserId, nowMs, recipientUserId);
     return Number(lost?.lost) === 1 ? "shares" : "none";
   });
   if (plan === "none") return;
   storage.tx(() => {
-    const rows = storage.db.prepare(`SELECT notice_id, recipient_share_id, target_json FROM sync_relay_notices
-       WHERE ${live} ORDER BY change_seq`).all(recipientUserId, nowMs);
+    const rows = storage.db
+      .prepare(`SELECT notice_id, recipient_share_id, target_json FROM sync_relay_notices
+       WHERE ${live} ORDER BY change_seq`)
+      .all(recipientUserId, nowMs);
     const reach = shareReach(storage, recipientUserId);
     const move = storage.db.prepare(
       `UPDATE sync_relay_notices
@@ -906,13 +1406,26 @@ function settleLostReach(storage: StorageContext, recipientUserId: string, nowMs
     for (const row of rows) {
       const shareId = String(row.recipient_share_id);
       const path = (JSON.parse(String(row.target_json)) as NoticeTarget).path;
-      if (path === undefined ? holdsShare(storage, recipientUserId, shareId) : admits(reach.sidesOn(shareId), path)) continue;
+      if (
+        path === undefined
+          ? holdsShare(storage, recipientUserId, shareId)
+          : admits(reach.sidesOn(shareId), path)
+      )
+        continue;
       const workspaceId = storage.getShare(shareId)?.workspaceId;
-      const movedTo = path === undefined || workspaceId === undefined ? null : reach.admitting(workspaceId, path);
-      move.run(movedTo, movedTo, nextChangeSeq(storage, recipientUserId), recipientUserId, String(row.notice_id));
+      const movedTo =
+        path === undefined || workspaceId === undefined ? null : reach.admitting(workspaceId, path);
+      move.run(
+        movedTo,
+        movedTo,
+        nextChangeSeq(storage, recipientUserId),
+        recipientUserId,
+        String(row.notice_id),
+      );
     }
     if (plan === "digest") {
-      storage.db.prepare("UPDATE sync_relay_notice_lists SET reach_token = ? WHERE recipient_user_id = ?")
+      storage.db
+        .prepare("UPDATE sync_relay_notice_lists SET reach_token = ? WHERE recipient_user_id = ?")
         .run(reachToken(storage, recipientUserId), recipientUserId);
     }
   });
@@ -929,26 +1442,41 @@ function makeRoom(
   senderUserId: string | null,
   nowMs: number,
 ): void {
-  const live = (sender: string | null) => Number(storage.db.prepare(
-    `SELECT COUNT(*) AS count FROM sync_relay_notices
+  const live = (sender: string | null) =>
+    Number(
+      storage.db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM sync_relay_notices
      WHERE recipient_user_id = ? AND removed_at_ms IS NULL ${sender === null ? "" : "AND sender_user_id = ?"}`,
-  ).get(recipientUserId, ...(sender === null ? [] : [sender]))?.count ?? 0);
+        )
+        .get(recipientUserId, ...(sender === null ? [] : [sender]))?.count ?? 0,
+    );
   let removed = 0;
   if (senderUserId !== null) {
-    removed += removeRows(storage, recipientUserId, senderUserId, senderUserId,
-      live(senderUserId) - NOTICE_ROWS_PER_SENDER + 1, nowMs);
+    removed += removeRows(
+      storage,
+      recipientUserId,
+      senderUserId,
+      senderUserId,
+      live(senderUserId) - NOTICE_ROWS_PER_SENDER + 1,
+      nowMs,
+    );
   }
   const excess = live(null) - NOTICE_LIST_ROW_LIMIT + 1;
   const freed = removeRows(storage, recipientUserId, null, senderUserId, excess, nowMs);
   if (freed < excess) throw relayError("notice_list_full");
   if (removed + freed === 0) return;
-  // Past its tombstone limit, a list deletes its oldest tombstones.
-  raiseFloors(storage, storage.db.prepare(
-    `DELETE FROM sync_relay_notices WHERE rowid IN (
+  raiseFloors(
+    storage,
+    storage.db
+      .prepare(
+        `DELETE FROM sync_relay_notices WHERE rowid IN (
        SELECT rowid FROM sync_relay_notices WHERE recipient_user_id = ? AND removed_at_ms IS NOT NULL
        ORDER BY change_seq DESC LIMIT -1 OFFSET ?)
      RETURNING recipient_user_id, change_seq`,
-  ).all(recipientUserId, NOTICE_REMOVED_ROW_LIMIT));
+      )
+      .all(recipientUserId, NOTICE_REMOVED_ROW_LIMIT),
+  );
 }
 
 // Turns up to `needed` rows into tombstones: read or dismissed rows from
@@ -964,25 +1492,31 @@ function removeRows(
   nowMs: number,
 ): number {
   if (needed <= 0) return 0;
-  const pick = (sender: string | null, state: string, limit: number) => storage.db.prepare(
-    `SELECT notice_id FROM sync_relay_notices
+  const pick = (sender: string | null, state: string, limit: number) =>
+    storage.db
+      .prepare(
+        `SELECT notice_id FROM sync_relay_notices
      WHERE recipient_user_id = ? AND removed_at_ms IS NULL AND ${state}
        AND NOT (kind = 'automation-wake' AND dismissed_at_ms IS NULL)
        ${sender === null ? "" : "AND sender_user_id = ?"}
      ORDER BY created_at_ms, notice_id LIMIT ?`,
-  ).all(recipientUserId, ...(sender === null ? [] : [sender]), limit).map((row) => String(row.notice_id));
+      )
+      .all(recipientUserId, ...(sender === null ? [] : [sender]), limit)
+      .map((row) => String(row.notice_id));
   const noticeIds = pick(markedSender, MARKED, needed);
-  if (noticeIds.length < needed) noticeIds.push(...pick(unreadSender, UNREAD, needed - noticeIds.length));
+  if (noticeIds.length < needed)
+    noticeIds.push(...pick(unreadSender, UNREAD, needed - noticeIds.length));
   const tombstone = storage.db.prepare(
     `UPDATE sync_relay_notices
      SET removed_at_ms = ?, body = '', target_json = NULL, expires_at_ms = ?, change_seq = ?
      WHERE recipient_user_id = ? AND notice_id = ?`,
   );
-  const removeWake = storage.db.prepare("DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?");
+  const removeWake = storage.db.prepare(
+    "DELETE FROM sync_relay_automation_wakes WHERE recipient_user_id = ? AND notice_id = ?",
+  );
   const nextSeq = changeSequence(storage, recipientUserId);
   for (const noticeId of noticeIds) {
-    tombstone.run(nowMs, nowMs + NOTICE_REMOVED_RETENTION_MS, nextSeq(),
-      recipientUserId, noticeId);
+    tombstone.run(nowMs, nowMs + NOTICE_REMOVED_RETENTION_MS, nextSeq(), recipientUserId, noticeId);
     if (noticeId.startsWith(AUTOMATION_WAKE_PREFIX)) {
       removeWake.run(recipientUserId, noticeId);
     }
@@ -993,22 +1527,36 @@ function removeRows(
 // Retention runs with each post, as the relay's other expiring rows do: this
 // recipient's expired rows go first so they never count against the list's
 // limit, then a bounded batch from every list.
-function sweepExpiredNotices(storage: StorageContext, recipientUserId: string, nowMs: number): void {
-  storage.db.prepare("DELETE FROM sync_relay_automation_wake_receipts WHERE dismissed_at_ms < ?")
+function sweepExpiredNotices(
+  storage: StorageContext,
+  recipientUserId: string,
+  nowMs: number,
+): void {
+  storage.db
+    .prepare("DELETE FROM sync_relay_automation_wake_receipts WHERE dismissed_at_ms < ?")
     .run(nowMs - AUTOMATION_WAKE_RETRY_MS);
-  raiseFloors(storage, storage.db.prepare(
-    `DELETE FROM sync_relay_notices WHERE recipient_user_id = ? AND expires_at_ms <= ?
+  raiseFloors(
+    storage,
+    storage.db
+      .prepare(
+        `DELETE FROM sync_relay_notices WHERE recipient_user_id = ? AND expires_at_ms <= ?
      RETURNING recipient_user_id, change_seq`,
-  ).all(recipientUserId, nowMs));
-  raiseFloors(storage, storage.db.prepare(
-    `DELETE FROM sync_relay_notices WHERE rowid IN (
+      )
+      .all(recipientUserId, nowMs),
+  );
+  raiseFloors(
+    storage,
+    storage.db
+      .prepare(
+        `DELETE FROM sync_relay_notices WHERE rowid IN (
        SELECT rowid FROM sync_relay_notices WHERE expires_at_ms <= ?
        ORDER BY expires_at_ms LIMIT ?)
      RETURNING recipient_user_id, change_seq`,
-  ).all(nowMs, NOTICE_SWEEP_BATCH));
+      )
+      .all(nowMs, NOTICE_SWEEP_BATCH),
+  );
 }
 
-// Each list's floor rises to the newest change among its deleted rows.
 function raiseFloors(storage: StorageContext, deleted: readonly Record<string, unknown>[]): void {
   const floors = new Map<string, number>();
   for (const row of deleted) {
@@ -1018,7 +1566,10 @@ function raiseFloors(storage: StorageContext, deleted: readonly Record<string, u
   const raise = storage.db.prepare(
     "UPDATE sync_relay_notice_lists SET floor_seq = max(floor_seq, ?) WHERE recipient_user_id = ?",
   );
-  for (const [recipient, floor] of floors) raise.run(floor, recipient);
+  for (const [recipient, floor] of floors) {
+    raise.run(floor, recipient);
+    notifyNoticeChange(storage, recipient);
+  }
 }
 
 function nextChangeSeq(storage: StorageContext, recipientUserId: string): number {
@@ -1032,7 +1583,12 @@ function changeSequence(storage: StorageContext, recipientUserId: string): () =>
      ON CONFLICT (recipient_user_id) DO UPDATE SET change_seq = change_seq + 1
      RETURNING change_seq`,
   );
-  return () => Number(increment.get(recipientUserId)!.change_seq);
+  // Every change to a list takes its sequence here, so this is where waiting reads hear of it.
+  return () => {
+    const seq = Number(increment.get(recipientUserId)!.change_seq);
+    notifyNoticeChange(storage, recipientUserId);
+    return seq;
+  };
 }
 
 function rowToNotice(row: Record<string, unknown>): RelayNotice {
@@ -1048,11 +1604,12 @@ function rowToNotice(row: Record<string, unknown>): RelayNotice {
     senderLabel: String(row.sender_label),
     title: String(row.title),
     body: String(row.body),
-    target: row.target_json === null ? null : JSON.parse(String(row.target_json)) as NoticeTarget,
+    target: row.target_json === null ? null : (JSON.parse(String(row.target_json)) as NoticeTarget),
     originInstallId: String(row.origin_install_id),
     createdAtMs: Number(row.created_at_ms),
     readAtMs: row.read_at_ms === null ? null : Number(row.read_at_ms),
     dismissedAtMs: row.dismissed_at_ms === null ? null : Number(row.dismissed_at_ms),
+    expiresAtMs: Number(row.expires_at_ms),
     removed: row.removed_at_ms !== null,
   };
 }

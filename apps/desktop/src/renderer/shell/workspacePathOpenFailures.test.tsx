@@ -18,7 +18,6 @@ let ping: () => void = () => undefined;
 let order: string[] = [];
 const retryWorkspacePathOpen = vi.fn(async (_payload: { attemptId: string }) => undefined);
 
-// Main reports a failure: it holds it, then pings.
 async function emit(failure: WorkspacePathOpenFailure) {
   held.push(failure);
   await act(async () => ping());
@@ -54,7 +53,6 @@ afterEach(() => {
   retryWorkspacePathOpen.mockReset();
 });
 
-// A notice owner as the workspace manager is one: its own toasts and rows.
 function Owner(props: { workspaceId: string | null }) {
   const notices = useConnectionNotices();
   useWorkspacePathOpenFailures(props.workspaceId, notices.reportFailure);
@@ -80,7 +78,10 @@ function Root(props: { owner: string | null | false }) {
   );
 }
 
-function failure(cause: string, change: Partial<WorkspacePathOpenFailure> = {}): WorkspacePathOpenFailure {
+function failure(
+  cause: string,
+  change: Partial<WorkspacePathOpenFailure> = {},
+): WorkspacePathOpenFailure {
   return { attemptId: "attempt-1", path: "C:\\work\\Trips", cause, workspaceId: null, ...change };
 }
 
@@ -120,46 +121,65 @@ describe("folders a launch could not open", () => {
     ],
     [
       "an error with nothing a person can act on",
-      "ZodError: [{\"code\":\"too_big\",\"path\":[\"workspaceId\"]}]",
+      'ZodError: [{"code":"too_big","path":["workspaceId"]}]',
       "dohc could not open Trips.",
       true,
     ],
-  ])("names the folder and says why for %s, with the error behind Copy", async (_kind, cause, message, canRetry) => {
-    render(<Root owner={null} />);
-    await emit(failure(cause));
+  ])(
+    "names the folder and says why for %s, with the error behind Copy",
+    async (_kind, cause, message, canRetry) => {
+      render(<Root owner={null} />);
+      await emit(failure(cause));
 
-    const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain(message);
-    // The error as it arrived is for Copy only.
-    expect(toast.textContent).not.toMatch(/Error|EACCES|manifest v2|kind is invalid/);
-    expect(within(toast).queryByRole("button", { name: "Try again" }) !== null).toBe(canRetry);
-    const details = await copied(toast);
-    expect(details).toContain(`Error: ${message}`);
-    expect(details).toContain("Folder: C:\\work\\Trips");
-    expect(details).toContain(`Cause: ${cause}`);
-  });
+      const toast = await screen.findByTestId("workspace-shell-error");
+      expect(toast.textContent).toContain(message);
+      expect(toast.textContent).not.toMatch(/Error|EACCES|manifest v2|kind is invalid/);
+      expect(within(toast).queryByRole("button", { name: "Try again" }) !== null).toBe(canRetry);
+      const details = await copied(toast);
+      expect(details).toContain(`Error: ${message}`);
+      expect(details).toContain("Folder: C:\\work\\Trips");
+      expect(details).toContain(`Cause: ${cause}`);
+    },
+  );
 
   it("shows folders main combined as one row, with each listed folder in Copy and no Try again", async () => {
     render(<Root owner={null} />);
-    held.push({ attemptId: "more-1", paths: ["C:\\work\\Notes", "C:\\work\\Plans"], count: 3, workspaceId: null });
+    held.push({
+      attemptId: "more-1",
+      paths: ["C:\\work\\Notes", "C:\\work\\Plans"],
+      count: 3,
+      workspaceId: null,
+    });
     await act(async () => ping());
 
     const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("dohc could not open 3 more folders. Copy the details to list them.");
+    expect(toast.textContent).toContain(
+      "dohc could not open 3 more folders. Copy the details to list them.",
+    );
     expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
     const details = await copied(toast);
-    expect(details).toContain("Folder: C:\\work\\Notes\nFolder: C:\\work\\Plans\nNot listed: 1 more, named in dohc's log");
+    expect(details).toContain(
+      "Folder: C:\\work\\Notes\nFolder: C:\\work\\Plans\nNot listed: 1 more, named in dohc's log",
+    );
   });
 
   it("shows a failed move to Applications with Try again, which asks main to move again", async () => {
     const user = userEvent.setup();
     render(<Root owner={null} />);
-    const said = "Failed to copy dohc.app. Drag dohc into Applications in Finder to move it yourself.";
-    await emit({ attemptId: "move-1", moveToApplications: true, cause: `Error: ${said}`, workspaceId: null });
+    const said =
+      "Failed to copy dohc.app. Drag dohc into Applications in Finder to move it yourself.";
+    await emit({
+      attemptId: "move-1",
+      moveToApplications: true,
+      cause: `Error: ${said}`,
+      workspaceId: null,
+    });
 
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(`dohc could not move itself to Applications. ${said}`);
-    expect(await copied(toast)).toContain(`Error: dohc could not move itself to Applications. ${said}`);
+    expect(await copied(toast)).toContain(
+      `Error: dohc could not move itself to Applications. ${said}`,
+    );
     await user.click(within(toast).getByRole("button", { name: "Try again" }));
     expect(retryWorkspacePathOpen).toHaveBeenCalledExactlyOnceWith({ attemptId: "move-1" });
   });
@@ -203,42 +223,61 @@ describe("folders a launch could not open", () => {
 
   it("drops a failure main tied to a workspace this window no longer shows", async () => {
     render(<Root owner="current" />);
-    await emit(failure("Error [EBUSY]: EBUSY: resource busy or locked", { workspaceId: "previous" }));
+    await emit(
+      failure("Error [EBUSY]: EBUSY: resource busy or locked", { workspaceId: "previous" }),
+    );
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
-    await emit(failure("Error [EBUSY]: EBUSY: resource busy or locked", { workspaceId: "current" }));
+    await emit(
+      failure("Error [EBUSY]: EBUSY: resource busy or locked", { workspaceId: "current" }),
+    );
     expect(await screen.findByTestId("workspace-shell-error")).toBeTruthy();
   });
 
   it("asks main to open the same attempt again, and shows main's next answer with its own Try again", async () => {
     const user = userEvent.setup();
     render(<Root owner={null} />);
-    await emit(failure("WorkspaceManifestError [unreadable]: this folder has a corrupt .dohc/manifest.json"));
+    await emit(
+      failure("WorkspaceManifestError [unreadable]: this folder has a corrupt .dohc/manifest.json"),
+    );
 
-    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    await user.click(
+      within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {
+        name: "Try again",
+      }),
+    );
     expect(retryWorkspacePathOpen).toHaveBeenCalledExactlyOnceWith({ attemptId: "attempt-1" });
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
-    // Main reports the second failure with a new attempt, on the same row.
-    await emit(failure("Error [ENOENT]: ENOENT: no such file or directory, stat 'C:\\work\\Trips'", {
-      attemptId: "attempt-2",
-    }));
+    await emit(
+      failure("Error [ENOENT]: ENOENT: no such file or directory, stat 'C:\\work\\Trips'", {
+        attemptId: "attempt-2",
+      }),
+    );
     const toasts = await screen.findAllByTestId("workspace-shell-error");
     expect(toasts).toHaveLength(1);
-    expect(toasts[0]!.textContent).toContain("dohc could not open Trips. The file or folder is not there anymore.");
+    expect(toasts[0]!.textContent).toContain(
+      "dohc could not open Trips. The file or folder is not there anymore.",
+    );
     await user.click(within(toasts[0]!).getByRole("button", { name: "Try again" }));
     expect(retryWorkspacePathOpen).toHaveBeenLastCalledWith({ attemptId: "attempt-2" });
   });
 
   it("says what to do when main refuses the attempt, without another Try again", async () => {
     const user = userEvent.setup();
-    retryWorkspacePathOpen.mockRejectedValueOnce(new Error(
-      "Error invoking remote method 'desktop:retry-workspace-path-open': Error: Open the folder again.",
-    ));
+    retryWorkspacePathOpen.mockRejectedValueOnce(
+      new Error(
+        "Error invoking remote method 'desktop:retry-workspace-path-open': Error: Open the folder again.",
+      ),
+    );
     render(<Root owner={null} />);
     await emit(failure("Error [EBUSY]: EBUSY: resource busy or locked"));
 
-    await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
+    await user.click(
+      within(await screen.findByTestId("workspace-shell-error")).getByRole("button", {
+        name: "Try again",
+      }),
+    );
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain("dohc could not open Trips. Open the folder again.");
     expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();

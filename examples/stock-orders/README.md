@@ -11,7 +11,8 @@ Orders can attach an optional receipt. The uploaded file becomes private order d
 The form saves its exact request through dohc before placing the order. Reopening offers that request for retry.
 Keep the page open while uploading; an unfinished upload has not saved the draft yet.
 The example keeps one saved order per browser and app. **Place another order** clears a confirmed request before starting again.
-**Discard pending order** warns about unknown outcomes, checks the saved request, and clears its matching token before accepting corrections.
+Choose **Discard pending order** to check and clear the saved request before correcting it.
+The app first warns that the order may already be saved.
 If that check fails or another tab changed the request, the existing order stays pending.
 The example has no checkout or payment processing.
 
@@ -36,19 +37,6 @@ Owner tables use `tableItems`, `tableOrders`, and `tableOrderItems`.
 They accept `after`, `limit` (1–100), `search`, `sort`, and `filters`.
 They return `{ rows: [{ id, version, values }], nextCursor }`, with values keyed by stable field ID.
 Search matches literal substrings in IDs and text fields, ignoring ASCII case; `%` and `_` are ordinary characters.
-Pagination runs in SQL. Existing public and organizer list operations retain their original result shapes.
+Pagination runs in SQL.
 
-The runtime and dataset-host tests prove atomic reservation, cancellation, restoration, stale edits, and app/Collection access to the same records:
-
-```sh
-pnpm --filter @dohc/app-backend-runtime test src/examples.test.ts src/dataset-examples.test.ts
-```
-
-The browser proof compiles both real apps and runs them through the local launch broker and SQLite host.
-It submits two related order lines with a receipt, checks the stock board, and reads the same records through Collection and MCP interfaces.
-It also checks that a stock shortage rolls back every line and inventory change.
-
-```sh
-pnpm --filter @dohc/app-backend-runtime build
-pnpm --filter @dohc/share-web exec playwright test e2e/stock-orders.spec.ts --config playwright.config.ts
-```
+The browser test for this example is `services/share-web/e2e/stock-orders.spec.ts`.

@@ -55,10 +55,8 @@ export const preloadBundledRuntimeDeps = [
 export const mainBuildEntries = {
   main: "src/entry.ts",
   app: "src/main.ts",
-  "workspace-database-worker":
-    "src/workspaces/workspaceDatabaseThread.ts",
-  "document-projection-worker":
-    "src/workspaces/documentProjectionThread.ts",
+  "workspace-database-worker": "src/workspaces/workspaceDatabaseThread.ts",
+  "document-projection-worker": "src/workspaces/documentProjectionThread.ts",
   "workspace-files-worker": "src/workspaces/workspaceFilesThread.ts",
   "collection-history-worker": "src/workspaces/localDatasetHistoryThread.ts",
 };
@@ -67,7 +65,9 @@ export const mainBuildEntries = {
 // element, and the chat Markdown worker has no DOM. Every renderer context
 // uses the package's entity table instead.
 export const rendererAlias = {
-  "decode-named-character-reference": createRequire(import.meta.url).resolve("decode-named-character-reference"),
+  "decode-named-character-reference": createRequire(import.meta.url).resolve(
+    "decode-named-character-reference",
+  ),
 };
 
 // Excalidraw asks for <asset path>fonts/<family>/<file>.woff2. The renderer
@@ -105,7 +105,11 @@ function excalidrawFonts(): Plugin {
   return {
     name: "excalidraw-fonts",
     transform(code, id) {
-      if (!/[\\/]@excalidraw[\\/]excalidraw[\\/]/u.test(id) || !code.includes("ASSETS_FALLBACK_URL")) return null;
+      if (
+        !/[\\/]@excalidraw[\\/]excalidraw[\\/]/u.test(id) ||
+        !code.includes("ASSETS_FALLBACK_URL")
+      )
+        return null;
       return { code: withoutExcalidrawCdnFallback(code), map: null };
     },
     configureServer(server) {
@@ -118,15 +122,22 @@ function excalidrawFonts(): Plugin {
           next();
           return;
         }
-        readFile(file).then((bytes) => {
-          response.setHeader("Content-Type", "font/woff2");
-          response.end(bytes);
-        }, () => next());
+        readFile(file).then(
+          (bytes) => {
+            response.setHeader("Content-Type", "font/woff2");
+            response.end(bytes);
+          },
+          () => next(),
+        );
       });
     },
     async generateBundle() {
       for (const asset of await excalidrawFontAssets()) {
-        this.emitFile({ type: "asset", fileName: asset.fileName, source: await readFile(asset.source) });
+        this.emitFile({
+          type: "asset",
+          fileName: asset.fileName,
+          source: await readFile(asset.source),
+        });
       }
     },
   };

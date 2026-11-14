@@ -3,8 +3,15 @@ import { openRelayDeployment } from "./relayDeployment";
 
 const [configPath, boundary] = process.argv.slice(2);
 if (boundary === "contender") {
-  try { openRelayDeployment(configPath!); } catch (error) {
-    if (error instanceof Error && "errcode" in error && error.errcode === 5 && error.message === "database is locked") {
+  try {
+    openRelayDeployment(configPath!);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "errcode" in error &&
+      error.errcode === 5 &&
+      error.message === "database is locked"
+    ) {
       process.exit(0);
     }
     throw error;
@@ -14,14 +21,27 @@ if (boundary === "contender") {
 const exec = DatabaseSync.prototype.exec;
 const prepare = DatabaseSync.prototype.prepare;
 function installCrash() {
-  DatabaseSync.prototype.prepare = function(sql: string) {
-    if (sql === "PRAGMA wal_checkpoint(FULL)" && boundary === "before-checkpoint" && prepare.call(this, "SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get()) process.exit(83);
+  DatabaseSync.prototype.prepare = function (sql: string) {
+    if (
+      sql === "PRAGMA wal_checkpoint(FULL)" &&
+      boundary === "before-checkpoint" &&
+      prepare.call(this, "SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get()
+    )
+      process.exit(83);
     return prepare.call(this, sql);
   };
-  DatabaseSync.prototype.exec = function(sql: string) {
-    if (sql === "BEGIN IMMEDIATE" && boundary === "after-checkpoint" && this.prepare("SELECT 1 FROM sqlite_schema WHERE name='continuity'").get()) process.exit(84);
-    const relay = sql === "COMMIT" && this.prepare("SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get();
-    const side = sql === "COMMIT" && this.prepare("SELECT 1 FROM sqlite_schema WHERE name='continuity'").get();
+  DatabaseSync.prototype.exec = function (sql: string) {
+    if (
+      sql === "BEGIN IMMEDIATE" &&
+      boundary === "after-checkpoint" &&
+      this.prepare("SELECT 1 FROM sqlite_schema WHERE name='continuity'").get()
+    )
+      process.exit(84);
+    const relay =
+      sql === "COMMIT" &&
+      this.prepare("SELECT 1 FROM sqlite_schema WHERE name='sync_relay_continuity'").get();
+    const side =
+      sql === "COMMIT" && this.prepare("SELECT 1 FROM sqlite_schema WHERE name='continuity'").get();
     if (relay && boundary === "before-commit") process.exit(81);
     if (side && boundary === "before-settlement-commit") process.exit(85);
     const result = exec.call(this, sql);

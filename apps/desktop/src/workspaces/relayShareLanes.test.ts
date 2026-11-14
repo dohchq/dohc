@@ -61,18 +61,18 @@ describe("relay share lanes", () => {
   it("sends a group grant to the chat manager too", () => {
     const lanes = pathShareLanes({
       granted: [pathRow("s-path"), groupRow("s-group")],
-      received: [pathRow("r-path"), groupRow("r-group"), { ...groupRow("r-damaged"), selector: null, damaged: true, selectorKind: "group" }],
+      received: [
+        pathRow("r-path"),
+        groupRow("r-group"),
+        { ...groupRow("r-damaged"), selector: null, damaged: true, selectorKind: "group" },
+      ],
     });
     expect(lanes.granted.map((row) => row.shareId)).toEqual(["s-path"]);
     expect(lanes.received.map((row) => row.shareId)).toEqual(["r-path"]);
   });
 
-  // The regression this rule exists for. The chat manager scopes by
-  // selector.kind and channelWireId, which a damaged row does not have, so
-  // dropping it here too left it in neither manager and unendable.
   it("keeps a damaged chat grant listed, because no other manager can", () => {
     const damaged = damagedChatRow("s-damaged-chat");
-    // Traced: the chat manager cannot take this row.
     expect(isReadableChatChannelRow(damaged)).toBe(false);
 
     const lanes = pathShareLanes({ granted: [damaged], received: [damaged] });
@@ -80,7 +80,6 @@ describe("relay share lanes", () => {
       lanes.granted.map((row) => row.shareId),
       "a damaged chat grant reaches neither manager and cannot be ended",
     ).toEqual(["s-damaged-chat"]);
-    // The receive side has nothing to accept, so it is dropped there.
     expect(lanes.received).toEqual([]);
   });
 
@@ -94,12 +93,7 @@ describe("relay share lanes", () => {
   // The property the split owes: every granted row is listed by exactly one
   // manager, so none is left without a way to end it.
   it("leaves no granted row without a manager", () => {
-    const granted = [
-      pathRow("a"),
-      chatRow("b"),
-      damagedChatRow("c"),
-      damagedPathRow("d"),
-    ];
+    const granted = [pathRow("a"), chatRow("b"), damagedChatRow("c"), damagedPathRow("d")];
     const lanes = pathShareLanes({ granted });
     for (const row of granted) {
       const here = lanes.granted.some((kept) => kept.shareId === row.shareId);

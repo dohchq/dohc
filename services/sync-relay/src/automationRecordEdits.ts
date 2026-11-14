@@ -1,8 +1,8 @@
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
-import type {AutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
-import {AutomationCreationCommitted} from "@dohc/automation-executor/collection-record-edits";
-import {createHash} from "node:crypto";
-import {posix} from "node:path";
+import type { AutomationDeclaration } from "@dohc/live-session-contract/live-authorship";
+import { AutomationCreationCommitted } from "@dohc/automation-executor/collection-record-edits";
+import { createHash } from "node:crypto";
+import { posix } from "node:path";
 import type {
   CollectionRecordEditContext,
   RecordEditSession,
@@ -15,34 +15,54 @@ import {
   type EngineTransport,
   type EngineYdocProviderSession,
 } from "@dohc/workspace-engine-client";
-import type {AutomationReplica} from "./automationReplicas";
+import type { AutomationReplica } from "./automationReplicas";
 
 /** The engine calls a replica's record writes make. */
 export interface ReplicaRecordEngine {
-  readonly adapter: Pick<VersionedLiveAdapter, "getActiveVersion" | "readTextFile" | "writeTextFile" | "getCollectionRecord" | "sharedFileUpdateStates">;
-  openSession(input: {versionId: string; path: string; expectedObjectId?: string}): Promise<EngineYdocProviderSession>;
-  checkWriteAuthority?(path: string, declaration: AutomationDeclaration, signal: AbortSignal): Promise<void>;
+  readonly adapter: Pick<
+    VersionedLiveAdapter,
+    | "getActiveVersion"
+    | "readTextFile"
+    | "writeTextFile"
+    | "getCollectionRecord"
+    | "sharedFileUpdateStates"
+  >;
+  openSession(input: {
+    versionId: string;
+    path: string;
+    expectedObjectId?: string;
+  }): Promise<EngineYdocProviderSession>;
+  checkWriteAuthority?(
+    path: string,
+    declaration: AutomationDeclaration,
+    signal: AbortSignal,
+  ): Promise<void>;
   prepareSharedRecord?(path: string, signal: AbortSignal): Promise<void>;
   deliverSharedRecord?(path: string, signal: AbortSignal): Promise<void>;
   onDeliveryError?(path: string, error: unknown): void;
 }
 
 /** The engine of one open replica. */
-export function replicaRecordEngine(replica: Pick<AutomationReplica, "client" | "workspace" | "workspaceId">): ReplicaRecordEngine {
+export function replicaRecordEngine(
+  replica: Pick<AutomationReplica, "client" | "workspace" | "workspaceId">,
+): ReplicaRecordEngine {
   return {
-    adapter: new VersionedLiveAdapter(replica.client, replica.workspace, {workspaceId: replica.workspaceId}),
-    openSession: ({versionId, path, expectedObjectId}) => openEngineYdocProviderSession({
-      transport: replica.client as EngineTransport,
-      workspace: replica.workspace,
-      versionId,
-      path,
-      ...(expectedObjectId === undefined ? {} : {expectedObjectId}),
-      // A record file is a live Markdown document.
-      contentKind: "richdoc",
-      trustedAutomationDraft: true,
-      // The session reads its own doc when a write's turn comes.
-      onRemoteUpdate: () => undefined,
+    adapter: new VersionedLiveAdapter(replica.client, replica.workspace, {
+      workspaceId: replica.workspaceId,
     }),
+    openSession: ({ versionId, path, expectedObjectId }) =>
+      openEngineYdocProviderSession({
+        transport: replica.client as EngineTransport,
+        workspace: replica.workspace,
+        versionId,
+        path,
+        ...(expectedObjectId === undefined ? {} : { expectedObjectId }),
+        // A record file is a live Markdown document.
+        contentKind: "richdoc",
+        trustedAutomationDraft: true,
+        // The session reads its own doc when a write's turn comes.
+        onRemoteUpdate: () => undefined,
+      }),
   };
 }
 
@@ -70,50 +90,97 @@ export function replicaRecordEditContext(
   callerSignal: AbortSignal,
   ownerUndo = false,
 ): CollectionRecordEditContext {
-  const {workspaceId} = replica;
+  const { workspaceId } = replica;
   const signal = AbortSignal.any([callerSignal, replica.signal]);
-  const {adapter} = engine;
+  const { adapter } = engine;
   const activeVersion = async (): Promise<string> => {
-    const version = await adapter.getActiveVersion({workspaceId});
-    if (version === null) throw new Error("This server's copy of the workspace has no active version.");
+    const version = await adapter.getActiveVersion({ workspaceId });
+    if (version === null)
+      throw new Error("This server's copy of the workspace has no active version.");
     return version.id;
   };
   return {
     async openRecord(path) {
       const versionId = await activeVersion();
       await engine.prepareSharedRecord?.(path, signal);
-      const provider = await engine.openSession({versionId, path});
+      const provider = await engine.openSession({ versionId, path });
       const expectedObjectId = provider.objectId;
-      return await recordSession(provider, path, signal, ownerUndo, () => engine.openSession({
-        versionId, path, ...(expectedObjectId === undefined ? {} : {expectedObjectId}),
-      }), engine.deliverSharedRecord ? () => engine.deliverSharedRecord!(path, signal) : undefined, error => engine.onDeliveryError?.(path, error), engine.checkWriteAuthority ? async options => {
-        if (!ownerUndo && options.attribution?.actorKind === "automation" && options.actorOriginId !== undefined) {
-          await engine.checkWriteAuthority!(path, {automationId: options.actorOriginId, attribution: {...options.attribution, actorKind: "automation", depth: options.attribution.depth ?? 0}}, signal);
-        }
-      } : undefined);
+      return await recordSession(
+        provider,
+        path,
+        signal,
+        ownerUndo,
+        () =>
+          engine.openSession({
+            versionId,
+            path,
+            ...(expectedObjectId === undefined ? {} : { expectedObjectId }),
+          }),
+        engine.deliverSharedRecord ? () => engine.deliverSharedRecord!(path, signal) : undefined,
+        (error) => engine.onDeliveryError?.(path, error),
+        engine.checkWriteAuthority
+          ? async (options) => {
+              if (
+                !ownerUndo &&
+                options.attribution?.actorKind === "automation" &&
+                options.actorOriginId !== undefined
+              ) {
+                await engine.checkWriteAuthority!(
+                  path,
+                  {
+                    automationId: options.actorOriginId,
+                    attribution: {
+                      ...options.attribution,
+                      actorKind: "automation",
+                      depth: options.attribution.depth ?? 0,
+                    },
+                  },
+                  signal,
+                );
+              }
+            }
+          : undefined,
+      );
     },
     async createFile(path, text, author) {
       // Undo adds nothing.
       if (ownerUndo || author.kind !== "automation") throw new Error(AUTOMATIONS_ONLY);
-      await engine.checkWriteAuthority?.(path, {automationId: author.automationId, attribution: {actorKind: "automation",
-        ...(author.onBehalfOf === undefined ? {} : {onBehalfOf: author.onBehalfOf}), depth: author.depth, run: author.run}}, signal);
+      await engine.checkWriteAuthority?.(
+        path,
+        {
+          automationId: author.automationId,
+          attribution: {
+            actorKind: "automation",
+            ...(author.onBehalfOf === undefined ? {} : { onBehalfOf: author.onBehalfOf }),
+            depth: author.depth,
+            run: author.run,
+          },
+        },
+        signal,
+      );
       const versionId = await activeVersion();
       signal.throwIfAborted();
       let result;
-      try { result = await adapter.writeTextFile({
-        workspaceId,
-        versionId,
-        path,
-        text,
-        publish: true,
-        createOnly: true,
-        // The same file again is the same request, so a retry after the
-        // engine committed it replays the answer instead of refusing.
-        requestId: `automation-create:${createHash("sha256").update(text).digest("hex")}`,
-        metadata: {origin: "api", summary: `Added ${posix.basename(path)}`},
-        author: {kind: "automation", automationId: author.automationId, onBehalfOf: author.onBehalfOf, depth: author.depth},
-      }); }
-      catch (error) {
+      try {
+        result = await adapter.writeTextFile({
+          workspaceId,
+          versionId,
+          path,
+          text,
+          publish: true,
+          createOnly: true,
+          // The same file again is the same request, so a retry after the
+          // engine committed it replays the answer instead of refusing.
+          requestId: `automation-create:${createHash("sha256").update(text).digest("hex")}`,
+          metadata: { origin: "api", summary: `Added ${posix.basename(path)}` },
+          author: {
+            kind: "automation",
+            automationId: author.automationId,
+            onBehalfOf: author.onBehalfOf,
+            depth: author.depth,
+          },
+        });
+      } catch (error) {
         if (isIdempotencyKeyReuseRefusal(error)) throw new AutomationCreationCommitted();
         throw error;
       }
@@ -121,11 +188,19 @@ export function replicaRecordEditContext(
       return path;
     },
     async readText(path) {
-      const read = await adapter.readTextFile({workspaceId, versionId: await activeVersion(), path});
-      if (typeof read?.text !== "string") throw new VersionedTextStoreError("file-not-found", `${path} is not a text file in this server's copy of the workspace.`);
-      return {text: read.text, truncated: false};
+      const read = await adapter.readTextFile({
+        workspaceId,
+        versionId: await activeVersion(),
+        path,
+      });
+      if (typeof read?.text !== "string")
+        throw new VersionedTextStoreError(
+          "file-not-found",
+          `${path} is not a text file in this server's copy of the workspace.`,
+        );
+      return { text: read.text, truncated: false };
     },
-    withAdapter: async (work) => replica.signal.aborted ? null : await work(adapter),
+    withAdapter: async (work) => (replica.signal.aborted ? null : await work(adapter)),
     // No change notices here. A new record is adopted before its create returns;
     // a deduped one adopted later makes the run wait out its adoption deadline and resume on retry.
     onRecordsChanged: () => () => undefined,
@@ -133,7 +208,8 @@ export function replicaRecordEditContext(
   };
 }
 
-const AUTOMATIONS_ONLY = "This server writes records only for automations, and for the owner's Undo of their runs.";
+const AUTOMATIONS_ONLY =
+  "This server writes records only for automations, and for the owner's Undo of their runs.";
 
 /**
  * One write's session over a provider. It refuses a path the version does
@@ -144,15 +220,29 @@ const AUTOMATIONS_ONLY = "This server writes records only for automations, and f
  * canonical state for the caller to inspect. Other failures or an aborted
  * signal stop further writes and settlement.
  */
-async function recordSession(provider: EngineYdocProviderSession, path: string, signal: AbortSignal, ownerUndo: boolean, reopen: () => Promise<EngineYdocProviderSession>, deliver?: () => Promise<void>, onDeliveryError?: (error: unknown) => void, checkWriteAuthority?: (options: Parameters<RecordEditSession["applyDecidedLocalUpdate"]>[2]) => Promise<void>): Promise<RecordEditSession> {
+async function recordSession(
+  provider: EngineYdocProviderSession,
+  path: string,
+  signal: AbortSignal,
+  ownerUndo: boolean,
+  reopen: () => Promise<EngineYdocProviderSession>,
+  deliver?: () => Promise<void>,
+  onDeliveryError?: (error: unknown) => void,
+  checkWriteAuthority?: (
+    options: Parameters<RecordEditSession["applyDecidedLocalUpdate"]>[2],
+  ) => Promise<void>,
+): Promise<RecordEditSession> {
   try {
     if (provider.head === "absent") {
       throw new Error(`${path} is not a record in this server's copy of the workspace.`);
     }
     signal.throwIfAborted();
     if (provider.unsettled) {
-      try {await provider.settleNow({summary: `Updated ${posix.basename(path)}`});}
-      catch (error) {if (!(error instanceof YdocOwnerDraftPendingError)) throw error;}
+      try {
+        await provider.settleNow({ summary: `Updated ${posix.basename(path)}` });
+      } catch (error) {
+        if (!(error instanceof YdocOwnerDraftPendingError)) throw error;
+      }
     }
   } catch (error) {
     await provider.evict();
@@ -164,7 +254,10 @@ async function recordSession(provider: EngineYdocProviderSession, path: string, 
   return {
     applyDecidedLocalUpdate(decide, onArmed, options) {
       const turn = chain.then(async () => {
-        if (failed) throw new Error(`An earlier write to ${path} failed, so this session writes nothing more.`);
+        if (failed)
+          throw new Error(
+            `An earlier write to ${path} failed, so this session writes nothing more.`,
+          );
         signal.throwIfAborted();
         const allowed = ownerUndo
           ? options.attribution?.actorKind === "human"
@@ -175,7 +268,7 @@ async function recordSession(provider: EngineYdocProviderSession, path: string, 
         if (update === null) return false;
         try {
           // This write settles once, when the caller asks.
-          const journaled = provider.applyLocalUpdate(update, {...options, armSettle: false});
+          const journaled = provider.applyLocalUpdate(update, { ...options, armSettle: false });
           onArmed();
           await journaled;
         } catch (error) {
@@ -186,18 +279,22 @@ async function recordSession(provider: EngineYdocProviderSession, path: string, 
             await provider.evict();
             signal.throwIfAborted();
             provider = await reopen();
-            if (provider.head === "absent") throw new Error(`${path} is not a record in this server's copy of the workspace.`);
+            if (provider.head === "absent")
+              throw new Error(`${path} is not a record in this server's copy of the workspace.`);
             signal.throwIfAborted();
             if (provider.unsettled) {
-              try {await provider.settleNow({summary: `Updated ${posix.basename(path)}`});}
-              catch (error) {if (!(error instanceof YdocOwnerDraftPendingError)) throw error;}
+              try {
+                await provider.settleNow({ summary: `Updated ${posix.basename(path)}` });
+              } catch (error) {
+                if (!(error instanceof YdocOwnerDraftPendingError)) throw error;
+              }
             }
             failed = false;
             throw error;
           }
           throw new Error(
             `The write to ${path} may have been recorded. Retry it with the same idempotency key to find out; the key keeps a recorded write from applying twice.`,
-            {cause: error},
+            { cause: error },
           );
         }
         return true;
@@ -207,14 +304,21 @@ async function recordSession(provider: EngineYdocProviderSession, path: string, 
     },
     async settleNow(options) {
       await chain;
-      if (failed) throw new Error(`An earlier write to ${path} failed, so its session does not settle.`);
+      if (failed)
+        throw new Error(`An earlier write to ${path} failed, so its session does not settle.`);
       signal.throwIfAborted();
-      try {return await provider.settleNow(options);}
-      catch (error) {
+      try {
+        return await provider.settleNow(options);
+      } catch (error) {
         if (!(error instanceof YdocOwnerDraftPendingError) || !deliver) throw error;
         // Keep the draft reference even if delivery is uncertain. Its durable
         // native status distinguishes pending, accepted and not accepted.
-        try {await deliver();} catch (deliveryError) {signal.throwIfAborted(); onDeliveryError?.(deliveryError);}
+        try {
+          await deliver();
+        } catch (deliveryError) {
+          signal.throwIfAborted();
+          onDeliveryError?.(deliveryError);
+        }
         throw error;
       }
     },

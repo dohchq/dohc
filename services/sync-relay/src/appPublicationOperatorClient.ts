@@ -1,16 +1,35 @@
 import { createConnection } from "node:net";
-import { OPERATOR_MAX_RESPONSE_BYTES, OPERATOR_TIMEOUT_MS, type OperatorRequest, type OperatorResponse } from "./appPublicationOperatorProtocol";
+import {
+  OPERATOR_MAX_RESPONSE_BYTES,
+  OPERATOR_TIMEOUT_MS,
+  type OperatorRequest,
+  type OperatorResponse,
+} from "./appPublicationOperatorProtocol";
 
-export function requestPublicationTakedown(path: string, request: OperatorRequest, secret: string, timeoutMs = OPERATOR_TIMEOUT_MS): Promise<OperatorResponse> {
+export function requestPublicationTakedown(
+  path: string,
+  request: OperatorRequest,
+  secret: string,
+  timeoutMs = OPERATOR_TIMEOUT_MS,
+): Promise<OperatorResponse> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
-    const deadline = setTimeout(() => socket.destroy(new Error("Publication takedown timed out. Check the relay before retrying.")), timeoutMs);
+    const deadline = setTimeout(
+      () =>
+        socket.destroy(
+          new Error("Publication takedown timed out. Check the relay before retrying."),
+        ),
+      timeoutMs,
+    );
     socket.once("close", () => clearTimeout(deadline));
     socket.once("error", reject);
-    socket.once("connect", () => socket.write(JSON.stringify({...request, secret}) + "\n"));
+    socket.once("connect", () => socket.write(JSON.stringify({ ...request, secret }) + "\n"));
     let bytes = Buffer.alloc(0);
-    socket.on("data", chunk => {
-      if (bytes.length + chunk.length > OPERATOR_MAX_RESPONSE_BYTES) {socket.destroy(new Error("Invalid operator response.")); return;}
+    socket.on("data", (chunk) => {
+      if (bytes.length + chunk.length > OPERATOR_MAX_RESPONSE_BYTES) {
+        socket.destroy(new Error("Invalid operator response."));
+        return;
+      }
       bytes = Buffer.concat([bytes, chunk]);
     });
     socket.once("end", () => {
@@ -18,9 +37,16 @@ export function requestPublicationTakedown(path: string, request: OperatorReques
         const value: unknown = JSON.parse(bytes.toString("utf8"));
         if (!value || typeof value !== "object") throw new Error("Invalid operator response.");
         const row = value as Record<string, unknown>;
-        if (![0, 1, 2, 3].includes(Number(row.code)) || typeof row.code !== "number" || typeof row.message !== "string") throw new Error("Invalid operator response.");
+        if (
+          ![0, 1, 2, 3].includes(Number(row.code)) ||
+          typeof row.code !== "number" ||
+          typeof row.message !== "string"
+        )
+          throw new Error("Invalid operator response.");
         resolve(value as OperatorResponse);
-      } catch (error) {reject(error);}
+      } catch (error) {
+        reject(error);
+      }
     });
   });
 }

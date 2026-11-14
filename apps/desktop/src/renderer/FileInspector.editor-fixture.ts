@@ -8,7 +8,7 @@ import { WYSIWYG_MARKDOWN_THRESHOLD_BYTES } from "../workspaces/workspaceTextLim
 // A text view's test id appears one commit before CodeMirror exists: the view
 // creates its EditorView — and with it `.cm-content` — in a passive effect. A
 // `querySelector` on the render that found the test id therefore returns null
-// often enough to matter, and `as HTMLElement` used to hide exactly that null
+// often enough to matter, and an `as HTMLElement` cast would hide that null
 // until a later line failed on it. Waiting for the element is the honest read,
 // and it is what every interaction here needs anyway: no user can click into an
 // editor that has not been built.
@@ -81,13 +81,13 @@ export function codeEditorTestHost(host: HTMLElement): CodeEditorTestHost {
     value: {
       configurable: true,
       get: () => codeEditorText(host),
-      set: (text: string) => replaceCodeEditorText(host, text),
+      set: (text: string) => {
+        replaceCodeEditorText(host, text);
+      },
     },
     readOnly: {
       configurable: true,
-      get: () =>
-        host.querySelector(".cm-content")?.getAttribute("contenteditable") ===
-        "false",
+      get: () => host.querySelector(".cm-content")?.getAttribute("contenteditable") === "false",
     },
     selectionStart: {
       configurable: true,
@@ -203,10 +203,11 @@ export function stubScrollSpy(
 export async function findEnabledMarkdownEditToggle(): Promise<HTMLElement> {
   return await waitFor(() => {
     const toggle = screen.getByTestId("markdown-edit-toggle");
-    if ((toggle instanceof HTMLButtonElement && toggle.disabled) || toggle.getAttribute("aria-disabled") === "true") {
-      throw new Error(
-        "markdown-edit-toggle is still disabled — the document is opening",
-      );
+    if (
+      (toggle instanceof HTMLButtonElement && toggle.disabled) ||
+      toggle.getAttribute("aria-disabled") === "true"
+    ) {
+      throw new Error("markdown-edit-toggle is still disabled — the document is opening");
     }
     return toggle;
   });

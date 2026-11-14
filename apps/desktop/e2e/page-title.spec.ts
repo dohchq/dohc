@@ -10,19 +10,21 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-const TITLE = "A deliberately long page title that keeps going well past the width of a narrow pane";
+const TITLE =
+  "A deliberately long page title that keeps going well past the width of a narrow pane";
 
 function caret(title: Locator, timeout?: number) {
-  return title.evaluate((element: HTMLTextAreaElement) => ({
-    start: element.selectionStart,
-    end: element.selectionEnd,
-    focused: document.activeElement === element,
-  }), undefined, { timeout });
+  return title.evaluate(
+    (element: HTMLTextAreaElement) => ({
+      start: element.selectionStart,
+      end: element.selectionEnd,
+      focused: document.activeElement === element,
+    }),
+    undefined,
+    { timeout },
+  );
 }
 
-// A long title wraps in a narrow pane, and stays one line of text: ArrowDown
-// moves through its lines before it moves to the body, and pasted line
-// breaks become spaces.
 test("a wrapped page title keeps ArrowDown, selection, and paste inside the title", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -34,23 +36,30 @@ test("a wrapped page title keeps ArrowDown, selection, and paste inside the titl
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
-    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(900, 700));
+    await desktop.app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]!.setSize(900, 700),
+    );
 
     await explorerRow(page, "long.md").click();
     const title = page.getByTestId("page-title");
     await expect(title).toHaveValue(TITLE, { timeout: 20_000 });
-    // It wraps: the field is taller than one line.
     await expect
       .poll(() =>
-        title.evaluate((element) => element.getBoundingClientRect().height / parseFloat(getComputedStyle(element).lineHeight)),
+        title.evaluate(
+          (element) =>
+            element.getBoundingClientRect().height /
+            parseFloat(getComputedStyle(element).lineHeight),
+        ),
       )
       .toBeGreaterThan(1.5);
 
     // The body editor settles its collaboration state after it opens. A
     // handoff before that can be dropped, for Enter as for ArrowDown.
-    await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute("data-collab-state", "disabled");
+    await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute(
+      "data-collab-state",
+      "disabled",
+    );
 
-    // From the first line, ArrowDown moves down the title.
     await title.click();
     await page.keyboard.press(DOCUMENT_START);
     await page.keyboard.press("ArrowDown");
@@ -58,35 +67,36 @@ test("a wrapped page title keeps ArrowDown, selection, and paste inside the titl
     expect(moved.focused).toBe(true);
     expect(moved.start).toBeGreaterThan(0);
 
-    // Shift+ArrowDown selects instead of leaving.
     await page.keyboard.press(DOCUMENT_START);
     await page.keyboard.press("Shift+ArrowDown");
     const selected = await caret(title);
     expect(selected.focused).toBe(true);
     expect(selected.end).toBeGreaterThan(selected.start);
 
-    // From the last line, ArrowDown moves to the body.
     await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.press("ArrowDown");
     await expect(page.getByTestId("markdown-editor")).toBeFocused();
 
-    // A pasted line break becomes a space, and the caret stays after the paste.
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       await desktop!.app.evaluate(({ clipboard }) => clipboard.writeText("short\nand "));
       await title.click({ timeout: remainingMs() });
-      await title.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(2, 2), undefined, { timeout: remainingMs() });
+      await title.evaluate(
+        (element: HTMLTextAreaElement) => element.setSelectionRange(2, 2),
+        undefined,
+        { timeout: remainingMs() },
+      );
       await page.keyboard.press("ControlOrMeta+V");
       await expect(title).toHaveValue(`A short and ${TITLE.slice(2)}`, { timeout: remainingMs() });
-      expect(await caret(title, remainingMs())).toMatchObject({ start: "A short and ".length, focused: true });
+      expect(await caret(title, remainingMs())).toMatchObject({
+        start: "A short and ".length,
+        focused: true,
+      });
     });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
 
-// A page whose body opens with an H1 folds its empty title beside "Add icon".
-// Focus and blur leave it folded, so the + below does not move between the
-// press that blurs the title and the release that clicks the +.
 test("a click on + while the empty folded title has focus adds a property", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -100,7 +110,10 @@ test("a click on + while the empty folded title has focus adds a property", asyn
     await explorerRow(page, "plan.md").click();
     const title = page.getByTestId("page-title");
     await expect(title).toHaveAttribute("placeholder", "Add title", { timeout: 20_000 });
-    await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute("data-collab-state", "disabled");
+    await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute(
+      "data-collab-state",
+      "disabled",
+    );
     const add = page.getByTestId("property-add");
     const before = await add.boundingBox();
 
@@ -124,7 +137,8 @@ test("ArrowDown leaves a mixed-direction title from its last line, and only ther
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const short = "Hello שלום world";
-  const long = "Hello שלום world, a much longer title with עברית in the middle that wraps in a narrow pane";
+  const long =
+    "Hello שלום world, a much longer title with עברית in the middle that wraps in a narrow pane";
 
   try {
     await writeWorkspaceFiles(temp, [
@@ -134,22 +148,28 @@ test("ArrowDown leaves a mixed-direction title from its last line, and only ther
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
-    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(900, 700));
+    await desktop.app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]!.setSize(900, 700),
+    );
     const title = page.getByTestId("page-title");
 
-    // A wrapped mixed-direction title keeps ArrowDown on its first line.
     await explorerRow(page, "long.md").click();
     await expect(title).toHaveValue(long, { timeout: 20_000 });
-    await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute("data-collab-state", "disabled");
+    await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute(
+      "data-collab-state",
+      "disabled",
+    );
     await title.click();
     await page.keyboard.press(DOCUMENT_START);
     await page.keyboard.press("ArrowDown");
     expect(await caret(title)).toMatchObject({ focused: true });
 
-    // A one-line mixed-direction title hands ArrowDown to the body from its start.
     await explorerRow(page, "short.md").click();
     await expect(title).toHaveValue(short, { timeout: 20_000 });
-    await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute("data-collab-state", "disabled");
+    await expect(page.locator(".dohc-tiptap-editor")).toHaveAttribute(
+      "data-collab-state",
+      "disabled",
+    );
     await title.click();
     await page.keyboard.press(DOCUMENT_START);
     await page.keyboard.press("ArrowDown");

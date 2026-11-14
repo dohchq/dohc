@@ -53,25 +53,16 @@ describe("conflictPreview", () => {
     ["\n", 1],
     ["\r\n", 2],
   ])("bounds line boxes for a body broken by %j", (lineBreak, breakUnits) => {
-    const text = `${"line".repeat(4)}${lineBreak}`.repeat(
-      CONFLICT_PREVIEW_MAX_LINES * 3,
-    );
+    const text = `${"line".repeat(4)}${lineBreak}`.repeat(CONFLICT_PREVIEW_MAX_LINES * 3);
     const preview = conflictPreview(text, 1);
     expect(preview.text.split("\n").length - 1).toBe(CONFLICT_PREVIEW_MAX_LINES);
-    expect(preview.text.length).toBe(
-      CONFLICT_PREVIEW_MAX_LINES * (16 + breakUnits),
-    );
+    expect(preview.text.length).toBe(CONFLICT_PREVIEW_MAX_LINES * (16 + breakUnits));
     expect(preview.hiddenChars).toBeGreaterThan(0);
     // CRLF must cost one line, not two. Counting each half separately would
     // halve the window for every Windows document.
     expect(preview.text.endsWith(lineBreak)).toBe(true);
   });
 
-  // The other side of that measurement. A character that only soft wraps is
-  // not a line box, so a body full of them is one line to the line window and
-  // the character window is what holds it. Bounded either way — and cutting
-  // these at the line window would have shown far less of the file than it
-  // safely could.
   it.each([
     ["CR", "\r"],
     ["U+2028 LINE SEPARATOR", "\u2028"],
@@ -80,9 +71,7 @@ describe("conflictPreview", () => {
     ["FF", "\u000c"],
     ["NEL", "\u0085"],
   ])("holds a body separated by %s at the character window", (_label, separator) => {
-    const text = `${"line".repeat(4)}${separator}`.repeat(
-      CONFLICT_PREVIEW_MAX_LINES * 3,
-    );
+    const text = `${"line".repeat(4)}${separator}`.repeat(CONFLICT_PREVIEW_MAX_LINES * 3);
     const preview = conflictPreview(text, 1);
     expect(preview.text).toHaveLength(CONFLICT_PREVIEW_MAX_CHARS);
     expect(preview.text.length + preview.hiddenChars).toBe(text.length);
@@ -113,7 +102,6 @@ describe("conflictPreview", () => {
     expect(lastUnit >= 0xd800 && lastUnit < 0xdc00).toBe(false);
     expect(preview.text).toHaveLength(CONFLICT_PREVIEW_MAX_CHARS - 1);
     expect(preview.text.length + preview.hiddenChars).toBe(body.length);
-    // The whole preview still decodes: no replacement character anywhere.
     expect(preview.text).not.toContain("�");
     expect([...preview.text]).toHaveLength(CONFLICT_PREVIEW_MAX_CHARS / 2);
   });
@@ -126,10 +114,10 @@ describe("conflictPreview", () => {
     expect(preview.hiddenChars).toBe(text.length - preview.text.length);
   });
 
-  // Every shape, including the one that used to stall: a short complete line
-  // followed by a line far wider than the window. Requiring a line boundary
-  // kept the cut on that first newline, so 58 of the first 59 presses of
-  // "Show more" changed nothing.
+  // Every shape, including a short complete line followed by a line far wider
+  // than the window. A cut that required a line boundary would stay on that
+  // first newline, so 58 of the first 59 presses of "Show more" would change
+  // nothing.
   const shapes: [string, string][] = [
     ["many short lines", lines(CONFLICT_PREVIEW_MAX_LINES * 5, 10)],
     ["one 1 MiB line", "y".repeat(1024 * 1024)],
@@ -151,8 +139,6 @@ describe("conflictPreview", () => {
         expect(next.hiddenChars).toBe(0);
         continue;
       }
-      // The press must pay for itself: strictly more painted, strictly less
-      // held back, every time, until the side is fully shown.
       expect(next.text.length).toBeGreaterThan(previous.text.length);
       expect(next.hiddenChars).toBeLessThan(previous.hiddenChars);
       previous = next;

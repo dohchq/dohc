@@ -12,7 +12,10 @@ export interface PinnedApp {
 }
 
 function folderLabel(appRoot: string): string {
-  const folder = appRoot.split("/").filter((part) => part !== "" && part !== ".").at(-1);
+  const folder = appRoot
+    .split("/")
+    .filter((part) => part !== "" && part !== ".")
+    .at(-1);
   return folder ?? "App";
 }
 
@@ -25,10 +28,7 @@ export function pinnedAppInitial(label: string): string {
  * Reads each pinned app once when the pins change, so the sidebar can use its
  * title. Until an answer arrives the folder stands in.
  */
-export function usePinnedApps(
-  workspaceId: string,
-  roots: readonly string[],
-): readonly PinnedApp[] {
+export function usePinnedApps(workspaceId: string, roots: readonly string[]): readonly PinnedApp[] {
   const [read, setRead] = useState<ReadonlyMap<string, { title: string; missing: boolean }>>(
     new Map(),
   );
@@ -53,7 +53,6 @@ export function usePinnedApps(
       setRead(new Map(answers.filter((answer) => answer !== null)));
     });
     // The joined key stands for the list.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, requests, workspaceId]);
 
   // The same pins and titles answer the same list, so what reads it, such
@@ -69,7 +68,6 @@ export function usePinnedApps(
         };
       }),
     // The joined key stands for the list.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [key, read],
   );
 }

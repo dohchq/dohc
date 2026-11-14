@@ -89,7 +89,14 @@ function valid(automation: Partial<Automation>): AutomationEntry {
       enabled: true,
       when: { kind: "record-added", table: null },
       if: null,
-      do: [{ kind: "set", values: [{ field: "X", value: { kind: "literal", value: 1 } }], records: null, operation: null }],
+      do: [
+        {
+          kind: "set",
+          values: [{ field: "X", value: { kind: "literal", value: 1 } }],
+          records: null,
+          operation: null,
+        },
+      ],
       ...automation,
     },
   };
@@ -109,7 +116,6 @@ function reverseKeys<T>(value: T): T {
   return value;
 }
 
-// Every trigger and step kind, in the writer's own form.
 const EVERY_KIND = `version: 1
 automations:
   - id: stamp-finish-date
@@ -244,7 +250,12 @@ describe("automations.yaml round trip", () => {
       id: "stamp-finish-date",
       name: "Stamp the finish date",
       enabled: true,
-      when: { kind: "field-changed", field: "Status", to: { kind: "literal", value: "Done" }, table: null },
+      when: {
+        kind: "field-changed",
+        field: "Status",
+        to: { kind: "literal", value: "Done" },
+        table: null,
+      },
       if: null,
       do: [
         {
@@ -264,7 +275,11 @@ describe("automations.yaml round trip", () => {
         { kind: "literal", value: "user_ana" },
       ],
     });
-    expect(review?.when).toEqual({ kind: "record-changed", fields: ["Estimate", "Due"], table: null });
+    expect(review?.when).toEqual({
+      kind: "record-changed",
+      fields: ["Estimate", "Due"],
+      table: null,
+    });
     expect(review?.if).toBe("record.Estimate > 8");
     expect(archive?.when).toEqual({ kind: "record-removed", table: null });
     expect(archive?.do[0]).toMatchObject({ collection: "Archive/Removed tasks", as: "logged" });
@@ -315,7 +330,10 @@ describe("automations.yaml round trip", () => {
     const parsed = entries(EVERY_KIND);
     const [first] = parsed;
     if (first?.status !== "valid") throw new Error("expected a valid automation");
-    const edited = [{ ...first, automation: { ...first.automation, enabled: false } }, ...parsed.slice(1)];
+    const edited = [
+      { ...first, automation: { ...first.automation, enabled: false } },
+      ...parsed.slice(1),
+    ];
     const before = written(parsed).split("\n\n");
     const after = written(edited).split("\n\n");
     expect(after.slice(1)).toEqual(before.slice(1));
@@ -374,13 +392,18 @@ automations:
   });
 
   it("reads a file with no automations", () => {
-    for (const text of ["", "# nothing yet\n", "---\n", "version: 1\n", "version: 1\nautomations:\n"]) {
+    for (const text of [
+      "",
+      "# nothing yet\n",
+      "---\n",
+      "version: 1\n",
+      "version: 1\nautomations:\n",
+    ]) {
       expect(entries(text)).toEqual([]);
     }
   });
 });
 
-// One automation whose add-record step holds fields of these lengths.
 function fieldsOfLengths(lengths: number[]): AutomationEntry[] {
   return [
     valid({
@@ -429,9 +452,19 @@ describe("the checked writer", () => {
   it("keeps text and formulas at their bounds and refuses them past it", () => {
     const setX = (value: Automation["do"][number]) => valid({ do: [value] });
     const literal = (text: string) =>
-      setX({ kind: "set", values: [{ field: "X", value: { kind: "literal", value: text } }], records: null, operation: null });
+      setX({
+        kind: "set",
+        values: [{ field: "X", value: { kind: "literal", value: text } }],
+        records: null,
+        operation: null,
+      });
     const formula = (expression: string) =>
-      setX({ kind: "set", values: [{ field: "X", value: { kind: "formula", expression } }], records: null, operation: null });
+      setX({
+        kind: "set",
+        values: [{ field: "X", value: { kind: "formula", expression } }],
+        records: null,
+        operation: null,
+      });
     for (const entry of [
       literal(`=${"x".repeat(MAX_AUTOMATION_TEXT_LENGTH - 1)}`),
       formula("1".repeat(MAX_EXPRESSION_LENGTH)),
@@ -456,7 +489,13 @@ describe("the checked writer", () => {
     expect(
       refusal([
         valid({
-          when: { kind: "schedule", every: "week", at: "09:00", days: ["fri", "mon"], timezone: "UTC" },
+          when: {
+            kind: "schedule",
+            every: "week",
+            at: "09:00",
+            days: ["fri", "mon"],
+            timezone: "UTC",
+          },
           do: [{ kind: "post", text: "Hi", group: "Team" }],
         }),
       ]),
@@ -464,7 +503,14 @@ describe("the checked writer", () => {
     expect(
       refusal([
         valid({
-          do: [{ kind: "set", values: [{ field: "X", value: { kind: "formula", expression: "=x" } }], records: null, operation: null }],
+          do: [
+            {
+              kind: "set",
+              values: [{ field: "X", value: { kind: "formula", expression: "=x" } }],
+              records: null,
+              operation: null,
+            },
+          ],
         }),
       ]),
     ).toEqual([{ code: "changed-on-reread", path: "/automations/0" }]);
@@ -478,14 +524,18 @@ describe("the checked writer", () => {
       ),
     );
     expect(refusal(parsed)).toEqual([{ code: "duplicate-key", path: "/automations/1/do/0/set/X" }]);
-    expect(refusal(parsed.slice(1))).toEqual([{ code: "duplicate-key", path: "/automations/0/do/0/set/X" }]);
+    expect(refusal(parsed.slice(1))).toEqual([
+      { code: "duplicate-key", path: "/automations/0/do/0/set/X" },
+    ]);
   });
 });
 
 describe("values, conditions, and templates", () => {
   it("reads text that starts with = as a formula, however the YAML quotes it", () => {
     const [automation] = validAutomations(
-      automationsFile(withStep(`set: {A: =x, B: "=y", C: '= z ', D: x, E: 1.5, F: true, G: null, H: ""}`)),
+      automationsFile(
+        withStep(`set: {A: =x, B: "=y", C: '= z ', D: x, E: 1.5, F: true, G: null, H: ""}`),
+      ),
     );
     expect(automation?.do[0]).toMatchObject({
       values: [
@@ -516,7 +566,12 @@ describe("values, conditions, and templates", () => {
 
   it("keeps a literal that starts with = a literal, and a formula a formula, after a save", () => {
     const entry = valid({
-      when: { kind: "field-changed", field: "Code", to: { kind: "literal", value: "=5" }, table: null },
+      when: {
+        kind: "field-changed",
+        field: "Code",
+        to: { kind: "literal", value: "=5" },
+        table: null,
+      },
       do: [
         {
           kind: "set",
@@ -553,14 +608,18 @@ describe("values, conditions, and templates", () => {
 
   it("keeps a condition exactly as written", () => {
     const [automation] = validAutomations(
-      automationsFile("id: a\nname: A\nwhen: record-added\nif: '  record.Done '\ndo: [{set: {X: 1}}]"),
+      automationsFile(
+        "id: a\nname: A\nwhen: record-added\nif: '  record.Done '\ndo: [{set: {X: 1}}]",
+      ),
     );
     expect(automation?.if).toBe("  record.Done ");
   });
 
   it("reads a formula in to: as the value to compare, not a condition", () => {
     const [automation] = validAutomations(
-      automationsFile("id: a\nname: A\nwhen: {field-changed: Due, to: '=record.Due > today()'}\ndo: [{set: {X: 1}}]"),
+      automationsFile(
+        "id: a\nname: A\nwhen: {field-changed: Due, to: '=record.Due > today()'}\ndo: [{set: {X: 1}}]",
+      ),
     );
     expect(automation?.when).toEqual({
       kind: "field-changed",
@@ -571,12 +630,21 @@ describe("values, conditions, and templates", () => {
   });
 
   it("ends an unquoted formula at ' #', which YAML reads as a comment", () => {
-    const [automation] = validAutomations(automationsFile(withStep("set:\n  X: =a + 1 # the rest")));
+    const [automation] = validAutomations(
+      automationsFile(withStep("set:\n  X: =a + 1 # the rest")),
+    );
     expect(automation?.do[0]).toMatchObject({
       values: [{ field: "X", value: { kind: "formula", expression: "a + 1" } }],
     });
     const entry = valid({
-      do: [{ kind: "set", values: [{ field: "X", value: { kind: "formula", expression: "a + 1 # b" } }], records: null, operation: null }],
+      do: [
+        {
+          kind: "set",
+          values: [{ field: "X", value: { kind: "formula", expression: "a + 1 # b" } }],
+          records: null,
+          operation: null,
+        },
+      ],
     });
     expect(written([entry])).toContain("X: '=a + 1 # b'\n");
   });
@@ -601,7 +669,16 @@ describe("values, conditions, and templates", () => {
     expect(automationTextParts("{ ({a: 1}).a }")).toEqual([
       { kind: "expression", expression: " ({a: 1}).a " },
     ]);
-    for (const broken of ["{unclosed", "stray }", "{}", "{  }", "{a}}", "{a // }", "{'}", "{/* } */"]) {
+    for (const broken of [
+      "{unclosed",
+      "stray }",
+      "{}",
+      "{  }",
+      "{a}}",
+      "{a // }",
+      "{'}",
+      "{/* } */",
+    ]) {
       expect(automationTextParts(broken)).toBeNull();
     }
   });
@@ -644,9 +721,12 @@ describe("values, conditions, and templates", () => {
     ]);
   });
 
-  it.each(["(a)", "(a + b)", "((a))", "(record?.of) / 2"])("reads the grouped expression %s", (expression) => {
-    expect(automationTextParts(`{${expression}}`)).toEqual([{ kind: "expression", expression }]);
-  });
+  it.each(["(a)", "(a + b)", "((a))", "(record?.of) / 2"])(
+    "reads the grouped expression %s",
+    (expression) => {
+      expect(automationTextParts(`{${expression}}`)).toEqual([{ kind: "expression", expression }]);
+    },
+  );
 
   it("ends each expression at its own brace", () => {
     expect(automationTextParts("{x.of / 2}{y}")).toEqual([
@@ -656,12 +736,18 @@ describe("values, conditions, and templates", () => {
   });
 
   it("ends a line comment at the newline", () => {
-    expect(automationTextParts("{a // }\n}")).toEqual([{ kind: "expression", expression: "a // }\n" }]);
+    expect(automationTextParts("{a // }\n}")).toEqual([
+      { kind: "expression", expression: "a // }\n" },
+    ]);
   });
 
   it("quotes clock times so YAML 1.1 readers keep them as text", () => {
     const text = written(
-      entries(automationsFile("id: a\nname: A\nwhen: {schedule: day, at: '12:30', timezone: UTC}\ndo: [{post: Hi, group: Team}]")),
+      entries(
+        automationsFile(
+          "id: a\nname: A\nwhen: {schedule: day, at: '12:30', timezone: UTC}\ndo: [{post: Hi, group: Team}]",
+        ),
+      ),
     );
     expect(text).toContain("at: '12:30'\n");
   });
@@ -746,7 +832,11 @@ const AUTOMATION_CASES: AutomationCase[] = [
     item: withStep(`set: {2024: 1, "2024": 2}`),
     expected: [{ code: "duplicate-key", path: at("/do/0/set/2024") }],
   },
-  { name: "an entry that is not a mapping", item: "just text", expected: [{ code: "expected-mapping", path: at("") }] },
+  {
+    name: "an entry that is not a mapping",
+    item: "just text",
+    expected: [{ code: "expected-mapping", path: at("") }],
+  },
   {
     name: "steps that are not a list",
     item: "id: a\nname: A\nwhen: record-added\ndo: {set: {X: 1}}",
@@ -988,7 +1078,6 @@ function stepsItem(steps: string[]): string {
   return `id: a\nname: A\nwhen: record-added\ndo: [${steps.join(", ")}]`;
 }
 
-// `depth` if steps inside one another, with one set step in the innermost.
 function nestedIfs(depth: number): string {
   let steps = "{set: {X: 1}}";
   for (let level = 0; level < depth; level += 1) steps = `{if: "true", do: [${steps}]}`;
@@ -1007,13 +1096,10 @@ const BOUND_CASES: AutomationCase[] = [
   {
     name: "an if step one level too deep",
     item: nestedIfs(MAX_IF_DEPTH + 1),
-    expected: [
-      { code: "if-too-deep", path: at(`${"/do/0".repeat(MAX_IF_DEPTH + 1)}`) },
-    ],
+    expected: [{ code: "if-too-deep", path: at(`${"/do/0".repeat(MAX_IF_DEPTH + 1)}`) }],
   },
 ];
 
-// Steps and triggers on dataset Collections, in the writer's own form.
 const DATASET_KINDS = `version: 1
 automations:
   - id: close-invoice
@@ -1211,8 +1297,12 @@ const DATASET_CASES: AutomationCase[] = [
   },
   {
     name: "an input key past its bound",
-    item: withStep(`{invoke: invoices.markPaid, input: {${"k".repeat(MAX_ACTION_INPUT_KEY_LENGTH + 1)}: 1}}`),
-    expected: [{ code: "too-long", path: at(`/do/0/input/${"k".repeat(MAX_ACTION_INPUT_KEY_LENGTH + 1)}`) }],
+    item: withStep(
+      `{invoke: invoices.markPaid, input: {${"k".repeat(MAX_ACTION_INPUT_KEY_LENGTH + 1)}: 1}}`,
+    ),
+    expected: [
+      { code: "too-long", path: at(`/do/0/input/${"k".repeat(MAX_ACTION_INPUT_KEY_LENGTH + 1)}`) },
+    ],
   },
   {
     name: "an input key written twice as a number and as text",
@@ -1226,7 +1316,9 @@ const DATASET_CASES: AutomationCase[] = [
   },
   {
     name: "more input keys than an action takes",
-    item: withStep(`{invoke: invoices.markPaid, input: {${Array.from({ length: MAX_ACTION_INPUT_KEYS + 1 }, (_, index) => `k${index}: 1`).join(", ")}}}`),
+    item: withStep(
+      `{invoke: invoices.markPaid, input: {${Array.from({ length: MAX_ACTION_INPUT_KEYS + 1 }, (_, index) => `k${index}: 1`).join(", ")}}}`,
+    ),
     expected: [{ code: "too-many-inputs", path: at("/do/0/input") }],
   },
   {
@@ -1239,7 +1331,9 @@ const DATASET_CASES: AutomationCase[] = [
 describe("dataset entries", () => {
   it("round trips invoke destinations, including an explicit source path", () => {
     for (const collection of [null, "Invoices", "Finance/Invoices"]) {
-      const automation = valid({ do: [{ kind: "invoke", collection, operation: "invoices.markPaid", input: [] }] });
+      const automation = valid({
+        do: [{ kind: "invoke", collection, operation: "invoices.markPaid", input: [] }],
+      });
       if (automation.status !== "valid") throw new Error("Expected a valid automation");
       const text = written([automation]);
       expect(validAutomations(text)[0]?.do).toEqual(automation.automation.do);
@@ -1247,9 +1341,14 @@ describe("dataset entries", () => {
     }
   });
 
-  it.each(["../Other", "/Other", "Other/../Invoices"])("rejects invoke destination %s outside normalized workspace paths", (collection) => {
-    expect(diagnosticsOf(withStep(`{invoke: invoices.markPaid, collection: '${collection}'}`))).not.toEqual([]);
-  });
+  it.each(["../Other", "/Other", "Other/../Invoices"])(
+    "rejects invoke destination %s outside normalized workspace paths",
+    (collection) => {
+      expect(
+        diagnosticsOf(withStep(`{invoke: invoices.markPaid, collection: '${collection}'}`)),
+      ).not.toEqual([]);
+    },
+  );
 
   it("reads every dataset trigger and step and writes the same text back", () => {
     const parsed = entries(DATASET_KINDS);
@@ -1258,10 +1357,21 @@ describe("dataset entries", () => {
   });
 
   it("reads the operation each step invokes and the table each trigger watches", () => {
-    const [close, added, changed, address, removed, overdue, send, markPaid] = validAutomations(DATASET_KINDS);
-    expect(close?.when).toEqual({ kind: "field-changed", field: "Paid", to: { kind: "literal", value: true }, table: "Invoices" });
+    const [close, added, changed, address, removed, overdue, send, markPaid] =
+      validAutomations(DATASET_KINDS);
+    expect(close?.when).toEqual({
+      kind: "field-changed",
+      field: "Paid",
+      to: { kind: "literal", value: true },
+      table: "Invoices",
+    });
     expect(close?.do).toEqual([
-      { kind: "set", values: [{ field: "Status", value: { kind: "literal", value: "Closed" } }], records: null, operation: "invoices.edit" },
+      {
+        kind: "set",
+        values: [{ field: "Status", value: { kind: "literal", value: "Closed" } }],
+        records: null,
+        operation: "invoices.edit",
+      },
       {
         kind: "add-record",
         values: [{ field: "Invoice", value: { kind: "formula", expression: "record.Number" } }],
@@ -1276,17 +1386,31 @@ describe("dataset entries", () => {
         as: "entries",
         operation: "ledger.read",
       },
-      { kind: "set", values: [{ field: "Reconciled", value: { kind: "literal", value: true } }], records: "entries", operation: "ledger.edit" },
+      {
+        kind: "set",
+        values: [{ field: "Reconciled", value: { kind: "literal", value: true } }],
+        records: "entries",
+        operation: "ledger.edit",
+      },
     ]);
     expect(added?.when).toEqual({ kind: "record-added", table: "Customers" });
     expect(changed?.when).toEqual({ kind: "record-changed", fields: null, table: "Customers" });
-    expect(address?.when).toEqual({ kind: "record-changed", fields: ["Address"], table: "Customers" });
+    expect(address?.when).toEqual({
+      kind: "record-changed",
+      fields: ["Address"],
+      table: "Customers",
+    });
     expect(removed?.when).toEqual({ kind: "record-removed", table: "Customers" });
-    expect(overdue?.when).toEqual({ kind: "starts-matching", condition: "record.Due < today()", table: "Invoices" });
+    expect(overdue?.when).toEqual({
+      kind: "starts-matching",
+      condition: "record.Due < today()",
+      table: "Invoices",
+    });
     expect(send?.when).toEqual({ kind: "button", field: "Send", table: "Invoices" });
     expect(markPaid?.do).toEqual([
       {
-        kind: "invoke", collection: null,
+        kind: "invoke",
+        collection: null,
         operation: "invoices.markPaid",
         input: [
           { key: "id", value: { kind: "formula", expression: "record.id" } },
@@ -1300,35 +1424,73 @@ describe("dataset entries", () => {
   });
 
   it("accepts an action's input at its key bound", () => {
-    const keys = Array.from({ length: MAX_ACTION_INPUT_KEYS }, (_, index) => `k${index}: 1`).join(", ");
+    const keys = Array.from({ length: MAX_ACTION_INPUT_KEYS }, (_, index) => `k${index}: 1`).join(
+      ", ",
+    );
     expect(diagnosticsOf(withStep(`{invoke: invoices.markPaid, input: {${keys}}}`))).toEqual([]);
   });
 
   it("refuses to save an action's input past its key bound", () => {
-    const input = Array.from({ length: MAX_ACTION_INPUT_KEYS + 1 }, (_, index) => ({ key: `k${index}`, value: { kind: "literal" as const, value: 1 } }));
-    expect(refusal([valid({ do: [{ kind: "invoke", collection: null, operation: "invoices.markPaid", input }] })]))
-      .toEqual([{ code: "too-many-inputs", path: "/automations/0/do/0/input" }]);
+    const input = Array.from({ length: MAX_ACTION_INPUT_KEYS + 1 }, (_, index) => ({
+      key: `k${index}`,
+      value: { kind: "literal" as const, value: 1 },
+    }));
+    expect(
+      refusal([
+        valid({
+          do: [{ kind: "invoke", collection: null, operation: "invoices.markPaid", input }],
+        }),
+      ]),
+    ).toEqual([{ code: "too-many-inputs", path: "/automations/0/do/0/input" }]);
   });
 
   it("keeps field names as written, for the executor to resolve against the dataset", () => {
-    const [automation] = validAutomations(automationsFile(withStep("{set: {Finished on: '=today()'}, operation: tasks.edit}")));
-    expect(automation?.do[0]).toMatchObject({ values: [{ field: "Finished on" }], operation: "tasks.edit" });
+    const [automation] = validAutomations(
+      automationsFile(withStep("{set: {Finished on: '=today()'}, operation: tasks.edit}")),
+    );
+    expect(automation?.do[0]).toMatchObject({
+      values: [{ field: "Finished on" }],
+      operation: "tasks.edit",
+    });
   });
 
   it("accepts a table at the reference bound, and an operation name as long as the dataset host allows", () => {
     const longest = "o".repeat(MAX_REFERENCE_LENGTH);
-    expect(diagnosticsOf(withStep(`{set: {X: 1}, operation: ${"o".repeat(64)}}`, `{record-added: null, table: ${longest}}`))).toEqual([]);
+    expect(
+      diagnosticsOf(
+        withStep(
+          `{set: {X: 1}, operation: ${"o".repeat(64)}}`,
+          `{record-added: null, table: ${longest}}`,
+        ),
+      ),
+    ).toEqual([]);
     expect(diagnosticsOf(withStep(`{invoke: ${"o".repeat(64)}}`))).toEqual([]);
   });
 
   it("refuses to save a table past the reference bound, or an operation name the dataset host would refuse", () => {
     const tooLong = "o".repeat(MAX_REFERENCE_LENGTH + 1);
-    expect(refusal([valid({ when: { kind: "record-added", table: tooLong } })]))
-      .toEqual([{ code: "too-long", path: "/automations/0/when/table" }]);
-    expect(refusal([valid({ do: [{ kind: "set", values: [{ field: "X", value: { kind: "literal", value: 1 } }], records: null, operation: "o".repeat(65) }] })]))
-      .toEqual([{ code: "invalid-operation-name", path: "/automations/0/do/0/operation" }]);
-    expect(refusal([valid({ do: [{ kind: "invoke", collection: null, operation: "mark paid", input: [] }] })]))
-      .toEqual([{ code: "invalid-operation-name", path: "/automations/0/do/0/invoke" }]);
+    expect(refusal([valid({ when: { kind: "record-added", table: tooLong } })])).toEqual([
+      { code: "too-long", path: "/automations/0/when/table" },
+    ]);
+    expect(
+      refusal([
+        valid({
+          do: [
+            {
+              kind: "set",
+              values: [{ field: "X", value: { kind: "literal", value: 1 } }],
+              records: null,
+              operation: "o".repeat(65),
+            },
+          ],
+        }),
+      ]),
+    ).toEqual([{ code: "invalid-operation-name", path: "/automations/0/do/0/operation" }]);
+    expect(
+      refusal([
+        valid({ do: [{ kind: "invoke", collection: null, operation: "mark paid", input: [] }] }),
+      ]),
+    ).toEqual([{ code: "invalid-operation-name", path: "/automations/0/do/0/invoke" }]);
   });
 
   it.each(DATASET_CASES)("turns off one automation for $name", ({ item, expected }) => {
@@ -1341,12 +1503,17 @@ describe("automations.yaml diagnostics", () => {
     expect(parseAutomationsFile(text)).toEqual({ status: "unreadable", diagnostic: expected });
   });
 
-  it.each([...AUTOMATION_CASES, ...BOUND_CASES])("turns off one automation for $name", ({ item, expected }) => {
-    expect(diagnosticsOf(item)).toEqual(expected);
-  });
+  it.each([...AUTOMATION_CASES, ...BOUND_CASES])(
+    "turns off one automation for $name",
+    ({ item, expected }) => {
+      expect(diagnosticsOf(item)).toEqual(expected);
+    },
+  );
 
   it("accepts the bounds themselves", () => {
-    expect(diagnosticsOf(stepsItem(Array.from({ length: MAX_AUTOMATION_STEPS }, () => "{set: {X: 1}}")))).toEqual([]);
+    expect(
+      diagnosticsOf(stepsItem(Array.from({ length: MAX_AUTOMATION_STEPS }, () => "{set: {X: 1}}"))),
+    ).toEqual([]);
     expect(diagnosticsOf(nestedIfs(MAX_IF_DEPTH))).toEqual([]);
   });
 
@@ -1395,7 +1562,8 @@ describe("automations.yaml diagnostics", () => {
   });
 
   it("turns off automations past the bound", () => {
-    const item = (index: number) => `id: a${index}\nname: A\nwhen: record-added\ndo: [{set: {X: 1}}]`;
+    const item = (index: number) =>
+      `id: a${index}\nname: A\nwhen: record-added\ndo: [{set: {X: 1}}]`;
     const parsed = entries(
       automationsFile(...Array.from({ length: MAX_AUTOMATIONS + 1 }, (_, index) => item(index))),
     );
@@ -1407,14 +1575,23 @@ describe("automations.yaml diagnostics", () => {
     });
   });
 
-  it.each(["new", "this", "class", "let", "undefined", "NaN", "Math", "JSON", "record", "today", "now"])(
-    "refuses %s as a binding name",
-    (name) => {
-      expect(diagnosticsOf(withStep(`find: 'true'\nas: ${name}`))).toEqual([
-        { code: "invalid-binding-name", path: at("/do/0/as") },
-      ]);
-    },
-  );
+  it.each([
+    "new",
+    "this",
+    "class",
+    "let",
+    "undefined",
+    "NaN",
+    "Math",
+    "JSON",
+    "record",
+    "today",
+    "now",
+  ])("refuses %s as a binding name", (name) => {
+    expect(diagnosticsOf(withStep(`find: 'true'\nas: ${name}`))).toEqual([
+      { code: "invalid-binding-name", path: at("/do/0/as") },
+    ]);
+  });
 
   it("refuses every reserved name as a binding name", () => {
     expect(AUTOMATION_RESERVED_NAMES).toEqual(
@@ -1448,7 +1625,9 @@ describe("automations.yaml diagnostics", () => {
 
   it("changes only the records that an add-record or find step bound", () => {
     expect(
-      diagnosticsOf(stepsItem(["{add-record: {X: 1}, as: added}", "{set: {Y: 1}, records: added}"])),
+      diagnosticsOf(
+        stepsItem(["{add-record: {X: 1}, as: added}", "{set: {Y: 1}, records: added}"]),
+      ),
     ).toEqual([]);
     expect(
       diagnosticsOf(stepsItem(["{find: 'true', as: open}", "{set: {Y: 1}, records: open}"])),
@@ -1505,20 +1684,21 @@ describe("automations.yaml diagnostics", () => {
     "ASIA/KOLKATA",
     "europe/london",
     "Utc",
-  ])(
-    "accepts the time zone %s",
-    (timezone) => {
-      expect(diagnosticsOf(withStep("post: Hi\ngroup: Team", `{schedule: day, timezone: '${timezone}'}`))).toEqual([]);
-    },
-  );
+  ])("accepts the time zone %s", (timezone) => {
+    expect(
+      diagnosticsOf(withStep("post: Hi\ngroup: Team", `{schedule: day, timezone: '${timezone}'}`)),
+    ).toEqual([]);
+  });
 
   const minus = String.fromCharCode(0x2212);
   it.each(["+08:00", "-05:00", "+0800", `${minus}08:00`, `${minus}0500`, "UTC+8", "Mars/Olympus"])(
     "refuses the time zone %s",
     (timezone) => {
-      expect(diagnosticsOf(withStep("post: Hi\ngroup: Team", `{schedule: day, timezone: '${timezone}'}`))).toEqual([
-        { code: "invalid-timezone", path: at("/when/timezone") },
-      ]);
+      expect(
+        diagnosticsOf(
+          withStep("post: Hi\ngroup: Team", `{schedule: day, timezone: '${timezone}'}`),
+        ),
+      ).toEqual([{ code: "invalid-timezone", path: at("/when/timezone") }]);
     },
   );
 
@@ -1526,12 +1706,30 @@ describe("automations.yaml diagnostics", () => {
     const [weekly, monthly, hourly] = validAutomations(
       automationsFile(
         withStep("post: Hi\ngroup: Team", "{schedule: week, timezone: UTC}"),
-        withStep("post: Hi\ngroup: Team", "{schedule: month, timezone: UTC}").replace("id: a", "id: b"),
-        withStep("post: Hi\ngroup: Team", "{schedule: hour, timezone: UTC}").replace("id: a", "id: c"),
+        withStep("post: Hi\ngroup: Team", "{schedule: month, timezone: UTC}").replace(
+          "id: a",
+          "id: b",
+        ),
+        withStep("post: Hi\ngroup: Team", "{schedule: hour, timezone: UTC}").replace(
+          "id: a",
+          "id: c",
+        ),
       ),
     );
-    expect(weekly?.when).toEqual({ kind: "schedule", every: "week", at: "00:00", days: ["mon"], timezone: "UTC" });
-    expect(monthly?.when).toEqual({ kind: "schedule", every: "month", at: "00:00", days: [1], timezone: "UTC" });
+    expect(weekly?.when).toEqual({
+      kind: "schedule",
+      every: "week",
+      at: "00:00",
+      days: ["mon"],
+      timezone: "UTC",
+    });
+    expect(monthly?.when).toEqual({
+      kind: "schedule",
+      every: "month",
+      at: "00:00",
+      days: [1],
+      timezone: "UTC",
+    });
     expect(hourly?.when).toEqual({ kind: "schedule", every: "hour", at: ":00", timezone: "UTC" });
   });
 

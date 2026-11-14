@@ -2,20 +2,59 @@ import { expect, it, vi } from "vitest";
 import { describeApprovedDataset, type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
-import { addressDatasets, resolveDatasetAddress, invalidateDatasetAddresses, unclaimedDatasetFolders } from "./datasetAddress";
+import {
+  addressDatasets,
+  resolveDatasetAddress,
+  invalidateDatasetAddresses,
+  unclaimedDatasetFolders,
+} from "./datasetAddress";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "Equipment", schemaPath: "data/schema.sql", operationsPath: "data/actions.js",
-  tables: [{ tableId: id(2), name: "Equipment", sqlName: "equipment", primaryKey: "id", fields: [{ fieldId: id(3), name: "ID", type: "text", sqlColumn: "id", required: true, unique: true }] }],
-  operations: [{ operationId: id(4), tableId: id(2), name: "list", label: "List", kind: "read", readOnly: true, access: "owner", fieldIds: [id(3)] }] };
+const definition: DatasetDefinition = {
+  formatVersion: 1,
+  datasetId: id(1),
+  name: "Equipment",
+  schemaPath: "data/schema.sql",
+  operationsPath: "data/actions.js",
+  tables: [
+    {
+      tableId: id(2),
+      name: "Equipment",
+      sqlName: "equipment",
+      primaryKey: "id",
+      fields: [
+        { fieldId: id(3), name: "ID", type: "text", sqlColumn: "id", required: true, unique: true },
+      ],
+    },
+  ],
+  operations: [
+    {
+      operationId: id(4),
+      tableId: id(2),
+      name: "list",
+      label: "List",
+      kind: "read",
+      readOnly: true,
+      access: "owner",
+      fieldIds: [id(3)],
+    },
+  ],
+};
 const signal = new AbortController().signal;
 
 it("keeps concurrent callers independent when the first caller cancels", async () => {
-  const adapter = sourceCaptureAdapter(new Map([["data/dataset.json", JSON.stringify({ datasetId: id(99) })]]));
+  const adapter = sourceCaptureAdapter(
+    new Map([["data/dataset.json", JSON.stringify({ datasetId: id(99) })]]),
+  );
   const list = adapter.listTextFileMetadata.bind(adapter);
   let release!: () => void;
-  const waiting = new Promise<void>(resolve => { release = resolve; });
-  const listing = vi.spyOn(adapter, "listTextFileMetadata").mockImplementation(async args => { await waiting; return list(args); });
+  const waiting = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const listing = vi.spyOn(adapter, "listTextFileMetadata").mockImplementation(async (args) => {
+    await waiting;
+    return list(args);
+  });
   const cancelled = new AbortController();
   const first = resolveDatasetAddress(adapter, "w", "data/dataset.json", cancelled.signal);
   const firstResult = expect(first).rejects.toThrow("cancelled lookup");
@@ -30,22 +69,54 @@ it("keeps concurrent callers independent when the first caller cancels", async (
 it("resolves a renamed dataset through engine source while the old address reports a broken reference", async () => {
   const sources = new Map([["data/dataset.json", JSON.stringify(definition)]]);
   const adapter = sourceCaptureAdapter(sources);
-  const description = describeApprovedDataset(describeDatasetRevision({ definition, revision: 1, schemaSql: "schema", operationSource: "actions" }), definition.operations);
+  const description = describeApprovedDataset(
+    describeDatasetRevision({
+      definition,
+      revision: 1,
+      schemaSql: "schema",
+      operationSource: "actions",
+    }),
+    definition.operations,
+  );
   expect(await resolveDatasetAddress(adapter, "w", "data/dataset.json", signal)).toBe(id(1));
   sources.set("renamed/dataset.json", sources.get("data/dataset.json")!);
   sources.delete("data/dataset.json");
   invalidateDatasetAddresses({ workspaceId: "w" });
   expect(await resolveDatasetAddress(adapter, "w", "renamed/dataset.json", signal)).toBe(id(1));
-  await expect(resolveDatasetAddress(adapter, "w", "data/dataset.json", signal)).rejects.toThrow("Collection reference broken: data/dataset.json. Choose its current dataset.json path.");
-  expect(await addressDatasets(adapter, "w", [description], signal)).toEqual([{ ...description, datasetPath: "renamed/dataset.json", datasetAddressStatus: "available" }]);
+  await expect(resolveDatasetAddress(adapter, "w", "data/dataset.json", signal)).rejects.toThrow(
+    "Collection reference broken: data/dataset.json. Choose its current dataset.json path.",
+  );
+  expect(await addressDatasets(adapter, "w", [description], signal)).toEqual([
+    { ...description, datasetPath: "renamed/dataset.json", datasetAddressStatus: "available" },
+  ]);
 });
 
 it("rejects unknown, invalid, and cross-workspace source captures", async () => {
-  const adapter = sourceCaptureAdapter(new Map([["data/dataset.json", JSON.stringify(definition)], ["bad/dataset.json", "{}"]]));
-  for (const path of ["unknown/dataset.json", "bad/dataset.json"]) await expect(resolveDatasetAddress(adapter, "w", path, signal)).rejects.toThrow(`Collection reference broken: ${path}`);
-  await expect(resolveDatasetAddress(adapter, "other", "data/dataset.json", signal)).rejects.toThrow();
-  for (const path of [id(1), "data", "/data/dataset.json", "../data/dataset.json", "data/../dataset.json", ".dohc/dataset.json", "data\\dataset.json"]) {
-    await expect(resolveDatasetAddress(adapter, "w", path, signal)).rejects.toThrow("relative dataset.json path");
+  const adapter = sourceCaptureAdapter(
+    new Map([
+      ["data/dataset.json", JSON.stringify(definition)],
+      ["bad/dataset.json", "{}"],
+    ]),
+  );
+  for (const path of ["unknown/dataset.json", "bad/dataset.json"])
+    await expect(resolveDatasetAddress(adapter, "w", path, signal)).rejects.toThrow(
+      `Collection reference broken: ${path}`,
+    );
+  await expect(
+    resolveDatasetAddress(adapter, "other", "data/dataset.json", signal),
+  ).rejects.toThrow();
+  for (const path of [
+    id(1),
+    "data",
+    "/data/dataset.json",
+    "../data/dataset.json",
+    "data/../dataset.json",
+    ".dohc/dataset.json",
+    "data\\dataset.json",
+  ]) {
+    await expect(resolveDatasetAddress(adapter, "w", path, signal)).rejects.toThrow(
+      "relative dataset.json path",
+    );
   }
 });
 
@@ -57,107 +128,192 @@ it("names every conflicting descriptor without including other Collections", asy
     ["other/dataset.json", JSON.stringify({ datasetId: id(9) })],
   ]);
   const adapter = sourceCaptureAdapter(sources);
-  await expect(resolveDatasetAddress(adapter, "w", "data/dataset.json", signal)).rejects.toMatchObject({
-    message: "Collection address ambiguous: data/dataset.json. These dataset.json files name this Collection: copy/dataset.json, data/dataset.json, data/revisions/2-review/dataset.json. Choose one file to keep. Remove the other files.",
+  await expect(
+    resolveDatasetAddress(adapter, "w", "data/dataset.json", signal),
+  ).rejects.toMatchObject({
+    message:
+      "Collection address ambiguous: data/dataset.json. These dataset.json files name this Collection: copy/dataset.json, data/dataset.json, data/revisions/2-review/dataset.json. Choose one file to keep. Remove the other files.",
   });
 });
 
 it("batches discovery, reuses unchanged descriptors, and rejects duplicate IDs", async () => {
-  const sources = new Map([["data/dataset.json", JSON.stringify(definition)], ["other/dataset.json", JSON.stringify({ datasetId: id(9), name: "batch-only" })]]);
+  const sources = new Map([
+    ["data/dataset.json", JSON.stringify(definition)],
+    ["other/dataset.json", JSON.stringify({ datasetId: id(9), name: "batch-only" })],
+  ]);
   const onRequest = vi.fn();
   const adapter = sourceCaptureAdapter(sources, { onRequest });
   expect(await resolveDatasetAddress(adapter, "w", "data/dataset.json", signal)).toBe(id(1));
-  expect(onRequest.mock.calls.filter(([method]) => method === "versionedText.captureSources")).toHaveLength(1);
+  expect(
+    onRequest.mock.calls.filter(([method]) => method === "versionedText.captureSources"),
+  ).toHaveLength(1);
   await resolveDatasetAddress(adapter, "w", "data/dataset.json", signal);
-  expect(onRequest.mock.calls.filter(([method]) => method === "versionedText.captureSources")).toHaveLength(1);
-  expect(onRequest.mock.calls.filter(([method]) => method === "versionedText.list")).toHaveLength(1);
+  expect(
+    onRequest.mock.calls.filter(([method]) => method === "versionedText.captureSources"),
+  ).toHaveLength(1);
+  expect(onRequest.mock.calls.filter(([method]) => method === "versionedText.list")).toHaveLength(
+    1,
+  );
   sources.set("copy/dataset.json", JSON.stringify(definition));
   invalidateDatasetAddresses({ workspaceId: "w" });
-  await expect(resolveDatasetAddress(adapter, "w", "copy/dataset.json", signal)).rejects.toThrow("Collection address ambiguous");
-  expect(await addressDatasets(adapter, "w", [{ ...definition, revision: 1, revisionSha256: "a".repeat(64) }], signal)).toMatchObject([{ datasetPath: null, datasetAddressStatus: "ambiguous" }]);
+  await expect(resolveDatasetAddress(adapter, "w", "copy/dataset.json", signal)).rejects.toThrow(
+    "Collection address ambiguous",
+  );
+  expect(
+    await addressDatasets(
+      adapter,
+      "w",
+      [{ ...definition, revision: 1, revisionSha256: "a".repeat(64) }],
+      signal,
+    ),
+  ).toMatchObject([{ datasetPath: null, datasetAddressStatus: "ambiguous" }]);
   sources.delete("copy/dataset.json");
   sources.set("data/dataset.json", JSON.stringify({ datasetId: id(1), tables: "unfinished edit" }));
   invalidateDatasetAddresses({ workspaceId: "w" });
   expect(await resolveDatasetAddress(adapter, "w", "data/dataset.json", signal)).toBe(id(1));
   invalidateDatasetAddresses({ workspaceId: "w" });
   vi.spyOn(adapter, "listTextFileMetadata").mockRejectedValue(new Error("Engine connection lost"));
-  await expect(resolveDatasetAddress(adapter, "w", "data/dataset.json", signal)).rejects.toThrow("Engine connection lost");
+  await expect(resolveDatasetAddress(adapter, "w", "data/dataset.json", signal)).rejects.toThrow(
+    "Engine connection lost",
+  );
 });
 
-
 it("does not repeat a large workspace listing until workspace activity invalidates it", async () => {
-  const sources = new Map(Array.from({ length: 2000 }, (_, index) => [`notes/${index}.txt`, "note"]));
+  const sources = new Map(
+    Array.from({ length: 2000 }, (_, index) => [`notes/${index}.txt`, "note"]),
+  );
   sources.set("data/dataset.json", JSON.stringify(definition));
-  const onRequest = vi.fn(), adapter = sourceCaptureAdapter(sources, { onRequest });
+  const onRequest = vi.fn(),
+    adapter = sourceCaptureAdapter(sources, { onRequest });
   await resolveDatasetAddress(adapter, "w", "data/dataset.json", signal);
   const pages = onRequest.mock.calls.filter(([method]) => method === "versionedText.list").length;
   expect(pages).toBe(5);
-  for (let index = 0; index < 10; index++) await resolveDatasetAddress(adapter, "w", "data/dataset.json", signal);
-  expect(onRequest.mock.calls.filter(([method]) => method === "versionedText.list")).toHaveLength(pages);
+  for (let index = 0; index < 10; index++)
+    await resolveDatasetAddress(adapter, "w", "data/dataset.json", signal);
+  expect(onRequest.mock.calls.filter(([method]) => method === "versionedText.list")).toHaveLength(
+    pages,
+  );
   invalidateDatasetAddresses({ workspaceId: "other" });
   await resolveDatasetAddress(adapter, "w", "data/dataset.json", signal);
-  expect(onRequest.mock.calls.filter(([method]) => method === "versionedText.list")).toHaveLength(pages);
+  expect(onRequest.mock.calls.filter(([method]) => method === "versionedText.list")).toHaveLength(
+    pages,
+  );
   invalidateDatasetAddresses({ workspaceId: "w" });
   await resolveDatasetAddress(adapter, "w", "data/dataset.json", signal);
-  expect(onRequest.mock.calls.filter(([method]) => method === "versionedText.list")).toHaveLength(pages * 2);
+  expect(onRequest.mock.calls.filter(([method]) => method === "versionedText.list")).toHaveLength(
+    pages * 2,
+  );
 });
 
 it("excludes live documents before capture even when their content hash is cached", async () => {
-  const sources = new Map([["plain/dataset.json", JSON.stringify({ datasetId: id(70) })], ["live/dataset.json", JSON.stringify({ datasetId: id(71) })]]);
+  const sources = new Map([
+    ["plain/dataset.json", JSON.stringify({ datasetId: id(70) })],
+    ["live/dataset.json", JSON.stringify({ datasetId: id(71) })],
+  ]);
   const adapter = sourceCaptureAdapter(sources);
   await resolveDatasetAddress(adapter, "w", "live/dataset.json", signal);
   invalidateDatasetAddresses({ workspaceId: "w" });
   const list = adapter.listTextFileMetadata.bind(adapter);
-  vi.spyOn(adapter, "listTextFileMetadata").mockImplementation(async input => (await list(input)).map(file => ({ ...file, hasYdocMarker: file.path.startsWith("live/") })));
+  vi.spyOn(adapter, "listTextFileMetadata").mockImplementation(async (input) =>
+    (await list(input)).map((file) => ({ ...file, hasYdocMarker: file.path.startsWith("live/") })),
+  );
   const capture = vi.spyOn(adapter, "captureSourceMetadata");
   sources.set("plain/dataset.json", JSON.stringify({ datasetId: id(72) }));
-  await expect(resolveDatasetAddress(adapter, "w", "plain/dataset.json", signal)).resolves.toBe(id(72));
-  await expect(resolveDatasetAddress(adapter, "w", "live/dataset.json", signal)).rejects.toThrow("Collection reference broken");
+  await expect(resolveDatasetAddress(adapter, "w", "plain/dataset.json", signal)).resolves.toBe(
+    id(72),
+  );
+  await expect(resolveDatasetAddress(adapter, "w", "live/dataset.json", signal)).rejects.toThrow(
+    "Collection reference broken",
+  );
   expect(capture).toHaveBeenCalledTimes(1);
   expect(capture.mock.calls[0]![0].paths).toEqual(["plain/dataset.json"]);
 });
 
 it("leaves out a Collection whose dataset.json is gone, keeps one whose file can't be read, and lists it again once the file is back", async () => {
-  const sources = new Map([["data/dataset.json", JSON.stringify(definition)], ["other/dataset.json", JSON.stringify({ datasetId: id(9) })]]);
+  const sources = new Map([
+    ["data/dataset.json", JSON.stringify(definition)],
+    ["other/dataset.json", JSON.stringify({ datasetId: id(9) })],
+  ]);
   const adapter = sourceCaptureAdapter(sources);
-  const description = describeApprovedDataset(describeDatasetRevision({ definition, revision: 1, schemaSql: "schema", operationSource: "actions" }), definition.operations);
+  const description = describeApprovedDataset(
+    describeDatasetRevision({
+      definition,
+      revision: 1,
+      schemaSql: "schema",
+      operationSource: "actions",
+    }),
+    definition.operations,
+  );
   const approvedFolder = vi.fn(async (_datasetId: string) => "data");
-  const list = () => { invalidateDatasetAddresses({ workspaceId: "w" }); return addressDatasets(adapter, "w", [description], signal, approvedFolder); };
-  const available = { ...description, datasetPath: "data/dataset.json", datasetAddressStatus: "available" };
+  const list = () => {
+    invalidateDatasetAddresses({ workspaceId: "w" });
+    return addressDatasets(adapter, "w", [description], signal, approvedFolder);
+  };
+  const available = {
+    ...description,
+    datasetPath: "data/dataset.json",
+    datasetAddressStatus: "available",
+  };
   expect(await list()).toEqual([available]);
   sources.delete("data/dataset.json");
   expect(await list()).toEqual([]);
   // With every dataset.json readable, nothing in the workspace can be its unreadable file.
   expect(approvedFolder).not.toHaveBeenCalled();
-  sources.set("data/dataset.json", "{ \"datasetId\": ");
-  expect(await list()).toEqual([{ ...description, datasetPath: null, datasetAddressStatus: "unreadable", datasetPaths: ["data/dataset.json"] }]);
+  sources.set("data/dataset.json", '{ "datasetId": ');
+  expect(await list()).toEqual([
+    {
+      ...description,
+      datasetPath: null,
+      datasetAddressStatus: "unreadable",
+      datasetPaths: ["data/dataset.json"],
+    },
+  ]);
   expect(approvedFolder).toHaveBeenCalledWith(id(1));
   sources.delete("data/dataset.json");
-  sources.set("elsewhere/dataset.json", "{ \"datasetId\": ");
+  sources.set("elsewhere/dataset.json", '{ "datasetId": ');
   expect(await list()).toEqual([]);
   approvedFolder.mockRejectedValueOnce(new Error("The server didn't answer."));
-  sources.set("data/dataset.json", "{ \"datasetId\": ");
+  sources.set("data/dataset.json", '{ "datasetId": ');
   expect(await list()).toEqual([]);
   sources.set("data/dataset.json", JSON.stringify(definition));
   expect(await list()).toEqual([available]);
   sources.set("copy/dataset.json", JSON.stringify(definition));
-  expect(await list()).toEqual([{ ...description, datasetPath: null, datasetAddressStatus: "ambiguous", datasetPaths: ["copy/dataset.json", "data/dataset.json"] }]);
+  expect(await list()).toEqual([
+    {
+      ...description,
+      datasetPath: null,
+      datasetAddressStatus: "ambiguous",
+      datasetPaths: ["copy/dataset.json", "data/dataset.json"],
+    },
+  ]);
   // A share's list has no approved folder to check, so it keeps the Collection and says it's missing.
   sources.delete("copy/dataset.json");
   sources.delete("data/dataset.json");
   invalidateDatasetAddresses({ workspaceId: "w" });
-  expect(await addressDatasets(adapter, "w", [description], signal)).toEqual([{ ...description, datasetPath: null, datasetAddressStatus: "missing" }]);
+  expect(await addressDatasets(adapter, "w", [description], signal)).toEqual([
+    { ...description, datasetPath: null, datasetAddressStatus: "missing" },
+  ]);
 });
 
 it("names the folders whose dataset.json names a Collection the store no longer keeps, and opens no store when no file names one", async () => {
-  const sources = new Map([["data/dataset.json", JSON.stringify(definition)], ["gone/dataset.json", JSON.stringify({ datasetId: id(9) })],
-    ["dataset.json", JSON.stringify({ datasetId: id(8) })], ["draft/dataset.json", "{ \"datasetId\": "], ["gone/notes.md", "# Notes"]]);
+  const sources = new Map([
+    ["data/dataset.json", JSON.stringify(definition)],
+    ["gone/dataset.json", JSON.stringify({ datasetId: id(9) })],
+    ["dataset.json", JSON.stringify({ datasetId: id(8) })],
+    ["draft/dataset.json", '{ "datasetId": '],
+    ["gone/notes.md", "# Notes"],
+  ]);
   const adapter = sourceCaptureAdapter(sources);
   const kept = vi.fn(async () => [id(1)]);
   const listed = async () => true;
   invalidateDatasetAddresses({ workspaceId: "w" });
-  expect((await unclaimedDatasetFolders(adapter, "w", signal, { listed, kept })).sort()).toEqual(["", "gone"]);
-  sources.delete("gone/dataset.json"); sources.delete("dataset.json"); sources.delete("data/dataset.json");
+  expect((await unclaimedDatasetFolders(adapter, "w", signal, { listed, kept })).sort()).toEqual([
+    "",
+    "gone",
+  ]);
+  sources.delete("gone/dataset.json");
+  sources.delete("dataset.json");
+  sources.delete("data/dataset.json");
   invalidateDatasetAddresses({ workspaceId: "w" });
   kept.mockClear();
   // A dataset.json that can't be read names nothing, so its folder keeps today's rule.
@@ -166,9 +322,12 @@ it("names the folders whose dataset.json names a Collection the store no longer 
 });
 
 it("reads no engine listing when the file listing in hand has no dataset.json, and reads one when that listing is missing or wrong", async () => {
-  const sources = new Map([["gone/dataset.json", JSON.stringify({ datasetId: id(9) })], ["notes.md", "# Notes"]]);
+  const sources = new Map([
+    ["gone/dataset.json", JSON.stringify({ datasetId: id(9) })],
+    ["notes.md", "# Notes"],
+  ]);
   const requests: string[] = [];
-  const adapter = sourceCaptureAdapter(sources, { onRequest: method => requests.push(method) });
+  const adapter = sourceCaptureAdapter(sources, { onRequest: (method) => requests.push(method) });
   const kept = vi.fn(async () => [id(1)]);
   const read = (listed: boolean | undefined) => {
     invalidateDatasetAddresses({ workspaceId: "w" });
@@ -178,7 +337,6 @@ it("reads no engine listing when the file listing in hand has no dataset.json, a
   expect(await read(false)).toEqual([]);
   expect(requests).toEqual([]);
   expect(kept).not.toHaveBeenCalled();
-  // No listing in hand, or one that names a dataset.json: the engine's files decide.
   for (const listed of [undefined, true]) {
     expect(await read(listed)).toEqual(["gone"]);
     expect(requests).toContain("versionedText.list");

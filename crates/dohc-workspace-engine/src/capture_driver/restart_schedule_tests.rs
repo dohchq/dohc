@@ -22,8 +22,6 @@ fn the_backoff_doubles_and_then_caps() {
             RESTART_BACKOFF_CAP,
         ]
     );
-    // Strictly non-decreasing everywhere, so no schedule edit can
-    // accidentally make a later failure retry sooner than an earlier one.
     for failures in 1..64u32 {
         assert!(
             restart_delay(failures + 1) >= restart_delay(failures),
@@ -44,8 +42,7 @@ fn escalation_is_bounded_and_the_terminal_probe_still_runs() {
     assert!(TERMINAL_PROBE_INTERVAL > DRIVE_INTERVAL);
     // The terminal probe must be distinguishable from the capped backoff,
     // or deleting the terminal branch of `restart_delay` would leave every
-    // assertion above satisfied by the cap alone — which is exactly what
-    // an earlier revision of this test did.
+    // assertion above satisfied by the cap alone.
     assert_ne!(
         TERMINAL_PROBE_INTERVAL, RESTART_BACKOFF_CAP,
         "a terminal probe indistinguishable from the cap is untestable"

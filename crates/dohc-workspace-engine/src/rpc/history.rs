@@ -168,7 +168,6 @@ fn moment_wire_json(moment: &MomentRecord, bodies: MomentBodies) -> Value {
         // dropped and never trusted raw.
         "authors": moment.author_json.as_deref().map(parsed_moment_authors),
         "syncRecordOnly": moment.sync_record_only,
-        // Hydrated payload text (momentSelectSql parity).
         "afterText": after_text,
         "afterByteLength": moment.after_byte_length,
         "afterInbandLimitBytes": after_inband_limit_bytes,
@@ -556,10 +555,6 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsListParams = parse(params)?;
-        // The filter rejects only what the write path can never store
-        // (the empty string): every id versionedText.list or
-        // moments.list can return — whitespace/control-carrying
-        // included — must stay filterable verbatim.
         if params.object_id.as_deref() == Some("") {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,

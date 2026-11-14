@@ -8,7 +8,11 @@ import { join } from "node:path";
 import { activityPin } from "../src/testPins";
 import { waitForVisibleAnimations } from "./helpers/animations";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
+import {
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  openWorkspaceFromFirstRun,
+} from "./helpers/workspace";
 
 // Screenshot harness (@ui-audit) for an update a person chose that dohc
 // opened without. Light and dark, on Windows. Not a regression test; it runs
@@ -23,7 +27,9 @@ test.skip(process.platform !== "win32", "the feed offers only a Windows installe
 
 const CHOSEN = "0.1.1-nightly.20261030.158.1";
 const TITLE = "dohc could not install the update";
-const ELECTRON = (createRequire(join(desktopRoot, "package.json"))("electron/package.json") as { version: string }).version;
+const ELECTRON = (
+  createRequire(join(desktopRoot, "package.json"))("electron/package.json") as { version: string }
+).version;
 
 // A feed that offers an update and holds its download open, so the title
 // bar keeps showing the download.
@@ -82,14 +88,22 @@ test("@ui-audit an update a person chose that dohc opened without", async () => 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   let devUpdateConfig: string | null = null;
   try {
-    // A person pressed Update on this version, and dohc opens on it again.
-    await writeFile(join(workspace.homeDir, "chosen-update.json"), JSON.stringify({ version: CHOSEN, from: ELECTRON }));
+    await writeFile(
+      join(workspace.homeDir, "chosen-update.json"),
+      JSON.stringify({ version: CHOSEN, from: ELECTRON }),
+    );
     desktop = await launchDesktopApp({ workspace, env });
     const { page } = desktop;
     const currentVersion = await desktop.app.evaluate(({ app }) => app.getVersion());
     expect(currentVersion).toBe(ELECTRON);
-    devUpdateConfig = join(await desktop.app.evaluate(({ app }) => app.getAppPath()), "dev-app-update.yml");
-    await writeFile(devUpdateConfig, `provider: generic\nurl: ${feed.url}\nupdaterCacheDirName: dohc-ui-audit-updater\n`);
+    devUpdateConfig = join(
+      await desktop.app.evaluate(({ app }) => app.getAppPath()),
+      "dev-app-update.yml",
+    );
+    await writeFile(
+      devUpdateConfig,
+      `provider: generic\nurl: ${feed.url}\nupdaterCacheDirName: dohc-ui-audit-updater\n`,
+    );
     await openWorkspaceFromFirstRun(page, workspace);
     await expect(page.getByTestId("workspace-shell")).toHaveAttribute("data-ready", "true");
     await page.emulateMedia({ reducedMotion: "reduce" });
@@ -107,7 +121,9 @@ test("@ui-audit an update a person chose that dohc opened without", async () => 
 
     await page.getByTestId(activityPin("settings")).click();
     const line = page.getByTestId("desktop-updates-status");
-    await expect(line).toHaveText(`dohc could not install version ${CHOSEN} and is still on version ${currentVersion}.`);
+    await expect(line).toHaveText(
+      `dohc could not install version ${CHOSEN} and is still on version ${currentVersion}.`,
+    );
     await line.scrollIntoViewIfNeeded();
     await shoot(page, "03-settings-update-line");
     await page.getByRole("button", { name: "Close settings" }).click();
@@ -117,12 +133,13 @@ test("@ui-audit an update a person chose that dohc opened without", async () => 
     await expect(notices.getByText(TITLE)).toBeVisible();
     await shoot(page, "04-notices-row");
 
-    // Try again starts the download: the toast and the row go at once, and
-    // the title bar shows the download. Running a row's action closes Notices.
     await notices.getByRole("button", { name: "Try again" }).click();
     await expect(notices).toBeHidden();
     await expect(toast).toHaveCount(0);
-    await expect(page.getByTestId("titlebar-update")).toHaveAttribute("data-update-status", "downloading");
+    await expect(page.getByTestId("titlebar-update")).toHaveAttribute(
+      "data-update-status",
+      "downloading",
+    );
     await shoot(page, "05-title-bar-after-try-again");
     await page.getByTestId("notice-center-toggle").click();
     await expect(notices).toBeVisible();

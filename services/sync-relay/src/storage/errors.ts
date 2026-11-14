@@ -34,5 +34,7 @@ export function logBlobsMissing(missing: readonly string[]): SyncRelayBlobMissin
 export class LiveJournalAdmittedCapacityError extends Error {
   readonly source = "admitted-cut";
   readonly reason = "capacity-refused";
-  constructor() { super("Admitted live update journal cut exceeds the validation policy."); }
+  constructor() {
+    super("Admitted live update journal cut exceeds the validation policy.");
+  }
 }

@@ -328,9 +328,6 @@ fn generated_ts_policy_resolution_matches_the_rust_port() {
             "{}: export disagrees with the TypeScript oracle",
             case.name
         );
-        // The Rust port models version and capture ownership as post-policy
-        // tracked ownership, exactly as the oracle documents. Asserting the
-        // mirror keeps a future oracle change from splitting them silently.
         assert_eq!(
             case.result.versioned, actual.tracked,
             "{}: the oracle stopped mirroring versioned onto tracked",

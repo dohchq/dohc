@@ -9,10 +9,14 @@ const STILL_RUNNING = {
   both: "An app and an agent in this workspace are still running",
 };
 const SAVE_FAILED = "dohc could not save Restricted Mode";
-const SAVE_NEXT = "Try again before you quit dohc, or this workspace will be trusted again after a restart.";
+const SAVE_NEXT =
+  "Try again before you quit dohc, or this workspace will be trusted again after a restart.";
 
 // Why a restrict failed, or null when it did not.
-export function restrictFailure(stillRunning: keyof typeof STILL_RUNNING | null, saveFailed: boolean): string | null {
+export function restrictFailure(
+  stillRunning: keyof typeof STILL_RUNNING | null,
+  saveFailed: boolean,
+): string | null {
   if (!stillRunning) return saveFailed ? `${SAVE_FAILED}. ${SAVE_NEXT}` : null;
   const running = STILL_RUNNING[stillRunning];
   if (saveFailed) return `${running}, and ${SAVE_FAILED}. ${SAVE_NEXT}`;
@@ -46,7 +50,6 @@ export function workspaceTrustHandlers<
   notifyChanged(workspaceId: string, trusted: boolean): void;
 }): OperationHandlers<typeof workspaceTrustOperations, Event, Operation> {
   const { trust } = dependencies;
-  // One dialog per workspace. A second request waits for the first answer.
   const asking = new Map<string, Promise<void>>();
 
   async function askAndTrust(event: Event, operation: Operation): Promise<void> {
@@ -77,8 +80,6 @@ export function workspaceTrustHandlers<
       }
       if (!(await trust.isTrusted(workspace))) {
         let answer = asking.get(workspaceId);
-        // A question a send asked for automatically opens only until it
-        // was shown; Trust workspace the person clicks always opens it.
         if (!answer && !(input.automatic && dependencies.wasAsked?.(workspaceId))) {
           answer = askAndTrust(event, operation).finally(() => asking.delete(workspaceId));
           asking.set(workspaceId, answer);
@@ -96,13 +97,23 @@ export function workspaceTrustHandlers<
       // The save starts with the stops, so quitting while an agent takes its
       // time to exit still leaves the workspace restricted. Saves wait in
       // line with Trust's writes and skip when a Trust replaced this.
-      const failed = (work: Promise<void>, what: string) => work.then(() => false, (error: unknown) => {
-        console.warn(`[desktop] could not ${what}`, error);
-        return true;
-      });
+      const failed = (work: Promise<void>, what: string) =>
+        work.then(
+          () => false,
+          (error: unknown) => {
+            console.warn(`[desktop] could not ${what}`, error);
+            return true;
+          },
+        );
       const early = trust.persistRevocation(workspaceId).catch(() => undefined);
-      const agentsFailing = failed(dependencies.stopAgents(workspaceId), "stop a restricted workspace's agent");
-      const appsFailed = await failed(dependencies.stopAppCommands(operation), "stop a restricted workspace's app commands");
+      const agentsFailing = failed(
+        dependencies.stopAgents(workspaceId),
+        "stop a restricted workspace's agent",
+      );
+      const appsFailed = await failed(
+        dependencies.stopAppCommands(operation),
+        "stop a restricted workspace's app commands",
+      );
       // Windows start their static previews again, unless a Trust the
       // person gave meanwhile already told them otherwise.
       if (trust.isRevoked(workspaceId)) dependencies.notifyChanged(workspaceId, false);
@@ -116,7 +127,7 @@ export function workspaceTrustHandlers<
       // them is not a failure, and the save skipped.
       if (!trust.isRevoked(workspaceId)) return { workspaceId, trusted: true };
       const failure = restrictFailure(
-        appsFailed ? agentsFailed ? "both" : "app" : agentsFailed ? "agent" : null,
+        appsFailed ? (agentsFailed ? "both" : "app") : agentsFailed ? "agent" : null,
         saveFailed,
       );
       if (failure) throw new Error(failure);

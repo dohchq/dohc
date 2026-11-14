@@ -1,7 +1,5 @@
 import type { ShareHandoffIntent } from "@dohc/workspace-contracts/deep-links";
-import type {
-  ShareHandoffIntentSlot,
-} from "./shareHandoffIngress";
+import type { ShareHandoffIntentSlot } from "./shareHandoffIngress";
 import type { ShareHandoffStatus } from "./ipc/bridgeContract";
 import { relayUrlsMatch } from "./workspaces/syncCode";
 
@@ -27,10 +25,7 @@ export interface ShareHandoffRedemptionCoordinator {
   dismiss(statusId: string): void;
 }
 
-type ShareHandoffFetch = (
-  input: string | URL | Request,
-  init?: RequestInit,
-) => Promise<Response>;
+type ShareHandoffFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 interface ShareHandoffRedemptionOptions {
   intent: Pick<ShareHandoffIntentSlot, "snapshot" | "settle">;
@@ -51,10 +46,7 @@ interface VisibleIdentity {
   statusId: string;
 }
 
-function sameStatus(
-  left: ShareHandoffStatus,
-  right: ShareHandoffStatus,
-): boolean {
+function sameStatus(left: ShareHandoffStatus, right: ShareHandoffStatus): boolean {
   if (left.status !== right.status) return false;
   if (left.status === "idle") return true;
   if (right.status === "idle" || left.statusId !== right.statusId) return false;
@@ -62,15 +54,10 @@ function sameStatus(
     return right.status === "done" && left.shareId === right.shareId;
   }
   if (left.status === "waiting-for-acceptance") {
-    return (
-      right.status === "waiting-for-acceptance" && left.email === right.email
-    );
+    return right.status === "waiting-for-acceptance" && left.email === right.email;
   }
   if (left.status === "failed-wrong-server") {
-    return (
-      right.status === "failed-wrong-server" &&
-      left.linkRelayUrl === right.linkRelayUrl
-    );
+    return right.status === "failed-wrong-server" && left.linkRelayUrl === right.linkRelayUrl;
   }
   return true;
 }
@@ -113,10 +100,7 @@ export function createShareHandoffRedemptionCoordinator(
     options.publishStatus(status);
   }
 
-  function statusIdFor(
-    pendingGeneration: number,
-    credentialGeneration: number,
-  ): string {
+  function statusIdFor(pendingGeneration: number, credentialGeneration: number): string {
     if (
       visibleIdentity?.pendingGeneration === pendingGeneration &&
       visibleIdentity.credentialGeneration === credentialGeneration
@@ -132,10 +116,7 @@ export function createShareHandoffRedemptionCoordinator(
     return statusId;
   }
 
-  function isCurrentCompletion(
-    pendingGeneration: number,
-    credentialGeneration: number,
-  ): boolean {
+  function isCurrentCompletion(pendingGeneration: number, credentialGeneration: number): boolean {
     return (
       options.intent.snapshot().generation === pendingGeneration &&
       options.credentialSnapshot().generation === credentialGeneration
@@ -172,9 +153,7 @@ export function createShareHandoffRedemptionCoordinator(
     };
   }
 
-  function beginRedemption(
-    input: NonNullable<ReturnType<typeof currentAttempt>>,
-  ): void {
+  function beginRedemption(input: NonNullable<ReturnType<typeof currentAttempt>>): void {
     const attemptKey = `${input.pendingGeneration}:${input.credentialGeneration}`;
     if (activeAttemptKeys.has(attemptKey)) return;
     activeAttemptKeys.add(attemptKey);
@@ -196,10 +175,7 @@ export function createShareHandoffRedemptionCoordinator(
     ) {
       return;
     }
-    const statusId = statusIdFor(
-      pending.generation,
-      credentialSnapshot.generation,
-    );
+    const statusId = statusIdFor(pending.generation, credentialSnapshot.generation);
     const credentials = credentialSnapshot.credentials;
     if (!credentials?.relayUrl) {
       publish({ status: "waiting-for-sign-in", statusId });
@@ -239,29 +215,17 @@ export function createShareHandoffRedemptionCoordinator(
         body: JSON.stringify({ code: input.intent.code }),
       });
     } catch {
-      if (
-        isCurrentCompletion(
-          input.pendingGeneration,
-          input.credentialGeneration,
-        )
-      ) {
+      if (isCurrentCompletion(input.pendingGeneration, input.credentialGeneration)) {
         publish({ status: "failed-network", statusId: input.statusId });
       }
       return;
     }
 
     if (response.status === 401) {
-      if (
-        !isCurrentCompletion(
-          input.pendingGeneration,
-          input.credentialGeneration,
-        )
-      ) {
+      if (!isCurrentCompletion(input.pendingGeneration, input.credentialGeneration)) {
         return;
       }
-      const sessionWasCurrent = await options.handleUnauthorized(
-        input.credentials,
-      );
+      const sessionWasCurrent = await options.handleUnauthorized(input.credentials);
       if (
         sessionWasCurrent &&
         options.intent.snapshot().generation === input.pendingGeneration &&
@@ -272,9 +236,7 @@ export function createShareHandoffRedemptionCoordinator(
       return;
     }
 
-    if (
-      !isCurrentCompletion(input.pendingGeneration, input.credentialGeneration)
-    ) {
+    if (!isCurrentCompletion(input.pendingGeneration, input.credentialGeneration)) {
       return;
     }
 
@@ -295,9 +257,7 @@ export function createShareHandoffRedemptionCoordinator(
     }
 
     const body = await response.json().catch(() => null);
-    if (
-      !isCurrentCompletion(input.pendingGeneration, input.credentialGeneration)
-    ) {
+    if (!isCurrentCompletion(input.pendingGeneration, input.credentialGeneration)) {
       return;
     }
     const success = redeemSuccess(body);
@@ -325,10 +285,7 @@ export function createShareHandoffRedemptionCoordinator(
       showCurrent();
     },
     accept(statusId) {
-      if (
-        publicStatus.status !== "waiting-for-acceptance" ||
-        publicStatus.statusId !== statusId
-      ) {
+      if (publicStatus.status !== "waiting-for-acceptance" || publicStatus.statusId !== statusId) {
         return;
       }
       const input = currentAttempt(statusId);
@@ -341,10 +298,7 @@ export function createShareHandoffRedemptionCoordinator(
       beginRedemption(input);
     },
     retry() {
-      if (
-        publicStatus.status !== "failed-network" &&
-        publicStatus.status !== "failed-busy"
-      ) {
+      if (publicStatus.status !== "failed-network" && publicStatus.status !== "failed-busy") {
         return;
       }
       const input = currentAttempt(publicStatus.statusId);

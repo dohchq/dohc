@@ -2,53 +2,61 @@ import { randomUUID } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
-import { DOHC_COLLECTIONS_GUARD, DOHC_METADATA_GUARD, notAFileRefusal, notARealFolderRefusal, type DohcPathGuard } from "@dohc/workspace-core";
-import { COLLECTIONS_REFUSAL_CODE, USE_THIS_COMPUTER, collectionsElsewhereWords, type CollectionsRefusalKind } from "../ipc/errorWords";
+import {
+  DOHC_COLLECTIONS_GUARD,
+  DOHC_METADATA_GUARD,
+  notAFileRefusal,
+  notARealFolderRefusal,
+  type DohcPathGuard,
+} from "@dohc/workspace-core";
+import {
+  COLLECTIONS_REFUSAL_CODE,
+  USE_THIS_COMPUTER,
+  collectionsElsewhereWords,
+  type CollectionsRefusalKind,
+} from "../ipc/errorWords";
 import { atomicWriteFile } from "../atomicReplaceFile";
-import { computerOf, guardedFileExists, parseObject, readGuardedFile, type Computer } from "./syncHistory";
+import {
+  computerOf,
+  guardedFileExists,
+  parseObject,
+  readGuardedFile,
+  type Computer,
+} from "./syncHistory";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { OLD_STORE_PATH, STORE_PATH } from "./localDatasetFolders";
 
 // Which installation of dohc keeps a workspace's Collections, recorded in
 // .dohc/collections.json. Their store, .dohc/local/datasets/state.sqlite with
 // its -wal and -shm, is the only copy of their records, files, approvals and
-// History. iCloud Drive skips .dohc/local, but Dropbox or a copied folder can
-// carry those files to other computers one by one, and the store was in
-// .dohc/datasets, which iCloud Drive syncs, before .dohc/local. A computer
-// could open an older copy, or write its own, and changes would be lost. So
-// only the installation the record names opens the store, and only it moves
-// a store from .dohc/datasets. Every other one refuses, creates nothing, and
-// says which computer keeps the Collections. It can still use the ones moved
-// to its signed-in server, which it asks without opening a store.
+// History. A synced or copied folder can carry those files to other
+// computers one by one, and a computer that opened an older copy, or wrote
+// its own, would lose changes. So only the installation the record names
+// opens the store, and only it moves a store from .dohc/datasets. Every other
+// one refuses, creates nothing, and says which computer keeps the
+// Collections. It can still use the ones moved to its signed-in server.
 //
-// The record also names the store by a random id that the store keeps in
-// local_dataset_store. The holder opens only the store with that id, so a
-// copy from another computer, or a backup, that took its place is refused.
+// The record names the store by a random id the store keeps in
+// local_dataset_store. The holder opens only that store, so a copy from
+// another computer, or a backup, that took its place is refused.
 //
 // A new workspace names the installation that made it, with no store id
-// until that installation first creates the store. A workspace from before
-// the record has none, and no computer opens or creates its store until a
-// person keeps the Collections on one. dohc never claims them by itself: a
-// synced folder can bring the record or the store late, after another
-// computer already keeps them. A record dohc cannot read blocks the same way.
+// until that installation first creates the store. A workspace with no
+// record, or one dohc cannot read, opens no store until a person keeps the
+// Collections on one computer: a synced folder can bring the record or the
+// store late, so dohc never claims them by itself.
 //
-// The record sits beside manifest.json, so a synced folder carries it, and
-// outside .dohc/local, which iCloud Drive skips. .dohc resolves through
+// The record sits beside manifest.json, outside .dohc/local, which iCloud
+// Drive skips, so a synced folder carries it. .dohc resolves through
 // resolveWorkspaceMetadataDir, and a link or folder at the record's name is
-// refused, never followed.
+// refused, never followed. A server's sync never carries .dohc, so a
+// workspace that syncs through a server keeps the record too. Only a
+// received share does not use it.
 //
-// Claims, adoptions and new stores run one at a time per workspace in this
-// process, and each checks just before it writes that the record is still
-// the one it read. That gives no exclusion across computers: two computers
-// that keep the Collections at once through iCloud Drive can both write.
-// Then the store id catches the one whose record lost, as "elsewhere" or
-// "replaced", and it stops.
-//
-// An open store reads the record before each piece of work, so a record that
-// names another computer or store stops the next write, with no wait between.
-//
-// A server's sync never carries .dohc, so a workspace that syncs through a
-// server keeps the record too. Only a received share does not use it.
+// Writes run one at a time per workspace in this process and recheck the
+// record first. Two computers can still both write through a synced folder.
+// The store id then stops the one whose record lost, as "elsewhere" or
+// "replaced", and an open store reads the record before each piece of work.
 
 /** The record: who keeps the Collections, and the id of their store once made. */
 export interface CollectionsHolder {
@@ -75,13 +83,15 @@ const RECORD = "collections.json";
 const STORE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const UNREADABLE = `${DOHC_COLLECTIONS_GUARD.lead} Restore ${DOHC_COLLECTIONS_GUARD.path}, or update dohc. Then retry.`;
 
-/** The words for a refusal, as a person, an agent and the CLI read them. */
 function collectionsRefusalMessage(refusal: CollectionsRefusal): string {
   switch (refusal.kind) {
     case "unclaimed":
       return `dohc doesn't know which computer keeps this workspace's Collections. To keep them on this computer, choose ${USE_THIS_COMPUTER} in dohc.`;
     case "elsewhere":
-      return collectionsElsewhereWords({ label: refusal.computer.label, sameName: refusal.sameName });
+      return collectionsElsewhereWords({
+        label: refusal.computer.label,
+        sameName: refusal.sameName,
+      });
     case "unreadable":
       return refusal.words;
     case "missing":
@@ -124,7 +134,9 @@ export interface CollectionsHolderCheck {
  * person's own does, whether or not it syncs through a server. A received
  * share does not.
  */
-export function collectionsHolderRequired(entry: { shareView?: unknown } | null | undefined): boolean {
+export function collectionsHolderRequired(
+  entry: { shareView?: unknown } | null | undefined,
+): boolean {
   return entry?.shareView === undefined;
 }
 
@@ -144,9 +156,10 @@ function parseRecord(text: string, workspaceId: string): CollectionsHolder | nul
   return { computer, storeId };
 }
 
-// A guard's own refusal, which says what to remove, or the general words.
 function wordsOf(error: unknown, guard: DohcPathGuard): string {
-  return error instanceof Error && error.message.startsWith(guard.lead) ? error.message : UNREADABLE;
+  return error instanceof Error && error.message.startsWith(guard.lead)
+    ? error.message
+    : UNREADABLE;
 }
 
 async function recordPath(rootPath: string): Promise<string | null> {
@@ -154,7 +167,10 @@ async function recordPath(rootPath: string): Promise<string | null> {
     const metadata = await resolveWorkspaceMetadataDir(rootPath, { create: false });
     return metadata === null ? null : join(metadata, RECORD);
   } catch (error) {
-    throw refused({ kind: "unreadable", words: error instanceof Error ? error.message : UNREADABLE });
+    throw refused({
+      kind: "unreadable",
+      words: error instanceof Error ? error.message : UNREADABLE,
+    });
   }
 }
 
@@ -163,7 +179,8 @@ async function readRecord(rootPath: string, workspaceId: string): Promise<Record
   if (path === null) return { kind: "absent" };
   const read = await readGuardedFile(path, DOHC_COLLECTIONS_GUARD);
   if (read.kind === "absent") return read;
-  if (read.kind === "failed") throw refused({ kind: "unreadable", words: wordsOf(read.error, DOHC_COLLECTIONS_GUARD) });
+  if (read.kind === "failed")
+    throw refused({ kind: "unreadable", words: wordsOf(read.error, DOHC_COLLECTIONS_GUARD) });
   const holder = parseRecord(read.text, workspaceId);
   if (holder === null) throw refused({ kind: "unreadable", words: UNREADABLE });
   return { kind: "holder", holder, text: read.text };
@@ -174,14 +191,27 @@ function recordText(workspaceId: string, { computer, storeId }: CollectionsHolde
 }
 
 // Refuses when the record is no longer the one read as `seen`.
-async function assertUnchanged(rootPath: string, workspaceId: string, seen: RecordRead): Promise<void> {
+async function assertUnchanged(
+  rootPath: string,
+  workspaceId: string,
+  seen: RecordRead,
+): Promise<void> {
   const now = await readRecord(rootPath, workspaceId).catch(() => null);
-  const same = now !== null && (now.kind === "absent" ? seen.kind === "absent" : seen.kind === "holder" && now.text === seen.text);
+  const same =
+    now !== null &&
+    (now.kind === "absent"
+      ? seen.kind === "absent"
+      : seen.kind === "holder" && now.text === seen.text);
   if (!same) throw refused({ kind: "changed" });
 }
 
 // Replaces the record read as `seen`, or refuses when it changed since.
-async function replaceRecord(rootPath: string, workspaceId: string, seen: RecordRead, holder: CollectionsHolder): Promise<void> {
+async function replaceRecord(
+  rootPath: string,
+  workspaceId: string,
+  seen: RecordRead,
+  holder: CollectionsHolder,
+): Promise<void> {
   await assertUnchanged(rootPath, workspaceId, seen);
   const path = join(await resolveWorkspaceMetadataDir(rootPath), RECORD);
   // Refuse a link or a folder before replacing the record.
@@ -197,16 +227,25 @@ const queues = new Map<string, Promise<unknown>>();
  */
 export function holderWork<T>(workspaceId: string, work: () => Promise<T>): Promise<T> {
   const run = (queues.get(workspaceId) ?? Promise.resolve()).then(work, work);
-  const settled = run.then(() => undefined, () => undefined);
+  const settled = run.then(
+    () => undefined,
+    () => undefined,
+  );
   queues.set(workspaceId, settled);
-  void settled.then(() => { if (queues.get(workspaceId) === settled) queues.delete(workspaceId); });
+  void settled.then(() => {
+    if (queues.get(workspaceId) === settled) queues.delete(workspaceId);
+  });
   return run;
 }
 
-const present = (path: string) => lstat(path).then(() => true, (error: NodeJS.ErrnoException) => {
-  if (error.code === "ENOENT" || error.code === "ENOTDIR") return false;
-  throw error;
-});
+const present = (path: string) =>
+  lstat(path).then(
+    () => true,
+    (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return false;
+      throw error;
+    },
+  );
 
 /**
  * Whether any file of a Collections store is in the workspace, in
@@ -214,7 +253,11 @@ const present = (path: string) => lstat(path).then(() => true, (error: NodeJS.Er
  * computer's, until iCloud Drive removes it. Checking creates nothing.
  */
 async function collectionsStorePresent(rootPath: string): Promise<boolean> {
-  const files = [STORE_PATH, OLD_STORE_PATH].flatMap((store) => [store, `${store}-wal`, `${store}-shm`]);
+  const files = [STORE_PATH, OLD_STORE_PATH].flatMap((store) => [
+    store,
+    `${store}-wal`,
+    `${store}-shm`,
+  ]);
   return (await Promise.all(files.map((file) => present(join(rootPath, file))))).includes(true);
 }
 
@@ -222,14 +265,23 @@ async function collectionsStorePresent(rootPath: string): Promise<boolean> {
  * A new workspace's Collections belong to `here`, which has no store for
  * them yet. A record already there stays.
  */
-export async function recordNewCollectionsHolder(rootPath: string, workspaceId: string, here: Computer): Promise<void> {
+export async function recordNewCollectionsHolder(
+  rootPath: string,
+  workspaceId: string,
+  here: Computer,
+): Promise<void> {
   const path = join(await resolveWorkspaceMetadataDir(rootPath), RECORD);
   // Whole or not at all: a record cut short would block the Collections.
-  if (!(await guardedFileExists(path, DOHC_COLLECTIONS_GUARD))) await atomicWriteFile(path, recordText(workspaceId, { computer: here, storeId: null }));
+  if (!(await guardedFileExists(path, DOHC_COLLECTIONS_GUARD)))
+    await atomicWriteFile(path, recordText(workspaceId, { computer: here, storeId: null }));
 }
 
 type Elsewhere = Extract<CollectionsRefusal, { kind: "elsewhere" }>;
-const elsewhereOf = (computer: Computer, here: Computer): Elsewhere => ({ kind: "elsewhere", computer, sameName: computer.label === here.label });
+const elsewhereOf = (computer: Computer, here: Computer): Elsewhere => ({
+  kind: "elsewhere",
+  computer,
+  sameName: computer.label === here.label,
+});
 
 function heldBy(read: RecordRead, here: Computer): CollectionsHolder {
   if (read.kind === "absent") throw refused({ kind: "unclaimed" });
@@ -245,12 +297,18 @@ function heldBy(read: RecordRead, here: Computer): CollectionsHolder {
  * holder, or dohc cannot read the record. Those still take the store's own
  * admission, which refuses as before.
  */
-export async function collectionsKeptElsewhere(rootPath: string, workspaceId: string, check: CollectionsHolderCheck): Promise<Elsewhere | null> {
+export async function collectionsKeptElsewhere(
+  rootPath: string,
+  workspaceId: string,
+  check: CollectionsHolderCheck,
+): Promise<Elsewhere | null> {
   if (!check.required()) return null;
   const read = await readRecord(rootPath, workspaceId).catch(() => null);
   if (read?.kind !== "holder") return null;
   const here = check.here();
-  return read.holder.computer.installId === here.installId ? null : elsewhereOf(read.holder.computer, here);
+  return read.holder.computer.installId === here.installId
+    ? null
+    : elsewhereOf(read.holder.computer, here);
 }
 
 /**
@@ -264,7 +322,11 @@ export type CollectionsAdmission =
   | { kind: "create"; storeId: string; seen: RecordRead }
   | { kind: "open"; storeId: string };
 
-export async function admitCollectionsStore(rootPath: string, workspaceId: string, check: CollectionsHolderCheck): Promise<CollectionsAdmission> {
+export async function admitCollectionsStore(
+  rootPath: string,
+  workspaceId: string,
+  check: CollectionsHolderCheck,
+): Promise<CollectionsAdmission> {
   if (!check.required()) return { kind: "unguarded" };
   const seen = await readRecord(rootPath, workspaceId);
   const { storeId } = heldBy(seen, check.here());
@@ -274,7 +336,11 @@ export async function admitCollectionsStore(rootPath: string, workspaceId: strin
     return { kind: "create", storeId: randomUUID(), seen };
   }
   // A store still where stores were before .dohc/local is moved when it opens.
-  if (!(await present(join(rootPath, STORE_PATH))) && !(await present(join(rootPath, OLD_STORE_PATH)))) throw refused({ kind: "missing" });
+  if (
+    !(await present(join(rootPath, STORE_PATH))) &&
+    !(await present(join(rootPath, OLD_STORE_PATH)))
+  )
+    throw refused({ kind: "missing" });
   return { kind: "open", storeId };
 }
 
@@ -282,7 +348,13 @@ export async function admitCollectionsStore(rootPath: string, workspaceId: strin
  * The store with `storeId` was just created here, so the record names it
  * from now on. Refuses when the record changed since admission read it.
  */
-export async function recordCollectionsStore(rootPath: string, workspaceId: string, here: Computer, storeId: string, seen: RecordRead): Promise<void> {
+export async function recordCollectionsStore(
+  rootPath: string,
+  workspaceId: string,
+  here: Computer,
+  storeId: string,
+  seen: RecordRead,
+): Promise<void> {
   await replaceRecord(rootPath, workspaceId, seen, { computer: here, storeId });
 }
 
@@ -292,17 +364,32 @@ export async function recordCollectionsStore(rootPath: string, workspaceId: stri
  * File times and sizes cannot prove that the record is unchanged.
  * Throws a CollectionsRefusalError when it no longer holds the store.
  */
-export function createHoldingCheck(rootPath: string, workspaceId: string, check: CollectionsHolderCheck, storeId: () => string | null): () => void {
-  const metadata = join(rootPath, ".dohc"), path = join(metadata, RECORD);
+export function createHoldingCheck(
+  rootPath: string,
+  workspaceId: string,
+  check: CollectionsHolderCheck,
+  storeId: () => string | null,
+): () => void {
+  const metadata = join(rootPath, ".dohc"),
+    path = join(metadata, RECORD);
   return () => {
     if (!check.required()) return;
     const stats = lstatSync(path, { bigint: true, throwIfNoEntry: false });
     if (stats === undefined) throw refused({ kind: "unclaimed" });
     const folder = lstatSync(metadata);
-    if (folder.isSymbolicLink() || !folder.isDirectory()) throw refused({ kind: "unreadable", words: notARealFolderRefusal(DOHC_METADATA_GUARD, folder) });
-    if (!stats.isFile()) throw refused({ kind: "unreadable", words: notAFileRefusal(DOHC_COLLECTIONS_GUARD, stats) });
+    if (folder.isSymbolicLink() || !folder.isDirectory())
+      throw refused({
+        kind: "unreadable",
+        words: notARealFolderRefusal(DOHC_METADATA_GUARD, folder),
+      });
+    if (!stats.isFile())
+      throw refused({ kind: "unreadable", words: notAFileRefusal(DOHC_COLLECTIONS_GUARD, stats) });
     let text: string;
-    try { text = readFileSync(path, "utf8"); } catch { throw refused({ kind: "unreadable", words: UNREADABLE }); }
+    try {
+      text = readFileSync(path, "utf8");
+    } catch {
+      throw refused({ kind: "unreadable", words: UNREADABLE });
+    }
     const holder = parseRecord(text, workspaceId);
     if (holder === null) throw refused({ kind: "unreadable", words: UNREADABLE });
     heldBy({ kind: "holder", holder, text }, check.here());
@@ -324,8 +411,14 @@ export function keepQuestionWords(question: KeepQuestion): { message: string; de
   const { label } = question.computer;
   const message = "Use this computer for these Collections?";
   return question.kind === "made-elsewhere"
-    ? { message, detail: `${label} made this workspace. Its Collections may still be syncing from there. If you keep them here before they arrive, this computer can replace ${label}'s Collections.` }
-    : { message, detail: `${label} keeps these Collections. If ${label} was this computer before dohc was set up again, keep them here. If ${label} is another computer that still uses them, don't, or its changes can be lost.` };
+    ? {
+        message,
+        detail: `${label} made this workspace. Its Collections may still be syncing from there. If you keep them here before they arrive, this computer can replace ${label}'s Collections.`,
+      }
+    : {
+        message,
+        detail: `${label} keeps these Collections. If ${label} was this computer before dohc was set up again, keep them here. If ${label} is another computer that still uses them, don't, or its changes can be lost.`,
+      };
 }
 
 export interface KeepSteps {
@@ -335,7 +428,6 @@ export interface KeepSteps {
   storeIdHere(): Promise<string | null>;
   /** The installation that made the workspace, as its sync history records it, or null. */
   madeBy(): Promise<Computer | null>;
-  /** Asks the person; false when they did not confirm. */
   confirm(question: KeepQuestion): Promise<boolean>;
 }
 
@@ -354,18 +446,29 @@ export interface KeepSteps {
  *   label, never the store id. A record naming no store yet can be kept
  *   only where there is no store, since no store here could match it.
  */
-export async function keepCollectionsHere(rootPath: string, workspaceId: string, here: Computer, steps: KeepSteps): Promise<boolean> {
+export async function keepCollectionsHere(
+  rootPath: string,
+  workspaceId: string,
+  here: Computer,
+  steps: KeepSteps,
+): Promise<boolean> {
   const seen = await readRecord(rootPath, workspaceId);
-  const elsewhere = seen.kind === "holder" && seen.holder.computer.installId !== here.installId ? seen.holder : null;
+  const elsewhere =
+    seen.kind === "holder" && seen.holder.computer.installId !== here.installId
+      ? seen.holder
+      : null;
   if (seen.kind === "holder" && elsewhere === null && seen.holder.storeId !== null) return true;
-  const refuseElsewhere = (holder: CollectionsHolder) => refused(elsewhereOf(holder.computer, here));
+  const refuseElsewhere = (holder: CollectionsHolder) =>
+    refused(elsewhereOf(holder.computer, here));
   let question: KeepQuestion | null = null;
   if (elsewhere !== null) {
-    if (elsewhere.storeId === null && await collectionsStorePresent(rootPath)) throw refuseElsewhere(elsewhere);
+    if (elsewhere.storeId === null && (await collectionsStorePresent(rootPath)))
+      throw refuseElsewhere(elsewhere);
     question = { kind: "earlier-installation", computer: elsewhere.computer };
   } else {
     const madeBy = await steps.madeBy();
-    if (madeBy !== null && madeBy.installId !== here.installId) question = { kind: "made-elsewhere", computer: madeBy };
+    if (madeBy !== null && madeBy.installId !== here.installId)
+      question = { kind: "made-elsewhere", computer: madeBy };
   }
   if (question !== null && !(await steps.confirm(question))) return false;
   return holderWork(workspaceId, async () => {
@@ -377,8 +480,14 @@ export async function keepCollectionsHere(rootPath: string, workspaceId: string,
         await replaceRecord(rootPath, workspaceId, seen, { computer: here, storeId: null });
         return true;
       }
-      if ((await steps.storeIdHere()) !== elsewhere.storeId) throw new Error(`This computer doesn't have ${elsewhere.computer.label}'s copy of the Collections.`);
-      await replaceRecord(rootPath, workspaceId, seen, { computer: here, storeId: elsewhere.storeId });
+      if ((await steps.storeIdHere()) !== elsewhere.storeId)
+        throw new Error(
+          `This computer doesn't have ${elsewhere.computer.label}'s copy of the Collections.`,
+        );
+      await replaceRecord(rootPath, workspaceId, seen, {
+        computer: here,
+        storeId: elsewhere.storeId,
+      });
       return true;
     }
     if (!present) {

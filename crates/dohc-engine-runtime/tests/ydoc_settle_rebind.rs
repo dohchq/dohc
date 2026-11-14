@@ -243,7 +243,6 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
 
-    // The session creates and settles PATH ("same text").
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let state = handle
@@ -463,8 +462,6 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
         .await
         .expect("prune close");
 
-    // The head advances without a session: an external disk edit ingested by
-    // capture (disk + DB stay consistent).
     std::fs::write(scratch.path().join(PATH), "external edit").expect("disk edit");
     handle
         .capture_ingest(
@@ -642,11 +639,6 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
     .await
     .expect("retire");
 
-    // Reopen: the deleted document must not resurrect, and the fresh
-    // create-flow must settle cleanly. Mutation check: drop the
-    // retired-lineage clearing in ydoc_open_state_on_store — the open
-    // reports lineage existing and the settle below wedges
-    // ConflictStaleTarget on the retained last_settled_sha.
     let reopened = handle
         .ydoc_open_state(
             WS.to_owned(),
@@ -837,7 +829,6 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
         "the crashed settle must not have replaced the file"
     );
 
-    // The committed-but-unmaterialized settle blocks a prune-close.
     let prune_refused = handle
         .ydoc_close_session(
             key.clone(),
@@ -855,7 +846,6 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
         "expected UnsettledClose, got {prune_refused:?}"
     );
 
-    // The retry replays the pending job to disk.
     let settled = handle
         .ydoc_settle(
             scratch.path().to_path_buf(),

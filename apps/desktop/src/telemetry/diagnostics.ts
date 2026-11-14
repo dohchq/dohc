@@ -17,7 +17,8 @@ export function diagnosticsText(input: {
   crashReport: string | null;
 }): string {
   const { facts } = input;
-  const state = (available: boolean, on: boolean) => !available ? "unavailable for this launch" : on ? "on" : "off";
+  const state = (available: boolean, on: boolean) =>
+    !available ? "unavailable for this launch" : on ? "on" : "off";
   const text = [
     "dohc diagnostics",
     `Created: ${new Date(facts.atMs).toISOString()}`,
@@ -30,7 +31,9 @@ export function diagnosticsText(input: {
     "",
     input.crashReport ?? "Recent problems: none",
   ].join("\n");
-  return text.length > DIAGNOSTICS_MAX_CHARS ? `${text.slice(0, DIAGNOSTICS_MAX_CHARS - 1)}…` : text;
+  return text.length > DIAGNOSTICS_MAX_CHARS
+    ? `${text.slice(0, DIAGNOSTICS_MAX_CHARS - 1)}…`
+    : text;
 }
 
 /** Asks where to save, then writes the text there. False when cancelled. */

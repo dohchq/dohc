@@ -33,29 +33,13 @@ const DEFAULT_ATTACHMENT_SETTINGS: AttachmentSettings = {
   folderName: DEFAULT_ATTACHMENT_FOLDER,
 };
 
-// Coerces a stored folder name to a single path segment the writer will accept.
-//
-// The folder name is user input that becomes one segment of the write path, so
-// "safe" here means exactly one thing: whatever we return, writeWorkspaceAsset
-// must accept. The main process runs every write through validateUserWritePath,
-// which rejects more than traversal — reserved names (`.dohc`,
-// `shared-with-me`), ignored ones (`node_modules`, `.git`), percent-encoded
-// traversal (`%2e%2e`), and Windows dot/space aliases. Re-deriving that list
-// here would drift; instead we ask the same validator, and require the path it
-// normalizes to be the segment we passed in (so a name that decodes into
-// several segments, like `a%2fb`, is rejected rather than quietly widening the
-// target). Anything it refuses falls back to "assets" — a rejected name must
-// degrade to the default, never make every paste fail its write and silently
-// drop the image.
 export function sanitizeAttachmentFolderName(name: string): string {
   const trimmed = name.trim();
   if (trimmed.length === 0) return DEFAULT_ATTACHMENT_FOLDER;
   // One segment only: the caller joins this into a path itself.
   if (/[/\\]/.test(trimmed)) return DEFAULT_ATTACHMENT_FOLDER;
   const validated = validateUserWritePath(trimmed);
-  return validated.ok && validated.normalized === trimmed
-    ? trimmed
-    : DEFAULT_ATTACHMENT_FOLDER;
+  return validated.ok && validated.normalized === trimmed ? trimmed : DEFAULT_ATTACHMENT_FOLDER;
 }
 
 // Computes both paths a saved attachment needs, purely from the document's
@@ -77,15 +61,13 @@ export function computeAttachmentPaths(
   const folder = sanitizeAttachmentFolderName(settings.folderName);
   if (settings.location === "global-folder") {
     // One folder at the workspace root; a nested doc climbs to it with `..`.
-    const depth =
-      docDir === "" ? 0 : docDir.replace(/\/+$/, "").split("/").length;
+    const depth = docDir === "" ? 0 : docDir.replace(/\/+$/, "").split("/").length;
     const up = "../".repeat(depth);
     return {
       writePath: `${folder}/${filename}`,
       relativeSrc: `${up}${folder}/${filename}`,
     };
   }
-  // per-document (default): a subfolder next to the document.
   return {
     writePath: `${docDir}${folder}/${filename}`,
     relativeSrc: `${folder}/${filename}`,
@@ -107,23 +89,11 @@ const MIME_EXTENSIONS: Record<string, string> = {
   "image/bmp": "bmp",
 };
 
-const KNOWN_IMAGE_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "webp",
-  "gif",
-  "svg",
-  "avif",
-  "bmp",
-]);
+const KNOWN_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif", "svg", "avif", "bmp"]);
 
 // Writes image bytes into the workspace. Injected so tests can mock it; the
 // default (in MarkdownEditor) routes through the desktop bridge.
-type WriteWorkspaceAsset = (
-  relativePath: string,
-  bytes: Uint8Array,
-) => Promise<void>;
+type WriteWorkspaceAsset = (relativePath: string, bytes: Uint8Array) => Promise<void>;
 
 // One image the user chose through the native `/image` picker. Main read the
 // bytes (it owns the dialog and fs access), so unlike a pasted/dropped File
@@ -195,9 +165,7 @@ export type ImagePasteContext = {
 // Reads the attachment setting for this write. A failed/absent read is not an
 // error: attachments fall back to the per-document default rather than the
 // paste dying.
-async function resolveAttachmentSettings(
-  context: ImagePasteContext,
-): Promise<AttachmentSettings> {
+async function resolveAttachmentSettings(context: ImagePasteContext): Promise<AttachmentSettings> {
   if (!context.readAttachments) return DEFAULT_ATTACHMENT_SETTINGS;
   try {
     return await context.readAttachments();
@@ -245,21 +213,11 @@ export function imageExtension(name: string, mimeType: string): string {
 }
 
 // Collision-safe asset filename: `<slug>-<hash>.<ext>`.
-export function generateAssetFilename(
-  name: string,
-  mimeType: string,
-  bytes: Uint8Array,
-): string {
-  return `${slugifyBaseName(name)}-${shortContentHash(bytes)}.${imageExtension(
-    name,
-    mimeType,
-  )}`;
+export function generateAssetFilename(name: string, mimeType: string, bytes: Uint8Array): string {
+  return `${slugifyBaseName(name)}-${shortContentHash(bytes)}.${imageExtension(name, mimeType)}`;
 }
 
-// Collects image Files from a clipboard/drag DataTransfer.
-export function extractImageFiles(
-  dataTransfer: DataTransfer | null,
-): File[] {
+export function extractImageFiles(dataTransfer: DataTransfer | null): File[] {
   if (!dataTransfer) return [];
   const files: File[] = [];
   for (const file of Array.from(dataTransfer.files ?? [])) {
@@ -383,11 +341,7 @@ function sequenceDiff<T>(
 
   let minDiagonal = -Infinity;
   let maxDiagonal = Infinity;
-  for (
-    let editLength = 1;
-    editLength <= before.length + after.length;
-    editLength += 1
-  ) {
+  for (let editLength = 1; editLength <= before.length + after.length; editLength += 1) {
     for (
       let diagonal = Math.max(minDiagonal, -editLength);
       diagonal <= Math.min(maxDiagonal, editLength);
@@ -398,22 +352,16 @@ function sequenceDiff<T>(
       const removePath = paths[diagonal - 1];
       const insertPath = paths[diagonal + 1];
       if (removePath) paths[diagonal - 1] = undefined;
-      const insertNewPos = insertPath
-        ? insertPath.oldPos - diagonal
-        : -1;
+      const insertNewPos = insertPath ? insertPath.oldPos - diagonal : -1;
       const canInsert =
-        insertPath !== undefined &&
-        insertNewPos >= 0 &&
-        insertNewPos < after.length;
-      const canRemove =
-        removePath !== undefined && removePath.oldPos + 1 < before.length;
+        insertPath !== undefined && insertNewPos >= 0 && insertNewPos < after.length;
+      const canRemove = removePath !== undefined && removePath.oldPos + 1 < before.length;
       if (!canInsert && !canRemove) {
         paths[diagonal] = undefined;
         continue;
       }
       const path =
-        !canRemove ||
-        (canInsert && removePath!.oldPos < insertPath!.oldPos)
+        !canRemove || (canInsert && removePath!.oldPos < insertPath!.oldPos)
           ? addToPath(insertPath!, true, false, 0)
           : addToPath(removePath!, false, true, 1);
       newPos = extractCommon(path, diagonal);
@@ -430,27 +378,15 @@ function sequenceDiff<T>(
     }
   }
   return [
-    ...(before.length > 0
-      ? [{ count: before.length, added: false, removed: true }]
-      : []),
-    ...(after.length > 0
-      ? [{ count: after.length, added: true, removed: false }]
-      : []),
+    ...(before.length > 0 ? [{ count: before.length, added: false, removed: true }] : []),
+    ...(after.length > 0 ? [{ count: after.length, added: true, removed: false }] : []),
   ];
 }
 
-function appendRange(
-  ranges: number[],
-  start: number,
-  oldSize: number,
-  newSize: number,
-): void {
+function appendRange(ranges: number[], start: number, oldSize: number, newSize: number): void {
   if (oldSize === 0 && newSize === 0) return;
   const previous = ranges.length - 3;
-  if (
-    previous >= 0 &&
-    ranges[previous]! + ranges[previous + 1]! === start
-  ) {
+  if (previous >= 0 && ranges[previous]! + ranges[previous + 1]! === start) {
     ranges[previous + 1] += oldSize;
     ranges[previous + 2] += newSize;
     return;
@@ -464,10 +400,7 @@ type DiffAnchor = {
   length: number;
 };
 
-function uniqueItemIndices<T, Key>(
-  items: readonly T[],
-  keyOf: (item: T) => Key,
-): Map<Key, number> {
+function uniqueItemIndices<T, Key>(items: readonly T[], keyOf: (item: T) => Key): Map<Key, number> {
   const indices = new Map<Key, number>();
   for (let index = 0; index < items.length; index += 1) {
     const key = keyOf(items[index]!);
@@ -522,20 +455,13 @@ function increasingAnchors<T, Key>(
 
 function textWindows(text: string): string[] {
   const windows: string[] = [];
-  for (
-    let index = 0;
-    index + FALLBACK_TEXT_ANCHOR_LENGTH <= text.length;
-    index += 1
-  ) {
+  for (let index = 0; index + FALLBACK_TEXT_ANCHOR_LENGTH <= text.length; index += 1) {
     windows.push(text.slice(index, index + FALLBACK_TEXT_ANCHOR_LENGTH));
   }
   return windows;
 }
 
-function increasingTextAnchors(
-  before: string,
-  after: string,
-): DiffAnchor[] {
+function increasingTextAnchors(before: string, after: string): DiffAnchor[] {
   const anchors = increasingAnchors(
     textWindows(before),
     textWindows(after),
@@ -552,16 +478,12 @@ function increasingTextAnchors(
       normalized.push({ ...anchor });
       continue;
     }
-    const sameOffset =
-      anchor.newStart - anchor.oldStart === last.newStart - last.oldStart;
+    const sameOffset = anchor.newStart - anchor.oldStart === last.newStart - last.oldStart;
     const overlaps =
       anchor.oldStart <= last.oldStart + last.length &&
       anchor.newStart <= last.newStart + last.length;
     if (sameOffset && overlaps) {
-      last.length = Math.max(
-        last.length,
-        anchor.oldStart + anchor.length - last.oldStart,
-      );
+      last.length = Math.max(last.length, anchor.oldStart + anchor.length - last.oldStart);
     } else if (
       anchor.oldStart >= last.oldStart + last.length &&
       anchor.newStart >= last.newStart + last.length
@@ -610,12 +532,7 @@ function diffWithAnchors<T>(
   appendRange(ranges, pos, oldSize, newSize);
 }
 
-function diffTextWithAnchors(
-  before: string,
-  after: string,
-  start: number,
-  ranges: number[],
-): void {
+function diffTextWithAnchors(before: string, after: string, start: number, ranges: number[]): void {
   diffWithAnchors(
     before.split(""),
     after.split(""),
@@ -636,12 +553,7 @@ function diffText(
   let pos = start;
   let oldSize = 0;
   let newSize = 0;
-  const components = sequenceDiff(
-    before.split(""),
-    after.split(""),
-    (a, b) => a === b,
-    budget,
-  );
+  const components = sequenceDiff(before.split(""), after.split(""), (a, b) => a === b, budget);
   if (components === null) {
     diffTextWithAnchors(before, after, start, ranges);
     return;
@@ -717,13 +629,7 @@ function diffContent(
     ) {
       let nestedPos = pos;
       for (let index = 0; index < changedOld.length; index += 1) {
-        diffNode(
-          changedOld[index]!,
-          changedNew[index]!,
-          nestedPos,
-          ranges,
-          budget,
-        );
+        diffNode(changedOld[index]!, changedNew[index]!, nestedPos, ranges, budget);
         nestedPos += changedOld[index]!.nodeSize;
       }
     } else {
@@ -739,19 +645,12 @@ function diffContent(
     changedNew = [];
   };
 
-  const components = sequenceDiff(
-    oldChildren,
-    newChildren,
-    (a, b) => a.eq(b),
-    budget,
-  );
+  const components = sequenceDiff(oldChildren, newChildren, (a, b) => a.eq(b), budget);
   if (components === null) {
     diffWithAnchors(
       oldChildren,
       newChildren,
-      increasingAnchors(oldChildren, newChildren, (node) =>
-        JSON.stringify(node.toJSON()),
-      ),
+      increasingAnchors(oldChildren, newChildren, (node) => JSON.stringify(node.toJSON())),
       start,
       ranges,
       (node) => node.nodeSize,
@@ -776,10 +675,7 @@ function diffContent(
   flush();
 }
 
-export function documentReplacementMap(
-  before: ProseMirrorNode,
-  after: ProseMirrorNode,
-): StepMap {
+export function documentReplacementMap(before: ProseMirrorNode, after: ProseMirrorNode): StepMap {
   if (before.eq(after)) return StepMap.empty;
   const ranges: number[] = [];
   diffContent(before, after, 0, ranges, {
@@ -795,10 +691,7 @@ function rebasePositionAfterDocumentChange(
 ): number {
   if (before === after) return Math.max(0, Math.min(pos, after.content.size));
   const mapped = documentReplacementMap(before, after).map(pos, 1);
-  return Math.max(
-    0,
-    Math.min(mapped, after.content.size),
-  );
+  return Math.max(0, Math.min(mapped, after.content.size));
 }
 
 // Writes each image to the workspace and inserts an image node for it. Images
@@ -851,11 +744,7 @@ export async function placeImageFiles(
       continue;
     }
     context.onBeforeInsert?.();
-    pos = rebasePositionAfterDocumentChange(
-      pos,
-      anchorDoc,
-      view.state.doc,
-    );
+    pos = rebasePositionAfterDocumentChange(pos, anchorDoc, view.state.doc);
     pos = insertImageAtPosition(view, { src: relativeSrc, alt: "" }, pos);
     anchorDoc = view.state.doc;
   }
@@ -889,8 +778,7 @@ export function handleImageDrop(
   if (files.length === 0) return false;
   event.preventDefault();
   const dropPos =
-    view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ??
-    view.state.selection.from;
+    view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ?? view.state.selection.from;
   void placeImageFiles(view, files.map(fileImageSource), context, dropPos);
   return true;
 }
@@ -969,11 +857,5 @@ export async function pickAndInsertImages(
     return;
   }
   if (picked.length === 0) return; // cancelled
-  await placeImageFiles(
-    view,
-    picked.map(pickedImageSource),
-    context,
-    pos,
-    anchorDoc,
-  );
+  await placeImageFiles(view, picked.map(pickedImageSource), context, pos, anchorDoc);
 }

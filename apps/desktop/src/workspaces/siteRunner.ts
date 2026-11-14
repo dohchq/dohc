@@ -6,7 +6,12 @@ import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { killProcessTreePosix, parseProcessTable, processDescendants, readProcessTableWithPs } from "../process/posixSpawn";
+import {
+  killProcessTreePosix,
+  parseProcessTable,
+  processDescendants,
+  processGroupDescendants,
+} from "../process/posixSpawn";
 import {
   killChildTreeWin32,
   killProcessTreeWin32,
@@ -50,7 +55,10 @@ export const APP_STILL_RUNNING_MESSAGE =
 
 export class AppCommandStillRunningError extends Error {
   override name = "AppCommandStillRunningError";
-  constructor(readonly handle: SiteProcessHandle, readonly pids: readonly number[]) {
+  constructor(
+    readonly handle: SiteProcessHandle,
+    readonly pids: readonly number[],
+  ) {
     super(APP_STILL_RUNNING_MESSAGE);
   }
 }
@@ -86,10 +94,10 @@ const DEV_URL_RE =
   /(http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?![A-Za-z0-9.-])(?::\d+)?(?:\/[^\s]*)?)(?=$|[\s.)"'`,\]>])/i;
 const DEV_URL_TRAILING_PUNCTUATION_RE = /[.,)"'`,\]>]+$/;
 // Dev tools colorize their "Local: http://..." line when FORCE_COLOR reaches
-// them (Playwright workers set it; user shells can too). Vite bolds the PORT
-// — "http://127.0.0.1:\x1b[1m5173\x1b[22m/" — which used to split the URL at
-// the escape and silently drop the port, loading a dead preview. Strip ANSI
-// SGR sequences before matching.
+// them (Playwright workers set it; user shells can too). Vite bolds the port:
+// "http://127.0.0.1:\x1b[1m5173\x1b[22m/". Matched as is, the URL splits at
+// the escape and drops the port, loading a dead preview. Strip ANSI SGR
+// sequences before matching.
 // eslint-disable-next-line no-control-regex
 const ANSI_SGR_RE = /\u001B\[[0-9;]*m/g;
 // Case-insensitive for both the inline (--host=X) and separate-token
@@ -148,14 +156,21 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+// On POSIX an app command leads its own process group, so a snapshot that
+// lands after the command exits still finds what it put in the background.
+// Windows has no such group, and a detached child there gets its own console.
+const OWN_PROCESS_GROUP = process.platform !== "win32";
+
 // The periodic descendant capture below runs on every platform: a wrapper
 // that backgrounds its real server or build helper and exits leaves an
 // orphan behind on Windows exactly as it does on POSIX, and taskkill /T
 // needs a live root pid to walk — a snapshot taken while the wrapper was
 // still running is the only way to reach it once that wrapper is gone.
-function defaultDescendantsReader(pid: number, spawnedAt: number): Promise<number[]> {
-  if (process.platform !== "win32") return processDescendants(pid, readProcessTableWithPs);
-  return processDescendants(pid, async () => withoutReusedParents(await readProcessTableWithPowershell(), pid, spawnedAt));
+export function defaultDescendantsReader(pid: number, spawnedAt: number): Promise<number[]> {
+  if (process.platform !== "win32") return processGroupDescendants(pid);
+  return processDescendants(pid, async () =>
+    withoutReusedParents(await readProcessTableWithPowershell(), pid, spawnedAt),
+  );
 }
 
 // Windows keeps a process's parent pid after that parent exits, and gives the
@@ -165,12 +180,25 @@ function defaultDescendantsReader(pid: number, spawnedAt: number): Promise<numbe
 // because a read can land after the root exits. Times are local, in whole
 // seconds, with no offset, so an hour that repeats when clocks go back reads as
 // its first occurrence. The root's time is read the same way.
-export function withoutReusedParents(table: string, rootPid: number, rootSpawnedAt: number): string {
+export function withoutReusedParents(
+  table: string,
+  rootPid: number,
+  rootSpawnedAt: number,
+): string {
   const rows = parseProcessTable(table);
   const started = new Map(rows.map((row) => [row.pid, Date.parse(row.startedAt)]));
   const spawned = new Date(rootSpawnedAt);
-  started.set(rootPid, new Date(spawned.getFullYear(), spawned.getMonth(), spawned.getDate(),
-    spawned.getHours(), spawned.getMinutes(), spawned.getSeconds()).getTime());
+  started.set(
+    rootPid,
+    new Date(
+      spawned.getFullYear(),
+      spawned.getMonth(),
+      spawned.getDate(),
+      spawned.getHours(),
+      spawned.getMinutes(),
+      spawned.getSeconds(),
+    ).getTime(),
+  );
   return rows
     .filter((row) => !((started.get(row.ppid) ?? -Infinity) > Date.parse(row.startedAt)))
     .map((row) => `${row.pid} ${row.ppid} ${row.startedAt}`)
@@ -222,17 +250,21 @@ function createDescendantCapture(
   const capturedDescendantSet = new Set<number>();
   let capturedDescendants: number[] = [];
   const inFlightCaptures = new Set<Promise<void>>();
-  const readDescendants = options.reader ?? ((pid: number) => defaultDescendantsReader(pid, options.spawnedAt));
+  const readDescendants =
+    options.reader ?? ((pid: number) => defaultDescendantsReader(pid, options.spawnedAt));
   const captureOnce = (pid: number): Promise<void> => {
     // A read that fails or times out found nothing, so every stop that waits
     // for captures in flight still ends.
-    const capture = readDescendants(pid).then((pids) => {
-      for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
-      for (const capturedPid of capturedDescendantSet) {
-        if (!isPidAlive(capturedPid)) capturedDescendantSet.delete(capturedPid);
-      }
-      capturedDescendants = [...capturedDescendantSet];
-    }, () => undefined);
+    const capture = readDescendants(pid).then(
+      (pids) => {
+        for (const descendantPid of pids) capturedDescendantSet.add(descendantPid);
+        for (const capturedPid of capturedDescendantSet) {
+          if (!isPidAlive(capturedPid)) capturedDescendantSet.delete(capturedPid);
+        }
+        capturedDescendants = [...capturedDescendantSet];
+      },
+      () => undefined,
+    );
     inFlightCaptures.add(capture);
     void capture.finally(() => inFlightCaptures.delete(capture));
     return capture;
@@ -241,7 +273,10 @@ function createDescendantCapture(
     child.pid !== undefined ? captureOnce(child.pid) : Promise.resolve();
   const timer =
     child.pid !== undefined
-      ? setInterval(() => captureOnce(child.pid!), options.intervalMs ?? DESCENDANT_CAPTURE_INTERVAL_MS)
+      ? setInterval(
+          () => captureOnce(child.pid!),
+          options.intervalMs ?? DESCENDANT_CAPTURE_INTERVAL_MS,
+        )
       : undefined;
   void captureNow();
   timer?.unref?.();
@@ -270,9 +305,10 @@ function pushLog(logs: SiteLogEntry[], stream: SiteLogEntry["stream"], text: str
   const at = Date.now();
   for (const chunk of text.split(/\r?\n/)) {
     if (chunk.length === 0) continue;
-    const stored = chunk.length > MAX_LOG_TEXT_CHARS
-      ? `${chunk.slice(0, MAX_LOG_TEXT_CHARS - LOG_TRUNCATION_MARKER.length)}${LOG_TRUNCATION_MARKER}`
-      : chunk;
+    const stored =
+      chunk.length > MAX_LOG_TEXT_CHARS
+        ? `${chunk.slice(0, MAX_LOG_TEXT_CHARS - LOG_TRUNCATION_MARKER.length)}${LOG_TRUNCATION_MARKER}`
+        : chunk;
     logs.push({ stream, text: stored, at });
   }
   if (logs.length > MAX_LOG_ENTRIES) logs.splice(0, logs.length - MAX_LOG_ENTRIES);
@@ -288,9 +324,7 @@ function pushLog(logs: SiteLogEntry[], stream: SiteLogEntry["stream"], text: str
  */
 export function isPathAllowedForAuthority(authority: SiteAuthority, candidate: string): boolean {
   if (authority.kind === "workspace") return !isSharedWithMePath(candidate);
-  return (
-    candidate === authority.mountRoot || candidate.startsWith(`${authority.mountRoot}/`)
-  );
+  return candidate === authority.mountRoot || candidate.startsWith(`${authority.mountRoot}/`);
 }
 
 export async function startStaticSitePreview(
@@ -309,16 +343,16 @@ export async function startStaticSitePreview(
   const isAllowedByAuthority = (candidate: string): boolean =>
     isPathAllowedForAuthority(options.authority, candidate);
   if (!isAllowedByAuthority(spelledRelative) || !isAllowedByAuthority(resolvedRelative)) {
-    const constraint = options.authority.kind === "workspace"
-      ? "inside shared-with-me"
-      : `outside its own shared mount ${options.authority.mountRoot}`;
-    throw new Error(
-      `This app's served root is ${constraint}. dohc cannot preview it: ${siteRoot}`,
-    );
+    const constraint =
+      options.authority.kind === "workspace"
+        ? "inside shared-with-me"
+        : `outside its own shared mount ${options.authority.mountRoot}`;
+    throw new Error(`This app's served root is ${constraint}. dohc cannot preview it: ${siteRoot}`);
   }
-  const containmentRoot = options.authority.kind === "share"
-    ? join(workspaceRoot, ...options.authority.mountRoot.split("/"))
-    : workspaceRoot;
+  const containmentRoot =
+    options.authority.kind === "share"
+      ? join(workspaceRoot, ...options.authority.mountRoot.split("/"))
+      : workspaceRoot;
   return startStaticDirectoryPreview(root, {
     containmentRoot,
     entry: options.entry ?? "index.html",
@@ -328,7 +362,10 @@ export async function startStaticSitePreview(
   });
 }
 
-export function packageManagerCommand(manager: PackageManager, script: string): {
+export function packageManagerCommand(
+  manager: PackageManager,
+  script: string,
+): {
   command: string;
   args: string[];
 } {
@@ -341,7 +378,7 @@ export function packageManagerCommand(manager: PackageManager, script: string): 
 export function splitCommandLine(commandLine: string): { command: string; args: string[] } {
   const tokens: string[] = [];
   let token = "";
-  let quote: "'" | "\"" | null = null;
+  let quote: "'" | '"' | null = null;
   let escaped = false;
   // Backslash is a POSIX shell escape, but on Windows it is the path
   // separator (cmd.exe has no backslash escaping), so a configured command
@@ -366,7 +403,7 @@ export function splitCommandLine(commandLine: string): { command: string; args: 
       }
       continue;
     }
-    if (char === "'" || char === "\"") {
+    if (char === "'" || char === '"') {
       quote = char;
       continue;
     }
@@ -384,7 +421,7 @@ export function splitCommandLine(commandLine: string): { command: string; args: 
     if (char === "(" || char === ")" || char === "{" || char === "}" || char === "`") {
       throw new Error(
         `App dev server command contains an unquoted "${char}", a shell grouping or command-substitution ` +
-        `construct dohc cannot statically decompose to verify its loopback-only host binding: ${commandLine}`,
+          `construct dohc cannot statically decompose to verify its loopback-only host binding: ${commandLine}`,
       );
     }
     if (/\s/.test(char)) {
@@ -424,7 +461,7 @@ export function splitCommandLine(commandLine: string): { command: string; args: 
 export function splitShellStatements(commandLine: string): string[] {
   const statements: string[] = [];
   let current = "";
-  let quote: "'" | "\"" | null = null;
+  let quote: "'" | '"' | null = null;
   let escaped = false;
   const backslashEscapes = process.platform !== "win32";
   const chars = [...commandLine];
@@ -446,7 +483,7 @@ export function splitShellStatements(commandLine: string): string[] {
       if (char === quote) quote = null;
       continue;
     }
-    if (char === "'" || char === "\"") {
+    if (char === "'" || char === '"') {
       quote = char;
       current += char;
       continue;
@@ -463,7 +500,9 @@ export function splitShellStatements(commandLine: string): string[] {
     current += char;
   }
   statements.push(current);
-  return statements.map((statement) => statement.trim()).filter((statement) => statement.length > 0);
+  return statements
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
 }
 
 interface HostBindCandidate {
@@ -524,7 +563,14 @@ const HOST_ENVIRONMENT_NAME = /^host(name)?$/i;
 // looking for (`env -i HOST=0.0.0.0 vite`, `env -u FOO HOST=0.0.0.0 vite`).
 // Each recognized option is skipped, along with the value token it takes,
 // so the scan can still reach a HOST/HOSTNAME assignment that follows it.
-const ENV_OPTIONS_WITHOUT_VALUE = new Set(["-i", "--ignore-environment", "-0", "--null", "-v", "--debug"]);
+const ENV_OPTIONS_WITHOUT_VALUE = new Set([
+  "-i",
+  "--ignore-environment",
+  "-0",
+  "--null",
+  "-v",
+  "--debug",
+]);
 const ENV_OPTIONS_WITH_VALUE = new Set(["-u", "--unset", "-C", "--chdir"]);
 // -S/--split-string re-parses its own payload into further OPTIONs,
 // NAME=VALUE assignments, and the command — using env(1)'s own splitting
@@ -536,45 +582,29 @@ const ENV_OPTIONS_WITH_VALUE = new Set(["-u", "--unset", "-C", "--chdir"]);
 // unrecognized option is refused below.
 const ENV_OPTIONS_UNVERIFIABLE = new Set(["-S", "--split-string"]);
 
-// Prefix wrappers this file refuses outright rather than trying to verify.
-// There is no allowlist anywhere in this validator — every command not
-// refused here still has its own args scanned by assertDirectHostBinds and,
-// if it nests a shell or an env-style wrapper, recursed into below. This is
-// the refuse set: commands that run an arbitrary wrapped command (the same
-// "smuggle a shell past validation" risk env(1) had before its own fix) but
-// that this file cannot soundly verify, for one of two reasons:
+// Prefix wrappers this file refuses outright. This validator has no
+// allowlist: every command not refused here has its args scanned by
+// assertDirectHostBinds and, if it nests a shell or an env-style wrapper, is
+// recursed into below. Each wrapper in this set runs an arbitrary wrapped
+// command, which could carry a shell past validation, and this file cannot
+// soundly verify it. What cannot be verified is not approved.
 //
-// - `nice`, `stdbuf`, `timeout`, `sudo`, `doas` each have their own
-//   prefix-attached, value-carrying option grammar (`nice -n <adjustment>`,
-//   `stdbuf -i/-o/-e <size>`, `timeout -s/-k <duration>`, `sudo -u/-g
-//   <user>`, ...) that would need reimplementing here to find where their
-//   own options end and the wrapped command begins — the same
-//   reimplementation risk ENV_OPTIONS_UNVERIFIABLE already declines for
-//   env's own -S/--split-string. `nohup` and `setsid` take next to no
-//   options of their own, but are grouped here rather than singled out:
-//   nothing about "this wrapper happens to have a small grammar" changes
-//   the risk it exists to smuggle a shell past validation.
-// - `cross-env-shell` joins its own remaining args back into one shell
-//   command string with a plain space join before handing it to a shell —
-//   unlike env's `sh -c "already one token"`, where the author quoted the
-//   whole body as a single argument this file's own tokenizer received
-//   intact, cross-env-shell's body is SYNTHESIZED from args this file
-//   already split apart, and re-joining them with a bare space cannot
-//   soundly reconstruct whatever quoting the author originally wrote (an
-//   arg that itself contained a space arrives here as one token; rejoining
-//   loses the boundary that made it one arg instead of two). Recursing into
-//   it as a shell body the way env-wrapped shells are below would be
-//   verifying a different string than what cross-env-shell will actually
-//   run — refused instead.
-// - `env-cmd`, `dotenv` both load their environment assignments from a
-//   CONFIG FILE (an .env file, an env-cmd config) this validator never
-//   reads — there is no command-line token to scan a HOST/HOSTNAME
-//   assignment out of at all, so nothing here can prove what environment
-//   the wrapped command receives.
-//
-// Refused outright: the same "cannot statically verify, so don't approve"
-// stance this file already takes throughout, rather than silently trusting
-// an unexamined wrapped command's own loopback binding.
+// - `nice`, `stdbuf`, `timeout`, `sudo`, `doas` each have a prefix-attached,
+//   value-carrying option grammar (`nice -n <adjustment>`, `stdbuf -i/-o/-e
+//   <size>`, `timeout -s/-k <duration>`, `sudo -u/-g <user>`, ...). Finding
+//   where their options end and the wrapped command begins would mean
+//   reimplementing it, the risk ENV_OPTIONS_UNVERIFIABLE declines for env's
+//   -S/--split-string. `nohup` and `setsid` take next to no options, but a
+//   small grammar does not change the risk.
+// - `cross-env-shell` joins its remaining args into one shell command string
+//   with a plain space join. This file already split those args, and an arg
+//   that contained a space arrives here as one token, so rejoining loses the
+//   boundary. Recursing into it as a shell body would verify a different
+//   string than the one cross-env-shell runs.
+// - `env-cmd`, `dotenv` load their environment assignments from a config
+//   file this validator never reads, so no command-line token holds a
+//   HOST/HOSTNAME assignment and nothing here can prove what environment the
+//   wrapped command receives.
 const PASSTHROUGH_WRAPPER_COMMAND_NAMES = new Set([
   "nice",
   "nohup",
@@ -690,7 +720,8 @@ function explicitHostEnvironmentAssignments(
       index += 1;
       continue;
     }
-    const longOptionName = token.startsWith("--") && token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
+    const longOptionName =
+      token.startsWith("--") && token.includes("=") ? token.slice(0, token.indexOf("=")) : token;
     if (ENV_OPTIONS_WITHOUT_VALUE.has(longOptionName)) {
       index += 1;
       continue;
@@ -740,7 +771,9 @@ function assertDirectHostBinds(command: string, args: string[]): void {
   // HostBindCandidate with no unverifiableFlag.
   const hosts: HostBindCandidate[] = [
     ...explicitHostBinds(args),
-    ...explicitHostEnvironmentAssignments([command, ...args], false).hosts.map((value) => ({ value })),
+    ...explicitHostEnvironmentAssignments([command, ...args], false).hosts.map((value) => ({
+      value,
+    })),
     // env/cross-env each set every leading assignment before running the
     // wrapped command, so the same assignments matter here too, just one
     // token later since the wrapper's own name isn't one — and env's own
@@ -773,19 +806,13 @@ function nestedShellCommand(command: string, args: string[]): string | null {
   const name = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
   let flagIndex = -1;
   if (name === "sh" || name === "bash" || name === "zsh" || name === "dash") {
-    flagIndex = args.findIndex(
-      (arg) => /^-[A-Za-z]+$/.test(arg) && arg.includes("c"),
-    );
+    flagIndex = args.findIndex((arg) => /^-[A-Za-z]+$/.test(arg) && arg.includes("c"));
   } else if (name === "cmd" || name === "cmd.exe") {
     flagIndex = args.findIndex((arg) => arg.toLowerCase() === "/c");
-  } else if (
-    name === "powershell" ||
-    name === "powershell.exe" ||
-    name === "pwsh"
-  ) {
+  } else if (name === "powershell" || name === "powershell.exe" || name === "pwsh") {
     flagIndex = args.findIndex((arg) => arg.toLowerCase() === "-command");
   }
-  return flagIndex >= 0 ? args[flagIndex + 1] ?? null : null;
+  return flagIndex >= 0 ? (args[flagIndex + 1] ?? null) : null;
 }
 
 // What env(1) (or cross-env, same shape) actually runs, once its own
@@ -799,7 +826,10 @@ function nestedShellCommand(command: string, args: string[]): string | null {
 // explicitHostEnvironmentAssignments already walks past every OPTION/
 // assignment either wrapper accepts to find exactly this boundary;
 // consumedThrough IS the wrapped command's index.
-function envWrappedCommand(command: string, args: string[]): { command: string; args: string[] } | null {
+function envWrappedCommand(
+  command: string,
+  args: string[],
+): { command: string; args: string[] } | null {
   const commandName = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
   if (!isEnvStyleWrapper(commandName)) return null;
   const { consumedThrough } = explicitHostEnvironmentAssignments(args, true);
@@ -817,7 +847,7 @@ function assertLoopbackOnlyDevServerCommandAtDepth(
   if (commandName && PASSTHROUGH_WRAPPER_COMMAND_NAMES.has(commandName)) {
     throw new Error(
       `App dev server command uses "${commandName}", whose own wrapped command dohc cannot statically ` +
-      `re-parse to verify its loopback-only host binding: ${[command, ...args].join(" ")}`,
+        `re-parse to verify its loopback-only host binding: ${[command, ...args].join(" ")}`,
     );
   }
   assertDirectHostBinds(command, args);
@@ -830,9 +860,9 @@ function assertLoopbackOnlyDevServerCommandAtDepth(
   if (shellDepth >= MAX_SHELL_NESTING_DEPTH) {
     throw new Error(
       "App dev server command could not statically validate the nested shell command " +
-      "for the loopback-only constraint because it exceeds " +
-      String(MAX_SHELL_NESTING_DEPTH) +
-      " shell levels.",
+        "for the loopback-only constraint because it exceeds " +
+        String(MAX_SHELL_NESTING_DEPTH) +
+        " shell levels.",
     );
   }
   if (wrappedByEnv) {
@@ -841,7 +871,11 @@ function assertLoopbackOnlyDevServerCommandAtDepth(
     // wrapped shell (env sh -c "...", env -i bash -c "...", a nested `env
     // env ...`, ...) gets exactly the treatment a bare invocation of that
     // same wrapped command would, at the next shell depth.
-    assertLoopbackOnlyDevServerCommandAtDepth(wrappedByEnv.command, wrappedByEnv.args, shellDepth + 1);
+    assertLoopbackOnlyDevServerCommandAtDepth(
+      wrappedByEnv.command,
+      wrappedByEnv.args,
+      shellDepth + 1,
+    );
     return;
   }
   if (nested === null) return;
@@ -859,15 +893,11 @@ function assertLoopbackOnlyDevServerCommandAtDepth(
       const reason = errorMessage(error);
       throw new Error(
         "App dev server command could not statically validate the nested shell command " +
-        "for the loopback-only constraint: " +
-        reason,
+          "for the loopback-only constraint: " +
+          reason,
       );
     }
-    assertLoopbackOnlyDevServerCommandAtDepth(
-      parsed.command,
-      parsed.args,
-      shellDepth + 1,
-    );
+    assertLoopbackOnlyDevServerCommandAtDepth(parsed.command, parsed.args, shellDepth + 1);
   }
 }
 
@@ -939,12 +969,15 @@ export function siteCommandEnvironment(
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(parent)) {
-    if (!HOST_ENVIRONMENT_NAME.test(name) && !DOHC_OWN_ENVIRONMENT_NAME.test(name)) env[name] = value;
+    if (!HOST_ENVIRONMENT_NAME.test(name) && !DOHC_OWN_ENVIRONMENT_NAME.test(name))
+      env[name] = value;
   }
   // dohc's own callers may set any variable, but not a host beyond loopback.
   for (const [name, value] of Object.entries(overrides)) {
     if (HOST_ENVIRONMENT_NAME.test(name) && value !== undefined && !isLoopbackHostname(value)) {
-      throw new Error(`App command environment must set ${name} to a loopback host, not ${value || "all interfaces"}.`);
+      throw new Error(
+        `App command environment must set ${name} to a loopback host, not ${value || "all interfaces"}.`,
+      );
     }
     env[name] = value;
   }
@@ -965,8 +998,11 @@ async function survivingProcesses(
   await descendants.awaitAll();
   const deadline = Date.now() + STOP_CONFIRM_MS;
   for (;;) {
-    const wrapperAlive = child.pid !== undefined && child.exitCode === null &&
-      child.signalCode === null && isPidAlive(child.pid);
+    const wrapperAlive =
+      child.pid !== undefined &&
+      child.exitCode === null &&
+      child.signalCode === null &&
+      isPidAlive(child.pid);
     const left = [...(wrapperAlive ? [child.pid!] : []), ...descendants.captured()];
     if (left.length === 0 || Date.now() >= deadline) return left;
     await delay(50);
@@ -1003,7 +1039,9 @@ async function leftRunning(
   command: { command: string; args: string[]; cwd: string; logs: SiteLogEntry[] },
 ): Promise<AppCommandStillRunningError | null> {
   const left = await survivingProcesses(child, descendants);
-  return left.length > 0 ? new AppCommandStillRunningError(leftoverHandle(child, descendants, command), left) : null;
+  return left.length > 0
+    ? new AppCommandStillRunningError(leftoverHandle(child, descendants, command), left)
+    : null;
 }
 
 // A start that ends without a ready preview: cancelled, timed out, or exited
@@ -1015,7 +1053,9 @@ async function cancelledStart(
   command: { command: string; args: string[]; cwd: string; logs: SiteLogEntry[] },
   message: string,
 ): Promise<Error> {
-  await stopChild(child, descendants.captured, undefined, descendants.awaitAll).catch(() => undefined);
+  await stopChild(child, descendants.captured, undefined, descendants.awaitAll).catch(
+    () => undefined,
+  );
   return (await leftRunning(child, descendants, command)) ?? new Error(message);
 }
 
@@ -1034,14 +1074,17 @@ function assertMayStart(input: SpawnGate): void {
   input.assertMayRun?.();
 }
 
-export async function startSiteDevServer(input: {
-  workspaceRoot: string;
-  siteRoot: string;
-  command: string;
-  args?: string[];
-  env?: NodeJS.ProcessEnv;
-  readyTimeoutMs?: number;
-} & SpawnGate & DescendantCaptureOverrides): Promise<SiteProcessHandle> {
+export async function startSiteDevServer(
+  input: {
+    workspaceRoot: string;
+    siteRoot: string;
+    command: string;
+    args?: string[];
+    env?: NodeJS.ProcessEnv;
+    readyTimeoutMs?: number;
+  } & SpawnGate &
+    DescendantCaptureOverrides,
+): Promise<SiteProcessHandle> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
   assertLoopbackOnlyDevServerCommand(input.command, args);
@@ -1056,6 +1099,7 @@ export async function startSiteDevServer(input: {
     cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
+    detached: OWN_PROCESS_GROUP,
     windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments,
   });
   child.unref();
@@ -1091,7 +1135,12 @@ export async function startSiteDevServer(input: {
       if (resolved || stopped) return;
       stopped = true;
       clearTimers();
-      void cancelledStart(child, descendants, { command: input.command, args, cwd, logs }, message).then(reject);
+      void cancelledStart(
+        child,
+        descendants,
+        { command: input.command, args, cwd, logs },
+        message,
+      ).then(reject);
     }
 
     function abortStart() {
@@ -1099,15 +1148,16 @@ export async function startSiteDevServer(input: {
     }
 
     const failTimer = setTimeout(() => {
-      endUnready(`App dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`);
+      endUnready(
+        `App dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`,
+      );
     }, input.readyTimeoutMs ?? 15000);
 
     if (input.signal?.aborted) abortStart();
     else input.signal?.addEventListener("abort", abortStart, { once: true });
 
     function maybeResolve(chunk: string, stream: "stdout" | "stderr") {
-      const combined =
-        (stream === "stdout" ? stdoutCarry : stderrCarry) + chunk;
+      const combined = (stream === "stdout" ? stdoutCarry : stderrCarry) + chunk;
       const carry = combined.slice(-DEV_URL_CARRY_CHARS);
       if (stream === "stdout") stdoutCarry = carry;
       else stderrCarry = carry;
@@ -1243,8 +1293,14 @@ async function stopChild(
   // Node reaped a wrapper it saw exit, so its pid may name another program
   // by now. A round's roots are the wrapper only while it runs, and the
   // captured pids still alive.
-  const signalRound = async (signal: NodeJS.Signals, helpers: readonly number[]): Promise<number[]> => {
-    const roots = [...(wrapperExited() ? [] : [pid]), ...helpers.filter((each) => each !== pid && isPidAlive(each))];
+  const signalRound = async (
+    signal: NodeJS.Signals,
+    helpers: readonly number[],
+  ): Promise<number[]> => {
+    const roots = [
+      ...(wrapperExited() ? [] : [pid]),
+      ...helpers.filter((each) => each !== pid && isPidAlive(each)),
+    ];
     const [root, ...alsoSignal] = roots;
     if (root === undefined) return [];
     try {
@@ -1280,7 +1336,10 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-export async function detectBuildOutput(siteRoot: string, configured?: string): Promise<string | null> {
+export async function detectBuildOutput(
+  siteRoot: string,
+  configured?: string,
+): Promise<string | null> {
   const candidates = configured ? [configured] : ["dist", "build", "out"];
   const realSiteRoot = await realpath(siteRoot);
   for (const candidate of candidates) {
@@ -1321,15 +1380,18 @@ export async function detectBuildOutput(siteRoot: string, configured?: string): 
   return null;
 }
 
-export async function buildSite(input: {
-  workspaceRoot: string;
-  siteRoot: string;
-  command: string;
-  args?: string[];
-  output?: string;
-  env?: NodeJS.ProcessEnv;
-  timeoutMs?: number;
-} & SpawnGate & DescendantCaptureOverrides): Promise<BuildSiteResult> {
+export async function buildSite(
+  input: {
+    workspaceRoot: string;
+    siteRoot: string;
+    command: string;
+    args?: string[];
+    output?: string;
+    env?: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+  } & SpawnGate &
+    DescendantCaptureOverrides,
+): Promise<BuildSiteResult> {
   const cwd = await resolveContainedDir(input.workspaceRoot, input.siteRoot);
   const args = input.args ?? [];
   const timeoutMs = input.timeoutMs ?? BUILD_TIMEOUT_MS;
@@ -1342,6 +1404,7 @@ export async function buildSite(input: {
     cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
+    detached: OWN_PROCESS_GROUP,
     windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments,
   });
 
@@ -1385,7 +1448,8 @@ export async function buildSite(input: {
       if (timer) clearTimeout(timer);
       pushLog(logs, "system", reason);
       void cancelledStart(child, descendants, command, reason).then((error) =>
-        answerWith(error instanceof AppCommandStillRunningError ? error : null, null));
+        answerWith(error instanceof AppCommandStillRunningError ? error : null, null),
+      );
     }
 
     function abortBuild() {

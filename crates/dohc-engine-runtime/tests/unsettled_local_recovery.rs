@@ -107,7 +107,6 @@ fn ingest(path: &str, text: &str, now_ms: i64, claim_foreign_head: bool) -> Capt
     }
 }
 
-/// The write job that places `path`, with its status.
 fn write_job(store: &EngineStore, path: &str) -> (String, String) {
     store
         .read_with(|conn| {
@@ -151,7 +150,6 @@ async fn place(fixture: &Fixture, job_id: &str, now_ms: i64) -> Result<(), Runti
         .await
 }
 
-/// Every `(recovered …)` file beside the document on disk, by name.
 fn recovered_files_on_disk(fixture: &Fixture) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(fixture.root().join("notes"))
         .expect("read the notes directory")
@@ -168,7 +166,6 @@ fn recovered_files_on_disk(fixture: &Fixture) -> Vec<String> {
     names
 }
 
-/// A person renames a file through the API.
 async fn rename(fixture: &Fixture, from: &str, to: &str, moment_id: &str, now_ms: i64) {
     fixture
         .actor
@@ -195,7 +192,6 @@ async fn rename(fixture: &Fixture, from: &str, to: &str, moment_id: &str, now_ms
         .expect("the person renames the file");
 }
 
-/// The copy's name with the next collision ordinal.
 fn second_name(first_path: &str) -> String {
     let (stem, _) = first_path
         .rsplit_once(").md")
@@ -222,8 +218,6 @@ async fn recover_and_occupy(fixture: &Fixture) -> (Sibling, String) {
     (copy, job)
 }
 
-/// The materializer keeps the other program's file and refuses the copy's
-/// write. Nothing moves until capture records the occupant.
 async fn refuse_placement(fixture: &Fixture, copy: &Sibling, job: &str) {
     let placed = place(fixture, job, 5).await;
     assert!(
@@ -249,9 +243,6 @@ async fn refuse_placement(fixture: &Fixture, copy: &Sibling, job: &str) {
     assert!(repaired.is_empty(), "nothing moves yet: {repaired:?}");
 }
 
-/// The refused copy and its occupant, which capture records as the path's
-/// head the way it records a file it watched change. Returns the copy and
-/// its refused job.
 async fn collide(fixture: &Fixture) -> (Sibling, String) {
     let (copy, job) = recover_and_occupy(fixture).await;
     refuse_placement(fixture, &copy, &job).await;
@@ -333,8 +324,6 @@ async fn open_and_seed(actor: &ActorHandle, now_ms: i64) -> (YdocOpenState, Ydoc
     (opened, doc)
 }
 
-/// A person appends to the open document. The engine admits the update; no
-/// settle follows.
 async fn type_human(
     actor: &ActorHandle,
     opened: &YdocOpenState,
@@ -407,8 +396,6 @@ struct Sibling {
     job_pending: bool,
 }
 
-/// Every text head in `main` other than the document itself, with the
-/// moment that produced it.
 fn siblings(store: &EngineStore) -> Vec<Sibling> {
     store
         .read_with(|conn| {
@@ -494,7 +481,6 @@ async fn unsettled_typing_survives_a_local_write_as_a_recovered_sibling() {
     let (opened, doc) = open_and_seed(&fixture.actor, 2).await;
     type_human(&fixture.actor, &opened, &doc, 3).await;
 
-    // The editor has let go of the file. The outside write reaches capture.
     std::fs::write(fixture.root().join(PATH), OUTSIDE).expect("outside write");
     capture(&fixture.actor, OUTSIDE, 4, true, Arc::new(NoFaults))
         .await
@@ -536,13 +522,11 @@ async fn unsettled_typing_survives_a_local_write_as_a_recovered_sibling() {
     );
     drop(store);
 
-    // The same write arriving again finds the folded lineage and adds nothing.
     capture(&fixture.actor, OUTSIDE, 5, true, Arc::new(NoFaults))
         .await
         .expect("capture the same write again");
     assert_eq!(siblings(&fixture.store()).len(), 1);
 
-    // The converged lineage still prunes on close, and the copy outlives it.
     let closed = fixture
         .actor
         .ydoc_close_session(
@@ -722,14 +706,12 @@ async fn a_file_at_the_copy_name_moves_the_copy_to_the_next_free_name() {
     );
     drop(store);
 
-    // Another pass announces the same pending copy and makes no third.
     let again = repair(&fixture.actor, Arc::new(NoFaults))
         .await
         .expect("repair again");
     assert_eq!(paths(&again), vec![second_path.as_str()]);
     assert_eq!(siblings(&fixture.store()).len(), 2);
 
-    // The copy reaches disk beside the occupant, and is then announced no more.
     place(&fixture, &second_job, 7)
         .await
         .expect("place the copy");
@@ -883,7 +865,6 @@ async fn a_copy_renamed_away_and_back_is_not_copied_again() {
 /// Which pending copy a person renames before it reaches disk.
 #[derive(Clone, Copy)]
 enum PendingCopy {
-    /// The copy the recovery itself created.
     Original,
     /// The replacement a committed repair created, whose response was lost.
     Replacement,
@@ -1084,7 +1065,6 @@ async fn a_first_sight_of_the_occupant_records_it_and_moves_the_copy() {
     );
     drop(store);
 
-    // The occupant is capture's own head now: seeing it again adds nothing.
     first_sight(&fixture.actor, &first.path, 7)
         .await
         .expect("the same bytes again");
@@ -1149,8 +1129,6 @@ async fn a_first_sight_leaves_an_unrefused_or_replaced_copy_alone() {
     assert_eq!(found[0].text, REPLACED);
     drop(store);
 
-    // The person's text is the head and no occupant was recorded over the
-    // recovery: the pass moves nothing.
     let repaired = repair(&fixture.actor, Arc::new(NoFaults))
         .await
         .expect("repair after the replacement");

@@ -13,36 +13,70 @@ import { STORED_STATE, makeBridge, renderShell } from "./DesktopWorkspaceShell.t
 // stands aside: it shows what the shell kept for its record panel, and tells
 // the shell what a person does with the panel.
 vi.mock("./TransactionalCollectionPage", () => ({
-  TransactionalCollectionPage: (props: TransactionalCollectionPageProps) => <>
-    <output aria-label="Open record">{props.initialOpenRecord ?? "none"}</output>
-    <output aria-label="Panel width">{props.initialRecordPanelWidth}</output>
-    <button onClick={() => props.onOpenRecordChange?.("9")}>Open record 9</button>
-    <button onClick={() => props.onOpenRecordChange?.(null)}>Close the record</button>
-    <button onClick={() => props.onRecordPanelWidthChange?.(640)}>Widen the panel</button>
-  </>,
+  TransactionalCollectionPage: (props: TransactionalCollectionPageProps) => (
+    <>
+      <output aria-label="Open record">{props.initialOpenRecord ?? "none"}</output>
+      <output aria-label="Panel width">{props.initialRecordPanelWidth}</output>
+      <button onClick={() => props.onOpenRecordChange?.("9")}>Open record 9</button>
+      <button onClick={() => props.onOpenRecordChange?.(null)}>Close the record</button>
+      <button onClick={() => props.onRecordPanelWidthChange?.(640)}>Widen the panel</button>
+    </>
+  ),
 }));
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-const budget: DatasetDescription = { datasetId: id(1), name: "Budget", revision: 4, revisionSha256: "a".repeat(64),
-  tables: [{ tableId: id(2), name: "Expenses", fields: [{ fieldId: id(3), name: "Item", type: "text", required: true, unique: false }] }],
-  operations: [{ operationId: id(4), tableId: id(2), name: "list", label: "Read", kind: "read", access: "owner", readOnly: true, fieldIds: [id(3)] }] };
+const budget: DatasetDescription = {
+  datasetId: id(1),
+  name: "Budget",
+  revision: 4,
+  revisionSha256: "a".repeat(64),
+  tables: [
+    {
+      tableId: id(2),
+      name: "Expenses",
+      fields: [{ fieldId: id(3), name: "Item", type: "text", required: true, unique: false }],
+    },
+  ],
+  operations: [
+    {
+      operationId: id(4),
+      tableId: id(2),
+      name: "list",
+      label: "Read",
+      kind: "read",
+      access: "owner",
+      readOnly: true,
+      fieldIds: [id(3)],
+    },
+  ],
+};
 const budgetTab = transactionalCollectionTabPath("budget/dataset.json", id(2));
 
 function collectionShell(state: WorkspaceUiState) {
   const bridge = Object.assign(makeBridge(Promise.resolve(state)), {
-    findDatasetCollection: vi.fn(async (): Promise<FindDatasetCollectionResult> => ({ status: "unavailable" })),
+    findDatasetCollection: vi.fn(async (): Promise<FindDatasetCollectionResult> => ({
+      status: "unavailable",
+    })),
   });
   bridge.dataset = vi.fn(async (request: DatasetRequest): Promise<DatasetResult> => {
-    if (request.action === "list") return { kind: "list", datasets: [{ ...budget, datasetPath: "budget/dataset.json" }], nextCursor: null };
-    if (request.action === "describe") return { kind: "description", dataset: { ...budget, datasetPath: "budget/dataset.json" } };
+    if (request.action === "list")
+      return {
+        kind: "list",
+        datasets: [{ ...budget, datasetPath: "budget/dataset.json" }],
+        nextCursor: null,
+      };
+    if (request.action === "describe")
+      return { kind: "description", dataset: { ...budget, datasetPath: "budget/dataset.json" } };
     throw new Error(`Unexpected dataset action: ${request.action}`);
   });
   renderShell(bridge);
-  /** The layout the shell last asked main to save. */
   const saved = () => bridge.setWorkspaceUiState.mock.calls.at(-1)?.[0].state;
   return { saved };
 }
-const withTab: WorkspaceUiState = { ...STORED_STATE, editorGroups: [{ id: "primary", tabs: [budgetTab, "b.md"], activeTab: budgetTab, size: 1 }] };
+const withTab: WorkspaceUiState = {
+  ...STORED_STATE,
+  editorGroups: [{ id: "primary", tabs: [budgetTab, "b.md"], activeTab: budgetTab, size: 1 }],
+};
 
 it("opens a Collection's tab with the record and the panel width its saved layout kept, as after a restart", async () => {
   collectionShell({ ...withTab, openRecords: { [budgetTab]: "7" }, recordPanelWidth: 512 });

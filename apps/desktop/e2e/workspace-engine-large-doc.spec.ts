@@ -34,10 +34,7 @@ const INBAND_CAP_BYTES = 48 * 1024;
 const CAPTURE_TEXT_CAP_BYTES = 128 * 1024;
 const TAIL_SENTINEL = "TAIL-SENTINEL-THE-LAST-BYTE-MUST-LAND";
 
-async function openEngineDoc(
-  page: import("@playwright/test").Page,
-  path: string,
-): Promise<void> {
+async function openEngineDoc(page: import("@playwright/test").Page, path: string): Promise<void> {
   const segments = path.split("/");
   for (let i = 0; i < segments.length - 1; i += 1) {
     await explorerRow(page, segments.slice(0, i + 1).join("/")).click();
@@ -90,15 +87,12 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
     await page.keyboard.insertText(TAIL_SENTINEL);
 
     await expect(editor).toContainText(TAIL_SENTINEL, { timeout: 15_000 });
-    // The edit registered: the indicator left "Saved" for the typing. From
-    // here on, the next "Saved" is a claim about this content.
     await expect(saveState).toHaveAttribute("data-state", "saving", {
       timeout: 15_000,
     });
 
-    // THE HONESTY INVARIANT, checked continuously: the indicator may read
+    // The honesty invariant, checked continuously: the indicator may read
     // "Saved" only when the file on disk really holds what the editor shows.
-    // Before the fix this failed within a second — "Saved" over 0 bytes.
     const dishonest: string[] = [];
     const deadline = Date.now() + 60_000;
     let landed = false;
@@ -120,13 +114,10 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
     }
 
     expect(dishonest, dishonest.join("; ")).toEqual([]);
-    expect(
-      landed,
-      "the over-cap document never reached disk (the settle is still refusing)",
-    ).toBe(true);
+    expect(landed, "the over-cap document never reached disk (the settle is still refusing)").toBe(
+      true,
+    );
 
-    // The whole document is there — not a truncated prefix, not a cap-sized
-    // slice. Both the size and the last byte typed.
     const finalText = await readFile(absolute, "utf8");
     const finalSize = (await stat(absolute)).size;
     expect(finalSize).toBeGreaterThan(INBAND_CAP_BYTES);
@@ -137,16 +128,11 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
     expect(finalText).toContain(TAIL_SENTINEL);
     expect(finalText).toContain("Start small.");
 
-    // And the editor's own claim is now backed by that file.
     await expect(saveState).toHaveAttribute("data-state", "saved");
     await expect(saveState).toHaveText("Saved");
 
-    // The engine recorded it as history too — the settle committed a moment
-    // carrying the full body, not just a materialized file.
     expect(
-      momentTextsForPath(temp.rootPath, "load/big.md").some((text) =>
-        text.includes(TAIL_SENTINEL),
-      ),
+      momentTextsForPath(temp.rootPath, "load/big.md").some((text) => text.includes(TAIL_SENTINEL)),
     ).toBe(true);
 
     // Sanity: the record IS tracked before the restart. Without this the
@@ -165,11 +151,7 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
     await desktop.close();
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
-    await waitForWorkspaceFile(
-      desktop.page,
-      workspace.workspaceId,
-      "load/big.md",
-    );
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, "load/big.md");
     // The startup reconcile runs after the workspace opens. It must keep the
     // over-cap document tracked (the lineage guard), so the observable is
     // that the record is still there once the reconcile has settled the
@@ -180,14 +162,12 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
         timeout: 15_000,
       })
       .toBe(true);
-    // A retire journals a moment; none may appear for this path after restart.
     expect(
       momentTextsForPath(temp.rootPath, "load/big.md").filter((text) =>
         text.includes("Stopped tracking"),
       ),
       "the startup reconcile journaled a retire for the over-cap doc",
     ).toEqual([]);
-    // And the file itself is untouched.
     expect(await readFile(absolute, "utf8")).toContain(TAIL_SENTINEL);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -195,9 +175,9 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
 });
 
 test("a note past the in-band cap opens live, and opens live again after a switch", async () => {
-  // #2521. A note over 48 KiB with no lineage refused its live session, so it
-  // opened in the editor that writes the file directly. A settled close prunes
-  // the lineage, so even a note that had been live reopened that way.
+  // A note over 48 KiB with no lineage must get a live session, not the
+  // editor that writes the file directly. A settled close prunes the lineage,
+  // so a note that has been live reopens with none.
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -220,9 +200,13 @@ test("a note past the in-band cap opens live, and opens live again after a switc
     await editor.click();
     await page.keyboard.press(DOCUMENT_END);
     await page.keyboard.insertText(TAIL_SENTINEL);
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved", { timeout: 30_000 });
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved", {
+      timeout: 30_000,
+    });
     await expect
-      .poll(async () => await readFile(join(temp.rootPath, "notes/long.md"), "utf8"), { timeout: 30_000 })
+      .poll(async () => await readFile(join(temp.rootPath, "notes/long.md"), "utf8"), {
+        timeout: 30_000,
+      })
       .toContain(TAIL_SENTINEL);
 
     await explorerRow(page, "notes/other.md").click();
@@ -230,7 +214,9 @@ test("a note past the in-band cap opens live, and opens live again after a switc
     await explorerRow(page, "notes/long.md").click();
     await expect(page.getByTestId("markdown-edit-toggle")).toHaveCount(0, { timeout: 15_000 });
     await expect(page.getByTestId("markdown-editor")).toContainText(TAIL_SENTINEL);
-    expect(desktop.logs.filter((entry) => entry.text.includes("engine Y.Doc open refused"))).toEqual([]);
+    expect(
+      desktop.logs.filter((entry) => entry.text.includes("engine Y.Doc open refused")),
+    ).toEqual([]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

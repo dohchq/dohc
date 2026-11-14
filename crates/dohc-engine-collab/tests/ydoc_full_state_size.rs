@@ -72,7 +72,6 @@ const WORDS: &[&str] = &[
     "content",
 ];
 
-/// A block of at least `target` bytes of prose.
 fn block(rng: &mut Rng, target: usize) -> String {
     let mut out = String::new();
     while out.len() < target {
@@ -210,8 +209,6 @@ fn the_bound_covers_the_largest_document_the_engine_accepts() {
     let samples = vec![
         grow_rich(corpus, 700, 1),
         grow_rich(corpus, 400, 2),
-        // The fragmentation the worst measured document has: a heavily broken
-        // outline, one short block per edit.
         grow_rich(corpus, 120, 3),
         grow_plaintext(corpus, 4096, 0, 4),
         grow_plaintext(corpus, 4096, 1_000, 5),

@@ -1152,8 +1152,6 @@ mod tests {
                 params![original.payload.to_string(), original.origin_id, original.origin_seq]).map_err(SyncError::persist)?;
             Ok::<_, SyncError>(())
         }).unwrap();
-        // Stop sync closes the relay configuration and keeps the store's
-        // journal and push position, so nothing pushes the save.
         start_pushing(&mut store, &original.origin_id);
         assert!(matches!(
             roll_back(&mut store, "moment"),

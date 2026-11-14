@@ -17,10 +17,7 @@ export const LIVE_TICKET_LIFETIME_MS = 30_000;
 export interface LiveTicketClaims {
   readonly ticketId: string;
   readonly audience: string;
-  readonly authority: Exclude<
-    ServerDerivedLiveUpdateAuthority,
-    { principalKind: "owner" }
-  >;
+  readonly authority: Exclude<ServerDerivedLiveUpdateAuthority, { principalKind: "owner" }>;
   readonly binding: LiveObjectBinding;
   readonly hostEpoch: HostEpoch;
   readonly mintedAtMs: number;
@@ -32,15 +29,23 @@ export type RedeemedLiveTicket = LiveTicketClaims & {
 };
 
 const CLAIM_FIELDS = [
-  "ticketId", "audience", "authority", "binding", "hostEpoch",
-  "mintedAtMs", "expiresAtMs",
+  "ticketId",
+  "audience",
+  "authority",
+  "binding",
+  "hostEpoch",
+  "mintedAtMs",
+  "expiresAtMs",
 ] as const;
-const AUTHORITY_FIELDS = [
-  "principalKind", "principalId", "grantId", "grantGeneration",
-] as const;
+const AUTHORITY_FIELDS = ["principalKind", "principalId", "grantId", "grantGeneration"] as const;
 const BINDING_FIELDS = [
-  "workspaceId", "mainVersionId", "objectId", "lineageClaimId",
-  "currentPath", "selectorPaths", "restoreFenceGeneration",
+  "workspaceId",
+  "mainVersionId",
+  "objectId",
+  "lineageClaimId",
+  "currentPath",
+  "selectorPaths",
+  "restoreFenceGeneration",
 ] as const;
 
 function snapshot(value: unknown, fields: readonly string[]): Record<string, unknown> {
@@ -51,7 +56,10 @@ function snapshot(value: unknown, fields: readonly string[]): Record<string, unk
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) throw new TypeError();
     const keys = Reflect.ownKeys(value);
-    if (keys.length !== fields.length || keys.some(key => typeof key !== "string" || !fields.includes(key))) {
+    if (
+      keys.length !== fields.length ||
+      keys.some((key) => typeof key !== "string" || !fields.includes(key))
+    ) {
       throw new TypeError();
     }
     const result: Record<string, unknown> = Object.create(null);
@@ -68,9 +76,14 @@ function snapshot(value: unknown, fields: readonly string[]): Record<string, unk
 
 function snapshotSelectors(value: unknown): unknown[] {
   try {
-    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) throw new TypeError();
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype)
+      throw new TypeError();
     const length = Object.getOwnPropertyDescriptor(value, "length")?.value;
-    if (!Number.isSafeInteger(length) || length < 1 || length > LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT) {
+    if (
+      !Number.isSafeInteger(length) ||
+      length < 1 ||
+      length > LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT
+    ) {
       throw new TypeError();
     }
     const keys = Reflect.ownKeys(value);
@@ -89,13 +102,19 @@ function snapshotSelectors(value: unknown): unknown[] {
 
 export function parseLiveTicketAudience(value: unknown): string {
   if (
-    typeof value !== "string" || value.length > 2_048 || /[\ud800-\udfff]/u.test(value) ||
+    typeof value !== "string" ||
+    value.length > 2_048 ||
+    /[\ud800-\udfff]/u.test(value) ||
     /[\u0000-\u001f\u007f]/.test(value) ||
     new TextEncoder().encode(value).byteLength > 2_048
-  ) throw new TypeError("Live-ticket audience must be a canonical HTTP or HTTPS origin.");
+  )
+    throw new TypeError("Live-ticket audience must be a canonical HTTP or HTTPS origin.");
   let parsed: URL;
-  try { parsed = new URL(value); }
-  catch { throw new TypeError("Live-ticket audience must be a canonical HTTP or HTTPS origin."); }
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new TypeError("Live-ticket audience must be a canonical HTTP or HTTPS origin.");
+  }
   if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.origin !== value) {
     throw new TypeError("Live-ticket audience must be a canonical HTTP or HTTPS origin.");
   }
@@ -114,10 +133,14 @@ function claims(record: Record<string, unknown>): LiveTicketClaims {
   const rawBinding = snapshot(record.binding, BINDING_FIELDS);
   rawBinding.selectorPaths = snapshotSelectors(rawBinding.selectorPaths);
   const authority = parseServerDerivedLiveUpdateAuthority(rawAuthority);
-  if (authority.principalKind === "owner") throw new TypeError("Owner authority cannot use a live ticket.");
+  if (authority.principalKind === "owner")
+    throw new TypeError("Owner authority cannot use a live ticket.");
   const mintedAtMs = time(record.mintedAtMs);
   const expiresAtMs = time(record.expiresAtMs);
-  if (mintedAtMs > Number.MAX_SAFE_INTEGER - LIVE_TICKET_LIFETIME_MS || expiresAtMs !== mintedAtMs + LIVE_TICKET_LIFETIME_MS) {
+  if (
+    mintedAtMs > Number.MAX_SAFE_INTEGER - LIVE_TICKET_LIFETIME_MS ||
+    expiresAtMs !== mintedAtMs + LIVE_TICKET_LIFETIME_MS
+  ) {
     throw new TypeError("Live-ticket expiry must be exactly 30000 ms after issue.");
   }
   return {

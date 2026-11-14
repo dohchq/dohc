@@ -1,5 +1,11 @@
 import { holdSystemClipboard } from "./helpers/systemClipboard";
-import { desktopPins, activityPin, editorTabTestId, settingsNavPin, settingsSectionPin } from "../src/testPins";
+import {
+  desktopPins,
+  activityPin,
+  editorTabTestId,
+  settingsNavPin,
+  settingsSectionPin,
+} from "../src/testPins";
 import { test, expect, type Page } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -31,7 +37,10 @@ function fatalLogs(desktop: LaunchedDesktopApp): string[] {
     .filter((text) => FATAL_LOG_PATTERNS.some((pattern) => pattern.test(text)));
 }
 
-async function openWorkspace(temp: TempWorkspace, env?: NodeJS.ProcessEnv): Promise<LaunchedDesktopApp> {
+async function openWorkspace(
+  temp: TempWorkspace,
+  env?: NodeJS.ProcessEnv,
+): Promise<LaunchedDesktopApp> {
   const desktop = await launchDesktopApp({ workspace: temp, env });
   await openWorkspaceFromFirstRun(desktop.page, temp);
   return desktop;
@@ -87,7 +96,10 @@ test("draws a switch's thumb inside its track, on and off", async () => {
         return thumb.left + thumb.width / 2 > track.left + track.width / 2 ? "end" : "start";
       });
 
-    for (const [checked, place] of [["true", "end"], ["false", "start"]] as const) {
+    for (const [checked, place] of [
+      ["true", "end"],
+      ["false", "start"],
+    ] as const) {
       if ((await toggle.getAttribute("aria-checked")) !== checked) await toggle.click();
       await expect(toggle).toHaveAttribute("aria-checked", checked);
       await expect.poll(thumbPlace).toBe(place);
@@ -102,7 +114,6 @@ test("settings search finds matching sections and shows an empty result", async 
   let desktop: LaunchedDesktopApp | null = null;
 
   try {
-    // Searching for "mcp" opens the Agents section, which detects agent tools.
     desktop = await openWorkspace(temp, await installFakeAgentTools(temp));
     await openSettings(desktop.page);
     await desktop.page.getByTestId(desktopPins.settingsSearch).fill("theme");
@@ -148,8 +159,6 @@ test("MCP config copies the canonical workspace path", async () => {
     desktop = await openWorkspace(temp, await installFakeAgentTools(temp));
     await openSettings(desktop.page);
     await desktop.page.getByTestId(settingsNavPin("agents")).click();
-    // Each agent you run copies its own config, with the workspace's real
-    // path in forward-slash form and the agent's id.
     const canonicalRootPath = canonicalWorkspaceRoot(temp.rootPath);
     const page = desktop.page;
     await page.getByTestId("agent-add").click();
@@ -167,9 +176,13 @@ test("MCP config copies the canonical workspace path", async () => {
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       await copy.click({ timeout: remainingMs() });
       await expect
-        .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: remainingMs() })
+        .poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText()), {
+          timeout: remainingMs(),
+        })
         .toContain(canonicalRootPath);
-      const config = JSON.parse(await desktop!.app.evaluate(({ clipboard }) => clipboard.readText())) as { mcpServers: { dohc: { args: string[] } } };
+      const config = JSON.parse(
+        await desktop!.app.evaluate(({ clipboard }) => clipboard.readText()),
+      ) as { mcpServers: { dohc: { args: string[] } } };
       expect(config.mcpServers.dohc.args.slice(-2)).toEqual(["--agent-id", agentId]);
     });
   } finally {
@@ -182,8 +195,6 @@ test("corrupt settings recover with a warning and a usable dialog", async () => 
   let desktop: LaunchedDesktopApp | null = null;
 
   try {
-    // Intentionally malformed JSON verifies tolerant recovery from a corrupt
-    // user settings file.
     await writeFile(join(temp.homeDir, "dohc-settings.json"), "{not json");
     desktop = await openWorkspace(temp);
     await openSettings(desktop.page);
@@ -195,7 +206,6 @@ test("corrupt settings recover with a warning and a usable dialog", async () => 
   }
 });
 
-// The surfaces around open work that a theme change repaints.
 const THEMED_SURFACES = {
   "active tab": '[data-testid="editor-tabs"] [role="tab"][aria-selected="true"]',
   "other tab": '[data-testid="editor-tabs"] [role="tab"][aria-selected="false"]',
@@ -208,33 +218,46 @@ interface ThemeWatch {
   firstFrame: Promise<Record<string, string>>;
 }
 
-// Records the surfaces' colors in the first frame drawn after the next theme
-// change.
 async function watchNextThemeChange(page: Page): Promise<void> {
   await page.evaluate((surfaces) => {
-    const colors = () => Object.fromEntries(Object.entries(surfaces).flatMap(([name, selector]) => {
-      const style = getComputedStyle(document.querySelector(selector)!);
-      return [[`${name} fill`, style.backgroundColor], [`${name} text`, style.color]];
-    }));
+    const colors = () =>
+      Object.fromEntries(
+        Object.entries(surfaces).flatMap(([name, selector]) => {
+          const style = getComputedStyle(document.querySelector(selector)!);
+          return [
+            [`${name} fill`, style.backgroundColor],
+            [`${name} text`, style.color],
+          ];
+        }),
+      );
     const firstFrame = new Promise<Record<string, string>>((resolve) => {
       const observer = new MutationObserver(() => {
         observer.disconnect();
         requestAnimationFrame(() => resolve(colors()));
       });
-      observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+      observer.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["data-theme"],
+      });
     });
     (window as Window & { themeWatch?: ThemeWatch }).themeWatch = { colors, firstFrame };
   }, THEMED_SURFACES);
 }
 
-// The first frame after the change already has the colors the window keeps
-// once every transition has ended.
 async function expectThemeChangeInOneFrame(page: Page): Promise<void> {
-  const first = await page.evaluate(() => (window as Window & { themeWatch?: ThemeWatch }).themeWatch!.firstFrame);
+  const first = await page.evaluate(
+    () => (window as Window & { themeWatch?: ThemeWatch }).themeWatch!.firstFrame,
+  );
   await expect
-    .poll(() => page.evaluate(() => document.getAnimations().some((animation) => animation instanceof CSSTransition)))
+    .poll(() =>
+      page.evaluate(() =>
+        document.getAnimations().some((animation) => animation instanceof CSSTransition),
+      ),
+    )
     .toBe(false);
-  const settled = await page.evaluate(() => (window as Window & { themeWatch?: ThemeWatch }).themeWatch!.colors());
+  const settled = await page.evaluate(() =>
+    (window as Window & { themeWatch?: ThemeWatch }).themeWatch!.colors(),
+  );
   expect(first).toEqual(settled);
 }
 
@@ -243,7 +266,10 @@ test("a theme change repaints open tabs and the editor in one frame", async () =
   let desktop: LaunchedDesktopApp | null = null;
 
   try {
-    const lines = Array.from({ length: 120 }, (_, index) => `export const limit${index} = ${index};`);
+    const lines = Array.from(
+      { length: 120 },
+      (_, index) => `export const limit${index} = ${index};`,
+    );
     await writeWorkspaceFiles(temp, [
       { path: "notes.md", contents: "# Notes\n\nA paragraph.\n" },
       { path: "limits.js", contents: `${lines.join("\n")}\n` },
@@ -253,7 +279,10 @@ test("a theme change repaints open tabs and the editor in one frame", async () =
     await explorerRow(page, "notes.md").click();
     await expect(page.getByTestId(editorTabTestId("notes.md"))).toBeVisible();
     await explorerRow(page, "limits.js").click();
-    await expect(page.getByTestId(editorTabTestId("limits.js"))).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId(editorTabTestId("limits.js"))).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     await expect(page.locator(".cm-content")).toBeVisible();
 
     await openSettings(page);
@@ -273,19 +302,27 @@ test("a theme change repaints open tabs and the editor in one frame", async () =
     await page.locator(".cm-scroller").evaluate((scroller) => {
       scroller.scrollTop = 600;
     });
-    await page.locator(".cm-line", { hasText: /^export const limit40 =/ }).click({ position: { x: 4, y: 6 } });
+    await page
+      .locator(".cm-line", { hasText: /^export const limit40 =/ })
+      .click({ position: { x: 4, y: 6 } });
     await page.keyboard.press("Shift+End");
     await page.locator(".cm-editor").evaluate((editor) => {
       (window as Window & { themedEditor?: Element }).themedEditor = editor;
     });
-    const editorState = () => page.evaluate(() => ({
-      sameEditor: document.querySelector(".cm-editor") === (window as Window & { themedEditor?: Element }).themedEditor,
-      scrollTop: document.querySelector(".cm-scroller")!.scrollTop,
-      selection: getSelection()?.toString(),
-    }));
+    const editorState = () =>
+      page.evaluate(() => ({
+        sameEditor:
+          document.querySelector(".cm-editor") ===
+          (window as Window & { themedEditor?: Element }).themedEditor,
+        scrollTop: document.querySelector(".cm-scroller")!.scrollTop,
+        selection: getSelection()?.toString(),
+      }));
     const before = await editorState();
-    expect(before).toEqual({ sameEditor: true, scrollTop: 600, selection: "export const limit40 = 40;" });
-    // A transition already on screen keeps running through the change.
+    expect(before).toEqual({
+      sameEditor: true,
+      scrollTop: 600,
+      selection: "export const limit40 = 40;",
+    });
     await page.evaluate(async () => {
       const element = document.body.appendChild(document.createElement("div"));
       element.id = "running-transition";
@@ -297,11 +334,13 @@ test("a theme change repaints open tabs and the editor in one frame", async () =
     await watchNextThemeChange(page);
     await page.emulateMedia({ colorScheme: "dark" });
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
-    expect(await page.locator("#running-transition").evaluate((element) => {
-      const playState = element.getAnimations()[0]?.playState;
-      element.remove();
-      return playState;
-    })).toBe("running");
+    expect(
+      await page.locator("#running-transition").evaluate((element) => {
+        const playState = element.getAnimations()[0]?.playState;
+        element.remove();
+        return playState;
+      }),
+    ).toBe("running");
     await expectThemeChangeInOneFrame(page);
     expect(await editorState()).toEqual(before);
   } finally {
@@ -319,10 +358,8 @@ test("attachment location setting persists across reopen", async () => {
     await desktop.page.getByTestId(settingsNavPin("files")).click();
     await expect(desktop.page.getByTestId(settingsSectionPin("files"))).toBeVisible();
 
-    // The folder name can be edited for the default (per-document) location.
     await expect(desktop.page.getByTestId("attachment-folder-input")).toBeEnabled();
     await desktop.page.getByTestId("attachment-location-same-folder").click();
-    // Beside the document uses no folder, so its name cannot be edited.
     await expect(desktop.page.getByTestId("attachment-folder-input")).toBeDisabled();
 
     await closeSettings(desktop.page);
@@ -353,9 +390,7 @@ test("settings remains usable down to the minimum supported renderer viewport", 
     ]) {
       await desktop.page.setViewportSize({ width, height });
       await expect
-        .poll(() =>
-          desktop!.page.evaluate(() => ({ width: innerWidth, height: innerHeight })),
-        )
+        .poll(() => desktop!.page.evaluate(() => ({ width: innerWidth, height: innerHeight })))
         .toEqual({ width, height });
       await openSettings(desktop.page);
       const dialog = desktop.page.getByTestId(desktopPins.settingsDialog);
@@ -402,7 +437,8 @@ test("a press outside closes the dialog on top, then Settings", async () => {
     const addSheet = page.getByTestId("agent-add-sheet");
     await expect(addSheet).toBeVisible();
     // The bottom-left corner of the window: outside both panels.
-    const pressOutside = async () => page.mouse.click(8, await page.evaluate(() => innerHeight) - 8);
+    const pressOutside = async () =>
+      page.mouse.click(8, (await page.evaluate(() => innerHeight)) - 8);
 
     await pressOutside();
     await expect(addSheet).toBeHidden();

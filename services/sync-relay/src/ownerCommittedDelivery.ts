@@ -1,21 +1,39 @@
-import { parseLiveDocumentKey, type LiveDocumentKey, type LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
+import {
+  parseLiveDocumentKey,
+  type LiveDocumentKey,
+  type LiveUpdateReceipt,
+} from "@dohc/live-session-contract/live-update-admission";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
 import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
 import { authorityInteger } from "./storage/liveDocumentAuthority.js";
-import {admittedOwner,drainOwnerOutbox,ownerOutboxHeadIsSeed,type OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
-import type {CommittedDeliveryOutcome} from "./liveCommittedDelivery.js";
-import {settlementResponse,settlementPending,type CommittedSettlement,type SettlementOutcome} from "./liveSettlement.js";
-import {isDeepStrictEqual} from "node:util";
-import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import {cancelStopRestore, deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";
-import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
-import type {LiveRestorePreparation} from "./liveRestorePreparation";
-import {LiveHostRegistrations} from "./liveHostRegistration";
-import type {ServiceSeedDelivery} from "./serviceOwnerTransport";
+import {
+  admittedOwner,
+  drainOwnerOutbox,
+  ownerOutboxHeadIsSeed,
+  type OwnerOutboxAdmission,
+} from "./ownerOutboxDelivery.js";
+import type { CommittedDeliveryOutcome } from "./liveCommittedDelivery.js";
+import {
+  settlementResponse,
+  settlementPending,
+  type CommittedSettlement,
+  type SettlementOutcome,
+} from "./liveSettlement.js";
+import { isDeepStrictEqual } from "node:util";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import {
+  cancelStopRestore,
+  deliverStopRestore,
+  snapshotStopRestoreLookup,
+} from "./liveRestoreDelivery";
+import type { StopRestoreLookup } from "./storage/liveRestoreOperation";
+import type { LiveRestorePreparation } from "./liveRestorePreparation";
+import { LiveHostRegistrations } from "./liveHostRegistration";
+import type { ServiceSeedDelivery } from "./serviceOwnerTransport";
 
-type OwnerDeliveryOutcome = CommittedDeliveryOutcome & {continueDrain: boolean};
+type OwnerDeliveryOutcome = CommittedDeliveryOutcome & { continueDrain: boolean };
 // The host settled but its file write has not landed. The pass waits for the next wake instead of draining on.
 const SETTLEMENT_UNMATERIALIZED = "Owner settlement has not reached the file.";
 
@@ -24,24 +42,53 @@ export class OwnerCommittedDelivery {
   readonly #store;
   readonly #active = new Set<string>();
   readonly #registrations: LiveHostRegistrations;
-  readonly #adopted = new Map<string,{registrationId: number; adoptionId: string; sequence: number; binding: LiveObjectBinding;settled?: CommittedSettlement}>();
+  readonly #adopted = new Map<
+    string,
+    {
+      registrationId: number;
+      adoptionId: string;
+      sequence: number;
+      binding: LiveObjectBinding;
+      settled?: CommittedSettlement;
+    }
+  >();
   // The adoption, per document, whose divergent seed a pass of this connection
   // proved the host applied. Empty on a new connection; cleared with the adoption.
-  readonly #seedApplied = new Map<string,string>();
-  constructor(private readonly storage: SyncRelayStorage,history: LiveJournalHistoryAuthority,private readonly connection: {
-    client: EngineClient; workspace: string; host: LiveHostConnectionCoordinate; deadlineMs: number; nextRequestId(): number;
-    bounds: { maxBytes: number; maxEvents: number };
-    ownerAdmission: OwnerOutboxAdmission;
-    restore?: LiveRestorePreparation;
-    publish?(signal?: AbortSignal): Promise<unknown>;
-    /** A native service transport's permission to acknowledge its adoption seed before applying it. */
-    seedDelivery?(): ServiceSeedDelivery | undefined;
-  }) {
-    authorityInteger(connection.bounds.maxBytes,1); authorityInteger(connection.bounds.maxEvents,1); authorityInteger(connection.deadlineMs,1);
-    this.#store = storage.createLiveCommittedDeliveryStore(history, connection.ownerAdmission.activation);
+  readonly #seedApplied = new Map<string, string>();
+  #settlesSent = 0;
+  /** How many settlements this consumer has asked the engine for, so a caller can tell a sent one from a reused one. */
+  get settlesSent(): number {
+    return this.#settlesSent;
+  }
+  constructor(
+    private readonly storage: SyncRelayStorage,
+    history: LiveJournalHistoryAuthority,
+    private readonly connection: {
+      client: EngineClient;
+      workspace: string;
+      host: LiveHostConnectionCoordinate;
+      deadlineMs: number;
+      nextRequestId(): number;
+      bounds: { maxBytes: number; maxEvents: number };
+      ownerAdmission: OwnerOutboxAdmission;
+      restore?: LiveRestorePreparation;
+      publish?(signal?: AbortSignal): Promise<unknown>;
+      /** A native service transport's permission to acknowledge its adoption seed before applying it. */
+      seedDelivery?(): ServiceSeedDelivery | undefined;
+    },
+  ) {
+    authorityInteger(connection.bounds.maxBytes, 1);
+    authorityInteger(connection.bounds.maxEvents, 1);
+    authorityInteger(connection.deadlineMs, 1);
+    this.#store = storage.createLiveCommittedDeliveryStore(
+      history,
+      connection.ownerAdmission.activation,
+    );
     this.#registrations = new LiveHostRegistrations(connection);
   }
-  captureRegistration(binding: LiveObjectBinding) { return this.#registrations.capture(binding); }
+  captureRegistration(binding: LiveObjectBinding) {
+    return this.#registrations.capture(binding);
+  }
   captureDocumentRegistration(document: LiveDocumentKey) {
     const saved = this.#adopted.get(JSON.stringify(parseLiveDocumentKey(document)));
     if (!saved) throw new Error("Owner registration is unavailable.");
@@ -49,93 +96,198 @@ export class OwnerCommittedDelivery {
   }
   /** Whether the host applied the held adoption's divergent seed, or the adoption had none. A new stream waits for it. */
   adoptionSeedApplied(document: LiveDocumentKey): boolean {
-    const key = JSON.stringify(parseLiveDocumentKey(document)), saved = this.#adopted.get(key);
+    const key = JSON.stringify(parseLiveDocumentKey(document)),
+      saved = this.#adopted.get(key);
     return saved !== undefined && this.#seedApplied.get(key) === saved.adoptionId;
   }
-  #forget(key: string) { this.#adopted.delete(key); this.#seedApplied.delete(key); }
+  #forget(key: string) {
+    this.#adopted.delete(key);
+    this.#seedApplied.delete(key);
+  }
   /** Ends the document's registration after the host unloaded it. */
   release(document: LiveDocumentKey) {
     const parsed = parseLiveDocumentKey(document);
-    this.#registrations.invalidate(parsed.objectId); this.#forget(JSON.stringify(parsed));
+    this.#registrations.invalidate(parsed.objectId);
+    this.#forget(JSON.stringify(parsed));
   }
-  get workspace() { return this.connection.workspace; }
-  async #run(value: LiveDocumentKey,settle: false,signal?: AbortSignal): Promise<OwnerDeliveryOutcome>;
-  async #run(value: LiveDocumentKey,settle: true,signal?: AbortSignal,wanted?: boolean): Promise<SettlementOutcome>;
-  async #run(value: LiveDocumentKey,settle: boolean,signal?: AbortSignal,wanted = false): Promise<OwnerDeliveryOutcome | SettlementOutcome> {
-    const document = parseLiveDocumentKey(value), key = JSON.stringify(document), c = this.connection;
+  get workspace() {
+    return this.connection.workspace;
+  }
+  async #run(
+    value: LiveDocumentKey,
+    settle: false,
+    signal?: AbortSignal,
+  ): Promise<OwnerDeliveryOutcome>;
+  async #run(
+    value: LiveDocumentKey,
+    settle: true,
+    signal?: AbortSignal,
+    wanted?: boolean,
+    drained?: boolean,
+  ): Promise<SettlementOutcome>;
+  async #run(
+    value: LiveDocumentKey,
+    settle: boolean,
+    signal?: AbortSignal,
+    wanted = false,
+    drained = false,
+  ): Promise<OwnerDeliveryOutcome | SettlementOutcome> {
+    const document = parseLiveDocumentKey(value),
+      key = JSON.stringify(document),
+      c = this.connection;
     if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
     this.#active.add(key);
-    const check = () => { if (signal?.aborted) throw signal.reason; };
-    const request = () => ({ id: c.nextRequestId(),workspace: c.workspace,deadlineMs: c.deadlineMs });
+    const check = () => {
+      if (signal?.aborted) throw signal.reason;
+    };
+    const request = () => ({
+      id: c.nextRequestId(),
+      workspace: c.workspace,
+      deadlineMs: c.deadlineMs,
+    });
     try {
       check();
       const actor = admittedOwner(this.storage, c.ownerAdmission, document.workspaceId);
       let saved = this.#adopted.get(key);
-      const existing = this.#store.existingOwnerDelivery({host: c.host, document, actor});
+      const drainedRegistration = drained ? saved : undefined;
+      const existing = this.#store.existingOwnerDelivery({ host: c.host, document, actor });
       if (existing && (!saved || !isDeepStrictEqual(saved.binding, existing.binding))) {
         this.#registrations.invalidate(document.objectId);
         this.#seedApplied.delete(key);
         const progress = this.#store.ownerDeliveryProgress(existing);
-        const registered = await c.client.sendRequest({...request(), method: "liveApplication.register", params: {
-          binding: {...existing.binding, selectorPaths: [...existing.binding.selectorPaths]}, resumeAdoptionId: progress.adoptionId,
-        }}, signal);
-        check(); existing.assertCurrent();
-        const registration = configRecord(registered.result, [], ["registrationId", "status", "reason"]);
+        const registered = await c.client.sendRequest(
+          {
+            ...request(),
+            method: "liveApplication.register",
+            params: {
+              binding: { ...existing.binding, selectorPaths: [...existing.binding.selectorPaths] },
+              resumeAdoptionId: progress.adoptionId,
+            },
+          },
+          signal,
+        );
+        check();
+        existing.assertCurrent();
+        const registration = configRecord(
+          registered.result,
+          [],
+          ["registrationId", "status", "reason"],
+        );
         if (registration.status === "pending" && typeof registration.reason === "string") {
-          if (!settle) return {kind: "pending", reason: registration.reason, continueDrain: false};
+          if (!settle)
+            return { kind: "pending", reason: registration.reason, continueDrain: false };
           throw new Error(registration.reason);
         }
-        saved = {registrationId: authorityInteger(configRecord(registered.result, ["registrationId"]).registrationId, 1),
-          adoptionId: progress.adoptionId, sequence: progress.sequence, binding: existing.binding};
+        saved = {
+          registrationId: authorityInteger(
+            configRecord(registered.result, ["registrationId"]).registrationId,
+            1,
+          ),
+          adoptionId: progress.adoptionId,
+          sequence: progress.sequence,
+          binding: existing.binding,
+        };
         this.#adopted.set(key, saved);
         this.#registrations.remember(saved.binding, saved.registrationId);
       }
       if (!saved) {
         this.#registrations.invalidate(document.objectId);
-        const current = this.#store.captureOwnerBinding({host: c.host,document,actor});
-        const registered = await c.client.sendRequest({ ...request(),method: "liveApplication.register",params: { binding: { ...current.binding,selectorPaths: [...current.binding.selectorPaths] } } },signal);
-        check(); current.assertCurrent();
-        const registrationId = authorityInteger(configRecord(registered.result,["registrationId"]).registrationId,1);
-        const stateResponse = await c.client.sendRequest({ ...request(),method: "liveApplication.ownerState",params: { registrationId } },signal);
-        check(); current.assertCurrent();
-        const state = configRecord(stateResponse.result,["adoptionId","expectedLocalSequence","throughCursor","sessionId"]);
-        if (typeof state.adoptionId !== "string" || typeof state.sessionId !== "string") throw new Error("Invalid owner adoption state.");
-        const adoptedCut = this.#store.captureOwnerCut({ host: c.host,document,actor,adoptionId: state.adoptionId,
-          expectedLocalSequence: authorityInteger(state.expectedLocalSequence),...c.bounds,
-          ...(state.throughCursor === null ? {} : { throughCursor: authorityInteger(state.throughCursor) }) });
-        const adopted = await c.client.sendLiveOwnerAdoption({ ...request(),registrationId,sessionId: state.sessionId },adoptedCut.cut,c.bounds,signal);
-        check(); adoptedCut.assertCurrent();
-        const result = configRecord(adopted.result,["status","adoption"]);
+        const current = this.#store.captureOwnerBinding({ host: c.host, document, actor });
+        const registered = await c.client.sendRequest(
+          {
+            ...request(),
+            method: "liveApplication.register",
+            params: {
+              binding: { ...current.binding, selectorPaths: [...current.binding.selectorPaths] },
+            },
+          },
+          signal,
+        );
+        check();
+        current.assertCurrent();
+        const registrationId = authorityInteger(
+          configRecord(registered.result, ["registrationId"]).registrationId,
+          1,
+        );
+        const stateResponse = await c.client.sendRequest(
+          { ...request(), method: "liveApplication.ownerState", params: { registrationId } },
+          signal,
+        );
+        check();
+        current.assertCurrent();
+        const state = configRecord(stateResponse.result, [
+          "adoptionId",
+          "expectedLocalSequence",
+          "throughCursor",
+          "sessionId",
+        ]);
+        if (typeof state.adoptionId !== "string" || typeof state.sessionId !== "string")
+          throw new Error("Invalid owner adoption state.");
+        const adoptedCut = this.#store.captureOwnerCut({
+          host: c.host,
+          document,
+          actor,
+          adoptionId: state.adoptionId,
+          expectedLocalSequence: authorityInteger(state.expectedLocalSequence),
+          ...c.bounds,
+          ...(state.throughCursor === null
+            ? {}
+            : { throughCursor: authorityInteger(state.throughCursor) }),
+        });
+        const adopted = await c.client.sendLiveOwnerAdoption(
+          { ...request(), registrationId, sessionId: state.sessionId },
+          adoptedCut.cut,
+          c.bounds,
+          signal,
+        );
+        check();
+        adoptedCut.assertCurrent();
+        const result = configRecord(adopted.result, ["status", "adoption"]);
         if (result.status !== "adopted") throw new Error("Owner adoption did not commit.");
-        this.#store.acknowledgeOwnerAdoption(adoptedCut,result.adoption);
-        saved = {registrationId,adoptionId: state.adoptionId,sequence: authorityInteger(state.expectedLocalSequence),binding: adoptedCut.binding};
-        this.#adopted.set(key,saved);
+        this.#store.acknowledgeOwnerAdoption(adoptedCut, result.adoption);
+        saved = {
+          registrationId,
+          adoptionId: state.adoptionId,
+          sequence: authorityInteger(state.expectedLocalSequence),
+          binding: adoptedCut.binding,
+        };
+        this.#adopted.set(key, saved);
         this.#registrations.remember(saved.binding, saved.registrationId);
       }
-      const adopted = saved, {registrationId} = adopted;
+      const adopted = saved,
+        { registrationId } = adopted;
       // A pass the owner wants drops the reused settlement before it waits on
       // anything, so if it fails, the next ordinary settle asks the host again.
       if (wanted) adopted.settled = undefined;
-      const current = this.#store.openOwnerDelivery({host: c.host,document,actor});
-      if (!isDeepStrictEqual(adopted.binding,current.binding)) throw new Error("Owner binding requires reconciliation.");
+      const current = this.#store.openOwnerDelivery({ host: c.host, document, actor });
+      if (!isDeepStrictEqual(adopted.binding, current.binding))
+        throw new Error("Owner binding requires reconciliation.");
       let latest = current;
       let progress = this.#store.ownerDeliveryProgress(latest);
       // The adoption as the relay recorded it from the host's ACK, never the
       // greatest sequence delivery has reached since.
       if (progress.adoptionId !== adopted.adoptionId) throw new Error("Owner adoption changed.");
-      const recorded = {adoptionId: progress.adoptionId, sequence: progress.adoptionSequence};
+      const recorded = { adoptionId: progress.adoptionId, sequence: progress.adoptionSequence };
       // Materialize the handover cut before accepting or applying another edit.
       // A resumed registration repeats this empty settle if its reply was lost.
-      if (!adopted.settled && progress.adoptionTerminal !== null &&
-        isDeepStrictEqual(progress.terminal, progress.adoptionTerminal)) {
+      if (
+        !adopted.settled &&
+        progress.adoptionTerminal !== null &&
+        isDeepStrictEqual(progress.terminal, progress.adoptionTerminal)
+      ) {
         // One recovered ACK moves past the cut. Later applications replay in
         // applyPending under its event budget, without repeating the cut settle.
         const next = this.#store.nextOwnerApplication(latest);
         if (next) {
-          const ack = await c.client.readLiveApplicationAck({...request(),registrationId},next.metadata.accepted.receipt,signal);
-          check(); latest.assertCurrent();
+          const ack = await c.client.readLiveApplicationAck(
+            { ...request(), registrationId },
+            next.metadata.accepted.receipt,
+            signal,
+          );
+          check();
+          latest.assertCurrent();
           if (ack) {
-            this.#store.acknowledgeOwnerDeliveryApplication(latest,ack);
+            this.#store.acknowledgeOwnerDeliveryApplication(latest, ack);
             progress = this.#store.ownerDeliveryProgress(latest);
           }
         }
@@ -144,17 +296,45 @@ export class OwnerCommittedDelivery {
         // here: it follows F, and the terminal is still the cut at B <= F.
         // applyPending applies the predecessor's rows after B and then the
         // seed, moving the terminal past the cut without a settle.
-        if (isDeepStrictEqual(progress.terminal, progress.adoptionTerminal) &&
-          !(next && this.#store.hasPendingActivationSeed(latest)) && !await ownerOutboxHeadIsSeed({client: c.client,workspace: c.workspace,
-          registrationId,binding: adopted.binding,adoption: recorded,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,
-          assertCurrent: latest.assertCurrent})) {
-          const settled = await settlementResponse(c.client.sendRequest({...request(),method: "liveApplication.settle",params: {
-            registrationId,terminalReceipt: {...progress.adoptionTerminal},
-          }},signal),progress.adoptionTerminal);
-          check(); latest.assertCurrent();
+        if (
+          isDeepStrictEqual(progress.terminal, progress.adoptionTerminal) &&
+          !(next && this.#store.hasPendingActivationSeed(latest)) &&
+          !(await ownerOutboxHeadIsSeed({
+            client: c.client,
+            workspace: c.workspace,
+            registrationId,
+            binding: adopted.binding,
+            adoption: recorded,
+            nextRequestId: c.nextRequestId,
+            deadlineMs: c.deadlineMs,
+            signal,
+            assertCurrent: latest.assertCurrent,
+          }))
+        ) {
+          this.#settlesSent++;
+          const settled = await settlementResponse(
+            c.client.sendRequest(
+              {
+                ...request(),
+                method: "liveApplication.settle",
+                params: {
+                  registrationId,
+                  terminalReceipt: { ...progress.adoptionTerminal },
+                },
+              },
+              signal,
+            ),
+            progress.adoptionTerminal,
+          );
+          check();
+          latest.assertCurrent();
           if (settlementPending(settled) || !settled.materialized) {
             if (settle) return settled;
-            return {kind: "pending",reason: settlementPending(settled) ? settled.reason : SETTLEMENT_UNMATERIALIZED,continueDrain: false};
+            return {
+              kind: "pending",
+              reason: settlementPending(settled) ? settled.reason : SETTLEMENT_UNMATERIALIZED,
+              continueDrain: false,
+            };
           }
           adopted.settled = settled;
         }
@@ -165,149 +345,322 @@ export class OwnerCommittedDelivery {
       // A materialized settlement released the host's author coverage, and nothing applied since.
       let settledSinceApply = false;
       const applyPending = async (through?: LiveUpdateReceipt) => {
-        latest = this.#store.openOwnerDelivery({host: c.host,document,actor});
+        latest = this.#store.openOwnerDelivery({ host: c.host, document, actor });
         progress = this.#store.ownerDeliveryProgress(latest);
-        while (pendingReason === null && appliedCount < c.bounds.maxEvents &&
-          (!through || (progress.terminal?.journalCursor ?? 0) < through.journalCursor)) {
-          const event = this.#store.nextOwnerApplication(latest); if (!event) break;
-          check(); latest.assertCurrent();
+        while (
+          pendingReason === null &&
+          appliedCount < c.bounds.maxEvents &&
+          (!through || (progress.terminal?.journalCursor ?? 0) < through.journalCursor)
+        ) {
+          const event = this.#store.nextOwnerApplication(latest);
+          if (!event) break;
+          check();
+          latest.assertCurrent();
           let applied;
           try {
-            applied = await c.client.sendLiveApplication({ ...request(),registrationId },event,signal);
+            applied = await c.client.sendLiveApplication(
+              { ...request(), registrationId },
+              event,
+              signal,
+            );
           } catch (error) {
-            check(); latest.assertCurrent();
-            const ack = await c.client.readLiveApplicationAck({...request(),registrationId},event.metadata.accepted.receipt,signal).catch(() => {
-              check(); latest.assertCurrent();
-              throw error;
-            });
-            check(); latest.assertCurrent();
+            check();
+            latest.assertCurrent();
+            const ack = await c.client
+              .readLiveApplicationAck(
+                { ...request(), registrationId },
+                event.metadata.accepted.receipt,
+                signal,
+              )
+              .catch(() => {
+                check();
+                latest.assertCurrent();
+                throw error;
+              });
+            check();
+            latest.assertCurrent();
             if (!ack) throw error;
-            applied = {result: {status: "applied",ack}};
+            applied = { result: { status: "applied", ack } };
           }
-          check(); latest.assertCurrent();
-          const result = configRecord(applied.result,["status"],["ack","reason"]);
+          check();
+          latest.assertCurrent();
+          const result = configRecord(applied.result, ["status"], ["ack", "reason"]);
           if (result.status === "pending" && result.reason === "settlement-required") {
             // The host's author coverage is full. Settle what it applied once, then offer the identical event again.
-            if (settledSinceApply) throw new Error("The host still requires settlement after settling everything it applied.");
-            const settled = await settlementResponse(c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal),progress.terminal);
-            check(); latest.assertCurrent();
-            adopted.settled = !settlementPending(settled) && settled.materialized ? settled : undefined;
-            if (settlementPending(settled)) {pendingReason = settled.reason; break;}
-            if (!settled.materialized) { pendingReason = SETTLEMENT_UNMATERIALIZED; break; }
+            if (settledSinceApply)
+              throw new Error(
+                "The host still requires settlement after settling everything it applied.",
+              );
+            this.#settlesSent++;
+            const settled = await settlementResponse(
+              c.client.sendRequest(
+                {
+                  ...request(),
+                  method: "liveApplication.settle",
+                  params: {
+                    registrationId,
+                    terminalReceipt: progress.terminal ? { ...progress.terminal } : null,
+                  },
+                },
+                signal,
+              ),
+              progress.terminal,
+            );
+            check();
+            latest.assertCurrent();
+            adopted.settled =
+              !settlementPending(settled) && settled.materialized ? settled : undefined;
+            if (settlementPending(settled)) {
+              pendingReason = settled.reason;
+              break;
+            }
+            if (!settled.materialized) {
+              pendingReason = SETTLEMENT_UNMATERIALIZED;
+              break;
+            }
             settledSinceApply = true;
             continue;
           }
           if (result.status === "pending" && typeof result.reason === "string") {
-            pendingReason = "Owner application did not commit.";
+            // The engine's reason is one of its fixed words, so the log can name it.
+            pendingReason = `Owner application did not commit: ${result.reason}.`;
             break;
           }
           if (result.status !== "applied") throw new Error("Owner application did not commit.");
-          this.#store.acknowledgeOwnerDeliveryApplication(latest,result.ack);
+          this.#store.acknowledgeOwnerDeliveryApplication(latest, result.ack);
           progress = this.#store.ownerDeliveryProgress(latest);
           appliedCount++;
           settledSinceApply = false;
         }
       };
-      const outbox = await drainOwnerOutbox({storage: this.storage,admission: c.ownerAdmission,client: c.client,workspace: c.workspace,host: c.host,
-        registrationId,binding: saved.binding,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,assertCurrent: current.assertCurrent,
-        seedDelivery: c.seedDelivery?.(),
-        adoption: {...recorded, applied: () => {if (this.#adopted.get(key) === adopted) this.#seedApplied.set(key, recorded.adoptionId);}},
-        applyThrough: async receipt => {
-          await applyPending(receipt);
-          check(); latest.assertCurrent();
-          if ((progress.terminal?.journalCursor ?? 0) < receipt.journalCursor) return null;
-          const ack = await c.client.readLiveApplicationAck({...request(),registrationId},receipt,signal);
-          check(); latest.assertCurrent();
-          return ack;
-        }});
+      // The drain that just returned done read the owner queue empty under this registration. Anything queued
+      // since waits for the next pass's drain.
+      const outbox =
+        drainedRegistration === adopted
+          ? { admittedEntries: 0, hasMore: false, retryReady: false }
+          : await drainOwnerOutbox({
+              storage: this.storage,
+              admission: c.ownerAdmission,
+              client: c.client,
+              workspace: c.workspace,
+              host: c.host,
+              registrationId,
+              binding: saved.binding,
+              nextRequestId: c.nextRequestId,
+              deadlineMs: c.deadlineMs,
+              signal,
+              assertCurrent: current.assertCurrent,
+              seedDelivery: c.seedDelivery?.(),
+              adoption: {
+                ...recorded,
+                applied: () => {
+                  if (this.#adopted.get(key) === adopted)
+                    this.#seedApplied.set(key, recorded.adoptionId);
+                },
+              },
+              applyThrough: async (receipt) => {
+                await applyPending(receipt);
+                check();
+                latest.assertCurrent();
+                if ((progress.terminal?.journalCursor ?? 0) < receipt.journalCursor) return null;
+                const ack = await c.client.readLiveApplicationAck(
+                  { ...request(), registrationId },
+                  receipt,
+                  signal,
+                );
+                check();
+                latest.assertCurrent();
+                return ack;
+              },
+            });
       await applyPending();
-      if (!settle) return outbox.hasMore || this.#store.nextOwnerApplication(latest)
-        ? {kind: "pending",reason: pendingReason ?? "Owner delivery pass reached its work budget.",
-          continueDrain: pendingReason === null && (outbox.retryReady === true || outbox.admittedEntries > 0 || appliedCount > 0)}
-        : { kind: "done",terminalReceipt: progress.terminal, continueDrain: false };
-      if (pendingReason === "markdown-write-held" || pendingReason === "markdown-witness-check-pending") return {kind: "pending", reason: pendingReason};
+      if (!settle)
+        return outbox.hasMore || this.#store.nextOwnerApplication(latest)
+          ? {
+              kind: "pending",
+              reason: pendingReason ?? "Owner delivery pass reached its work budget.",
+              continueDrain:
+                pendingReason === null &&
+                (outbox.retryReady === true || outbox.admittedEntries > 0 || appliedCount > 0),
+            }
+          : { kind: "done", terminalReceipt: progress.terminal, continueDrain: false };
+      if (
+        pendingReason === "markdown-write-held" ||
+        pendingReason === "markdown-witness-check-pending"
+      )
+        return { kind: "pending", reason: pendingReason };
       if (pendingReason) throw new Error(pendingReason);
       if (outbox.hasMore) throw new Error("Owner outbox delivery must finish before settlement.");
-      if (this.#store.nextOwnerApplication(latest)) throw new Error("Owner application did not commit.");
-      if (!wanted && adopted.settled && adopted.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return adopted.settled;
-      const settled = await settlementResponse(c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal),progress.terminal);
-      check(); latest.assertCurrent();
+      if (this.#store.nextOwnerApplication(latest))
+        throw new Error("Owner application did not commit.");
+      if (
+        !wanted &&
+        adopted.settled &&
+        adopted.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)
+      )
+        return adopted.settled;
+      this.#settlesSent++;
+      const settled = await settlementResponse(
+        c.client.sendRequest(
+          {
+            ...request(),
+            method: "liveApplication.settle",
+            params: {
+              registrationId,
+              terminalReceipt: progress.terminal ? { ...progress.terminal } : null,
+            },
+          },
+          signal,
+        ),
+        progress.terminal,
+      );
+      check();
+      latest.assertCurrent();
       adopted.settled = !settlementPending(settled) && settled.materialized ? settled : undefined;
       return settled;
-    } finally { this.#active.delete(key); }
+    } finally {
+      this.#active.delete(key);
+    }
   }
-  drain(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,false,signal); }
+  drain(document: LiveDocumentKey, signal?: AbortSignal) {
+    return this.#run(document, false, signal);
+  }
   documentForRestore(value: StopRestoreLookup): LiveDocumentKey {
     const lookup = snapshotStopRestoreLookup(value);
-    return parseLiveDocumentKey(this.#store.stopRestoreDocument({...lookup, host: this.connection.host}));
+    return parseLiveDocumentKey(
+      this.#store.stopRestoreDocument({ ...lookup, host: this.connection.host }),
+    );
   }
   async stopRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const lookup = snapshotStopRestoreLookup(value), document = parseLiveDocumentKey(this.documentForRestore(lookup));
-    const key = JSON.stringify(document);
-    if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
-    this.#active.add(key);
-    this.#registrations.invalidate(document.objectId);
-    this.#forget(key);
-    try {return await deliverStopRestore({store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal});}
-    finally {this.#active.delete(key);}
-  }
-  settle(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,true,signal); }
-  /** Settles past the settlement this connection has of the same terminal, as its owner wants after consenting to a held write. */
-  settleWanted(document: LiveDocumentKey,signal?: AbortSignal) { return this.#run(document,true,signal,true); }
-  async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const restore = this.connection.restore;
-    if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value), document = parseLiveDocumentKey(this.documentForRestore(lookup));
-    const key = JSON.stringify(document);
-    if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
-    this.#active.add(key);
-    this.#registrations.invalidate(document.objectId);
-    this.#forget(key);
-    try {return await restore.prepare({store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal});}
-    finally {this.#active.delete(key);}
-  }
-  async reviewRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const restore = this.connection.restore;
-    if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value), document = this.documentForRestore(lookup);
-    const key = JSON.stringify(document);
-    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
-    this.#active.add(key);
-    try {return await restore.review({store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal});}
-    finally {this.#active.delete(key);}
-  }
-
-  async confirmRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
-    const restore = this.connection.restore;
-    if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value), document = this.documentForRestore(lookup);
-    const key = JSON.stringify(document);
-    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
-    this.#active.add(key);
-    try {return await restore.confirm({store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal}, proposalDigest);}
-    finally {this.#active.delete(key);}
-  }
-
-  async declineRestore(value: StopRestoreLookup, signal?: AbortSignal) {
-    const lookup = snapshotStopRestoreLookup(value), document = this.documentForRestore(lookup);
-    const key = JSON.stringify(document);
-    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
-    this.#active.add(key);
-    try {return await cancelStopRestore({store: this.#store, lookup, connection: this.connection, signal});}
-    finally {this.#active.delete(key);}
-  }
-
-  async completeRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
-    const restore = this.connection.restore;
-    if (!restore) throw new Error("Restore preparation is not configured on this host.");
-    const lookup = snapshotStopRestoreLookup(value), document = parseLiveDocumentKey(this.documentForRestore(lookup));
+    const lookup = snapshotStopRestoreLookup(value),
+      document = parseLiveDocumentKey(this.documentForRestore(lookup));
     const key = JSON.stringify(document);
     if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
     this.#active.add(key);
     this.#registrations.invalidate(document.objectId);
     this.#forget(key);
     try {
-      return await restore.complete({store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal}, proposalDigest);
-    } finally {this.#active.delete(key);}
+      return await deliverStopRestore({
+        store: this.#store,
+        lookup,
+        connection: this.connection,
+        deliveryKind: "owner",
+        signal,
+      });
+    } finally {
+      this.#active.delete(key);
+    }
+  }
+  settle(document: LiveDocumentKey, signal?: AbortSignal) {
+    return this.#run(document, true, signal);
+  }
+  /**
+   * Settles right after `drain` returned done for the document, without reading the owner queue that drain just
+   * read empty. A registration made since drains first, as `settle` does.
+   */
+  settleDrained(document: LiveDocumentKey, signal?: AbortSignal) {
+    return this.#run(document, true, signal, false, true);
+  }
+  /** Settles past the settlement this connection has of the same terminal, as its owner wants after consenting to a held write. */
+  settleWanted(document: LiveDocumentKey, signal?: AbortSignal) {
+    return this.#run(document, true, signal, true);
+  }
+  async prepareRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+    const restore = this.connection.restore;
+    if (!restore) throw new Error("Restore preparation is not configured on this host.");
+    const lookup = snapshotStopRestoreLookup(value),
+      document = parseLiveDocumentKey(this.documentForRestore(lookup));
+    const key = JSON.stringify(document);
+    if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
+    this.#active.add(key);
+    this.#registrations.invalidate(document.objectId);
+    this.#forget(key);
+    try {
+      return await restore.prepare({
+        store: this.#store,
+        lookup,
+        connection: this.connection,
+        deliveryKind: "owner",
+        signal,
+      });
+    } finally {
+      this.#active.delete(key);
+    }
+  }
+  async reviewRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+    const restore = this.connection.restore;
+    if (!restore) throw new Error("Restore preparation is not configured on this host.");
+    const lookup = snapshotStopRestoreLookup(value),
+      document = this.documentForRestore(lookup);
+    const key = JSON.stringify(document);
+    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
+    this.#active.add(key);
+    try {
+      return await restore.review({
+        store: this.#store,
+        lookup,
+        connection: this.connection,
+        deliveryKind: "owner",
+        signal,
+      });
+    } finally {
+      this.#active.delete(key);
+    }
+  }
+
+  async confirmRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
+    const restore = this.connection.restore;
+    if (!restore) throw new Error("Restore preparation is not configured on this host.");
+    const lookup = snapshotStopRestoreLookup(value),
+      document = this.documentForRestore(lookup);
+    const key = JSON.stringify(document);
+    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
+    this.#active.add(key);
+    try {
+      return await restore.confirm(
+        { store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal },
+        proposalDigest,
+      );
+    } finally {
+      this.#active.delete(key);
+    }
+  }
+
+  async declineRestore(value: StopRestoreLookup, signal?: AbortSignal) {
+    const lookup = snapshotStopRestoreLookup(value),
+      document = this.documentForRestore(lookup);
+    const key = JSON.stringify(document);
+    if (this.#active.has(key)) throw new Error("A restore operation already owns this document.");
+    this.#active.add(key);
+    try {
+      return await cancelStopRestore({
+        store: this.#store,
+        lookup,
+        connection: this.connection,
+        signal,
+      });
+    } finally {
+      this.#active.delete(key);
+    }
+  }
+
+  async completeRestore(value: StopRestoreLookup, proposalDigest: string, signal?: AbortSignal) {
+    const restore = this.connection.restore;
+    if (!restore) throw new Error("Restore preparation is not configured on this host.");
+    const lookup = snapshotStopRestoreLookup(value),
+      document = parseLiveDocumentKey(this.documentForRestore(lookup));
+    const key = JSON.stringify(document);
+    if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
+    this.#active.add(key);
+    this.#registrations.invalidate(document.objectId);
+    this.#forget(key);
+    try {
+      return await restore.complete(
+        { store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal },
+        proposalDigest,
+      );
+    } finally {
+      this.#active.delete(key);
+    }
   }
 }

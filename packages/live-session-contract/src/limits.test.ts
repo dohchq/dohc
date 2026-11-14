@@ -13,13 +13,10 @@ test("admits exactly 2 MiB of projected UTF-8 Markdown", () => {
 
   const ascii = "a".repeat(LIVE_MARKDOWN_MAX_BYTES);
   const emoji = "💡".repeat(LIVE_MARKDOWN_MAX_BYTES / 4);
-  const loneSurrogates =
-    "\ud800".repeat(Math.floor(LIVE_MARKDOWN_MAX_BYTES / 3)) + "aa";
+  const loneSurrogates = "\ud800".repeat(Math.floor(LIVE_MARKDOWN_MAX_BYTES / 3)) + "aa";
 
   for (const exactLimit of [ascii, emoji, loneSurrogates]) {
-    expect(utf8ByteLength(exactLimit)).toBe(
-      new TextEncoder().encode(exactLimit).length,
-    );
+    expect(utf8ByteLength(exactLimit)).toBe(new TextEncoder().encode(exactLimit).length);
     expect.soft(exceedsLiveMarkdownLimit(exactLimit)).toBe(false);
     expect(exceedsUtf8Bytes(exactLimit, LIVE_MARKDOWN_MAX_BYTES)).toBe(false);
 

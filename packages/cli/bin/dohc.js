@@ -13,9 +13,10 @@ const requireFromHere = createRequire(import.meta.url);
 // fixed launcher-specific messages directly instead of duplicating the
 // formatter.
 function launcherFailure(step, error) {
-  const detail = error instanceof Error && error.message.trim()
-    ? ` (${error.message.replace(/[\r\n]+/g, " ").trim()})`
-    : "";
+  const detail =
+    error instanceof Error && error.message.trim()
+      ? ` (${error.message.replace(/[\r\n]+/g, " ").trim()})`
+      : "";
   return `dohc: ${step}${detail}\n`;
 }
 

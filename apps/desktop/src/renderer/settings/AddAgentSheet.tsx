@@ -1,14 +1,35 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { CircleAlert, CloudOff, Link, LoaderCircle, Plug } from "lucide-react";
-import { MAX_PREFERRED_NAME_LENGTH, preferredNameFromInput } from "@dohc/workspace-contracts/chat-identity-values";
+import {
+  MAX_PREFERRED_NAME_LENGTH,
+  preferredNameFromInput,
+} from "@dohc/workspace-contracts/chat-identity-values";
 import type { AgentHue } from "@dohc/workspace-contracts/agent-hues";
 import { AGENT_TOOLS, type AgentLaunch } from "../../agents/agentToolCatalog";
-import { agentHandle, agentNameTaken, newAgentName, type DesktopUserSettings } from "../../settings/userSettings";
+import {
+  agentHandle,
+  agentNameTaken,
+  newAgentName,
+  type AgentThread,
+  type DesktopUserSettings,
+} from "../../settings/userSettings";
 import { AgentLinkAppMenu } from "../agentLinkApps";
+import { ipcErrorMessage } from "../ipcError";
 import { Overlay } from "../Overlay";
 import { CopyButton } from "../ui/CopyButton";
-import { PrimaryButton, SecondaryButton } from "../ui/controls";
+import { FieldError, PrimaryButton, RetryRow, SecondaryButton } from "../ui/controls";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { HueControl, SwitchControl } from "./SettingRow";
+import {
+  T3_CODE,
+  T3_CODE_CANNOT_KEEP,
+  T3CodeAllow,
+  T3CodeAllowAgain,
+  T3CodeThreadPicker,
+  t3CodeAllowed,
+  useT3CodeAccess,
+  type T3CodeThreadChoice,
+} from "./T3CodeThread";
 import { ToolReadiness, type ReadinessTone } from "./ToolReadiness";
 
 export type ToolTileState =
@@ -22,7 +43,7 @@ const TILE_STATE: Record<ToolTileState["status"], { text: string; tone: Readines
   "not-found": { text: "Not found", tone: "unknown" },
 };
 
-export type RunsWith = "claude" | "codex" | "mcp" | "link";
+export type RunsWith = "claude" | "codex" | "t3-code" | "mcp" | "link";
 
 /**
  * The Agent link choice: none without a server account; while dohc reads the
@@ -41,25 +62,86 @@ export type NewAgent = {
   hue: AgentHue;
   enabled: boolean;
   launch?: AgentLaunch;
+  // The agent's own thread in its tool. dohc forwards to it and never starts it.
+  thread?: AgentThread;
   idBase: string;
 };
 
-function nameProblem(agents: DesktopUserSettings["agents"], value: string, takenElsewhere: (name: string) => boolean): string | null {
+function nameProblem(
+  agents: DesktopUserSettings["agents"],
+  value: string,
+  takenElsewhere: (name: string) => boolean,
+): string | null {
   try {
     const name = preferredNameFromInput(value);
     if (!name) return "Enter an agent name.";
-    return agentNameTaken(agents, "", name) || takenElsewhere(name) ? "Another agent has this name." : null;
+    return agentNameTaken(agents, "", name) || takenElsewhere(name)
+      ? "Another agent has this name."
+      : null;
   } catch {
     return "This name can't be used.";
   }
 }
 
-const baseName = (choice: RunsWith) => choice === "mcp" || choice === "link" ? "Agent" : AGENT_TOOLS.find((entry) => entry.id === choice)!.name;
+const baseName = (choice: RunsWith) =>
+  AGENT_TOOLS.find((entry) => entry.id === choice)?.name ?? "Agent";
+
+const THREAD_SEARCH_ID = "agent-add-thread-search";
+
+// T3 Code on Add agent: why dohc cannot connect it, the ask that allows dohc
+// there, or the thread to connect. `onReady` says when a thread can be chosen.
+function T3CodeChoice(props: {
+  picked: string | null;
+  onPick: (thread: T3CodeThreadChoice | null) => void;
+  error: string | null;
+  onReady: (ready: boolean) => void;
+}) {
+  const access = useT3CodeAccess();
+  const { state } = access;
+  const ready = state !== undefined && state.canKeep && t3CodeAllowed(state);
+  const { onReady } = props;
+  useEffect(() => {
+    onReady(ready);
+    return () => onReady(false);
+  }, [onReady, ready]);
+  if (access.readError !== null)
+    return (
+      <RetryRow testId="t3-code-access-retry" onRetry={() => void access.retryRead()}>
+        {ipcErrorMessage(access.readError, "dohc could not check whether T3 Code allows it.")}
+      </RetryRow>
+    );
+  if (state === undefined)
+    return <SkeletonRows testId="t3-code-access-loading" label="Checking T3 Code" rows={2} />;
+  if (!state.canKeep)
+    return (
+      <p data-testid="t3-code-cannot-keep" className="m-0 text-[13px] text-danger">
+        {T3_CODE_CANNOT_KEEP}
+      </p>
+    );
+  if (!ready)
+    return (
+      <div className="rounded-lg border border-line bg-bg px-3 py-3">
+        <T3CodeAllow access={access} />
+      </div>
+    );
+  return (
+    <>
+      <T3CodeThreadPicker
+        picked={props.picked}
+        onPick={props.onPick}
+        error={props.error}
+        searchId={THREAD_SEARCH_ID}
+      />
+      <T3CodeAllowAgain access={access} />
+    </>
+  );
+}
 
 /**
  * Add agent: name and color, then what the agent runs with. Claude Code and
- * Codex run on this computer when their switch is on. Another agent connects
- * through MCP with the config shown here, under the id it will get. Agent
+ * Codex run on this computer when their switch is on. T3 Code connects a
+ * thread the person already has there, and dohc forwards to it. Another agent
+ * connects through MCP with the config shown here, under the id it will get. Agent
  * link adds nothing here: it copies the link an agent signs in with, and the
  * agent takes its name on the sign-in page.
  */
@@ -69,7 +151,6 @@ export function AddAgentSheet(props: {
   toolState: (tool: "claude" | "codex") => ToolTileState | null;
   detectionFailed: boolean;
   hue: AgentHue;
-  // The MCP config for an agent with this id, or null when this workspace has none.
   mcpConfig: (agentId: string) => string | null;
   mcpUnavailable: string | null;
   // The id an agent you run would get.
@@ -78,6 +159,8 @@ export function AddAgentSheet(props: {
   // A name one of your personal agents has.
   takenElsewhere: (name: string) => boolean;
   adding: boolean;
+  // Why the last Add added nothing, such as a thread T3 Code would not let dohc message.
+  addError?: string | null;
   onAdd: (agent: NewAgent) => void;
   onCancel: () => void;
 }) {
@@ -86,13 +169,26 @@ export function AddAgentSheet(props: {
   // The sheet shows no choice while dohc looks for the tools. Then it starts
   // on the first tool that is ready, and only the person changes it.
   const [initial, setInitial] = useState<RunsWith | null>(null);
-  const start = initial ?? (looking ? null : tools.find((tool) => props.toolState(tool)?.status === "ready") ?? "mcp");
+  const start =
+    initial ??
+    (looking ? null : (tools.find((tool) => props.toolState(tool)?.status === "ready") ?? "mcp"));
   if (initial === null && start !== null) setInitial(start);
   const [picked, setPicked] = useState<RunsWith | null>(null);
   const choice = picked ?? start;
-  // The name follows the choice until the person types one.
   const [typed, setTyped] = useState<string | null>(null);
-  const name = typed ?? newAgentName(props.agents, baseName(choice ?? "mcp"), props.takenElsewhere);
+  // The T3 Code thread to connect. Its title is the name until the person types one.
+  const [thread, setThread] = useState<T3CodeThreadChoice | null>(null);
+  const [threadMissing, setThreadMissing] = useState(false);
+  const [t3CodeReady, setT3CodeReady] = useState(false);
+  const pickThread = useCallback((next: T3CodeThreadChoice | null) => {
+    setThread(next);
+    setThreadMissing(false);
+  }, []);
+  const threadName =
+    choice === "t3-code" ? thread?.title.trim().slice(0, MAX_PREFERRED_NAME_LENGTH).trim() : "";
+  const name =
+    typed ??
+    newAgentName(props.agents, threadName || baseName(choice ?? "mcp"), props.takenElsewhere);
   const [hue, setHue] = useState<AgentHue>(props.hue);
   const [enabled, setEnabled] = useState(true);
   const [shownError, setShownError] = useState(false);
@@ -100,13 +196,32 @@ export function AddAgentSheet(props: {
   const error = problem === "Another agent has this name." || shownError ? problem : null;
   const handle = problem ? "" : agentHandle(name.trim());
   const config = choice === "mcp" ? props.mcpConfig(props.mcpAgentId) : null;
-  const state = choice === "mcp" || choice === "link" || choice === null ? null : props.toolState(choice);
+  const tool = choice === "claude" || choice === "codex" ? choice : null;
+  const state = tool ? props.toolState(tool) : null;
   const link = props.agentLink;
-  const canAdd = !props.adding && problem === null && (choice === "mcp" || state?.status === "ready");
+  const canAdd =
+    !props.adding && problem === null && (choice === "mcp" || state?.status === "ready");
 
   const submit = () => {
     // Agent link has no name to check and nothing to add.
     if (choice === "link") return;
+    if (choice === "t3-code") {
+      if (!t3CodeReady || props.adding) return;
+      if (problem) setShownError(true);
+      if (!thread) {
+        setThreadMissing(true);
+        if (!problem) document.getElementById(THREAD_SEARCH_ID)?.focus();
+      }
+      if (problem || !thread) return;
+      props.onAdd({
+        name: preferredNameFromInput(name)!,
+        hue,
+        enabled: true,
+        thread: { tool: "t3-code", id: thread.id },
+        idBase: "t3-code",
+      });
+      return;
+    }
     if (problem) {
       setShownError(true);
       return;
@@ -115,12 +230,24 @@ export function AddAgentSheet(props: {
     const trimmed = preferredNameFromInput(name)!;
     if (choice === "mcp") {
       props.onAdd({ name: trimmed, hue, enabled: false, idBase: "agent" });
-    } else if (choice !== null && state?.status === "ready") {
-      props.onAdd({ name: trimmed, hue, enabled, launch: { tool: choice, executable: state.executable }, idBase: choice });
+    } else if (tool !== null && state?.status === "ready") {
+      props.onAdd({
+        name: trimmed,
+        hue,
+        enabled,
+        launch: { tool, executable: state.executable },
+        idBase: tool,
+      });
     }
   };
 
-  const option = (id: RunsWith, title: string, line: ReactNode, disabled: boolean, hint?: string) => (
+  const option = (
+    id: RunsWith,
+    title: string,
+    line: ReactNode,
+    disabled: boolean,
+    hint?: string,
+  ) => (
     <button
       key={id}
       type="button"
@@ -131,10 +258,16 @@ export function AddAgentSheet(props: {
       title={hint}
       onClick={() => setPicked(id)}
       className={`flex min-h-[52px] min-w-0 flex-col justify-center rounded-lg border px-3 py-2 text-left transition-colors disabled:cursor-default ${
-        choice === id ? "border-ink bg-hover" : "border-line bg-bg hover:bg-hover disabled:hover:bg-bg"
+        choice === id
+          ? "border-ink bg-hover"
+          : "border-line bg-bg hover:bg-hover disabled:hover:bg-bg"
       }`}
     >
-      <span className={`block truncate text-[13px] font-medium ${disabled ? "text-muted" : "text-ink"}`}>{title}</span>
+      <span
+        className={`block truncate text-[13px] font-medium ${disabled ? "text-muted" : "text-ink"}`}
+      >
+        {title}
+      </span>
       <span className="text-[12px]">{line}</span>
     </button>
   );
@@ -152,46 +285,74 @@ export function AddAgentSheet(props: {
         }}
         className="dohc-elevated dohc-pop-in flex w-[min(520px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
       >
-        <h2 id="agent-add-title" className="m-0 text-base font-semibold text-ink">Add agent</h2>
+        <h2 id="agent-add-title" className="m-0 text-base font-semibold text-ink">
+          Add agent
+        </h2>
         {choice === "link" ? (
           // The sign-in page names the agent, so a name typed here would belong to nobody.
           <div data-testid="agent-add-link-name" className="flex items-center gap-3">
-            <span aria-hidden className="grid size-9 shrink-0 place-items-center rounded-lg border border-dashed border-line text-subtle">
+            <span
+              aria-hidden
+              className="grid size-9 shrink-0 place-items-center rounded-lg border border-dashed border-line text-subtle"
+            >
               <Link size={16} />
             </span>
             <p className="m-0 min-w-0 text-[13px] text-muted">You name it when it signs in.</p>
           </div>
-        ) : <>
-          <div className="flex flex-col gap-1">
-            <label htmlFor="agent-add-name" className="text-[12px] text-muted">Name</label>
-            <input
-              id="agent-add-name"
-              data-testid="agent-add-name"
-              autoFocus
-              value={name}
-              maxLength={MAX_PREFERRED_NAME_LENGTH}
-              autoComplete="off"
-              spellCheck={false}
-              aria-invalid={error ? true : undefined}
-              aria-describedby="agent-add-name-note"
-              onChange={(event) => {
-                setTyped(event.currentTarget.value);
-                setShownError(false);
-              }}
-              className={`h-8 rounded-md border bg-bg px-2.5 text-[13px] text-ink ${error ? "border-danger" : "border-line focus:border-ink"}`}
-            />
-            <p id="agent-add-name-note" role={error ? "alert" : undefined} className={`m-0 flex min-h-4 items-center gap-1 text-[12px] ${error ? "text-danger" : "text-muted"}`}>
-              {error ? <><CircleAlert size={12} aria-hidden />{error}</> : handle ? <>People mention it as <span className="font-mono text-ink">@{handle}</span></> : null}
-            </p>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <span className="text-[12px] text-muted">Color</span>
-            <HueControl label="Agent color" shape="agent" value={hue} onChange={setHue} />
-          </div>
-        </>}
+        ) : (
+          <>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="agent-add-name" className="text-[12px] text-muted">
+                Name
+              </label>
+              <input
+                id="agent-add-name"
+                data-testid="agent-add-name"
+                autoFocus
+                value={name}
+                maxLength={MAX_PREFERRED_NAME_LENGTH}
+                autoComplete="off"
+                spellCheck={false}
+                aria-invalid={error ? true : undefined}
+                aria-describedby="agent-add-name-note"
+                onChange={(event) => {
+                  setTyped(event.currentTarget.value);
+                  setShownError(false);
+                }}
+                className={`h-8 rounded-md border bg-bg px-2.5 text-[13px] text-ink ${error ? "border-danger" : "border-line focus:border-ink"}`}
+              />
+              <p
+                id="agent-add-name-note"
+                role={error ? "alert" : undefined}
+                className={`m-0 flex min-h-4 items-center gap-1 text-[12px] ${error ? "text-danger" : "text-muted"}`}
+              >
+                {error ? (
+                  <>
+                    <CircleAlert size={12} aria-hidden />
+                    {error}
+                  </>
+                ) : handle ? (
+                  <>
+                    People mention it as <span className="font-mono text-ink">@{handle}</span>
+                  </>
+                ) : null}
+              </p>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[12px] text-muted">Color</span>
+              <HueControl label="Agent color" shape="agent" value={hue} onChange={setHue} />
+            </div>
+          </>
+        )}
         <div className="flex flex-col gap-1.5">
-          <span id="agent-add-runs-with" className="text-[12px] text-muted">Runs with</span>
-          <div role="radiogroup" aria-labelledby="agent-add-runs-with" className="grid grid-cols-2 gap-2 max-[560px]:grid-cols-1">
+          <span id="agent-add-runs-with" className="text-[12px] text-muted">
+            Runs with
+          </span>
+          <div
+            role="radiogroup"
+            aria-labelledby="agent-add-runs-with"
+            className="grid grid-cols-2 gap-2 max-[560px]:grid-cols-1"
+          >
             {tools.map((tool) => {
               const toolName = baseName(tool);
               const found = props.toolState(tool);
@@ -199,72 +360,151 @@ export function AddAgentSheet(props: {
                 tool,
                 toolName,
                 found ? (
-                  <ToolReadiness tone={TILE_STATE[found.status].tone} className="mt-0.5">{TILE_STATE[found.status].text}</ToolReadiness>
+                  <ToolReadiness tone={TILE_STATE[found.status].tone} className="mt-0.5">
+                    {TILE_STATE[found.status].text}
+                  </ToolReadiness>
                 ) : props.detectionFailed ? (
                   <span className="text-muted">Couldn't check</span>
                 ) : (
-                  <span className="flex text-muted"><LoaderCircle size={12} aria-label={`Looking for ${toolName}`} className="animate-spin" /></span>
+                  <span className="flex text-muted">
+                    <LoaderCircle
+                      size={12}
+                      aria-label={`Looking for ${toolName}`}
+                      className="animate-spin"
+                    />
+                  </span>
                 ),
                 found?.status !== "ready",
                 found?.status === "update" ? `Update ${toolName} to use it here.` : undefined,
               );
             })}
-            {option("mcp", "Another agent", <span className="inline-flex items-center gap-1 text-muted"><Plug size={12} aria-hidden />Through MCP</span>, false,
-              "Cursor, OpenCode or any agent with MCP")}
+            {option(
+              "t3-code",
+              T3_CODE,
+              <span className="text-muted">A thread you have</span>,
+              false,
+            )}
+            {option(
+              "mcp",
+              "Another agent",
+              <span className="inline-flex items-center gap-1 text-muted">
+                <Plug size={12} aria-hidden />
+                Through MCP
+              </span>,
+              false,
+              "Cursor, OpenCode or any agent with MCP",
+            )}
             {option(
               "link",
               "Agent link",
               link.status === "ready" ? (
-                <span className="flex min-w-0 items-center gap-1 text-muted"><Link size={12} aria-hidden className="shrink-0" /><span className="truncate">{link.host}</span></span>
+                <span className="flex min-w-0 items-center gap-1 text-muted">
+                  <Link size={12} aria-hidden className="shrink-0" />
+                  <span className="truncate">{link.host}</span>
+                </span>
               ) : link.status === "loading" ? (
-                <span className="flex text-muted"><LoaderCircle size={12} aria-label="Looking for your server account" className="animate-spin" /></span>
+                <span className="flex text-muted">
+                  <LoaderCircle
+                    size={12}
+                    aria-label="Looking for your server account"
+                    className="animate-spin"
+                  />
+                </span>
               ) : (
-                <span className="text-muted">{link.status === "failed" ? "Couldn't check" : "Not signed in to a server"}</span>
+                <span className="text-muted">
+                  {link.status === "failed" ? "Couldn't check" : "Not signed in to a server"}
+                </span>
               ),
               link.status !== "ready",
-              link.status === "no-server" ? "Sign in to a server to give an agent a link." : undefined,
+              link.status === "no-server"
+                ? "Sign in to a server to give an agent a link."
+                : undefined,
             )}
           </div>
         </div>
-        {choice === "link" && link.status === "ready" ? <>
-          <div data-testid="agent-add-link" className="flex min-h-11 items-center gap-3 rounded-lg border border-line bg-bg px-3 py-2">
-            {link.link !== null
-              ? <Link size={14} aria-hidden className="shrink-0 text-muted" />
-              : <CloudOff size={14} aria-hidden className="shrink-0 text-muted" />}
-            <span className="min-w-0 truncate text-[13px] text-ink">{link.workspaceName}</span>
-            <span className="ml-auto min-w-0 truncate text-[12px] text-muted">{link.link !== null ? link.host : "Not synced"}</span>
-            <AgentLinkAppMenu link={link.link} server="dohc-personal" testId="agent-add-link-apps" />
-          </div>
-          {/* Why the link can't be copied takes the place of what copying it does. */}
-          <p data-testid="agent-add-link-note" className="m-0 -mt-2 text-[12px] text-muted">
-            {link.link !== null
-              ? "The agent signs in in your browser, where you choose what it can reach."
-              : `Sync this workspace to ${link.host} to give an agent a link.`}
-          </p>
-        </> : choice === "mcp" ? (
+        {choice === "link" && link.status === "ready" ? (
+          <>
+            <div
+              data-testid="agent-add-link"
+              className="flex min-h-11 items-center gap-3 rounded-lg border border-line bg-bg px-3 py-2"
+            >
+              {link.link !== null ? (
+                <Link size={14} aria-hidden className="shrink-0 text-muted" />
+              ) : (
+                <CloudOff size={14} aria-hidden className="shrink-0 text-muted" />
+              )}
+              <span className="min-w-0 truncate text-[13px] text-ink">{link.workspaceName}</span>
+              <span className="ml-auto min-w-0 truncate text-[12px] text-muted">
+                {link.link !== null ? link.host : "Not synced"}
+              </span>
+              <AgentLinkAppMenu
+                link={link.link}
+                server="dohc-personal"
+                testId="agent-add-link-apps"
+              />
+            </div>
+            {/* Why the link can't be copied takes the place of what copying it does. */}
+            <p data-testid="agent-add-link-note" className="m-0 -mt-2 text-[12px] text-muted">
+              {link.link !== null
+                ? "The agent signs in in your browser, where you choose what it can reach."
+                : `Sync this workspace to ${link.host} to give an agent a link.`}
+            </p>
+          </>
+        ) : choice === "mcp" ? (
           <div data-testid="agent-add-connect" className="rounded-lg border border-line bg-bg">
             <div className="flex min-h-11 items-center gap-3 border-b border-line px-3 py-2">
-              <span className="text-[13px] text-ink">Paste this into your agent's MCP settings</span>
+              <span className="text-[13px] text-ink">
+                Paste this into your agent's MCP settings
+              </span>
               <span className="ml-auto">
-                <CopyButton label="Copy MCP config" size="button" testId="agent-add-config-copy" disabled={config === null} getText={() => config} />
+                <CopyButton
+                  label="Copy MCP config"
+                  size="button"
+                  testId="agent-add-config-copy"
+                  disabled={config === null}
+                  getText={() => config}
+                />
               </span>
             </div>
             {config !== null ? (
-              <pre className="m-0 overflow-x-auto px-3 py-2.5 font-mono text-[11px] leading-relaxed text-ink">{config}</pre>
+              <pre className="m-0 overflow-x-auto px-3 py-2.5 font-mono text-[11px] leading-relaxed text-ink">
+                {config}
+              </pre>
             ) : props.mcpUnavailable ? (
               <p className="m-0 px-3 py-2.5 text-[12px] text-danger">{props.mcpUnavailable}</p>
             ) : null}
           </div>
+        ) : choice === "t3-code" ? (
+          <T3CodeChoice
+            picked={thread?.id ?? null}
+            onPick={pickThread}
+            error={threadMissing ? "Choose a thread." : null}
+            onReady={setT3CodeReady}
+          />
         ) : choice !== null && choice !== "link" ? (
           <div className="flex min-h-11 items-center gap-3 rounded-lg border border-line bg-bg px-3 py-2">
-            <span id="agent-add-run-label" className="text-[13px] text-ink">Run on this computer</span>
+            <span id="agent-add-run-label" className="text-[13px] text-ink">
+              Run on this computer
+            </span>
             <span className="ml-auto">
-              <SwitchControl label="Run on this computer" labelledBy="agent-add-run-label" checked={enabled} onChange={setEnabled} />
+              <SwitchControl
+                label="Run on this computer"
+                labelledBy="agent-add-run-label"
+                checked={enabled}
+                onChange={setEnabled}
+              />
             </span>
           </div>
         ) : null}
+        {props.addError ? (
+          <FieldError id="agent-add-error" testId="agent-add-error">
+            {props.addError}
+          </FieldError>
+        ) : null}
         <div className="flex items-center justify-end gap-2">
-          <SecondaryButton type="button" disabled={props.adding} onClick={props.onCancel}>Cancel</SecondaryButton>
+          <SecondaryButton type="button" disabled={props.adding} onClick={props.onCancel}>
+            Cancel
+          </SecondaryButton>
           {choice === "link" ? (
             // Nothing is added until the agent signs in, so the copy is the primary.
             <CopyButton
@@ -274,8 +514,16 @@ export function AddAgentSheet(props: {
               disabled={link.status !== "ready" || link.link === null}
               getText={() => (link.status === "ready" ? link.link : null)}
             />
-          ) : (
-            <PrimaryButton type="submit" data-testid="agent-add-confirm" disabled={props.adding || choice === null || (choice !== "mcp" && state?.status !== "ready")}>
+          ) : choice === "t3-code" && !t3CodeReady ? null : (
+            // Until dohc is allowed in T3 Code there is no thread to add.
+            <PrimaryButton
+              type="submit"
+              data-testid="agent-add-confirm"
+              aria-describedby={props.addError ? "agent-add-error" : undefined}
+              disabled={
+                props.adding || choice === null || (tool !== null && state?.status !== "ready")
+              }
+            >
               {props.adding ? "Adding…" : "Add agent"}
             </PrimaryButton>
           )}

@@ -19,6 +19,20 @@ export const noticesWords = {
   fromSender: { person: "From a person", agent: "From an agent", automation: "From an automation" },
   unreadCount: (count: number) => `Notices, ${count} unread`,
   showMore: (count: number) => `Show ${count} more`,
+
+  // The phone's.
+  markRead: "Mark read",
+  markUnread: "Mark unread",
+  /** Marks a Notice from the server done: it leaves the list, everywhere the account reads it. */
+  done: "Done",
+  /** The toast after Done, which holds its only Undo. */
+  markedDone: "Marked done",
+  /** A Notice whose target the phone can't open. */
+  openOnComputer: "Open on your computer",
+  readFailed: "dohc could not read your notices.",
+  marksFailed: "dohc could not save your changes to notices.",
+  /** Under marksFailed when this phone's storage would not take the changes: a close before they send loses them. */
+  marksNotStored: "They are not stored on this phone yet. Keep dohc open until they send.",
 } as const;
 
 export const syncStatusWords = {
@@ -33,7 +47,8 @@ export const syncProblemSentence = {
   serverUnreachable: "dohc could not reach the server.",
   syncFailed: "dohc could not sync this workspace.",
   updateToSync: "This server needs a newer version of dohc. Update dohc to sync again.",
-  serverNeedsUpdate: "This server runs an older version of dohc. Ask the person who runs it to update it.",
+  serverNeedsUpdate:
+    "This server runs an older version of dohc. Ask the person who runs it to update it.",
 } as const;
 
 /** The phone's band body for a workspace that can't sync. */
@@ -64,9 +79,13 @@ export function spokenRelativeTime(thenMs: number, nowMs: number = Date.now()): 
   const minutes = Math.floor(Math.max(0, nowMs - thenMs) / 60_000);
   if (minutes < 1) return "just now";
   const hours = Math.floor(minutes / 60);
-  if (hours >= 24) return new Date(thenMs).toLocaleDateString(undefined, { month: "long", day: "numeric" });
+  if (hours >= 24)
+    return new Date(thenMs).toLocaleDateString(undefined, { month: "long", day: "numeric" });
   const [count, unit] = minutes < 60 ? [minutes, "minute" as const] : [hours, "hour" as const];
   return typeof Intl.RelativeTimeFormat === "function"
-    ? new Intl.RelativeTimeFormat(undefined, { numeric: "always", style: "long" }).format(-count, unit)
+    ? new Intl.RelativeTimeFormat(undefined, { numeric: "always", style: "long" }).format(
+        -count,
+        unit,
+      )
     : `${count} ${unit}${count === 1 ? "" : "s"} ago`;
 }

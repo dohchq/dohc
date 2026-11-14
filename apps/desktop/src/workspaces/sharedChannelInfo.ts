@@ -1,7 +1,4 @@
-import {
-  isChatShareAccessValue,
-  type ChatShareAccess,
-} from "@dohc/security-contract/share-grant";
+import { isChatShareAccessValue, type ChatShareAccess } from "@dohc/security-contract/share-grant";
 import {
   RelayUnauthorizedError,
   ShareUnavailableError,

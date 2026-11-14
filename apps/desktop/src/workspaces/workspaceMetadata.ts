@@ -28,8 +28,14 @@ import {
 // With `create: false`, a missing .dohc (or workspace root) answers null and
 // nothing is made.
 export async function resolveWorkspaceMetadataDir(rootPath: string): Promise<string>;
-export async function resolveWorkspaceMetadataDir(rootPath: string, options: { create: false }): Promise<string | null>;
-export async function resolveWorkspaceMetadataDir(rootPath: string, options?: { create: false }): Promise<string | null> {
+export async function resolveWorkspaceMetadataDir(
+  rootPath: string,
+  options: { create: false },
+): Promise<string | null>;
+export async function resolveWorkspaceMetadataDir(
+  rootPath: string,
+  options?: { create: false },
+): Promise<string | null> {
   const create = options?.create !== false;
   if (!create && (await lstat(join(rootPath, ".dohc")).catch(() => null)) === null) return null;
   const realRoot = await realpath(rootPath);

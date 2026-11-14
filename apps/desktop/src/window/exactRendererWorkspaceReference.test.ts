@@ -41,9 +41,9 @@ describe("exact renderer workspace references", () => {
     };
     const effect = vi.fn();
 
-    await expect(
-      references.withReference(sender, reference, "stale", effect),
-    ).rejects.toThrow("stale");
+    await expect(references.withReference(sender, reference, "stale", effect)).rejects.toThrow(
+      "stale",
+    );
     expect(effect).not.toHaveBeenCalled();
   });
 
@@ -66,9 +66,9 @@ describe("exact renderer workspace references", () => {
     operation.session = { generation: 2 };
     const effect = vi.fn();
 
-    await expect(
-      references.withReference(sender, reference, "stale", effect),
-    ).rejects.toThrow("stale");
+    await expect(references.withReference(sender, reference, "stale", effect)).rejects.toThrow(
+      "stale",
+    );
     expect(effect).not.toHaveBeenCalled();
   });
 
@@ -90,12 +90,7 @@ describe("exact renderer workspace references", () => {
     const reference = await references.capture(sender, "workspace", "stale");
 
     await expect(
-      references.withReference(
-        sender,
-        reference,
-        "stale",
-        (current) => current.workspace.rootPath,
-      ),
+      references.withReference(sender, reference, "stale", (current) => current.workspace.rootPath),
     ).resolves.toBe("C:/real/workspace");
   });
 

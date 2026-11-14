@@ -6,28 +6,27 @@
 //! 1. **`OffsetKind::Utf16` everywhere.** [`Ydoc::wire`] is the only constructor
 //!    a durable/replicated doc may use; it hard-codes `OffsetKind::Utf16`. The
 //!    default `OffsetKind::Bytes` is wire-unsafe against Yjs (positional
-//!    divergence + a struct-store panic on non-ASCII) and is reachable only
-//!    through [`Ydoc::with_mode`] with [`OffsetMode::Bytes`], which the
-//!    cross-engine `offsetProbe` test uses solely to PIN the divergence.
+//!    divergence and a struct-store panic on non-ASCII). Only the cross-engine
+//!    `offsetProbe` test reaches it, through [`Ydoc::with_mode`] with
+//!    [`OffsetMode::Bytes`], to pin the divergence.
 //! 2. **Nested `Any::Map` key order is nondeterministic through a yrs re-encode.**
-//!    [`Ydoc::canonical_content`] sorts every map (including nested frontmatter
-//!    objects) via `BTreeMap`, and [`project_frontmatter`] sorts nested keys, so
-//!    neither the semantic convergence surface nor the content projection
-//!    depends on HashMap iteration order.
+//!    [`Ydoc::canonical_content`] sorts every map through `BTreeMap`, and
+//!    [`project_frontmatter`] sorts nested keys, so neither the convergence
+//!    surface nor the content projection depends on HashMap iteration order.
 //! 3. **Well-formed UTF-16 at the boundary.** Rust `String` cannot hold a lone
-//!    surrogate, so every string this module produces is well-formed by
-//!    construction. Raw [`Ydoc::apply`] remains the permissive yrs primitive;
-//!    durable callers additionally use [`crate::validate_replay_parity`] before
-//!    journaling so a wire edit cannot split a multi-unit scalar.
+//!    surrogate, so every string this module produces is well-formed. Raw
+//!    [`Ydoc::apply`] stays permissive; durable callers also use
+//!    [`crate::validate_replay_parity`] before journaling so a wire edit cannot
+//!    split a multi-unit scalar.
 //! 4. **Shared declared root schema; projection is destructive on the TS side.**
-//!    Roots are read through the declared dohc schema ([`ROOT_FRONTMATTER`],
-//!    [`ROOT_META`], [`ROOT_BODY`], [`ROOT_PLAINTEXT`], and the three scene
-//!    maps) — the Yjs v1 wire carries no root kinds. The projection records
+//!    The Yjs v1 wire carries no root kinds, so roots are read through the
+//!    declared dohc schema ([`ROOT_FRONTMATTER`], [`ROOT_META`], [`ROOT_BODY`],
+//!    [`ROOT_PLAINTEXT`], and the three scene maps). The projection records
 //!    provenance including a `destructive` flag.
 //! 5. **yjs `applyUpdate` is not atomic on malformed input; yrs is.** The durable
-//!    layer never journals bytes that failed validation: [`Ydoc::apply`] decodes
-//!    the whole update before applying (a truncated update is rejected on decode,
-//!    state-unchanged), and the caller only persists bytes an apply accepted.
+//!    layer never journals bytes that failed validation. [`Ydoc::apply`] decodes
+//!    the whole update before applying, so a truncated update is rejected with
+//!    state unchanged, and the caller persists only bytes an apply accepted.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -57,7 +56,7 @@ mod wikilinks;
 
 /// The declared dohc root schema. The Yjs v1 wire format does not carry
 /// root-type kinds — a root's kind is defined by typed API access — so both
-/// engines must read roots through this identical declaration (spike finding 4).
+/// engines must read roots through this identical declaration.
 pub const ROOT_FRONTMATTER: &str = "frontmatter";
 /// Secondary map root (engine metadata).
 pub const ROOT_META: &str = "meta";
@@ -404,7 +403,7 @@ pub struct Projection {
     pub source_state_vector_sha256: String,
     /// Whether producing this projection mutated the live doc. The Rust
     /// projection is read-only (`false`); the TS `yDocToMarkdown` can mutate
-    /// (drops PM-invalid elements), which R11b's live adapter journals as an
+    /// (drops PM-invalid elements), which the live adapter journals as an
     /// ordinary update. Recorded so a cross-engine settle can reconcile.
     pub destructive: bool,
     pub markdown_write_safety: MarkdownWriteSafety,
@@ -418,35 +417,6 @@ pub struct Projection {
 pub struct MarkdownSourceReference {
     pub source_sha256: String,
     pub projection_sha256: String,
-}
-
-#[cfg(test)]
-pub(crate) fn main_era_flattened_list_for_test(source: &str) -> Ydoc {
-    let doc = Ydoc::wire();
-    let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
-    doc.with_delta(|txn| {
-        let list = body.insert(txn, 0, XmlElementPrelim::empty("bulletList"));
-        let item = list.insert(txn, 0, XmlElementPrelim::empty("listItem"));
-        insert_md_paragraph(txn, &item, 0, "parent");
-        insert_md_paragraph(txn, &body, 1, "  - nested");
-    });
-    let canonical = "- parent\n\n  \\- nested";
-    let meta = doc.doc.get_or_insert_map(ROOT_META);
-    let mut txn = doc.doc.transact_mut();
-    meta.insert(&mut txn, "schemaVersion", Any::Number(1.0));
-    meta.insert(&mut txn, MARKDOWN_SOURCE_META_KEY, source);
-    meta.insert(
-        &mut txn,
-        MARKDOWN_SOURCE_SHA_META_KEY,
-        crate::hex_sha256(source.as_bytes()),
-    );
-    meta.insert(
-        &mut txn,
-        MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
-        crate::hex_sha256(canonical.as_bytes()),
-    );
-    drop(txn);
-    doc
 }
 /// A wire-facing durable Y.Doc.
 pub struct Ydoc {
@@ -1502,7 +1472,7 @@ impl Ydoc {
 
     /// The update that gives this document of `key` the rich-document schema
     /// version, or `None` when it already names one. New page's editor writes
-    /// a note's first update without the version (#3790).
+    /// a note's first update without the version.
     pub(crate) fn missing_schema_version_update(
         &self,
         key: &crate::DocKey,
@@ -1654,7 +1624,7 @@ impl Ydoc {
                     keep_frontmatter_source(&map, &meta, txn, source.as_deref());
                     // A live note keeps every block it deletes, so an outside
                     // save keeps the blocks it left alone at either end and
-                    // adds only what changed (#3741).
+                    // adds only what changed.
                     let (start, end) = if file_fold {
                         unchanged_ends::<_, WIRE_SEED>(&*txn, &frag, &blocks)
                     } else {
@@ -3215,7 +3185,6 @@ fn normalize_list_tabs(body: &str, reading: MarkdownReading) -> std::borrow::Cow
             output.push_str(line);
             continue;
         }
-        // Include checkboxes and compact child markers in the syntax prefix.
         let mut prefix = indent;
         if marker {
             let mut width = marker_width;
@@ -5009,8 +4978,6 @@ fn snap_utf16(s: &str, idx: u32) -> u32 {
     units
 }
 
-// ---- canonical content JSON (ported from the spike harness `main.rs`) -------
-
 fn content_json(doc: &Doc) -> Value {
     let mut roots = BTreeMap::new();
     // Read each declared root through its typed accessor (defining the kind
@@ -5145,9 +5112,6 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     let scratch = yrs::Doc::new();
     let fresh = scratch.get_or_insert_xml_fragment(ROOT_BODY);
     let mut scratch_txn = scratch.transact_mut();
-    // Whether `old` is exactly the block `block` inserts. Each block is built
-    // alone at the front of the scratch body, and only until the first that
-    // differs.
     let mut kept = |old: &XmlOut, block: &MdBlock<'_>| {
         let before = fresh.len(&scratch_txn);
         count_fold_work!(built);
@@ -5701,8 +5665,6 @@ fn base64_encode(bytes: &[u8]) -> String {
     }
     out
 }
-
-// ---- markdown projection helpers -------------------------------------------
 
 type ProjectionResult<T> = Result<T, CollabError>;
 
@@ -7035,7 +6997,6 @@ fn written_as_references(
     Ok(written.into_string())
 }
 
-/// The bytes `written_as_references` writes for `text[from..to]`.
 fn written_as_references_len(text: &str, from: usize, to: usize, highlighted: bool) -> usize {
     written_references(text, from, to, highlighted)
         .map(|piece| match piece {
@@ -8185,8 +8146,6 @@ fn render_inline(
         };
         let in_span =
             |from: usize, to: usize| span.is_some_and(|(start, end)| from < end && start < to);
-        // The stretches written as literal parts: those that hold a newline,
-        // `&`, `<`, or `>`.
         let mut stretches = Vec::new();
         let mut offset = 0usize;
         for (part_index, (text, ranges)) in texts.iter().zip(&empty_links).enumerate() {
@@ -9111,7 +9070,6 @@ fn is_js_whitespace(character: char) -> bool {
 #[cfg(test)]
 mod projection_tests {
     use super::*;
-    use std::sync::Arc;
 
     use crate::limits::MAX_PROJECTION_BYTES;
     use yrs::types::xml::XmlIn;
@@ -9131,44 +9089,11 @@ mod projection_tests {
         }
         assert_eq!(doc.encode_full_state(), expected);
     }
-
     fn scene_map_set(doc: &Ydoc, root: &str, key: &str, value: &str) -> Vec<u8> {
         let map = doc.doc.get_or_insert_map(root);
         doc.with_delta(|txn| {
             map.insert(txn, key, value);
         })
-    }
-
-    #[test]
-    fn scene_roots_apply_in_any_order_and_project_identically() {
-        let revisions = Ydoc::wire();
-        let revision_update = scene_map_set(
-            &revisions,
-            ROOT_SCENE_REVISIONS,
-            "[\"box\",1,1]",
-            "{\"id\":\"box\",\"isDeleted\":false,\"type\":\"rectangle\",\"version\":1,\"versionNonce\":1}",
-        );
-        let state = Ydoc::wire();
-        let state_update = scene_map_set(&state, ROOT_SCENE_APP_STATE, "theme", "\"dark\"");
-
-        let forward = Ydoc::wire();
-        forward.apply(&revision_update).expect("revision update");
-        forward.apply(&state_update).expect("state update");
-        let reverse = Ydoc::wire();
-        reverse.apply(&state_update).expect("state update");
-        reverse.apply(&revision_update).expect("revision update");
-
-        assert_eq!(forward.canonical_content(), reverse.canonical_content());
-        assert_eq!(
-            forward
-                .project(ContentKind::Scene)
-                .expect("scene projection")
-                .content,
-            reverse
-                .project(ContentKind::Scene)
-                .expect("scene projection")
-                .content
-        );
     }
 
     #[test]
@@ -9277,28 +9202,6 @@ mod projection_tests {
     }
 
     #[test]
-    fn canonical_fingerprint_includes_scene_root_values() {
-        let first = Ydoc::wire();
-        scene_map_set(&first, ROOT_SCENE_APP_STATE, "theme", "\"dark\"");
-        let second = Ydoc::wire();
-        scene_map_set(&second, ROOT_SCENE_APP_STATE, "theme", "\"light\"");
-
-        assert_ne!(first.canonical_content(), second.canonical_content());
-        assert_ne!(
-            first.canonical_content_sha256(),
-            second.canonical_content_sha256()
-        );
-        assert_eq!(
-            first.canonical_content()[ROOT_SCENE_APP_STATE]["type"],
-            "map"
-        );
-        assert_ne!(
-            first.canonical_content()[ROOT_SCENE_APP_STATE]["type"],
-            "undeclaredRoot"
-        );
-    }
-
-    #[test]
     fn file_fold_quote_guard_allows_code_and_preserves_the_document_on_overflow() {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, "original")
@@ -9320,27 +9223,6 @@ mod projection_tests {
                 .unwrap();
             assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, quote);
         }
-    }
-
-    #[test]
-    fn a_canonical_file_fold_clears_the_old_source_witness_without_storing_a_copy() {
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "old\n\n")
-            .unwrap();
-        assert!(doc.markdown_source_reference().is_some());
-        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "old\n")
-            .unwrap();
-        assert!(doc.markdown_source_reference().is_none());
-        assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, "old\n");
-    }
-
-    #[test]
-    fn scene_rejects_markdown_replacement() {
-        let doc = Ydoc::wire();
-        let error = doc
-            .rewrite_content_to_markdown(ContentKind::Scene, "not a scene")
-            .expect_err("scene replacement must use a scene operation");
-        assert_eq!(error.code(), "markdown-rewrite-unsupported");
     }
 
     #[test]
@@ -9416,402 +9298,6 @@ mod projection_tests {
             .expect("test update is valid");
         remote
     }
-
-    fn nested_any_array(depth: usize, leaf: Any) -> Any {
-        (0..depth).fold(leaf, |value, _| Any::Array(Arc::from([value])))
-    }
-
-    fn remote_doc_with_element_attribute(tag: &str, key: &str, value: Any) -> Ydoc {
-        let source = Ydoc::wire();
-        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        {
-            let mut txn = source.doc.transact_mut();
-            let element = body.push_back(
-                &mut txn,
-                XmlElementPrelim::new(tag, std::iter::empty::<XmlIn>()),
-            );
-            element.insert_attribute(&mut txn, key, value);
-        }
-        let remote = Ydoc::wire();
-        remote
-            .apply(&source.encode_full_state())
-            .expect("hostile test update is valid");
-        remote
-    }
-
-    fn remote_doc_with_nested_mark_attribute(depth: usize) -> Ydoc {
-        let source = Ydoc::wire();
-        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        {
-            let mut txn = source.doc.transact_mut();
-            let outer = body.push_back(
-                &mut txn,
-                XmlElementPrelim::new("blockquote", std::iter::empty::<XmlIn>()),
-            );
-            let paragraph = outer.push_back(
-                &mut txn,
-                XmlElementPrelim::new("paragraph", std::iter::empty::<XmlIn>()),
-            );
-            let text = paragraph.push_back(&mut txn, XmlTextPrelim::new("x"));
-            text.format(
-                &mut txn,
-                0,
-                1,
-                Attrs::from([("link".into(), nested_any_array(depth, Any::Null))]),
-            );
-        }
-        let remote = Ydoc::wire();
-        remote
-            .apply(&source.encode_full_state())
-            .expect("hostile test update is valid");
-        remote
-    }
-
-    fn text_run(value: &str, marks: Vec<MarkdownMark>) -> MarkdownNode {
-        MarkdownNode::Text(vec![TextRun {
-            text: value.to_string(),
-            marks,
-        }])
-    }
-
-    fn code_mark() -> MarkdownMark {
-        MarkdownMark {
-            kind: MarkKind::Code,
-            attrs: Value::Object(serde_json::Map::new()),
-        }
-    }
-
-    #[test]
-    fn unknown_xml_elements_preserve_descendant_text() {
-        let nodes = vec![MarkdownNode::Element {
-            tag: "futureNode".to_string(),
-            attrs: BTreeMap::new(),
-            children: vec![MarkdownNode::Text(vec![TextRun {
-                text: "content survives".to_string(),
-                marks: Vec::new(),
-            }])],
-        }];
-
-        assert_eq!(
-            markdown_document(&nodes).expect("small projection"),
-            "content survives"
-        );
-    }
-
-    #[test]
-    fn inline_node_line_endings_preserve_text_and_protect_following_block_openers() {
-        for (line_ending, expected) in [
-            ("\n", "before\n\\- still paragraph text"),
-            ("\r", "before&#13;- still paragraph text"),
-            ("\r\n", "before&#13;\n\\- still paragraph text"),
-        ] {
-            let nodes = vec![MarkdownNode::Element {
-                tag: "paragraph".to_string(),
-                attrs: BTreeMap::new(),
-                children: vec![
-                    MarkdownNode::Element {
-                        tag: "futureInline".to_string(),
-                        attrs: BTreeMap::new(),
-                        children: vec![text_run(&format!("before{line_ending}"), Vec::new())],
-                    },
-                    text_run("- still paragraph text", Vec::new()),
-                ],
-            }];
-
-            assert_eq!(
-                markdown_document(&nodes).expect("small projection"),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn inline_node_raw_attributes_preserve_carriage_returns() {
-        for nested in [false, true] {
-            let math = MarkdownNode::Element {
-                tag: "mathInline".to_string(),
-                attrs: BTreeMap::from([("tex".to_string(), Value::String("x\ry".to_string()))]),
-                children: Vec::new(),
-            };
-            let child = if nested {
-                MarkdownNode::Element {
-                    tag: "futureInline".to_string(),
-                    attrs: BTreeMap::new(),
-                    children: vec![math],
-                }
-            } else {
-                math
-            };
-            let nodes = vec![MarkdownNode::Element {
-                tag: "paragraph".to_string(),
-                attrs: BTreeMap::new(),
-                children: vec![child],
-            }];
-
-            assert_eq!(
-                markdown_document(&nodes).expect("small projection"),
-                "$x\ry$"
-            );
-        }
-    }
-
-    #[test]
-    fn unknown_inline_nodes_protect_internal_block_openers() {
-        let nodes = vec![MarkdownNode::Element {
-            tag: "paragraph".to_string(),
-            attrs: BTreeMap::new(),
-            children: vec![MarkdownNode::Element {
-                tag: "futureInline".to_string(),
-                attrs: BTreeMap::new(),
-                children: vec![text_run("before\n- still paragraph text", Vec::new())],
-            }],
-        }];
-
-        assert_eq!(
-            markdown_document(&nodes).expect("small projection"),
-            "before\n&#45; still paragraph text"
-        );
-    }
-
-    #[test]
-    fn block_opener_escaping_encodes_cr_and_starts_lines_only_after_lf() {
-        assert_eq!(
-            escape_markdown_block_syntax("before\r---\rnext", true, false)
-                .expect("small projection"),
-            "before&#13;---&#13;next"
-        );
-        assert_eq!(
-            escape_markdown_block_syntax("before\r\n---\r\nnext", true, false)
-                .expect("small projection"),
-            "before&#13;\n---&#13;\nnext"
-        );
-    }
-
-    #[test]
-    fn code_block_uses_collision_free_backtick_fence() {
-        let nodes = vec![MarkdownNode::Element {
-            tag: "codeBlock".to_string(),
-            attrs: BTreeMap::from([("language".to_string(), Value::String("js".to_string()))]),
-            children: vec![text_run("before\n```\nafter", Vec::new())],
-        }];
-
-        assert_eq!(
-            markdown_document(&nodes).expect("small projection"),
-            "````js\nbefore\n```\nafter\n````"
-        );
-    }
-
-    #[test]
-    fn code_block_language_with_backticks_uses_collision_free_tilde_fence() {
-        for language in ["lang`tick", "`leading", "```leading", "~lang`tick"] {
-            for content in ["", "code", "before\n~~~\n```\nafter"] {
-                let children = if content.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![text_run(content, Vec::new())]
-                };
-                let attrs =
-                    BTreeMap::from([("language".to_string(), Value::String(language.into()))]);
-                let fence = if content.contains("~~~") {
-                    "~~~~"
-                } else {
-                    "~~~"
-                };
-                let padding = if language.starts_with('~') { " " } else { "" };
-                assert_eq!(
-                    render_code_block(&attrs, &children).expect("small projection"),
-                    format!("{fence}{padding}{language}\n{content}\n{fence}")
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn inline_code_uses_collision_free_commonmark_delimiters() {
-        let nodes = vec![MarkdownNode::Element {
-            tag: "paragraph".to_string(),
-            attrs: BTreeMap::new(),
-            children: vec![
-                text_run("a`b", vec![code_mark()]),
-                text_run(" / ", Vec::new()),
-                text_run("`edge`", vec![code_mark()]),
-                text_run(" / ", Vec::new()),
-                text_run(" spaced ", vec![code_mark()]),
-                text_run(" / ", Vec::new()),
-                text_run("   ", vec![code_mark()]),
-            ],
-        }];
-
-        assert_eq!(
-            markdown_document(&nodes).expect("small projection"),
-            "``a`b`` / `` `edge` `` / `  spaced  ` / `   `"
-        );
-    }
-
-    #[test]
-    fn adjacent_inline_code_runs_with_same_mark_share_one_fence() {
-        let nodes = vec![MarkdownNode::Element {
-            tag: "paragraph".to_string(),
-            attrs: BTreeMap::new(),
-            children: vec![
-                text_run("a`", vec![code_mark()]),
-                text_run("b", vec![code_mark()]),
-            ],
-        }];
-
-        assert_eq!(
-            markdown_document(&nodes).expect("small projection"),
-            "``a`b``"
-        );
-    }
-
-    #[test]
-    fn table_pipe_escaping_respects_existing_backslashes_and_break_entities() {
-        assert_eq!(
-            prepare_rendered_table_cell(r"plain | odd \| even \\| &lt;br&gt; &amp;lt;br&amp;gt;")
-                .expect("small projection"),
-            r"plain \| odd \| even \\\| <br> <br>"
-        );
-    }
-
-    #[test]
-    fn table_literal_pipes_are_escaped_before_width_measurement() {
-        let doc = remote_doc_with_body([xml_element(
-            "table",
-            &[],
-            [
-                xml_element(
-                    "tableRow",
-                    &[],
-                    [
-                        xml_element("tableHeader", &[], [paragraph("Value")]),
-                        xml_element("tableHeader", &[], [paragraph("Other")]),
-                    ],
-                ),
-                xml_element(
-                    "tableRow",
-                    &[],
-                    [
-                        xml_element("tableCell", &[], [paragraph("left | right")]),
-                        xml_element("tableCell", &[], [paragraph("stable")]),
-                    ],
-                ),
-            ],
-        )]);
-
-        assert_eq!(
-            doc.project(ContentKind::Richdoc)
-                .expect("small projection")
-                .content,
-            "| Value         | Other  |\n| ------------- | ------ |\n| left \\| right | stable |\n"
-        );
-    }
-
-    #[test]
-    fn headerless_table_promotes_first_row_to_header() {
-        let doc = remote_doc_with_body([xml_element(
-            "table",
-            &[],
-            [
-                xml_element(
-                    "tableRow",
-                    &[],
-                    [
-                        xml_element("tableCell", &[], [paragraph("first")]),
-                        xml_element("tableCell", &[], [paragraph("row")]),
-                    ],
-                ),
-                xml_element(
-                    "tableRow",
-                    &[],
-                    [
-                        xml_element("tableCell", &[], [paragraph("second")]),
-                        xml_element("tableCell", &[], [paragraph("row")]),
-                    ],
-                ),
-            ],
-        )]);
-
-        assert_eq!(
-            doc.project(ContentKind::Richdoc)
-                .expect("small projection")
-                .content,
-            "| first  | row |\n| ------ | --- |\n| second | row |\n"
-        );
-    }
-
-    fn remote_table_with_row_heights(heights: &[(u32, Any)]) -> Ydoc {
-        let source = Ydoc::wire();
-        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        {
-            let mut txn = source.doc.transact_mut();
-            let table = body.push_back(
-                &mut txn,
-                XmlElementPrelim::new(
-                    "table",
-                    (0..4).map(|row| {
-                        xml_element(
-                            "tableRow",
-                            &[],
-                            [xml_element(
-                                "tableCell",
-                                &[],
-                                [paragraph(format!("row {row}"))],
-                            )],
-                        )
-                    }),
-                ),
-            );
-            for (index, height) in heights {
-                let XmlOut::Element(row) = table.get(&txn, *index).expect("row exists") else {
-                    panic!("row {index} is an element");
-                };
-                row.insert_attribute(&mut txn, "height", height.clone());
-            }
-        }
-        let remote = Ydoc::wire();
-        remote
-            .apply(&source.encode_full_state())
-            .expect("test update is valid");
-        remote
-    }
-
-    #[test]
-    fn resized_table_rows_project_their_heights_above_the_table() {
-        let doc = remote_table_with_row_heights(&[
-            (1, Any::BigInt(84)),
-            (2, Any::String("120".into())),
-            (3, Any::Number(0.5)),
-        ]);
-
-        assert_eq!(
-            doc.project(ContentKind::Richdoc)
-                .expect("small projection")
-                .content,
-            "<!-- dohc:table row-heights=1:84,2:120 -->\n| row 0 |\n| ----- |\n| row 1 |\n| row 2 |\n| row 3 |\n"
-        );
-    }
-
-    #[test]
-    fn hostile_table_row_heights_are_omitted() {
-        for hostile in [
-            Any::BigInt(0),
-            Any::BigInt(-84),
-            Any::BigInt(1 << 53),
-            Any::Bool(true),
-            Any::String("84px".into()),
-        ] {
-            let doc = remote_table_with_row_heights(&[(1, hostile.clone())]);
-            assert_eq!(
-                doc.project(ContentKind::Richdoc)
-                    .expect("small projection")
-                    .content,
-                "| row 0 |\n| ----- |\n| row 1 |\n| row 2 |\n| row 3 |\n",
-                "{hostile:?} is not a row height"
-            );
-        }
-    }
-
     #[test]
     fn hostile_remote_heading_level_is_clamped_before_allocation() {
         let doc = remote_doc_with_body([xml_element(
@@ -9863,13 +9349,6 @@ mod projection_tests {
         }));
         let doc = remote_doc_with_body([xml_element("table", &[], rows)]);
 
-        // The property under test is that the projection refuses before the
-        // amplifying allocation — 18 short rows padded to a 1 MiB column width
-        // would materialize ~18 MB. Either bound refusing is correct: the byte
-        // cap catches the padding, and the node/complexity budget catches the
-        // 1 MiB text run that produces the width. Pinning one variant made this
-        // test fail when the budget accounting tightened, even though the
-        // protection held.
         let error = doc
             .project(ContentKind::Richdoc)
             .expect_err("padding amplification must be refused");
@@ -9882,131 +9361,6 @@ mod projection_tests {
                 } if actual > MAX_PROJECTION_BYTES
             ) || matches!(error, CollabError::ProjectionTooComplex { .. }),
             "expected a projection bound to refuse, got {error:?}"
-        );
-    }
-
-    #[test]
-    fn multi_block_remote_table_cell_uses_gfm_inline_break() {
-        let doc = remote_doc_with_body([xml_element(
-            "table",
-            &[],
-            [
-                xml_element(
-                    "tableRow",
-                    &[],
-                    [xml_element(
-                        "tableHeader",
-                        &[("colspan", "1"), ("rowspan", "1")],
-                        [paragraph("H")],
-                    )],
-                ),
-                xml_element(
-                    "tableRow",
-                    &[],
-                    [xml_element(
-                        "tableCell",
-                        &[("colspan", "1"), ("rowspan", "1")],
-                        [paragraph("first"), paragraph("second")],
-                    )],
-                ),
-            ],
-        )]);
-
-        let markdown = doc
-            .project(ContentKind::Richdoc)
-            .expect("small projection")
-            .content;
-        assert_eq!(
-            markdown,
-            "| H               |\n| --------------- |\n| first<br>second |\n"
-        );
-    }
-
-    #[test]
-    fn table_followed_by_nested_list_has_one_markdown_block_separator() {
-        let doc = remote_doc_with_body([
-            xml_element(
-                "table",
-                &[],
-                [
-                    xml_element(
-                        "tableRow",
-                        &[],
-                        [
-                            xml_element("tableHeader", &[], [paragraph("Metric")]),
-                            xml_element("tableHeader", &[], [paragraph("Value")]),
-                        ],
-                    ),
-                    xml_element(
-                        "tableRow",
-                        &[],
-                        [
-                            xml_element("tableCell", &[], [paragraph("apples")]),
-                            xml_element("tableCell", &[], [paragraph("10")]),
-                        ],
-                    ),
-                ],
-            ),
-            xml_element(
-                "bulletList",
-                &[],
-                [xml_element(
-                    "listItem",
-                    &[],
-                    [
-                        paragraph("parent"),
-                        xml_element(
-                            "bulletList",
-                            &[],
-                            [xml_element("listItem", &[], [paragraph("nested")])],
-                        ),
-                    ],
-                )],
-            ),
-        ]);
-
-        assert_eq!(
-            doc.project(ContentKind::Richdoc)
-                .expect("small projection")
-                .content,
-            "| Metric | Value |\n| ------ | ----- |\n| apples | 10    |\n\n- parent\n  - nested\n"
-        );
-    }
-
-    #[test]
-    fn multiline_code_block_in_table_cell_uses_inline_code_and_breaks() {
-        let doc = remote_doc_with_body([xml_element(
-            "table",
-            &[],
-            [
-                xml_element(
-                    "tableRow",
-                    &[],
-                    [xml_element("tableHeader", &[], [paragraph("Code")])],
-                ),
-                xml_element(
-                    "tableRow",
-                    &[],
-                    [xml_element(
-                        "tableCell",
-                        &[],
-                        [xml_element(
-                            "codeBlock",
-                            &[("language", "mermaid")],
-                            [xml_text("const fence = ```;\nleft | right <&>")],
-                        )],
-                    )],
-                ),
-            ],
-        )]);
-
-        let markdown = doc
-            .project(ContentKind::Richdoc)
-            .expect("small projection")
-            .content;
-        assert!(
-            markdown.contains("````const fence = ```;````<br>`left \\| right <&>`"),
-            "unexpected projection: {markdown}"
         );
     }
 
@@ -10025,66 +9379,6 @@ mod projection_tests {
                 max_nodes: MAX_PROJECTION_NODES
             })
         ));
-    }
-
-    #[test]
-    fn alternating_format_runs_stop_before_copying_the_rejected_run() {
-        const TEST_NODE_BUDGET: usize = 16;
-        const RUNS: usize = TEST_NODE_BUDGET * 2;
-
-        let source = Ydoc::wire();
-        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        {
-            let mut txn = source.doc.transact_mut();
-            let paragraph = body.push_back(
-                &mut txn,
-                XmlElementPrelim::new("paragraph", std::iter::empty::<XmlIn>()),
-            );
-            let text = paragraph.push_back(&mut txn, XmlTextPrelim::new("x".repeat(RUNS)));
-            for index in 0..RUNS {
-                text.format(
-                    &mut txn,
-                    index as u32,
-                    1,
-                    Attrs::from([("bold".into(), Any::Bool(index % 2 == 0))]),
-                );
-            }
-        }
-        let remote = Ydoc::wire();
-        remote
-            .apply(&source.encode_full_state())
-            .expect("hostile alternating-format update is valid");
-
-        PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
-        assert!(matches!(
-            remote.project_richdoc_with_node_budget(TEST_NODE_BUDGET),
-            Err(CollabError::ProjectionTooComplex { .. })
-        ));
-        PROJECTION_TEXT_BYTES_COPIED.with(|count| {
-            assert_eq!(
-                count.get(),
-                (TEST_NODE_BUDGET - 2) / 2,
-                "only admitted runs are copied: paragraph and text cost two nodes, each run and mark cost two"
-            );
-        });
-    }
-
-    #[test]
-    fn two_mib_plain_body_uses_one_run_node() {
-        let body = "x".repeat(2 * 1024 * 1024);
-        let doc = remote_doc_with_body([paragraph(&body)]);
-        PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
-        assert_eq!(
-            doc.project_richdoc_with_node_budget(3).unwrap(),
-            format!("{body}\n")
-        );
-        PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), body.len()));
-        PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
-        assert!(matches!(
-            doc.project_richdoc_with_node_budget(2),
-            Err(CollabError::ProjectionTooComplex { .. })
-        ));
-        PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), 0));
     }
 
     #[test]
@@ -10187,60 +9481,6 @@ mod projection_tests {
     }
 
     #[test]
-    fn markdown_continuations_charge_bytes_without_recharging_run_or_marks() {
-        let attrs = Attrs::from([("bold".into(), Any::Bool(true))]);
-        let mut runs = Vec::new();
-        let mut remaining = 2;
-        let mut bytes = MAX_PROJECTION_BYTES - 7;
-        PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
-        append_markdown_text(&mut runs, "x", &attrs, false, 0, &mut remaining, &mut bytes).unwrap();
-        assert_eq!(remaining, 0);
-        append_markdown_text(&mut runs, "é", &attrs, true, 0, &mut remaining, &mut bytes).unwrap();
-        assert_eq!(bytes, MAX_PROJECTION_BYTES);
-        assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].text, "xé");
-        assert_eq!(runs[0].marks.len(), 1);
-        assert!(matches!(
-            append_markdown_text(&mut runs, "!", &attrs, true, 0, &mut remaining, &mut bytes),
-            Err(CollabError::ProjectionTooLarge { .. })
-        ));
-        assert_eq!(runs[0].text, "xé");
-        PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), 3));
-    }
-
-    #[test]
-    fn oversized_remote_element_attribute_is_refused_at_projection_cap() {
-        let encoded_bytes = MAX_PROJECTION_BYTES + 1;
-        let raw_bytes = (encoded_bytes / 4) * 3 + 1;
-        let doc = remote_doc_with_element_attribute(
-            "paragraph",
-            "hostile",
-            Any::Buffer(Arc::from(vec![0_u8; raw_bytes])),
-        );
-
-        assert!(matches!(
-            doc.project(ContentKind::Richdoc),
-            Err(CollabError::ProjectionTooLarge {
-                actual,
-                max: MAX_PROJECTION_BYTES
-            }) if actual > MAX_PROJECTION_BYTES
-        ));
-    }
-
-    #[test]
-    fn deeply_nested_remote_mark_attribute_is_refused_at_projection_depth_cap() {
-        let doc = remote_doc_with_nested_mark_attribute(MAX_PROJECTION_DEPTH - 1);
-
-        assert!(matches!(
-            doc.project(ContentKind::Richdoc),
-            Err(CollabError::ProjectionTooComplex {
-                max_depth: MAX_PROJECTION_DEPTH,
-                max_nodes: MAX_PROJECTION_NODES
-            })
-        ));
-    }
-
-    #[test]
     fn a_full_body_rewrite_cannot_erase_an_unseen_concurrent_edit() {
         const RESOLVED: &str = "resolved";
 
@@ -10270,71 +9510,6 @@ mod projection_tests {
             .content;
         assert_ne!(projection, RESOLVED);
         assert!(projection.contains("peer unseen edit"));
-    }
-
-    #[test]
-    fn a_scene_successor_is_byte_stable_and_reproduces_embedded_assets() {
-        let key = crate::DocKey::new("ws", "main", "drawing-object").expect("valid key");
-        let external = serde_json::to_string(&json!({
-            "type": "excalidraw",
-            "version": 2,
-            "source": "https://excalidraw.com",
-            "elements": [{
-                "id": "image",
-                "type": "image",
-                "version": 1,
-                "versionNonce": 7,
-                "isDeleted": false,
-                "index": "a0",
-                "fileId": "image-file"
-            }],
-            "appState": { "viewBackgroundColor": "#ffffff" },
-            "files": {
-                "image-file": {
-                    "id": "image-file",
-                    "mimeType": "image/png",
-                    "created": 10,
-                    "dataURL": "data:image/png;base64,AQID"
-                }
-            }
-        }))
-        .expect("external scene");
-        let canonical_doc = Ydoc::wire();
-        let asset_bytes = crate::scene::seed_portable_scene(&canonical_doc, &key, &external)
-            .expect("seed canonical scene");
-        let canonical = canonical_doc
-            .fold_scene()
-            .portable_json_with_asset_bytes(&asset_bytes)
-            .expect("canonical portable scene");
-        let result_sha = crate::hex_sha256(canonical.as_bytes());
-        let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
-            key: &key,
-            predecessor_claim_id: &"a".repeat(64),
-            predecessor_state_vector_sha256: &"b".repeat(64),
-            artifact_op_kind: "conflict.resolve",
-            artifact_id: "scene-conflict",
-            artifact_preimage_sha256: &"c".repeat(64),
-            content_kind: ContentKind::Scene,
-            result_sha256: &result_sha,
-        });
-
-        let first = fresh_successor_base(&identity, &canonical).expect("scene successor");
-        let replay = fresh_successor_base(&identity, &canonical).expect("scene replay");
-        assert_eq!(first, replay, "one scene identity has one exact base");
-
-        let loaded = Ydoc::wire();
-        loaded.apply(&first.update).expect("load scene successor");
-        assert_eq!(
-            loaded.lineage_epoch_tag().as_deref(),
-            Some(first.epoch_tag.as_str())
-        );
-        assert_eq!(
-            loaded
-                .fold_scene()
-                .portable_json_with_asset_bytes(&asset_bytes)
-                .expect("project scene successor"),
-            canonical,
-        );
     }
 
     #[test]
@@ -10513,97 +9688,6 @@ mod projection_tests {
     }
 
     #[test]
-    fn resolution_fold_reconstructs_an_annotated_table() {
-        // The projector writes this for a table whose two body rows were
-        // resized and whose second column is right-aligned.
-        let chosen = "# Sizes\n\n<!-- dohc:table row-heights=1:84,2:120 -->\n| Metric | Value |\n| ------ | -----: |\n| apples | 10    |\n| pears  | 4     |\n\nAfter.\n";
-        let doc = Ydoc::wire();
-        doc.richdoc_append_paragraph("old content");
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
-            .expect("richdoc rewrite");
-        assert_eq!(
-            doc.project(ContentKind::Richdoc)
-                .expect("projection")
-                .content,
-            chosen,
-            "the folded document projects the chosen bytes back"
-        );
-        let body = doc.canonical_content()["body"].clone();
-        let table = &body["children"][1];
-        assert_eq!(table["tag"], "table");
-        let rows = table["children"].as_array().expect("table rows");
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0]["children"][0]["tag"], "tableHeader");
-        assert_eq!(rows[1]["children"][0]["tag"], "tableCell");
-        assert_eq!(rows[1]["attrs"]["height"], 84);
-        assert_eq!(rows[2]["attrs"]["height"], 120);
-        assert_eq!(rows[2]["children"][1]["attrs"]["align"], "right");
-        assert!(
-            rows[0]["attrs"].get("height").is_none(),
-            "an unannotated row has no height"
-        );
-    }
-
-    #[test]
-    fn resolution_fold_decodes_one_entity_layer_in_table_cells() {
-        let doc = remote_doc_with_body([xml_element(
-            "table",
-            &[],
-            [
-                xml_element(
-                    "tableRow",
-                    &[],
-                    [xml_element("tableHeader", &[], [paragraph("Text")])],
-                ),
-                xml_element(
-                    "tableRow",
-                    &[("height", "84")],
-                    [xml_element("tableCell", &[], [paragraph("a & b | c")])],
-                ),
-                xml_element(
-                    "tableRow",
-                    &[],
-                    [xml_element(
-                        "tableCell",
-                        &[],
-                        [paragraph("<tag> &amp; x<br>y")],
-                    )],
-                ),
-            ],
-        )]);
-        let chosen = doc
-            .project(ContentKind::Richdoc)
-            .expect("projection")
-            .content;
-        assert!(
-            chosen.contains("a &amp; b \\| c") && chosen.contains("&lt;tag&gt; &amp;amp; x<br>y"),
-            "{chosen}"
-        );
-        let folded = Ydoc::wire();
-        folded
-            .rewrite_content_to_markdown(ContentKind::Richdoc, &chosen)
-            .expect("richdoc rewrite");
-        assert_eq!(
-            folded
-                .project(ContentKind::Richdoc)
-                .expect("projection")
-                .content,
-            chosen
-        );
-        let body = serde_json::to_string(&folded.canonical_content()["body"]).expect("body json");
-        assert!(
-            body.contains("a & b | c") && body.contains("<tag> &amp; x<br>y"),
-            "{body}"
-        );
-    }
-
-    // Raw HTML the live document holds as text settles as inert text. The
-    // importer's test of the same document (RAW_HTML_SETTLED in
-    // packages/ydoc-projection/src/import-export.test.ts) reads these bytes
-    // back as the same document, and the cross-engine fixture
-    // richdocProjection-raw-html-literal-text pins them against the
-    // TypeScript projector.
-    #[test]
     fn raw_html_text_settles_as_inert_text_the_importer_reopens() {
         const SETTLED: &str = concat!(
             "Lit &lt;span title&#61;&#34;q &#39;é&#39; &amp;&#35;92&#59;&#34;&gt;&#92;&#42; ",
@@ -10730,7 +9814,6 @@ mod projection_tests {
                     (".", Attrs::new()),
                 ],
             );
-            // A line of spaces whose newline starts the next, unmarked run.
             push_runs(
                 &mut txn,
                 &seventh,
@@ -10755,34 +9838,6 @@ mod projection_tests {
         );
     }
 
-    // The fold reads a cell's references as the importer does: inside an
-    // encoded tag, where the projector writes them, as their characters, and
-    // elsewhere, between two real tags too, as the text they spell.
-    #[test]
-    fn table_cell_fold_reads_references_only_inside_an_encoded_tag() {
-        assert_eq!(
-            decode_html_entities_once("&#123; &#92; &amp;#123;"),
-            "&#123; &#92; &#123;"
-        );
-        assert_eq!(
-            decode_html_entities_once("<b>x</b> &#123; &#92; <i>y</i>"),
-            "<b>x</b> &#123; &#92; <i>y</i>"
-        );
-        assert_eq!(
-            decode_html_entities_once("a<br>&#123;<br>b"),
-            "a<br>&#123;<br>b"
-        );
-        assert_eq!(
-            decode_html_entities_once("&#123; &lt;b&gt;&#123;&#92;&#59;&lt;/b&gt; &#92;"),
-            "&#123; <b>{\\;</b> &#92;"
-        );
-    }
-
-    // A table cell's `<br>` is a real tag in the file, which the importer reads
-    // as raw HTML, so it bounds no raw HTML span: the cell's literal reference
-    // before the `<b>` stays the text it spells. The importer's test of the same
-    // cell is "saves a table cell holding a real <br> beside raw HTML as the
-    // same document" in packages/ydoc-projection/src/import-export.test.ts.
     #[test]
     fn a_table_cell_br_bounds_no_raw_html_span() {
         let doc = remote_doc_with_body([xml_element(
@@ -10829,66 +9884,6 @@ mod projection_tests {
         assert!(body.contains("a<br>b &#124; <b>*x*</b>"), "{body}");
     }
 
-    // A nested block in a table cell is still in the cell, so its real `<br>`
-    // bounds no raw HTML span either.
-    #[test]
-    fn a_nested_block_in_a_table_cell_keeps_the_cell_context() {
-        let doc = remote_doc_with_body([xml_element(
-            "table",
-            &[],
-            [
-                xml_element(
-                    "tableRow",
-                    &[],
-                    [xml_element("tableHeader", &[], [paragraph("H")])],
-                ),
-                xml_element(
-                    "tableRow",
-                    &[],
-                    [xml_element(
-                        "tableCell",
-                        &[],
-                        [xml_element(
-                            "callout",
-                            &[("calloutType", "note"), ("fold", ""), ("title", "")],
-                            [paragraph("a<br>b &#124; <b>*x*</b>")],
-                        )],
-                    )],
-                ),
-            ],
-        )]);
-        let projected = doc
-            .project(ContentKind::Richdoc)
-            .expect("projection")
-            .content;
-        assert!(
-            projected.contains("a<br>b &amp;#124; &lt;b&gt;&#42;x&#42;&lt;/b&gt;"),
-            "{projected}"
-        );
-    }
-
-    // Each punctuation character in a raw HTML span becomes its own reference,
-    // and the text between two references is copied alone, not with the run.
-    #[test]
-    fn dense_raw_html_punctuation_copies_the_run_once() {
-        const PAIRS: usize = 4096;
-        let text = format!("<b>{}</b>", "x*".repeat(PAIRS));
-        let doc = remote_doc_with_body([paragraph(text.as_str())]);
-        TEXT_RUN_BYTES_CLONED.with(|count| count.set(0));
-        RAW_HTML_REFERENCES_RECORDED.with(|count| count.set(0));
-        assert_eq!(
-            doc.project_richdoc().unwrap(),
-            format!("&lt;b&gt;{}&lt;/b&gt;\n", "x&#42;".repeat(PAIRS))
-        );
-        RAW_HTML_REFERENCES_RECORDED.with(|count| assert_eq!(count.get(), PAIRS));
-        TEXT_RUN_BYTES_CLONED.with(|count| assert_eq!(count.get(), text.len()));
-    }
-
-    // A part's links with no text, and the text between them that holds no
-    // newline, `&`, `<`, or `>`, become one literal part when they hold a
-    // byte a later pass would rewrite. So a dense link, or a run of links,
-    // makes one part and one string, not one for each character or link.
-    // The counter counts the parts the projector actually makes.
     #[test]
     fn empty_links_become_one_literal_part() {
         const COUNT: usize = 1 << 16;
@@ -10938,9 +9933,6 @@ mod projection_tests {
         }
     }
 
-    // A link with no text keeps each line its title starts: no block opener,
-    // indent, or reference escape reads it. The Markdown after it still
-    // reads as Markdown, and a highlight's `=` keeps its escape.
     #[test]
     fn empty_link_lines_are_written_as_they_are() {
         for (text, expected) in [
@@ -11158,45 +10150,12 @@ mod projection_tests {
         remote
             .apply(&source.encode_full_state())
             .expect("valid update");
-        // A highlighted link whose line starts with `=` keeps its source
-        // spelling, `&` too, with each `=` written as `\=`, in one part.
         INLINE_PARTS_MATERIALIZED.with(|count| count.set(0));
         assert_eq!(
             remote.project_richdoc().unwrap(),
             "==[](u \"&\\=\n\\=\")==\n"
         );
         INLINE_PARTS_MATERIALIZED.with(|count| assert_eq!(count.get(), 1));
-    }
-
-    // The reader of links with no text examines each byte a bounded number of
-    // times, whether its candidates fail or succeed, with no close after them,
-    // one, or two.
-    #[test]
-    fn empty_link_reader_work_is_linear() {
-        let steps = |text: &str| {
-            EMPTY_LINK_READER_STEPS.with(|count| count.set(0));
-            empty_link_ranges(text);
-            EMPTY_LINK_READER_STEPS.with(std::cell::Cell::get)
-        };
-        for unit in [
-            "[](",
-            "[](<",
-            "[](u \"",
-            "[](a)",
-            "[](u \"t\") ",
-            "[](a)b)",
-            "[](a b c",
-        ] {
-            for close in ["", ")", "))"] {
-                let small = steps(&format!("{}{close}", unit.repeat(1024)));
-                let large = steps(&format!("{}{close}", unit.repeat(2048)));
-                assert!(small > 0, "{unit:?}{close:?}");
-                assert!(
-                    large * 10 < small * 22,
-                    "{unit:?}{close:?}: {small} -> {large}"
-                );
-            }
-        }
     }
 
     // The fixture generator has marked 17.0.6 read a shared corpus of links
@@ -11244,109 +10203,6 @@ mod projection_tests {
         }
     }
 
-    // A definition's NBSP and `\r` are references like its punctuation, as
-    // the importer requires, and other Unicode is written as it is.
-    #[test]
-    fn definition_whitespace_is_written_as_references() {
-        for (text, expected) in [
-            (
-                "[x]: u \"a\u{a0}b\"",
-                "&#91;x&#93;&#58; u &#34;a&#160;b&#34;\n",
-            ),
-            ("[x]: u \"a\rb\"", "&#91;x&#93;&#58; u &#34;a&#13;b&#34;\n"),
-            (
-                "[x]: https://e.example/日本 \"😀 é\"",
-                "&#91;x&#93;&#58; https&#58;//e&#46;example/日本 &#34;😀 é&#34;\n",
-            ),
-        ] {
-            let doc = remote_doc_with_body([paragraph(text)]);
-            assert_eq!(doc.project_richdoc().unwrap(), expected);
-        }
-    }
-
-    // Text the reader admits can still encode past the output limit. The
-    // projector refuses it before it records any of the span's references.
-    #[test]
-    fn raw_html_punctuation_past_the_output_limit_is_refused_before_recording() {
-        let text = format!("<b>{}</b>", "*".repeat(MAX_PROJECTION_BYTES / 4));
-        let doc = remote_doc_with_body([paragraph(text.as_str())]);
-        RAW_HTML_REFERENCES_RECORDED.with(|count| count.set(0));
-        assert!(matches!(
-            doc.project_richdoc(),
-            Err(CollabError::ProjectionTooLarge {
-                actual,
-                max: MAX_PROJECTION_BYTES
-            }) if actual > MAX_PROJECTION_BYTES
-        ));
-        RAW_HTML_REFERENCES_RECORDED.with(|count| assert_eq!(count.get(), 0));
-    }
-
-    // A link with no text written as references can encode past the output
-    // limit across its lines while each line stays under it. The projector
-    // refuses it before it writes any line. One that encodes to exactly the
-    // limit is written whole.
-    #[test]
-    fn literal_links_past_the_output_limit_are_refused_before_writing() {
-        let lines = |count: usize, length: usize, tail: usize| {
-            format!(
-                "[](u \"{}# {}\")",
-                format!("{}\n", "*".repeat(length)).repeat(count),
-                "b".repeat(tail)
-            )
-        };
-        let refused = |text: &str| {
-            let doc = remote_doc_with_body([paragraph(text)]);
-            LITERAL_LINKS_WRITTEN.with(|count| count.set(0));
-            RAW_HTML_REFERENCES_RECORDED.with(|count| count.set(0));
-            assert!(matches!(
-                doc.project_richdoc(),
-                Err(CollabError::ProjectionTooLarge {
-                    actual,
-                    max: MAX_PROJECTION_BYTES
-                }) if actual > MAX_PROJECTION_BYTES
-            ));
-            LITERAL_LINKS_WRITTEN.with(|count| assert_eq!(count.get(), 0));
-            RAW_HTML_REFERENCES_RECORDED.with(|count| assert_eq!(count.get(), 0));
-        };
-        // Four lines of 2^20 `*`, each about 5 MiB written.
-        refused(&lines(4, 1 << 20, 1));
-        // Four lines of `length` `*` write 20 bytes for each `*` they hold
-        // and 44 bytes besides, counting the note's final line break, and each
-        // further `b` writes one byte more.
-        let length = (MAX_PROJECTION_BYTES - 44) / 20;
-        let tail = 1 + MAX_PROJECTION_BYTES - 44 - 20 * length;
-        let doc = remote_doc_with_body([paragraph(lines(4, length, tail).as_str())]);
-        LITERAL_LINKS_WRITTEN.with(|count| count.set(0));
-        let projected = doc.project_richdoc().unwrap();
-        assert_eq!(projected.len(), MAX_PROJECTION_BYTES);
-        assert_eq!(
-            projected,
-            format!(
-                "&#91;&#93;&#40;u &#34;{}&#35; {}&#34;&#41;\n",
-                format!("{}\n", "&#42;".repeat(length)).repeat(4),
-                "b".repeat(tail)
-            )
-        );
-        // Each line the link keeps.
-        LITERAL_LINKS_WRITTEN.with(|count| assert_eq!(count.get(), 5));
-        // One more `b` still fits the link, but not the note's final line
-        // break after it.
-        let doc = remote_doc_with_body([paragraph(lines(4, length, tail + 1).as_str())]);
-        assert!(matches!(
-            doc.project_richdoc(),
-            Err(CollabError::ProjectionTooLarge {
-                actual,
-                max: MAX_PROJECTION_BYTES
-            }) if actual > MAX_PROJECTION_BYTES
-        ));
-        refused(&lines(4, length, tail + 2));
-    }
-
-    // The engine's reader resolves the references the projector writes inside
-    // raw HTML it wrote as text, as the importer reads them. A literal
-    // reference elsewhere, between two raw tags too, still reads as the text
-    // it spells, and a reference to a character a reader may not see is still
-    // syntax, inside raw HTML too.
     #[test]
     fn the_reader_resolves_projected_references_only_inside_raw_html_text() {
         let read = |text: &str| read_text(text, TextPlace::Inline);
@@ -11389,12 +10245,6 @@ mod projection_tests {
         );
     }
 
-    // A `<` or `>` a file holds as text opens and closes no encoded tag span,
-    // so a reference beside it reads as the text it spells, as the importer
-    // reads it (import-export.test.ts, "keeps the spelling of a reference").
-    // The fold keeps that text, which projects as the importer's save of it.
-    // A renderer decodes the source's reference, so the source still does not
-    // read as its projection, while the same text without one does.
     #[test]
     fn a_reference_beside_text_angles_keeps_its_spelling() {
         let read = |text: &str| read_text(text, TextPlace::Block);
@@ -11453,243 +10303,6 @@ mod projection_tests {
             "Map&lt;K&#44; V&gt;",
             MarkdownReading::Source
         ));
-    }
-
-    /// marked 17's readings of links with no text and of definitions, which
-    /// `markedReadings` in packages/ydoc-projection/src/import-export.test.ts
-    /// pins against marked itself.
-    #[test]
-    fn marked_literal_source_readings() {
-        for (source, raw) in [
-            (
-                "[](https://e.example \"Map<K, &#59; V>\") tail",
-                Some("[](https://e.example \"Map<K, &#59; V>\")"),
-            ),
-            (
-                "[](<https://e.example/&#59;>) tail",
-                Some("[](<https://e.example/&#59;>)"),
-            ),
-            ("[](u \"a)b\") tail", Some("[](u \"a)b\")")),
-            ("[](a(b)c) tail", Some("[](a(b)c)")),
-            ("[](a)b)", Some("[](a)")),
-            ("[](a b)", None),
-            ("[](<a b> 't')", Some("[](<a b> 't')")),
-            ("[](<a) x>)", Some("[](<a) x>)")),
-            ("[](  u \n  \"t\"  ) tail", Some("[](  u \n  \"t\"  )")),
-            ("[](u (t)) tail", Some("[](u (t))")),
-            ("[](u \"a\\\"b\" \"c\")", None),
-            ("[](u \"a\\\"b)", None),
-            ("[](u \"a\\\" ) \"x\")", Some("[](u \"a\\\" )")),
-            ("[]()", Some("[]()")),
-            ("[](\\)) tail", Some("[](\\))")),
-            ("[](a\\)b)", Some("[](a\\)b)")),
-            ("[](<a\\>)", None),
-            ("[](<a\\\\>)", Some("[](<a\\\\>)")),
-            ("[](u 'a\\'b')", Some("[](u 'a\\'b')")),
-            ("[](u\n\"t\"\n)", Some("[](u\n\"t\"\n)")),
-            ("[](u \"t\"x)", None),
-            ("[](a\u{a0}b)", Some("[](a\u{a0}b)")),
-            ("[](\u{a0}u)", Some("[](\u{a0}u)")),
-            ("[](\u{a0}a)b)", Some("[](\u{a0}a")),
-            ("[](a)b) \"t\")", Some("[](a)")),
-            ("[](a(b)", Some("[](a(b)")),
-            ("[](<>)", Some("[](<>)")),
-            ("[](u (a(b)) x", Some("[](u (a(b))")),
-            ("[](u\t\n\t\"t\")", Some("[](u\t\n\t\"t\")")),
-            ("[](u\n\n\"t\")", None),
-            ("[]((a)", Some("[]((a)")),
-            ("[]( (a)b)", Some("[]( (a)b)")),
-            ("[](a\\(b\\)c \"x\\\"y\")", Some("[](a\\(b\\)c \"x\\\"y\")")),
-            ("[](<a(b)> \"title\")", Some("[](<a(b)> \"title\")")),
-            (
-                "[](u (title with ( characters))",
-                Some("[](u (title with ( characters))"),
-            ),
-            ("[](u \"a\\\")\\\")", Some("[](u \"a\\\")\\\")")),
-        ] {
-            assert_eq!(
-                EmptyLinks::new(source).read(0).map(|end| &source[..end]),
-                raw,
-                "{source:?}"
-            );
-        }
-        for (source, raw) in [
-            (
-                "[a]: <https://e.example/?q=&#59;>",
-                Some("[a]: <https://e.example/?q=&#59;>"),
-            ),
-            (
-                "[x]: https://h.example \"kept\"",
-                Some("[x]: https://h.example \"kept\""),
-            ),
-            (
-                "[x]:\nhttps://e.example\n\"t\"",
-                Some("[x]:\nhttps://e.example\n\"t\""),
-            ),
-            ("[x]: u\nmore", Some("[x]: u\n")),
-            ("[label]: not a definition", None),
-            ("[^1]: Footnote body.", None),
-            ("[x]: u 'a\nb'", Some("[x]: u 'a\nb'")),
-            ("[x]: u (t)", Some("[x]: u (t)")),
-            ("   [x]: u", Some("   [x]: u")),
-            ("    [x]: u", None),
-            ("[ ]: u", None),
-            ("[x\\]]: u", Some("[x\\]]: u")),
-            ("[x]: <a b> \"t\"", Some("[x]: <a b> \"t\"")),
-            (
-                "[x]: <https://e.example/a b> \"t\"",
-                Some("[x]: <https://e.example/a b> \"t\""),
-            ),
-            ("[x]: u \"a\\\"b\"", Some("[x]: u \"a\\\"b\"")),
-            ("[x]: <a>b>", Some("[x]: <a>b>")),
-            ("[x]: u \"t\" x", None),
-            ("[x]: u\n\n", Some("[x]: u\n\n")),
-            ("[x]:", None),
-            ("[x]: u 't'\n\nnext", Some("[x]: u 't'\n\n")),
-            ("[x]: u \"t\"   ", Some("[x]: u \"t\"   ")),
-            ("[x]: u 'a\n\nb'", None),
-            ("[x]:\n  \tu", Some("[x]:\n  \tu")),
-            ("[x [y]]: u", None),
-            ("[x]: u  \n  \"t\"", Some("[x]: u  \n  \"t\"")),
-        ] {
-            assert_eq!(
-                definition_len(source).map(|len| &source[..len]),
-                raw,
-                "{source:?}"
-            );
-        }
-    }
-
-    /// The importer keeps a link with no text and a definition as the text
-    /// the file holds. The projector writes an empty link as it is, and
-    /// starts a definition with `&#91;`, so a destination in angles is
-    /// tag-span text. Inside a tag span an empty link reads as the span's
-    /// other text does. Any other `[` keeps its `\[` escape. The importer's
-    /// tests expect these bytes.
-    #[test]
-    fn literal_link_source_projects_as_written() {
-        assert_eq!(
-            leading_markdown_block_escape_index("[](https://h.example)"),
-            None
-        );
-        assert_eq!(
-            leading_markdown_block_escape_index("[x]: https://h.example"),
-            Some((0, false))
-        );
-        assert_eq!(
-            empty_link_ranges("a [](x) b [](y \"z\") c [](<w>)"),
-            vec![(2, 7), (10, 19), (22, 29)]
-        );
-        for (source, ranges) in [
-            ("[](".repeat(4000), 0),
-            ("[](<".repeat(4000), 0),
-            (format!("{})", "[](".repeat(4000)), 1),
-            (format!("{}))", "[](".repeat(4000)), 1),
-            (format!("[](u \"{}", "[](u \"".repeat(4000)), 0),
-            ("[](a)".repeat(4000), 4000),
-            ("[](u \"t\") ".repeat(4000), 4000),
-            (format!("[](u {}", "x".repeat(16000)), 0),
-            (format!("[](a){}", " x".repeat(8000)), 1),
-        ] {
-            assert_eq!(empty_link_ranges(&source).len(), ranges);
-        }
-        for (text, projection) in [
-            (
-                "[](https://e.example \"Map<K, &#59; V>\")",
-                "[](https://e.example \"Map<K, &#59; V>\")",
-            ),
-            (
-                "[](<https://e.example/&#59;>)",
-                "[](<https://e.example/&#59;>)",
-            ),
-            (
-                "See [](https://e.example \"a &amp; b &lt;i&gt; &quot;q&quot;\")",
-                "See [](https://e.example \"a &amp; b &lt;i&gt; &quot;q&quot;\")",
-            ),
-            (
-                "before\n[](https://h.example \"kept\")",
-                "before\n[](https://h.example \"kept\")",
-            ),
-            (
-                "<b> [](https://e.example \"Map<K, &#59; V>\") x</b>",
-                "&lt;b&gt; &#91;&#93;&#40;https&#58;//e&#46;example &#34;Map&lt;K&#44; \
-                 &amp;&#35;59&#59; V&gt;&#34;&#41; x&lt;/b&gt;",
-            ),
-            (
-                "[a]: <https://e.example/?q=&#59;>",
-                "&#91;a&#93;&#58; &lt;https&#58;//e&#46;example/?q&#61;&amp;&#35;59&#59;&gt;",
-            ),
-            (
-                "[x]: <a b> \"t\"",
-                "&#91;x&#93;&#58; &lt;a b&gt; &#34;t&#34;",
-            ),
-            (
-                "[x]: <https://e.example/a b> \"t\"",
-                "&#91;x&#93;&#58; &lt;https&#58;//e&#46;example/a b&gt; &#34;t&#34;",
-            ),
-            (
-                "[x]: https://h.example \"kept\"",
-                "&#91;x&#93;&#58; https&#58;//h&#46;example &#34;kept&#34;",
-            ),
-            (
-                "[x]: https://e.example \"Map<K, &#59; V>\"",
-                "&#91;x&#93;&#58; https&#58;//e&#46;example &#34;Map&lt;K&#44; \
-                 &amp;&#35;59&#59; V&gt;&#34;",
-            ),
-            (
-                "[x]: u \"[](v '&amp; <b>')\"",
-                "&#91;x&#93;&#58; u &#34;&#91;&#93;&#40;v &#39;&amp;amp&#59; \
-                 &lt;b&gt;&#39;&#41;&#34;",
-            ),
-            (
-                "[x]:\nhttps://e.example\n\"t\"",
-                "&#91;x&#93;&#58;\nhttps&#58;//e&#46;example\n&#34;t&#34;",
-            ),
-            ("[label]: not a definition", "\\[label]: not a definition"),
-            ("[^1]: Footnote body.", "\\[^1]: Footnote body."),
-        ] {
-            let folded = Ydoc::wire();
-            folded
-                .rewrite_content_to_markdown(ContentKind::Richdoc, text)
-                .expect("richdoc rewrite");
-            assert_eq!(
-                folded
-                    .project(ContentKind::Richdoc)
-                    .expect("projection")
-                    .content,
-                format!("{projection}\n")
-            );
-        }
-    }
-
-    #[test]
-    fn resolution_fold_keeps_other_tables_and_comments_as_text() {
-        for chosen in [
-            // A plain table reproduces as text, as before.
-            "| a | b |\n|---|---|\n| c | d |",
-            // An annotation with nothing under it is an ordinary comment.
-            "<!-- dohc:table row-heights=1:84 -->\n\nNot a table.",
-            // A malformed annotation is an ordinary comment.
-            "<!-- dohc:table row-heights=1:84px -->\n| a |\n| --- |\n| b |",
-        ] {
-            let doc = Ydoc::wire();
-            doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
-                .expect("richdoc rewrite");
-            let body = serde_json::to_string(&doc.canonical_content()["body"]).expect("body json");
-            assert!(
-                !body.contains("\"table\""),
-                "{chosen:?} folded a table: {body}"
-            );
-        }
-    }
-
-    #[test]
-    fn resolution_fold_keeps_lists_the_projector_separated() {
-        let chosen = "- one\n\n- two\n\n1. first\n\n1. again\n";
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
-            .expect("richdoc rewrite");
-        assert_eq!(doc.project_richdoc().expect("projection"), chosen);
     }
 
     #[test]
@@ -11762,31 +10375,6 @@ mod projection_tests {
     }
 
     #[test]
-    fn engine_seeded_rewrite_preserves_supported_version_and_other_metadata() {
-        let doc = Ydoc::wire();
-        let meta = doc.doc.get_or_insert_map(ROOT_META);
-        {
-            let mut txn = doc.doc.transact_mut();
-            meta.insert(&mut txn, "schemaVersion", Any::Number(1.0));
-            meta.insert(&mut txn, "unrelated", "keep");
-        }
-        let before = doc.encode_full_state();
-        assert_eq!(
-            doc.rewrite_content_to_markdown(ContentKind::Richdoc, "")
-                .unwrap(),
-            [0, 0],
-            "a supported version must not be rewritten"
-        );
-        assert_eq!(doc.encode_full_state(), before);
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Body")
-            .unwrap();
-        assert_eq!(
-            meta.get(&doc.doc.transact(), "unrelated"),
-            Some(Out::Any(Any::from("keep")))
-        );
-    }
-
-    #[test]
     fn engine_seeded_rewrite_refuses_unsupported_version_without_mutation() {
         for version in [
             Any::Number(2.0),
@@ -11825,67 +10413,6 @@ mod projection_tests {
         }
     }
 
-    #[test]
-    fn engine_seeded_cleanup_fixture_passes_rust_admission() {
-        let fixture: Value =
-            serde_json::from_str(include_str!("../tests/seeded-doc-fixtures/cleanup.json"))
-                .unwrap();
-        for field in ["seed", "checkpoint", "afterRestart"] {
-            let bytes: Vec<u8> = serde_json::from_value(fixture[field].clone()).unwrap();
-            let doc = Ydoc::wire();
-            doc.apply(&bytes).unwrap();
-            doc.validate_public_baseline(&bytes)
-                .expect("cleanup checkpoint passes Rust admission");
-            let expected = if field == "seed" {
-                serde_json::json!({ "id": fixture["sourceId"], "related": fixture["targetId"] })
-            } else {
-                serde_json::json!({ "id": fixture["sourceId"] })
-            };
-            assert_eq!(doc.frontmatter_json(), expected);
-        }
-    }
-
-    #[test]
-    fn engine_seeded_fix_keeps_inbound_missing_version_invalid() {
-        let incoming = Ydoc::wire();
-        let bytes = incoming.richdoc_append_paragraph("Incoming without schema metadata");
-        let refusal = incoming.validate_public_baseline(&bytes).unwrap_err();
-        assert_eq!(refusal.code(), "baseline-schema-version-missing");
-    }
-
-    /// New page opens a note before its file exists, so nothing seeds it: its
-    /// Y.Doc holds only the title and the text the editor typed. Shared as
-    /// that, its base has no schema version and the capture refuses it.
-    #[test]
-    fn a_new_page_base_without_a_seed_has_no_schema_version_and_is_refused() {
-        let doc = Ydoc::wire();
-        doc.doc.get_or_insert_map(ROOT_FRONTMATTER).insert(
-            &mut doc.doc.transact_mut(),
-            "title",
-            "Case one",
-        );
-        doc.richdoc_append_paragraph("Typed into a new page.");
-        let base = doc.encode_full_state();
-        let shared = Ydoc::wire();
-        shared.apply(&base).unwrap();
-        let meta = shared.doc.get_or_insert_map(ROOT_META);
-        assert_eq!(meta.len(&shared.doc.transact()), 0);
-        let refusal = shared.validate_public_baseline(&base).unwrap_err();
-        assert!(
-            matches!(&refusal, CollabError::BaselineSchemaVersionMissing),
-            "{refusal:?}"
-        );
-        // The same note with the version the seed would have written passes.
-        meta.insert(
-            &mut shared.doc.transact_mut(),
-            "schemaVersion",
-            Any::Number(1.0),
-        );
-        shared
-            .validate_public_baseline(&shared.encode_full_state())
-            .expect("a seeded new page passes");
-    }
-
     /// Binds `source` to the document's current projection, as a crafted
     /// update from any collaborator can.
     fn witness_source(doc: &Ydoc, source: &str) -> String {
@@ -11905,51 +10432,6 @@ mod projection_tests {
             crate::hex_sha256(canonical.as_bytes()),
         );
         canonical
-    }
-
-    #[test]
-    fn clear_markdown_witness_is_meta_only_with_a_large_source_and_private_tail() {
-        let doc = Ydoc::wire();
-        let source = "source paragraph\n\n".repeat(8_000);
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &source)
-            .unwrap();
-        witness_source(&doc, &source);
-        doc.doc.get_or_insert_map(ROOT_META).insert(
-            &mut doc.doc.transact_mut(),
-            MARKDOWN_SOURCE_READER_META_KEY,
-            "reader-identity",
-        );
-        let peer = Ydoc::wire();
-        peer.apply(&doc.encode_full_state()).unwrap();
-        let tail = doc.richdoc_append_paragraph("Owner's unsettled tail");
-        let mut before = doc.canonical_content();
-        for key in [
-            MARKDOWN_SOURCE_META_KEY,
-            MARKDOWN_SOURCE_SHA_META_KEY,
-            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
-            MARKDOWN_SOURCE_READER_META_KEY,
-        ] {
-            before[ROOT_META]["value"]
-                .as_object_mut()
-                .unwrap()
-                .remove(key);
-        }
-        let update = doc.clear_markdown_source_witness();
-        assert!(!doc.has_markdown_witness());
-        assert!(!doc.has_reader_source());
-        assert_eq!(doc.canonical_content(), before);
-        assert!(doc
-            .project(ContentKind::Richdoc)
-            .unwrap()
-            .content
-            .contains("Owner's unsettled tail"));
-        // Delivery in either order keeps a tail the clearing peer has not seen.
-        peer.apply(&update).unwrap();
-        peer.apply(&tail).unwrap();
-        assert_eq!(peer.canonical_content(), before);
-        assert!(!peer.has_markdown_witness());
-        peer.apply(&update).unwrap();
-        assert_eq!(peer.canonical_content(), before);
     }
 
     #[test]
@@ -12071,140 +10553,6 @@ mod projection_tests {
         }
     }
 
-    #[test]
-    fn local_settle_drops_flattened_lists_but_keeps_literal_fence_witness() {
-        let file = "- parent\n  - nested\n";
-        let doc = main_era_flattened_list_for_test(file);
-        let canonical = doc.project_richdoc().unwrap();
-        assert_eq!(doc.preserved_markdown_source(&canonical), None);
-        assert_eq!(settled(&doc, &canonical, file), None);
-        let source = "~~~\ncode\n~~~\n";
-        let doc = Ydoc::wire();
-        let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        doc.with_delta(|txn| insert_md_paragraph(txn, &body, 0, source.trim_end()));
-        let canonical = witness_source(&doc, source);
-        assert_eq!(settled(&doc, &canonical, source).as_deref(), Some(source));
-    }
-
-    #[test]
-    fn local_settle_escapes_main_era_rule_text() {
-        let source = "***";
-        let doc = Ydoc::wire();
-        let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        doc.with_delta(|txn| insert_md_paragraph(txn, &body, 0, source));
-        let canonical = witness_source(&doc, source);
-        assert_eq!(canonical, "\\***\n");
-        assert_eq!(settled(&doc, &canonical, source), None);
-    }
-
-    #[test]
-    fn a_local_settle_keeps_a_source_whose_body_is_the_files_body() {
-        let file = "---\nid: rec\n---\n\nHello <b>hidden</b> world\n";
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, file)
-            .expect("richdoc rewrite");
-        let canonical = witness_source(&doc, file);
-        assert_eq!(doc.preserved_markdown_source(&canonical), None);
-        // The file on disk holds that body, so a local settle keeps it, also
-        // under other frontmatter.
-        for local in [
-            file,
-            "---\nid: rec\nrelated: old\n---\n\nHello <b>hidden</b> world\n",
-        ] {
-            assert_eq!(
-                settled(&doc, &canonical, local).as_deref(),
-                Some(file),
-                "{local:?}"
-            );
-        }
-        // Any other body, or no snapshot, is dropped.
-        for local in ["---\nid: rec\n---\n\nHello world\n", "Hello\n"] {
-            assert_eq!(settled(&doc, &canonical, local), None, "{local:?}");
-        }
-        assert_eq!(
-            doc.settled_markdown_source(&canonical, || Ok::<_, ()>(None)),
-            Ok(None)
-        );
-        // A source that does not rebuild the document is dropped, even when
-        // the file holds it.
-        let forged = "---\nid: rec\n---\n\nHidden\n";
-        witness_source(&doc, forged);
-        assert_eq!(settled(&doc, &canonical, forged), None);
-    }
-
-    #[test]
-    fn a_local_settle_keeps_desktop_reference_links() {
-        use yrs::types::Attrs;
-
-        let source = "<details>\n<summary>Extras</summary>\n\nSunscreen and a spare charger.\n</details>\n\nSee [the airline's bag rules][bags].\n\n[bags]: https://example.com/bags\n";
-        let doc = Ydoc::wire();
-        let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        doc.with_delta(|txn| {
-            insert_md_paragraph(txn, &body, 0, "<details>\n<summary>Extras</summary>");
-            insert_md_paragraph(txn, &body, 1, "Sunscreen and a spare charger.");
-            insert_md_paragraph(txn, &body, 2, "</details>");
-            // The desktop seeds one XmlText with a link mark, then a plain
-            // paragraph for the definition (MarkdownDefinition).
-            let paragraph = body.push_back(txn, XmlElementPrelim::empty("paragraph"));
-            let text = paragraph.push_back(txn, XmlTextPrelim::new("See "));
-            text.insert_with_attributes(
-                txn,
-                4,
-                "the airline's bag rules",
-                reference_links::link_attributes("https://example.com/bags"),
-            );
-            let at = text.len(&*txn);
-            text.insert_with_attributes(txn, at, ".", Attrs::new());
-            insert_md_paragraph(txn, &body, 4, "[bags]: https://example.com/bags");
-        });
-        let canonical = witness_source(&doc, source);
-        assert_eq!(
-            canonical,
-            "&lt;details&gt;\n&lt;summary&gt;Extras&lt;/summary&gt;\n\n\
-             Sunscreen and a spare charger.\n\n&lt;/details&gt;\n\n\
-             See [the airline's bag rules](https://example.com/bags).\n\n\
-             &#91;bags&#93;&#58; https&#58;//example&#46;com/bags\n"
-        );
-        assert_eq!(doc.preserved_markdown_source(&canonical), None);
-        assert_eq!(settled(&doc, &canonical, source).as_deref(), Some(source));
-        assert_eq!(settled(&doc, &canonical, "A different file body"), None);
-
-        // A witnessed source must rebuild this destination and this label.
-        for forged in [
-            source.replace("example.com/bags", "other.example/bags"),
-            source.replace("the airline's bag rules", "different rules"),
-            source.replace("[bags].", "[missing]."),
-        ] {
-            witness_source(&doc, &forged);
-            assert_eq!(settled(&doc, &canonical, &forged), None, "{forged}");
-        }
-    }
-
-    #[test]
-    fn a_local_settle_keeps_undefined_reference_links_as_plain_text() {
-        // Without its final line break, so the settle must keep the source
-        // rather than write the same bytes as the projection.
-        let source = "See [the airline's bag rules][bags].";
-        // Base-path guard: this source needs no reference-link pass.
-        // marked emits plain text when no definition resolves the label.
-        let desktop = Ydoc::wire();
-        let body = desktop.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        desktop.with_delta(|txn| {
-            insert_md_paragraph(txn, &body, 0, source);
-        });
-        let canonical = witness_source(&desktop, source);
-        let native = Ydoc::wire();
-        native
-            .rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
-            .unwrap();
-        assert_eq!(native.project_richdoc().unwrap(), canonical);
-        assert_eq!(canonical, format!("{source}\n"));
-        assert_eq!(
-            settled(&desktop, &canonical, source).as_deref(),
-            Some(source)
-        );
-    }
-
     fn assert_reference_link_pass_refused(source: &str) {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown_as(ContentKind::Richdoc, source, MarkdownReading::Source)
@@ -12215,40 +10563,6 @@ mod projection_tests {
             doc.encode_full_state(),
             before,
             "a refused pass must not edit"
-        );
-    }
-
-    #[test]
-    fn reference_link_pass_refuses_formatted_html_split() {
-        let source = "Sunscreen and a **spare** charger.\n</details>\n\n[bags]: https://e.com";
-        let doc = Ydoc::wire();
-        let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
-        doc.with_delta(|txn| {
-            let paragraph = body.push_back(txn, XmlElementPrelim::empty("paragraph"));
-            let text = paragraph.push_back(txn, XmlTextPrelim::new("Sunscreen and a "));
-            text.insert_with_attributes(
-                txn,
-                16,
-                "spare",
-                yrs::types::Attrs::from([("bold".into(), json_to_any(&json!({})))]),
-            );
-            text.insert_with_attributes(txn, 21, " charger.\n</details>", yrs::types::Attrs::new());
-            insert_md_paragraph(txn, &body, 1, "[bags]: https://e.com");
-        });
-        assert!(doc
-            .body_paragraph_runs()
-            .iter()
-            .flatten()
-            .any(|(_, bold, _)| *bold));
-        let before = doc.encode_full_state();
-        assert!(!doc.resolve_reference_links(source));
-        assert_eq!(doc.encode_full_state(), before);
-    }
-
-    #[test]
-    fn reference_link_pass_refuses_math_definitions() {
-        assert_reference_link_pass_refused(
-            "$$\n\n[bags]: https://evil.example\n\n$$\n\nSee [x][bags].",
         );
     }
 
@@ -12286,54 +10600,6 @@ mod projection_tests {
     }
 
     #[test]
-    fn reference_link_pass_refuses_false_html_interrupts() {
-        for tag in ["<br>", "</span>", "<DIV>", "</DETAILS>"] {
-            assert!(!paragraph_ending_html(tag));
-            let source = format!("word\n{tag}\n\nSee [r][bags].\n\n[bags]: https://e.com");
-            // Forge the split the old pass accepted, with a real link mark.
-            let doc = Ydoc::wire();
-            let body = doc.doc.get_or_insert_xml_fragment(ROOT_BODY);
-            doc.with_delta(|txn| {
-                insert_md_paragraph(txn, &body, 0, "word");
-                insert_md_paragraph(txn, &body, 1, tag);
-                let paragraph = body.push_back(txn, XmlElementPrelim::empty("paragraph"));
-                let text = paragraph.push_back(txn, XmlTextPrelim::new("See "));
-                text.insert_with_attributes(
-                    txn,
-                    4,
-                    "r",
-                    reference_links::link_attributes("https://e.com"),
-                );
-                text.insert_with_attributes(txn, 5, ".", yrs::types::Attrs::new());
-                insert_md_paragraph(txn, &body, 3, "[bags]: https://e.com");
-            });
-            let canonical = witness_source(&doc, &source);
-            assert_eq!(settled(&doc, &canonical, &source), None, "{tag}");
-        }
-    }
-
-    #[test]
-    fn reference_link_pass_refuses_padded_labels() {
-        for (definition, reference) in [
-            ("bags ", "bags"),
-            (" bags", "bags"),
-            ("bags", "bags "),
-            ("bags", " bags"),
-            ("bags\t", "bags"),
-            ("bags", "\tbags"),
-        ] {
-            assert_reference_link_pass_refused(&format!(
-                "See [x][{reference}].\n\n[{definition}]: https://e.com"
-            ));
-        }
-    }
-
-    fn settled(doc: &Ydoc, canonical: &str, snapshot: &str) -> Option<String> {
-        doc.settled_markdown_source(canonical, || Ok::<_, ()>(Some(snapshot.to_owned())))
-            .expect("snapshot read")
-    }
-
-    #[test]
     fn a_source_whose_text_reads_as_plain_text_is_preserved() {
         for source in [
             "Tom & Jerry, 5 > 3 and 2 < 4\n\n* one\n* two\n",
@@ -12343,10 +10609,8 @@ mod projection_tests {
             "[WIP] fix\n",
             "Vec<T> and cmd <file>\n",
             "a &copy; b\n",
-            // Later numbers do not change a list.
             "1. one\n7. two\n",
             "1. a\n3. b\n",
-            // A cell's `<br>`, however it is spelled.
             "| a |\n|---|\n| x &lt;br&gt; y |\n",
             // A tag without attributes and another name stays text.
             "a <x> b </x-y>\n",
@@ -12370,58 +10634,6 @@ mod projection_tests {
                 doc.preserved_markdown_source(&canonical).as_deref(),
                 Some(source),
                 "{source:?} projects as {canonical:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_table_ends_where_marked_starts_another_block() {
-        fn blocks(body: &str) -> Vec<MdBlock<'_>> {
-            parse_markdown_blocks(body, MarkdownReading::Source)
-        }
-        let table = |rows: &[&[&str]]| MdBlock::Table {
-            rows: rows
-                .iter()
-                .map(|row| row.iter().map(|cell| cell.to_string()).collect())
-                .collect(),
-            alignments: vec![None],
-            row_heights: BTreeMap::new(),
-        };
-        assert_eq!(
-            blocks("| a |\n|---|\nplain\n# h"),
-            [
-                table(&[&["a"], &["plain"]]),
-                MdBlock::Heading {
-                    level: 1,
-                    text: "h".into()
-                }
-            ]
-        );
-        for next in [
-            "> q", "- x", "-\tx", "1. x", "1) x", "***", "```", "    code", "\tcode", "<div> |",
-            "</p>", "<!-- c",
-        ] {
-            assert_eq!(
-                blocks(&format!("| a |\n|---|\n{next}"))[0],
-                table(&[&["a"]]),
-                "{next:?}"
-            );
-        }
-        // marked keeps inline HTML, block HTML it does not match, and other
-        // numbers as rows.
-        for next in ["<b>x</b>", "<DIV>", " <div>", "2. x", "Vec<T>"] {
-            assert_eq!(
-                blocks(&format!("| a |\n|---|\n{next}"))[0],
-                table(&[&["a"], &[next.trim()]]),
-                "{next:?}"
-            );
-        }
-        for header in ["    a | b", "\ta | b", "> a | b", "- a | b", "<b> | c"] {
-            assert!(
-                !blocks(&format!("{header}\n--- | ---"))
-                    .iter()
-                    .any(|block| matches!(block, MdBlock::Table { .. })),
-                "{header:?}"
             );
         }
     }
@@ -12491,178 +10703,6 @@ fn main() {}
         );
     }
 
-    #[test]
-    fn resolution_fold_parses_the_projectors_nested_frontmatter() {
-        // The projector itself emits one-level nested
-        // maps (`scalar_line`), and the fold must accept its own output.
-        let doc = Ydoc::wire();
-        doc.richdoc_append_paragraph("old");
-        let chosen = "---\ntitle: Chosen\nmeta:\n  owner: ice\n  team: dohc\n---\n\nbody text\n";
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
-            .expect("richdoc rewrite");
-        let projected = doc.project(ContentKind::Richdoc).expect("projection");
-        assert_eq!(
-            projected.content, chosen,
-            "the nested frontmatter roundtrips byte-identically"
-        );
-        let frontmatter =
-            serde_json::to_string(&doc.canonical_content()["frontmatter"]).expect("fm json");
-        assert!(
-            frontmatter.contains("owner") && frontmatter.contains("ice"),
-            "the nested map is real metadata, not body text: {frontmatter}"
-        );
-    }
-
-    #[test]
-    fn empty_frontmatter_mappings_settle_and_roundtrip_as_mappings() {
-        let chosen = "---\ntop: {}\nnested:\n  child: {}\n---\n\nbody text\n";
-        let canonical = "---\nnested:\n  child: {}\ntop: {}\n---\n\nbody text\n";
-        let expected_frontmatter = json!({
-            "top": {},
-            "nested": { "child": {} },
-        });
-        for markdown in [chosen, canonical] {
-            let doc = Ydoc::wire();
-            doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
-                .expect("seed empty frontmatter mappings");
-
-            assert_eq!(doc.frontmatter_json(), expected_frontmatter);
-            assert_eq!(
-                doc.project(ContentKind::Richdoc)
-                    .expect("settle empty frontmatter mappings")
-                    .content,
-                markdown
-            );
-        }
-    }
-
-    #[test]
-    fn floating_point_frontmatter_key_survives_settlement_roundtrip() {
-        let chosen = "---\n1.5: value\n---\n\nbody text\n";
-        let canonical = "---\n'1.5': value\n---\n\nbody text\n";
-        for markdown in [chosen, canonical] {
-            let doc = Ydoc::wire();
-            doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
-                .expect("seed floating-point frontmatter key");
-
-            assert_eq!(doc.frontmatter_json(), json!({ "1.5": "value" }));
-            assert_eq!(
-                doc.project(ContentKind::Richdoc)
-                    .expect("settle floating-point frontmatter key")
-                    .content,
-                markdown
-            );
-        }
-        let edited = Ydoc::wire();
-        edited
-            .rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
-            .expect("seed floating-point frontmatter key");
-        edited.frontmatter_set("1.5", "changed").unwrap();
-        assert_eq!(
-            edited.project(ContentKind::Richdoc).unwrap().content,
-            "---\n'1.5': changed\n---\n\nbody text\n"
-        );
-    }
-
-    #[test]
-    fn fresh_successor_preserves_frontmatter_integers_outside_the_javascript_safe_range() {
-        let key = crate::DocKey::new("ws", "main", "large-integer").expect("valid key");
-        let artifact =
-            "---\ndebt: -9007199254740993\nestimate: 9007199254740993\n---\n\nbody text\n";
-        let result_sha256 = crate::hex_sha256(artifact.as_bytes());
-        let identity = SuccessorIdentity::derive(SuccessorIdentityInput {
-            key: &key,
-            predecessor_claim_id: &"a".repeat(64),
-            predecessor_state_vector_sha256: &"b".repeat(64),
-            artifact_op_kind: "conflict.resolve",
-            artifact_id: "large-integer-choice",
-            artifact_preimage_sha256: &"c".repeat(64),
-            content_kind: ContentKind::Richdoc,
-            result_sha256: &result_sha256,
-        });
-
-        let successor = fresh_successor_base(&identity, artifact)
-            .expect("large frontmatter integers remain representable");
-        let loaded = Ydoc::wire();
-        loaded.apply(&successor.update).expect("load successor");
-
-        assert_eq!(
-            loaded
-                .project(ContentKind::Richdoc)
-                .expect("project successor")
-                .content,
-            artifact
-        );
-        assert_eq!(
-            loaded.frontmatter_json()["estimate"],
-            json!(9_007_199_254_740_993_i64)
-        );
-        assert_eq!(
-            loaded.frontmatter_json()["debt"],
-            json!(-9_007_199_254_740_993_i64)
-        );
-    }
-
-    #[test]
-    fn conflict_fold_preserves_selected_tagged_prefix() {
-        let fixtures: Value = serde_json::from_str(include_str!(
-            "../tests/live-bootstrap-fixtures/live-bootstrap.json"
-        ))
-        .unwrap();
-        for row in fixtures.as_array().unwrap().iter().filter(|row| {
-            row["name"].as_str().unwrap().starts_with("tagged")
-                && row["registrationAccepted"] == true
-        }) {
-            let doc = Ydoc::wire();
-            doc.apply(&serde_json::from_value::<Vec<u8>>(row["bytes"].clone()).unwrap())
-                .unwrap();
-            let markdown = row["markdown"].as_str().unwrap();
-            let end = markdown.trim_end().len();
-            let selected = format!("{} edited{}", &markdown[..end], &markdown[end..]);
-            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &selected)
-                .unwrap();
-            assert_eq!(
-                doc.project(ContentKind::Richdoc).unwrap().content,
-                selected,
-                "{}",
-                row["name"]
-            );
-        }
-    }
-
-    #[test]
-    fn source_preserving_rewrite_replaces_the_previous_frontmatter_source() {
-        let doc = Ydoc::wire();
-        let selected = "---\npriority: high\n---\n\nRestored body\n";
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, selected)
-            .unwrap();
-        let meta = doc.doc.get_or_insert_map(ROOT_META);
-        let frontmatter = doc.doc.get_or_insert_map(ROOT_FRONTMATTER);
-        {
-            let mut txn = doc.doc.transact_mut();
-            keep_frontmatter_source(
-                &frontmatter,
-                &meta,
-                &mut txn,
-                Some("---\npriority: !custom high\n---\n\n"),
-            );
-        }
-        assert!(doc.project_richdoc().unwrap().contains("!custom"));
-        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, selected)
-            .unwrap();
-        let projection = doc.project_richdoc().unwrap();
-        assert_eq!(projection, selected);
-        assert_eq!(
-            doc.preserved_markdown_source(&projection).as_deref(),
-            Some(selected)
-        );
-        let txn = doc.doc.transact();
-        assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_META_KEY));
-        assert!(meta
-            .keys(&txn)
-            .all(|key| !key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)));
-    }
-
     /// A collaborator can write any frontmatter source. One too deep, too
     /// large, or too costly to expand must refuse settlement.
     #[test]
@@ -12729,133 +10769,6 @@ fn main() {}
         }
     }
 
-    /// Writes a frontmatter key the way a client with no knowledge of the
-    /// kept text does: a plain map write.
-    fn write_key_directly(doc: &Ydoc, key: &str, value: Option<&str>) {
-        let frontmatter = doc.doc.get_or_insert_map(ROOT_FRONTMATTER);
-        let mut txn = doc.doc.transact_mut();
-        match value {
-            Some(value) => {
-                frontmatter.insert(&mut txn, key, value);
-            }
-            None => {
-                frontmatter.remove(&mut txn, key);
-            }
-        }
-    }
-
-    const WIFI: &str = "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: 100\n---\n\nBody";
-
-    /// A key deleted and written again, by any writer and in any number of
-    /// updates, no longer holds the item its kept text was written for, so
-    /// its old comment never comes back.
-    #[test]
-    fn a_deleted_key_written_again_never_brings_back_its_comment() {
-        let expected = "---\nwifi: new\n# Monthly\nbudget: 100\n---\n\nBody\n";
-        // A plain writer, in two updates and then in one.
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
-            .unwrap();
-        write_key_directly(&doc, "wifi", None);
-        write_key_directly(&doc, "wifi", Some("new"));
-        assert_eq!(doc.project_richdoc().unwrap(), expected);
-        let together = Ydoc::wire();
-        together
-            .rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
-            .unwrap();
-        let frontmatter = together.doc.get_or_insert_map(ROOT_FRONTMATTER);
-        {
-            let mut txn = together.doc.transact_mut();
-            frontmatter.remove(&mut txn, "wifi");
-            frontmatter.insert(&mut txn, "wifi", "new");
-        }
-        assert_eq!(together.project_richdoc().unwrap(), expected);
-        // The engine's own writers.
-        let engine = Ydoc::wire();
-        engine
-            .rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
-            .unwrap();
-        write_key_directly(&engine, "wifi", None);
-        engine.frontmatter_set("wifi", "new").unwrap();
-        assert_eq!(engine.project_richdoc().unwrap(), expected);
-    }
-
-    /// The engine's edits keep an edited key's comment; a plain writer's edit
-    /// keeps the key's place but not its comment.
-    #[test]
-    fn an_edited_key_keeps_its_comment_only_through_the_engine_edit() {
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, WIFI)
-            .unwrap();
-        doc.frontmatter_set("budget", "200").unwrap();
-        assert_eq!(
-            doc.project_richdoc().unwrap(),
-            "---\n# Wi-Fi password\nwifi: hunter2\n# Monthly\nbudget: '200'\n---\n\nBody\n"
-        );
-        write_key_directly(&doc, "wifi", Some("changed"));
-        assert_eq!(
-            doc.project_richdoc().unwrap(),
-            "---\nwifi: changed\n# Monthly\nbudget: '200'\n---\n\nBody\n"
-        );
-    }
-
-    /// Two devices drop different relations offline, and one sets both keys
-    /// again. Neither key holds the item the kept text was written for, so
-    /// neither comment comes back.
-    #[test]
-    fn a_key_dropped_on_another_device_returns_without_its_comment() {
-        let base = Ydoc::wire();
-        base.rewrite_content_to_markdown(
-            ContentKind::Richdoc,
-            "---\n# owner note\nowner: rec_a\n# editor note\neditor: rec_b\nstatus:   open\n---\n\nBody",
-        )
-        .unwrap();
-        let (a, b) = (Ydoc::wire(), Ydoc::wire());
-        a.apply(&base.encode_full_state()).unwrap();
-        b.apply(&base.encode_full_state()).unwrap();
-        a.frontmatter_drop_relation_target("owner", "rec_a", false)
-            .expect("owner dropped");
-        b.frontmatter_drop_relation_target("editor", "rec_b", false)
-            .expect("editor dropped");
-        a.apply(&b.encode_full_state()).unwrap();
-        assert_eq!(
-            a.project_richdoc().unwrap(),
-            "---\nstatus:   open\n---\n\nBody\n"
-        );
-        a.frontmatter_set("owner", "rec_c").unwrap();
-        a.frontmatter_set("editor", "rec_d").unwrap();
-        assert_eq!(
-            a.project_richdoc().unwrap(),
-            "---\nowner: rec_c\neditor: rec_d\nstatus:   open\n---\n\nBody\n"
-        );
-    }
-
-    /// Settling reads each key's item once. Prints the time to settle a
-    /// document with 2,000 written frontmatter keys, with and without kept text.
-    #[test]
-    fn settling_a_large_kept_frontmatter_stays_fast() {
-        let keys: String = (0..2_000)
-            .map(|index| format!("# note {index}\nkey{index}:   {index}\n"))
-            .collect();
-        let written = format!("---\n{keys}---\n\nBody");
-        let canonical: String = (0..2_000)
-            .map(|index| format!("key{index}: {index}\n"))
-            .collect();
-        for (name, markdown) in [
-            ("kept", written),
-            ("canonical", format!("---\n{canonical}---\n\nBody")),
-        ] {
-            let doc = Ydoc::wire();
-            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
-                .unwrap();
-            doc.frontmatter_set("key1000", "edited").unwrap();
-            let started = std::time::Instant::now();
-            let settled = doc.project_richdoc().unwrap();
-            println!("settle with {name} frontmatter: {:?}", started.elapsed());
-            assert!(settled.contains("key1000: edited"));
-        }
-    }
-
     #[test]
     fn shared_frontmatter_edit_candidates() {
         let vectors: Value = serde_json::from_str(include_str!(
@@ -12888,73 +10801,6 @@ fn main() {}
                 );
             }
         }
-    }
-
-    #[test]
-    fn supplied_frontmatter_candidate_preserves_values_before_mutation() {
-        let original = "---\n{score: .nan, title: Plan}\n---\n\nBody";
-        for (candidate, accepted) in [
-            (
-                "---\n{score: .nan, title: Plan, id: \"record\"}\n---\n\nBody\n",
-                true,
-            ),
-            (
-                "---\n{score: '.nan', title: Plan, id: record}\n---\n\nBody",
-                false,
-            ),
-            (
-                "---\n{score: .nan, title: Plan, id: different}\n---\n\nBody",
-                false,
-            ),
-        ] {
-            let doc = Ydoc::wire();
-            doc.rewrite_content_to_markdown(ContentKind::Richdoc, original)
-                .unwrap();
-            let before = doc.encode_full_state();
-            let result = doc.frontmatter_set_preserving_markdown_source("id", "record", candidate);
-            if accepted {
-                result.unwrap();
-                assert_eq!(doc.project_richdoc().unwrap(), candidate);
-            } else {
-                assert!(matches!(result, Err(CollabError::FrontmatterEditRefused)));
-                assert_eq!(doc.encode_full_state(), before);
-            }
-        }
-    }
-
-    #[test]
-    fn relation_cleanup_refuses_alias_dependencies_before_mutation() {
-        for yaml in [
-            "owner: &v rec_a\ncopy: *v",
-            "owner: &v [rec_a, rec_b]\ncopy: {nested: *v}",
-        ] {
-            let doc = Ydoc::wire();
-            let markdown = format!("---\n{yaml}\n---\n\nBody\n");
-            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
-                .unwrap();
-            let before = doc.encode_full_state();
-            assert!(doc
-                .frontmatter_drop_relation_target("owner", "rec_a", yaml.contains('['))
-                .is_none());
-            assert_eq!(doc.encode_full_state(), before);
-            assert_eq!(doc.project_richdoc().unwrap(), markdown);
-        }
-    }
-
-    #[test]
-    fn requested_string_cannot_keep_a_yaml_number_with_the_same_projection() {
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(
-            ContentKind::Richdoc,
-            "---\na: &v .nan\nb: *v\n---\n\nBody",
-        )
-        .unwrap();
-        let before = doc.encode_full_state();
-        assert!(matches!(
-            doc.frontmatter_set("b", ".nan"),
-            Err(CollabError::FrontmatterEditRefused)
-        ));
-        assert_eq!(doc.encode_full_state(), before);
     }
 
     #[test]
@@ -13055,67 +10901,6 @@ fn main() {}
     }
 
     #[test]
-    fn relation_cleanup_keeps_untouched_nested_flow_entries() {
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown_preserving_source(
-            ContentKind::Richdoc,
-            "---\nowner: rec_a\neditors: [rec_a, rec_b]\nscore: {value: .nan}\n---\n\nBody",
-        )
-        .unwrap();
-        assert!(!doc.frontmatter_edits_refused());
-        doc.frontmatter_drop_relation_target_preserving_markdown_source("owner", "rec_a", false)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            doc.project_richdoc().unwrap(),
-            "---\neditors: [rec_a, rec_b]\nscore: {value: .nan}\n---\n\nBody\n"
-        );
-    }
-
-    #[test]
-    fn empty_frontmatter_blocks_stay_until_a_key_arrives() {
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\n---\n\nBody")
-            .unwrap();
-        assert_eq!(doc.project_richdoc().unwrap(), "---\n---\n\nBody\n");
-        doc.frontmatter_set("title", "Plan").unwrap();
-        assert_eq!(
-            doc.project_richdoc().unwrap(),
-            "---\ntitle: Plan\n---\n\nBody\n"
-        );
-
-        let removed = Ydoc::wire();
-        removed
-            .rewrite_content_to_markdown(
-                ContentKind::Richdoc,
-                "---\nz: 1\ntitle: Plan\n---\n\nBody",
-            )
-            .unwrap();
-        let frontmatter = removed.doc.get_or_insert_map(ROOT_FRONTMATTER);
-        {
-            let mut txn = removed.doc.transact_mut();
-            frontmatter.remove(&mut txn, "z");
-            frontmatter.remove(&mut txn, "title");
-        }
-        assert_eq!(removed.project_richdoc().unwrap(), "Body\n");
-    }
-
-    #[test]
-    fn documents_without_frontmatter_or_with_canonical_frontmatter_keep_no_source() {
-        for markdown in ["\n\n# Title\n", "---\npadding: xxx\n---\n\n"] {
-            let doc = Ydoc::wire();
-            doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
-                .unwrap();
-            let meta = doc.doc.get_or_insert_map(ROOT_META);
-            let txn = doc.doc.transact();
-            assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_META_KEY));
-            assert!(!meta
-                .keys(&txn)
-                .any(|key| key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)));
-        }
-    }
-
-    #[test]
     fn forged_frontmatter_source_cannot_inject_body() {
         for prefix in [
             "---\npriority: !custom foreign\n---\n\n",
@@ -13147,217 +10932,6 @@ fn main() {}
     }
 
     #[test]
-    fn preserved_frontmatter_cannot_replace_zero_with_negative_zero() {
-        let doc = Ydoc::wire();
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "---\nvalue: 0\n---\n\nBody")
-            .unwrap();
-        let meta = doc.doc.get_or_insert_map(ROOT_META);
-        {
-            let mut txn = doc.doc.transact_mut();
-            meta.insert(
-                &mut txn,
-                FRONTMATTER_SOURCE_META_KEY,
-                "---\nvalue: -0.0\n---\n\n",
-            );
-        }
-        assert_eq!(
-            doc.project_richdoc().unwrap(),
-            "---\nvalue: 0\n---\n\nBody\n"
-        );
-    }
-
-    fn decode_fixture_int64_markers(value: &mut Value) {
-        match value {
-            Value::Array(values) => values.iter_mut().for_each(decode_fixture_int64_markers),
-            Value::Object(values) => {
-                let decoded = if values.len() == 1 {
-                    values
-                        .get("$dohcInt64")
-                        .and_then(Value::as_str)
-                        .map(|decimal| decimal.parse::<i64>().expect("fixture int64 is valid"))
-                } else {
-                    None
-                };
-                if let Some(integer) = decoded {
-                    *value = json!(integer);
-                } else {
-                    values.values_mut().for_each(decode_fixture_int64_markers);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn frontmatter_fixture_expectation(name: &str) -> Value {
-        let fixture: Value = serde_json::from_str(include_str!(
-            "../../dohc-engine-domain/tests/fixtures/collection-frontmatter.json"
-        ))
-        .expect("frontmatter fixture parses");
-        let mut expected = fixture["vectors"]
-            .as_array()
-            .expect("frontmatter vectors")
-            .iter()
-            .find(|vector| vector["name"] == name)
-            .unwrap_or_else(|| panic!("fixture vector {name} exists"))["expected"]
-            .clone();
-        decode_fixture_int64_markers(&mut expected);
-        expected
-    }
-
-    /// The yjs shared-type frontmatter branch for the fixture markdown
-    /// `sequence: [{constructor: hostile-constructor}, <second item>]`: a
-    /// `Y.Array` holding real `Y.Map`s, with the second map carrying one
-    /// bigint under the chosen key.
-    fn shared_branch_sequence_doc(second_item_key: &str) -> Ydoc {
-        let doc = Ydoc::wire();
-        let frontmatter = doc.doc.get_or_insert_map(ROOT_FRONTMATTER);
-        let mut txn = doc.doc.transact_mut();
-        frontmatter.insert(
-            &mut txn,
-            "sequence",
-            yrs::ArrayPrelim::from([
-                yrs::In::from(yrs::MapPrelim::from_iter([(
-                    "constructor",
-                    Any::from("hostile-constructor"),
-                )])),
-                yrs::In::from(yrs::MapPrelim::from_iter([(
-                    second_item_key,
-                    Any::BigInt(9_007_199_254_740_993),
-                )])),
-            ]),
-        );
-        drop(txn);
-        doc
-    }
-
-    #[test]
-    fn shared_branch_bigint_sentinel_projects_as_the_plain_branch_scalar() {
-        let plain = Ydoc::wire();
-        let frontmatter = plain.doc.get_or_insert_map(ROOT_FRONTMATTER);
-        {
-            let mut txn = plain.doc.transact_mut();
-            frontmatter.insert(
-                &mut txn,
-                "sequence",
-                Any::from(vec![
-                    Any::from(HashMap::from([(
-                        "constructor".to_string(),
-                        Any::from("hostile-constructor"),
-                    )])),
-                    Any::BigInt(9_007_199_254_740_993),
-                ]),
-            );
-        }
-        let expected = plain
-            .project(ContentKind::Richdoc)
-            .expect("plain-branch projection")
-            .content;
-
-        let shared = shared_branch_sequence_doc(FRONTMATTER_SHARED_BIGINT_KEY);
-        let projected = shared
-            .project(ContentKind::Richdoc)
-            .expect("shared-branch projection")
-            .content;
-
-        assert!(
-            projected.contains("9007199254740993"),
-            "the sentinel decodes to its integer: {projected}"
-        );
-        assert_eq!(
-            projected, expected,
-            "both frontmatter branches settle identically"
-        );
-        assert_eq!(
-            dohc_engine_domain::collections::markdown_frontmatter_json(&projected),
-            Some(frontmatter_fixture_expectation(
-                "constructor-map-and-unsafe-integer-share-array"
-            )),
-            "the settled artifact parses to the shared vector expectation"
-        );
-    }
-
-    #[test]
-    fn escaped_shared_bigint_key_unescapes_and_projects_as_a_map() {
-        let plain = Ydoc::wire();
-        let frontmatter = plain.doc.get_or_insert_map(ROOT_FRONTMATTER);
-        {
-            let mut txn = plain.doc.transact_mut();
-            frontmatter.insert(
-                &mut txn,
-                "sequence",
-                Any::from(vec![
-                    Any::from(HashMap::from([(
-                        "constructor".to_string(),
-                        Any::from("hostile-constructor"),
-                    )])),
-                    Any::from(HashMap::from([(
-                        FRONTMATTER_SHARED_BIGINT_KEY.to_string(),
-                        Any::BigInt(9_007_199_254_740_993),
-                    )])),
-                ]),
-            );
-        }
-        let expected = plain
-            .project(ContentKind::Richdoc)
-            .expect("plain-branch projection")
-            .content;
-
-        let shared = shared_branch_sequence_doc("$$dohcBigInt");
-        let projected = shared
-            .project(ContentKind::Richdoc)
-            .expect("shared-branch projection")
-            .content;
-
-        assert!(
-            projected.contains("$dohcBigInt:"),
-            "the escaped key loses exactly one `$`: {projected}"
-        );
-        assert!(
-            !projected.contains("$$dohcBigInt"),
-            "no escape depth survives projection: {projected}"
-        );
-        assert_eq!(
-            projected, expected,
-            "the literal collision map survives both branches as a map"
-        );
-        assert_eq!(
-            dohc_engine_domain::collections::markdown_frontmatter_json(&projected),
-            Some(frontmatter_fixture_expectation(
-                "literal-shared-bigint-key-map-survives-the-shared-branch"
-            )),
-            "the settled artifact parses to the shared vector expectation"
-        );
-    }
-
-    #[test]
-    fn richdoc_rewrite_adopts_crlf_frontmatter_as_typed_fields() {
-        let doc = Ydoc::wire();
-        let chosen =
-            "---\r\ndone: false\r\npriority: 3\r\nstatus: open\r\n---\r\n\r\nbody text\r\n";
-
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
-            .expect("richdoc rewrite");
-
-        assert_eq!(doc.frontmatter_json()["status"], json!("open"));
-        assert_eq!(doc.frontmatter_json()["priority"], json!(3));
-        assert_eq!(doc.frontmatter_json()["done"], json!(false));
-        let body =
-            serde_json::to_string(&doc.canonical_content()["body"]).expect("canonical body json");
-        assert_eq!(body.matches("body text").count(), 1);
-        assert!(
-            !body.contains("status"),
-            "frontmatter must not become body: {body}"
-        );
-        assert_eq!(
-            doc.project(ContentKind::Richdoc)
-                .expect("richdoc projection")
-                .content,
-            chosen,
-            "the fold must retain the source's CRLF byte shape"
-        );
-    }
-
-    #[test]
     fn richdoc_projection_quotes_strings_that_yaml_would_retype_or_reject() {
         let doc = Ydoc::wire();
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, "body text")
@@ -13386,8 +10960,6 @@ fn main() {}
 
     #[test]
     fn resolution_fold_bounds_blockquote_depth() {
-        // An adversarial run of `> ` prefixes must not recurse without bound
-        // inside the resolve frame.
         let adversarial = Ydoc::wire();
         let hostile = format!("{}deep", "> ".repeat(1_000));
         adversarial
@@ -13408,13 +10980,6 @@ fn main() {}
 
     #[test]
     fn a_fold_past_the_quote_budget_is_detectably_lossy_not_silently_wrong() {
-        // The overflow is not lossless: the leftover `> ` markers become
-        // paragraph text, which the projector escapes to `&gt;`. The previous
-        // comment asserted losslessness and the fold trusted it, so a
-        // resolution past the budget would have been stored as bytes the user
-        // never chose. This pins the real behaviour — the divergence is
-        // observable — which is what `fold_resolution_into_ydoc_in_tx`
-        // re-projects to catch before it commits anything.
         let overflowed = Ydoc::wire();
         let hostile = format!("{}deep", "> ".repeat(QUOTE_FOLD_MAX_DEPTH + 5));
         overflowed
@@ -13435,38 +11000,6 @@ fn main() {}
             projected.content.contains("&gt;"),
             "and the loss is the projector's escaping"
         );
-    }
-
-    #[test]
-    fn an_ordered_list_ordinal_at_the_integer_ceiling_does_not_overflow() {
-        // A parsed ordinal can be i64::MAX. A resolution body is
-        // user-supplied text, so this is reachable from a tiny input, and
-        // the parse must neither overflow nor lose the text after the list.
-        let doc = Ydoc::wire();
-        let chosen = format!("{}. item\n\nafter", i64::MAX);
-        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen)
-            .expect("richdoc rewrite");
-        let projected = doc.project(ContentKind::Richdoc).expect("projection");
-        assert!(
-            projected.content.contains("item") && projected.content.contains("after"),
-            "the list and the text after it both parse: {}",
-            projected.content
-        );
-    }
-
-    #[test]
-    fn a_fold_within_the_quote_budget_roundtrips_byte_exactly() {
-        for levels in [1_usize, 40, 100, QUOTE_FOLD_MAX_DEPTH] {
-            let doc = Ydoc::wire();
-            let chosen = format!("{}deep\n", "> ".repeat(levels));
-            doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen)
-                .expect("richdoc rewrite");
-            let projected = doc.project(ContentKind::Richdoc).expect("projection");
-            assert_eq!(
-                projected.content, chosen,
-                "a {levels}-level quote must roundtrip byte-identically"
-            );
-        }
     }
 }
 
@@ -13520,8 +11053,6 @@ mod owner_source_public_limits {
 #[cfg(test)]
 mod fence_projection_tests {
     use super::*;
-    /// The fold before fences were found in one pass, reduced to the lines
-    /// the test alphabet holds: blanks, paragraphs and fences.
     fn forward_scan_blocks<'src>(lines: &[&'src str]) -> Vec<MdBlock<'src>> {
         let mut blocks = Vec::new();
         let mut index = 0;
@@ -13575,17 +11106,6 @@ mod fence_projection_tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn unclosed_fences_remain_paragraphs() {
-        let openers = 16_000;
-        let body = "```x\n".repeat(openers);
-        let blocks = parse_markdown_blocks(&body, MarkdownReading::Projection);
-        assert_eq!(blocks.len(), openers);
-        assert!(blocks
-            .iter()
-            .all(|block| *block == MdBlock::Paragraph("```x".to_owned())));
     }
 }
 

@@ -1,31 +1,76 @@
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
-import { datasetBaseFolder, datasetColumnFields, parseDatasetDefinition, parseDatasetRevision, type DatasetRevision } from "@dohc/security-contract/dataset";
+import {
+  datasetBaseFolder,
+  datasetColumnFields,
+  parseDatasetDefinition,
+  parseDatasetRevision,
+  type DatasetRevision,
+} from "@dohc/security-contract/dataset";
 
 /** Prepare a separate source revision. Only owner approval can activate the public read action. */
-export function generateDatasetRelationChoices(input: { revision: DatasetRevision; schemaSql: string; operationSource: string; tableId: string; fieldId: string; labelFieldId: string }) {
-  const revision = parseDatasetRevision(input.revision), definition = structuredClone(revision.definition);
-  const table = definition.tables.find(table => table.tableId === input.tableId);
-  const field = table && datasetColumnFields(table).find(field => field.fieldId === input.fieldId);
+export function generateDatasetRelationChoices(input: {
+  revision: DatasetRevision;
+  schemaSql: string;
+  operationSource: string;
+  tableId: string;
+  fieldId: string;
+  labelFieldId: string;
+}) {
+  const revision = parseDatasetRevision(input.revision),
+    definition = structuredClone(revision.definition);
+  const table = definition.tables.find((table) => table.tableId === input.tableId);
+  const field =
+    table && datasetColumnFields(table).find((field) => field.fieldId === input.fieldId);
   if (!field?.relation) throw Error("Choose a related-record field in this Collection.");
   const relation = field.relation;
-  const target = definition.tables.find(table => table.tableId === relation.tableId)!;
-  const key = datasetColumnFields(target).find(field => field.fieldId === relation.fieldId)!;
-  const label = datasetColumnFields(target).find(field => field.fieldId === input.labelFieldId);
-  if (!label || !["text", "number", "select"].includes(label.type)) throw Error("Choose a text, number, or select field as the public label.");
-  const operationId = randomUUID(), name = `choices_${operationId.replaceAll("-", "")}`;
-  definition.operations.push({ operationId, name, label: `Read ${field.name} choices`, tableId: target.tableId, kind: "read", access: "link", readOnly: true,
-    fieldIds: [...new Set([key.fieldId, label.fieldId])] });
+  const target = definition.tables.find((table) => table.tableId === relation.tableId)!;
+  const key = datasetColumnFields(target).find((field) => field.fieldId === relation.fieldId)!;
+  const label = datasetColumnFields(target).find((field) => field.fieldId === input.labelFieldId);
+  if (!label || !["text", "number", "select"].includes(label.type))
+    throw Error("Choose a text, number, or select field as the public label.");
+  const operationId = randomUUID(),
+    name = `choices_${operationId.replaceAll("-", "")}`;
+  definition.operations.push({
+    operationId,
+    name,
+    label: `Read ${field.name} choices`,
+    tableId: target.tableId,
+    kind: "read",
+    access: "link",
+    readOnly: true,
+    fieldIds: [...new Set([key.fieldId, label.fieldId])],
+  });
   const base = datasetBaseFolder(definition);
   const directory = posix.join(base, "revisions", `${revision.revision + 1}-${randomUUID()}`);
-  definition.schemaPath = posix.join(directory, "schema.sql"); definition.operationsPath = posix.join(directory, `operations${posix.extname(revision.definition.operationsPath)}`);
+  definition.schemaPath = posix.join(directory, "schema.sql");
+  definition.operationsPath = posix.join(
+    directory,
+    `operations${posix.extname(revision.definition.operationsPath)}`,
+  );
   const parsed = parseDatasetDefinition(definition);
   const quote = (value: string) => `"${value}"`;
-  const operationSource = input.operationSource + `\n;(() => {\nconst settings = ${JSON.stringify({ name, table: quote(target.sqlName), key: quote(key.sqlColumn), label: quote(label.sqlColumn), keyFieldId: key.fieldId, labelFieldId: label.fieldId, numeric: key.type === "number" })};\n${READ_SOURCE}\n})();\n`;
-  const descriptorPath = posix.join(directory, "revision.json"), migrationPath = posix.join(directory, "migration.sql"), migrationSql = "SELECT 1;";
-  return { definition: parsed, schemaSql: input.schemaSql, operationSource, descriptorPath, migrationPath, migrationSql,
+  const operationSource =
+    input.operationSource +
+    `\n;(() => {\nconst settings = ${JSON.stringify({ name, table: quote(target.sqlName), key: quote(key.sqlColumn), label: quote(label.sqlColumn), keyFieldId: key.fieldId, labelFieldId: label.fieldId, numeric: key.type === "number" })};\n${READ_SOURCE}\n})();\n`;
+  const descriptorPath = posix.join(directory, "revision.json"),
+    migrationPath = posix.join(directory, "migration.sql"),
+    migrationSql = "SELECT 1;";
+  return {
+    definition: parsed,
+    schemaSql: input.schemaSql,
+    operationSource,
+    descriptorPath,
+    migrationPath,
+    migrationSql,
     summary: `Allow apps to request ${key.name} and ${label.name} from ${target.name}`,
-    files: { [descriptorPath]: JSON.stringify(parsed, null, 2) + "\n", [parsed.schemaPath]: input.schemaSql, [parsed.operationsPath]: operationSource, [migrationPath]: migrationSql } };
+    files: {
+      [descriptorPath]: JSON.stringify(parsed, null, 2) + "\n",
+      [parsed.schemaPath]: input.schemaSql,
+      [parsed.operationsPath]: operationSource,
+      [migrationPath]: migrationSql,
+    },
+  };
 }
 
 const READ_SOURCE = String.raw`

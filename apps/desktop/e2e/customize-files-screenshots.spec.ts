@@ -22,8 +22,10 @@ import {
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 test.skip(SHOT_DIR === "", "set UI_AUDIT_SHOT_DIR to capture Customize screenshots");
 
-const COLLECTION = (name: string) => `name: ${name}\nfields:\n  Name:\n    type: text\nviews:\n  - name: Table\n    kind: table\n`;
-const AUTOMATIONS = "version: 1\nautomations:\n  - id: stamp\n    name: stamp\n    when: record-added\n    do:\n      - set:\n          Name: Packed\n";
+const COLLECTION = (name: string) =>
+  `name: ${name}\nfields:\n  Name:\n    type: text\nviews:\n  - name: Table\n    kind: table\n`;
+const AUTOMATIONS =
+  "version: 1\nautomations:\n  - id: stamp\n    name: stamp\n    when: record-added\n    do:\n      - set:\n          Name: Packed\n";
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
   await page.evaluate(async (value) => {
@@ -74,8 +76,6 @@ test("@ui-audit Customize files, the Explorer's Apps section, and Settings from 
     await expect(collections.getByTestId("collections-refusal")).toBeHidden();
     await page.getByTestId("explorer-mode-files").click();
 
-    // A file-backed Collection with automations.yaml, then keyboard focus on
-    // the first row's controls after Close.
     let dialog = await openCustomize(page, "trips", "Trips");
     await expect(dialog.getByText("trips/automations.yaml")).toBeVisible();
     await shoot(page, "customize-with-automations");
@@ -86,15 +86,15 @@ test("@ui-audit Customize files, the Explorer's Apps section, and Settings from 
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
 
-    // A file-backed Collection before its first automation.
     dialog = await openCustomize(page, "tasks", "Tasks");
     await expect(dialog.getByText("tasks/automations.yaml")).toBeVisible();
     await shoot(page, "customize-without-automations");
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
 
-    // A database-backed Collection.
-    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"));
+    await desktop.app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]!.webContents.send("desktop:menu-command", "new-collection"),
+    );
     const create = page.getByTestId("new-collection-dialog");
     await create.getByLabel("Collection name").fill("Registrations");
     await create.getByTestId("new-collection-create").click();
@@ -107,21 +107,23 @@ test("@ui-audit Customize files, the Explorer's Apps section, and Settings from 
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
 
-    // The Explorer without apps, whose Apps section says so, and then with an
-    // app, which takes the line's place.
     await openExplorerHome(page);
     await expect(page.getByTestId("explorer-pages")).toBeVisible();
     await expect(page.getByTestId("explorer-apps-empty")).toBeVisible();
     await shoot(page, "apps-empty");
-    await writeWorkspaceFiles(temp, [{ path: "demo/index.html", contents: "<!doctype html><title>Demo</title><h1>Demo</h1>\n" }]);
+    await writeWorkspaceFiles(temp, [
+      { path: "demo/index.html", contents: "<!doctype html><title>Demo</title><h1>Demo</h1>\n" },
+    ]);
     await expect(page.locator('[data-testid="sites-row"][data-root="demo"]')).toBeVisible();
     await expect(page.getByTestId("explorer-apps-empty")).toHaveCount(0);
     await shoot(page, "apps-with-apps");
 
-    // Settings opened from the sidebar's Customize…, then the settings file row.
     await page.getByRole("button", { name: "Sidebar actions" }).click();
     await page.getByRole("menuitem", { name: "Customize…" }).click();
-    await expect(page.getByTestId("settings-row-sidebar")).toHaveAttribute("data-highlighted", "true");
+    await expect(page.getByTestId("settings-row-sidebar")).toHaveAttribute(
+      "data-highlighted",
+      "true",
+    );
     await shoot(page, "settings-customize-row");
     await page.getByTestId(settingsNavPin("advanced")).click();
     await expect(page.getByTestId("settings-row-settings-file")).toBeVisible();

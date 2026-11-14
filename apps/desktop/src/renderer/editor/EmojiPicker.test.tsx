@@ -205,7 +205,6 @@ describe("EmojiPicker — dismiss leaves text intact", () => {
     const listbox = screen.getByRole("listbox", { name: "emoji" });
     const options = screen.getAllByRole("option");
     expect(options.length).toBeGreaterThan(1);
-    // Points at the first option on open.
     expect(listbox.getAttribute("aria-activedescendant")).toBe(options[0]!.id);
     expect(options[0]!.id).toBeTruthy();
 
@@ -227,7 +226,13 @@ describe("EmojiPicker during IME composition", () => {
     try {
       editor.commands.focus("end");
       const onDismiss = vi.fn();
-      render(createElement(EmojiPicker, { state: { open: true, from: 1, query: "smi" }, view: editor.view, onDismiss }));
+      render(
+        createElement(EmojiPicker, {
+          state: { open: true, from: 1, query: "smi" },
+          view: editor.view,
+          onDismiss,
+        }),
+      );
       const list = screen.getByRole("listbox", { name: "emoji" });
       const options = screen.getAllByRole("option");
       const doc = editor.getJSON();
@@ -269,7 +274,13 @@ describe("EmojiPicker on the Menu part's recipe", () => {
     Element.prototype.scrollIntoView = scrollIntoView;
     const editor = makeEditor(":");
     try {
-      render(createElement(EmojiPicker, { state: { open: true, from: 1, query: "" }, view: editor.view, onDismiss: vi.fn() }));
+      render(
+        createElement(EmojiPicker, {
+          state: { open: true, from: 1, query: "" },
+          view: editor.view,
+          onDismiss: vi.fn(),
+        }),
+      );
       const list = screen.getByRole("listbox", { name: "emoji" });
       const options = screen.getAllByRole("option");
       expect(options.length).toBeGreaterThan(8);

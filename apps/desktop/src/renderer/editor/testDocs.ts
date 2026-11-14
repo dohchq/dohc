@@ -15,9 +15,7 @@ export function doc(...blocks: ProseMirrorNode[]): ProseMirrorNode {
 }
 
 /** A paragraph. Strings become plain text nodes. */
-export function paragraph(
-  ...inline: Array<string | ProseMirrorNode>
-): ProseMirrorNode {
+export function paragraph(...inline: Array<string | ProseMirrorNode>): ProseMirrorNode {
   return schema.node(
     "paragraph",
     null,
@@ -36,11 +34,7 @@ export function boldText(content: string): ProseMirrorNode {
 }
 
 export function codeBlock(content: string, language = ""): ProseMirrorNode {
-  return schema.node(
-    "codeBlock",
-    { language },
-    content ? [schema.text(content)] : [],
-  );
+  return schema.node("codeBlock", { language }, content ? [schema.text(content)] : []);
 }
 
 export function heading(level: number, content = ""): ProseMirrorNode {
@@ -96,7 +90,11 @@ export function randomEdit(
     return tr.replaceWith(0, state.doc.content.size, copy.content);
   }
   const from = inBlock();
-  return tr.addMark(from, Math.min(from + 3, block.pos + block.node.nodeSize - 1), schema.marks.code.create());
+  return tr.addMark(
+    from,
+    Math.min(from + 3, block.pos + block.node.nodeSize - 1),
+    schema.marks.code.create(),
+  );
 }
 
 /** A small seeded generator (mulberry32), so a failing run can be replayed. */

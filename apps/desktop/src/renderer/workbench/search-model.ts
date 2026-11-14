@@ -3,10 +3,7 @@
 // Electron. The renderer never re-executes the pattern: highlighting comes
 // only from each entry's matchStart/matchEnd offsets.
 
-import type {
-  SearchResultsEvent,
-  SearchResultsEventEntry,
-} from "../../ipc/bridgeContract";
+import type { SearchResultsEvent, SearchResultsEventEntry } from "../../ipc/bridgeContract";
 
 export interface SearchGroup {
   path: string;
@@ -91,8 +88,6 @@ export function applyBatch(model: SearchModel, batch: SearchResultsEvent): Searc
     limitHit: model.limitHit || batch.limitHit,
     groups,
     totalMatches: model.totalMatches + batch.entries.length,
-    // A later batch without a notice never clears an earlier one for the same
-    // search (the pause reason persists until the search is re-run).
     notice: batch.notice ?? model.notice,
   };
 }
@@ -159,9 +154,7 @@ export function visibleFlatEntries(
 // ellipsis, and shift the offsets by the trim (still offset-based — the
 // pattern never re-executes here).
 
-// Matches starting at or before this column render untrimmed.
 export const PREVIEW_LEAD_TRIM_THRESHOLD = 24;
-// Context characters kept immediately before the match after a trim.
 export const PREVIEW_LEAD_CONTEXT_CHARS = 8;
 
 interface WindowedPreview {

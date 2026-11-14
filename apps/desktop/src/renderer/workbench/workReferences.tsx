@@ -1,4 +1,12 @@
-import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import {
+  createContext,
+  Fragment,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import { extractChatWorkReferenceTokens } from "@dohc/workspace-contracts/chat-mentions";
 import type { WorkReferenceOpen, WorkReferenceView } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
@@ -57,7 +65,8 @@ export function createWorkReferenceLinks(
     return describe(references).then((answer) => {
       if (disposed) return answer;
       const now = Date.now();
-      for (const view of answer) if (newest.get(view.reference) === at) views.set(view.reference, { view, at: now });
+      for (const view of answer)
+        if (newest.get(view.reference) === at) views.set(view.reference, { view, at: now });
       for (const listener of listeners) listener();
       return answer;
     });
@@ -71,9 +80,11 @@ export function createWorkReferenceLinks(
       const batch = references.slice(at, at + BATCH);
       for (const reference of batch) asking.add(reference);
       // A failed read leaves the link as it was; a link that still shows asks again.
-      void read(batch).catch(() => {}).finally(() => {
-        for (const reference of batch) asking.delete(reference);
-      });
+      void read(batch)
+        .catch(() => {})
+        .finally(() => {
+          for (const reference of batch) asking.delete(reference);
+        });
     }
   }
 
@@ -81,7 +92,9 @@ export function createWorkReferenceLinks(
     view: (reference) => views.get(reference)?.view,
     want(reference) {
       const known = views.get(reference);
-      const fresh = known && Date.now() - known.at < (known.view.kind === null ? UNAVAILABLE_FRESH_MS : FRESH_MS);
+      const fresh =
+        known &&
+        Date.now() - known.at < (known.view.kind === null ? UNAVAILABLE_FRESH_MS : FRESH_MS);
       if (disposed || fresh || asking.has(reference) || queued.has(reference)) return;
       queued.add(reference);
       if (scheduled) return;
@@ -99,7 +112,8 @@ export function createWorkReferenceLinks(
       try {
         answer = await read([reference]);
       } catch (error) {
-        if (!disposed && ticket === latestOpen) handlers.failed(error, () => void links.open(reference));
+        if (!disposed && ticket === latestOpen)
+          handlers.failed(error, () => void links.open(reference));
         return;
       }
       const target = answer.find((view) => view.reference === reference)?.open;
@@ -113,13 +127,20 @@ export function createWorkReferenceLinks(
   return links;
 }
 
-export function useWorkReferenceLinks(workspaceId: string, handlers: WorkReferenceHandlers): WorkReferenceLinks {
+export function useWorkReferenceLinks(
+  workspaceId: string,
+  handlers: WorkReferenceHandlers,
+): WorkReferenceLinks {
   const latest = useRef(handlers);
   latest.current = handlers;
-  const links = useMemo(() => createWorkReferenceLinks(workspaceId, {
-    open: (target) => latest.current.open(target),
-    failed: (error, retry) => latest.current.failed(error, retry),
-  }), [workspaceId]);
+  const links = useMemo(
+    () =>
+      createWorkReferenceLinks(workspaceId, {
+        open: (target) => latest.current.open(target),
+        failed: (error, retry) => latest.current.failed(error, retry),
+      }),
+    [workspaceId],
+  );
   useEffect(() => () => links.dispose(), [links]);
   return links;
 }
@@ -148,7 +169,9 @@ const FALLBACK_NAMES: Partial<Record<NonNullable<WorkReferenceView["kind"]>, str
 // one still being read opens once it is read.
 export function WorkRef(props: { reference: string; interactive: boolean; testId?: string }) {
   const links = useContext(WorkReferences);
-  const view = useSyncExternalStore(links?.subscribe ?? noLinks, () => links?.view(props.reference));
+  const view = useSyncExternalStore(links?.subscribe ?? noLinks, () =>
+    links?.view(props.reference),
+  );
   useEffect(() => links?.want(props.reference), [links, props.reference]);
   // A link not yet read, or read as unavailable, is read again while it
   // shows, counted from its last answer.
@@ -173,8 +196,14 @@ export function WorkRef(props: { reference: string; interactive: boolean; testId
     );
   }
   const objectKind = OBJECT_KINDS[view.kind];
-  const opensPath = view.kind === "file" || view.kind === "record" || view.kind === "app" || view.kind === "collection";
-  const name = opensPath ? basenameOf(view.label) : view.label.trim() || FALLBACK_NAMES[view.kind] || "";
+  const opensPath =
+    view.kind === "file" ||
+    view.kind === "record" ||
+    view.kind === "app" ||
+    view.kind === "collection";
+  const name = opensPath
+    ? basenameOf(view.label)
+    : view.label.trim() || FALLBACK_NAMES[view.kind] || "";
   return (
     <Ref
       path={opensPath ? view.label : ""}
@@ -201,7 +230,11 @@ export function WorkLinkText(props: { text: string; interactive: boolean; testId
         return (
           <Fragment key={token.start}>
             {before}
-            <WorkRef reference={token.reference} interactive={props.interactive} testId={props.testId} />
+            <WorkRef
+              reference={token.reference}
+              interactive={props.interactive}
+              testId={props.testId}
+            />
           </Fragment>
         );
       })}

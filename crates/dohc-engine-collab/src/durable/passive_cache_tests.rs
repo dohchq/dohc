@@ -135,8 +135,6 @@ fn removed_entry_defers_dependency_reconstruction_until_page_end() {
             let mut cache = TransactionDocCache::new(tx);
             cache.append(key, &Ydoc::wire().plaintext_insert(0, "resident"), 1)?;
             assert!(!cache.has_missing_updates(key)?);
-            // Model a document larger than the byte budget, including a stale
-            // dependency result from its earlier resident append.
             cache.docs = WriterDocCache::with_limits_for_test(16, 0);
             for update in &pending {
                 reset_reconstructions();

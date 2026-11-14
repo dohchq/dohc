@@ -88,7 +88,6 @@ fn joined(pressed: AutomationPressed) -> AutomationClaim {
     }
 }
 
-/// Serve and settle the oldest pending Collection claim.
 fn run(store: &mut EngineStore, settle: AutomationSettle, now_ms: i64) -> AutomationClaim {
     let (claim, _) = claim_next_pending_automation(store, WS, "collection:", now_ms, &NoFaults)
         .expect("claim next")
@@ -124,8 +123,6 @@ fn mark(hash: &str, through_ms: i64) -> AutomationScheduleMark {
     }
 }
 
-/// Expires run history as it stands at `now_ms`, keeping nothing. Answers
-/// how many claims left it.
 fn expire(store: &mut EngineStore, now_ms: i64) -> u64 {
     prune_automation_history(store, WS, &[], now_ms, &NoFaults)
         .expect("prune")
@@ -174,8 +171,6 @@ fn a_press_claims_once_and_joins_an_unfinished_run_of_its_button() {
     assert_eq!(first.change.on_behalf_of.as_deref(), Some(ADA));
     assert_eq!(first.state, AutomationClaimState::Pending);
 
-    // The same press sent again, a double click, and a press in another
-    // window all run once.
     let resent = joined(press(&mut store, "press-1", INVOICE, 11).expect("resend"));
     assert_eq!(resent.claim_id, first.claim_id);
     let double = joined(press(&mut store, "press-2", INVOICE, 12).expect("double click"));
@@ -183,7 +178,6 @@ fn a_press_claims_once_and_joins_an_unfinished_run_of_its_button() {
     let other = claimed(press(&mut store, "press-3", OTHER_INVOICE, 13).expect("other record"));
     assert_ne!(other.claim_id, first.claim_id);
 
-    // A running claim still takes presses; a finished one does not.
     let (running, _) = claim_next_pending_automation(&mut store, WS, "collection:", 14, &NoFaults)
         .expect("claim next")
         .expect("pending");
@@ -225,7 +219,6 @@ fn a_press_claims_once_and_joins_an_unfinished_run_of_its_button() {
     assert!(matches!(malformed, Err(DomainError::InvalidInput { .. })));
 }
 
-/// An agent's press for a person, at its run's depth.
 fn agent_press(
     store: &mut EngineStore,
     press_id: &str,
@@ -266,7 +259,6 @@ fn an_agents_press_claims_for_its_person_at_its_runs_depth_and_stops_at_the_cap(
     let theirs = joined(press(&mut store, "press-2", INVOICE, 11).expect("the person's press"));
     assert_eq!(theirs.claim_id, pressed.claim_id);
 
-    // At the cap the press stops at once, as a record change at the cap does.
     let stopped = claimed(
         agent_press(
             &mut store,
@@ -280,7 +272,6 @@ fn an_agents_press_claims_for_its_person_at_its_runs_depth_and_stops_at_the_cap(
     assert_eq!(stopped.state, AutomationClaimState::Failed);
     assert_eq!(stopped.error.as_deref(), Some(AUTOMATION_CHAIN_STOPPED));
     assert_eq!(stopped.attempts, 0);
-    // A depth past the cap counts as the cap.
     let past = claimed(
         agent_press(
             &mut store,
@@ -353,14 +344,10 @@ fn a_press_finds_its_claim_while_remembered_or_while_its_key_remains() {
     let later_press = claimed(press(&mut store, "press-2", OTHER_INVOICE, 20).expect("press"));
     run(&mut store, AutomationSettle::Done, 21);
 
-    // Within 30 days of settling, run history keeps both claims, and a
-    // press sent again finds its claim.
     assert_eq!(expire(&mut store, 11 + AUTOMATION_HISTORY_RETENTION_MS), 0);
     let remembered = joined(press(&mut store, "press-1", INVOICE, 500).expect("resend"));
     assert_eq!(remembered.claim_id, pressed.claim_id);
 
-    // Past the retention, the next press forgets the old ones. A forgotten
-    // press whose claim remains still finds it, for the same person only.
     let later = 21 + AUTOMATION_PRESS_RETENTION_MS + 1_000;
     claimed(press(&mut store, "press-after", OTHER_INVOICE, later).expect("press"));
     let found = joined(press(&mut store, "press-2", OTHER_INVOICE, later + 1).expect("resend"));
@@ -370,8 +357,6 @@ fn a_press_finds_its_claim_while_remembered_or_while_its_key_remains() {
         Err(DomainError::InvalidInput { .. })
     ));
 
-    // Expiring run history deletes the forgotten press's claim; then the
-    // old id presses anew.
     run(&mut store, AutomationSettle::Done, later + 3);
     assert!(expire(&mut store, later + 3) >= 1);
     assert!(!claim_exists(&store, &pressed.claim_id));
@@ -430,7 +415,6 @@ fn a_schedule_claims_each_due_time_once_behind_a_forward_mark() {
             "{run:?} through {through_ms}"
         );
     }
-    // A clock set back runs nothing and answers the stored mark.
     assert_eq!(
         schedule(&mut store, "weekdays-9", &[], 900).expect("resync"),
         AutomationScheduleClaimed {
@@ -470,8 +454,6 @@ fn a_schedule_claims_each_due_time_once_behind_a_forward_mark() {
         vec![mark("weekdays-9", 2_000)]
     );
 
-    // A changed schedule starts over, and a change back cannot claim a due
-    // time twice.
     assert!(matches!(
         schedule(&mut store, "weekdays-10", &[3_000], 3_000),
         Err(DomainError::InvalidInput { .. })
@@ -506,7 +488,6 @@ fn a_done_schedule_claim_keeps_its_key_after_it_expires() {
         "the oldest schedule claim keeps its key"
     );
 
-    // A reset mark that reaches the same due time again claims nothing.
     schedule(&mut store, "daily", &[], 0).expect("change");
     schedule(&mut store, "hourly", &[], 0).expect("change back");
     assert_eq!(
@@ -516,7 +497,6 @@ fn a_done_schedule_claim_keeps_its_key_after_it_expires() {
         Vec::new()
     );
 
-    // Once the mark is 30 days past its due times, the keys go.
     schedule(&mut store, "hourly", &[], 40 * DAY_MS).expect("move the mark");
     assert_eq!(expire(&mut store, later), 0, "the keys are not history");
     assert!(!claim_exists(&store, &first[0].claim_id));

@@ -502,7 +502,6 @@ fn covered_authors(
     Ok(authors.json())
 }
 
-/// The canonical JSON a decision keeps of the merged contributions.
 fn merged_contributions_json(merged: &[RetainedContribution]) -> Result<String, SyncError> {
     serde_json::to_string(
         &merged

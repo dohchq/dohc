@@ -53,9 +53,7 @@ test("Explorer creates, renames, deletes from its menu, and undoes the delete", 
     await page.getByLabel("Page title").fill("notes");
     await page.getByLabel("Page title").press("Enter");
     await expect(explorerRow(page, "Research/notes.md")).toBeVisible();
-    await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "notes.md")))
-      .toBe(true);
+    await expect.poll(() => pathExists(join(temp.rootPath, "Research", "notes.md"))).toBe(true);
 
     const created = explorerRow(page, "Research/notes.md");
     await created.click();
@@ -65,18 +63,12 @@ test("Explorer creates, renames, deletes from its menu, and undoes the delete", 
     await rename.press("Enter");
     const renamed = explorerRow(page, "Research/plan.md");
     await expect(renamed).toBeVisible();
-    await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "notes.md")))
-      .toBe(false);
-    await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.md")))
-      .toBe(true);
+    await expect.poll(() => pathExists(join(temp.rootPath, "Research", "notes.md"))).toBe(false);
+    await expect.poll(() => pathExists(join(temp.rootPath, "Research", "plan.md"))).toBe(true);
     const notice = page.getByTestId("workspace-shell-notice");
     await expect(notice).toContainText("Renamed notes.md to plan.md");
     await expect(notice.getByRole("button", { name: "Undo" })).toBeVisible();
 
-    // The row's menu, opened from the keyboard, focuses its first entry and
-    // gives focus back on Escape.
     const menu = page.getByTestId("explorer-menu");
     await renamed.click();
     await renamed.press("Shift+F10");
@@ -86,20 +78,15 @@ test("Explorer creates, renames, deletes from its menu, and undoes the delete", 
     await expect(menu).toHaveCount(0);
     await expect(renamed).toBeFocused();
 
-    // A delete goes to the trash at once, and its notice offers Undo.
     await renamed.click({ button: "right" });
     await menu.getByRole("menuitem", { name: "Delete" }).click();
     await expect(page.getByTestId("delete-confirm")).toHaveCount(0);
     await expect(renamed).toHaveCount(0);
-    await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.md")))
-      .toBe(false);
+    await expect.poll(() => pathExists(join(temp.rootPath, "Research", "plan.md"))).toBe(false);
     await expect(notice).toContainText("Deleted plan.md");
     await notice.getByRole("button", { name: "Undo" }).click();
     await expect(renamed).toBeVisible();
-    await expect
-      .poll(() => pathExists(join(temp.rootPath, "Research", "plan.md")))
-      .toBe(true);
+    await expect.poll(() => pathExists(join(temp.rootPath, "Research", "plan.md"))).toBe(true);
     await expect(notice).toContainText("Restored plan.md");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -146,9 +133,7 @@ test("renaming a live Markdown file first lands the newest editor update", async
   const marker = "rename-keeps-this-edit";
 
   try {
-    await writeWorkspaceFiles(temp, [
-      { path: "notes.md", contents: "# Notes\n\nBase.\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "notes.md", contents: "# Notes\n\nBase.\n" }]);
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     const workspace = await openWorkspaceFromFirstRun(page, temp);
@@ -175,18 +160,11 @@ test("renaming a live Markdown file first lands the newest editor update", async
     await expect(explorerRow(page, "notes.md")).toHaveCount(0);
     await expect(page.getByTestId("editor-tabs")).toContainText("plan.md");
     await expect(page.getByTestId("workspace-shell-error")).toHaveCount(0);
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
-      "data-state",
-      "saved",
-    );
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
     await expect
-      .poll(async () =>
-        await readFile(join(temp.rootPath, "plan.md"), "utf8").catch(() => ""),
-      )
+      .poll(async () => await readFile(join(temp.rootPath, "plan.md"), "utf8").catch(() => ""))
       .toContain(marker);
-    await expect
-      .poll(() => pathExists(join(temp.rootPath, "notes.md")))
-      .toBe(false);
+    await expect.poll(() => pathExists(join(temp.rootPath, "notes.md"))).toBe(false);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -214,7 +192,10 @@ test("dropping a folder from the OS imports it whole", async ({}, testInfo) => {
     const dropFromOs = async (path: string) => {
       const box = await page.getByTestId("file-tree").boundingBox();
       if (!box) throw new Error("The file tree has no bounding box");
-      const point = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height - 24) };
+      const point = {
+        x: Math.round(box.x + box.width / 2),
+        y: Math.round(box.y + box.height - 24),
+      };
       const cdp = await app.context().newCDPSession(page);
       const data = { items: [], files: [path], dragOperationsMask: 1 };
       for (const type of ["dragEnter", "dragOver", "drop"] as const) {
@@ -230,12 +211,12 @@ test("dropping a folder from the OS imports it whole", async ({}, testInfo) => {
     await expect(page.getByTestId("workspace-shell-notice")).toHaveCount(0);
     await revealExplorerPath(page, "Trip/photos/beach.txt");
     await expect(explorerRow(page, "Trip/plan.md")).toBeVisible();
-    expect(await readFile(join(temp.rootPath, "Trip", "photos", "beach.txt"), "utf8")).toBe("sand\n");
+    expect(await readFile(join(temp.rootPath, "Trip", "photos", "beach.txt"), "utf8")).toBe(
+      "sand\n",
+    );
     expect(await pathExists(join(temp.rootPath, "Trip", "photos", ".DS_Store"))).toBe(false);
     await page.screenshot({ path: testInfo.outputPath("folder-drop.png") });
 
-    // A drop of empty folders lands no file, and the folder it landed is
-    // selected all the same.
     await mkdir(join(outside, "Empty", "Inner"), { recursive: true });
     await dropFromOs(join(outside, "Empty"));
     await expect(explorerRow(page, "Empty")).toHaveAttribute("aria-selected", "true");

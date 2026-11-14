@@ -7,8 +7,6 @@ import {
   type PresenceTransport,
 } from "./presenceChannel";
 
-// A controllable fake transport: publish/leave are recorded; poll returns a
-// promise the test resolves/rejects on demand to drive the loop deterministically.
 function fakeTransport() {
   const publishes: Array<{
     topic: string;
@@ -29,7 +27,20 @@ function fakeTransport() {
   const transport: PresenceTransport = {
     async publish(input) {
       publishes.push(input);
-      return { version: publishes.length, peers: [{ faceToken: "me", sessionToken: input.clientId, isSelf: true, displayName: null, paletteSlot: 0, state: input.state, updatedAtMs: 0 }] };
+      return {
+        version: publishes.length,
+        peers: [
+          {
+            faceToken: "me",
+            sessionToken: input.clientId,
+            isSelf: true,
+            displayName: null,
+            paletteSlot: 0,
+            state: input.state,
+            updatedAtMs: 0,
+          },
+        ],
+      };
     },
     async leave(input) {
       leaves.push(input);
@@ -94,11 +105,9 @@ describe("createPresenceChannel", () => {
       },
       poll: (input) =>
         new Promise((resolve) => {
-          input.signal.addEventListener(
-            "abort",
-            () => resolve({ version: 0, peers: [] }),
-            { once: true },
-          );
+          input.signal.addEventListener("abort", () => resolve({ version: 0, peers: [] }), {
+            once: true,
+          });
         }),
     };
     const first = createPresenceChannel({
@@ -139,8 +148,24 @@ describe("createPresenceChannel", () => {
     await f.resolvePoll({
       version: 9,
       peers: [
-        { faceToken: "me", sessionToken: "c1", isSelf: true, displayName: null, paletteSlot: 0, state: {}, updatedAtMs: 0 },
-        { faceToken: "bob", sessionToken: "cb", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob" }, updatedAtMs: 0 },
+        {
+          faceToken: "me",
+          sessionToken: "c1",
+          isSelf: true,
+          displayName: null,
+          paletteSlot: 0,
+          state: {},
+          updatedAtMs: 0,
+        },
+        {
+          faceToken: "bob",
+          sessionToken: "cb",
+          isSelf: false,
+          displayName: "Bob",
+          paletteSlot: 0,
+          state: { displayName: "Bob" },
+          updatedAtMs: 0,
+        },
       ],
     });
     await flush();
@@ -177,8 +202,20 @@ describe("createPresenceChannel", () => {
         incarnationId: f.publishes[0]?.incarnationId,
       },
     ]);
-    // A poll that resolves after stop must not repaint.
-    await f.resolvePoll({ version: 99, peers: [{ faceToken: "x", sessionToken: "cx", isSelf: false, displayName: null, paletteSlot: 0, state: {}, updatedAtMs: 0 }] });
+    await f.resolvePoll({
+      version: 99,
+      peers: [
+        {
+          faceToken: "x",
+          sessionToken: "cx",
+          isSelf: false,
+          displayName: null,
+          paletteSlot: 0,
+          state: {},
+          updatedAtMs: 0,
+        },
+      ],
+    });
     await flush();
     expect(peers).not.toHaveBeenCalled();
   });
@@ -216,7 +253,6 @@ describe("createPresenceChannel", () => {
       retryMs: 1,
     });
     await flush();
-    // No unhandled rejection; stopping is clean.
     expect(() => void channel.stop()).not.toThrow();
   });
 
@@ -243,7 +279,7 @@ describe("createPresenceChannel", () => {
     await flush(); // the failed poll has parked the loop in its retry sleep
     expect(polls).toBe(1);
     // stop() must resolve the sleeping promise so the loop observes `stopped`
-    // and returns — before the fix it dangled until the 60s timer was GC'd.
+    // and returns. Otherwise it dangles until the 60s timer is collected.
     const outcome = await Promise.race([
       channel.stop().then(() => "terminated"),
       new Promise<string>((resolve) => setTimeout(() => resolve("leaked"), 250)),
@@ -260,11 +296,9 @@ describe("createPresenceChannel", () => {
       },
       poll: (input) =>
         new Promise((resolve) => {
-          input.signal.addEventListener(
-            "abort",
-            () => resolve({ version: 0, peers: [] }),
-            { once: true },
-          );
+          input.signal.addEventListener("abort", () => resolve({ version: 0, peers: [] }), {
+            once: true,
+          });
         }),
     };
     const channel = createPresenceChannel({
@@ -279,15 +313,6 @@ describe("createPresenceChannel", () => {
     await flush(); // any unhandled rejection would fail the test run here
   });
 
-  // Awaiting transport.leave alone does not order it after
-  // a publish already in flight when stop() is called — a late-arriving
-  // publish (a heartbeat, or setState) can reach the transport after leave
-  // does, reviving presence the instant after it left (ghost until the
-  // relay's TTL). This transport hangs its SECOND publish (the kickoff's
-  // first publish settles immediately, matching real startup) until the test
-  // releases it, and proves leave is withheld for the whole hang — not just
-  // dispatched-then-reordered, which a transport-level spy on call order
-  // alone could not distinguish from a real wait.
   it("waits out an in-flight publish before sending leave", async () => {
     let releasePublish!: (snapshot: PresenceSnapshot) => void;
     const publishGate = new Promise<PresenceSnapshot>((resolve) => {
@@ -302,20 +327,16 @@ describe("createPresenceChannel", () => {
     const transport: PresenceTransport = {
       publish: () => {
         publishCalls += 1;
-        return publishCalls === 1
-          ? Promise.resolve({ version: 1, peers: [] })
-          : publishGate;
+        return publishCalls === 1 ? Promise.resolve({ version: 1, peers: [] }) : publishGate;
       },
       async leave(input) {
         leaves.push(input);
       },
       poll: (input) =>
         new Promise((resolve) => {
-          input.signal.addEventListener(
-            "abort",
-            () => resolve({ version: 0, peers: [] }),
-            { once: true },
-          );
+          input.signal.addEventListener("abort", () => resolve({ version: 0, peers: [] }), {
+            once: true,
+          });
         }),
     };
     const channel = createPresenceChannel({
@@ -326,8 +347,6 @@ describe("createPresenceChannel", () => {
       onPeers: vi.fn(),
     });
     await flush();
-    // A second publish, in flight and hanging — e.g. a heartbeat or setState
-    // firing right as stop() is about to run.
     channel.setState({ typing: true });
     expect(publishCalls).toBe(2);
 
@@ -357,11 +376,9 @@ describe("createPresenceChannel", () => {
       leave: async () => undefined,
       poll: (input) =>
         new Promise((resolve) => {
-          input.signal.addEventListener(
-            "abort",
-            () => resolve({ version: 0, peers: [] }),
-            { once: true },
-          );
+          input.signal.addEventListener("abort", () => resolve({ version: 0, peers: [] }), {
+            once: true,
+          });
         }),
     };
     const channel = createPresenceChannel({
@@ -371,9 +388,6 @@ describe("createPresenceChannel", () => {
       initialState: { n: 0 },
       onPeers: vi.fn(),
     });
-    // The initial publish is still in flight. Rapid updates must not start
-    // concurrent requests — they coalesce into one queued publish that reads
-    // the newest state when it runs.
     channel.setState({ n: 1 });
     channel.setState({ n: 2 });
     channel.setState({ n: 3 });
@@ -423,20 +437,24 @@ describe("createRelayPresenceTransport", () => {
       scope: { kind: "share", shareId: "share-1" },
       fetch: fakeFetch,
     });
-    await transport.poll({ clientId: "c1", topic: "notes/a.md", since: 3, signal: new AbortController().signal });
+    await transport.poll({
+      clientId: "c1",
+      topic: "notes/a.md",
+      since: 3,
+      signal: new AbortController().signal,
+    });
     expect(calls[0]).toContain("/sync/shares/share-1/presence?topic=notes%2Fa.md&since=3");
   });
 
   it("surfaces non-2xx publish/leave/poll responses as rejections — which the channel swallows", async () => {
-    const fakeFetch = (async () => new Response("relay says no", { status: 503 })) as unknown as typeof fetch;
+    const fakeFetch = (async () =>
+      new Response("relay says no", { status: 503 })) as unknown as typeof fetch;
     const transport = createRelayPresenceTransport({
       baseUrl: "http://relay.test",
       token: "tok",
       scope: { kind: "workspace", workspaceId: "w" },
       fetch: fakeFetch,
     });
-    // The transport boundary: an HTTP error is a rejected promise, never a
-    // silently-parsed snapshot.
     await expect(
       transport.publish({
         topic: "t",
@@ -451,7 +469,12 @@ describe("createRelayPresenceTransport", () => {
       }),
     ).rejects.toThrow("presence leave failed: 503");
     await expect(
-      transport.poll({ clientId: "c1", topic: "t", since: 0, signal: new AbortController().signal }),
+      transport.poll({
+        clientId: "c1",
+        topic: "t",
+        since: 0,
+        signal: new AbortController().signal,
+      }),
     ).rejects.toThrow("presence poll failed: 503");
 
     // The channel contract: those rejections degrade to dark presence and
@@ -473,7 +496,15 @@ describe("createRelayPresenceTransport", () => {
 });
 
 describe("resolvePeerDisplayName", () => {
-  const peer = (state: unknown) => ({ faceToken: "u", sessionToken: "c", isSelf: false, displayName: (state as { displayName?: string } | null)?.displayName ?? null, paletteSlot: 0, state, updatedAtMs: 0 });
+  const peer = (state: unknown) => ({
+    faceToken: "u",
+    sessionToken: "c",
+    isSelf: false,
+    displayName: (state as { displayName?: string } | null)?.displayName ?? null,
+    paletteSlot: 0,
+    state,
+    updatedAtMs: 0,
+  });
 
   it("returns the trimmed name and caps hostile lengths", () => {
     // The name a peer publishes is untrusted payload: padding must not leak

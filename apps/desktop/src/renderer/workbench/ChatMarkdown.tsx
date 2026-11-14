@@ -32,15 +32,6 @@ import {
 } from "./chatMarkdownParse";
 import { parseChatInWorker } from "./chatMarkdownWorker";
 
-// A chat message's body, rendered as Markdown. Chat text comes from other
-// people, agents and link holders, so it renders no raw HTML (it reads as
-// text), loads no remote image, and opens only http, https and mailto links,
-// through the same path a read-only document uses.
-//
-// A short body parses where it is drawn. A longer one parses in the chat's
-// worker and shows as its words without Markdown syntax until the tree
-// arrives. A body the parser gives up on keeps that look.
-
 interface ChatTextScope {
   chips: readonly Chip[];
   testId?: string;
@@ -67,14 +58,17 @@ function ChipView(props: { index: number; children?: ReactNode }) {
       </span>
     );
   }
-  if (chip.kind === "work") return <WorkRef reference={chip.reference} interactive={!inLink} testId={scope.testId} />;
+  if (chip.kind === "work")
+    return <WorkRef reference={chip.reference} interactive={!inLink} testId={scope.testId} />;
   const onOpenPath = inLink ? undefined : scope.onOpenPath;
   return (
     <Ref
       path={chip.path}
       heading={chip.heading}
       testId={scope.testId ? `${scope.testId}-file-mention` : undefined}
-      onOpen={onOpenPath ? () => onOpenPath(chip.target.path, chip.target.headingAnchor) : undefined}
+      onOpen={
+        onOpenPath ? () => onOpenPath(chip.target.path, chip.target.headingAnchor) : undefined
+      }
     />
   );
 }
@@ -124,7 +118,10 @@ function CodeBlock(props: ExtraProps) {
       <pre className="m-0 overflow-x-auto whitespace-pre rounded-md border border-line bg-panel-2 px-3 py-2.5 font-mono text-[12.5px] leading-5 text-ink">
         <code>{code}</code>
       </pre>
-      <div data-chat-control className="absolute right-px top-px rounded-md bg-panel-2 opacity-0 transition-opacity duration-75 focus-within:opacity-100 group-hover/code:opacity-100">
+      <div
+        data-chat-control
+        className="absolute right-px top-px rounded-md bg-panel-2 opacity-0 transition-opacity duration-75 focus-within:opacity-100 group-hover/code:opacity-100"
+      >
         <CopyButton iconOnly label="Copy code" getText={() => code} />
       </div>
     </div>
@@ -142,7 +139,9 @@ const COMPONENTS = {
   p: (props: Children) => <p className={BLOCK}>{props.children}</p>,
   ul: (props: Children) => <ul className={`${LIST} list-disc`}>{props.children}</ul>,
   ol: (props: Children & { start?: number }) => (
-    <ol start={props.start} className={`${LIST} list-decimal`}>{props.children}</ol>
+    <ol start={props.start} className={`${LIST} list-decimal`}>
+      {props.children}
+    </ol>
   ),
   li: (props: Children & { className?: string }) => (
     <li className={`mt-0.5 first:mt-0 ${props.className === "task-list-item" ? "list-none" : ""}`}>
@@ -167,11 +166,15 @@ const COMPONENTS = {
   h6: (props: Children) => <h6 className={HEADING}>{props.children}</h6>,
   strong: (props: Children) => <strong className="font-semibold">{props.children}</strong>,
   blockquote: (props: Children) => (
-    <blockquote className={`${BLOCK} mx-0 border-l-2 border-line pl-3 text-muted`}>{props.children}</blockquote>
+    <blockquote className={`${BLOCK} mx-0 border-l-2 border-line pl-3 text-muted`}>
+      {props.children}
+    </blockquote>
   ),
   hr: () => <hr className={`${BLOCK} h-0 border-0 border-t border-line`} />,
   code: (props: Children) => (
-    <code className="rounded bg-panel-2 px-[5px] py-px font-mono text-[12.5px]">{props.children}</code>
+    <code className="rounded bg-panel-2 px-[5px] py-px font-mono text-[12.5px]">
+      {props.children}
+    </code>
   ),
   pre: CodeBlock,
   a: ChatLink,
@@ -191,7 +194,9 @@ const COMPONENTS = {
     </th>
   ),
   td: (props: Children & { style?: CSSProperties }) => (
-    <td style={props.style} className="border border-line px-2 py-1">{props.children}</td>
+    <td style={props.style} className="border border-line px-2 py-1">
+      {props.children}
+    </td>
   ),
   span: ChipSpan,
 } satisfies Components;
@@ -221,7 +226,10 @@ function PlainText(props: { body: string; chips: readonly Chip[]; strip: boolean
   const kept = props.chips.length > 0 || !props.strip ? props.chips : chatLinkRanges(props.body);
   const { text, atoms } = props.strip
     ? stripMarkdown(props.body, kept)
-    : { text: props.body, atoms: kept.map((chip, index) => ({ start: chip.start, end: chip.end, index })) };
+    : {
+        text: props.body,
+        atoms: kept.map((chip, index) => ({ start: chip.start, end: chip.end, index })),
+      };
   const content: ReactNode[] = [];
   const pushText = (piece: string, key: number) =>
     piece.split(/\r?\n|\r/u).forEach((line, at) => {
@@ -232,7 +240,15 @@ function PlainText(props: { body: string; chips: readonly Chip[]; strip: boolean
   for (const atom of atoms) {
     pushText(text.slice(cursor, atom.start), cursor);
     const words = text.slice(atom.start, atom.end);
-    content.push(props.chips[atom.index] ? <ChipView key={`chip:${atom.start}`} index={atom.index}>{words}</ChipView> : words);
+    content.push(
+      props.chips[atom.index] ? (
+        <ChipView key={`chip:${atom.start}`} index={atom.index}>
+          {words}
+        </ChipView>
+      ) : (
+        words
+      ),
+    );
     cursor = atom.end;
   }
   pushText(text.slice(cursor), cursor);
@@ -250,7 +266,11 @@ function copySource(event: ClipboardEvent<HTMLDivElement>, body: string, copiesS
   const root = event.currentTarget;
   if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return;
   const edges = textEdges(root);
-  if (!edges || !range.isPointInRange(edges.first, edges.firstOffset) || !range.isPointInRange(edges.last, edges.lastOffset)) {
+  if (
+    !edges ||
+    !range.isPointInRange(edges.first, edges.firstOffset) ||
+    !range.isPointInRange(edges.last, edges.lastOffset)
+  ) {
     return;
   }
   event.preventDefault();
@@ -263,7 +283,9 @@ function copySource(event: ClipboardEvent<HTMLDivElement>, body: string, copiesS
 function textEdges(root: HTMLElement) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => {
-      const control = node.parentElement?.closest("[data-chat-control], [aria-live], [role=status]");
+      const control = node.parentElement?.closest(
+        "[data-chat-control], [aria-live], [role=status]",
+      );
       if (control && root.contains(control)) return NodeFilter.FILTER_REJECT;
       return node.nodeValue?.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
     },
@@ -283,13 +305,12 @@ function textEdges(root: HTMLElement) {
 // Text the Markdown parser would turn into one paragraph of the same text:
 // nothing Markdown or GFM gives meaning to, no blank line, and no edge
 // spaces. Most chat lines are like this, so they skip the parser.
-const MARKDOWN_SYNTAX = /[\\`*_~\[\]<>&|#!:]|\w@|www\.|^\s|\s$|^(?:[-+=]|\d+[.)])/mu;
+const MARKDOWN_SYNTAX = /[\\`*_~[\]<>&|#!:]|\w@|www\.|^\s|\s$|^(?:[-+=]|\d+[.)])/mu;
 
 interface Drawn {
   content: ReactNode;
   chips: readonly Chip[];
   copiesSource: boolean;
-  // What its tree costs the cache to hold.
   weight: number;
 }
 
@@ -377,9 +398,15 @@ function listId(list: object, content: () => unknown): string {
   return id;
 }
 
-function drawKey(body: string, candidates: readonly MentionCandidate[], attachments: readonly ChatAttachmentRecord[]) {
+function drawKey(
+  body: string,
+  candidates: readonly MentionCandidate[],
+  attachments: readonly ChatAttachmentRecord[],
+) {
   if (!body.includes("@")) return body;
-  const people = listId(candidates, () => candidates.map((candidate) => [candidate.kind, candidate.handle]));
+  const people = listId(candidates, () =>
+    candidates.map((candidate) => [candidate.kind, candidate.handle]),
+  );
   return `${body}\u0000${people}\u0000${listId(attachments, () => attachments)}`;
 }
 
@@ -395,17 +422,28 @@ function drawNow(
   if (known) return known;
   if (!MARKDOWN_SYNTAX.test(body)) {
     const chips = chatChips(body, candidates, attachments);
-    return { content: <PlainText body={body} chips={chips} strip={false} />, chips, copiesSource: true, weight: 0 };
+    return {
+      content: <PlainText body={body} chips={chips} strip={false} />,
+      chips,
+      copiesSource: true,
+      weight: 0,
+    };
   }
   const sync = fitsMainThread(body);
-  if (gaveUp.has(hash(body))) return textOnly(body, sync ? chatChips(body, candidates, attachments) : []);
+  if (gaveUp.has(hash(body)))
+    return textOnly(body, sync ? chatChips(body, candidates, attachments) : []);
   if (!sync) return null;
   const chips = chatChips(body, candidates, attachments);
   let value: Drawn | undefined;
   try {
     const parsed = parseChatMarkdown(body, chips);
     if (withinChatMarkdownLimits(parsed)) {
-      value = { content: drawTree(parsed.tree), chips, copiesSource: parsed.copiesSource, weight: chatMarkdownWeight(parsed) };
+      value = {
+        content: drawTree(parsed.tree),
+        chips,
+        copiesSource: parsed.copiesSource,
+        weight: chatMarkdownWeight(parsed),
+      };
     }
   } catch {
     value = undefined;
@@ -462,8 +500,14 @@ export const ChatMarkdown = memo(function ChatMarkdown(props: {
 }) {
   const { body, candidates } = props;
   const attachments = props.attachments ?? NO_ATTACHMENTS;
-  const key = useMemo(() => drawKey(body, candidates, attachments), [body, candidates, attachments]);
-  const now = useMemo(() => drawNow(key, body, candidates, attachments), [key, body, candidates, attachments]);
+  const key = useMemo(
+    () => drawKey(body, candidates, attachments),
+    [body, candidates, attachments],
+  );
+  const now = useMemo(
+    () => drawNow(key, body, candidates, attachments),
+    [key, body, candidates, attachments],
+  );
   const [later, setLater] = useState<{ key: string; value: Drawn } | null>(null);
   useEffect(() => {
     if (now) return;
@@ -491,4 +535,3 @@ export const ChatMarkdown = memo(function ChatMarkdown(props: {
     </div>
   );
 });
-

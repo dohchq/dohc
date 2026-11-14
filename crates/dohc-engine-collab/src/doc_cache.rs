@@ -1,36 +1,33 @@
-//! The writer thread's cache of live Y.Docs, serving the replay-parity gate's
-//! base on cached local and ordinary-remote append paths so they stop paying a
-//! full `load_doc_in` reconstruction per append.
+//! The writer thread's cache of live Y.Docs. It serves the replay-parity gate's
+//! base on cached local and ordinary-remote append paths, so an append does
+//! not pay a full `load_doc_in` reconstruction.
 //!
 //! ## The CACHE-VALID invariant
 //!
-//! An entry may serve as the gate base only when it is **byte-replay-identical**
-//! to what `load_doc_in` would rebuild inside the same transaction:
-//! the cached doc applied exactly the byte sequence, in the same order, that a
-//! fresh reconstruction would apply. Logical CRDT equality is not sufficient —
-//! yrs block splits are history-sensitive, and the gate reads the base's
-//! delete-set endpoints. The proof is carried by [`CacheTuple`]: every marker
-//! field that names the replay path, plus the sha of the log row at the head
-//! seq. A hit requires the whole tuple to match inside the caller's write
-//! transaction; any mismatch is a miss and the caller reconstructs as before.
+//! An entry may serve as the gate base only when it is byte-replay-identical
+//! to what `load_doc_in` would rebuild inside the same transaction. Logical
+//! CRDT equality is not sufficient: yrs block splits are history-sensitive, and
+//! the gate reads the base's delete-set endpoints. [`CacheTuple`] carries the
+//! proof: every marker field that names the replay path, plus the sha of the
+//! log row at the head seq. A hit requires the whole tuple to match inside the
+//! caller's write transaction. Any mismatch is a miss, and the caller
+//! reconstructs.
 //!
 //! ## Containment
 //!
 //! The cache serves local and ordinary remote parity-gate bases plus read-only
 //! consumers: settle projection, resync, deferred-update validation, and final
 //! drain projection. Forced compaction, close, `claim_base`, origination, and
-//! lineage successor always fully reconstruct. Durable lineage bytes are never
-//! derived from the cache.
-//! Resident writer caches never mutate their byte-replay document, frontier,
-//! tuple, map, or accounting inside a transaction. A transaction cache advances
-//! its private copy within its own transaction and discards it on rollback.
-//! The check-4-only persistent scratch applies a
-//! gated candidate in place; the transaction probe retains it only after an
-//! exact commit and evicts it after any rollback or post-mutation refusal.
+//! lineage successor always fully reconstruct. Durable lineage bytes never
+//! come from the cache.
+//! Resident writer caches never mutate their document, frontier, tuple, map,
+//! or accounting inside a transaction. A transaction cache advances a private
+//! copy and discards it on rollback. The check-4 scratch applies a gated
+//! candidate in place, so the transaction probe keeps it only after an exact
+//! commit and evicts it after any rollback or post-mutation refusal.
 //!
-//! Single writer: one workspace store has one writer thread (`worker_main`),
-//! and the cache is a plain local of that thread. The head-row sha probe is
-//! defense-in-depth on top of that contract.
+//! One workspace store has one writer thread (`worker_main`), and the cache is
+//! a plain local of that thread. The head-row sha probe is defense in depth.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -385,7 +382,7 @@ impl WriterDocCache {
         }
     }
 
-    /// Serve a read-only PR3 consumer after validating the entry against the
+    /// Serve a read-only consumer after validating the entry against the
     /// current durable replay tuple. A miss leaves reconstruction to the
     /// caller, preserving each consumer's existing absence/error semantics.
     pub fn doc_for_consumer(

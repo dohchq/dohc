@@ -112,13 +112,11 @@ describe("the required-mode gate", () => {
   });
 
   it("Throws when the binary is absent and the flag is set", () => {
-    // The whole point of #390: on a machine that is meant to have a daemon, a
-    // silent skip is indistinguishable from a pass.
+    // On a machine that is meant to have a daemon, a silent skip is
+    // indistinguishable from a pass.
     vi.stubEnv(ENGINE_BINARY_ENV_VAR, join(tmpdir(), "dohc-absent-engine-xyz"));
     vi.stubEnv(REQUIRE_ENGINE_ENV_VAR, "1");
-    expect(() => requireEngineBinaryOrSkip()).toThrow(
-      new RegExp(REQUIRE_ENGINE_ENV_VAR),
-    );
+    expect(() => requireEngineBinaryOrSkip()).toThrow(new RegExp(REQUIRE_ENGINE_ENV_VAR));
   });
 
   it("resolves and reports present when a binary exists", () => {

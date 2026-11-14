@@ -4,11 +4,22 @@ import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { expect, vi } from "vitest";
 import * as Y from "yjs";
-import type { AttachedEngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import type {
+  AttachedEngineWorkspace,
+  EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import { VersionedLiveAdapter, isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
-import { createWorkspaceEngineCapture as createAttachedWorkspaceEngineCapture, type WorkspaceEngineCaptureFailure, type WorkspaceEngineCaptureOptions } from "./workspaceEngineCapture";
+import {
+  createWorkspaceEngineCapture as createAttachedWorkspaceEngineCapture,
+  type WorkspaceEngineCaptureFailure,
+  type WorkspaceEngineCaptureOptions,
+} from "./workspaceEngineCapture";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
-import { createRealDaemonLifecycle, createRealDaemonWorkspaceSessions, REAL_DAEMON_DEADLINE_MS } from "../testing/realDaemonWorkspaceSessions";
+import {
+  createRealDaemonLifecycle,
+  createRealDaemonWorkspaceSessions,
+  REAL_DAEMON_DEADLINE_MS,
+} from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
 import { listLiveDraftRecovery, workspaceDraftStore } from "./liveDraftRecovery";
 import { waitForPathMoments } from "./waitForPathMoments";
@@ -55,16 +66,13 @@ export async function waitForDaemonCaptureDeferral(
 ): Promise<void> {
   const deadline = performance.now() + REAL_DAEMON_DEADLINE_MS;
   while (performance.now() < deadline) {
-    const status = await sessions.run(
-      workspace,
-      async ({ client, workspace: handle }) => {
-        const engine = new VersionedLiveAdapter(client, handle, {
-          workspaceId: workspace.workspaceId,
-        });
-        expect(await engine.flushCapture()).toMatchObject({ settled: true, degraded: false });
-        return engine.watcherStatus();
-      },
-    );
+    const status = await sessions.run(workspace, async ({ client, workspace: handle }) => {
+      const engine = new VersionedLiveAdapter(client, handle, {
+        workspaceId: workspace.workspaceId,
+      });
+      expect(await engine.flushCapture()).toMatchObject({ settled: true, degraded: false });
+      return engine.watcherStatus();
+    });
     if (status.deferredWrites.length > 0) return;
     await delay(25);
   }
@@ -104,7 +112,7 @@ export async function listDaemonPathMoments(
   return page.moments.filter((moment) => moment.path === path);
 }
 
-// dohchq/dohc#337 item 5, driven by its own mechanism: another app holds the
+// Another app holds the
 // `.md` open without FILE_SHARE_DELETE, so every attempt to replace it fails
 // with a sharing violation. An ACL cannot model this — the workspace folder
 // grants FILE_DELETE_CHILD, which lets the replace through a deny-write ACE on
@@ -113,11 +121,9 @@ export async function holdWithoutShareDelete(absolute: string): Promise<() => Pr
   const script =
     `$f=[System.IO.File]::Open('${absolute.replace(/'/g, "''")}','Open','ReadWrite','Read');` +
     "Write-Output 'held';[Console]::In.ReadLine()|Out-Null;$f.Close()";
-  const child = spawn(
-    "powershell",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    { stdio: ["pipe", "pipe", "pipe"] },
-  );
+  const child = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   await new Promise<void>((resolve, reject) => {
     let seen = "";
     child.stdout.on("data", (chunk: Buffer) => {
@@ -140,30 +146,41 @@ export async function holdWithoutShareDelete(absolute: string): Promise<() => Pr
 export const NO_WINDOWS = { all: () => [], workspaceIdOf: () => undefined };
 
 // A capture on its own real engine, with the reads desktop main bases two
-// workspace notices on (dohc#2342). `health` first has the engine scan the
+// workspace notices on. `health` first has the engine scan the
 // folder, so it counts a change whether or not the watcher has reported it.
 // Then it reads the newest moment as the shell does, which waits for capture
 // to settle and answers "still updating" while History is still updating.
 // Last, it answers the outcome of the first health poll, which raises History
 // paused unless it is null.
-export async function openRealCapture(workspaceId: string, options: Partial<WorkspaceEngineCaptureOptions> = {}, existingRoot?: string) {
-  const root = existingRoot ?? await createTestScratch(`dohc-${workspaceId}-`);
+export async function openRealCapture(
+  workspaceId: string,
+  options: Partial<WorkspaceEngineCaptureOptions> = {},
+  existingRoot?: string,
+) {
+  const root = existingRoot ?? (await createTestScratch(`dohc-${workspaceId}-`));
   const workspace = { workspaceId, rootPath: root, attachmentId: Symbol(workspaceId) };
   const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
   await lifecycle.start();
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
   const outcomes: WorkspaceEngineCaptureFailure[] = [];
   const capture = createAttachedWorkspaceEngineCapture({
-    ...workspace, rustEngineSessions: sessions, onError: () => undefined, ...options,
+    ...workspace,
+    rustEngineSessions: sessions,
+    onError: () => undefined,
+    ...options,
     onCaptureOutcome: (failure) => outcomes.push(failure),
   });
   const health = async () => {
     await sessions.run(workspace, ({ client, workspace: handle }) =>
-      new VersionedLiveAdapter(client, handle, { workspaceId }).reconcileCapture());
-    const newestMoment = await capture.listMoments({ limit: 1 }).then(() => "read", (error: unknown) => {
-      if (isWorkspaceUpdatingRefusal(error)) return "still updating";
-      throw error;
-    });
+      new VersionedLiveAdapter(client, handle, { workspaceId }).reconcileCapture(),
+    );
+    const newestMoment = await capture.listMoments({ limit: 1 }).then(
+      () => "read",
+      (error: unknown) => {
+        if (isWorkspaceUpdatingRefusal(error)) return "still updating";
+        throw error;
+      },
+    );
     capture.start();
     await vi.waitFor(() => expect(outcomes).not.toEqual([]), { timeout: REAL_DAEMON_DEADLINE_MS });
     return { newestMoment, health: outcomes[0] };
@@ -173,13 +190,28 @@ export async function openRealCapture(workspaceId: string, options: Partial<Work
     await sessions.closeAll().catch(() => undefined);
     await lifecycle.stop().catch(() => undefined);
   };
-  const withEngine = <T>(run: (engine: VersionedLiveAdapter) => Promise<T>) => sessions.run(workspace,
-    ({ client, workspace: handle }) => run(new VersionedLiveAdapter(client, handle, { workspaceId })));
-  return { root, sessions, capture, health, stop, withEngine, workspaceId, stopEngine: () => lifecycle.stop() };
+  const withEngine = <T>(run: (engine: VersionedLiveAdapter) => Promise<T>) =>
+    sessions.run(workspace, ({ client, workspace: handle }) =>
+      run(new VersionedLiveAdapter(client, handle, { workspaceId })),
+    );
+  return {
+    root,
+    sessions,
+    capture,
+    health,
+    stop,
+    withEngine,
+    workspaceId,
+    stopEngine: () => lifecycle.stop(),
+  };
 }
 
 // An agent replaces an open note's file, by rename or in place.
-export async function writeOutside(absolute: string, text: string, style: "rename" | "in-place"): Promise<void> {
+export async function writeOutside(
+  absolute: string,
+  text: string,
+  style: "rename" | "in-place",
+): Promise<void> {
   if (style === "rename") {
     await writeFile(`${absolute}.tmp`, text, "utf8");
     await rename(`${absolute}.tmp`, absolute);
@@ -196,12 +228,15 @@ export async function writeOutside(absolute: string, text: string, style: "renam
 
 // The editor's part of an open note: its Y.Doc, the save states main
 // reports, and what main says when the file changed outside dohc.
-export async function openNote(capture: Pick<Awaited<ReturnType<typeof openRealCapture>>["capture"], "openYDocSession">) {
+export async function openNote(
+  capture: Pick<Awaited<ReturnType<typeof openRealCapture>>["capture"], "openYDocSession">,
+) {
   const editor = new Y.Doc();
   const states: string[] = [];
   const changedOutside: boolean[] = [];
   const session = await capture.openYDocSession({
-    path: "note.md", contentKind: "plaintext",
+    path: "note.md",
+    contentKind: "plaintext",
     onRemoteUpdate: (update) => Y.applyUpdate(editor, update),
     onSaveState: (state) => states.push(state),
     onChangedOutside: (unsaved) => changedOutside.push(unsaved),
@@ -211,16 +246,30 @@ export async function openNote(capture: Pick<Awaited<ReturnType<typeof openRealC
   const type = (text: string, author: "person" | "agent" = "person") => {
     const vector = Y.encodeStateVector(editor);
     editor.getText("plainText").insert(0, text);
-    session.applyLocalUpdate(Y.encodeStateAsUpdate(editor, vector), undefined, author === "agent"
-      ? { actorOriginId: "test-agent", attribution: { actorKind: "agent", onBehalfOf: "local-person", depth: 0 } }
-      : undefined);
+    session.applyLocalUpdate(
+      Y.encodeStateAsUpdate(editor, vector),
+      undefined,
+      author === "agent"
+        ? {
+            actorOriginId: "test-agent",
+            attribution: { actorKind: "agent", onBehalfOf: "local-person", depth: 0 },
+          }
+        : undefined,
+    );
   };
-  return { editor, session, states, changedOutside, type, text: () => editor.getText("plainText").toString() };
+  return {
+    editor,
+    session,
+    states,
+    changedOutside,
+    type,
+    text: () => editor.getText("plainText").toString(),
+  };
 }
 
 export const RECOVERED_COPY = /^note \(recovered [0-9a-f]{8} [0-9a-f]{64}\)\.md$/;
 
-// dohc#2308. An open document whose file was deleted outside dohc. The engine
+// An open document whose file was deleted outside dohc. The engine
 // refuses every save over the missing file, so nothing writes it back until
 // the person chooses Save it again. `shape` is a file capture recorded and
 // saved over, or one New File left empty and deleted before its first save.
@@ -240,7 +289,10 @@ export async function openDeletedDocument(shape: "recorded" | "new", failedDisca
   });
   const absolute = join(root, "note.md");
   const states: string[] = [];
-  const drafts = async () => (await listLiveDraftRecovery(draftStore, workspaceId)).map(({ path, text }) => `${path}: ${text}`);
+  const drafts = async () =>
+    (await listLiveDraftRecovery(draftStore, workspaceId)).map(
+      ({ path, text }) => `${path}: ${text}`,
+    );
   try {
     if (shape === "recorded") {
       await writeFile(absolute, "base\n", "utf8");
@@ -249,7 +301,10 @@ export async function openDeletedDocument(shape: "recorded" | "new", failedDisca
       await writeFile(absolute, "", { flag: "wx" });
     }
     const session = await capture.openYDocSession({
-      path: "note.md", contentKind: "plaintext", onRemoteUpdate: () => undefined, onSaveState: (state) => states.push(state),
+      path: "note.md",
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onSaveState: (state) => states.push(state),
     });
     const editor = new Y.Doc();
     Y.applyUpdate(editor, session.initialUpdate);

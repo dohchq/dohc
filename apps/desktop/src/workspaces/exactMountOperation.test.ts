@@ -17,10 +17,10 @@ function harness() {
     return run(operation);
   };
   const engineReady = vi.fn(async (): Promise<void> => {});
-  const run = createExactMountOperationRunner<
-    typeof workspace,
-    typeof operation
-  >({ withOperation, engineReady });
+  const run = createExactMountOperationRunner<typeof workspace, typeof operation>({
+    withOperation,
+    engineReady,
+  });
   const input = { workspace, assertCurrent: vi.fn() };
   const mutate = vi.fn(async () => "mounted");
   return {
@@ -37,9 +37,9 @@ function harness() {
 describe("exact mount operations", () => {
   it("requires an attachment before acquiring authority", () => {
     const h = harness();
-    expect(() =>
-      h.run({ ...h.input, workspace: { workspaceId: "workspace" } }, h.mutate),
-    ).toThrow("Open this workspace again before using this share.");
+    expect(() => h.run({ ...h.input, workspace: { workspaceId: "workspace" } }, h.mutate)).toThrow(
+      "Open this workspace again before using this share.",
+    );
     expect(h.withOperation).not.toHaveBeenCalled();
     expect(h.mutate).not.toHaveBeenCalled();
   });
@@ -68,10 +68,7 @@ describe("exact mount operations", () => {
       const started = Promise.withResolvers<void>();
       h.engineReady.mockReturnValue(started.promise);
       const result = h.run(h.input, h.mutate);
-      (gate === "caller"
-        ? h.input.assertCurrent
-        : h.assertCurrent
-      ).mockImplementation(() => {
+      (gate === "caller" ? h.input.assertCurrent : h.assertCurrent).mockImplementation(() => {
         throw new Error("retired");
       });
       started.resolve();

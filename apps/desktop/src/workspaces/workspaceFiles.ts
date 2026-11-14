@@ -42,7 +42,6 @@ import {
   rmdir,
   stat,
   unlink,
-  writeFile,
   type FileHandle,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, parse, relative, sep } from "node:path";
@@ -108,7 +107,7 @@ export function extractFrontmatterIcon(head: string): string | undefined {
   if (lines[0]?.trim() !== "---") return undefined;
   for (let i = 1; i < lines.length; i += 1) {
     const line = lines[i] ?? "";
-    if (line.trim() === "---") return undefined; // block closed, no icon
+    if (line.trim() === "---") return undefined;
     const match = /^icon:[ \t]*(.*)$/.exec(line);
     if (!match) continue;
     let value = (match[1] ?? "").trim();
@@ -120,7 +119,6 @@ export function extractFrontmatterIcon(head: string): string | undefined {
     ) {
       value = value.slice(1, -1);
     } else {
-      // Strip a trailing inline comment on an unquoted scalar.
       const comment = value.indexOf(" #");
       if (comment !== -1) value = value.slice(0, comment).trim();
     }
@@ -129,9 +127,6 @@ export function extractFrontmatterIcon(head: string): string | undefined {
   return undefined;
 }
 
-// Best-effort, failure-tolerant read of a markdown file's icon: this runs for
-// every markdown file on every listing, so it must never throw or read the
-// whole file.
 async function readMarkdownIcon(absolutePath: string): Promise<string | undefined> {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
@@ -202,7 +197,10 @@ export async function getMarkdownListingMetadata(
 }
 
 /** Refresh the same non-symlink paths admitted by the file listing. */
-export async function getWorkspaceListingMetadata(rootPath: string, path: string): Promise<IconCacheEntry | undefined> {
+export async function getWorkspaceListingMetadata(
+  rootPath: string,
+  path: string,
+): Promise<IconCacheEntry | undefined> {
   const validated = validateUserReadPath(path, { platform: process.platform });
   if (!validated.ok || hasEngineIgnoredSegment(path, process.platform)) return undefined;
   try {
@@ -211,10 +209,16 @@ export async function getWorkspaceListingMetadata(rootPath: string, path: string
     for (let index = 0; index < segments.length; index += 1) {
       absolute = join(absolute, segments[index]!);
       const entry = await lstat(absolute);
-      if (entry.isSymbolicLink() || (index < segments.length - 1 ? !entry.isDirectory() : !entry.isFile())) return undefined;
+      if (
+        entry.isSymbolicLink() ||
+        (index < segments.length - 1 ? !entry.isDirectory() : !entry.isFile())
+      )
+        return undefined;
     }
     return await getMarkdownListingMetadata(absolute, /\.(md|markdown)$/i.test(path));
-  } catch { return undefined; }
+  } catch {
+    return undefined;
+  }
 }
 
 // Both queues are process-wide: overlapping forced listings still stay at a
@@ -255,9 +259,7 @@ export function createBoundedTaskQueue(concurrency: number) {
 }
 
 const runDirectoryRead = createBoundedTaskQueue(LISTING_DIRECTORY_CONCURRENCY);
-const runMarkdownIconRead = createBoundedTaskQueue(
-  LISTING_MARKDOWN_ICON_CONCURRENCY,
-);
+const runMarkdownIconRead = createBoundedTaskQueue(LISTING_MARKDOWN_ICON_CONCURRENCY);
 
 export async function listFiles(
   rootPath: string,
@@ -269,19 +271,22 @@ export async function listFiles(
 ): Promise<{ files: WorkspaceFileEntry[]; folders: string[] }> {
   const platform = options.platform ?? process.platform;
   const targets = options.paths === undefined ? null : new Set(options.paths);
-  const targetDirectories = targets === null ? null : new Set([...targets].flatMap(path => {
-    const segments = path.split("/");
-    return segments.slice(0, -1).map((_, index) => segments.slice(0, index + 1).join("/"));
-  }));
+  const targetDirectories =
+    targets === null
+      ? null
+      : new Set(
+          [...targets].flatMap((path) => {
+            const segments = path.split("/");
+            return segments.slice(0, -1).map((_, index) => segments.slice(0, index + 1).join("/"));
+          }),
+        );
   const entries: WorkspaceFileListingEntry[] = [];
   // Directories ride along so empty folders stay visible in the explorer
   // tree (the walk already visits every dir — this is purely additive).
   const folders: string[] = [];
 
   async function walk(dir: string, prefix: string): Promise<void> {
-    const dirents = await runDirectoryRead(() =>
-      readdir(dir, { withFileTypes: true }),
-    );
+    const dirents = await runDirectoryRead(() => readdir(dir, { withFileTypes: true }));
     const pending: Promise<void>[] = [];
     for (const dirent of dirents) {
       const rel = prefix ? `${prefix}/${dirent.name}` : dirent.name;
@@ -290,7 +295,11 @@ export async function listFiles(
       if (hasEngineIgnoredSegment(rel, platform) || dirent.isSymbolicLink()) continue;
       if (dirent.isDirectory()) {
         if (!targets && matchesFileListingScope(rel, options)) folders.push(rel);
-        if (targetDirectories ? targetDirectories.has(rel) : directoryMayContainListedFiles(rel, options)) {
+        if (
+          targetDirectories
+            ? targetDirectories.has(rel)
+            : directoryMayContainListedFiles(rel, options)
+        ) {
           pending.push(walk(join(dir, dirent.name), rel));
         }
       } else if (dirent.isFile()) {
@@ -304,10 +313,7 @@ export async function listFiles(
         ) {
           pending.push(
             runMarkdownIconRead(() =>
-              getMarkdownListingMetadata(
-                join(dir, dirent.name),
-                /\.(md|markdown)$/i.test(rel),
-              ),
+              getMarkdownListingMetadata(join(dir, dirent.name), /\.(md|markdown)$/i.test(rel)),
             ).then((metadata) => {
               if (!metadata) return;
               if (options.includeContentIdentity === true) {
@@ -332,7 +338,10 @@ export async function listFiles(
 // An existing file at the path is left as it is. By default the create then
 // succeeds; with `exclusive` it rejects with the EEXIST error.
 export class CreatedFileWriteError extends Error {
-  constructor(readonly path: string, cause: unknown) {
+  constructor(
+    readonly path: string,
+    cause: unknown,
+  ) {
     super(`Created ${path}, but dohc could not finish writing it.`, { cause });
     this.name = "CreatedFileWriteError";
   }
@@ -350,7 +359,8 @@ export async function createFile(
   options: { exclusive?: boolean } = {},
 ): Promise<string> {
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
-  if (validated.ok || validated.reason === "unsupported-name") assertWorkspaceDestination(relativePath);
+  if (validated.ok || validated.reason === "unsupported-name")
+    assertWorkspaceDestination(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
   }
@@ -365,8 +375,11 @@ export async function createFile(
   });
   if (handle) {
     try {
-      try { await handle.writeFile(initialText); }
-      finally { await handle.close(); }
+      try {
+        await handle.writeFile(initialText);
+      } finally {
+        await handle.close();
+      }
     } catch (error) {
       throw new CreatedFileWriteError(validated.normalized, error);
     }
@@ -381,8 +394,12 @@ export async function createFile(
  * ignored temporary sibling, so a crash never leaves a cut-off file there.
  * A drive without hard links refuses: nothing is written to the final name.
  */
-export async function createDurableFile(rootPath: string, relativePath: string, text: string,
-  operations: Pick<NonNullable<Parameters<typeof atomicCreateFile>[3]>, "open" | "link"> = {}): Promise<string> {
+export async function createDurableFile(
+  rootPath: string,
+  relativePath: string,
+  text: string,
+  operations: Pick<NonNullable<Parameters<typeof atomicCreateFile>[3]>, "open" | "link"> = {},
+): Promise<string> {
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
     throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
@@ -391,25 +408,46 @@ export async function createDurableFile(rootPath: string, relativePath: string, 
   const target = await newFileTarget(rootPath, relativePath, validated.normalized, created);
   const temporary = join(dirname(target), `.dohc-write-${process.pid}-${randomUUID()}.tmp`);
   const publish = operations.link ?? link;
-  const linkWhole = (source: string, destination: string) => publish(source, destination).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "EEXIST") throw error;
-    throw new Error("This drive can't save a recovery copy safely, so dohc saved nothing. Your kept edits stay on this computer.", { cause: error });
-  });
-  if (!await atomicCreateFile(target, text, 0o666, { ...operations, link: linkWhole, temporary })) {
-    throw Object.assign(new Error(`EEXIST: file already exists, ${relativePath}`), { code: "EEXIST" });
+  const linkWhole = (source: string, destination: string) =>
+    publish(source, destination).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "EEXIST") throw error;
+      throw new Error(
+        "This drive can't save a recovery copy safely, so dohc saved nothing. Your kept edits stay on this computer.",
+        { cause: error },
+      );
+    });
+  if (
+    !(await atomicCreateFile(target, text, 0o666, { ...operations, link: linkWhole, temporary }))
+  ) {
+    throw Object.assign(new Error(`EEXIST: file already exists, ${relativePath}`), {
+      code: "EEXIST",
+    });
   }
   // The file's own folder is synced; each folder this create made needs its entry synced in its parent.
   if (created.directory && process.platform !== "win32") {
     const top = dirname(created.directory);
-    for (let folder = dirname(target); folder !== top && dirname(folder) !== folder; folder = dirname(folder)) {
+    for (
+      let folder = dirname(target);
+      folder !== top && dirname(folder) !== folder;
+      folder = dirname(folder)
+    ) {
       const handle = await open(dirname(folder), "r");
-      try { await handle.sync(); } finally { await handle.close(); }
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
     }
   }
   return validated.normalized;
 }
 
-async function newFileTarget(rootPath: string, relativePath: string, normalized: string, created?: { directory?: string }): Promise<string> {
+async function newFileTarget(
+  rootPath: string,
+  relativePath: string,
+  normalized: string,
+  created?: { directory?: string },
+): Promise<string> {
   const absolute = join(rootPath, normalized);
   // Lexical validation can't see symlinks, and it read the path as SPELLED.
   // Both questions get asked of the real path before mkdir, so a symlinked
@@ -468,7 +506,9 @@ export class ImportSkips {
   }
 
   outcome(): Pick<ImportCopyOutcome, "skipped" | "skippedSources"> {
-    return this.count === 0 ? { skipped: 0 } : { skipped: this.count, skippedSources: [...this.listed] };
+    return this.count === 0
+      ? { skipped: 0 }
+      : { skipped: this.count, skippedSources: [...this.listed] };
   }
 }
 
@@ -535,11 +575,7 @@ export async function resolveImportDestination(
 // limit where one applies. Without that second rung a colliding multibyte name
 // in a deep folder composes past MAX_PATH and copyFile answers ENOENT, which
 // aborts the whole import.
-function collisionVariants(
-  name: string,
-  attempt: number,
-  maxEntryChars: number,
-): string[] {
+function collisionVariants(name: string, attempt: number, maxEntryChars: number): string[] {
   return collisionVariantPlan(name, attempt, {
     unit: nameUnitFor(process.platform),
     maxEntryChars,
@@ -568,8 +604,7 @@ export async function importNameFor(
 ): Promise<string | null> {
   const maxEntryChars = entryCharBudget(absDir, process.platform);
   for (let attempt = 1; attempt <= IMPORT_COLLISION_RENAMES + 1; attempt += 1) {
-    const candidates =
-      attempt === 1 ? [name] : collisionVariants(name, attempt, maxEntryChars);
+    const candidates = attempt === 1 ? [name] : collisionVariants(name, attempt, maxEntryChars);
     for (const candidate of candidates) {
       if (!(await taken(candidate))) return candidate;
     }
@@ -608,26 +643,6 @@ export function couldBeLengthRefusal(
   return code === "ENOENT" && candidate.length > maxEntryChars;
 }
 
-// The arithmetic above says an over-budget name could be refused for length.
-// It cannot say it WAS. On a long-path-aware Windows host the budget is not
-// the real limit -- a 300-character path works there -- so an ENOENT means
-// something that should exist does not: the source moved after the file dialog
-// validated it, or the destination folder went away. Predicting from the
-// budget silently counted that as `skipped`, and a user does not notice a
-// skipped line.
-//
-// So ask, exactly as `copyFile` asks: `stat`, which follows the source link,
-// because that is what the copy did. An earlier revision asked `lstat`, which
-// answers about the LINK -- so a source that was a symlink to a missing target
-// read as "still there", its ENOENT was charged to length, and the broken link
-// was skipped.
-//
-// `null` means both ends are there, so the ENOENT is about the composed path
-// and the ladder may try a shorter name. "danglingLink" is the one thing dohc
-// can say better than the copy's own error. "unexplained" is every other
-// answer -- a source that is plainly gone, a destination folder that went away,
-// a probe that could not look -- where the original ENOENT already names a
-// path and dohc has nothing to add, so the batch aborts on that error.
 type CopyEnoent = "danglingLink" | "unexplained";
 
 /**
@@ -643,9 +658,7 @@ export function classifyEndProbe(
   probe: { looked: true } | { looked: false; code: string | undefined },
 ): "there" | "absent" | "unknown" {
   if (probe.looked) return "there";
-  return probe.code === "ENOENT" || probe.code === "ENOTDIR"
-    ? "absent"
-    : "unknown";
+  return probe.code === "ENOENT" || probe.code === "ENOTDIR" ? "absent" : "unknown";
 }
 
 async function probeEnd(path: string) {
@@ -660,14 +673,8 @@ async function probeEnd(path: string) {
   );
 }
 
-async function classifyCopyEnoent(
-  source: string,
-  absDir: string,
-): Promise<CopyEnoent | null> {
-  const [sourceProbe, dirProbe] = await Promise.all([
-    probeEnd(source),
-    probeEnd(absDir),
-  ]);
+async function classifyCopyEnoent(source: string, absDir: string): Promise<CopyEnoent | null> {
+  const [sourceProbe, dirProbe] = await Promise.all([probeEnd(source), probeEnd(absDir)]);
   if (dirProbe !== "there") return "unexplained";
   if (sourceProbe === "there") return null;
   if (sourceProbe === "unknown") return "unexplained";
@@ -711,9 +718,7 @@ type LadderStop = "gone" | "replaced" | "unchecked";
  */
 export function classifyLadderProbe(
   started: FsEntryIdentity | null,
-  probe:
-    | { looked: true; now: FsEntryIdentity }
-    | { looked: false; code: string | undefined },
+  probe: { looked: true; now: FsEntryIdentity } | { looked: false; code: string | undefined },
 ): LadderStop | null {
   // No starting identity means there is nothing to compare against, so the
   // question cannot be answered rather than answered "changed".
@@ -751,15 +756,6 @@ function ladderStopReason(name: string, stop: LadderStop): string {
   }
 }
 
-// One copy that never overwrites: COPYFILE_EXCL on every attempt, retrying
-// through collision variants. Returns the basename that landed, or why the
-// source is skipped: "taken" when the rename budget ran out. Non-EEXIST
-// errors still throw — a permission or IO failure is a real error, not a
-// skip — with one exception: a name the filesystem cannot hold
-// (ENAMETOOLONG, e.g. an extension longer than the variant budget) skips
-// that source as "too-long" instead of aborting the whole batch.
-// A dropped folder lands through the same ladder with `place` making the
-// folder, so "Photos" collides into "Photos (2)" as a file would.
 async function copyWithoutOverwrite(
   source: string,
   absDir: string,
@@ -773,8 +769,7 @@ async function copyWithoutOverwrite(
   for (let attempt = 1; attempt <= IMPORT_COLLISION_RENAMES + 1; attempt += 1) {
     // Longest first, exactly as the trash ladder does: a shorter name is used
     // only once the platform has actually refused the longer one for length.
-    const candidates =
-      attempt === 1 ? [name] : collisionVariants(name, attempt, maxEntryChars);
+    const candidates = attempt === 1 ? [name] : collisionVariants(name, attempt, maxEntryChars);
     for (const [rung, candidate] of candidates.entries()) {
       const target = join(absDir, candidate);
       await assertRealParent(target);
@@ -846,7 +841,8 @@ export async function copyIntoWorkspace(
         landed = await copyWithoutOverwrite(sourcePath, absDir, name);
       } else if (source.entries === null) {
         landed = await copyWithoutOverwrite(sourcePath, absDir, name, (target) =>
-          copyDroppedFile(sourcePath, source.identity, target, undefined));
+          copyDroppedFile(sourcePath, source.identity, target, undefined),
+        );
       } else {
         await verifyDroppedFolder(sourcePath, source.identity);
         landed = await copyWithoutOverwrite(sourcePath, absDir, name, (target) => mkdir(target));
@@ -861,7 +857,12 @@ export async function copyIntoWorkspace(
               await assertRealParent(join(absDir, current));
               await mkdir(join(absDir, current));
             } else {
-              await copyDroppedFile(from, entry.identity, join(absDir, current), droppedEntryParent(source, entry));
+              await copyDroppedFile(
+                from,
+                entry.identity,
+                join(absDir, current),
+                droppedEntryParent(source, entry),
+              );
               imported.push(landedPath(current));
             }
           }
@@ -957,10 +958,12 @@ export interface DroppedFolderCheck {
   identity: FsEntryIdentity;
 }
 
-// The folder a dropped entry sits in.
 export function droppedEntryParent(source: DroppedSource, entry: DroppedEntry): DroppedFolderCheck {
   const at = entry.path.lastIndexOf("/");
-  return { path: at < 0 ? source.source : join(source.source, entry.path.slice(0, at)), identity: entry.parent };
+  return {
+    path: at < 0 ? source.source : join(source.source, entry.path.slice(0, at)),
+    identity: entry.parent,
+  };
 }
 
 // A screened folder is still the folder the screen saw, at the real path the
@@ -971,7 +974,11 @@ export function droppedEntryParent(source: DroppedSource, entry: DroppedEntry): 
 // back between two adjacent calls is the window left.
 export async function verifyDroppedFolder(path: string, identity: FsEntryIdentity): Promise<void> {
   const now = await lstat(path, { bigint: true });
-  if (!now.isDirectory() || sameFsEntry(identity, now) !== "same" || !samePath(await realpath(path), path)) {
+  if (
+    !now.isDirectory() ||
+    sameFsEntry(identity, now) !== "same" ||
+    !samePath(await realpath(path), path)
+  ) {
     throw new ImportPathChangedError(path);
   }
 }
@@ -980,7 +987,9 @@ export async function verifyDroppedFolder(path: string, identity: FsEntryIdentit
 // so on macOS a folder dohc made from a composed name such as Café reads back
 // as Cafe plus a combining accent.
 function samePath(real: string, expected: string): boolean {
-  return process.platform === "darwin" ? real.normalize("NFD") === expected.normalize("NFD") : real === expected;
+  return process.platform === "darwin"
+    ? real.normalize("NFD") === expected.normalize("NFD")
+    : real === expected;
 }
 
 // The folder a create lands in is still the real folder dohc made or checked.
@@ -1002,14 +1011,19 @@ export async function openDroppedFile(
 ): Promise<FileHandle> {
   let handle: FileHandle;
   try {
-    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    handle = await open(
+      path,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+    );
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ELOOP") throw new ImportPathChangedError(path, { cause: error });
+    if ((error as NodeJS.ErrnoException).code === "ELOOP")
+      throw new ImportPathChangedError(path, { cause: error });
     throw error;
   }
   try {
     const now = await handle.stat({ bigint: true });
-    if (!now.isFile() || sameFsEntry(identity, now) !== "same") throw new ImportPathChangedError(path);
+    if (!now.isFile() || sameFsEntry(identity, now) !== "same")
+      throw new ImportPathChangedError(path);
     if (parent) await verifyDroppedFolder(parent.path, parent.identity);
     return handle;
   } catch (error) {
@@ -1047,7 +1061,8 @@ async function copyDroppedFile(
       await to.close().catch(() => undefined);
       // Only the file this copy created, never one put at its path since.
       const now = await lstat(target, { bigint: true }).catch(() => null);
-      if (created && now && sameFsEntry(created, now) === "same") await unlink(target).catch(() => undefined);
+      if (created && now && sameFsEntry(created, now) === "same")
+        await unlink(target).catch(() => undefined);
       throw error;
     }
   } finally {
@@ -1075,7 +1090,9 @@ export async function importDroppedPaths(
 // data and never lands as an ordinary file. Only Windows separates folders
 // with a backslash; elsewhere it is part of a name.
 function inDohcFolder(realPath: string): boolean {
-  return realPath.split(process.platform === "win32" ? /[\\/]/ : "/").some((part) => part.toLowerCase() === ".dohc");
+  return realPath
+    .split(process.platform === "win32" ? /[\\/]/ : "/")
+    .some((part) => part.toLowerCase() === ".dohc");
 }
 
 // The import dialog's picks are the person's own choice, so they copy as the
@@ -1105,41 +1122,34 @@ export async function screenPickedPaths(
 // and why: the user handed them over and deserves to see they did not land,
 // same as a collision-budget skip inside the copy.
 //
-// TRUST DELTA vs copyIntoWorkspace's dialog path: these
-// absolute source paths are RENDERER-supplied (webUtils.getPathForFile in the
-// preload), not minted by a main-process file dialog — a compromised renderer
-// could forge the IPC array and name any readable file (e.g. ~/.ssh/id_rsa) to
-// have it copied into a possibly cloud-synced workspace. That residual is
-// inherent once file-write IPCs exist at all (renderer-compromise is already
-// game-over) and a genuine user drag may legitimately include any file the
-// user owns, so we do not gate by location. We DO bound it:
+// Trust differs from copyIntoWorkspace's dialog path: the renderer supplies
+// these absolute source paths (webUtils.getPathForFile in the preload), and
+// no main-process file dialog minted them. A compromised renderer could forge
+// the IPC array and name any readable file (e.g. ~/.ssh/id_rsa) to have it
+// copied into a possibly cloud-synced workspace. A genuine drag may include
+// any file the user owns, so location is not gated. These bounds apply:
 //   - count is capped here (not just at the zod boundary), and larger caps
 //     count every entry inside a dropped folder, landed or left out;
-//   - only real regular files and folders import — a FINAL-component symlink
+//   - only real regular files and folders import. A final-component symlink
 //     is refused before it is followed (lstat the original source, never
 //     realpath-then-isFile, which would promote a planted symlink-to-secret
-//     under the link's own innocuous name); special files are skipped, and a
-//     folder's walk never follows a link inside it;
+//     under the link's own name); special files are skipped, and a folder's
+//     walk never follows a link inside it;
 //   - every entry keeps the identity lstat gave it, so a file or folder
 //     another process swaps for a link after the screen is never copied;
-//   - a source whose CANONICAL path is inside any `.dohc` folder, or inside a
+//   - a source whose canonical path is inside any `.dohc` folder, or inside a
 //     registered workspace's `.dohc` wherever a link puts it, is refused (the
-//     check runs on realpath(source), so an ancestor symlink cannot smuggle a
+//     check runs on realpath(source), so an ancestor symlink cannot carry a
 //     metadata source past it);
-//   - a link on the way to a dropped item decides where the item really is,
-//     so it must belong to root or to this user. Another user's link, such as
-//     `/Users/Shared/evil/proj -> /Users/victim`, could otherwise turn a drop
-//     of `evil/proj/Documents` into this user's own Documents, and every
-//     later check would verify that target. Root owns the system links, such
-//     as macOS /tmp -> /private/tmp, so legitimate drags through them import.
-// Residuals: a link this user or root owns still leads where it leads, which
-// grants a compromised renderer nothing beyond the residual above (it could
-// just name `~/.ssh/id_rsa` directly). Another user's link swapped in and out
-// around the screen's adjacent checks is the window left. Windows has no
-// owner to compare here.
-// The real defense if that matters is a visible import-confirm quarantine
-// (deferred — needs product sign-off); until then it is accepted and named
-// here.
+//   - a link on the way to a dropped item must belong to root or to this
+//     user. Another user's link, such as `/Users/Shared/evil/proj ->
+//     /Users/victim`, could otherwise turn a drop of `evil/proj/Documents`
+//     into this user's own Documents. Root owns the system links, such as
+//     macOS /tmp -> /private/tmp, so drags through them import.
+// Accepted residuals: a link this user or root owns still leads where it
+// leads, and another user's link can be swapped in and out around the
+// screen's adjacent checks. Windows has no owner to compare here. A visible
+// import-confirm quarantine would close them and is deferred.
 export async function screenDroppedPaths(
   absolutePaths: string[],
   registeredRoots: string[],
@@ -1179,7 +1189,9 @@ export async function screenDroppedPaths(
   const prefix = relDir === "" ? "" : `${relDir}/`;
   for (const source of absolutePaths) {
     const name = basename(source) || source;
-    const screened = isAbsolute(source) ? await screenDroppedSource(source, realMetadataRoots) : "unreadable";
+    const screened = isAbsolute(source)
+      ? await screenDroppedSource(source, realMetadataRoots)
+      : "unreadable";
     if (typeof screened === "string") {
       skips.add(name, screened);
       continue;
@@ -1192,8 +1204,15 @@ export async function screenDroppedPaths(
     }
     count.land();
     if (screened.entries !== null) {
-      await screenDroppedFolder(screened.source, screened.identity, destination, "", screened.entries, count,
-        (path, reason) => skips.add(`${name}/${path}`, reason));
+      await screenDroppedFolder(
+        screened.source,
+        screened.identity,
+        destination,
+        "",
+        screened.entries,
+        count,
+        (path, reason) => skips.add(`${name}/${path}`, reason),
+      );
     }
     usable.push(screened);
   }
@@ -1234,17 +1253,23 @@ async function screenDroppedSource(
     for (const root of realMetadataRoots) {
       if (await isInsideOrUnknown(root, real)) return "workspace-data";
     }
-    return { source: real, identity: { dev: linkStat.dev, ino: linkStat.ino }, entries: folder ? [] : null };
+    return {
+      source: real,
+      identity: { dev: linkStat.dev, ino: linkStat.ino },
+      entries: folder ? [] : null,
+    };
   } catch (error) {
-    if (error instanceof ForeignDropLinkError || error instanceof ImportPathChangedError) throw error;
+    if (error instanceof ForeignDropLinkError || error instanceof ImportPathChangedError)
+      throw error;
     return "unreadable";
   }
 }
 
-// A dropped item reached through a link another user owns.
 class ForeignDropLinkError extends Error {
   constructor(source: string) {
-    super(`dohc did not import ${basename(source)}, because a link another user owns leads to it. Drop it from a folder you own.`);
+    super(
+      `dohc did not import ${basename(source)}, because a link another user owns leads to it. Drop it from a folder you own.`,
+    );
   }
 }
 
@@ -1297,9 +1322,11 @@ async function screenDroppedFolder(
       continue;
     }
     const folder = info.isDirectory();
-    const unusable = info.isSymbolicLink() ? "link"
-      : !info.isFile() && !folder ? "not-a-file"
-      : nameSkip(`${destination}/${path}`);
+    const unusable = info.isSymbolicLink()
+      ? "link"
+      : !info.isFile() && !folder
+        ? "not-a-file"
+        : nameSkip(`${destination}/${path}`);
     if (unusable !== null) {
       count.leaveOut();
       skip(path, unusable);
@@ -1309,7 +1336,15 @@ async function screenDroppedFolder(
     const entry = { path, folder, identity: { dev: info.dev, ino: info.ino }, parent: identity };
     entries.push(entry);
     if (folder) {
-      await screenDroppedFolder(join(dir, dirent.name), entry.identity, destination, path, entries, count, skip);
+      await screenDroppedFolder(
+        join(dir, dirent.name),
+        entry.identity,
+        destination,
+        path,
+        entries,
+        count,
+        skip,
+      );
     }
   }
 }
@@ -1325,7 +1360,8 @@ export async function createFolder(
   options: { exclusive?: boolean } = {},
 ): Promise<string> {
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
-  if (validated.ok || validated.reason === "unsupported-name") assertWorkspaceDestination(relativePath);
+  if (validated.ok || validated.reason === "unsupported-name")
+    assertWorkspaceDestination(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid folder path (${validated.reason}): ${relativePath}`);
   }
@@ -1350,21 +1386,26 @@ export async function createFolder(
 
 // Rollback removes a folder only while it is empty. rmdir checks emptiness
 // atomically, so another writer's descendants can never enter the trash.
-export async function removeEmptyWorkspaceFolder(rootPath: string, relativePath: string): Promise<boolean> {
+export async function removeEmptyWorkspaceFolder(
+  rootPath: string,
+  relativePath: string,
+): Promise<boolean> {
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
-  if (!validated.ok) throw new Error(
-    `Invalid folder path (${validated.reason}): ${relativePath}`,
-  );
+  if (!validated.ok) throw new Error(`Invalid folder path (${validated.reason}): ${relativePath}`);
   const { resolvedAbsolute: target } = await assertResolvedWorkspacePath({
-    rootPath, absolutePath: join(rootPath, validated.normalized),
-    spelled: relativePath, label: "Folder path", access: "entry",
+    rootPath,
+    absolutePath: join(rootPath, validated.normalized),
+    spelled: relativePath,
+    label: "Folder path",
+    access: "entry",
   });
   try {
     await rmdir(target);
     return true;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR" || code === "ENOTEMPTY" || code === "EEXIST") return false;
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "ENOTEMPTY" || code === "EEXIST")
+      return false;
     throw error;
   }
 }
@@ -1401,16 +1442,14 @@ export interface PreparedWorkspaceMove {
   visibleResultPath: string;
 }
 
-export function normalizeWorkspaceMovePaths(
-  fromPath: string,
-  toPath: string,
-): WorkspaceMovePaths {
+export function normalizeWorkspaceMovePaths(fromPath: string, toPath: string): WorkspaceMovePaths {
   const fromValidated = validateUserWritePath(fromPath);
   if (!fromValidated.ok) {
     throw new Error(`Invalid move source (${fromValidated.reason}): ${fromPath}`);
   }
   const toValidated = validateUserMaterializePath(toPath, { platform: process.platform });
-  if (toValidated.ok || toValidated.reason === "unsupported-name") assertWorkspaceDestination(toPath);
+  if (toValidated.ok || toValidated.reason === "unsupported-name")
+    assertWorkspaceDestination(toPath);
   if (!toValidated.ok) {
     throw new Error(`Invalid move destination (${toValidated.reason}): ${toPath}`);
   }
@@ -1445,32 +1484,49 @@ export function deleteIdentityUnavailable(path: string): Error {
   );
 }
 
-export async function assertMoveParentCase(realRoot: string, paths: WorkspaceMovePaths): Promise<void> {
-  const fromParent = dirname(paths.fromPath), toParent = dirname(paths.toPath);
-  if (fromParent === toParent || pathCollisionKey(fromParent) !== pathCollisionKey(toParent)) return;
+export async function assertMoveParentCase(
+  realRoot: string,
+  paths: WorkspaceMovePaths,
+): Promise<void> {
+  const fromParent = dirname(paths.fromPath),
+    toParent = dirname(paths.toPath);
+  if (fromParent === toParent || pathCollisionKey(fromParent) !== pathCollisionKey(toParent))
+    return;
   const [sourceParent, destinationParent] = await Promise.all([
     lstat(join(realRoot, fromParent)).catch(absentAsNull),
     lstat(join(realRoot, toParent)).catch(absentAsNull),
-  ])
-    .catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
+  ]).catch(() => {
+    throw moveIdentityUnavailable(paths.fromPath, paths.toPath);
+  });
   if (sourceParent === null || destinationParent === null) return;
   const [from, to] = await Promise.all([
     storedEntryPath(realRoot, join(realRoot, fromParent)),
     storedEntryPath(realRoot, join(realRoot, toParent)),
-  ]).catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
+  ]).catch(() => {
+    throw moveIdentityUnavailable(paths.fromPath, paths.toPath);
+  });
   const spelledParent = toParent.replaceAll("\\", "/");
   if (from === to && to.normalize("NFC") !== spelledParent.normalize("NFC")) {
-    const folders = to.split("/"), renamed = spelledParent.split("/");
-    const index = folders.findIndex((folder, index) => folder.normalize("NFC") !== renamed[index]?.normalize("NFC"));
+    const folders = to.split("/"),
+      renamed = spelledParent.split("/");
+    const index = folders.findIndex(
+      (folder, index) => folder.normalize("NFC") !== renamed[index]?.normalize("NFC"),
+    );
     throw new Error(
       `dohc did not move ${paths.fromPath} to ${paths.toPath}. The folder is named ${folders[index]}, not ${renamed[index]}. Use that name, or rename the folder first.`,
     );
   }
 }
 
-export function checkCaseRename(spelling: string | null, to: string, paths: WorkspaceMovePaths): void {
+export function checkCaseRename(
+  spelling: string | null,
+  to: string,
+  paths: WorkspaceMovePaths,
+): void {
   if (spelling !== null && basename(spelling).normalize("NFC") !== basename(to).normalize("NFC")) {
-    throw new Error(`dohc did not rename ${paths.fromPath} to ${paths.toPath}. This disk kept the name ${basename(spelling)}. Rename it to another name first, then to ${basename(paths.toPath)}.`);
+    throw new Error(
+      `dohc did not rename ${paths.fromPath} to ${paths.toPath}. This disk kept the name ${basename(spelling)}. Rename it to another name first, then to ${basename(paths.toPath)}.`,
+    );
   }
 }
 
@@ -1484,12 +1540,16 @@ async function compareStoredMovePaths(
   const [storedSource, storedDestination] = await Promise.all([
     diskSpelling(realRoot, source),
     diskSpelling(realRoot, destination),
-  ]).catch(() => { throw moveIdentityUnavailable(paths.fromPath, paths.toPath); });
+  ]).catch(() => {
+    throw moveIdentityUnavailable(paths.fromPath, paths.toPath);
+  });
   if (storedSource === null || (storedDestination === null && relation === "inside")) {
     throw moveIdentityUnavailable(paths.fromPath, paths.toPath);
   }
   if (storedDestination === null) return false;
-  return relation === "same" ? storedSource === storedDestination : isInside(storedSource, storedDestination);
+  return relation === "same"
+    ? storedSource === storedDestination
+    : isInside(storedSource, storedDestination);
 }
 
 async function movePathsNest(
@@ -1502,7 +1562,6 @@ async function movePathsNest(
   const sourceKey = pathCollisionKey(relative(realRoot, source).replaceAll("\\", "/"));
   const parentKey = pathCollisionKey(relative(realRoot, parent).replaceAll("\\", "/"));
   if (parentKey !== sourceKey && !parentKey.startsWith(`${sourceKey}/`)) return false;
-  // Only lookup-case aliases need a listing after realpath's containment check.
   return compareStoredMovePaths(realRoot, source, parent, paths, "inside");
 }
 
@@ -1544,10 +1603,7 @@ async function inspectWorkspaceMove(
     label: "Move source",
     access: "entry",
   });
-  const {
-    relative: resolvedToPath,
-    resolvedAbsolute: to,
-  } = await assertResolvedWorkspacePath({
+  const { relative: resolvedToPath, resolvedAbsolute: to } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: absTo,
     spelled: toPath,
@@ -1564,8 +1620,9 @@ async function inspectWorkspaceMove(
   }
   // The source is not a symlink, so realpath resolves ancestor links only.
   const realFrom = await realpath(from);
-  const physicalFromPath = await storedEntryPath(realRoot, realFrom)
-    .catch(() => { throw moveIdentityUnavailable(fromPath, toPath); });
+  const physicalFromPath = await storedEntryPath(realRoot, realFrom).catch(() => {
+    throw moveIdentityUnavailable(fromPath, toPath);
+  });
   const realDestAncestor = await existingAncestor(dirname(to));
   if (!isInside(realRoot, realDestAncestor)) {
     throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
@@ -1574,7 +1631,9 @@ async function inspectWorkspaceMove(
     throw new Error(`Cannot move a path into itself: ${fromPath}`);
   }
   const destinationStat = await lstat(to).catch(() => null);
-  const sameDestination = destinationStat !== null && await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath });
+  const sameDestination =
+    destinationStat !== null &&
+    (await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath }));
   if (destinationStat !== null && !sameDestination) {
     throw new Error(`Destination already exists: ${toPath}`);
   }
@@ -1583,7 +1642,10 @@ async function inspectWorkspaceMove(
     // spelling. On Windows, an IPC case alias still reaches the same entry,
     // but the engine keys stable objects by their canonical workspace path.
     physicalFromPath,
-    physicalToPath: (sameDestination && !destinationStat?.isSymbolicLink() ? join(dirname(physicalFromPath), basename(normalized.toPath)) : resolvedToPath).replaceAll("\\", "/"),
+    physicalToPath: (sameDestination && !destinationStat?.isSymbolicLink()
+      ? join(dirname(physicalFromPath), basename(normalized.toPath))
+      : resolvedToPath
+    ).replaceAll("\\", "/"),
     visibleResultPath: normalized.toPath,
     realRoot,
     from,
@@ -1613,12 +1675,9 @@ export async function prepareWorkspaceDelete(
 ): Promise<string> {
   const validated = validateUserWritePath(relativePath);
   if (!validated.ok) {
-    throw new Error(
-      `Invalid delete path (${validated.reason}): ${relativePath}`,
-    );
+    throw new Error(`Invalid delete path (${validated.reason}): ${relativePath}`);
   }
-  const { relative: resolvedPath, resolvedAbsolute } =
-    await assertResolvedWorkspacePath({
+  const { relative: resolvedPath, resolvedAbsolute } = await assertResolvedWorkspacePath({
     rootPath,
     absolutePath: join(rootPath, validated.normalized),
     spelled: relativePath,
@@ -1646,19 +1705,16 @@ export async function movePath(
 ): Promise<string> {
   // Repeat the inspection after engine preparation so its await cannot turn
   // the earlier proof into a commit-time TOCTOU gap.
-  const { visibleResultPath, realRoot, from, to, realFrom } =
-    await inspectWorkspaceMove(rootPath, fromPath, toPath);
+  const { visibleResultPath, realRoot, from, to, realFrom } = await inspectWorkspaceMove(
+    rootPath,
+    fromPath,
+    toPath,
+  );
   await mkdir(dirname(to), { recursive: true });
   const realDestParent = await realpath(dirname(to));
   if (!isInside(realRoot, realDestParent)) {
     throw new Error(`Invalid move destination (escapes workspace): ${toPath}`);
   }
-  // Descendant guard, case-fold safe. The lexical self/descendant refusal at
-  // the top is case-SENSITIVE, so on a case-insensitive filesystem "Foo" ->
-  // "foo/bar" slips past it and would move a folder into its own (same-inode)
-  // subtree — corrupting it. Compare resolved paths: if the destination's parent
-  // resolves to the source itself or anywhere beneath it, refuse. (For a file
-  // source this is always false — a file has no descendants.)
   if (await movePathsNest(realRoot, realFrom, realDestParent, { fromPath, toPath })) {
     throw new Error(`Cannot move a path into itself: ${fromPath}`);
   }
@@ -1668,12 +1724,10 @@ export async function movePath(
   );
   let renamesInPlace = false;
   if (destExists) {
-    // Case-only rename carve-out: on a case-insensitive filesystem the
-    // destination "exists" because it IS the source under another case.
-    // Compare resolved paths so a genuinely distinct file that
-    // case-collides still refuses — the carve-out must not reopen the
-    // overwrite hole.
-    renamesInPlace = await sameMoveEntry(realRoot, realFrom, await realpath(to), { fromPath, toPath });
+    renamesInPlace = await sameMoveEntry(realRoot, realFrom, await realpath(to), {
+      fromPath,
+      toPath,
+    });
     if (!renamesInPlace) {
       throw new Error(`Destination already exists: ${toPath}`);
     }
@@ -1778,7 +1832,10 @@ export async function moveIntoWorkspaceTrash(
   // to keep the swap window minimal; a colluding local process racing a
   // symlink into .dohc between the check and the rename is the accepted
   // residual (Node has no renameat dirfd).
-  const trashDir = await workspaceTrashForWrite(workspace, `move ${basename(target)} to the workspace trash`);
+  const trashDir = await workspaceTrashForWrite(
+    workspace,
+    `move ${basename(target)} to the workspace trash`,
+  );
   // Checked here, with the workspace held and right before the rename, so a
   // file has the least time to leave the disk after it was seen there. The
   // check's bounds limit how long it holds the workspace.
@@ -1819,8 +1876,7 @@ export async function moveIntoWorkspaceTrash(
     } catch (error) {
       moveError = error;
       // Only a length failure earns a shorter name. Windows reports an
-      // over-long path as ENOENT, which is how #613 disguised itself;
-      // anything else is not about length.
+      // over-long path as ENOENT; anything else is not about length.
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENAMETOOLONG" && code !== "ENOENT") throw error;
     }

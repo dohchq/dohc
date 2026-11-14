@@ -19,7 +19,6 @@ it("says an agent listens from its first wait until its last one ends", () => {
   expect(onChange).toHaveBeenLastCalledWith(["agent", "terminal"]);
   expect(onChange).toHaveBeenCalledTimes(2);
   first();
-  // Its second wait is still open.
   vi.advanceTimersByTime(2_000);
   expect(waits.listening()).toEqual(["agent", "terminal"]);
   expect(onChange).toHaveBeenCalledTimes(2);

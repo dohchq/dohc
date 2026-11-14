@@ -29,13 +29,20 @@ describe("workspace filesystem metadata", () => {
 
   // The engine's `is_text_media_type` reads the same cases, so the two rules
   // cannot drift apart.
-  it.each(textMediaCases)("routes $path ($mediaType) to text: $text", ({ mediaType, path, text }) => {
-    expect(isTextMediaType(mediaType, path)).toBe(text);
-  });
+  it.each(textMediaCases)(
+    "routes $path ($mediaType) to text: $text",
+    ({ mediaType, path, text }) => {
+      expect(isTextMediaType(mediaType, path)).toBe(text);
+    },
+  );
 
   it("reads a Collection's schema, its automations and other YAML as text", () => {
-    expect(isTextMediaType(mediaTypeForPath("trip/collection.yaml"), "trip/collection.yaml")).toBe(true);
-    expect(isTextMediaType(mediaTypeForPath("trip/automations.yaml"), "trip/automations.yaml")).toBe(true);
+    expect(isTextMediaType(mediaTypeForPath("trip/collection.yaml"), "trip/collection.yaml")).toBe(
+      true,
+    );
+    expect(
+      isTextMediaType(mediaTypeForPath("trip/automations.yaml"), "trip/automations.yaml"),
+    ).toBe(true);
     expect(isTextMediaType(mediaTypeForPath("trip/notes.yaml"), "trip/notes.yaml")).toBe(true);
   });
 });

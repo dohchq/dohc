@@ -14,7 +14,8 @@ export const CAPTURE_RECOVERY_TITLE = "Text kept in History";
 // way back for a shared file is to put the kept version in by hand, as
 // History Restore would. The outside change stays in History either way.
 export function captureRecoveryMessage(path: string, shared: boolean, deleted = false): string {
-  if (deleted) return `The file "${path}" was deleted. Your text is in History. Open the recovery change and choose Restore to recreate the file.`;
+  if (deleted)
+    return `The file "${path}" was deleted. Your text is in History. Open the recovery change and choose Restore to recreate the file.`;
   return shared
     ? `The file "${path}" changed outside dohc. Your text is in History. The file is shared live, so replace its text with your version from the recovery change.`
     : `The file "${path}" changed outside dohc. Your text is in History. Open the recovery change and choose Restore.`;
@@ -54,20 +55,30 @@ export function useCaptureRecoveryNotices(input: {
     const shared = new Set<string>();
 
     // Only the changes answering this action raise their toasts.
-    const publish = (raised: ReadonlySet<string> = new Set()) => latest.current.show([...listed,
-      ...[...committed.values()].filter(recovery => !listed.some(row => row.momentId === recovery.momentId)),
-    ].map((recovery) => ({
-      momentId: recovery.momentId,
-      path: recovery.path,
-      title: CAPTURE_RECOVERY_TITLE,
-      message: captureRecoveryMessage(recovery.path, shared.has(recovery.path), recovery.deleted),
-      raise: raised.has(recovery.momentId),
-      open: () => {
-        if (committed.has(recovery.momentId)) retireFallback(recovery.momentId);
-        latest.current.openRecovery(recovery.momentId, recovery.path);
-      },
-      dismiss: () => clear(recovery),
-    })));
+    const publish = (raised: ReadonlySet<string> = new Set()) =>
+      latest.current.show(
+        [
+          ...listed,
+          ...[...committed.values()].filter(
+            (recovery) => !listed.some((row) => row.momentId === recovery.momentId),
+          ),
+        ].map((recovery) => ({
+          momentId: recovery.momentId,
+          path: recovery.path,
+          title: CAPTURE_RECOVERY_TITLE,
+          message: captureRecoveryMessage(
+            recovery.path,
+            shared.has(recovery.path),
+            recovery.deleted,
+          ),
+          raise: raised.has(recovery.momentId),
+          open: () => {
+            if (committed.has(recovery.momentId)) retireFallback(recovery.momentId);
+            latest.current.openRecovery(recovery.momentId, recovery.path);
+          },
+          dismiss: () => clear(recovery),
+        })),
+      );
 
     const retireFallback = (momentId: string): void => {
       pendingMoments.delete(momentId);
@@ -125,33 +136,55 @@ export function useCaptureRecoveryNotices(input: {
       refresh,
       restored(momentId: string): void {
         reads.next();
-        listed = listed.filter(recovery => recovery.momentId !== momentId);
+        listed = listed.filter((recovery) => recovery.momentId !== momentId);
         retireFallback(momentId);
       },
       async imported(momentId: string, path: string): Promise<void> {
         const request = Symbol(momentId);
         const workspaceRequest = momentReads.current();
         pendingMoments.set(momentId, request);
-        const current = () => pendingMoments.get(momentId) === request && momentReads.isCurrent(workspaceRequest) && here();
+        const current = () =>
+          pendingMoments.get(momentId) === request &&
+          momentReads.isCurrent(workspaceRequest) &&
+          here();
         try {
           await refresh();
           if (!current()) return;
-          const recovery = listed.find(recovery => recovery.momentId === momentId);
-          if (recovery) { publish(new Set([momentId])); return; }
-          const {moment} = await bridge().readEngineMoment({workspaceId, momentId});
+          const recovery = listed.find((recovery) => recovery.momentId === momentId);
+          if (recovery) {
+            publish(new Set([momentId]));
+            return;
+          }
+          const { moment } = await bridge().readEngineMoment({ workspaceId, momentId });
           if (!current()) return;
-          if (!moment?.correlationId) { latest.current.openRecovery(momentId, path); return; }
-          const captured = await bridge().readEngineMoment({workspaceId, momentId: moment.correlationId});
+          if (!moment?.correlationId) {
+            latest.current.openRecovery(momentId, path);
+            return;
+          }
+          const captured = await bridge().readEngineMoment({
+            workspaceId,
+            momentId: moment.correlationId,
+          });
           if (!current()) return;
-          if (!captured.moment) { latest.current.openRecovery(momentId, path); return; }
-          if (!listed.some(recovery => recovery.momentId === momentId)) {
-            committed.set(momentId, {momentId, path: moment.path, deleted: captured.moment.operation === "delete"});
+          if (!captured.moment) {
+            latest.current.openRecovery(momentId, path);
+            return;
+          }
+          if (!listed.some((recovery) => recovery.momentId === momentId)) {
+            committed.set(momentId, {
+              momentId,
+              path: moment.path,
+              deleted: captured.moment.operation === "delete",
+            });
           }
           publish(new Set([momentId]));
         } catch (error) {
           if (!current()) return;
-          latest.current.reportShellError("dohc could not check for typing it kept in History.", error,
-            () => void notices.imported(momentId, path));
+          latest.current.reportShellError(
+            "dohc could not check for typing it kept in History.",
+            error,
+            () => void notices.imported(momentId, path),
+          );
         } finally {
           if (pendingMoments.get(momentId) === request) pendingMoments.delete(momentId);
         }
@@ -161,9 +194,16 @@ export function useCaptureRecoveryNotices(input: {
       // toast again, in the shared words, through the same row. True when a
       // row took it.
       restoreRefused(path: string, error: unknown): boolean {
-        if (!isSharedLiveFileRefusal(error) || !listed.some((recovery) => recovery.path === path)) return false;
+        if (!isSharedLiveFileRefusal(error) || !listed.some((recovery) => recovery.path === path))
+          return false;
         shared.add(path);
-        publish(new Set(listed.filter(recovery => recovery.path === path).map(recovery => recovery.momentId)));
+        publish(
+          new Set(
+            listed
+              .filter((recovery) => recovery.path === path)
+              .map((recovery) => recovery.momentId),
+          ),
+        );
         return true;
       },
     };

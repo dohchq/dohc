@@ -14,7 +14,9 @@ export type ActorHueInput = {
 export function createActorIssuer(serverUrl: string): ActorIssuer {
   const url = new URL(serverUrl);
   if (!/^https?:$/u.test(url.protocol) || url.username || url.password || url.search || url.hash) {
-    throw new TypeError("An actor issuer must be an HTTP or HTTPS server URL without credentials, query, or fragment.");
+    throw new TypeError(
+      "An actor issuer must be an HTTP or HTTPS server URL without credentials, query, or fragment.",
+    );
   }
   // URL normalizes scheme, host, and default ports. Preserve a server's path and non-default port.
   return url.href.replace(/\/+$/u, "") as ActorIssuer;
@@ -39,15 +41,23 @@ type LegacyHumanActorKey = ActorKeyBrand & {
 export type ActorOwnerKey = AccountActorKey | InstallationActorKey | LegacyHumanActorKey;
 
 /** Display grouping only. Never accepts or supplies dataset principalKey authority. */
-export type ActorKey = ActorOwnerKey | (ActorKeyBrand & (
-  | { readonly kind: "agent"; readonly ownerKey: ActorOwnerKey; readonly claimedName: string }
-  | { readonly kind: "automation"; readonly ownerKey: ActorOwnerKey | null; readonly workspaceId: string; readonly automationId: string }
-  | { readonly kind: "remote-automation"; readonly ownerKey: ActorOwnerKey }
-  | { readonly kind: "link"; readonly grantId: string; readonly principalId: string }
-  | { readonly kind: "link"; readonly publicPrincipalId: string }
-  | { readonly kind: "public"; readonly grantId: string; readonly principalId: string }
-  | { readonly kind: "unknown" }
-));
+export type ActorKey =
+  | ActorOwnerKey
+  | (ActorKeyBrand &
+      (
+        | { readonly kind: "agent"; readonly ownerKey: ActorOwnerKey; readonly claimedName: string }
+        | {
+            readonly kind: "automation";
+            readonly ownerKey: ActorOwnerKey | null;
+            readonly workspaceId: string;
+            readonly automationId: string;
+          }
+        | { readonly kind: "remote-automation"; readonly ownerKey: ActorOwnerKey }
+        | { readonly kind: "link"; readonly grantId: string; readonly principalId: string }
+        | { readonly kind: "link"; readonly publicPrincipalId: string }
+        | { readonly kind: "public"; readonly grantId: string; readonly principalId: string }
+        | { readonly kind: "unknown" }
+      ));
 
 export type ActorOrigin = "renderer" | "cli" | "automation" | "unknown";
 
@@ -95,13 +105,17 @@ export function canonicalClaimedName(handshakeName?: string | null): string {
 function localOwner(identity: LocalActorIdentity): ActorOwnerKey {
   return identity.account === null
     ? branded({ kind: "installation" as const, installationId: identity.installationId })
-    : branded({ kind: "account" as const, issuer: createActorIssuer(identity.account.issuer), userId: identity.account.userId });
+    : branded({
+        kind: "account" as const,
+        issuer: createActorIssuer(identity.account.issuer),
+        userId: identity.account.userId,
+      });
 }
 
 function legacyOwner(humanId: string): LegacyHumanActorKey {
   return branded({
     kind: "legacy-human" as const,
-    identityKind: humanId.startsWith("local:") ? "installation" as const : "account" as const,
+    identityKind: humanId.startsWith("local:") ? ("installation" as const) : ("account" as const),
     humanId,
   });
 }
@@ -122,16 +136,34 @@ export function deriveLocalActor(input: {
   const origin = input.origin;
   switch (input.author.kind) {
     case "human":
-      return { key: ownerKey, displayName: input.displayName, origin, assurance: origin === "renderer" ? "local" : "owner-asserted" };
+      return {
+        key: ownerKey,
+        displayName: input.displayName,
+        origin,
+        assurance: origin === "renderer" ? "local" : "owner-asserted",
+      };
     case "agent":
       return {
-        key: branded({ kind: "agent" as const, ownerKey, claimedName: canonicalClaimedName(input.author.claimedName) }),
-        displayName: input.displayName, origin, assurance: "owner-asserted",
+        key: branded({
+          kind: "agent" as const,
+          ownerKey,
+          claimedName: canonicalClaimedName(input.author.claimedName),
+        }),
+        displayName: input.displayName,
+        origin,
+        assurance: "owner-asserted",
       };
     case "automation":
       return {
-        key: branded({ kind: "automation" as const, ownerKey, workspaceId: input.workspaceId, automationId: input.author.automationId }),
-        displayName: input.displayName, origin, assurance: "owner-asserted",
+        key: branded({
+          kind: "automation" as const,
+          ownerKey,
+          workspaceId: input.workspaceId,
+          automationId: input.author.automationId,
+        }),
+        displayName: input.displayName,
+        origin,
+        assurance: "owner-asserted",
       };
   }
 }
@@ -143,39 +175,61 @@ export function deriveLocalActor(input: {
  * run's agent, else as the unnamed agent, as that device does. None is invented here.
  * A link holder is its link grant and link principal, which only the relay writes; it has no account.
  */
-export function deriveRelayChatActor(input: {
-  readonly issuer: ActorIssuer | null;
-  readonly authorUserId?: string;
-  readonly displayName: string;
-  readonly origin?: ActorOrigin;
-} & (
-  | { readonly kind: "agent"; readonly claimedName: string }
-  | { readonly kind: "human" | "automation" }
-  | { readonly kind: "link"; readonly grantId: string; readonly principalId: string }
-)): ActorRef {
+export function deriveRelayChatActor(
+  input: {
+    readonly issuer: ActorIssuer | null;
+    readonly authorUserId?: string;
+    readonly displayName: string;
+    readonly origin?: ActorOrigin;
+  } & (
+    | { readonly kind: "agent"; readonly claimedName: string }
+    | { readonly kind: "human" | "automation" }
+    | { readonly kind: "link"; readonly grantId: string; readonly principalId: string }
+  ),
+): ActorRef {
   const origin = input.origin ?? "unknown";
   if (input.kind === "link") {
-    if (!input.grantId || !input.principalId || input.authorUserId !== undefined) return unknownActor(input.displayName, origin);
+    if (!input.grantId || !input.principalId || input.authorUserId !== undefined)
+      return unknownActor(input.displayName, origin);
     return {
-      key: branded({ kind: "link" as const, grantId: input.grantId, principalId: input.principalId }),
-      displayName: input.displayName, origin, assurance: "relay-verified",
+      key: branded({
+        kind: "link" as const,
+        grantId: input.grantId,
+        principalId: input.principalId,
+      }),
+      displayName: input.displayName,
+      origin,
+      assurance: "relay-verified",
     };
   }
   if (!input.issuer || !input.authorUserId) return unknownActor(input.displayName, origin);
-  const ownerKey = branded({ kind: "account" as const, issuer: createActorIssuer(input.issuer), userId: input.authorUserId });
+  const ownerKey = branded({
+    kind: "account" as const,
+    issuer: createActorIssuer(input.issuer),
+    userId: input.authorUserId,
+  });
   switch (input.kind) {
     case "human":
-      return { key: ownerKey, displayName: input.displayName, origin, assurance: origin === "cli" ? "owner-asserted" : "relay-verified" };
+      return {
+        key: ownerKey,
+        displayName: input.displayName,
+        origin,
+        assurance: origin === "cli" ? "owner-asserted" : "relay-verified",
+      };
     case "agent":
       if (!input.claimedName) return unknownActor(input.displayName, origin);
       return {
         key: branded({ kind: "agent" as const, ownerKey, claimedName: input.claimedName }),
-        displayName: input.displayName, origin, assurance: "owner-asserted",
+        displayName: input.displayName,
+        origin,
+        assurance: "owner-asserted",
       };
     case "automation":
       return {
         key: branded({ kind: "remote-automation" as const, ownerKey }),
-        displayName: input.displayName, origin, assurance: "owner-asserted",
+        displayName: input.displayName,
+        origin,
+        assurance: "owner-asserted",
       };
   }
 }
@@ -185,7 +239,11 @@ type MomentActorContext = {
   /** Required for named authors. An issuer supplies no assurance for received History claims. */
   readonly relayIssuer?: ActorIssuer;
 } & (
-  | { readonly source: "own-store"; readonly identity: LocalActorIdentity; readonly workspaceId: string }
+  | {
+      readonly source: "own-store";
+      readonly identity: LocalActorIdentity;
+      readonly workspaceId: string;
+    }
   | { readonly source: "received" | "legacy" }
 );
 
@@ -199,49 +257,90 @@ type MomentActorContext = {
  * Own-store automation keys retain the workspace and definition ID; assurance is owner-asserted.
  * An absent automation owner stays null. Received named/link authors are also owner-asserted.
  */
-export function deriveMomentActor(author: MomentAuthor, context: MomentActorContext, displayName: string): ActorRef {
+export function deriveMomentActor(
+  author: MomentAuthor,
+  context: MomentActorContext,
+  displayName: string,
+): ActorRef {
   const origin = context.origin ?? "unknown";
   if (author.kind === "unattributed") return unknownActor(displayName, origin);
   if (author.kind === "named") {
     if (!context.relayIssuer) return unknownActor(displayName, origin);
     return {
-      key: branded({ kind: "account" as const, issuer: createActorIssuer(context.relayIssuer), userId: author.userId }),
-      displayName, origin, assurance: context.source === "received" ? "owner-asserted" : "relay-verified",
+      key: branded({
+        kind: "account" as const,
+        issuer: createActorIssuer(context.relayIssuer),
+        userId: author.userId,
+      }),
+      displayName,
+      origin,
+      assurance: context.source === "received" ? "owner-asserted" : "relay-verified",
     };
   }
   if (author.kind === "link" || author.kind === "public") {
     return {
-      key: "publicPrincipalId" in author
-        ? branded({ kind: "link" as const, publicPrincipalId: author.publicPrincipalId })
-        : author.kind === "link"
-          ? branded({ kind: "link" as const, grantId: author.grantId, principalId: author.principalId })
-          : branded({ kind: "public" as const, grantId: author.grantId, principalId: author.principalId }),
-      displayName, origin, assurance: context.source === "received" ? "owner-asserted" : "relay-verified",
+      key:
+        "publicPrincipalId" in author
+          ? branded({ kind: "link" as const, publicPrincipalId: author.publicPrincipalId })
+          : author.kind === "link"
+            ? branded({
+                kind: "link" as const,
+                grantId: author.grantId,
+                principalId: author.principalId,
+              })
+            : branded({
+                kind: "public" as const,
+                grantId: author.grantId,
+                principalId: author.principalId,
+              }),
+      displayName,
+      origin,
+      assurance: context.source === "received" ? "owner-asserted" : "relay-verified",
     };
   }
   const humanId = author.kind === "human" ? author.humanId : author.onBehalfOf;
   if (context.source === "own-store") {
-    const ownerKey = humanId === context.identity.installationId
-      ? localOwner({ ...context.identity, account: null })
-      : humanId && humanId === context.identity.account?.userId
-        ? localOwner(context.identity)
-        : humanId ? legacyOwner(humanId) : null;
+    const ownerKey =
+      humanId === context.identity.installationId
+        ? localOwner({ ...context.identity, account: null })
+        : humanId && humanId === context.identity.account?.userId
+          ? localOwner(context.identity)
+          : humanId
+            ? legacyOwner(humanId)
+            : null;
     if (author.kind === "automation") {
       return {
-        key: branded({ kind: "automation" as const, ownerKey, workspaceId: context.workspaceId, automationId: author.automationId }),
-        displayName, origin, assurance: "owner-asserted",
+        key: branded({
+          kind: "automation" as const,
+          ownerKey,
+          workspaceId: context.workspaceId,
+          automationId: author.automationId,
+        }),
+        displayName,
+        origin,
+        assurance: "owner-asserted",
       };
     }
     if (ownerKey && ownerKey.kind !== "legacy-human") {
       return author.kind === "human"
         ? {
-            key: ownerKey, displayName, origin,
-            assurance: ownerKey.kind === "installation" && (origin === "renderer" || origin === "unknown")
-              ? "local" : "owner-asserted",
+            key: ownerKey,
+            displayName,
+            origin,
+            assurance:
+              ownerKey.kind === "installation" && (origin === "renderer" || origin === "unknown")
+                ? "local"
+                : "owner-asserted",
           }
         : {
-            key: branded({ kind: "agent" as const, ownerKey, claimedName: canonicalClaimedName(author.agentId) }),
-            displayName, origin, assurance: "owner-asserted",
+            key: branded({
+              kind: "agent" as const,
+              ownerKey,
+              claimedName: canonicalClaimedName(author.agentId),
+            }),
+            displayName,
+            origin,
+            assurance: "owner-asserted",
           };
     }
   }
@@ -255,17 +354,30 @@ export function deriveMomentActor(author: MomentAuthor, context: MomentActorCont
       return { key: ownerKey, displayName, origin, assurance };
     case "agent":
       return {
-        key: branded({ kind: "agent" as const, ownerKey, claimedName: canonicalClaimedName(author.agentId) }),
-        displayName, origin, assurance,
+        key: branded({
+          kind: "agent" as const,
+          ownerKey,
+          claimedName: canonicalClaimedName(author.agentId),
+        }),
+        displayName,
+        origin,
+        assurance,
       };
     case "automation":
       // Received or old rows cannot establish a local automation identity.
-      return { key: branded({ kind: "remote-automation" as const, ownerKey }), displayName, origin, assurance };
+      return {
+        key: branded({ kind: "remote-automation" as const, ownerKey }),
+        displayName,
+        origin,
+        assurance,
+      };
   }
 }
 
 function hasFields(row: Record<string, unknown>, fields: readonly string[]): boolean {
-  return Object.keys(row).length === fields.length && fields.every(field => Object.hasOwn(row, field));
+  return (
+    Object.keys(row).length === fields.length && fields.every((field) => Object.hasOwn(row, field))
+  );
 }
 
 function nonempty(value: unknown): value is string {
@@ -273,10 +385,18 @@ function nonempty(value: unknown): value is string {
 }
 
 function decodeOwnerKey(value: unknown): ActorOwnerKey | null {
-  if (typeof value !== "object" || value === null || !("kind" in value) ||
-    (value.kind !== "account" && value.kind !== "installation" && value.kind !== "legacy-human")) return null;
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("kind" in value) ||
+    (value.kind !== "account" && value.kind !== "installation" && value.kind !== "legacy-human")
+  )
+    return null;
   const key = decodeActorKey(value);
-  return key && (key.kind === "account" || key.kind === "installation" || key.kind === "legacy-human") ? key : null;
+  return key &&
+    (key.kind === "account" || key.kind === "installation" || key.kind === "legacy-human")
+    ? key
+    : null;
 }
 
 // Reconstruct every variant in canonical order. Serialized fields contain no brand or assurance.
@@ -285,26 +405,49 @@ function decodeActorKey(value: unknown): ActorKey | null {
   const row = value as Record<string, unknown>;
   switch (row.kind) {
     case "account":
-      if (!hasFields(row, ["kind", "issuer", "userId"]) || !nonempty(row.issuer) || !nonempty(row.userId)) return null;
-      return branded({ kind: "account" as const, issuer: createActorIssuer(row.issuer), userId: row.userId });
+      if (
+        !hasFields(row, ["kind", "issuer", "userId"]) ||
+        !nonempty(row.issuer) ||
+        !nonempty(row.userId)
+      )
+        return null;
+      return branded({
+        kind: "account" as const,
+        issuer: createActorIssuer(row.issuer),
+        userId: row.userId,
+      });
     case "installation":
       if (!hasFields(row, ["kind", "installationId"]) || !nonempty(row.installationId)) return null;
       return branded({ kind: "installation" as const, installationId: row.installationId });
     case "legacy-human": {
-      if (!hasFields(row, ["kind", "identityKind", "humanId"]) || !nonempty(row.humanId)) return null;
+      if (!hasFields(row, ["kind", "identityKind", "humanId"]) || !nonempty(row.humanId))
+        return null;
       const key = legacyOwner(row.humanId);
       return key.identityKind === row.identityKind ? key : null;
     }
     case "agent": {
-      if (!hasFields(row, ["kind", "ownerKey", "claimedName"]) || !nonempty(row.claimedName)) return null;
+      if (!hasFields(row, ["kind", "ownerKey", "claimedName"]) || !nonempty(row.claimedName))
+        return null;
       const ownerKey = decodeOwnerKey(row.ownerKey);
-      return ownerKey ? branded({ kind: "agent" as const, ownerKey, claimedName: row.claimedName }) : null;
+      return ownerKey
+        ? branded({ kind: "agent" as const, ownerKey, claimedName: row.claimedName })
+        : null;
     }
     case "automation": {
-      if (!hasFields(row, ["kind", "ownerKey", "workspaceId", "automationId"]) || !nonempty(row.workspaceId) || !nonempty(row.automationId)) return null;
+      if (
+        !hasFields(row, ["kind", "ownerKey", "workspaceId", "automationId"]) ||
+        !nonempty(row.workspaceId) ||
+        !nonempty(row.automationId)
+      )
+        return null;
       const ownerKey = row.ownerKey === null ? null : decodeOwnerKey(row.ownerKey);
       if (row.ownerKey !== null && ownerKey === null) return null;
-      return branded({ kind: "automation" as const, ownerKey, workspaceId: row.workspaceId, automationId: row.automationId });
+      return branded({
+        kind: "automation" as const,
+        ownerKey,
+        workspaceId: row.workspaceId,
+        automationId: row.automationId,
+      });
     }
     case "remote-automation": {
       if (!hasFields(row, ["kind", "ownerKey"])) return null;
@@ -316,21 +459,43 @@ function decodeActorKey(value: unknown): ActorKey | null {
         return branded({ kind: "link" as const, publicPrincipalId: row.publicPrincipalId });
       }
       // A direct link write names its grant and internal participant.
-      if (!hasFields(row, ["kind", "grantId", "principalId"]) || !nonempty(row.grantId) || !nonempty(row.principalId)) return null;
+      if (
+        !hasFields(row, ["kind", "grantId", "principalId"]) ||
+        !nonempty(row.grantId) ||
+        !nonempty(row.principalId)
+      )
+        return null;
       return branded({ kind: "link" as const, grantId: row.grantId, principalId: row.principalId });
     case "public":
-      if (!hasFields(row, ["kind", "grantId", "principalId"]) || !nonempty(row.grantId) || !nonempty(row.principalId)) return null;
+      if (
+        !hasFields(row, ["kind", "grantId", "principalId"]) ||
+        !nonempty(row.grantId) ||
+        !nonempty(row.principalId)
+      )
+        return null;
       return branded({ kind: row.kind, grantId: row.grantId, principalId: row.principalId });
     case "unknown":
       return hasFields(row, ["kind"]) ? branded({ kind: "unknown" as const }) : null;
-    default: return null;
+    default:
+      return null;
   }
 }
 
 // The property list fixes field order for every variant, including nested owner objects.
 const actorKeyFields = [
-  "kind", "issuer", "userId", "installationId", "identityKind", "humanId",
-  "ownerKey", "claimedName", "workspaceId", "automationId", "grantId", "principalId", "publicPrincipalId",
+  "kind",
+  "issuer",
+  "userId",
+  "installationId",
+  "identityKind",
+  "humanId",
+  "ownerKey",
+  "claimedName",
+  "workspaceId",
+  "automationId",
+  "grantId",
+  "principalId",
+  "publicPrincipalId",
 ];
 
 /** Local storage only. Branded keys already carry normalized issuers; serialization does not parse them again. */
@@ -363,15 +528,35 @@ function hueInput(value: string): ActorHueInput {
 /** Color input only; equal colors never make two identities equal. Hash the returned value. */
 export function actorHueInput(key: ActorKey): ActorHueInput | null {
   switch (key.kind) {
-    case "account": return hueInput(key.userId);
-    case "installation": return hueInput(key.installationId);
-    case "legacy-human": return hueInput(key.humanId);
-    case "agent": return hueInput(JSON.stringify(["agent", actorHueInput(key.ownerKey)?.value, key.claimedName]));
-    case "automation": return hueInput(JSON.stringify(["automation", key.ownerKey ? actorHueInput(key.ownerKey)?.value : null, key.workspaceId, key.automationId]));
-    case "remote-automation": return hueInput(JSON.stringify(["remote-automation", actorHueInput(key.ownerKey)?.value]));
+    case "account":
+      return hueInput(key.userId);
+    case "installation":
+      return hueInput(key.installationId);
+    case "legacy-human":
+      return hueInput(key.humanId);
+    case "agent":
+      return hueInput(
+        JSON.stringify(["agent", actorHueInput(key.ownerKey)?.value, key.claimedName]),
+      );
+    case "automation":
+      return hueInput(
+        JSON.stringify([
+          "automation",
+          key.ownerKey ? actorHueInput(key.ownerKey)?.value : null,
+          key.workspaceId,
+          key.automationId,
+        ]),
+      );
+    case "remote-automation":
+      return hueInput(JSON.stringify(["remote-automation", actorHueInput(key.ownerKey)?.value]));
     // Link sessions remain distinct; their hues share the grant input.
-    case "link": return hueInput(JSON.stringify(["link", "publicPrincipalId" in key ? key.publicPrincipalId : key.grantId]));
-    case "public": return hueInput(JSON.stringify(["public", key.grantId, key.principalId]));
-    case "unknown": return null;
+    case "link":
+      return hueInput(
+        JSON.stringify(["link", "publicPrincipalId" in key ? key.publicPrincipalId : key.grantId]),
+      );
+    case "public":
+      return hueInput(JSON.stringify(["public", key.grantId, key.principalId]));
+    case "unknown":
+      return null;
   }
 }

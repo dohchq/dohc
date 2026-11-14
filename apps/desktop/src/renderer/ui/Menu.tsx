@@ -40,7 +40,8 @@ export const MENU_SEPARATOR = "separator";
 /** A label over the rows that follow it, up to the next label. The rows are its group. */
 export type MenuSectionLabel = { section: string };
 export type MenuEntry = MenuItem | typeof MENU_SEPARATOR | MenuSectionLabel;
-const isSectionLabel = (entry: MenuEntry): entry is MenuSectionLabel => entry !== MENU_SEPARATOR && "section" in entry;
+const isSectionLabel = (entry: MenuEntry): entry is MenuSectionLabel =>
+  entry !== MENU_SEPARATOR && "section" in entry;
 
 /** What the menu needs on its trigger. Spread it onto the owner's button. */
 export type MenuTriggerProps = {
@@ -72,7 +73,11 @@ export const MENU_FRAME = "dohc-popover overflow-y-auto rounded-lg border border
  */
 export const MENU_ROW =
   "flex min-h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75";
-export const MENU_ROW_TONE = { rest: "text-muted", current: "bg-selected text-ink font-medium", danger: "text-danger" };
+export const MENU_ROW_TONE = {
+  rest: "text-muted",
+  current: "bg-selected text-ink font-medium",
+  danger: "text-danger",
+};
 /**
  * The active option of a list whose focus stays on its frame, with
  * aria-activedescendant naming the option: the selected fill, whether the
@@ -86,8 +91,7 @@ export const MENU_ACTIVE_OPTION = "data-active:bg-selected";
  * into. While the keyboard moves, it adds the row's accent line, which tells
  * the two apart.
  */
-export const MENU_ACTIVE_OPTION_BESIDE_CURRENT =
-  `${MENU_ACTIVE_OPTION} keyboard:data-active:outline-1 keyboard:data-active:-outline-offset-1 keyboard:data-active:outline-accent`;
+export const MENU_ACTIVE_OPTION_BESIDE_CURRENT = `${MENU_ACTIVE_OPTION} keyboard:data-active:outline-1 keyboard:data-active:-outline-offset-1 keyboard:data-active:outline-accent`;
 /** The leading icon column; a destructive row keeps its own color here. */
 export const MENU_ICON = "grid size-3.5 shrink-0 place-items-center";
 export const MENU_LABEL = "min-w-0 flex-1 truncate";
@@ -114,8 +118,13 @@ export const MENU_SHORTCUT = "shrink-0 font-sans text-[12px] text-subtle";
  * front of the person labels it: ⌫ on macOS, where that key is Backspace,
  * and Del elsewhere. `keys` is the row's aria-keyshortcuts.
  */
-export function deleteShortcut(platform = window.dohcDesktop?.platform): { label: string; keys: string } {
-  return platform === "darwin" ? { label: "⌫", keys: "Backspace" } : { label: "Del", keys: "Delete" };
+export function deleteShortcut(platform = window.dohcDesktop?.platform): {
+  label: string;
+  keys: string;
+} {
+  return platform === "darwin"
+    ? { label: "⌫", keys: "Backspace" }
+    : { label: "Del", keys: "Delete" };
 }
 
 /**
@@ -126,11 +135,16 @@ export function deleteShortcut(platform = window.dohcDesktop?.platform): { label
  * For a list whose focus stays on its frame; a row that takes focus is
  * revealed by the browser.
  */
-export function revealMenuRow(list: HTMLElement, row: HTMLElement | null | undefined, start: HTMLElement | null = row ?? null): void {
+export function revealMenuRow(
+  list: HTMLElement,
+  row: HTMLElement | null | undefined,
+  start: HTMLElement | null = row ?? null,
+): void {
   if (!row || !start) return;
   const style = list.ownerDocument.defaultView?.getComputedStyle(list);
   const top = start.offsetTop - (Number.parseFloat(style?.paddingTop ?? "") || 0);
-  const bottom = row.offsetTop + row.offsetHeight + (Number.parseFloat(style?.paddingBottom ?? "") || 0);
+  const bottom =
+    row.offsetTop + row.offsetHeight + (Number.parseFloat(style?.paddingBottom ?? "") || 0);
   if (top < list.scrollTop) list.scrollTop = Math.max(0, top);
   else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
 }
@@ -168,7 +182,8 @@ export function moveInMenu(
   if (key === "ArrowUp") return wrap(current - 1);
   if (key === "Home") return 0;
   if (key === "End") return count - 1;
-  if (key.length !== 1 || key === " " || event.ctrlKey || event.metaKey || event.altKey) return null;
+  if (key.length !== 1 || key === " " || event.ctrlKey || event.metaKey || event.altKey)
+    return null;
   const letter = key.toLocaleLowerCase();
   for (let step = 1; step <= count; step += 1) {
     const index = wrap(current + step);
@@ -189,7 +204,11 @@ const ROW_FOCUS = { besideCurrent: "dohc-focus-row", alone: "focus-visible:outli
 // Hover paints only after the pointer moves, so a menu opened from the
 // keyboard under a still pointer shows one active row.
 const ROW_TONE = {
-  rest: { base: MENU_ROW_TONE.rest, marked: "focus:text-ink", hover: "hover:bg-hover hover:text-ink" },
+  rest: {
+    base: MENU_ROW_TONE.rest,
+    marked: "focus:text-ink",
+    hover: "hover:bg-hover hover:text-ink",
+  },
   current: { base: MENU_ROW_TONE.current, marked: "", hover: "" },
   danger: { base: MENU_ROW_TONE.danger, marked: "", hover: "hover:bg-hover" },
 };
@@ -227,7 +246,6 @@ export function Menu(props: {
   at?: { x: number; y: number };
   /** A menu the keyboard opened away from its trigger, such as a context menu, marks the row it opens on at once. A trigger's own keys mark it themselves. */
   fromKeyboard?: boolean;
-  /** The default trigger's test id. */
   testId?: string;
   /** The default trigger stays in its place but cannot open the list. */
   disabled?: boolean;
@@ -255,7 +273,9 @@ export function Menu(props: {
   const [marked, setMarked] = useState(false);
   useDismiss({ open, container, trigger, onClose: () => onOpenChange(false) });
 
-  const rows = props.items.filter((entry): entry is MenuItem => entry !== MENU_SEPARATOR && !isSectionLabel(entry));
+  const rows = props.items.filter(
+    (entry): entry is MenuItem => entry !== MENU_SEPARATOR && !isSectionLabel(entry),
+  );
   const count = rows.length;
   // The row focus starts on: the checked one, where Enter keeps things as they are.
   const checkedRow = rows.findIndex((row) => row.checked === true);
@@ -264,7 +284,9 @@ export function Menu(props: {
   const descriptionId = useId();
   // One leading column for every row when any row needs it, so labels line up.
   const lead = rows.some((row) => row.icon !== undefined || row.checked !== undefined);
-  const rowFocus = rows.some((row) => row.current || row.checked) ? ROW_FOCUS.besideCurrent : ROW_FOCUS.alone;
+  const rowFocus = rows.some((row) => row.current || row.checked)
+    ? ROW_FOCUS.besideCurrent
+    : ROW_FOCUS.alone;
 
   // Measured before the first paint, at its full height, so the side with
   // room is known before anything shows. A context menu's point is a trigger
@@ -275,16 +297,19 @@ export function Menu(props: {
     if (!open) return;
     if (fromKeyboard) setMarked(true);
     if (props.topLayer) list.current?.showPopover?.();
-    const box = at ? { left: at.x, right: at.x, top: at.y, bottom: at.y } : trigger.current?.getBoundingClientRect();
+    const box = at
+      ? { left: at.x, right: at.x, top: at.y, bottom: at.y }
+      : trigger.current?.getBoundingClientRect();
     // A context menu places at its point; a trigger's list opens under or over its anchor when it has one.
-    const edge = at ? box : props.anchor?.current?.getBoundingClientRect() ?? box;
+    const edge = at ? box : (props.anchor?.current?.getBoundingClientRect() ?? box);
     const gap = at ? 0 : MENU_GAP_PX;
     const height = list.current?.offsetHeight ?? 0;
     if (box && edge) {
       // A context menu's list starts at its point, as a trigger's does at "start".
-      const left = at || props.align === "start"
-        ? Math.max(MENU_EDGE_PX, Math.min(box.left, window.innerWidth - MENU_EDGE_PX - width))
-        : Math.max(MENU_EDGE_PX, Math.min(box.right, window.innerWidth - MENU_EDGE_PX) - width);
+      const left =
+        at || props.align === "start"
+          ? Math.max(MENU_EDGE_PX, Math.min(box.left, window.innerWidth - MENU_EDGE_PX - width))
+          : Math.max(MENU_EDGE_PX, Math.min(box.right, window.innerWidth - MENU_EDGE_PX) - width);
       const below = window.innerHeight - edge.bottom - gap - MENU_EDGE_PX;
       const above = edge.top - gap - MENU_EDGE_PX;
       setPlace(
@@ -334,10 +359,18 @@ export function Menu(props: {
     // marks the first row and Up the last. A list that opened on its checked
     // row moves from there.
     const from = marked || checkedRow >= 0 ? current() : event.key === "ArrowUp" ? count : -1;
-    const next = arrow || letter || event.key === "Home" || event.key === "End"
-      ? moveInMenu(event, from, rows.map((row, index) =>
-        typeof row.label === "string" ? row.label : rowElements.current[index]?.textContent ?? ""))
-      : null;
+    const next =
+      arrow || letter || event.key === "Home" || event.key === "End"
+        ? moveInMenu(
+            event,
+            from,
+            rows.map((row, index) =>
+              typeof row.label === "string"
+                ? row.label
+                : (rowElements.current[index]?.textContent ?? ""),
+            ),
+          )
+        : null;
     if (next !== null) {
       if (!letter) event.preventDefault();
       setMarked(true);
@@ -372,7 +405,10 @@ export function Menu(props: {
   };
 
   // Rows under a label are its group; rows before the first label stand alone.
-  const sections: Array<{ label: string | null; entries: Array<{ entry: MenuItem | typeof MENU_SEPARATOR; entryIndex: number }> }> = [];
+  const sections: Array<{
+    label: string | null;
+    entries: Array<{ entry: MenuItem | typeof MENU_SEPARATOR; entryIndex: number }>;
+  }> = [];
   props.items.forEach((entry, entryIndex) => {
     if (isSectionLabel(entry)) sections.push({ label: entry.section, entries: [] });
     else {
@@ -387,7 +423,14 @@ export function Menu(props: {
       {at ? null : props.trigger ? (
         props.trigger(triggerProps)
       ) : (
-        <IconButton {...triggerProps} disabled={props.disabled} data-testid={props.testId} aria-label={props.label} title={props.label} className="shrink-0">
+        <IconButton
+          {...triggerProps}
+          disabled={props.disabled}
+          data-testid={props.testId}
+          aria-label={props.label}
+          title={props.label}
+          className="shrink-0"
+        >
           <MoreHorizontal size={14} aria-hidden />
         </IconButton>
       )}
@@ -408,85 +451,120 @@ export function Menu(props: {
           onMouseMove={(event) => {
             if (!pointerMoved && movedPointer(event)) setPointerMoved(true);
           }}
-          style={{
-            width,
-            ...(props.topLayer ? { margin: 0, inset: "auto" } : {}),
-            ...(place
-              ? {
-                  left: place.left,
-                  top: place.top,
-                  bottom: place.bottom,
-                  maxHeight: place.maxHeight,
-                  // The list enters from its trigger's side.
-                  ...menuEnterFrom(place.above ? "above" : "below"),
-                }
-              : { left: 0, top: 0 }),
-          } as CSSProperties}
+          style={
+            {
+              width,
+              ...(props.topLayer ? { margin: 0, inset: "auto" } : {}),
+              ...(place
+                ? {
+                    left: place.left,
+                    top: place.top,
+                    bottom: place.bottom,
+                    maxHeight: place.maxHeight,
+                    // The list enters from its trigger's side.
+                    ...menuEnterFrom(place.above ? "above" : "below"),
+                  }
+                : { left: 0, top: 0 }),
+            } as CSSProperties
+          }
           className={`${MENU_FRAME} fixed z-40 ${place ? MENU_ENTER : ""}`}
         >
           {sections.map((section, sectionIndex) => {
             const sectionRows = section.entries.map(({ entry, entryIndex }) => {
-            if (entry === MENU_SEPARATOR) {
-              return <div key={`separator-${entryIndex}`} role="separator" className={MENU_SEPARATOR_LINE} />;
-            }
-            const index = rowIndex++;
-            const setElement = (element: HTMLElement | null) => {
-              rowElements.current[index] = element;
-            };
-            const tone = entry.danger ? ROW_TONE.danger : entry.current || entry.checked ? ROW_TONE.current : ROW_TONE.rest;
-            const hover = pointerMoved ? tone.hover : "";
-            const dim = entry.disabled ? "opacity-50" : "";
-            const describedBy = entry.description ? `${descriptionId}-${index}` : undefined;
-            return (
-              <button
-                key={entry.id}
-                ref={setElement}
-                type="button"
-                role={entry.checked === undefined ? "menuitem" : "menuitemradio"}
-                aria-checked={entry.checked}
-                aria-current={entry.current || undefined}
-                aria-disabled={entry.disabled || undefined}
-                aria-keyshortcuts={entry.shortcut?.keys}
-                aria-describedby={describedBy}
-                title={entry.title}
-                data-testid={entry.testId}
-                {...entry.data}
-                tabIndex={-1}
-                // Hover and the keyboard share one active row, but only a
-                // pointer that moves takes focus. A row that opens under a
-                // still pointer leaves focus where the menu opened.
-                onMouseMove={(event) => {
-                  if (movedPointer(event) && document.activeElement !== event.currentTarget) {
-                    event.currentTarget.focus();
-                  }
-                }}
-                onClick={() => pick(entry)}
-                className={`${MENU_ROW} ${rowFocus} ${tone.base} ${marked ? `${MARKED} ${tone.marked}` : "outline-none"} ${hover} ${describedBy ? "py-1" : ""}`}
-              >
-                {lead ? (
-                  // Beside a description, the icon sits on the label's line.
-                  <span className={`${MENU_ICON} ${entry.danger ? "" : "text-subtle"} ${dim} ${describedBy ? "mt-[3px] self-start" : ""}`}>
-                    {entry.checked === undefined ? entry.icon : entry.checked ? <Check size={14} aria-hidden className="text-accent" /> : null}
-                  </span>
-                ) : null}
-                {describedBy ? (
-                  <span className="min-w-0 flex-1">
-                    <span className={`block truncate leading-5 ${dim}`}>{entry.label}</span>
-                    {/* The row is named by its label; this line is its description. */}
-                    <span id={describedBy} aria-hidden className="block text-[12px] leading-4 text-muted">{entry.description}</span>
-                  </span>
-                ) : (
-                  <span className={`${MENU_LABEL} ${dim}`}>{entry.label}</span>
-                )}
-                {entry.shortcut ? <kbd aria-hidden className={`${MENU_SHORTCUT} ${dim}`}>{entry.shortcut.label}</kbd> : null}
-              </button>
-            );
+              if (entry === MENU_SEPARATOR) {
+                return (
+                  <div
+                    key={`separator-${entryIndex}`}
+                    role="separator"
+                    className={MENU_SEPARATOR_LINE}
+                  />
+                );
+              }
+              const index = rowIndex++;
+              const setElement = (element: HTMLElement | null) => {
+                rowElements.current[index] = element;
+              };
+              const tone = entry.danger
+                ? ROW_TONE.danger
+                : entry.current || entry.checked
+                  ? ROW_TONE.current
+                  : ROW_TONE.rest;
+              const hover = pointerMoved ? tone.hover : "";
+              const dim = entry.disabled ? "opacity-50" : "";
+              const describedBy = entry.description ? `${descriptionId}-${index}` : undefined;
+              return (
+                <button
+                  key={entry.id}
+                  ref={setElement}
+                  type="button"
+                  role={entry.checked === undefined ? "menuitem" : "menuitemradio"}
+                  aria-checked={entry.checked}
+                  aria-current={entry.current || undefined}
+                  aria-disabled={entry.disabled || undefined}
+                  aria-keyshortcuts={entry.shortcut?.keys}
+                  aria-describedby={describedBy}
+                  title={entry.title}
+                  data-testid={entry.testId}
+                  {...entry.data}
+                  tabIndex={-1}
+                  // Hover and the keyboard share one active row, but only a
+                  // pointer that moves takes focus. A row that opens under a
+                  // still pointer leaves focus where the menu opened.
+                  onMouseMove={(event) => {
+                    if (movedPointer(event) && document.activeElement !== event.currentTarget) {
+                      event.currentTarget.focus();
+                    }
+                  }}
+                  onClick={() => pick(entry)}
+                  className={`${MENU_ROW} ${rowFocus} ${tone.base} ${marked ? `${MARKED} ${tone.marked}` : "outline-none"} ${hover} ${describedBy ? "py-1" : ""}`}
+                >
+                  {lead ? (
+                    // Beside a description, the icon sits on the label's line.
+                    <span
+                      className={`${MENU_ICON} ${entry.danger ? "" : "text-subtle"} ${dim} ${describedBy ? "mt-[3px] self-start" : ""}`}
+                    >
+                      {entry.checked === undefined ? (
+                        entry.icon
+                      ) : entry.checked ? (
+                        <Check size={14} aria-hidden className="text-accent" />
+                      ) : null}
+                    </span>
+                  ) : null}
+                  {describedBy ? (
+                    <span className="min-w-0 flex-1">
+                      <span className={`block truncate leading-5 ${dim}`}>{entry.label}</span>
+                      {/* The row is named by its label; this line is its description. */}
+                      <span
+                        id={describedBy}
+                        aria-hidden
+                        className="block text-[12px] leading-4 text-muted"
+                      >
+                        {entry.description}
+                      </span>
+                    </span>
+                  ) : (
+                    <span className={`${MENU_LABEL} ${dim}`}>{entry.label}</span>
+                  )}
+                  {entry.shortcut ? (
+                    <kbd aria-hidden className={`${MENU_SHORTCUT} ${dim}`}>
+                      {entry.shortcut.label}
+                    </kbd>
+                  ) : null}
+                </button>
+              );
             });
             if (section.label === null) return sectionRows;
             const labelId = `${descriptionId}-section-${sectionIndex}`;
             return (
-              <div key={labelId} role="group" aria-labelledby={labelId} className={sectionIndex > 0 ? "mt-1" : undefined}>
-                <div id={labelId} className={MENU_SECTION}>{section.label}</div>
+              <div
+                key={labelId}
+                role="group"
+                aria-labelledby={labelId}
+                className={sectionIndex > 0 ? "mt-1" : undefined}
+              >
+                <div id={labelId} className={MENU_SECTION}>
+                  {section.label}
+                </div>
                 {sectionRows}
               </div>
             );

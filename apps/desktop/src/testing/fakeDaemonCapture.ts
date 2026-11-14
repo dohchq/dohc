@@ -19,22 +19,17 @@ type JsonObject = { [key: string]: JsonValue | undefined };
 /**
  * The daemon's disk side, in front of a `VersionedLoopbackEngine`.
  *
- * The desktop capture chain no longer reads or writes the workspace folder on
- * capture: the Rust daemon watches the folder, ingests it on `capture.flush`,
- * and rewrites it after `versions.setActive`, a merge into the active
- * version, and a conflict resolution. The loopback models only the store, so
- * a chain-side test that exercises those operations sees no disk effect at
- * all. This fake adds the disk half the daemon owns, with the same rules the
- * daemon applies:
+ * The Rust daemon, not the desktop capture chain, reads and writes the
+ * workspace folder. The loopback models only the store, so this fake adds the
+ * disk half the daemon owns, with the daemon's rules:
  *
  * - `capture.flush` and `capture.reconcile` scan the root and ingest every
  *   policy-tracked path into the active version (text, binary, and secret
  *   files by the same classification as `readDiskTextState`), retiring paths
  *   the store tracks that the disk no longer holds. A path under a live
  *   `ydoc.open` lease is left alone, as `ensure_capture_target_not_leased`
- *   does. Bytes the chain itself just wrote (a self-write) are ingested like
- *   any other; the store's content-equality no-op keeps them from becoming a
- *   second moment.
+ *   does. The store's content-equality no-op keeps bytes the chain itself
+ *   just wrote from becoming a second moment.
  * - `versions.setActive` ingests the outgoing version first (the fence), then
  *   rewrites the folder to the incoming version's text, binary, and secret
  *   heads and removes paths the incoming version lacks.
@@ -76,7 +71,10 @@ async function readSecret(
  * engine checks the path and swaps a temp in, which a scratch disk needs no
  * more than a plain write for.
  */
-export async function replaceFileOnScratchDisk(rootPath: string, request: Request): Promise<Response> {
+export async function replaceFileOnScratchDisk(
+  rootPath: string,
+  request: Request,
+): Promise<Response> {
   const params = request.params as Record<string, JsonValue | undefined>;
   const target = join(rootPath, String(params.path));
   await mkdir(dirname(target), { recursive: true });
@@ -126,9 +124,9 @@ export function createFakeDaemonCapture(input: {
     return "main";
   }
 
-  async function listText(versionId: string): Promise<
-    Array<{ path: string; contentKind: "text" | "binary"; sha256: string }>
-  > {
+  async function listText(
+    versionId: string,
+  ): Promise<Array<{ path: string; contentKind: "text" | "binary"; sha256: string }>> {
     const files: Array<{ path: string; contentKind: "text" | "binary"; sha256: string }> = [];
     let afterPath: string | undefined;
     do {
@@ -327,8 +325,17 @@ export function createFakeDaemonCapture(input: {
         case "capture.reconcile":
         case "capture.retry": {
           await ingest(await activeVersionId());
-          const result = { deferredWrites: [], settled: true, running: true, degraded: false, heldFiles: [] };
-          return { id: request.id, result: request.method === "capture.retry" ? { ...result, restarted: false } : result };
+          const result = {
+            deferredWrites: [],
+            settled: true,
+            running: true,
+            degraded: false,
+            heldFiles: [],
+          };
+          return {
+            id: request.id,
+            result: request.method === "capture.retry" ? { ...result, restarted: false } : result,
+          };
         }
         case VERSIONED_METHOD.textWrite:
         case VERSIONED_METHOD.textWriteBlob:
@@ -337,26 +344,35 @@ export function createFakeDaemonCapture(input: {
           const response = await loopback.sendRequest(request);
           const result = response.result as { materializeOutcome?: string };
           const key = request.idempotencyKey ?? null;
-          if (result.materializeOutcome === "applied" &&
-              (!key || !publishedRequests.has(key)) &&
-              String(params.versionId) === await activeVersionId()) {
+          if (
+            result.materializeOutcome === "applied" &&
+            (!key || !publishedRequests.has(key)) &&
+            String(params.versionId) === (await activeVersionId())
+          ) {
             await writeHead(String(params.versionId), String(params.path));
             if (key) publishedRequests.add(key);
           }
           return response;
         }
         case VERSIONED_METHOD.textDelete: {
-            if (typeof params.expectedSha256 === "string") {
-              const disk = await readDiskContent(join(rootPath, String(params.path)));
-              if ((disk.kind !== "text" && disk.kind !== "binary") || disk.sha256 !== params.expectedSha256) {
-                throw Object.assign(new Error("write-precondition-failed"), {
-                  wireError: { code: "INVALID_PARAMS", message: "write-precondition-failed", retry: "no" },
-                });
-              }
-              const response = await loopback.sendRequest(request);
-              await rm(join(rootPath, String(params.path)));
-              return response;
+          if (typeof params.expectedSha256 === "string") {
+            const disk = await readDiskContent(join(rootPath, String(params.path)));
+            if (
+              (disk.kind !== "text" && disk.kind !== "binary") ||
+              disk.sha256 !== params.expectedSha256
+            ) {
+              throw Object.assign(new Error("write-precondition-failed"), {
+                wireError: {
+                  code: "INVALID_PARAMS",
+                  message: "write-precondition-failed",
+                  retry: "no",
+                },
+              });
             }
+            const response = await loopback.sendRequest(request);
+            await rm(join(rootPath, String(params.path)));
+            return response;
+          }
           // Like the engine, confirm the caller's absence against the disk.
           if (params.onlyIfAbsentOnDisk === true) {
             const present = await lstat(join(rootPath, String(params.path))).then(
@@ -408,9 +424,15 @@ export function createFakeDaemonCapture(input: {
           // A fixture's check-then-rename: nothing races it on a test's scratch disk.
           const from = join(rootPath, String(params.fromPath));
           const to = join(rootPath, String(params.toPath));
-          const present = (absolute: string) => lstat(absolute).then(() => true, () => false);
-          if (await present(to)) return { id: request.id, result: { moved: false, reason: "destination-exists" } };
-          if (!(await present(from))) return { id: request.id, result: { moved: false, reason: "source-missing" } };
+          const present = (absolute: string) =>
+            lstat(absolute).then(
+              () => true,
+              () => false,
+            );
+          if (await present(to))
+            return { id: request.id, result: { moved: false, reason: "destination-exists" } };
+          if (!(await present(from)))
+            return { id: request.id, result: { moved: false, reason: "source-missing" } };
           await rename(from, to);
           return { id: request.id, result: { moved: true } };
         }

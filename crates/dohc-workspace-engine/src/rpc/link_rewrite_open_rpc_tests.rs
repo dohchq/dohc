@@ -252,15 +252,13 @@ async fn open_session_proof(mutate: bool, timing_file: &str) {
         );
     }
     f.service.workspace_close(Some(f.handle)).await.unwrap();
-    if !mutate {
-        if let Ok(dir) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(
-                std::path::Path::new(&dir).join(timing_file),
-                json!({"forwardNs":forward_ns,"undoNs":undo_ns}).to_string(),
-            )
-            .unwrap();
-        }
+    if !mutate && let Ok(dir) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            std::path::Path::new(&dir).join(timing_file),
+            json!({"forwardNs":forward_ns,"undoNs":undo_ns}).to_string(),
+        )
+        .unwrap();
     }
     assert!(stays_open, "Undo closed the write member's session");
     assert!(inverse_resync);

@@ -6,10 +6,16 @@ import { expect, type Locator } from "@playwright/test";
 
 /** The cells under the column named `field`, one for each record on the page. */
 export async function fieldCells(collection: Locator, field: string): Promise<Locator> {
-  const header = collection.getByRole("columnheader").filter({ has: collection.page().getByText(field, { exact: true }) });
+  const header = collection
+    .getByRole("columnheader")
+    .filter({ has: collection.page().getByText(field, { exact: true }) });
   await expect(header).toHaveCount(1, { timeout: 30_000 });
-  const column = await header.evaluate(element => [...element.parentElement!.children].indexOf(element));
-  return collection.locator(`[role="row"][data-index] > [role="gridcell"]:nth-child(${column + 1})`);
+  const column = await header.evaluate((element) =>
+    [...element.parentElement!.children].indexOf(element),
+  );
+  return collection.locator(
+    `[role="row"][data-index] > [role="gridcell"]:nth-child(${column + 1})`,
+  );
 }
 
 /**
@@ -18,7 +24,7 @@ export async function fieldCells(collection: Locator, field: string): Promise<Lo
  */
 export async function collectionCommand(collection: Locator, name: string): Promise<Locator> {
   const trigger = collection.getByRole("button", { name: "Manage Collection", exact: true });
-  if (await trigger.getAttribute("aria-expanded") !== "true") await trigger.click();
+  if ((await trigger.getAttribute("aria-expanded")) !== "true") await trigger.click();
   const command = collection.getByRole("menuitem", { name, exact: true });
   // A command that waits for a read is marked aria-disabled, which a click does not wait out.
   await expect(command).not.toHaveAttribute("aria-disabled", "true");
@@ -55,7 +61,10 @@ export async function createRecord(collection: Locator, firstField: string): Pro
  * Enter, with no wait between them: the first key after each Enter is typed
  * in the next row.
  */
-export async function typeRecords(collection: Locator, firstFields: readonly string[]): Promise<void> {
+export async function typeRecords(
+  collection: Locator,
+  firstFields: readonly string[],
+): Promise<void> {
   await collection.getByRole("button", { name: "New record", exact: true }).first().click();
   await expect(collection.locator("[data-cell-editor] input")).toBeFocused();
   for (const firstField of firstFields) {
@@ -74,7 +83,11 @@ export function newRecordPanel(collection: Locator): Locator {
 }
 
 /** Types a value into one text field of the new record in the panel, and saves the field with Enter. */
-export async function fillNewRecordField(panel: Locator, field: string, value: string): Promise<void> {
+export async function fillNewRecordField(
+  panel: Locator,
+  field: string,
+  value: string,
+): Promise<void> {
   await panel.getByRole("group", { name: field, exact: true }).getByRole("button").first().click();
   const input = panel.locator("[data-cell-editor] input");
   await input.fill(value);

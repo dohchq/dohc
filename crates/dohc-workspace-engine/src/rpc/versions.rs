@@ -258,8 +258,8 @@ async fn settle_ydoc_session_for_version_fence(
 }
 
 fn unsettled_fork_error(_content_kind: ContentKind) -> WireError {
-    // Both kinds settle now (richdoc projection is full-fidelity since
-    // R15-3), so an unsettled lineage refuses with one message.
+    // Both kinds settle, because richdoc projection is full-fidelity, so an
+    // unsettled lineage refuses with one message.
     WireError::new(ErrorCode::InvalidParams, "ydoc-unsettled-close")
 }
 
@@ -893,13 +893,6 @@ impl VersionFence {
         let events = self.events.clone();
         let detached_operation = operation.to_owned();
         let settle_summary = settle_summary.to_owned();
-        // The fence's forced reconcile is a capture pass (TS parity:
-        // `version-switch-${id}` / `version-create-${id}`): its moments carry
-        // the fence's own summary and one correlation id so the pre-switch
-        // "nothing is ever lost" capture groups in history instead of
-        // rendering as unrelated per-file rows. A file an unfinished first
-        // import has not recorded yet joins that import instead. The capture
-        // gate is held, so the live driver cannot finish it meanwhile.
         let first_import = open
             .actor
             .unfinished_first_import(open.workspace_id.clone())
@@ -1390,13 +1383,12 @@ impl EngineService {
         // small — resuming positionally over the loaded ordered vector is
         // exact (the id either exists at one position or the cursor is
         // stale and reads from the start).
-        if let Some(after) = params.after_version_id.as_deref() {
-            if let Some(position) = versions
+        if let Some(after) = params.after_version_id.as_deref()
+            && let Some(position) = versions
                 .iter()
                 .position(|version| version.version_id == after)
-            {
-                versions.drain(..=position);
-            }
+        {
+            versions.drain(..=position);
         }
         // Versions are few in practice, but the frame limit does not care
         // about practice: same measured budget + honest truncated flag as

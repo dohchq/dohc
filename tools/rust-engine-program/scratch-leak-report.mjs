@@ -10,16 +10,33 @@ import { join } from "node:path";
  * it. Its name is short because a macOS socket path must stay under 104 bytes. The desktop's `testTemp.ts` and the `dohc-test-scratch` crate derive the
  * same path.
  */
-export function testScratchParent({ platform = process.platform, uid = process.getuid?.(), base } = {}) {
+export function testScratchParent({
+  platform = process.platform,
+  uid = process.getuid?.(),
+  base,
+} = {}) {
   if (platform === "win32") return join(tmpdir(), "dohc-test-scratch");
   if (uid === undefined) throw new Error("test scratch needs a user id on this platform");
-  const parent = join(base ?? realpathSync(existsSync("/tmp") ? "/tmp" : tmpdir()), `dohc-scratch-${uid}`);
-  try { mkdirSync(parent, { mode: 0o700 }); }
-  catch (error) { if (error?.code !== "EEXIST") throw error; }
+  const parent = join(
+    base ?? realpathSync(existsSync("/tmp") ? "/tmp" : tmpdir()),
+    `dohc-scratch-${uid}`,
+  );
+  try {
+    mkdirSync(parent, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  }
   const stats = lstatSync(parent);
-  if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error(`test scratch parent ${parent} is not a directory. Remove it, then run again.`);
-  if (stats.uid !== uid) throw new Error(`test scratch parent ${parent} belongs to user ${stats.uid}, not ${uid}. Remove it as its owner, then run again.`);
-  if ((stats.mode & 0o077) !== 0) throw new Error(`test scratch parent ${parent} has mode ${(stats.mode & 0o777).toString(8)}, which lets other accounts in. Run chmod 700 on it, then run again.`);
+  if (stats.isSymbolicLink() || !stats.isDirectory())
+    throw new Error(`test scratch parent ${parent} is not a directory. Remove it, then run again.`);
+  if (stats.uid !== uid)
+    throw new Error(
+      `test scratch parent ${parent} belongs to user ${stats.uid}, not ${uid}. Remove it as its owner, then run again.`,
+    );
+  if ((stats.mode & 0o077) !== 0)
+    throw new Error(
+      `test scratch parent ${parent} has mode ${(stats.mode & 0o777).toString(8)}, which lets other accounts in. Run chmod 700 on it, then run again.`,
+    );
   return parent;
 }
 
@@ -32,28 +49,16 @@ export function testScratchParent({ platform = process.platform, uid = process.g
 // up, and the handle is released when that test binary exits — after the guard
 // is gone.
 //
-// Measured on this machine, per full run: 0 entries from every package run on
-// its own (`-p dohc-engine-domain`, `-p dohc-workspace-engine --lib`, and
-// `-p dohc-engine-runtime -p dohc-engine-testkit -p dohc-engine-sync
-// -p dohc-engine-sync-http` — thousands of scratch directories between them),
-// and 4, then 3 entries from `--workspace`, where ~30 test binaries run at
-// once. Stragglers appear only at full parallelism, and single digits are the
-// healthy range.
+// Stragglers appear only at full parallelism. A package run on its own leaves
+// 0 entries. `--workspace`, with about 30 test binaries at once, was measured
+// leaving 3 or 4, so single digits are the healthy range.
 //
-// The limit sits an order of magnitude beyond that range, because the
-// regression this row exists to catch is not a straggler. It is a harness that
-// stops cleaning up at all, which showed up as 191,851 directories in #605.
-// Failing a healthy run over 3 stragglers would only teach the next reader to
-// ignore the row.
+// The limit sits an order of magnitude beyond that range. This row exists to
+// catch a harness that stops cleaning up at all, which left 191,851
+// directories the one time it happened. Failing a healthy run over 3
+// stragglers would only teach the next reader to ignore the row.
 const LEAK_ENTRY_LIMIT = 32;
 
-// #605 was 196 GB, not 191,851 directories — the directories were the symptom
-// and the bytes were the outage. A row that bounds only the count would pass
-// one workspace whose engine.db grew without limit, which is the same failure
-// wearing a different shape. Measured healthy: a full `--workspace` run left
-// 7,612,907 bytes, then 4,201,818, and every single-package run left 0. The
-// ceiling is 256 MiB — about 35x the largest healthy run seen here, and still
-// three orders of magnitude below the incident.
 const LEAK_BYTE_LIMIT = 256 * 1024 * 1024;
 
 // Written into the run root before the tests start and required after they

@@ -25,9 +25,7 @@ describe("SearchView", () => {
       run: vi.fn(),
       clear: vi.fn(),
     };
-    const { rerender } = render(
-      <SearchView search={idleSearch} onOpenResult={vi.fn()} />,
-    );
+    const { rerender } = render(<SearchView search={idleSearch} onOpenResult={vi.fn()} />);
     const liveRegion = screen.getByRole("status");
     expect(liveRegion.textContent).toBe("");
 
@@ -63,19 +61,12 @@ describe("SearchView", () => {
 
     render(<SearchView search={search} onOpenResult={vi.fn()} />);
 
-    expect(screen.getByTestId("search-view").getAttribute("data-state")).toBe(
-      "updating",
-    );
-    expect(screen.getByTestId("search-spinner").textContent).toContain(
-      "Updating workspace…",
-    );
-    expect(screen.getByRole("status").textContent).toContain(
-      "Updating workspace…",
-    );
+    expect(screen.getByTestId("search-view").getAttribute("data-state")).toBe("updating");
+    expect(screen.getByTestId("search-spinner").textContent).toContain("Updating workspace…");
+    expect(screen.getByRole("status").textContent).toContain("Updating workspace…");
     expect(screen.queryByTestId("search-empty-state")).toBeNull();
   });
 
-  // A finished search that found nothing, under whatever the input holds now.
   function emptySearch(criteria: Partial<WorkspaceSearchApi["criteria"]>): WorkspaceSearchApi {
     return {
       model: { ...beginSearch("search-1", "agnet"), status: "complete" },
@@ -97,7 +88,9 @@ describe("SearchView", () => {
   it("names the query that found nothing, not the next one the input holds", () => {
     render(<SearchView search={emptySearch({ query: "agent" })} onOpenResult={vi.fn()} />);
 
-    expect(screen.getByTestId("search-empty-state").textContent).toBe('No files or chats match "agnet".');
+    expect(screen.getByTestId("search-empty-state").textContent).toBe(
+      'No files or chats match "agnet".',
+    );
     expect(screen.queryByRole("button", { name: "Clear filters" })).toBeNull();
   });
 
@@ -105,7 +98,9 @@ describe("SearchView", () => {
     const search = emptySearch({ regex: true, includeGlob: "*.md" });
     render(<SearchView search={search} onOpenResult={vi.fn()} />);
 
-    const clear = within(screen.getByTestId("search-empty-state")).getByRole("button", { name: "Clear filters" });
+    const clear = within(screen.getByTestId("search-empty-state")).getByRole("button", {
+      name: "Clear filters",
+    });
     clear.focus();
     await userEvent.setup().keyboard("{Enter}");
 
@@ -125,10 +120,11 @@ describe("SearchView", () => {
     });
   });
 
-  // The shell's search state, held for real: run() moves the model to a new
-  // search, which replaces the empty state and the button in it.
   function LiveSearch(props: { criteria: SearchCriteria }) {
-    const [model, setModel] = useState<SearchModel>({ ...beginSearch("search-1", "agnet"), status: "complete" });
+    const [model, setModel] = useState<SearchModel>({
+      ...beginSearch("search-1", "agnet"),
+      status: "complete",
+    });
     const [criteria, setCriteria] = useState(props.criteria);
     return (
       <SearchView
@@ -147,7 +143,14 @@ describe("SearchView", () => {
   it("keeps keyboard focus in Search when Clear filters searches again", async () => {
     render(
       <LiveSearch
-        criteria={{ query: "agnet", caseSensitive: true, wholeWord: false, regex: false, includeGlob: "", excludeGlob: "" }}
+        criteria={{
+          query: "agnet",
+          caseSensitive: true,
+          wholeWord: false,
+          regex: false,
+          includeGlob: "",
+          excludeGlob: "",
+        }}
       />,
     );
 

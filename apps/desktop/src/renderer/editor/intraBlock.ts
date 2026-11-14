@@ -1,39 +1,3 @@
-// lineBlocks.ts lands a search result on the top-level BLOCK holding the
-// line, which is the whole passage when the block is a paragraph and almost
-// none of it when the block is a hundred-item list or a three-hundred-line
-// fence. This refines that landing to a range inside the block — but only
-// where the source and the parsed node agree well enough to prove the answer.
-//
-// The mapping in lineBlocks.ts is block-granular BY DESIGN and stays that way.
-// Nothing here re-splits Markdown: this reads the block's own source lines
-// against the node the editor already built and asks whether the two line up.
-// When they do not, the answer is null and the reveal stays at the block
-// start — the behaviour before this module existed.
-// A gap or trailing-blank match inside the block's span lands the item or
-// content immediately above it, following lineBlocks.ts's gap rule.
-// A proven later list item can descend through nested lists or fences. Every
-// level must pass the same count, shape, and text checks.
-//
-// UNSURE, every case, all of which fall back to the block start:
-//
-//  - The matched line is the block's first line (offset 0), or sits outside
-//    the block's own lines. Both already land where the block starts.
-//  - The block is neither a fenced code block nor a list. A quote, a table
-//    and a paragraph have children too, but no rule here maps a source line
-//    onto them, and a guessed one would land the wrong child.
-//  - A code block whose text does not equal its source lines from line 1 on.
-//    That is what proves the offset is exactly one opening fence — an
-//    indented code block (four columns the parse strips) fails it, and so
-//    does a Y.Doc that has drifted from the artifact search numbered.
-//  - A code block whose matched line is empty: an empty inline range renders
-//    no element to scroll to.
-//  - A list whose counted items disagree with the items the editor built, or
-//    whose counted child's rendered text does not contain the matched line's
-//    rendered text. The count rejects drift and unmodeled shapes; because it
-//    can agree by coincidence, the text check rejects the wrong child.
-//  - A top-level list whose matched line belongs to its first item, nested
-//    lines included — that item starts where the block does.
-
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { blockForLine, columnAt, leadingColumns } from "./lineBlocks";
 
@@ -59,9 +23,7 @@ const LIST_TYPES = new Set(["bulletList", "orderedList", "taskList"]);
 
 function listItemLineSource(line: string, task: boolean): string {
   const marker = LIST_ITEM_RE.exec(line);
-  let source = line
-    .slice(marker?.[0].length ?? 0)
-    .replace(/^[ \t]*/, "");
+  let source = line.slice(marker?.[0].length ?? 0).replace(/^[ \t]*/, "");
   if (task) source = source.replace(/^\[[ xX]\](?:[ \t]+|$)/, "");
   return source;
 }
@@ -127,14 +89,7 @@ export function intraBlockRange(
     return codeLineRange(container, containerPos, lines, offset);
   }
   if (LIST_TYPES.has(container.type.name)) {
-    return listItemRange(
-      container,
-      containerPos,
-      lines,
-      offset,
-      renderInlineText,
-      topLevel,
-    );
+    return listItemRange(container, containerPos, lines, offset, renderInlineText, topLevel);
   }
   return null;
 }
@@ -230,20 +185,11 @@ function listItemRange(
     listItemLineSource(itemLines[0] ?? "", task),
     ...itemLines.slice(1).map((line) => dedentLine(line, content)),
   ];
-  const nestedTarget = blockTargetForLine(
-    dedentedLines.join("\n"),
-    itemLocalOffset + 1,
-  );
+  const nestedTarget = blockTargetForLine(dedentedLines.join("\n"), itemLocalOffset + 1);
   const nestedIndex = dedentedLines[0] === "" ? 0 : 1;
   if (nestedTarget.index !== nestedIndex || !nestedTarget.match) return itemRange;
   const nestedPos = from + 1 + itemNode.child(0).nodeSize;
-  const refined = intraBlockRange(
-    nested,
-    nestedPos,
-    nestedTarget.match,
-    renderInlineText,
-    false,
-  );
+  const refined = intraBlockRange(nested, nestedPos, nestedTarget.match, renderInlineText, false);
   if (refined) return refined;
   if (nested.type.name !== "codeBlock" || content <= 0) return itemRange;
   const nestedStart = itemLocalOffset - nestedTarget.match.offset;

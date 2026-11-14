@@ -10,7 +10,11 @@ import { EngineHistoryView, HistoryRow, type HistoryCollections } from "./Engine
 // This suite checks what each row says and offers, not viewport measurement.
 // The real virtualizer is covered by history-virtualization.spec.ts.
 vi.mock("@legendapp/list/react", () => ({
-  LegendList: ({ data, renderItem, ListFooterComponent }: {
+  LegendList: ({
+    data,
+    renderItem,
+    ListFooterComponent,
+  }: {
     data: unknown[];
     renderItem: (props: { item: unknown; index: number }) => ReactNode;
     ListFooterComponent: ReactNode;
@@ -31,40 +35,111 @@ const GUESTS = "00000000-0000-4000-8000-000000000002";
 const DAY = new Date(2026, 9, 16, 12).getTime();
 
 function file(id: string, overrides: Partial<EngineMomentRecord> = {}): TimelineEntry {
-  return { kind: "file", moment: { id, versionId: "main", path: "notes/plan.md", recordedAtMs: DAY, operation: "write", origin: "local-file", momentOrder: 1, ...overrides } };
+  return {
+    kind: "file",
+    moment: {
+      id,
+      versionId: "main",
+      path: "notes/plan.md",
+      recordedAtMs: DAY,
+      operation: "write",
+      origin: "local-file",
+      momentOrder: 1,
+      ...overrides,
+    },
+  };
 }
-const version: TimelineEntry = { kind: "version", version: { id: "draft", workspaceId: "workspace", kind: "named", name: "Draft", createdAtMs: DAY - 1_000 } };
-const workspaceStart: TimelineEntry = { kind: "version", version: { id: "main", workspaceId: "workspace", kind: "main", name: "Main", createdAtMs: DAY - 9_000 } };
-function change(revision: number, recordedAtMs: number | null, datasetId = BUDGET, name = "Budget",
-  options: { sortAtMs?: number | null; rulesApprovedBy?: string | null } = {}): TimelineEntry {
+const version: TimelineEntry = {
+  kind: "version",
+  version: {
+    id: "draft",
+    workspaceId: "workspace",
+    kind: "named",
+    name: "Draft",
+    createdAtMs: DAY - 1_000,
+  },
+};
+const workspaceStart: TimelineEntry = {
+  kind: "version",
+  version: {
+    id: "main",
+    workspaceId: "workspace",
+    kind: "main",
+    name: "Main",
+    createdAtMs: DAY - 9_000,
+  },
+};
+function change(
+  revision: number,
+  recordedAtMs: number | null,
+  datasetId = BUDGET,
+  name = "Budget",
+  options: { sortAtMs?: number | null; rulesApprovedBy?: string | null } = {},
+): TimelineEntry {
   // A rules change has the engine's fixed operation and a schema; only it
   // can carry the agent that approved it.
   const rules = options.rulesApprovedBy !== undefined;
-  return { kind: "collection", datasetId, name, sortAtMs: options.sortAtMs !== undefined ? options.sortAtMs : recordedAtMs ?? DAY - 5_000, change: {
-    revision, operation: rules ? "Fields and rules" : "addRow", callerReference: null, recordedAtMs, approvedRevisionHash: "a".repeat(64),
-    changesetBytes: 10, attachmentCount: 0,
-    ...(rules ? {
-      schema: { previousRevisionHash: "b".repeat(64), revisionHash: "a".repeat(64) },
-      approvalAgent: { kind: "agent" as const, label: options.rulesApprovedBy ?? null, labelSource: "agent-declared" as const },
-    } : { automation: { automationId: "automations.yaml#stamp", depth: 1, name: "Stamp the date" } }),
-  } };
+  return {
+    kind: "collection",
+    datasetId,
+    name,
+    sortAtMs: options.sortAtMs !== undefined ? options.sortAtMs : (recordedAtMs ?? DAY - 5_000),
+    change: {
+      revision,
+      operation: rules ? "Fields and rules" : "addRow",
+      callerReference: null,
+      recordedAtMs,
+      approvedRevisionHash: "a".repeat(64),
+      changesetBytes: 10,
+      attachmentCount: 0,
+      ...(rules
+        ? {
+            schema: { previousRevisionHash: "b".repeat(64), revisionHash: "a".repeat(64) },
+            approvalAgent: {
+              kind: "agent" as const,
+              label: options.rulesApprovedBy ?? null,
+              labelSource: "agent-declared" as const,
+            },
+          }
+        : {
+            automation: {
+              automationId: "automations.yaml#stamp",
+              depth: 1,
+              name: "Stamp the date",
+            },
+          }),
+    },
+  };
 }
 
 function view(props: Partial<Parameters<typeof EngineHistoryView>[0]> = {}) {
   const calls = { open: vi.fn(), retry: vi.fn(), openHistory: vi.fn() };
-  // Budget's definition is loaded and labels its operation; Guests' is not.
   const collections: HistoryCollections = new Map([
-    [BUDGET, { name: "Budget", operationLabels: new Map([["addRow", "Add row"]]), openHistory: calls.openHistory }],
+    [
+      BUDGET,
+      {
+        name: "Budget",
+        operationLabels: new Map([["addRow", "Add row"]]),
+        openHistory: calls.openHistory,
+      },
+    ],
     [GUESTS, { name: "Guests" }],
   ]);
   render(
-    <EngineHistoryView entries={[]} hasMore={false} loadingMore={false} onLoadMore={() => {}}
-      onOpenMoment={calls.open} collections={collections} onRetry={calls.retry} {...props} />,
+    <EngineHistoryView
+      entries={[]}
+      hasMore={false}
+      loadingMore={false}
+      onLoadMore={() => {}}
+      onOpenMoment={calls.open}
+      collections={collections}
+      onRetry={calls.retry}
+      {...props}
+    />,
   );
   return calls;
 }
 
-// A part's flex-shrink factor from its class; 1 when it sets none.
 const shrinkOf = (el: Element) => Number(el.className.match(/shrink-\[(\d+)\]/)?.[1] ?? 1);
 // How much sooner each part of a History line gives way than the next.
 const STEP = 1e6;
@@ -73,13 +148,16 @@ describe("History timeline rows", () => {
   it("shows files, versions and Collection changes as one list, each with its own way in", () => {
     const calls = view({ entries: [file("m-1"), version, change(4, DAY - 2_000)] });
     const rows = screen.getAllByRole("listitem").filter((row) => row.dataset.historyKey);
-    expect(rows.map((row) => row.dataset.testid)).toEqual(["engine-moment", "history-version", "history-collection-change"]);
+    expect(rows.map((row) => row.dataset.testid)).toEqual([
+      "engine-moment",
+      "history-version",
+      "history-collection-change",
+    ]);
 
     fireEvent.click(screen.getByTestId("engine-moment-open"));
     expect(calls.open).toHaveBeenCalledWith("m-1", "notes/plan.md");
     expect(rows[1]!.textContent).toContain("Created version Draft");
     expect(rows[1]!.querySelector("button")).toBeNull();
-    // A file's row opens its change, and so does a Collection's: its History.
     const collection = screen.getByRole("button", { name: "Open Collection history for Budget" });
     expect(collection.textContent).toContain("Automation Stamp the date");
     fireEvent.click(collection);
@@ -89,20 +167,41 @@ describe("History timeline rows", () => {
   });
 
   it("draws a connected agent's change with the plug, apart from your agent of the same name", () => {
-    const claude = (connected: boolean): Partial<EngineMomentRecord> => ({ agentAuthorName: "Claude",
-      authors: [connected ? { kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "alice" } : { kind: "agent", agentId: "claude", onBehalfOf: "alice" }],
-      authorPresentations: [connected ? { group: "g-connected", hue: null, self: true, connected: true } : { group: "g-claude", hue: null, self: true }] });
-    // A file write by each, then a move by each.
-    const moved = (id: string, connected: boolean) => file(id, { ...claude(connected), operation: "rename", path: `trip/${id}.md` });
-    view({ entries: [file("m-connected", claude(true)), file("m-yours", claude(false)), moved("moved-connected", true), moved("moved-yours", false)] });
+    const claude = (connected: boolean): Partial<EngineMomentRecord> => ({
+      agentAuthorName: "Claude",
+      authors: [
+        connected
+          ? { kind: "agent", agentId: "dohc-mcp", agentName: "Claude", onBehalfOf: "alice" }
+          : { kind: "agent", agentId: "claude", onBehalfOf: "alice" },
+      ],
+      authorPresentations: [
+        connected
+          ? { group: "g-connected", hue: null, self: true, connected: true }
+          : { group: "g-claude", hue: null, self: true },
+      ],
+    });
+    const moved = (id: string, connected: boolean) =>
+      file(id, { ...claude(connected), operation: "rename", path: `trip/${id}.md` });
+    view({
+      entries: [
+        file("m-connected", claude(true)),
+        file("m-yours", claude(false)),
+        moved("moved-connected", true),
+        moved("moved-yours", false),
+      ],
+    });
     const rows = screen.getAllByTestId("engine-moment");
-    expect(rows.map((row) => row.querySelector("[data-agent-mark]")?.getAttribute("data-agent-mark"))).toEqual(["connected", "agent", "connected", "agent"]);
+    expect(
+      rows.map((row) => row.querySelector("[data-agent-mark]")?.getAttribute("data-agent-mark")),
+    ).toEqual(["connected", "agent", "connected", "agent"]);
     cleanup();
-    // One request's files fold into a pass, which names its connected agent with the plug too.
-    const pass = (id: string) => file(id, { ...claude(true), path: `notes/${id}.md`, correlationId: "request-1" });
+    const pass = (id: string) =>
+      file(id, { ...claude(true), path: `notes/${id}.md`, correlationId: "request-1" });
     view({ entries: [pass("a"), pass("b")] });
     const source = screen.getByTestId("engine-moment-group-source");
-    expect(source.querySelector("[data-agent-mark]")?.getAttribute("data-agent-mark")).toBe("connected");
+    expect(source.querySelector("[data-agent-mark]")?.getAttribute("data-agent-mark")).toBe(
+      "connected",
+    );
     expect(source.textContent).toBe("Connected agent Claude");
   });
 
@@ -111,118 +210,178 @@ describe("History timeline rows", () => {
     const calls = view({ entries: [change(4, DAY - 2_000)] });
     await user.tab();
     await user.tab();
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Open Collection history for Budget" }));
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Open Collection history for Budget" }),
+    );
     await user.keyboard("{Enter}");
     expect(calls.openHistory).toHaveBeenCalledOnce();
     await user.keyboard(" ");
     expect(calls.openHistory).toHaveBeenCalledTimes(2);
   });
 
-  // The operation's name is the definition's ID, not the person's words.
   it("titles a Collection change with its operation's label, else by its Collection", () => {
     view({ entries: [change(4, DAY - 2_000), change(2, DAY - 3_000, GUESTS, "Guests")] });
-    const [labelled, unlabelled] = screen.getAllByRole("listitem").filter((row) => row.dataset.historyKey);
-    expect(labelled!.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe("Add row");
+    const [labelled, unlabelled] = screen
+      .getAllByRole("listitem")
+      .filter((row) => row.dataset.historyKey);
+    expect(labelled!.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe(
+      "Add row",
+    );
     expect(labelled!.textContent).not.toContain("addRow");
-    expect(unlabelled!.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe("Changed Guests");
-    expect(unlabelled!.querySelector('[data-testid="history-collection-operation"]')!.textContent).toBe("addRow");
+    expect(unlabelled!.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe(
+      "Changed Guests",
+    );
+    expect(
+      unlabelled!.querySelector('[data-testid="history-collection-operation"]')!.textContent,
+    ).toBe("addRow");
     // The title already names the Collection, so the line does not again.
     expect(unlabelled!.querySelector('[data-testid="history-collection-name"]')).toBeNull();
-    // The row's name says what it opens; the change describes it, as its
-    // line reads, then when.
     const button = screen.getByRole("button", { name: "Open Collection history for Budget" });
     const description = document.getElementById(button.getAttribute("aria-describedby")!);
     expect(description?.hidden).toBe(true);
-    expect(description?.textContent).toBe(`Add row, Automation Stamp the date, Budget, ${formatChatTime(DAY - 2_000).label}`);
+    expect(description?.textContent).toBe(
+      `Add row, Automation Stamp the date, Budget, ${formatChatTime(DAY - 2_000).label}`,
+    );
   });
 
-  // As the line runs short, the operation's name gives way first, then who
-  // made the change, then what changed; the Collection's name goes last.
-  // Each step's factor is a million times the next's, so the part that
-  // should hold loses nothing; the states page measures the floors.
   it("cuts a Collection change's line from its end inward, keeping the Collection's name", () => {
-    view({ entries: [change(4, DAY - 2_000, GUESTS, "Guests", { rulesApprovedBy: "trip-agent" }), change(2, null, GUESTS, "Guests")] });
-    const [rules, undated] = screen.getAllByRole("listitem").filter((row) => row.dataset.historyKey);
+    view({
+      entries: [
+        change(4, DAY - 2_000, GUESTS, "Guests", { rulesApprovedBy: "trip-agent" }),
+        change(2, null, GUESTS, "Guests"),
+      ],
+    });
+    const [rules, undated] = screen
+      .getAllByRole("listitem")
+      .filter((row) => row.dataset.historyKey);
     const line = within(rules!).getByTestId("history-collection-line");
     const [title, agent, name] = [...line.children];
-    expect([title, agent, name].map((el) => el!.getAttribute("data-testid")))
-      .toEqual(["history-collection-title", "history-collection-agent", "history-collection-name"]);
+    expect([title, agent, name].map((el) => el!.getAttribute("data-testid"))).toEqual([
+      "history-collection-title",
+      "history-collection-agent",
+      "history-collection-name",
+    ]);
     expect(shrinkOf(name!)).toBe(1);
     expect(shrinkOf(title!) / shrinkOf(name!)).toBeGreaterThanOrEqual(STEP);
     expect(shrinkOf(agent!) / shrinkOf(title!)).toBeGreaterThanOrEqual(STEP);
     expect(line.className).toContain("overflow-hidden");
-    // An undated change is one line, and its parts share all of it.
     const undatedLine = within(undated!).getByTestId("history-collection-line");
-    expect(undatedLine.className.split(" ")).toEqual(expect.arrayContaining(["flex-1", "overflow-hidden"]));
-    expect(shrinkOf(within(undated!).getByTestId("history-collection-operation")) / shrinkOf(agent!)).toBeGreaterThanOrEqual(STEP);
+    expect(undatedLine.className.split(" ")).toEqual(
+      expect.arrayContaining(["flex-1", "overflow-hidden"]),
+    );
+    expect(
+      shrinkOf(within(undated!).getByTestId("history-collection-operation")) / shrinkOf(agent!),
+    ).toBeGreaterThanOrEqual(STEP);
   });
 
-  // The name stays in the line's ink; colour belongs to faces.
   it("names the agent that approved a Collection's rules first, in the line's ink", () => {
-    view({ entries: [change(4, DAY - 2_000, BUDGET, "Budget", { rulesApprovedBy: "trip-agent" }), change(3, DAY - 3_000, BUDGET, "Budget", { rulesApprovedBy: null })] });
+    view({
+      entries: [
+        change(4, DAY - 2_000, BUDGET, "Budget", { rulesApprovedBy: "trip-agent" }),
+        change(3, DAY - 3_000, BUDGET, "Budget", { rulesApprovedBy: null }),
+      ],
+    });
     const agents = screen.getAllByTestId("history-collection-agent");
     expect(agents.map((agent) => agent.textContent)).toEqual(["trip-agent", "Agent"]);
     expect(agents[0]!.className).not.toContain("text-agent");
-    // Who made it follows what changed.
-    expect(agents[0]!.previousElementSibling!.getAttribute("data-testid")).toBe("history-collection-title");
+    expect(agents[0]!.previousElementSibling!.getAttribute("data-testid")).toBe(
+      "history-collection-title",
+    );
   });
 
-  // The engine names every rules change "Fields and rules". That is not an
-  // ID to show in mono, and no definition labels it.
   it("titles a rules change in words and names its Collection, without an operation", () => {
-    view({ entries: [change(4, DAY - 2_000, GUESTS, "Guests", { rulesApprovedBy: "trip-agent" })] });
+    view({
+      entries: [change(4, DAY - 2_000, GUESTS, "Guests", { rulesApprovedBy: "trip-agent" })],
+    });
     const row = screen.getAllByRole("listitem").find((item) => item.dataset.historyKey)!;
-    expect(row.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe("Changed fields and rules");
-    expect(row.querySelector('[data-testid="history-collection-name"]')!.textContent).toBe("Guests");
+    expect(row.querySelector('[data-testid="history-collection-title"]')!.textContent).toBe(
+      "Changed fields and rules",
+    );
+    expect(row.querySelector('[data-testid="history-collection-name"]')!.textContent).toBe(
+      "Guests",
+    );
     expect(row.textContent).not.toContain("Fields and rules");
   });
 
   it("marks where the workspace started, not a version someone created", () => {
     view({ entries: [file("m-1"), workspaceStart] });
-    const marker = screen.getAllByRole("listitem").find((row) => row.dataset.testid === "history-version")!;
+    const marker = screen
+      .getAllByRole("listitem")
+      .find((row) => row.dataset.testid === "history-version")!;
     expect(marker.textContent).toContain("Workspace created");
     expect(marker.textContent).not.toContain("Created version");
   });
 
-  // Main reaches an undated change three ways: with its Collection's
-  // previous time to sort by, with no time at all so it sorts last, and
-  // holding its Collection's older dated changes back behind it.
   it("lists dated days in order, then one Date unknown heading with every undated change", () => {
-    view({ entries: [
-      file("m-2"),
-      change(5, null, GUESTS, "Guests", { sortAtMs: DAY - 1_000 }),
-      file("m-1", { recordedAtMs: DAY - 2 * DAY_MS }),
-      change(6, null, BUDGET, "Budget", { sortAtMs: null }),
-      change(5, DAY - DAY_MS, BUDGET, "Budget"),
-      change(4, null, BUDGET, "Budget", { sortAtMs: DAY - DAY_MS }),
-    ] });
+    view({
+      entries: [
+        file("m-2"),
+        change(5, null, GUESTS, "Guests", { sortAtMs: DAY - 1_000 }),
+        file("m-1", { recordedAtMs: DAY - 2 * DAY_MS }),
+        change(6, null, BUDGET, "Budget", { sortAtMs: null }),
+        change(5, DAY - DAY_MS, BUDGET, "Budget"),
+        change(4, null, BUDGET, "Budget", { sortAtMs: DAY - DAY_MS }),
+      ],
+    });
     expect(listOrder()).toEqual([
-      `day:${dayKey(DAY)}`, "m-2",
-      `day:${dayKey(DAY - DAY_MS)}`, `collection:${BUDGET}:5`,
-      `day:${dayKey(DAY - 2 * DAY_MS)}`, "m-1",
-      "day:Date unknown", `collection:${GUESTS}:5`, `collection:${BUDGET}:6`, `collection:${BUDGET}:4`,
+      `day:${dayKey(DAY)}`,
+      "m-2",
+      `day:${dayKey(DAY - DAY_MS)}`,
+      `collection:${BUDGET}:5`,
+      `day:${dayKey(DAY - 2 * DAY_MS)}`,
+      "m-1",
+      "day:Date unknown",
+      `collection:${GUESTS}:5`,
+      `collection:${BUDGET}:6`,
+      `collection:${BUDGET}:4`,
     ]);
-    expect(screen.getAllByTestId("engine-history-day-heading").at(-1)!.hasAttribute("datetime")).toBe(false);
-    // An undated change is one line with no time.
-    const guests = screen.getAllByRole("listitem").find((row) => row.dataset.historyKey === `collection:${GUESTS}:5`)!;
+    expect(
+      screen.getAllByTestId("engine-history-day-heading").at(-1)!.hasAttribute("datetime"),
+    ).toBe(false);
+    const guests = screen
+      .getAllByRole("listitem")
+      .find((row) => row.dataset.historyKey === `collection:${GUESTS}:5`)!;
     expect(guests.querySelector("time")).toBeNull();
     expect(guests.textContent).not.toContain("Date unknown");
     expect(guests.firstElementChild!.className.split(" ")).toContain("h-7");
-    // A Collection this computer cannot open is a row, not a control.
     expect(screen.queryByRole("button", { name: "Open Collection history for Guests" })).toBeNull();
   });
 
   it("keeps older dated days above the Date unknown group as earlier pages load", () => {
-    const props = { hasMore: true, loadingMore: false, onLoadMore: () => {}, onOpenMoment: () => {} };
+    const props = {
+      hasMore: true,
+      loadingMore: false,
+      onLoadMore: () => {},
+      onOpenMoment: () => {},
+    };
     const firstPage = [file("m-2"), change(6, null, BUDGET, "Budget", { sortAtMs: null })];
     const { rerender } = render(<EngineHistoryView entries={firstPage} {...props} />);
-    expect(listOrder()).toEqual([`day:${dayKey(DAY)}`, "m-2", "day:Date unknown", `collection:${BUDGET}:6`]);
-    rerender(<EngineHistoryView entries={[...firstPage, change(5, DAY - DAY_MS, BUDGET, "Budget"), file("m-1", { recordedAtMs: DAY - 2 * DAY_MS })]} {...props} hasMore={false} />);
     expect(listOrder()).toEqual([
-      `day:${dayKey(DAY)}`, "m-2",
-      `day:${dayKey(DAY - DAY_MS)}`, `collection:${BUDGET}:5`,
-      `day:${dayKey(DAY - 2 * DAY_MS)}`, "m-1",
-      "day:Date unknown", `collection:${BUDGET}:6`,
+      `day:${dayKey(DAY)}`,
+      "m-2",
+      "day:Date unknown",
+      `collection:${BUDGET}:6`,
+    ]);
+    rerender(
+      <EngineHistoryView
+        entries={[
+          ...firstPage,
+          change(5, DAY - DAY_MS, BUDGET, "Budget"),
+          file("m-1", { recordedAtMs: DAY - 2 * DAY_MS }),
+        ]}
+        {...props}
+        hasMore={false}
+      />,
+    );
+    expect(listOrder()).toEqual([
+      `day:${dayKey(DAY)}`,
+      "m-2",
+      `day:${dayKey(DAY - DAY_MS)}`,
+      `collection:${BUDGET}:5`,
+      `day:${dayKey(DAY - 2 * DAY_MS)}`,
+      "m-1",
+      "day:Date unknown",
+      `collection:${BUDGET}:6`,
     ]);
   });
 });
@@ -234,7 +393,6 @@ function dayKey(ms: number): string {
   return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
 }
 
-// The list from top to bottom: each day heading by its date, then each row by its key.
 function listOrder(): string[] {
   return screen.getAllByRole("listitem").flatMap((row) => {
     if (row.dataset.historyKey) return [row.dataset.historyKey];
@@ -246,18 +404,20 @@ function listOrder(): string[] {
 describe("History timeline changes", () => {
   const nova = { kind: "agent" as const, agentId: "nova", agentRunId: "run" };
   const agentEdit = (id: string, minutes: number): TimelineEntry =>
-    file(id, { recordedAtMs: DAY - minutes * 60_000, agentAuthorName: "Nova", summary: "Updated plan.md", authors: [nova], authorPresentations: [{ group: "nova", hue: null, self: false }] });
+    file(id, {
+      recordedAtMs: DAY - minutes * 60_000,
+      agentAuthorName: "Nova",
+      summary: "Updated plan.md",
+      authors: [nova],
+      authorPresentations: [{ group: "nova", hue: null, self: false }],
+    });
 
   it("draws each change on two lines: who and when, then the file and its folder", () => {
     view({ entries: [agentEdit("m-2", 0), file("m-1", { recordedAtMs: DAY - 3_600_000 })] });
     const [agent, local] = screen.getAllByTestId("engine-moment-open");
-    // The agent's square avatar leads, and its name follows in the agent voice.
     expect(agent!.querySelector('[title="Nova"]')?.className).toContain("rounded");
     expect(agent!.querySelector('[title="Nova"]')?.className).not.toContain("rounded-full");
     expect(screen.getAllByTestId("engine-moment-source")[0]!.textContent).toBe("Nova");
-    // A local edit leads with its origin's mark and names it, then says
-    // its file and folder.
-    // An edit made outside dohc draws a file being edited.
     expect(local!.querySelector('[title="Local file edit"] .lucide-file-pen')).not.toBeNull();
     expect(local!.textContent).toContain("plan.mdnotes");
     expect(local!.textContent).not.toContain("Edited");
@@ -270,14 +430,22 @@ describe("History timeline changes", () => {
   it("lets the file's name win its line: the folder goes first, then the actor, then the name's middle", () => {
     const row = (overrides: Partial<EngineMomentRecord>) => {
       cleanup();
-      const moment = (file("m-1", { path: "work/clients/product-planning-notes.md", namedAuthor: { userId: "m", label: "Margaret Okonkwo-Fitzgerald" }, ...overrides }) as Extract<TimelineEntry, { kind: "file" }>).moment;
+      const moment = (
+        file("m-1", {
+          path: "work/clients/product-planning-notes.md",
+          namedAuthor: { userId: "m", label: "Margaret Okonkwo-Fitzgerald" },
+          ...overrides,
+        }) as Extract<TimelineEntry, { kind: "file" }>
+      ).moment;
       render(<HistoryRow moment={moment} context="workspace" onOpen={() => {}} />);
       return screen.getByTestId("engine-moment-open");
     };
     const open = row({});
     expect(open.getAttribute("title")).toBe("Open diff for work/clients/product-planning-notes.md");
     const line = within(open).getByTestId("engine-moment-line");
-    expect(line.className.split(" ")).toEqual(expect.arrayContaining(["flex-wrap", "h-4", "overflow-hidden"]));
+    expect(line.className.split(" ")).toEqual(
+      expect.arrayContaining(["flex-wrap", "h-4", "overflow-hidden"]),
+    );
     const actor = within(open).getByTestId("engine-moment-source");
     expect(actor.getAttribute("title")).toBe("Margaret Okonkwo-Fitzgerald");
     expect(shrinkOf(actor)).toBeGreaterThanOrEqual(STEP);
@@ -288,7 +456,9 @@ describe("History timeline changes", () => {
     expect(base.nextElementSibling!.className).toContain("shrink-0");
     const folder = within(open).getByTestId("engine-moment-folder");
     expect(folder.textContent).toBe("work/clients");
-    expect(folder.className.split(" ")).toEqual(expect.arrayContaining(["grow", "basis-6", "max-w-max", "truncate"]));
+    expect(folder.className.split(" ")).toEqual(
+      expect.arrayContaining(["grow", "basis-6", "max-w-max", "truncate"]),
+    );
     // The actor and the name share a part that never wraps; the folder is outside it.
     expect(folder.parentElement).toBe(line);
     expect(actor.parentElement!.parentElement).toBe(line);
@@ -301,15 +471,14 @@ describe("History timeline changes", () => {
     expect(shrinkOf(summary) / shrinkOf(actor)).toBeGreaterThanOrEqual(STEP);
     expect(within(summarized).queryByTestId("engine-moment-folder")).toBeNull();
 
-    // A summary that names the file takes the name's place and keeps the
-    // name whole longest: the words before it cut first, down to their floor,
-    // and the name cuts in its middle, in a name's ink.
     const deleted = row({ operation: "delete" });
     const named = within(deleted).getByTestId("engine-moment-summary");
     expect(named.textContent).toBe("Deleted product-planning-notes.md");
     const [verb, fileName] = [...named.children];
     expect(verb!.textContent).toBe("Deleted ");
-    expect(verb!.className.split(" ")).toEqual(expect.arrayContaining(["text-ellipsis", "whitespace-pre"]));
+    expect(verb!.className.split(" ")).toEqual(
+      expect.arrayContaining(["text-ellipsis", "whitespace-pre"]),
+    );
     expect(shrinkOf(verb!) / shrinkOf(fileName!)).toBeGreaterThanOrEqual(STEP);
     // Its trailing space stays; `truncate`'s nowrap would drop it.
     expect(verb!.className).not.toContain("truncate");
@@ -317,18 +486,20 @@ describe("History timeline changes", () => {
     expect(fileName!.firstElementChild!.textContent).toBe("product-planning-notes");
     expect(fileName!.lastElementChild!.textContent).toBe(".md");
     expect(fileName!.lastElementChild!.className).toContain("shrink-0");
-    // What follows the name gives way before the words that lead to it.
     const moved = row({ summary: "Moved product-planning-notes.md to the archive" });
     const [, , rest] = [...within(moved).getByTestId("engine-moment-summary").children];
     expect(rest!.textContent).toBe(" to the archive");
-    expect(shrinkOf(rest!) / shrinkOf(within(moved).getByTestId("engine-moment-summary").firstElementChild!)).toBeGreaterThanOrEqual(STEP);
+    expect(
+      shrinkOf(rest!) /
+        shrinkOf(within(moved).getByTestId("engine-moment-summary").firstElementChild!),
+    ).toBeGreaterThanOrEqual(STEP);
   });
 
   it("folds an agent's edits to one file into one row that opens the newest and lists the rest", () => {
-    const calls = view({ entries: [agentEdit("m-3", 0), agentEdit("m-2", 5), agentEdit("m-1", 9)] });
+    const calls = view({
+      entries: [agentEdit("m-3", 0), agentEdit("m-2", 5), agentEdit("m-1", 9)],
+    });
     expect(screen.getAllByTestId("engine-moment-open")).toHaveLength(1);
-    // The run's head leads with its time, then names the agent and its file;
-    // each edit's summary is listed under it.
     const head = screen.getByTestId("engine-moment-open");
     expect(head.firstElementChild!.tagName).toBe("TIME");
     expect(head.textContent).toMatch(/Nova.*plan\.mdnotes$/);
@@ -347,15 +518,22 @@ describe("History timeline changes", () => {
     expect(calls.open).toHaveBeenLastCalledWith("m-1", "notes/plan.md");
   });
 
-  // History loads a page at a time. While earlier changes remain, the oldest
-  // loaded row may continue on the next page, so it counts what has loaded as
-  // a lower bound, and only it does.
   it("counts the oldest loaded pass or run as a lower bound while earlier changes remain", () => {
     // Main sends changes newest first, so a pass listed after the run is older.
-    const pass = (id: string, minutes = 0) => file(id, { correlationId: "import", path: `notes/${id}.md`, recordedAtMs: DAY - minutes * 60_000 });
-    view({ entries: [agentEdit("m-2", 0), agentEdit("m-1", 5), pass("p-2", 10), pass("p-1", 10)], hasMore: true });
+    const pass = (id: string, minutes = 0) =>
+      file(id, {
+        correlationId: "import",
+        path: `notes/${id}.md`,
+        recordedAtMs: DAY - minutes * 60_000,
+      });
+    view({
+      entries: [agentEdit("m-2", 0), agentEdit("m-1", 5), pass("p-2", 10), pass("p-1", 10)],
+      hasMore: true,
+    });
     expect(screen.getByTestId("engine-moment-run-toggle").textContent).toBe("2 changes");
-    const count = screen.getByTestId("engine-moment-group-toggle").querySelector("span.tabular-nums")!;
+    const count = screen
+      .getByTestId("engine-moment-group-toggle")
+      .querySelector("span.tabular-nums")!;
     expect(count.querySelector("[aria-hidden]")?.textContent).toBe("2+ files");
     expect(count.querySelector(".sr-only")?.textContent).toBe("2 or more files");
     cleanup();
@@ -363,20 +541,34 @@ describe("History timeline changes", () => {
     // An undated Collection change lists last, but the pass it follows in
     // main's order is still the oldest dated row, and the next page continues it.
     view({ entries: [change(4, null), pass("p-2", 10), pass("p-1", 10)], hasMore: true });
-    expect(screen.getByTestId("engine-moment-group-toggle").querySelector("span.tabular-nums [aria-hidden]")?.textContent).toBe("2+ files");
+    expect(
+      screen
+        .getByTestId("engine-moment-group-toggle")
+        .querySelector("span.tabular-nums [aria-hidden]")?.textContent,
+    ).toBe("2+ files");
     cleanup();
 
-    view({ entries: [pass("p-2"), pass("p-1"), agentEdit("m-2", 0), agentEdit("m-1", 5)], hasMore: true });
+    view({
+      entries: [pass("p-2"), pass("p-1"), agentEdit("m-2", 0), agentEdit("m-1", 5)],
+      hasMore: true,
+    });
     const run = screen.getByTestId("engine-moment-run-toggle");
     expect(run.querySelector("[aria-hidden]")?.textContent).toBe("2+ changes");
     expect(run.getAttribute("aria-label")).toBe("2 or more changes");
     expect(run.getAttribute("title")).toBe("2 or more changes");
-    expect(screen.getByTestId("engine-moment-group-toggle").querySelector("span.tabular-nums")!.textContent).toBe("2 files");
+    expect(
+      screen.getByTestId("engine-moment-group-toggle").querySelector("span.tabular-nums")!
+        .textContent,
+    ).toBe("2 files");
     cleanup();
 
-    // Once nothing earlier remains, every count is the total.
-    view({ entries: [pass("p-2"), pass("p-1"), agentEdit("m-2", 0), agentEdit("m-1", 5)], hasMore: false });
-    expect(screen.getByTestId("engine-moment-run-toggle").getAttribute("aria-label")).toBe("2 changes");
+    view({
+      entries: [pass("p-2"), pass("p-1"), agentEdit("m-2", 0), agentEdit("m-1", 5)],
+      hasMore: false,
+    });
+    expect(screen.getByTestId("engine-moment-run-toggle").getAttribute("aria-label")).toBe(
+      "2 changes",
+    );
   });
 
   it("marks the open change, and only it, as selected", () => {
@@ -400,8 +592,6 @@ describe("History timeline changes", () => {
     return id === null ? null : document.getElementById(id)?.textContent;
   };
 
-  // The open change may be one a collapsed row hides. The row shows it holds
-  // it without opening; aria-current stays on the change itself.
   it("marks a collapsed run that holds the open change, until it opens", () => {
     view({ entries: [agentEdit("m-2", 0), agentEdit("m-1", 5)], openMomentId: "m-1" });
     const row = screen.getByTestId("engine-moment-run").firstElementChild!;
@@ -412,28 +602,41 @@ describe("History timeline changes", () => {
     fireEvent.click(toggle);
     expect(row.className.split(" ")).not.toContain("bg-selected");
     expect(describedBy(toggle)).toBeNull();
-    expect(screen.getAllByTestId("engine-moment-open")[1]!.getAttribute("aria-current")).toBe("true");
+    expect(screen.getAllByTestId("engine-moment-open")[1]!.getAttribute("aria-current")).toBe(
+      "true",
+    );
   });
 
   it("marks a collapsed pass that holds the open change, until it opens", () => {
-    view({ entries: [file("p-2", { correlationId: "pass" }), file("p-1", { correlationId: "pass", path: "notes/other.md" })], openMomentId: "p-1" });
+    view({
+      entries: [
+        file("p-2", { correlationId: "pass" }),
+        file("p-1", { correlationId: "pass", path: "notes/other.md" }),
+      ],
+      openMomentId: "p-1",
+    });
     const toggle = screen.getByTestId("engine-moment-group-toggle");
     expect(toggle.className.split(" ")).toContain("bg-selected");
     expect(describedBy(toggle)).toBe("Includes the open change");
     fireEvent.click(toggle);
     expect(toggle.className.split(" ")).not.toContain("bg-selected");
-    expect(screen.getAllByTestId("engine-moment-open")[1]!.getAttribute("aria-current")).toBe("true");
+    expect(screen.getAllByTestId("engine-moment-open")[1]!.getAttribute("aria-current")).toBe(
+      "true",
+    );
   });
 
-  // The name says what a row opens. Its description tells one edit of the
-  // file from the next: what it did, who made it, and when.
   it("describes each change by what it did, who made it, and when", () => {
-    view({ entries: [
-      agentEdit("m-3", 0),
-      agentEdit("m-2", 5),
-      file("m-1", { recordedAtMs: DAY - 3_600_000, namedAuthor: { userId: "sam", label: "Sam Rivera" },
-        authors: [{ kind: "named", userId: "sam", grantId: "grant-sam", grantGeneration: 1 }] }),
-    ] });
+    view({
+      entries: [
+        agentEdit("m-3", 0),
+        agentEdit("m-2", 5),
+        file("m-1", {
+          recordedAtMs: DAY - 3_600_000,
+          namedAuthor: { userId: "sam", label: "Sam Rivera" },
+          authors: [{ kind: "named", userId: "sam", grantId: "grant-sam", grantGeneration: 1 }],
+        }),
+      ],
+    });
     fireEvent.click(screen.getByTestId("engine-moment-run-toggle"));
     const [newest, earlier, person] = screen.getAllByTestId("engine-moment-open").map(describedBy);
     expect(newest).toMatch(/^Updated plan\.md, Agent Nova, /);
@@ -451,9 +654,9 @@ describe("History timeline changes", () => {
     };
     expect(row({})).toMatch(/Local file edit$/);
     expect(row({ origin: "ydoc" })).toMatch(/Live edit$/);
-    // A real summary, another operation, a source that is not an action, and
-    // a person's name all keep their words.
-    expect(row({ summary: "Added the Sintra day trip" })).toMatch(/Local file editAdded the Sintra day trip$/);
+    expect(row({ summary: "Added the Sintra day trip" })).toMatch(
+      /Local file editAdded the Sintra day trip$/,
+    );
     expect(row({ operation: "delete" })).toMatch(/Local file editDeleted$/);
     expect(row({ origin: "sync" })).toMatch(/SyncEdited$/);
     expect(row({ origin: "ydoc", liveAuthorName: "Jun Park" })).toMatch(/Jun ParkEdited$/);
@@ -462,15 +665,21 @@ describe("History timeline changes", () => {
 
 describe("History timeline sources", () => {
   it("names the Collections a partial page is missing, and Try again reads again", () => {
-    const calls = view({ entries: [file("m-1")], unavailableSources: [{ datasetId: BUDGET }, { datasetId: "00000000-0000-4000-8000-000000000009" }] });
-    expect(screen.getByTestId("history-sources-unavailable").textContent).toBe("dohc could not load changes from Budget and 1 more.");
+    const calls = view({
+      entries: [file("m-1")],
+      unavailableSources: [
+        { datasetId: BUDGET },
+        { datasetId: "00000000-0000-4000-8000-000000000009" },
+      ],
+    });
+    expect(screen.getByTestId("history-sources-unavailable").textContent).toBe(
+      "dohc could not load changes from Budget and 1 more.",
+    );
     fireEvent.click(screen.getByTestId("history-sources-retry"));
     expect(calls.retry).toHaveBeenCalledOnce();
     expect(screen.getByTestId("engine-moment-open")).toBeTruthy();
   });
 
-  // A warning, not one more row: the warning's mark, the words in ink that
-  // wrap rather than cut a name, and the small bordered Try again.
   it("shows a Collection that did not load as a warning row", () => {
     view({ entries: [file("m-1")], unavailableSources: [{ datasetId: GUESTS }] });
     const words = screen.getByTestId("history-sources-unavailable-words");
@@ -480,24 +689,30 @@ describe("History timeline sources", () => {
     expect(row.className.split(" ")).toContain("text-ink");
     expect(row.className.split(" ")).not.toContain("h-7");
     expect(row.getAttribute("title")).toBe("dohc could not load changes from Guests.");
-    expect(row.querySelector(".lucide-triangle-alert")!.getAttribute("class")).toContain("text-warning");
+    expect(row.querySelector(".lucide-triangle-alert")!.getAttribute("class")).toContain(
+      "text-warning",
+    );
     const retry = screen.getByRole("button", { name: "Try again" });
     expect(retry.dataset.testid).toBe("history-sources-retry");
-    expect(retry.className.split(" ")).toEqual(expect.arrayContaining(["border", "border-line", "h-6"]));
-    expect(screen.getByTestId("history-sources-unavailable").textContent).toBe("dohc could not load changes from Guests.");
+    expect(retry.className.split(" ")).toEqual(
+      expect.arrayContaining(["border", "border-line", "h-6"]),
+    );
+    expect(screen.getByTestId("history-sources-unavailable").textContent).toBe(
+      "dohc could not load changes from Guests.",
+    );
   });
 
-  // A limit, not one more row: a filled band whose whole sentence shows and
-  // wraps, says how many Collections History includes and how to see the
-  // rest, and offers no retry that cannot help.
   it("shows the Collections the source limit left out as a band with its whole sentence", () => {
     view({ entries: [file("m-1")], omittedSources: 12, hasMore: true });
     const band = screen.getByTestId("history-sources-limit");
-    expect(band.className.split(" ")).toEqual(expect.arrayContaining(["rounded-md", "bg-panel-2", "text-muted"]));
+    expect(band.className.split(" ")).toEqual(
+      expect.arrayContaining(["rounded-md", "bg-panel-2", "text-muted"]),
+    );
     expect(band.getAttribute("title")).toBeNull();
     const words = within(band).getByTestId("history-sources-omitted");
     expect(words.textContent).toBe(
-      "History includes 128 of 140 Collections. For another Collection, open it and choose History.");
+      "History includes 128 of 140 Collections. For another Collection, open it and choose History.",
+    );
     expect(words.className).not.toContain("truncate");
     expect(words.className).not.toContain("sr-only");
     expect(words.getAttribute("aria-hidden")).toBeNull();
@@ -506,7 +721,11 @@ describe("History timeline sources", () => {
   });
 
   it("puts a Collection that did not load above the limit's band on a page with rows", () => {
-    view({ entries: [file("m-1")], unavailableSources: [{ datasetId: GUESTS }], omittedSources: 3 });
+    view({
+      entries: [file("m-1")],
+      unavailableSources: [{ datasetId: GUESTS }],
+      omittedSources: 3,
+    });
     const notice = screen.getByTestId("history-sources-notice");
     const band = within(notice).getByTestId("history-sources-limit");
     const warning = within(notice).getByTestId("history-sources-unavailable-words").parentElement!;
@@ -514,16 +733,18 @@ describe("History timeline sources", () => {
     expect(within(warning).getByTestId("history-sources-retry")).toBeTruthy();
     expect(within(band).queryByRole("button")).toBeNull();
     expect(within(band).getByTestId("history-sources-omitted").textContent).toBe(
-      "History includes 128 of 131 Collections. For another Collection, open it and choose History.");
+      "History includes 128 of 131 Collections. For another Collection, open it and choose History.",
+    );
   });
 
   it("shows a Collection that did not load as History's failed state, not as empty History", () => {
     const calls = view({ unavailableSources: [{ datasetId: GUESTS }] });
     const state = screen.getByTestId("history-collections-unavailable");
     expect(state.textContent).toContain("dohc could not load changes from Guests.");
-    expect(state.querySelector(".lucide-triangle-alert")!.getAttribute("class")).toContain("text-danger");
+    expect(state.querySelector(".lucide-triangle-alert")!.getAttribute("class")).toContain(
+      "text-danger",
+    );
     expect(screen.queryByText("No changes yet.")).toBeNull();
-    // The standard Try again, not the small one a row uses.
     const retry = within(state).getByRole("button", { name: "Try again" });
     expect(retry.dataset.testid).toBe("history-sources-retry");
     expect(retry.className.split(" ")).toContain("h-8");
@@ -533,8 +754,12 @@ describe("History timeline sources", () => {
 
   it("puts the Collections that did not load first and the ones left out under them", () => {
     view({ unavailableSources: [{ datasetId: GUESTS }], omittedSources: 3 });
-    expect(screen.getByText("dohc could not load changes from Guests.").className).toContain("text-sm");
-    expect(screen.getByText(/History includes 128 of 131 Collections\./).className).toContain("text-subtle");
+    expect(screen.getByText("dohc could not load changes from Guests.").className).toContain(
+      "text-sm",
+    );
+    expect(screen.getByText(/History includes 128 of 131 Collections\./).className).toContain(
+      "text-subtle",
+    );
     expect(screen.getByTestId("history-sources-retry")).toBeTruthy();
   });
 
@@ -560,7 +785,6 @@ describe("History timeline sources", () => {
   it("says No changes yet only for a complete page", () => {
     view();
     const line = screen.getByText("No changes yet.");
-    // The picture is decorative and there is no second line or action.
     expect(line.parentElement!.textContent).toBe("No changes yet.");
     expect(line.previousElementSibling!.getAttribute("aria-hidden")).toBe("true");
     expect(screen.queryByTestId("history-sources-notice")).toBeNull();

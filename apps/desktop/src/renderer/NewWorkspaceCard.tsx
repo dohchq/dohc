@@ -10,11 +10,6 @@ import { FieldError, GhostButton, PrimaryButton } from "./ui/controls";
 import { PathLine } from "./ui/PathLine";
 import { useRequestSequence } from "./useRequestSequence";
 
-// The folder card: the new workspace's name on the folder's tab, where its
-// folder goes on one line in the card, then Create. Sheets of the kinds a
-// workspace holds stand in the folder behind the tab. First run shows it as
-// the primary; the workspace manager shows the same card beside its list.
-
 const DEFAULT_FOLDER_NAME = "Personal";
 
 function isWindows(): boolean {
@@ -36,22 +31,16 @@ function folderNameError(name: string, platform: string): string | null {
   return workspaceNameError(trimmed, platform);
 }
 
-export function NewWorkspaceCard(props: {
-  onWorkspaceReady: (workspace: Workspace) => void;
-}) {
+export function NewWorkspaceCard(props: { onWorkspaceReady: (workspace: Workspace) => void }) {
   const [root, setRoot] = useState<string | null>(null);
   const [folderName, setFolderName] = useState(DEFAULT_FOLDER_NAME);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // The name's error as of its last check, when focus left the field or the
-  // person pressed Create. Typing clears it until the next check.
   const [nameError, setNameError] = useState<string | null>(null);
   // A picked location shows once its suggested name arrives; until then
   // Create would use the location still on screen.
   const [placing, setPlacing] = useState(false);
   const nameField = useRef<HTMLInputElement>(null);
-  // Until the person types, the name is dohc's suggestion and follows the
-  // location.
   const nameTyped = useRef(false);
   const locationTooltip = useTooltip();
   // The default suggestion and the picker race for the same field. The
@@ -93,12 +82,11 @@ export function NewWorkspaceCard(props: {
     nameField.current?.select();
     suggestDefaultRoot();
     // rootRequests is a stable ref holder.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // A new suggestion stays selected in the focused field.
   useLayoutEffect(() => {
-    if (!nameTyped.current && document.activeElement === nameField.current) nameField.current?.select();
+    if (!nameTyped.current && document.activeElement === nameField.current)
+      nameField.current?.select();
   }, [folderName]);
 
   async function chooseFolder() {
@@ -199,17 +187,28 @@ export function NewWorkspaceCard(props: {
           <Pencil size={13} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
         </label>
         {/* The open path sits over the tab, so the card rises above it. */}
-        <div className={`dohc-elevated relative ${pathShown ? "z-4" : "z-2"} flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5`}>
-          {/* The name's error sits right under its tab. */}
+        <div
+          className={`dohc-elevated relative ${pathShown ? "z-4" : "z-2"} flex flex-col gap-4 rounded-xl rounded-tl-none border border-line bg-panel p-5`}
+        >
           {nameError ? (
             <FieldError id="new-workspace-name-error" className="-mb-2">
               {nameError}
             </FieldError>
           ) : null}
-          <div {...locationTooltip.hoverProps} className="relative flex min-w-0 items-center gap-2 text-subtle">
+          <div
+            {...locationTooltip.hoverProps}
+            className="relative flex min-w-0 items-center gap-2 text-subtle"
+          >
             <Folder size={13} strokeWidth={1.9} aria-hidden className="shrink-0" />
-            <span data-testid="new-workspace-location" className="flex min-w-0 flex-1 text-[12px] leading-5 text-muted">
-              {path ? <PathLine path={path} /> : <span className="truncate">{error ? "Choose a folder" : "…"}</span>}
+            <span
+              data-testid="new-workspace-location"
+              className="flex min-w-0 flex-1 text-[12px] leading-5 text-muted"
+            >
+              {path ? (
+                <PathLine path={path} />
+              ) : (
+                <span className="truncate">{error ? "Choose a folder" : "…"}</span>
+              )}
             </span>
             {/* It stays live when no default arrived, so the person can still
                 choose a folder by hand. */}
@@ -221,10 +220,6 @@ export function NewWorkspaceCard(props: {
             >
               Change
             </GhostButton>
-            {/* The path opens above its line, as wide as the card, so a long
-                one takes few lines and covers only the tab. Clicks go through
-                it, and it closes once the pointer leaves the line. The shared
-                Tooltip opens below its holder, at most 16rem wide. */}
             <span
               id={locationTooltip.tooltipProps.id}
               role="tooltip"
@@ -238,7 +233,11 @@ export function NewWorkspaceCard(props: {
           </div>
 
           {error ? (
-            <p id="new-workspace-error" role="alert" className="-mt-2 text-xs leading-relaxed text-danger">
+            <p
+              id="new-workspace-error"
+              role="alert"
+              className="-mt-2 text-xs leading-relaxed text-danger"
+            >
               {error}
             </p>
           ) : null}

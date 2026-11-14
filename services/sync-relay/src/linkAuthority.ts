@@ -44,7 +44,9 @@ export interface LinkAuthority {
  * it again before each chunk, as its blob downloads do.
  */
 export type LinkJsonResponse = (
-  authority: LinkAuthority | (Pick<LinkAuthority, "shareId" | "grantId"> & { credential?: undefined }),
+  authority:
+    | LinkAuthority
+    | (Pick<LinkAuthority, "shareId" | "grantId"> & { credential?: undefined }),
   body: unknown,
   signal: AbortSignal,
 ) => Response;
@@ -66,7 +68,11 @@ export interface LinkAuthorityResolver {
   /** Authenticates the request. */
   resolve(request: Request): LinkAuthority;
   /** Authenticates the request, then admits it per caller and per link. */
-  require(request: Request, callerLimiter: TokenBucketLimiter, grantLimiter: TokenBucketLimiter): LinkAuthority;
+  require(
+    request: Request,
+    callerLimiter: TokenBucketLimiter,
+    grantLimiter: TokenBucketLimiter,
+  ): LinkAuthority;
   /** Authenticates the same credential again, for the same link at the same generation. */
   fresh(authority: LinkAuthority): LinkAuthority;
   /** Authenticates a personal agent's request at its account's current fence. 503 while the fence can't be read. */
@@ -85,9 +91,19 @@ export function isAgentRequest(request: Request): boolean {
 }
 
 /** An agent's access token and the MCP address it was sent to, hashed; null when either is malformed. */
-export function agentAccessCheck(token: unknown, resource: unknown, linkKey: string | Uint8Array): AgentAccessCheck | null {
-  if (typeof token !== "string" || !AGENT_TOKEN.test(token) || typeof resource !== "string" || resource.length === 0 ||
-      resource.length > AGENT_URI_CHAR_LIMIT || CONTROL_CHARS.test(resource)) {
+export function agentAccessCheck(
+  token: unknown,
+  resource: unknown,
+  linkKey: string | Uint8Array,
+): AgentAccessCheck | null {
+  if (
+    typeof token !== "string" ||
+    !AGENT_TOKEN.test(token) ||
+    typeof resource !== "string" ||
+    resource.length === 0 ||
+    resource.length > AGENT_URI_CHAR_LIMIT ||
+    CONTROL_CHARS.test(resource)
+  ) {
     return null;
   }
   return {
@@ -97,16 +113,26 @@ export function agentAccessCheck(token: unknown, resource: unknown, linkKey: str
 }
 
 export function createLinkAuthorityResolver(input: {
-  storage: Pick<SyncRelayStorage,
-    | "authenticateAgentAuthority" | "findChannelCreateKind" | "getShare" | "getShareGrant" | "workspaceIsOwnedBy"
-    | "personalCredentialOwner" | "authenticatePersonalAuthority">;
+  storage: Pick<
+    SyncRelayStorage,
+    | "authenticateAgentAuthority"
+    | "findChannelCreateKind"
+    | "getShare"
+    | "getShareGrant"
+    | "workspaceIsOwnedBy"
+    | "personalCredentialOwner"
+    | "authenticatePersonalAuthority"
+  >;
   personalAgents: Pick<PersonalAgents, "readFence">;
   linkKey: string | Uint8Array | undefined;
   publicEditRelease: PublicEditRelease | undefined;
   relayExchangeKeyConfigured: boolean;
   hasValidRelayExchangeKey: (request: Request) => boolean;
   nowMs: () => number;
-  requireLinkCapability: (request: Request) => { capabilityToken: string; capability: ValidatedLinkCapability };
+  requireLinkCapability: (request: Request) => {
+    capabilityToken: string;
+    capability: ValidatedLinkCapability;
+  };
   requireFreshLinkRead: (
     capabilityToken: string,
     expected: { shareId: string; grantId: string; generation: number },
@@ -126,16 +152,26 @@ export function createLinkAuthorityResolver(input: {
 
   // The four token checks and the address happen in storage. Here, the link
   // still serves its files at the generation the agent signed in with.
-  const agent = (check: AgentAccessCheck, expected?: { shareId: string; grantId: string; generation: number }): LinkAuthority => {
+  const agent = (
+    check: AgentAccessCheck,
+    expected?: { shareId: string; grantId: string; generation: number },
+  ): LinkAuthority => {
     const connection = storage.authenticateAgentAuthority(check, nowMs());
     if (!connection) throw invalidLinkCapability();
-    const authorized = authorizeLinkShareAction({ storage, grantId: connection.grantId, action: "read" });
+    const authorized = authorizeLinkShareAction({
+      storage,
+      grantId: connection.grantId,
+      action: "read",
+    });
     if (
-      !authorized.ok || authorized.grant.generation !== connection.generation ||
+      !authorized.ok ||
+      authorized.grant.generation !== connection.generation ||
       authorized.share.shareId !== connection.shareId ||
       !servableFiles(authorized.effectiveSelector, input.publicEditRelease) ||
-      (expected && (expected.shareId !== connection.shareId || expected.grantId !== connection.grantId ||
-        expected.generation !== connection.generation))
+      (expected &&
+        (expected.shareId !== connection.shareId ||
+          expected.grantId !== connection.grantId ||
+          expected.generation !== connection.generation))
     ) {
       throw invalidLinkCapability();
     }
@@ -152,12 +188,20 @@ export function createLinkAuthorityResolver(input: {
 
   // An agent never sends a holder's profile, and never comes from a browser.
   const agentCheck = (request: Request): AgentAccessCheck => {
-    if (!linkKey || !input.relayExchangeKeyConfigured || !input.hasValidRelayExchangeKey(request) ||
-        request.headers.has("x-dohc-link-profile-secret") || request.headers.has("cookie")) {
+    if (
+      !linkKey ||
+      !input.relayExchangeKeyConfigured ||
+      !input.hasValidRelayExchangeKey(request) ||
+      request.headers.has("x-dohc-link-profile-secret") ||
+      request.headers.has("cookie")
+    ) {
       throw invalidLinkCapability();
     }
-    const check = agentAccessCheck(AGENT_SCHEME.exec(request.headers.get("authorization") ?? "")?.[1],
-      request.headers.get("x-dohc-agent-resource"), linkKey);
+    const check = agentAccessCheck(
+      AGENT_SCHEME.exec(request.headers.get("authorization") ?? "")?.[1],
+      request.headers.get("x-dohc-agent-resource"),
+      linkKey,
+    );
     if (!check) throw invalidLinkCapability();
     return check;
   };
@@ -174,12 +218,16 @@ export function createLinkAuthorityResolver(input: {
 
   // The account's fence is read by primary key first, then storage checks the
   // token, connection, agent epoch, that fence, account deletion, and address.
-  const personal = async (check: AgentAccessCheck, connectionId?: string): Promise<PersonalAuthority> => {
+  const personal = async (
+    check: AgentAccessCheck,
+    connectionId?: string,
+  ): Promise<PersonalAuthority> => {
     const owner = storage.personalCredentialOwner({ kind: "access", hash: check.accessTokenHash });
     if (owner === null) throw invalidLinkCapability();
     const fenceEpoch = await input.personalAgents.readFence(owner);
     const connection = storage.authenticatePersonalAuthority(check, fenceEpoch, nowMs());
-    if (!connection || (connectionId !== undefined && connection.connectionId !== connectionId)) throw invalidLinkCapability();
+    if (!connection || (connectionId !== undefined && connection.connectionId !== connectionId))
+      throw invalidLinkCapability();
     return {
       kind: "personal",
       agentId: connection.agentId,
@@ -197,7 +245,8 @@ export function createLinkAuthorityResolver(input: {
     require(request, callerLimiter, grantLimiter) {
       const authority = resolve(request);
       const admittedAtMs = nowMs();
-      const admitted = callerLimiter.allow(authority.callerKey, admittedAtMs) &&
+      const admitted =
+        callerLimiter.allow(authority.callerKey, admittedAtMs) &&
         grantLimiter.allow(authority.grantId, admittedAtMs);
       if (!admitted) throw relayError("link_read_rate_limited");
       return authority;
@@ -205,7 +254,10 @@ export function createLinkAuthorityResolver(input: {
     fresh(authority) {
       const { credential } = authority;
       if (credential.kind === "agent") return agent(credential.check, authority);
-      return holder(credential.capabilityToken, input.requireFreshLinkRead(credential.capabilityToken, authority));
+      return holder(
+        credential.capabilityToken,
+        input.requireFreshLinkRead(credential.capabilityToken, authority),
+      );
     },
     async personal(request) {
       if (!isAgentRequest(request)) throw invalidLinkCapability();

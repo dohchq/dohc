@@ -37,25 +37,30 @@ beforeEach(() => {
 });
 
 describe("main-window initial visibility", () => {
-  it.each(["workspace", "manager"] as const)("shows a ready %s document without a first-paint event", role => {
-    const window = createMainWindow({ role });
-    expect(window.show).not.toHaveBeenCalled();
-    window.webContents.emit("dom-ready");
-    expect(window.show).toHaveBeenCalledOnce();
-  });
+  it.each(["workspace", "manager"] as const)(
+    "shows a ready %s document without a first-paint event",
+    (role) => {
+      const window = createMainWindow({ role });
+      expect(window.show).not.toHaveBeenCalled();
+      window.webContents.emit("dom-ready");
+      expect(window.show).toHaveBeenCalledOnce();
+    },
+  );
 
-  it.each(["ready-to-show", "dom-ready"] as const)("shows only once when %s arrives first", first => {
-    const window = createMainWindow();
-    if (first === "ready-to-show") window.emit(first);
-    else window.webContents.emit(first);
-    expect(window.show).toHaveBeenCalledOnce();
+  it.each(["ready-to-show", "dom-ready"] as const)(
+    "shows only once when %s arrives first",
+    (first) => {
+      const window = createMainWindow();
+      if (first === "ready-to-show") window.emit(first);
+      else window.webContents.emit(first);
+      expect(window.show).toHaveBeenCalledOnce();
 
-    // A late first paint or a renderer reload must not bring it forward again.
-    window.emit("ready-to-show");
-    window.webContents.emit("dom-ready");
-    window.webContents.emit("dom-ready");
-    expect(window.show).toHaveBeenCalledOnce();
-  });
+      window.emit("ready-to-show");
+      window.webContents.emit("dom-ready");
+      window.webContents.emit("dom-ready");
+      expect(window.show).toHaveBeenCalledOnce();
+    },
+  );
 
   it("does not show a window closed before its document is ready", () => {
     const window = createMainWindow();
@@ -72,19 +77,27 @@ afterEach(() => {
 });
 
 describe("main-window OS mouse input", () => {
-  it.each(["workspace", "manager"] as const)("enables webview tags only for a workspace window: %s", role => {
-    createMainWindow({ role });
-    expect(vi.mocked(BrowserWindow).mock.calls.at(-1)?.[0]?.webPreferences?.webviewTag).toBe(role === "workspace");
-  });
-  it.each(["workspace", "manager"] as const)("ignores OS mouse events before showing an e2e %s window", (role) => {
-    vi.stubEnv("DOHC_DESKTOP_TEST", "1");
-    vi.stubEnv("DOHC_TEST_IGNORE_MOUSE", "1");
-    const window = createMainWindow({ role });
-    expect(window.setIgnoreMouseEvents).toHaveBeenCalledExactlyOnceWith(true);
-    expect(window.show).not.toHaveBeenCalled();
-    window.emit("ready-to-show");
-    expect(window.show).toHaveBeenCalledOnce();
-  });
+  it.each(["workspace", "manager"] as const)(
+    "enables webview tags only for a workspace window: %s",
+    (role) => {
+      createMainWindow({ role });
+      expect(vi.mocked(BrowserWindow).mock.calls.at(-1)?.[0]?.webPreferences?.webviewTag).toBe(
+        role === "workspace",
+      );
+    },
+  );
+  it.each(["workspace", "manager"] as const)(
+    "ignores OS mouse events before showing an e2e %s window",
+    (role) => {
+      vi.stubEnv("DOHC_DESKTOP_TEST", "1");
+      vi.stubEnv("DOHC_TEST_IGNORE_MOUSE", "1");
+      const window = createMainWindow({ role });
+      expect(window.setIgnoreMouseEvents).toHaveBeenCalledExactlyOnceWith(true);
+      expect(window.show).not.toHaveBeenCalled();
+      window.emit("ready-to-show");
+      expect(window.show).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each([
     { name: "normal development", packaged: false, test: "", ignore: "1" },

@@ -36,7 +36,6 @@ function fileRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-// Open one file of the review, by its row.
 async function openFile(user: ReturnType<typeof userEvent.setup>, index = 0) {
   const toggles = await screen.findAllByTestId("proposal-review-file-toggle");
   await user.click(toggles[index]!);
@@ -82,19 +81,17 @@ describe("ProposalReviewDialog", () => {
     expect(file.dataset.proposalPath).toBe("docs/plan.md");
     expect(file.textContent).toContain("Changed");
     await openFile(user);
-    expect(
-      (await screen.findByTestId("proposal-review-diff-lines")).textContent,
-    ).toContain("three");
+    expect((await screen.findByTestId("proposal-review-diff-lines")).textContent).toContain(
+      "three",
+    );
   });
 
-  // The whole review is one read. It used to be a listing plus one read per
-  // file, and each of those re-read the entire listing from the relay.
+  // The whole review is one read. A listing plus one read per file would
+  // re-read the entire listing from the relay for each file.
   it("reads the whole review once, however many files it holds", async () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(
       changes({
-        files: [0, 1, 2, 3, 4].map((opIndex) =>
-          fileRow({ opIndex, path: `docs/f-${opIndex}.md` }),
-        ),
+        files: [0, 1, 2, 3, 4].map((opIndex) => fileRow({ opIndex, path: `docs/f-${opIndex}.md` })),
       }),
     );
     renderDialog();
@@ -110,9 +107,6 @@ describe("ProposalReviewDialog", () => {
     });
   });
 
-  // The whole point of the lazy read. A review carrying what a fortnight of
-  // work changes must open — and opening it must not fetch a single file's
-  // content, because fetching all of them is what made it impossible before.
   it("opens a review of the full bound without fetching any content", async () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(
       changes({
@@ -130,23 +124,17 @@ describe("ProposalReviewDialog", () => {
       bridgeMock.readShareProposalFileContent,
       "fetching content to draw the list restores the eager read this bound depends on",
     ).not.toHaveBeenCalled();
-    // Every row still says what it is without its content.
     expect(screen.getAllByTestId("proposal-review-file-toggle")[0]!.textContent).toContain(
       "docs/f-0.md",
     );
-    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
-      false,
-    );
+    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(false);
   });
 
-  // Opening one file fetches that file, and only that file.
   it("fetches one file's content when its row is opened", async () => {
     const user = userEvent.setup();
     bridgeMock.readShareProposalChanges.mockResolvedValue(
       changes({
-        files: [0, 1, 2].map((opIndex) =>
-          fileRow({ opIndex, path: `docs/f-${opIndex}.md` }),
-        ),
+        files: [0, 1, 2].map((opIndex) => fileRow({ opIndex, path: `docs/f-${opIndex}.md` })),
       }),
     );
     renderDialog();
@@ -154,9 +142,7 @@ describe("ProposalReviewDialog", () => {
 
     await openFile(user, 1);
 
-    await waitFor(() =>
-      expect(screen.getByTestId("proposal-review-diff-lines")).toBeTruthy(),
-    );
+    await waitFor(() => expect(screen.getByTestId("proposal-review-diff-lines")).toBeTruthy());
     expect(
       bridgeMock.readShareProposalFileContent.mock.calls,
       "opening one file must not fetch the ones the granter did not open",
@@ -166,12 +152,9 @@ describe("ProposalReviewDialog", () => {
       proposalId: "proposal-1",
       opIndex: 1,
     });
-    // Exactly one file is open, so exactly one diff is drawn.
     expect(screen.getAllByTestId("proposal-review-diff-lines")).toHaveLength(1);
   });
 
-  // Closing and reopening shows what was already read. A refetch per toggle
-  // would turn one impatient granter into a stream of relay round trips.
   it("reads one file's content once, however often its row is toggled", async () => {
     const user = userEvent.setup();
     renderDialog();
@@ -189,7 +172,6 @@ describe("ProposalReviewDialog", () => {
     ).toHaveLength(1);
   });
 
-  // One file this surface cannot read must not take the review down with it.
   it("states a file it could not read, and keeps both decisions available", async () => {
     const user = userEvent.setup();
     bridgeMock.readShareProposalFileContent.mockRejectedValue(
@@ -200,18 +182,15 @@ describe("ProposalReviewDialog", () => {
 
     await openFile(user);
 
-    expect(
-      (await screen.findByTestId("proposal-review-file-error")).textContent,
-    ).toContain("dohc could not read that file.");
+    expect((await screen.findByTestId("proposal-review-file-error")).textContent).toContain(
+      "dohc could not read that file.",
+    );
     expect(
       screen.getByTestId("proposal-review-decline").hasAttribute("disabled"),
       "one unreadable file that disables Decline leaves the granter unable to answer the rest",
     ).toBe(false);
-    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
-      false,
-    );
+    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(false);
 
-    // A failure is not a permanent verdict on that file. Reopening tries again.
     bridgeMock.readShareProposalFileContent.mockResolvedValue({
       currentText: "one\n",
       incomingText: "two\n",
@@ -224,20 +203,14 @@ describe("ProposalReviewDialog", () => {
     ).toContain("two");
   });
 
-  // The relay could not state who sent them. The review still works, and the
-  // dialog names an unknown account the way the share banner does.
   it("names an unknown sender the way the share surfaces already do", async () => {
-    bridgeMock.readShareProposalChanges.mockResolvedValue(
-      changes({ proposedByEmail: null }),
-    );
+    bridgeMock.readShareProposalChanges.mockResolvedValue(changes({ proposedByEmail: null }));
     renderDialog();
     expect((await screen.findByRole("dialog")).textContent).toContain(
       "Changes from another dohc user",
     );
   });
 
-  // Drift is the one thing review has to say that a diff cannot: the
-  // granter's copy moved after the recipient sent this.
   it("states drift on the file that drifted, and only on that file", async () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(
       changes({
@@ -266,10 +239,6 @@ describe("ProposalReviewDialog", () => {
     expect(files[1]!.textContent).toContain("Removed");
   });
 
-  // A change this surface cannot PREVIEW is still a change the granter has to
-  // answer. Binary content, content over the text bound, and a blob the relay
-  // would not serve all arrive as no incoming side — and the granter must
-  // still be able to say no.
   it("keeps both decisions available for a change it cannot preview", async () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(
       changes({
@@ -283,9 +252,7 @@ describe("ProposalReviewDialog", () => {
       screen.getByTestId("proposal-review-decline").hasAttribute("disabled"),
       "failing the read on unpreviewable content leaves the granter unable to decline it",
     ).toBe(false);
-    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
-      false,
-    );
+    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(false);
   });
 
   // Decline is the safe exit: it moves nothing into this workspace. A granter
@@ -308,9 +275,7 @@ describe("ProposalReviewDialog", () => {
       "a read failure that disables Decline leaves the granter holding a proposal they can neither see nor answer",
     ).toBe(false);
     // Accept is the opposite: it writes, so it stays disabled.
-    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
-      true,
-    );
+    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(true);
 
     await user.click(screen.getByTestId("proposal-review-decline"));
     await waitFor(() =>
@@ -382,23 +347,18 @@ describe("ProposalReviewDialog", () => {
     expect((await screen.findByRole("alert")).textContent).toBe(
       "dohc could not find those changes. Refresh, then try again.",
     );
-    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
-      true,
-    );
+    expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(true);
     await user.click(screen.getByTestId("proposal-review-later"));
     expect(onClose).toHaveBeenCalled();
   });
 
-  // The renderer async-state invariant: a slow answer for one submission must
-  // never repaint the window that replaced it.
   it("drops an answer that belongs to a replaced window", async () => {
     let releaseFirst: (() => void) | null = null;
     bridgeMock.readShareProposalChanges.mockImplementation(
       async () =>
         await new Promise((resolve) => {
           if (releaseFirst === null) {
-            releaseFirst = () =>
-              resolve(changes({ proposedByEmail: "stale@dohc.test" }));
+            releaseFirst = () => resolve(changes({ proposedByEmail: "stale@dohc.test" }));
             return;
           }
           resolve(changes({ proposedByEmail: "current@dohc.test" }));
@@ -429,8 +389,6 @@ describe("ProposalReviewDialog", () => {
       screen.getByRole("dialog").textContent,
       "dropping the liveness token repaints a replaced window",
     ).not.toContain("stale@dohc.test");
-    expect(screen.getByRole("dialog").textContent).toContain(
-      "Changes from current@dohc.test",
-    );
+    expect(screen.getByRole("dialog").textContent).toContain("Changes from current@dohc.test");
   });
 });

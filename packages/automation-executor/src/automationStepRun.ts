@@ -1,5 +1,10 @@
 import { isEngineStoreBusyRefusal } from "@dohc/workspace-engine-client";
-import { prepareRecordBackend, type RecordRunDependencies, type RecordRunInput, type RunSource } from "./automationRecordBackend";
+import {
+  prepareRecordBackend,
+  type RecordRunDependencies,
+  type RecordRunInput,
+  type RunSource,
+} from "./automationRecordBackend";
 import { AutomationRunWait } from "./automationRunWait";
 import { automationUsageInvocations } from "./automationUsage";
 import type { AutomationTimeSpent, JsonValue } from "@dohc/app-backend-runtime/automation";
@@ -31,7 +36,13 @@ import {
 } from "./automationPlan";
 import { chatNeedsOf, AutomationChatSessionWait, type ChatDirectory } from "./automationChat";
 import type { ReachCollection, ReachRoster } from "./automationReach";
-import { engineWrite, RUN_PLAN_BUDGET_BYTES, type RunWrite, type StoredRun, type StoredStep } from "./automationRunStore";
+import {
+  engineWrite,
+  RUN_PLAN_BUDGET_BYTES,
+  type RunWrite,
+  type StoredRun,
+  type StoredStep,
+} from "./automationRunStore";
 import {
   startRun,
   checkPlannedMessages,
@@ -73,15 +84,23 @@ export interface StepReads {
   /** The records the Find at `ordinal` matches now, with its filters' values, or why it cannot read them all. */
   find(ordinal: number, values: readonly JsonValue[]): Promise<RunRecord[] | { problem: string }>;
   /** Checks what a code step changes, then reads each record it changes by id. */
-  codeRecords(changes: readonly CodeChange[], inputs: { record: RunRecord | null }): Promise<{ records: Map<string, RunRecord> } | { outcome: CollectionAutomationRunOutcome }>;
+  codeRecords(
+    changes: readonly CodeChange[],
+    inputs: { record: RunRecord | null },
+  ): Promise<{ records: Map<string, RunRecord> } | { outcome: CollectionAutomationRunOutcome }>;
   /** A step's planned effects as the run saves them, or why they cannot run. */
-  effects(ordinal: number, planned: readonly PlannedEffect[]): StoredStep["effects"] | { problem: string };
+  effects(
+    ordinal: number,
+    planned: readonly PlannedEffect[],
+  ): StoredStep["effects"] | { problem: string };
 }
 
 /** How a run's steps read and write one kind of Collection. */
 export interface StepBackend {
   /** Whether this approved action can write. Unknown actions are not counted. */
-  isWriteAction?(effect: Extract<StoredStep["effects"][number], { kind: "dataset-action" }>): boolean;
+  isWriteAction?(
+    effect: Extract<StoredStep["effects"][number], { kind: "dataset-action" }>,
+  ): boolean;
   /** A write may have landed even if applying its effect failed before recording it. */
   needsDurability?(): boolean;
   madeDurable?(): void;
@@ -123,7 +142,11 @@ export interface StepRunInput {
   engineClaimId?: string;
 }
 
-const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({ kind: "failed", error, timedOut });
+const failed = (error: string, timedOut = false): CollectionAutomationRunOutcome => ({
+  kind: "failed",
+  error,
+  timedOut,
+});
 const stopped: CollectionAutomationRunOutcome = { kind: "wait", reason: "stopped" };
 
 function errorText(error: unknown): string {
@@ -147,7 +170,9 @@ export function unfinishedStep(run: StoredRun): StoredStep | null {
  * The first effect a stopped run had not recorded, with its step, or null.
  * It may have landed before the run stopped; no later effect started.
  */
-export function unrecordedEffect(run: StoredRun): { ordinal: number; effect: StoredStep["effects"][number] } | null {
+export function unrecordedEffect(
+  run: StoredRun,
+): { ordinal: number; effect: StoredStep["effects"][number] } | null {
   let first = 0;
   for (const step of run.steps) {
     const index = run.applied.length - first;
@@ -163,10 +188,15 @@ type Done =
   | { kind: "add"; ordinal: number; ref: RunRef | null }
   | { kind: "code"; value: JsonValue };
 
-function replayEffect(effect: StoredStep["effects"][number], writes: readonly RunWrite[]): StoredStep["effects"][number] {
-  const fields = new Set(writes.flatMap(write => write.kind === "field" ? [write.field] : []));
-  if (effect.kind === "set") return { ...effect, fields: effect.fields.filter(field => fields.has(field.field)) };
-  if (effect.kind === "add") return { ...effect, fields: effect.fields.filter(field => fields.has(field.field)) };
+function replayEffect(
+  effect: StoredStep["effects"][number],
+  writes: readonly RunWrite[],
+): StoredStep["effects"][number] {
+  const fields = new Set(writes.flatMap((write) => (write.kind === "field" ? [write.field] : [])));
+  if (effect.kind === "set")
+    return { ...effect, fields: effect.fields.filter((field) => fields.has(field.field)) };
+  if (effect.kind === "add")
+    return { ...effect, fields: effect.fields.filter((field) => fields.has(field.field)) };
   return effect;
 }
 
@@ -203,23 +233,35 @@ export async function runSteps(
   const mark = run.durableEffects;
   let lastDurableAt = dependencies.nowMs();
   const sync = async () => {
-    const engineWrites = backend.needsDurability?.() || run.applied.slice(run.durableEffects, progress.effects)
-      .some(({ writes }) => writes.some(engineWrite));
+    const engineWrites =
+      backend.needsDurability?.() ||
+      run.applied
+        .slice(run.durableEffects, progress.effects)
+        .some(({ writes }) => writes.some(engineWrite));
     // The receipt and WAL sync different files. Own both through completion.
     const [durable, appended] = await Promise.allSettled([
-      (async () => { if (engineWrites) await dependencies.makeDurable(input.engineClaimId); })(),
+      (async () => {
+        if (engineWrites) await dependencies.makeDurable(input.engineClaimId);
+      })(),
       finishEffectAppend(progress),
     ]);
     if (appended.status === "rejected") throw appended.reason;
-    if (durable.status === "rejected") { progress.syncFailed = true; return false; }
+    if (durable.status === "rejected") {
+      progress.syncFailed = true;
+      return false;
+    }
     backend.madeDurable?.();
     return true;
   };
-  const progress: RunProgress = { effects: mark, engineEffects: 0, syncFailed: false, append: null,
+  const progress: RunProgress = {
+    effects: mark,
+    engineEffects: 0,
+    syncFailed: false,
+    append: null,
     async checkpoint() {
       // Bound crash replay without syncing short runs or every effect.
       if (progress.engineEffects < 50 || dependencies.nowMs() - lastDurableAt < 2000) return true;
-      if (!await sync()) return false;
+      if (!(await sync())) return false;
       await dependencies.store.save({ ...run, durableEffects: progress.effects });
       run.durableEffects = progress.effects;
       progress.engineEffects = 0;
@@ -234,8 +276,9 @@ export async function runSteps(
     await finishEffectAppend(progress).catch(() => {});
     throw error;
   }
-  if (progress.syncFailed || !await sync()) return { kind: "wait", reason: "engine" };
-  if (outcome.kind === "done" && input.stopped.aborted) outcome = { kind: "wait", reason: "stopped" };
+  if (progress.syncFailed || !(await sync())) return { kind: "wait", reason: "engine" };
+  if (outcome.kind === "done" && input.stopped.aborted)
+    outcome = { kind: "wait", reason: "stopped" };
   const durableEffects = progress.effects;
   if (outcome.kind === "wait") {
     if (durableEffects > mark) {
@@ -250,22 +293,43 @@ export async function runSteps(
   if (outcome.kind === "done") {
     run.outcome = { state: "done" };
   } else if (outcome.outcome.kind === "failed") {
-    run.outcome = { state: "failed", error: outcome.outcome.error, run: input.claimRun, step: outcome.step };
+    run.outcome = {
+      state: "failed",
+      error: outcome.outcome.error,
+      run: input.claimRun,
+      step: outcome.step,
+    };
   }
   run.finishedAtMs = dependencies.nowMs();
   await dependencies.store.save(run);
   dependencies.onRunEnded?.(run);
   if (dependencies.onUsageSuccess && outcome.kind === "done") {
-    for (const invocation of automationUsageInvocations(run, effect => backend.isWriteAction?.(effect) === true)) {
+    for (const invocation of automationUsageInvocations(
+      run,
+      (effect) => backend.isWriteAction?.(effect) === true,
+    )) {
       // Measurement must not change a run's result.
-      try { dependencies.onUsageSuccess(invocation); } catch {}
+      try {
+        dependencies.onUsageSuccess(invocation);
+      } catch {}
     }
   }
   return outcome.kind === "done" ? outcome : outcome.outcome;
 }
 
-/** What running steps needs besides a backend. */
-type StepRunDependencies = Pick<CollectionAutomationRunDependencies, "makeDurable" | "evaluator" | "store" | "nowMs" | "chat" | "recipientVerdicts" | "readCode" | "onUsageSuccess" | "beforeEffect" | "onRunEnded">;
+type StepRunDependencies = Pick<
+  CollectionAutomationRunDependencies,
+  | "makeDurable"
+  | "evaluator"
+  | "store"
+  | "nowMs"
+  | "chat"
+  | "recipientVerdicts"
+  | "readCode"
+  | "onUsageSuccess"
+  | "beforeEffect"
+  | "onRunEnded"
+>;
 
 /** The text of the code file a run-file step runs, or why it cannot run. */
 export async function readCodeFile(
@@ -276,8 +340,10 @@ export async function readCodeFile(
 ): Promise<string | { problem: string }> {
   const path = `${collectionPath}/${file}`;
   const read = await dependencies.readCode(path);
-  if (read === null) return { problem: `Step ${ordinal + 1} runs ${path}, and dohc cannot find that file.` };
-  if (read.truncated) return { problem: `Step ${ordinal + 1} runs ${path}, which is too large to run.` };
+  if (read === null)
+    return { problem: `Step ${ordinal + 1} runs ${path}, and dohc cannot find that file.` };
+  if (read.truncated)
+    return { problem: `Step ${ordinal + 1} runs ${path}, which is too large to run.` };
   return read.text;
 }
 
@@ -290,7 +356,11 @@ async function walkSteps(
   wasSaved: boolean,
   spent: AutomationTimeSpent,
   progress: RunProgress,
-): Promise<{ kind: "done" } | { kind: "wait"; reason: Extract<CollectionAutomationRunOutcome, { kind: "wait" }>["reason"] } | { kind: "ended"; outcome: CollectionAutomationRunOutcome; saved: boolean; step: number }> {
+): Promise<
+  | { kind: "done" }
+  | { kind: "wait"; reason: Extract<CollectionAutomationRunOutcome, { kind: "wait" }>["reason"] }
+  | { kind: "ended"; outcome: CollectionAutomationRunOutcome; saved: boolean; step: number }
+> {
   const { automation } = input;
   const { store } = dependencies;
   let saved = wasSaved;
@@ -305,15 +375,24 @@ async function walkSteps(
   let fieldWrites = run.steps.reduce((count, step) => count + fieldWriteCount(step.effects), 0);
   // Each step and its effects' records, as the run's files will hold them.
   const sizeOf = (step: StoredStep) => 2 * Buffer.byteLength(JSON.stringify(step));
-  let bytes = run.steps.reduce((total, step) => total + sizeOf(step), Buffer.byteLength(JSON.stringify({ ...run, steps: [] })));
+  let bytes = run.steps.reduce(
+    (total, step) => total + sizeOf(step),
+    Buffer.byteLength(JSON.stringify({ ...run, steps: [] })),
+  );
 
   // The step the walk is at, which a run that fails names.
   let at = 0;
-  type End = { kind: "wait"; reason: Extract<CollectionAutomationRunOutcome, { kind: "wait" }>["reason"] } | { kind: "ended"; outcome: CollectionAutomationRunOutcome; saved: boolean; step: number };
+  type End =
+    | { kind: "wait"; reason: Extract<CollectionAutomationRunOutcome, { kind: "wait" }>["reason"] }
+    | { kind: "ended"; outcome: CollectionAutomationRunOutcome; saved: boolean; step: number };
   const end = (outcome: CollectionAutomationRunOutcome): End =>
-    outcome.kind === "wait" ? { kind: "wait", reason: outcome.reason } : { kind: "ended", outcome, saved, step: at };
+    outcome.kind === "wait"
+      ? { kind: "wait", reason: outcome.reason }
+      : { kind: "ended", outcome, saved, step: at };
 
-  const prepare = async (entry: OrderedStep): Promise<{ step: StoredStep } | { outcome: CollectionAutomationRunOutcome }> => {
+  const prepare = async (
+    entry: OrderedStep,
+  ): Promise<{ step: StoredStep } | { outcome: CollectionAutomationRunOutcome }> => {
     const { ordinal, step } = entry;
     const timing = { findMs: 0, planMs: 0 };
     let stage: keyof typeof timing = "findMs";
@@ -337,63 +416,105 @@ async function walkSteps(
     const unavailable = unavailableTo(ordinal, bindings, new Set(done.keys()), names);
     for (let rereads = 0; ; rereads += 1) {
       enter("findMs");
-      const result = await backend.step(async (reads): Promise<{ step: StoredStep } | { outcome: CollectionAutomationRunOutcome }> => {
-        const record = await reads.trigger();
-        const bound = new Map<string, Bound>();
-        for (const [name, result] of done) {
-          if (names !== "all" && !names.has(name)) continue;
-          if (result.kind === "code") bound.set(name, { kind: "code", value: result.value });
-          else if (result.kind === "find") bound.set(name, { kind: "find", records: await reads.bound(result.ordinal, result.refs) });
-          else bound.set(name, { kind: "add", record: result.ref === null ? null : ((await reads.bound(result.ordinal, [result.ref]))[0] ?? null) });
-        }
-        enter("planMs");
-        const inputs = { record, bound, unavailable };
-        if (step.kind === "find") {
-          const values = reads.findValues(ordinal);
-          const request = findRequest(ctx, ordinal, inputs, values);
-          const results = request.items.length === 0 ? [] : await evaluateRequest(dependencies.evaluator, ctx.claim.automationId, request, spent);
+      const result = await backend.step(
+        async (
+          reads,
+        ): Promise<{ step: StoredStep } | { outcome: CollectionAutomationRunOutcome }> => {
+          const record = await reads.trigger();
+          const bound = new Map<string, Bound>();
+          for (const [name, result] of done) {
+            if (names !== "all" && !names.has(name)) continue;
+            if (result.kind === "code") bound.set(name, { kind: "code", value: result.value });
+            else if (result.kind === "find")
+              bound.set(name, {
+                kind: "find",
+                records: await reads.bound(result.ordinal, result.refs),
+              });
+            else
+              bound.set(name, {
+                kind: "add",
+                record:
+                  result.ref === null
+                    ? null
+                    : ((await reads.bound(result.ordinal, [result.ref]))[0] ?? null),
+              });
+          }
+          enter("planMs");
+          const inputs = { record, bound, unavailable };
+          if (step.kind === "find") {
+            const values = reads.findValues(ordinal);
+            const request = findRequest(ctx, ordinal, inputs, values);
+            const results =
+              request.items.length === 0
+                ? []
+                : await evaluateRequest(
+                    dependencies.evaluator,
+                    ctx.claim.automationId,
+                    request,
+                    spent,
+                  );
+            if (results === "busy") return { outcome: { kind: "wait", reason: "busy" } };
+            const answers = answersOf(request, results);
+            if ("error" in answers) return { outcome: failed(answers.error, answers.timedOut) };
+            const filters = filterValues(values, record, answers);
+            enter("findMs");
+            const found = await reads.find(ordinal, filters);
+            enter("planMs");
+            if ("problem" in found) return { outcome: failed(found.problem) };
+            return {
+              step: {
+                ordinal,
+                ...(reads.destinations ? { destinations: reads.destinations(ordinal) } : {}),
+                effects: [],
+                output: { kind: "find", records: found.map(refOf) },
+              },
+            };
+          }
+          const request = stepRequest(ctx, entry, inputs, source);
+          const results = await evaluateRequest(
+            dependencies.evaluator,
+            ctx.claim.automationId,
+            request,
+            spent,
+          );
           if (results === "busy") return { outcome: { kind: "wait", reason: "busy" } };
           const answers = answersOf(request, results);
           if ("error" in answers) return { outcome: failed(answers.error, answers.timedOut) };
-          const filters = filterValues(values, record, answers);
-          enter("findMs");
-          const found = await reads.find(ordinal, filters);
-          enter("planMs");
-          if ("problem" in found) return { outcome: failed(found.problem) };
-          return { step: { ordinal, ...(reads.destinations ? { destinations: reads.destinations(ordinal) } : {}), effects: [], output: { kind: "find", records: found.map(refOf) } } };
-        }
-        const request = stepRequest(ctx, entry, inputs, source);
-        const results = await evaluateRequest(dependencies.evaluator, ctx.claim.automationId, request, spent);
-        if (results === "busy") return { outcome: { kind: "wait", reason: "busy" } };
-        const answers = answersOf(request, results);
-        if ("error" in answers) return { outcome: failed(answers.error, answers.timedOut) };
-        const codeChanges = codeChangesOf(request, results, ctx.claim.collectionPath);
-        if ("problem" in codeChanges) return { outcome: failed(codeChanges.problem) };
-        let codeRecords = new Map<string, RunRecord>();
-        if (codeChanges.length > 0) {
-          enter("findMs");
-          const checked = await reads.codeRecords(codeChanges, inputs);
-          enter("planMs");
-          if ("outcome" in checked) return checked;
-          codeRecords = checked.records;
-        }
-        // Only the conversations of the people the step's formulas named are read.
-        let chat = ctx.chat;
-        const named = formulaPeople(request, results);
-        if (named.length > 0) {
-          const needs = chatNeedsOf([automation]);
-          for (const userId of named) needs.people.add(userId);
-          enter("findMs");
-          chat = await dependencies.chat.directory(input.roster, needs);
-          enter("planMs");
-          if (chat === null) return { outcome: { kind: "wait", reason: "engine" } };
-        }
-        const planned = planStep(ctx, entry, inputs, answers, { chat, codeChanges, codeRecords });
-        if ("problem" in planned) return { outcome: failed(planned.problem) };
-        const effects = reads.effects(ordinal, planned.step.effects);
-        if ("problem" in effects) return { outcome: failed(effects.problem) };
-        return { step: { ordinal, ...(reads.destinations ? { destinations: reads.destinations(ordinal) } : {}), effects, ...(planned.step.output ? { output: planned.step.output } : {}) } };
-      });
+          const codeChanges = codeChangesOf(request, results, ctx.claim.collectionPath);
+          if ("problem" in codeChanges) return { outcome: failed(codeChanges.problem) };
+          let codeRecords = new Map<string, RunRecord>();
+          if (codeChanges.length > 0) {
+            enter("findMs");
+            const checked = await reads.codeRecords(codeChanges, inputs);
+            enter("planMs");
+            if ("outcome" in checked) return checked;
+            codeRecords = checked.records;
+          }
+          // Only the conversations of the people the step's formulas named are read.
+          let chat = ctx.chat;
+          const named = formulaPeople(request, results);
+          if (named.length > 0) {
+            const needs = chatNeedsOf([automation]);
+            for (const userId of named) needs.people.add(userId);
+            enter("findMs");
+            chat = await dependencies.chat.directory(input.roster, needs);
+            enter("planMs");
+            if (chat === null) return { outcome: { kind: "wait", reason: "engine" } };
+          }
+          const planned = planStep(ctx, entry, inputs, answers, { chat, codeChanges, codeRecords });
+          if ("problem" in planned) return { outcome: failed(planned.problem) };
+          const effects = reads.effects(ordinal, planned.step.effects);
+          if ("problem" in effects) return { outcome: failed(effects.problem) };
+          return {
+            step: {
+              ordinal,
+              ...(reads.destinations ? { destinations: reads.destinations(ordinal) } : {}),
+              effects,
+              ...(planned.step.output ? { output: planned.step.output } : {}),
+            },
+          };
+        },
+      );
       if (result === null) return { outcome: { kind: "wait", reason: "engine" } };
       if (result !== "changed") {
         enter(stage);
@@ -406,7 +527,10 @@ async function walkSteps(
   };
 
   // Lands the effects of `step` this attempt has not recorded.
-  const land = async (step: StoredStep, fresh: boolean): Promise<CollectionAutomationRunOutcome | null> => {
+  const land = async (
+    step: StoredStep,
+    fresh: boolean,
+  ): Promise<CollectionAutomationRunOutcome | null> => {
     const first = effectIndex;
     effectIndex += step.effects.length;
     const recorded = run.applied.filter((effect) => effect.ordinal === step.ordinal).length;
@@ -417,8 +541,24 @@ async function walkSteps(
     }
     if (effectIndex <= durableEffects) return null;
     // Check newly planned steps together before sending any message or notice.
-    const unsent = { ...step, effects: step.effects.filter((_effect, part) => first + part >= firstUnrecorded) };
-    const messages = fresh || !wasSaved ? await checkPlannedMessages(dependencies, { automationId: ctx.claim.automationId, automation, collection: input.collection, roster: input.roster }, [unsent], ctx.chat) : { chat: ctx.chat };
+    const unsent = {
+      ...step,
+      effects: step.effects.filter((_effect, part) => first + part >= firstUnrecorded),
+    };
+    const messages =
+      fresh || !wasSaved
+        ? await checkPlannedMessages(
+            dependencies,
+            {
+              automationId: ctx.claim.automationId,
+              automation,
+              collection: input.collection,
+              roster: input.roster,
+            },
+            [unsent],
+            ctx.chat,
+          )
+        : { chat: ctx.chat };
     if ("outcome" in messages) return messages.outcome;
     for (const [part, effect] of step.effects.entries()) {
       const index = first + part;
@@ -435,14 +575,28 @@ async function walkSteps(
       await finishEffectAppend(progress);
       if (input.stopped.aborted) return stopped;
       if (input.signal.aborted) return failed(DEADLINE_ERROR, true);
-      const mode: EffectMode = recorded ? "may-have-landed" : fresh ? "fresh" : index === firstUnrecorded ? "may-have-landed" : "resumed";
+      const mode: EffectMode = recorded
+        ? "may-have-landed"
+        : fresh
+          ? "fresh"
+          : index === firstUnrecorded
+            ? "may-have-landed"
+            : "resumed";
       let writes: RunWrite[];
       const writeStarted = dependencies.nowMs();
       try {
         dependencies.beforeEffect?.(run, effect);
-        const applied = await backend.apply(run, receipt === null ? effect : replayEffect(effect, receipt.writes), { index, ordinal: step.ordinal, part, mode, recorded }, messages.chat);
+        const applied = await backend.apply(
+          run,
+          receipt === null ? effect : replayEffect(effect, receipt.writes),
+          { index, ordinal: step.ordinal, part, mode, recorded },
+          messages.chat,
+        );
         if ("outcome" in applied) return applied.outcome;
-        writes = receipt === null ? applied : [...receipt.writes.filter(write => !engineWrite(write)), ...applied];
+        writes =
+          receipt === null
+            ? applied
+            : [...receipt.writes.filter((write) => !engineWrite(write)), ...applied];
       } catch (error) {
         if (isEngineStoreBusyRefusal(error)) return { kind: "wait", reason: "busy" };
         if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };
@@ -451,27 +605,35 @@ async function walkSteps(
         if (error instanceof AutomationChatSessionWait) return { kind: "wait", reason: "session" };
         return input.signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error));
       }
-      const landed = { ordinal: step.ordinal, writes, writeMs: Math.max(0, dependencies.nowMs() - writeStarted), writeCount: 1 };
+      const landed = {
+        ordinal: step.ordinal,
+        writes,
+        writeMs: Math.max(0, dependencies.nowMs() - writeStarted),
+        writeCount: 1,
+      };
       const appendStarted = dependencies.nowMs();
       if (recorded) {
         progress.effects = index + 1;
         run.applied[index] = landed;
         if (writes.some(engineWrite)) progress.engineEffects++;
-        if (!await progress.checkpoint()) return { kind: "wait", reason: "engine" };
+        if (!(await progress.checkpoint())) return { kind: "wait", reason: "engine" };
         continue;
       }
-      progress.append = store.appendEffect(run, landed).then(() => {
-        const appendMs = Math.max(0, dependencies.nowMs() - appendStarted);
-        if (step.appendMs !== undefined && step.appendCount !== undefined) {
-          step.appendMs += appendMs;
-          step.appendCount += 1;
-        }
-        return null;
-      }, (error: unknown) => ({ error }));
+      progress.append = store.appendEffect(run, landed).then(
+        () => {
+          const appendMs = Math.max(0, dependencies.nowMs() - appendStarted);
+          if (step.appendMs !== undefined && step.appendCount !== undefined) {
+            step.appendMs += appendMs;
+            step.appendCount += 1;
+          }
+          return null;
+        },
+        (error: unknown) => ({ error }),
+      );
       run.applied.push(landed);
       progress.effects = index + 1;
       if (writes.some(engineWrite)) progress.engineEffects++;
-      if (!await progress.checkpoint()) return { kind: "wait", reason: "engine" };
+      if (!(await progress.checkpoint())) return { kind: "wait", reason: "engine" };
     }
     return null;
   };
@@ -495,8 +657,15 @@ async function walkSteps(
           prepared = await prepare(entry);
         } catch (error) {
           if (isEngineStoreBusyRefusal(error)) return end({ kind: "wait", reason: "busy" });
-          if (error instanceof AutomationRunWait) return end({ kind: "wait", reason: error.reason });
-          return end(input.stopped.aborted ? stopped : input.signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error)));
+          if (error instanceof AutomationRunWait)
+            return end({ kind: "wait", reason: error.reason });
+          return end(
+            input.stopped.aborted
+              ? stopped
+              : input.signal.aborted
+                ? failed(DEADLINE_ERROR, true)
+                : failed(errorText(error)),
+          );
         }
         if (input.stopped.aborted) return end(stopped);
         if (input.signal.aborted) return end(failed(DEADLINE_ERROR, true));
@@ -514,7 +683,9 @@ async function walkSteps(
         // A Collection the step writes that the run does not name yet is
         // saved with the step, so a move is followed by its Collection id.
         const known = new Set(run.collections.map(({ collectionId }) => collectionId));
-        const joined = backend.collectionsOf(step).filter(({ collectionId }) => !known.has(collectionId));
+        const joined = backend
+          .collectionsOf(step)
+          .filter(({ collectionId }) => !known.has(collectionId));
         if (joined.length > 0) {
           step.collections = joined;
           run.collections.push(...joined);
@@ -553,13 +724,16 @@ async function walkSteps(
   const ended = await walk(orderSteps(automation.do));
   // A stop that came during the last write or its record leaves the run to
   // the next drain, which finds every effect recorded and completes it.
-  if (ended === null) return input.stopped.aborted ? { kind: "wait", reason: "stopped" } : { kind: "done" };
+  if (ended === null)
+    return input.stopped.aborted ? { kind: "wait", reason: "stopped" } : { kind: "done" };
   return ended;
 }
 
 /** Both source runners use this coordinator and its destination-routed backend. */
 export async function coordinateSourceRun(
-  dependencies: RecordRunDependencies, input: RecordRunInput, source: RunSource,
+  dependencies: RecordRunDependencies,
+  input: RecordRunInput,
+  source: RunSource,
 ): Promise<CollectionAutomationRunOutcome> {
   try {
     const prepared = await prepareRecordBackend(dependencies, input, source);
@@ -568,14 +742,23 @@ export async function coordinateSourceRun(
     const spent = { prepareMs: 0, runMs: 0 };
     if (!resuming) {
       let started: CollectionAutomationRunOutcome | null;
-      try { started = await startRun(dependencies.evaluator, backend, ctx, spent); }
-      catch (error) {
+      try {
+        started = await startRun(dependencies.evaluator, backend, ctx, spent);
+      } catch (error) {
         if (error instanceof AutomationRunWait || isEngineStoreBusyRefusal(error)) throw error;
         return failed(errorText(error));
       }
       if (started !== null) return input.stopped.aborted ? stopped : started;
     }
-    return await runSteps(dependencies, backend, { ...input, claimRun: input.claim.run, engineClaimId: source.engineClaim?.claimId }, ctx, state, resuming, spent);
+    return await runSteps(
+      dependencies,
+      backend,
+      { ...input, claimRun: input.claim.run, engineClaimId: source.engineClaim?.claimId },
+      ctx,
+      state,
+      resuming,
+      spent,
+    );
   } catch (error) {
     if (isEngineStoreBusyRefusal(error)) return { kind: "wait", reason: "busy" };
     if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };

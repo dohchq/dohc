@@ -21,11 +21,18 @@ export function testServer(origin = "https://dohc.example.com") {
     const path = url.slice(origin.length);
     const method = init.method ?? "GET";
     const headers = { ...(init.headers as Record<string, string> | undefined) };
-    const call: Call = { method, path, headers, body: typeof init.body === "string" ? JSON.parse(init.body) : undefined, signal: init.signal! };
+    const call: Call = {
+      method,
+      path,
+      headers,
+      body: typeof init.body === "string" ? JSON.parse(init.body) : undefined,
+      signal: init.signal!,
+    };
     calls.push(call);
     const queue = routes.get(`${method} ${path}`);
     const route = queue && queue.length > 1 ? queue.shift()! : queue?.[0];
-    if (!route) return new Response(JSON.stringify({ ok: false, code: "not_found" }), { status: 404 });
+    if (!route)
+      return new Response(JSON.stringify({ ok: false, code: "not_found" }), { status: 404 });
     // A request aborts the moment its signal does, as a real fetch does.
     const answer = await Promise.race([
       Promise.resolve(route(call)),
@@ -35,7 +42,9 @@ export function testServer(origin = "https://dohc.example.com") {
       }),
     ]);
     if (answer === "offline") throw new TypeError("Network request failed");
-    return new Response(answer.body === undefined ? null : JSON.stringify(answer.body), { status: answer.status });
+    return new Response(answer.body === undefined ? null : JSON.stringify(answer.body), {
+      status: answer.status,
+    });
   };
   return {
     origin,
@@ -43,16 +52,21 @@ export function testServer(origin = "https://dohc.example.com") {
     calls,
     /** Answers each listed request in turn, then repeats the last answer. */
     on(method: string, path: string, ...answers: (Answer | Route)[]) {
-      routes.set(`${method} ${path}`, answers.map(answer => typeof answer === "function" ? answer : () => answer));
+      routes.set(
+        `${method} ${path}`,
+        answers.map((answer) => (typeof answer === "function" ? answer : () => answer)),
+      );
     },
-    paths: () => calls.map(call => `${call.method} ${call.path}`),
+    paths: () => calls.map((call) => `${call.method} ${call.path}`),
   };
 }
 
 /** A promise the test settles. */
 export function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(done => { resolve = done; });
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 
@@ -63,8 +77,15 @@ export function memoryStore(initial: StoredSignIn | null = null) {
   let loading: Promise<void> | null = null;
   let failingClears = 0;
   const store: SignInStore = {
-    async load() { if (loading) await loading; return value; },
-    async save(next) { log.push("save"); if (saving) await saving; value = next; },
+    async load() {
+      if (loading) await loading;
+      return value;
+    },
+    async save(next) {
+      log.push("save");
+      if (saving) await saving;
+      value = next;
+    },
     async clear() {
       log.push("clear");
       if (failingClears > 0) {
@@ -92,11 +113,51 @@ export function memoryStore(initial: StoredSignIn | null = null) {
     holdLoads() {
       const held = hold();
       loading = held.promise;
-      return () => { loading = null; held.release(); };
+      return () => {
+        loading = null;
+        held.release();
+      };
     },
     /** The next `count` clears fail. */
     failClears(count: number) {
       failingClears = count;
     },
+  };
+}
+
+/** A relay Notice row as the phone's scope sends it. It expires at 10,000,000 ms: test clocks run before. */
+export function relayRow(noticeId: string, fields: Record<string, unknown> = {}) {
+  return {
+    noticeId,
+    changeSeq: 1,
+    workspaceId: "w1",
+    recipientShareId: null,
+    kind: "agent-run",
+    senderKind: "agent",
+    senderUserId: "u-agent",
+    senderLabel: "Nova",
+    title: `Nova replied (${noticeId})`,
+    body: "The train leaves at 8:09.",
+    target: { thread: "thread-1", message: "m-1" },
+    originInstallId: "laptop",
+    createdAtMs: 1000,
+    readAtMs: null,
+    dismissedAtMs: null,
+    expiresAtMs: 10_000_000,
+    removed: false,
+    ...fields,
+  };
+}
+
+/** A page of Notices as the relay answers it. */
+export function noticePageBody(notices: readonly unknown[], fields: Record<string, unknown> = {}) {
+  return {
+    ok: true,
+    notices,
+    nextCursor: "1",
+    hasMore: false,
+    replace: false,
+    personalAgentsRevision: 1,
+    ...fields,
   };
 }

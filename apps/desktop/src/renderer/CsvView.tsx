@@ -1,7 +1,15 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { Code, Database, LoaderCircle, Plus, Table, Trash2 } from "lucide-react";
 import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
-import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type KeyboardEvent,
+} from "react";
 import { flushSync } from "react-dom";
 import type { ImportToDatabaseResult } from "../ipc/bridgeContract";
 import { hasPrimaryModifier } from "../shortcuts/shortcutRegistry";
@@ -26,10 +34,7 @@ import {
 import { SegmentedControl, type SegmentedOption } from "./ui/SegmentedControl";
 import { StateMark } from "./ui/StateMark";
 import { isComposingKey } from "./ui/keys";
-import {
-  useAutosavedTextDraft,
-  type DraftFlush,
-} from "./useAutosavedTextDraft";
+import { useAutosavedTextDraft, type DraftFlush } from "./useAutosavedTextDraft";
 
 // Derives where a CSV/JSON import materializes: a sibling .sqlite, table named
 // after the file. Keeps the import one click and the result next to its source.
@@ -68,7 +73,11 @@ const notifyImports = () => {
 // Imports a CSV into a SQLite file beside it. While an import of the same
 // file runs, a header click starts nothing and answers null, and a retry
 // (`join`) waits for that import and answers with its result.
-function importCsv(workspaceId: string, path: string, join = false): Promise<ImportToDatabaseResult | null> {
+function importCsv(
+  workspaceId: string,
+  path: string,
+  join = false,
+): Promise<ImportToDatabaseResult | null> {
   const key = importKey(workspaceId, path);
   const running = runningImports.get(key);
   if (running) return join ? running : Promise.resolve(null);
@@ -109,7 +118,6 @@ interface ImportHooks {
   onError?: ReportButtonError;
 }
 
-// A finished import opens the database and says what it made, with Undo.
 function imported(workspaceId: string, result: ImportToDatabaseResult, hooks: ImportHooks) {
   hooks.onOpenPath?.(result.path);
   hooks.onNotice?.(
@@ -123,7 +131,11 @@ function imported(workspaceId: string, result: ImportToDatabaseResult, hooks: Im
 // reads it while it goes. Main moves it to the trash only while it is
 // unchanged; a refusal says why, and its row offers Try again. Undo and Try
 // again run from a click, never while React renders.
-function undoImport(workspaceId: string, result: ImportToDatabaseResult, hooks: ImportHooks): () => void {
+function undoImport(
+  workspaceId: string,
+  result: ImportToDatabaseResult,
+  hooks: ImportHooks,
+): () => void {
   const run = async () => {
     flushSync(() => hooks.onClosePath?.(result.path));
     try {
@@ -191,7 +203,12 @@ export function CsvControls(props: {
           onClick={props.onImport}
         >
           {props.importing ? (
-            <LoaderCircle data-testid="csv-import-sqlite-pending" size={14} aria-hidden className="motion-safe:animate-spin" />
+            <LoaderCircle
+              data-testid="csv-import-sqlite-pending"
+              size={14}
+              aria-hidden
+              className="motion-safe:animate-spin"
+            />
           ) : (
             <Database size={14} aria-hidden />
           )}
@@ -257,7 +274,8 @@ const DELETE_BUTTON =
 
 // Enter ends a cell's edit and keeps focus there, as leaving the cell does.
 // An Enter that finishes composing a character is the input method's.
-const endEditOnEnter = (onEndEdit: (cellIndex: number) => void, cellIndex: number) =>
+const endEditOnEnter =
+  (onEndEdit: (cellIndex: number) => void, cellIndex: number) =>
   (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter" && !isComposingKey(event)) onEndEdit(cellIndex);
   };
@@ -289,7 +307,9 @@ const CsvTableHeader = memo(function CsvTableHeader({
           <DataGridHeaderCell key={index} column={index}>
             {/* A number column's name ends at its numbers' edge, so its
                 Delete column sits on the left. */}
-            <div className={`flex items-center gap-1 ${columns[index]?.numeric ? "flex-row-reverse" : ""}`}>
+            <div
+              className={`flex items-center gap-1 ${columns[index]?.numeric ? "flex-row-reverse" : ""}`}
+            >
               <input
                 data-testid="csv-cell"
                 aria-label={`Header column ${index + 1}`}
@@ -380,9 +400,7 @@ const CsvTableRow = memo(function CsvTableRow({
             size={1}
             value={row[cellIndex] ?? ""}
             readOnly={truncated}
-            onChange={(event) =>
-              onUpdateCell(rowIndex, cellIndex, event.target.value)
-            }
+            onChange={(event) => onUpdateCell(rowIndex, cellIndex, event.target.value)}
             onKeyDown={endEditOnEnter(onEndEdit, cellIndex)}
             onBlur={() => onEndEdit(cellIndex)}
             className={`${CELL_INPUT} text-ink`}
@@ -511,14 +529,14 @@ export function CsvView({
   });
   const rows = grid.rows;
   const rowsRef = useRef(rows);
-  // A cell edit keeps its column's alignment and width until the edit ends.
-  // An edit can widen the table only by writing past its last column; that,
-  // and any other change, finds every column again.
   const showRows = useCallback((nextRows: string[][], editedColumn?: number) => {
     rowsRef.current = nextRows;
     setGrid((shown) => ({
       rows: nextRows,
-      columns: editedColumn !== undefined && editedColumn < shown.columns.length ? shown.columns : csvColumns(nextRows),
+      columns:
+        editedColumn !== undefined && editedColumn < shown.columns.length
+          ? shown.columns
+          : csvColumns(nextRows),
     }));
   }, []);
   // A cell that loses focus, or takes Enter, ends its edit: its column is
@@ -528,7 +546,12 @@ export function CsvView({
       const current = shown.columns[column];
       if (!current) return shown;
       const next = csvColumn(shown.rows, column);
-      if (next.numeric === current.numeric && next.header === current.header && next.cell === current.cell) return shown;
+      if (
+        next.numeric === current.numeric &&
+        next.header === current.header &&
+        next.cell === current.cell
+      )
+        return shown;
       const columns = [...shown.columns];
       columns[column] = next;
       return { ...shown, columns };
@@ -559,9 +582,16 @@ export function CsvView({
 
   // The import reads the file in main, not this preview, so the offer needs
   // only its count, its source, and a way to open the database.
-  const offer = onOpenPath && csvSource
-    ? detectCsvBound({ workspaceId, path, totalRows: Math.max(0, rows.length - 1), source: csvSource, complete: !truncated })
-    : null;
+  const offer =
+    onOpenPath && csvSource
+      ? detectCsvBound({
+          workspaceId,
+          path,
+          totalRows: Math.max(0, rows.length - 1),
+          source: csvSource,
+          complete: !truncated,
+        })
+      : null;
 
   const columnName = useCallback(function columnName(index: number): string {
     return index === 0 ? "column" : `column_${index + 1}`;
@@ -580,8 +610,8 @@ export function CsvView({
         nextRows.length === rowsRef.current.length
       ) {
         const start = rowOffsets[changedRowIndex]!;
-        const end = rowOffsets[changedRowIndex + 1]! -
-          (changedRowIndex < nextRows.length - 1 ? 1 : 0);
+        const end =
+          rowOffsets[changedRowIndex + 1]! - (changedRowIndex < nextRows.length - 1 ? 1 : 0);
         const row = stringifyDelimitedRow(nextRows[changedRowIndex]!, delimiter);
         nextDraft = [previous.text.slice(0, start), row, previous.text.slice(end)].join("");
         const delta = row.length - (end - start);
@@ -605,8 +635,8 @@ export function CsvView({
       while (nextRows.length <= rowIndex) nextRows.push([]);
       const nextRow = [...nextRows[rowIndex]!];
       // A sliced UTF-16 draft stays wide even after its last wide cell narrows.
-      const narrowed = /[^\u0000-\u00ff]/.test(nextRow[cellIndex] ?? "") &&
-        !/[^\u0000-\u00ff]/.test(value);
+      const narrowed =
+        /[^\u0000-\u00ff]/.test(nextRow[cellIndex] ?? "") && !/[^\u0000-\u00ff]/.test(value);
       while (nextRow.length <= cellIndex) nextRow.push("");
       nextRow[cellIndex] = value;
       nextRows[rowIndex] = nextRow;
@@ -641,34 +671,41 @@ export function CsvView({
     setRows(next);
   }, [columnName, setRows]);
 
-  const deleteRow = useCallback((rowIndex: number) => {
-    const next = rowsRef.current.filter((_, index) => index !== rowIndex);
-    setRows(next);
-  }, [setRows]);
+  const deleteRow = useCallback(
+    (rowIndex: number) => {
+      const next = rowsRef.current.filter((_, index) => index !== rowIndex);
+      setRows(next);
+    },
+    [setRows],
+  );
 
-  const deleteColumn = useCallback((cellIndex: number) => {
-    const next = rowsRef.current.map((row) =>
-      row.filter((_, index) => index !== cellIndex),
-    );
-    if (next.every((row) => row.length === 0)) {
-      setRows([]);
-      return;
-    }
-    setRows(next);
-  }, [setRows]);
+  const deleteColumn = useCallback(
+    (cellIndex: number) => {
+      const next = rowsRef.current.map((row) => row.filter((_, index) => index !== cellIndex));
+      if (next.every((row) => row.length === 0)) {
+        setRows([]);
+        return;
+      }
+      setRows(next);
+    },
+    [setRows],
+  );
 
-  const chooseMode = useCallback((mode: CsvMode) => {
-    if (mode === (raw ? "raw" : "table")) return;
-    if (mode === "raw") {
-      setRaw(true);
-      return;
-    }
-    const text = draftRef.current.getDraft();
-    const nextRows = delimitedTextCodec.parse(text, delimiter);
-    tableDraftIdentity.current = { text, delimiter };
-    showRows(nextRows);
-    setRaw(false);
-  }, [delimiter, raw, showRows]);
+  const chooseMode = useCallback(
+    (mode: CsvMode) => {
+      if (mode === (raw ? "raw" : "table")) return;
+      if (mode === "raw") {
+        setRaw(true);
+        return;
+      }
+      const text = draftRef.current.getDraft();
+      const nextRows = delimitedTextCodec.parse(text, delimiter);
+      tableDraftIdentity.current = { text, delimiter };
+      showRows(nextRows);
+      setRaw(false);
+    },
+    [delimiter, raw, showRows],
+  );
 
   // The tab row's Import and the preview bound's run this one import.
   async function importToSqlite() {
@@ -817,7 +854,11 @@ export function CsvTable(props: {
         </tbody>
       </DataGrid>
       {dataRowCount > previewRows.length ? (
-        <CsvPreviewBound rowCount={dataRowCount} importing={props.importing} onImport={props.onImport} />
+        <CsvPreviewBound
+          rowCount={dataRowCount}
+          importing={props.importing}
+          onImport={props.onImport}
+        />
       ) : null}
     </div>
   );
@@ -826,20 +867,24 @@ export function CsvTable(props: {
 // How many rows the preview shows. With a CSV offer it ends in Import to
 // SQLite, which runs the tab row's import and is busy as that button is;
 // without one it names the way to the rest.
-export function CsvPreviewBound(props: { rowCount: number; importing?: boolean; onImport?: () => void }) {
+export function CsvPreviewBound(props: {
+  rowCount: number;
+  importing?: boolean;
+  onImport?: () => void;
+}) {
   if (!props.onImport) {
     return (
-      <p
-        data-testid="csv-preview-bound"
-        className="mb-0 mt-2 text-[11px] text-subtle"
-      >
-        Showing the first {MAX_CSV_PREVIEW_ROWS} of {props.rowCount} rows —
-        import to SQLite to work with all of them.
+      <p data-testid="csv-preview-bound" className="mb-0 mt-2 text-[11px] text-subtle">
+        Showing the first {MAX_CSV_PREVIEW_ROWS} of {props.rowCount} rows — import to SQLite to work
+        with all of them.
       </p>
     );
   }
   return (
-    <p data-testid="csv-preview-bound" className="mb-0 mt-2 flex items-center gap-2 text-[11px] text-subtle">
+    <p
+      data-testid="csv-preview-bound"
+      className="mb-0 mt-2 flex items-center gap-2 text-[11px] text-subtle"
+    >
       Showing the first {MAX_CSV_PREVIEW_ROWS} of {props.rowCount} rows.
       <SecondaryButton
         size="row"
@@ -858,7 +903,6 @@ export function CsvPreviewBound(props: { rowCount: number; importing?: boolean; 
   );
 }
 
-// The widest of the header and the preview's rows.
 function columnCountFor(rows: string[][]): number {
   let count = rows[0]?.length ?? 0;
   const end = Math.min(rows.length, MAX_CSV_PREVIEW_ROWS + 1);
@@ -962,9 +1006,7 @@ function parseDelimitedRows(text: string, delimiter: "," | "\t"): string[][] {
 function stringifyDelimitedRow(row: string[], delimiter: "," | "\t"): string {
   return row
     .map((cell) =>
-      (cell === "" && row.length === 1) ||
-      cell.includes(delimiter) ||
-      /["\r\n]/.test(cell)
+      (cell === "" && row.length === 1) || cell.includes(delimiter) || /["\r\n]/.test(cell)
         ? `"${cell.replace(/"/g, '""')}"`
         : cell,
     )

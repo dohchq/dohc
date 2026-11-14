@@ -22,10 +22,13 @@ const roots: string[] = [];
 const releases: Array<() => void> = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   for (const release of releases.splice(0)) release();
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   vi.mocked(lstat).mockReset().mockImplementation(actual.lstat);
-  await Promise.all(roots.splice(0).map((root) => actual.rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    roots.splice(0).map((root) => actual.rm(root, { recursive: true, force: true })),
+  );
 });
 
 async function tempWorkspace(workspaceId: string) {
@@ -42,7 +45,8 @@ async function hangRoot(rootPath: string) {
   const root = resolve(rootPath);
   const gate = Promise.withResolvers<void>();
   releases.push(() => gate.resolve());
-  let settled = false, error: Error | undefined;
+  let settled = false,
+    error: Error | undefined;
   vi.mocked(lstat).mockImplementation((async (path: PathLike) => {
     if (String(path) === root && !settled) {
       await gate.promise;
@@ -88,7 +92,13 @@ async function outcomeOf(run: Promise<unknown>): Promise<unknown> {
   const bound = Promise.withResolvers<string>();
   const timer = setTimeout(() => bound.resolve("still waiting"), DEADLINE_MS * 20);
   try {
-    return await Promise.race([run.then(() => "opened", (error: unknown) => error), bound.promise]);
+    return await Promise.race([
+      run.then(
+        () => "opened",
+        (error: unknown) => error,
+      ),
+      bound.promise,
+    ]);
   } finally {
     clearTimeout(timer);
   }
@@ -106,10 +116,14 @@ it("stops opening a workspace whose folder does not answer, and checks the folde
   expect((first as Error).message).not.toContain(workspace.rootPath);
   expect(client.opens).toEqual([]);
 
+  // From here the open's deadline runs on a clock that never moves, so on a
+  // slow machine only the folder check can end the second open.
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   // A reopen while the stuck check is pending waits on that check again,
   // rather than starting another file system call that can hang too.
   const second = sessions.run(workspace, async () => "ran");
-  await vi.waitFor(() => expect(sessions.openInProgress(workspace)).not.toBeNull(), { interval: 5 });
+  // The open arms its deadline once it is waiting on the check.
+  while (vi.getTimerCount() === 0) await new Promise((resolve) => setImmediate(resolve));
   expect(root.calls()).toBe(1);
   // That check then fails. It is not kept: the open's immediate retry checks
   // the folder again, and opens the workspace.
@@ -117,6 +131,7 @@ it("stops opening a workspace whose folder does not answer, and checks the folde
   await expect(second).resolves.toBe("ran");
   expect(root.calls()).toBe(2);
   expect(client.opens).toEqual(["stuck-folder"]);
+  vi.useRealTimers();
   await sessions.closeAll();
 });
 

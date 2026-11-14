@@ -22,11 +22,6 @@ import {
 // scan, so its call count is the render-cost probe for the memo boundaries.
 vi.mock("@dohc/workspace-contracts/chat-mentions", { spy: true });
 
-// The perf contract for chat surfaces: composer drafts live in ChatsView, so
-// a keystroke re-renders the view — but it must not reconcile the message
-// list, whose bodies each re-run the file-token and mention scans. The spied
-// extractChatFileReferenceTokens call count is the probe: it grows only when
-// a message body actually renders.
 describe("chat render cost", () => {
   it("DM composer keystrokes do not re-render the conversation's messages", async () => {
     const user = userEvent.setup();
@@ -90,9 +85,7 @@ describe("chat render cost", () => {
         declined: [],
       }));
       bridgeMock.listChatMessages.mockImplementation(async () => ({
-        messages: [
-          message({ id: "m-1", threadId: "thread-dm-1", body: "see @[docs/plan.md]" }),
-        ],
+        messages: [message({ id: "m-1", threadId: "thread-dm-1", body: "see @[docs/plan.md]" })],
       }));
       bridgeMock.listChatReactions.mockImplementation(async () => ({
         reactions: [],
@@ -265,7 +258,7 @@ describe("keepIfUnchanged", () => {
   });
 });
 
-// D2#6: the shell suspends the panel navigator's polling while a Chats tab is
+// The shell suspends the panel navigator's polling while a Chats tab is
 // live, because the page instance runs the same polls against the same store.
 // The Group list is the exception: no page reloads it.
 describe("suspended polling", () => {
@@ -314,17 +307,13 @@ describe("suspended polling", () => {
       );
       await waitFor(() => {
         expect(bridgeMock.syncDms.mock.calls.length).toBe(dmSyncs + 1);
-        expect(
-          bridgeMock.listChatChannels.mock.calls.length,
-        ).toBeGreaterThanOrEqual(listings + 1);
+        expect(bridgeMock.listChatChannels.mock.calls.length).toBeGreaterThanOrEqual(listings + 1);
       });
       expect(workspaceActivityCallbacks.size).toBe(1);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_100);
       });
-      expect(bridgeMock.syncDms.mock.calls.length).toBeGreaterThanOrEqual(
-        dmSyncs + 2,
-      );
+      expect(bridgeMock.syncDms.mock.calls.length).toBeGreaterThanOrEqual(dmSyncs + 2);
     } finally {
       vi.useRealTimers();
     }

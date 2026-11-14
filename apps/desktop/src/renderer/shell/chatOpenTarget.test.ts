@@ -15,7 +15,8 @@ describe("targeted chat navigation", () => {
         messageId: "message-1",
         threadId: thread.id,
         targetKind: "file",
-        objectId: "object-1", pathHint: "docs/plan.md",
+        objectId: "object-1",
+        pathHint: "docs/plan.md",
         createdAtMs: 10,
       },
       message: {
@@ -32,14 +33,16 @@ describe("targeted chat navigation", () => {
       focusMessageId: "message-1",
     });
 
-    expect(graphChatOpenTarget({
-      path: `chat-thread:${thread.id}`,
-      kind: "chat-thread",
-      threadId: thread.id,
-      title: thread.title,
-      incoming: 1,
-      outgoing: 0,
-    })).toEqual({
+    expect(
+      graphChatOpenTarget({
+        path: `chat-thread:${thread.id}`,
+        kind: "chat-thread",
+        threadId: thread.id,
+        title: thread.title,
+        incoming: 1,
+        outgoing: 0,
+      }),
+    ).toEqual({
       surface: "file",
       thread: { ...thread, createdAtMs: 0, updatedAtMs: 0 },
     });
@@ -72,7 +75,8 @@ describe("targeted chat navigation", () => {
         messageId: "message-channel",
         threadId: "thread-channel",
         targetKind: "file",
-        objectId: "object-1", pathHint: "docs/plan.md",
+        objectId: "object-1",
+        pathHint: "docs/plan.md",
         createdAtMs: 0,
       },
       message: {

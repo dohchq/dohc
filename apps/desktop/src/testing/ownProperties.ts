@@ -22,8 +22,14 @@ function read(target: object, key: PropertyKey): unknown {
 }
 
 function same(a: PropertyDescriptor, b: PropertyDescriptor): boolean {
-  return Object.is(a.value, b.value) && a.get === b.get && a.set === b.set
-    && a.writable === b.writable && a.enumerable === b.enumerable && a.configurable === b.configurable;
+  return (
+    Object.is(a.value, b.value) &&
+    a.get === b.get &&
+    a.set === b.set &&
+    a.writable === b.writable &&
+    a.enumerable === b.enumerable &&
+    a.configurable === b.configurable
+  );
 }
 
 /**
@@ -40,22 +46,31 @@ export function saveOwnProperties(
   const saved = new Map<PropertyKey, Saved>();
   for (const key of keys(target)) {
     const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
-    if (descriptor) saved.set(key, { descriptor, value: compareValues && descriptor.set ? read(target, key) : undefined });
+    if (descriptor)
+      saved.set(key, {
+        descriptor,
+        value: compareValues && descriptor.set ? read(target, key) : undefined,
+      });
   }
   return { keys, saved, compareValues };
 }
 
 /** Deletes added properties and puts back changed or deleted ones. A property that cannot be configured stays. */
-export function restoreOwnProperties(target: object, { keys, saved, compareValues }: OwnProperties): void {
+export function restoreOwnProperties(
+  target: object,
+  { keys, saved, compareValues }: OwnProperties,
+): void {
   for (const key of keys(target)) {
     const now = Reflect.getOwnPropertyDescriptor(target, key);
     if (!now?.configurable) continue;
     const before = saved.get(key);
     if (!before) Reflect.deleteProperty(target, key);
     else if (!same(before.descriptor, now)) Reflect.defineProperty(target, key, before.descriptor);
-    else if (compareValues && now.set && !Object.is(read(target, key), before.value)) Reflect.set(target, key, before.value);
+    else if (compareValues && now.set && !Object.is(read(target, key), before.value))
+      Reflect.set(target, key, before.value);
   }
   for (const [key, { descriptor }] of saved) {
-    if (!Reflect.getOwnPropertyDescriptor(target, key)) Reflect.defineProperty(target, key, descriptor);
+    if (!Reflect.getOwnPropertyDescriptor(target, key))
+      Reflect.defineProperty(target, key, descriptor);
   }
 }

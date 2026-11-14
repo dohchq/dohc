@@ -13,8 +13,6 @@ afterEach(() => {
   forgetDriveLimitNoticesForTests();
 });
 
-// The shell's error hook and the drive-limit notice, as the workspace shell
-// wires them.
 function mountShell(workspaceId: string, unavailable: boolean) {
   return renderHook(
     (props: { unavailable: boolean }) => {
@@ -44,14 +42,12 @@ describe("useDriveLimitNotice", () => {
     expect(rows[0].details).toEqual([["Detail", "no-atomic-placement"]]);
     first.unmount();
 
-    // A workspace switch remounts the shell: the row again, no second toast.
     const second = mountShell("ws-usb", true);
     const again = second.result.current.shell.shellErrors;
     expect(again).toHaveLength(1);
     expect(again[0].seen).toBe(true);
     second.unmount();
 
-    // Another workspace on another such drive gets its own toast.
     const other = mountShell("ws-share", true);
     expect(other.result.current.shell.shellErrors[0].seen).toBe(false);
   });

@@ -1,13 +1,27 @@
-import { access, lstat, mkdir, readFile, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import {
+  access,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../testing/deferred";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { createTestScratch } from "./testTemp";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
-import { saveRecoveryRecord, scheduleRecoveryPrune, waitForRecoveryPrune } from "./workspaceDeleteRecovery";
+import {
+  saveRecoveryRecord,
+  scheduleRecoveryPrune,
+  waitForRecoveryPrune,
+} from "./workspaceDeleteRecovery";
 
-vi.mock("./workspaceMetadata", async original => {
+vi.mock("./workspaceMetadata", async (original) => {
   const actual = await original<typeof import("./workspaceMetadata")>();
   return { ...actual, resolveWorkspaceMetadataDir: vi.fn(actual.resolveWorkspaceMetadataDir) };
 });
@@ -16,7 +30,6 @@ afterEach(() => vi.restoreAllMocks());
 
 const workspaceAt = (rootPath: string) => ({ workspaceId: "prune", rootPath });
 
-// A workspace whose engine open prepared `.dohc/local`.
 async function opened(prefix: string) {
   const root = await createTestScratch(prefix);
   await openedLocalState(workspaceAt(root));
@@ -26,7 +39,7 @@ async function opened(prefix: string) {
 function scheduledPrune(root: string): () => Promise<void> {
   let run: (() => unknown) | undefined;
   const immediate = globalThis.setImmediate;
-  const scheduling = vi.spyOn(globalThis, "setImmediate").mockImplementationOnce(callback => {
+  const scheduling = vi.spyOn(globalThis, "setImmediate").mockImplementationOnce((callback) => {
     run = callback;
     return immediate(() => undefined);
   });
@@ -61,7 +74,8 @@ describe("recovery pruning", () => {
     const root = await opened("prune-raced-");
     const metadata = join(root, ".dohc");
     await mkdir(join(metadata, "local", "trash"), { recursive: true });
-    const entered = deferred(), release = deferred();
+    const entered = deferred(),
+      release = deferred();
     const lookup = vi.mocked(resolveWorkspaceMetadataDir);
     const actual = lookup.getMockImplementation()!;
     lookup.mockImplementationOnce(async (...args) => {
@@ -83,26 +97,31 @@ describe("recovery pruning", () => {
   it("leaves a missing trash folder absent", async () => {
     const root = await opened("prune-missing-trash-");
     await scheduledPrune(root)();
-    await expect(access(join(root, ".dohc", "local", "trash"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(access(join(root, ".dohc", "local", "trash"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
-  it.each([".dohc", ".dohc/local"])("keeps a linked %s and its expired recovery records untouched", async linked => {
-    const root = await opened("prune-linked-metadata-");
-    const target = join(root, "metadata-target");
-    const trash = join(target, ...(linked === ".dohc" ? ["local", "trash"] : ["trash"]));
-    await mkdir(trash, { recursive: true });
-    const record = join(trash, expiredName);
-    await writeFile(record, "keep");
-    await utimes(record, old, old);
-    const link = join(root, linked);
-    await rm(link, { recursive: true });
-    await symlink(target, link, process.platform === "win32" ? "junction" : "dir");
-    await scheduledPrune(root)();
-    expect((await lstat(link)).isSymbolicLink()).toBe(true);
-    expect(await readFile(record, "utf8")).toBe("keep");
-    expect((await readdir(root)).sort()).toEqual([".dohc", "metadata-target"]);
-    expect(await readdir(trash)).toEqual([expiredName]);
-  });
+  it.each([".dohc", ".dohc/local"])(
+    "keeps a linked %s and its expired recovery records untouched",
+    async (linked) => {
+      const root = await opened("prune-linked-metadata-");
+      const target = join(root, "metadata-target");
+      const trash = join(target, ...(linked === ".dohc" ? ["local", "trash"] : ["trash"]));
+      await mkdir(trash, { recursive: true });
+      const record = join(trash, expiredName);
+      await writeFile(record, "keep");
+      await utimes(record, old, old);
+      const link = join(root, linked);
+      await rm(link, { recursive: true });
+      await symlink(target, link, process.platform === "win32" ? "junction" : "dir");
+      await scheduledPrune(root)();
+      expect((await lstat(link)).isSymbolicLink()).toBe(true);
+      expect(await readFile(record, "utf8")).toBe("keep");
+      expect((await readdir(root)).sort()).toEqual([".dohc", "metadata-target"]);
+      expect(await readdir(trash)).toEqual([expiredName]);
+    },
+  );
 
   it("keeps a metadata file without replacing it with recovery storage", async () => {
     const root = await opened("prune-metadata-file-");
@@ -123,41 +142,52 @@ describe("recovery pruning", () => {
     // A move dohc stopped during still waits for an open to put it back.
     const unfinished = `replace-${"c".repeat(64)}.json`;
     const staged = "delete-staged-notes";
-    for (const name of [expiredName, recent, unfinished, staged]) await writeFile(join(trash, name), name);
+    for (const name of [expiredName, recent, unfinished, staged])
+      await writeFile(join(trash, name), name);
     for (const name of [expiredName, unfinished, staged]) await utimes(join(trash, name), old, old);
     await scheduledPrune(root)();
     await expect(access(join(trash, expiredName))).rejects.toMatchObject({ code: "ENOENT" });
-    for (const name of [recent, unfinished, staged]) expect(await readFile(join(trash, name), "utf8")).toBe(name);
+    for (const name of [recent, unfinished, staged])
+      expect(await readFile(join(trash, name), "utf8")).toBe(name);
   });
 
-  it.each([false, true])("prunes only once the workspace's open prepares .dohc/local, and never the old .dohc/trash (opened=%s)", async open => {
-    const root = await createTestScratch("prune-not-opened-");
-    const trash = join(root, ".dohc", "local", "trash"), oldTrash = join(root, ".dohc", "trash");
-    for (const dir of [trash, oldTrash]) {
-      await mkdir(dir, { recursive: true });
-      await writeFile(join(dir, expiredName), "keep");
-      await utimes(join(dir, expiredName), old, old);
-    }
-    if (open) await openedLocalState(workspaceAt(root));
-    await scheduledPrune(root)();
-    if (open) await expect(access(join(trash, expiredName))).rejects.toMatchObject({ code: "ENOENT" });
-    else expect(await readFile(join(trash, expiredName), "utf8")).toBe("keep");
-    expect(await readFile(join(oldTrash, expiredName), "utf8")).toBe("keep");
-  });
+  it.each([false, true])(
+    "prunes only once the workspace's open prepares .dohc/local, and never the old .dohc/trash (opened=%s)",
+    async (open) => {
+      const root = await createTestScratch("prune-not-opened-");
+      const trash = join(root, ".dohc", "local", "trash"),
+        oldTrash = join(root, ".dohc", "trash");
+      for (const dir of [trash, oldTrash]) {
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, expiredName), "keep");
+        await utimes(join(dir, expiredName), old, old);
+      }
+      if (open) await openedLocalState(workspaceAt(root));
+      await scheduledPrune(root)();
+      if (open)
+        await expect(access(join(trash, expiredName))).rejects.toMatchObject({ code: "ENOENT" });
+      else expect(await readFile(join(trash, expiredName), "utf8")).toBe("keep");
+      expect(await readFile(join(oldTrash, expiredName), "utf8")).toBe("keep");
+    },
+  );
 
-  it.each(["inside", "outside"] as const)("does not prune through a trash link pointing %s the workspace", async location => {
-    const root = await opened("prune-linked-");
-    const target = location === "inside" ? join(root, "target") : await createTestScratch("prune-outside-");
-    await mkdir(target, { recursive: true });
-    const record = join(target, expiredName);
-    await writeFile(record, "keep");
-    await utimes(record, old, old);
-    const trash = join(root, ".dohc", "local", "trash");
-    await symlink(target, trash, process.platform === "win32" ? "junction" : "dir");
-    await scheduledPrune(root)();
-    expect(await readFile(record, "utf8")).toBe("keep");
-    expect((await lstat(trash)).isSymbolicLink()).toBe(true);
-  });
+  it.each(["inside", "outside"] as const)(
+    "does not prune through a trash link pointing %s the workspace",
+    async (location) => {
+      const root = await opened("prune-linked-");
+      const target =
+        location === "inside" ? join(root, "target") : await createTestScratch("prune-outside-");
+      await mkdir(target, { recursive: true });
+      const record = join(target, expiredName);
+      await writeFile(record, "keep");
+      await utimes(record, old, old);
+      const trash = join(root, ".dohc", "local", "trash");
+      await symlink(target, trash, process.platform === "win32" ? "junction" : "dir");
+      await scheduledPrune(root)();
+      expect(await readFile(record, "utf8")).toBe("keep");
+      expect((await lstat(trash)).isSymbolicLink()).toBe(true);
+    },
+  );
 
   it("keeps a non-directory trash entry", async () => {
     const root = await opened("prune-file-");

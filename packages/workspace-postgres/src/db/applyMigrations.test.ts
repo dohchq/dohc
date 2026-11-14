@@ -6,8 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // Auth schema that the auth service and relay query.
 import { applyMigrations, listMigrations } from "../../../../scripts/lib/apply-migrations.mjs";
 
-const POSTGRES_URL =
-  process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
+const POSTGRES_URL = process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
 const RETIRED_TABLES = [
   "agent_approvals",
   "agent_runs",
@@ -43,7 +42,9 @@ try {
   pgAvailable = true;
 } catch (error) {
   if (process.env.DOHC_REQUIRE_POSTGRES === "1") {
-    throw new Error(`DOHC_REQUIRE_POSTGRES=1 but no Postgres is reachable at ${POSTGRES_URL}.`, { cause: error });
+    throw new Error(`DOHC_REQUIRE_POSTGRES=1 but no Postgres is reachable at ${POSTGRES_URL}.`, {
+      cause: error,
+    });
   }
 }
 
@@ -74,10 +75,8 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
     expect(migrations.map((m) => m.id)).toContain("0001_better_auth");
 
     const ran = await applyMigrations(client);
-    // A fresh schema gains all migrations on the first run, in filename order.
     expect(ran).toEqual(migrations.map((m) => m.id));
 
-    // The Better Auth tables exist without the retired application schema.
     const tables = await client.query<{
       user_tbl: string | null;
       session_tbl: string | null;
@@ -99,7 +98,6 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
     expect(row.workspaces_tbl).toBeNull();
     expect(row.crash_reports_tbl).not.toBeNull();
 
-    // The ledger records every applied migration.
     const ledger = await client.query<{ id: string }>(
       `select id from "${schema}".dohc_migrations order by id`,
     );

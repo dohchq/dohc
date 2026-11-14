@@ -1,9 +1,16 @@
 import { jsonResponse, readBoundedJson, TokenBucketLimiter } from "@dohc/service-http";
 import type { PublicEditRelease } from "@dohc/security-contract";
 import type { ConsentCredentials } from "@dohc/workspace-auth/credentialFence";
-import { UnauthorizedError, type AccountSession, type ResolveAccountSession } from "@dohc/workspace-auth/session";
 import {
-  AGENT_REDIRECT_URI_LIMIT, AGENT_URI_CHAR_LIMIT, isAgentRedirectUri, LINK_SECRET_PATTERN,
+  UnauthorizedError,
+  type AccountSession,
+  type ResolveAccountSession,
+} from "@dohc/workspace-auth/session";
+import {
+  AGENT_REDIRECT_URI_LIMIT,
+  AGENT_URI_CHAR_LIMIT,
+  isAgentRedirectUri,
+  LINK_SECRET_PATTERN,
 } from "@dohc/security-contract/wire-patterns";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import type { DiscussionActivityHub } from "./discussionActivity";
@@ -28,35 +35,55 @@ import {
   type AgentConnectionCursor,
   type AgentConnectionRow,
 } from "./storage/agentConnections";
-import { PERSONAL_AGENT_ID, PERSONAL_REACH_LEVELS, type PersonalAgentChoice } from "./storage/personalAgents";
+import {
+  PERSONAL_AGENT_ID,
+  PERSONAL_REACH_LEVELS,
+  type PersonalAgentChoice,
+} from "./storage/personalAgents";
 
-// share-web calls the internal routes over the relay exchange key. They hold
-// the durable half of MCP sign-in for share links and personal agents: client
-// registrations, the consent request, its single-use code, and the
-// connection's tokens. share-web keeps the public OAuth routes, the consent
-// page, and the MCP transport.
-//
-// The two families never mix. The resource an agent signs in at picks the
-// tables: a share link's MCP address, or a personal one under
-// `/mcp/agent/w/<workspaceId>`. A code or token is looked up only in its own
-// family's tables.
 export type AgentConnectionRoute =
   | { route: "agent-clients" }
-  | { route: "agent-authorizations"; action: "begin" | "consent" | "decision" | "personal-consent" | "personal-decision" }
+  | {
+      route: "agent-authorizations";
+      action: "begin" | "consent" | "decision" | "personal-consent" | "personal-decision";
+    }
   | { route: "agent-token" }
   | { route: "agent-introspect" }
   | { route: "share-link-agents"; workspaceId: string; shareId: string; grantId: string }
-  | { route: "share-link-agent-disconnect"; workspaceId: string; shareId: string; grantId: string; connectionId: string };
+  | {
+      route: "share-link-agent-disconnect";
+      workspaceId: string;
+      shareId: string;
+      grantId: string;
+      connectionId: string;
+    };
 
-type AgentStorage = Pick<SyncRelayStorage,
-  | "registerAgentClient" | "getAgentClient" | "beginAgentAuthorization" | "readAgentAuthorization"
-  | "decideAgentAuthorization" | "redeemAgentAuthorizationCode" | "refreshAgentTokens"
-  | "authenticateAgentAccessToken" | "listAgentConnections" | "disconnectAgentConnection"
-  | "findLinkGrantByCredentialHash" | "getShare" | "getShareGrant" | "workspaceIsOwnedBy"
-  | "findChannelCreateKind" | "getShareLabels"
-  | "beginPersonalAuthorization" | "readPersonalAuthorization" | "cancelPersonalAuthorization"
-  | "allowPersonalAuthorization" | "personalCredentialOwner" | "redeemPersonalAuthorizationCode"
-  | "refreshPersonalTokens" | "listPersonalAgents"
+type AgentStorage = Pick<
+  SyncRelayStorage,
+  | "registerAgentClient"
+  | "getAgentClient"
+  | "beginAgentAuthorization"
+  | "readAgentAuthorization"
+  | "decideAgentAuthorization"
+  | "redeemAgentAuthorizationCode"
+  | "refreshAgentTokens"
+  | "authenticateAgentAccessToken"
+  | "listAgentConnections"
+  | "disconnectAgentConnection"
+  | "findLinkGrantByCredentialHash"
+  | "getShare"
+  | "getShareGrant"
+  | "workspaceIsOwnedBy"
+  | "findChannelCreateKind"
+  | "getShareLabels"
+  | "beginPersonalAuthorization"
+  | "readPersonalAuthorization"
+  | "cancelPersonalAuthorization"
+  | "allowPersonalAuthorization"
+  | "personalCredentialOwner"
+  | "redeemPersonalAuthorizationCode"
+  | "refreshPersonalTokens"
+  | "listPersonalAgents"
 >;
 
 const MAX_INTERNAL_BODY_BYTES = 16 * 1024;
@@ -79,7 +106,12 @@ function refused(): Response {
 class Refused extends Error {}
 
 function text(value: unknown, maxChars: number): string {
-  if (typeof value !== "string" || value.length === 0 || value.length > maxChars || CONTROL_CHARS.test(value)) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > maxChars ||
+    CONTROL_CHARS.test(value)
+  ) {
     throw new Refused();
   }
   return value;
@@ -89,9 +121,16 @@ function optionalText(value: unknown, maxChars: number): string | null {
   return value === undefined || value === null ? null : text(value, maxChars);
 }
 
-function fields(input: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): void {
+function fields(
+  input: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): void {
   const allowed = new Set([...required, ...optional]);
-  if (Object.keys(input).some((key) => !allowed.has(key)) || required.some((key) => !(key in input))) {
+  if (
+    Object.keys(input).some((key) => !allowed.has(key)) ||
+    required.some((key) => !(key in input))
+  ) {
     throw new Refused();
   }
 }
@@ -132,23 +171,36 @@ export function createAgentConnectionRoutes(input: {
   resolveAccountSession: ResolveAccountSession | undefined;
 }) {
   const { storage, linkKey, shareWebOrigin, nowMs, newId, newLinkBearer } = input;
-  const hash = (kind: AgentCredentialKind, value: string) => hashAgentCredential(kind, value, linkKey!);
+  const hash = (kind: AgentCredentialKind, value: string) =>
+    hashAgentCredential(kind, value, linkKey!);
 
   // The link's files read access, at the generation the caller bound.
   const linkIsServable = (grantId: string, generation: number): boolean => {
     const authorized = authorizeLinkShareAction({ storage, grantId, action: "read" });
-    return authorized.ok && authorized.grant.generation === generation &&
-      servableFiles(authorized.effectiveSelector, input.publicEditRelease);
+    return (
+      authorized.ok &&
+      authorized.grant.generation === generation &&
+      servableFiles(authorized.effectiveSelector, input.publicEditRelease)
+    );
   };
 
   async function readInternal(request: Request): Promise<Record<string, unknown>> {
-    if (!linkKey || !shareWebOrigin || !input.relayExchangeKeyConfigured || !input.hasValidRelayExchangeKey(request) ||
-        request.method !== "POST") {
+    if (
+      !linkKey ||
+      !shareWebOrigin ||
+      !input.relayExchangeKeyConfigured ||
+      !input.hasValidRelayExchangeKey(request) ||
+      request.method !== "POST"
+    ) {
       throw new Refused();
     }
     let body: unknown;
     try {
-      body = await readBoundedJson(request, MAX_INTERNAL_BODY_BYTES, AbortSignal.any([request.signal, AbortSignal.timeout(10_000)]));
+      body = await readBoundedJson(
+        request,
+        MAX_INTERNAL_BODY_BYTES,
+        AbortSignal.any([request.signal, AbortSignal.timeout(10_000)]),
+      );
     } catch {
       throw new Refused();
     }
@@ -163,7 +215,10 @@ export function createAgentConnectionRoutes(input: {
     const secret = resource.startsWith(prefix) ? resource.slice(prefix.length) : "";
     const secretHash = hashLinkBearer(secret, linkKey!);
     const found = storage.findLinkGrantByCredentialHash(secretHash);
-    const matches = constantTimeHashEqual(secretHash, found?.credential.secretHash ?? hashLinkBearer("", linkKey!));
+    const matches = constantTimeHashEqual(
+      secretHash,
+      found?.credential.secretHash ?? hashLinkBearer("", linkKey!),
+    );
     if (!LINK_SECRET_PATTERN.test(secret) || !found || !matches) return null;
     const share = storage.getShare(found.grant.shareId);
     if (!share || !linkIsServable(found.grant.grantId, found.credential.generation)) return null;
@@ -195,8 +250,11 @@ export function createAgentConnectionRoutes(input: {
 
   function registerClient(body: Record<string, unknown>): Response {
     fields(body, ["registration", "redirectUris"], ["clientId", "clientName", "clientVersion"]);
-    if (!Array.isArray(body.redirectUris) || body.redirectUris.length === 0 ||
-        body.redirectUris.length > AGENT_REDIRECT_URI_LIMIT) {
+    if (
+      !Array.isArray(body.redirectUris) ||
+      body.redirectUris.length === 0 ||
+      body.redirectUris.length > AGENT_REDIRECT_URI_LIMIT
+    ) {
       throw new Refused();
     }
     const redirectUris = [...new Set(body.redirectUris.map(redirectUri))];
@@ -216,49 +274,70 @@ export function createAgentConnectionRoutes(input: {
       } catch {
         throw new Refused();
       }
-      if (parsed.protocol !== "https:" || parsed.hash || parsed.href !== clientId) throw new Refused();
+      if (parsed.protocol !== "https:" || parsed.hash || parsed.href !== clientId)
+        throw new Refused();
     } else {
       throw new Refused();
     }
-    if (!storage.registerAgentClient({ clientId, registration, reportedName, reportedVersion, redirectUris, nowMs: nowMs() })) {
+    if (
+      !storage.registerAgentClient({
+        clientId,
+        registration,
+        reportedName,
+        reportedVersion,
+        redirectUris,
+        nowMs: nowMs(),
+      })
+    ) {
       throw new Refused();
     }
     return jsonResponse({ ok: true, clientId });
   }
 
   function beginAuthorization(body: Record<string, unknown>, ip: string): Response {
-    fields(body, ["clientId", "resource", "redirectUri", "codeChallenge", "codeChallengeMethod"], ["state"]);
-    if (!input.linkExchangeGlobalRateLimiter.allow("global", nowMs())) throw relayError("link_read_rate_limited");
+    fields(
+      body,
+      ["clientId", "resource", "redirectUri", "codeChallenge", "codeChallengeMethod"],
+      ["state"],
+    );
+    if (!input.linkExchangeGlobalRateLimiter.allow("global", nowMs()))
+      throw relayError("link_read_rate_limited");
     const clientId = text(body.clientId, AGENT_URI_CHAR_LIMIT);
     const resource = text(body.resource, AGENT_URI_CHAR_LIMIT);
     const uri = redirectUri(body.redirectUri);
     const codeChallenge = text(body.codeChallenge, 43);
-    if (body.codeChallengeMethod !== "S256" || !PKCE_CHALLENGE_PATTERN.test(codeChallenge)) throw new Refused();
+    if (body.codeChallengeMethod !== "S256" || !PKCE_CHALLENGE_PATTERN.test(codeChallenge))
+      throw new Refused();
     const state = optionalText(body.state, AGENT_STATE_CHAR_LIMIT);
     if (isPersonalResource(resource)) {
       // Anyone who knows a workspace id can begin one, and each pushes out the
       // workspace's oldest pending request at the cap, so every begin counts.
-      if (!input.linkExchangeRateLimiter.allow(ip, nowMs())) throw relayError("link_read_rate_limited");
+      if (!input.linkExchangeRateLimiter.allow(ip, nowMs()))
+        throw relayError("link_read_rate_limited");
       const workspaceId = personalWorkspaceFromResource(resource);
       const requestId = newLinkBearer();
       // Personal sign-in needs the fence store, which consent checks the browser's session against.
-      const begun = workspaceId !== null && input.personalAgents.fence !== undefined && storage.beginPersonalAuthorization({
-        authorizationId: newId(),
-        requestHash: hash("request", requestId),
-        clientId,
-        redirectUri: uri,
-        resourceHash: hash("resource", resource),
-        codeChallenge,
-        state,
-        workspaceId,
-        nowMs: nowMs(),
-      });
+      const begun =
+        workspaceId !== null &&
+        input.personalAgents.fence !== undefined &&
+        storage.beginPersonalAuthorization({
+          authorizationId: newId(),
+          requestHash: hash("request", requestId),
+          clientId,
+          redirectUri: uri,
+          resourceHash: hash("resource", resource),
+          codeChallenge,
+          state,
+          workspaceId,
+          nowMs: nowMs(),
+        });
       if (!begun) throw new Refused();
       return jsonResponse({ ok: true, requestId });
     }
     const link = linkFromResource(resource);
     if (!link) {
-      if (!input.linkExchangeRateLimiter.allow(ip, nowMs())) throw relayError("link_read_rate_limited");
+      if (!input.linkExchangeRateLimiter.allow(ip, nowMs()))
+        throw relayError("link_read_rate_limited");
       throw new Refused();
     }
     const requestId = newLinkBearer();
@@ -283,12 +362,17 @@ export function createAgentConnectionRoutes(input: {
     const requestId = text(body.requestId, 64);
     const authorization = storage.readAgentAuthorization(hash("request", requestId), nowMs());
     if (!authorization) throw new Refused();
-    const authorized = authorizeLinkShareAction({ storage, grantId: authorization.grantId, action: "read" });
-    if (!authorized.ok || authorized.grant.generation !== authorization.generation) throw new Refused();
+    const authorized = authorizeLinkShareAction({
+      storage,
+      grantId: authorization.grantId,
+      action: "read",
+    });
+    if (!authorized.ok || authorized.grant.generation !== authorization.generation)
+      throw new Refused();
     return jsonResponse({
       ok: true,
       access: authorized.effectiveSelector.access,
-      subjectName: storage.getShareLabels(authorization.shareId).subjectName,
+      subjectName: storage.getShareLabels(authorization.shareId, "link").subjectName,
       reportedClientName: authorization.reportedName,
       redirectUri: authorization.redirectUri,
       expiresAtMs: authorization.expiresAtMs,
@@ -323,9 +407,12 @@ export function createAgentConnectionRoutes(input: {
     if (!input.resolveAccountSession) throw new Refused();
     let session: AccountSession;
     try {
-      session = await input.resolveAccountSession(new Request(request.url, {
-        headers: { cookie: request.headers.get("cookie") ?? "" }, signal: request.signal,
-      }));
+      session = await input.resolveAccountSession(
+        new Request(request.url, {
+          headers: { cookie: request.headers.get("cookie") ?? "" },
+          signal: request.signal,
+        }),
+      );
     } catch (error) {
       // A session lookup that can't reach Postgres fails closed, as the fence does.
       if (error instanceof UnauthorizedError) throw error;
@@ -356,7 +443,10 @@ export function createAgentConnectionRoutes(input: {
     return { pending, session, credentials };
   }
 
-  async function readPersonalConsent(request: Request, body: Record<string, unknown>): Promise<Response> {
+  async function readPersonalConsent(
+    request: Request,
+    body: Record<string, unknown>,
+  ): Promise<Response> {
     fields(body, ["requestId"]);
     const { pending, session } = await personalConsentContext(request, text(body.requestId, 64));
     const roster = storage.listPersonalAgents(session.userId);
@@ -386,7 +476,11 @@ export function createAgentConnectionRoutes(input: {
       return { kind: "new", name: text(choice.name, AGENT_CLIENT_NAME_LIMIT) };
     }
     fields(choice, ["kind", "agentId"]);
-    if (choice.kind !== "existing" || typeof choice.agentId !== "string" || !PERSONAL_AGENT_ID.test(choice.agentId)) {
+    if (
+      choice.kind !== "existing" ||
+      typeof choice.agentId !== "string" ||
+      !PERSONAL_AGENT_ID.test(choice.agentId)
+    ) {
       throw new Refused();
     }
     return { kind: "existing", agentId: choice.agentId };
@@ -394,10 +488,16 @@ export function createAgentConnectionRoutes(input: {
 
   // Allow records the fence epoch read with the session check, so a password
   // changed after that read fails redemption.
-  async function decidePersonal(request: Request, body: Record<string, unknown>): Promise<Response> {
+  async function decidePersonal(
+    request: Request,
+    body: Record<string, unknown>,
+  ): Promise<Response> {
     if (body.decision === "cancel") {
       fields(body, ["requestId", "decision"]);
-      const cancelled = storage.cancelPersonalAuthorization(hash("request", text(body.requestId, 64)), nowMs());
+      const cancelled = storage.cancelPersonalAuthorization(
+        hash("request", text(body.requestId, 64)),
+        nowMs(),
+      );
       if (!cancelled) throw new Refused();
       return jsonResponse({ ok: true, redirectUri: cancelled.redirectUri, state: cancelled.state });
     }
@@ -423,7 +523,11 @@ export function createAgentConnectionRoutes(input: {
 
   type IssuedTokens = { accessTokenHash: string; refreshTokenHash: string; issuedAtMs: number };
 
-  function issueLinkTokens(body: Record<string, unknown>, resource: string, tokens: IssuedTokens): boolean {
+  function issueLinkTokens(
+    body: Record<string, unknown>,
+    resource: string,
+    tokens: IssuedTokens,
+  ): boolean {
     if (body.grantType === "authorization_code") {
       fields(body, ["grantType", "clientId", "code", "codeVerifier", "resource"], ["redirectUri"]);
       const verifier = text(body.codeVerifier, 128);
@@ -432,7 +536,8 @@ export function createAgentConnectionRoutes(input: {
       return storage.redeemAgentAuthorizationCode({
         codeHash: hash("code", text(body.code, 64)),
         clientId: text(body.clientId, AGENT_URI_CHAR_LIMIT),
-        redirectUri: body.redirectUri === undefined ? null : text(body.redirectUri, AGENT_URI_CHAR_LIMIT),
+        redirectUri:
+          body.redirectUri === undefined ? null : text(body.redirectUri, AGENT_URI_CHAR_LIMIT),
         resourceHash: hash("resource", resource),
         verifierChallenge: pkceS256Challenge(verifier),
         connectionId,
@@ -461,7 +566,11 @@ export function createAgentConnectionRoutes(input: {
 
   // The account's fence is read just before the transaction that compares
   // it, so a password change committed before that read refuses the grant.
-  async function issuePersonalTokens(body: Record<string, unknown>, resource: string, tokens: IssuedTokens): Promise<boolean> {
+  async function issuePersonalTokens(
+    body: Record<string, unknown>,
+    resource: string,
+    tokens: IssuedTokens,
+  ): Promise<boolean> {
     const personal = input.personalAgents;
     if (body.grantType === "authorization_code") {
       fields(body, ["grantType", "clientId", "code", "codeVerifier", "resource"], ["redirectUri"]);
@@ -474,7 +583,8 @@ export function createAgentConnectionRoutes(input: {
       const result = storage.redeemPersonalAuthorizationCode({
         codeHash,
         clientId: text(body.clientId, AGENT_URI_CHAR_LIMIT),
-        redirectUri: body.redirectUri === undefined ? null : text(body.redirectUri, AGENT_URI_CHAR_LIMIT),
+        redirectUri:
+          body.redirectUri === undefined ? null : text(body.redirectUri, AGENT_URI_CHAR_LIMIT),
         resourceHash: hash("resource", resource),
         verifierChallenge: pkceS256Challenge(verifier),
         fenceEpoch,
@@ -515,7 +625,11 @@ export function createAgentConnectionRoutes(input: {
     const issuedAtMs = nowMs();
     const accessToken = newLinkBearer();
     const refreshToken = newLinkBearer();
-    const tokens = { accessTokenHash: hash("access", accessToken), refreshTokenHash: hash("refresh", refreshToken), issuedAtMs };
+    const tokens = {
+      accessTokenHash: hash("access", accessToken),
+      refreshTokenHash: hash("refresh", refreshToken),
+      issuedAtMs,
+    };
     const resource = text(body.resource, AGENT_URI_CHAR_LIMIT);
     const issued = isPersonalResource(resource)
       ? await issuePersonalTokens(body, resource, tokens)
@@ -531,11 +645,21 @@ export function createAgentConnectionRoutes(input: {
 
   function introspect(body: Record<string, unknown>): Response {
     fields(body, ["accessToken"]);
-    const connection = storage.authenticateAgentAccessToken(hash("access", text(body.accessToken, 64)), nowMs());
+    const connection = storage.authenticateAgentAccessToken(
+      hash("access", text(body.accessToken, 64)),
+      nowMs(),
+    );
     if (!connection) throw new Refused();
-    const authorized = authorizeLinkShareAction({ storage, grantId: connection.grantId, action: "read" });
-    if (!authorized.ok || authorized.grant.generation !== connection.generation ||
-        !servableFiles(authorized.effectiveSelector, input.publicEditRelease)) {
+    const authorized = authorizeLinkShareAction({
+      storage,
+      grantId: connection.grantId,
+      action: "read",
+    });
+    if (
+      !authorized.ok ||
+      authorized.grant.generation !== connection.generation ||
+      !servableFiles(authorized.effectiveSelector, input.publicEditRelease)
+    ) {
       throw new Refused();
     }
     return jsonResponse({
@@ -550,12 +674,16 @@ export function createAgentConnectionRoutes(input: {
     });
   }
 
-  async function respondToAgentSignIn(request: Request, route: AgentConnectionRoute): Promise<Response> {
+  async function respondToAgentSignIn(
+    request: Request,
+    route: AgentConnectionRoute,
+  ): Promise<Response> {
     try {
       const body = await readInternal(request);
       const ip = request.headers.get("x-dohc-relay-client-ip") ?? "unknown";
       switch (route.route) {
-        case "agent-clients": return registerClient(body);
+        case "agent-clients":
+          return registerClient(body);
         case "agent-authorizations":
           if (route.action === "begin") return beginAuthorization(body, ip);
           if (route.action === "consent") return readConsent(body);
@@ -563,9 +691,12 @@ export function createAgentConnectionRoutes(input: {
           return route.action === "personal-consent"
             ? await readPersonalConsent(request, body)
             : await decidePersonal(request, body);
-        case "agent-token": return await issueTokens(body);
-        case "agent-introspect": return introspect(body);
-        default: throw new Refused();
+        case "agent-token":
+          return await issueTokens(body);
+        case "agent-introspect":
+          return introspect(body);
+        default:
+          throw new Refused();
       }
     } catch (error) {
       if (error instanceof RelayError && ANSWERED_REFUSALS.has(error.code)) throw error;
@@ -578,11 +709,20 @@ export function createAgentConnectionRoutes(input: {
   // and its workspace, and the grant is an active link on that share.
   function respondToLinkAgents(
     request: Request,
-    route: Extract<AgentConnectionRoute, { route: "share-link-agents" | "share-link-agent-disconnect" }>,
+    route: Extract<
+      AgentConnectionRoute,
+      { route: "share-link-agents" | "share-link-agent-disconnect" }
+    >,
     actor: { userId: string },
   ): Response {
     const owned = () => {
-      const { share } = requireOwnedShareGrant(storage, "link", route.shareId, route.grantId, actor);
+      const { share } = requireOwnedShareGrant(
+        storage,
+        "link",
+        route.shareId,
+        route.grantId,
+        actor,
+      );
       input.requireShareWorkspace(share, route.workspaceId);
     };
     owned();
@@ -590,7 +730,10 @@ export function createAgentConnectionRoutes(input: {
       if (request.method !== "GET") throw relayError("method_not_allowed");
       const cursor = connectionCursor.decode(new URL(request.url).searchParams.get("cursor"));
       const page = storage.listAgentConnections({
-        workspaceId: route.workspaceId, shareId: route.shareId, grantId: route.grantId, cursor,
+        workspaceId: route.workspaceId,
+        shareId: route.shareId,
+        grantId: route.grantId,
+        cursor,
       });
       return jsonResponse({
         ok: true,

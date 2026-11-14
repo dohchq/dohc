@@ -76,8 +76,6 @@ async fn malformed_seed_is_rejected_without_stranding_the_parent_row() {
     );
     supervisor.close(&db).expect("close actor");
 
-    // The rejection rolled the whole transaction back: no parent row, no
-    // marker, no journaled update.
     let object_id = open.key.object_id.clone();
     {
         let store = EngineStore::open(&db, 100).expect("open store");

@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import { EditorState, TextSelection, type Command, type Plugin } from "@tiptap/pm/state";
-import { addColumnAfter, addRowAfter, deleteColumn, deleteRow, tableEditing } from "@tiptap/pm/tables";
+import {
+  addColumnAfter,
+  addRowAfter,
+  deleteColumn,
+  deleteRow,
+  tableEditing,
+} from "@tiptap/pm/tables";
 import { Decoration, type DecorationSet } from "@tiptap/pm/view";
 import { makeTableControlsPlugin } from "./tableControls";
 import { doc, paragraph, randomEdit, schema, seededRandom } from "./testDocs";
@@ -15,14 +21,15 @@ function table(rows: number, cols: number, label = ""): PMNode {
         "tableRow",
         null,
         Array.from({ length: cols }, (_, col) =>
-          schema.node(row === 0 ? "tableHeader" : "tableCell", null, [paragraph(`${label}${row}${col}`)]),
+          schema.node(row === 0 ? "tableHeader" : "tableCell", null, [
+            paragraph(`${label}${row}${col}`),
+          ]),
         ),
       ),
     ),
   );
 }
 
-// Each control's range and key, or the node class for a table's own decoration.
 function shown(state: EditorState, plugin: Plugin) {
   return (plugin.getState(state) as DecorationSet)
     .find()
@@ -38,7 +45,8 @@ function expected(document: PMNode) {
 function cellPositions(document: PMNode): number[] {
   const positions: number[] = [];
   document.descendants((node, pos) => {
-    if (node.type.spec.tableRole === "cell" || node.type.spec.tableRole === "header_cell") positions.push(pos);
+    if (node.type.spec.tableRole === "cell" || node.type.spec.tableRole === "header_cell")
+      positions.push(pos);
   });
   return positions;
 }
@@ -48,7 +56,13 @@ describe("makeTableControlsPlugin — edits", () => {
     const random = seededRandom(2260);
     const plugin = makeTableControlsPlugin();
     let state = EditorState.create({
-      doc: doc(paragraph("lead"), table(2, 2, "a"), paragraph("between"), table(3, 2, "b"), paragraph("after")),
+      doc: doc(
+        paragraph("lead"),
+        table(2, 2, "a"),
+        paragraph("between"),
+        table(3, 2, "b"),
+        paragraph("after"),
+      ),
       // As in the editor, a table an edit leaves uneven is fixed after it.
       plugins: [plugin, tableEditing()],
     });
@@ -57,7 +71,9 @@ describe("makeTableControlsPlugin — edits", () => {
       const cells = cellPositions(state.doc);
       if (cells.length && random() < 0.2) {
         const cell = cells[Math.floor(random() * cells.length)]!;
-        const inCell = state.apply(state.tr.setSelection(TextSelection.near(state.doc.resolve(cell + 1))));
+        const inCell = state.apply(
+          state.tr.setSelection(TextSelection.near(state.doc.resolve(cell + 1))),
+        );
         const command = commands[Math.floor(random() * commands.length)]!;
         command(inCell, (tr) => {
           state = inCell.apply(tr);

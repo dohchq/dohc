@@ -1,12 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { type Browser } from "@playwright/test";
-import {
-  expect,
-  ownerHeaders,
-  seedShare,
-  type SeededShare,
-  test,
-} from "./harness";
+import { expect, ownerHeaders, seedShare, type SeededShare, test } from "./harness";
 
 async function refusalCopy(browser: Browser, stackUrl: string, secret: string): Promise<string> {
   const context = await browser.newContext();
@@ -73,9 +67,7 @@ test("opens a real accountless share without exposing its bearer secret", async 
   expect(await exchangeResponse.json()).toEqual({ ok: true, session });
   const setCookie = await exchangeResponse.headerValue("set-cookie");
   expect(setCookie).not.toBeNull();
-  expect(setCookie).toMatch(
-    new RegExp(`^dohc_share_${session}=[A-Za-z0-9_-]+;`, "u"),
-  );
+  expect(setCookie).toMatch(new RegExp(`^dohc_share_${session}=[A-Za-z0-9_-]+;`, "u"));
   expect(setCookie).toMatch(/;\s*Path=\/(?:;|$)/iu);
   expect(setCookie).toMatch(/;\s*Secure(?:;|$)/iu);
   expect(setCookie).toMatch(/;\s*HttpOnly(?:;|$)/iu);
@@ -100,7 +92,6 @@ test("opens a real accountless share without exposing its bearer secret", async 
   const wrongSecretCopy = await refusalCopy(browser, stack.shareWebUrl, wrongSecret);
   await revokeLink(stack.relayUrl, seeded);
   const revokedLinkCopy = await refusalCopy(browser, stack.shareWebUrl, seeded.secret);
-  // The page says the same thing for a wrong secret and a revoked link, starting with this line.
   expect(wrongSecretCopy.split("\n")[0]).toBe("This link isn't available.");
   expect(revokedLinkCopy).toBe(wrongSecretCopy);
 });

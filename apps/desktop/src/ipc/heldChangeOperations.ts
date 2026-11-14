@@ -11,7 +11,8 @@ export const heldChangeOperations = {
     channel: "desktop:read-held-change",
     scope: "workspace",
     guard: "active-workspace",
-    inactiveMessage: "dohc stopped reading this held change because this window changed workspaces.",
+    inactiveMessage:
+      "dohc stopped reading this held change because this window changed workspaces.",
     payload: z.object({ ...workspace, path }).strict(),
     result: z.object({ change: HeldChange.nullable() }).strict(),
   },

@@ -13,8 +13,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // fall through to `null` instead of getting the usual https:// prefix.
 // Restricted to `localhost` or a dotted host so declared schemes with numeric
 // tails (`tel:1234`) aren't misread as host:port.
-const HOST_PORT_RE =
-  /^(?:localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)+):\d+(?:[/?#].*)?$/i;
+const HOST_PORT_RE = /^(?:localhost|[a-z0-9-]+(?:\.[a-z0-9-]+)+):\d+(?:[/?#].*)?$/i;
 
 /** Validates + normalizes user-entered link text. Returns the safe,
  *  absolute URL string, or null if the input isn't a usable http(s)/mailto
@@ -72,9 +71,7 @@ export async function openLink(rawUrl: string): Promise<void> {
 
 function percentByteAt(value: string, index: number): number | null {
   const escape = value.slice(index, index + 3);
-  return /^%[\da-f]{2}$/iu.test(escape)
-    ? Number.parseInt(escape.slice(1), 16)
-    : null;
+  return /^%[\da-f]{2}$/iu.test(escape) ? Number.parseInt(escape.slice(1), 16) : null;
 }
 
 function decodeHrefComponent(value: string): string {
@@ -148,13 +145,11 @@ function parseReadOnlyLinkHref(href: string): ReadOnlyLinkTarget {
   }
 
   const fragmentIndex = trimmed.indexOf("#");
-  const beforeFragment =
-    fragmentIndex === -1 ? trimmed : trimmed.slice(0, fragmentIndex);
+  const beforeFragment = fragmentIndex === -1 ? trimmed : trimmed.slice(0, fragmentIndex);
   const queryIndex = beforeFragment.indexOf("?");
   const pathEnd = queryIndex === -1 ? beforeFragment.length : queryIndex;
   const rawPath = beforeFragment.slice(0, pathEnd);
-  const rawFragment =
-    fragmentIndex === -1 ? null : trimmed.slice(fragmentIndex + 1);
+  const rawFragment = fragmentIndex === -1 ? null : trimmed.slice(fragmentIndex + 1);
   const decodedPath = decodeHrefComponent(rawPath);
 
   // URL parsers ignore these controls inside a scheme. Check the same
@@ -171,9 +166,7 @@ function parseReadOnlyLinkHref(href: string): ReadOnlyLinkTarget {
 
   if (!rawPath && rawFragment === null) return { kind: "blocked" };
   const explicitlyRelative =
-    decodedPath.startsWith("./") ||
-    decodedPath.startsWith("../") ||
-    decodedPath.startsWith("/");
+    decodedPath.startsWith("./") || decodedPath.startsWith("../") || decodedPath.startsWith("/");
   const path = rawPath && !explicitlyRelative ? `./${decodedPath}` : decodedPath;
   return {
     kind: "workspace",

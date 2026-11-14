@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EDITOR_MENU_COMMANDS, MENU_COMMANDS, WORKBENCH_MENU_COMMANDS, isEditorMenuCommand } from "../../ipc/channels";
+import {
+  EDITOR_MENU_COMMANDS,
+  MENU_COMMANDS,
+  WORKBENCH_MENU_COMMANDS,
+  isEditorMenuCommand,
+} from "../../ipc/channels";
 import type { ShareViewWriteScope } from "../../workspaces/shareWriteGate";
 import { CommandPalette } from "../CommandPalette";
 import { VIEW_IDENTITY } from "../workbench/viewIdentity";
@@ -25,17 +30,26 @@ const context: CommandContext = {
   pinnedApps: [],
   updateStatus: null,
 };
-// Main's palette with an update ready to install.
 const mainContext: CommandContext = { ...mainPalette.context, updateStatus: "ready" };
 const viewShare: ShareViewWriteScope = { access: "view", ended: false };
 const editShare: ShareViewWriteScope = { access: "edit", ended: false };
-// In palette order.
-const CREATE_COMMANDS: readonly CommandId[] = ["new-file", "new-file-at-path", "new-drawing", "new-folder", "new-collection", "import-files"];
+const CREATE_COMMANDS: readonly CommandId[] = [
+  "new-file",
+  "new-file-at-path",
+  "new-drawing",
+  "new-folder",
+  "new-collection",
+  "import-files",
+];
 
 describe("command availability", () => {
   it.each<[string, ShareViewWriteScope | null, readonly CommandId[]]>([
     ["an ordinary workspace", null, CREATE_COMMANDS],
-    ["an Edit share view", editShare, ["new-file", "new-file-at-path", "new-drawing", "new-collection", "import-files"]],
+    [
+      "an Edit share view",
+      editShare,
+      ["new-file", "new-file-at-path", "new-drawing", "new-collection", "import-files"],
+    ],
     ["a Comment share view", { access: "comment", ended: false }, []],
     ["a View share view", viewShare, []],
     ["an ended Edit share view", { access: "edit", ended: true }, []],
@@ -43,30 +57,46 @@ describe("command availability", () => {
   ])("%s offers only the creates and imports its handlers take", (_name, shareView, expected) => {
     const current = { ...context, shareView };
     expect(CREATE_COMMANDS.filter((id) => isCommandAvailable(id, current))).toEqual(expected);
-    expect(paletteCommandRows(current).map((row) => row.id).filter((id) => CREATE_COMMANDS.includes(id))).toEqual(expected);
+    expect(
+      paletteCommandRows(current)
+        .map((row) => row.id)
+        .filter((id) => CREATE_COMMANDS.includes(id)),
+    ).toEqual(expected);
   });
 
-  it.each([null, "code", "drawing", "markdown"])("source toggle with active kind %s", (activeDocumentKind) => {
-    const current = { ...context, activeDocumentKind };
-    expect(isCommandAvailable("toggle-markdown-source", current)).toBe(activeDocumentKind === "markdown");
-    expect(paletteCommandRows(current).some((row) => row.id === "toggle-markdown-source")).toBe(activeDocumentKind === "markdown");
-  });
+  it.each([null, "code", "drawing", "markdown"])(
+    "source toggle with active kind %s",
+    (activeDocumentKind) => {
+      const current = { ...context, activeDocumentKind };
+      expect(isCommandAvailable("toggle-markdown-source", current)).toBe(
+        activeDocumentKind === "markdown",
+      );
+      expect(paletteCommandRows(current).some((row) => row.id === "toggle-markdown-source")).toBe(
+        activeDocumentKind === "markdown",
+      );
+    },
+  );
 
-  // Like the source toggle, Share… is hidden, not disabled, when the active
-  // editor shows no file its Share button could share.
-  it.each([false, true])("Share… when the active file is shareable: %s", (activeDocumentShareable) => {
-    const current = { ...context, activeDocumentShareable };
-    expect(isCommandAvailable("share-file", current)).toBe(activeDocumentShareable);
-    const rows = paletteCommandRows(current).filter((row) => row.label.toLowerCase().includes("share"));
-    expect(rows.map(({ id, label }) => ({ id, label }))).toEqual(
-      activeDocumentShareable ? [{ id: "share-file", label: "Share…" }] : [],
-    );
-  });
+  it.each([false, true])(
+    "Share… when the active file is shareable: %s",
+    (activeDocumentShareable) => {
+      const current = { ...context, activeDocumentShareable };
+      expect(isCommandAvailable("share-file", current)).toBe(activeDocumentShareable);
+      const rows = paletteCommandRows(current).filter((row) =>
+        row.label.toLowerCase().includes("share"),
+      );
+      expect(rows.map(({ id, label }) => ({ id, label }))).toEqual(
+        activeDocumentShareable ? [{ id: "share-file", label: "Share…" }] : [],
+      );
+    },
+  );
 
   it.each([null, viewShare, editShare])("Chats with share view %j", (shareView) => {
     const current = { ...context, shareView };
     expect(isCommandAvailable("show-chats", current)).toBe(shareView === null);
-    expect(paletteCommandRows(current).some((row) => row.id === "show-chats")).toBe(shareView === null);
+    expect(paletteCommandRows(current).some((row) => row.id === "show-chats")).toBe(
+      shareView === null,
+    );
   });
 
   it("pinned app rows keep encoded ids, labels, order, and membership", () => {
@@ -78,10 +108,16 @@ describe("command availability", () => {
       const current = { ...context, shareView, pinnedApps };
       const rows = paletteCommandRows(current);
       const cloudIndex = rows.findIndex((row) => row.id === "connect-cloud");
-      expect(rows.slice(cloudIndex - 2, cloudIndex).map(({ id, label }) => ({ id, label }))).toEqual(
-        pinnedApps.map((app) => ({ id: `show-${appViewId(app.root)}`, label: `View: ${app.label}` })),
+      expect(
+        rows.slice(cloudIndex - 2, cloudIndex).map(({ id, label }) => ({ id, label })),
+      ).toEqual(
+        pinnedApps.map((app) => ({
+          id: `show-${appViewId(app.root)}`,
+          label: `View: ${app.label}`,
+        })),
       );
-      for (const app of pinnedApps) expect(isCommandAvailable(pinnedAppCommandId(app.root), current)).toBe(true);
+      for (const app of pinnedApps)
+        expect(isCommandAvailable(pinnedAppCommandId(app.root), current)).toBe(true);
     }
     expect(isCommandAvailable(pinnedAppCommandId(pinnedApps[0].root), context)).toBe(false);
     expect(paletteCommandRows(context).some((row) => row.availability === "pinnedApp")).toBe(false);
@@ -90,14 +126,20 @@ describe("command availability", () => {
 
 describe("command inventory", () => {
   it("every application menu id names a row, opens the palette, or goes to the focused editor", () => {
-    const unknownIds = MENU_COMMANDS.filter((id) => id !== "command-palette" && !isStaticCommandId(id) && !isEditorMenuCommand(id));
+    const unknownIds = MENU_COMMANDS.filter(
+      (id) => id !== "command-palette" && !isStaticCommandId(id) && !isEditorMenuCommand(id),
+    );
     expect(unknownIds).toEqual([]);
     expect(EDITOR_MENU_COMMANDS.filter((id) => isStaticCommandId(id))).toEqual([]);
   });
 
   it("checks the five global workbench command ids without changing their dispatch", () => {
     const globalCommands = [
-      "connect-cloud", "settings", "check-updates", "install-update", "toggle-theme",
+      "connect-cloud",
+      "settings",
+      "check-updates",
+      "install-update",
+      "toggle-theme",
     ] as const satisfies readonly (CommandId & (typeof WORKBENCH_MENU_COMMANDS)[number])[];
     for (const id of globalCommands) expect(isStaticCommandId(id)).toBe(true);
     expect(isStaticCommandId("open-history")).toBe(false);
@@ -111,9 +153,11 @@ describe("command inventory", () => {
   });
 
   it("tags only the matching capability already issued on this base", () => {
-    expect(paletteCommandRows(mainContext).filter((row) => row.capabilityId).map(({ id, capabilityId }) => ({ id, capabilityId }))).toEqual([
-      { id: "new-folder", capabilityId: "folder.create" },
-    ]);
+    expect(
+      paletteCommandRows(mainContext)
+        .filter((row) => row.capabilityId)
+        .map(({ id, capabilityId }) => ({ id, capabilityId })),
+    ).toEqual([{ id: "new-folder", capabilityId: "folder.create" }]);
   });
 
   it("offers Update dohc while an update waits, and Restart to update once it is downloaded", () => {
@@ -128,14 +172,20 @@ describe("command inventory", () => {
   });
 
   it("rejects an unknown command rather than treating it as unavailable", () => {
-    expect(() => isCommandAvailable("fake-command" as CommandId, context)).toThrow("Unknown command: fake-command");
+    expect(() => isCommandAvailable("fake-command" as CommandId, context)).toThrow(
+      "Unknown command: fake-command",
+    );
   });
 
   it("renders main's generated labels in main's order for the fixed context", () => {
     const rows = paletteCommandRows(mainContext);
     expect(rows.map(({ id, label }) => ({ id, label }))).toEqual(mainPalette.rows);
     Element.prototype.scrollIntoView = vi.fn();
-    render(<CommandPalette commands={rows.map((row) => ({ ...row, run: vi.fn() }))} onClose={vi.fn()} />);
-    expect(screen.getAllByRole("option").map((row) => row.textContent)).toEqual(mainPalette.rows.map((row) => row.label));
+    render(
+      <CommandPalette commands={rows.map((row) => ({ ...row, run: vi.fn() }))} onClose={vi.fn()} />,
+    );
+    expect(screen.getAllByRole("option").map((row) => row.textContent)).toEqual(
+      mainPalette.rows.map((row) => row.label),
+    );
   });
 });

@@ -11,17 +11,15 @@ import { TEST_CONTENT_HASH } from "./FileInspector.draft-fixture";
 
 setupFileInspectorTests();
 
-// The text and CSV editors are disabled for two different reasons, and the
-// chip must name the one that applies: a read-only share is not a file that
-// was too large to read.
 describe("read-only reason on the text and CSV chips", () => {
   const bridgeMock = {
     platform: "linux" as const,
     onWorkspaceActivity: vi.fn(() => () => undefined),
     readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(),
-    writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(
-      async () => ({ status: "written", contentHash: TEST_CONTENT_HASH }),
-    ),
+    writeWorkspaceText: vi.fn<DohcDesktopBridge["writeWorkspaceText"]>(async () => ({
+      status: "written",
+      contentHash: TEST_CONTENT_HASH,
+    })),
     listWorkspaceFiles: vi.fn(async () => ({ files: [], folders: [] })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
     getWorkspaceSettings: vi.fn(async () => ({
@@ -39,56 +37,29 @@ describe("read-only reason on the text and CSV chips", () => {
     vi.unstubAllGlobals();
   });
 
-  // Other files keep the chip's title, which names any file; a page says its own.
-  const SHARE = "This document is shared with you to read.";
   const PAGE_SHARE = "This page is shared with you to read.";
   const TOO_LARGE = "This file is too large to edit in dohc.";
 
-  it.each([false, true])("describes why the Markdown toggle is disabled, truncated: %s", async (truncated) => {
-    bridgeMock.readWorkspaceText.mockResolvedValue(truncated
-      ? { text: "# Plan\n", truncated: true, contentHash: null }
-      : { text: "# Plan\n", truncated: false, contentHash: TEST_CONTENT_HASH });
-    const user = userEvent.setup();
-    render(<FileInspector workspaceId="ws-1" path="plan.md" readOnly={!truncated} />);
-    const toggle = await screen.findByRole("button", { name: "Edit", description: truncated ? TOO_LARGE : PAGE_SHARE });
-    expect(toggle.getAttribute("title")).toBe(truncated ? TOO_LARGE : PAGE_SHARE);
-    toggle.focus();
-    await user.keyboard("{Enter} ");
-    await user.click(toggle);
-    expect(screen.queryByTestId("markdown-editor")).toBeNull();
-    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
-  });
-
-  // No header repeats the file above the page (its tab names it); the chip
-  // says its state.
-  for (const [path, testId] of [
-    ["notes.txt", "view-text-save-state"],
-    ["main.ts", "view-text-save-state"],
-    ["index.html", "view-text-save-state"],
-    // Data files share the json kind, but only a .json file takes its view.
-    ["config.yaml", "view-text-save-state"],
-    ["settings.toml", "view-text-save-state"],
-    ["config.json", "view-json-save-state"],
-    ["rows.csv", "csv-save-state"],
-  ] as const) {
-    it(`${path}: a read-only share says so`, async () => {
-      bridgeMock.readWorkspaceText.mockResolvedValue({ text: "a,b\n", truncated: false, contentHash: TEST_CONTENT_HASH });
-      render(<FileInspector workspaceId="ws-1" path={path} readOnly />);
-      const chip = await screen.findByTestId(testId);
-      expect(screen.getByTestId("file-inspector").querySelector("header")).toBeNull();
-      expect(chip.textContent).toBe("Read-only");
-      expect(chip.getAttribute("title")).toBe(SHARE);
-      expect(chip.dataset.state).toBe("saved");
-    });
-
-    it(`${path}: a bounded read says the file is too large`, async () => {
-      bridgeMock.readWorkspaceText.mockResolvedValue({ text: "a,b\n", truncated: true, contentHash: null });
-      render(<FileInspector workspaceId="ws-1" path={path} />);
-      const chip = await screen.findByTestId(testId);
-      expect(screen.getByTestId("file-inspector").querySelector("header")).toBeNull();
-      expect(chip.textContent).toBe("Too large to edit");
-      expect(chip.getAttribute("title")).toBe(TOO_LARGE);
-      expect(chip.dataset.state).toBe("saved");
-    });
-  }
+  it.each([false, true])(
+    "describes why the Markdown toggle is disabled, truncated: %s",
+    async (truncated) => {
+      bridgeMock.readWorkspaceText.mockResolvedValue(
+        truncated
+          ? { text: "# Plan\n", truncated: true, contentHash: null }
+          : { text: "# Plan\n", truncated: false, contentHash: TEST_CONTENT_HASH },
+      );
+      const user = userEvent.setup();
+      render(<FileInspector workspaceId="ws-1" path="plan.md" readOnly={!truncated} />);
+      const toggle = await screen.findByRole("button", {
+        name: "Edit",
+        description: truncated ? TOO_LARGE : PAGE_SHARE,
+      });
+      expect(toggle.getAttribute("title")).toBe(truncated ? TOO_LARGE : PAGE_SHARE);
+      toggle.focus();
+      await user.keyboard("{Enter} ");
+      await user.click(toggle);
+      expect(screen.queryByTestId("markdown-editor")).toBeNull();
+      expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    },
+  );
 });

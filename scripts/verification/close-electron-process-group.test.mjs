@@ -10,43 +10,60 @@ import { closeElectronApplication } from "./close-electron.mjs";
 async function bounded(promise, message, timeoutMs = 20_000) {
   let timer;
   try {
-    return await Promise.race([promise, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-    })]);
-  } finally { clearTimeout(timer); }
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-for (const [close, group] of [["rejected", "shared"], ["hung", "shared"], ["rejected", "own"], ["hung", "own"]]) {
-  test(`POSIX ${close} Electron close stops a TERM-ignoring descendant${group === "own" ? " that leads its own group" : ""}`, {
-    skip: process.platform === "win32" ? "Native POSIX process-group signals" : false,
-    timeout: 30_000,
-  }, async (t) => {
-    const root = mkdtempSync(join(tmpdir(), "dohc-electron-group-"));
-    let descendantSocket;
-    let descendantClosed;
-    let descendantPid;
-    let leader;
-    let leaderClosed;
-    let ready;
-    const connected = new Promise((resolve) => { ready = resolve; });
-    const server = createServer((socket) => {
-      descendantSocket = socket;
-      descendantClosed = new Promise((resolve) => socket.once("close", resolve));
-      socket.on("error", () => {});
-      let received = "";
-      socket.on("data", (chunk) => {
-        received += chunk;
-        if (!received.includes("\n")) return;
-        descendantPid = Number(received.trim());
-        ready();
+for (const [close, group] of [
+  ["rejected", "shared"],
+  ["hung", "shared"],
+  ["rejected", "own"],
+  ["hung", "own"],
+]) {
+  test(
+    `POSIX ${close} Electron close stops a TERM-ignoring descendant${group === "own" ? " that leads its own group" : ""}`,
+    {
+      skip: process.platform === "win32" ? "Native POSIX process-group signals" : false,
+      timeout: 30_000,
+    },
+    async (t) => {
+      const root = mkdtempSync(join(tmpdir(), "dohc-electron-group-"));
+      let descendantSocket;
+      let descendantClosed;
+      let descendantPid;
+      let leader;
+      let leaderClosed;
+      let ready;
+      const connected = new Promise((resolve) => {
+        ready = resolve;
       });
-    });
-    try {
-      await new Promise((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(join(root, "cleanup.sock"), resolve);
+      const server = createServer((socket) => {
+        descendantSocket = socket;
+        descendantClosed = new Promise((resolve) => socket.once("close", resolve));
+        socket.on("error", () => {});
+        let received = "";
+        socket.on("data", (chunk) => {
+          received += chunk;
+          if (!received.includes("\n")) return;
+          descendantPid = Number(received.trim());
+          ready();
+        });
       });
-      writeFileSync(join(root, "descendant.mjs"), `
+      try {
+        await new Promise((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(join(root, "cleanup.sock"), resolve);
+        });
+        writeFileSync(
+          join(root, "descendant.mjs"),
+          `
         import { connect } from 'node:net';
         import { join } from 'node:path';
         const owner = connect(join(import.meta.dirname, 'cleanup.sock'));
@@ -56,40 +73,83 @@ for (const [close, group] of [["rejected", "shared"], ["hung", "shared"], ["reje
         process.on('SIGTERM', () => {});
         owner.once('connect', () => owner.write(String(process.pid) + '\\n'));
         setTimeout(() => process.exit(72), 5000);
-      `);
-      leader = spawn(process.execPath, ["--input-type=module", "-e", `
+      `,
+        );
+        leader = spawn(
+          process.execPath,
+          [
+            "--input-type=module",
+            "-e",
+            `
         import { spawn } from 'node:child_process';
         spawn(process.execPath, [process.argv[1]], { stdio: ['ignore', 'inherit', 'inherit'], detached: ${group === "own"} });
         setInterval(() => {}, 1000);
-      `, join(root, "descendant.mjs")], { detached: true, stdio: ["ignore", "pipe", "pipe"] });
-      leader.stdout.resume();
-      leader.stderr.resume();
-      leaderClosed = new Promise((resolve) => leader.once("close", resolve));
-      await bounded(connected, "Descendant did not establish its cleanup connection.");
-      assert.ok(Number.isInteger(descendantPid) && descendantPid > 0);
-      const app = { close: close === "rejected"
-        ? async () => { throw new Error("fixture close rejected"); }
-        : () => new Promise(() => {}) };
-      await assert.rejects(closeElectronApplication(app, leader, 25),
-        close === "rejected" ? /fixture close rejected/ : /Electron close timed out/);
-      t.diagnostic(JSON.stringify({ phase: "helper-returned", leaderPid: leader.pid, descendantPid,
-        leaderSignal: leader.signalCode, descendantConnectionClosed: descendantSocket.destroyed }));
-      // Inherited pipes and the retained connection must close without fixture cleanup.
-      await bounded(Promise.all([leaderClosed, descendantClosed]), "Descendant survived forced Electron cleanup.", 500);
-      assert.equal(descendantSocket.destroyed, true);
-    } finally {
-      // The connection owns descendant cleanup even after the group leader exits.
-      descendantSocket?.end();
-      if (leader?.pid && leader.exitCode === null && leader.signalCode === null) {
-        try { process.kill(-leader.pid, "SIGKILL"); }
-        catch (error) { if (error.code !== "ESRCH") throw error; }
+      `,
+            join(root, "descendant.mjs"),
+          ],
+          { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+        );
+        leader.stdout.resume();
+        leader.stderr.resume();
+        leaderClosed = new Promise((resolve) => leader.once("close", resolve));
+        await bounded(connected, "Descendant did not establish its cleanup connection.");
+        assert.ok(Number.isInteger(descendantPid) && descendantPid > 0);
+        const app = {
+          close:
+            close === "rejected"
+              ? async () => {
+                  throw new Error("fixture close rejected");
+                }
+              : () => new Promise(() => {}),
+        };
+        await assert.rejects(
+          closeElectronApplication(app, leader, 25),
+          close === "rejected" ? /fixture close rejected/ : /Electron close timed out/,
+        );
+        t.diagnostic(
+          JSON.stringify({
+            phase: "helper-returned",
+            leaderPid: leader.pid,
+            descendantPid,
+            leaderSignal: leader.signalCode,
+            descendantConnectionClosed: descendantSocket.destroyed,
+          }),
+        );
+        // Inherited pipes and the retained connection must close without fixture cleanup.
+        await bounded(
+          Promise.all([leaderClosed, descendantClosed]),
+          "Descendant survived forced Electron cleanup.",
+          500,
+        );
+        assert.equal(descendantSocket.destroyed, true);
+      } finally {
+        // The connection owns descendant cleanup even after the group leader exits.
+        descendantSocket?.end();
+        if (leader?.pid && leader.exitCode === null && leader.signalCode === null) {
+          try {
+            process.kill(-leader.pid, "SIGKILL");
+          } catch (error) {
+            if (error.code !== "ESRCH") throw error;
+          }
+        }
+        await bounded(
+          Promise.all([leaderClosed, descendantClosed]),
+          "Fixture cleanup did not finish.",
+          6000,
+        );
+        await new Promise((resolve) => server.close(resolve));
+        rmSync(root, { recursive: true, force: true });
+        t.diagnostic(
+          JSON.stringify({
+            phase: "fixture-cleaned",
+            leaderPid: leader?.pid,
+            descendantPid,
+            leaderExited: !leader || leader.exitCode !== null || leader.signalCode !== null,
+            descendantConnectionClosed: descendantSocket?.destroyed ?? true,
+            serverClosed: !server.listening,
+          }),
+        );
       }
-      await bounded(Promise.all([leaderClosed, descendantClosed]), "Fixture cleanup did not finish.", 6000);
-      await new Promise((resolve) => server.close(resolve));
-      rmSync(root, { recursive: true, force: true });
-      t.diagnostic(JSON.stringify({ phase: "fixture-cleaned", leaderPid: leader?.pid, descendantPid,
-        leaderExited: !leader || leader.exitCode !== null || leader.signalCode !== null,
-        descendantConnectionClosed: descendantSocket?.destroyed ?? true, serverClosed: !server.listening }));
-    }
-  });
+    },
+  );
 }

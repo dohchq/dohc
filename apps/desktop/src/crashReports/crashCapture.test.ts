@@ -46,27 +46,57 @@ describe("crash capture", () => {
   it("records GPU and Chromium service crashes, and leaves processes dohc forks to their owners", () => {
     const { recorded, emit } = fakeTarget([]);
     emit("child-process-gone", {}, { type: "GPU", reason: "abnormal-exit", exitCode: 34 });
-    emit("child-process-gone", {}, {
-      type: "Utility", serviceName: "network.mojom.NetworkService", name: "Network Service", reason: "oom", exitCode: 1,
-    });
-    emit("child-process-gone", {}, {
-      type: "Utility", serviceName: "node.mojom.NodeService", name: "dohc-plugin-host", reason: "crashed", exitCode: 1,
-    });
+    emit(
+      "child-process-gone",
+      {},
+      {
+        type: "Utility",
+        serviceName: "network.mojom.NetworkService",
+        name: "Network Service",
+        reason: "oom",
+        exitCode: 1,
+      },
+    );
+    emit(
+      "child-process-gone",
+      {},
+      {
+        type: "Utility",
+        serviceName: "node.mojom.NodeService",
+        name: "dohc-plugin-host",
+        reason: "crashed",
+        exitCode: 1,
+      },
+    );
     emit("child-process-gone", {}, { type: "GPU", reason: "memory-eviction", exitCode: 0 });
     expect(recorded).toEqual([
       { kind: "process-gone", source: "gpu", name: "GPU", reason: "abnormal-exit", exitCode: 34 },
-      { kind: "process-gone", source: "utility", name: "network.mojom.NetworkService", reason: "oom", exitCode: 1 },
+      {
+        kind: "process-gone",
+        source: "utility",
+        name: "network.mojom.NetworkService",
+        reason: "oom",
+        exitCode: 1,
+      },
     ]);
   });
 
   // 0xC000026B: Windows refused to start a process while the session logged off.
   const LOGOFF = { reason: "crashed", exitCode: -1073741205 };
-  const NETWORK = { type: "Utility", serviceName: "network.mojom.NetworkService", name: "Network Service" };
+  const NETWORK = {
+    type: "Utility",
+    serviceName: "network.mojom.NetworkService",
+    name: "Network Service",
+  };
 
   it("records nothing once Windows ends the session", () => {
     const { recorded, emit } = fakeTarget(["window"]);
     const windowListeners = new Map<string, () => void>();
-    emit("browser-window-created", {}, { on: (event: string, listener: () => void) => windowListeners.set(event, listener) });
+    emit(
+      "browser-window-created",
+      {},
+      { on: (event: string, listener: () => void) => windowListeners.set(event, listener) },
+    );
     // Windows can still cancel a query-session-end.
     windowListeners.get("query-session-end")?.();
     emit("child-process-gone", {}, { ...NETWORK, reason: "crashed", exitCode: 1 });
@@ -74,7 +104,13 @@ describe("crash capture", () => {
     emit("child-process-gone", {}, { ...NETWORK, reason: "crashed", exitCode: 1 });
     emit("render-process-gone", {}, "window", { reason: "crashed", exitCode: -1 });
     expect(recorded).toEqual([
-      { kind: "process-gone", source: "utility", name: "network.mojom.NetworkService", reason: "crashed", exitCode: 1 },
+      {
+        kind: "process-gone",
+        source: "utility",
+        name: "network.mojom.NetworkService",
+        reason: "crashed",
+        exitCode: 1,
+      },
     ]);
   });
 
@@ -97,7 +133,13 @@ describe("crash capture", () => {
     emit("render-process-gone", {}, "window", LOGOFF);
     emit("child-process-gone", {}, { ...NETWORK, reason: "crashed", exitCode: -1073741819 });
     expect(recorded).toEqual([
-      { kind: "process-gone", source: "utility", name: "network.mojom.NetworkService", reason: "crashed", exitCode: -1073741819 },
+      {
+        kind: "process-gone",
+        source: "utility",
+        name: "network.mojom.NetworkService",
+        reason: "crashed",
+        exitCode: -1073741819,
+      },
     ]);
   });
 });
@@ -112,9 +154,13 @@ describe("crash report code", () => {
       .map((name) => ({ name, source: readFileSync(join(__dirname, name), "utf8") }));
     for (const { name, source } of sources) {
       const imports = [...source.matchAll(/from\s+"([^"]+)"/g)].map((match) => match[1]);
-      expect(imports.filter((specifier) => /relay|notice|workspaces\/|electron$/.test(specifier ?? "")), name)
-        .toEqual([]);
-      expect(source.match(/\bfetch\w*\(/g) ?? [], name).toEqual(name === "crashReportStore.ts" ? ["fetchReport("] : []);
+      expect(
+        imports.filter((specifier) => /relay|notice|workspaces\/|electron$/.test(specifier ?? "")),
+        name,
+      ).toEqual([]);
+      expect(source.match(/\bfetch\w*\(/g) ?? [], name).toEqual(
+        name === "crashReportStore.ts" ? ["fetchReport("] : [],
+      );
     }
   });
 });

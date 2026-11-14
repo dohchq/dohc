@@ -1,8 +1,5 @@
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
-import {
-  isChatShareAccessValue,
-  type ChatShareAccess,
-} from "@dohc/security-contract/share-grant";
+import { isChatShareAccessValue, type ChatShareAccess } from "@dohc/security-contract/share-grant";
 import {
   MAX_SHARE_PATHS,
   MAX_SHARE_PATH_CHARS,
@@ -13,8 +10,14 @@ import {
   isShareAccessValue,
   isValidShareVersionId,
   prepareSharePath,
+  shareCoversLinkPath,
   visibleSharePath,
 } from "@dohc/security-contract/share-selector";
+import {
+  projectChatFileLinks,
+  withholdChatFileLinks,
+} from "@dohc/workspace-contracts/chat-mentions";
+import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { asRecord } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
@@ -23,23 +26,27 @@ import { pathCollisionKey } from "./pathCollisionKey";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
 
-// PR 18 share grants: the server-side filter that decides which replicated
-// ops (and which blobs) a share RECIPIENT may see. This module is the
-// security boundary for external shares — everything here fails closed.
+// Share grants: the server-side filter that decides which replicated ops (and
+// which blobs) a share recipient may see. This module is the security
+// boundary for external shares. Everything here fails closed.
 //
-// Design note (recorded in the execution log): shares are LIVE-FOLLOW
-// read-only views. The recipient re-uses the relay's since-cursor log fetch
-// with this filter applied server-side, so a granter's later edits to shared
-// paths reach the recipient on refresh, and nothing outside the selector
-// ever crosses the wire. A point-in-time snapshot was the alternative; the
-// live-follow choice reuses the whole sync pipeline (cursoring, blobs,
-// idempotent re-fetch) instead of inventing a parallel snapshot format.
+// A share's read side is a live-follow view. The recipient re-uses the relay's
+// since-cursor log fetch with this filter applied server-side, so a granter's
+// later edits to shared paths reach the recipient on refresh, and nothing
+// outside the selector ever crosses the wire. Live-follow reuses the whole
+// sync pipeline (cursoring, blobs, idempotent re-fetch) instead of a parallel
+// snapshot format.
+//
+// A recipient's writes are separate decisions, each with its own allowlist:
+// chat appends (`filterOpForShareAppend`), proposed file changes
+// (`filterProposedChangeForShare`), and direct Collection writes
+// (`filterCollectionWriteForShare`).
 //
 // The relay normally treats op payloads as opaque. Shares deliberately relax
 // that in one direction: the filter may read well-known path/hash/version
-// fields to decide inclusion, and may REDACT one field (version.create's
+// fields to decide inclusion, and may redact one field (version.create's
 // forkSnapshots). It still never interprets content, and any op kind or
-// payload shape it does not positively recognize is EXCLUDED.
+// payload shape it does not positively recognize is excluded.
 
 export { MAX_SHARE_PATHS, MAX_SHARE_PATH_CHARS };
 
@@ -60,8 +67,8 @@ export interface ShareSelector extends StoredShareSelector {
   access: ShareAccess;
 }
 
-// MU-C4 shared channels: a bidirectional chat grant. Unlike the
-// read-only path/version selector above, a chat share scopes a whole
+// Shared channels: a bidirectional chat grant. Unlike the
+// path/version selector above, a chat share scopes a whole
 // channel (its channel/thread/message/reaction ops, nothing else) and — when
 // access is "read-write" — lets the member append channel-scoped chat ops via
 // the member append route. "read-only" is the broadcast/announcements opt-in:
@@ -124,7 +131,6 @@ export function groupChannelIsOrdinary(
   return chat?.channelKind(selector.channelWireId) === "channel";
 }
 
-// The chat half of a group grant, for the code paths that scope chat ops.
 export function chatHalfOfGroup(selector: GroupShareSelector): ChatChannelShareSelector {
   return { kind: "chat", channelWireId: selector.channelWireId, access: selector.access };
 }
@@ -164,8 +170,6 @@ export function chatSideOf(selector: AnyShareSelector): ChatChannelShareSelector
 
 export type ChatShareChannelKind = "channel" | "dm" | "agent";
 
-// Declared where it is read out of the log, and re-exported here for the
-// filter that consumes it.
 import type { ThreadFileBinding } from "./storage";
 export type { ThreadFileBinding };
 
@@ -186,7 +190,7 @@ export interface ShareFileChatResolver {
   objectIdAtPath(path: string): string | undefined;
 }
 
-// MU-C4: how the chat branch resolves channel and thread ownership from the
+// How the chat branch resolves channel and thread ownership from the
 // workspace owner's append-only log. Both lookups use the earliest matching
 // create op, mirroring the engine's insert-if-absent apply semantics: a later
 // forged create can never change a channel's kind or re-bind a thread.
@@ -209,13 +213,9 @@ export function isChatChannelSelector(
   return "kind" in selector && (selector as { kind?: unknown }).kind === "chat";
 }
 
-export function isLiveEditShareSelector(
-  selector: AnyShareSelector,
-): selector is ShareSelector {
+export function isLiveEditShareSelector(selector: AnyShareSelector): selector is ShareSelector {
   if ("kind" in selector) return false;
-  return selector.access === "edit"
-    && selector.versionId === null
-    && selector.paths.length > 0;
+  return selector.access === "edit" && selector.versionId === null && selector.paths.length > 0;
 }
 
 export type GroupSelectorValidation =
@@ -273,8 +273,12 @@ export function validateGroupShareSelector(
       message: "a group share names its folder",
     };
   }
-  if (chat && (!Array.isArray(input.paths) || input.paths.length !== 1 ||
-    input.paths[0] !== chat.channelFolderPath?.(channel.selector.channelWireId))) {
+  if (
+    chat &&
+    (!Array.isArray(input.paths) ||
+      input.paths.length !== 1 ||
+      input.paths[0] !== chat.channelFolderPath?.(channel.selector.channelWireId))
+  ) {
     return {
       ok: false,
       code: RELAY_ERRORS.invalid_path.code,
@@ -474,9 +478,7 @@ export function validateShareSelector(input: {
         // `SyncError::ShareVersionUnusable`) names the same unit — and the
         // observed length with it, so 129 and 10,000 do not read alike.
         message: `versionId must be a non-empty trimmed string of at most ${MAX_SHARE_VERSION_ID_CHARS} UTF-16 code units${
-          typeof input.versionId === "string"
-            ? `; this one is ${input.versionId.length}`
-            : ""
+          typeof input.versionId === "string" ? `; this one is ${input.versionId.length}` : ""
         }`,
       };
     }
@@ -537,9 +539,7 @@ export function parseStoredAnyShareSelectorJson(
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
     if ((parsed as { kind?: unknown }).kind === "chat") {
       if ((parsed as { access?: unknown }).access !== undefined) return null;
-      const validation = validateChatChannelShareSelector(
-        parsed as { channelWireId?: unknown },
-      );
+      const validation = validateChatChannelShareSelector(parsed as { channelWireId?: unknown });
       return validation.ok ? validation.selector : null;
     }
     if ((parsed as { kind?: unknown }).kind === "group") {
@@ -599,12 +599,12 @@ export function parseChatThreadTopic(topic: string): string | null {
   return threadId;
 }
 
-// MU-C1 presence gate: whether a share RECIPIENT may join the ephemeral
+// Presence gate: whether a share recipient may join the ephemeral
 // awareness scope for `topic`. Fail-closed and reuses the same visibility
 // check the durable filter uses, so presence can never fan out to a scope the
 // share does not already expose. For a path/version selector a topic is a
-// workspace-relative path (doc co-presence on a shared file). For a MU-C4
-// chat selector two topic shapes are allowed, both scoped to exactly
+// workspace-relative path (doc co-presence on a shared file). For a chat
+// selector two topic shapes are allowed, both scoped to exactly
 // the granted channel:
 //   - the bare granted channel wire id (channel-level co-presence), and
 //   - `chat:thread:<threadId>` for a thread that binds to the granted channel,
@@ -700,7 +700,6 @@ function collectReferencedMomentPaths(record: Record<string, unknown>): string[]
   ].filter((path): path is string => path !== null);
 }
 
-
 function isSha256(value: unknown): value is string {
   return typeof value === "string" && SHA256_HEX_PATTERN.test(value);
 }
@@ -722,20 +721,14 @@ export function hasValidShareMomentShape(record: Record<string, unknown>): boole
     (beforePathRaw !== null && beforePathRaw !== undefined) ||
     (beforeShaRaw !== null && beforeShaRaw !== undefined);
   const beforePath = hasBefore ? collectString(beforePathRaw) : null;
-  if (
-    hasBefore &&
-    (beforePath === null || !isSha256(beforeShaRaw))
-  ) {
+  if (hasBefore && (beforePath === null || !isSha256(beforeShaRaw))) {
     return false;
   }
   if (operation === "delete" && beforePath === null) return false;
 
   const afterPath = collectString(record.payloadAfterPath);
   if (operation === "write" || operation === "rename") {
-    if (
-      afterPath === null ||
-      !isSha256(record.payloadAfterBlobSha256)
-    ) {
+    if (afterPath === null || !isSha256(record.payloadAfterBlobSha256)) {
       return false;
     }
   }
@@ -747,10 +740,7 @@ export function hasValidShareMomentShape(record: Record<string, unknown>): boole
     (operation !== "delete" || matches(record.payloadAfterPath, beforePath));
   if (!aliasesMatch) return false;
   return (
-    beforePath === null ||
-    afterPath === null ||
-    beforePath === afterPath ||
-    operation === "rename"
+    beforePath === null || afterPath === null || beforePath === afterPath || operation === "rename"
   );
 }
 
@@ -787,16 +777,22 @@ function pickServed(
 // A personal agent's post also names its agent, which only the relay writes.
 // Every desktop refuses such a post without it. The ids of agents a desktop
 // runs stay on the owner's computers.
-function servedChatPayload(record: Record<string, unknown>, opKind: keyof typeof SERVED_CHAT_FIELDS): Record<string, unknown> {
+function servedChatPayload(
+  record: Record<string, unknown>,
+  opKind: keyof typeof SERVED_CHAT_FIELDS,
+): Record<string, unknown> {
   const served = pickServed(record, SERVED_CHAT_FIELDS[opKind]);
-  if (opKind === "chat.message.append" && typeof record.authorAgentId === "string" &&
-      record.authorAgentId.startsWith(PERSONAL_AGENT_ID_PREFIX)) {
+  if (
+    opKind === "chat.message.append" &&
+    typeof record.authorAgentId === "string" &&
+    record.authorAgentId.startsWith(PERSONAL_AGENT_ID_PREFIX)
+  ) {
     served.authorAgentId = record.authorAgentId;
   }
   return served;
 }
 
-// The chat branch of the fail-closed share filter (MU-C4). Strict allowlist,
+// The chat branch of the fail-closed share filter. Strict allowlist,
 // scoped to exactly the granted channel's wire id:
 //   - chat.channel.create for the granted wireId (the join bootstrap);
 //   - chat.thread.create carrying the granted channelWireId, provided the
@@ -834,7 +830,14 @@ function filterChatOpForChannelShare(
       // The folder path is the folder half's fact: a group carries it, a
       // chat-only share does not name a folder.
       payload: pickServed(record, [
-        "channelId", "name", "slug", "kind", "createdAtMs", "wireId", "type", "purpose",
+        "channelId",
+        "name",
+        "slug",
+        "kind",
+        "createdAtMs",
+        "wireId",
+        "type",
+        "purpose",
         ...(servesFolder ? ["folderPath"] : []),
       ]),
       blobSha256s: [],
@@ -860,7 +863,12 @@ function filterChatOpForChannelShare(
     return {
       allowed: true,
       payload: pickServed(record, [
-        "threadId", "title", "createdAtMs", "channelSlug", "channelWireId", "lane",
+        "threadId",
+        "title",
+        "createdAtMs",
+        "channelSlug",
+        "channelWireId",
+        "lane",
       ]),
       blobSha256s: [],
     };
@@ -933,15 +941,15 @@ const SERVED_CHAT_FIELDS = {
     "atMs",
   ],
   "chat.decision.set": [
-    "threadId", "messageId", "state", "resolvedByMessageId", "atMs", "options", "chosenOption",
-  ],
-  "chat.attachment.add": [
-    "attachmentId",
     "threadId",
     "messageId",
-    "targetKind",
-    "createdAtMs",
+    "state",
+    "resolvedByMessageId",
+    "atMs",
+    "options",
+    "chosenOption",
   ],
+  "chat.attachment.add": ["attachmentId", "threadId", "messageId", "targetKind", "createdAtMs"],
 } as const satisfies Record<string, readonly string[]>;
 
 const FILE_CHAT_THREAD_SCOPED_KINDS = [
@@ -1068,12 +1076,84 @@ function filterFileChatOpForPathShare(
   };
 }
 
+// The served fields of each chat kind that hold words someone wrote. Nested
+// values (an agent's report, its work status and link, a poll's options) are
+// read to their strings.
+const CHAT_TEXT_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  "chat.channel.create": ["name", "slug", "purpose"],
+  "chat.thread.create": ["title", "channelSlug"],
+  "chat.message.append": [
+    "body",
+    "authorDisplayName",
+    "authorOwnerDisplayName",
+    "authorReported",
+    "work",
+  ],
+  "chat.reaction.set": ["emoji", "authorDisplayName"],
+  "chat.decision.set": ["options", "chosenOption"],
+};
+
+function withholdIn(value: unknown, covers: (path: string) => boolean): unknown {
+  if (typeof value === "string") return withholdChatFileLinks(value, covers);
+  if (Array.isArray(value)) return value.map((item) => withholdIn(item, covers));
+  const record = asRecord(value);
+  return record
+    ? Object.fromEntries(
+        Object.entries(record).map(([key, item]) => [key, withholdIn(item, covers)]),
+      )
+    : value;
+}
+
+// What a recipient reads of a chat op keeps only the file links its share's
+// files cover; a share without files covers none. The relay applies it on
+// every read of every stored message. Appends are stored as written: the
+// owner reads them whole.
+function withheldLinks(
+  decision: ShareOpDecision,
+  opKind: string,
+  files: ShareSelector | null,
+): ShareOpDecision {
+  if (!decision.allowed || !Object.hasOwn(CHAT_TEXT_FIELDS, opKind)) return decision;
+  const served = asRecord(decision.payload);
+  if (!served) return decision;
+  const covers = (path: string) => shareCoversLinkPath(files, path);
+  const payload = { ...served };
+  for (const field of CHAT_TEXT_FIELDS[opKind]!) {
+    if (payload[field] !== undefined) payload[field] = withholdIn(payload[field], covers);
+  }
+  return { ...decision, payload };
+}
+
+// Who reads a share's label. The owner wrote it; a member reads real paths;
+// a link holder or link agent reads paths from the shared folder down.
+export type ShareLabelReader = "owner" | "member" | "link";
+
+// A Group's name is also its share's label. Anyone but the owner reads it
+// with only the file links its share's files cover, as the name reads in
+// the chat, and a link reader reads those as its files show them. A selector
+// that does not parse covers none.
+export function shareLabelFor(
+  selectorJson: string,
+  label: string | null,
+  reader: ShareLabelReader,
+): string | null {
+  if (label === null || reader === "owner") return label;
+  const selector = parseStoredAnyShareSelectorJson(selectorJson);
+  if (selector && !("kind" in selector)) return label;
+  const files: ShareSelector | null =
+    selector?.kind === "group" ? { paths: selector.paths, versionId: null, access: "view" } : null;
+  const covered = withholdChatFileLinks(label, (path) => shareCoversLinkPath(files, path));
+  if (reader === "member" || files === null) return covered;
+  const projection = createAccountlessPathProjection(files);
+  return projectChatFileLinks(covered, (path) => projection.projectPath(path));
+}
+
 // The single decision point for what a share recipient may read. Strict
 // allowlist per selector kind. Path/version selector: moment.append (all
 // referenced paths visible, version matches), version.create for the shared
 // version (forkSnapshots redacted), the payload-free workspace.init bootstrap
 // op, and the five file-chat kinds whose thread resolves to a file
-// inside the selector. Chat-channel selector (MU-C4): only the
+// inside the selector. Chat-channel selector: only the
 // granted channel's chat ops (see filterChatOpForChannelShare) — file, secret,
 // version, and bootstrap ops stay excluded. Everything unrecognized is
 // excluded either way.
@@ -1096,20 +1176,32 @@ export function filterOpForShare(
     // folder either: a group's chat is one channel.
     if (opKind.startsWith("chat.")) {
       if (half === "files") return { allowed: false };
-      return filterChatOpForChannelShare(chatHalfOfGroup(selector), opKind, payload, chat, true);
+      return withheldLinks(
+        filterChatOpForChannelShare(chatHalfOfGroup(selector), opKind, payload, chat, true),
+        opKind,
+        fileHalfOfGroup(selector),
+      );
     }
     if (half === "chat") return { allowed: false };
     return filterOpForShare(fileHalfOfGroup(selector), opKind, payloadJson, chat);
   }
   if (isChatChannelSelector(selector)) {
-    return filterChatOpForChannelShare(selector, opKind, payload, chat);
+    return withheldLinks(
+      filterChatOpForChannelShare(selector, opKind, payload, chat),
+      opKind,
+      null,
+    );
   }
 
   // Chat follows the file share. Every chat kind routes here, so the
   // branch's own allowlist is the only way one is served — a kind it does not
   // name is denied there, not silently carried by a later branch.
   if (opKind.startsWith("chat.")) {
-    return filterFileChatOpForPathShare(selector, opKind, payload, chat);
+    return withheldLinks(
+      filterFileChatOpForPathShare(selector, opKind, payload, chat),
+      opKind,
+      selector,
+    );
   }
 
   if (opKind === "workspace.init") {
@@ -1170,9 +1262,7 @@ export function filterOpForShare(
     // Only the after-blob is ever fetched by the recipient (before-blobs are
     // never replayed), so the lineage hash does not make its blob reachable.
     const blobSha256s =
-      (record.operation === "write" || record.operation === "rename") && afterSha
-        ? [afterSha]
-        : [];
+      (record.operation === "write" || record.operation === "rename") && afterSha ? [afterSha] : [];
     return { allowed: true, payload: served, blobSha256s };
   }
 
@@ -1219,12 +1309,11 @@ export function filterOpForShare(
 // `filterOpForShare` above answers the read question — "may this recipient see
 // this op?" — and the two are not the same question. A recipient may read every
 // file moment in the selector; it may write none of them, because a written
-// moment lands in the GRANTER's log and the granter's engine replays it
-// (#646 PR3-0).
+// moment lands in the granter's log and the granter's engine replays it.
 //
 // Only chat crosses in this direction today. A chat grant at
 // `read-write` appends what the channel branch admits. A file share appends
-// only the five file-chat kinds PR2 serves: the file-chat branch's own terminal
+// only the five file-chat kinds: the file-chat branch's own terminal
 // deny is the allowlist, so `moment.append`, `workspace.init`, `version.create`,
 // and every unknown kind are refused there. This function never falls through
 // to the read filter.
@@ -1256,7 +1345,11 @@ function decisionPollFieldsValid(payload: unknown): boolean {
     for (const option of options) {
       if (typeof option !== "string") return false;
       const trimmed = trimLikeEngine(option);
-      if (trimmed.length === 0 || trimmed.length > MAX_POLL_OPTION_UNITS || /[\r\n]/u.test(trimmed)) {
+      if (
+        trimmed.length === 0 ||
+        trimmed.length > MAX_POLL_OPTION_UNITS ||
+        /[\r\n]/u.test(trimmed)
+      ) {
         return false;
       }
       if (normalized.includes(trimmed)) return false;
@@ -1265,7 +1358,8 @@ function decisionPollFieldsValid(payload: unknown): boolean {
   }
   if (chosen !== undefined) {
     // The engine compares the pick as written against the trimmed choices.
-    if (typeof chosen !== "string" || record.state !== "resolved" || normalized.length === 0) return false;
+    if (typeof chosen !== "string" || record.state !== "resolved" || normalized.length === 0)
+      return false;
     if (!normalized.includes(chosen)) return false;
   } else if (record.state === "resolved" && normalized.length > 0) {
     return false;
@@ -1324,9 +1418,7 @@ export interface ProposedChange {
   recordedAtMs: number;
 }
 
-export type ProposedChangeDecision =
-  | { allowed: false }
-  | { allowed: true; change: ProposedChange };
+export type ProposedChangeDecision = { allowed: false } | { allowed: true; change: ProposedChange };
 
 // The single decision point for what a recipient may PROPOSE. It is a third
 // question, next to "may this recipient see this op?" (`filterOpForShare`) and
@@ -1488,9 +1580,12 @@ export function collectionEditSelector(
 ): ShareSelector | null {
   if (isChatChannelSelector(selector)) return null;
   if (isGroupSelector(selector)) {
-    return groupChannelIsOrdinary(selector, chat) ? collectionEditSelector(fileHalfOfGroup(selector), chat) : null;
+    return groupChannelIsOrdinary(selector, chat)
+      ? collectionEditSelector(fileHalfOfGroup(selector), chat)
+      : null;
   }
-  if (selector.access !== "edit" || selector.versionId !== null || selector.paths.length === 0) return null;
+  if (selector.access !== "edit" || selector.versionId !== null || selector.paths.length === 0)
+    return null;
   return selector;
 }
 
@@ -1526,7 +1621,8 @@ export function filterCollectionWriteForShare(
  * checked as a share of its top-level folder or file would check it.
  */
 export function filterPersonalCollectionWrite(raw: unknown): CollectionWriteDecision {
-  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_NEW_COLLECTION_RECORDS + 2) return { allowed: false };
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_NEW_COLLECTION_RECORDS + 2)
+    return { allowed: false };
   const tops = new Set<string>();
   for (const entry of raw) {
     const record = asRecord(entry);
@@ -1536,7 +1632,12 @@ export function filterPersonalCollectionWrite(raw: unknown): CollectionWriteDeci
     }
   }
   if (tops.size === 0) return { allowed: false };
-  return decideCollectionWrite({ paths: [...tops], versionId: null, access: "edit" }, raw, undefined, () => true);
+  return decideCollectionWrite(
+    { paths: [...tops], versionId: null, access: "edit" },
+    raw,
+    undefined,
+    () => true,
+  );
 }
 
 function decideCollectionWrite(
@@ -1554,17 +1655,33 @@ function decideCollectionWrite(
   const paths = new Set<string>();
   let bytes = 0;
   for (const entry of raw) {
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)
-      || Object.keys(entry).some(key => ![
-        "basedOnPath", "basedOnBlobSha256", "operation", "afterPath", "afterBlobSha256",
-        "afterContentKind", "afterByteLength", "recordedAtMs",
-      ].includes(key))) return refused;
+    if (
+      entry === null ||
+      typeof entry !== "object" ||
+      Array.isArray(entry) ||
+      Object.keys(entry).some(
+        (key) =>
+          ![
+            "basedOnPath",
+            "basedOnBlobSha256",
+            "operation",
+            "afterPath",
+            "afterBlobSha256",
+            "afterContentKind",
+            "afterByteLength",
+            "recordedAtMs",
+          ].includes(key),
+      )
+    )
+      return refused;
     const decision = filterProposedChangeForShare(files, entry, chat);
     if (!decision.allowed) return refused;
     const change = decision.change;
     if (
-      change.operation !== "write" || change.afterContentKind !== "text" ||
-      change.afterPath === null || change.afterByteLength === null
+      change.operation !== "write" ||
+      change.afterContentKind !== "text" ||
+      change.afterPath === null ||
+      change.afterByteLength === null
     ) {
       return refused;
     }
@@ -1580,7 +1697,8 @@ function decideCollectionWrite(
   }
 
   const schemaCreates = changes.filter(
-    (change) => change.basedOnPath === null && baseName(change.afterPath!) === COLLECTION_SCHEMA_FILE,
+    (change) =>
+      change.basedOnPath === null && baseName(change.afterPath!) === COLLECTION_SCHEMA_FILE,
   );
   if (schemaCreates.length === 0) {
     if (changes.length !== 1) return refused;
@@ -1610,7 +1728,8 @@ function decideCollectionWrite(
   const records: ProposedChange[] = [];
   for (const change of changes) {
     if (change === schema) continue;
-    if (change.basedOnPath !== null || parentPath(change.afterPath!) !== collectionPath) return refused;
+    if (change.basedOnPath !== null || parentPath(change.afterPath!) !== collectionPath)
+      return refused;
     const file = baseName(change.afterPath!);
     if (file === COLLECTION_AUTOMATIONS_FILE) {
       if (automations !== null) return refused;

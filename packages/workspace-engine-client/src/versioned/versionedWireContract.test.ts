@@ -31,12 +31,22 @@ const validMoment = {
 
 describe("versioned result decoder rejection", () => {
   it("decodes closed-document rewrite counts and rejects malformed replies", () => {
-    const reply = {documents: 2, links: 4, unchecked: ["open.md"], uncheckedCount: 1, complete: false};
+    const reply = {
+      documents: 2,
+      links: 4,
+      unchecked: ["open.md"],
+      uncheckedCount: 1,
+      complete: false,
+    };
     expect(decodeVersionedResult(VERSIONED_METHOD.historyRewriteLinks, reply)).toEqual(reply);
     for (const field of ["documents", "links", "uncheckedCount", "complete"]) {
-      expect(() => decodeVersionedResult(VERSIONED_METHOD.historyRewriteLinks, {...reply, [field]: "wrong"})).toThrow(ProtocolShapeError);
+      expect(() =>
+        decodeVersionedResult(VERSIONED_METHOD.historyRewriteLinks, { ...reply, [field]: "wrong" }),
+      ).toThrow(ProtocolShapeError);
     }
-    expect(() => decodeVersionedResult(VERSIONED_METHOD.historyRewriteLinks, {...reply, unchecked: [7]})).toThrow(ProtocolShapeError);
+    expect(() =>
+      decodeVersionedResult(VERSIONED_METHOD.historyRewriteLinks, { ...reply, unchecked: [7] }),
+    ).toThrow(ProtocolShapeError);
   });
   it("preserves parked rollback placement as a distinct outcome", () => {
     const result = {
@@ -55,10 +65,15 @@ describe("versioned result decoder rejection", () => {
     { kind: "human", humanId: "ada" },
   ])("keeps a $kind author without a declared principal", (author) => {
     const authors = [author];
-    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors })?.authors).toEqual(authors);
-    expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, {
-      ...validMoment, authors: [{ ...author, onBehalfOf: null }],
-    })).toThrow(ProtocolShapeError);
+    expect(
+      decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors })?.authors,
+    ).toEqual(authors);
+    expect(() =>
+      decodeVersionedResult(VERSIONED_METHOD.momentsGet, {
+        ...validMoment,
+        authors: [{ ...author, onBehalfOf: null }],
+      }),
+    ).toThrow(ProtocolShapeError);
   });
 
   it("keeps every author of a moment and each corrupt entry", () => {
@@ -68,10 +83,15 @@ describe("versioned result decoder rejection", () => {
       { corrupt: true },
       { kind: "unattributed" },
     ];
-    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors })?.authors).toEqual(authors);
-    expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, {
-      ...validMoment, authors: { kind: "agent", agentId: "agent" },
-    })).toThrow(ProtocolShapeError);
+    expect(
+      decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors })?.authors,
+    ).toEqual(authors);
+    expect(() =>
+      decodeVersionedResult(VERSIONED_METHOD.momentsGet, {
+        ...validMoment,
+        authors: { kind: "agent", agentId: "agent" },
+      }),
+    ).toThrow(ProtocolShapeError);
   });
 
   it("keeps a live author snapshot's account holder, declared agent, and link holder", () => {
@@ -81,7 +101,9 @@ describe("versioned result decoder rejection", () => {
       { kind: "link", publicPrincipalId: "public_1", label: "Anonymous" },
       { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" },
     ];
-    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors })?.authors).toEqual(authors);
+    expect(
+      decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors })?.authors,
+    ).toEqual(authors);
     for (const author of [
       { kind: "human", humanId: "owner", humanName: "Owner", onBehalfOf: "owner" },
       { kind: "human", humanId: "owner", humanName: 1 },
@@ -90,8 +112,11 @@ describe("versioned result decoder rejection", () => {
       { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder", label: "Ana" },
       { kind: "agent", agentId: "writer", agentName: null },
     ]) {
-      expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] }), JSON.stringify(author))
-        .toThrow(ProtocolShapeError);
+      expect(
+        () =>
+          decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] }),
+        JSON.stringify(author),
+      ).toThrow(ProtocolShapeError);
     }
   });
 
@@ -175,22 +200,30 @@ describe("versioned result decoder rejection", () => {
 
   it("accepts a named author only with its user, grant, and integer generation", () => {
     const author = { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 };
-    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] })?.authors)
-      .toEqual([author]);
+    expect(
+      decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] })
+        ?.authors,
+    ).toEqual([author]);
     for (const malformed of [
       { kind: "named", userId: "ana", grantId: "grant" },
       { ...author, grantGeneration: 1.5 },
       { ...author, email: "ana@example.com" },
     ]) {
       expect(() =>
-        decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [malformed] }),
+        decodeVersionedResult(VERSIONED_METHOD.momentsGet, {
+          ...validMoment,
+          authors: [malformed],
+        }),
       ).toThrow(ProtocolShapeError);
     }
   });
 
   it("accepts a link author only with its grant, integer generation, and principal", () => {
     const author = { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" };
-    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] })?.authors).toEqual([author]);
+    expect(
+      decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] })
+        ?.authors,
+    ).toEqual([author]);
     for (const malformed of [
       { kind: "link", grantId: "grant", grantGeneration: 2 },
       { ...author, grantGeneration: 1.5 },
@@ -198,7 +231,10 @@ describe("versioned result decoder rejection", () => {
       { ...author, displayName: "Ana" },
     ]) {
       expect(() =>
-        decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [malformed] }),
+        decodeVersionedResult(VERSIONED_METHOD.momentsGet, {
+          ...validMoment,
+          authors: [malformed],
+        }),
       ).toThrow(ProtocolShapeError);
     }
   });
@@ -208,8 +244,16 @@ describe("versioned result decoder rejection", () => {
       { kind: "human", humanId: "ana", humanName: "Ana" },
       { kind: "link", publicPrincipalId: "public-ana", label: "Ana" },
     ]) {
-      expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] })?.authors).toEqual([author]);
-      expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [{ ...author, principalId: "private" }] })).toThrow(ProtocolShapeError);
+      expect(
+        decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] })
+          ?.authors,
+      ).toEqual([author]);
+      expect(() =>
+        decodeVersionedResult(VERSIONED_METHOD.momentsGet, {
+          ...validMoment,
+          authors: [{ ...author, principalId: "private" }],
+        }),
+      ).toThrow(ProtocolShapeError);
     }
   });
 
@@ -229,11 +273,11 @@ describe("versioned result decoder rejection", () => {
 });
 
 describe("versionedText.list hasYdocMarker", () => {
-  // AUDIT-SILENTSAVE round 4 (D3). hasYdocMarker is what stops the desktop
-  // capture layer from retiring a settled Y.Doc for exceeding a cap a Y.Doc is
-  // not bound by. A row that silently defaulted to false would re-open exactly
-  // that data-loss path, so an absent key must be a protocol violation — the
-  // same rule already applied to `materialized`.
+  // hasYdocMarker is what stops the desktop capture layer from retiring a
+  // settled Y.Doc for exceeding a cap a Y.Doc is not bound by. A row that
+  // silently defaulted to false would re-open exactly that data-loss path, so
+  // an absent key must be a protocol violation, the same rule already applied
+  // to `materialized`.
   const row = (overrides: Record<string, unknown> = {}) => ({
     path: "notes/settled.md",
     objectId: "object-1",
@@ -264,7 +308,10 @@ describe("versionedText.list hasYdocMarker", () => {
   it("Rejects a row with no hasYdocMarker instead of assuming unowned", () => {
     const { hasYdocMarker: _omitted, ...withoutFlag } = row();
     expect(() =>
-      decodeVersionedResult(VERSIONED_METHOD.textList, { files: [withoutFlag], nextAfterPath: null }),
+      decodeVersionedResult(VERSIONED_METHOD.textList, {
+        files: [withoutFlag],
+        nextAfterPath: null,
+      }),
     ).toThrow(ProtocolShapeError);
   });
 
@@ -278,32 +325,96 @@ describe("versionedText.list hasYdocMarker", () => {
   });
 });
 
-
 describe("metadata-only History pages", () => {
-  const cursor = { format: 1, engineUuid: "store", workspaceId: "ws", versionId: "main", objectId: null, operationId: null,
-    textFence: 1, protectedFence: -1, markerFence: 1, text: null, protected: null, marker: null };
-  const metadata = { momentOrder: 1, momentId: "m", versionId: "main", objectId: "o", path: "a.md", beforePath: null, recordedAtMs: 10,
-    operation: "write", afterContentKind: "text", afterByteLength: 1, metadataOrigin: "api", authors: null, syncRecordOnly: false };
-  const page = { activeVersion: { id: "main", workspaceId: "ws", kind: "main", name: "Main", createdAtMs: 1 },
-    moments: [metadata], protectedMoments: [], versionMarkers: [], startCursor: cursor, nextCursor: null, latestMomentOrder: 1 };
+  const cursor = {
+    format: 1,
+    engineUuid: "store",
+    workspaceId: "ws",
+    versionId: "main",
+    objectId: null,
+    operationId: null,
+    textFence: 1,
+    protectedFence: -1,
+    markerFence: 1,
+    text: null,
+    protected: null,
+    marker: null,
+  };
+  const metadata = {
+    momentOrder: 1,
+    momentId: "m",
+    versionId: "main",
+    objectId: "o",
+    path: "a.md",
+    beforePath: null,
+    recordedAtMs: 10,
+    operation: "write",
+    afterContentKind: "text",
+    afterByteLength: 1,
+    metadataOrigin: "api",
+    authors: null,
+    syncRecordOnly: false,
+  };
+  const page = {
+    activeVersion: { id: "main", workspaceId: "ws", kind: "main", name: "Main", createdAtMs: 1 },
+    moments: [metadata],
+    protectedMoments: [],
+    versionMarkers: [],
+    startCursor: cursor,
+    nextCursor: null,
+    latestMomentOrder: 1,
+  };
   it("decodes literal positions and metadata without payload fields", () => {
     expect(decodeVersionedResult(VERSIONED_METHOD.historyPage, page)).toEqual(page);
   });
-  it.each(["afterText", "beforeText", "payload", "bytesBase64"])("rejects a page moment carrying %s", key => {
-    expect(() => decodeVersionedResult(VERSIONED_METHOD.historyPage, { ...page, moments: [{ ...metadata, [key]: "body" }] })).toThrow(ProtocolShapeError);
-  });
+  it.each(["afterText", "beforeText", "payload", "bytesBase64"])(
+    "rejects a page moment carrying %s",
+    (key) => {
+      expect(() =>
+        decodeVersionedResult(VERSIONED_METHOD.historyPage, {
+          ...page,
+          moments: [{ ...metadata, [key]: "body" }],
+        }),
+      ).toThrow(ProtocolShapeError);
+    },
+  );
 });
 
-const operationResult = {operationId:"dohc-operation:minted", versionId:"main", momentCount:15000};
-it.each([VERSIONED_METHOD.historyOperations, VERSIONED_METHOD.historyUndo])("decodes %s as a bounded summary", method => {
-  const result = method===VERSIONED_METHOD.historyUndo ? {...operationResult,notRestored: [], compensationOperationId:"dohc-operation:undo:committed",deduped:true,materialized:false} : {...operationResult,kind:null};
-  expect(decodeVersionedResult(method,result)).toEqual(result);
-  expect(()=>decodeVersionedResult(method,{...result,moments:[]})).toThrow(ProtocolShapeError);
-});
+const operationResult = {
+  operationId: "dohc-operation:minted",
+  versionId: "main",
+  momentCount: 15000,
+};
+it.each([VERSIONED_METHOD.historyOperations, VERSIONED_METHOD.historyUndo])(
+  "decodes %s as a bounded summary",
+  (method) => {
+    const result =
+      method === VERSIONED_METHOD.historyUndo
+        ? {
+            ...operationResult,
+            notRestored: [],
+            compensationOperationId: "dohc-operation:undo:committed",
+            deduped: true,
+            materialized: false,
+          }
+        : { ...operationResult, kind: null };
+    expect(decodeVersionedResult(method, result)).toEqual(result);
+    expect(() => decodeVersionedResult(method, { ...result, moments: [] })).toThrow(
+      ProtocolShapeError,
+    );
+  },
+);
 it("requires and preserves Undo members that were not restored", () => {
-  const reply = { ...operationResult, compensationOperationId: "dohc-operation:undo:committed", deduped: true,
-    materialized: true, notRestored: ["moved/source.md"] };
+  const reply = {
+    ...operationResult,
+    compensationOperationId: "dohc-operation:undo:committed",
+    deduped: true,
+    materialized: true,
+    notRestored: ["moved/source.md"],
+  };
   expect(decodeVersionedResult(VERSIONED_METHOD.historyUndo, reply)).toEqual(reply);
   const { notRestored: _omitted, ...missing } = reply;
-  expect(() => decodeVersionedResult(VERSIONED_METHOD.historyUndo, missing)).toThrow(ProtocolShapeError);
+  expect(() => decodeVersionedResult(VERSIONED_METHOD.historyUndo, missing)).toThrow(
+    ProtocolShapeError,
+  );
 });

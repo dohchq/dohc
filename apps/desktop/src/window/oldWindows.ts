@@ -14,7 +14,9 @@ export function createOldWindows<
   Window extends { readonly webContents: Contents },
 >(dependencies: {
   windows(): readonly Window[];
-  sessionOf(contents: Contents): { readonly workspaceId: string; readonly attachmentId: symbol } | undefined;
+  sessionOf(
+    contents: Contents,
+  ): { readonly workspaceId: string; readonly attachmentId: symbol } | undefined;
   authorities: { isCurrentAttachment(workspaceId: string, attachmentId: symbol): boolean };
   // Quitting closes every workspace, which leaves no window old.
   isQuitting(): boolean;
@@ -25,8 +27,8 @@ export function createOldWindows<
     if (dependencies.isQuitting()) return null;
     return oldWindowState(
       dependencies.sessionOf(contents),
-      dependencies.windows().filter(window => window.webContents !== contents),
-      window => dependencies.sessionOf(window.webContents),
+      dependencies.windows().filter((window) => window.webContents !== contents),
+      (window) => dependencies.sessionOf(window.webContents),
       dependencies.authorities,
     );
   }

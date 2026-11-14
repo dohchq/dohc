@@ -21,5 +21,5 @@ export function compareCodePoints(left: string, right: string): number {
     leftIndex += leftPoint > 0xffff ? 2 : 1;
     rightIndex += rightPoint > 0xffff ? 2 : 1;
   }
-  return (left.length - leftIndex) - (right.length - rightIndex);
+  return left.length - leftIndex - (right.length - rightIndex);
 }

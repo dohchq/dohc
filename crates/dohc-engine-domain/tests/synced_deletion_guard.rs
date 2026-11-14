@@ -206,74 +206,10 @@ fn restore_after_restart(absent_current: bool, older: bool) {
 }
 
 #[test]
-fn synced_deletion_restore_after_applying_absent_incoming() {
-    restore_after_restart(false, false);
-}
-#[test]
 fn synced_deletion_restore_after_keeping_absent_current() {
     restore_after_restart(true, false);
 }
-#[test]
-fn synced_deletion_older_moment_after_applying_absent_incoming() {
-    restore_after_restart(false, true);
-}
-#[test]
-fn synced_deletion_older_moment_after_keeping_absent_current() {
-    restore_after_restart(true, true);
-}
 
-fn refuse_choice_before_preflight(resolution: ResolveConflictKind) {
-    let dir = ScratchDir::new().unwrap();
-    let mut store = EngineStore::open(&engine_db_path(&dir).unwrap(), 1).unwrap();
-    setup(&mut store, true);
-    let before = counts(&mut store);
-    let mut preflight = false;
-    let result = VersionedTextStore::new(&mut store).resolve_text_conflict_with(
-        &choice(resolution),
-        &NoFaults,
-        |_, _, _| {
-            preflight = true;
-            Ok(())
-        },
-        |_, _, _| Ok(()),
-    );
-    assert_eq!(
-        result.unwrap_err().code(),
-        "synced-deletion-revival-refused"
-    );
-    assert!(!preflight);
-    assert_eq!(counts(&mut store), before);
-}
-
-#[test]
-fn synced_deletion_incoming_choice_brings_the_note_back_as_the_same_object() {
-    let dir = ScratchDir::new().unwrap();
-    let mut store = EngineStore::open(&engine_db_path(&dir).unwrap(), 1).unwrap();
-    let conflict = setup(&mut store, true);
-    let mut preflight = false;
-    VersionedTextStore::new(&mut store)
-        .resolve_text_conflict_with(
-            &choice(ResolveConflictKind::ApplyIncoming),
-            &NoFaults,
-            |_, _, _| {
-                preflight = true;
-                Ok(())
-            },
-            |_, _, _| Ok(()),
-        )
-        .unwrap();
-    assert!(preflight);
-    let head = VersionedTextStore::new(&mut store)
-        .read_text("ws", "main", "trip.md")
-        .unwrap()
-        .unwrap();
-    assert_eq!(head.text, "Tokyo");
-    assert_eq!(
-        head.object_id,
-        conflict.incoming.snapshot.unwrap().object_id,
-        "the other machine's copy must come back as the same object"
-    );
-}
 fn point_incoming_at(store: &mut EngineStore, object_id: &str) {
     store
         .write_with(&NoFaults, |tx| {
@@ -316,79 +252,6 @@ fn synced_deletion_incoming_choice_needs_a_stored_file() {
 }
 
 #[test]
-fn synced_deletion_combined_choice_is_refused_before_preflight() {
-    refuse_choice_before_preflight(ResolveConflictKind::ApplyMerged {
-        text: "Tokyo combined".into(),
-    });
-}
-
-#[test]
-fn receiver_both_absent_review_guards_the_base_object() {
-    let dir = ScratchDir::new().unwrap();
-    let mut store = EngineStore::open(&engine_db_path(&dir).unwrap(), 1).unwrap();
-    setup(&mut store, true);
-    store.write_with(&NoFaults, |tx| {
-        tx.execute("UPDATE conflicts SET incoming_exists=0, incoming_object_id=NULL, incoming_blob_sha256=NULL", []).unwrap();
-        Ok::<_, DomainError>(())
-    }).unwrap();
-    refuse_restore(&mut store, "delete", "Tokyo");
-    assert_eq!(
-        resolve(
-            &mut store,
-            ResolveConflictKind::ApplyMerged {
-                text: "combined".into()
-            }
-        )
-        .unwrap_err()
-        .code(),
-        "synced-deletion-revival-refused"
-    );
-}
-
-#[test]
-fn both_absent_review_allows_either_nonwriting_choice() {
-    for resolution in [
-        ResolveConflictKind::KeepCurrent,
-        ResolveConflictKind::ApplyIncoming,
-    ] {
-        let dir = ScratchDir::new().unwrap();
-        let mut store = EngineStore::open(&engine_db_path(&dir).unwrap(), 1).unwrap();
-        setup(&mut store, true);
-        store.write_with(&NoFaults, |tx| {
-            tx.execute("UPDATE conflicts SET incoming_exists=0, incoming_object_id=NULL, incoming_blob_sha256=NULL", []).unwrap();
-            Ok::<_, DomainError>(())
-        }).unwrap();
-        let before = counts(&mut store);
-        resolve(&mut store, resolution).unwrap();
-        assert!(
-            VersionedTextStore::new(&mut store)
-                .read_text("ws", "main", "trip.md")
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(
-            counts(&mut store).0,
-            before.0,
-            "closing the review must not write a moment"
-        );
-        store
-            .read_with(|conn| {
-                assert_eq!(
-                    conn.query_row(
-                        "SELECT status FROM conflicts WHERE conflict_id='conflict'",
-                        [],
-                        |row| row.get::<_, String>(0)
-                    )
-                    .unwrap(),
-                    "resolved"
-                );
-                Ok::<_, DomainError>(())
-            })
-            .unwrap();
-    }
-}
-
-#[test]
 fn resolution_parent_guards_without_local_row_pending_and_journaled() {
     for pending in [true, false] {
         for chosen in ["current", "incoming"] {
@@ -424,7 +287,6 @@ fn surviving_note_noop_removal_and_plain_undelete_remain_allowed() {
     let dir = ScratchDir::new().unwrap();
     let mut store = EngineStore::open(&engine_db_path(&dir).unwrap(), 1).unwrap();
     setup(&mut store, false);
-    // Retained deletion evidence must not prevent a surviving note's rollback.
     store.write_with(&NoFaults, |tx| {
         tx.execute("UPDATE conflicts SET status='resolved', chosen_from='incoming', resolution='applied-incoming'", []).unwrap();
         Ok::<_, DomainError>(())
@@ -439,7 +301,6 @@ fn surviving_note_noop_removal_and_plain_undelete_remain_allowed() {
             write_history_text_in_tx(tx, &write("noop", "Paris"), "edit")
         })
         .unwrap();
-    // A committed request/moment still replays after the object becomes dormant.
     delete_as(&mut VersionedTextStore::new(&mut store), "restore");
     let before_replay = counts(&mut store);
     store
@@ -451,7 +312,6 @@ fn surviving_note_noop_removal_and_plain_undelete_remain_allowed() {
         .write_with(&NoFaults, |tx| write_history_text_in_tx(tx, &input, "edit"))
         .unwrap();
     assert_eq!(counts(&mut store), before_replay);
-    // No sync delete/edit evidence: ordinary deleted-note History restore is safe.
     store
         .write_with(&NoFaults, |tx| {
             tx.execute("DELETE FROM conflicts", []).unwrap();

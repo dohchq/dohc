@@ -328,7 +328,6 @@ struct System {
     /// Whether the folder is on a local volume.
     local: fn(BorrowedFd<'_>) -> io::Result<bool>,
     remove_acl: fn(BorrowedFd<'_>),
-    /// Runs on the folder's path just before it is made private.
     before_protect: fn(&Path) -> io::Result<()>,
 }
 
@@ -1161,9 +1160,8 @@ mod tests {
         super::remove_acl_entries_in(&folder, relative(), std::ffi::OsStr::new("gone")).unwrap();
     }
 
-    /// A folder renamed after its path is read, with another put at its
-    /// name, keeps its own file's entries from being removed only if the path
-    /// names it by ID (#2375).
+    /// After a folder swap, remove ACL entries from the opened folder, not
+    /// its replacement.
     #[test]
     fn removing_a_files_entries_reaches_its_folder_after_a_swap() {
         use std::os::fd::AsFd;

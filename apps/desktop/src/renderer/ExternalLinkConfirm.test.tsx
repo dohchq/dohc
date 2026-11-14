@@ -12,8 +12,6 @@ afterEach(() => {
   vi.mocked(bridge).mockReset();
 });
 
-/** Installs a bridge whose workspace settings answer `confirmExternalLinks`
- *  as given, or reject when `confirm` is the string "unreadable". */
 function mockBridge(confirm: boolean | "unreadable"): {
   openExternalUrl: ReturnType<typeof vi.fn>;
 } {
@@ -31,8 +29,6 @@ function mockBridge(confirm: boolean | "unreadable"): {
   return { openExternalUrl };
 }
 
-/** Drains the promise chain between openLinkExternally and the rendered
- *  dialog (settings read → confirm decision → setState). */
 async function flush(): Promise<void> {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -47,8 +43,6 @@ describe("ExternalLinkConfirm", () => {
     const opening = openLinkExternally("https://example.com/docs");
     await flush();
 
-    // The kill: without the gate in openLinkExternally, the bridge is already
-    // called here and no dialog exists.
     expect(openExternalUrl).not.toHaveBeenCalled();
     expect(screen.getByTestId("external-link-confirm")).toBeTruthy();
     expect(screen.getByTestId("external-link-confirm-url").textContent).toBe(

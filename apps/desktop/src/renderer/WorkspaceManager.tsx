@@ -54,7 +54,6 @@ function RouteButton(props: {
   );
 }
 
-// Compact: "now", "5m", "3h", "4d", then a short date.
 export function openedLabel(thenMs: number, nowMs = Date.now()): string {
   const minutes = Math.floor(Math.max(0, nowMs - thenMs) / 60_000);
   if (minutes < 1) return "now";
@@ -68,9 +67,7 @@ export function openedLabel(thenMs: number, nowMs = Date.now()): string {
 
 // Most recently opened first; never-stamped rows keep registry order at the end.
 export function byRecency(workspaces: readonly Workspace[]): Workspace[] {
-  return [...workspaces].sort(
-    (a, b) => (b.lastOpenedAt ?? -1) - (a.lastOpenedAt ?? -1),
-  );
+  return [...workspaces].sort((a, b) => (b.lastOpenedAt ?? -1) - (a.lastOpenedAt ?? -1));
 }
 
 const LIST_WIDTH_KEY = "dohc.workspace-manager.list-width";
@@ -106,7 +103,8 @@ const LIST_REFRESH = "workspace-list:refresh";
 type RemovalDialog = { workspace: Workspace; busy: boolean; error: string | null };
 const ROW_ACTIONS = ["open", "reveal", "remove"] as const;
 type RowAction = (typeof ROW_ACTIONS)[number];
-const rowIdentity = (action: RowAction, workspaceId: string) => `workspace-row:${action}:${workspaceId}`;
+const rowIdentity = (action: RowAction, workspaceId: string) =>
+  `workspace-row:${action}:${workspaceId}`;
 
 function WorkspaceRow(props: {
   workspace: Workspace;
@@ -135,7 +133,10 @@ function WorkspaceRow(props: {
         <span className="truncate text-[13px] font-medium leading-5 text-ink">
           {workspaceName(props.workspace)}
         </span>
-        <PathLine path={displayPath(props.workspace.rootPath)} className="text-[11px] leading-4 text-subtle" />
+        <PathLine
+          path={displayPath(props.workspace.rootPath)}
+          className="text-[11px] leading-4 text-subtle"
+        />
       </button>
       {/* One slot at the end: when it was last opened at rest, the row menu
           on hover, focus, or while open. Nothing else moves. */}
@@ -161,14 +162,20 @@ function WorkspaceRow(props: {
               aria-label={label}
               title={label}
               className={`col-start-1 row-start-1 ${
-                menuOpen ? "text-ink" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+                menuOpen
+                  ? "text-ink"
+                  : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
               }`}
             >
               <MoreHorizontal size={14} aria-hidden />
             </IconButton>
           )}
           items={[
-            { id: "reveal", label: revealInFileManagerLabel(window.dohcDesktop?.platform), onSelect: props.onReveal },
+            {
+              id: "reveal",
+              label: revealInFileManagerLabel(window.dohcDesktop?.platform),
+              onSelect: props.onReveal,
+            },
             { id: "remove", label: "Remove from list", onSelect: props.onRemove },
           ]}
         />
@@ -240,8 +247,13 @@ export function WorkspaceManager(props: {
   // identity, so a repeat replaces its row and a later success takes it back.
   const { reportError, clearIdentity } = connectionNotices;
   // A retry that returns false started nothing, so its failure stays listed.
-  const reportRowError = (action: RowAction, workspaceId: string, fallback: string, cause: unknown, retry: () => void | false) =>
-    reportError(fallback, cause, retry, undefined, rowIdentity(action, workspaceId));
+  const reportRowError = (
+    action: RowAction,
+    workspaceId: string,
+    fallback: string,
+    cause: unknown,
+    retry: () => void | false,
+  ) => reportError(fallback, cause, retry, undefined, rowIdentity(action, workspaceId));
   // The removed row is gone, so none of its failures has anything to retry.
   const clearRow = (workspaceId: string) => {
     for (const action of ROW_ACTIONS) clearIdentity(rowIdentity(action, workspaceId));
@@ -257,13 +269,20 @@ export function WorkspaceManager(props: {
       await props.onOpenWorkspace(workspace);
       clearIdentity(rowIdentity("open", workspace.workspaceId));
     } catch (cause) {
-      reportRowError("open", workspace.workspaceId, "dohc could not open this workspace.", cause, () => void open(workspace));
+      reportRowError(
+        "open",
+        workspace.workspaceId,
+        "dohc could not open this workspace.",
+        cause,
+        () => void open(workspace),
+      );
     }
   }
 
   async function openExisting() {
     const workspace = await openExistingFolder((cause, folder) =>
-      connectionNotices.reportOpenFolderFailure(cause, folder, () => void openExisting()));
+      connectionNotices.reportOpenFolderFailure(cause, folder, () => void openExisting()),
+    );
     if (workspace) await open(workspace);
   }
 
@@ -272,7 +291,13 @@ export function WorkspaceManager(props: {
       await bridge().revealWorkspaceFolder({ workspaceId: workspace.workspaceId });
       clearIdentity(rowIdentity("reveal", workspace.workspaceId));
     } catch (cause) {
-      reportRowError("reveal", workspace.workspaceId, "dohc could not show this workspace's folder.", cause, () => void reveal(workspace));
+      reportRowError(
+        "reveal",
+        workspace.workspaceId,
+        "dohc could not show this workspace's folder.",
+        cause,
+        () => void reveal(workspace),
+      );
     }
   }
 
@@ -307,7 +332,13 @@ export function WorkspaceManager(props: {
       if (listRefresh.isCurrent(token)) clearIdentity(LIST_REFRESH);
     } catch (cause) {
       if (!listRefresh.isCurrent(token)) return;
-      reportError("dohc could not refresh the workspace list.", cause, () => void refreshAfterRemoval(), undefined, LIST_REFRESH);
+      reportError(
+        "dohc could not refresh the workspace list.",
+        cause,
+        () => void refreshAfterRemoval(),
+        undefined,
+        LIST_REFRESH,
+      );
     }
   }
 
@@ -406,7 +437,10 @@ export function WorkspaceManager(props: {
     );
 
   return (
-    <div data-testid="workspace-manager" className="app-chrome flex h-screen flex-col bg-bg text-ink">
+    <div
+      data-testid="workspace-manager"
+      className="app-chrome flex h-screen flex-col bg-bg text-ink"
+    >
       {/* Frameless window: without the drag strip it could not be moved. */}
       <Titlebar update={<TitlebarUpdateButton update={update} />} />
       <div className="flex min-h-0 flex-1">

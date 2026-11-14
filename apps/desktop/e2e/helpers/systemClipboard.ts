@@ -13,18 +13,22 @@ export async function holdSystemClipboard<T>(
 ): Promise<T> {
   // Playwright 1.62.1 keeps the running test's start time on its runtime TestInfo.
   const startedAt = (testInfo as TestInfo & { _startWallTime: number })._startWallTime;
-  return withSystemClipboardLock({
-    lockPath,
-    timeoutMs: testInfo.timeout === 0 ? 20_000 : Math.max(0, Math.min(
-      20_000, testInfo.timeout - (Date.now() - startedAt) - 1_000,
-    )),
-    holder: testInfo.titlePath.join(" > "),
-  }, () => {
-    const deadline = performance.now() + 10_000;
-    return use(() => {
-      const remaining = deadline - performance.now();
-      if (remaining <= 0) throw new Error("System clipboard span exceeded its 10 s budget.");
-      return remaining;
-    });
-  });
+  return withSystemClipboardLock(
+    {
+      lockPath,
+      timeoutMs:
+        testInfo.timeout === 0
+          ? 20_000
+          : Math.max(0, Math.min(20_000, testInfo.timeout - (Date.now() - startedAt) - 1_000)),
+      holder: testInfo.titlePath.join(" > "),
+    },
+    () => {
+      const deadline = performance.now() + 10_000;
+      return use(() => {
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) throw new Error("System clipboard span exceeded its 10 s budget.");
+        return remaining;
+      });
+    },
+  );
 }

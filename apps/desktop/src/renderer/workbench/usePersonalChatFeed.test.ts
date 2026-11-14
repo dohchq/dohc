@@ -29,7 +29,15 @@ function row(overrides: Partial<ChatReactionRecord> = {}): ChatReactionRecord {
 // The fields the hook reads. Main's items carry more; the hook passes them through.
 function item(id: string, reactions: ChatReactionRecord[] = []) {
   return {
-    message: { presentation: { group: "fixture", hue: null, self: false }, id, threadId: "thread-1", authorKind: "human", authorDisplayName: "You", body: id, createdAtMs: 1 },
+    message: {
+      presentation: { group: "fixture", hue: null, self: false },
+      id,
+      threadId: "thread-1",
+      authorKind: "human",
+      authorDisplayName: "You",
+      body: id,
+      createdAtMs: 1,
+    },
     thread: { id: "thread-1", title: "Thread", createdAtMs: 1, updatedAtMs: 1 },
     reactions,
     viewerAuthorId: "author-you",
@@ -88,7 +96,9 @@ describe("usePersonalChatFeed with the reaction store", () => {
     await like();
     act(() => void result.current.loadPersonalFeed());
     await act(async () => {
-      refresh.resolve({ items: [item("message-1", [row({ reactionId: "reaction-peer", authorId: "author-peer" })])] });
+      refresh.resolve({
+        items: [item("message-1", [row({ reactionId: "reaction-peer", authorId: "author-peer" })])],
+      });
       await refresh.promise;
     });
     expect(shown().map((reaction) => [reaction.reactionId, reaction.authorDisplayName])).toEqual([
@@ -104,7 +114,10 @@ describe("usePersonalChatFeed with the reaction store", () => {
       .mockResolvedValueOnce({ items: [item("message-1")] })
       .mockImplementationOnce(() => olderRead.promise);
     bridgeMock.setChatReaction.mockImplementationOnce(() => write.promise);
-    bridgeMock.listChatReactions.mockResolvedValue({ reactions: [row()], viewerAuthorId: "author-you" });
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [row()],
+      viewerAuthorId: "author-you",
+    });
     const { result, store, shown, like } = setup();
     await act(() => result.current.loadPersonalFeed());
     act(() => void result.current.loadPersonalFeed());
@@ -117,7 +130,6 @@ describe("usePersonalChatFeed with the reaction store", () => {
     await waitFor(() => expect(store.pending("thread-1", "message-1")).toBe(false));
     expect(shown()).toEqual([row()]);
 
-    // The page began before the write and lands last, without the like.
     await act(async () => {
       olderRead.resolve({ items: [item("message-1")] });
       await olderRead.promise;
@@ -135,12 +147,16 @@ describe("usePersonalChatFeed with the reaction store", () => {
     act(() => void result.current.loadPersonalFeed());
     // The person left Home; the answer still says what the server holds.
     liveToken.current += 1;
-    store.ingest([{
-      threadId: "thread-1",
-      reactions: [row({ reactionId: "reaction-other", messageId: "message-2", authorId: "author-peer" })],
-      viewerAuthorId: "author-you",
-      ticket: earlier,
-    }]);
+    store.ingest([
+      {
+        threadId: "thread-1",
+        reactions: [
+          row({ reactionId: "reaction-other", messageId: "message-2", authorId: "author-peer" }),
+        ],
+        viewerAuthorId: "author-you",
+        ticket: earlier,
+      },
+    ]);
     await act(async () => {
       page.resolve({ items: [item("message-1", [row()])] });
       await page.promise;

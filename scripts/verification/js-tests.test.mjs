@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -13,52 +21,94 @@ import { affectedPackages, packageReferences } from "./selection.mjs";
 import { copyFlakyFixture } from "./flaky-fixture.mjs";
 
 test("a malformed proof continuation cannot silently omit proofs", async () => {
-  await assert.rejects(testWorkspace({runProofs: true}), /runProofs must be a function/);
+  await assert.rejects(testWorkspace({ runProofs: true }), /runProofs must be a function/);
 });
 
 function deferred() {
   let resolve, reject;
-  const promise = new Promise((pass, fail) => { resolve = pass; reject = fail; });
+  const promise = new Promise((pass, fail) => {
+    resolve = pass;
+    reject = fail;
+  });
   return { promise, resolve, reject };
 }
 
-for (const [limit, slots] of [[3, 2], [2, 2], [2, 4]]) {
+for (const [limit, slots] of [
+  [3, 2],
+  [2, 2],
+  [2, 4],
+]) {
   test(`slot reservations at limit ${limit} keep a ${slots}-slot task within its capacity`, async () => {
-    const hold = deferred(), started = [], active = new Set(), snapshots = [];
-    const tasks = [{name: "wide", slots}, {name: "one"}, {name: "two"}];
-    const run = runBounded(tasks, async task => {
-      started.push(task.name); active.add(task);
-      snapshots.push([...active]);
-      await hold.promise;
-      active.delete(task);
-    }, limit);
+    const hold = deferred(),
+      started = [],
+      active = new Set(),
+      snapshots = [];
+    const tasks = [{ name: "wide", slots }, { name: "one" }, { name: "two" }];
+    const run = runBounded(
+      tasks,
+      async (task) => {
+        started.push(task.name);
+        active.add(task);
+        snapshots.push([...active]);
+        await hold.promise;
+        active.delete(task);
+      },
+      limit,
+    );
     try {
       await new Promise(setImmediate);
       assert.deepEqual(started, limit === 3 ? ["wide", "one"] : ["wide"]);
-    } finally { hold.resolve(); await run; }
+    } finally {
+      hold.resolve();
+      await run;
+    }
     assert.equal(started.length, tasks.length);
     for (const snapshot of snapshots) {
-      assert.ok(snapshot.length === 1 || snapshot.reduce((n, task) => n + (task.slots ?? 1), 0) <= limit);
+      assert.ok(
+        snapshot.length === 1 || snapshot.reduce((n, task) => n + (task.slots ?? 1), 0) <= limit,
+      );
     }
   });
 }
 
 test("slots preserve first-runnable order, resource exclusions, preparation and widening", async () => {
-  const preparation = deferred(), more = deferred(), started = [], controls = new Map();
-  const tasks = [{name:"native", slots:2, native:true, resource:"postgres"}, {name:"same-resource", native:true, resource:"postgres"},
-    ...["one", "two", "three"].map(name => ({name}))];
+  const preparation = deferred(),
+    more = deferred(),
+    started = [],
+    controls = new Map();
+  const tasks = [
+    { name: "native", slots: 2, native: true, resource: "postgres" },
+    { name: "same-resource", native: true, resource: "postgres" },
+    ...["one", "two", "three"].map((name) => ({ name })),
+  ];
   for (const task of tasks) controls.set(task.name, deferred());
-  let ready = false, followerReady = false;
-  const changed = preparation.promise.then(() => { ready = true; });
-  const run = runBounded(tasks, async task => { started.push(task.name); await controls.get(task.name).promise; },
-    2, more.promise, {changed, canRun: task => (!task.native || ready) && (task.name !== "same-resource" || followerReady)});
+  let ready = false,
+    followerReady = false;
+  const changed = preparation.promise.then(() => {
+    ready = true;
+  });
+  const run = runBounded(
+    tasks,
+    async (task) => {
+      started.push(task.name);
+      await controls.get(task.name).promise;
+    },
+    2,
+    more.promise,
+    {
+      changed,
+      canRun: (task) => (!task.native || ready) && (task.name !== "same-resource" || followerReady),
+    },
+  );
   try {
     await new Promise(setImmediate);
     assert.deepEqual(started, ["one", "two"]);
-    preparation.resolve(); more.resolve();
+    preparation.resolve();
+    more.resolve();
     await new Promise(setImmediate);
     assert.deepEqual(started, ["one", "two", "three"]);
-    controls.get("one").resolve(); controls.get("two").resolve();
+    controls.get("one").resolve();
+    controls.get("two").resolve();
     await new Promise(setImmediate);
     assert.deepEqual(started, ["one", "two", "three", "native"]);
     followerReady = true;
@@ -68,39 +118,67 @@ test("slots preserve first-runnable order, resource exclusions, preparation and 
     controls.get("native").resolve();
     await new Promise(setImmediate);
     assert.equal(started.at(-1), "same-resource");
-  } finally { for (const control of controls.values()) control.resolve(); await run; }
+  } finally {
+    for (const control of controls.values()) control.resolve();
+    await run;
+  }
 });
 
 test("a failing two-slot task stops new starts and drains its sibling", async () => {
-  const fail = deferred(), hold = deferred(), started = [], error = Error("browser failed");
-  const run = runBounded([{name:"browser", slots:2}, {name:"sibling"}, {name:"waiting"}], async task => {
-    started.push(task.name);
-    if (task.name === "browser") { await fail.promise; throw error; }
-    await hold.promise;
-  }, 3);
-  const outcome = assert.rejects(run, cause => cause === error);
+  const fail = deferred(),
+    hold = deferred(),
+    started = [],
+    error = Error("browser failed");
+  const run = runBounded(
+    [{ name: "browser", slots: 2 }, { name: "sibling" }, { name: "waiting" }],
+    async (task) => {
+      started.push(task.name);
+      if (task.name === "browser") {
+        await fail.promise;
+        throw error;
+      }
+      await hold.promise;
+    },
+    3,
+  );
+  const outcome = assert.rejects(run, (cause) => cause === error);
   try {
     await new Promise(setImmediate);
     assert.deepEqual(started, ["browser", "sibling"]);
     fail.resolve();
     await new Promise(setImmediate);
     assert.deepEqual(started, ["browser", "sibling"]);
-  } finally { fail.resolve(); hold.resolve(); await outcome; }
+  } finally {
+    fail.resolve();
+    hold.resolve();
+    await outcome;
+  }
 });
 
 test("task slot reservations are positive integers", async () => {
   for (const slots of [0, -1, 1.5, NaN]) {
-    await assert.rejects(runBounded([{slots}], () => {}, 2), /slots.*positive integer/);
+    await assert.rejects(
+      runBounded([{ slots }], () => {}, 2),
+      /slots.*positive integer/,
+    );
   }
 });
 
 test("package scheduling bounds concurrency and serializes shared database consumers", async () => {
-  const tasks = [{name: "db-one", resource: "postgres"}, {name: "db-two", resource: "postgres"}, {name: "disk"}, {name: "last"}];
-  const controls = new Map(tasks.map(task => [task.name, deferred()]));
-  const started = [], active = new Set();
-  const arrivals = new Map(tasks.map(task => [task.name, deferred()]));
-  const run = runBounded(tasks, async task => {
-    started.push(task.name); active.add(task.name); arrivals.get(task.name).resolve();
+  const tasks = [
+    { name: "db-one", resource: "postgres" },
+    { name: "db-two", resource: "postgres" },
+    { name: "disk" },
+    { name: "last" },
+  ];
+  const controls = new Map(tasks.map((task) => [task.name, deferred()]));
+  const started = [],
+    active = new Set();
+  const arrivals = new Map(tasks.map((task) => [task.name, deferred()]));
+  const run = runBounded(tasks, async (task) => {
+    started.push(task.name);
+    active.add(task.name);
+    arrivals.get(task.name).resolve();
     assert.ok(active.size <= 2);
     assert.ok(!(active.has("db-one") && active.has("db-two")));
     await controls.get(task.name).promise;
@@ -113,23 +191,39 @@ test("package scheduling bounds concurrency and serializes shared database consu
   assert.deepEqual(started, ["db-one", "disk", "db-two"]);
   controls.get("disk").resolve();
   await arrivals.get("last").promise;
-  controls.get("db-two").resolve(); controls.get("last").resolve();
+  controls.get("db-two").resolve();
+  controls.get("last").resolve();
   await run;
   assert.equal(active.size, 0);
 });
 
 test("pure work fills both lanes before native preparation and admits native work when ready", async () => {
-  const preparation = deferred(), release = deferred(), second = deferred(), native = deferred(), started = [];
+  const preparation = deferred(),
+    release = deferred(),
+    second = deferred(),
+    native = deferred(),
+    started = [];
   let ready = false;
-  const changed = preparation.promise.then(() => { ready = true; });
+  const changed = preparation.promise.then(() => {
+    ready = true;
+  });
   const tasks = [{ name: "native", native: true }, { name: "pure-one" }, { name: "pure-two" }];
-  const run = runBounded(tasks, async task => {
-    started.push(task.name);
-    if (task.name === "pure-two") second.resolve();
-    if (task.native) { native.resolve(); return; }
-    if (task.name === "pure-one") await release.promise;
-    else await preparation.promise;
-  }, 2, undefined, { changed, canRun: task => !task.native || ready });
+  const run = runBounded(
+    tasks,
+    async (task) => {
+      started.push(task.name);
+      if (task.name === "pure-two") second.resolve();
+      if (task.native) {
+        native.resolve();
+        return;
+      }
+      if (task.name === "pure-one") await release.promise;
+      else await preparation.promise;
+    },
+    2,
+    undefined,
+    { changed, canRun: (task) => !task.native || ready },
+  );
   await second.promise;
   assert.deepEqual(started, ["pure-one", "pure-two"]);
   preparation.resolve();
@@ -138,19 +232,37 @@ test("pure work fills both lanes before native preparation and admits native wor
   release.resolve();
   await run;
   const failure = new Error("preparation failed");
-  await assert.rejects(runBounded([{ native: true }], () => assert.fail("native must not run"), 2, undefined,
-    { changed: Promise.reject(failure), canRun: () => false }), error => error === failure);
-  await assert.rejects(runBounded([{ native: true }], () => assert.fail("native must not run"), 2, undefined,
-    { changed: Promise.resolve(), canRun: () => false }), /never became ready/);
+  await assert.rejects(
+    runBounded([{ native: true }], () => assert.fail("native must not run"), 2, undefined, {
+      changed: Promise.reject(failure),
+      canRun: () => false,
+    }),
+    (error) => error === failure,
+  );
+  await assert.rejects(
+    runBounded([{ native: true }], () => assert.fail("native must not run"), 2, undefined, {
+      changed: Promise.resolve(),
+      canRun: () => false,
+    }),
+    /never became ready/,
+  );
 });
 
 test("a freed lane runs a waiting package beside the running ones", async () => {
-  const more = deferred(), hold = deferred(), second = deferred(), started = [];
-  const run = runBounded([{name: "one"}, {name: "two"}, {name: "waiting"}], async task => {
-    started.push(task.name);
-    if (task.name === "two") second.resolve();
-    await hold.promise;
-  }, 2, more.promise);
+  const more = deferred(),
+    hold = deferred(),
+    second = deferred(),
+    started = [];
+  const run = runBounded(
+    [{ name: "one" }, { name: "two" }, { name: "waiting" }],
+    async (task) => {
+      started.push(task.name);
+      if (task.name === "two") second.resolve();
+      await hold.promise;
+    },
+    2,
+    more.promise,
+  );
   await second.promise;
   assert.deepEqual(started, ["one", "two"]);
   more.resolve();
@@ -162,47 +274,83 @@ test("a freed lane runs a waiting package beside the running ones", async () => 
 });
 
 test("a rejected preparation stops admission and drains commands before returning", async () => {
-  const preparation = deferred(), held = deferred(), entered = deferred(), failure = Error("preparation failed");
-  let drained = false, returned = false;
-  const running = runBounded(["held", "waiting"], async task => {
-    assert.equal(task, "held"); entered.resolve(); await held.promise; drained = true;
-  }, 1, preparation.promise).finally(() => { returned = true; });
-  const outcome = assert.rejects(running, error => error === failure);
+  const preparation = deferred(),
+    held = deferred(),
+    entered = deferred(),
+    failure = Error("preparation failed");
+  let drained = false,
+    returned = false;
+  const running = runBounded(
+    ["held", "waiting"],
+    async (task) => {
+      assert.equal(task, "held");
+      entered.resolve();
+      await held.promise;
+      drained = true;
+    },
+    1,
+    preparation.promise,
+  ).finally(() => {
+    returned = true;
+  });
+  const outcome = assert.rejects(running, (error) => error === failure);
   await entered.promise;
   preparation.reject(failure);
   await new Promise(setImmediate);
   assert.equal(returned, false);
-  held.resolve(); await outcome;
+  held.resolve();
+  await outcome;
   assert.equal(drained, true);
 });
 
 test("a failed package stops admission and waits for its running sibling", async () => {
-  const failure = new Error("package failed"), sibling = deferred(), entered = deferred(), more = deferred(), started = [];
-  const run = runBounded([{name:"fail"}, {name:"sibling"}, {name:"must-not-start"}], async task => {
-    started.push(task.name);
-    if (task.name === "fail") { await entered.promise; throw failure; }
-    entered.resolve();
-    await sibling.promise;
-  }, 2, more.promise);
+  const failure = new Error("package failed"),
+    sibling = deferred(),
+    entered = deferred(),
+    more = deferred(),
+    started = [];
+  const run = runBounded(
+    [{ name: "fail" }, { name: "sibling" }, { name: "must-not-start" }],
+    async (task) => {
+      started.push(task.name);
+      if (task.name === "fail") {
+        await entered.promise;
+        throw failure;
+      }
+      entered.resolve();
+      await sibling.promise;
+    },
+    2,
+    more.promise,
+  );
   // Observe rejection immediately so the test cannot create an unhandled rejection.
-  const outcome = run.then(() => assert.fail("must fail"), error => assert.equal(error, failure));
+  const outcome = run.then(
+    () => assert.fail("must fail"),
+    (error) => assert.equal(error, failure),
+  );
   await entered.promise;
   sibling.resolve();
   await outcome;
   assert.deepEqual(started, ["fail", "sibling"]);
 });
 
-test("a node:test step that failed only in its tests runs once more and records them as flaky, or as failed when the retry fails too", t => {
+test("a node:test step that failed only in its tests runs once more and records them as flaky, or as failed when the retry fails too", (t) => {
   const root = mkdtempSync(join(tmpdir(), "dohc-js-rerun-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/verification"), { recursive: true });
   copyFlakyFixture(root);
-  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"])
+    copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
   mkdirSync(join(root, "packages/tail"), { recursive: true });
-  writeFileSync(join(root, "packages/tail/package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+  writeFileSync(
+    join(root, "packages/tail/package.json"),
+    JSON.stringify({ scripts: { test: "vitest run" } }),
+  );
   // The fake repository step fails in a test the first time and passes the second, or fails both times; a check failure always fails.
   // The fake vitest package records what the reporter records for a test that passed on retry and one that failed both tries.
-  writeFileSync(join(root, "scripts/verification/process.mjs", ), `
+  writeFileSync(
+    join(root, "scripts/verification/process.mjs"),
+    `
     import {appendFileSync,existsSync,writeFileSync} from 'node:fs';
     import {resolve} from 'node:path';
     export const repoRoot=resolve(import.meta.dirname,'../..');
@@ -219,40 +367,69 @@ test("a node:test step that failed only in its tests runs once more and records 
       }
       writeFileSync(log,'ok');return {stdout:''};
     }
-  `);
-  writeFileSync(join(root, "driver.mjs"), `
+  `,
+  );
+  writeFileSync(
+    join(root, "driver.mjs"),
+    `
     import {readFileSync} from 'node:fs';
     import {testWorkspace} from './scripts/verification/js-tests.mjs';
     import {calls} from './scripts/verification/process.mjs';
     await testWorkspace({prepared:true,output:'evidence'}).catch(error=>console.log('ERROR',error.message));
     const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
     console.log(JSON.stringify({repo:calls.filter(call=>call.includes('test:repo')).length,flaky:report.flaky,failed:report.failed}));
-  `);
-  const drive = scenario => {
+  `,
+  );
+  const drive = (scenario) => {
     rmSync(join(root, "ran"), { force: true });
     rmSync(join(root, "evidence"), { recursive: true, force: true });
-    const result = spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, SCENARIO: scenario } });
+    const result = spawnSync(process.execPath, ["driver.mjs"], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 20_000,
+      env: { ...process.env, SCENARIO: scenario },
+    });
     return JSON.parse(result.stdout.trim().split("\n").at(-1));
   };
-  assert.deepEqual(drive("flaky"), { repo: 2, flaky: [{ step: "repository", test: "times out under load" }], failed: [] });
-  assert.deepEqual(drive("twice"), { repo: 2, flaky: [], failed: [{ step: "repository", test: "times out under load" }] }, "the retry's report names the failure, with the flaky list's name");
+  assert.deepEqual(drive("flaky"), {
+    repo: 2,
+    flaky: [{ step: "repository", test: "times out under load" }],
+    failed: [],
+  });
+  assert.deepEqual(
+    drive("twice"),
+    { repo: 2, flaky: [], failed: [{ step: "repository", test: "times out under load" }] },
+    "the retry's report names the failure, with the flaky list's name",
+  );
   assert.deepEqual(drive("check"), { repo: 1, flaky: [], failed: [] });
-  assert.deepEqual(drive("vitest"), { repo: 1, flaky: [{ step: "@dohc/tail", test: "src/a.test.ts › settles on retry" }], failed: [{ step: "@dohc/tail", test: "src/a.test.ts › fails both tries" }] },
-    "a vitest test that failed both tries is failed, not flaky, and node:test output in a vitest log names nothing");
+  assert.deepEqual(
+    drive("vitest"),
+    {
+      repo: 1,
+      flaky: [{ step: "@dohc/tail", test: "src/a.test.ts › settles on retry" }],
+      failed: [{ step: "@dohc/tail", test: "src/a.test.ts › fails both tries" }],
+    },
+    "a vitest test that failed both tries is failed, not flaky, and node:test output in a vitest log names nothing",
+  );
 });
 
-test("a confirmed failure stops the running steps unless the run keeps going, and a retried pass does not", t => {
+test("a confirmed failure stops the running steps unless the run keeps going, and a retried pass does not", (t) => {
   const root = mkdtempSync(join(tmpdir(), "dohc-js-stop-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/verification"), { recursive: true });
   copyFlakyFixture(root);
-  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"])
+    copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
   for (const name of ["a-fail", "b-sibling", "c-queued"]) {
     mkdirSync(join(root, "packages", name), { recursive: true });
-    writeFileSync(join(root, "packages", name, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+    writeFileSync(
+      join(root, "packages", name, "package.json"),
+      JSON.stringify({ scripts: { test: "vitest run" } }),
+    );
   }
-  // Running commands hold until the failure. A stop interrupts them as run() does; otherwise they finish.
-  writeFileSync(join(root, "scripts/verification/process.mjs"), `
+  writeFileSync(
+    join(root, "scripts/verification/process.mjs"),
+    `
     import {existsSync,writeFileSync} from 'node:fs';
     import {resolve} from 'node:path';
     export const repoRoot=resolve(import.meta.dirname,'../..');
@@ -280,8 +457,11 @@ test("a confirmed failure stops the running steps unless the run keeps going, an
       await until(scenario==='stop'?'never':'failed',signal);
       return {stdout:''};
     }
-  `);
-  writeFileSync(join(root, "driver.mjs"), `
+  `,
+  );
+  writeFileSync(
+    join(root, "driver.mjs"),
+    `
     import {existsSync,readFileSync} from 'node:fs';
     import {cancellationScope} from './scripts/verification/cancellation.mjs';
     import {testWorkspace} from './scripts/verification/js-tests.mjs';
@@ -291,10 +471,17 @@ test("a confirmed failure stops the running steps unless the run keeps going, an
     const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
     console.log(JSON.stringify({error:error?.message??null,stoppedBy:stop.stopped?.step??null,verdict:report.verdict,stopped:report.stopped??null,
       steps:Object.fromEntries(report.steps.filter(step=>step.name!=='inventory').map(step=>[step.name,step.verdict])),flaky:report.flaky}));
-  `);
-  const drive = scenario => {
-    for (const file of ["ran", "sibling-started", "repository-passed", "failed", "evidence"]) rmSync(join(root, file), { recursive: true, force: true });
-    const result = spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, SCENARIO: scenario } });
+  `,
+  );
+  const drive = (scenario) => {
+    for (const file of ["ran", "sibling-started", "repository-passed", "failed", "evidence"])
+      rmSync(join(root, file), { recursive: true, force: true });
+    const result = spawnSync(process.execPath, ["driver.mjs"], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 20_000,
+      env: { ...process.env, SCENARIO: scenario },
+    });
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout.trim().split("\n").at(-1));
   };
@@ -302,28 +489,62 @@ test("a confirmed failure stops the running steps unless the run keeps going, an
   assert.equal(stopped.error, "package failed");
   assert.equal(stopped.stoppedBy, "@dohc/a-fail");
   assert.equal(stopped.verdict, "FAIL");
-  assert.deepEqual(stopped.steps, { repository: "NOT RUN", "@dohc/a-fail": "FAIL", "@dohc/b-sibling": "NOT RUN", "@dohc/c-queued": "NOT RUN", proofs: "NOT RUN" });
+  assert.deepEqual(stopped.steps, {
+    repository: "NOT RUN",
+    "@dohc/a-fail": "FAIL",
+    "@dohc/b-sibling": "NOT RUN",
+    "@dohc/c-queued": "NOT RUN",
+    proofs: "NOT RUN",
+  });
   assert.equal(stopped.stopped.after, "@dohc/a-fail");
-  assert.deepEqual(stopped.stopped.notRun.toSorted(), ["@dohc/b-sibling", "@dohc/c-queued", "proofs", "repository"]);
+  assert.deepEqual(stopped.stopped.notRun.toSorted(), [
+    "@dohc/b-sibling",
+    "@dohc/c-queued",
+    "proofs",
+    "repository",
+  ]);
 
   const kept = drive("keep-going");
   assert.equal(kept.error, "package failed");
   assert.equal(kept.stoppedBy, null);
   assert.equal(kept.stopped, null);
-  assert.deepEqual(kept.steps, { repository: "PASS", "@dohc/a-fail": "FAIL", "@dohc/b-sibling": "PASS" }, "running steps finish; nothing new starts, as before");
+  assert.deepEqual(
+    kept.steps,
+    { repository: "PASS", "@dohc/a-fail": "FAIL", "@dohc/b-sibling": "PASS" },
+    "running steps finish; nothing new starts, as before",
+  );
 
   const flaky = drive("flaky");
   assert.equal(flaky.error, null);
   assert.equal(flaky.stoppedBy, null);
   assert.equal(flaky.verdict, "PASS");
-  assert.deepEqual(flaky.steps, { repository: "PASS", "@dohc/a-fail": "PASS", "@dohc/b-sibling": "PASS", "@dohc/c-queued": "PASS", proofs: "PASS" });
+  assert.deepEqual(flaky.steps, {
+    repository: "PASS",
+    "@dohc/a-fail": "PASS",
+    "@dohc/b-sibling": "PASS",
+    "@dohc/c-queued": "PASS",
+    proofs: "PASS",
+  });
   // A vitest test that passed on retry keeps what its failed try threw.
-  assert.deepEqual(flaky.flaky, [{ step: "repository", test: "times out under load" },
-    { step: "@dohc/b-sibling", test: "src/b.test.ts › settles on retry", error: "EPERM: operation not permitted, rmdir" }]);
+  assert.deepEqual(flaky.flaky, [
+    { step: "repository", test: "times out under load" },
+    {
+      step: "@dohc/b-sibling",
+      test: "src/b.test.ts › settles on retry",
+      error: "EPERM: operation not permitted, rmdir",
+    },
+  ]);
 });
 
 // The vitest the desktop package runs, for a fixture that runs a real file alone.
-const vitestBin = join(dirname(createRequire(new URL("../../apps/desktop/package.json", import.meta.url)).resolve("vitest/package.json")), "vitest.mjs");
+const vitestBin = join(
+  dirname(
+    createRequire(new URL("../../apps/desktop/package.json", import.meta.url)).resolve(
+      "vitest/package.json",
+    ),
+  ),
+  "vitest.mjs",
+);
 
 // A fixture whose package and repository steps fail their tests under each scenario. A vitest file's run alone is
 // modeled, except in "skipped-alone"; a node:test file's run alone runs the real file.
@@ -332,30 +553,52 @@ function isolatedRetry(t) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/verification"), { recursive: true });
   copyFlakyFixture(root);
-  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs", "test-record-reporter.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
-  // The repository script's last command tests a and b, and the tree set's tests b; source runs in an earlier command.
-  const manifest = JSON.stringify({ scripts: { "test:repo": "pnpm test:repo:source && node --test --test-concurrency=2 scripts/a.test.mjs scripts/b.test.mjs",
-    "test:repo:tree": "pnpm test:repo:source && node --test --test-concurrency=2 scripts/b.test.mjs" } });
-  // b's second test can set the exit code, which fails its file without failing a test.
-  writeFileSync(join(root, "scripts/b.test.mjs"), `
+  for (const file of [
+    "js-tests.mjs",
+    "timing.mjs",
+    "cancellation.mjs",
+    "selection.mjs",
+    "test-record-reporter.mjs",
+  ])
+    copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  const manifest = JSON.stringify({
+    scripts: {
+      "test:repo":
+        "pnpm test:repo:source && node --test --test-concurrency=2 scripts/a.test.mjs scripts/b.test.mjs",
+      "test:repo:tree":
+        "pnpm test:repo:source && node --test --test-concurrency=2 scripts/b.test.mjs",
+    },
+  });
+  writeFileSync(
+    join(root, "scripts/b.test.mjs"),
+    `
     import test from 'node:test';
     const scenario = process.env.SCENARIO;
     test('times out under load', { skip: scenario === 'node-unmatched' }, () => {});
     test('leaves the exit code set', () => { if (scenario === 'node-exit-code') process.exitCode = 1; });
-  `);
+  `,
+  );
   for (const name of ["sibling", "tail"]) {
     mkdirSync(join(root, "packages", name), { recursive: true });
-    writeFileSync(join(root, "packages", name, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+    writeFileSync(
+      join(root, "packages", name, "package.json"),
+      JSON.stringify({ scripts: { test: "vitest run" } }),
+    );
   }
   // In "skipped-alone", the test that failed both tries skips itself alone, beside a test that passes.
   mkdirSync(join(root, "packages/tail/src"));
-  writeFileSync(join(root, "packages/tail/src/a.test.ts"), `
+  writeFileSync(
+    join(root, "packages/tail/src/a.test.ts"),
+    `
     describe('load', () => {
       test.skipIf(process.env.SCENARIO === 'skipped-alone')('fails under load', () => {});
       test('passes beside it', () => {});
     });
-  `);
-  writeFileSync(join(root, "scripts/verification/process.mjs"), String.raw`
+  `,
+  );
+  writeFileSync(
+    join(root, "scripts/verification/process.mjs"),
+    String.raw`
     import {spawnSync} from 'node:child_process';
     import {appendFileSync,existsSync,writeFileSync} from 'node:fs';
     import {resolve} from 'node:path';
@@ -435,8 +678,11 @@ function isolatedRetry(t) {
       }
       return {stdout:''};
     }
-  `);
-  writeFileSync(join(root, "driver.mjs"), `
+  `,
+  );
+  writeFileSync(
+    join(root, "driver.mjs"),
+    `
     import {existsSync,readFileSync} from 'node:fs';
     import {resolve} from 'node:path';
     import {cancellationScope} from './scripts/verification/cancellation.mjs';
@@ -454,12 +700,27 @@ function isolatedRetry(t) {
       outcomes:report.steps.flatMap(step=>(step.alone??[]).map(({file,outcome,log})=>({step:step.name,file,outcome,logged:Boolean(log&&existsSync(log))}))),
       repository:repository.length,repositoryArgs:repository.map(call=>call.args),recorded:report.steps.find(step=>step.name==='repository')?.args,
       alone:calls.filter(call=>call.alone).map(({alone:_alone,...call})=>call)}));
-  `);
+  `,
+  );
   return (scenario, repositoryTests, onlyPackage) => {
-    for (const file of ["ran", "sibling-started", "tail-alone-started", "evidence"]) rmSync(join(root, file), { recursive: true, force: true });
-    writeFileSync(join(root, "package.json"), scenario === "node-bad-manifest" ? "{ not json" : manifest);
-    const result = spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000,
-      env: { ...process.env, SCENARIO: scenario, VITEST_BIN: vitestBin, REPOSITORY_TESTS: repositoryTests ?? "", ONLY_PACKAGE: onlyPackage ?? "" } });
+    for (const file of ["ran", "sibling-started", "tail-alone-started", "evidence"])
+      rmSync(join(root, file), { recursive: true, force: true });
+    writeFileSync(
+      join(root, "package.json"),
+      scenario === "node-bad-manifest" ? "{ not json" : manifest,
+    );
+    const result = spawnSync(process.execPath, ["driver.mjs"], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 20_000,
+      env: {
+        ...process.env,
+        SCENARIO: scenario,
+        VITEST_BIN: vitestBin,
+        REPOSITORY_TESTS: repositoryTests ?? "",
+        ONLY_PACKAGE: onlyPackage ?? "",
+      },
+    });
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout.trim().split("\n").at(-1));
   };
@@ -468,22 +729,43 @@ function isolatedRetry(t) {
 const underLoad = "src/a.test.ts › load > fails under load";
 const outcome = (step, file, result) => ({ step, file, outcome: result, logged: true });
 
-test("vitest files whose tests failed both tries pass alone, so the step passes and records each test as passed alone", t => {
+test("vitest files whose tests failed both tries pass alone, so the step passes and records each test as passed alone", (t) => {
   const passed = isolatedRetry(t)("pass-alone");
   assert.equal(passed.error, null);
   assert.equal(passed.verdict, "PASS");
-  assert.deepEqual(passed.steps, { repository: "PASS", "@dohc/sibling": "PASS", "@dohc/tail": "PASS" });
-  // Each keeps what it threw when it failed both tries.
-  assert.deepEqual(passed.flaky, [underLoad, "src/a.test.ts › load > also fails under load", "src/c.test.ts › waits under load"]
-    .map(test => ({ step: "@dohc/tail", test, passedAlone: true, error: `EBUSY: ${test}` })));
+  assert.deepEqual(passed.steps, {
+    repository: "PASS",
+    "@dohc/sibling": "PASS",
+    "@dohc/tail": "PASS",
+  });
+  assert.deepEqual(
+    passed.flaky,
+    [
+      underLoad,
+      "src/a.test.ts › load > also fails under load",
+      "src/c.test.ts › waits under load",
+    ].map((test) => ({ step: "@dohc/tail", test, passedAlone: true, error: `EBUSY: ${test}` })),
+  );
   assert.deepEqual(passed.failed, [], "a test that passed alone did not fail");
-  assert.deepEqual(passed.alone.map(call => call.args.split(" --reporter=")[0]), ["src/a.test.ts", "src/c.test.ts"]
-    .map(file => `--filter @dohc/tail exec vitest run ${file} --maxWorkers=1 --no-file-parallelism --retry=0`), "each file runs once, whole, with one worker");
-  assert.ok(passed.alone.every(call => call.require === "1"), "the files run alone with the step's env");
-  assert.deepEqual(passed.outcomes, [outcome("@dohc/tail", "src/a.test.ts", "passed"), outcome("@dohc/tail", "src/c.test.ts", "passed")]);
+  assert.deepEqual(
+    passed.alone.map((call) => call.args.split(" --reporter=")[0]),
+    ["src/a.test.ts", "src/c.test.ts"].map(
+      (file) =>
+        `--filter @dohc/tail exec vitest run ${file} --maxWorkers=1 --no-file-parallelism --retry=0`,
+    ),
+    "each file runs once, whole, with one worker",
+  );
+  assert.ok(
+    passed.alone.every((call) => call.require === "1"),
+    "the files run alone with the step's env",
+  );
+  assert.deepEqual(passed.outcomes, [
+    outcome("@dohc/tail", "src/a.test.ts", "passed"),
+    outcome("@dohc/tail", "src/c.test.ts", "passed"),
+  ]);
 });
 
-test("one package's run retries and runs files alone as its step in a full run does, without the repository lane or other packages", t => {
+test("one package's run retries and runs files alone as its step in a full run does, without the repository lane or other packages", (t) => {
   const drive = isolatedRetry(t);
   const full = drive("pass-alone");
   const tail = drive("pass-alone", undefined, "@dohc/tail");
@@ -502,7 +784,7 @@ test("one package's run retries and runs files alone as its step in a full run d
   assert.deepEqual(unknown.alone, []);
 });
 
-test("a test that fails alone too fails its step, and only then stops the run", t => {
+test("a test that fails alone too fails its step, and only then stops the run", (t) => {
   const drive = isolatedRetry(t);
   const failed = drive("fails-alone");
   assert.equal(failed.error, "tests failed");
@@ -510,12 +792,18 @@ test("a test that fails alone too fails its step, and only then stops the run", 
   assert.equal(failed.verdict, "FAIL");
   assert.equal(failed.steps["@dohc/tail"], "FAIL");
   assert.equal(failed.steps["@dohc/sibling"], "NOT RUN");
-  assert.deepEqual(failed.alone.map(({ step, aborted }) => ({ step, aborted })), [{ step: "@dohc/tail", aborted: false }],
-    "the file ran alone while its sibling still ran, before the failure stopped the run");
+  assert.deepEqual(
+    failed.alone.map(({ step, aborted }) => ({ step, aborted })),
+    [{ step: "@dohc/tail", aborted: false }],
+    "the file ran alone while its sibling still ran, before the failure stopped the run",
+  );
   assert.deepEqual(failed.outcomes, [outcome("@dohc/tail", "src/a.test.ts", "failed")]);
   assert.deepEqual(failed.flaky, []);
-  assert.deepEqual(failed.failed.filter(row => row.step === "@dohc/tail").map(row => row.test), [underLoad, "src/a.test.ts › load > checks its setup"],
-    "failed also names what the file failed alone");
+  assert.deepEqual(
+    failed.failed.filter((row) => row.step === "@dohc/tail").map((row) => row.test),
+    [underLoad, "src/a.test.ts › load > checks its setup"],
+    "failed also names what the file failed alone",
+  );
   const unmatched = drive("unmatched");
   assert.equal(unmatched.alone.length, 1);
   assert.equal(unmatched.verdict, "FAIL", "a run alone that passed no test is no pass");
@@ -523,20 +811,31 @@ test("a test that fails alone too fails its step, and only then stops the run", 
   assert.deepEqual(unmatched.failed, [{ step: "@dohc/tail", test: underLoad }]);
 });
 
-test("a vitest test that fails only after an earlier test in its file fails alone too, because its whole file runs", t => {
+test("a vitest test that fails only after an earlier test in its file fails alone too, because its whole file runs", (t) => {
   const failed = isolatedRetry(t)("order");
   assert.equal(failed.verdict, "FAIL");
   assert.equal(failed.steps["@dohc/tail"], "FAIL");
-  assert.deepEqual(failed.alone.map(call => call.args.includes(" -t ")), [false], "no pattern filters the file");
+  assert.deepEqual(
+    failed.alone.map((call) => call.args.includes(" -t ")),
+    [false],
+    "no pattern filters the file",
+  );
   assert.deepEqual(failed.outcomes, [outcome("@dohc/tail", "src/a.test.ts", "failed")]);
   assert.deepEqual(failed.failed, [{ step: "@dohc/tail", test: underLoad }]);
 });
 
-test("a step that failed outside its tests, or in a test that cannot run alone, gets no isolated retry", t => {
+test("a step that failed outside its tests, or in a test that cannot run alone, gets no isolated retry", (t) => {
   const drive = isolatedRetry(t);
-  assert.equal(drive("pass-alone").alone.length, 2, "the same test failures inside their tests run alone");
-  for (const [scenario, reason] of [["outside", "vitest counted an error no test owns"], ["inexact", "no command reruns a test without a file"],
-    ["node-earlier", "a failure in an earlier command of the script stopped the commands after it"]]) {
+  assert.equal(
+    drive("pass-alone").alone.length,
+    2,
+    "the same test failures inside their tests run alone",
+  );
+  for (const [scenario, reason] of [
+    ["outside", "vitest counted an error no test owns"],
+    ["inexact", "no command reruns a test without a file"],
+    ["node-earlier", "a failure in an earlier command of the script stopped the commands after it"],
+  ]) {
     const result = drive(scenario);
     assert.equal(result.verdict, "FAIL", reason);
     assert.equal(result.error, "tests failed", reason);
@@ -544,45 +843,85 @@ test("a step that failed outside its tests, or in a test that cannot run alone, 
   }
 });
 
-test("a node:test step that fails its whole-step rerun, then passes alone, passes", t => {
+test("a node:test step that fails its whole-step rerun, then passes alone, passes", (t) => {
   const drive = isolatedRetry(t);
   const passed = drive("node-alone");
   assert.equal(passed.verdict, "PASS");
   assert.equal(passed.repository, 2);
-  assert.deepEqual(passed.flaky, [{ step: "repository", test: "scripts/a.test.mjs › settles on retry" },
-    { step: "repository", test: "scripts/b.test.mjs › times out under load", passedAlone: true }], "a test that failed only the first try passed on retry");
+  assert.deepEqual(
+    passed.flaky,
+    [
+      { step: "repository", test: "scripts/a.test.mjs › settles on retry" },
+      { step: "repository", test: "scripts/b.test.mjs › times out under load", passedAlone: true },
+    ],
+    "a test that failed only the first try passed on retry",
+  );
   assert.deepEqual(passed.failed, []);
-  assert.deepEqual(passed.alone, [{ step: "repository", args: "--test --test-concurrency=1 scripts/b.test.mjs", aborted: false, require: "1" }]);
+  assert.deepEqual(passed.alone, [
+    {
+      step: "repository",
+      args: "--test --test-concurrency=1 scripts/b.test.mjs",
+      aborted: false,
+      require: "1",
+    },
+  ]);
   assert.deepEqual(passed.outcomes, [outcome("repository", "scripts/b.test.mjs", "passed")]);
   const unmatched = drive("node-unmatched");
-  assert.equal(unmatched.verdict, "FAIL", "a file that passes without running its failed test is no pass");
-  assert.deepEqual(unmatched.outcomes, [outcome("repository", "scripts/b.test.mjs", "no test ran")]);
+  assert.equal(
+    unmatched.verdict,
+    "FAIL",
+    "a file that passes without running its failed test is no pass",
+  );
+  assert.deepEqual(unmatched.outcomes, [
+    outcome("repository", "scripts/b.test.mjs", "no test ran"),
+  ]);
 });
 
-test("the repository step runs every repository test unless the caller selects the tree set, whose retries work the same way", t => {
+test("the repository step runs every repository test unless the caller selects the tree set, whose retries work the same way", (t) => {
   const drive = isolatedRetry(t);
   const all = drive("node-alone");
   assert.deepEqual(all.repositoryArgs, ["run test:repo", "run test:repo"]);
   const tree = drive("node-alone", "test:repo:tree");
-  assert.deepEqual(tree.repositoryArgs, ["run test:repo:tree", "run test:repo:tree"], "the step and its retry run the tree set");
-  assert.deepEqual(tree.recorded, ["run", "test:repo:tree"], "the report records the script that ran");
+  assert.deepEqual(
+    tree.repositoryArgs,
+    ["run test:repo:tree", "run test:repo:tree"],
+    "the step and its retry run the tree set",
+  );
+  assert.deepEqual(
+    tree.recorded,
+    ["run", "test:repo:tree"],
+    "the report records the script that ran",
+  );
   assert.equal(tree.verdict, "PASS");
-  assert.deepEqual(tree.flaky, all.flaky, "a test that failed once is flaky, and one that failed both tries passed alone");
+  assert.deepEqual(
+    tree.flaky,
+    all.flaky,
+    "a test that failed once is flaky, and one that failed both tries passed alone",
+  );
   assert.deepEqual(tree.alone, all.alone);
   assert.deepEqual(tree.outcomes, [outcome("repository", "scripts/b.test.mjs", "passed")]);
 });
 
-test("a node:test file that fails only by its exit code fails alone, although its report names only the test that failed", t => {
+test("a node:test file that fails only by its exit code fails alone, although its report names only the test that failed", (t) => {
   const failed = isolatedRetry(t)("node-exit-code");
   assert.equal(failed.verdict, "FAIL");
   assert.equal(failed.steps.repository, "FAIL");
-  assert.deepEqual(failed.alone.map(call => call.args), ["--test --test-concurrency=1 scripts/b.test.mjs"]);
+  assert.deepEqual(
+    failed.alone.map((call) => call.args),
+    ["--test --test-concurrency=1 scripts/b.test.mjs"],
+  );
   assert.deepEqual(failed.outcomes, [outcome("repository", "scripts/b.test.mjs", "failed")]);
-  assert.deepEqual(failed.failed, [{ step: "repository", test: "scripts/b.test.mjs › times out under load" },
-    { step: "repository", test: `scripts/b.test.mjs › ${join("scripts", "b.test.mjs")}` }], "failed also names the file's own failure alone, so its rerun runs the file");
+  assert.deepEqual(
+    failed.failed,
+    [
+      { step: "repository", test: "scripts/b.test.mjs › times out under load" },
+      { step: "repository", test: `scripts/b.test.mjs › ${join("scripts", "b.test.mjs")}` },
+    ],
+    "failed also names the file's own failure alone, so its rerun runs the file",
+  );
 });
 
-test("a vitest file whose failed test skips itself alone fails its step, though another test in the file passes", t => {
+test("a vitest file whose failed test skips itself alone fails its step, though another test in the file passes", (t) => {
   const failed = isolatedRetry(t)("skipped-alone");
   assert.equal(failed.verdict, "FAIL");
   assert.equal(failed.steps["@dohc/tail"], "FAIL");
@@ -591,28 +930,33 @@ test("a vitest file whose failed test skips itself alone fails its step, though 
   assert.deepEqual(failed.failed, [{ step: "@dohc/tail", test: underLoad }]);
 });
 
-test("a script test that failed only when the step ran again gets no isolated retry", t => {
+test("a script test that failed only when the step ran again gets no isolated retry", (t) => {
   const failed = isolatedRetry(t)("node-new-failure");
   assert.equal(failed.repository, 2, "the step ran again");
   assert.equal(failed.verdict, "FAIL");
   assert.deepEqual(failed.alone, []);
-  assert.deepEqual(failed.failed, [{ step: "repository", test: "scripts/b.test.mjs › times out under load" }]);
+  assert.deepEqual(failed.failed, [
+    { step: "repository", test: "scripts/b.test.mjs › times out under load" },
+  ]);
 });
 
-test("a script whose package.json does not parse gets no isolated retry, and its own failure stands", t => {
+test("a script whose package.json does not parse gets no isolated retry, and its own failure stands", (t) => {
   const failed = isolatedRetry(t)("node-bad-manifest");
   assert.equal(failed.error, "tests failed");
   assert.equal(failed.verdict, "FAIL");
   assert.deepEqual(failed.alone, []);
 });
 
-test("an interrupted step gets no isolated retry, and an interrupted run alone passes nothing", t => {
+test("an interrupted step gets no isolated retry, and an interrupted run alone passes nothing", (t) => {
   const drive = isolatedRetry(t);
   // The sibling recorded a failed test before the tail's confirmed failure stopped it.
   const stopped = drive("fails-alone");
   assert.equal(stopped.steps["@dohc/sibling"], "NOT RUN");
-  assert.deepEqual(stopped.alone.map(call => call.step), ["@dohc/tail"], "only the step that failed by itself ran a file alone");
-  // The sibling's failure stops the run while the tail's file runs alone.
+  assert.deepEqual(
+    stopped.alone.map((call) => call.step),
+    ["@dohc/tail"],
+    "only the step that failed by itself ran a file alone",
+  );
   const cut = drive("alone-interrupted");
   assert.equal(cut.stoppedBy, "@dohc/sibling");
   assert.equal(cut.steps["@dohc/tail"], "FAIL");
@@ -629,69 +973,170 @@ test("a step stopped by another job's failure is reported as not run", async () 
     scope.stop("tests", new Error("a later failure"));
     assert.equal(scope.stopped.step, "rust", "the first confirmed failure is the cause");
     assert.equal(scope.signal.aborted, true);
-    const own = { verdict: "FAIL" }, interrupted = { verdict: "FAIL" }, later = { verdict: "FAIL" };
+    const own = { verdict: "FAIL" },
+      interrupted = { verdict: "FAIL" },
+      later = { verdict: "FAIL" };
     assert.equal(scope.notRun(own, failure), false);
-    assert.equal(scope.notRun(interrupted, Object.assign(new Error("pnpm failed (interrupted)."), { interrupted: true })), true);
-    assert.equal(scope.notRun(later, new Error("an assertion failed after the stop")), false, "a real failure is not hidden");
-    assert.deepEqual([own.verdict, interrupted, later.verdict], ["FAIL", { verdict: "NOT RUN", reason: "stopped after rust failed" }, "FAIL"]);
-    const steps = [{ name: "rust", verdict: "FAIL" }, { name: "typecheck", ...interrupted }];
-    assert.deepEqual(scope.unfinished(steps, ["rust", "rust-verdict", "typecheck", "tests"]), { after: "rust", notRun: ["typecheck", "rust-verdict", "tests"] });
-  } finally { await scope.dispose(); }
+    assert.equal(
+      scope.notRun(
+        interrupted,
+        Object.assign(new Error("pnpm failed (interrupted)."), { interrupted: true }),
+      ),
+      true,
+    );
+    assert.equal(
+      scope.notRun(later, new Error("an assertion failed after the stop")),
+      false,
+      "a real failure is not hidden",
+    );
+    assert.deepEqual(
+      [own.verdict, interrupted, later.verdict],
+      ["FAIL", { verdict: "NOT RUN", reason: "stopped after rust failed" }, "FAIL"],
+    );
+    const steps = [
+      { name: "rust", verdict: "FAIL" },
+      { name: "typecheck", ...interrupted },
+    ];
+    assert.deepEqual(scope.unfinished(steps, ["rust", "rust-verdict", "typecheck", "tests"]), {
+      after: "rust",
+      notRun: ["typecheck", "rust-verdict", "tests"],
+    });
+  } finally {
+    await scope.dispose();
+  }
   const kept = cancellationScope("Fixture");
   kept.stop("rust", new Error("fixture Rust failed"));
   assert.equal(kept.stopped, null, "a run that keeps going never stops");
   await kept.dispose();
-  const signalled = spawnSync(process.execPath, ["--input-type=module", "-e", `
+  const signalled = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
     import {cancellationScope} from ${JSON.stringify(new URL("./cancellation.mjs", import.meta.url).href)};
     const scope=cancellationScope('Fixture',{stopOnFailure:true});
     process.emit('SIGTERM');
     scope.stop('tests',new Error('pnpm failed (interrupted).'));
     console.log(JSON.stringify({stopped:scope.stopped,error:(await scope.dispose()).message}));
-  `], { encoding: "utf8", timeout: 20_000 });
-  assert.deepEqual(JSON.parse(signalled.stdout), { stopped: null, error: "Fixture interrupted by SIGTERM." }, "a signal's interruption is not a failure");
+  `,
+    ],
+    { encoding: "utf8", timeout: 20_000 },
+  );
+  assert.deepEqual(
+    JSON.parse(signalled.stdout),
+    { stopped: null, error: "Fixture interrupted by SIGTERM." },
+    "a signal's interruption is not a failure",
+  );
 });
 
 test("a change affects its own packages and every package that depends on them", () => {
-  const pkg = (name, path, dependencies = {}, devDependencies = {}) => ({ name, path, manifest: { dependencies, devDependencies } });
-  const packages = [pkg("@dohc/runtime", "packages/runtime"), pkg("@dohc/relay", "services/relay", { "@dohc/runtime": "workspace:*" }),
-    pkg("@dohc/desktop", "apps/desktop", {}, { "@dohc/relay": "workspace:*", react: "^19" }), pkg("@dohc/site", "apps/site"),
-    pkg("@dohc/runtime-tools", "packages/runtime/tools")];
-  assert.deepEqual(affectedPackages(["apps/site/src/index.ts", "docs/notes.md"], packages), ["@dohc/site"]);
-  assert.deepEqual(affectedPackages(["packages/runtime/src/a.ts"], packages), ["@dohc/desktop", "@dohc/relay", "@dohc/runtime"], "dependents, through a dev dependency too");
-  assert.deepEqual(affectedPackages(["packages/runtime/tools/build.mjs"], packages), ["@dohc/runtime-tools"], "the nested package owns its files");
-  assert.deepEqual(affectedPackages(["README.md", "docs/a.md"], packages), [], "documentation affects no package");
-  assert.equal(affectedPackages(["docs/reference/cli-mcp-sdk.md"], packages), null, "a generated reference that tests compare against is not documentation");
-  assert.equal(affectedPackages([], packages), null, "with nothing to attribute, every package runs");
-  const aliased = [...packages, pkg("@dohc/consumer", "packages/consumer", { renamed: "workspace:@dohc/site@*" })];
-  assert.deepEqual(affectedPackages(["apps/site/src/index.ts"], aliased), ["@dohc/consumer", "@dohc/site"], "a workspace alias is a dependency");
-  assert.deepEqual(affectedPackages(["apps/site/src/index.ts"], packages, [["@dohc/site", "@dohc/runtime"]]), ["@dohc/desktop", "@dohc/relay", "@dohc/runtime", "@dohc/site"],
-    "a package another package's tests import affects it, and its dependents in turn");
+  const pkg = (name, path, dependencies = {}, devDependencies = {}) => ({
+    name,
+    path,
+    manifest: { dependencies, devDependencies },
+  });
+  const packages = [
+    pkg("@dohc/runtime", "packages/runtime"),
+    pkg("@dohc/relay", "services/relay", { "@dohc/runtime": "workspace:*" }),
+    pkg("@dohc/desktop", "apps/desktop", {}, { "@dohc/relay": "workspace:*", react: "^19" }),
+    pkg("@dohc/site", "apps/site"),
+    pkg("@dohc/runtime-tools", "packages/runtime/tools"),
+  ];
+  assert.deepEqual(affectedPackages(["apps/site/src/index.ts", "docs/notes.md"], packages), [
+    "@dohc/site",
+  ]);
+  assert.deepEqual(
+    affectedPackages(["packages/runtime/src/a.ts"], packages),
+    ["@dohc/desktop", "@dohc/relay", "@dohc/runtime"],
+    "dependents, through a dev dependency too",
+  );
+  assert.deepEqual(
+    affectedPackages(["packages/runtime/tools/build.mjs"], packages),
+    ["@dohc/runtime-tools"],
+    "the nested package owns its files",
+  );
+  assert.deepEqual(
+    affectedPackages(["README.md", "docs/a.md"], packages),
+    [],
+    "documentation affects no package",
+  );
+  assert.equal(
+    affectedPackages(["docs/reference/cli-mcp-sdk.md"], packages),
+    null,
+    "a generated reference that tests compare against is not documentation",
+  );
+  assert.equal(
+    affectedPackages([], packages),
+    null,
+    "with nothing to attribute, every package runs",
+  );
+  const aliased = [
+    ...packages,
+    pkg("@dohc/consumer", "packages/consumer", { renamed: "workspace:@dohc/site@*" }),
+  ];
+  assert.deepEqual(
+    affectedPackages(["apps/site/src/index.ts"], aliased),
+    ["@dohc/consumer", "@dohc/site"],
+    "a workspace alias is a dependency",
+  );
+  assert.deepEqual(
+    affectedPackages(["apps/site/src/index.ts"], packages, [["@dohc/site", "@dohc/runtime"]]),
+    ["@dohc/desktop", "@dohc/relay", "@dohc/runtime", "@dohc/site"],
+    "a package another package's tests import affects it, and its dependents in turn",
+  );
 });
 
-test("undeclared relative imports between packages count as dependencies", t => {
+test("undeclared relative imports between packages count as dependencies", (t) => {
   const root = mkdtempSync(join(tmpdir(), "dohc-references-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const put = (path, text) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), text); };
+  const put = (path, text) => {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), text);
+  };
   put("apps/desktop/src/ipc/channels.ts", "export const channel = 'a';\n");
-  put("services/relay/src/edits.test.ts", "import { channel } from '../../../apps/desktop/src/ipc/channels';\nimport { local } from './local';\n");
+  put(
+    "services/relay/src/edits.test.ts",
+    "import { channel } from '../../../apps/desktop/src/ipc/channels';\nimport { local } from './local';\n",
+  );
   put("services/relay/dist/bundle.js", "require('../../../apps/site/index.js');\n");
-  put("packages/x/src/a.ts", "const fixture = new URL(\x60../../../services/relay/src/edits.test.ts\x60, import.meta.url);\n");
-  const packages = [{ name: "@dohc/desktop", path: "apps/desktop" }, { name: "@dohc/relay", path: "services/relay" },
-    { name: "@dohc/site", path: "apps/site" }, { name: "@dohc/x", path: "packages/x" }];
-  assert.deepEqual(packageReferences(root, packages), [["@dohc/desktop", "@dohc/relay"], ["@dohc/relay", "@dohc/x"]], "build output is not read");
+  put(
+    "packages/x/src/a.ts",
+    "const fixture = new URL(\x60../../../services/relay/src/edits.test.ts\x60, import.meta.url);\n",
+  );
+  const packages = [
+    { name: "@dohc/desktop", path: "apps/desktop" },
+    { name: "@dohc/relay", path: "services/relay" },
+    { name: "@dohc/site", path: "apps/site" },
+    { name: "@dohc/x", path: "packages/x" },
+  ];
+  assert.deepEqual(
+    packageReferences(root, packages),
+    [
+      ["@dohc/desktop", "@dohc/relay"],
+      ["@dohc/relay", "@dohc/x"],
+    ],
+    "build output is not read",
+  );
 });
 
-test("a narrowed run tests only the affected packages, and records the rest as skipped", t => {
+test("a narrowed run tests only the affected packages, and records the rest as skipped", (t) => {
   const root = mkdtempSync(join(tmpdir(), "dohc-js-only-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/verification"), { recursive: true });
   copyFlakyFixture(root);
-  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"])
+    copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
   for (const name of ["tail", "head"]) {
     mkdirSync(join(root, "packages", name), { recursive: true });
-    writeFileSync(join(root, "packages", name, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+    writeFileSync(
+      join(root, "packages", name, "package.json"),
+      JSON.stringify({ scripts: { test: "vitest run" } }),
+    );
   }
-  writeFileSync(join(root, "scripts/verification/process.mjs"), `
+  writeFileSync(
+    join(root, "scripts/verification/process.mjs"),
+    `
     import {resolve} from 'node:path';
     export const repoRoot=resolve(import.meta.dirname,'../..');
     export const pnpm=args=>['pnpm',args];
@@ -701,33 +1146,70 @@ test("a narrowed run tests only the affected packages, and records the rest as s
       if(args.includes('list'))return {stdout:JSON.stringify(['tail','head'].map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
       return {stdout:''};
     }
-  `);
-  writeFileSync(join(root, "driver.mjs"), `
+  `,
+  );
+  writeFileSync(
+    join(root, "driver.mjs"),
+    `
     import {readFileSync} from 'node:fs';
     import {testWorkspace} from './scripts/verification/js-tests.mjs';
     import {calls} from './scripts/verification/process.mjs';
     await testWorkspace({prepared:true,output:'evidence',changed:JSON.parse(process.env.CHANGED)});
     const report=JSON.parse(readFileSync('evidence/result.json','utf8'));
     console.log(JSON.stringify({ran:calls.filter(call=>call.startsWith('--filter')).map(call=>call.split(' ')[1]),skipped:report.skippedPackages??null,verdict:report.verdict}));
-  `);
-  const drive = changed => JSON.parse(spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000, env: { ...process.env, CHANGED: JSON.stringify(changed) } }).stdout.trim().split("\n").at(-1));
-  assert.deepEqual(drive(["packages/head/src/a.ts"]), { ran: ["@dohc/head"], skipped: ["@dohc/tail"], verdict: "PASS" });
-  assert.deepEqual(drive(["docs/a.md"]), { ran: [], skipped: ["@dohc/head", "@dohc/tail"], verdict: "PASS" }, "a documentation change runs no package tests");
-  assert.deepEqual(drive(["pnpm-lock.yaml", "packages/head/src/a.ts"]), { ran: ["@dohc/head", "@dohc/tail"], skipped: null, verdict: "PASS" });
-  assert.deepEqual(drive(null), { ran: ["@dohc/head", "@dohc/tail"], skipped: null, verdict: "PASS" }, "--full runs every package");
+  `,
+  );
+  const drive = (changed) =>
+    JSON.parse(
+      spawnSync(process.execPath, ["driver.mjs"], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 20_000,
+        env: { ...process.env, CHANGED: JSON.stringify(changed) },
+      })
+        .stdout.trim()
+        .split("\n")
+        .at(-1),
+    );
+  assert.deepEqual(drive(["packages/head/src/a.ts"]), {
+    ran: ["@dohc/head"],
+    skipped: ["@dohc/tail"],
+    verdict: "PASS",
+  });
+  assert.deepEqual(
+    drive(["docs/a.md"]),
+    { ran: [], skipped: ["@dohc/head", "@dohc/tail"], verdict: "PASS" },
+    "a documentation change runs no package tests",
+  );
+  assert.deepEqual(drive(["pnpm-lock.yaml", "packages/head/src/a.ts"]), {
+    ran: ["@dohc/head", "@dohc/tail"],
+    skipped: null,
+    verdict: "PASS",
+  });
+  assert.deepEqual(
+    drive(null),
+    { ran: ["@dohc/head", "@dohc/tail"], skipped: null, verdict: "PASS" },
+    "--full runs every package",
+  );
 });
 
-test("a full run gives each desktop unit test file a worker of its own, and other runs do not", t => {
+test("a full run gives each desktop unit test file a worker of its own, and other runs do not", (t) => {
   const root = mkdtempSync(join(tmpdir(), "dohc-js-isolation-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "scripts/verification"), { recursive: true });
   copyFlakyFixture(root);
-  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
-  for (const [name, scripts] of [["desktop", { test: "unit then scripts", "test:unit": "vitest run" }], ["tail", { test: "vitest run" }]]) {
+  for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"])
+    copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+  for (const [name, scripts] of [
+    ["desktop", { test: "unit then scripts", "test:unit": "vitest run" }],
+    ["tail", { test: "vitest run" }],
+  ]) {
     mkdirSync(join(root, "packages", name), { recursive: true });
     writeFileSync(join(root, "packages", name, "package.json"), JSON.stringify({ scripts }));
   }
-  writeFileSync(join(root, "scripts/verification/process.mjs"), `
+  writeFileSync(
+    join(root, "scripts/verification/process.mjs"),
+    `
     import {resolve} from 'node:path';
     export const repoRoot=resolve(import.meta.dirname,'../..');
     export const pnpm=args=>['pnpm',args];
@@ -737,58 +1219,107 @@ test("a full run gives each desktop unit test file a worker of its own, and othe
       if(args.includes('list'))return {stdout:JSON.stringify(['desktop','tail'].map(name=>({name:'@dohc/'+name,path:resolve('packages',name)})))};
       return {stdout:''};
     }
-  `);
-  writeFileSync(join(root, "driver.mjs"), `
+  `,
+  );
+  writeFileSync(
+    join(root, "driver.mjs"),
+    `
     import {testWorkspace} from './scripts/verification/js-tests.mjs';
     import {calls} from './scripts/verification/process.mjs';
     await testWorkspace({prepared:true,output:'evidence',full:process.env.FULL==='1'});
     console.log(JSON.stringify(calls.filter(({isolation})=>isolation!==null)));
-  `);
-  const drive = full => {
+  `,
+  );
+  const drive = (full) => {
     const env = { ...process.env, FULL: full ? "1" : "0" };
     delete env.DOHC_DESKTOP_TEST_ISOLATION;
-    return JSON.parse(spawnSync(process.execPath, ["driver.mjs"], { cwd: root, encoding: "utf8", timeout: 20_000, env }).stdout.trim().split("\n").at(-1));
+    return JSON.parse(
+      spawnSync(process.execPath, ["driver.mjs"], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 20_000,
+        env,
+      })
+        .stdout.trim()
+        .split("\n")
+        .at(-1),
+    );
   };
-  assert.deepEqual(drive(true), [{ call: "--filter @dohc/desktop run test:unit", isolation: "all" }], "only the desktop unit tests run isolated");
+  assert.deepEqual(
+    drive(true),
+    [{ call: "--filter @dohc/desktop run test:unit", isolation: "all" }],
+    "only the desktop unit tests run isolated",
+  );
   assert.deepEqual(drive(false), [], "a PR run lets desktop test files share workers");
 });
 
 test("the plan retains every package test and preserves stricter worker caps", () => {
-  const pkg = (name, scripts = {test: "vitest run"}) => ({name: `@dohc/${name}`, manifest: {scripts}});
-  const tasks = testPlan([pkg("future-package"), pkg("workspace-auth"), pkg("workspace-postgres"), pkg("share-web"), pkg("workspace-api"),
-    pkg("app-backend-runtime", {test: "build then test", "test:prepared": "vitest run"}),
-    pkg("desktop", {test: "unit then scripts", "test:unit": "vitest run"}), pkg("ydoc-projection"), pkg("no-tests", {})]);
+  const pkg = (name, scripts = { test: "vitest run" }) => ({
+    name: `@dohc/${name}`,
+    manifest: { scripts },
+  });
+  const tasks = testPlan([
+    pkg("future-package"),
+    pkg("workspace-auth"),
+    pkg("workspace-postgres"),
+    pkg("share-web"),
+    pkg("workspace-api"),
+    pkg("app-backend-runtime", { test: "build then test", "test:prepared": "vitest run" }),
+    pkg("desktop", { test: "unit then scripts", "test:unit": "vitest run" }),
+    pkg("ydoc-projection"),
+    pkg("no-tests", {}),
+  ]);
   assert.equal(tasks.length, 8);
   assert.equal(tasks[0].name, "@dohc/ydoc-projection");
   assert.equal(tasks[1].name, "@dohc/desktop");
-  const runtime = tasks.find(task => task.name === "@dohc/app-backend-runtime").args;
+  const runtime = tasks.find((task) => task.name === "@dohc/app-backend-runtime").args;
   assert.ok(runtime.includes("--maxWorkers=1"), runtime.join(" "));
   // Every vitest package retries a failing test once and records the tests that needed it.
-  assert.ok(runtime.includes("--retry=1") && runtime.some(arg => arg.endsWith("test-record-reporter.mjs")), runtime.join(" "));
-  assert.equal(tasks.find(task => task.name === "@dohc/future-package").script, "test");
-  assert.equal(tasks.filter(task => task.resource === "postgres").length, 4);
+  assert.ok(
+    runtime.includes("--retry=1") &&
+      runtime.some((arg) => arg.endsWith("test-record-reporter.mjs")),
+    runtime.join(" "),
+  );
+  assert.equal(tasks.find((task) => task.name === "@dohc/future-package").script, "test");
+  assert.equal(tasks.filter((task) => task.resource === "postgres").length, 4);
   assert.throws(() => testPlan([pkg("desktop")]), /Missing test:unit/);
 });
 
-for (const scenario of ["success", "lane-reuse", "proof-failure", "package-failure", "repository-failure", "cancel"]) {
+for (const scenario of [
+  "success",
+  "lane-reuse",
+  "proof-failure",
+  "package-failure",
+  "repository-failure",
+  "cancel",
+]) {
   test(`proofs reuse the repository lane and settle every reader: ${scenario}`, () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-proof-lane-"));
     const put = (path, value) => {
-      mkdirSync(dirname(join(root, path)), {recursive: true});
+      mkdirSync(dirname(join(root, path)), { recursive: true });
       writeFileSync(join(root, path), value);
     };
     try {
       put("package.json", '{"type":"module"}');
       for (const name of ["desktop", "share-web", "workspace-api", "new-package", "tail"]) {
-        put(`packages/${name}/package.json`, JSON.stringify({name: `@dohc/${name}`, scripts: {
-          test: "vitest run", ...(name === "desktop" ? {"test:unit": "vitest run"} : {}),
-        }}));
+        put(
+          `packages/${name}/package.json`,
+          JSON.stringify({
+            name: `@dohc/${name}`,
+            scripts: {
+              test: "vitest run",
+              ...(name === "desktop" ? { "test:unit": "vitest run" } : {}),
+            },
+          }),
+        );
       }
       copyFlakyFixture(root);
       for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) {
         put(`scripts/verification/${file}`, readFileSync(new URL(file, import.meta.url)));
       }
-      put("scripts/verification/process.mjs", `
+      put(
+        "scripts/verification/process.mjs",
+        `
         import assert from 'node:assert/strict';
         import {resolve} from 'node:path';
         export const repoRoot=resolve(import.meta.dirname,'../..');
@@ -821,8 +1352,11 @@ for (const scenario of ["success", "lane-reuse", "proof-failure", "package-failu
           try{await control(controls,name).promise;return {stdout:''};}
           finally{active.delete(name);}
         }
-      `);
-      put("driver.mjs", `
+      `,
+      );
+      put(
+        "driver.mjs",
+        `
         import assert from 'node:assert/strict';
         import {readFileSync} from 'node:fs';
         import {setImmediate} from 'node:timers/promises';
@@ -886,41 +1420,118 @@ for (const scenario of ["success", "lane-reuse", "proof-failure", "package-failu
         assert.equal(report.verdict,['success','lane-reuse'].includes(scenario)?'PASS':'FAIL');
         assert.equal(report.concurrency,2);assert.equal(report.proofs,true);
         assert.equal(started.has('test:scripts:runtime'),['success','lane-reuse'].includes(scenario));
-      `);
-      const result = spawnSync(process.execPath, ["driver.mjs"], {cwd: root, encoding: "utf8", timeout: 20_000});
+      `,
+      );
+      const result = spawnSync(process.execPath, ["driver.mjs"], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 20_000,
+      });
       assert.equal(result.error, undefined, result.stderr);
       assert.equal(result.status, scenario === "cancel" ? 143 : 0, result.stderr);
-    } finally { rmSync(root, {recursive: true, force: true}); }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 }
 
-for (const {name, cancel = false, repoFail = false, packageFail = false, overlap = false, barrier = false, barrierCancel = false, scriptOverlap = false, scriptFail = false, scriptCancel = false, onlyDesktop = false} of [
-  {name:"desktop preflight finishes unit tests before starting isolated scripts",onlyDesktop:true},
-  {name:"isolated scripts reuse the repository lane while packages continue, before runtime packaging",overlap:true,scriptOverlap:true},
-  {name:"cancellation rejects queued packages before launching their commands",cancel:true,overlap:true},
-  {name:"packaging waits for the external runtime reader",barrier:true},
-  {name:"cancellation while waiting for the runtime reader skips packaging",barrier:true,barrierCancel:true},
-  {name:"a repository failure stops new commands and skips the packaging step",repoFail:true,overlap:true},
-  {name:"the first failure in time is the one reported",repoFail:true,packageFail:true,overlap:true},
-  {name:"isolated script failure stops package admission and skips runtime packaging",overlap:true,scriptOverlap:true,scriptFail:true},
-  {name:"isolated script cancellation settles running packages and skips runtime packaging",overlap:true,scriptOverlap:true,scriptCancel:true},
-]) test(name, () => {
-  // The inventory's package without a test script is not scheduled.
-  const expectedPackages = onlyDesktop ? ["@dohc/desktop"] : ["@dohc/desktop", "@dohc/app-backend-runtime", "@dohc/new-package"];
-  const root = mkdtempSync(join(tmpdir(), "dohc-js-schedule-"));
-  const put = (path, data) => { mkdirSync(dirname(join(root, path)), {recursive:true}); writeFileSync(join(root, path), data); };
-  try {
-    put("package.json", '{"type":"module","scripts":{"test":"node scripts/verification/js-tests.mjs"}}');
-    copyFlakyFixture(root);
-    for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) {
-      mkdirSync(join(root, "scripts/verification"), {recursive:true});
-      copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
-    }
-    put("apps/desktop/package.json", JSON.stringify({scripts:{test:"unused", "test:unit":"vitest run", "test:scripts":"scripts", "test:scripts:isolated":"isolated", "test:scripts:runtime":"runtime"}}));
-    put("packages/app-backend-runtime/package.json", JSON.stringify({scripts:{test:"unused", "test:prepared":"vitest run"}}));
-    put("packages/new-package/package.json", JSON.stringify({scripts:{test:"vitest run"}}));
-    put("packages/no-tests/package.json", "{}");
-    put("scripts/verification/process.mjs", `
+for (const {
+  name,
+  cancel = false,
+  repoFail = false,
+  packageFail = false,
+  overlap = false,
+  barrier = false,
+  barrierCancel = false,
+  scriptOverlap = false,
+  scriptFail = false,
+  scriptCancel = false,
+  onlyDesktop = false,
+} of [
+  {
+    name: "desktop preflight finishes unit tests before starting isolated scripts",
+    onlyDesktop: true,
+  },
+  {
+    name: "isolated scripts reuse the repository lane while packages continue, before runtime packaging",
+    overlap: true,
+    scriptOverlap: true,
+  },
+  {
+    name: "cancellation rejects queued packages before launching their commands",
+    cancel: true,
+    overlap: true,
+  },
+  { name: "packaging waits for the external runtime reader", barrier: true },
+  {
+    name: "cancellation while waiting for the runtime reader skips packaging",
+    barrier: true,
+    barrierCancel: true,
+  },
+  {
+    name: "a repository failure stops new commands and skips the packaging step",
+    repoFail: true,
+    overlap: true,
+  },
+  {
+    name: "the first failure in time is the one reported",
+    repoFail: true,
+    packageFail: true,
+    overlap: true,
+  },
+  {
+    name: "isolated script failure stops package admission and skips runtime packaging",
+    overlap: true,
+    scriptOverlap: true,
+    scriptFail: true,
+  },
+  {
+    name: "isolated script cancellation settles running packages and skips runtime packaging",
+    overlap: true,
+    scriptOverlap: true,
+    scriptCancel: true,
+  },
+])
+  test(name, () => {
+    const expectedPackages = onlyDesktop
+      ? ["@dohc/desktop"]
+      : ["@dohc/desktop", "@dohc/app-backend-runtime", "@dohc/new-package"];
+    const root = mkdtempSync(join(tmpdir(), "dohc-js-schedule-"));
+    const put = (path, data) => {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), data);
+    };
+    try {
+      put(
+        "package.json",
+        '{"type":"module","scripts":{"test":"node scripts/verification/js-tests.mjs"}}',
+      );
+      copyFlakyFixture(root);
+      for (const file of ["js-tests.mjs", "timing.mjs", "cancellation.mjs", "selection.mjs"]) {
+        mkdirSync(join(root, "scripts/verification"), { recursive: true });
+        copyFileSync(new URL(file, import.meta.url), join(root, "scripts/verification", file));
+      }
+      put(
+        "apps/desktop/package.json",
+        JSON.stringify({
+          scripts: {
+            test: "unused",
+            "test:unit": "vitest run",
+            "test:scripts": "scripts",
+            "test:scripts:isolated": "isolated",
+            "test:scripts:runtime": "runtime",
+          },
+        }),
+      );
+      put(
+        "packages/app-backend-runtime/package.json",
+        JSON.stringify({ scripts: { test: "unused", "test:prepared": "vitest run" } }),
+      );
+      put("packages/new-package/package.json", JSON.stringify({ scripts: { test: "vitest run" } }));
+      put("packages/no-tests/package.json", "{}");
+      put(
+        "scripts/verification/process.mjs",
+        `
       import assert from 'node:assert/strict';
       import {appendFileSync,writeFileSync,existsSync} from 'node:fs';
       import {resolve} from 'node:path';
@@ -983,9 +1594,20 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
         completed.add('test:'+args[1]);
         return {stdout:''};
       }
-    `);
-    // The standalone CLI runs every case except the packaging barrier, which needs a caller.
-    const args = !barrier ? ["scripts/verification/js-tests.mjs", "--output", "evidence", ...onlyDesktop ? ["--package", "@dohc/desktop"] : []] : ["--input-type=module", "-e", `
+    `,
+      );
+      // The standalone CLI runs every case except the packaging barrier, which needs a caller.
+      const args = !barrier
+        ? [
+            "scripts/verification/js-tests.mjs",
+            "--output",
+            "evidence",
+            ...(onlyDesktop ? ["--package", "@dohc/desktop"] : []),
+          ]
+        : [
+            "--input-type=module",
+            "-e",
+            `
       import {testWorkspace} from './scripts/verification/js-tests.mjs';
       import assert from 'node:assert/strict';
       import {readFileSync,writeFileSync} from 'node:fs';
@@ -999,84 +1621,233 @@ for (const {name, cancel = false, repoFail = false, packageFail = false, overlap
       };
       try {await testWorkspace({output:'evidence',beforeDesktopScripts});}
       catch(error){console.error(error.message);process.exitCode ||= 1;}
-    `];
-    const result = spawnSync(process.execPath, args, {
-      cwd:root, encoding:"utf8", timeout:20_000, env:{...process.env, FIXTURE_CANCEL:cancel ? "1" : "0", FIXTURE_REPO_FAIL:repoFail ? "1" : "0",
-        FIXTURE_PACKAGE_FAIL:packageFail ? "1" : "0", FIXTURE_OVERLAP:overlap ? "1" : "0",
-        FIXTURE_SCRIPT_OVERLAP:scriptOverlap ? "1" : "0", FIXTURE_SCRIPT_FAIL:scriptFail ? "1" : "0", FIXTURE_SCRIPT_CANCEL:scriptCancel ? "1" : "0", FIXTURE_ONLY_DESKTOP:onlyDesktop ? "1" : "0"},
-    });
-    assert.equal(result.error, undefined);
-    const failed = repoFail || packageFail || scriptFail;
-    assert.equal(result.status, barrierCancel || scriptCancel ? 143 : cancel ? 130 : failed ? 1 : 0, result.stderr);
-    const report = JSON.parse(readFileSync(join(root, "evidence/result.json"), "utf8"));
-    assert.equal(report.verdict, cancel || barrierCancel || scriptCancel || failed ? "FAIL" : "PASS");
-    assert.equal(JSON.parse(readFileSync(join(root,"command-counts.json"),"utf8")).active,0,"all commands must settle before the runner exits");
-    if (barrier) assert.ok(existsSync(join(root, "barrier-entered")));
-    if (overlap && !cancel) assert.ok(existsSync(join(root, "repository-saw-package")), "the repository lane must still be open when a package starts");
-    if (scriptOverlap) assert.ok(existsSync(join(root,"package-saw-isolated")),"isolated scripts must start while package commands remain active");
-    const commands = readFileSync(join(root,"commands.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
-    assert.equal(commands.some(args => args[0] === "run" && args[1] === "test:repo"), !onlyDesktop);
-    assert.deepEqual(report.packages.map(pkg=>pkg.name).sort(),expectedPackages.toSorted());
-    if (barrierCancel) {
-      assert.match(report.error, /interrupted by SIGTERM/);
-      assert.equal(commands.some(args => args.includes("test:scripts:runtime")), false);
-    } else if (cancel) {
-      assert.match(report.error, /interrupted/);
-      assert.equal(commands.some(args => args.some(arg=>arg.startsWith("test:scripts:")) || args.includes("test:prepared") || args.includes("test")), false);
-      assert.equal(report.steps.at(-1).verdict, "FAIL");
-    } else if (repoFail) {
-      assert.match(report.error, packageFail ? /fixture package failed/ : /fixture repository failed/);
-      if (!packageFail) assert.equal(commands.filter(args=>args[2]==="run").length, 2, "the queued package must not start after the failure");
-      assert.equal(commands.some(args=>args.some(arg=>arg.startsWith("test:scripts:"))),false);
-    } else if (scriptFail || scriptCancel) {
-      assert.match(report.error,scriptCancel ? /interrupted/ : /fixture isolated script failed/);
-      assert.equal(commands.filter(args=>args[2]==="run" && !args[3].startsWith("test:scripts:")).length,2,"queued packages must not start after an isolated script fails");
-      assert.equal(commands.some(args=>args.includes("test:scripts:runtime")),false);
-    } else {
-      assert.deepEqual(commands.filter(args=>args[2]==="run" && !args[3].startsWith("test:scripts:")).map(args=>args[1]).sort(),expectedPackages.toSorted());
-      assert.ok(commands.some(args=>args.includes("test:scripts:isolated")));
-      assert.ok(commands.some(args=>args.includes("test:scripts:runtime")));
-      assert.ok(report.steps.every(step => step.verdict === "PASS"));
-    }
-    assert.ok(report.steps.every(step => step.seconds >= 0 && step.finishedAt));
-    assert.ok(report.seconds >= Math.max(...report.steps.map(step => step.seconds)));
-  } finally { rmSync(root, {recursive:true, force:true}); }
-});
-
-for (const kind of ["desktop", "accounts"]) {
-  test("cloud " + kind + " accepts a flaky proof but rejects failed, skipped, empty, and missing-tag proofs", async t => {
-    const root = mkdtempSync(join(tmpdir(), "cloud-browser-retry-"));
-    t.after(() => rmSync(root, { recursive: true, force: true }));
-    const task = { id: kind + ":proof", kind, tag: "@proof" };
-    const group = { ...task, tasks: [task], weight: 1 };
-    for (const status of ["flaky", "unexpected", "skipped", "empty", "missing", "mixed"]) {
-      const record = { steps: [], tests: [], completed: [], flaky: [] };
-      const executeCommand = async (_command, args, options) => {
-        assert.ok(args.includes("--retries=1"));
-        const passing = ["flaky", "missing", "mixed"].includes(status);
-        writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME, JSON.stringify({
-          stats: { expected: status === "missing" ? 1 : 0, flaky: ["flaky", "mixed"].includes(status) ? 1 : 0, unexpected: ["unexpected", "mixed"].includes(status) ? 1 : 0, skipped: status === "skipped" ? 1 : 0 },
-          suites: [{ specs: status === "empty" ? [] : [{ file: "proof.spec.ts", title: status === "missing" ? "another proof" : "@proof recovered", ok: passing,
-            tests: [{ status: status === "missing" ? "expected" : status === "mixed" ? "flaky" : status, results: passing ? [{ status: "failed", retry: 0 }, { status: "passed", retry: 1 }] : [{ status: "failed", retry: 0 }, { status: "failed", retry: 1 }] }] },
-          ...(status === "mixed" ? [{ file: "proof.spec.ts", title: "failed proof", ok: false, tests: [{ status: "unexpected", results: [{ status: "failed", retry: 0 }, { status: "failed", retry: 1 }] }] }] : [])] }],
-        }));
-        if (status === "mixed") throw new Error("proof command failed");
-      };
-      const action = () => runJavascript([group], record, () => {}, undefined, { executeCommand, directory: root });
-      if (status === "flaky") {
-        await action();
-        assert.deepEqual(record.completed, [task.id]);
-        assert.deepEqual(record.flaky, [{ id: task.id, test: "proof.spec.ts › @proof recovered" }]);
+    `,
+          ];
+      const result = spawnSync(process.execPath, args, {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 20_000,
+        env: {
+          ...process.env,
+          FIXTURE_CANCEL: cancel ? "1" : "0",
+          FIXTURE_REPO_FAIL: repoFail ? "1" : "0",
+          FIXTURE_PACKAGE_FAIL: packageFail ? "1" : "0",
+          FIXTURE_OVERLAP: overlap ? "1" : "0",
+          FIXTURE_SCRIPT_OVERLAP: scriptOverlap ? "1" : "0",
+          FIXTURE_SCRIPT_FAIL: scriptFail ? "1" : "0",
+          FIXTURE_SCRIPT_CANCEL: scriptCancel ? "1" : "0",
+          FIXTURE_ONLY_DESKTOP: onlyDesktop ? "1" : "0",
+        },
+      });
+      assert.equal(result.error, undefined);
+      const failed = repoFail || packageFail || scriptFail;
+      assert.equal(
+        result.status,
+        barrierCancel || scriptCancel ? 143 : cancel ? 130 : failed ? 1 : 0,
+        result.stderr,
+      );
+      const report = JSON.parse(readFileSync(join(root, "evidence/result.json"), "utf8"));
+      assert.equal(
+        report.verdict,
+        cancel || barrierCancel || scriptCancel || failed ? "FAIL" : "PASS",
+      );
+      assert.equal(
+        JSON.parse(readFileSync(join(root, "command-counts.json"), "utf8")).active,
+        0,
+        "all commands must settle before the runner exits",
+      );
+      if (barrier) assert.ok(existsSync(join(root, "barrier-entered")));
+      if (overlap && !cancel)
+        assert.ok(
+          existsSync(join(root, "repository-saw-package")),
+          "the repository lane must still be open when a package starts",
+        );
+      if (scriptOverlap)
+        assert.ok(
+          existsSync(join(root, "package-saw-isolated")),
+          "isolated scripts must start while package commands remain active",
+        );
+      const commands = readFileSync(join(root, "commands.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map(JSON.parse);
+      assert.equal(
+        commands.some((args) => args[0] === "run" && args[1] === "test:repo"),
+        !onlyDesktop,
+      );
+      assert.deepEqual(report.packages.map((pkg) => pkg.name).sort(), expectedPackages.toSorted());
+      if (barrierCancel) {
+        assert.match(report.error, /interrupted by SIGTERM/);
+        assert.equal(
+          commands.some((args) => args.includes("test:scripts:runtime")),
+          false,
+        );
+      } else if (cancel) {
+        assert.match(report.error, /interrupted/);
+        assert.equal(
+          commands.some(
+            (args) =>
+              args.some((arg) => arg.startsWith("test:scripts:")) ||
+              args.includes("test:prepared") ||
+              args.includes("test"),
+          ),
+          false,
+        );
+        assert.equal(report.steps.at(-1).verdict, "FAIL");
+      } else if (repoFail) {
+        assert.match(
+          report.error,
+          packageFail ? /fixture package failed/ : /fixture repository failed/,
+        );
+        if (!packageFail)
+          assert.equal(
+            commands.filter((args) => args[2] === "run").length,
+            2,
+            "the queued package must not start after the failure",
+          );
+        assert.equal(
+          commands.some((args) => args.some((arg) => arg.startsWith("test:scripts:"))),
+          false,
+        );
+      } else if (scriptFail || scriptCancel) {
+        assert.match(report.error, scriptCancel ? /interrupted/ : /fixture isolated script failed/);
+        assert.equal(
+          commands.filter((args) => args[2] === "run" && !args[3].startsWith("test:scripts:"))
+            .length,
+          2,
+          "queued packages must not start after an isolated script fails",
+        );
+        assert.equal(
+          commands.some((args) => args.includes("test:scripts:runtime")),
+          false,
+        );
       } else {
-        await assert.rejects(action(), status === "mixed" ? /proof command failed/u : status === "missing" ? /Missing desktop proof/u : /Browser proof failed or skipped/u);
-        assert.deepEqual(record.completed, []);
-        if (status === "mixed") assert.deepEqual(record.flaky, [{ id: task.id, test: "proof.spec.ts › @proof recovered" }]);
+        assert.deepEqual(
+          commands
+            .filter((args) => args[2] === "run" && !args[3].startsWith("test:scripts:"))
+            .map((args) => args[1])
+            .sort(),
+          expectedPackages.toSorted(),
+        );
+        assert.ok(commands.some((args) => args.includes("test:scripts:isolated")));
+        assert.ok(commands.some((args) => args.includes("test:scripts:runtime")));
+        assert.ok(report.steps.every((step) => step.verdict === "PASS"));
       }
+      assert.ok(report.steps.every((step) => step.seconds >= 0 && step.finishedAt));
+      assert.ok(report.seconds >= Math.max(...report.steps.map((step) => step.seconds)));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
+
+for (const kind of ["desktop", "accounts"]) {
+  test(
+    "cloud " +
+      kind +
+      " accepts a flaky proof but rejects failed, skipped, empty, and missing-tag proofs",
+    async (t) => {
+      const root = mkdtempSync(join(tmpdir(), "cloud-browser-retry-"));
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      const task = { id: kind + ":proof", kind, tag: "@proof" };
+      const group = { ...task, tasks: [task], weight: 1 };
+      for (const status of ["flaky", "unexpected", "skipped", "empty", "missing", "mixed"]) {
+        const record = { steps: [], tests: [], completed: [], flaky: [] };
+        const executeCommand = async (_command, args, options) => {
+          assert.ok(args.includes("--retries=1"));
+          const passing = ["flaky", "missing", "mixed"].includes(status);
+          writeFileSync(
+            options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,
+            JSON.stringify({
+              stats: {
+                expected: status === "missing" ? 1 : 0,
+                flaky: ["flaky", "mixed"].includes(status) ? 1 : 0,
+                unexpected: ["unexpected", "mixed"].includes(status) ? 1 : 0,
+                skipped: status === "skipped" ? 1 : 0,
+              },
+              suites: [
+                {
+                  specs:
+                    status === "empty"
+                      ? []
+                      : [
+                          {
+                            file: "proof.spec.ts",
+                            title: status === "missing" ? "another proof" : "@proof recovered",
+                            ok: passing,
+                            tests: [
+                              {
+                                status:
+                                  status === "missing"
+                                    ? "expected"
+                                    : status === "mixed"
+                                      ? "flaky"
+                                      : status,
+                                results: passing
+                                  ? [
+                                      { status: "failed", retry: 0 },
+                                      { status: "passed", retry: 1 },
+                                    ]
+                                  : [
+                                      { status: "failed", retry: 0 },
+                                      { status: "failed", retry: 1 },
+                                    ],
+                              },
+                            ],
+                          },
+                          ...(status === "mixed"
+                            ? [
+                                {
+                                  file: "proof.spec.ts",
+                                  title: "failed proof",
+                                  ok: false,
+                                  tests: [
+                                    {
+                                      status: "unexpected",
+                                      results: [
+                                        { status: "failed", retry: 0 },
+                                        { status: "failed", retry: 1 },
+                                      ],
+                                    },
+                                  ],
+                                },
+                              ]
+                            : []),
+                        ],
+                },
+              ],
+            }),
+          );
+          if (status === "mixed") throw new Error("proof command failed");
+        };
+        const action = () =>
+          runJavascript([group], record, () => {}, undefined, { executeCommand, directory: root });
+        if (status === "flaky") {
+          await action();
+          assert.deepEqual(record.completed, [task.id]);
+          assert.deepEqual(record.flaky, [
+            { id: task.id, test: "proof.spec.ts › @proof recovered" },
+          ]);
+        } else {
+          await assert.rejects(
+            action(),
+            status === "mixed"
+              ? /proof command failed/u
+              : status === "missing"
+                ? /Missing desktop proof/u
+                : /Browser proof failed or skipped/u,
+          );
+          assert.deepEqual(record.completed, []);
+          if (status === "mixed")
+            assert.deepEqual(record.flaky, [
+              { id: task.id, test: "proof.spec.ts › @proof recovered" },
+            ]);
+        }
+      }
+    },
+  );
 }
 
-test("cloud browser report recording preserves command errors and still rejects invalid reports after success", async t => {
+test("cloud browser report recording preserves command errors and still rejects invalid reports after success", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "cloud-browser-report-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const kind of ["desktop", "accounts"]) {
@@ -1091,8 +1862,18 @@ test("cloud browser report recording preserves command errors and still rejects 
           if (malformed) writeFileSync(path, "{");
           if (commandFails) throw commandError;
         };
-        await assert.rejects(runJavascript([{ ...task, tasks: [task], weight: 1 }], record, () => {}, undefined, { executeCommand, directory: root }),
-          error => commandFails ? error === commandError : malformed ? error instanceof SyntaxError : error.code === "ENOENT");
+        await assert.rejects(
+          runJavascript([{ ...task, tasks: [task], weight: 1 }], record, () => {}, undefined, {
+            executeCommand,
+            directory: root,
+          }),
+          (error) =>
+            commandFails
+              ? error === commandError
+              : malformed
+                ? error instanceof SyntaxError
+                : error.code === "ENOENT",
+        );
         assert.deepEqual(record.completed, []);
         assert.deepEqual(record.flaky, []);
       }
@@ -1100,19 +1881,40 @@ test("cloud browser report recording preserves command errors and still rejects 
   }
 });
 
-test("cloud node:test files rerun once after a test failure; other commands do not", async t => {
+test("cloud node:test files rerun once after a test failure; other commands do not", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "cloud-node-retry-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const [name, failures, nodeTest] of [["once", 1, true], ["twice", 2, true], ["check", 2, false]]) {
-    const marker = join(root, name + ".count"), file = join(root, name + ".mjs");
-    writeFileSync(file, "import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import test from 'node:test'; import assert from 'node:assert/strict'; const marker=" + JSON.stringify(marker) + "; const count=existsSync(marker)?Number(readFileSync(marker,'utf8'))+1:1; writeFileSync(marker,String(count)); " + (nodeTest ? "test('recovers',()=>assert.ok(count>" + failures + "));" : "process.exit(1);"));
-    const task = { id: "node:" + name, kind: "command", command: "node", args: [...(nodeTest ? ["--test"] : []), file], cwd: root };
+  for (const [name, failures, nodeTest] of [
+    ["once", 1, true],
+    ["twice", 2, true],
+    ["check", 2, false],
+  ]) {
+    const marker = join(root, name + ".count"),
+      file = join(root, name + ".mjs");
+    writeFileSync(
+      file,
+      "import {existsSync,readFileSync,writeFileSync} from 'node:fs'; import test from 'node:test'; import assert from 'node:assert/strict'; const marker=" +
+        JSON.stringify(marker) +
+        "; const count=existsSync(marker)?Number(readFileSync(marker,'utf8'))+1:1; writeFileSync(marker,String(count)); " +
+        (nodeTest ? "test('recovers',()=>assert.ok(count>" + failures + "));" : "process.exit(1);"),
+    );
+    const task = {
+      id: "node:" + name,
+      kind: "command",
+      command: "node",
+      args: [...(nodeTest ? ["--test"] : []), file],
+      cwd: root,
+    };
     const record = { steps: [], tests: [], completed: [], flaky: [] };
-    const action = () => runJavascript([{ ...task, tasks: [task], weight: 1 }], record, () => {}, undefined, { directory: root, executeCommand: (command, args, options) => {
-      const { NODE_TEST_CONTEXT: _context, ...env } = process.env;
-      // The fixtures fail on purpose. Their reports stay out of this step's log, where the runner would read them as failures.
-      return run(command, args, { ...options, env, quietStdout: true });
-    } });
+    const action = () =>
+      runJavascript([{ ...task, tasks: [task], weight: 1 }], record, () => {}, undefined, {
+        directory: root,
+        executeCommand: (command, args, options) => {
+          const { NODE_TEST_CONTEXT: _context, ...env } = process.env;
+          // The fixtures fail on purpose. Their reports stay out of this step's log, where the runner would read them as failures.
+          return run(command, args, { ...options, env, quietStdout: true });
+        },
+      });
     if (name === "once") {
       await action();
       assert.deepEqual(record.completed, [task.id]);
@@ -1127,15 +1929,32 @@ test("cloud node:test files rerun once after a test failure; other commands do n
   }
 });
 
-test("cloud workers retain the errors and retry count from recovered Vitest files", async t => {
+test("cloud workers retain the errors and retry count from recovered Vitest files", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "cloud-vitest-retry-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const task = { id: "vitest:fixture", package: "fixture", cwd: root };
   const flakyTests = [{ name: "recovered case", errors: ["first error"], retries: 1 }];
   const record = { steps: [], tests: [], completed: [] };
-  await runJavascript([{ kind: "vitest", pkg: "fixture", tasks: [task], weight: 1 }], record, () => {}, undefined, { directory: root,
-    executeCommand: async (_command, args) => writeFileSync(args.at(-1), JSON.stringify({ verdict: "PASS", completed: [task.id], tests: [{ id: task.id, flakyTests }] })),
-  });
+  await runJavascript(
+    [{ kind: "vitest", pkg: "fixture", tasks: [task], weight: 1 }],
+    record,
+    () => {},
+    undefined,
+    {
+      directory: root,
+      executeCommand: async (_command, args) =>
+        writeFileSync(
+          args.at(-1),
+          JSON.stringify({
+            verdict: "PASS",
+            completed: [task.id],
+            tests: [{ id: task.id, flakyTests }],
+          }),
+        ),
+    },
+  );
   assert.deepEqual(record.completed, [task.id]);
-  assert.deepEqual(record.flaky, [{ id: task.id, test: "recovered case", errors: ["first error"], retries: 1 }]);
+  assert.deepEqual(record.flaky, [
+    { id: task.id, test: "recovered case", errors: ["first error"], retries: 1 },
+  ]);
 });

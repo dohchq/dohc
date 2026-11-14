@@ -40,7 +40,6 @@ export interface ButtonView {
    * state or an unchecked one. A button with any other state keeps it.
    */
   checking: boolean;
-  /** True from the press until its run settles. */
   running: boolean;
   /** Why the run waits, or what the last press found, for the button's description. */
   note: string | null;
@@ -86,7 +85,10 @@ export type AutomationButtons = ReturnType<typeof createAutomationButtons>;
 const reporters = new Map<string, ButtonReporter>();
 type ButtonResult = "settled" | "relayed";
 const buttonResults = new Map<string, Set<(kind: ButtonResult) => void>>();
-export function onAutomationButtonResult(workspaceId: string, listener: (kind: ButtonResult) => void): () => void {
+export function onAutomationButtonResult(
+  workspaceId: string,
+  listener: (kind: ButtonResult) => void,
+): () => void {
   const listeners = buttonResults.get(workspaceId) ?? new Set();
   listeners.add(listener);
   buttonResults.set(workspaceId, listeners);
@@ -145,7 +147,7 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       if (state === undefined || state.kind === "unchecked") changed(key);
     }
   };
-  const report = (): ButtonReporter => (closed ? silent : reporters.get(workspaceId) ?? silent);
+  const report = (): ButtonReporter => (closed ? silent : (reporters.get(workspaceId) ?? silent));
   // Every Try again goes through the window's live store for this
   // Collection, since this one may be dropped while the notice waits, and
   // does nothing once the workspace closed.
@@ -162,7 +164,8 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     buttonResult(workspaceId, "settled");
     const { onNotice } = report();
     if (outcome.outcome === "done") onNotice(`Ran ${run.field} on ${run.label}`);
-    else if (outcome.outcome === "skipped") onNotice(`${run.field} made no changes to ${run.label}`);
+    else if (outcome.outcome === "skipped")
+      onNotice(`${run.field} made no changes to ${run.label}`);
     // A press sent again after its run record was trimmed: it ended, and dohc cannot say how.
     else if (outcome.outcome === "ended") onNotice(`${run.field} finished on ${run.label}`);
     // A failed run is main's to report, as every automation's is: its notice reaches
@@ -178,9 +181,15 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     const request = ++requests;
     setChecking(true);
     try {
-      const { buttons } = await bridge().listAutomationButtons("collectionPath" in of
-        ? { workspaceId, collectionPath: of.collectionPath, ...(check ? { check: true as const } : {}) }
-        : { workspaceId, datasetId: of.datasetId });
+      const { buttons } = await bridge().listAutomationButtons(
+        "collectionPath" in of
+          ? {
+              workspaceId,
+              collectionPath: of.collectionPath,
+              ...(check ? { check: true as const } : {}),
+            }
+          : { workspaceId, datasetId: of.datasetId },
+      );
       if (closed || request !== requests) return;
       notes.clear();
       // A dataset lists every table's buttons; this store shows one table's.
@@ -195,7 +204,11 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       // main sends when it finishes, so its buttons stay checking until then.
       if ("collectionPath" in of && isWorkspaceUpdatingError(error)) return;
       setChecking(false);
-      report().onError("dohc could not read this Collection's buttons.", error, () => void live()?.refresh());
+      report().onError(
+        "dohc could not read this Collection's buttons.",
+        error,
+        () => void live()?.refresh(),
+      );
     }
   }
   const refresh = () => read(false);
@@ -248,7 +261,6 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     /** Whether nothing shows or runs these buttons, so the window may drop the store. */
     idle: () => listeners.size === 0 && runs.size === 0,
 
-    /** Reads what each button shows. */
     refresh,
 
     /** Check again: asks a shared view's host now, not main's last answer. */
@@ -258,7 +270,12 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
      * Presses a button on one record. The press id stays with this press, so
      * Try again after a lost answer sends the same press, not a second one.
      */
-    async press(field: string, record: PressedRecord, pressId: string = crypto.randomUUID(), confirmed: readonly string[] = []): Promise<void> {
+    async press(
+      field: string,
+      record: PressedRecord,
+      pressId: string = crypto.randomUUID(),
+      confirmed: readonly string[] = [],
+    ): Promise<void> {
       const key = runKey(field, record.id);
       if (closed || runs.has(key)) return;
       const run: Run = { field, label: record.label, claimId: null, waiting: null };
@@ -266,7 +283,14 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       notes.delete(key);
       changed(key);
       try {
-        const result = await bridge().pressAutomationButton({ workspaceId, ...of, field, recordId: record.id, pressId, confirmed: [...confirmed] });
+        const result = await bridge().pressAutomationButton({
+          workspaceId,
+          ...of,
+          field,
+          recordId: record.id,
+          pressId,
+          confirmed: [...confirmed],
+        });
         if (closed) return;
         if (result.busy) {
           notes.set(key, result.reason);
@@ -291,7 +315,11 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       } catch (error) {
         if (closed) return;
         finish(key);
-        report().onError(`${field} did not start.`, error, () => void live()?.press(field, record, pressId, confirmed));
+        report().onError(
+          `${field} did not start.`,
+          error,
+          () => void live()?.press(field, record, pressId, confirmed),
+        );
       }
     },
 
@@ -303,7 +331,9 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
         const run = runs.get(key);
         const state = states?.get(field) ?? null;
         view = {
-          state, running: run !== undefined, note: run?.waiting ?? notes.get(key) ?? null,
+          state,
+          running: run !== undefined,
+          note: run?.waiting ?? notes.get(key) ?? null,
           checking: checking && (state === null || state.kind === "unchecked"),
         };
         views.set(key, view);
@@ -313,7 +343,6 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
 
     key: runKey,
 
-    /** Stops listening and forgets its runs; the window dropped this store. */
     close(): void {
       closed = true;
       stopSettled();
@@ -334,7 +363,11 @@ const stores = new Map<string, AutomationButtons>();
 
 /** The window's store for one Collection's buttons, made on first use. */
 export function automationButtonsFor(workspaceId: string, of: ButtonsOf): AutomationButtons {
-  const id = JSON.stringify("collectionPath" in of ? [workspaceId, of.collectionPath] : [workspaceId, of.datasetId, of.table]);
+  const id = JSON.stringify(
+    "collectionPath" in of
+      ? [workspaceId, of.collectionPath]
+      : [workspaceId, of.datasetId, of.table],
+  );
   let store = stores.get(id);
   if (store) {
     stores.delete(id);
@@ -376,7 +409,6 @@ export function disposeAutomationButtons(workspaceId: string): void {
 /** One Collection's button store, reporting through this surface's toasts while it shows. */
 export function useAutomationButtons(input: {
   workspaceId: string;
-  /** Null until the component knows which Collection, as for a record view still reading. */
   of: ButtonsOf | null;
   onError: ReportButtonError;
   onNotice: (message: string) => void;
@@ -396,7 +428,11 @@ export function useAutomationButtons(input: {
 }
 
 /** What one button shows, re-rendering only when it changes. */
-export function useButtonView(buttons: AutomationButtons, field: string, recordId: string): ButtonView {
+export function useButtonView(
+  buttons: AutomationButtons,
+  field: string,
+  recordId: string,
+): ButtonView {
   const key = buttons.key(field, recordId);
   return useSyncExternalStore(
     (listener) => buttons.subscribe(key, listener),
@@ -405,7 +441,9 @@ export function useButtonView(buttons: AutomationButtons, field: string, recordI
 }
 
 /** Every button's state, for the Fields dialog; null follows nothing. */
-export function useButtonStates(buttons: AutomationButtons | null): ReadonlyMap<string, AutomationButtonState> | null {
+export function useButtonStates(
+  buttons: AutomationButtons | null,
+): ReadonlyMap<string, AutomationButtonState> | null {
   return useSyncExternalStore(
     (listener) => buttons?.subscribe(STATES_KEY, listener) ?? (() => undefined),
     () => buttons?.states() ?? null,

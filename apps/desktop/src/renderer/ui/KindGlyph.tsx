@@ -21,21 +21,13 @@ import {
   Workflow,
   type LucideIcon,
 } from "lucide-react";
-import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
+import {
+  FILE_KIND_RECORDS,
+  fileKindForPath,
+  type FileKindRecord,
+} from "@dohc/workspace-contracts/kinds";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 
-// One kind, one glyph, one name: every surface draws a file's kind through
-// this part, so the glyph comes from the kind registry and never from a
-// surface's own choice. The glyph says the kind, so a visible word never
-// does. A caller with only a path passes `fileKindForPath(path)`. Size and
-// color are the caller's.
-//
-// Beside a name the glyph is decorative: the control is named by its own
-// text, and a glyph label would rename it. A glyph standing alone asks for
-// `labelled`, and the kind's name becomes its accessible name.
-//
-// A `Record` over the registry's glyph ids, so a new glyph is a compile error
-// here until it has its icon.
 const GLYPHS: Record<FileKindRecord["glyphId"], LucideIcon> = {
   file: File,
   "file-text": FileText,
@@ -64,7 +56,10 @@ export function KindGlyph(props: {
 
 // The listing, not the file name, says whether a file is a database: the kind
 // registry matches `.db` by extension alone.
-export function listedFileKind(path: string, listed: WorkspaceFileEntry["kind"] | null | undefined): FileKindRecord {
+export function listedFileKind(
+  path: string,
+  listed: WorkspaceFileEntry["kind"] | null | undefined,
+): FileKindRecord {
   if (listed === "database") return FILE_KIND_RECORDS.database;
   const kind = fileKindForPath(path);
   return kind.displayKind === "database" ? FILE_KIND_RECORDS.binary : kind;
@@ -73,8 +68,14 @@ export function listedFileKind(path: string, listed: WorkspaceFileEntry["kind"] 
 // A listed file's mark: a page's `icon` frontmatter emoji stands in for its
 // kind glyph (Notion-style), in a box the glyph's size so the name does not
 // move.
-export function FileGlyph(props: { kind: FileKindRecord; icon: string | undefined; size: number; className?: string }) {
-  if (!props.icon) return <KindGlyph kind={props.kind} size={props.size} className={props.className} />;
+export function FileGlyph(props: {
+  kind: FileKindRecord;
+  icon: string | undefined;
+  size: number;
+  className?: string;
+}) {
+  if (!props.icon)
+    return <KindGlyph kind={props.kind} size={props.size} className={props.className} />;
   return (
     <span
       aria-hidden
@@ -86,11 +87,17 @@ export function FileGlyph(props: { kind: FileKindRecord; icon: string | undefine
   );
 }
 
-// The objects a workspace holds that are not files, each with one glyph
-// wherever it is listed. A `Record` over the kinds, so a new kind is a
-// compile error here until it has its icon. Like a file's, the glyph is
-// decorative beside the object's name.
-export type ObjectKind = "app" | "collection" | "group" | "chat" | "agent" | "compare" | "change" | "graph" | "history" | "news";
+export type ObjectKind =
+  | "app"
+  | "collection"
+  | "group"
+  | "chat"
+  | "agent"
+  | "compare"
+  | "change"
+  | "graph"
+  | "history"
+  | "news";
 
 const OBJECT_GLYPHS: Record<ObjectKind, LucideIcon> = {
   app: AppWindow,

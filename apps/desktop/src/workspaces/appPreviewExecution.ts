@@ -5,15 +5,17 @@ import { isInside } from "../security/pathContainment";
 import type { SitePreviewExecutionInput } from "../ipc/sitePreviewIpc";
 import { prepareOwnedStaticSitePreview } from "./ownedStaticSiteFileSource";
 import { buildOutputSiteRoot } from "./sitePackage";
-import { buildSite, startSiteDevServer, startStaticSitePreview, type SiteLogEntry } from "./siteRunner";
+import {
+  buildSite,
+  startSiteDevServer,
+  startStaticSitePreview,
+  type SiteLogEntry,
+} from "./siteRunner";
 import { commandForSiteScript } from "./siteScriptCommand";
 import { START_CANCELLED_MESSAGE } from "./sitePreviewLifecycle";
 import type { ShareViewFiles, ShareViewFilesTarget } from "./shareViewFiles";
 
-async function relativeWorkspacePath(
-  workspaceRoot: string,
-  absolutePath: string,
-): Promise<string> {
+async function relativeWorkspacePath(workspaceRoot: string, absolutePath: string): Promise<string> {
   const [realWorkspaceRoot, realAbsolutePath] = await Promise.all([
     realpath(workspaceRoot),
     realpath(absolutePath),
@@ -30,9 +32,7 @@ function buildOutputRelativeToApp(appRoot: string, workspaceRelativeOutput: stri
   if (appRoot === ".") return workspaceRelativeOutput;
   if (workspaceRelativeOutput === appRoot) return ".";
   if (!workspaceRelativeOutput.startsWith(`${appRoot}/`)) {
-    throw new Error(
-      `Build output must be inside the app folder: ${workspaceRelativeOutput}`,
-    );
+    throw new Error(`Build output must be inside the app folder: ${workspaceRelativeOutput}`);
   }
   return workspaceRelativeOutput.slice(appRoot.length + 1);
 }
@@ -54,7 +54,10 @@ export function createAppPreviewExecution(dependencies: {
   ) => Promise<{ target: ShareViewFilesTarget; path: string } | null>;
   // Throws unless this computer trusts the workspace to run its apps' code.
   // Its answer checks again, synchronously, at the spawn itself.
-  readonly assertMayRunAppCode: (workspace: { workspaceId: string; rootPath: string }) => Promise<() => void>;
+  readonly assertMayRunAppCode: (workspace: {
+    workspaceId: string;
+    rootPath: string;
+  }) => Promise<() => void>;
 }) {
   async function executeAppPreview(input: SitePreviewExecutionInput) {
     if (input.mode === "static") {
@@ -98,10 +101,12 @@ export function createAppPreviewExecution(dependencies: {
       ) {
         throw new Error(`App has no dev or start script: ${input.site.root}`);
       }
-      const script =
-        input.site.configuredScripts.dev || input.site.scripts.dev ? "dev" : "start";
+      const script = input.site.configuredScripts.dev || input.site.scripts.dev ? "dev" : "start";
       const command = commandForSiteScript(input.site, script);
-      const assertMayRun = await dependencies.assertMayRunAppCode({ workspaceId: input.workspaceId, rootPath: input.workspaceRoot });
+      const assertMayRun = await dependencies.assertMayRunAppCode({
+        workspaceId: input.workspaceId,
+        rootPath: input.workspaceRoot,
+      });
       const handle = await startSiteDevServer({
         workspaceRoot: input.workspaceRoot,
         siteRoot: input.site.root,
@@ -134,7 +139,10 @@ export function createAppPreviewExecution(dependencies: {
     let outputRoot = preferredBuildOutput(input.site);
     if (input.site.configuredScripts.build || input.site.scripts.build) {
       const command = commandForSiteScript(input.site, "build");
-      const assertMayRun = await dependencies.assertMayRunAppCode({ workspaceId: input.workspaceId, rootPath: input.workspaceRoot });
+      const assertMayRun = await dependencies.assertMayRunAppCode({
+        workspaceId: input.workspaceId,
+        rootPath: input.workspaceRoot,
+      });
       const result = await buildSite({
         workspaceRoot: input.workspaceRoot,
         siteRoot: input.site.root,

@@ -4,6 +4,9 @@ Use this guide to run sync and sharing for your own devices and collaborators.
 Local work in dohc does not need a server or account.
 dohc Drive, the managed service, is coming soon.
 
+The sections through [Check before inviting other people](#check-before-inviting-other-people) set up a working server.
+The sections after it cover optional configuration and maintenance.
+
 ## Choose who can reach the server
 
 For public access, use a server with a domain name and inbound HTTPS access.
@@ -21,31 +24,11 @@ Keep the server running while other devices need sync or browser access.
 Local work remains available when the server is offline.
 
 App publishing is disabled in the default self-host bundle.
-It needs a separate HTTPS app domain and additional relay limits.
-The app domain can be a registrable domain or a private suffix you control from the Public Suffix List.
-Use an app domain you control.
-Keep the viewer outside the app domain.
-The app domain must not be the viewer's registrable domain or a host under it.
-Launch hosts must not be public suffixes.
-Follow the [share-web operations reference](../../services/share-web/README.md) before enabling it.
-Behind Cloudflare, the bundle can serve the app domain: see [Serve published apps behind Cloudflare](#serve-published-apps-behind-cloudflare).
-Apps use their approved datasets when `DOHC_RELAY_APP_PUBLICATIONS=1` is enabled.
-Set `DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT` to change the default limit of 1,000 submitting participants per app and share grant.
-Reading an app does not consume this limit. Uploads and write operations do. Workspace storage quotas still apply.
-The release includes the isolated app runtime. The release build checks its compiled child and Wasm dependencies before creating the image.
+To turn it on, follow [Publish apps](#publish-apps).
 
 ## Prepare the host
 
-The amd64 and arm64 images include the Markdown reader. The relay refuses to start without it, because Edit shares need it.
-To override `DOHC_ENGINE_READER_CONFIG`, point its `node`, `bundle` and `manifest` fields at the absolute paths of root-owned regular files.
-Keep those files and their parent directories unwritable by the service user and other accounts.
-
 Install Docker Engine with Linux container support, Docker Compose 2.24.4 or newer, and Node.js 24.16 or newer.
-Development read replicas require Linux 5.19 or later with Landlock ABI 2 or later enabled.
-Other hosts refuse replicas. The relay must run under Docker's default seccomp profile or an equivalent outer filter.
-Replicas refuse startup when `/proc/self/status` reports no seccomp filter. Replicas remain disabled by default.
-`check:self-host --running` reports whether the running container can apply the sandbox.
-Replicas use the separate `/replicas` volume. Backups and deployment archives skip this disposable data.
 Have an SMTP service ready for verification and password reset emails.
 The SMTP service must support TLS.
 
@@ -94,6 +77,7 @@ It refuses to replace an existing configuration.
 Restrict access to this file; it contains credentials.
 Copy `DOHC_SNAPSHOT_KEY` to storage that does not depend on this server.
 Without that key, nobody can open the server's relay snapshots.
+[Keep the snapshot key away from the server](self-host-recovery.md#keep-the-snapshot-key-away-from-the-server) describes how to keep and replace the key.
 
 Edit these SMTP settings and your approved email in `.env.self-host`:
 
@@ -109,6 +93,8 @@ DOHC_SIGN_UP_EMAILS=you@your-domain.com
 
 Port 587 uses STARTTLS. For implicit TLS, use port 465 and `DOHC_SMTP_SECURE=true`.
 Use a sender address accepted by your SMTP provider.
+`DOHC_SIGN_UP_EMAILS` keeps sign-up closed to the addresses you list.
+To approve more people, see [Choose who can create an account](#choose-who-can-create-an-account).
 
 Print the network setup instructions:
 
@@ -125,62 +111,95 @@ Check existing routes before changing them.
 The setup tool does not change your Tailscale configuration.
 The configured HTTPS address must also work from inside the relay container.
 The readiness check tests that connection and reports DNS, TLS, or routing failures.
-If you add your own proxy in front of the relay, do not let it log the `Authorization` header.
-That header carries sign-in credentials and the credential your server syncs with to run your automations.
+Before you add your own proxy in front of the relay, read [Use your own proxy](#use-your-own-proxy).
 
-`DOHC_GATEWAY_ADDRESS` and `DOHC_SHARE_WEB_ADDRESS` in `.env.self-host` are the Docker network addresses of the gateway and `share-web`.
-If you change them, keep each one a single IPv4 address inside `DOHC_NETWORK_SUBNET`, with no hostname, CIDR range, or port.
-The bundle passes them to `DOHC_AUTH_TRUSTED_PROXIES` and `DOHC_SHARE_WEB_TRUSTED_PROXIES`.
-The sign-in service, `workspace-api`, trusts `X-Forwarded-For` from both addresses, and `share-web` trusts it only from the gateway.
-Each service refuses to start when a trusted proxy entry is not an IP address.
+### Decide before the first start
 
-`workspace-api` compares addresses in the same canonical form as `share-web`.
-It uses the connection's peer address unless that peer is a trusted proxy.
-For a trusted peer, it reads `X-Forwarded-For` from right to left and uses the first address that is not a trusted proxy.
-It uses the peer address instead when the header is missing, is longer than 4,096 characters, has more than 32 entries, has an empty entry or any entry that is not an IP address, or names only trusted proxies.
-It answers 400 to a connection without an IP address.
-The [proxy section of the share-web operations reference](../../services/share-web/README.md#public-origin-and-proxy) describes the `share-web` rules.
+Make these two choices before the first start. This guide does not change either one afterward.
 
-## Delete a server account
+- To move the server to a new host later by moving a disk, follow [Keep server data on an attached disk](#keep-server-data-on-an-attached-disk).
+- To keep accounts when a host or disk is lost, follow [Keep accounts in an external Postgres](#keep-accounts-in-an-external-postgres).
 
-A signed-in person can preview deletion with `POST /api/auth/account/deletion-preview`.
-The preview lists the email, server origin, owned workspace IDs, stored bytes, and counts of shares and grants.
-It returns a preview token that expires after five minutes.
+## Start and check the server
 
-Send the token and account password as `{"previewToken":"...","password":"..."}` to `POST /api/auth/account/delete`.
-The preview returns `passwordRequired: true`.
-The server verifies the password before recording deletion and rate limits attempts like password sign-in.
-An incorrect or missing password refuses deletion, including for sessions created through device approval.
-If the preview changed, request another preview before continuing.
-Share-link and app credentials cannot delete a server account.
+```sh
+node scripts/check-self-host.mjs --start
+```
 
-Deletion removes the server account, its owned workspaces, and their files, data, shares, apps, chats, and history.
-Local copies remain on each device.
-Received shares end, and their local copies remain readable.
-Contributions to another person's workspace stay in that workspace's history and discussion, including their stored authorship snapshots.
+The deployment initializes fresh storage, applies authentication migrations, and starts the services.
+The start worked when the command ends with `Self-host check summary` and two equal numbers.
+A failed check starts with `[missing]`.
+Keep the deployment secrets and volumes across restarts.
+Do not rerun fresh initialization against an existing deployment.
 
-Deletion first blocks account access, then removes server data.
-If another service is unavailable, deletion stays pending and account sessions remain blocked.
-After the account-session fence commits, share links and server automation access can remain active until the relay receives its fence, especially during a relay outage.
-The server resumes pending deletion after a restart.
-The response reports `finished: true` only after the relay purge and account cleanup finish.
+### First start with a data disk or an external database
 
-Account deletion does not edit backups.
-Backups keep the account's data until you delete them.
-Remove the person's email from `DOHC_SIGN_UP_EMAILS` yourself; the API does not change operator configuration.
-An empty list opens sign-up; keep at least one address if you want sign-up closed.
+With `DOHC_DATA_DIRECTORY` or `DOHC_POSTGRES_HOST` set, add `--first-start` for the first start only:
+
+```sh
+node scripts/check-self-host.mjs --start --first-start
+```
+
+Use `--first-start` only for a new, empty deployment. It cannot recover existing workspaces.
+A first start refuses unless all four disk folders are empty, and names each folder that holds data.
+With `DOHC_POSTGRES_HOST` set and no data disk, a first start refuses if the relay's Docker volumes already hold relay data.
+
+After the first start, every start and upgrade refuses to run in these cases:
+
+- With `DOHC_DATA_DIRECTORY` set, the disk does not hold the relay deployment.
+- With only `DOHC_POSTGRES_HOST` set, the relay's Docker volumes do not hold the relay deployment, for example on a new host.
+- With `DOHC_POSTGRES_HOST` set, the external database is unreachable or holds no dohc accounts.
+- With only `DOHC_DATA_DIRECTORY` set, the accounts volume on the host holds no accounts database.
+
+A start also refuses when Docker cannot complete these checks.
+The accounts check accepts any database that holds dohc accounts, including another deployment's, so check that `POSTGRES_DB` names this deployment's database.
+Without a data disk, the relay deployment stays in the Docker volumes on its original host, so start it there.
+
+## Connect the desktop app
+
+1. Open **Settings → Sync and sharing** and select **Connect server**.
+2. Enter the HTTPS address you configured above.
+3. Follow the browser sign-in flow.
+4. Create an account on your server and open the link in the email it sends.
+5. Approve the device after checking the displayed code.
+6. Return to dohc. Settings opens on **Sync and sharing**; turn on **Sync this workspace**.
+
+The server account belongs to your server.
+A dohc Drive account is not required.
+The connection applies to this dohc installation; workspace permissions still determine what it can access.
+
+On another device, connect to the same server and sign in to the same account.
+Copy the workspace code from **Settings → Sync and sharing**, then use it to join the existing workspace in a local folder.
+
+## Share work
+
+Use the workspace's sharing controls to choose the work and the recipient's permissions.
+Share the resulting link.
+Anonymous access works only when the share permits it.
+
+For a private server, recipients also need Tailscale network access.
+Changing the network route does not change a share's permissions.
+
+## Check before inviting other people
+
+Create a test account and confirm that verification and password reset emails arrive.
+Connect a second desktop and confirm that an edit reaches it.
+Open a share link in a separate browser profile and check its permissions.
+Restart the services and confirm that the workspace remains available.
+
+Keep a local copy of important work while testing your deployment.
+See the [browser service operations reference](../../services/share-web/README.md) for storage and permission boundaries.
 
 ## Choose who can create an account
 
 A nonempty `DOHC_SIGN_UP_EMAILS` list keeps sign-up closed to approved email addresses and pending invites.
-Add your email before the first start.
-To close sign-up, list the approved email addresses in `.env.self-host`, separated by commas:
+List the approved addresses in `.env.self-host`, separated by commas.
+Include your own address before the first start:
 
 ```dotenv
 DOHC_SIGN_UP_EMAILS=you@your-domain.com,colleague@your-domain.com
 ```
 
-Include your own address.
 With a list, the server also accepts an address that has a pending invite.
 A pending invite exists when someone shares work with an email address that has no verified account on the server.
 Revoking that share removes the invite.
@@ -250,6 +269,9 @@ If an existing volume keeps its data elsewhere, the setup and move commands refu
 Restore the previous setting. Never remove the volume: it holds the deployment's data.
 This guide does not move existing volumes onto a disk.
 
+Then [start the server with `--first-start`](#first-start-with-a-data-disk-or-an-external-database).
+The disk setup passed when the check prints `[ok] data disk volumes` and `[ok] relay deployment on the data disk`.
+
 ## Keep accounts in an external Postgres
 
 By default, the deployment runs its own Postgres for accounts and sign-in sessions, in a Docker volume on the host.
@@ -294,6 +316,10 @@ Leave `DOHC_POSTGRES_HOST`, `DOHC_POSTGRES_PORT` and `DOHC_POSTGRES_CA_FILE` emp
 Your provider's backups are the only backups of these accounts.
 A deployment archive does not include them.
 This guide does not move accounts from the bundled database to an external one.
+
+Then [start the server with `--first-start`](#first-start-with-a-data-disk-or-an-external-database).
+The database setup passed when the check prints `[ok] compose startup`. The services start only after the migrations finish.
+Every later start also prints `[ok] accounts database`.
 
 ## Run behind Cloudflare
 
@@ -343,6 +369,21 @@ node tools/self-host/bootstrap.mjs stop
 node tools/self-host/bootstrap.mjs start
 ```
 
+## Publish apps
+
+App publishing is disabled in the default self-host bundle.
+It needs its own HTTPS app domain and additional relay limits.
+Use a separate registrable domain that you control for apps.
+For example, serve the viewer at `dohc.your-domain.com` and apps under `your-app-domain.net`.
+[App domains](../../services/share-web/README.md#app-domains) gives the full rules, including the private suffixes it permits.
+Follow the [share-web operations reference](../../services/share-web/README.md) before enabling it.
+Behind Cloudflare, the bundle can serve the app domain: see [Serve published apps behind Cloudflare](#serve-published-apps-behind-cloudflare).
+
+Apps use their approved datasets when `DOHC_RELAY_APP_PUBLICATIONS=1` is enabled.
+Set `DOHC_RELAY_APP_BACKEND_MAX_PARTICIPANTS_PER_GRANT` to change the default limit of 1,000 submitting participants per app and share grant.
+Reading an app does not consume this limit. Uploads and write operations do. Workspace storage quotas still apply.
+The release includes the isolated app runtime. The release build checks its compiled child and Wasm dependencies before creating the image.
+
 ### Serve published apps behind Cloudflare
 
 Behind Cloudflare, the gateway can also serve published apps on their app domain.
@@ -374,6 +415,9 @@ Use the app domain only for published apps. Serve nothing else on it, including 
 5. Bypass the cache and turn off bot challenges for the app hosts, as for the server's own host.
 6. Stop and start the deployment.
 
+To check the setup, publish an app from a connected desktop and open its share link in a browser.
+The app opens on a host under your app domain.
+
 With `DOHC_BEHIND_CLOUDFLARE=1` and an app domain, the setup and recovery commands add the Cloudflare app overlay.
 They refuse to run when the certificate or key setting is missing.
 They also refuse a certificate setting without Cloudflare and an app domain.
@@ -391,79 +435,20 @@ Keep the wildcard record proxied.
 Never turn off certificate checks in a client to reach the origin directly.
 To replace the certificate, install the new files at the same paths, then stop and start the deployment.
 
-## Start and check the server
+## Use your own proxy
 
-```sh
-node scripts/check-self-host.mjs --start
-```
+If you add your own proxy in front of the relay, do not let it log the `Authorization` header.
+That header carries sign-in credentials and the credential your server syncs with to run your automations.
 
-With `DOHC_DATA_DIRECTORY` or `DOHC_POSTGRES_HOST` set, add `--first-start` for the first start only.
-After that, every start and upgrade refuses to run in these cases:
+`DOHC_GATEWAY_ADDRESS` and `DOHC_SHARE_WEB_ADDRESS` in `.env.self-host` are the Docker network addresses of the gateway and `share-web`.
+If you change them, keep each one a single IPv4 address inside `DOHC_NETWORK_SUBNET`, with no hostname, CIDR range, or port.
+The bundle passes them to `DOHC_AUTH_TRUSTED_PROXIES` and `DOHC_SHARE_WEB_TRUSTED_PROXIES`.
+The sign-in service, `workspace-api`, trusts `X-Forwarded-For` from both addresses, and `share-web` trusts it only from the gateway.
+Each service refuses to start when a trusted proxy entry is not an IP address.
 
-- With `DOHC_DATA_DIRECTORY` set, the disk does not hold the relay deployment.
-- With only `DOHC_POSTGRES_HOST` set, the relay's Docker volumes do not hold the relay deployment, for example on a new host.
-- With `DOHC_POSTGRES_HOST` set, the external database is unreachable or holds no dohc accounts.
-- With only `DOHC_DATA_DIRECTORY` set, the accounts volume on the host holds no accounts database.
-
-The accounts check accepts any database that holds dohc accounts, including another deployment's, so check that `POSTGRES_DB` names this deployment's database.
-
-A first start refuses unless all four disk folders are empty, and names each folder that holds data.
-With `DOHC_POSTGRES_HOST` set and no data disk, a first start refuses if the relay's Docker volumes already hold relay data.
-Without a data disk, the relay deployment stays in the Docker volumes on its original host, so start it there.
-Add `--first-start` only to create a new relay deployment that holds none of the existing workspaces.
-A start also refuses when Docker cannot complete these checks.
-
-The deployment initializes fresh storage, applies authentication migrations, and starts the services.
-Keep the deployment secrets and volumes across restarts.
-Do not rerun fresh initialization against an existing deployment.
-
-## Live editing limits
-
-The live editing profile allows 128 connections in the relay and 96 per workspace.
-The relay keeps 16 of each for workspace owners, so other people share 112 in total and 80 per workspace.
-Each grant allows 80 connections, each principal 12, and each editing session 6.
-Everyone using one share link counts against its link grant.
-One browser or one agent connection holding that link has its own link principal.
-Named accounts count across their grants and devices.
-The browser gateway applies the same limits to its named and link routes.
-
-A refused connection closes with the code of the limit it hit:
-
-| Code | Limit |
-| --- | --- |
-| `live_total_limit` | Connections in the relay or gateway |
-| `live_workspace_limit` | Connections in one workspace |
-| `live_grant_limit` | Connections on one grant |
-| `live_person_limit` | Connections for one principal |
-| `live_session_limit` | Connections in one editing session |
-| `live_buffer_limit` | Live frame buffers |
-
-The relay holds at most 128 MiB of live frame buffers across its owner, desktop, named, and link routes.
-Within that budget, one principal holds at most 12 MiB.
-People other than the owner hold at most 80 MiB per share and 80 MiB per workspace, which leaves room for owners and other workspaces.
-The browser gateway has a separate 128 MiB frame budget with the same portions, shared by its named and link routes.
-Each relay socket can queue at most 256 KiB of outgoing data.
-Each gateway socket can queue at most 4 MiB.
-
-Checking an edit uses a separate 128 MiB pool in the relay, so it never takes room from live frames.
-Each check reserves five times the document's stored state on the relay, plus three times the edit.
-Each person runs one check at a time.
-A check that must wait for room gets a retry.
-The relay refuses an edit whose check needs more than 128 MiB, or whose document state and new edit total more than 16 MiB.
-Two validation processes run the checks, each with its own heap of up to 512 MiB.
-When a check runs out of that heap, the relay refuses the edit as too large and keeps running.
-An owner's refused edit is kept unapplied, and that document's later owner edits wait behind it.
-The owner can save a recovery copy of refused edits, even ones kept in an earlier copy of the workspace.
-If this build has not migrated that earlier copy, the session host copies it into `.recovery` in the session host's data folder and migrates the copy.
-That needs free space of twice the earlier copy's size. The session host removes the copy after the save, or after one idle minute.
-The session host checks a document in the same processes before it starts live editing on it, one document at a time, so edits always keep one process.
-When that check runs out of heap, the document shows Stopped by the server until its owner chooses Resume.
-These budgets exclude the validation processes' memory, the session host's document state, and OS socket buffers.
-
-These limits fit 20 people with three documents open each, with capacity left for owners and other devices.
-They remain provisional until the launch server is measured.
-The numbers come from [the live editing profile](../../services/sync-relay/src/selfHostLiveProfile.ts).
-Custom deployments must supply the same buffer budget to all live routes.
+`workspace-api` reads `X-Forwarded-For` only from a trusted proxy.
+If the forwarded address list is missing, invalid, or names only trusted proxies, the service uses the connecting proxy's address.
+The [proxy section of the share-web operations reference](../../services/share-web/README.md#public-origin-and-proxy) describes the `share-web` rules.
 
 ## Run automations on the server
 
@@ -487,7 +472,19 @@ Each workspace can start a burst of 120 runs, then one run every 10 seconds, or 
 Excess runs wait. The owner receives a notice at most once a day when the workspace reaches its run limit.
 At the workspace limit, newly assigned schedules run on the owner's computer.
 
-To turn server automations off, set `DOHC_RELAY_AUTOMATIONS=0` in `.env.self-host`.
+Check a running deployment with `node scripts/check-self-host.mjs --running`.
+The automation check reports whether the engine daemon is up and a replica pass has completed.
+Individual workspace failures appear in the sync-relay logs with their workspace IDs and do not take the server offline.
+An unavailable automation host fails this check even when sync and sharing remain available.
+If it fails, inspect the sync-relay logs and verify disk space and the relay's public HTTPS route.
+
+### Turn server automations off
+
+Turning off automations deletes their server copies at startup, with each copy's claims and run history.
+Save a private deployment archive first if you need that history.
+The bundle cannot restore or view archived run history.
+
+Set `DOHC_RELAY_AUTOMATIONS=0` in `.env.self-host`.
 Stop and start the deployment to apply the setting:
 
 ```sh
@@ -495,60 +492,153 @@ node tools/self-host/bootstrap.mjs stop
 node tools/self-host/bootstrap.mjs start
 ```
 
-Turning automations off deletes server automation copies and their local claims and run history at startup.
 A copy the phone has also read stays for one day after the restart or the phone's last read, then goes with its run history.
 With automations off, a read from the phone or a personal agent still makes a copy of the workspace under `/host-data`.
 That copy goes a day after the last read.
 At startup, the server ends the phone and personal-agent hold on a copy whose workspace has **Show on phone** turned off, or has a new owner.
 Such a copy goes at once unless an automation still uses it.
 To keep a workspace's phone reads off the server, turn off **Show on phone** for it in the phone's Settings.
-Save a private deployment archive first if you need to preserve that history.
-The bundle cannot restore or view archived run history.
 The synced workspace files remain in the relay.
 At the owner's next desktop check-in, schedules move back to that computer.
 Set `DOHC_RELAY_AUTOMATIONS=1` and restart to enable server automations again.
 
-Check a running deployment with `node scripts/check-self-host.mjs --running`.
-The automation check reports whether the engine daemon is up and a replica pass has completed.
-Individual workspace failures appear in the sync-relay logs with their workspace IDs and do not take the server offline.
-An unavailable automation host fails this check even when sync and sharing remain available.
-If it fails, inspect the sync-relay logs and verify disk space and the relay's public HTTPS route.
+## Replace the Markdown reader
 
-## Connect the desktop app
+The amd64 and arm64 images include the Markdown reader. The relay refuses to start without it, because Edit shares need it.
+To override `DOHC_ENGINE_READER_CONFIG`, point its `node`, `bundle` and `manifest` fields at the absolute paths of root-owned regular files.
+Keep those files and their parent directories unwritable by the service user and other accounts.
 
-1. Open **Settings → Sync and sharing** and select **Connect server**.
-2. Enter the HTTPS address you configured above.
-3. Follow the browser sign-in flow.
-4. Create an account on your server and open the link in the email it sends.
-5. Approve the device after checking the displayed code.
-6. Return to dohc. Settings opens on **Sync and sharing**; turn on **Sync this workspace**.
+## Development read replicas
 
-The server account belongs to your server.
-A dohc Drive account is not required.
-The connection applies to this dohc installation; workspace permissions still determine what it can access.
+Replicas remain disabled by default.
+Development read replicas require Linux 5.19 or later with Landlock ABI 2 or later enabled.
+Other hosts refuse replicas. The relay must run under Docker's default seccomp profile or an equivalent outer filter.
+Replicas refuse startup when `/proc/self/status` reports no seccomp filter.
+`node scripts/check-self-host.mjs --running` reports whether the running container can apply the sandbox.
+Replicas use the separate `/replicas` volume. Backups and deployment archives skip this disposable data.
 
-On another device, connect to the same server and sign in to the same account.
-Copy the workspace code from **Settings → Sync and sharing**, then use it to join the existing workspace in a local folder.
+## Live editing limits
 
-## Share work
+The live editing profile allows 128 connections in the relay and 96 per workspace.
+The relay keeps 16 of each for workspace owners, so other people share 112 in total and 80 per workspace.
+Each grant allows 80 connections, each principal 12, and each editing session 6.
+Everyone using one share link counts against its link grant.
+One browser or one agent connection holding that link has its own link principal.
+Named accounts count across their grants and devices.
+The browser gateway applies the same limits to its named and link routes.
 
-Use the workspace's sharing controls to choose the work and the recipient's permissions.
-Share the resulting link.
-Anonymous access works only when the share permits it.
+A refused connection closes with the code of the limit it hit:
 
-For a private server, recipients also need Tailscale network access.
-For a public server, the share link provides the browser entry point.
-Changing the network route does not change a share's permissions.
+| Code | Limit |
+| --- | --- |
+| `live_total_limit` | Connections in the relay or gateway |
+| `live_workspace_limit` | Connections in one workspace |
+| `live_grant_limit` | Connections on one grant |
+| `live_person_limit` | Connections for one principal |
+| `live_session_limit` | Connections in one editing session |
+| `live_buffer_limit` | Live frame buffers |
 
-## Check before inviting other people
+The relay holds at most 128 MiB of live frame buffers, and the browser gateway has a separate 128 MiB budget.
+Checking edits uses another 128 MiB pool in the relay and two validation processes, each with a heap of up to 512 MiB.
+The session host's document state and OS socket buffers use memory outside these budgets.
 
-Create a test account and confirm that verification and password reset emails arrive.
-Connect a second desktop and confirm that an edit reaches it.
-Open a share link in a separate browser profile and check its permissions.
-Restart the services and confirm that the workspace remains available.
+The relay refuses an edit whose document state and new edit total more than 16 MiB, or whose check needs more than the 128 MiB pool.
+When a check runs out of heap, the relay refuses the edit as too large and keeps running.
+A check that must wait for room gets a retry.
+An owner's refused edit is kept unapplied, and that document's later owner edits wait behind it.
+The owner can save a recovery copy of refused edits, even ones kept in an earlier copy of the workspace.
+If this build has not migrated that earlier copy, the session host copies it into `.recovery` in its data folder and migrates the copy.
+That needs free space of twice the earlier copy's size. The session host removes the copy after the save, or after one idle minute.
+The session host also checks a document before it starts live editing on it.
+When that check runs out of heap, the document shows Stopped by the server until its owner chooses Resume.
 
-Keep a local copy of important work while testing your deployment.
-See the [browser service operations reference](../../services/share-web/README.md) for storage and permission boundaries.
+These limits fit 20 people with three documents open each, with capacity left for owners and other devices.
+They remain provisional until the launch server is measured.
+The numbers come from [the live editing profile](../../services/sync-relay/src/selfHostLiveProfile.ts).
+Custom deployments must supply the same buffer budget to all live routes.
+
+## Back up and maintain the deployment
+
+Follow the [backup and recovery procedure](self-host-recovery.md) before changing your deployment.
+To upload an encrypted relay snapshot every hour, follow [Take hourly off-site snapshots](self-host-recovery.md#take-hourly-off-site-snapshots).
+Recovery must preserve revoked access; replacing current databases with an older snapshot is not a supported rollback.
+
+Stop the services without removing data:
+
+```sh
+node tools/self-host/bootstrap.mjs stop
+```
+
+Start them again and check readiness:
+
+```sh
+node tools/self-host/bootstrap.mjs start
+```
+
+### Upgrade the server
+
+Each server release serves a range of relay API versions, and `GET /ready` on the relay reports it as `apiVersions`.
+A desktop newer than that range tells its user that the server runs an older version of dohc.
+Upgrade the server to serve that desktop again.
+
+For an upgrade, stop the deployment and save a snapshot and private archive.
+Replace the shipped Compose files, scripts, and documentation with the new release bundle.
+Keep your `.env.self-host`, including `DOHC_DEPLOYMENT_NAME`, and all existing data volumes.
+Do not rerun `init`.
+Load the new release image, then select it:
+
+```sh
+node tools/self-host/bootstrap.mjs upgrade --image dohc-self-host:NEW_VERSION
+```
+
+The upgrade preserves volumes and secrets and saves the previous configuration privately.
+It can apply database migrations. If it fails, preserve the data and follow the recovery procedure.
+On a large relay log, the first start after an upgrade can take several minutes.
+
+### Request logs
+
+`workspace-api`, `sync-relay` and `share-web` each write one line per answered request: when it arrived, the method, the route and the status.
+For example: `[share-web] request 2026-11-12T11:02:03.456Z GET /s/* 200`.
+A line names the route's pattern, never the address that was requested, so link secrets, sign-in tokens and session ids stay out of it.
+It also omits the caller's IP address and every header.
+A path that matches no route logs as `unmatched`, a request to a published app as `app`, and the relay's service-to-service traffic as `replication`.
+
+Docker keeps each service's newest lines up to a size (`logging` in `docker-compose.self-host.yml`): 50 MB for `sync-relay`, 20 MB for `share-web` and 10 MB for `workspace-api`.
+The sizes are chosen so a lightly used server keeps about a week of lines.
+Retention is by size, not age: a quieter server keeps lines for longer, and a busier one for less.
+The gateway writes no request lines; Docker keeps its newest 50 MB of other messages.
+Recreating a container deletes its lines.
+To keep more or less, change `max-size` and `max-file` there.
+The lines still show when each route was used, such as when a share link was opened, so keep them only as long as you need them.
+
+## Delete a server account
+
+A signed-in person can preview deletion with `POST /api/auth/account/deletion-preview`.
+The preview lists the email, server origin, owned workspace IDs, stored bytes, and counts of shares and grants.
+It returns a preview token that expires after five minutes.
+
+Send the token and account password as `{"previewToken":"...","password":"..."}` to `POST /api/auth/account/delete`.
+The preview returns `passwordRequired: true`.
+The server verifies the password before recording deletion and rate limits attempts like password sign-in.
+An incorrect or missing password refuses deletion, including for sessions created through device approval.
+If the preview changed, request another preview before continuing.
+Share-link and app credentials cannot delete a server account.
+
+Deletion removes the server account, its owned workspaces, and their files, data, shares, apps, chats, and history.
+Local copies remain on each device.
+Received shares end, and their local copies remain readable.
+Contributions to another person's workspace stay in that workspace's history and discussion, including their stored authorship snapshots.
+
+Deletion first blocks account access, then removes server data.
+If another service is unavailable, deletion stays pending and account sessions remain blocked.
+After the account-session fence commits, share links and server automation access can remain active until the relay receives its fence, especially during a relay outage.
+The server resumes pending deletion after a restart.
+The response reports `finished: true` only after the relay purge and account cleanup finish.
+
+Account deletion does not edit backups.
+Backups keep the account's data until you delete them.
+Remove the person's email from `DOHC_SIGN_UP_EMAILS` yourself; the API does not change operator configuration.
+An empty list opens sign-up; keep at least one address if you want sign-up closed.
 
 ## Disable a published app
 
@@ -561,6 +651,7 @@ docker compose --env-file .env.self-host -f docker-compose.self-host.yml exec -T
 ```
 
 Use the publication ID from the owner's publication list or the app URL's `app` parameter.
+The takedown worked when the command prints `Disabled publication` with that ID and exits with status 0.
 The command disables that one publication. The owner sees the reason and cannot reactivate that publication.
 The relay records the actor as "operator", the time, and the reason durably.
 It immediately refuses serving, new launches, and writes, including requests from existing launches.
@@ -597,53 +688,3 @@ A retry after a lift holds the owner's app publishing again.
 
 Restoring a backup taken before the takedown brings that publication back and removes the hold.
 Run the takedown command again after restoring such a backup.
-
-## Back up and maintain the deployment
-
-Follow the [backup and recovery procedure](self-host-recovery.md) before changing your deployment.
-To upload an encrypted relay snapshot every hour, follow [Take hourly off-site snapshots](self-host-recovery.md#take-hourly-off-site-snapshots).
-Recovery must preserve revoked access; replacing current databases with an older snapshot is not a supported rollback.
-
-Stop the services without removing data:
-
-```sh
-node tools/self-host/bootstrap.mjs stop
-```
-
-Start them again and check readiness:
-
-```sh
-node tools/self-host/bootstrap.mjs start
-```
-
-Each server release serves a range of relay API versions, and `GET /ready` on the relay reports it as `apiVersions`.
-A desktop newer than that range tells its user that the server runs an older version of dohc.
-Upgrade the server to serve that desktop again.
-
-For an upgrade, stop the deployment and save a snapshot and private archive.
-Replace the shipped Compose files, scripts, and documentation with the new release bundle.
-Keep your `.env.self-host`, including `DOHC_DEPLOYMENT_NAME`, and all existing data volumes.
-Do not rerun `init`.
-Load the new release image, then select it:
-
-```sh
-node tools/self-host/bootstrap.mjs upgrade --image dohc-self-host:NEW_VERSION
-```
-
-The upgrade preserves volumes and secrets and saves the previous configuration privately.
-It can apply database migrations. If it fails, preserve the data and follow the recovery procedure.
-On a large relay log, the first start after an upgrade can take several minutes.
-
-### Request logs
-
-`workspace-api`, `sync-relay` and `share-web` each write one line per answered request: when it arrived, the method, the route and the status.
-For example: `[share-web] request 2026-11-12T11:02:03.456Z GET /s/* 200`.
-A line names the route's pattern, never the address that was requested, so link secrets, sign-in tokens and session ids stay out of it.
-It also omits the caller's IP address and every header.
-A path that matches no route logs as `unmatched`, a request to a published app as `app`, and the relay's service-to-service traffic as `replication`.
-
-Docker keeps the newest 50 MB of each service's lines (`logging` in `docker-compose.self-host.yml`).
-That limit is by size, not age: on a quiet server it can hold months of lines.
-Recreating a container deletes its lines.
-To keep more or less, change `max-size` and `max-file` there.
-The lines still show when each route was used, such as when a share link was opened, so keep them only as long as you need them.

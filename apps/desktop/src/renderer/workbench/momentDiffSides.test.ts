@@ -21,7 +21,10 @@ describe("momentDiffSides", () => {
       afterBinary: bytes(2048),
     });
 
-    expect(sides.before, "key the page on one record-level kind -> `before` is dropped and the only readable thing this moment has disappears.").toBe("the old words\n");
+    expect(
+      sides.before,
+      "key the page on one record-level kind -> `before` is dropped and the only readable thing this moment has disappears.",
+    ).toBe("the old words\n");
     expect(sides.after).toBeUndefined();
     expect(sides.afterIsBinary).toBe(true);
     expect(sides.beforeIsBinary).toBe(false);
@@ -56,7 +59,6 @@ describe("momentDiffSides", () => {
     expect(sides.bytesOnly).toBe(true);
     expect(sides.before).toBeUndefined();
     expect(sides.after).toBeUndefined();
-    // The result is what the file holds now.
     expect(sides.byteLength).toBe(12);
   });
 
@@ -71,7 +73,10 @@ describe("momentDiffSides", () => {
       byteLength: undefined,
     });
 
-    expect(sides.bytesOnly, "read moment.byteLength alone -> a removed file that held 4096 bytes reports '0 bytes'.").toBe(true);
+    expect(
+      sides.bytesOnly,
+      "read moment.byteLength alone -> a removed file that held 4096 bytes reports '0 bytes'.",
+    ).toBe(true);
     expect(sides.byteLength).toBe(4096);
   });
 

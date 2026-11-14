@@ -1,47 +1,146 @@
-import {afterEach, expect, it, vi} from "vitest";
-import {createLinkLiveClient} from "./linkLiveClient";
-import {LINK_REFUSALS, linkRefusalBody, type LinkRefusalCode} from "@dohc/security-contract/link-refusal";
+import { afterEach, expect, it, vi } from "vitest";
+import { createLinkLiveClient } from "./linkLiveClient";
+import type { LinkBrowserMaterial } from "./server";
+import {
+  LINK_REFUSALS,
+  linkRefusalBody,
+  type LinkRefusalCode,
+} from "@dohc/security-contract/link-refusal";
 
-const origin = "https://share.example.test", exchangeKey = "link-live-exchange-key-at-least-32-bytes";
-const discriminator = "abcdefghijkl", capabilityToken = "A".repeat(43), profileSecret = "B".repeat(43);
-const limits = {maxPendingRequests: 1, maxRequestBytes: 2048, maxResponseBytes: 8192, timeoutMs: 1000};
-const browserLimits = {provider: {frames: {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384},
-  maxQueuedBytes: 16384, maxQueuedFrames: 64, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 16384},
-  maxPendingUpdateBytes: 16384, maxPendingUpdates: 8, maxDeliveryAttempts: 4},
-  maxHttpResponseBytes: 16384, maxSocketBufferedBytes: 16384, connectTimeoutMs: 2000, sendTimeoutMs: 500, drainPollMs: 10};
-const metadata = {discriminator, path: "docs/a.md"};
-function request(body: unknown = metadata, path = "/api/live/link-document", headers: Record<string, string> = {}, signal?: AbortSignal) {
-  return new Request(`${origin}${path}`, {method: "POST", body: JSON.stringify(body), signal,
-    headers: {host: "share.example.test", origin, "content-type": "application/json", cookie: "protected=cookie", ...headers}});
+const origin = "https://share.example.test",
+  exchangeKey = "link-live-exchange-key-at-least-32-bytes";
+const discriminator = "abcdefghijkl",
+  capabilityToken = "A".repeat(43),
+  profileSecret = "B".repeat(43);
+const limits = {
+  maxPendingRequests: 1,
+  maxRequestBytes: 2048,
+  maxResponseBytes: 8192,
+  timeoutMs: 1000,
+};
+const browserLimits = {
+  provider: {
+    frames: {
+      receive: {
+        maxFrameBytes: 1024,
+        maxStateVectorBytes: 4096,
+        maxUpdateBytes: 8192,
+        maxSyncBytes: 16384,
+      },
+      maxQueuedBytes: 16384,
+      maxQueuedFrames: 64,
+      maxControlBytes: 4096,
+      maxControlFrames: 8,
+      maxAssemblyBytes: 16384,
+    },
+    maxPendingUpdateBytes: 16384,
+    maxPendingUpdates: 8,
+    maxDeliveryAttempts: 4,
+  },
+  maxHttpResponseBytes: 16384,
+  maxSocketBufferedBytes: 16384,
+  connectTimeoutMs: 2000,
+  sendTimeoutMs: 500,
+  drainPollMs: 10,
+};
+const metadata = { discriminator, path: "docs/a.md" };
+function request(
+  body: unknown = metadata,
+  path = "/api/live/link-document",
+  headers: Record<string, string> = {},
+  signal?: AbortSignal,
+) {
+  return new Request(`${origin}${path}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    signal,
+    headers: {
+      host: "share.example.test",
+      origin,
+      "content-type": "application/json",
+      cookie: "protected=cookie",
+      ...headers,
+    },
+  });
 }
-function fixture(fetchRelay = vi.fn(async (_request: Request) => Response.json({objectId: "object-a"}))) {
-  const resolveMaterial = vi.fn(async (_discriminator: string, _cookie: string | null, _signal: AbortSignal) =>
-    ({ok: true as const, capabilityToken, profileSecret, setCookie: null,currentCapability:async()=>capabilityToken}));
-  return {fetchRelay, resolveMaterial, client: createLinkLiveClient({relayUrl: "https://relay.example.test", publicOrigin: origin,
-    exchangeKey, limits, browserLimits, resolveMaterial, fetchRelay})};
+function fixture(
+  fetchRelay = vi.fn(async (_request: Request) => Response.json({ objectId: "object-a" })),
+  {
+    holdsSession,
+    material = {
+      ok: true,
+      capabilityToken,
+      profileSecret,
+      setCookie: null,
+      currentCapability: async () => capabilityToken,
+    },
+  }: { holdsSession?: boolean; material?: LinkBrowserMaterial } = {},
+) {
+  const resolveMaterial = vi.fn(
+    async (_discriminator: string, _cookie: string | null, _signal: AbortSignal) => material,
+  );
+  return {
+    fetchRelay,
+    resolveMaterial,
+    client: createLinkLiveClient({
+      relayUrl: "https://relay.example.test",
+      publicOrigin: origin,
+      exchangeKey,
+      limits,
+      browserLimits,
+      resolveMaterial,
+      fetchRelay,
+      ...(holdsSession === undefined ? {} : { holdsSession: () => holdsSession }),
+    }),
+  };
 }
+const ticketRequest = () =>
+  request({ discriminator, objectId: "object-a" }, "/api/live/link-ticket");
+const opaque = [404, '{"ok":false,"error":"not found"}'];
+const tryAgain = [503, JSON.stringify(linkRefusalBody("link_live_unavailable"))];
+const answered = async (response: Response) => [response.status, await response.text()];
 afterEach(() => vi.restoreAllMocks());
-it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])("preserves only the scoped relay refusal %s", async code => {
-  const body = linkRefusalBody(code), status = LINK_REFUSALS[code].status;
-  const f = fixture(vi.fn(async () => Response.json(body, {status})));
-  const response = await f.client.handle(request());
-  expect([response.status, await response.json()]).toEqual([status, body]);
-  for (const value of [{...body, workspaceId: "private"}, {...body, error: "private path"}]) {
-    const refused = await fixture(vi.fn(async () => Response.json(value, {status}))).client.handle(request());
-    expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
-  }
-});
+it.each(Object.keys(LINK_REFUSALS) as LinkRefusalCode[])(
+  "preserves only the scoped relay refusal %s",
+  async (code) => {
+    const body = linkRefusalBody(code),
+      status = LINK_REFUSALS[code].status;
+    const f = fixture(vi.fn(async () => Response.json(body, { status })));
+    const response = await f.client.handle(request());
+    expect([response.status, await response.json()]).toEqual([status, body]);
+    for (const value of [
+      { ...body, workspaceId: "private" },
+      { ...body, error: "private path" },
+    ]) {
+      const refused = await fixture(
+        vi.fn(async () => Response.json(value, { status })),
+      ).client.handle(request());
+      // A relay failure that is not a clean refusal is still the servers' trouble.
+      expect(await answered(refused)).toEqual(status >= 500 ? tryAgain : opaque);
+    }
+  },
+);
 
-it.each([401, 404, 429, 503])("keeps unverified relay failures opaque (%s)", async status => {
-  const f = fixture(vi.fn(async () => Response.json({ok: false, error: "private detail"}, {status})));
+it.each([401, 404, 429])("keeps unverified relay failures opaque (%s)", async (status) => {
+  const f = fixture(
+    vi.fn(async () => Response.json({ ok: false, error: "private detail" }, { status })),
+  );
   const response = await f.client.handle(request());
-  expect([response.status, await response.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
+  expect([response.status, await response.text()]).toEqual([
+    404,
+    '{"ok":false,"error":"not found"}',
+  ]);
 });
 it("derives private credentials from the selected cookie and exposes only object identity and limits", async () => {
-  const f = fixture(), response = await f.client.handle(request());
+  const f = fixture(),
+    response = await f.client.handle(request());
   expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({objectId: "object-a", limits: browserLimits});
-  expect(f.resolveMaterial).toHaveBeenCalledWith(discriminator, "protected=cookie", expect.any(AbortSignal));
+  expect(await response.json()).toEqual({ objectId: "object-a", limits: browserLimits });
+  expect(f.resolveMaterial).toHaveBeenCalledWith(
+    discriminator,
+    "protected=cookie",
+    expect.any(AbortSignal),
+  );
   const sent = f.fetchRelay.mock.calls[0]![0];
   expect(sent.url).toBe("https://relay.example.test/sync/live/link-document");
   expect(sent.headers.get("authorization")).toBe(`LinkCapability ${capabilityToken}`);
@@ -51,16 +150,35 @@ it("derives private credentials from the selected cookie and exposes only object
   expect(await sent.json()).toEqual(metadata);
 });
 it("sends an agent's own token and address, with one session name per address and no profile", async () => {
-  const f = fixture(), accessToken = "C".repeat(43), resource = `${origin}/mcp/s/${"A".repeat(43)}`;
-  const agent = f.client.agent({accessToken, resource});
+  const f = fixture(),
+    accessToken = "C".repeat(43),
+    resource = `${origin}/mcp/s/${"A".repeat(43)}`;
+  const agent = f.client.agent({ accessToken, resource });
   const opened = await agent.document("docs/a.md", AbortSignal.timeout(1000));
-  expect([opened.status, await opened.json()]).toEqual([200, {objectId: "object-a", limits: browserLimits}]);
-  expect((await f.client.agent({accessToken, resource}).document("docs/a.md", AbortSignal.timeout(1000))).status).toBe(200);
+  expect([opened.status, await opened.json()]).toEqual([
+    200,
+    { objectId: "object-a", limits: browserLimits },
+  ]);
+  expect(
+    (
+      await f.client
+        .agent({ accessToken, resource })
+        .document("docs/a.md", AbortSignal.timeout(1000))
+    ).status,
+  ).toBe(200);
   const [first, second] = f.fetchRelay.mock.calls.map(([sent]) => sent);
-  expect([first!.headers.get("authorization"), first!.headers.get("x-dohc-agent-resource"), first!.headers.get("x-dohc-relay-exchange-key")])
-    .toEqual([`DohcAgent ${accessToken}`, resource, exchangeKey]);
-  expect(first!.headers.has("x-dohc-link-profile-secret") || first!.headers.has("cookie")).toBe(false);
-  const bodies = [await first!.json(), await second!.json()] as Array<{discriminator: string; path: string}>;
+  expect([
+    first!.headers.get("authorization"),
+    first!.headers.get("x-dohc-agent-resource"),
+    first!.headers.get("x-dohc-relay-exchange-key"),
+  ]).toEqual([`DohcAgent ${accessToken}`, resource, exchangeKey]);
+  expect(first!.headers.has("x-dohc-link-profile-secret") || first!.headers.has("cookie")).toBe(
+    false,
+  );
+  const bodies = [await first!.json(), await second!.json()] as Array<{
+    discriminator: string;
+    path: string;
+  }>;
   expect(bodies[0]!.discriminator).toMatch(/^[A-Za-z0-9_-]{12}$/u);
   expect(bodies[1]).toEqual(bodies[0]);
   expect(f.resolveMaterial).not.toHaveBeenCalled();
@@ -69,55 +187,205 @@ it("sends an agent's own token and address, with one session name per address an
   expect(f.fetchRelay).toHaveBeenCalledTimes(2);
 });
 it.each([
-  {origin: "https://attacker.test"}, {origin: "null"}, {host: "attacker.test"},
-  {"sec-fetch-site": "cross-site"}, {"content-type": "text/plain"},
-] as Record<string, string>[])("refuses cross-origin metadata before resolving cookie authority: %j", async headers => {
-  const f = fixture(); expect((await f.client.handle(request(metadata, undefined, headers))).status).toBe(404);
-  expect(f.resolveMaterial).not.toHaveBeenCalled(); expect(f.fetchRelay).not.toHaveBeenCalled();
-});
+  { origin: "https://attacker.test" },
+  { origin: "null" },
+  { host: "attacker.test" },
+  { "sec-fetch-site": "cross-site" },
+  { "content-type": "text/plain" },
+] as Record<string, string>[])(
+  "refuses cross-origin metadata before resolving cookie authority: %j",
+  async (headers) => {
+    const f = fixture();
+    expect((await f.client.handle(request(metadata, undefined, headers))).status).toBe(404);
+    expect(f.resolveMaterial).not.toHaveBeenCalled();
+    expect(f.fetchRelay).not.toHaveBeenCalled();
+  },
+);
 it.each([
-  {...metadata, workspaceId: "foreign"}, {...metadata, principalId: "owner"}, {...metadata, capabilityToken},
-  {...metadata, discriminator: "a".repeat(43)}, {...metadata, path: "a.excalidraw"},
-])("refuses client authority claims and invalid selectors: %j", async body => {
-  const f = fixture(); expect((await f.client.handle(request(body))).status).toBe(404); expect(f.fetchRelay).not.toHaveBeenCalled();
+  { ...metadata, workspaceId: "foreign" },
+  { ...metadata, principalId: "owner" },
+  { ...metadata, capabilityToken },
+  { ...metadata, discriminator: "a".repeat(43) },
+  { ...metadata, path: "a.excalidraw" },
+])("refuses client authority claims and invalid selectors: %j", async (body) => {
+  const f = fixture();
+  expect((await f.client.handle(request(body))).status).toBe(404);
+  expect(f.fetchRelay).not.toHaveBeenCalled();
 });
 it("forwards a different cookie only for its own discriminator and refuses missing credentials", async () => {
   const seen: string[] = [];
-  const client = createLinkLiveClient({relayUrl: "https://relay.example.test", publicOrigin: origin, exchangeKey, limits, browserLimits,
-    async resolveMaterial(value, cookie) {seen.push(`${value}:${cookie}`); return {ok: false, status: 404};},
-    async fetchRelay() {throw Error("Must not forward refused cookie");}});
-  expect((await client.handle(request({...metadata, discriminator: "mnopqrstuvwx"}, undefined, {cookie: "second=cookie"}))).status).toBe(404);
+  const client = createLinkLiveClient({
+    relayUrl: "https://relay.example.test",
+    publicOrigin: origin,
+    exchangeKey,
+    limits,
+    browserLimits,
+    async resolveMaterial(value, cookie) {
+      seen.push(`${value}:${cookie}`);
+      return { ok: false, status: 404 };
+    },
+    async fetchRelay() {
+      throw Error("Must not forward refused cookie");
+    },
+  });
+  expect(
+    (
+      await client.handle(
+        request({ ...metadata, discriminator: "mnopqrstuvwx" }, undefined, {
+          cookie: "second=cookie",
+        }),
+      )
+    ).status,
+  ).toBe(404);
   expect(seen).toEqual(["mnopqrstuvwx:second=cookie"]);
 });
 it.each([
-  {objectId: "object-a", capabilityToken}, {objectId: "object-a", workspaceId: "workspace"}, {objectId: ""},
-])("rejects unexpected private metadata without exposing it: %j", async value => {
-  const f = fixture(vi.fn(async () => Response.json(value))), response = await f.client.handle(request());
-  expect(response.status).toBe(404); expect(await response.text()).toBe('{"ok":false,"error":"not found"}');
+  { objectId: "object-a", capabilityToken },
+  { objectId: "object-a", workspaceId: "workspace" },
+  { objectId: "" },
+])("rejects unexpected private metadata without exposing it: %j", async (value) => {
+  const f = fixture(vi.fn(async () => Response.json(value))),
+    response = await f.client.handle(request());
+  expect(response.status).toBe(404);
+  expect(await response.text()).toBe('{"ok":false,"error":"not found"}');
 });
 it("returns the single-use ticket only after exact relay response validation", async () => {
-  const ticket = {token: "ab".repeat(32), publicPrincipalId: "public-link-a", expiresAtMs: Date.now() + 60_000};
+  const ticket = {
+    token: "ab".repeat(32),
+    publicPrincipalId: "public-link-a",
+    expiresAtMs: Date.now() + 60_000,
+  };
   const f = fixture(vi.fn(async () => Response.json(ticket)));
-  const response = await f.client.handle(request({discriminator, objectId: "object-a"}, "/api/live/link-ticket"));
+  const response = await f.client.handle(
+    request({ discriminator, objectId: "object-a" }, "/api/live/link-ticket"),
+  );
   expect(await response.json()).toEqual(ticket);
-  expect(f.fetchRelay.mock.calls[0]![0].url).toBe("https://relay.example.test/sync/live/link-tickets");
+  expect(f.fetchRelay.mock.calls[0]![0].url).toBe(
+    "https://relay.example.test/sync/live/link-tickets",
+  );
 });
 it.each([
-  {token: "ab".repeat(32), expiresAtMs: Date.now() + 60_000},
-  {token: "ab".repeat(32), expiresAtMs: Date.now() + 60_000, publicPrincipalId: ""},
-  {token: "ab".repeat(32), expiresAtMs: Date.now() + 60_000, publicPrincipalId: "public-link-a", principalId: "private"},
-])("refuses a link ticket without its exact public identity: %j", async ticket => {
-  const response = await fixture(vi.fn(async () => Response.json(ticket))).client.handle(request({discriminator, objectId: "object-a"}, "/api/live/link-ticket"));
+  { token: "ab".repeat(32), expiresAtMs: Date.now() + 60_000 },
+  { token: "ab".repeat(32), expiresAtMs: Date.now() + 60_000, publicPrincipalId: "" },
+  {
+    token: "ab".repeat(32),
+    expiresAtMs: Date.now() + 60_000,
+    publicPrincipalId: "public-link-a",
+    principalId: "private",
+  },
+])("refuses a link ticket without its exact public identity: %j", async (ticket) => {
+  const response = await fixture(vi.fn(async () => Response.json(ticket))).client.handle(
+    request({ discriminator, objectId: "object-a" }, "/api/live/link-ticket"),
+  );
   expect(response.status).toBe(404);
 });
 it("bounds admission even when an injected relay ignores cancellation", async () => {
   let release!: (value: Response) => void, entered!: () => void;
-  const started = new Promise<void>(done => {entered = done;});
-  const held = new Promise<Response>(done => {release = done;});
-  const f = fixture(vi.fn(async (_request: Request) => Response.json({objectId: "object-a"})).mockImplementationOnce(async () => {entered(); return held;})), controller = new AbortController();
-  const first = f.client.handle(request(metadata, undefined, {}, controller.signal)); await started;
-  controller.abort(); expect((await first).status).toBe(404);
-  expect((await f.client.handle(request())).status).toBe(404); expect(f.fetchRelay).toHaveBeenCalledTimes(1);
-  release(Response.json({objectId: "object-a"}));
-  await vi.waitFor(async () => {expect((await f.client.handle(request())).status).toBe(200);});
+  const started = new Promise<void>((done) => {
+    entered = done;
+  });
+  const held = new Promise<Response>((done) => {
+    release = done;
+  });
+  const f = fixture(
+      vi
+        .fn(async (_request: Request) => Response.json({ objectId: "object-a" }))
+        .mockImplementationOnce(async () => {
+          entered();
+          return held;
+        }),
+    ),
+    controller = new AbortController();
+  const first = f.client.handle(request(metadata, undefined, {}, controller.signal));
+  await started;
+  controller.abort();
+  expect((await first).status).toBe(404);
+  expect((await f.client.handle(request())).status).toBe(404);
+  expect(f.fetchRelay).toHaveBeenCalledTimes(1);
+  release(Response.json({ objectId: "object-a" }));
+  await vi.waitFor(async () => {
+    expect((await f.client.handle(request())).status).toBe(200);
+  });
+});
+
+// The servers' own trouble while a viewer's page is open. Each answered 404 before, which stops the page.
+const serverTrouble: [string, () => Promise<Response>][] = [
+  [
+    "relay unreachable",
+    async () => {
+      throw new TypeError("fetch failed");
+    },
+  ],
+  ["proxy error page", async () => new Response("<html>Bad gateway</html>", { status: 502 })],
+  [
+    "relay failure without a code",
+    async () => Response.json({ ok: false, error: "private detail" }, { status: 500 }),
+  ],
+];
+it.each(serverTrouble)("tells a viewer to try again after %s", async (_name, relay) => {
+  const f = fixture(vi.fn(relay), { holdsSession: true });
+  expect(await answered(await f.client.handle(ticketRequest()))).toEqual(tryAgain);
+  expect(await answered(await f.client.handle(request()))).toEqual(tryAgain);
+});
+it("tells a viewer to try again when share-web can't renew its session", async () => {
+  const f = fixture(undefined, { holdsSession: true, material: { ok: false, status: 503 } });
+  expect(await answered(await f.client.handle(ticketRequest()))).toEqual(tryAgain);
+  expect(f.fetchRelay).not.toHaveBeenCalled();
+});
+it("stops a viewer whose link has ended", async () => {
+  const f = fixture(undefined, { holdsSession: true, material: { ok: false, status: 404 } });
+  expect(await answered(await f.client.handle(ticketRequest()))).toEqual(opaque);
+  expect(f.fetchRelay).not.toHaveBeenCalled();
+});
+it("tells a viewer to try again when the relay doesn't answer in time", async () => {
+  const f = fixture(
+    vi.fn(() => new Promise<Response>(() => {})),
+    { holdsSession: true },
+  );
+  expect(await answered(await f.client.handle(ticketRequest()))).toEqual(tryAgain);
+});
+it("refuses a malformed ticket request from a viewer with a session", async () => {
+  const f = fixture(undefined, { holdsSession: true });
+  for (const objectId of ["", "a\u0000b", 7])
+    expect(
+      await answered(
+        await f.client.handle(request({ discriminator, objectId }, "/api/live/link-ticket")),
+      ),
+    ).toEqual(opaque);
+  expect(f.fetchRelay).not.toHaveBeenCalled();
+});
+it("gives anyone without a session and every agent the same 404 in each server state", async () => {
+  for (const [, relay] of serverTrouble) {
+    const stranger = fixture(vi.fn(relay), {
+      holdsSession: false,
+      material: { ok: false, status: 404 },
+    });
+    expect(await answered(await stranger.client.handle(ticketRequest()))).toEqual(opaque);
+    const agent = fixture(vi.fn(relay), { holdsSession: false }).client.agent({
+      accessToken: "C".repeat(43),
+      resource: `${origin}/mcp/s/${"A".repeat(43)}`,
+    });
+    expect(await answered(await agent.ticket("object-a", AbortSignal.timeout(1000)))).toEqual(
+      opaque,
+    );
+  }
+});
+it("tells only a viewer with a session to try again when requests are full", async () => {
+  for (const holdsSession of [true, false]) {
+    let release!: (value: Response) => void;
+    const held = new Promise<Response>((done) => {
+      release = done;
+    });
+    const f = fixture(
+      vi.fn(() => held),
+      { holdsSession },
+    );
+    const first = f.client.handle(request());
+    await vi.waitFor(() => expect(f.fetchRelay).toHaveBeenCalledTimes(1));
+    expect(await answered(await f.client.handle(ticketRequest()))).toEqual(
+      holdsSession ? tryAgain : opaque,
+    );
+    release(Response.json({ objectId: "object-a" }));
+    expect((await first).status).toBe(200);
+  }
 });

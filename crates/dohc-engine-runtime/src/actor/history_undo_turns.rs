@@ -164,8 +164,6 @@ type DiskProof = (
     Option<dohc_engine_files::ProjectionTargetStamp>,
 );
 fn disk_check(root: &Path, member: &Member) -> Result<DiskProof, RuntimeError> {
-    #[cfg(test)]
-    tests::observe_disk_probe(root);
     let probe =
         dohc_engine_files::ProjectionProbe::new(root).map_err(StorageError::persist_public)?;
     let m = &member.effect;

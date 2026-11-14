@@ -4,8 +4,16 @@ import { validateUserMaterializePath } from "@dohc/workspace-core";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
-import type { ChangeAttributionWire, SharedFileUpdate, SharedFileUpdateState } from "@dohc/workspace-engine-client";
-import { isEngineStoreBusyRefusal, isIdempotencyKeyReuseRefusal, YdocOwnerDraftPendingError } from "@dohc/workspace-engine-client";
+import type {
+  ChangeAttributionWire,
+  SharedFileUpdate,
+  SharedFileUpdateState,
+} from "@dohc/workspace-engine-client";
+import {
+  isEngineStoreBusyRefusal,
+  isIdempotencyKeyReuseRefusal,
+  YdocOwnerDraftPendingError,
+} from "@dohc/workspace-engine-client";
 import {
   RECORD_ID_FRONTMATTER_KEY,
   isRecordId,
@@ -23,7 +31,12 @@ import {
   frontmatterEditsRefused,
 } from "@dohc/ydoc-projection/frontmatter";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
-import { isLossyDocument, isLossyMarkdownCached, lossyNoteRefusal, unreadNoteRefusal } from "@dohc/ydoc-projection/lossy-markdown";
+import {
+  isLossyDocument,
+  isLossyMarkdownCached,
+  lossyNoteRefusal,
+  unreadNoteRefusal,
+} from "@dohc/ydoc-projection/lossy-markdown";
 import type { CollectionRecordWrites } from "./collectionAutomationRun";
 import { recordIdFromBytes } from "./recordIds";
 
@@ -54,7 +67,9 @@ const RECORD_NOT_FOUND = "collection-record-not-found";
 const ADOPTION_DEADLINE_MS = 15_000;
 
 export class AutomationCreationSkipped extends Error {
-  constructor() { super("The record was already created, then moved or deleted."); }
+  constructor() {
+    super("The record was already created, then moved or deleted.");
+  }
 }
 
 /** The request committed; its file may still need Collection adoption. */
@@ -63,9 +78,7 @@ export class AutomationCreationCommitted extends Error {}
 /** The engine adapter subset the seam reads through. VersionedLiveAdapter satisfies it. */
 export interface CollectionRecordEditAdapter {
   sharedFileUpdateStates(writes: readonly SharedFileUpdate[]): Promise<SharedFileUpdateState[]>;
-  getCollectionRecord(
-    params: CollectionGetRecordParams,
-  ): Promise<CollectionGetRecordResult>;
+  getCollectionRecord(params: CollectionGetRecordParams): Promise<CollectionGetRecordResult>;
 }
 
 /** How one update is recorded: its author, its declared provenance, and its idempotency key. */
@@ -108,9 +121,7 @@ export interface CollectionRecordEditContext {
   /** A file's text in the active version. Throws when there is none. */
   readText(path: string): Promise<{ text: string; truncated: boolean }>;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
-  withAdapter<T>(
-    work: (adapter: CollectionRecordEditAdapter) => Promise<T>,
-  ): Promise<T | null>;
+  withAdapter<T>(work: (adapter: CollectionRecordEditAdapter) => Promise<T>): Promise<T | null>;
   /**
    * Subscribes to the engine's news that it may have adopted records: the
    * paths it reconciled, or null when the news did not list them all.
@@ -209,14 +220,6 @@ export function actorOriginIdFor(author: ChangeAuthor): string | undefined {
   }
 }
 
-/**
- * The declared attribution recorded beside the actor origin. An agent author
- * writes as an agent for its `onBehalfOf` person at its run's chain depth,
- * naming the run it wrote in when it has one;
- * an automation writes for its run's person, when it has one, at the depth
- * its author carries (one greater than its trigger's), naming the run it
- * wrote from; every other author through this seam is a person.
- */
 export function attributionFor(author: ChangeAuthor): ChangeAttributionWire {
   switch (author.kind) {
     case "agent":
@@ -264,15 +267,11 @@ function assertWritableFieldValue(field: string, value: unknown): void {
   }
 }
 
-function writableFieldEntries(
-  fields: Record<string, unknown>,
-): Array<[string, unknown]> {
+function writableFieldEntries(fields: Record<string, unknown>): Array<[string, unknown]> {
   const entries = Object.entries(fields);
   for (const [field, value] of entries) {
     if (field === "id") {
-      throw new Error(
-        'The "id" field is engine-owned record identity and cannot be set.',
-      );
+      throw new Error('The "id" field is engine-owned record identity and cannot be set.');
     }
     assertWritableFieldValue(field, value);
   }
@@ -338,10 +337,14 @@ export async function setCollectionRecordFields(
   try {
     current = await context.readText(input.recordPath);
   } catch (error) {
-    if (!isFileNotFound(error)) throw new Error(unreadNoteRefusal(input.recordPath), { cause: error });
+    if (!isFileNotFound(error))
+      throw new Error(unreadNoteRefusal(input.recordPath), { cause: error });
   }
   if (current?.truncated) throw new Error(unreadNoteRefusal(input.recordPath));
-  if (current && isLossyMarkdownCached(createHash("sha256").update(current.text).digest("hex"), current.text)) {
+  if (
+    current &&
+    isLossyMarkdownCached(createHash("sha256").update(current.text).digest("hex"), current.text)
+  ) {
     throw new Error(lossyNoteRefusal(input.recordPath));
   }
   input.onStage?.("bind");
@@ -353,7 +356,9 @@ export async function setCollectionRecordFields(
   let sessionLossy: boolean | undefined;
   const headSha256 = current ? createHash("sha256").update(current.text).digest("hex") : null;
   let sharedFileUpdates: Record<string, SharedFileUpdate> | undefined;
-  const appendPrefix = input.idempotencyKeyPrefix ?? (input.allowPendingSharedSettlement ? `collection-fields/${randomUUID()}` : undefined);
+  const appendPrefix =
+    input.idempotencyKeyPrefix ??
+    (input.allowPendingSharedSettlement ? `collection-fields/${randomUUID()}` : undefined);
   try {
     // The caller can end while the session opens (an automation run's
     // deadline); a write must not land after that.
@@ -369,65 +374,81 @@ export async function setCollectionRecordFields(
     // chain, against the canonical doc as it stands then, so a change that
     // arrived after the session opened is compared, not overwritten.
     input.onStage?.("fields");
-    const journaled = await Promise.all(entries.map(([field, value]) => {
-      const idempotencyKey = appendPrefix === undefined ? undefined : `${appendPrefix}/${field}`;
-      let fieldArmed = false;
-      let fieldDecided = false;
-      return session.applyDecidedLocalUpdate(
-        (doc) => {
-          const current = doc.getMap(FRONTMATTER_FIELD).get(field);
-          const currentValue =
-            (current instanceof Y.AbstractType ? current.toJSON() : current) ??
-            null;
-          if (isDeepStrictEqual(currentValue, value)) return null;
-          if (
-            expected !== undefined &&
-            Object.hasOwn(expected, field) &&
-            !isDeepStrictEqual(currentValue, expected[field] ?? null)
-          ) {
-            kept[field] = currentValue;
-            return null;
-          }
-          sessionLossy ??= isLossyDocument(doc, headSha256);
-          if (sessionLossy) throw new Error(lossyNoteRefusal(input.recordPath));
-          if (frontmatterEditsRefused(doc)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
-          replaced[field] = currentValue;
-          fieldDecided = true;
-          decidedFields.add(field);
-          return frontmatterUpdate(doc, field, value);
-        },
-        () => {
-          armed += 1;
-          fieldArmed = true;
-        },
-        {
-          ...(actorOriginId === undefined ? {} : { actorOriginId }),
-          attribution: attributionFor(input.author),
-          ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-        },
-      ).then(written => {
-        if (fieldDecided && !written) {
-          throw new Error(`The engine session did not accept the field change for ${input.recordPath}.`);
-        }
-        return written;
-      }).catch(async error => {
-        if ((!input.preserveCompletedSeeds && !input.preserveCompletedFields) || idempotencyKey === undefined || !isIdempotencyKeyReuseRefusal(error)) throw error;
-        // This typed refusal proves the chosen key already landed. The session
-        // restores canonical state before rejecting; no new write was recorded.
-        if (fieldArmed) armed -= 1;
-        delete replaced[field];
-        decidedFields.delete(field);
-        if (input.preserveCompletedFields) return false;
-        return session.applyDecidedLocalUpdate(doc => {
-          const current = doc.getMap(FRONTMATTER_FIELD).get(field);
-          kept[field] = (current instanceof Y.AbstractType ? current.toJSON() : current) ?? null;
-          return null;
-        }, () => {}, {
-          ...(actorOriginId === undefined ? {} : { actorOriginId }),
-          attribution: attributionFor(input.author),
-        });
-      });
-    }));
+    const journaled = await Promise.all(
+      entries.map(([field, value]) => {
+        const idempotencyKey = appendPrefix === undefined ? undefined : `${appendPrefix}/${field}`;
+        let fieldArmed = false;
+        let fieldDecided = false;
+        return session
+          .applyDecidedLocalUpdate(
+            (doc) => {
+              const current = doc.getMap(FRONTMATTER_FIELD).get(field);
+              const currentValue =
+                (current instanceof Y.AbstractType ? current.toJSON() : current) ?? null;
+              if (isDeepStrictEqual(currentValue, value)) return null;
+              if (
+                expected !== undefined &&
+                Object.hasOwn(expected, field) &&
+                !isDeepStrictEqual(currentValue, expected[field] ?? null)
+              ) {
+                kept[field] = currentValue;
+                return null;
+              }
+              sessionLossy ??= isLossyDocument(doc, headSha256);
+              if (sessionLossy) throw new Error(lossyNoteRefusal(input.recordPath));
+              if (frontmatterEditsRefused(doc)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
+              replaced[field] = currentValue;
+              fieldDecided = true;
+              decidedFields.add(field);
+              return frontmatterUpdate(doc, field, value);
+            },
+            () => {
+              armed += 1;
+              fieldArmed = true;
+            },
+            {
+              ...(actorOriginId === undefined ? {} : { actorOriginId }),
+              attribution: attributionFor(input.author),
+              ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+            },
+          )
+          .then((written) => {
+            if (fieldDecided && !written) {
+              throw new Error(
+                `The engine session did not accept the field change for ${input.recordPath}.`,
+              );
+            }
+            return written;
+          })
+          .catch(async (error) => {
+            if (
+              (!input.preserveCompletedSeeds && !input.preserveCompletedFields) ||
+              idempotencyKey === undefined ||
+              !isIdempotencyKeyReuseRefusal(error)
+            )
+              throw error;
+            // This typed refusal proves the chosen key already landed. The session
+            // restores canonical state before rejecting; no new write was recorded.
+            if (fieldArmed) armed -= 1;
+            delete replaced[field];
+            decidedFields.delete(field);
+            if (input.preserveCompletedFields) return false;
+            return session.applyDecidedLocalUpdate(
+              (doc) => {
+                const current = doc.getMap(FRONTMATTER_FIELD).get(field);
+                kept[field] =
+                  (current instanceof Y.AbstractType ? current.toJSON() : current) ?? null;
+                return null;
+              },
+              () => {},
+              {
+                ...(actorOriginId === undefined ? {} : { actorOriginId }),
+                attribution: attributionFor(input.author),
+              },
+            );
+          });
+      }),
+    );
     const updates = journaled.filter(Boolean).length;
     // Every field already held its value, or someone else's: nothing to settle.
     if (updates === 0 && !input.settleUnchanged) return { path: input.recordPath, replaced, kept };
@@ -440,25 +461,57 @@ export async function setCollectionRecordFields(
         summary: `Updated ${recordBasename(input.recordPath)}`,
       });
     } catch (error) {
-      if (!input.allowPendingSharedSettlement || !(error instanceof YdocOwnerDraftPendingError) || appendPrefix === undefined) throw error;
+      if (
+        !input.allowPendingSharedSettlement ||
+        !(error instanceof YdocOwnerDraftPendingError) ||
+        appendPrefix === undefined
+      )
+        throw error;
       sharedSettlementPending = true;
-      const candidates = entries.filter(([field]) => !Object.hasOwn(kept, field)).map(([field]) => [field, {
-        outboxId: error.draft.outboxId, binding: error.draft.binding,
-        nativeHeadSequence: error.draft.nativeHeadSequence, appendKey: `${appendPrefix}/${field}`,
-      }] as const);
+      const candidates = entries
+        .filter(([field]) => !Object.hasOwn(kept, field))
+        .map(
+          ([field]) =>
+            [
+              field,
+              {
+                outboxId: error.draft.outboxId,
+                binding: error.draft.binding,
+                nativeHeadSequence: error.draft.nativeHeadSequence,
+                appendKey: `${appendPrefix}/${field}`,
+              },
+            ] as const,
+        );
       const unchanged = candidates.filter(([field]) => !decidedFields.has(field));
       // Undo cannot finish while a prior reversal's receipt is unknown.
-      const states = unchanged.length === 0 ? [] : await context.withAdapter(adapter =>
-        adapter.sharedFileUpdateStates(unchanged.map(([, draft]) => draft))).catch(error => {
-          if (input.preserveCompletedFields) throw new Error("dohc could not check this run's shared reversals.", {cause: error});
-          return [];
-        });
-      if (input.preserveCompletedFields && unchanged.some((_, index) => states?.[index] === undefined)) {
+      const states =
+        unchanged.length === 0
+          ? []
+          : await context
+              .withAdapter((adapter) =>
+                adapter.sharedFileUpdateStates(unchanged.map(([, draft]) => draft)),
+              )
+              .catch((error) => {
+                if (input.preserveCompletedFields)
+                  throw new Error("dohc could not check this run's shared reversals.", {
+                    cause: error,
+                  });
+                return [];
+              });
+      if (
+        input.preserveCompletedFields &&
+        unchanged.some((_, index) => states?.[index] === undefined)
+      ) {
         throw new Error("dohc could not check this run's shared reversals.");
       }
-      const existing = new Set(unchanged.filter((_, index) => states?.[index] !== undefined && states[index] !== "absent")
-        .map(([field]) => field));
-      sharedFileUpdates = Object.fromEntries(candidates.filter(([field]) => decidedFields.has(field) || existing.has(field)));
+      const existing = new Set(
+        unchanged
+          .filter((_, index) => states?.[index] !== undefined && states[index] !== "absent")
+          .map(([field]) => field),
+      );
+      sharedFileUpdates = Object.fromEntries(
+        candidates.filter(([field]) => decidedFields.has(field) || existing.has(field)),
+      );
     }
     if (armed !== updates) {
       throw new Error(
@@ -466,14 +519,23 @@ export async function setCollectionRecordFields(
       );
     }
     input.onStage?.("close");
-    return { path: input.recordPath, replaced, kept, ...(sharedFileUpdates ? { sharedFileUpdates } : {}) };
+    return {
+      path: input.recordPath,
+      replaced,
+      kept,
+      ...(sharedFileUpdates ? { sharedFileUpdates } : {}),
+    };
   } catch (error) {
     failed = true;
     throw error;
   } finally {
-    try { await session.close(sharedSettlementPending || sessionLossy ? { settle: false } : undefined); }
-    catch (error) {
-      if (!failed) { input.onStage?.("close"); throw error; }
+    try {
+      await session.close(sharedSettlementPending || sessionLossy ? { settle: false } : undefined);
+    } catch (error) {
+      if (!failed) {
+        input.onStage?.("close");
+        throw error;
+      }
     }
   }
 }
@@ -516,8 +578,10 @@ async function createRecord(
   let checkingExistingFile = false;
   let failedStage: CreationStage = "index";
   try {
-    const existingPath = input.recordId === undefined
-      ? null : await recordPathFor(context, input.collectionPath, requestedId);
+    const existingPath =
+      input.recordId === undefined
+        ? null
+        : await recordPathFor(context, input.collectionPath, requestedId);
     if (existingPath !== null) {
       if (input.author.kind === "automation") {
         checkingExistingFile = true;
@@ -529,7 +593,9 @@ async function createRecord(
         checkingExistingFile = false;
       }
       if (input.author.kind !== "automation" && existingPath !== prepared.path) {
-        throw new Error("This record ID belongs to another path. Open that record to edit its fields.");
+        throw new Error(
+          "This record ID belongs to another path. Open that record to edit its fields.",
+        );
       }
       path = existingPath;
       durable = true;
@@ -538,7 +604,9 @@ async function createRecord(
       path = await createRecordFile(context, path, requestedId, input.author);
       durable = true;
       failedStage = "index";
-      ({ path, recordId } = await waitForRecord(context, input.collectionPath, path, stage => { failedStage = stage; }));
+      ({ path, recordId } = await waitForRecord(context, input.collectionPath, path, (stage) => {
+        failedStage = stage;
+      }));
     }
     let kept: Record<string, unknown> = {};
     if (entries.length > 0) {
@@ -549,58 +617,74 @@ async function createRecord(
         // Creation keys stay completed even after someone clears a seeded field.
         preserveCompletedSeeds: true,
         idempotencyKeyPrefix: input.idempotencyKeyPrefix ?? `create-record/${recordId}`,
-        expectedBefore: Object.fromEntries(entries.map(([field]) => [field,
-          input.expectedBefore && Object.hasOwn(input.expectedBefore, field) ? input.expectedBefore[field] : null,
-        ])),
+        expectedBefore: Object.fromEntries(
+          entries.map(([field]) => [
+            field,
+            input.expectedBefore && Object.hasOwn(input.expectedBefore, field)
+              ? input.expectedBefore[field]
+              : null,
+          ]),
+        ),
         settleUnchanged: true,
-        onStage: stage => { failedStage = stage; },
+        onStage: (stage) => {
+          failedStage = stage;
+        },
       }));
     }
     return { path, recordId, ...(Object.keys(kept).length > 0 ? { kept } : {}) };
   } catch (error) {
     // A transport or lease can fail after the write landed.
     if (error instanceof AutomationCreationSkipped || checkingExistingFile) throw error;
-    onFailure?.(error instanceof Error && isEngineStoreBusyRefusal(error.cause) ? error.cause : error);
+    onFailure?.(
+      error instanceof Error && isEngineStoreBusyRefusal(error.cause) ? error.cause : error,
+    );
 
     const diskId = await fileRecordId(context, path).catch(() => null);
     if (!durable && diskId !== requestedId) throw error;
     if (diskId !== null && ["write", "capture", "index"].includes(failedStage)) recordId = diskId;
     return {
-      kind: "partial", created: [path], failedStage, reason: (error instanceof Error ? error.message : String(error)),
+      kind: "partial",
+      created: [path],
+      failedStage,
+      reason: error instanceof Error ? error.message : String(error),
       retry: {
-        mode: "resume", recordId,
-        instruction: "Try again with the same record ID and fields to finish this record without creating another.",
+        mode: "resume",
+        recordId,
+        instruction:
+          "Try again with the same record ID and fields to finish this record without creating another.",
       },
     };
   }
 }
 
 /** The same identity and validated path for local and received-share creation. */
-export function prepareCollectionRecord(input: Pick<CreateCollectionRecordInput, "collectionPath" | "name" | "recordId">): {
-  path: string; recordId: string; text: string;
+export function prepareCollectionRecord(
+  input: Pick<CreateCollectionRecordInput, "collectionPath" | "name" | "recordId">,
+): {
+  path: string;
+  recordId: string;
+  text: string;
 } {
   const name = input.name;
-  if (
-    name.length === 0 ||
-    name.includes("/") ||
-    name.includes("\\") ||
-    name.includes("\0")
-  ) {
-    throw new Error(
-      "Record name must be a plain file name without path separators.",
-    );
+  if (name.length === 0 || name.includes("/") || name.includes("\\") || name.includes("\0")) {
+    throw new Error("Record name must be a plain file name without path separators.");
   }
   if (input.recordId !== undefined && !isRecordId(input.recordId)) {
     throw new Error(
       `Record id must be "rec_" followed by 26 lowercase base32 characters: ${input.recordId}`,
     );
   }
-  const validated = validateUserMaterializePath(`${input.collectionPath}/${name}.md`, { platform: process.platform });
+  const validated = validateUserMaterializePath(`${input.collectionPath}/${name}.md`, {
+    platform: process.platform,
+  });
   if (!validated.ok) throw new Error(`Invalid record path: ${validated.reason}`);
   const recordId = input.recordId ?? recordIdFromBytes(randomBytes(16));
-  return { path: validated.normalized, recordId, text: `---\n${RECORD_ID_FRONTMATTER_KEY}: ${recordId}\n---\n` };
+  return {
+    path: validated.normalized,
+    recordId,
+    text: `---\n${RECORD_ID_FRONTMATTER_KEY}: ${recordId}\n---\n`,
+  };
 }
-
 
 /** Keep durable facts when the authority lease rejects after the work returns. */
 export async function runCollectionRecordCreation(
@@ -609,7 +693,7 @@ export async function runCollectionRecordCreation(
 ): ReturnType<typeof createCollectionRecord> {
   let result: Awaited<ReturnType<typeof createCollectionRecord>> | undefined;
   try {
-    return await run(async context => {
+    return await run(async (context) => {
       result = await createCollectionRecord(context, input);
       return result;
     });
@@ -617,24 +701,37 @@ export async function runCollectionRecordCreation(
     if (!result) throw error;
     if ("kind" in result) return result;
     return {
-      kind: "partial", created: [result.path], failedStage: "scope", reason: (error instanceof Error ? error.message : String(error)),
-      retry: { mode: "resume", recordId: result.recordId,
-        instruction: "Reopen this workspace. Try again with the same record ID and fields to confirm the saved record." },
+      kind: "partial",
+      created: [result.path],
+      failedStage: "scope",
+      reason: error instanceof Error ? error.message : String(error),
+      retry: {
+        mode: "resume",
+        recordId: result.recordId,
+        instruction:
+          "Reopen this workspace. Try again with the same record ID and fields to confirm the saved record.",
+      },
     };
   }
 }
 
 /** The record writes an automation run makes, in this edit context. */
-export function collectionRecordWrites(context: CollectionRecordEditContext): CollectionRecordWrites {
+export function collectionRecordWrites(
+  context: CollectionRecordEditContext,
+): CollectionRecordWrites {
   return {
-    setFields: (input) => setCollectionRecordFields(context, {
-      ...input, allowPendingSharedSettlement: true,
-      // A keyed effect can have landed before its run recorded the result.
-      settleUnchanged: input.idempotencyKeyPrefix !== undefined,
-    }),
+    setFields: (input) =>
+      setCollectionRecordFields(context, {
+        ...input,
+        allowPendingSharedSettlement: true,
+        // A keyed effect can have landed before its run recorded the result.
+        settleUnchanged: input.idempotencyKeyPrefix !== undefined,
+      }),
     create: async (input) => {
       let failure: unknown;
-      const result = await createRecord(context, input, error => { failure = error; });
+      const result = await createRecord(context, input, (error) => {
+        failure = error;
+      });
       if ("kind" in result) {
         if (result.retry.mode === "resume" && result.retry.recordId) {
           await input.onPartial?.({ path: result.created[0]!, recordId: result.retry.recordId });
@@ -680,16 +777,16 @@ async function createRecordFile(
     return await context.createFile(requestedPath, text, author);
   } catch (error) {
     const committed = error instanceof AutomationCreationCommitted;
-    const collision = error instanceof VersionedTextStoreError
-      ? error.code === "target-path-exists"
-      : (error as NodeJS.ErrnoException | null)?.code === "EEXIST";
+    const collision =
+      error instanceof VersionedTextStoreError
+        ? error.code === "target-path-exists"
+        : (error as NodeJS.ErrnoException | null)?.code === "EEXIST";
     if (!collision && !committed) throw error;
     const existing = await fileRecordId(context, requestedPath).catch((readError: unknown) => {
       if (!committed || isFileNotFound(readError)) return undefined;
       throw readError;
     });
     if (committed && existing !== recordId) throw new AutomationCreationSkipped();
-    // Nothing is there: the create itself failed.
     if (existing === undefined) throw error;
     if (existing === recordId) return requestedPath;
   }
@@ -697,8 +794,10 @@ async function createRecordFile(
 }
 
 function isFileNotFound(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException | null)?.code === "ENOENT"
-    || (error instanceof VersionedTextStoreError && error.code === "file-not-found");
+  return (
+    (error as NodeJS.ErrnoException | null)?.code === "ENOENT" ||
+    (error instanceof VersionedTextStoreError && error.code === "file-not-found")
+  );
 }
 
 /** The valid record id in a file's frontmatter, or null. */
@@ -713,7 +812,6 @@ async function fileRecordId(
   return typeof id === "string" && isRecordId(id) ? id : null;
 }
 
-/** Where the record with `recordId` lives in the Collection, or null when no record has it. */
 async function recordPathFor(
   context: CollectionRecordEditContext,
   collectionPath: string,
@@ -754,21 +852,23 @@ async function waitForRecord(
   onStage: (stage: CreationStage) => void,
 ): Promise<{ path: string; recordId: string }> {
   let lastError: unknown;
-  const expired = (): Error => new Error(
-    `dohc created ${path}, but the engine did not add it to the Collection in time.`,
-    lastError === undefined ? undefined : { cause: lastError },
-  );
+  const expired = (): Error =>
+    new Error(
+      `dohc created ${path}, but the engine did not add it to the Collection in time.`,
+      lastError === undefined ? undefined : { cause: lastError },
+    );
   const wait = Effect.gen(function* () {
     const changes = yield* Queue.sliding<void>(1);
     onStage("capture");
     yield* Effect.acquireRelease(
       Effect.try({
-        try: () => context.onRecordsChanged((paths) => {
-          if (paths === null || paths.includes(path)) Queue.offerUnsafe(changes, undefined);
-        }),
-        catch: error => error,
+        try: () =>
+          context.onRecordsChanged((paths) => {
+            if (paths === null || paths.includes(path)) Queue.offerUnsafe(changes, undefined);
+          }),
+        catch: (error) => error,
       }),
-      unsubscribe => Effect.sync(unsubscribe),
+      (unsubscribe) => Effect.sync(unsubscribe),
     );
     onStage("index");
     if (context.signal.aborted) return yield* Effect.fail(expired());
@@ -778,22 +878,27 @@ async function waitForRecord(
       const adopted = yield* Effect.gen(function* () {
         const recordId = yield* Effect.tryPromise({
           try: () => fileRecordId(context, path),
-          catch: error => error,
+          catch: (error) => error,
         });
         if (recordId === null) return null;
         const found = yield* Effect.tryPromise({
           try: () => recordPathFor(context, collectionPath, recordId),
-          catch: error => error,
+          catch: (error) => error,
         });
         return found === path ? { path, recordId } : null;
-      }).pipe(Effect.catch(error => {
-        // A refusal during reconciliation can recover on the next announcement.
-        lastError = error;
-        if (isEngineStoreBusyRefusal(error)) {
-          return Effect.sleep(100).pipe(Effect.andThen(Queue.offer(changes, undefined)), Effect.as(null));
-        }
-        return Effect.succeed(null);
-      }));
+      }).pipe(
+        Effect.catch((error) => {
+          // A refusal during reconciliation can recover on the next announcement.
+          lastError = error;
+          if (isEngineStoreBusyRefusal(error)) {
+            return Effect.sleep(100).pipe(
+              Effect.andThen(Queue.offer(changes, undefined)),
+              Effect.as(null),
+            );
+          }
+          return Effect.succeed(null);
+        }),
+      );
       if (adopted !== null) return adopted;
     }
   }).pipe(

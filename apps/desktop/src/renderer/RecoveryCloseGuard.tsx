@@ -1,13 +1,7 @@
 import { Power, RefreshCw, RotateCw, X, type LucideIcon } from "lucide-react";
 import { hasPendingYDocDeliveries, settleYDocDeliveries } from "./pendingYDocDeliveries";
 import { hasPendingEditorDrafts, settlePendingEditorDrafts } from "./pendingEditorDrafts";
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { UpdateActionResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import {
@@ -21,7 +15,12 @@ import { Overlay } from "./Overlay";
 import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
 import { DangerButton, SecondaryButton } from "./ui/controls";
-import { ConfirmActions, ConfirmationCard, ConfirmationHead, confirmPanel } from "./ui/ConfirmDialog";
+import {
+  ConfirmActions,
+  ConfirmationCard,
+  ConfirmationHead,
+  confirmPanel,
+} from "./ui/ConfirmDialog";
 
 type UnloadKind = "close" | "reload" | "update" | "quit";
 
@@ -61,11 +60,7 @@ let exitRequest = 0;
 // The mounted guard registers its dialog opener here so the decide-first
 // paths (update install) can warn without triggering the destructive call.
 let openRecoveryWarning:
-  | ((warning: {
-      kind: UnloadKind;
-      resume: () => Promise<boolean>;
-      round?: number;
-    }) => void)
+  | ((warning: { kind: UnloadKind; resume: () => Promise<boolean>; round?: number }) => void)
   | null = null;
 
 // Update buttons showing a restart under way. A person going back on a
@@ -104,7 +99,9 @@ function isOwnRoundRequest(request: number): boolean {
 }
 
 function answerRound(roundId: number, decision: "clear" | "hold" | "cancel"): void {
-  void bridge().answerExitRound({ roundId, decision }).catch(() => undefined);
+  void bridge()
+    .answerExitRound({ roundId, decision })
+    .catch(() => undefined);
 }
 
 // The round ended without the exit happening: refused or failed staging,
@@ -113,7 +110,11 @@ function answerRound(roundId: number, decision: "clear" | "hold" | "cancel"): vo
 // the exit this window gave up, or null when it held none for the round.
 function forgetRoundIntent(roundId: number): "quit" | "update" | null {
   const round =
-    activeRound?.id === roundId ? activeRound : proceededRound?.id === roundId ? proceededRound : null;
+    activeRound?.id === roundId
+      ? activeRound
+      : proceededRound?.id === roundId
+        ? proceededRound
+        : null;
   if (!round) return null;
   if (activeRound === round) activeRound = null;
   if (proceededRound === round) proceededRound = null;
@@ -169,17 +170,12 @@ export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult 
     // own flow ends here with nothing to report.
     if (result.cancelled) return null;
     // Main's boundary re-check refuses the install when a reopen set an edit
-    // aside after this renderer's own check. That refusal
-    // is a recovery decision, not an install failure, and the direct branch
-    // used to report it as one — the user's Restart click became a generic
-    // error and the drafts were never mentioned. The
-    // dialog path already re-prompts; both paths reach the same state, so
-    // both must say the same thing.
-    if (
-      !result.accepted &&
-      atRiskOrphanedDraftIds().length > 0 &&
-      openRecoveryWarning !== null
-    ) {
+    // aside after this renderer's own check. That refusal is a recovery
+    // decision, not an install failure. Reported as a failure, the user's
+    // Restart click would become a generic error that never mentions the
+    // drafts. The dialog path already re-prompts; both paths reach the same
+    // state, so both must say the same thing.
+    if (!result.accepted && atRiskOrphanedDraftIds().length > 0 && openRecoveryWarning !== null) {
       openRecoveryWarning({ kind: "update", resume: resumeInstall });
       return null;
     }
@@ -190,7 +186,10 @@ export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult 
 }
 
 const resumeInstall = () =>
-  beginInstall().then((result) => result.accepted, () => false);
+  beginInstall().then(
+    (result) => result.accepted,
+    () => false,
+  );
 
 // Resumes an exit main has already approved, re-claiming the intent each
 // attempt so a draft captured before this attempt's unload still produces a
@@ -226,7 +225,12 @@ function resumeRoundIntent(
 }
 
 function hasUnsettledWrites(): boolean {
-  return hasPendingYDocDeliveries() || hasPendingEditorDrafts() || hasPendingCollectionFieldWrites() || collectionWriteFailures().length > 0;
+  return (
+    hasPendingYDocDeliveries() ||
+    hasPendingEditorDrafts() ||
+    hasPendingCollectionFieldWrites() ||
+    collectionWriteFailures().length > 0
+  );
 }
 
 async function settleWritesForExit(): Promise<boolean> {
@@ -355,8 +359,7 @@ const BYPASS_REARM_MS = 10_000;
 // irreversible, so it must be announced before it runs (product invariant).
 // Electron cancels a close silently on preventDefault, so the dialog below is
 // the announcement, and it carries the at-risk drafts with their own
-// Copy/Dismiss: the warning must offer the very actions it demands (#579
-// review, r5).
+// Copy/Dismiss: the warning must offer the very actions it demands.
 //
 // This mounts above AppErrorBoundary (see main.tsx): a crash unmounts the
 // shell, and the crash screen's "Reload dohc" must not destroy the drafts
@@ -377,10 +380,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   // nothing left to warn about. Only the drafts an exit would destroy belong
   // here — a restored draft comes back on its own.
   const allDrafts = useAllOrphanedDrafts();
-  const liveDrafts = useMemo(
-    () => allDrafts.filter((row) => !row.persisted),
-    [allDrafts],
-  );
+  const liveDrafts = useMemo(() => allDrafts.filter((row) => !row.persisted), [allDrafts]);
   const liveCount = liveDrafts.length;
   const warningOpen = closeWarning !== null;
   const warningVisible = warningOpen && liveCount > 0;
@@ -392,10 +392,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     round?: number;
   }) => {
     const active = document.activeElement;
-    if (
-      active instanceof HTMLElement &&
-      !warningRef.current?.contains(active)
-    ) {
+    if (active instanceof HTMLElement && !warningRef.current?.contains(active)) {
       returnFocusRef.current = active;
     }
     setCloseWarning(warning);
@@ -422,7 +419,6 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       }
     }
     // closeWarning is read once, at the moment the count reaches zero.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [warningOpen, liveCount]);
   useEffect(() => {
     if (!warningVisible) return;
@@ -485,7 +481,8 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       // a "close". Confirming that would call window.close(), which does not
       // quit on macOS.
       void bridge().holdQuit();
-      const held = proceededRound && pending?.kind === proceededRound.kind ? proceededRound.id : null;
+      const held =
+        proceededRound && pending?.kind === proceededRound.kind ? proceededRound.id : null;
       if (held !== null) heldRound = held;
       showCloseWarning({
         kind: pending?.kind ?? "close",
@@ -530,9 +527,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
         if (exit === null) return;
         if (exit === "update") for (const listener of restartStoppedListeners) listener();
         rearmGuard();
-        setCloseWarning((current) =>
-          current?.round === message.roundId ? null : current,
-        );
+        setCloseWarning((current) => (current?.round === message.roundId ? null : current));
         return;
       }
       exitRequest += 1;
@@ -542,7 +537,8 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       // A quit replaces the restart this window was waiting to see through,
       // so no button keeps showing it under way. A newer restart carries
       // on, and ends through its own round.
-      if (proceededRound?.kind === "update" && round.kind === "quit") for (const listener of restartStoppedListeners) listener();
+      if (proceededRound?.kind === "update" && round.kind === "quit")
+        for (const listener of restartStoppedListeners) listener();
       proceededRound = null;
       heldRound = null;
       // Claim the intent up front: a queued reopen can still capture a
@@ -553,7 +549,10 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       // round: resuming it re-answers the round until main proceeds.
       const intent: PendingUnload = {
         kind: round.kind,
-        resume: () => resumeRoundIntent(round, () => { pendingUnload = intent; }),
+        resume: () =>
+          resumeRoundIntent(round, () => {
+            pendingUnload = intent;
+          }),
       };
       const resume = intent.resume;
       pendingUnload = intent;
@@ -612,7 +611,6 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     // rearmGuard and hasUnapprovedDrafts read refs and the module store, never
     // render state, so the first closure stays correct; the handlers register
     // once.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return (
     <>
@@ -657,7 +655,8 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                   // of that round.
                   const round = closeWarning.round ?? heldRound ?? undefined;
                   const exit = round === undefined ? null : forgetRoundIntent(round);
-                  if (closeWarning.kind === "update" || exit === "update") for (const listener of restartStoppedListeners) listener();
+                  if (closeWarning.kind === "update" || exit === "update")
+                    for (const listener of restartStoppedListeners) listener();
                   setCloseWarning(null);
                   if (round !== undefined && exit !== null) {
                     rearmGuard();
@@ -692,16 +691,11 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                   // reopen queued behind this click can still set one more
                   // aside. That draft keeps its notice and its Copy edits button,
                   // and the gates below refuse to exit over it.
-                  approvedDraftIds.current = new Set(
-                    liveDrafts.map((row) => row.draft.id),
-                  );
+                  approvedDraftIds.current = new Set(liveDrafts.map((row) => row.draft.id));
                   if (bypassRearmTimer.current) {
                     clearTimeout(bypassRearmTimer.current);
                   }
-                  bypassRearmTimer.current = setTimeout(
-                    rearmGuard,
-                    BYPASS_REARM_MS,
-                  );
+                  bypassRearmTimer.current = setTimeout(rearmGuard, BYPASS_REARM_MS);
                   // A dialog answering a pending round clears this window's
                   // part of it. Main proceeds only when every window is
                   // clear; the exit itself then comes back through the

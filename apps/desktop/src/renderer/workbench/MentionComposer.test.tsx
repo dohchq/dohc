@@ -9,14 +9,20 @@ import { useState, type ReactNode } from "react";
 import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
 
 const candidates: MentionCandidate[] = [
-  { id: "agent:default", kind: "agent", handle: "agent", label: "Your agent", description: "your agent" },
+  {
+    id: "agent:default",
+    kind: "agent",
+    handle: "agent",
+    label: "Your agent",
+    description: "your agent",
+  },
   { id: "user:you", kind: "user", handle: "you", label: "You", description: "you" },
 ];
 
 // A tiny controlled harness so the composer behaves like it does in ChatsView
 // (parent owns the value).
 function Harness(props: {
-  fileCandidates?: { path: string; label: string }[];
+  fileCandidates?: { path: string; label: string; readPath?: string }[];
   onSend?: () => void;
   onRosterPick?: (pick: import("../offers/agentAddressed").AgentRosterPick | null) => void;
   onEscape?: () => void;
@@ -36,9 +42,7 @@ function Harness(props: {
       sendLabel="Send message"
       candidates={candidates}
       fileCandidates={props.fileCandidates ?? [{ path: "docs/plan.md", label: "Plan" }]}
-      {...(props.loadFileHeadings
-        ? { loadFileHeadings: props.loadFileHeadings }
-        : {})}
+      {...(props.loadFileHeadings ? { loadFileHeadings: props.loadFileHeadings } : {})}
       onRosterPick={props.onRosterPick}
       onChange={setValue}
       onSend={props.onSend ?? (() => {})}
@@ -59,14 +63,12 @@ describe("MentionComposer autocomplete", () => {
     const composer = screen.getByTestId("chats-composer");
     await userEvent.type(composer, "hey @");
     const menu = await screen.findByTestId("chats-mention-menu");
-    // Both candidates offered; the agent leads.
     const options = within(menu).getAllByTestId("chats-mention-option");
     expect(options.map((el) => el.getAttribute("data-candidate-id"))).toEqual([
       "agent:default",
       "user:you",
     ]);
 
-    // "@agent" filters to exactly the agent (the user handle shares no prefix).
     await userEvent.type(composer, "gent");
     expect(
       within(screen.getByTestId("chats-mention-menu"))
@@ -81,7 +83,6 @@ describe("MentionComposer autocomplete", () => {
     const options = within(screen.getByTestId("chats-mention-menu")).getAllByTestId(
       "chats-mention-option",
     );
-    // Both share the "you" prefix; the exact user handle leads.
     expect(options[0]!.getAttribute("data-candidate-id")).toBe("user:you");
   });
 
@@ -135,24 +136,32 @@ describe("MentionComposer autocomplete", () => {
   it.each([
     ["darwin", "closes the menu and leaves the line break to the textarea", false],
     ["win32", "completes the highlighted mention", true],
-  ] as const)("Option+Return with the mention menu open on %s %s", async (platform, _result, completes) => {
-    vi.stubGlobal("dohcDesktop", { platform });
-    try {
-      const onSend = vi.fn();
-      render(<Harness onSend={onSend} />);
-      const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
-      await userEvent.type(composer, "hey @ag");
-      await screen.findByTestId("chats-mention-menu");
-      const event = new KeyboardEvent("keydown", { key: "Enter", altKey: true, bubbles: true, cancelable: true });
-      fireEvent(composer, event);
-      expect(event.defaultPrevented).toBe(completes);
-      expect(composer.value).toBe(completes ? "hey @agent " : "hey @ag");
-      expect(screen.queryByTestId("chats-mention-menu") !== null).toBe(false);
-      expect(onSend).not.toHaveBeenCalled();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
+  ] as const)(
+    "Option+Return with the mention menu open on %s %s",
+    async (platform, _result, completes) => {
+      vi.stubGlobal("dohcDesktop", { platform });
+      try {
+        const onSend = vi.fn();
+        render(<Harness onSend={onSend} />);
+        const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+        await userEvent.type(composer, "hey @ag");
+        await screen.findByTestId("chats-mention-menu");
+        const event = new KeyboardEvent("keydown", {
+          key: "Enter",
+          altKey: true,
+          bubbles: true,
+          cancelable: true,
+        });
+        fireEvent(composer, event);
+        expect(event.defaultPrevented).toBe(completes);
+        expect(composer.value).toBe(completes ? "hey @agent " : "hey @ag");
+        expect(screen.queryByTestId("chats-mention-menu") !== null).toBe(false);
+        expect(onSend).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it("starts a new line on Option+Return on macOS instead of sending", async () => {
     vi.stubGlobal("dohcDesktop", { platform: "darwin" });
@@ -195,9 +204,27 @@ describe("MentionComposer autocomplete", () => {
   // composer's frame, or off a bar stacked on it, 30px tall: above them when
   // the list fits there, otherwise on the side with more room.
   it.each([
-    { name: "above a composer with room over it", frameTop: 500, bar: false, side: "bottom", at: "272px" },
-    { name: "above the bar stacked on a composer", frameTop: 500, bar: true, side: "bottom", at: "302px" },
-    { name: "below a composer with no room over it", frameTop: 70, bar: false, side: "top", at: "134px" },
+    {
+      name: "above a composer with room over it",
+      frameTop: 500,
+      bar: false,
+      side: "bottom",
+      at: "272px",
+    },
+    {
+      name: "above the bar stacked on a composer",
+      frameTop: 500,
+      bar: true,
+      side: "bottom",
+      at: "302px",
+    },
+    {
+      name: "below a composer with no room over it",
+      frameTop: 70,
+      bar: false,
+      side: "top",
+      at: "134px",
+    },
   ] as const)("floats the roster $name", async ({ frameTop, bar, side, at }) => {
     const listHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(100);
     render(<Harness above={bar ? <div data-testid="bar" /> : undefined} />);
@@ -205,8 +232,13 @@ describe("MentionComposer autocomplete", () => {
     const frame = composer.closest("form")!;
     vi.spyOn(frame, "getBoundingClientRect").mockReturnValue(new DOMRect(40, frameTop, 300, 60));
     // The stack's own box starts at its empty top margin; the menu ignores it.
-    vi.spyOn(frame.parentElement!, "getBoundingClientRect").mockReturnValue(new DOMRect(40, frameTop - (bar ? 34 : 4), 300, 90));
-    if (bar) vi.spyOn(screen.getByTestId("bar"), "getBoundingClientRect").mockReturnValue(new DOMRect(40, frameTop - 30, 300, 30));
+    vi.spyOn(frame.parentElement!, "getBoundingClientRect").mockReturnValue(
+      new DOMRect(40, frameTop - (bar ? 34 : 4), 300, 90),
+    );
+    if (bar)
+      vi.spyOn(screen.getByTestId("bar"), "getBoundingClientRect").mockReturnValue(
+        new DOMRect(40, frameTop - 30, 300, 30),
+      );
     await userEvent.type(composer, "@");
     const menu = await screen.findByTestId("chats-mention-menu");
     expect(menu.getAttribute("popover")).toBe("manual");
@@ -223,7 +255,9 @@ describe("MentionComposer autocomplete", () => {
     const composer = screen.getByTestId("chats-composer");
     const frame = composer.closest("form")!;
     vi.spyOn(frame, "getBoundingClientRect").mockReturnValue(new DOMRect(40, 500, 300, 120));
-    vi.spyOn(frame.firstElementChild!, "getBoundingClientRect").mockReturnValue(new DOMRect(53, 513, 274, 20));
+    vi.spyOn(frame.firstElementChild!, "getBoundingClientRect").mockReturnValue(
+      new DOMRect(53, 513, 274, 20),
+    );
     await userEvent.type(composer, "@");
     const menu = await screen.findByTestId("chats-mention-menu");
     expect(menu.style.bottom).toBe("272px");
@@ -232,11 +266,16 @@ describe("MentionComposer autocomplete", () => {
 
   it("moves the roster above once a query leaves it room there", async () => {
     // Each row is 38px tall. Over the frame there are 104px to fill.
-    const listHeight = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get")
-      .mockImplementation(function (this: HTMLElement) { return this.querySelectorAll('[role="option"]').length * 38; });
+    const listHeight = vi
+      .spyOn(HTMLElement.prototype, "scrollHeight", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return this.querySelectorAll('[role="option"]').length * 38;
+      });
     render(<Harness />);
     const composer = screen.getByTestId("chats-composer");
-    vi.spyOn(composer.closest("form")!, "getBoundingClientRect").mockReturnValue(new DOMRect(40, 120, 300, 60));
+    vi.spyOn(composer.closest("form")!, "getBoundingClientRect").mockReturnValue(
+      new DOMRect(40, 120, 300, 60),
+    );
     await userEvent.type(composer, "@");
     const menu = await screen.findByTestId("chats-mention-menu");
     expect(within(menu).getAllByRole("option", { hidden: true })).toHaveLength(3);
@@ -251,9 +290,7 @@ describe("MentionComposer autocomplete", () => {
     render(
       <Harness
         loadFileHeadings={() =>
-          Promise.resolve([
-            { text: "Scope", anchor: "scope", line: 3, level: 2, occurrence: 0 },
-          ])
+          Promise.resolve([{ text: "Scope", anchor: "scope", line: 3, level: 2, occurrence: 0 }])
         }
       />,
     );
@@ -280,9 +317,7 @@ describe("MentionComposer autocomplete", () => {
     await screen.findByTestId("chats-file-mention-whole");
 
     await userEvent.keyboard("{Escape}");
-    resolveHeadings([
-      { text: "Stale", anchor: "stale", line: 1, level: 1, occurrence: 0 },
-    ]);
+    resolveHeadings([{ text: "Stale", anchor: "stale", line: 1, level: 1, occurrence: 0 }]);
     await headings;
     expect(screen.queryByTestId("chats-file-mention-heading")).toBeNull();
   });
@@ -302,9 +337,7 @@ describe("MentionComposer autocomplete", () => {
 
     rerender(<Harness loadFileHeadings={newLoader} />);
     fireEvent.blur(composer);
-    resolveOld([
-      { text: "Old workspace", anchor: "old", line: 1, level: 1, occurrence: 0 },
-    ]);
+    resolveOld([{ text: "Old workspace", anchor: "old", line: 1, level: 1, occurrence: 0 }]);
     await oldHeadings;
     expect(screen.queryByTestId("chats-mention-menu")).toBeNull();
     expect(screen.queryByTestId("chats-file-mention-heading")).toBeNull();
@@ -321,6 +354,27 @@ describe("MentionComposer autocomplete", () => {
     await userEvent.click(screen.getByTestId("chats-file-mention-option"));
     await userEvent.click(await screen.findByTestId("chats-file-mention-whole"));
     expect((composer as HTMLTextAreaElement).value).toContain("@[docs/plan.md]");
+  });
+
+  it("links a joined Group's file by the Group's path and reads headings from this workspace's copy", async () => {
+    const load = vi.fn(() =>
+      Promise.resolve([{ text: "Scope", anchor: "scope", line: 3, level: 2, occurrence: 0 }]),
+    );
+    render(
+      <Harness
+        fileCandidates={[
+          { path: "team/plan.md", label: "Plan", readPath: "shared-with-me/ana/team/plan.md" },
+        ]}
+        loadFileHeadings={load}
+      />,
+    );
+    const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
+    await userEvent.type(composer, "@plan");
+    await userEvent.click(await screen.findByTestId("chats-file-mention-option"));
+    await userEvent.click(await screen.findByTestId("chats-file-mention-heading"));
+    expect(load.mock.calls).toEqual([["shared-with-me/ana/team/plan.md"]]);
+    expect(composer.value).toContain("@[team/plan.md#scope]");
+    expect(composer.value).not.toContain("shared-with-me");
   });
 
   it("offers the file choices from the chat's +", async () => {
@@ -346,21 +400,21 @@ describe("MentionComposer autocomplete", () => {
   it("keeps the collapsed prompt on one line inside its pill", async () => {
     render(<Harness surface="post" />);
     const pill = screen.getByTestId("chats-open");
-    // A narrow channel column used to wrap this prompt past the pill's fixed
-    // height; it now shortens inside the border and the tooltip carries it.
+    // A narrow channel column must not wrap this prompt past the pill's fixed
+    // height. It shortens inside the border and the tooltip carries it.
     expect(within(pill).getByText("Write a message…").className).toContain("truncate");
     expect(pill.getAttribute("title")).toBe("Write a message…");
-    // Shortening the text costs the pill neither its name nor its job.
     expect(pill.getAttribute("aria-label")).toBe("Write a post");
     await userEvent.click(pill);
     expect(document.activeElement).toBe(screen.getByTestId("chats-composer"));
   });
 });
 
-// Two people and six files fill more than the menu's height. The textarea
-// keeps focus while the arrows move the active option.
 describe("MentionComposer menu on the Menu part's recipe", () => {
-  const files = Array.from({ length: 6 }, (_, index) => ({ path: `docs/file-${index + 1}.md`, label: `File ${index + 1}` }));
+  const files = Array.from({ length: 6 }, (_, index) => ({
+    path: `docs/file-${index + 1}.md`,
+    label: `File ${index + 1}`,
+  }));
 
   it("keeps the active option in the list's view as the arrows move it", async () => {
     const restore = mockListLayout(120);
@@ -381,8 +435,6 @@ describe("MentionComposer menu on the Menu part's recipe", () => {
     }
   });
 
-  // The @ shows as an icon; a screen reader still hears it, so a person or
-  // an agent never reads like a file.
   it("keeps @ in a person's or agent's name", async () => {
     render(<Harness />);
     await userEvent.type(screen.getByTestId("chats-composer"), "@");
@@ -406,7 +458,6 @@ describe("MentionComposer menu on the Menu part's recipe", () => {
   });
 });
 
-
 describe("offer roster picks", () => {
   it("emits an agent pick only on roster completion and clears it when removed", async () => {
     const onRosterPick = vi.fn();
@@ -429,7 +480,8 @@ describe("offer roster picks", () => {
     const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
     await user.type(composer, "@ag");
     await user.click(screen.getAllByTestId("chats-mention-option")[0]!);
-    composer.focus(); composer.setSelectionRange(0, 0);
+    composer.focus();
+    composer.setSelectionRange(0, 0);
     await user.paste("Hi ");
     expect(onRosterPick).toHaveBeenLastCalledWith({ candidate: candidates[0], from: 3, to: 9 });
   });
@@ -444,10 +496,15 @@ describe("agent pick continuity", () => {
     await user.type(composer, "@ag");
     await user.click(screen.getAllByTestId("chats-mention-option")[0]!);
     await user.type(composer, "and @yo");
-    await user.click(screen.getAllByTestId("chats-mention-option").find(option => option.getAttribute("data-candidate-id") === "user:you")!);
+    await user.click(
+      screen
+        .getAllByTestId("chats-mention-option")
+        .find((option) => option.getAttribute("data-candidate-id") === "user:you")!,
+    );
     expect(composer.value).toBe("@agent and @you ");
     expect(onRosterPick).toHaveBeenLastCalledWith({ candidate: candidates[0], from: 0, to: 6 });
-    composer.focus(); composer.setSelectionRange(0, 7);
+    composer.focus();
+    composer.setSelectionRange(0, 7);
     await user.keyboard("{Backspace}");
     expect(onRosterPick).toHaveBeenLastCalledWith(null);
   });

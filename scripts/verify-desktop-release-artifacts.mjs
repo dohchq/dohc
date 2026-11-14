@@ -8,9 +8,20 @@ import { dirname, join, resolve } from "node:path";
 // Each platform's artifacts, and whether its updater installs from one. electron-builder names an x64
 // AppImage x86_64 and an x64 .deb amd64. Each Linux updater installs its own kind, so the manifest lists both.
 const platforms = {
-  mac: { suffix: "-mac", arches: ["arm64"], artifacts: [{ extension: "dmg" }, { extension: "zip", update: true }] },
+  mac: {
+    suffix: "-mac",
+    arches: ["arm64"],
+    artifacts: [{ extension: "dmg" }, { extension: "zip", update: true }],
+  },
   win: { suffix: "", arches: ["x64"], artifacts: [{ extension: "exe", update: true }] },
-  linux: { suffix: "-linux", arches: ["x64"], artifacts: [{ extension: "AppImage", arch: "x86_64", update: true }, { extension: "deb", arch: "amd64", update: true }] },
+  linux: {
+    suffix: "-linux",
+    arches: ["x64"],
+    artifacts: [
+      { extension: "AppImage", arch: "x86_64", update: true },
+      { extension: "deb", arch: "amd64", update: true },
+    ],
+  },
 };
 
 function parseScalar(value) {
@@ -81,27 +92,40 @@ async function inspectFile(root, name) {
   const path = await realpath(join(root, name));
   if (dirname(path) !== root) throw new Error(`Release artifact escapes its directory: ${name}`);
   const info = await stat(path);
-  if (!info.isFile() || info.size === 0) throw new Error(`Release artifact is not a nonempty file: ${name}`);
+  if (!info.isFile() || info.size === 0)
+    throw new Error(`Release artifact is not a nonempty file: ${name}`);
   const hash = createHash("sha512");
   for await (const chunk of createReadStream(path)) hash.update(chunk);
   return { name, size: info.size, sha512: hash.digest("base64") };
 }
 
 // This checks distributable bytes, not installation, signatures, or app startup.
-export async function verifyDesktopReleaseArtifacts({ directory, platform, arch, version, channel }) {
+export async function verifyDesktopReleaseArtifacts({
+  directory,
+  platform,
+  arch,
+  version,
+  channel,
+}) {
   const target = platforms[platform];
-  if (!target || !target.arches.includes(arch)) throw new Error(`Unsupported release target: ${platform}-${arch}`);
-  if (!["latest", "nightly"].includes(channel)) throw new Error("Channel must be latest or nightly.");
+  if (!target || !target.arches.includes(arch))
+    throw new Error(`Unsupported release target: ${platform}-${arch}`);
+  if (!["latest", "nightly"].includes(channel))
+    throw new Error("Channel must be latest or nightly.");
   if (typeof version !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
     throw new Error("A release version is required.");
   }
   const root = await realpath(resolve(directory));
   const manifestName = `${channel}${target.suffix}.yml`;
   const manifestFile = await inspectFile(root, manifestName);
-  const manifest = parseUpdateManifest(await readFile(join(root, manifestName), "utf8"), manifestName);
-  if (manifest.version !== version) throw new Error(`Manifest version ${manifest.version} does not match ${version}.`);
+  const manifest = parseUpdateManifest(
+    await readFile(join(root, manifestName), "utf8"),
+    manifestName,
+  );
+  if (manifest.version !== version)
+    throw new Error(`Manifest version ${manifest.version} does not match ${version}.`);
   const inspected = new Map();
-  const inspect = async name => {
+  const inspect = async (name) => {
     if (!inspected.has(name)) inspected.set(name, await inspectFile(root, name));
     return inspected.get(name);
   };
@@ -114,7 +138,7 @@ export async function verifyDesktopReleaseArtifacts({ directory, platform, arch,
       throw new Error(`Manifest size or SHA-512 does not match artifact: ${file.url}`);
     }
   }
-  const legacy = manifest.files.find(file => file.url === manifest.path);
+  const legacy = manifest.files.find((file) => file.url === manifest.path);
   if (!legacy || legacy.sha512 !== manifest.sha512) {
     throw new Error("Manifest path and SHA-512 must match a listed artifact.");
   }
@@ -126,9 +150,15 @@ export async function verifyDesktopReleaseArtifacts({ directory, platform, arch,
     }
   }
   return {
-    status: "passed", scope: "release artifact sizes and SHA-512 checksums",
-    directory: root, platform, arch, version, channel,
-    manifest: manifestFile, artifacts: [...inspected.values()],
+    status: "passed",
+    scope: "release artifact sizes and SHA-512 checksums",
+    directory: root,
+    platform,
+    arch,
+    version,
+    channel,
+    manifest: manifestFile,
+    artifacts: [...inspected.values()],
     excludes: ["installation", "code signing", "application startup", "update installation"],
   };
 }
@@ -139,15 +169,27 @@ async function main() {
   for (let index = 2; index < process.argv.length; index += 2) {
     const name = process.argv[index].slice(2);
     const value = process.argv[index + 1];
-    if (!process.argv[index].startsWith("--") || !allowed.has(name) || options[name] || !value || value.startsWith("--")) {
-      throw new Error("Usage: verify-desktop-release-artifacts --directory <release> --platform mac|win|linux --arch x64|arm64 --version <version> --channel latest|nightly");
+    if (
+      !process.argv[index].startsWith("--") ||
+      !allowed.has(name) ||
+      options[name] ||
+      !value ||
+      value.startsWith("--")
+    ) {
+      throw new Error(
+        "Usage: verify-desktop-release-artifacts --directory <release> --platform mac|win|linux --arch x64|arm64 --version <version> --channel latest|nightly",
+      );
     }
     options[name] = value;
   }
-  if ([...allowed].some(name => !options[name])) throw new Error("Provide directory, platform, arch, version, and channel.");
+  if ([...allowed].some((name) => !options[name]))
+    throw new Error("Provide directory, platform, arch, version, and channel.");
   console.log(JSON.stringify(await verifyDesktopReleaseArtifacts(options), null, 2));
 }
 
 if (import.meta.main) {
-  main().catch(error => { console.error(error.message); process.exitCode = 1; });
+  main().catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
 }

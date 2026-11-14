@@ -38,7 +38,6 @@ describe("applyBatch", () => {
     expect(stale).toBe(model); // same reference — identity says "ignored"
     model = applyBatch(model, batch({ searchId: "s2", entries: [entry("new.md")] }));
     expect(model.groups.map((g) => g.path)).toEqual(["new.md"]);
-    // A stale done batch must not complete the new search either.
     expect(applyBatch(model, batch({ searchId: "s1", done: true })).status).toBe("searching");
   });
 
@@ -75,7 +74,6 @@ describe("applyBatch", () => {
       batch({ entries: [], done: true, notice: "Search paused: policy error" }),
     );
     expect(model.notice).toBe("Search paused: policy error");
-    // beginSearch clears it for the next run.
     expect(beginSearch("s2", "needle").notice).toBeNull();
   });
 
@@ -122,7 +120,6 @@ describe("visibleFlatEntries", () => {
     };
     expect(groupVisibleEntries(big, false)).toHaveLength(GROUP_PREVIEW_ROWS);
     expect(groupVisibleEntries(big, true)).toHaveLength(GROUP_PREVIEW_ROWS + 30);
-    // Small groups never truncate (no pointless "show 0 more").
     expect(groupVisibleEntries(groups[0], false)).toHaveLength(2);
     expect(visibleFlatEntries([big], none, none)).toHaveLength(GROUP_PREVIEW_ROWS);
     expect(visibleFlatEntries([big], none, new Set(["big.md"]))).toHaveLength(
@@ -140,7 +137,6 @@ describe("windowPreviewForRow (lead-trim so the match survives end-truncation)",
       matchEnd: 12,
       leadTrimmed: false,
     });
-    // Exactly at the threshold is still untrimmed.
     const at = {
       preview: `${"x".repeat(PREVIEW_LEAD_TRIM_THRESHOLD)}needle tail`,
       matchStart: PREVIEW_LEAD_TRIM_THRESHOLD,
@@ -157,10 +153,7 @@ describe("windowPreviewForRow (lead-trim so the match survives end-truncation)",
     const windowed = windowPreviewForRow({ preview, matchStart: 26, matchEnd: 41 });
     expect(windowed.leadTrimmed).toBe(true);
     expect(windowed.matchStart).toBe(PREVIEW_LEAD_CONTEXT_CHARS);
-    // The mark substring is intact in the rendered window, near its start.
-    expect(windowed.text.slice(windowed.matchStart, windowed.matchEnd)).toBe(
-      "jumptargettoken",
-    );
+    expect(windowed.text.slice(windowed.matchStart, windowed.matchEnd)).toBe("jumptargettoken");
     expect(windowed.text).toBe("ies the jumptargettoken here");
   });
 

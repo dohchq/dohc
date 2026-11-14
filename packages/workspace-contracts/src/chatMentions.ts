@@ -105,17 +105,15 @@ export function codeCover(body: string): (position: number) => boolean {
   let next = 0;
   let end = -1;
   return (position) => {
-    while (next < ranges.length && ranges[next]![0] <= position) end = Math.max(end, ranges[next++]![1]);
+    while (next < ranges.length && ranges[next]![0] <= position)
+      end = Math.max(end, ranges[next++]![1]);
     return position < end;
   };
 }
 
 // Candidate-agnostic source scanner used by the engine mention index and by
 // renderer candidate resolution. Tokens are returned in document order.
-export function scanMentionTokens(
-  body: string,
-  options: MentionScanOptions = {},
-): MentionToken[] {
+export function scanMentionTokens(body: string, options: MentionScanOptions = {}): MentionToken[] {
   const inCode = options.ignoreCode ? codeCover(body) : () => false;
   const found: MentionToken[] = [];
   MENTION_RE.lastIndex = 0;
@@ -181,7 +179,6 @@ function decodeReferenceComponent(value: string): string {
   });
 }
 
-// A file link in a chat message: its path and, when it has one, its heading.
 export interface ChatFileReference {
   path: string;
   headingAnchor?: string;
@@ -225,7 +222,10 @@ export function extractChatWorkReferenceTokens(body: string): ChatWorkReferenceT
 
 // Both kinds of link in one pass, each in source order. A token that is a
 // work link is never also a file link.
-export function scanChatLinks(body: string): { files: ChatFileReferenceToken[]; works: ChatWorkReferenceToken[] } {
+export function scanChatLinks(body: string): {
+  files: ChatFileReferenceToken[];
+  works: ChatWorkReferenceToken[];
+} {
   const tokens: ChatFileReferenceToken[] = [];
   const works: ChatWorkReferenceToken[] = [];
   if (!body.includes("@[")) return { files: tokens, works };
@@ -242,12 +242,17 @@ export function scanChatLinks(body: string): { files: ChatFileReferenceToken[]; 
     openerAt[at] = char === "@" && body[at + 1] === "[" ? at : openerAt[at + 1]!;
   }
   const inCode = codeCover(body);
-  for (let start = openerAt[0]!; start < length; ) {
+  for (let start = openerAt[0]!; start < length;) {
     const from = start + 2;
     const stop = stopAt[from]!;
     const hash = hashAt[from]!;
     // The path runs to the first "#"; a heading after it is not empty.
-    const matched = stop < length && body[stop] === "]" && stop > from && hash > from && (hash >= stop || stop > hash + 1);
+    const matched =
+      stop < length &&
+      body[stop] === "]" &&
+      stop > from &&
+      hash > from &&
+      (hash >= stop || stop > hash + 1);
     if (!matched) {
       start = openerAt[start + 1]!;
       continue;
@@ -270,9 +275,8 @@ export function scanChatLinks(body: string): { files: ChatFileReferenceToken[]; 
     // Edge spaces are legal filename bytes and the insertion formatter emits
     // them literally, so trim only to reject an empty/whitespace-only value.
     const rawHeading = hash < stop ? body.slice(hash + 1, stop) : undefined;
-    const headingAnchor = rawHeading !== undefined ? decodeReferenceComponent(rawHeading.trim()) : undefined;
-    // Keep heading normalization unchanged, but reject an explicitly present
-    // heading delimiter whose value is empty after normalization.
+    const headingAnchor =
+      rawHeading !== undefined ? decodeReferenceComponent(rawHeading.trim()) : undefined;
     if (path.trim() && (rawHeading === undefined || headingAnchor)) {
       tokens.push({
         path,
@@ -285,6 +289,50 @@ export function scanChatLinks(body: string): { files: ChatFileReferenceToken[]; 
     start = next;
   }
   return { files: tokens, works };
+}
+
+/** What a reader sees in place of a file link they may not read. It holds no "@[", so a second pass changes nothing. */
+export const CHAT_FILE_LINK_WITHHELD = "(a file not shared here)";
+
+// Keeps only the links a reader may follow: a work link, and a file link whose
+// path `covers` accepts. Every other "@[" span is replaced whole, inside code
+// or not: a malformed, nested or unclosed one too, which runs to its line's
+// end. So no path or heading the reader may not read survives.
+export function withholdChatFileLinks(text: string, covers: (path: string) => boolean): string {
+  return projectChatFileLinks(text, (path) => (covers(path) ? path : null));
+}
+
+// As withholdChatFileLinks, but a file link is kept under the path `project`
+// gives it, the one its reader knows the file by, and withheld when that is null.
+export function projectChatFileLinks(
+  text: string,
+  project: (path: string) => string | null,
+): string {
+  if (!text.includes("@[")) return text;
+  let kept = "";
+  let at = 0;
+  for (let start = text.indexOf("@[", at); start >= 0; start = text.indexOf("@[", at)) {
+    let stop = start + 2;
+    while (stop < text.length && text[stop] !== "]" && text[stop] !== "\n" && text[stop] !== "\r")
+      stop++;
+    const end = text[stop] === "]" ? stop + 1 : stop;
+    const span = text.slice(start, end);
+    const { files, works } = scanChatLinks(span);
+    const file =
+      files.length === 1 && works.length === 0 && files[0]!.text === span ? files[0]! : null;
+    const path = file ? project(file.path) : null;
+    const read =
+      works.length === 1 && files.length === 0 && works[0]!.text === span
+        ? span
+        : file === null || path === null
+          ? CHAT_FILE_LINK_WITHHELD
+          : path === file.path
+            ? span
+            : formatChatFileReferenceToken({ ...file, path });
+    kept += text.slice(at, start) + read;
+    at = end;
+  }
+  return kept + text.slice(at);
 }
 
 // Chat reads an @ name outside code and outside file links. A file link owns
@@ -348,7 +396,7 @@ interface ActiveMentionQuery {
 
 export function activeMentionQuery(value: string, caret: number): ActiveMentionQuery | null {
   const before = value.slice(0, Math.max(0, Math.min(caret, value.length)));
-  const match = /(^|[\s(\[{])@([\p{L}\p{N}\p{M}._-]*)$/u.exec(before);
+  const match = /(^|[\s([{])@([\p{L}\p{N}\p{M}._-]*)$/u.exec(before);
   if (!match || nameByteLength(normalizeHandle(match[2]!)) > 200) return null;
   return { start: match.index + match[1]!.length, query: match[2]! };
 }

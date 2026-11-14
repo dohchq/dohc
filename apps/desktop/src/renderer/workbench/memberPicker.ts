@@ -25,8 +25,12 @@ export function splitAddresses(text: string): { emails: string[]; rest: string }
   for (const part of text.replace(/"[^"]*"/g, " ").split(/[,;\n]+/)) {
     // A part with bracketed addresses names people: keep every address in
     // it, bracketed or bare, and drop the names.
-    const bracketed = [...part.matchAll(/<([^<>]+)>/g)].map((match) => match[1]!.trim()).filter(isEmail);
-    const words = (bracketed.length > 0 ? part.replace(/<[^<>]*>/g, " ") : part).trim().split(/\s+/);
+    const bracketed = [...part.matchAll(/<([^<>]+)>/g)]
+      .map((match) => match[1]!.trim())
+      .filter(isEmail);
+    const words = (bracketed.length > 0 ? part.replace(/<[^<>]*>/g, " ") : part)
+      .trim()
+      .split(/\s+/);
     emails.push(...bracketed);
     for (const word of words) {
       if (word === "") continue;
@@ -62,10 +66,11 @@ export function suggestPeople(input: {
     if (query !== "" && !key.includes(query)) continue;
     matches.push({ email, member: input.members.has(key) });
   }
-  matches.sort((a, b) =>
-    Number(a.member) - Number(b.member) ||
-    Number(!emailKey(a.email).startsWith(query)) - Number(!emailKey(b.email).startsWith(query)) ||
-    emailKey(a.email).localeCompare(emailKey(b.email)),
+  matches.sort(
+    (a, b) =>
+      Number(a.member) - Number(b.member) ||
+      Number(!emailKey(a.email).startsWith(query)) - Number(!emailKey(b.email).startsWith(query)) ||
+      emailKey(a.email).localeCompare(emailKey(b.email)),
   );
   const typed = input.query.trim();
   if (isEmail(typed) && !seen.has(query) && !input.picked.has(query)) {

@@ -3,20 +3,16 @@ import {
   normalizeShareDiscussionDisplayName,
   SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT,
 } from "@dohc/security-contract/share-discussion";
-import { APIError, createAuthEndpoint, createAuthMiddleware, sessionMiddleware } from "better-auth/api";
+import {
+  APIError,
+  createAuthEndpoint,
+  createAuthMiddleware,
+  sessionMiddleware,
+} from "better-auth/api";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
 import type { SignUpAdmission } from "./signUp";
 import type { SendEmail } from "./smtp";
-
-// dohc server auth: Better Auth mounted on the same Postgres the workspace
-// backend uses (self-host = one database, no auth vendor). Email/password for
-// accounts, the organization plugin for team workspaces, and the OAuth
-// device-authorization grant for desktop login (the desktop shows a code, the
-// browser approves, and the desktop polls).
-//
-// This package owns the auth surface. Its only application callbacks deliver
-// email and decide whether a new account may exist.
 
 /** Verification and reset links expire one hour after dohc sends them. */
 export const EMAIL_LINK_TTL_SECONDS = 3600;
@@ -45,7 +41,11 @@ interface WorkspaceAuthOptions {
   admitAccount?: (email: string) => Promise<SignUpAdmission>;
   accountDeletion?: {
     preview(user: { id: string; email: string }): Promise<Record<string, unknown>>;
-    delete(user: { id: string; email: string }, token: string, confirmPassword: () => Promise<void>): Promise<Record<string, unknown>>;
+    delete(
+      user: { id: string; email: string },
+      token: string,
+      confirmPassword: () => Promise<void>,
+    ): Promise<Record<string, unknown>>;
   };
 }
 
@@ -82,7 +82,14 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
           hooks: {
             before: createAuthMiddleware(async (ctx) => {
               const body: unknown = ctx.body;
-              if (ctx.path !== "/reset-password" || !ctx.request || !body || typeof body !== "object" || !("name" in body)) return;
+              if (
+                ctx.path !== "/reset-password" ||
+                !ctx.request ||
+                !body ||
+                typeof body !== "object" ||
+                !("name" in body)
+              )
+                return;
               setupNames.set(ctx.request, chosenName(body.name));
             }),
           },
@@ -137,11 +144,19 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       },
       ...(closed
         ? {
-            onExistingUserSignUp: async ({ user }: { user: { email: string; emailVerified: boolean } }) => {
+            onExistingUserSignUp: async ({
+              user,
+            }: {
+              user: { email: string; emailVerified: boolean };
+            }) => {
               if (!user.emailVerified) await sendPasswordLink(user.email, null);
             },
-            onPasswordReset: async ({ user }: { user: { id: string; emailVerified: boolean } }, request?: Request) => {
-              if (!user.emailVerified) await verifyOnPasswordReset(user.id, (request && setupNames.get(request)) ?? "");
+            onPasswordReset: async (
+              { user }: { user: { id: string; emailVerified: boolean } },
+              request?: Request,
+            ) => {
+              if (!user.emailVerified)
+                await verifyOnPasswordReset(user.id, (request && setupNames.get(request)) ?? "");
             },
           }
         : {}),
@@ -152,7 +167,9 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       sendVerificationEmail: async ({ user, token, url: originalUrl }) => {
         const next = nextPage(originalUrl);
         if (closed) return sendPasswordLink(user.email, next);
-        const url = page(`/account/verify-email?token=${encodeURIComponent(token)}&next=${encodeURIComponent(next ?? "/account")}`);
+        const url = page(
+          `/account/verify-email?token=${encodeURIComponent(token)}&next=${encodeURIComponent(next ?? "/account")}`,
+        );
         await send({
           to: user.email,
           subject: "Verify your dohc email",
@@ -203,29 +220,74 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       },
     },
     plugins: [
-      ...(options.accountDeletion ? [{
-        id: "dohc-account-deletion",
-        endpoints: {
-          accountDeletionPreview: createAuthEndpoint("/account/deletion-preview", {method: "POST", use: [sessionMiddleware], requireHeaders: true}, async ctx => {
-            return ctx.json(await options.accountDeletion!.preview(ctx.context.session.user));
-          }),
-          deleteServerAccount: createAuthEndpoint("/account/delete", {method: "POST", use: [sessionMiddleware], requireHeaders: true}, async ctx => {
-            const body: unknown = ctx.body;
-            const token = body && typeof body === "object" && "previewToken" in body ? body.previewToken : undefined;
-            if (typeof token !== "string" || token.length > 512) throw new APIError("BAD_REQUEST", {code: "PREVIEW_REQUIRED", message: "Review account deletion before continuing."});
-            return ctx.json(await options.accountDeletion!.delete(ctx.context.session.user, token, async () => {
-              const password = body && typeof body === "object" && "password" in body ? body.password : undefined;
-              if (typeof password !== "string" || password.length === 0) throw new APIError("BAD_REQUEST", {code: "PASSWORD_REQUIRED", message: "Enter your server account password to delete this account."});
-              try {
-                await ctx.context.password.checkPassword(ctx.context.session.user.id, ctx);
-              } catch (error) {
-                if (error instanceof APIError && error.body?.code === "INVALID_PASSWORD") throw new APIError("BAD_REQUEST", {code: "INVALID_PASSWORD", message: "The password is incorrect. Enter your server account password."});
-                throw error;
-              }
-            }));
-          }),
-        },
-      }] : []),
+      ...(options.accountDeletion
+        ? [
+            {
+              id: "dohc-account-deletion",
+              endpoints: {
+                accountDeletionPreview: createAuthEndpoint(
+                  "/account/deletion-preview",
+                  { method: "POST", use: [sessionMiddleware], requireHeaders: true },
+                  async (ctx) => {
+                    return ctx.json(
+                      await options.accountDeletion!.preview(ctx.context.session.user),
+                    );
+                  },
+                ),
+                deleteServerAccount: createAuthEndpoint(
+                  "/account/delete",
+                  { method: "POST", use: [sessionMiddleware], requireHeaders: true },
+                  async (ctx) => {
+                    const body: unknown = ctx.body;
+                    const token =
+                      body && typeof body === "object" && "previewToken" in body
+                        ? body.previewToken
+                        : undefined;
+                    if (typeof token !== "string" || token.length > 512)
+                      throw new APIError("BAD_REQUEST", {
+                        code: "PREVIEW_REQUIRED",
+                        message: "Review account deletion before continuing.",
+                      });
+                    return ctx.json(
+                      await options.accountDeletion!.delete(
+                        ctx.context.session.user,
+                        token,
+                        async () => {
+                          const password =
+                            body && typeof body === "object" && "password" in body
+                              ? body.password
+                              : undefined;
+                          if (typeof password !== "string" || password.length === 0)
+                            throw new APIError("BAD_REQUEST", {
+                              code: "PASSWORD_REQUIRED",
+                              message: "Enter your server account password to delete this account.",
+                            });
+                          try {
+                            await ctx.context.password.checkPassword(
+                              ctx.context.session.user.id,
+                              ctx,
+                            );
+                          } catch (error) {
+                            if (
+                              error instanceof APIError &&
+                              error.body?.code === "INVALID_PASSWORD"
+                            )
+                              throw new APIError("BAD_REQUEST", {
+                                code: "INVALID_PASSWORD",
+                                message:
+                                  "The password is incorrect. Enter your server account password.",
+                              });
+                            throw error;
+                          }
+                        },
+                      ),
+                    );
+                  },
+                ),
+              },
+            },
+          ]
+        : []),
       // The desktop authenticates API calls with `Authorization: Bearer
       // <session token>` (the device flow's access_token IS a session token).
       bearer(),
@@ -265,14 +327,21 @@ function nextPage(betterAuthUrl: string): string | null {
 
 /** The name other people see, normalized as the relay shows it. */
 function chosenName(value: unknown): string {
-  const invalid = (message: string) => new APIError("BAD_REQUEST", { code: "INVALID_NAME", message });
+  const invalid = (message: string) =>
+    new APIError("BAD_REQUEST", { code: "INVALID_NAME", message });
   const name = normalizeShareDiscussionDisplayName(value);
   if (!name.ok) {
-    throw invalid(name.reason === "too-long" ? `Enter a name of ${SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT} characters or fewer.` : "Enter your name.");
+    throw invalid(
+      name.reason === "too-long"
+        ? `Enter a name of ${SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT} characters or fewer.`
+        : "Enter your name.",
+    );
   }
   // The relay hides any name that looks like an address.
   if (/[^\s@]+@[^\s@]+\.[^\s@]+/.test(name.value)) {
-    throw invalid("Enter a name instead of an email address. Other people see it beside your work.");
+    throw invalid(
+      "Enter a name instead of an email address. Other people see it beside your work.",
+    );
   }
   return name.value;
 }

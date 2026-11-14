@@ -34,7 +34,6 @@ function unreachable(sinceMs: number, attempts: number): Failure {
   };
 }
 
-// A person's retry whose failed answer the test sends when it chooses.
 function pendingRetry() {
   let resolve: ((status: SyncStatusResult) => void) | null = null;
   const retryCloudSync = vi.fn(
@@ -50,10 +49,11 @@ function pendingRetry() {
   };
 }
 
-// The shell's two hooks together, as the shell wires them.
 function renderNotice(
   initial: { workspaceId?: string; failure: Failure | null | undefined },
-  retryCloudSync = vi.fn(async (_id: string, _reason: "person" | "reconnect"): Promise<SyncStatusResult> => HEALTHY),
+  retryCloudSync = vi.fn(
+    async (_id: string, _reason: "person" | "reconnect"): Promise<SyncStatusResult> => HEALTHY,
+  ),
 ) {
   const view = renderHook(
     ({ workspaceId, failure }: { workspaceId: string; failure: Failure | null | undefined }) => {
@@ -75,42 +75,58 @@ function renderNotice(
 }
 
 describe("useSyncFailureNotice", () => {
-  it.each([false, true])("shows copy recovery and keeps the same row on retry, blocked=%s", async blocked => {
-    const next = blocked
-      ? "Move .dohc/local/outside-write-copies out of the way, then choose Try again."
-      : "Check that dohc can write to the workspace folder, then choose Try again.";
-    const message = `${next}\nUntil then, dohc leaves n.md as it was.`;
-    const detail = `OutsideWriteCopyError: dohc could not keep a copy of n.md\n${message}\n${blocked ? "Blocking file: C:\\workspace\\.dohc\\local\\outside-write-copies" : "Workspace folder: C:\\workspace"}\nCause: not a folder`;
-    const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
-    await waitFor(() => expect(view.toasts()).toHaveLength(1));
-    expect(view.rows()[0]).toMatchObject({ title: "dohc could not keep a copy of n.md", message: `${next}\nUntil then, dohc leaves n.md as it was and sync waits.`, seen: false });
-    expect(view.rows()[0]!.retry).toBeTypeOf("function");
-    expect(view.rows()[0]!.details).toEqual([["Detail", detail]]);
-    const id = view.rows()[0]!.id;
-    act(() => view.result.current.errors.hideShellError(id));
-    for (const attempts of [2, 3, 4]) {
-      view.rerender({ workspaceId: "ws-a", failure: { cause: "unknown", detail, sinceMs: 1, attempts } });
-      expect(view.rows()).toHaveLength(1);
-      expect(view.rows()[0]!.id).toBe(id);
-      expect(view.toasts()).toEqual([]);
-    }
-    view.rerender({ workspaceId: "ws-a", failure: null });
-    expect(view.rows()).toEqual([]);
-    act(() => view.result.current.errors.showOutsideCopies([["n.md", "n (kept copy).md", `copy-after-retry-${blocked}`]], vi.fn()));
-    expect(view.toasts()).toHaveLength(1);
-    expect(view.toasts()[0]!.title).toBe("Kept a copy of n.md");
-    expect(view.rows().some(row => row.kind === "cloud-sync")).toBe(false);
-  });
+  it.each([false, true])(
+    "shows copy recovery and keeps the same row on retry, blocked=%s",
+    async (blocked) => {
+      const next = blocked
+        ? "Move .dohc/local/outside-write-copies out of the way, then choose Try again."
+        : "Check that dohc can write to the workspace folder, then choose Try again.";
+      const message = `${next}\nUntil then, dohc leaves n.md as it was.`;
+      const detail = `OutsideWriteCopyError: dohc could not keep a copy of n.md\n${message}\n${blocked ? "Blocking file: C:\\workspace\\.dohc\\local\\outside-write-copies" : "Workspace folder: C:\\workspace"}\nCause: not a folder`;
+      const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
+      await waitFor(() => expect(view.toasts()).toHaveLength(1));
+      expect(view.rows()[0]).toMatchObject({
+        title: "dohc could not keep a copy of n.md",
+        message: `${next}\nUntil then, dohc leaves n.md as it was and sync waits.`,
+        seen: false,
+      });
+      expect(view.rows()[0]!.retry).toBeTypeOf("function");
+      expect(view.rows()[0]!.details).toEqual([["Detail", detail]]);
+      const id = view.rows()[0]!.id;
+      act(() => view.result.current.errors.hideShellError(id));
+      for (const attempts of [2, 3, 4]) {
+        view.rerender({
+          workspaceId: "ws-a",
+          failure: { cause: "unknown", detail, sinceMs: 1, attempts },
+        });
+        expect(view.rows()).toHaveLength(1);
+        expect(view.rows()[0]!.id).toBe(id);
+        expect(view.toasts()).toEqual([]);
+      }
+      view.rerender({ workspaceId: "ws-a", failure: null });
+      expect(view.rows()).toEqual([]);
+      act(() =>
+        view.result.current.errors.showOutsideCopies(
+          [["n.md", "n (kept copy).md", `copy-after-retry-${blocked}`]],
+          vi.fn(),
+        ),
+      );
+      expect(view.toasts()).toHaveLength(1);
+      expect(view.toasts()[0]!.title).toBe("Kept a copy of n.md");
+      expect(view.rows().some((row) => row.kind === "cloud-sync")).toBe(false);
+    },
+  );
   it("shows the claim refusal and keeps the existing Try again action", async () => {
     const message = "Another account already claimed this workspace.";
-    const view = renderNotice({ failure: { cause: "claim-refused", detail: message, sinceMs: 1, attempts: 1 } });
+    const view = renderNotice({
+      failure: { cause: "claim-refused", detail: message, sinceMs: 1, attempts: 1 },
+    });
     expect(view.toasts()[0]!.message).toBe(message);
     act(() => view.result.current.errors.retryShellError(view.rows()[0]!.id));
     await waitFor(() => expect(view.rows()).toEqual([]));
     expect(view.retryCloudSync).toHaveBeenCalledWith("ws-a", "person");
   });
 
-  // A blip costs one toast, and recovery takes it away with the row.
   it("toasts each failure once and clears its toast and row on recovery", () => {
     const view = renderNotice({ failure: null });
     for (let round = 1; round <= 3; round += 1) {
@@ -122,32 +138,32 @@ describe("useSyncFailureNotice", () => {
     }
   });
 
-  // Codex on #1233: the first failed pass filed only a quiet row, so a
-  // failure that one retry cleared never reached a toast at all.
+  // The first failed pass must toast. With only a quiet row, a failure that
+  // one retry cleared would never reach a toast at all.
   it("toasts a failure's first pass once, then only updates the row", () => {
     const view = renderNotice({ failure: unreachable(100, 1) });
     expect(view.toasts()).toHaveLength(1);
-    expect(view.toasts()[0]!.message).toBe(
-      "dohc could not reach the server.",
-    );
+    expect(view.toasts()[0]!.message).toBe("dohc could not reach the server.");
     act(() => view.result.current.errors.hideShellError(view.rows()[0]!.id));
     view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 2) });
     expect(view.toasts()).toEqual([]);
     view.rerender({ workspaceId: "ws-a", failure: unreachable(100, 3) });
     expect(view.toasts()).toEqual([]);
-    // The row carries the newest failure, so its copied detail is current.
     expect(view.rows()).toHaveLength(1);
     expect(view.rows()[0]!.details).toEqual([["Detail", "RelayUnreachableError: attempt 3"]]);
   });
 
-  // #3294: a busy server is a state dohc fixes by itself. The title bar shows
+  // A busy server is a state dohc fixes by itself. The title bar shows
   // its ring at once; the toast and row wait until it has lasted 15 s.
   it("holds a busy server's toast and row until the failure has lasted 15 s", () => {
     vi.useFakeTimers({ now: 50_000 });
     try {
-      const busy = (sinceMs: number, attempts: number): Failure =>
-        ({ cause: "server-busy", detail: "RelayBusyError: The server is busy.", sinceMs, attempts });
-      // A busy answer that a later pass clears never reaches a toast or row.
+      const busy = (sinceMs: number, attempts: number): Failure => ({
+        cause: "server-busy",
+        detail: "RelayBusyError: The server is busy.",
+        sinceMs,
+        attempts,
+      });
       const view = renderNotice({ failure: busy(50_000, 1) });
       act(() => vi.advanceTimersByTime(5_000));
       view.rerender({ workspaceId: "ws-a", failure: busy(50_000, 2) });
@@ -157,27 +173,32 @@ describe("useSyncFailureNotice", () => {
       act(() => vi.advanceTimersByTime(20_000));
       expect(view.rows()).toEqual([]);
 
-      // One that lasts toasts once its 15 s are up, counted from its first pass.
       view.rerender({ workspaceId: "ws-a", failure: busy(Date.now(), 1) });
       act(() => vi.advanceTimersByTime(14_999));
       expect(view.rows()).toEqual([]);
       act(() => vi.advanceTimersByTime(1));
       expect(view.toasts()).toHaveLength(1);
-      expect(view.toasts()[0]!.message).toBe("The server is busy. dohc keeps trying to sync this workspace.");
+      expect(view.toasts()[0]!.message).toBe(
+        "The server is busy. dohc keeps trying to sync this workspace.",
+      );
       expect(view.rows()[0]!.retry).toBeTypeOf("function");
 
       // A failure that needs the person still shows at once.
       view.rerender({ workspaceId: "ws-a", failure: null });
       const since = Date.now();
-      view.rerender({ workspaceId: "ws-a", failure: { cause: "unknown", detail: "Error: no", sinceMs: since, attempts: 1 } });
+      view.rerender({
+        workspaceId: "ws-a",
+        failure: { cause: "unknown", detail: "Error: no", sinceMs: since, attempts: 1 },
+      });
       expect(view.toasts()).toHaveLength(1);
       expect(view.toasts()[0]!.message).toBe("dohc could not sync this workspace.");
 
-      // When its next pass finds the server busy, the row and toast say so at once.
       act(() => vi.advanceTimersByTime(1_000));
       view.rerender({ workspaceId: "ws-a", failure: busy(since, 2) });
       expect(view.rows()).toHaveLength(1);
-      expect(view.rows()[0]!.message).toBe("The server is busy. dohc keeps trying to sync this workspace.");
+      expect(view.rows()[0]!.message).toBe(
+        "The server is busy. dohc keeps trying to sync this workspace.",
+      );
       expect(view.toasts()).toHaveLength(1);
     } finally {
       vi.useRealTimers();
@@ -193,10 +214,8 @@ describe("useSyncFailureNotice", () => {
     });
     first.unmount();
 
-    // Back to this workspace: the same failure shows neither toast nor row.
     const second = renderNotice({ failure: unreachable(100, 3) });
     expect(second.rows()).toEqual([]);
-    // A new failure after recovery is news again.
     second.rerender({ workspaceId: "ws-a", failure: null });
     second.rerender({ workspaceId: "ws-a", failure: unreachable(900, 1) });
     expect(second.rows()).toHaveLength(1);
@@ -204,8 +223,8 @@ describe("useSyncFailureNotice", () => {
 
   // The shell remounts on every workspace switch, and its status starts
   // unknown until the workspace answers. That is not a recovery.
-  // #1233 review: each new attempt refiled the row as seen, which closed an
-  // open toast by itself.
+  // A new attempt must not refile the row as seen, which would close an open
+  // toast by itself.
   it("keeps an open toast open when the next attempt fails", () => {
     const view = renderNotice({ failure: unreachable(100, 2) });
     expect(view.toasts()).toHaveLength(1);
@@ -214,8 +233,8 @@ describe("useSyncFailureNotice", () => {
     expect(view.toasts()[0]!.details).toEqual([["Detail", "RelayUnreachableError: attempt 3"]]);
   });
 
-  // #1233 review: a reconnect retry changed the cause without counting an
-  // attempt, and the row kept the old message and detail.
+  // A reconnect retry can change the cause without counting an attempt, and
+  // the row must not keep the old message and detail.
   it("refiles the row when a reconnect retry changes the cause, without a toast", () => {
     const view = renderNotice({
       failure: { cause: "unknown", detail: "RelayError: first", sinceMs: 100, attempts: 1 },
@@ -224,7 +243,12 @@ describe("useSyncFailureNotice", () => {
     act(() => view.result.current.errors.hideShellError(view.rows()[0]!.id));
     view.rerender({
       workspaceId: "ws-a",
-      failure: { cause: "server-unreachable", detail: "RelayUnreachableError: reconnect", sinceMs: 100, attempts: 1 },
+      failure: {
+        cause: "server-unreachable",
+        detail: "RelayUnreachableError: reconnect",
+        sinceMs: 100,
+        attempts: 1,
+      },
     });
     expect(view.rows()).toHaveLength(1);
     expect(view.rows()[0]!.message).toBe("dohc could not reach the server.");
@@ -232,8 +256,8 @@ describe("useSyncFailureNotice", () => {
     expect(view.toasts()).toEqual([]);
   });
 
-  // #1233 review: a retry answered after the shell unmounted changed what
-  // the next mount reads, here bringing back a dismissed row.
+  // A retry answered after the shell unmounted must not change what the next
+  // mount reads, here by bringing back a dismissed row.
   it("ignores a retry that answers after the shell unmounted", async () => {
     let answer: ((status: SyncStatusResult) => void) | null = null;
     const retryCloudSync = vi.fn(
@@ -314,8 +338,8 @@ describe("useSyncFailureNotice", () => {
     await waitFor(() => expect(view.rows()).toEqual([]));
   });
 
-  // #1233 review: the retry's answer and the status keyed the same failed
-  // pass differently, so the status refiled the row and the toast remounted.
+  // The retry's answer and the status must key the same failed pass the same
+  // way, or the status refiles the row and the toast remounts.
   it("files a failed retry once when the status repeats its answer", async () => {
     const retry = pendingRetry();
     const view = renderNotice({ failure: unreachable(100, 1) }, retry.retryCloudSync);
@@ -328,8 +352,6 @@ describe("useSyncFailureNotice", () => {
     expect(view.toasts()[0]!.id).toBe(toastId);
   });
 
-  // The status files the failed pass quietly, because this failure already
-  // toasted; the answer then raises the toast the person asked for, once.
   it("files a failed retry once when the status reports it before the answer", async () => {
     const retry = pendingRetry();
     const view = renderNotice({ failure: unreachable(100, 1) }, retry.retryCloudSync);
@@ -346,9 +368,11 @@ describe("useSyncFailureNotice", () => {
   });
 
   it("files a failed retry request as the sync failure, so recovery clears it", async () => {
-    const retryCloudSync = vi.fn(async (_id: string, _reason: "person" | "reconnect"): Promise<SyncStatusResult> => {
-      throw new Error("This workspace is no longer active.");
-    });
+    const retryCloudSync = vi.fn(
+      async (_id: string, _reason: "person" | "reconnect"): Promise<SyncStatusResult> => {
+        throw new Error("This workspace is no longer active.");
+      },
+    );
     const view = renderNotice({ failure: unreachable(100, 1) }, retryCloudSync);
     act(() => view.result.current.notice.retry());
     await waitFor(() =>
@@ -367,10 +391,10 @@ describe("useSyncFailureNotice", () => {
     expect(view.retryCloudSync).toHaveBeenCalledWith("ws-a", "reconnect");
   });
 
-  // A failed sync pass proves nothing about this machine's copy, so no
-  // message claims the changes are saved here.
   it("never claims the changes are saved", () => {
-    expect(syncFailureNotice(unreachable(1, 1))).toEqual({ message: "dohc could not reach the server." });
+    expect(syncFailureNotice(unreachable(1, 1))).toEqual({
+      message: "dohc could not reach the server.",
+    });
     expect(
       syncFailureNotice({ cause: "unknown", detail: "Error: disk full", sinceMs: 1, attempts: 1 }),
     ).toEqual({ message: "dohc could not sync this workspace." });
@@ -384,7 +408,8 @@ describe("useSyncFailureNotice", () => {
     expect(view.rows()[0]).toMatchObject({
       kind: "cloud-sync",
       title: "dohc could not sync this workspace",
-      message: "dohc can't apply a change to notes/trip.txt, because this machine has a different file there. Other changes wait behind it.",
+      message:
+        "dohc can't apply a change to notes/trip.txt, because this machine has a different file there. Other changes wait behind it.",
       details: [["Detail", detail]],
       seen: false,
     });
@@ -399,14 +424,16 @@ describe("useSyncFailureNotice", () => {
     expect(view.rows()[0]).toMatchObject({
       kind: "cloud-sync",
       title: "dohc could not sync this workspace",
-      message: "dohc could not read the permissions of notes/trip.txt, so it left the file as it was.\nIn its Properties › Security › Advanced, give your account Read permissions, then choose Try again.",
+      message:
+        "dohc could not read the permissions of notes/trip.txt, so it left the file as it was.\nIn its Properties › Security › Advanced, give your account Read permissions, then choose Try again.",
       details: [["Detail", detail]],
     });
     expect(view.rows()[0]!.retry).toBeTypeOf("function");
   });
 
   it("says changes wait on a conflict, and keeps the counts in Details", async () => {
-    const sentences = "Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.";
+    const sentences =
+      "Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again.";
     const detail = `DaemonRefusalError: conflict-wait-limit: ${sentences} (path plan.md, origin device-d seq 7, retained ops 1, retained bytes 536870912)`;
     const view = renderNotice({ failure: { cause: "unknown", detail, sinceMs: 1, attempts: 1 } });
     await waitFor(() => expect(view.toasts()).toHaveLength(1));
@@ -420,7 +447,12 @@ describe("useSyncFailureNotice", () => {
 
   it("keeps the generic words for a failed pass that names no file", () => {
     expect(
-      syncFailureNotice({ cause: "unknown", detail: "DaemonRefusalError: workspace operation failed", sinceMs: 1, attempts: 1 }),
+      syncFailureNotice({
+        cause: "unknown",
+        detail: "DaemonRefusalError: workspace operation failed",
+        sinceMs: 1,
+        attempts: 1,
+      }),
     ).toEqual({ message: "dohc could not sync this workspace." });
   });
 });

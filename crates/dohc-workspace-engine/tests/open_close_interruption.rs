@@ -1,15 +1,3 @@
-//! An interrupted workspace.open or workspace.close must never strand the
-//! engine.db so that the same caller's retry refuses with "workspace database
-//! is already attached".
-//!
-//! An in-process caller can drop a handler future at any await, so every
-//! await in the open and close paths is a point where the request can vanish
-//! mid-flight. `tokio::spawn` plus `abort()` reproduces that drop
-//! at pseudo-random points across both paths while a second workspace opens
-//! and closes on the same service, the way the desktop's startup smoke open
-//! races the first real open. The OpenGuard and the Closing marker are what
-//! keep the registry consistent through the drop; this pins them.
-
 use crate::common;
 
 use common::*;
@@ -81,8 +69,6 @@ fn assert_not_already_attached(error: &WireError, at: &str) {
 const RETRY_ROUNDS: u32 = 2000;
 const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(5);
 
-/// Retry an open until it succeeds, failing the test the moment any attempt
-/// refuses with the stranded-db message a real client cannot recover from.
 async fn open_until_success(
     harness: &Harness,
     root: &str,
@@ -182,7 +168,6 @@ async fn an_interrupted_open_or_close_never_strands_the_workspace_db() {
             Err(_) => None,
         };
 
-        // The caller retries; the retry must always land.
         let handle = open_until_success(
             &harness,
             &root_t,
@@ -201,14 +186,12 @@ async fn an_interrupted_open_or_close_never_strands_the_workspace_db() {
             .await;
         }
 
-        // A close whose future is dropped mid-flight.
         let close_harness = Arc::clone(&harness);
         let racing_close = tokio::spawn(async move { close_harness.close(handle).await });
         tokio::time::sleep(std::time::Duration::from_micros(lcg(&mut seed) % 60_000)).await;
         racing_close.abort();
         let _ = racing_close.await;
 
-        // Reopen after the aborted close, then settle clean.
         let reopened = open_until_success(
             &harness,
             &root_t,

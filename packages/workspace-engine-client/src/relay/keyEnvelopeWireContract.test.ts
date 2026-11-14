@@ -20,8 +20,8 @@ describe("key-envelope wire schemas", () => {
   });
 
   it("wraps malformed results in the public error", () => {
-    expect(() =>
-      decodeKeyEnvelopeResult(KEY_ENVELOPE_METHOD.upload, { etag: 1 }),
-    ).toThrow(ProtocolShapeError);
+    expect(() => decodeKeyEnvelopeResult(KEY_ENVELOPE_METHOD.upload, { etag: 1 })).toThrow(
+      ProtocolShapeError,
+    );
   });
 });

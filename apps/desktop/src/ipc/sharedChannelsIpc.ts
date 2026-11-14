@@ -7,8 +7,10 @@ import {
   ListJoinedSharedChannelsResult,
 } from "./bridgeContract";
 import {
-  awaitCredentialGeneration, chatShareSessionKey,
-  readRelayChatShareLanes, RelaySessionError,
+  awaitCredentialGeneration,
+  chatShareSessionKey,
+  readRelayChatShareLanes,
+  RelaySessionError,
 } from "../mainChatIpcHandlers";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import { ShareUnavailableError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
@@ -17,18 +19,28 @@ import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { DesktopLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { EngineRelayWorkspaceClient } from "../workspaces/engineRelayClient";
 import { pushWithIdentity } from "../workspaces/pushWithIdentity";
-import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
+import {
+  credentialScopedOperation,
+  requireCredentials,
+} from "../workspaces/credentialScopedOperation";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import {
-  endJoinedChannel, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS, scopeJoinedChannels,
+  endJoinedChannel,
+  relayFetchWithTimeout,
+  RELAY_FETCH_TIMEOUT_MS,
+  scopeJoinedChannels,
 } from "../workspaces/sharedChannels";
 import {
-  requireShareableChatChannel, resolveDmKinds, shareIdsToWithholdFromOrdinaryInvites,
+  requireShareableChatChannel,
+  resolveDmKinds,
+  shareIdsToWithholdFromOrdinaryInvites,
   type DmPeekResult,
 } from "../workspaces/dmChats";
 import {
-  liveSharedChannelHoldersByShareId, otherLiveSharedChannelHolder,
-  otherLiveSharedChannelHolderByWireId, reserveAndPullSharedChannel,
+  liveSharedChannelHoldersByShareId,
+  otherLiveSharedChannelHolder,
+  otherLiveSharedChannelHolderByWireId,
+  reserveAndPullSharedChannel,
 } from "../workspaces/dmRequests";
 import { fetchSharedChannelInfo, type SharedChannelInfo } from "../workspaces/sharedChannelInfo";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
@@ -43,17 +55,25 @@ export function createSharedChannelsIpc<
     assertCurrent(): void;
   },
 >(dependencies: {
-  requireEngineCapture(workspace: Workspace, feature: "Chats"): Promise<{ workspace: RegistryEntry }>;
+  requireEngineCapture(
+    workspace: Workspace,
+    feature: "Chats",
+  ): Promise<{ workspace: RegistryEntry }>;
   assertWritableWorkspace(workspace: RegistryEntry): void;
-  linkedChatStoreFor(workspace: RegistryEntry): Pick<DesktopLinkedChatStore, "listChannels" | "getChannelWireId">;
+  linkedChatStoreFor(
+    workspace: RegistryEntry,
+  ): Pick<DesktopLinkedChatStore, "listChannels" | "getChannelWireId">;
   remoteForWorkspace(workspace: RegistryEntry): Promise<{
-    credentials: CloudCredentials; credentialGeneration: number;
+    credentials: CloudCredentials;
+    credentialGeneration: number;
   }>;
   currentCredentialGeneration(): number;
   currentCredentials(): CloudCredentials | null;
   warmCredentialCache(): Promise<void>;
   relayShareJsonWithCredentials<Result>(
-    credentials: CloudCredentials, path: string, init?: RequestInit,
+    credentials: CloudCredentials,
+    path: string,
+    init?: RequestInit,
   ): Promise<Result>;
   listWorkspaces(): RegistryEntry[];
   updateWorkspaceSharedChannels(
@@ -61,23 +81,37 @@ export function createSharedChannelsIpc<
     update: (channels: readonly JoinedSharedChannel[]) => readonly JoinedSharedChannel[],
   ): Promise<void>;
   relayClientForWorkspace(input: {
-    workspaceId: string; rootPath: string; attachmentId?: symbol;
+    workspaceId: string;
+    rootPath: string;
+    attachmentId?: symbol;
     accountId: string;
     relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
-  }): Pick<EngineRelayWorkspaceClient, "pullSharedChannel" | "claim"> & { push(): Promise<unknown> };
+  }): Pick<EngineRelayWorkspaceClient, "pullSharedChannel" | "claim"> & {
+    push(): Promise<unknown>;
+  };
   projectPendingChatBookmarksAfterPull(workspaceId: string): Promise<void>;
   normalizeServerUrl(url: string): string;
   peekedReceivedGrantKinds: Map<string, "dm" | "not-dm">;
   peekReceivedGrantKindForShare(relay: SyncRelayConnection, shareId: string): Promise<DmPeekResult>;
-  acknowledgeWorkspaceShareSkips(workspaceId: string, shareId: string | undefined, generation: number): unknown;
-  notifyRenderer(input: { workspaceId: string }): void;
+  acknowledgeWorkspaceShareSkips(
+    workspaceId: string,
+    shareId: string | undefined,
+    generation: number,
+  ): unknown;
+  notifyRenderer(input: { workspaceId: string; summaryChanged?: true }): void;
   // Mounts a group's folder under shared-with-me, the way a pasted share
   // code does. Joining a group is one action: the channel, then its folder.
   unmountShareFolder(input: {
-    workspace: Workspace; shareId: string; assertCurrent(): void;
+    workspace: Workspace;
+    shareId: string;
+    assertCurrent(): void;
   }): Promise<{ folderLeft?: true }>;
   mountShareFolder(input: {
-    workspace: Workspace; shareId: string; relayUrl: string; labelHint: string; assertCurrent(): void;
+    workspace: Workspace;
+    shareId: string;
+    relayUrl: string;
+    labelHint: string;
+    assertCurrent(): void;
   }): Promise<unknown>;
   // The owner shared one of this workspace's Groups or chats.
   sharesChanged(workspaceId: string): void;
@@ -87,25 +121,31 @@ export function createSharedChannelsIpc<
 }) {
   type Handlers = OperationHandlers<typeof sharedChannelOperations, unknown, Operation>;
   const {
-    requireEngineCapture, assertWritableWorkspace, linkedChatStoreFor, remoteForWorkspace,
-    currentCredentialGeneration, currentCredentials, warmCredentialCache,
-    relayShareJsonWithCredentials, listWorkspaces, updateWorkspaceSharedChannels,
-    relayClientForWorkspace, projectPendingChatBookmarksAfterPull, normalizeServerUrl,
-    peekedReceivedGrantKinds, peekReceivedGrantKindForShare, acknowledgeWorkspaceShareSkips,
-    notifyRenderer, mountShareFolder, unmountShareFolder, sharesChanged, reconcileReceivedShares,
+    requireEngineCapture,
+    assertWritableWorkspace,
+    linkedChatStoreFor,
+    remoteForWorkspace,
+    currentCredentialGeneration,
+    currentCredentials,
+    warmCredentialCache,
+    relayShareJsonWithCredentials,
+    listWorkspaces,
+    updateWorkspaceSharedChannels,
+    relayClientForWorkspace,
+    projectPendingChatBookmarksAfterPull,
+    normalizeServerUrl,
+    peekedReceivedGrantKinds,
+    peekReceivedGrantKindForShare,
+    acknowledgeWorkspaceShareSkips,
+    notifyRenderer,
+    mountShareFolder,
+    unmountShareFolder,
+    sharesChanged,
+    reconcileReceivedShares,
   } = dependencies;
 
-  // --- Shared channels (MU-C4) --------------------------------------------
-  // A chat grant shares a whole channel (threads/messages/reactions)
-  // with another account, read-write by default. The relay owns every
-  // security decision (membership, authorship, channel scoping, revocation);
-  // these handlers only address grants and move the member-side sync.
-
   const shareChatChannelHandler: Handlers["shareChatChannel"] = async (input, { operation }) => {
-    const { workspace } = await requireEngineCapture(
-      operation.workspace,
-      "Chats",
-    );
+    const { workspace } = await requireEngineCapture(operation.workspace, "Chats");
     operation.assertCurrent();
     assertWritableWorkspace(workspace);
     const store = linkedChatStoreFor(workspace);
@@ -125,21 +165,14 @@ export function createSharedChannelsIpc<
     // id everywhere by design, so sharing it would merge strangers' personal
     // chats. Refuse with a way forward.
     if (wireId === GENERAL_CHANNEL_WIRE_ID) {
-      throw new Error(
-        "The general group is personal to each workspace. Create a group to share.",
-      );
+      throw new Error("The general group is personal to each workspace. Create a group to share.");
     }
-    if (
-      workspace.sharedChannels?.some(
-        (channel) => channel.channelWireId === wireId,
-      )
-    ) {
+    if (workspace.sharedChannels?.some((channel) => channel.channelWireId === wireId)) {
       throw new Error(
         "This group was shared with you. Ask the person who shared it to add more people.",
       );
     }
-    const { credentials, credentialGeneration } =
-      await remoteForWorkspace(workspace);
+    const { credentials, credentialGeneration } = await remoteForWorkspace(workspace);
     operation.assertCurrent();
     // A group is a grant on a channel the relay already knows. The
     // channel's create op may still be waiting for the next sync pass,
@@ -156,13 +189,15 @@ export function createSharedChannelsIpc<
     // handler resuming; nothing runs on a session that is already gone.
     assertCurrentShareSession();
     if (channel.folderPath && credentials.relayUrl) {
-      await pushWithIdentity(relayClientForWorkspace({
-        workspaceId: workspace.workspaceId,
-        accountId: credentials.userId,
-        rootPath: workspace.rootPath,
-        attachmentId: operation.workspace.attachmentId,
-        relay: { baseUrl: credentials.relayUrl, token: credentials.token },
-      }));
+      await pushWithIdentity(
+        relayClientForWorkspace({
+          workspaceId: workspace.workspaceId,
+          accountId: credentials.userId,
+          rootPath: workspace.rootPath,
+          attachmentId: operation.workspace.attachmentId,
+          relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+        }),
+      );
       assertCurrentShareSession();
     }
     const created = await awaitCredentialGeneration({
@@ -194,33 +229,21 @@ export function createSharedChannelsIpc<
     return ShareChatChannelResult.parse({ shareId: created.shareId });
   };
 
-  // What this machine joined, for the channels the caller named. The grant
-  // side lives on the relay; this side does not, so asking it costs no network
-  // — and a caller that needs only this must not wait on a relay that may
-  // never answer.
-  //
-  // The scope is a required argument, not a filter a caller may skip: the
-  // registry array grows with every channel this workspace has ever joined,
-  // and an unscoped answer would carry that history to the renderer. The write
-  // gate is unaffected — assertSharedChannelWritable reads the whole array
-  // here in main and never crosses IPC at all.
-  function joinedChannelAnswers(
-    workspace: RegistryEntry,
-    channelWireIds: readonly string[],
-  ) {
+  function joinedChannelAnswers(workspace: RegistryEntry, channelWireIds: readonly string[]) {
     return scopeJoinedChannels(workspace.sharedChannels ?? [], channelWireIds);
   }
 
-  const listJoinedSharedChannelsHandler: Handlers["listJoinedSharedChannels"] = (input, { operation }) =>
+  const listJoinedSharedChannelsHandler: Handlers["listJoinedSharedChannels"] = (
+    input,
+    { operation },
+  ) =>
     ListJoinedSharedChannelsResult.parse({
       joined: joinedChannelAnswers(operation.workspace, input.channelWireIds),
     });
 
   function shareIdsClaimedByOtherWorkspaces(workspaceId: string): Set<string> {
     const claimed = new Set<string>();
-    for (const [shareId, holders] of liveSharedChannelHoldersByShareId(
-      listWorkspaces(),
-    )) {
+    for (const [shareId, holders] of liveSharedChannelHoldersByShareId(listWorkspaces())) {
       if ([...holders].some((holder) => holder !== workspaceId)) claimed.add(shareId);
     }
     return claimed;
@@ -255,12 +278,9 @@ export function createSharedChannelsIpc<
   ): void {
     const holder =
       otherWorkspaceHoldingShare(shareId, workspaceId) ??
-      (channelWireId
-        ? otherWorkspaceHoldingWireId(channelWireId, workspaceId)
-        : null);
+      (channelWireId ? otherWorkspaceHoldingWireId(channelWireId, workspaceId) : null);
     if (!holder) return;
-    const workspaceName =
-      holder.rootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "workspace";
+    const workspaceName = holder.rootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? "workspace";
     throw new Error(
       `This conversation already lives in ${workspaceName}. Open that workspace to continue.`,
     );
@@ -305,10 +325,7 @@ export function createSharedChannelsIpc<
       },
       pull: async ({ workspaceId, rootPath, relay, shareId, channelWireId }) => {
         assertCurrent();
-        if (
-          workspaceId !== workspace.workspaceId ||
-          rootPath !== workspace.rootPath
-        ) {
+        if (workspaceId !== workspace.workspaceId || rootPath !== workspace.rootPath) {
           throw new Error("This pull targeted a different workspace.");
         }
         const result = await relayClientForWorkspace({
@@ -345,7 +362,10 @@ export function createSharedChannelsIpc<
     });
   }
 
-  const listChatChannelSharesHandler: Handlers["listChatChannelShares"] = async (input, { operation }) => {
+  const listChatChannelSharesHandler: Handlers["listChatChannelShares"] = async (
+    input,
+    { operation },
+  ) => {
     const workspace = operation.workspace;
     // Relay-side listings need a signed-in session; without one the local
     // joined set still answers (their local copies keep working offline), and
@@ -364,9 +384,7 @@ export function createSharedChannelsIpc<
       capturedGeneration: shareCredentialGeneration,
       currentGeneration: () => currentCredentialGeneration(),
     });
-    const shareIdsClaimedElsewhere = shareIdsClaimedByOtherWorkspaces(
-      workspace.workspaceId,
-    );
+    const shareIdsClaimedElsewhere = shareIdsClaimedByOtherWorkspaces(workspace.workspaceId);
     const relay = await readRelayChatShareLanes({
       fetchListing: async () => {
         if (!credentials) {
@@ -385,11 +403,8 @@ export function createSharedChannelsIpc<
         assertCurrentShareSession();
         const receivedShareIds = Array.isArray(listing.received)
           ? listing.received.flatMap((row) => {
-              const selector = row.selector as
-                | { kind?: unknown }
-                | undefined;
-              return selector?.kind === "chat" &&
-                typeof row.shareId === "string"
+              const selector = row.selector as { kind?: unknown } | undefined;
+              return selector?.kind === "chat" && typeof row.shareId === "string"
                 ? [row.shareId]
                 : [];
             })
@@ -405,9 +420,7 @@ export function createSharedChannelsIpc<
               {
                 baseUrl: normalizeServerUrl(credentials.relayUrl!),
                 token: credentials.token,
-                fetch: relayFetchWithTimeout(
-                  RELAY_FETCH_TIMEOUT_MS,
-                ),
+                fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
               },
               shareId,
             );
@@ -436,9 +449,7 @@ export function createSharedChannelsIpc<
     // during it is reflected rather than missed.
     const shownWireIds = [
       ...input.channelWireIds,
-      ...(relay.state === "answered"
-        ? relay.received.map((row) => row.channelWireId)
-        : []),
+      ...(relay.state === "answered" ? relay.received.map((row) => row.channelWireId) : []),
     ];
     // The registry as it stands, not the operation's snapshot: the listing
     // above may have resumed a row.
@@ -447,10 +458,7 @@ export function createSharedChannelsIpc<
       operation.workspace;
     return ListChatChannelSharesResult.parse({
       joined: joinedChannelAnswers(registered, shownWireIds),
-      sessionKey:
-        relay.state === "signed-out"
-          ? null
-          : chatShareSessionKey(credentials),
+      sessionKey: relay.state === "signed-out" ? null : chatShareSessionKey(credentials),
       relay,
     });
   };
@@ -460,32 +468,27 @@ export function createSharedChannelsIpc<
   // channel was just pulled, so it is in the store; if the pull brought
   // nothing yet, the label falls back to the granter.
   async function groupFolderName(workspace: RegistryEntry, channelWireId: string): Promise<string> {
-    const channels = await linkedChatStoreFor(workspace).listChannels({ workspaceId: workspace.workspaceId });
+    const channels = await linkedChatStoreFor(workspace).listChannels({
+      workspaceId: workspace.workspaceId,
+    });
     return channels.find((channel) => channel.id === channelWireId)?.name ?? "";
   }
 
   const joinSharedChannelHandler: Handlers["joinSharedChannel"] = async (input, { operation }) => {
-    const { workspace } = await requireEngineCapture(
-      operation.workspace,
-      "Chats",
-    );
+    const { workspace } = await requireEngineCapture(operation.workspace, "Chats");
     operation.assertCurrent();
     if (shareViewIsPresent(workspace.shareView)) {
-      throw new Error(
-        "Shared views are read-only. Join groups from a workspace you own.",
-      );
+      throw new Error("Shared views are read-only. Join groups from a workspace you own.");
     }
     await warmCredentialCache();
     operation.assertCurrent();
     const joinCredentials = requireCredentials(currentCredentials());
     const joinCredentialGeneration = currentCredentialGeneration();
     if (!joinCredentials.relayUrl) {
-      throw new Error(
-        "Reconnect your server to refresh its connection settings, then try again.",
-      );
+      throw new Error("Reconnect your server to refresh its connection settings, then try again.");
     }
-    // Capture the credentials before the awaits below (CodeRabbit Data
-    // Integrity): currentCredentials() can change during fetch/pull (logout,
+    // Capture the credentials before the awaits below:
+    // currentCredentials() can change during fetch/pull (logout,
     // relay switch) — re-reading it afterwards can crash on null or pin the
     // joined channel to the wrong relay. The join is atomic against the
     // credentials it started with.
@@ -554,6 +557,8 @@ export function createSharedChannelsIpc<
         throw new Error(`Joined the group's chat, but its folder could not be added. ${reason}`);
       }
       operation.assertCurrent();
+      // The new mount is in the workspace's summary, which the Group's composer reads its files from.
+      notifyRenderer({ workspaceId: operation.workspace.workspaceId, summaryChanged: true });
     }
     return JoinSharedChannelResult.parse({
       joined: { ...joined, ended: false },
@@ -566,10 +571,7 @@ export function createSharedChannelsIpc<
   // leaveSharedChannel and leaveDm — a DM's accepted row IS a
   // JoinedSharedChannel row in the same registry, so ending it is the same
   // operation regardless of which surface asked.
-  async function endWorkspaceJoinedChannel(
-    operation: Operation,
-    shareId: string,
-  ): Promise<void> {
+  async function endWorkspaceJoinedChannel(operation: Operation, shareId: string): Promise<void> {
     const workspaceId = operation.workspace.workspaceId;
     await updateWorkspaceSharedChannels(workspaceId, (channels) => {
       operation.assertCurrent();
@@ -578,14 +580,22 @@ export function createSharedChannelsIpc<
     operation.assertCurrent();
   }
 
-  const leaveSharedChannelHandler: Handlers["leaveSharedChannel"] = async (input, { operation }) => {
+  const leaveSharedChannelHandler: Handlers["leaveSharedChannel"] = async (
+    input,
+    { operation },
+  ) => {
     await endWorkspaceJoinedChannel(operation, input.shareId);
     if (shareMountRecordsForId(storedShareMounts(operation.workspace), input.shareId).length > 0) {
       let folderLeft = false;
       try {
-        folderLeft = (await unmountShareFolder({
-          workspace: operation.workspace, shareId: input.shareId, assertCurrent: operation.assertCurrent,
-        })).folderLeft === true;
+        folderLeft =
+          (
+            await unmountShareFolder({
+              workspace: operation.workspace,
+              shareId: input.shareId,
+              assertCurrent: operation.assertCurrent,
+            })
+          ).folderLeft === true;
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         throw new Error(`Left the group, but its folder could not be removed. ${reason}`);
@@ -611,27 +621,17 @@ export function createSharedChannelsIpc<
   // generation) raise it again on its own.
   const dismissShareSkipsHandler: Handlers["dismissShareSkips"] = async (input, { operation }) => {
     const workspace = operation.workspace;
-    if (
-      input.shareId === undefined &&
-      !shareViewIsPresent(workspace.shareView)
-    ) {
+    if (input.shareId === undefined && !shareViewIsPresent(workspace.shareView)) {
       throw new Error("This workspace is not a shared view.");
     }
     if (
       input.shareId !== undefined &&
-      shareMountRecordsForId(
-        storedShareMounts(workspace),
-        input.shareId,
-      ).length === 0
+      shareMountRecordsForId(storedShareMounts(workspace), input.shareId).length === 0
     ) {
       throw new Error("That share is not mounted in this workspace.");
     }
     operation.assertCurrent();
-    acknowledgeWorkspaceShareSkips(
-      workspace.workspaceId,
-      input.shareId,
-      input.generation,
-    );
+    acknowledgeWorkspaceShareSkips(workspace.workspaceId, input.shareId, input.generation);
     operation.assertCurrent();
     notifyRenderer({ workspaceId: workspace.workspaceId });
   };

@@ -1,13 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RegistryEntry } from "./registryStore";
-import {
-  workspaceSummariesFrom,
-  workspaceSummaryFor,
-} from "./workspaceSummaryProjection";
-
-// The registry file is data, not a contract. These drive the projection with
-// the damaged shapes a stored record can actually carry, and pin the blast
-// radius: a share-sized fault stays share-sized.
+import { workspaceSummariesFrom, workspaceSummaryFor } from "./workspaceSummaryProjection";
 
 const entry = (extra: Record<string, unknown> = {}): RegistryEntry =>
   ({
@@ -41,29 +34,44 @@ const mount = (id: string, label: string, selector: unknown) => ({
 describe("workspace summary projection", () => {
   it("marks a received copy without a recipient pin as damaged", () => {
     const raw = { ...shareView(goodSelector), recipientUserId: undefined };
-    expect(workspaceSummaryFor(entry({ shareView: raw })).shareView).toMatchObject({ damaged: true });
+    expect(workspaceSummaryFor(entry({ shareView: raw })).shareView).toMatchObject({
+      damaged: true,
+    });
     expect(workspaceSummaryFor(entry({ shareView: raw })).shareView?.access).toBeUndefined();
-    expect(workspaceSummaryFor(entry({ shareView: raw })).shareView?.recipientUserId).toBeUndefined();
+    expect(
+      workspaceSummaryFor(entry({ shareView: raw })).shareView?.recipientUserId,
+    ).toBeUndefined();
   });
 
   it("keeps the recipient pin when the grant is unreadable", () => {
-    expect(workspaceSummaryFor(entry({ shareView: shareView(staleSelector) })).shareView)
-      .toMatchObject({ damaged: true, recipientUserId: "recipient" });
+    expect(
+      workspaceSummaryFor(entry({ shareView: shareView(staleSelector) })).shareView,
+    ).toMatchObject({ damaged: true, recipientUserId: "recipient" });
   });
 
   it("carries durable unsaved paths to the shell", () => {
     for (const unsavedPaths of [["docs/locked.md"], null]) {
-      expect(workspaceSummaryFor(entry({ shareView: { ...shareView(goodSelector), unsavedPaths } })).shareView?.unsavedPaths).toEqual(unsavedPaths);
+      expect(
+        workspaceSummaryFor(entry({ shareView: { ...shareView(goodSelector), unsavedPaths } }))
+          .shareView?.unsavedPaths,
+      ).toEqual(unsavedPaths);
     }
   });
 
   it("projects a display snapshot independently of capture protection", () => {
     const unconfirmedChanges = { paths: ["docs/automations.yaml"], unchecked: true, checked: 0 };
-    const raw = { ...shareView(goodSelector), unsavedPaths: ["docs/locked.md"], unconfirmedChanges };
+    const raw = {
+      ...shareView(goodSelector),
+      unsavedPaths: ["docs/locked.md"],
+      unconfirmedChanges,
+    };
     expect(workspaceSummaryFor(entry({ shareView: raw })).shareView).toMatchObject({
-      unsavedPaths: ["docs/locked.md"], unconfirmedChanges,
+      unsavedPaths: ["docs/locked.md"],
+      unconfirmedChanges,
     });
-    const malformed = workspaceSummaryFor(entry({ shareView: { ...raw, unconfirmedChanges: { paths: null } } })).shareView;
+    const malformed = workspaceSummaryFor(
+      entry({ shareView: { ...raw, unconfirmedChanges: { paths: null } } }),
+    ).shareView;
     expect(malformed?.unconfirmedChanges).toBeUndefined();
     expect(malformed?.unsavedPaths).toEqual(["docs/locked.md"]);
   });
@@ -112,9 +120,9 @@ describe("workspace summary projection", () => {
     }
   });
 
-  // The defect CodeRabbit found: one unreadable share record threw out of the
-  // whole projection, so a single stale grant answered "you have no
-  // workspaces" — false, and with no way back from the UI.
+  // One unreadable share record must not throw out of the whole projection.
+  // A single stale grant would answer "you have no workspaces", which is
+  // false and has no way back from the UI.
   it("keeps every other workspace when one stored share record is unreadable", () => {
     const summaries = workspaceSummariesFrom([
       entry({ workspaceId: "ws-healthy" }),
@@ -132,9 +140,7 @@ describe("workspace summary projection", () => {
   // as an ordinary writable workspace — damage failing open, which is the one
   // direction this PR must never fail in.
   it("keeps the share-view marker when its grant is unreadable, and marks it damaged", () => {
-    const summary = workspaceSummaryFor(
-      entry({ shareView: shareView(staleSelector) }),
-    );
+    const summary = workspaceSummaryFor(entry({ shareView: shareView(staleSelector) }));
     expect(summary.workspaceId).toBe("ws-1");
     expect(
       summary.shareView,
@@ -149,9 +155,7 @@ describe("workspace summary projection", () => {
   });
 
   it("keeps a readable share view undamaged", () => {
-    const summary = workspaceSummaryFor(
-      entry({ shareView: shareView(goodSelector) }),
-    );
+    const summary = workspaceSummaryFor(entry({ shareView: shareView(goodSelector) }));
     expect(summary.shareView?.damaged).toBeUndefined();
     expect(summary.shareView?.access).toBe("view");
   });
@@ -166,16 +170,8 @@ describe("workspace summary projection", () => {
         ],
       }),
     );
-    expect(summary.shareMounts?.map((m) => m.shareId)).toEqual([
-      "m-good",
-      "m-stale",
-      "m-good-2",
-    ]);
-    expect(summary.shareMounts?.map((m) => m.access)).toEqual([
-      "view",
-      undefined,
-      "edit",
-    ]);
+    expect(summary.shareMounts?.map((m) => m.shareId)).toEqual(["m-good", "m-stale", "m-good-2"]);
+    expect(summary.shareMounts?.map((m) => m.access)).toEqual(["view", undefined, "edit"]);
   });
 
   it("refuses a level the relay could never have issued", () => {
@@ -188,9 +184,6 @@ describe("workspace summary projection", () => {
     }
   });
 
-  // A row does not have to be an object. Reading a field off one that turned
-  // out to be `null` threw out of the whole projection, which is the same
-  // zero-workspaces defect by another door.
   it("survives rows that are not objects at all", () => {
     const summaries = workspaceSummariesFrom([
       entry({ workspaceId: "ws-healthy" }),
@@ -205,7 +198,6 @@ describe("workspace summary projection", () => {
       summaries.map((summary) => summary.workspaceId),
       "a non-object row must not empty the workspace list",
     ).toEqual(["ws-healthy", "ws-null-row", "ws-null-view", "ws-scalar-view"]);
-    // Only the readable mount survives the listing.
     expect(summaries[1]?.shareMounts?.map((m) => m.shareId)).toEqual(["m-good"]);
   });
 
@@ -219,7 +211,6 @@ describe("workspace summary projection", () => {
         summary.shareView?.damaged,
         `shareView ${JSON.stringify(raw)} must not present as an ordinary workspace`,
       ).toBe(true);
-      // Nothing is invented for a marker that carried nothing.
       expect(summary.shareView?.shareId).toBeUndefined();
       expect(summary.shareView?.granterEmail).toBeNull();
       expect(summary.shareView?.access).toBeUndefined();
@@ -248,11 +239,10 @@ describe("workspace summary projection", () => {
     }
   });
 
-  // The mount and open handlers used to parse the raw registry record. A
-  // record nests each level under its pinned grant, so the wire schema could
-  // not be satisfied: every mount threw at the end and rolled back, and a
-  // freshly opened share view reached the renderer with no level. The unit
-  // suites missed it because they never drove a handler with a real record.
+  // A registry record nests each level under its pinned grant, so parsing the
+  // raw record cannot satisfy the wire schema: a mount would throw at the end
+  // and roll back, and a freshly opened share view would reach the renderer
+  // with no level. This test drives the projection with a real record.
   it("projects a raw registry record, level and all", () => {
     const summary = workspaceSummaryFor(
       entry({
@@ -347,20 +337,34 @@ describe("workspace summary projection", () => {
   it("says what a removal from the list would drop: sync and joined chats", () => {
     const remote = { workspaceId: "ws-1", ownerUserId: "user-1" };
     const channel = (shareId: string, extra: Record<string, unknown> = {}) => ({
-      shareId, channelWireId: `wire-${shareId}`, access: "read-write", granterEmail: null,
-      relayUrl: "https://relay.test", recipientUserId: "user-1", ...extra,
+      shareId,
+      channelWireId: `wire-${shareId}`,
+      access: "read-write",
+      granterEmail: null,
+      relayUrl: "https://relay.test",
+      recipientUserId: "user-1",
+      ...extra,
     });
     const plain = workspaceSummaryFor(entry());
     expect(plain.sync).toBeUndefined();
     expect(plain.joinedChatCount).toBeUndefined();
     expect(workspaceSummaryFor(entry({ remote })).sync).toBe("on");
     expect(workspaceSummaryFor(entry({ pausedRemote: remote })).sync).toBe("paused");
-    const joined = workspaceSummaryFor(entry({
-      sharedChannels: [channel("a"), channel("b", { ended: true }), channel("c", { left: true }), null],
-    }));
+    const joined = workspaceSummaryFor(
+      entry({
+        sharedChannels: [
+          channel("a"),
+          channel("b", { ended: true }),
+          channel("c", { left: true }),
+          null,
+        ],
+      }),
+    );
     expect(joined.joinedChatCount).toBe(2);
-    expect(workspaceSummaryFor(entry({ sharedChannels: [channel("c", { left: true })] })).joinedChatCount)
-      .toBeUndefined();
+    expect(
+      workspaceSummaryFor(entry({ sharedChannels: [channel("c", { left: true })] }))
+        .joinedChatCount,
+    ).toBeUndefined();
   });
 
   it("treats an absent share view as an ordinary workspace", () => {
@@ -417,10 +421,7 @@ describe("workspace summary projection", () => {
     expect(stale?.damaged).toBe(true);
     expect(stale?.access).toBeUndefined();
     expect(stale?.label).toBe("sam");
-    // The out-of-range email is dropped to null rather than taking the row.
-    expect(
-      summary.shareMounts?.find((m) => m.shareId === "m-bademail")?.granterEmail,
-    ).toBeNull();
+    expect(summary.shareMounts?.find((m) => m.shareId === "m-bademail")?.granterEmail).toBeNull();
   });
 
   // The one mount shape with nothing to act on: no id, or no label, means
@@ -460,9 +461,10 @@ describe("workspace summary projection", () => {
       "m-empty",
       "m-badversion",
     ]);
-    expect(summary.shareMounts?.filter((m) => m.damaged).map((m) => m.shareId)).toEqual(
-      ["m-empty", "m-badversion"],
-    );
+    expect(summary.shareMounts?.filter((m) => m.damaged).map((m) => m.shareId)).toEqual([
+      "m-empty",
+      "m-badversion",
+    ]);
     expect(summary.shareMounts?.[0]?.access).toBe("view");
   });
 
@@ -470,13 +472,23 @@ describe("workspace summary projection", () => {
   // the refusal screen exists for exactly this, and silently hiding a
   // workspace would be an unrecoverable answer to a fault worth reporting.
   it("still throws when the workspace itself is unreadable", () => {
-    expect(() =>
-      workspaceSummaryFor(entry({ workspaceId: "", shareView: undefined })),
-    ).toThrow();
+    expect(() => workspaceSummaryFor(entry({ workspaceId: "", shareView: undefined }))).toThrow();
   });
 });
 
 it("carries sanitized share labels independently of pinned access", () => {
-  const summary = workspaceSummaryFor(entry({shareView: {...shareView({...goodSelector, access: "view"}), subjectName: "Trip\n", sharerName: "Ana\u202e"}}));
-  expect(summary.shareView).toMatchObject({subjectName: "Trip", sharerName: "Ana", access: "view"});
+  const summary = workspaceSummaryFor(
+    entry({
+      shareView: {
+        ...shareView({ ...goodSelector, access: "view" }),
+        subjectName: "Trip\n",
+        sharerName: "Ana\u202e",
+      },
+    }),
+  );
+  expect(summary.shareView).toMatchObject({
+    subjectName: "Trip",
+    sharerName: "Ana",
+    access: "view",
+  });
 });

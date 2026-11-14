@@ -91,7 +91,10 @@ async function scanDir(
   }
 }
 
-async function scanFileEntry(relativePath: string, fullPath: string): Promise<ScannedWorkspaceFile> {
+async function scanFileEntry(
+  relativePath: string,
+  fullPath: string,
+): Promise<ScannedWorkspaceFile> {
   const rel = assertSafeWorkspacePath(relativePath);
   const size = await fileSize(fullPath);
   const bytes = size <= MAX_INLINE_FILE_SIZE ? await readFile(fullPath) : undefined;
@@ -105,7 +108,11 @@ async function scanFileEntry(relativePath: string, fullPath: string): Promise<Sc
   };
 }
 
-async function mediaTypeForScannedFile(path: string, fullPath: string, bytes: Uint8Array | undefined) {
+async function mediaTypeForScannedFile(
+  path: string,
+  fullPath: string,
+  bytes: Uint8Array | undefined,
+) {
   if (!path.toLowerCase().endsWith(".db")) return mediaTypeForPath(path);
   const header = bytes ? bytes.slice(0, 16) : await readHeader(fullPath, 16);
   return new TextDecoder().decode(header) === "SQLite format 3\0"

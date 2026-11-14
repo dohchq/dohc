@@ -61,75 +61,56 @@ const DEFAULT_WORKSPACE_READ_TIMEOUT_MS = 10_000;
 // slot, and admission overflow refuses immediately. So only silence is
 // evidence of a wedge — never a slow answer, and never a refusal.
 const DEFAULT_PING_INTERVAL_MS = 30_000;
-// A probe carries NO wire deadline, so the supervisor gives it the daemon's own
-// `default_deadline` of 30s — the latest a live daemon can take to answer a
-// probe it never gets an execution slot for. 45s is that bound plus 15s of
+// A probe carries no wire deadline, so the supervisor gives it the daemon's own
+// `default_deadline` of 30 s, the latest a live daemon can take to answer a
+// probe it never gets an execution slot for. 45 s is that bound plus 15 s of
 // egress headroom. The probe must not carry a deadline of its own: EngineClient
 // arms a client-side timer for any request that has one, and that timer turns
-// the very silence this looks for into a rejection, which reads as life.
+// the silence this looks for into a rejection, which reads as life.
 //
-// The 30s does not bound when the reply arrives, and no constant here could.
-// A reply is queued on the daemon's single output channel, and `write_output`
-// writes one whole item before it reads the next. The supervisor's deadline
-// covers `run_job` only; the wait on that channel is untimed. The queue holds
-// `OUTPUT_QUEUE_CAPACITY` = 64 ITEMS, counted without regard to size, and a
-// control frame may reach `max_frame_bytes` = 8 MiB — so up to 512 MiB can sit
-// ahead of a reply. `BlobEgressBudget` does not bound this: it reserves blob
-// bytes only. Most responses are far smaller (`SINGLE_ROW_HARD_CAP_BYTES` is
-// 700 KiB and page budgets are 256 KiB), but a control response may still fill
-// its frame, so 64 maximum-sized responses reach the ceiling.
+// No timeout bounds when the reply arrives. The reply waits, untimed, on the
+// daemon's single output channel, which holds `OUTPUT_QUEUE_CAPACITY` = 64
+// items of up to `max_frame_bytes` = 8 MiB each, so up to 512 MiB can sit ahead
+// of it. `BlobEgressBudget` reserves blob bytes only and does not bound this.
+// So the probe verdict reads inbound traffic, not the expiry alone: bytes for
+// anybody prove the daemon is turning, and a wedged daemon sends nothing to
+// anyone. The expiry measures total silence.
 //
-// That is why the expiry alone cannot be the test, and why raising it would
-// not help: no timeout both survives 512 MiB of egress and still catches a
-// wedge. The probe verdict reads inbound TRAFFIC instead. A probe stuck behind
-// bulk output arrives with that output, and bytes for anybody prove the daemon
-// is turning; a wedged daemon sends nothing to anyone. The expiry then measures
-// what it can honestly measure — total silence.
+// Traffic counts whenever it arrived since the last verdict, not only while a
+// probe was racing. The next probe starts an interval after the previous one
+// resolved: at production values a probe expires at 45 s and its successor
+// begins at 75 s, and the expired probe's own reply at 50 s must still count.
 //
-// That traffic counts whenever it arrived since the last verdict, not only
-// while a probe was racing. The next probe starts an interval after the
-// previous one resolved, so probes do not tile the timeline: at production
-// values a probe expires at 45s and its successor begins at 75s. A reply
-// delivered at 50s — the likeliest late frame there is, being the expired
-// probe's own — would fall in that gap and prove nothing.
-//
-// Scope: events count as traffic too. `event_forwarder` is a separate task
-// pushing onto the same queue, so it can emit while no request is in flight.
-// It is file-change driven, so an idle wedge still goes silent and is still
-// caught; a workspace being edited only defers the verdict, never loses it.
+// Events count as traffic too. `event_forwarder` is a separate task pushing
+// onto the same queue. It is file-change driven, so an idle wedge still goes
+// silent and is still caught; a workspace being edited only defers the verdict.
 const DEFAULT_PING_EXPIRY_MS = 45_000;
-// Three silent probes in a row. They are one interval apart and each waits out
-// its own expiry, so a wedge verdict needs at least 2 intervals + 3 expiries —
-// three and a half minutes of unbroken silence from a process that answers in
-// milliseconds when it is well. One answer in that span clears the count.
 const DEFAULT_MAX_PING_EXPIRIES = 3;
-// A wedge cannot be counted like a crash, so it gets its own budget.
-//
+// A wedge gets its own budget, because the crash budget can never trip on one.
 // The crash window asks for 10 exits inside 10 minutes. One wedge cycle is
-// 3 intervals + 3 expiries = 225s by construction, so a 10-minute window can
-// never hold more than 3 of them. Ten is unreachable, `healthyResetMs` (30s)
-// is shorter than the cycle so the burst budget resets every generation too,
-// and a daemon that wedges after every launch would restart forever — the
-// exact failure this file exists to end.
+// 3 intervals + 3 expiries = 225 s, so a 10-minute window holds at most 3 of
+// them, and `healthyResetMs` (30 s) is shorter than the cycle, so the burst
+// budget resets every generation too. A daemon that wedges after every launch
+// would restart forever.
 //
-// The deeper reason the shared contract does not fit: a crash is a sample and
-// a wedge is already a VERDICT. Ten crashes are evidence because one crash
-// might be a bad input. One wedge kill already cost three silent probes and
-// about three and a half minutes of proven silence. When a fresh process
-// repeats that from a clean start, with no probe answered in between,
-// restarting a third time is not a recovery plan — it is a loop. Two strikes
-// is about 7.5 minutes of a workspace that has answered nothing.
+// One wedge kill already cost three silent probes and about three and a half
+// minutes of proven silence. Two strikes is about 7.5 minutes of a workspace
+// that has answered nothing, from a clean start each time.
 //
 // Any answered probe clears the streak, so a daemon that wedges once and then
-// recovers is restarted, not condemned. The cap therefore bounds only an
-// unbroken wedge streak: a daemon that wedges intermittently is restarted
-// every time, by design. This file ends a daemon that stopped answering for
-// good, not one that answers unreliably. A crash between two wedges does not
-// clear the streak either — a process that exits answered nothing.
+// recovers is restarted, not condemned. The cap bounds only an unbroken wedge
+// streak: a daemon that wedges intermittently is restarted every time, by
+// design. A crash between two wedges does not clear the streak either, because
+// a process that exits answered nothing.
 const DEFAULT_MAX_CONSECUTIVE_WEDGES = 2;
 
 export interface EngineDaemonClient extends MinimalDaemonClient {
-  sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void, cancelSignal?: AbortSignal): Promise<Response>;
+  sendRequest(
+    request: Request,
+    signal?: AbortSignal,
+    onProgress?: () => void,
+    cancelSignal?: AbortSignal,
+  ): Promise<Response>;
   reportsProgress?(): boolean;
   onEvent?(handler: (event: Event) => void): () => void;
   // Kill a daemon that stopped answering. `close` reports a deliberate
@@ -147,9 +128,11 @@ export interface EngineDaemonClient extends MinimalDaemonClient {
 
 export interface EngineDaemonLifecycleOptions {
   readerConfig?: string;
-  privateOwnerHost?: {configPath: string; client: NonNullable<EngineClientSpawnOptions["privateLiveApplication"]>};
+  privateOwnerHost?: {
+    configPath: string;
+    client: NonNullable<EngineClientSpawnOptions["privateLiveApplication"]>;
+  };
   command: string;
-  // Starts the engine in its own process group. See EngineClientSpawnOptions.
   ownProcessGroup?: boolean;
   launch?: (options: EngineClientSpawnOptions) => Promise<EngineDaemonClient>;
   fileExists?: (path: string) => boolean;
@@ -224,9 +207,7 @@ function engineBinaryName(platform: NodeJS.Platform): string {
   return `${ENGINE_BINARY_BASENAME}${platform === "win32" ? ".exe" : ""}`;
 }
 
-export function defaultEngineBinaryPath(
-  options: EngineBinaryPathOptions,
-): string {
+export function defaultEngineBinaryPath(options: EngineBinaryPathOptions): string {
   const platform = options.platform ?? process.platform;
   const path = platform === "win32" ? win32 : posix;
   if (options.isPackaged) {
@@ -235,19 +216,9 @@ export function defaultEngineBinaryPath(
         "Electron resources path is unavailable for the packaged Rust engine.",
       );
     }
-    return path.join(
-      options.resourcesPath,
-      ENGINE_BINARY_RESOURCE_DIR,
-      engineBinaryName(platform),
-    );
+    return path.join(options.resourcesPath, ENGINE_BINARY_RESOURCE_DIR, engineBinaryName(platform));
   }
-  return path.resolve(
-    options.appPath,
-    "../..",
-    "target",
-    "debug",
-    engineBinaryName(platform),
-  );
+  return path.resolve(options.appPath, "../..", "target", "debug", engineBinaryName(platform));
 }
 
 function isFile(path: string): boolean {
@@ -283,24 +254,17 @@ function describeWindow(windowMs: number): string {
   return minutes === 1 ? "1 minute" : `${minutes} minutes`;
 }
 
-function resultObject(
-  response: Response,
-  method: string,
-): Record<string, JsonValue | undefined> {
+function resultObject(response: Response, method: string): Record<string, JsonValue | undefined> {
   const result = response.result;
   if (result === null || Array.isArray(result) || typeof result !== "object") {
-    throw new EngineDaemonUnavailableError(
-      `Rust engine ${method} returned an invalid result.`,
-    );
+    throw new EngineDaemonUnavailableError(`Rust engine ${method} returned an invalid result.`);
   }
   return result;
 }
 
 export class EngineDaemonLifecycle {
   private readonly options: EngineDaemonLifecycleOptions;
-  private readonly launch: (
-    options: EngineClientSpawnOptions,
-  ) => Promise<EngineDaemonClient>;
+  private readonly launch: (options: EngineClientSpawnOptions) => Promise<EngineDaemonClient>;
   private readonly fileExists: (path: string) => boolean;
   private readonly tokenFactory: () => string;
   private readonly sleep: (delayMs: number) => Effect.Effect<void, unknown>;
@@ -354,7 +318,8 @@ export class EngineDaemonLifecycle {
   // one open lock through capture adoption, and a close leaves the workspace
   // closing, which a reopen waits on, until capture drain and shutdown end.
   private readonly holdsOpenLock = (request: Request) =>
-    (request.method === ENGINE_LIFECYCLE_METHOD.workspaceOpen || request.method === ENGINE_LIFECYCLE_METHOD.workspaceClose) &&
+    (request.method === ENGINE_LIFECYCLE_METHOD.workspaceOpen ||
+      request.method === ENGINE_LIFECYCLE_METHOD.workspaceClose) &&
     !this.readRequests.has(request);
 
   constructor(options: EngineDaemonLifecycleOptions) {
@@ -366,16 +331,16 @@ export class EngineDaemonLifecycle {
     // /proc/<pid>/environ; the boundary here is other OS accounts. If the
     // threat model expands, replace this with an inherited fd or a 0600
     // create-exclusive file rather than persisting this token normally.
-    this.tokenFactory =
-      options.tokenFactory ?? (() => randomBytes(32).toString("hex"));
+    this.tokenFactory = options.tokenFactory ?? (() => randomBytes(32).toString("hex"));
     const sleep = options.sleep;
     this.sleep = sleep
-      ? delayMs => Effect.tryPromise({try: () => sleep(delayMs), catch: error => error})
-      : delayMs => Effect.callback<void>(resume => {
-        const timer = setTimeout(() => resume(Effect.void), delayMs);
-        timer.unref();
-        return Effect.sync(() => clearTimeout(timer));
-      });
+      ? (delayMs) => Effect.tryPromise({ try: () => sleep(delayMs), catch: (error) => error })
+      : (delayMs) =>
+          Effect.callback<void>((resume) => {
+            const timer = setTimeout(() => resume(Effect.void), delayMs);
+            timer.unref();
+            return Effect.sync(() => clearTimeout(timer));
+          });
     this.monotonicNowMs = options.monotonicNowMs ?? (() => performance.now());
     this.wallNowMs = options.wallNowMs ?? (() => Date.now());
   }
@@ -383,9 +348,7 @@ export class EngineDaemonLifecycle {
   async start(): Promise<void> {
     if (this.running) return;
     if (this.stopping) {
-      throw new EngineDaemonUnavailableError(
-        "Rust engine lifecycle is already stopping.",
-      );
+      throw new EngineDaemonUnavailableError("Rust engine lifecycle is already stopping.");
     }
     // Resolve on the handshake: hello/helloAck already proves the daemon is
     // alive and speaking the protocol, and the desktop blocks window creation
@@ -395,10 +358,7 @@ export class EngineDaemonLifecycle {
     await this.launchTracked("background");
   }
 
-  async smokeWorkspace(
-    rootDir: string,
-    workspaceId: string,
-  ): Promise<JsonValue> {
+  async smokeWorkspace(rootDir: string, workspaceId: string): Promise<JsonValue> {
     const client = this.requireClient();
     return await this.smokeWorkspaceWithClient(client, rootDir, workspaceId);
   }
@@ -414,8 +374,7 @@ export class EngineDaemonLifecycle {
     method: string,
     params: Request["params"],
   ): Promise<JsonValue> {
-    const budgetMs =
-      this.options.workspaceReadTimeoutMs ?? DEFAULT_WORKSPACE_READ_TIMEOUT_MS;
+    const budgetMs = this.options.workspaceReadTimeoutMs ?? DEFAULT_WORKSPACE_READ_TIMEOUT_MS;
     const endsAt = this.monotonicNowMs() + budgetMs;
     const unstarted = () =>
       new EngineDaemonUnavailableError(
@@ -433,13 +392,7 @@ export class EngineDaemonLifecycle {
           throw unstarted();
         }
         started = true;
-        return await this.requestWorkspaceOnce(
-          rootDir,
-          workspaceId,
-          method,
-          params,
-          endsAt,
-        );
+        return await this.requestWorkspaceOnce(rootDir, workspaceId, method, params, endsAt);
       });
     const tail = request.then(
       () => undefined,
@@ -478,10 +431,8 @@ export class EngineDaemonLifecycle {
     endsAt: number,
   ): Promise<JsonValue> {
     const client = this.requireClient();
-    const budgetMs =
-      this.options.workspaceReadTimeoutMs ?? DEFAULT_WORKSPACE_READ_TIMEOUT_MS;
-    const remaining = () =>
-      Math.max(1, Math.ceil(endsAt - this.monotonicNowMs()));
+    const budgetMs = this.options.workspaceReadTimeoutMs ?? DEFAULT_WORKSPACE_READ_TIMEOUT_MS;
+    const remaining = () => Math.max(1, Math.ceil(endsAt - this.monotonicNowMs()));
     // An attach open takes the engine's one open lock and mints a handle. The
     // desktop's own opens and closes hold that lock for as long as they run,
     // so a slow attach is evidence against the engine only when it had nearly
@@ -567,12 +518,18 @@ export class EngineDaemonLifecycle {
 
   onClientChanged(handler: () => void): () => void {
     this.clientChangedHandlers.add(handler);
-    return () => { this.clientChangedHandlers.delete(handler); };
+    return () => {
+      this.clientChangedHandlers.delete(handler);
+    };
   }
 
   private notifyClientChanged(): void {
     for (const handler of this.clientChangedHandlers) {
-      try { handler(); } catch { /* Observers cannot prevent client retirement or publication. */ }
+      try {
+        handler();
+      } catch {
+        /* Observers cannot prevent client retirement or publication. */
+      }
     }
   }
 
@@ -606,12 +563,8 @@ export class EngineDaemonLifecycle {
     this.client = null;
     this.notifyClientChanged();
     for (const client of clients) client.close();
-    await Promise.allSettled(
-      [...clients].map(async (client) => await client.waitForExit?.()),
-    );
-    await Promise.allSettled(
-      [...this.inFlightLaunches].map(async ({ promise }) => await promise),
-    );
+    await Promise.allSettled([...clients].map(async (client) => await client.waitForExit?.()));
+    await Promise.allSettled([...this.inFlightLaunches].map(async ({ promise }) => await promise));
     await this.backgroundSmoke;
     await this.restartPromise?.catch(() => undefined);
   }
@@ -685,9 +638,7 @@ export class EngineDaemonLifecycle {
 
   private requireClient(): EngineDaemonClient {
     if (!this.running || !this.client) {
-      throw new EngineDaemonUnavailableError(
-        "Rust engine daemon is not available.",
-      );
+      throw new EngineDaemonUnavailableError("Rust engine daemon is not available.");
     }
     return this.client;
   }
@@ -708,30 +659,60 @@ export class EngineDaemonLifecycle {
     };
     if (bound.read) this.readRequests.add(boundedRequest);
     const generation = this.activeGeneration;
-    const current = () => !this.stopping && generation === this.activeGeneration &&
+    const current = () =>
+      !this.stopping &&
+      generation === this.activeGeneration &&
       !this.exitedGenerations.has(generation) &&
       (this.client === client || this.launchingClients.has(client));
     const controller = new AbortController();
     const cancellation = new AbortController();
-    const watch = this.watchRequestLiveness(client, method, controller.signal, bound.cancelOnStall ?? true);
-    const startedAt = this.monotonicNowMs(), activityBefore = client.inboundActivity?.();
+    const watch = this.watchRequestLiveness(
+      client,
+      method,
+      controller.signal,
+      bound.cancelOnStall ?? true,
+    );
+    const startedAt = this.monotonicNowMs(),
+      activityBefore = client.inboundActivity?.();
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
     const deadline = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {
         const elapsedMs = Math.round(this.monotonicNowMs() - startedAt);
-        const diagnostic = { at: new Date(this.wallNowMs()).toISOString(), method, requestId: request.id, timeoutMs,
-          elapsedMs, timerLagMs: Math.max(0,elapsedMs-timeoutMs) };
-        console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic, action:"drain-pending-replies"}));
+        const diagnostic = {
+          at: new Date(this.wallNowMs()).toISOString(),
+          method,
+          requestId: request.id,
+          timeoutMs,
+          elapsedMs,
+          timerLagMs: Math.max(0, elapsedMs - timeoutMs),
+        };
+        console.warn(
+          "[engine-daemon] request deadline",
+          JSON.stringify({ ...diagnostic, action: "drain-pending-replies" }),
+        );
         setImmediate(() => {
           const activityAfter = client.inboundActivity?.();
-          const inboundFrames = activityBefore === undefined || activityAfter === undefined ? null : activityAfter-activityBefore;
+          const inboundFrames =
+            activityBefore === undefined || activityAfter === undefined
+              ? null
+              : activityAfter - activityBefore;
           if (settled) {
-            console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:"reply-drained"}));
+            console.warn(
+              "[engine-daemon] request deadline",
+              JSON.stringify({ ...diagnostic, inboundFrames, action: "reply-drained" }),
+            );
             return;
           }
           const condemnOnCap = current() && !watch.responding() && bound.condemnOnCap();
-          console.warn("[engine-daemon] request deadline", JSON.stringify({...diagnostic,inboundFrames,action:condemnOnCap ? "kill-for-replacement" : "cancel-request"}));
+          console.warn(
+            "[engine-daemon] request deadline",
+            JSON.stringify({
+              ...diagnostic,
+              inboundFrames,
+              action: condemnOnCap ? "kill-for-replacement" : "cancel-request",
+            }),
+          );
           cancellation.abort();
           const error = new EngineDaemonUnavailableError(
             `Rust engine ${method} timed out after ${timeoutMs}ms.`,
@@ -750,21 +731,36 @@ export class EngineDaemonLifecycle {
       throw error;
     });
     let rejectRetired!: (error: Error) => void;
-    const retired = new Promise<never>((_resolve, reject) => { rejectRetired = reject; });
+    const retired = new Promise<never>((_resolve, reject) => {
+      rejectRetired = reject;
+    });
     const checkGeneration = () => {
-      if (!current()) rejectRetired(new EngineDaemonUnavailableError("Rust engine request generation was retired."));
+      if (!current())
+        rejectRetired(
+          new EngineDaemonUnavailableError("Rust engine request generation was retired."),
+        );
     };
     const unsubscribe = this.onClientChanged(checkGeneration);
     try {
-      if (!current()) throw new EngineDaemonUnavailableError("Rust engine request generation was retired.");
-      const response = client.sendRequest(boundedRequest, controller.signal, method === "workspace.open" ? () => {
-        if (!settled && current()) watch.progress();
-      } : undefined, cancellation.signal).catch((error: unknown) => {
-        // The client deadline can win before our final frame drain. Keep the
-        // lifecycle cap responsible for the daemon-health verdict.
-        if (error instanceof EngineRequestDeadlineError) return deadline;
-        throw error;
-      });
+      if (!current())
+        throw new EngineDaemonUnavailableError("Rust engine request generation was retired.");
+      const response = client
+        .sendRequest(
+          boundedRequest,
+          controller.signal,
+          method === "workspace.open"
+            ? () => {
+                if (!settled && current()) watch.progress();
+              }
+            : undefined,
+          cancellation.signal,
+        )
+        .catch((error: unknown) => {
+          // The client deadline can win before our final frame drain. Keep the
+          // lifecycle cap responsible for the daemon-health verdict.
+          if (error instanceof EngineRequestDeadlineError) return deadline;
+          throw error;
+        });
       return await Promise.race([response, deadline, silent, retired]);
     } finally {
       settled = true;
@@ -784,17 +780,25 @@ export class EngineDaemonLifecycle {
     method: string,
     signal: AbortSignal,
     cancelOnStall: boolean,
-  ): { silent: Promise<never>; progress(): void; responding(): boolean; daemonSilent(): boolean; stop(): void } {
-    const probeDelayMs =
-      this.options.requestProbeDelayMs ?? DEFAULT_REQUEST_PROBE_DELAY_MS;
+  ): {
+    silent: Promise<never>;
+    progress(): void;
+    responding(): boolean;
+    daemonSilent(): boolean;
+    stop(): void;
+  } {
+    const probeDelayMs = this.options.requestProbeDelayMs ?? DEFAULT_REQUEST_PROBE_DELAY_MS;
     const expiryMs = this.options.pingExpiryMs ?? DEFAULT_PING_EXPIRY_MS;
     const tracksProgress = method === "workspace.open" && client.reportsProgress?.() === true;
     const activityBefore = client.inboundActivity?.();
     let progressCount = 0;
     let answeredProbe = false;
     let daemonSilent = false;
-    const responding = () => answeredProbe || progressCount > 0 ||
-      (activityBefore !== undefined && (client.inboundActivity?.() ?? activityBefore) > activityBefore);
+    const responding = () =>
+      answeredProbe ||
+      progressCount > 0 ||
+      (activityBefore !== undefined &&
+        (client.inboundActivity?.() ?? activityBefore) > activityBefore);
     let stopped = false;
     let endQuiet: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -808,13 +812,18 @@ export class EngineDaemonLifecycle {
     // it. Read them first, so the stall does not look like engine silence.
     const drained = () => new Promise<void>((resolve) => setImmediate(resolve));
     const silent = (async (): Promise<never> => {
-      let seen = client.inboundActivity?.(), seenProgress = progressCount;
+      let seen = client.inboundActivity?.(),
+        seenProgress = progressCount;
       for (;;) {
         await quiet();
         await drained();
         if (stopped || signal.aborted) return await new Promise<never>(() => {});
         const beforeProbe = client.inboundActivity?.();
-        if (tracksProgress && progressCount > 0 ? progressCount !== seenProgress : beforeProbe !== seen) {
+        if (
+          tracksProgress && progressCount > 0
+            ? progressCount !== seenProgress
+            : beforeProbe !== seen
+        ) {
           seenProgress = progressCount;
           seen = beforeProbe;
           continue;
@@ -830,9 +839,17 @@ export class EngineDaemonLifecycle {
           seen = afterProbe;
           continue;
         }
-        if (!answered && this.monotonicNowMs() - probedAt > expiryMs + LATE_TIMER_TOLERANCE_MS) continue;
-        if (cancelOnStall && tracksProgress && progressCount > 0 && (answered || afterProbe !== seen)) {
-          throw new EngineDaemonUnavailableError(`Rust engine ${method} made no progress while the daemon was responding.`);
+        if (!answered && this.monotonicNowMs() - probedAt > expiryMs + LATE_TIMER_TOLERANCE_MS)
+          continue;
+        if (
+          cancelOnStall &&
+          tracksProgress &&
+          progressCount > 0 &&
+          (answered || afterProbe !== seen)
+        ) {
+          throw new EngineDaemonUnavailableError(
+            `Rust engine ${method} made no progress while the daemon was responding.`,
+          );
         }
         if (answered || afterProbe !== seen) {
           seen = afterProbe;
@@ -846,7 +863,9 @@ export class EngineDaemonLifecycle {
     })();
     return {
       silent,
-      progress() { if (!stopped && !signal.aborted && tracksProgress) progressCount += 1; },
+      progress() {
+        if (!stopped && !signal.aborted && tracksProgress) progressCount += 1;
+      },
       responding,
       daemonSilent: () => daemonSilent,
       stop() {
@@ -877,10 +896,7 @@ export class EngineDaemonLifecycle {
     return promise;
   }
 
-  private async launchOnce(
-    signal: AbortSignal,
-    smokeMode: SmokeMode,
-  ): Promise<void> {
+  private async launchOnce(signal: AbortSignal, smokeMode: SmokeMode): Promise<void> {
     this.assertBinaryPresent();
     if (this.stopping) return;
     const generation = ++this.launchGeneration;
@@ -889,11 +905,17 @@ export class EngineDaemonLifecycle {
     let client: EngineDaemonClient;
     try {
       client = await this.launch({
-        ...(this.options.privateOwnerHost ? {
-          privateLiveApplication: this.options.privateOwnerHost.client,
-        } : {}),
-        env: { ...(this.options.privateOwnerHost ? { DOHC_ENGINE_OWNER_HOST_CONFIG: this.options.privateOwnerHost.configPath } : {}),
-          DOHC_ENGINE_READER_CONFIG: this.options.readerConfig },
+        ...(this.options.privateOwnerHost
+          ? {
+              privateLiveApplication: this.options.privateOwnerHost.client,
+            }
+          : {}),
+        env: {
+          ...(this.options.privateOwnerHost
+            ? { DOHC_ENGINE_OWNER_HOST_CONFIG: this.options.privateOwnerHost.configPath }
+            : {}),
+          DOHC_ENGINE_READER_CONFIG: this.options.readerConfig,
+        },
         command: this.options.command,
         cwd: dirname(this.options.command),
         ...(this.options.ownProcessGroup ? { ownProcessGroup: true } : {}),
@@ -907,10 +929,9 @@ export class EngineDaemonLifecycle {
       });
     } catch (error) {
       if (this.stopping) return;
-      throw new EngineDaemonUnavailableError(
-        "Rust engine failed its startup handshake.",
-        { cause: error },
-      );
+      throw new EngineDaemonUnavailableError("Rust engine failed its startup handshake.", {
+        cause: error,
+      });
     }
     this.launchingClients.add(client);
     // Attach the fan-out before the smoke: a capture event from a workspace
@@ -923,9 +944,7 @@ export class EngineDaemonLifecycle {
       if (this.stopping || this.exitedGenerations.has(generation)) {
         await this.closeClient(client);
         if (this.stopping) return;
-        throw new EngineDaemonUnavailableError(
-          "Rust engine exited during its startup handshake.",
-        );
+        throw new EngineDaemonUnavailableError("Rust engine exited during its startup handshake.");
       }
       if (smokeMode === "blocking") {
         await this.runSmoke(client);
@@ -938,7 +957,9 @@ export class EngineDaemonLifecycle {
         }
       }
       let onAbort!: () => void;
-      const cancelled = new Promise<void>((resolve) => { onAbort = resolve; });
+      const cancelled = new Promise<void>((resolve) => {
+        onAbort = resolve;
+      });
       signal.addEventListener("abort", onAbort, { once: true });
       try {
         if (signal.aborted) onAbort();
@@ -986,30 +1007,33 @@ export class EngineDaemonLifecycle {
     await runEngineDaemonSmoke(
       async (rootDir, workspaceId) =>
         await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
-      (error) => this.reportFailure(
-        new Error("Could not delete the engine startup smoke directory.", { cause: error }),
-        false,
-      ),
+      (error) =>
+        this.reportFailure(
+          new Error("Could not delete the engine startup smoke directory.", { cause: error }),
+          false,
+        ),
     );
   }
 
   // The first launch's smoke checks workspace work after the handshake, or
   // once `startupSmoke` asks for it.
   // Failures kill for replacement through the normal restart path.
-  private async runDeferredSmoke(
-    generation: number,
-    client: EngineDaemonClient,
-  ): Promise<void> {
+  private async runDeferredSmoke(generation: number, client: EngineDaemonClient): Promise<void> {
     try {
       if (this.options.startupSmoke) {
         const stop = this.stopController.signal;
         let onStop!: () => void;
-        const stopped = new Promise<"skip">((resolve) => { onStop = () => resolve("skip"); });
+        const stopped = new Promise<"skip">((resolve) => {
+          onStop = () => resolve("skip");
+        });
         stop.addEventListener("abort", onStop, { once: true });
         if (stop.aborted) onStop();
         let decision: "run" | "skip";
         try {
-          decision = await Promise.race([this.options.startupSmoke.catch((): "run" => "run"), stopped]);
+          decision = await Promise.race([
+            this.options.startupSmoke.catch((): "run" => "run"),
+            stopped,
+          ]);
         } finally {
           stop.removeEventListener("abort", onStop);
         }
@@ -1031,11 +1055,7 @@ export class EngineDaemonLifecycle {
     signal: NodeJS.Signals | null,
   ): void {
     this.exitedGenerations.add(generation);
-    if (
-      this.stopping ||
-      !this.running ||
-      generation !== this.activeGeneration
-    ) {
+    if (this.stopping || !this.running || generation !== this.activeGeneration) {
       return;
     }
     this.clearHealthyResetTimer();
@@ -1069,12 +1089,13 @@ export class EngineDaemonLifecycle {
     while (this.restartAttempts < maxRestarts) {
       const attempt = ++this.restartAttempts;
       const delay = Math.min(
-        (this.options.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS) *
-          2 ** (attempt - 1),
+        (this.options.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS) * 2 ** (attempt - 1),
         this.options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS,
       );
       if (delay > 0) {
-        const exit = await Effect.runPromiseExit(this.sleep(delay), {signal: this.stopController.signal});
+        const exit = await Effect.runPromiseExit(this.sleep(delay), {
+          signal: this.stopController.signal,
+        });
         if (exit._tag === "Failure") {
           if (Cause.hasInterruptsOnly(exit.cause)) return;
           throw Cause.squash(exit.cause);
@@ -1104,8 +1125,7 @@ export class EngineDaemonLifecycle {
   // healthyResetMs over and over.
   private recordCrash(exitError: Error): void {
     const windowMs = this.options.restartWindowMs ?? DEFAULT_RESTART_WINDOW_MS;
-    const maxPerWindow =
-      this.options.maxRestartsPerWindow ?? DEFAULT_MAX_RESTARTS_PER_WINDOW;
+    const maxPerWindow = this.options.maxRestartsPerWindow ?? DEFAULT_MAX_RESTARTS_PER_WINDOW;
     // Neither clock survives both failure modes alone, so an entry expires
     // when either says it is older than the window. A backwards wall step
     // (NTP, VM adjust) under-ages entries the monotonic side still expires; a
@@ -1130,15 +1150,10 @@ export class EngineDaemonLifecycle {
 
   private scheduleHealthyReset(generation: number): void {
     this.clearHealthyResetTimer();
-    const healthyResetMs =
-      this.options.healthyResetMs ?? DEFAULT_HEALTHY_RESET_MS;
+    const healthyResetMs = this.options.healthyResetMs ?? DEFAULT_HEALTHY_RESET_MS;
     this.healthyResetTimer = setTimeout(() => {
       this.healthyResetTimer = null;
-      if (
-        this.running &&
-        !this.stopping &&
-        generation === this.activeGeneration
-      ) {
+      if (this.running && !this.stopping && generation === this.activeGeneration) {
         this.restartAttempts = 0;
       }
     }, healthyResetMs);
@@ -1154,10 +1169,7 @@ export class EngineDaemonLifecycle {
   // Watch one live generation for a wedge: a process that is still running but
   // has stopped answering. Every generation starts its own watch with a fresh
   // count, so silence from a daemon that was already replaced cannot carry over.
-  private startWedgeWatch(
-    generation: number,
-    client: EngineDaemonClient,
-  ): void {
+  private startWedgeWatch(generation: number, client: EngineDaemonClient): void {
     this.pingExpiries = 0;
     this.activityBaseline = client.inboundActivity?.();
     this.schedulePing(generation, client);
@@ -1182,10 +1194,7 @@ export class EngineDaemonLifecycle {
   // still owns the client it was scheduled for. While a restart is in flight
   // `running` is false, so a daemon that is merely being replaced is never
   // probed and can never be called wedged.
-  private probedGenerationIsLive(
-    generation: number,
-    client: EngineDaemonClient,
-  ): boolean {
+  private probedGenerationIsLive(generation: number, client: EngineDaemonClient): boolean {
     return (
       this.running &&
       !this.stopping &&
@@ -1195,10 +1204,7 @@ export class EngineDaemonLifecycle {
     );
   }
 
-  private async probeOnce(
-    generation: number,
-    client: EngineDaemonClient,
-  ): Promise<void> {
+  private async probeOnce(generation: number, client: EngineDaemonClient): Promise<void> {
     if (!this.probedGenerationIsLive(generation, client)) return;
     const answered = await this.sendPing(client);
     // Re-check: the daemon can exit, or be replaced, while a probe is pending.
@@ -1255,17 +1261,22 @@ export class EngineDaemonLifecycle {
       timeout.unref();
     });
     const answer = client
-      .sendRequest({
-        id: this.requestId(),
-        method: ENGINE_LIFECYCLE_METHOD.ping,
-        params: {},
-      }, signal)
+      .sendRequest(
+        {
+          id: this.requestId(),
+          method: ENGINE_LIFECYCLE_METHOD.ping,
+          params: {},
+        },
+        signal,
+      )
       .then(
         () => true,
         () => true,
       );
     let onAbort!: () => void;
-    const aborted = new Promise<boolean>((resolve) => { onAbort = () => resolve(false); });
+    const aborted = new Promise<boolean>((resolve) => {
+      onAbort = () => resolve(false);
+    });
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) onAbort();
     try {
@@ -1280,8 +1291,7 @@ export class EngineDaemonLifecycle {
     this.clearPingTimer();
     this.pingExpiries = 0;
     this.consecutiveWedges += 1;
-    const maxWedges =
-      this.options.maxConsecutiveWedges ?? DEFAULT_MAX_CONSECUTIVE_WEDGES;
+    const maxWedges = this.options.maxConsecutiveWedges ?? DEFAULT_MAX_CONSECUTIVE_WEDGES;
     const expiryMs = this.options.pingExpiryMs ?? DEFAULT_PING_EXPIRY_MS;
     const silence = `${maxExpiries} probes in a row expired after ${expiryMs}ms each with no frame of any kind from the engine`;
     // The crash window cannot end a wedge loop: one wedge cycle is longer than
@@ -1294,11 +1304,6 @@ export class EngineDaemonLifecycle {
     // `handleUnexpectedExit` reads `terminal` to decide whether to relaunch.
     // Setting it here does not depend on when that exit is delivered.
     if (terminal) this.terminal = true;
-    // Kill before reporting because `reportFailure` runs consumer code: on a
-    // terminal verdict the desktop app answers it with `dialog.showErrorBox`,
-    // a modal that does not return until the user dismisses it. Killing after
-    // that call would leave the wedged child alive for as long as the dialog
-    // stands, while this lifecycle already called the engine gone.
     killForReplacement(client);
     this.reportFailure(
       new EngineDaemonUnavailableError(

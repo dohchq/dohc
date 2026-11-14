@@ -49,6 +49,7 @@ export function parseWorkLinkUrl(raw: string): WorkLink | null {
 
 export function buildWorkLinkUrl(link: WorkLink): string {
   if (!isWorkReference(link.reference)) throw new Error("invalid work reference");
-  if (workLinkServerOrigin(link.server) !== link.server) throw new Error("invalid work link server");
+  if (workLinkServerOrigin(link.server) !== link.server)
+    throw new Error("invalid work link server");
   return `${link.server}/l/${link.reference}`;
 }

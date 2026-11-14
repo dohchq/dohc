@@ -17,12 +17,10 @@ import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 // levers need a module this file has never resolved — hence its own file.
 let projectionCalls = 0;
 let failProjectionCall: number | null = null;
-let projectionGate: { promise: Promise<void>; release: () => void } | null =
-  null;
+let projectionGate: { promise: Promise<void>; release: () => void } | null = null;
 vi.mock("@dohc/ydoc-projection", async (importOriginal) => {
   if (projectionGate) await projectionGate.promise;
-  const original =
-    await importOriginal<typeof import("@dohc/ydoc-projection")>();
+  const original = await importOriginal<typeof import("@dohc/ydoc-projection")>();
   return {
     ...original,
     yDocToArtifactMarkdown: (doc: Y.Doc) => {
@@ -51,11 +49,9 @@ function armProjectionGate(): () => void {
 // while nothing can reach the engine, and every later edit re-captures the
 // whole document state through the same recovery path.
 function refusingBridge(initialUpdate: Uint8Array) {
-  let openedSessionId: string | null = null;
   return {
     platform: "linux" as const,
     async openEngineYDocSession(payload: { sessionId: string }) {
-      openedSessionId = payload.sessionId;
       return {
         available: true,
         initialUpdate,
@@ -71,7 +67,6 @@ function refusingBridge(initialUpdate: Uint8Array) {
     onEngineYDocLineageReplacement: () => () => undefined,
     onEngineYDocSaveState: () => () => undefined,
     async closeEngineYDocSession() {
-      openedSessionId = null;
       return undefined;
     },
   };
@@ -139,9 +134,7 @@ afterEach(async () => {
 
 it("refines the newest refused snapshot, not the one each edit queued", async () => {
   vi.stubGlobal("dohcDesktop", refusingBridge(richInitialUpdate()));
-  const consoleError = vi
-    .spyOn(console, "error")
-    .mockImplementation(() => undefined);
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
   // Held for the whole burst, so both edits are captured before any
   // refinement runs — the order this defect needs, and the order a user
   // typing through a refused session produces.
@@ -149,36 +142,30 @@ it("refines the newest refused snapshot, not the one each edit queued", async ()
 
   const drafts = renderHook(() => useOrphanedDrafts("ws-1", "notes/rich.md"));
   const retained = retainDocument();
-  await waitFor(() =>
-    expect(retained.snapshot.outcome?.kind).toBe("bound"),
-  );
+  await waitFor(() => expect(retained.snapshot.outcome?.kind).toBe("bound"));
 
   act(() => {
     appendBlock(retained.boundDoc());
   });
-  await waitFor(() =>
-    expect(drafts.result.current.length).toBe(1),
-  );
+  await waitFor(() => expect(drafts.result.current.length).toBe(1));
   act(() => {
     appendBlock(retained.boundDoc());
   });
-  await waitFor(() =>
-    expect(drafts.result.current.at(-1)?.text).toContain("edit-2"),
-  );
+  await waitFor(() => expect(drafts.result.current.at(-1)?.text).toContain("edit-2"));
 
-  // The newest snapshot's projection fails. The first edit's refinement — the
-  // one queued behind it — must not answer for it.
   failProjectionCall = 2;
   release();
-  await waitFor(
-    () =>
-      expect(consoleError).toHaveBeenCalledWith(
-        expect.stringContaining("could not refine the recovery draft"),
-        expect.any(Error),
-      ),
+  await waitFor(() =>
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining("could not refine the recovery draft"),
+      expect.any(Error),
+    ),
   );
 
-  expect(drafts.result.current.at(-1)?.text, "project the bytes each refinement was queued with instead of the newest ones — the first edit's Markdown lands last, and the second edit is gone from the only copy of it that exists.").toContain("edit-1");
+  expect(
+    drafts.result.current.at(-1)?.text,
+    "project the bytes each refinement was queued with instead of the newest ones — the first edit's Markdown lands last, and the second edit is gone from the only copy of it that exists.",
+  ).toContain("edit-1");
   expect(drafts.result.current.at(-1)?.text).toContain("edit-2");
   expect(drafts.result.current.length).toBe(1);
   consoleError.mockRestore();

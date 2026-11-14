@@ -2,13 +2,8 @@ import { foldPathSegment, isIgnoredPathSegment, isReserved83Alias } from "./path
 
 // POSIX absolute, Windows drive-qualified (C:\ or C:/), or UNC (\\server).
 function isAbsolutePathLike(path: string): boolean {
-  return (
-    path.startsWith("/") ||
-    /^[A-Za-z]:[\\/]/.test(path) ||
-    path.startsWith("\\\\")
-  );
+  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }
-
 
 // Windows silently strips trailing dots/spaces from path segments, so
 // ".dohc." and ".dohc " alias the reserved directory there. Strip them before
@@ -20,7 +15,6 @@ export function stripWindowsAliasSuffix(segment: string): string {
   return segment.replace(/[. ]+$/, "");
 }
 
-
 // Case-insensitive: on default macOS/Windows filesystems .DOHC aliases .dohc,
 // so a case-sensitive guard would let writes overwrite dohc metadata. Reserved
 // at any depth — a nested `notes/.dohc/x` is just as internal as a top-level
@@ -29,7 +23,7 @@ export function stripWindowsAliasSuffix(segment: string): string {
 //
 // Exported because this is the READ-side reservation: callers that re-decide
 // the reservation on a resolved path (a symlink can spell `.dohc` under any
-// name — #638) need the same predicate validateUserReadPath uses, not a copy.
+// name) need the same predicate validateUserReadPath uses, not a copy.
 export function isDohcMetadataPath(relativePath: string): boolean {
   return relativePath
     .replaceAll("\\", "/")
@@ -45,7 +39,12 @@ export function isDohcMetadataPath(relativePath: string): boolean {
 // validation (validateUserReadPath) allows it while every write surface
 // refuses it.
 export function isSharedWithMePath(relativePath: string): boolean {
-  const first = relativePath.replaceAll("\\", "/").split("/").map(foldPathSegment).map(stripWindowsAliasSuffix)[0] ?? "";
+  const first =
+    relativePath
+      .replaceAll("\\", "/")
+      .split("/")
+      .map(foldPathSegment)
+      .map(stripWindowsAliasSuffix)[0] ?? "";
   return first === "shared-with-me" || isReserved83Alias(first, "shared-with-me");
 }
 
@@ -61,11 +60,10 @@ export function isReservedPath(relativePath: string): boolean {
 // as dohc noise, never a workspace artifact.
 // Capture folds reserved names on every host. Only Windows strips trailing
 // dot/space aliases from on-disk names.
-export function hasEngineIgnoredSegment(
-  relativePath: string,
-  platform: string,
-): boolean {
-  return relativePath.split("/").some((segment) => isIgnoredPathSegment(segment, platform === "win32"));
+export function hasEngineIgnoredSegment(relativePath: string, platform: string): boolean {
+  return relativePath
+    .split("/")
+    .some((segment) => isIgnoredPathSegment(segment, platform === "win32"));
 }
 
 export function hasIgnoredSegment(path: string): boolean {
@@ -91,10 +89,15 @@ export function workspaceNameError(name: string, platform: string): string | nul
   const forbidden = name.match(/[<>:"/\\|?*]/u)?.[0];
   if (forbidden) {
     const character = {
-      "<": "a less-than sign (<)", ">": "a greater-than sign (>)",
-      ":": "a colon (:)", '"': 'a double quote (")',
-      "/": "a slash (/)", "\\": "a backslash (\\)",
-      "|": "a vertical bar (|)", "?": "a question mark (?)", "*": "an asterisk (*)",
+      "<": "a less-than sign (<)",
+      ">": "a greater-than sign (>)",
+      ":": "a colon (:)",
+      '"': 'a double quote (")',
+      "/": "a slash (/)",
+      "\\": "a backslash (\\)",
+      "|": "a vertical bar (|)",
+      "?": "a question mark (?)",
+      "*": "an asterisk (*)",
     }[forbidden];
     return `A name cannot contain ${character}. Remove it.`;
   }
@@ -116,7 +119,10 @@ export function workspaceNameError(name: string, platform: string): string | nul
 
 export function workspaceDestinationError(path: string, platform: string): string | null {
   if (platform !== "win32") return null;
-  const names = path.replaceAll("\\", "/").split("/").filter(name => name !== "" && name !== ".");
+  const names = path
+    .replaceAll("\\", "/")
+    .split("/")
+    .filter((name) => name !== "" && name !== ".");
   for (const name of names) {
     if (name === "..") continue;
     const error = workspaceNameError(name, platform);
@@ -251,9 +257,7 @@ function validateWorkspacePath(
         : { ok: false, reason: "invalid" };
     }
   }
-  const normalized = segments
-    .filter((segment) => segment !== "" && segment !== ".")
-    .join("/");
+  const normalized = segments.filter((segment) => segment !== "" && segment !== ".").join("/");
   if (normalized.length === 0) return { ok: false, reason: "invalid" };
   // Check A (reserved) runs before Check B so a reserved alias always reports
   // "reserved", never "unsupported-name".

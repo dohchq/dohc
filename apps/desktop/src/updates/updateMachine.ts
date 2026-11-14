@@ -89,7 +89,11 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
         : state;
     case "download":
       return state.status === "available"
-        ? { status: "downloading", version: state.version, message: `Downloading update ${state.version}…` }
+        ? {
+            status: "downloading",
+            version: state.version,
+            message: `Downloading update ${state.version}…`,
+          }
         : state;
     case "progress":
       return state.status === "downloading"
@@ -102,7 +106,11 @@ export function transition(state: UpdateState, event: UpdateEvent): UpdateState 
         : state;
     case "downloaded":
       return state.status === "downloading"
-        ? { status: "ready", version: event.version, message: `Update ${event.version} is ready. Restart dohc to install it.` }
+        ? {
+            status: "ready",
+            version: event.version,
+            message: `Update ${event.version} is ready. Restart dohc to install it.`,
+          }
         : state;
     case "unstaged":
       return state.status === "ready" ? available(state.version) : state;

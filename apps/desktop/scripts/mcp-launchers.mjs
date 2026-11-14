@@ -4,7 +4,11 @@ export const NODE_MISSING_MESSAGE =
   "dohc commands need Node.js on PATH. Install Node.js 22.13 or newer, then try again.";
 
 export function agentRuntimeTarget(platform, arch) {
-  if (["win32", "linux"].includes(platform) && arch === "x64" || platform === "darwin" && arch === "arm64") return "bundled";
+  if (
+    (["win32", "linux"].includes(platform) && arch === "x64") ||
+    (platform === "darwin" && arch === "arm64")
+  )
+    return "bundled";
   // Linux arm64 ships no Node.js, so its launchers use Node.js from PATH.
   if (platform === "linux" && arch === "arm64") return "path";
   throw new Error(`Unsupported agent runtime target: ${platform}-${arch}`);
@@ -81,7 +85,10 @@ export function cliLaunchers({ platform = process.platform, arch = process.arch 
   const files = {};
   for (const name of ["dohc", "dohc-mcp"]) {
     files[name] = bundled
-      ? bundledPosixLauncher(`${name}.mjs`, `../app-compiler/${platform === "win32" ? "node.exe" : "node"}`)
+      ? bundledPosixLauncher(
+          `${name}.mjs`,
+          `../app-compiler/${platform === "win32" ? "node.exe" : "node"}`,
+        )
       : posixMcpLauncher(`${name}.mjs`);
     files[`${name}.cmd`] = windowsLauncher(`${name}.mjs`);
   }

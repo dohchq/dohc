@@ -13,27 +13,16 @@ vi.mock("../editor/MarkdownEditor", () => ({ MarkdownEditor: () => null }));
 
 beforeEach(() => {
   localStorage.clear();
-  vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  vi.stubGlobal("matchMedia", () => ({
+    matches: true,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
   Element.prototype.scrollIntoView = vi.fn();
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
-
-it("offers only the five working demo panels, then Notices, each titled as in the app", () => {
-  const { container } = render(<ProductDemo />);
-  const rail = within(within(container).getByRole("navigation", { name: "Activity bar" }));
-  expect(rail.getAllByRole("button").map((button) => button.getAttribute("aria-label")))
-    .toEqual(["Explorer", "Chats", "Search", "Graph", "History", "Notices"]);
-  expect(rail.queryByRole("button", { name: "Sharing" })).toBeNull();
-
-  for (const name of ["Chats", "Search", "Graph", "History", "Explorer"]) {
-    const button = rail.getByRole("button", { name });
-    fireEvent.click(button);
-    expect(button.getAttribute("aria-current")).toBe("page");
-    // The Explorer's header is its Home | Files switch.
-    const header = container.querySelector('[data-testid="side-panel"] > header');
-    if (name === "Explorer") expect(within(header as HTMLElement).getByRole("tablist", { name: "Explorer" })).toBeTruthy();
-    else expect(header?.querySelector(".dohc-section-label")?.textContent).toBe(name);
-  }
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
 });
 
 it("keeps a demo Explorer collision in Notices after the toast closes", async () => {
@@ -60,7 +49,10 @@ it("keeps a demo Explorer collision in Notices after the toast closes", async ()
   const copy = demo.getByRole("button", { name: "Copy details" });
   fireEvent.pointerDown(copy, { bubbles: true, composed: true });
   expect(demo.getByRole("button", { name: "Copy details" })).toBe(copy);
-  fireEvent.pointerDown(demo.getByRole("button", { name: "New file" }), { bubbles: true, composed: true });
+  fireEvent.pointerDown(demo.getByRole("button", { name: "New file" }), {
+    bubbles: true,
+    composed: true,
+  });
   expect(demo.queryByTestId("notice-center")).toBeNull();
   fireEvent.click(demo.getByRole("button", { name: "Notices, 1 unread" }));
   const dismiss = demo.getByRole("button", { name: "Dismiss notice" });

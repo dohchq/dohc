@@ -5,7 +5,9 @@ import { readOrCreateLocalInstallationId } from "./localInstallationIdentity";
 import { createTestScratch } from "./testTemp";
 
 let dir: string;
-beforeEach(async () => { dir = await createTestScratch("dohc-local-id-"); });
+beforeEach(async () => {
+  dir = await createTestScratch("dohc-local-id-");
+});
 const idFile = () => join(dir, "dohc-local-id.json");
 
 describe("local installation id", () => {
@@ -20,7 +22,10 @@ describe("local installation id", () => {
   });
 
   it("keeps an existing id, whatever else an earlier build wrote beside it", async () => {
-    await writeFile(idFile(), JSON.stringify({ id: "local:preexisting", authorContextSecret: "a".repeat(64) }));
+    await writeFile(
+      idFile(),
+      JSON.stringify({ id: "local:preexisting", authorContextSecret: "a".repeat(64) }),
+    );
     expect(readOrCreateLocalInstallationId(idFile(), vi.fn())).toBe("local:preexisting");
   });
 
@@ -36,7 +41,9 @@ describe("local installation id", () => {
     const id = readOrCreateLocalInstallationId(idFile(), onError);
     expect(id).toMatch(/^local:[0-9a-f-]{36}$/u);
     expect(readOrCreateLocalInstallationId(idFile(), onError)).toBe(id);
-    const kept = (await readdir(dir)).filter(name => name.startsWith("dohc-local-id.json.corrupt-"));
+    const kept = (await readdir(dir)).filter((name) =>
+      name.startsWith("dohc-local-id.json.corrupt-"),
+    );
     expect(kept).toHaveLength(1);
     expect(await readFile(join(dir, kept[0]!), "utf8")).toBe(text);
     expect(onError).not.toHaveBeenCalled();
@@ -47,8 +54,10 @@ describe("local installation id", () => {
       await writeFile(idFile(), text);
       readOrCreateLocalInstallationId(idFile(), vi.fn());
     }
-    const kept = (await readdir(dir)).filter(name => name.startsWith("dohc-local-id.json.corrupt-"));
-    const texts = await Promise.all(kept.map(name => readFile(join(dir, name), "utf8")));
+    const kept = (await readdir(dir)).filter((name) =>
+      name.startsWith("dohc-local-id.json.corrupt-"),
+    );
+    const texts = await Promise.all(kept.map((name) => readFile(join(dir, name), "utf8")));
     expect(texts.sort()).toEqual(["first {", "second {"]);
   });
 

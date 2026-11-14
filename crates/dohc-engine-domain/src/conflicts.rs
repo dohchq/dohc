@@ -29,55 +29,34 @@ pub const TEXT_CONFLICT_QUERY_LIMIT: i64 = 17;
 /// beside it.
 pub const CONFLICT_ROW_CONSTRAINT: &str = "CONFLICT_METADATA_BUDGET_BYTES";
 
-/// The most one conflict's NON-WITHHELD strings may occupy, JSON-encoded.
+/// The most one conflict's non-withheld strings may occupy, JSON-encoded.
 ///
-/// The rule this enforces: **anything that survives withholding is bounded
-/// before persistence.** A `conflicts.list` row withholds an over-cap side
-/// BODY and the caller hydrates it by digest, so a body never bounds the row.
-/// Everything else — ids, paths, digests, origins, metadata — rides the row
-/// whatever its size, and withholding cannot shrink it. Persisting more of it
-/// than one row can carry dead-ends the listing for every open conflict in
-/// the workspace, and only the peer that wrote it could ever repair that.
+/// Anything that survives withholding is bounded before persistence. A
+/// `conflicts.list` row withholds an over-cap side body and the caller
+/// hydrates it by digest, so a body never bounds the row. Ids, paths,
+/// digests, origins, and metadata ride the row whatever their size.
+/// Persisting more of them than one row can carry dead-ends the listing for
+/// every open conflict in the workspace, and only the peer that wrote it
+/// could repair that.
 ///
-/// Derived from the wire contract, not chosen. This is a transport bound, so
-/// AGENTS.md's measurement rule does not govern it — it governs limits chosen
-/// to reject otherwise-valid work, and every byte past this one is work the
-/// listing provably cannot carry. The derivation, in full:
+/// The bound derives from the wire contract. It is a transport bound, not a
+/// limit chosen to reject otherwise-valid work, so AGENTS.md's measurement
+/// rule does not govern it. `conflicts.list` admits a row of at most
+/// `CONFLICT_ROW_HARD_CAP_BYTES` (the negotiated 8 MiB control frame less
+/// 64 KiB of envelope headroom = 8,323,072 bytes). The listing can shrink a
+/// row only by withholding side bodies, so a row is listable exactly when its
+/// non-withheld strings plus the row's JSON scaffolding fit that cap. The
+/// scaffolding is a fixed schema, and 64 KiB bounds it. Hence
+/// `CONFLICT_ROW_HARD_CAP_BYTES - 64 KiB`. The sum below uses encoded lengths
+/// and counts each string once per place the row carries it. Each side's
+/// metadata pair is stored once but served twice, so it counts twice.
 ///
-/// 1. `conflicts.list` admits a row of at most `CONFLICT_ROW_HARD_CAP_BYTES`
-///    (the negotiated 8 MiB control frame less 64 KiB of envelope headroom =
-///    8,323,072 bytes).
-/// 2. The only shrinking the listing can apply is withholding side BODIES.
-/// 3. So a row is listable exactly when its non-withheld strings, plus the
-///    row's own JSON scaffolding, fit that cap.
-/// 4. The scaffolding is a fixed schema — keys, punctuation, and the numbers
-///    beside each withheld body — so 64 KiB bounds it with room to spare.
-///    `a_fully_withheld_conflict_row_fits_the_structural_headroom` measures
-///    the real figure — 1,514 bytes — against that 64 KiB.
-///
-/// Hence `CONFLICT_ROW_HARD_CAP_BYTES - 64 KiB`. The sum below is of ENCODED
-/// lengths, and counts each string once per place the ROW carries it — a
-/// side's metadata pair is stored once but served twice, so it is counted
-/// twice — which is what makes the sum a true upper bound rather than an
-/// under-estimate. See
-/// `side_metadata_is_measured_at_the_two_copies_the_row_actually_carries`.
-///
-/// The bound therefore refuses only conflicts that would dead-end the listing,
-/// and accepts every conflict the listing can carry. Healthy work is nowhere
-/// near it: `healthy_conflict_metadata_sits_far_inside_the_row_budget`
-/// measures an ordinary conflict at under 4 KiB of non-withheld strings, and
-/// the legitimate worst case — every free-form metadata field at the 16 KiB
-/// cap the sibling write paths enforce, on the conflict and all three sides —
-/// at about 226 KiB, some thirty-five times inside this budget.
-///
-/// This is the shared pre-persistence path, so it covers all three routes
-/// that mint a conflict: the local RPC, a peer's replicated open, and the
-/// merge that raises one. A peer is in fact bounded earlier and far tighter —
-/// `ReplicationEnvelope::validate` caps a payload at `MAX_PAYLOAD_JSON_BYTES`
-/// (256 KiB) before any apply runs, thirty times inside this budget — so the
-/// replicated route cannot reach this bound today. It lives here anyway
-/// because one shared gate is what makes that a fact about the code rather
-/// than a coincidence between two independent limits.
+/// This shared pre-persistence path covers all three routes that mint a
+/// conflict: the local RPC, a peer's replicated open, and the merge that
+/// raises one. `ReplicationEnvelope::validate` caps a peer's payload at
+/// `MAX_PAYLOAD_JSON_BYTES` (256 KiB) before any apply runs, so the replicated
+/// route cannot reach this bound. One shared gate keeps that a fact about the
+/// code, not a coincidence between two independent limits.
 pub const CONFLICT_METADATA_BUDGET_BYTES: usize = (8 * 1024 * 1024) - (64 * 1024) - (64 * 1024);
 
 /// The scaffolding allowance inside the derivation above: what a fully
@@ -494,7 +473,7 @@ pub struct BinaryResolveWrite {
 pub const BINARY_COMBINED_TEXT_REFUSAL: &str =
     "a binary conflict cannot be resolved with combined text";
 
-/// Exact live-head gate shared by local resolution and R10 mirror apply.
+/// Exact live-head gate shared by local resolution and mirror apply.
 pub fn live_state_matches_conflict_current(
     live: &ConflictFileState,
     recorded: &ConflictFileState,
@@ -715,7 +694,7 @@ pub fn insert_text_conflict_if_absent(
     Ok(true)
 }
 
-/// Update only the resolution columns. R10 mirror apply can reuse this without
+/// Update only the resolution columns. Mirror apply can reuse this without
 /// duplicating local row-shape SQL.
 pub fn update_text_conflict_row(
     tx: &Transaction<'_>,

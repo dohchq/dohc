@@ -1,9 +1,3 @@
-//! Binary conflict sides: what a side must carry to be persisted, what a
-//! resolve still refuses to do with bytes (combined TEXT and divergent moves
-//! stay closed), that a resolve measures the live head before acting, that
-//! blob hydration is verified content-addressing, and that text conflicts are
-//! unaffected. Each test asserts a fail-closed invariant.
-
 use dohc_engine_domain::conflicts::hydrate_binary_conflict_blob;
 use dohc_engine_domain::{
     BINARY_COMBINED_TEXT_REFUSAL, ConflictChoice, ConflictContentKind, ConflictFileState,
@@ -113,7 +107,6 @@ fn resolve_input(id: &str, kind: ResolveConflictKind) -> ResolveTextConflict {
     }
 }
 
-/// Write a live binary head at `path` (its own object + moment).
 fn write_binary_head(store: &mut EngineStore, object_id: &str, path: &str, bytes: &[u8]) -> String {
     let sha = hex_sha256(bytes);
     store
@@ -508,8 +501,6 @@ fn hydrate_idempotent_and_claim_canonicalized() {
         .expect("count after double hydrate");
     assert_eq!(count, 1, "double hydrate must dedup to one row");
 
-    // Uppercase claim of the correct bytes is not spuriously rejected; the
-    // returned key and the stored row stay canonical lowercase.
     let upper = sha.to_uppercase();
     let dohc_engine_domain::TxnOutcome::Committed(returned) = store
         .write_with(&NoFaults, move |tx| {
@@ -532,7 +523,6 @@ fn hydrate_idempotent_and_claim_canonicalized() {
         .expect_err("wrong-length claim must be rejected");
     assert_eq!(err.code(), "blob-integrity");
 
-    // Round-trip: the stored bytes come back verified.
     let fetched = store
         .read_with(|conn| get_binary_blob(conn, &sha))
         .expect("get blob")
@@ -588,7 +578,6 @@ fn hydrate_fails_closed_when_existing_row_is_corrupt() {
     let (_scratch, mut store) = open_store();
     let bytes = b"original bytes";
     let sha = hydrate(&mut store, bytes);
-    // Corrupt the stored row out-of-band (bit rot simulation).
     let sha_corrupt = sha.clone();
     store
         .write_with(&NoFaults, move |tx| {
@@ -742,7 +731,6 @@ fn text_conflict_round_trip_unchanged() {
         .expect("snapshot");
     assert_eq!(live.text, "incoming body");
 
-    // Reload from disk: kinds and columns must not have mixed.
     let loaded = store
         .read_with(|conn| load_text_conflict_in_tx(conn, WS, "text-rt"))
         .expect("load")
@@ -843,13 +831,11 @@ fn duplicate_conflict_id_with_invalid_binary_side_rejected() {
         .expect("open valid binary-side conflict");
     assert_eq!(inserted, dohc_engine_domain::TxnOutcome::Committed(true));
 
-    // Honest idempotent duplicate: same id, valid hydrated side -> no-op Ok.
     let duplicate = store
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &valid))
         .expect("honest duplicate stays idempotent");
     assert_eq!(duplicate, dohc_engine_domain::TxnOutcome::Committed(false));
 
-    // Same id, UNHYDRATED binary sha: must fail closed, not ack as duplicate.
     let unhydrated = conflict(
         "dup",
         "d.bin",
@@ -867,7 +853,6 @@ fn duplicate_conflict_id_with_invalid_binary_side_rejected() {
         "binary conflict side references a missing binary blob",
     );
 
-    // Same id, binary side missing its sha entirely: also rejected.
     let mut missing_side = ConflictFileState::text("d.bin", None);
     missing_side.content_kind = ConflictContentKind::Binary;
     let missing = conflict(
@@ -903,11 +888,6 @@ fn text_side_with_binary_sha_rejected() {
     assert_invalid_input(&err, "text conflict side cannot reference a binary blob");
 }
 
-/// M3 regression: a TEXT conflict recorded while the path was absent must not be
-/// resolvable after a binary head appears at that path. The stale-target gate has
-/// to see the binary head (content-kind mismatch) and fail closed with
-/// `ConflictStaleTarget`, not invisibly treat the path as still-absent and let the
-/// incoming text overwrite/delete the newer binary head.
 #[test]
 fn text_resolve_over_now_binary_path_is_stale_not_clobber() {
     let (_scratch, mut store) = open_store();
@@ -915,7 +895,6 @@ fn text_resolve_over_now_binary_path_is_stale_not_clobber() {
         "text-over-binary",
         "occupied.md",
         ConflictFileState::text("occupied.md", None),
-        // Path was absent when the conflict opened.
         ConflictFileState::text("occupied.md", None),
         ConflictFileState::text(
             "occupied.md",
@@ -926,7 +905,6 @@ fn text_resolve_over_now_binary_path_is_stale_not_clobber() {
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
         .expect("open text conflict over absent path");
 
-    // A binary head now occupies the path.
     let binary_sha = write_binary_head(&mut store, "occupied-obj", "occupied.md", b"\x00pic\xff");
 
     let err = VersionedTextStore::new(&mut store)
@@ -939,7 +917,6 @@ fn text_resolve_over_now_binary_path_is_stale_not_clobber() {
         .expect_err("a binary head at the path must make the resolve stale");
     assert_eq!(err.code(), "conflict-stale-target");
 
-    // The binary head is untouched — no clobber.
     let (kind, bin_sha): (String, Option<String>) = store
         .read_with(|conn| {
             conn.query_row(
@@ -961,7 +938,6 @@ fn text_resolve_over_now_binary_path_is_stale_not_clobber() {
 fn text_move_resolve_onto_binary_destination_is_occupied_not_clobber() {
     let (_scratch, mut store) = open_store();
     let current = write_file(&mut store, "src.md", "current body");
-    // Incoming is a move: same content, different destination path.
     let mut incoming = incoming_text_snapshot("dst.md", "current body");
     incoming.blob_sha256 = current.blob_sha256.clone();
     let c = conflict(
@@ -975,7 +951,6 @@ fn text_move_resolve_onto_binary_destination_is_occupied_not_clobber() {
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
         .expect("open move conflict");
 
-    // A binary head occupies the destination.
     let binary_sha = write_binary_head(&mut store, "dst-obj", "dst.md", b"\x00dst\xff");
 
     let err = VersionedTextStore::new(&mut store)
@@ -988,7 +963,6 @@ fn text_move_resolve_onto_binary_destination_is_occupied_not_clobber() {
         .expect_err("a binary head at the destination must be occupied");
     assert_eq!(err.code(), "target-path-exists");
 
-    // The binary destination head is untouched.
     let (kind, bin_sha): (String, Option<String>) = store
         .read_with(|conn| {
             conn.query_row(

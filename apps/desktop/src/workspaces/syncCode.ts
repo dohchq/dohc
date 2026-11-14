@@ -1,7 +1,4 @@
-import {
-  canonicalRelayUrl,
-  relayUrlsMatch,
-} from "@dohc/workspace-contracts/relay-values";
+import { canonicalRelayUrl, relayUrlsMatch } from "@dohc/workspace-contracts/relay-values";
 
 export { canonicalRelayUrl, relayUrlsMatch };
 
@@ -87,9 +84,7 @@ export interface ShareCodeParts {
 
 function isValidShareId(value: string): boolean {
   return (
-    value.length > 0 &&
-    value.length <= MAX_SHARE_ID_LENGTH &&
-    /^[a-z0-9][a-z0-9-]*$/u.test(value)
+    value.length > 0 && value.length <= MAX_SHARE_ID_LENGTH && /^[a-z0-9][a-z0-9-]*$/u.test(value)
   );
 }
 

@@ -26,12 +26,20 @@ const RETRY_MAX_MS = 60_000;
  */
 export interface PressTransport {
   inspections(): RelayButtonInspectionRequest[];
-  answerInspection(generation: number, inspectionId: string, result: RelayButtonInspection): Promise<void>;
+  answerInspection(
+    generation: number,
+    inspectionId: string,
+    result: RelayButtonInspection,
+  ): Promise<void>;
   /** The presses this host has not settled, waiting a while for one when there are none. */
   list(signal: AbortSignal): Promise<RelayAutomationPress[]>;
   /** Accepts presses at the host generation this host read; answers the ones accepted. */
   accept(generation: number, hostPressIds: string[]): Promise<string[]>;
-  settle(input: { hostPressId: string; outcome: AutomationPressOutcome; error: string | null }): Promise<void>;
+  settle(input: {
+    hostPressId: string;
+    outcome: AutomationPressOutcome;
+    error: string | null;
+  }): Promise<void>;
 }
 
 /** How a relayed press ended, for the person who pressed it. */
@@ -53,7 +61,8 @@ export function relayedPressFailureNotice({ press, field, outcome, error }: Rela
     title: outcome === "busy" ? `${button} did not run` : `${button} did not finish`,
     body: (outcome === "busy"
       ? "It was already running on this record for someone else. Press it again when that run finishes."
-      : error ?? "The automation failed.").slice(0, 500),
+      : (error ?? "The automation failed.")
+    ).slice(0, 500),
     target: { path: collectionPath, record: press.recordId, automation: press.automationId },
     recipientUserId: press.pressedBy,
   };
@@ -89,7 +98,15 @@ export interface RelayedPressHostOptions {
   /** The claim the engine already holds for this press, found without making one. */
   heldClaim(press: RelayAutomationPress): Promise<HeldClaim>;
   press(
-    input: { automationId: string; collectionPath: string; definitionHash: string; recordId: string; pressId: string; pressedBy: string; confirmed: readonly string[] },
+    input: {
+      automationId: string;
+      collectionPath: string;
+      definitionHash: string;
+      recordId: string;
+      pressId: string;
+      pressedBy: string;
+      confirmed: readonly string[];
+    },
     watch: (claimId: string) => void,
   ): Promise<{ pressed: CollectionAutomationPress; field: string | null }>;
   inspect(inspectionIds: readonly string[], signal: AbortSignal): Promise<RelayButtonInspection[]>;
@@ -110,14 +127,19 @@ export interface RelayedPressHostOptions {
 export function createRelayedPressHost(options: RelayedPressHostOptions) {
   const { host, delay } = options;
   let running: Fiber.Fiber<void, unknown> | null = null;
-  // Presses this host has pressed, by claim, until their runs settle.
   const byClaim = new Map<string, { press: RelayAutomationPress; field: string | null }>();
   // Presses taken this session, so a list naming them again does not press twice.
   const taken = new Set<string>();
   // Settles the relay has not taken yet; each loop sends them first.
-  const unsent = new Map<string, { hostPressId: string; outcome: AutomationPressOutcome; error: string | null }>();
+  const unsent = new Map<
+    string,
+    { hostPressId: string; outcome: AutomationPressOutcome; error: string | null }
+  >();
 
-  async function settle(relay: PressTransport, input: { hostPressId: string; outcome: AutomationPressOutcome; error: string | null }): Promise<void> {
+  async function settle(
+    relay: PressTransport,
+    input: { hostPressId: string; outcome: AutomationPressOutcome; error: string | null },
+  ): Promise<void> {
     unsent.set(input.hostPressId, input);
     await relay.settle(input);
     unsent.delete(input.hostPressId);
@@ -125,7 +147,14 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
     taken.delete(input.hostPressId);
   }
 
-  async function ended(relay: PressTransport, press: RelayAutomationPress, field: string | null, outcome: AutomationPressOutcome, error: string | null, claimed = false) {
+  async function ended(
+    relay: PressTransport,
+    press: RelayAutomationPress,
+    field: string | null,
+    outcome: AutomationPressOutcome,
+    error: string | null,
+    claimed = false,
+  ) {
     if (outcome === "failed" && error !== SHARED_BUTTON_DENIED) error = SHARED_BUTTON_FAILED;
     try {
       await settle(relay, { hostPressId: press.hostPressId, outcome, error });
@@ -133,13 +162,19 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
       options.onError(`settle relayed press "${press.hostPressId}"`, settleError);
     }
     if (!claimed && (outcome === "failed" || outcome === "busy")) {
-      await options.notifyFailure({ press, field, outcome, error }).catch((notifyError: unknown) =>
-        options.onError(`tell the person who pressed "${press.hostPressId}"`, notifyError));
+      await options
+        .notifyFailure({ press, field, outcome, error })
+        .catch((notifyError: unknown) =>
+          options.onError(`tell the person who pressed "${press.hostPressId}"`, notifyError),
+        );
     }
   }
 
-  // Follows a claim the engine held before this session until its run settles.
-  async function resume(relay: PressTransport, press: RelayAutomationPress, held: NonNullable<HeldClaim>): Promise<void> {
+  async function resume(
+    relay: PressTransport,
+    press: RelayAutomationPress,
+    held: NonNullable<HeldClaim>,
+  ): Promise<void> {
     let settled = held.settled;
     if (settled === null) {
       if (byClaim.has(held.claimId)) return;
@@ -190,15 +225,35 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
       try {
         result = await options.press(
           {
-            automationId: press.automationId, collectionPath: press.collectionPath, definitionHash: press.definitionHash, recordId: press.recordId,
-            pressId: press.hostPressId, pressedBy: press.pressedBy, confirmed: press.confirmed,
+            automationId: press.automationId,
+            collectionPath: press.collectionPath,
+            definitionHash: press.definitionHash,
+            recordId: press.recordId,
+            pressId: press.hostPressId,
+            pressedBy: press.pressedBy,
+            confirmed: press.confirmed,
           },
           // Watched before its run can start, so a run that settles at once is still told.
-          (claimId) => { claimed = true; byClaim.set(claimId, { press, field: null }); },
+          (claimId) => {
+            claimed = true;
+            byClaim.set(claimId, { press, field: null });
+          },
         );
       } catch (error) {
-        if (error instanceof AutomationRunWait) { taken.delete(press.hostPressId); return; }
-        await ended(relay, press, null, "failed", error instanceof Error && error.message === SHARED_BUTTON_DENIED ? SHARED_BUTTON_DENIED : SHARED_BUTTON_FAILED, claimed);
+        if (error instanceof AutomationRunWait) {
+          taken.delete(press.hostPressId);
+          return;
+        }
+        await ended(
+          relay,
+          press,
+          null,
+          "failed",
+          error instanceof Error && error.message === SHARED_BUTTON_DENIED
+            ? SHARED_BUTTON_DENIED
+            : SHARED_BUTTON_FAILED,
+          claimed,
+        );
         return;
       }
       const { pressed, field } = result;
@@ -238,12 +293,20 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
             const requests = relay.inspections();
             const generation = host.generation();
             if (signal.aborted || generation === null || !host.stillRuns()) return null;
-            const results = requests.length === 0 ? [] : await options.inspect(requests.map(request => request.inspectionId), signal);
+            const results =
+              requests.length === 0
+                ? []
+                : await options.inspect(
+                    requests.map((request) => request.inspectionId),
+                    signal,
+                  );
             for (const [index, result] of results.entries()) {
               if (host.generation() !== generation || !host.stillRuns()) break;
               try {
                 await relay.answerInspection(generation, requests[index]!.inspectionId, result);
-              } catch (error) { options.onError("answer a shared Button inspection", error); }
+              } catch (error) {
+                options.onError("answer a shared Button inspection", error);
+              }
             }
             if (signal.aborted) return null;
             return { relay, presses };
@@ -253,21 +316,30 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
         if (listed === null) return false;
         for (const press of listed.presses) {
           // An admitted press finishes under its host hold even when the workspace closes.
-          yield* Effect.uninterruptible(Effect.tryPromise({
-            try: () => take(listed.relay, press),
-            catch: (error) => error,
-          }));
+          yield* Effect.uninterruptible(
+            Effect.tryPromise({
+              try: () => take(listed.relay, press),
+              catch: (error) => error,
+            }),
+          );
         }
         retryMs = RETRY_FIRST_MS;
         return true;
-      }).pipe(Effect.catch((error) => Effect.gen(function* () {
-        options.onError("take relayed Button presses", error);
-        yield* delay
-          ? Effect.tryPromise({ try: (signal) => delay(retryMs, signal), catch: (error) => error })
-          : Effect.sleep(retryMs);
-        retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
-        return true;
-      })));
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.gen(function* () {
+            options.onError("take relayed Button presses", error);
+            yield* delay
+              ? Effect.tryPromise({
+                  try: (signal) => delay(retryMs, signal),
+                  catch: (error) => error,
+                })
+              : Effect.sleep(retryMs);
+            retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
+            return true;
+          }),
+        ),
+      );
       if (!proceed) return;
     }
   });
@@ -288,13 +360,25 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
       const found = byClaim.get(event.claimId);
       if (!found) return;
       byClaim.delete(event.claimId);
-      void options.transport().then((relay) => {
-        if (relay === null) {
-          unsent.set(found.press.hostPressId, { hostPressId: found.press.hostPressId, outcome: event.outcome, error: event.outcome === "failed" && event.error !== SHARED_BUTTON_DENIED ? SHARED_BUTTON_FAILED : event.error });
-          return;
-        }
-        return ended(relay, found.press, found.field, event.outcome, event.error, true);
-      }).catch((error: unknown) => options.onError(`settle relayed press "${found.press.hostPressId}"`, error));
+      void options
+        .transport()
+        .then((relay) => {
+          if (relay === null) {
+            unsent.set(found.press.hostPressId, {
+              hostPressId: found.press.hostPressId,
+              outcome: event.outcome,
+              error:
+                event.outcome === "failed" && event.error !== SHARED_BUTTON_DENIED
+                  ? SHARED_BUTTON_FAILED
+                  : event.error,
+            });
+            return;
+          }
+          return ended(relay, found.press, found.field, event.outcome, event.error, true);
+        })
+        .catch((error: unknown) =>
+          options.onError(`settle relayed press "${found.press.hostPressId}"`, error),
+        );
     },
 
     /** The workspace closed. A later open finds each press again through its engine claim. */

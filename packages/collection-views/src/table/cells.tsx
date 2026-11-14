@@ -128,31 +128,21 @@ export const FLAGGED_REASON_TITLES: Record<FieldValueReasonCode, string> = {
   "expected-text": "This value is not text. Edit the value to replace it.",
   "expected-number": "This value is not a number. Edit the value to replace it.",
   "number-not-finite": "This number is not finite. Edit the value to replace it.",
-  "unsupported-tag":
-    "This value uses a YAML tag dohc cannot index. Replace the value.",
-  "value-depth-exceeded":
-    "This value nests too deeply to index. Replace the value.",
-  "expected-boolean":
-    "This value is not true or false. Toggle the checkbox to replace it.",
+  "unsupported-tag": "This value uses a YAML tag dohc cannot index. Replace the value.",
+  "value-depth-exceeded": "This value nests too deeply to index. Replace the value.",
+  "expected-boolean": "This value is not true or false. Toggle the checkbox to replace it.",
   "expected-sequence": "This value is not a list. Edit the value to replace it.",
   "invalid-date": "This value is not a date. Edit the value to pick a date.",
   "unknown-option":
     "This field's options do not include this value. Edit the value to pick or add an option.",
-  "duplicate-value":
-    "This list repeats a value. Edit the value to remove the duplicate.",
-  "empty-person-id":
-    "This person id is empty. Edit the value to enter a person id.",
-  "invalid-record-id":
-    "This value is not a record id. Edit the value to pick a record.",
+  "duplicate-value": "This list repeats a value. Edit the value to remove the duplicate.",
+  "empty-person-id": "This person id is empty. Edit the value to enter a person id.",
+  "invalid-record-id": "This value is not a record id. Edit the value to pick a record.",
   "invalid-url": "This value is not a URL. Edit the value to replace it.",
-  "expected-empty":
-    "A button field stores no value. Remove this value from the record's file.",
+  "expected-empty": "A button field stores no value. Remove this value from the record's file.",
 };
 
-function wrapFlagged(
-  reason: FieldValueReasonCode | null,
-  children: ReactNode,
-): ReactNode {
+function wrapFlagged(reason: FieldValueReasonCode | null, children: ReactNode): ReactNode {
   if (reason === null) return children;
   return (
     <span
@@ -179,7 +169,15 @@ interface CellInputProps {
   abandon?: (text: string, value: CollectionValue | undefined) => void;
 }
 
-function CellInput({ defaultValue, parse, invalid, caretAtEnd = false, emit, close, abandon }: CellInputProps) {
+function CellInput({
+  defaultValue,
+  parse,
+  invalid,
+  caretAtEnd = false,
+  emit,
+  close,
+  abandon,
+}: CellInputProps) {
   const [refused, setRefused] = useState(false);
   const errorId = useId();
   // Enter and Tab close the editor, which can blur the input. One edit saves once.
@@ -194,7 +192,8 @@ function CellInput({ defaultValue, parse, invalid, caretAtEnd = false, emit, clo
     // The input is off the page only once its cell or its table is gone.
     return () => {
       const { abandon, parse } = abandoned.current;
-      if (node && !node.isConnected && typedInto.current && !done.current) abandon?.(node.value, parse(node.value));
+      if (node && !node.isConnected && typedInto.current && !done.current)
+        abandon?.(node.value, parse(node.value));
     };
   }, []);
   const save = (raw: string, move?: CellMove) => {
@@ -243,7 +242,11 @@ function CellInput({ defaultValue, parse, invalid, caretAtEnd = false, emit, clo
         onBlur={(event) => save(event.currentTarget.value)}
       />
       {refused ? (
-        <p id={errorId} role="alert" className="m-0 mt-1 flex items-start gap-1 text-[12px] text-danger">
+        <p
+          id={errorId}
+          role="alert"
+          className="m-0 mt-1 flex items-start gap-1 text-[12px] text-danger"
+        >
           <span aria-hidden className="flex h-lh shrink-0 items-center">
             <CircleAlert size={12} />
           </span>
@@ -285,7 +288,11 @@ export interface CellEditorProps {
    * option. A host that returns the save's edit id lets a second edit of
    * the same cell start from this one.
    */
-  onCreateOption?: (option: string, nextValue: CollectionValue, previousValues?: readonly CollectionValue[]) => number | void;
+  onCreateOption?: (
+    option: string,
+    nextValue: CollectionValue,
+    previousValues?: readonly CollectionValue[],
+  ) => number | void;
   /** Changes the color of one of the field's options. Absent, the options offer no colors. */
   onOptionColorChange?: (option: string, color: OptionColor) => void;
   /** The people a person field can name. Absent, a person edit is a typed id. */
@@ -317,7 +324,13 @@ export function CellEditor({
   // The people list can arrive mid-edit. An edit keeps the editor it opened
   // with, so a typed id is not lost to the picker.
   const [listed] = useState(people);
-  const textInput = { defaultValue: typed ?? asText(value), caretAtEnd: typed !== undefined, emit, close, abandon };
+  const textInput = {
+    defaultValue: typed ?? asText(value),
+    caretAtEnd: typed !== undefined,
+    emit,
+    close,
+    abandon,
+  };
   const picker = { label, typed, emit, close };
   switch (field.type) {
     case "number":
@@ -334,7 +347,14 @@ export function CellEditor({
         />
       );
     case "date":
-      return <DatePicker label={label} current={value === null ? null : asText(value)} emit={emit} close={close} />;
+      return (
+        <DatePicker
+          label={label}
+          current={value === null ? null : asText(value)}
+          emit={emit}
+          close={close}
+        />
+      );
     case "select":
       return (
         <OptionPicker
@@ -378,10 +398,11 @@ export function CellEditor({
     // Without the list, edits work on the raw id; the trim keeps a
     // whitespace-only entry from indexing as a flagged empty id.
     case "person":
-      return listed
-        ? <PeoplePicker {...picker} people={listed} current={value === null ? null : asText(value)} />
-        : <CellInput {...textInput} parse={(raw) => raw.trim() || null} />;
-    // text, url: a plain text value.
+      return listed ? (
+        <PeoplePicker {...picker} people={listed} current={value === null ? null : asText(value)} />
+      ) : (
+        <CellInput {...textInput} parse={(raw) => raw.trim() || null} />
+      );
     default:
       return <CellInput {...textInput} parse={(raw) => raw || null} />;
   }
@@ -411,10 +432,7 @@ export function FieldCell({
 
   // A button field stores no value, so its cell shows the field's name.
   if (field.type === "button") {
-    return wrapFlagged(
-      reason,
-      <span className="truncate text-[13px] text-muted">{label}</span>,
-    );
+    return wrapFlagged(reason, <span className="truncate text-[13px] text-muted">{label}</span>);
   }
 
   if (field.type === "checkbox") {
@@ -434,7 +452,13 @@ export function FieldCell({
   }
 
   // A valid url opens from its text. The rest of the cell still edits it.
-  if (field.type === "url" && reason === null && typeof value === "string" && value !== "" && onOpenLink) {
+  if (
+    field.type === "url" &&
+    reason === null &&
+    typeof value === "string" &&
+    value !== "" &&
+    onOpenLink
+  ) {
     return (
       <span className="flex w-full min-w-0 items-center text-[13px]">
         <span
@@ -459,18 +483,31 @@ export function FieldCell({
           {value}
         </span>
         {editable ? (
-          <button type="button" tabIndex={stop} aria-label={`Edit ${label}`} className={`min-h-5 min-w-6 flex-1 self-stretch${target}`} />
+          <button
+            type="button"
+            tabIndex={stop}
+            aria-label={`Edit ${label}`}
+            className={`min-h-5 min-w-6 flex-1 self-stretch${target}`}
+          />
         ) : null}
       </span>
     );
   }
 
   const empty = value === null || value === "" || (Array.isArray(value) && value.length === 0);
-  const shown = reason !== null
-    ? <span className="truncate text-[13px]">{fieldDisplayText(field, indexed, personLabel)}</span>
-    : empty && emptyText !== undefined
-      ? <span className="truncate text-[13px] text-subtle">{emptyText}</span>
-      : <FieldValue field={field} indexed={indexed} personLabel={personLabel} alignStart={alignStart} />;
+  const shown =
+    reason !== null ? (
+      <span className="truncate text-[13px]">{fieldDisplayText(field, indexed, personLabel)}</span>
+    ) : empty && emptyText !== undefined ? (
+      <span className="truncate text-[13px] text-subtle">{emptyText}</span>
+    ) : (
+      <FieldValue
+        field={field}
+        indexed={indexed}
+        personLabel={personLabel}
+        alignStart={alignStart}
+      />
+    );
   if (!editable) return wrapFlagged(reason, shown);
   return wrapFlagged(
     reason,
@@ -526,7 +563,11 @@ export function FieldValue({
       return <span className="truncate text-[13px]">{shortDate(date)}</span>;
     }
     case "number":
-      return <span className={`${alignStart ? "" : "ml-auto "}truncate text-[13px] tabular-nums`}>{asText(value)}</span>;
+      return (
+        <span className={`${alignStart ? "" : "ml-auto "}truncate text-[13px] tabular-nums`}>
+          {asText(value)}
+        </span>
+      );
     case "relation":
     case "url":
       return (
@@ -535,6 +576,10 @@ export function FieldValue({
         </span>
       );
     default:
-      return <span className="truncate text-[13px]">{fieldDisplayText(field, indexed, personLabel)}</span>;
+      return (
+        <span className="truncate text-[13px]">
+          {fieldDisplayText(field, indexed, personLabel)}
+        </span>
+      );
   }
 }

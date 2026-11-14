@@ -6,7 +6,6 @@ export const CHAT_WORK_STATUSES = ["working", "waiting", "done", "failed", "stop
 export type ChatWorkStatus = (typeof CHAT_WORK_STATUSES)[number];
 export type ChatWorkReport = { status: ChatWorkStatus; url?: string };
 
-// The longest link, in characters.
 export const MAX_WORK_URL_CHARS = 2048;
 
 // A work report's link is a web address: `http://` or `https://` followed by

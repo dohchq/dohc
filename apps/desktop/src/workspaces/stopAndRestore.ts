@@ -26,7 +26,8 @@ import { sendsMessages } from "@dohc/automation-executor/collection-automation-r
 // hidden: messages those automations sent, changes Undo leaves, and runs
 // another computer's history holds.
 
-const LIVE_STOP_STILL_WAITING = "dohc is waiting for the server to stop live editing for this page and will keep trying. When it stops, restore it again.";
+const LIVE_STOP_STILL_WAITING =
+  "dohc is waiting for the server to stop live editing for this page and will keep trying. When it stops, restore it again.";
 const LIVE_EDITS_KEPT = "Check Notices for them, then restore it again.";
 const SCHEMA_FILE = "collection.yaml";
 const AUTOMATIONS_FILE = "automations.yaml";
@@ -55,9 +56,14 @@ export interface RestoreReceipt {
 }
 
 export interface StopAndRestoreDependencies {
-  recordDefinitions?(definitions: ReadonlyArray<{collectionPath: string; id: string; definitionHash: string}>): Promise<void>;
+  recordDefinitions?(
+    definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
+  ): Promise<void>;
   recordRestoreIntents?(momentIds: readonly string[]): Promise<void>;
-  recordRestores?(receipts: readonly RestoreReceipt[], originalMomentIds: readonly string[]): Promise<void>;
+  recordRestores?(
+    receipts: readonly RestoreReceipt[],
+    originalMomentIds: readonly string[],
+  ): Promise<void>;
   recordedRestores?: readonly RestoreReceipt[];
   findRestoreReceipt?(momentId: string, requestId: string): Promise<RestoreReceipt | null>;
   /** Whether the keyed restore that recorded `restoredMomentId` reached disk. */
@@ -77,13 +83,21 @@ export interface StopAndRestoreDependencies {
    * while nothing else is in its folder. The engine's expected refusals are
    * answers; any other failure throws.
    */
-  restore(momentId: string, expectedHeadMomentId: string, aloneInFolder: boolean): Promise<
+  restore(
+    momentId: string,
+    expectedHeadMomentId: string,
+    aloneInFolder: boolean,
+  ): Promise<
     | { kind: "restored"; receipt: RestoreReceipt }
     | { kind: "changed" }
     | { kind: "folder-in-use" }
     // "shared-live": a shared live file, which the review names in History's words.
     // "live-page-owned": a page this computer has live editing on.
-    | { kind: "refused"; detail: string; refusal?: "synced-deletion" | "shared-live" | "live-page-owned" }
+    | {
+        kind: "refused";
+        detail: string;
+        refusal?: "synced-deletion" | "shared-live" | "live-page-owned";
+      }
     // History's rules could not be read; `unreadable` names what to fix.
     | { kind: "rules-unreadable"; unreadable: WorkspacePolicyPath[] }
   >;
@@ -96,7 +110,6 @@ export interface StopAndRestoreDependencies {
   stopLiveEditing?(path: string, objectId: string): Promise<"stopped" | "kept" | "waiting">;
   /** The names in a workspace folder, or none when it is gone. */
   folderEntries(path: string): Promise<string[]>;
-  /** Removes a workspace folder only when it is empty. */
   removeEmptyFolder(path: string): Promise<void>;
   /** Runs undone and left, and fields kept at a later value or on records that left their Collection. */
   undoRuns(
@@ -116,7 +129,10 @@ export interface UndoneRuns {
 
 /** Undoing runs stopped part way: what it undid before it stopped. */
 export class UndoRunsStopped extends Error {
-  constructor(message: string, readonly runs: UndoneRuns) {
+  constructor(
+    message: string,
+    readonly runs: UndoneRuns,
+  ) {
     super(message);
   }
 }
@@ -179,9 +195,18 @@ function sameContent(left: Content, right: Content): boolean {
 function definitionsIn(text: string | null): Map<string, boolean> {
   const parsed = text === null ? null : parseAutomationsFile(text);
   if (parsed?.status !== "read") return new Map();
-  return new Map(parsed.entries.flatMap((entry) => entry.status === "valid"
-    ? [[`${definitionHash(entry.automation)} ${entry.automation.id}`, sendsMessages(entry.automation)] as const]
-    : []));
+  return new Map(
+    parsed.entries.flatMap((entry) =>
+      entry.status === "valid"
+        ? [
+            [
+              `${definitionHash(entry.automation)} ${entry.automation.id}`,
+              sendsMessages(entry.automation),
+            ] as const,
+          ]
+        : [],
+    ),
+  );
 }
 
 // Automations first, so none of the person's runs again, and a schema last.
@@ -218,9 +243,9 @@ export async function restoreDirectWrites(
   // Everything must be here before anything changes. A file whose contents
   // are protected here cannot be restored here, so it goes to review.
   const review = new Map<string, ReviewFile>();
-  type Receipt = {receipt: RestoreReceipt; originalMomentId: string; folder?: string};
+  type Receipt = { receipt: RestoreReceipt; originalMomentId: string; folder?: string };
   const recovered: Receipt[] = [];
-  const known = new Set(dependencies.recordedRestores?.map(receipt => receipt.restoredMomentId));
+  const known = new Set(dependencies.recordedRestores?.map((receipt) => receipt.restoredMomentId));
   const recoveredFolders = new Set<string>();
   // A protected automations.yaml hides which automations they changed, so
   // their runs are neither found nor undone; the file's review says so.
@@ -230,7 +255,8 @@ export async function restoreDirectWrites(
     const automations = theirs && posix.basename(path) === AUTOMATIONS_FILE;
     protectedAutomations ||= automations;
     review.set(path, {
-      path, reason: "restore-refused",
+      path,
+      reason: "restore-refused",
       detail: automations
         ? "Its contents are protected here, so dohc could not read its automations or undo their runs. Restore it from its History, and undo their runs from its Collection's run history."
         : "Its contents are protected. Restore it from its History.",
@@ -240,7 +266,14 @@ export async function restoreDirectWrites(
   for (const entry of objects.values()) {
     const retained = dependencies.reviewPath?.(entry.last.path);
     if (retained) {
-      review.set(entry.last.path, {path: entry.last.path, reason: "restore-refused", detail: posix.basename(entry.last.path) === AUTOMATIONS_FILE ? `${retained.replace(/\.$/, "")}. Runs from this file's automations were kept.` : retained});
+      review.set(entry.last.path, {
+        path: entry.last.path,
+        reason: "restore-refused",
+        detail:
+          posix.basename(entry.last.path) === AUTOMATIONS_FILE
+            ? `${retained.replace(/\.$/, "")}. Runs from this file's automations were kept.`
+            : retained,
+      });
       protectedAutomations ||= posix.basename(entry.last.path) === AUTOMATIONS_FILE;
       continue;
     }
@@ -271,8 +304,12 @@ export async function restoreDirectWrites(
   };
   // The file's newest moment when it goes back; null when passed over or listed for review.
   // After `stoppedLive`, the review says live editing is off and how to turn it back on.
-  const headIfAllTheirs = async (entry: Written, after: readonly string[],
-    readLater: ReturnType<typeof laterReader>, stoppedLive = false): Promise<{ head: string } | "waiting" | null> => {
+  const headIfAllTheirs = async (
+    entry: Written,
+    after: readonly string[],
+    readLater: ReturnType<typeof laterReader>,
+    stoppedLive = false,
+  ): Promise<{ head: string } | "waiting" | null> => {
     const theirs = new Set(entry.all.map((file) => file.momentId));
     let snapshotHead = entry.first.momentId;
     for (const id of after) {
@@ -285,18 +322,33 @@ export async function restoreDirectWrites(
     }
     const creator = entry.moments.get(entry.first.momentId)!.authors;
     const sameRecipient = (moment: VersionedTextMoment) => {
-      if (creator?.length !== 1 || !moment.authors?.length
-        || moment.authors.some(author => author.kind === "unattributed")) return false;
+      if (
+        creator?.length !== 1 ||
+        !moment.authors?.length ||
+        moment.authors.some((author) => author.kind === "unattributed")
+      )
+        return false;
       const original = creator[0]!;
       // Settlement exports keep their native IDs but encode "ydoc" as "local-file".
-      const liveSettlement = moment.metadata.origin === "ydoc" || (moment.metadata.origin === "local-file"
-        && /^moment-ydoc-(?:apply-)?[a-fA-F0-9]{64}$/u.test(moment.id));
-      return moment.authors.every(author => original.kind === "named"
-        ? (author.kind === "named" && author.userId === original.userId) || (liveSettlement && author.kind === "human" && author.relayConfirmed === true && author.humanId === original.userId)
-        : original.kind === "link" && "principalId" in original && author.kind === "link" && (
-          "publicPrincipalId" in author
-            ? entry.first.publicPrincipalId !== undefined && author.publicPrincipalId === entry.first.publicPrincipalId
-            : author.grantId === original.grantId && author.principalId === original.principalId));
+      const liveSettlement =
+        moment.metadata.origin === "ydoc" ||
+        (moment.metadata.origin === "local-file" &&
+          /^moment-ydoc-(?:apply-)?[a-fA-F0-9]{64}$/u.test(moment.id));
+      return moment.authors.every((author) =>
+        original.kind === "named"
+          ? (author.kind === "named" && author.userId === original.userId) ||
+            (liveSettlement &&
+              author.kind === "human" &&
+              author.relayConfirmed === true &&
+              author.humanId === original.userId)
+          : original.kind === "link" &&
+            "principalId" in original &&
+            author.kind === "link" &&
+            ("publicPrincipalId" in author
+              ? entry.first.publicPrincipalId !== undefined &&
+                author.publicPrincipalId === entry.first.publicPrincipalId
+              : author.grantId === original.grantId && author.principalId === original.principalId),
+      );
     };
     let changedBy: string | undefined;
     let allTheirs = true;
@@ -304,38 +356,73 @@ export async function restoreDirectWrites(
       if (theirs.has(id)) continue;
       const later = await readLater(id);
       if (later === null) return "waiting";
-      if (later !== "protected" && later.syncRecordOnly
-        && !later.authors?.some(author => author.kind === "unattributed")) {
-        const head = entry.moments.get(snapshotHead) ?? await readLater(snapshotHead);
-        if (!later.authors?.length || head !== null && head !== "protected"
-          && later.payload.after.path === head.payload.after.path
-          && sameContent(contentNow(later), contentNow(head))) continue;
+      if (
+        later !== "protected" &&
+        later.syncRecordOnly &&
+        !later.authors?.some((author) => author.kind === "unattributed")
+      ) {
+        const head = entry.moments.get(snapshotHead) ?? (await readLater(snapshotHead));
+        if (
+          !later.authors?.length ||
+          (head !== null &&
+            head !== "protected" &&
+            later.payload.after.path === head.payload.after.path &&
+            sameContent(contentNow(later), contentNow(head)))
+        )
+          continue;
       }
       // Opening a live document can settle its unchanged seed without an author.
-      if (later !== "protected" && later.operation === "write" && !later.authors?.length
-        && later.payload.before?.path === later.payload.after.path
-        && sameContent(contentBefore(later), contentNow(later))) continue;
+      if (
+        later !== "protected" &&
+        later.operation === "write" &&
+        !later.authors?.length &&
+        later.payload.before?.path === later.payload.after.path &&
+        sameContent(contentBefore(later), contentNow(later))
+      )
+        continue;
       if (later !== "protected" && sameRecipient(later)) continue;
       allTheirs = false;
-      const author = later !== "protected" && later.authors?.length === 1 ? later.authors[0] : undefined;
-      changedBy = later !== "protected" && later.authors?.some(author => author.kind === "unattributed")
-        ? "An unrecorded author"
-        : author?.kind === "automation" ? "An automation" : author?.kind === "human" ? `Person ${author.humanId}`
-        : author?.kind === "named" ? `Person ${author.userId}` : author?.kind === "agent" ? `Agent ${author.agentId}`
-        : author?.kind === "link" ? "Another share link participant" : "Another author";
+      const author =
+        later !== "protected" && later.authors?.length === 1 ? later.authors[0] : undefined;
+      changedBy =
+        later !== "protected" && later.authors?.some((author) => author.kind === "unattributed")
+          ? "An unrecorded author"
+          : author?.kind === "automation"
+            ? "An automation"
+            : author?.kind === "human"
+              ? `Person ${author.humanId}`
+              : author?.kind === "named"
+                ? `Person ${author.userId}`
+                : author?.kind === "agent"
+                  ? `Agent ${author.agentId}`
+                  : author?.kind === "link"
+                    ? "Another share link participant"
+                    : "Another author";
       break;
     }
     if (allTheirs) return { head: after[0] ?? entry.first.momentId };
-    const head = entry.moments.get(snapshotHead) ?? await readLater(snapshotHead);
+    const head = entry.moments.get(snapshotHead) ?? (await readLater(snapshotHead));
     if (head === "protected") {
       refuseProtected(entry.last.path, false);
       return null;
     }
-    if (sameContent(contentBefore(entry.moments.get(entry.first.momentId)!), contentNow(head))) return null;
+    if (sameContent(contentBefore(entry.moments.get(entry.first.momentId)!), contentNow(head)))
+      return null;
     const path = head !== null && head.operation !== "delete" ? head.path : entry.last.path;
-    review.set(path, stoppedLive
-      ? { path, reason: "restore-refused", detail: `dohc stopped live editing for "${path}" and kept it, because ${changedBy ?? "another author"} changed it too\nResume live editing for it in Live documents.`.slice(0, 500) }
-      : { path, reason: "changed-since", changedBy });
+    review.set(
+      path,
+      stoppedLive
+        ? {
+            path,
+            reason: "restore-refused",
+            detail:
+              `dohc stopped live editing for "${path}" and kept it, because ${changedBy ?? "another author"} changed it too\nResume live editing for it in Live documents.`.slice(
+                0,
+                500,
+              ),
+          }
+        : { path, reason: "changed-since", changedBy },
+    );
     return null;
   };
   for (const entry of written) {
@@ -346,19 +433,34 @@ export async function restoreDirectWrites(
       let receipt: RestoreReceipt | null = null;
       for (const id of after) {
         const later = await readLater(id);
-        if (later === null) return {status: "waiting"};
-        if (later !== "protected") receipt = restoreReceiptOf(later, entry.moments.get(entry.first.momentId)!, requestId);
+        if (later === null) return { status: "waiting" };
+        if (later !== "protected")
+          receipt = restoreReceiptOf(later, entry.moments.get(entry.first.momentId)!, requestId);
         if (receipt) break;
       }
       // History shows the restore committed; only a confirmed publication completes it.
-      if (receipt && !await dependencies.publicationApplied?.(receipt.restoredMomentId, requestId)) receipt = null;
-      else if (!receipt && entry.moments.get(entry.first.momentId)!.payload.before?.contentKind === "binary") {
-        receipt = await dependencies.findRestoreReceipt?.(entry.first.momentId, requestId) ?? null;
+      if (
+        receipt &&
+        !(await dependencies.publicationApplied?.(receipt.restoredMomentId, requestId))
+      )
+        receipt = null;
+      else if (
+        !receipt &&
+        entry.moments.get(entry.first.momentId)!.payload.before?.contentKind === "binary"
+      ) {
+        receipt =
+          (await dependencies.findRestoreReceipt?.(entry.first.momentId, requestId)) ?? null;
       }
       if (receipt) {
         const folder = isCreatedSchema(entry) ? posix.dirname(entry.first.path) : undefined;
-        if (known.has(receipt.restoredMomentId)) {if (folder) recoveredFolders.add(folder);}
-        else recovered.push({receipt: {...receipt, ...(entry.first.created ? {removed: true} : {})}, originalMomentId: entry.first.momentId, folder});
+        if (known.has(receipt.restoredMomentId)) {
+          if (folder) recoveredFolders.add(folder);
+        } else
+          recovered.push({
+            receipt: { ...receipt, ...(entry.first.created ? { removed: true } : {}) },
+            originalMomentId: entry.first.momentId,
+            folder,
+          });
         continue;
       }
     }
@@ -384,7 +486,11 @@ export async function restoreDirectWrites(
         messages ||= sends;
         // The hash has no spaces; an automation id may.
         const split = key.indexOf(" ");
-        definitions.push({ collectionPath: folder, id: key.slice(split + 1), definitionHash: key.slice(0, split) });
+        definitions.push({
+          collectionPath: folder,
+          id: key.slice(split + 1),
+          definitionHash: key.slice(0, split),
+        });
       }
     }
   }
@@ -410,35 +516,61 @@ export async function restoreDirectWrites(
       return keep(refusal);
     }
     dependencies.assertCurrent();
-    if (stopped === "waiting") return keep(`${livePageTitle(path, "restore")}\n${LIVE_STOP_STILL_WAITING}`);
+    if (stopped === "waiting")
+      return keep(`${livePageTitle(path, "restore")}\n${LIVE_STOP_STILL_WAITING}`);
     if (stopped === "kept") return keep(kept);
     const after = await dependencies.momentsAfter(entry.first.objectId, entry.first.momentId);
     const found = await headIfAllTheirs(entry, after, laterReader(), true);
-    if (found === "waiting") return keep(`dohc stopped live editing for "${path}"\nRestore it again in a moment.`);
+    if (found === "waiting")
+      return keep(`dohc stopped live editing for "${path}"\nRestore it again in a moment.`);
     if (found === null) return null;
     dependencies.assertCurrent();
-    const retried = await dependencies.restore(entry.first.momentId, found.head, isCreatedSchema(entry));
+    const retried = await dependencies.restore(
+      entry.first.momentId,
+      found.head,
+      isCreatedSchema(entry),
+    );
     // A release the engine deferred still holds the page, with its edits outside the file.
-    return retried.kind === "refused" && retried.refusal === "live-page-owned" ? keep(kept) : retried;
+    return retried.kind === "refused" && retried.refusal === "live-page-owned"
+      ? keep(kept)
+      : retried;
   };
   const restored: RestoreReceipt[] = [];
-  const receipts = durableBatch<Receipt>(async batch => {
-    await dependencies.recordRestores?.(batch.map(item => item.receipt), batch.map(item => item.originalMomentId));
-    restored.push(...batch.map(item => item.receipt));
+  const receipts = durableBatch<Receipt>(async (batch) => {
+    await dependencies.recordRestores?.(
+      batch.map((item) => item.receipt),
+      batch.map((item) => item.originalMomentId),
+    );
+    restored.push(...batch.map((item) => item.receipt));
     for (const item of batch) if (item.folder) await dependencies.removeEmptyFolder(item.folder);
   });
   const removeRecoveredFolders = async () => {
     for (const folder of recoveredFolders) await dependencies.removeEmptyFolder(folder);
     recoveredFolders.clear();
   };
-  const outcome = () => ({ status: "restored" as const, restored, review: [...review.values()].sort((left, right) => left.path.localeCompare(right.path)) });
-  let runs: Omit<UndoneRuns, "errorMessage"> = { undone: 0, left: 0, keptFields: [], missing: 0, otherKept: 0 };
+  const outcome = () => ({
+    status: "restored" as const,
+    restored,
+    review: [...review.values()].sort((left, right) => left.path.localeCompare(right.path)),
+  });
+  let runs: Omit<UndoneRuns, "errorMessage"> = {
+    undone: 0,
+    left: 0,
+    keptFields: [],
+    missing: 0,
+    otherKept: 0,
+  };
   let step: "files" | "runs" = "files";
   const done = (message: string | null) => ({
-    ...outcome(), runsUndone: runs.undone, runsLeft: runs.left, runChangesKept: runs.keptFields.length + runs.missing + runs.otherKept,
-    keptFields: runs.keptFields, fieldsMissing: runs.missing,
+    ...outcome(),
+    runsUndone: runs.undone,
+    runsLeft: runs.left,
+    runChangesKept: runs.keptFields.length + runs.missing + runs.otherKept,
+    keptFields: runs.keptFields,
+    fieldsMissing: runs.missing,
     ...(runs.sharedReversals?.length ? { sharedReversals: runs.sharedReversals } : {}),
-    wroteAutomations: definitions.length > 0 || protectedAutomations, sendsMessages: messages,
+    wroteAutomations: definitions.length > 0 || protectedAutomations,
+    sendsMessages: messages,
     unfinished: message === null ? null : { step, message },
   });
   try {
@@ -447,14 +579,17 @@ export async function restoreDirectWrites(
     await receipts.flush();
     for (let start = 0; start < restorable.length; start += DURABLE_BATCH_ITEMS) {
       const batch = restorable.slice(start, start + DURABLE_BATCH_ITEMS);
-      await dependencies.recordRestoreIntents?.(batch.map(({entry}) => entry.first.momentId));
+      await dependencies.recordRestoreIntents?.(batch.map(({ entry }) => entry.first.momentId));
       for (const { entry, head } of batch) {
         const folder = posix.dirname(entry.first.path);
         if (isCreatedSchema(entry)) {
           // Only the schema may be left now. A record History would not
           // restore, or a file someone added since, keeps the Collection.
           const entries = await dependencies.folderEntries(folder);
-          if (entries.some((name) => name !== SCHEMA_FILE) || [...review.keys()].some((path) => posix.dirname(path) === folder)) {
+          if (
+            entries.some((name) => name !== SCHEMA_FILE) ||
+            [...review.keys()].some((path) => posix.dirname(path) === folder)
+          ) {
             review.set(entry.last.path, { path: entry.last.path, reason: "folder-in-use" });
             continue;
           }
@@ -463,7 +598,12 @@ export async function restoreDirectWrites(
         // The engine checks the folder again in its own queue before it
         // removes the schema.
         let result = await dependencies.restore(entry.first.momentId, head, isCreatedSchema(entry));
-        if (result.kind === "refused" && result.refusal === "live-page-owned" && entry.first.created && dependencies.stopLiveEditing) {
+        if (
+          result.kind === "refused" &&
+          result.refusal === "live-page-owned" &&
+          entry.first.created &&
+          dependencies.stopLiveEditing
+        ) {
           const retried = await stopLiveEditingThenRestore(entry, result.detail);
           if (retried === null) continue;
           result = retried;
@@ -475,18 +615,37 @@ export async function restoreDirectWrites(
         }
         if (result.kind === "refused") {
           // History refuses some files, such as a shared live document.
-          review.set(entry.last.path, result.refusal === "shared-live"
-            ? { path: entry.last.path, reason: "restore-refused", detail: sharedLiveRestoreDetail(entry.last.path) }
-            : { path: entry.last.path, reason: "restore-refused", detail: result.detail.slice(0, 500),
-              ...(result.refusal === "synced-deletion" ? { refusal: result.refusal } : {}) });
+          review.set(
+            entry.last.path,
+            result.refusal === "shared-live"
+              ? {
+                  path: entry.last.path,
+                  reason: "restore-refused",
+                  detail: sharedLiveRestoreDetail(entry.last.path),
+                }
+              : {
+                  path: entry.last.path,
+                  reason: "restore-refused",
+                  detail: result.detail.slice(0, 500),
+                  ...(result.refusal === "synced-deletion" ? { refusal: result.refusal } : {}),
+                },
+          );
           continue;
         }
         if (result.kind === "rules-unreadable") {
-          review.set(entry.last.path, { path: entry.last.path, reason: "rules-unreadable", unreadable: result.unreadable });
+          review.set(entry.last.path, {
+            path: entry.last.path,
+            reason: "rules-unreadable",
+            unreadable: result.unreadable,
+          });
           continue;
         }
         const receipt = { ...result.receipt, ...(entry.first.created ? { removed: true } : {}) };
-        await receipts.add({receipt, originalMomentId: entry.first.momentId, ...(isCreatedSchema(entry) ? {folder} : {})});
+        await receipts.add({
+          receipt,
+          originalMomentId: entry.first.momentId,
+          ...(isCreatedSchema(entry) ? { folder } : {}),
+        });
       }
       await receipts.flush();
     }
@@ -498,9 +657,14 @@ export async function restoreDirectWrites(
       runs = undone;
       if (undone.errorMessage !== null) return done(undone.errorMessage);
     }
-  } catch (error) {
-    try { await receipts.flush(); await removeRecoveredFolders(); }
-    catch (flushError) { error = flushError; }
+  } catch (caught) {
+    let error = caught;
+    try {
+      await receipts.flush();
+      await removeRecoveredFolders();
+    } catch (flushError) {
+      error = flushError;
+    }
     if (error instanceof UndoRunsStopped) runs = error.runs;
     return done(error instanceof Error ? error.message : String(error));
   }

@@ -3,7 +3,13 @@ import { join } from "node:path";
 import { CAPABILITIES } from "@dohc/workspace-contracts/capabilities";
 import { describe, expect, it, vi } from "vitest";
 import { workspaceTrustOperations } from "./bridgeContract";
-import { SAVE_FAILED_MESSAGE, STOP_AND_SAVE_FAILED_MESSAGE, STOP_FAILED_MESSAGE, restrictFailure, workspaceTrustHandlers } from "./workspaceTrustIpc";
+import {
+  SAVE_FAILED_MESSAGE,
+  STOP_AND_SAVE_FAILED_MESSAGE,
+  STOP_FAILED_MESSAGE,
+  restrictFailure,
+  workspaceTrustHandlers,
+} from "./workspaceTrustIpc";
 import { createSitePreviewLifecycle } from "../workspaces/sitePreviewLifecycle";
 import type { SiteProcessHandle } from "../workspaces/siteRunner";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -12,23 +18,21 @@ import { deferred } from "../testing/deferred";
 
 type Event = { windowId: number };
 
-async function harness(input: {
-  answer?: boolean;
-  sharedView?: boolean;
-  failWrites?: { value: boolean };
-  // Stands in for the workspace's stop, when a test holds it.
-  stop?: () => Promise<void>;
-  // Stands in for the stop of the workspace's agent.
-  stopAgents?: (workspaceId: string) => Promise<void>;
-  // Hears the dialog open.
-  onAsk?: (workspaceId: string) => void;
-  // Hears every trust change.
-  onChange?: (workspaceId: string, trusted: boolean) => void;
-  // Keeps whether the dialog was shown, as dispatch does.
-  asked?: Set<string>;
-  // Runs before each write of the trust file, to hold it.
-  writeGate?: { hold: (() => Promise<void>) | null };
-} = {}) {
+async function harness(
+  input: {
+    answer?: boolean;
+    sharedView?: boolean;
+    failWrites?: { value: boolean };
+    stop?: () => Promise<void>;
+    stopAgents?: (workspaceId: string) => Promise<void>;
+    onAsk?: (workspaceId: string) => void;
+    onChange?: (workspaceId: string, trusted: boolean) => void;
+    // Keeps whether the dialog was shown, as dispatch does.
+    asked?: Set<string>;
+    // Runs before each write of the trust file, to hold it.
+    writeGate?: { hold: (() => Promise<void>) | null };
+  } = {},
+) {
   const scratch = await createTestScratch("workspace-trust-ipc-");
   const rootPath = join(scratch, "trip");
   await mkdir(rootPath);
@@ -49,9 +53,13 @@ async function harness(input: {
   const operation = {
     workspace,
     state: { sitePreviews: lifecycle },
-    assertCurrent: () => { if (!current) throw new Error("Open this workspace to trust it."); },
+    assertCurrent: () => {
+      if (!current) throw new Error("Open this workspace to trust it.");
+    },
   };
-  const confirm = vi.fn(async (_event: Event, _workspace: typeof workspace) => input.answer ?? false);
+  const confirm = vi.fn(
+    async (_event: Event, _workspace: typeof workspace) => input.answer ?? false,
+  );
   const notified: Array<[string, boolean]> = [];
   const handlers = workspaceTrustHandlers<Event, typeof operation>({
     trust,
@@ -59,34 +67,66 @@ async function harness(input: {
     isSharedView: () => input.sharedView ?? false,
     confirm,
     stopAppCommands: (held) =>
-      input.stop?.() ?? held.state.sitePreviews.stopWorkspace(held.workspace.workspaceId, { rejectOnFailure: true }),
+      input.stop?.() ??
+      held.state.sitePreviews.stopWorkspace(held.workspace.workspaceId, { rejectOnFailure: true }),
     stopAgents: input.stopAgents ?? (async () => undefined),
-    ...(input.onAsk || input.asked ? {
-      onAsk: (workspaceId: string) => { input.asked?.add(workspaceId); input.onAsk?.(workspaceId); },
-    } : {}),
+    ...(input.onAsk || input.asked
+      ? {
+          onAsk: (workspaceId: string) => {
+            input.asked?.add(workspaceId);
+            input.onAsk?.(workspaceId);
+          },
+        }
+      : {}),
     ...(input.asked ? { wasAsked: (workspaceId: string) => input.asked!.has(workspaceId) } : {}),
-    notifyChanged: (workspaceId, trusted) => { notified.push([workspaceId, trusted]); },
+    notifyChanged: (workspaceId, trusted) => {
+      notified.push([workspaceId, trusted]);
+    },
   });
   const context = { event: { windowId: 1 }, operation };
   const payload = { workspaceId: "trip" };
   return {
-    trust, file, scratch, workspace, lifecycle, confirm, notified, context,
-    leave: () => { current = false; },
+    trust,
+    file,
+    scratch,
+    workspace,
+    lifecycle,
+    confirm,
+    notified,
+    context,
+    leave: () => {
+      current = false;
+    },
     read: () => handlers.readWorkspaceTrust(payload, context),
     request: () => handlers.requestWorkspaceTrust(payload, context),
     // As the renderer asks after a send whose agent Restricted Mode holds.
-    requestAutomatic: () => handlers.requestWorkspaceTrust({ ...payload, automatic: true }, context),
+    requestAutomatic: () =>
+      handlers.requestWorkspaceTrust({ ...payload, automatic: true }, context),
     restrict: () => handlers.restrictWorkspace(payload, context),
   };
 }
 
-function devServer(h: Awaited<ReturnType<typeof harness>>, stop: () => Promise<void>): Promise<unknown> {
+function devServer(
+  h: Awaited<ReturnType<typeof harness>>,
+  stop: () => Promise<void>,
+): Promise<unknown> {
   const handle: SiteProcessHandle = {
-    url: "http://127.0.0.1:43210/", command: "node", args: ["server.js"], cwd: h.workspace.rootPath,
-    logs: () => [], onExit: () => undefined, stop, stillRunning: async () => [],
+    url: "http://127.0.0.1:43210/",
+    command: "node",
+    args: ["server.js"],
+    cwd: h.workspace.rootPath,
+    logs: () => [],
+    onExit: () => undefined,
+    stop,
+    stillRunning: async () => [],
   };
   return h.lifecycle.acquire({
-    holderId: "tab", senderId: 1, workspaceId: "trip", siteRoot: "portal", mode: "dev", restart: false,
+    holderId: "tab",
+    senderId: 1,
+    workspaceId: "trip",
+    siteRoot: "portal",
+    mode: "dev",
+    restart: false,
     isCurrent: () => true,
     prepare: async () => async () => ({ handle, result: { logs: [] } }),
   });
@@ -160,7 +200,6 @@ describe("main's workspace trust operations", () => {
     await stopReached.promise;
     // The save does not wait for the stop, so a quit meanwhile keeps it.
     expect(persisting).toHaveBeenCalledWith("trip");
-    // The Trust from another window is writing its grant when the stop ends.
     const writing = deferred<void>();
     const releaseWrite = deferred<void>();
     writeGate.hold = async () => {
@@ -181,11 +220,15 @@ describe("main's workspace trust operations", () => {
     const failWrites = { value: false };
     const h = await harness({ answer: true, failWrites });
     await h.request();
-    const stop = vi.fn(async () => { throw new Error("access denied"); });
+    const stop = vi.fn(async () => {
+      throw new Error("access denied");
+    });
     await devServer(h, stop);
     failWrites.value = true;
     await expect(h.restrict()).rejects.toThrow(STOP_AND_SAVE_FAILED_MESSAGE);
-    expect(STOP_AND_SAVE_FAILED_MESSAGE.startsWith("An app in this workspace is still running")).toBe(true);
+    expect(
+      STOP_AND_SAVE_FAILED_MESSAGE.startsWith("An app in this workspace is still running"),
+    ).toBe(true);
     expect(await h.trust.isTrusted(h.workspace)).toBe(false);
   });
 
@@ -193,7 +236,9 @@ describe("main's workspace trust operations", () => {
     const h = await harness({ answer: true });
     await h.request();
     let failStop = true;
-    const stop = vi.fn(async () => { if (failStop) throw new Error("access denied"); });
+    const stop = vi.fn(async () => {
+      if (failStop) throw new Error("access denied");
+    });
     await devServer(h, stop);
 
     await expect(h.restrict()).rejects.toThrow(STOP_FAILED_MESSAGE);
@@ -237,17 +282,21 @@ describe("main's workspace trust operations", () => {
     await expect(trust.request()).resolves.toEqual({ workspaceId: "trip", trusted: true });
     await expect(trust.read()).resolves.toEqual({ workspaceId: "trip", trusted: true });
     expect(trust.notified).toEqual([["trip", true]]);
-    // Asking again does not ask the person again.
     await trust.request();
     expect(trust.confirm).toHaveBeenCalledTimes(1);
   });
 
   it("gives a renderer no way to answer: every request payload carries only the workspace", () => {
     for (const row of Object.values(workspaceTrustOperations)) {
-      expect(row.payload.parse({ workspaceId: "trip", trusted: true })).toEqual({ workspaceId: "trip" });
+      expect(row.payload.parse({ workspaceId: "trip", trusted: true })).toEqual({
+        workspaceId: "trip",
+      });
     }
-    // No agent tool reaches trust.
-    for (const id of ["workspace.trust.read", "workspace.trust.request", "workspace.trust.restrict"] as const) {
+    for (const id of [
+      "workspace.trust.read",
+      "workspace.trust.request",
+      "workspace.trust.restrict",
+    ] as const) {
       const { mcp } = CAPABILITIES[id];
       expect([...mcp.owner, ...mcp.view, ...mcp.comment, ...mcp.edit]).toEqual([]);
     }
@@ -275,11 +324,22 @@ describe("main's workspace trust operations", () => {
     await h.request();
     const stop = vi.fn(async () => undefined);
     const handle: SiteProcessHandle = {
-      url: "http://127.0.0.1:43210/", command: "node", args: ["server.js"], cwd: h.workspace.rootPath,
-      logs: () => [], onExit: () => undefined, stop, stillRunning: async () => [],
+      url: "http://127.0.0.1:43210/",
+      command: "node",
+      args: ["server.js"],
+      cwd: h.workspace.rootPath,
+      logs: () => [],
+      onExit: () => undefined,
+      stop,
+      stillRunning: async () => [],
     };
     await h.lifecycle.acquire({
-      holderId: "tab", senderId: 1, workspaceId: "trip", siteRoot: "portal", mode: "dev", restart: false,
+      holderId: "tab",
+      senderId: 1,
+      workspaceId: "trip",
+      siteRoot: "portal",
+      mode: "dev",
+      restart: false,
       isCurrent: () => true,
       prepare: async () => async () => ({ handle, result: { logs: [] } }),
     });
@@ -290,7 +350,10 @@ describe("main's workspace trust operations", () => {
     expect(stop).toHaveBeenCalledTimes(1);
     expect(h.lifecycle.status("trip", "portal").running).toBe(false);
     expect(await h.trust.isTrusted(h.workspace)).toBe(false);
-    expect(h.notified).toEqual([["trip", true], ["trip", false]]);
+    expect(h.notified).toEqual([
+      ["trip", true],
+      ["trip", false],
+    ]);
   });
 
   it("stops the workspace's agent with its apps, and says which one is still running", async () => {
@@ -302,13 +365,19 @@ describe("main's workspace trust operations", () => {
 
     await h.request();
     stopAgents.mockRejectedValueOnce(new Error("runner outlived its kill"));
-    await expect(h.restrict()).rejects.toThrow("An agent in this workspace is still running. dohc could not stop it.");
+    await expect(h.restrict()).rejects.toThrow(
+      "An agent in this workspace is still running. dohc could not stop it.",
+    );
     expect(await h.trust.isTrusted(h.workspace)).toBe(false);
 
     await h.request();
-    await devServer(h, async () => { throw new Error("access denied"); });
+    await devServer(h, async () => {
+      throw new Error("access denied");
+    });
     stopAgents.mockRejectedValueOnce(new Error("runner outlived its kill"));
-    await expect(h.restrict()).rejects.toThrow("An app and an agent in this workspace are still running. dohc could not stop them.");
+    await expect(h.restrict()).rejects.toThrow(
+      "An app and an agent in this workspace are still running. dohc could not stop them.",
+    );
     expect(restrictFailure("agent", true)).toBe(
       "An agent in this workspace is still running, and dohc could not save Restricted Mode. Try again before you quit dohc, or this workspace will be trusted again after a restart.",
     );
@@ -319,8 +388,9 @@ describe("main's workspace trust operations", () => {
     const h = await harness({ answer: true, stopAgents: () => agentStopping.promise });
     await h.request();
     const restricting = h.restrict();
-    // The agent is still stopping, and a restart would already find the workspace restricted.
-    await vi.waitFor(async () => expect(await createWorkspaceTrust({ file: h.file }).isTrusted(h.workspace)).toBe(false));
+    await vi.waitFor(async () =>
+      expect(await createWorkspaceTrust({ file: h.file }).isTrusted(h.workspace)).toBe(false),
+    );
     await vi.waitFor(() => expect(h.notified.at(-1)).toEqual(["trip", false]));
     agentStopping.resolve();
     await expect(restricting).resolves.toEqual({ workspaceId: "trip", trusted: false });
@@ -331,7 +401,10 @@ describe("main's workspace trust operations", () => {
     const h = await harness({ answer: false, onAsk: (workspaceId) => asked.push(workspaceId) });
     await Promise.all([h.request(), h.request()]);
     expect(asked).toEqual(["trip"]);
-    const trusted = await harness({ answer: true, onAsk: (workspaceId) => asked.push(workspaceId) });
+    const trusted = await harness({
+      answer: true,
+      onAsk: (workspaceId) => asked.push(workspaceId),
+    });
     await trusted.request();
     await trusted.request();
     expect(asked).toEqual(["trip", "trip"]);
@@ -340,7 +413,12 @@ describe("main's workspace trust operations", () => {
 
   it("stops and saves a restrict, and keeps a grant, whatever a trust listener throws", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const h = await harness({ answer: true, onChange: () => { throw new Error("listener failed"); } });
+    const h = await harness({
+      answer: true,
+      onChange: () => {
+        throw new Error("listener failed");
+      },
+    });
     await expect(h.request()).resolves.toEqual({ workspaceId: "trip", trusted: true });
     const stop = vi.fn(async () => undefined);
     await devServer(h, stop);

@@ -20,10 +20,7 @@ function regionAboveDialogs(element: Element | null): HTMLElement | null {
 const leftAt = new WeakMap<HTMLElement, HTMLElement>();
 let leftLast: WeakRef<HTMLElement> | null = null;
 
-export function trapModalTabKey(
-  event: KeyboardEvent,
-  dialog: HTMLElement | null,
-): void {
+export function trapModalTabKey(event: KeyboardEvent, dialog: HTMLElement | null): void {
   if (event.key !== "Tab" || !dialog) return;
   const container = regionAboveDialogs(focusedElementIn(dialog)) ?? dialog;
   const focusable = modalFocusableElements(container);
@@ -66,11 +63,16 @@ export function switchModalRegion(event: KeyboardEvent, dialog: HTMLElement | nu
     return true;
   }
   if (event.key !== "F6") return false;
-  // The first toast with a control: its first worded action, or Details when
-  // it has no other, else its first control.
-  const controls = [...document.querySelectorAll<HTMLElement>(TOASTS_SELECTOR)].flatMap(modalFocusableElements);
+  const controls = [...document.querySelectorAll<HTMLElement>(TOASTS_SELECTOR)].flatMap(
+    modalFocusableElements,
+  );
   const first = controls[0]?.closest(`${TOASTS_SELECTOR} > *`);
-  const toast = controls.find((control) => control.closest(`${TOASTS_SELECTOR} > *`) === first && control.closest("[data-toast-actions]")) ?? controls[0];
+  const toast =
+    controls.find(
+      (control) =>
+        control.closest(`${TOASTS_SELECTOR} > *`) === first &&
+        control.closest("[data-toast-actions]"),
+    ) ?? controls[0];
   if (!toast) return false;
   // Stopped here, so a dialog inside this one, with a handler of its own,
   // does not read the same key as a way back from the toast.
@@ -83,14 +85,13 @@ export function switchModalRegion(event: KeyboardEvent, dialog: HTMLElement | nu
 }
 
 export function modalFocusableElements(container: HTMLElement): HTMLElement[] {
-  return [
-    ...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
-  ].filter((element) => {
+  return [...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter((element) => {
     if (
       element.closest('[hidden], [aria-hidden="true"], [inert]') !== null ||
       element.matches(':disabled, input[type="hidden"]') ||
       (element.hasAttribute("tabindex") && element.tabIndex < 0)
-    ) return false;
+    )
+      return false;
     // Closed details expose only their first summary, including when nested.
     for (
       let details = element.closest("details:not([open])");
@@ -109,9 +110,10 @@ export function hasBlockingModal() {
   return document.querySelector(BLOCKING_MODAL_SELECTOR) !== null;
 }
 
-// The panel of the dialog on top, if one is open.
 export function topModalPanel(): HTMLElement | null {
-  const panels = document.querySelectorAll<HTMLElement>("[data-dohc-modal='true'] > [data-focus-surface='dialog']");
+  const panels = document.querySelectorAll<HTMLElement>(
+    "[data-dohc-modal='true'] > [data-focus-surface='dialog']",
+  );
   return panels[panels.length - 1] ?? null;
 }
 

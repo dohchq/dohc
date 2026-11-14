@@ -1,41 +1,4 @@
 #!/usr/bin/env node
-// The Rust gate, shared by local verification and CI. It runs the Rust
-// policy checks and prints a timestamped evidence line the integrator pastes
-// into the pull request.
-//
-// Requirements: Node >= 22, zero npm dependencies. Windows-first — works from
-// PowerShell and Git Bash (spawns through the platform shell).
-//
-// Steps: native target (see below), fixture drift, cargo fmt --check, cargo
-// clippy -D warnings, the workspace test run including crash recovery (cargo
-// nextest), the Markdown reader regressions over a built reader, the doctest
-// run (nextest runs no doctests by design), the
-// shipping-default daemon build, then cargo-deny / cargo-audit IF
-// installed (skip-with-warning when absent, never fail on a missing tool).
-//
-// A REQUIRED step that SKIPs fails the verdict: a gate that silently drops a
-// row is how the fault-injection tests went unrun for a month. Optional tools
-// may still skip.
-//
-// BUDGET: see the `budget` block below.
-//
-// PROVENANCE: the run reads the tree at every step boundary and stamps the
-// commit into both the summary block and the evidence line. A verdict that
-// cannot name the tree it examined is not evidence — two concurrent runs
-// sharing one worktree produced PASS and FAIL for the same commit, and neither
-// log could say which tree it had read. HEAD moving mid-run FAILS the verdict,
-// and so does the worktree changing under it, and so does a HEAD that moved
-// and returned inside one step — the reading carries the HEAD reflog, which
-// records that even when both ends name the same commit. A tree already dirty
-// when the run starts is recorded, not failed, because running the gate over
-// uncommitted work is the normal local loop and a check that forbids it just
-// gets removed. Recorded is the point: the reader learns the sha does not
-// describe everything that ran.
-//
-// Usage:
-//   node tools/rust-engine-program/run-rust-checks.mjs
-// Exit code is non-zero if any REQUIRED step fails (optional tool skips do not
-// fail the run).
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -50,11 +13,7 @@ import {
   freeDiskGb,
   resolveBuildBudget,
 } from "./build-slot.mjs";
-import {
-  classifyTreeProvenance,
-  formatTreeState,
-  readTreeState,
-} from "./tree-provenance.mjs";
+import { classifyTreeProvenance, formatTreeState, readTreeState } from "./tree-provenance.mjs";
 import { SCRATCH_SENTINEL, inspectScratchRun, testScratchParent } from "./scratch-leak-report.mjs";
 import { clippy, fmtCheck, nextest } from "./gate-commands.mjs";
 import { readGit } from "./git-read.mjs";
@@ -67,13 +26,6 @@ const policyOnly = process.argv.includes("--policy-only");
 const resultIndex = process.argv.indexOf("--result");
 const resultPath = resultIndex < 0 ? null : resolve(process.argv[resultIndex + 1]);
 
-// The machine's build budget. On the shared dev box the gate refuses to
-// start under the free-space floor, takes one of the four build slots before
-// any cargo runs, and caps its compiler and test parallelism to its share of
-// the cores. A single-tenant host (CI)
-// has no slot root and runs uncapped. Incremental compilation is off on both:
-// a full-workspace gate never reuses incremental caches, it only pays their
-// disk — the dev loop keeps its own setting.
 const budget = resolveBuildBudget();
 if (budget) {
   const free = freeDiskGb(repoRoot);
@@ -97,17 +49,11 @@ if (budget) {
   }
 }
 const slot = budget ? await acquireBuildSlot(budget) : null;
-// The caps ride process.env so every child sees them — including the
-// native-target probe, which spawns its own cargo. A snapshot handed to
-// spawnSync would REPLACE the child environment and silently drop whatever
-// this file exports after the snapshot; that defect shipped once and made
-// the scratch-leak row vacuous. Jobs and test threads preserve stricter
-// caller caps and clamp larger or invalid values; incremental is always off — a full-workspace run
-// never reuses incremental caches, it only pays their disk.
 process.env.CARGO_INCREMENTAL = "0";
 if (budget) {
   const capped = capBuildParallelism(process.env, budget.jobs);
-  for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"]) process.env[name] = capped[name];
+  for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"])
+    process.env[name] = capped[name];
 }
 // A caller's libtest cap carries to nextest unless the caller split them
 // deliberately: the evidence line must never claim a cap the child does
@@ -120,12 +66,11 @@ if (process.env.RUST_TEST_THREADS !== undefined) {
 // values rather than reporting a share nextest is not using.
 const libtestThreads = process.env.RUST_TEST_THREADS ?? "default";
 const nextestThreads = process.env.NEXTEST_TEST_THREADS ?? libtestThreads;
-const capsField =
-  `jobs ${process.env.CARGO_BUILD_JOBS ?? "default"}, test-threads ${
-    nextestThreads === libtestThreads
-      ? libtestThreads
-      : `${nextestThreads} (doctests ${libtestThreads})`
-  }`;
+const capsField = `jobs ${process.env.CARGO_BUILD_JOBS ?? "default"}, test-threads ${
+  nextestThreads === libtestThreads
+    ? libtestThreads
+    : `${nextestThreads} (doctests ${libtestThreads})`
+}`;
 // Hand the tests the absolute root instead of a name they would re-derive.
 // `os.tmpdir()` and Rust's `std::env::temp_dir()` read different variables and
 // agree only by luck: under WSL the inherited TEMP/TMP point at /mnt/c, which
@@ -164,8 +109,12 @@ const gitReadFailures = [];
 // Match the JS gate: invoke git directly in the checkout that ran each step.
 // Git must be an executable; a Windows installation with only a .cmd shim is unsupported.
 function captureGit(cmd) {
-  try { return readGit(cmd.split(" ").slice(1), repoRoot); }
-  catch (error) { gitReadFailures.push(error.message); return null; }
+  try {
+    return readGit(cmd.split(" ").slice(1), repoRoot);
+  } catch (error) {
+    gitReadFailures.push(error.message);
+    return null;
+  }
 }
 
 function toolAvailable(probe) {
@@ -284,7 +233,9 @@ readTreeAfter("native target");
 // An unverified host makes every later result unattributable, so nothing else
 // runs — and the expensive steps are the ones worth skipping.
 const archivedSteps = new Set(["test fixtures", "test --workspace", "reader tests"]);
-for (const step of native.ok ? required.filter(step => !policyOnly || !archivedSteps.has(step.name)) : []) {
+for (const step of native.ok
+  ? required.filter((step) => !policyOnly || !archivedSteps.has(step.name))
+  : []) {
   console.log(`\n--- ${step.name} ---`);
   const r = run(step.cmd);
   // Read as soon as the command returns, before anything else can touch the
@@ -382,7 +333,6 @@ results.unshift({
 // already carry a `|`, so a trailing field could not be read back reliably.
 const treeStamp = provenance.stamp;
 
-// Summary + pasteable evidence line.
 const stamp = new Date().toISOString();
 const summary = results
   .map((r) => `${r.name}=${r.status}${r.reason ? `[${r.reason}]` : ""}`)
@@ -392,8 +342,7 @@ const summary = results
 // rows are a parsed contract (`require-ci-pass-verdict.mjs`) that a PASS row
 // may not decorate. The judgement rows (tree provenance, scratch leak) carry
 // no duration because nothing timed ran for them.
-const stepSeconds = (ms) =>
-  ms === undefined ? "" : ` (${(ms / 1000).toFixed(1)}s)`;
+const stepSeconds = (ms) => (ms === undefined ? "" : ` (${(ms / 1000).toFixed(1)}s)`);
 
 console.log(`\n== summary ==`);
 console.log(`  tree ${treeStamp}`);
@@ -406,8 +355,22 @@ for (const r of results) {
 const verdict = failed ? "FAIL" : "PASS";
 if (resultPath) {
   mkdirSync(dirname(resultPath), { recursive: true });
-  writeFileSync(resultPath, JSON.stringify({ version: 1, scope: "rust", part: policyOnly ? "policy" : "gate",
-    commit: readings[0].state.head, verdict, steps: results, provenance }, null, 2) + "\n");
+  writeFileSync(
+    resultPath,
+    JSON.stringify(
+      {
+        version: 1,
+        scope: "rust",
+        part: policyOnly ? "policy" : "gate",
+        commit: readings[0].state.head,
+        verdict,
+        steps: results,
+        provenance,
+      },
+      null,
+      2,
+    ) + "\n",
+  );
 }
 console.log(`\nEVIDENCE (paste into the pull request):`);
 console.log(

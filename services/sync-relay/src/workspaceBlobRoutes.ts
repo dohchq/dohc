@@ -12,11 +12,9 @@ export type WorkspaceBlobRoute =
   | { route: "blob-have"; workspaceId: string };
 
 export function createWorkspaceBlobRoutes(
-  storage: Pick<SyncRelayStorage,
-    | "collectUnreferencedBlobs"
-    | "putBlob"
-    | "getBlob"
-    | "missingBlobs"
+  storage: Pick<
+    SyncRelayStorage,
+    "collectUnreferencedBlobs" | "putBlob" | "getBlob" | "missingBlobs"
   >,
   nowMs: () => number,
 ) {

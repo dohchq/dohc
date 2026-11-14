@@ -32,8 +32,14 @@ export function isAutomationHostPath(path: string | readonly string[]): boolean 
   } catch {
     return false;
   }
-  return parts.length >= 3 && parts.length <= 4 && parts[0] === "sync" &&
-    parts[1] !== "shares" && parts[1] !== "notices" && parts[2] === "automation-host";
+  return (
+    parts.length >= 3 &&
+    parts.length <= 4 &&
+    parts[0] === "sync" &&
+    parts[1] !== "shares" &&
+    parts[1] !== "notices" &&
+    parts[2] === "automation-host"
+  );
 }
 
 // The largest request body a path takes, or null when it is not one of
@@ -53,7 +59,9 @@ export type AutomationHostRoute = {
   action: "read" | (typeof AUTOMATION_HOST_ACTIONS)[number];
 };
 
-export function parseAutomationHostAction(value: string | undefined): AutomationHostRoute["action"] | null {
+export function parseAutomationHostAction(
+  value: string | undefined,
+): AutomationHostRoute["action"] | null {
   if (value === undefined) return "read";
   return AUTOMATION_HOST_ACTIONS.find((action) => action === value) ?? null;
 }
@@ -102,10 +110,13 @@ export function createAutomationHostRoutes(
       return jsonResponse(answer, 200);
     }
     if (request.method !== "POST") throw relayError("method_not_allowed");
-    if (!changeRateLimiter.allow(ownerUserId, nowMs())) throw relayError("automation_host_rate_limited");
+    if (!changeRateLimiter.allow(ownerUserId, nowMs()))
+      throw relayError("automation_host_rate_limited");
     const body = await readBody(
       request,
-      route.action === "release" ? AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES : AUTOMATION_HOST_MAX_BODY_BYTES,
+      route.action === "release"
+        ? AUTOMATION_HOST_RELEASE_MAX_BODY_BYTES
+        : AUTOMATION_HOST_MAX_BODY_BYTES,
     );
     const state = (() => {
       switch (route.action) {
@@ -134,7 +145,10 @@ export function createAutomationHostRoutes(
             groupsWatched: generation(body.groupsWatched),
           });
         case "take-over":
-          return storage.takeOverAutomationHost({ ...scope, generation: generation(body.generation) });
+          return storage.takeOverAutomationHost({
+            ...scope,
+            generation: generation(body.generation),
+          });
       }
     })();
     return jsonResponse({ ok: true, ...state }, 200);
@@ -172,12 +186,14 @@ function reachHandover(value: unknown): string | null {
     throw badRequest("reach must be a JSON object or null");
   }
   const text = JSON.stringify(value);
-  if (Buffer.byteLength(text) > AUTOMATION_HOST_REACH_MAX_BYTES) throw relayError("payload_too_large");
+  if (Buffer.byteLength(text) > AUTOMATION_HOST_REACH_MAX_BYTES)
+    throw relayError("payload_too_large");
   return text;
 }
 
 function installId(value: unknown): string {
-  if (!isNoticeLine(value, AUTOMATION_INSTALL_ID_MAX_CHARS)) throw badRequest("installId is invalid");
+  if (!isNoticeLine(value, AUTOMATION_INSTALL_ID_MAX_CHARS))
+    throw badRequest("installId is invalid");
   return value;
 }
 
@@ -189,7 +205,8 @@ export function computerInstallId(value: unknown): string {
 }
 
 function label(value: unknown): string {
-  if (!isNoticeLine(value, AUTOMATION_COMPUTER_LABEL_MAX_CHARS)) throw badRequest("label is invalid");
+  if (!isNoticeLine(value, AUTOMATION_COMPUTER_LABEL_MAX_CHARS))
+    throw badRequest("label is invalid");
   return value;
 }
 

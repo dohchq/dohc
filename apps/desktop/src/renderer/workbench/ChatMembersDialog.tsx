@@ -1,9 +1,32 @@
 import { ArrowLeft, Eye, Hash, Search, UserPlus, X } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type KeyboardEvent,
+} from "react";
 import type { ChatChannelShareGrantRow } from "../../ipc/bridgeContract";
 import { Overlay } from "../Overlay";
-import { FieldError, GhostButton, IconButton, PrimaryButton, SecondaryButton } from "../ui/controls";
-import { MENU_ACTIVE_OPTION, MENU_EMPTY, MENU_ENTER, MENU_FRAME, MENU_LABEL, MENU_ROW, MENU_ROW_TONE, movedPointer } from "../ui/Menu";
+import {
+  FieldError,
+  GhostButton,
+  IconButton,
+  PrimaryButton,
+  SecondaryButton,
+} from "../ui/controls";
+import {
+  MENU_ACTIVE_OPTION,
+  MENU_EMPTY,
+  MENU_ENTER,
+  MENU_FRAME,
+  MENU_LABEL,
+  MENU_ROW,
+  MENU_ROW_TONE,
+  movedPointer,
+} from "../ui/Menu";
 import { useRadioGroup } from "../ui/SegmentedControl";
 import { ChatAvatar } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
@@ -18,7 +41,8 @@ const ACCESS: ReadonlyArray<{ value: Access; label: string }> = [
 ];
 
 // A box holding a field wears the field's focus: its border and thin underline.
-const FIELD_FOCUS = "focus-within:border-muted focus-within:shadow-[inset_0_-1px_0_var(--dohc-muted)]";
+const FIELD_FOCUS =
+  "focus-within:border-muted focus-within:shadow-[inset_0_-1px_0_var(--dohc-muted)]";
 
 type Props = {
   groupName: string;
@@ -44,10 +68,14 @@ export function ChatMembersDialog(props: Props) {
   const [view, setView] = useState<"members" | "add">(
     props.members.length === 0 && props.readFailure === null ? "add" : "members",
   );
-  // People just added, shown as members until the reloaded list names them.
   const [added, setAdded] = useState<ReadonlyArray<{ email: string; viewOnly: boolean }>>([]);
   const memberKeys = useMemo(
-    () => new Set(props.members.flatMap((member) => (member.recipientEmail ? [emailKey(member.recipientEmail)] : []))),
+    () =>
+      new Set(
+        props.members.flatMap((member) =>
+          member.recipientEmail ? [emailKey(member.recipientEmail)] : [],
+        ),
+      ),
     [props.members],
   );
   useEffect(() => {
@@ -80,16 +108,30 @@ export function ChatMembersDialog(props: Props) {
       >
         <div className="flex items-center gap-2">
           {view === "add" && canGoBack ? (
-            <IconButton aria-label="Back to members" title="Back to members" data-testid="chats-share-back" disabled={adding} onClick={() => setView("members")}>
+            <IconButton
+              aria-label="Back to members"
+              title="Back to members"
+              data-testid="chats-share-back"
+              disabled={adding}
+              onClick={() => setView("members")}
+            >
               <ArrowLeft size={14} aria-hidden />
             </IconButton>
           ) : null}
-          <h2 id={`${id}-title`} className="m-0 flex min-w-0 flex-1 items-center gap-1 text-base font-semibold text-ink">
+          <h2
+            id={`${id}-title`}
+            className="m-0 flex min-w-0 flex-1 items-center gap-1 text-base font-semibold text-ink"
+          >
             {view === "add" ? <span className="shrink-0">Add people to</span> : null}
             <Hash size={15} aria-hidden className="shrink-0 text-subtle" />
             <span className="truncate">{props.groupName}</span>
           </h2>
-          <IconButton aria-label="Close" title="Close" data-testid="chats-share-close" onClick={props.onClose}>
+          <IconButton
+            aria-label="Close"
+            title="Close"
+            data-testid="chats-share-close"
+            onClick={props.onClose}
+          >
             <X size={14} aria-hidden />
           </IconButton>
         </div>
@@ -147,17 +189,24 @@ function MemberList(props: {
     if (total > 0) searchRef.current?.focus();
     else addRef.current?.focus();
     // Only as the list first shows.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const needle = query.trim().toLowerCase();
-  const members = needle === "" ? props.members : props.members.filter((member) => member.recipientEmail?.toLowerCase().includes(needle));
-  const added = needle === "" ? props.added : props.added.filter((person) => person.email.toLowerCase().includes(needle));
+  const members =
+    needle === ""
+      ? props.members
+      : props.members.filter((member) => member.recipientEmail?.toLowerCase().includes(needle));
+  const added =
+    needle === ""
+      ? props.added
+      : props.added.filter((person) => person.email.toLowerCase().includes(needle));
   const shown = members.length + added.length;
 
   return (
     <div className="flex flex-col gap-3">
       {total > 0 ? (
-        <label className={`flex h-8 items-center gap-2 rounded-md border border-line bg-bg px-2.5 ${FIELD_FOCUS}`}>
+        <label
+          className={`flex h-8 items-center gap-2 rounded-md border border-line bg-bg px-2.5 ${FIELD_FOCUS}`}
+        >
           <Search size={13} aria-hidden className="shrink-0 text-subtle" />
           <input
             ref={searchRef}
@@ -184,7 +233,10 @@ function MemberList(props: {
               onClick={props.onAddPeople}
               className="flex h-11 w-full cursor-pointer items-center gap-3 rounded-md px-2 text-left text-[13px] font-medium text-ink enabled:hover:bg-hover disabled:cursor-not-allowed disabled:text-subtle"
             >
-              <span aria-hidden className="grid size-8 shrink-0 place-items-center rounded-lg bg-panel-2 text-muted">
+              <span
+                aria-hidden
+                className="grid size-8 shrink-0 place-items-center rounded-lg bg-panel-2 text-muted"
+              >
                 <UserPlus size={15} />
               </span>
               Add people
@@ -197,8 +249,16 @@ function MemberList(props: {
             data-testid="chats-share-member"
             className="group flex h-11 items-center gap-3 rounded-md px-2 hover:bg-hover"
           >
-            <ChatAvatar presentation={neutralPresentation} name={member.recipientEmail ?? "?"} kind="human" size="row" />
-            <span className="min-w-0 flex-1 truncate text-[13px] text-ink" title={member.recipientEmail ?? undefined}>
+            <ChatAvatar
+              presentation={neutralPresentation}
+              name={member.recipientEmail ?? "?"}
+              kind="human"
+              size="row"
+            />
+            <span
+              className="min-w-0 flex-1 truncate text-[13px] text-ink"
+              title={member.recipientEmail ?? undefined}
+            >
               {member.recipientEmail ?? "Invited"}
             </span>
             {member.access === "read-only" ? <ViewOnlyMark /> : null}
@@ -213,8 +273,18 @@ function MemberList(props: {
           </li>
         ))}
         {added.map((person) => (
-          <li key={emailKey(person.email)} data-testid="chats-share-member" data-pending="" className="flex h-11 items-center gap-3 rounded-md px-2">
-            <ChatAvatar presentation={neutralPresentation} name={person.email} kind="human" size="row" />
+          <li
+            key={emailKey(person.email)}
+            data-testid="chats-share-member"
+            data-pending=""
+            className="flex h-11 items-center gap-3 rounded-md px-2"
+          >
+            <ChatAvatar
+              presentation={neutralPresentation}
+              name={person.email}
+              kind="human"
+              size="row"
+            />
             <span className="min-w-0 flex-1 truncate text-[13px] text-ink" title={person.email}>
               {person.email}
             </span>
@@ -259,14 +329,25 @@ function AddPeople(props: {
   const [focused, setFocused] = useState(true);
   const [listShown, setListShown] = useState(false);
   const [active, setActive] = useState(0);
-  const group = useRadioGroup({ value: access, options: ACCESS, onChange: setAccess, disabled: props.blocked || busy });
+  const group = useRadioGroup({
+    value: access,
+    options: ACCESS,
+    onChange: setAccess,
+    disabled: props.blocked || busy,
+  });
   const id = useId();
   const field = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLUListElement>(null);
 
   const pickedKeys = useMemo(() => new Set(picked.map(emailKey)), [picked]);
   const options = useMemo(
-    () => suggestPeople({ known: props.knownPeople, members: props.memberKeys, picked: pickedKeys, query: text }),
+    () =>
+      suggestPeople({
+        known: props.knownPeople,
+        members: props.memberKeys,
+        picked: pickedKeys,
+        query: text,
+      }),
     [props.knownPeople, props.memberKeys, pickedKeys, text],
   );
   const open = focused && listShown && !busy && !props.blocked;
@@ -275,7 +356,9 @@ function AddPeople(props: {
   const optionId = (index: number) => `${id}-option-${index}`;
 
   useEffect(() => {
-    list.current?.querySelector(`[data-index="${activeIndex}"]`)?.scrollIntoView?.({ block: "nearest" });
+    list.current
+      ?.querySelector(`[data-index="${activeIndex}"]`)
+      ?.scrollIntoView?.({ block: "nearest" });
   }, [activeIndex]);
 
   // Adds addresses as chips. One already in the group, or a word that is no
@@ -313,7 +396,10 @@ function AddPeople(props: {
   async function submit() {
     if (busy || props.blocked) return;
     if (!commitText()) return;
-    const typed = text.trim() === "" ? [] : splitAddresses(text).emails.filter((email) => !props.memberKeys.has(emailKey(email)));
+    const typed =
+      text.trim() === ""
+        ? []
+        : splitAddresses(text).emails.filter((email) => !props.memberKeys.has(emailKey(email)));
     const people = [...picked, ...typed.filter((email) => !pickedKeys.has(emailKey(email)))];
     if (people.length === 0) {
       setError("Enter an email address.");
@@ -334,7 +420,11 @@ function AddPeople(props: {
       props.onBusy(false);
     }
     const finished = done.length === people.length;
-    if (done.length > 0) props.onAdded(done.map((email) => ({ email, viewOnly })), finished);
+    if (done.length > 0)
+      props.onAdded(
+        done.map((email) => ({ email, viewOnly })),
+        finished,
+      );
     if (finished) return;
     // The first failure reported itself. Whoever was not added stays picked.
     const doneKeys = new Set(done.map(emailKey));
@@ -395,7 +485,6 @@ function AddPeople(props: {
     const pasted = event.clipboardData.getData("text");
     if (busy || !/[\s,;<]/.test(pasted.trim())) return;
     event.preventDefault();
-    // The paste replaces the selection, as it would in any field.
     const input = event.currentTarget;
     const before = text.slice(0, input.selectionStart ?? text.length);
     const after = text.slice(input.selectionEnd ?? text.length);
@@ -430,7 +519,12 @@ function AddPeople(props: {
               data-testid="chats-share-chip"
               className="inline-flex h-6 max-w-full items-center gap-1 rounded-md bg-panel-2 pl-1 pr-0.5 text-[12px] text-ink"
             >
-              <ChatAvatar presentation={neutralPresentation} name={email} kind="human" size="strip" />
+              <ChatAvatar
+                presentation={neutralPresentation}
+                name={email}
+                kind="human"
+                size="strip"
+              />
               <span className="min-w-0 truncate">{email}</span>
               <button
                 type="button"
@@ -497,7 +591,9 @@ function AddPeople(props: {
           >
             {options.length === 0 ? (
               <li role="presentation" className={MENU_EMPTY}>
-                {text.trim() === "" ? "No suggestions yet. Enter a full email." : `No one matches "${text.trim()}". Enter their full email.`}
+                {text.trim() === ""
+                  ? "No suggestions yet. Enter a full email."
+                  : `No one matches "${text.trim()}". Enter their full email.`}
               </li>
             ) : (
               options.map((option, index) => (
@@ -519,15 +615,28 @@ function AddPeople(props: {
                   }}
                   className={`${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest} h-9 cursor-pointer data-active:text-ink aria-disabled:cursor-default`}
                 >
-                  <ChatAvatar presentation={neutralPresentation} name={option.email} kind="human" size="comment" />
-                  <span className={`${MENU_LABEL} ${option.member ? "text-subtle" : ""}`}>{option.email}</span>
-                  {option.member ? <span className="shrink-0 text-[12px] text-subtle">Already a member</span> : null}
+                  <ChatAvatar
+                    presentation={neutralPresentation}
+                    name={option.email}
+                    kind="human"
+                    size="comment"
+                  />
+                  <span className={`${MENU_LABEL} ${option.member ? "text-subtle" : ""}`}>
+                    {option.email}
+                  </span>
+                  {option.member ? (
+                    <span className="shrink-0 text-[12px] text-subtle">Already a member</span>
+                  ) : null}
                 </li>
               ))
             )}
           </ul>
         ) : null}
-        {error ? <FieldError id={`${id}-error`} testId="chats-share-error">{error}</FieldError> : null}
+        {error ? (
+          <FieldError id={`${id}-error`} testId="chats-share-error">
+            {error}
+          </FieldError>
+        ) : null}
       </div>
       <div
         role="radiogroup"
@@ -541,7 +650,9 @@ function AddPeople(props: {
             {...group.radio(index)}
             data-testid={option.value === "view" ? "chats-share-readonly" : "chats-share-canpost"}
             className={`rounded-md px-2.5 py-1 text-xs transition-colors disabled:opacity-50 ${
-              access === option.value ? "bg-bg text-ink shadow-sm" : "text-muted enabled:hover:text-ink"
+              access === option.value
+                ? "bg-bg text-ink shadow-sm"
+                : "text-muted enabled:hover:text-ink"
             }`}
           >
             {option.label}
@@ -552,7 +663,11 @@ function AddPeople(props: {
         <SecondaryButton data-testid="chats-share-cancel" disabled={busy} onClick={props.onCancel}>
           Cancel
         </SecondaryButton>
-        <PrimaryButton type="submit" data-testid="chats-share-submit" disabled={busy || props.blocked}>
+        <PrimaryButton
+          type="submit"
+          data-testid="chats-share-submit"
+          disabled={busy || props.blocked}
+        >
           {busy ? "Adding…" : "Add"}
         </PrimaryButton>
       </div>

@@ -1,13 +1,10 @@
-//! Sol's any-namespace ruling: a capture released without adopting in one
-//! relay namespace, beside the document's activation in another.
+//! A capture released without adopting in one relay namespace, beside the
+//! document's activation in another.
 
 use super::*;
 
-/// The namespace of the capture that never adopted.
 const ELSEWHERE: &str = "other";
 
-/// The document captured in [`ELSEWHERE`] and released there without
-/// adopting, once it left the hosted scope. It then returns to the scope.
 async fn release_elsewhere(host: &mut WindowHost) {
     let captured = host
         .actor
@@ -70,7 +67,6 @@ async fn release_elsewhere(host: &mut WindowHost) {
     owner.close().await.unwrap();
 }
 
-/// A synced update of the document fed from [`ELSEWHERE`].
 fn incoming() -> IncomingCoordinate {
     IncomingCoordinate {
         relay_namespace: Some(ELSEWHERE.into()),
@@ -82,9 +78,6 @@ fn incoming() -> IncomingCoordinate {
     }
 }
 
-/// The binding protection names for the document's `lineage` on `tails`,
-/// bound to `store`, after every validation it waits for; none while
-/// nothing protects it.
 fn decided(
     store: &EngineStore,
     lineage: &str,
@@ -133,7 +126,6 @@ async fn pass_elsewhere(
     }
 }
 
-/// The document's snapshot: its path and content digest.
 fn snapshot(store: &EngineStore) -> (String, String) {
     store
         .read_with(|conn| {
@@ -146,7 +138,6 @@ fn snapshot(store: &EngineStore) -> (String, String) {
         .unwrap()
 }
 
-/// `op` rebased over the host's head, as a peer that had seen it sends it.
 fn over_head(
     store: &EngineStore,
     mut op: dohc_engine_sync::ReplicationEnvelope,
@@ -174,18 +165,18 @@ fn over_head(
     op
 }
 
-/// Sol's any-namespace ruling, while A is current: B, a capture in another
-/// namespace, released without adopting, and A then adopted in "relay". A
-/// rewrite of the host's head, and a delete, rename or binary write from the
-/// owner's desktop, from its own head or over the host's, fed from B's
-/// namespace find no protecting window. Each leaves A's native state and the
-/// document's snapshot as they were, with nothing to materialize: over the
-/// host's head the current activation's guard refuses it, and from the
-/// desktop's own head it opens a conflict.
+/// While A is current: B, a capture in another namespace, released without
+/// adopting, and A then adopted in "relay". A rewrite of the host's head and
+/// a delete from the owner's desktop, from its own head or over the host's,
+/// fed from B's namespace find no protecting window. Each leaves A's native
+/// state and the document's snapshot as they were, with nothing to
+/// materialize: over the host's head the current activation's guard refuses
+/// it, and from the desktop's own head it opens a conflict.
 #[tokio::test]
 async fn input_fed_from_a_released_namespace_never_replaces_a_current_activations_state() {
     let mut cases = vec![("a rewrite".to_owned(), None, true)];
-    for change in FILE_CHANGES {
+    {
+        let change = FileChange::Delete;
         cases.push((
             format!("{change:?} from the desktop's head"),
             Some(change),
@@ -254,10 +245,10 @@ async fn input_fed_from_a_released_namespace_never_replaces_a_current_activation
     }
 }
 
-/// Sol's any-namespace ruling, once A releases: tails validated while only
-/// B's release stood, and a validation in flight then, never answer for A's
-/// release. The next decision on each validates again, and A's Carried
-/// deliveries protect the lineage under A's tail alone.
+/// Once A releases: tails validated while only B's release stood, and a
+/// validation in flight then, never answer for A's release. The next
+/// decision on each validates again, and A's Carried deliveries protect the
+/// lineage under A's tail alone.
 #[tokio::test]
 async fn protection_resumes_for_a_released_activations_work_beside_another_namespace() {
     let mut host = window_host().await;

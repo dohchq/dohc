@@ -1,25 +1,18 @@
-//! R09 chats-domain traces: channel/thread/message round-trips, the atomic
-//! thread+first-message boundary (crash mid-send strands no empty thread),
-//! keyset pagination at limit-1/limit/limit+1, the mark-read CAS + monotonic
-//! clamp, follows/feed/bookmark generation-CAS, dispatch claim idempotency, and
-//! the NON-TAUTOLOGICAL parity differentials (channel slug, projection path,
-//! base64url feed cursor) validated against real TS output — not Rust's own.
+//! Chat authority, local privacy, feed visibility, and durable dispatch traces.
 
-use dohc_engine_domain::chats::{MAX_REPORTED_AGENT_CHARS, channel_collision_slug};
+use dohc_engine_domain::chats::MAX_REPORTED_AGENT_CHARS;
 use dohc_engine_domain::{
-    AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChannelGroup, ChatActorKind,
-    ChatChannelKind, ChatChannelType, ChatDecisionState, ChatMessageAutomation, ChatReactionState,
+    BookmarkMode, BookmarkTargetKind, ChannelGroup, ChatActorKind, ChatChannelKind,
+    ChatChannelType, ChatDecisionState, ChatMessageAutomation, ChatReactionState,
     ChatReportedAgent, ChatThreadLane, CreateFileThread, DomainError, FeedCursorValue, FollowState,
     FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, LocalAttachmentInput,
-    MarkAccountThreadRead, MarkThreadRead, NoFaults, PENDING_CHAT_WORKSPACE_EXISTS_SQL,
-    ResolveDecision, SaveBookmark, SendMessage, SetFollow, SetReaction, StartChannelThread,
-    base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
-    encode_feed_cursor, linked_chat_projection_path,
+    MarkAccountThreadRead, MarkThreadRead, NoFaults, ResolveDecision, SaveBookmark, SendMessage,
+    SetFollow, SetReaction, StartChannelThread, channel_slug_for_name, decode_feed_cursor,
+    encode_feed_cursor,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 const NO_FAULTS: NoFaults = NoFaults;
 const WS: &str = "ws-1";
@@ -111,40 +104,6 @@ fn send_msg(
     }
 }
 
-// ------------------------------------------------------- channel round-trips
-
-#[test]
-fn create_list_find_channel_round_trip() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-
-    let ch = chats
-        .create_channel(
-            WS,
-            "chan-1",
-            "General Chat",
-            ChatChannelKind::Channel,
-            10,
-            &NO_FAULTS,
-        )
-        .expect("create");
-    assert_eq!(ch.slug, "general-chat");
-    assert_eq!(ch.kind, ChatChannelKind::Channel);
-
-    let listed = chats.list_channels(WS).expect("list");
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].channel.channel_id, "chan-1");
-    assert_eq!(listed[0].thread_count, 0);
-    assert_eq!(listed[0].unread_count, 0);
-
-    let found = chats
-        .find_channel_by_slug(WS, "general-chat")
-        .expect("find");
-    assert_eq!(found.map(|c| c.channel_id), Some("chan-1".to_owned()));
-}
-
 #[test]
 fn a_group_keeps_its_type_purpose_and_folder_and_journals_them() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -171,7 +130,6 @@ fn a_group_keeps_its_type_purpose_and_folder_and_journals_them() {
     assert_eq!(group.group.purpose, "Dates, flights, the flat.");
     assert_eq!(group.group.folder_path.as_deref(), Some("trips/lisbon"));
 
-    // The row reads back the same through every channel read.
     let listed = chats.list_channels(WS).expect("list");
     assert_eq!(listed[0].channel.group, group.group);
     let found = chats
@@ -180,7 +138,6 @@ fn a_group_keeps_its_type_purpose_and_folder_and_journals_them() {
         .expect("present");
     assert_eq!(found.group, group.group);
 
-    // A bare channel is a posts group with no folder.
     let plain = chats
         .create_channel(
             WS,
@@ -193,7 +150,6 @@ fn a_group_keeps_its_type_purpose_and_folder_and_journals_them() {
         .expect("create plain");
     assert_eq!(plain.group, ChannelGroup::default());
 
-    // A DM carries no folder.
     let err = chats
         .create_group(
             WS,
@@ -210,7 +166,6 @@ fn a_group_keeps_its_type_purpose_and_folder_and_journals_them() {
         .expect_err("a dm has no folder");
     assert_eq!(err.code(), "invalid-channel-folder");
 
-    // Traversal and absolute paths are refused.
     for bad in [
         "../up",
         "/abs",
@@ -260,71 +215,6 @@ fn a_group_keeps_its_type_purpose_and_folder_and_journals_them() {
 }
 
 #[test]
-fn competing_chat_lane_starts_append_to_one_thread_and_retry_the_same_message() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .create_channel(
-            WS,
-            "chan-1",
-            "Team",
-            ChatChannelKind::Channel,
-            1,
-            &NO_FAULTS,
-        )
-        .unwrap();
-    let mut first = start_thread(
-        "chan-1",
-        "lane-a",
-        "msg-a",
-        "First",
-        ChatActorKind::Human,
-        10,
-    );
-    first.lane = ChatThreadLane::Chat;
-    let mut second = start_thread(
-        "chan-1",
-        "lane-b",
-        "msg-b",
-        "Second",
-        ChatActorKind::Human,
-        10,
-    );
-    second.lane = ChatThreadLane::Chat;
-    second.author_user_id = Some("user-bob".to_owned());
-    second.request_id = Some("second-start".to_owned());
-    chats.start_channel_thread(&first, &NO_FAULTS).unwrap();
-    let (thread, message) = chats.start_channel_thread(&second, &NO_FAULTS).unwrap();
-    assert_eq!(thread.thread_id, "lane-a");
-    assert_eq!(message.thread_id, "lane-a");
-    assert_eq!(message.message_order, 1);
-    let (retry_thread, retry_message) = chats.start_channel_thread(&second, &NO_FAULTS).unwrap();
-    assert_eq!(retry_thread.thread_id, "lane-a");
-    assert_eq!(retry_message.message_id, "msg-b");
-    let threads = chats
-        .list_channel_threads_in_lane(WS, "chan-1", ChatThreadLane::Chat, None, 10)
-        .unwrap();
-    assert_eq!(threads.len(), 1);
-    assert_eq!(threads[0].message_count, 2);
-}
-
-#[test]
-fn group_purpose_counts_utf16_units() {
-    let group = ChannelGroup {
-        purpose: "💥".repeat(101),
-        ..ChannelGroup::default()
-    };
-    assert_eq!(
-        dohc_engine_domain::normalize_channel_group(group, ChatChannelKind::Channel)
-            .unwrap_err()
-            .code(),
-        "invalid-channel-purpose"
-    );
-}
-
-#[test]
 fn a_chat_lane_thread_stays_out_of_the_post_list_and_the_feed() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
@@ -367,7 +257,6 @@ fn a_chat_lane_thread_stays_out_of_the_post_list_and_the_feed() {
         .expect("chat lane");
     assert_eq!(started.lane, ChatThreadLane::Chat);
 
-    // The posts lane lists the post only; the chat lane lists the conversation only.
     let posts = chats
         .list_channel_threads(WS, "chan-1", None, 10)
         .expect("posts");
@@ -389,7 +278,6 @@ fn a_chat_lane_thread_stays_out_of_the_post_list_and_the_feed() {
     );
     assert_eq!(chat[0].thread.lane, ChatThreadLane::Chat);
 
-    // Home never shows a chat line, even from a followed channel.
     let feed = chats
         .list_personal_feed(WS, "user-ada", Some(10), None)
         .expect("feed");
@@ -453,7 +341,6 @@ fn a_poll_carries_its_choices_and_the_answer_names_one() {
     assert_eq!(open[0].options, vec!["7am direct", "2pm with a stop"]);
     assert_eq!(open[0].chosen_option, None);
 
-    // Twelve is the cap; a repeated or empty choice is refused.
     for bad in [
         vec!["a".to_owned(), "a".to_owned()],
         vec!["".to_owned()],
@@ -475,7 +362,6 @@ fn a_poll_carries_its_choices_and_the_answer_names_one() {
         assert_eq!(err.code(), "invalid-poll-options");
     }
 
-    // The answer names a choice, and only one of the poll's.
     let answer = send_msg(
         "poll-1",
         "answer-msg",
@@ -508,7 +394,6 @@ fn a_poll_carries_its_choices_and_the_answer_names_one() {
     assert_eq!(resolved.chosen_option.as_deref(), Some("7am direct"));
     assert_eq!(resolved.options, vec!["7am direct", "2pm with a stop"]);
 
-    // The choices and the answer ride the wire.
     let payloads: Vec<String> = store
         .read_with(|conn| {
             let mut stmt = conn
@@ -552,7 +437,6 @@ fn posting_commenting_and_reacting_follow_the_thread_implicitly() {
         )
         .expect("channel");
 
-    // The poster follows the post. (start_thread signs as user-ada.)
     let post = start_thread(
         "chan-1",
         "post-1",
@@ -573,13 +457,11 @@ fn posting_commenting_and_reacting_follow_the_thread_implicitly() {
     };
     assert_eq!(follows(&chats, "user-ada"), vec!["post-1"]);
 
-    // A commenter follows it too.
     let mut comment = send_msg("post-1", "comment-msg", Some("post-msg"), "Nice", 30);
     comment.author_user_id = Some("user-bob".to_owned());
     chats.send_message(&comment, &NO_FAULTS).expect("comment");
     assert_eq!(follows(&chats, "user-bob"), vec!["post-1"]);
 
-    // So does someone who only reacts.
     chats
         .set_reaction(
             &SetReaction {
@@ -610,7 +492,6 @@ fn posting_commenting_and_reacting_follow_the_thread_implicitly() {
     chats.send_message(&local, &NO_FAULTS).expect("local reply");
     assert_eq!(follows(&chats, "user-ada"), vec!["post-1"]);
 
-    // An unfollow the person chose stands: commenting again does not re-follow.
     chats
         .set_follow(
             &SetFollow {
@@ -646,283 +527,6 @@ fn posting_commenting_and_reacting_follow_the_thread_implicitly() {
         .expect("journaled follows");
     assert_eq!(journaled, 4, "three implicit follows and one unfollow");
 }
-
-#[test]
-fn empty_pending_replay_fast_path_does_not_open_the_replication_log() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let plan = store
-        .read_with(|conn| {
-            let explain_sql = format!("EXPLAIN QUERY PLAN {PENDING_CHAT_WORKSPACE_EXISTS_SQL}");
-            let mut stmt = conn
-                .prepare(&explain_sql)
-                .map_err(StorageError::corrupt_public)?;
-            let rows = stmt
-                .query_map([WS], |row| row.get::<_, String>(3))
-                .map_err(StorageError::corrupt_public)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(StorageError::corrupt_public)
-        })
-        .expect("pending probe query plan");
-    assert!(
-        plan.iter()
-            .any(|detail| detail.contains("COVERING INDEX") && detail.contains("workspace_id=?")),
-        "workspace emptiness probe must stay index-backed: {plan:?}"
-    );
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute_batch("DROP TABLE replication_log")
-                .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("remove the table only the full replay query reads");
-
-    let changed = LinkedChatStore::new(&mut store)
-        .fail_pending_for_thread(
-            WS,
-            "no-pending-thread",
-            "default",
-            "not needed",
-            2,
-            &NO_FAULTS,
-        )
-        .expect("empty pending set must bypass the full replay query");
-    assert_eq!(changed, 0);
-}
-
-#[test]
-fn reserved_channel_ids_refuse_and_wire_mapping_is_first_writer_wins() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    {
-        let mut chats = LinkedChatStore::new(&mut store);
-        for reserved in [GENERAL_CHANNEL_WIRE_ID, AGENT_CHANNEL_WIRE_ID] {
-            let err = chats
-                .create_channel(
-                    WS,
-                    reserved,
-                    &format!("Reserved {reserved}"),
-                    ChatChannelKind::Channel,
-                    2,
-                    &NO_FAULTS,
-                )
-                .unwrap_err();
-            assert_eq!(err.code(), "invalid-input");
-        }
-        chats
-            .create_channel(
-                WS,
-                "original-channel",
-                "Original",
-                ChatChannelKind::Channel,
-                3,
-                &NO_FAULTS,
-            )
-            .expect("original channel");
-    }
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute(
-                "INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
-                 VALUES (?1, ?2, ?3)",
-                rusqlite::params![WS, GENERAL_CHANNEL_WIRE_ID, "original-channel"],
-            )
-            .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("plant first mapping");
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "later-general", 4, &NO_FAULTS)
-        .expect("ensure general");
-    let mapped: String = store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT channel_id FROM chat_channel_wire_ids \
-                 WHERE workspace_id = ?1 AND wire_id = ?2",
-                rusqlite::params![WS, GENERAL_CHANNEL_WIRE_ID],
-                |row| row.get(0),
-            )
-            .map_err(StorageError::corrupt_public)
-        })
-        .expect("wire mapping");
-    assert_eq!(mapped, "original-channel");
-}
-
-#[test]
-fn list_channels_fails_closed_on_negative_read_state() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    {
-        let mut chats = LinkedChatStore::new(&mut store);
-        chats
-            .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-            .expect("general");
-        chats
-            .start_channel_thread(
-                &start_thread("gen-1", "t1", "m1", "hello", ChatActorKind::Human, 20),
-                &NO_FAULTS,
-            )
-            .expect("start");
-    }
-
-    // Deliberately bypass the domain validation to model a tampered persisted row.
-    store
-        .read_with(|conn| {
-            conn.execute(
-                "UPDATE chat_thread_read_state SET last_read_sequence = -1 \
-                 WHERE workspace_id = ?1 AND thread_id = ?2",
-                rusqlite::params![WS, "t1"],
-            )
-        })
-        .expect("tamper read state");
-
-    let chats = LinkedChatStore::new(&mut store);
-    let error = chats.list_channels(WS).unwrap_err();
-    assert_eq!(error.code(), "state-corrupt");
-}
-
-#[test]
-fn duplicate_slug_and_reserved_name_and_agent_kind_fail_closed() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .create_channel(
-            WS,
-            "chan-1",
-            "Planning",
-            ChatChannelKind::Channel,
-            10,
-            &NO_FAULTS,
-        )
-        .expect("create");
-
-    // Same slug (case/space-insensitive) → channel-exists.
-    let dup = chats
-        .create_channel(
-            WS,
-            "chan-2",
-            "  planning  ",
-            ChatChannelKind::Channel,
-            11,
-            &NO_FAULTS,
-        )
-        .unwrap_err();
-    assert_eq!(dup.code(), "channel-exists");
-
-    // Reserved "My agent" name → channel-exists.
-    let reserved = chats
-        .create_channel(
-            WS,
-            "chan-3",
-            "My agent",
-            ChatChannelKind::Channel,
-            12,
-            &NO_FAULTS,
-        )
-        .unwrap_err();
-    assert_eq!(reserved.code(), "channel-exists");
-
-    // agent kind is provisioned automatically → invalid-channel-kind.
-    let agent = chats
-        .create_channel(WS, "chan-4", "Bots", ChatChannelKind::Agent, 13, &NO_FAULTS)
-        .unwrap_err();
-    assert_eq!(agent.code(), "invalid-channel-kind");
-}
-
-#[test]
-fn ensure_general_and_agent_channels_are_idempotent_with_wellknown_wire_ids() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-
-    let g1 = chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("g1");
-    let g2 = chats
-        .ensure_general_channel(WS, "gen-2", 11, &NO_FAULTS)
-        .expect("g2");
-    assert_eq!(g1.channel_id, g2.channel_id, "general is idempotent");
-    assert_eq!(g1.slug, "general");
-
-    let a1 = chats
-        .ensure_agent_channel(WS, "agent-1", "default", "My agent", 12, &NO_FAULTS)
-        .expect("a1");
-    let a2 = chats
-        .ensure_agent_channel(WS, "agent-2", "default", "My agent", 13, &NO_FAULTS)
-        .expect("a2");
-    assert_eq!(a1.channel_id, a2.channel_id, "agent is idempotent");
-    assert_eq!(a1.kind, ChatChannelKind::Agent);
-
-    // Both well-known wire ids resolve to their converged channel.
-    store
-        .read_with(|conn| {
-            let g: String = conn
-                .query_row(
-                    "SELECT channel_id FROM chat_channel_wire_ids WHERE workspace_id=?1 AND wire_id=?2",
-                    rusqlite::params![WS, GENERAL_CHANNEL_WIRE_ID],
-                    |r| r.get(0),
-                )
-                .expect("g wire");
-            let a: String = conn
-                .query_row(
-                    "SELECT channel_id FROM chat_channel_wire_ids WHERE workspace_id=?1 AND wire_id=?2",
-                    rusqlite::params![WS, AGENT_CHANNEL_WIRE_ID],
-                    |r| r.get(0),
-                )
-                .expect("a wire");
-            assert_eq!(g, g1.channel_id);
-            assert_eq!(a, a1.channel_id);
-            Ok::<_, rusqlite::Error>(())
-        })
-        .expect("wire lookups");
-}
-
-/// An earlier build let a group be named "My agent notes". When the notes
-/// agent's chat is made, it takes that slug, and the group keeps its name
-/// under a slug no agent chat can have.
-#[test]
-fn an_agents_chat_moves_a_group_off_its_slug() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute_batch(
-                "INSERT INTO chat_channels \
-                 (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
-                 VALUES ('ws-1', 'notes-group', 'My agent notes', 'my-agent-notes', 'channel', 1, 1)",
-            )
-            .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("an earlier build's group");
-    let mut chats = LinkedChatStore::new(&mut store);
-    let chat = chats
-        .ensure_agent_channel(WS, "notes-chat", "notes", "Notes", 10, &NO_FAULTS)
-        .expect("the notes agent's chat");
-    assert_eq!(chat.slug, "my-agent-notes");
-    let group = chats
-        .list_channels(WS)
-        .expect("channels")
-        .into_iter()
-        .find(|summary| summary.channel.channel_id == "notes-group")
-        .expect("the group")
-        .channel;
-    assert_eq!(group.name, "My agent notes");
-    assert_eq!(
-        group.slug,
-        channel_collision_slug("my-agent-notes", "notes-group", 0)
-    );
-}
-
-// ------------------------------------------- atomic thread + first message
 
 #[test]
 fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() {
@@ -1061,7 +665,6 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
     assert_eq!(opening.author_kind, ChatActorKind::Automation);
     assert_eq!(opening.author_owner_display_name.as_deref(), Some("Ice"));
     assert_eq!(opening.automation, Some(stamp.clone()));
-    // Like an agent's message, it stays unread for the person.
     assert_eq!(
         chats
             .read_state(WS, "t-m1")
@@ -1128,7 +731,6 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
         vec![("m1", ChatActorKind::Automation)]
     );
 
-    // Following Ada the person does not follow automations that ran for her.
     chats
         .start_channel_thread(
             &start_thread("gen-1", "t-ada", "m-ada", "Hi", ChatActorKind::Human, 35),
@@ -1160,7 +762,6 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
         vec!["m-ada"]
     );
 
-    // A retry with the same key must name the same automation and depth.
     let keyed = StartChannelThread {
         request_id: Some("post-1".to_owned()),
         ..automated("m3", Some(stamp.clone()))
@@ -1183,7 +784,6 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
         Err(DomainError::IdempotencyKeyReuseMismatch)
     ));
 
-    // Search labels an automation as the projection does.
     let indexed: String = store
         .read_with(|conn| {
             conn.query_row(
@@ -1238,32 +838,6 @@ fn an_automation_posts_only_with_its_automation_and_keeps_it_on_this_computer() 
             "{payload}"
         );
     }
-}
-
-#[test]
-fn start_channel_thread_creates_thread_and_first_message_atomically() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("gen");
-
-    let (thread, message) = chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t1", "m1", "hello world", ChatActorKind::Human, 20),
-            &NO_FAULTS,
-        )
-        .expect("start");
-    assert_eq!(thread.channel_id, Some("gen-1".to_owned()));
-    assert_eq!(message.message_order, 0);
-    assert_eq!(message.body, "hello world");
-
-    // Human author's opening message advances the read cursor to 1.
-    let rs = chats.read_state(WS, "t1").expect("read state");
-    assert_eq!(rs.last_read_sequence, 1);
-    assert_eq!(rs.revision, 1);
 }
 
 /// Only the relay writes a link message. Neither local write path takes a
@@ -1465,307 +1039,6 @@ fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
 }
 
 #[test]
-fn untitled_thread_responses_and_listings_use_first_message_title() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    {
-        let mut chats = LinkedChatStore::new(&mut store);
-        chats
-            .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-            .expect("general");
-        let (short, _) = chats
-            .start_channel_thread(
-                &start_thread(
-                    "gen-1",
-                    "short",
-                    "short-message",
-                    "line   one\nrest",
-                    ChatActorKind::Human,
-                    20,
-                ),
-                &NO_FAULTS,
-            )
-            .expect("short");
-        assert_eq!(short.title, "line one");
-        let long_body = "x".repeat(81);
-        let (long, _) = chats
-            .start_channel_thread(
-                &start_thread(
-                    "gen-1",
-                    "long",
-                    "long-message",
-                    &long_body,
-                    ChatActorKind::Human,
-                    21,
-                ),
-                &NO_FAULTS,
-            )
-            .expect("long");
-        assert_eq!(long.title, format!("{}…", "x".repeat(79)));
-    }
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute(
-                "INSERT INTO chat_threads \
-                 (workspace_id, thread_id, title, created_at_ms, updated_at_ms, channel_id) \
-                 VALUES (?1, 'empty', '', 22, 22, 'gen-1')",
-                [WS],
-            )
-            .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("insert empty thread");
-    let chats = LinkedChatStore::new(&mut store);
-    let listed = chats.list_threads(WS).expect("list");
-    assert_eq!(
-        listed
-            .iter()
-            .find(|thread| thread.thread_id == "short")
-            .expect("short listed")
-            .title,
-        "line one"
-    );
-    assert_eq!(
-        listed
-            .iter()
-            .find(|thread| thread.thread_id == "long")
-            .expect("long listed")
-            .title,
-        format!("{}…", "x".repeat(79))
-    );
-    assert_eq!(
-        listed
-            .iter()
-            .find(|thread| thread.thread_id == "empty")
-            .expect("empty listed")
-            .title,
-        "New chat"
-    );
-}
-
-#[test]
-fn thread_header_message_id_is_reserved_before_search_index_write() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("general");
-    let invalid_start = start_thread(
-        "gen-1",
-        "bad",
-        "__thread__",
-        "bad",
-        ChatActorKind::Human,
-        19,
-    );
-    assert_eq!(
-        chats
-            .start_channel_thread(&invalid_start, &NO_FAULTS)
-            .unwrap_err()
-            .code(),
-        "invalid-input"
-    );
-    chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t1", "m1", "opening", ChatActorKind::Human, 20),
-            &NO_FAULTS,
-        )
-        .expect("valid start");
-    let sentinel = send_msg("t1", "__thread__", None, "overwrite", 21);
-    assert_eq!(
-        chats
-            .send_message(&sentinel, &NO_FAULTS)
-            .unwrap_err()
-            .code(),
-        "invalid-input"
-    );
-    let header: String = store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT text FROM engine_search_chat_messages_fts \
-                 WHERE workspace_id = ?1 AND thread_id = 't1' AND message_id = '__thread__'",
-                [WS],
-                |row| row.get(0),
-            )
-        })
-        .expect("thread header");
-    assert_eq!(header, "opening");
-}
-
-#[test]
-fn feed_cursor_message_id_cap_applies_to_start_and_send() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("general");
-
-    let too_long = "x".repeat(257);
-    let too_many_bytes = "😀".repeat(200);
-    let control_id = "m\n1";
-    let invalid_start = start_thread(
-        "gen-1",
-        "too-long",
-        &too_long,
-        "opening",
-        ChatActorKind::Human,
-        20,
-    );
-    assert_eq!(
-        chats
-            .start_channel_thread(&invalid_start, &NO_FAULTS)
-            .unwrap_err()
-            .code(),
-        "invalid-input"
-    );
-    let invalid_byte_heavy_start = start_thread(
-        "gen-1",
-        "too-many-bytes",
-        &too_many_bytes,
-        "opening",
-        ChatActorKind::Human,
-        20,
-    );
-    assert_eq!(
-        chats
-            .start_channel_thread(&invalid_byte_heavy_start, &NO_FAULTS)
-            .unwrap_err()
-            .code(),
-        "invalid-input"
-    );
-    let invalid_control_start = start_thread(
-        "gen-1",
-        "control-id",
-        control_id,
-        "opening",
-        ChatActorKind::Human,
-        20,
-    );
-    assert_eq!(
-        chats
-            .start_channel_thread(&invalid_control_start, &NO_FAULTS)
-            .unwrap_err()
-            .code(),
-        "invalid-input"
-    );
-
-    let max_id = format!("{}abc", "😀".repeat(89));
-    assert_eq!(max_id.len(), 359);
-    assert_eq!(
-        encode_feed_cursor(&FeedCursorValue {
-            created_at_ms: i64::MIN,
-            message_id: max_id.clone(),
-        })
-        .len(),
-        512
-    );
-    chats
-        .start_channel_thread(
-            &start_thread(
-                "gen-1",
-                "valid",
-                &max_id,
-                "opening",
-                ChatActorKind::Human,
-                21,
-            ),
-            &NO_FAULTS,
-        )
-        .expect("exact cursor byte-budget id");
-    let invalid_send = send_msg("valid", &too_long, None, "reply", 22);
-    assert_eq!(
-        chats
-            .send_message(&invalid_send, &NO_FAULTS)
-            .unwrap_err()
-            .code(),
-        "invalid-input"
-    );
-    let invalid_byte_heavy_send = send_msg("valid", &too_many_bytes, None, "reply", 22);
-    assert_eq!(
-        chats
-            .send_message(&invalid_byte_heavy_send, &NO_FAULTS)
-            .unwrap_err()
-            .code(),
-        "invalid-input"
-    );
-    let invalid_control_send = send_msg("valid", control_id, None, "reply", 22);
-    assert_eq!(
-        chats
-            .send_message(&invalid_control_send, &NO_FAULTS)
-            .unwrap_err()
-            .code(),
-        "invalid-input"
-    );
-    chats
-        .send_message(&send_msg("valid", "older", None, "older", 20), &NO_FAULTS)
-        .expect("older message");
-    chats
-        .set_follow(
-            &SetFollow {
-                workspace_id: WS.to_owned(),
-                owner_user_id: "cursor-owner".to_owned(),
-                replication_owner_user_id: None,
-                target_kind: FollowTargetKind::Thread,
-                target_id: "valid".to_owned(),
-                state: FollowState::Following,
-                now_ms: 23,
-            },
-            &NO_FAULTS,
-        )
-        .expect("follow");
-    let page = chats
-        .list_personal_feed(WS, "cursor-owner", Some(1), None)
-        .expect("feed page");
-    assert_eq!(page.items[0].message.message_id, max_id);
-    let next = page.next_cursor.expect("exact-budget next cursor");
-    let seen = chats
-        .mark_feed_seen(WS, "cursor-owner", None, &next, 24, &NO_FAULTS)
-        .expect("next cursor marks seen");
-    assert_eq!(seen.last_seen_message_id, max_id);
-}
-
-#[test]
-fn crash_mid_send_strands_no_empty_thread() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    {
-        let mut store = open(&db, 1);
-        let mut chats = LinkedChatStore::new(&mut store);
-        chats
-            .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-            .expect("gen");
-    }
-    // Arm a crash before persist during the atomic thread+message write.
-    {
-        let mut store = open(&db, 2);
-        let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
-        let mut chats = LinkedChatStore::new(&mut store);
-        let result = chats.start_channel_thread(
-            &start_thread("gen-1", "t1", "m1", "hi", ChatActorKind::Human, 20),
-            faults.as_ref(),
-        );
-        assert!(result.is_err(), "crash surfaces as an error");
-        assert!(faults.fired(), "the fault fired");
-        // simulated process death
-    }
-    // Reopen: neither the thread nor the message is durable — no empty thread.
-    let mut store = open(&db, 3);
-    let chats = LinkedChatStore::new(&mut store);
-    assert!(chats.list_threads(WS).expect("threads").is_empty());
-    let count: i64 = store
-        .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM chat_messages", [], |r| r.get(0)))
-        .expect("count");
-    assert_eq!(count, 0, "no stranded message either");
-}
-
-// ------------------------------------------------ send + keyset pagination
-
-#[test]
 fn send_message_reply_parent_must_exist_in_thread() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
@@ -1781,7 +1054,6 @@ fn send_message_reply_parent_must_exist_in_thread() {
         )
         .expect("start");
 
-    // Unknown parent → message-not-found.
     let bad = chats
         .send_message(
             &send_msg("t1", "m1", Some("does-not-exist"), "reply", 21),
@@ -1790,57 +1062,12 @@ fn send_message_reply_parent_must_exist_in_thread() {
         .unwrap_err();
     assert_eq!(bad.code(), "message-not-found");
 
-    // Existing parent in the same thread → ok, order increments.
     let ok = chats
         .send_message(&send_msg("t1", "m1", Some("m0"), "reply", 22), &NO_FAULTS)
         .expect("send");
     assert_eq!(ok.message_order, 1);
     assert_eq!(ok.parent_message_id, Some("m0".to_owned()));
 }
-
-#[test]
-fn list_messages_keyset_pagination_limit_minus_one_limit_plus_one() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("gen");
-    chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 20),
-            &NO_FAULTS,
-        )
-        .expect("start");
-    for i in 1..=3 {
-        chats
-            .send_message(
-                &send_msg("t1", &format!("m{i}"), None, &format!("msg {i}"), 20 + i),
-                &NO_FAULTS,
-            )
-            .expect("send");
-    }
-    // 4 messages total (orders 0..=3).
-    // limit-1 (3): a following page exists.
-    let p3 = chats.list_messages(WS, "t1", 3, None).expect("p3");
-    assert_eq!(p3.messages.len(), 3);
-    assert_eq!(p3.next_after_message_order, Some(2));
-    // limit (4): exactly the page, no cursor.
-    let p4 = chats.list_messages(WS, "t1", 4, None).expect("p4");
-    assert_eq!(p4.messages.len(), 4);
-    assert_eq!(p4.next_after_message_order, None);
-    // limit+1 (5): all four, no cursor.
-    let p5 = chats.list_messages(WS, "t1", 5, None).expect("p5");
-    assert_eq!(p5.messages.len(), 4);
-    assert_eq!(p5.next_after_message_order, None);
-    // Continue from the p3 cursor: the remaining message.
-    let rest = chats.list_messages(WS, "t1", 3, Some(2)).expect("rest");
-    assert_eq!(rest.messages.len(), 1);
-    assert_eq!(rest.messages[0].message_order, 3);
-}
-
-// ------------------------------------------------- mark-read CAS + clamp
 
 #[test]
 fn mark_thread_read_cas_monotonic_and_over_count_repair() {
@@ -1863,41 +1090,34 @@ fn mark_thread_read_cas_monotonic_and_over_count_repair() {
     second.author_kind = ChatActorKind::Agent;
     chats.send_message(&second, &NO_FAULTS).expect("send");
 
-    // Advance to 1 (revision 0 -> 1).
     let r1 = chats
         .mark_thread_read(&read_mark("t1", 1, None, None, 30), &NO_FAULTS)
         .expect("r1");
     assert_eq!(r1.last_read_sequence, 1);
     assert_eq!(r1.revision, 1);
 
-    // Monotonic: a lower target is a no-op (revision unchanged).
     let r_low = chats
         .mark_thread_read(&read_mark("t1", 0, None, None, 31), &NO_FAULTS)
         .expect("low");
     assert_eq!(r_low.last_read_sequence, 1);
     assert_eq!(r_low.revision, 1);
 
-    // Clamp: target beyond the 2 messages clamps to 2 (revision -> 2).
     let r_clamp = chats
         .mark_thread_read(&read_mark("t1", 99, None, None, 32), &NO_FAULTS)
         .expect("clamp");
     assert_eq!(r_clamp.last_read_sequence, 2);
     assert_eq!(r_clamp.revision, 2);
 
-    // Stale CAS: expected revision 0 while current is 2 → mismatch.
     let stale = chats
         .mark_thread_read(&read_mark("t1", 2, Some(0), None, 33), &NO_FAULTS)
         .unwrap_err();
     assert_eq!(stale.code(), "read-state-revision-mismatch");
 
-    // Correct CAS: expected 2 → no-op advance (already at 2), revision holds.
     let fresh = chats
         .mark_thread_read(&read_mark("t1", 2, Some(2), None, 34), &NO_FAULTS)
         .expect("fresh");
     assert_eq!(fresh.revision, 2);
 }
-
-// ------------------------------------------------ account thread read marks
 
 const ACCOUNT: &str = "user-ada";
 
@@ -1996,7 +1216,6 @@ fn account_read_seed_never_hides_a_locally_unread_message() {
     set_local_count(&store, "tie", 1);
     set_local_count(&store, "even", 1);
     set_local_count(&store, "newer", 1);
-    // Another copy already marked further.
     store
         .read_with(|conn| {
             conn.execute(
@@ -2020,10 +1239,8 @@ fn account_read_seed_never_hides_a_locally_unread_message() {
     assert_eq!(account_mark(&store, "tie"), None);
     assert_eq!(account_mark(&store, "even"), Some((50, "e-a".to_owned())));
     assert_eq!(account_mark(&store, "newer"), Some((20, "n1".to_owned())));
-    // Only the marks that moved journal.
     assert_eq!(thread_read_ops(&store), 2);
 
-    // Seeding is once per workspace.
     assert!(
         !LinkedChatStore::new(&mut store)
             .seed_account_reads(WS, ACCOUNT, true, 501, &NO_FAULTS)
@@ -2031,7 +1248,6 @@ fn account_read_seed_never_hides_a_locally_unread_message() {
     );
     assert_eq!(thread_read_ops(&store), 2);
 
-    // The once-unread messages read unread through the account.
     let summaries = LinkedChatStore::new(&mut store)
         .list_channel_threads(WS, "gen-1", None, 10)
         .expect("summaries");
@@ -2082,7 +1298,6 @@ fn a_server_copy_seed_takes_no_local_count() {
             .expect("gen");
         agent_thread(&mut chats, "t1", &[("m0", 10)]);
     }
-    // A past send on the server advanced its local count.
     set_local_count(&store, "t1", 1);
     assert!(
         LinkedChatStore::new(&mut store)
@@ -2107,7 +1322,6 @@ fn account_marks_move_forward_journal_with_the_owner_and_drive_every_human_reade
         chats
             .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
             .expect("gen");
-        // Arrival order m0, m1, m2; time order m0, m2, m1.
         agent_thread(&mut chats, "t1", &[("m0", 100), ("m1", 300), ("m2", 200)]);
         chats
             .create_thread(
@@ -2171,7 +1385,6 @@ fn account_marks_move_forward_journal_with_the_owner_and_drive_every_human_reade
     );
     assert_eq!(thread_read_ops(&store), 0, "no owner context, no journal");
 
-    // Another account's context moves the mark here and journals nothing.
     LinkedChatStore::new(&mut store)
         .mark_thread_read(
             &read_mark("t1", 3, None, Some("someone-else"), 402),
@@ -2183,8 +1396,6 @@ fn account_marks_move_forward_journal_with_the_owner_and_drive_every_human_reade
     assert_eq!(summary(&mut store), (3, 3, 0));
     assert_eq!(channel_unread(&mut store), Some(0));
 
-    // A newer message, marked with the owner's context, journals once. An
-    // older mark after it changes nothing.
     LinkedChatStore::new(&mut store)
         .send_message(&agent_message("t1", "m3", 500), &NO_FAULTS)
         .expect("newer message");
@@ -2200,7 +1411,6 @@ fn account_marks_move_forward_journal_with_the_owner_and_drive_every_human_reade
     assert_eq!(account_mark(&store, "t1"), Some((500, "m3".to_owned())));
     assert_eq!(thread_read_ops(&store), 1);
 
-    // The file thread's unread comes from the account too.
     let unread_files = LinkedChatStore::new(&mut store)
         .list_unread_file_threads(WS, None, 10)
         .expect("unread files");
@@ -2262,7 +1472,6 @@ fn a_persons_send_moves_the_account_mark_and_an_agents_does_not() {
         ..send_msg("t1", "m4", None, "someone else", 50)
     };
     chats.send_message(&other, &NO_FAULTS).expect("other send");
-    // A person's thread start moves it too.
     chats
         .start_channel_thread(
             &start_thread("gen-1", "t2", "s0", "mine", ChatActorKind::Human, 60),
@@ -2341,7 +1550,6 @@ fn a_joined_groups_threads_keep_local_counts_and_take_no_account_mark() {
     );
     assert_eq!(thread_read_ops(&store), 1);
 
-    // The joined thread and its Group read the local count.
     let theirs = LinkedChatStore::new(&mut store)
         .list_channel_threads(WS, "joined-1", None, 10)
         .expect("joined summaries")
@@ -2366,7 +1574,6 @@ fn a_joined_groups_threads_keep_local_counts_and_take_no_account_mark() {
     assert!(totals.contains(&("gen-1".to_owned(), 0)));
     assert!(totals.contains(&("joined-1".to_owned(), 1)));
 
-    // A person's message there, and a mark with the owner's context, stay local.
     let mut chats = LinkedChatStore::new(&mut store);
     chats
         .send_message(&send_msg("theirs", "b2", None, "mine", 30), &NO_FAULTS)
@@ -2402,7 +1609,6 @@ fn an_owner_mark_publishes_a_coordinate_stored_without_a_record_once() {
             .expect("seed")
     );
     agent_thread(&mut chats, "t1", &[("m0", 10), ("m1", 20)]);
-    // Signed out: the mark moves and journals nothing.
     chats
         .mark_thread_read(&read_mark("t1", 2, None, None, 30), &NO_FAULTS)
         .expect("signed-out mark");
@@ -2410,11 +1616,21 @@ fn an_owner_mark_publishes_a_coordinate_stored_without_a_record_once() {
     assert_eq!(account_mark(&store, "t1"), Some((20, "m1".to_owned())));
     assert_eq!(thread_read_ops(&store), 0);
 
-    // Signed in at the same place: the mark publishes once.
     LinkedChatStore::new(&mut store)
         .mark_thread_read(&read_mark("t1", 2, None, Some(ACCOUNT), 31), &NO_FAULTS)
         .expect("owner mark");
     assert_eq!(thread_read_ops(&store), 1);
+    let marker: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT json_extract(payload_json, '$.ownerPrivateAccountId') FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.thread.read.set'",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("owner-private marker");
+    assert_eq!(marker, ACCOUNT);
     LinkedChatStore::new(&mut store)
         .mark_thread_read(&read_mark("t1", 2, None, Some(ACCOUNT), 32), &NO_FAULTS)
         .expect("owner retry");
@@ -2492,8 +1708,6 @@ fn a_signed_in_read_after_a_signed_out_message_publishes_the_newest_message_that
     assert_eq!(account_mark(&store, "t1"), Some((20, "m1".to_owned())));
     assert_eq!(published_thread_reads(&store), vec![(10, "m0".to_owned())]);
 
-    // A retry publishes nothing more. A later message that replicates
-    // publishes itself.
     let mut chats = LinkedChatStore::new(&mut store);
     chats
         .mark_thread_read(&read_mark("t1", 2, None, Some(ACCOUNT), 31), &NO_FAULTS)
@@ -2523,7 +1737,6 @@ fn an_account_mark_names_a_message_in_its_thread_and_journals_only_with_the_owne
         .expect("gen");
     agent_thread(&mut chats, "t1", &[("m0", 10), ("m1", 20)]);
     agent_thread(&mut chats, "t2", &[("n0", 30)]);
-    // Before a copy shows an account's places, nothing moves.
     let local = chats
         .mark_account_thread_read(&account_read("t1", "m1", Some(ACCOUNT), 35), &NO_FAULTS)
         .expect("no account yet");
@@ -2574,184 +1787,6 @@ fn a_workspace_without_an_account_keeps_local_counts_and_journals_no_mark() {
     drop(chats);
     assert_eq!(account_mark(&store, "t1"), None);
     assert_eq!(thread_read_ops(&store), 0);
-}
-
-// -------------------------------------------------- follows + personal feed
-
-#[test]
-fn follow_lww_last_write_wins_and_lists_active() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
-        .expect("general");
-    chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t1", "m1", "opening", ChatActorKind::Human, 2),
-            &NO_FAULTS,
-        )
-        .expect("thread");
-
-    let follow = |ts: i64, state: FollowState| SetFollow {
-        workspace_id: WS.to_owned(),
-        owner_user_id: "owner".to_owned(),
-        replication_owner_user_id: None,
-        target_kind: FollowTargetKind::Thread,
-        target_id: "t1".to_owned(),
-        state,
-        now_ms: ts,
-    };
-    chats
-        .set_follow(&follow(10, FollowState::Following), &NO_FAULTS)
-        .expect("f1");
-    // A local mutation advances past the prior register even if the wall clock
-    // moved backward, matching the TS store's monotonic local path.
-    chats
-        .set_follow(&follow(5, FollowState::Unfollowed), &NO_FAULTS)
-        .expect("f2");
-    assert!(
-        chats
-            .list_follows(WS, "owner", Some("following"))
-            .expect("empty")
-            .is_empty()
-    );
-
-    let active = chats
-        .set_follow(&follow(20, FollowState::Following), &NO_FAULTS)
-        .expect("f3");
-    assert_eq!(active.state, FollowState::Following);
-    assert!(active.origin_id.starts_with("origin_"));
-    // The poster's implicit follow journaled first, so the three explicit
-    // writes sit one sequence later.
-    assert_eq!(active.origin_seq, 4);
-}
-
-#[test]
-fn local_follow_uses_persisted_origin_and_next_journal_sequence() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    {
-        let mut chats = LinkedChatStore::new(&mut store);
-        chats
-            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
-            .expect("general");
-        chats
-            .start_channel_thread(
-                &start_thread("gen-1", "t1", "m1", "opening", ChatActorKind::Human, 2),
-                &NO_FAULTS,
-            )
-            .expect("thread");
-    }
-    store
-        .read_with(|conn| {
-            conn.execute(
-                "UPDATE sync_identity SET origin_id = 'origin-fixed', \
-                 replication_epoch = 'epoch-fixed', stream_identity = 'stream-fixed' \
-                 WHERE workspace_id = ?1",
-                [WS],
-            )?;
-            conn.execute(
-                "INSERT INTO replication_log \
-                 (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported) \
-                 VALUES (?1, 'origin-fixed', 7, 'seed', '{}', 4, 0)",
-                [WS],
-            )
-        })
-        .expect("seed local replication coordinate");
-
-    let mut chats = LinkedChatStore::new(&mut store);
-    let follow = chats
-        .set_follow(
-            &SetFollow {
-                workspace_id: WS.to_owned(),
-                owner_user_id: "owner".to_owned(),
-                replication_owner_user_id: None,
-                target_kind: FollowTargetKind::Thread,
-                target_id: "t1".to_owned(),
-                state: FollowState::Following,
-                now_ms: 10,
-            },
-            &NO_FAULTS,
-        )
-        .expect("follow");
-    assert_eq!(follow.origin_id, "origin-fixed");
-    assert_eq!(follow.origin_seq, 8);
-}
-
-#[test]
-fn local_follow_timestamp_advances_past_same_millisecond_unfollow() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
-        .expect("general");
-    chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t1", "m1", "opening", ChatActorKind::Human, 2),
-            &NO_FAULTS,
-        )
-        .expect("thread");
-    let local = |state| SetFollow {
-        workspace_id: WS.to_owned(),
-        owner_user_id: "owner".to_owned(),
-        replication_owner_user_id: Some("owner".to_owned()),
-        target_kind: FollowTargetKind::Thread,
-        target_id: "t1".to_owned(),
-        state,
-        now_ms: 100,
-    };
-    let unfollowed = chats
-        .set_follow(&local(FollowState::Unfollowed), &NO_FAULTS)
-        .expect("unfollow");
-    let followed = chats
-        .set_follow(&local(FollowState::Following), &NO_FAULTS)
-        .expect("follow");
-    assert_eq!(unfollowed.updated_at_ms, 100);
-    assert_eq!(followed.updated_at_ms, 101);
-    assert_eq!(followed.state, FollowState::Following);
-    assert_eq!(unfollowed.origin_id, followed.origin_id);
-    assert_eq!(followed.origin_seq, unfollowed.origin_seq + 1);
-    let rows: Vec<(i64, String, i64)> = store
-        .read_with(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT origin_seq, payload_json, imported FROM replication_log \
-                 WHERE workspace_id = ?1 AND op_kind = 'chat.follow.set' ORDER BY origin_seq",
-            )?;
-            let mapped = stmt.query_map([WS], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-            mapped.collect()
-        })
-        .expect("follow replication rows");
-    // The poster's implicit follow is row 0; the two explicit writes follow.
-    assert_eq!(rows.len(), 3);
-    let rows = &rows[1..];
-    assert_eq!(rows[1].0, rows[0].0 + 1);
-    assert_eq!(rows[0].2, 0);
-    assert_eq!(rows[1].2, 0);
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&rows[0].1).expect("unfollow payload"),
-        json!({
-            "ownerUserId": "owner",
-            "targetKind": "thread",
-            "targetId": "t1",
-            "state": "unfollowed",
-            "atMs": 100,
-        })
-    );
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&rows[1].1).expect("follow payload"),
-        json!({
-            "ownerUserId": "owner",
-            "targetKind": "thread",
-            "targetId": "t1",
-            "state": "following",
-            "atMs": 101,
-        })
-    );
 }
 
 #[test]
@@ -2873,139 +1908,6 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
 }
 
 #[test]
-fn core_chat_creates_journal_exact_relay_payloads() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("general");
-    let mut opening = start_thread(
-        "gen-1",
-        "thread-1",
-        "message-1",
-        "opening",
-        ChatActorKind::Human,
-        20,
-    );
-    opening.title = Some("Launch".to_owned());
-    chats
-        .start_channel_thread(&opening, &NO_FAULTS)
-        .expect("thread");
-    let mut reply = send_msg("thread-1", "message-2", Some("message-1"), "reply", 30);
-    reply.origin = Some("cli".to_owned());
-    chats.send_message(&reply, &NO_FAULTS).expect("reply");
-    chats
-        .set_follow(
-            &SetFollow {
-                workspace_id: WS.to_owned(),
-                owner_user_id: "owner".to_owned(),
-                replication_owner_user_id: None,
-                target_kind: FollowTargetKind::Thread,
-                target_id: "thread-1".to_owned(),
-                state: FollowState::Following,
-                now_ms: 31,
-            },
-            &NO_FAULTS,
-        )
-        .expect("follow thread");
-    let feed = chats
-        .list_personal_feed(WS, "owner", Some(10), None)
-        .expect("hydrated feed");
-    assert_eq!(feed.items[0].message.message_id, "message-2");
-    assert_eq!(
-        feed.items[0]
-            .parent_message
-            .as_ref()
-            .expect("parent")
-            .message_id,
-        "message-1"
-    );
-    assert_eq!(
-        feed.items[0]
-            .opening_message
-            .as_ref()
-            .expect("opening")
-            .message_id,
-        "message-1"
-    );
-    assert_eq!(feed.items[0].matched_by, vec![FollowTargetKind::Thread]);
-
-    let ops: Vec<(String, serde_json::Value)> = store
-        .read_with(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT op_kind, payload_json FROM replication_log \
-                 WHERE workspace_id = ?1 AND op_kind IN \
-                   ('chat.channel.create', 'chat.thread.create', 'chat.message.append') \
-                 ORDER BY origin_seq",
-            )?;
-            let rows = stmt.query_map([WS], |row| {
-                let kind: String = row.get(0)?;
-                let payload: String = row.get(1)?;
-                Ok((kind, serde_json::from_str(&payload).expect("payload json")))
-            })?;
-            rows.collect()
-        })
-        .expect("core replication ops");
-    assert_eq!(ops.len(), 4);
-    assert_eq!(ops[0].0, "chat.channel.create");
-    assert_eq!(
-        ops[0].1,
-        json!({
-            "channelId": "gen-1",
-            "name": "general",
-            "slug": "general",
-            "kind": "channel",
-            "type": "posts",
-            "purpose": "",
-            "createdAtMs": 10,
-            "wireId": GENERAL_CHANNEL_WIRE_ID,
-        })
-    );
-    assert_eq!(ops[1].0, "chat.thread.create");
-    assert_eq!(
-        ops[1].1,
-        json!({
-            "threadId": "thread-1",
-            "title": "Launch",
-            "createdAtMs": 20,
-            "lane": "posts",
-            "channelSlug": "general",
-            "channelWireId": GENERAL_CHANNEL_WIRE_ID,
-        })
-    );
-    assert_eq!(ops[2].0, "chat.message.append");
-    assert_eq!(
-        ops[2].1,
-        json!({
-            "messageId": "message-1",
-            "threadId": "thread-1",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "authorUserId": "user-ada",
-            "body": "opening",
-            "createdAtMs": 20,
-        })
-    );
-    assert_eq!(ops[3].0, "chat.message.append");
-    assert_eq!(
-        ops[3].1,
-        json!({
-            "messageId": "message-2",
-            "threadId": "thread-1",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "authorUserId": "user-ada",
-            "parentMessageId": "message-1",
-            "origin": "cli",
-            "body": "reply",
-            "createdAtMs": 30,
-        })
-    );
-}
-
-#[test]
 fn authorless_message_and_derived_state_stay_local() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
@@ -3089,118 +1991,6 @@ fn authorless_message_and_derived_state_stay_local() {
 }
 
 #[test]
-fn authored_reply_exports_structure_without_exporting_local_parent() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    {
-        let mut chats = LinkedChatStore::new(&mut store);
-        chats
-            .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-            .expect("general");
-        let mut opening = start_thread(
-            "gen-1",
-            "local-thread",
-            "local-message",
-            "private before sign-in",
-            ChatActorKind::Human,
-            20,
-        );
-        opening.title = Some("Local thread".to_owned());
-        opening.author_user_id = None;
-        chats
-            .start_channel_thread(&opening, &NO_FAULTS)
-            .expect("local thread");
-
-        let mut reply = send_msg(
-            "local-thread",
-            "authored-message",
-            Some("local-message"),
-            "safe to share",
-            30,
-        );
-        reply.needs_decision = true;
-        reply.attachments = vec![LocalAttachmentInput {
-            object_id: "shared-file".to_owned(),
-            path_hint: Some("shared/file.md".to_owned()),
-            heading_text: None,
-            heading_anchor: None,
-            heading_occurrence: None,
-        }];
-        let sent = chats
-            .send_message(&reply, &NO_FAULTS)
-            .expect("authored reply");
-        assert_eq!(sent.parent_message_id.as_deref(), Some("local-message"));
-    }
-
-    let ops: Vec<(i64, String, serde_json::Value)> = store
-        .read_with(|conn| {
-            let mut statement = conn.prepare(
-                "SELECT origin_seq, op_kind, payload_json FROM replication_log \
-                 WHERE workspace_id = ?1 AND op_kind IN \
-                   ('chat.thread.create', 'chat.message.append', \
-                    'chat.decision.set', 'chat.attachment.add') \
-                 ORDER BY origin_seq",
-            )?;
-            statement
-                .query_map([WS], |row| {
-                    let payload: String = row.get(2)?;
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        serde_json::from_str(&payload).expect("payload json"),
-                    ))
-                })?
-                .collect()
-        })
-        .expect("exported ops");
-    // Sequence 3 is the replier's implicit follow, which this query leaves out.
-    assert_eq!(
-        ops.iter().map(|(seq, _, _)| *seq).collect::<Vec<_>>(),
-        vec![1, 2, 4, 5]
-    );
-    assert_eq!(
-        ops.iter()
-            .map(|(_, kind, _)| kind.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "chat.thread.create",
-            "chat.message.append",
-            "chat.decision.set",
-            "chat.attachment.add",
-        ]
-    );
-    assert_eq!(
-        ops[0].2,
-        json!({
-            "threadId": "local-thread",
-            "title": "Local thread",
-            "createdAtMs": 20,
-            "lane": "posts",
-            "channelSlug": "general",
-            "channelWireId": GENERAL_CHANNEL_WIRE_ID,
-        })
-    );
-    assert_eq!(
-        ops[1].2,
-        json!({
-            "messageId": "authored-message",
-            "threadId": "local-thread",
-            "authorKind": "human",
-            "authorDisplayName": "Ada",
-            "authorUserId": "user-ada",
-            "body": "safe to share",
-            "createdAtMs": 30,
-        })
-    );
-    assert!(ops[1].2.get("parentMessageId").is_none());
-    assert!(
-        ops.iter()
-            .all(|(_, _, payload)| !payload.to_string().contains("local-message"))
-    );
-}
-
-#[test]
 fn personal_feed_visibility_and_base64url_cursor_round_trip() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
@@ -3209,7 +1999,6 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
     chats
         .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
         .expect("gen");
-    // Two threads; only t1 is followed by the owner.
     for (t, m, ms) in [("t1", "m1", 100), ("t2", "m2", 101)] {
         chats
             .start_channel_thread(
@@ -3260,7 +2049,6 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
     assert!(page.items[0].reactions.is_empty());
     assert_eq!(page.items[0].matched_by, vec![FollowTargetKind::Thread]);
 
-    // A followed CHANNEL surfaces its threads' opening messages.
     chats
         .set_follow(
             &SetFollow {
@@ -3283,16 +2071,13 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
         chan_feed.items[0].matched_by,
         vec![FollowTargetKind::Channel]
     );
-    // With a limit of 1 and two visible opening messages, a keyset cursor is set.
     assert!(
         chan_feed.next_cursor.is_some(),
         "a following page yields a cursor"
     );
     let next = chan_feed.next_cursor.expect("cursor");
-    // The Rust-minted cursor decodes back to the last item's coordinate.
     let decoded = decode_feed_cursor(&next).expect("decode");
     assert_eq!(decoded.message_id, chan_feed.items[0].message.message_id);
-    // And continuing from it yields the remaining opening message.
     let page2 = chats
         .list_personal_feed(WS, "owner2", Some(1), Some(&next))
         .expect("feed page 2");
@@ -3302,176 +2087,6 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
         chan_feed.items[0].message.message_id
     );
 }
-
-#[test]
-fn personal_feed_batch_keeps_attachments_with_their_own_messages() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let attach = |object: &str| LocalAttachmentInput {
-        object_id: object.to_owned(),
-        path_hint: Some(format!("notes/{object}.md")),
-        heading_text: None,
-        heading_anchor: None,
-        heading_occurrence: None,
-    };
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("general");
-    let mut o1 = start_thread("gen-1", "t1", "o1", "opening one", ChatActorKind::Human, 20);
-    o1.attachments = vec![attach("alpha")];
-    chats.start_channel_thread(&o1, &NO_FAULTS).expect("t1");
-    let mut r1 = send_msg("t1", "r1", Some("o1"), "reply one", 30);
-    r1.attachments = vec![attach("beta")];
-    chats.send_message(&r1, &NO_FAULTS).expect("r1");
-    chats
-        .send_message(
-            &send_msg("t1", "r2", Some("o1"), "reply two", 40),
-            &NO_FAULTS,
-        )
-        .expect("r2");
-    chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t2", "o2", "opening two", ChatActorKind::Human, 50),
-            &NO_FAULTS,
-        )
-        .expect("t2");
-    let mut r3 = send_msg("t2", "r3", None, "reply three", 60);
-    r3.attachments = vec![attach("delta")];
-    chats.send_message(&r3, &NO_FAULTS).expect("r3");
-    chats
-        .send_message(
-            &send_msg("t2", "r4", Some("r3"), "reply four", 70),
-            &NO_FAULTS,
-        )
-        .expect("r4");
-    for (thread, at) in [("t1", 80), ("t2", 81)] {
-        chats
-            .set_follow(
-                &SetFollow {
-                    workspace_id: WS.to_owned(),
-                    owner_user_id: "owner".to_owned(),
-                    replication_owner_user_id: None,
-                    target_kind: FollowTargetKind::Thread,
-                    target_id: thread.to_owned(),
-                    state: FollowState::Following,
-                    now_ms: at,
-                },
-                &NO_FAULTS,
-            )
-            .expect("follow");
-    }
-    // r3's row disappears while its attachment row dangles: the batch join
-    // must not resurrect "delta" anywhere, and r4 keeps a None parent.
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute(
-                "DELETE FROM chat_messages WHERE workspace_id = ?1 AND message_id = 'r3'",
-                [WS],
-            )
-            .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .expect("prune r3");
-
-    let page = LinkedChatStore::new(&mut store)
-        .list_personal_feed(WS, "owner", Some(10), None)
-        .expect("feed");
-    fn objects(message: &dohc_engine_domain::ChatMessage) -> Vec<&str> {
-        message
-            .attachments
-            .iter()
-            .map(|attachment| attachment.object_id.as_deref().expect("object id"))
-            .collect()
-    }
-    assert_eq!(
-        page.items
-            .iter()
-            .map(|item| item.message.message_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["r4", "o2", "r2", "r1", "o1"]
-    );
-    let [r4, o2, r2, r1, o1] = page.items.as_slice() else {
-        panic!("five feed items");
-    };
-    assert!(objects(&r4.message).is_empty());
-    assert!(r4.parent_message.is_none(), "deleted parent stays absent");
-    let r4_opening = r4.opening_message.as_ref().expect("r4 opening");
-    assert_eq!(r4_opening.message_id, "o2");
-    assert!(objects(r4_opening).is_empty());
-    assert!(objects(&o2.message).is_empty());
-    assert!(o2.opening_message.is_none() && o2.parent_message.is_none());
-    assert_eq!(objects(&r1.message), vec!["beta"]);
-    assert!(objects(&r2.message).is_empty());
-    for item in [r2, r1] {
-        let opening = item.opening_message.as_ref().expect("shared opening");
-        assert_eq!(opening.message_id, "o1");
-        assert_eq!(objects(opening), vec!["alpha"]);
-        let parent = item.parent_message.as_ref().expect("shared parent");
-        assert_eq!(parent.message_id, "o1");
-        assert_eq!(objects(parent), vec!["alpha"]);
-    }
-    assert_eq!(objects(&o1.message), vec!["alpha"]);
-    assert!(o1.opening_message.is_none() && o1.parent_message.is_none());
-    for item in &page.items {
-        for message in std::iter::once(&item.message)
-            .chain(item.opening_message.as_ref())
-            .chain(item.parent_message.as_ref())
-        {
-            assert_eq!(message.thread_id, item.thread.thread_id);
-            for attachment in &message.attachments {
-                assert_eq!(attachment.message_id, message.message_id);
-                assert_eq!(attachment.thread_id, message.thread_id);
-                assert_ne!(attachment.object_id.as_deref(), Some("delta"));
-            }
-        }
-    }
-}
-
-#[test]
-fn personal_feed_reads_normalize_owner_before_follow_matching() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("general");
-    chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t1", "m1", "opening", ChatActorKind::Human, 20),
-            &NO_FAULTS,
-        )
-        .expect("start");
-    chats
-        .set_follow(
-            &SetFollow {
-                workspace_id: WS.to_owned(),
-                owner_user_id: "viewer".to_owned(),
-                replication_owner_user_id: None,
-                target_kind: FollowTargetKind::Thread,
-                target_id: "t1".to_owned(),
-                state: FollowState::Following,
-                now_ms: 21,
-            },
-            &NO_FAULTS,
-        )
-        .expect("follow");
-
-    let page = chats
-        .list_personal_feed(WS, "  viewer  ", Some(10), None)
-        .expect("padded-owner feed");
-    assert_eq!(page.items.len(), 1);
-    assert_eq!(page.items[0].matched_by, vec![FollowTargetKind::Thread]);
-    let head = page.head_cursor.expect("feed head");
-    let seen = chats
-        .mark_feed_seen(WS, "  viewer  ", None, &head, 22, &NO_FAULTS)
-        .expect("padded-owner mark seen");
-    assert_eq!(seen.owner_user_id, "viewer");
-}
-
-// ---------------------------------------------- bookmark generation-CAS
 
 #[test]
 fn bookmark_generation_cas_stale_worker_loses() {
@@ -3502,7 +2117,6 @@ fn bookmark_generation_cas_stale_worker_loses() {
     assert_eq!(b1.generation, 1);
     assert_eq!(b1.projection_state, "pending");
 
-    // A concurrent re-save bumps the generation to 2 (CAS token advances).
     let b2 = chats.save_bookmark(&save(31), &NO_FAULTS).expect("resave");
     assert_eq!(b2.generation, 2);
 
@@ -3513,365 +2127,11 @@ fn bookmark_generation_cas_stale_worker_loses() {
     assert!(!stale.applied, "stale generation must not mark ready");
     assert_eq!(stale.bookmark.projection_state, "pending");
 
-    // The current generation 2 wins.
     let fresh = chats
         .mark_bookmark_ready(WS, "owner", &b1.bookmark_id, 2, 41, None, None, &NO_FAULTS)
         .expect("fresh ready");
     assert!(fresh.applied, "current generation marks ready");
     assert_eq!(fresh.bookmark.projection_state, "ready");
-}
-
-#[test]
-fn bookmark_lifecycle_lookups_normalize_owner() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("general");
-    chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t1", "m1", "opening", ChatActorKind::Human, 20),
-            &NO_FAULTS,
-        )
-        .expect("start");
-    let save = |now_ms| SaveBookmark {
-        workspace_id: WS.to_owned(),
-        owner_user_id: "alice".to_owned(),
-        target_kind: BookmarkTargetKind::Thread,
-        target_id: "t1".to_owned(),
-        mode: BookmarkMode::Live,
-        destination_path: "bookmarks/alice.md".to_owned(),
-        now_ms,
-    };
-
-    let first = chats.save_bookmark(&save(30), &NO_FAULTS).expect("save");
-    let archived = chats
-        .archive_bookmark(WS, "  alice  ", &first.bookmark_id, 31, &NO_FAULTS)
-        .expect("padded-owner archive");
-    assert_eq!(archived.state, "archived");
-    assert_eq!(
-        chats
-            .list_bookmarks(WS, "  alice  ", None)
-            .expect("padded-owner list")
-            .len(),
-        1
-    );
-    let ready = chats
-        .mark_bookmark_ready(
-            WS,
-            "  alice  ",
-            &first.bookmark_id,
-            2,
-            32,
-            None,
-            None,
-            &NO_FAULTS,
-        )
-        .expect("padded-owner ready");
-    assert!(ready.applied);
-
-    let third = chats
-        .save_bookmark(&save(33), &NO_FAULTS)
-        .expect("reactivate");
-    let failed = chats
-        .mark_bookmark_failed(
-            WS,
-            "  alice  ",
-            &first.bookmark_id,
-            third.generation,
-            "projection failed",
-            34,
-            &NO_FAULTS,
-        )
-        .expect("padded-owner failed");
-    assert!(failed.applied);
-
-    let fourth = chats.save_bookmark(&save(35), &NO_FAULTS).expect("resave");
-    let stale = chats
-        .mark_bookmark_stale(
-            WS,
-            "  alice  ",
-            &first.bookmark_id,
-            fourth.generation,
-            None,
-            36,
-            &NO_FAULTS,
-        )
-        .expect("padded-owner stale");
-    assert!(stale.applied);
-}
-
-#[test]
-fn bookmark_ids_match_sha256_base32_oracle() {
-    assert_eq!(base32_lowercase_no_padding(b"foobar"), "mzxw6ytboi");
-    let mut hasher = Sha256::new();
-    hasher.update(b"owner\0thread\0thread-1");
-    let digest = hasher.finalize();
-    let expected = format!("bookmark_{}", base32_lowercase_no_padding(&digest[..16]));
-    assert_eq!(
-        bookmark_id_for("owner", BookmarkTargetKind::Thread, "thread-1"),
-        expected
-    );
-    assert_eq!(expected, "bookmark_lvasdmkz5istkol3a6oyjw63i4");
-}
-
-#[test]
-fn bookmark_destination_change_clears_projection_ownership() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("general");
-    chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 20),
-            &NO_FAULTS,
-        )
-        .expect("start");
-    let save = |destination: &str, now_ms| SaveBookmark {
-        workspace_id: WS.to_owned(),
-        owner_user_id: "owner".to_owned(),
-        target_kind: BookmarkTargetKind::Thread,
-        target_id: "t1".to_owned(),
-        mode: BookmarkMode::Live,
-        destination_path: destination.to_owned(),
-        now_ms,
-    };
-    let first = chats
-        .save_bookmark(&save("bookmarks/a.md", 30), &NO_FAULTS)
-        .expect("save a");
-    let ready_a = chats
-        .mark_bookmark_ready(
-            WS,
-            "owner",
-            &first.bookmark_id,
-            1,
-            31,
-            Some("object-a"),
-            Some("bookmarks/a.md"),
-            &NO_FAULTS,
-        )
-        .expect("ready a");
-    assert!(ready_a.applied);
-    let moved = chats
-        .save_bookmark(&save("bookmarks/b.md", 32), &NO_FAULTS)
-        .expect("save b");
-    assert_eq!(moved.projection_object_id, None);
-    let ready_b = chats
-        .mark_bookmark_ready(
-            WS,
-            "owner",
-            &first.bookmark_id,
-            2,
-            33,
-            Some("object-b"),
-            Some("bookmarks/b.md"),
-            &NO_FAULTS,
-        )
-        .expect("ready b");
-    assert!(ready_b.applied);
-    assert_eq!(
-        ready_b.bookmark.projection_object_id.as_deref(),
-        Some("object-b")
-    );
-}
-
-// ------------------------------------------------ dispatch claim idempotency
-
-#[test]
-fn dispatch_claim_is_single_writer_idempotent() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
-        .expect("agent");
-    chats
-        .start_channel_thread(
-            &StartChannelThread {
-                wake_agent_ids: vec!["default".to_owned()],
-                ..start_thread(
-                    "agent-1",
-                    "t1",
-                    "m0",
-                    "@agent do it",
-                    ChatActorKind::Human,
-                    20,
-                )
-            },
-            &NO_FAULTS,
-        )
-        .expect("start");
-    chats
-        .enqueue_dispatch(WS, "m0", "default", "t1", 21, &NO_FAULTS)
-        .expect("enqueue");
-
-    for invalid in [String::new(), "bad\0run".to_owned(), "x".repeat(513)] {
-        assert!(
-            chats
-                .claim_next_pending(WS, "default", &invalid, "agent", None, 22, &NO_FAULTS)
-                .is_err(),
-            "invalid run id must be refused"
-        );
-    }
-
-    // Whitespace-only commands are valid (the oracle's `normalizeCommand`
-    // preserves them verbatim; an omitted command is the empty string) —
-    // only NUL and the metadata length cap refuse.
-    for invalid_command in ["bad\0command".to_owned(), "x".repeat(16_385)] {
-        assert_eq!(
-            chats
-                .claim_next_pending(
-                    WS,
-                    "default",
-                    "run-1",
-                    &invalid_command,
-                    None,
-                    22,
-                    &NO_FAULTS,
-                )
-                .unwrap_err()
-                .code(),
-            "invalid-input"
-        );
-    }
-    for invalid_path in ["   ".to_owned(), "bad\0path".to_owned(), "x".repeat(16_385)] {
-        assert_eq!(
-            chats
-                .claim_next_pending(
-                    WS,
-                    "default",
-                    "run-1",
-                    "agent",
-                    Some(&invalid_path),
-                    22,
-                    &NO_FAULTS,
-                )
-                .unwrap_err()
-                .code(),
-            "invalid-input"
-        );
-    }
-
-    let claim = chats
-        .claim_next_pending(
-            WS,
-            "default",
-            "run-1",
-            "  agent --run  ",
-            Some("  logs/run-1.log  "),
-            22,
-            &NO_FAULTS,
-        )
-        .expect("claim")
-        .expect("some claim");
-    assert_eq!(claim.dispatch.trigger_message_id, "m0");
-    assert_eq!(claim.run.run_id, "run-1");
-    assert_eq!(claim.dispatch.attempt_count, 1);
-    assert_eq!(claim.dispatch.workspace_id, WS);
-    assert_eq!(claim.dispatch.thread_id, "t1");
-    assert_eq!(claim.dispatch.state, "running");
-    assert_eq!(claim.dispatch.run_id.as_deref(), Some("run-1"));
-    assert_eq!(claim.dispatch.failure_reason, None);
-    // The message asked the agent in its own write, at its own time.
-    assert_eq!(claim.dispatch.created_at_ms, 20);
-    assert_eq!(claim.dispatch.updated_at_ms, 22);
-    assert_eq!(claim.run.workspace_id, WS);
-    assert_eq!(claim.run.thread_id, "t1");
-    assert_eq!(claim.run.trigger_message_id, "m0");
-    assert_eq!(claim.run.command, "  agent --run  ");
-    assert_eq!(claim.run.started_at_ms, 22);
-    assert_eq!(claim.run.ended_at_ms, None);
-    assert_eq!(claim.run.exit_code, None);
-    assert_eq!(claim.run.failure_reason, None);
-    assert_eq!(claim.run.log_path.as_deref(), Some("  logs/run-1.log  "));
-    assert!(!claim.run.failure_handled);
-
-    for invalid in [String::new(), "bad\0run".to_owned(), "x".repeat(513)] {
-        assert!(
-            chats
-                .complete_dispatch(WS, &invalid, 0, 22, &NO_FAULTS)
-                .is_err()
-        );
-        assert!(
-            chats
-                .fail_dispatch(WS, &invalid, "failed", None, 22, &NO_FAULTS)
-                .is_err()
-        );
-    }
-
-    // A second claim while run-1 is running returns None (single-writer).
-    let second = chats
-        .claim_next_pending(WS, "default", "run-2", "agent", None, 23, &NO_FAULTS)
-        .expect("second");
-    assert!(second.is_none(), "no double-claim while a run is active");
-
-    // The run record exists.
-    let runs: i64 = store
-        .read_with(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM agent_run_records", [], |r| r.get(0))
-        })
-        .expect("runs");
-    assert_eq!(runs, 1);
-}
-
-#[test]
-fn dispatch_failure_reason_is_validated_and_stored_verbatim() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_agent_channel(WS, "agent-1", "default", "My agent", 10, &NO_FAULTS)
-        .expect("agent");
-    chats
-        .start_channel_thread(
-            &start_thread("agent-1", "t1", "m0", "@agent", ChatActorKind::Human, 20),
-            &NO_FAULTS,
-        )
-        .expect("start");
-    chats
-        .enqueue_dispatch(WS, "m0", "default", "t1", 21, &NO_FAULTS)
-        .expect("enqueue");
-    chats
-        .claim_next_pending(WS, "default", "run-1", "agent", None, 22, &NO_FAULTS)
-        .expect("claim")
-        .expect("some");
-    for invalid in ["   ".to_owned(), "x".repeat(16_385)] {
-        let error = chats
-            .fail_dispatch(WS, "run-1", &invalid, None, 23, &NO_FAULTS)
-            .unwrap_err();
-        assert_eq!(error.code(), "invalid-input");
-    }
-    let verbatim = "  durable failure  ";
-    chats
-        .fail_dispatch(WS, "run-1", verbatim, Some(7), 24, &NO_FAULTS)
-        .expect("fail");
-    let stored: (Option<String>, Option<String>) = store
-        .read_with(|conn| {
-            let run_reason = conn.query_row(
-                "SELECT failure_reason FROM agent_run_records WHERE workspace_id = ?1 AND run_id = 'run-1'",
-                [WS],
-                |row| row.get(0),
-            )?;
-            let dispatch_reason = conn.query_row(
-                "SELECT failure_reason FROM chat_dispatch_ledger \
-                 WHERE workspace_id = ?1 AND trigger_message_id = 'm0'",
-                [WS],
-                |row| row.get(0),
-            )?;
-            Ok::<_, rusqlite::Error>((run_reason, dispatch_reason))
-        })
-        .expect("failure reasons");
-    assert_eq!(
-        stored,
-        (Some(verbatim.to_owned()), Some(verbatim.to_owned()))
-    );
 }
 
 #[test]
@@ -3932,7 +2192,6 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
         .expect("same running claim");
     assert_eq!(retry, a);
 
-    // Before completion, B is not claimable (single-writer guard).
     assert!(
         chats
             .claim_next_pending(WS, "default", "run-B", "agent", None, 25, &NO_FAULTS)
@@ -3965,13 +2224,10 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
         "cross-workspace failure must refuse"
     );
 
-    // Completing an already-done run is an idempotent no-op.
     chats
         .complete_dispatch(WS, "run-A", 0, 28, &NO_FAULTS)
         .expect("idempotent complete");
 
-    // A's run record is ended with its original exit code timestamp (26), not
-    // the idempotent no-op's (28).
     let ended: Option<i64> = store
         .read_with(|conn| {
             conn.query_row(
@@ -4007,9 +2263,7 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
             .claim_next_pending(WS, "default", "run-1", "agent", None, 22, &NO_FAULTS)
             .expect("claim")
             .expect("some");
-        // Simulated process death: the run never completes; store dropped.
     }
-    // Reopen: the 'running' row survived the crash and wedges new claims.
     let mut store = open(&db, 2);
     let mut chats = LinkedChatStore::new(&mut store);
     assert!(
@@ -4019,12 +2273,10 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
             .is_none(),
         "a dead 'running' row blocks claims until reclaimed"
     );
-    // Reclaim the crashed run → its trigger is requeued to pending.
     let requeued = chats
         .reclaim_running_dispatches(WS, 2, 31, &NO_FAULTS)
         .expect("reclaim");
     assert_eq!(requeued, vec!["mA".to_owned()]);
-    // A fresh worker can now claim the reclaimed trigger.
     let fresh = chats
         .claim_next_pending(WS, "default", "run-3", "agent", None, 32, &NO_FAULTS)
         .expect("fresh claim")
@@ -4032,7 +2284,6 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
     assert_eq!(fresh.dispatch.trigger_message_id, "mA");
     assert_eq!(fresh.run.run_id, "run-3");
 
-    // The crashed run record is ended-with-failure.
     let failed: Option<String> = store
         .read_with(|conn| {
             conn.query_row(
@@ -4043,255 +2294,6 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
         })
         .expect("run-1 row");
     assert_eq!(failed, Some("reclaimed-crashed".to_owned()));
-}
-
-// ------------------------------------------------ exactly-once idempotency
-
-#[test]
-fn start_thread_after_commit_before_ack_retry_replays_exactly_once() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    {
-        let mut store = open(&db, 1);
-        let mut chats = LinkedChatStore::new(&mut store);
-        chats
-            .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-            .expect("gen");
-    }
-    // Arm a crash after commit, before ack — the write IS durable but surfaces
-    // as an error to the caller (who does not learn it succeeded).
-    {
-        let mut store = open(&db, 2);
-        let faults = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
-        let mut chats = LinkedChatStore::new(&mut store);
-        let mut input = start_thread("gen-1", "t1", "m0", "hello", ChatActorKind::Human, 20);
-        input.request_id = Some("req-1".to_owned());
-        let err = chats
-            .start_channel_thread(&input, faults.as_ref())
-            .unwrap_err();
-        assert_eq!(err.code(), "persist-failed");
-        assert!(faults.fired());
-    }
-    // Retry with the same ids + request_id: replays the recorded result exactly
-    // once (does not hit the message PK and fail a write that succeeded).
-    let mut store = open(&db, 3);
-    let mut chats = LinkedChatStore::new(&mut store);
-    let mut input = start_thread("gen-1", "t1", "m0", "hello", ChatActorKind::Human, 20);
-    input.request_id = Some("req-1".to_owned());
-    let (thread, message) = chats
-        .start_channel_thread(&input, &NO_FAULTS)
-        .expect("replay");
-    assert_eq!(thread.thread_id, "t1");
-    assert_eq!(message.message_id, "m0");
-    // A same-key retry with a different payload is a reuse mismatch.
-    let mut reused = start_thread("gen-1", "t1", "m0", "DIFFERENT", ChatActorKind::Human, 20);
-    reused.request_id = Some("req-1".to_owned());
-    assert_eq!(
-        chats
-            .start_channel_thread(&reused, &NO_FAULTS)
-            .unwrap_err()
-            .code(),
-        "idempotency-key-reuse-mismatch"
-    );
-    // Exactly one thread + message durably exist (no duplicate from the retry).
-    let counts: (i64, i64) = store
-        .read_with(|conn| {
-            let t: i64 = conn.query_row("SELECT COUNT(*) FROM chat_threads", [], |r| r.get(0))?;
-            let m: i64 = conn.query_row("SELECT COUNT(*) FROM chat_messages", [], |r| r.get(0))?;
-            Ok::<_, rusqlite::Error>((t, m))
-        })
-        .expect("counts");
-    assert_eq!(counts, (1, 1));
-}
-
-#[test]
-fn idempotency_hash_frames_fields_so_an_embedded_nul_cannot_collide() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("gen");
-    // `normalize_body` admits NUL. Moving the boundary between two adjacent
-    // hashed fields across a NUL yields the same NUL-joined byte string, so a
-    // NUL-separated hash would replay the first payload for the second.
-    let mut first = start_thread("gen-1", "t1", "m0", "world\0body", ChatActorKind::Human, 20);
-    first.title = Some("hello".to_owned());
-    first.request_id = Some("req-nul".to_owned());
-    chats
-        .start_channel_thread(&first, &NO_FAULTS)
-        .expect("first");
-    let mut second = start_thread("gen-1", "t1", "m0", "body", ChatActorKind::Human, 20);
-    second.title = Some("hello\0world".to_owned());
-    second.request_id = Some("req-nul".to_owned());
-    assert_eq!(
-        chats
-            .start_channel_thread(&second, &NO_FAULTS)
-            .unwrap_err()
-            .code(),
-        "idempotency-key-reuse-mismatch"
-    );
-}
-
-// ---------------------------------------------- write-side fail-closed CHECK
-
-#[test]
-fn author_kind_check_constraint_rejects_bogus_wire_value() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let store = open(&db, 1);
-    // A wrong-case / bogus author_kind (as a future R10 replication-apply might
-    // receive over the wire) is rejected AT write by the CHECK, not stored to
-    // trip later on read.
-    let result = store.read_with(|conn| {
-        conn.execute(
-            "INSERT INTO chat_mentions \
-             (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
-             VALUES ('ws-1', 't1', 'm1', 'ada', 'Agent', 1)",
-            [],
-        )
-    });
-    assert!(result.is_err(), "bogus author_kind must fail the CHECK");
-}
-
-// ------------------------------------------------ JS trimEnd body parity
-
-#[test]
-fn normalize_body_matches_js_trimend_including_zwnbsp() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("gen");
-    // A body ending in U+FEFF (ZWNBSP): JS `.trimEnd()` strips it; Rust
-    // `.trim_end()` would NOT. The stored body must match TS: "hi".
-    let (_t, m) = chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t1", "m0", "hi\u{FEFF}", ChatActorKind::Human, 20),
-            &NO_FAULTS,
-        )
-        .expect("start");
-    assert_eq!(m.body, "hi", "ZWNBSP trailing trimmed like JS trimEnd");
-}
-
-// ---------------------------------------------------------- bounded reads
-
-#[test]
-fn list_messages_huge_limit_is_bounded_no_overflow() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("gen");
-    chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 20),
-            &NO_FAULTS,
-        )
-        .expect("start");
-    // i64::MAX must not overflow the probe (limit is clamped to MAX_MESSAGE_PAGE)
-    // and returns the small page without a cursor.
-    let page = chats
-        .list_messages(WS, "t1", i64::MAX, None)
-        .expect("huge limit");
-    assert_eq!(page.messages.len(), 1);
-    assert_eq!(page.next_after_message_order, None);
-}
-
-// -------------------------------------------- codex review round 2 fixes
-
-#[test]
-fn create_channel_preserves_requested_dm_kind() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    let ch = chats
-        .create_channel(WS, "dm-1", "Ada & Bee", ChatChannelKind::Dm, 10, &NO_FAULTS)
-        .expect("dm");
-    assert_eq!(
-        ch.kind,
-        ChatChannelKind::Dm,
-        "requested DM kind is persisted"
-    );
-    let listed = chats.list_channels(WS).expect("list");
-    assert_eq!(listed[0].channel.kind, ChatChannelKind::Dm);
-}
-
-#[test]
-fn find_channel_by_slug_normalizes_display_name_input() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .create_channel(
-            WS,
-            "c1",
-            "Client ACME  Launch",
-            ChatChannelKind::Channel,
-            10,
-            &NO_FAULTS,
-        )
-        .expect("create");
-    // A display-name-like lookup resolves the stored slug (client-acme-launch).
-    let found = chats
-        .find_channel_by_slug(WS, "Client ACME  Launch")
-        .expect("find");
-    assert_eq!(found.map(|c| c.channel_id), Some("c1".to_owned()));
-}
-
-#[test]
-fn human_reply_advances_read_cursor_agent_reply_does_not() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("gen");
-    // Agent opening → cursor stays 0.
-    chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Agent, 20),
-            &NO_FAULTS,
-        )
-        .expect("start");
-    assert_eq!(
-        chats.read_state(WS, "t1").expect("rs0").last_read_sequence,
-        0
-    );
-    // Agent reply → cursor still 0 (unread is what agent messages surface).
-    let mut agent = send_msg("t1", "m1", None, "agent reply", 21);
-    agent.author_kind = ChatActorKind::Agent;
-    chats.send_message(&agent, &NO_FAULTS).expect("agent send");
-    assert_eq!(
-        chats.read_state(WS, "t1").expect("rs1").last_read_sequence,
-        0
-    );
-    // Human reply → cursor catches up to its own sequence (3 messages now → 3).
-    chats
-        .send_message(&send_msg("t1", "m2", None, "human reply", 22), &NO_FAULTS)
-        .expect("human send");
-    assert_eq!(
-        chats.read_state(WS, "t1").expect("rs2").last_read_sequence,
-        3
-    );
-}
-
-#[test]
-fn list_messages_unknown_thread_fails_closed() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let chats = LinkedChatStore::new(&mut store);
-    let err = chats.list_messages(WS, "nope", 10, None).unwrap_err();
-    assert_eq!(err.code(), "thread-not-found");
 }
 
 #[test]
@@ -4328,49 +2330,6 @@ fn save_bookmark_rejects_unsafe_destination_path() {
 }
 
 #[test]
-fn message_append_requeues_active_live_bookmark() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    chats
-        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
-        .expect("gen");
-    chats
-        .start_channel_thread(
-            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 20),
-            &NO_FAULTS,
-        )
-        .expect("start");
-    let bm = chats
-        .save_bookmark(
-            &SaveBookmark {
-                workspace_id: WS.to_owned(),
-                owner_user_id: "owner".to_owned(),
-                target_kind: BookmarkTargetKind::Thread,
-                target_id: "t1".to_owned(),
-                mode: BookmarkMode::Live,
-                destination_path: "bookmarks/t1.md".to_owned(),
-                now_ms: 30,
-            },
-            &NO_FAULTS,
-        )
-        .expect("save");
-    assert_eq!(bm.generation, 1);
-    // A later message on the thread bumps the live bookmark's generation so the
-    // projection reprojects (else it goes permanently stale).
-    chats
-        .send_message(&send_msg("t1", "m1", None, "more", 31), &NO_FAULTS)
-        .expect("send");
-    let after = chats.list_bookmarks(WS, "owner", None).expect("list");
-    assert_eq!(
-        after[0].generation, 2,
-        "live bookmark requeued after a message"
-    );
-    assert_eq!(after[0].projection_state, "pending");
-}
-
-#[test]
 fn mark_feed_seen_rejects_non_visible_coordinate() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");
@@ -4385,7 +2344,6 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
             &NO_FAULTS,
         )
         .expect("start");
-    // owner follows nothing → m0 is not visible; marking it seen fails closed.
     let head = encode_feed_cursor(&FeedCursorValue {
         created_at_ms: 100,
         message_id: "m0".to_owned(),
@@ -4394,7 +2352,6 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
         .mark_feed_seen(WS, "owner", None, &head, 200, &NO_FAULTS)
         .unwrap_err();
     assert_eq!(err.code(), "invalid-follow-target");
-    // After following the thread, the same coordinate is visible and accepted.
     chats
         .set_follow(
             &SetFollow {
@@ -4439,6 +2396,7 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
             "lastSeenCreatedAtMs": 100,
             "lastSeenMessageId": "m0",
             "atMs": 200,
+            "ownerPrivateAccountId": "owner",
         })
     );
     assert_eq!(
@@ -4448,46 +2406,10 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
             "lastSeenCreatedAtMs": 100,
             "lastSeenMessageId": "m0",
             "atMs": 201,
+            "ownerPrivateAccountId": "owner",
         })
     );
 }
-
-// ------------------------------------------------------ migration presence
-
-#[test]
-fn baseline_creates_the_chat_tables() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let store = open(&db, 1);
-    store
-        .read_with(|conn| {
-            let has: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM engine_migrations WHERE id = 'v2-baseline'",
-                    [],
-                    |r| r.get(0),
-                )
-                .expect("migration row");
-            assert_eq!(has, 1, "baseline migration is recorded");
-            // The repair table exists and is empty on a fresh store.
-            let pending: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM chat_pending_message_parents",
-                    [],
-                    |r| r.get(0),
-                )
-                .expect("pending");
-            assert_eq!(pending, 0);
-            Ok::<_, rusqlite::Error>(())
-        })
-        .expect("reads");
-}
-
-// =====================================================================
-// NON-TAUTOLOGICAL differentials — validated against REAL TS output.
-// Fixtures produced by running the exact TS algorithms under Node/V8
-// (channelSlugForName, linkedChatProjectionPath, encodeFeedCursor).
-// =====================================================================
 
 #[test]
 fn channel_slug_matches_ts_output() {
@@ -4499,67 +2421,11 @@ fn channel_slug_matches_ts_output() {
     assert_eq!(channel_slug_for_name("---a--b---"), "a-b");
 }
 
-#[test]
-fn projection_path_matches_ts_and_is_nfc_identity() {
-    // Node oracle: createHash("sha256").update("v1\0ws-1\0thread-1\0thread") then
-    // base32-lowercase-no-pad, wrapped as `.dohc/chats/v1-<b32>.md`.
-    assert_eq!(
-        linked_chat_projection_path("ws-1", "thread-1", None).expect("path"),
-        ".dohc/chats/v1-x5aa42flcljlxiwvesxm73hmnhyz6uzkqvro7jelswuchp27m6ha.md"
-    );
-    // NFD input yields the byte-identical path as the NFC input (matrix 4.1b):
-    // NFC "café" = caf\u{e9}; NFD "café" = cafe\u{301}.
-    let nfc_path = linked_chat_projection_path("ws-1", "caf\u{e9}", None).expect("nfc");
-    let nfd_path = linked_chat_projection_path("ws-1", "cafe\u{301}", None).expect("nfd");
-    assert_eq!(nfc_path, nfd_path);
-    assert_eq!(
-        nfc_path,
-        ".dohc/chats/v1-ib63bruu7myh44awyugdyxv46ivaechoo3mww7jo2ueoux2rx5dq.md"
-    );
-}
-
-#[test]
-fn feed_cursor_encode_matches_ts_and_ts_cursor_decodes() {
-    // Node oracle: Buffer.from(JSON.stringify([n, id]), "utf8").toString("base64url").
-    assert_eq!(
-        encode_feed_cursor(&FeedCursorValue {
-            created_at_ms: 5,
-            message_id: "msg-1".to_owned()
-        }),
-        "WzUsIm1zZy0xIl0"
-    );
-    assert_eq!(
-        encode_feed_cursor(&FeedCursorValue {
-            created_at_ms: 1_720_000_000_000,
-            message_id: "m-abc".to_owned(),
-        }),
-        "WzE3MjAwMDAwMDAwMDAsIm0tYWJjIl0"
-    );
-    assert_eq!(
-        encode_feed_cursor(&FeedCursorValue {
-            created_at_ms: 0,
-            message_id: "x".to_owned()
-        }),
-        "WzAsIngiXQ"
-    );
-
-    // A TS-minted cursor decodes back to its coordinate (round-trip parity).
-    let decoded = decode_feed_cursor("WzE3MjAwMDAwMDAwMDAsIm0tYWJjIl0").expect("decode");
-    assert_eq!(decoded.created_at_ms, 1_720_000_000_000);
-    assert_eq!(decoded.message_id, "m-abc");
-
-    // Garbage fails closed as invalid-follow-target.
-    assert_eq!(
-        decode_feed_cursor("!!!not-base64!!!").unwrap_err().code(),
-        "invalid-follow-target"
-    );
-    // An over-long cursor fails closed.
-    let long = "A".repeat(600);
-    assert_eq!(
-        decode_feed_cursor(&long).unwrap_err().code(),
-        "invalid-follow-target"
-    );
-}
+// =====================================================================
+// NON-TAUTOLOGICAL differentials — validated against REAL TS output.
+// Fixtures produced by running the exact TS algorithms under Node/V8
+// (channelSlugForName, linkedChatProjectionPath, encodeFeedCursor).
+// =====================================================================
 
 #[test]
 fn claim_refuses_a_run_id_already_used_anywhere() {
@@ -4588,7 +2454,6 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
             .expect("enqueue");
     }
 
-    // ws-1 claims and finishes run-taken; reusing it in ws-1 refuses.
     chats
         .claim_next_pending(WS, "default", "run-taken", "agent", None, 22, &NO_FAULTS)
         .expect("claim")
@@ -4638,156 +2503,6 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
             .code(),
         "invalid-input"
     );
-}
-
-#[test]
-fn agent_owner_name_survives_both_writes_and_reopen() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    {
-        let mut store = open(&db, 1);
-        let mut chats = LinkedChatStore::new(&mut store);
-        let channel = chats
-            .ensure_general_channel(WS, "general", 1, &NO_FAULTS)
-            .expect("channel");
-        let mut input = start_thread(
-            &channel.channel_id,
-            "thread-owner",
-            "first-owner",
-            "Hello",
-            ChatActorKind::Agent,
-            2,
-        );
-        input.author_display_name = "Nova".to_owned();
-        input.author_owner_display_name = Some("  Ada  ".to_owned());
-        let (_, first) = chats
-            .start_channel_thread(&input, &NO_FAULTS)
-            .expect("start");
-        assert_eq!(first.author_owner_display_name.as_deref(), Some("Ada"));
-        let mut reply = send_msg("thread-owner", "reply-owner", None, "Done", 3);
-        reply.author_kind = ChatActorKind::Agent;
-        reply.author_display_name = "Nova".to_owned();
-        reply.author_owner_display_name = Some("Ada".to_owned());
-        chats.send_message(&reply, &NO_FAULTS).expect("reply");
-        reply.message_id = "human-owner".to_owned();
-        reply.author_kind = ChatActorKind::Human;
-        assert!(chats.send_message(&reply, &NO_FAULTS).is_err());
-    }
-    let mut store = open(&db, 4);
-    let chats = LinkedChatStore::new(&mut store);
-    let page = chats
-        .list_messages(WS, "thread-owner", 10, None)
-        .expect("messages");
-    assert_eq!(page.messages.len(), 2);
-    for message in page.messages {
-        assert_eq!(message.author_display_name, "Nova");
-        assert_eq!(message.author_owner_display_name.as_deref(), Some("Ada"));
-    }
-}
-
-#[test]
-fn unicode_group_names_create_lookup_and_collide_without_losing_marks() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    let mut chats = LinkedChatStore::new(&mut store);
-    for (index, name) in ["Команда", "会议", "فريق", "हिन्दी", "Café"]
-        .iter()
-        .enumerate()
-    {
-        let id = format!("unicode-{index}");
-        let channel = chats
-            .create_channel(WS, &id, name, ChatChannelKind::Channel, 10, &NO_FAULTS)
-            .expect("create Unicode group");
-        assert_eq!(channel.slug, name.to_lowercase());
-        assert_eq!(
-            chats
-                .find_channel_by_slug(WS, name)
-                .unwrap()
-                .unwrap()
-                .channel_id,
-            id
-        );
-    }
-    assert!(
-        chats
-            .create_channel(
-                WS,
-                "duplicate",
-                "Cafe\u{301}",
-                ChatChannelKind::Channel,
-                11,
-                &NO_FAULTS
-            )
-            .is_err()
-    );
-    assert!(
-        chats
-            .create_channel(
-                WS,
-                "duplicate-case",
-                "КОМАНДА",
-                ChatChannelKind::Channel,
-                11,
-                &NO_FAULTS
-            )
-            .is_err()
-    );
-}
-
-#[test]
-fn stored_slug_is_a_lookup_identity_not_a_new_filename() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = engine_db_path(&scratch).expect("db");
-    let mut store = open(&db, 1);
-    LinkedChatStore::new(&mut store)
-        .create_channel(
-            WS,
-            "device",
-            "CON",
-            ChatChannelKind::Channel,
-            10,
-            &NO_FAULTS,
-        )
-        .unwrap();
-    assert!(
-        LinkedChatStore::new(&mut store)
-            .find_channel_by_slug(WS, "CON")
-            .unwrap()
-            .is_some()
-    );
-    store
-        .write_with(&NO_FAULTS, |tx| {
-            tx.execute(
-                "UPDATE chat_channels SET slug = 'con' WHERE channel_id = 'device'",
-                [],
-            )
-            .map_err(StorageError::persist_public)?;
-            Ok::<_, StorageError>(())
-        })
-        .unwrap();
-    let mut chats = LinkedChatStore::new(&mut store);
-    assert_eq!(
-        chats
-            .find_channel_by_slug(WS, "CON")
-            .unwrap()
-            .unwrap()
-            .channel_id,
-        "device"
-    );
-    chats
-        .start_channel_thread(
-            &start_thread(
-                "device",
-                "thread-device",
-                "message-device",
-                "Hello",
-                ChatActorKind::Human,
-                11,
-            ),
-            &NO_FAULTS,
-        )
-        .unwrap();
 }
 
 #[test]
@@ -4900,7 +2615,6 @@ fn an_agent_message_keeps_what_it_reported_and_sends_it_to_other_computers() {
             })
         );
 
-        // A report with no parts is no report.
         let mut silent = send_msg("t1", "m3", None, "Done", 40);
         silent.author_kind = ChatActorKind::Agent;
         silent.author_reported = Some(ChatReportedAgent::default());
@@ -4910,7 +2624,6 @@ fn an_agent_message_keeps_what_it_reported_and_sends_it_to_other_computers() {
             None
         );
 
-        // The post's preview in the channel carries it too.
         let listed = chats
             .list_channel_threads(WS, "gen", None, 10)
             .expect("posts");

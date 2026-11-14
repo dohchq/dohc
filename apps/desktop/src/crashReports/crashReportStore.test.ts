@@ -20,15 +20,19 @@ interface Received {
   body: string;
 }
 
-// A report server on this computer. It records every request it gets.
 async function startReportServer(
-  answer: (request: IncomingMessage) => { status: number; headers?: Record<string, string> } = () => ({ status: 204 }),
+  answer: (request: IncomingMessage) => {
+    status: number;
+    headers?: Record<string, string>;
+  } = () => ({ status: 204 }),
 ): Promise<{ url: URL; received: Received[]; server: Server }> {
   const received: Received[] = [];
   const server = createServer((request, response) => {
     let body = "";
     request.setEncoding("utf8");
-    request.on("data", (chunk: string) => { body += chunk; });
+    request.on("data", (chunk: string) => {
+      body += chunk;
+    });
     request.on("end", () => {
       received.push({
         method: request.method,
@@ -48,8 +52,11 @@ async function startReportServer(
 const servers: Server[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
-  await Promise.all(servers.splice(0).map((server) =>
-    new Promise<void>((resolve) => server.close(() => resolve()))));
+  await Promise.all(
+    servers
+      .splice(0)
+      .map((server) => new Promise<void>((resolve) => server.close(() => resolve()))),
+  );
 });
 
 let directory = "";
@@ -61,8 +68,14 @@ let clock = 1_000;
 function facts(): CrashFacts {
   clock += 1_000;
   return {
-    atMs: clock, version: "0.9.0", channel: "latest", packaged: true,
-    system: "Windows_NT 10.0.22631", arch: "x64", electron: "43.3.0", uptimeSeconds: 12,
+    atMs: clock,
+    version: "0.9.0",
+    channel: "latest",
+    packaged: true,
+    system: "Windows_NT 10.0.22631",
+    arch: "x64",
+    electron: "43.3.0",
+    uptimeSeconds: 12,
   };
 }
 
@@ -77,7 +90,9 @@ function store(endpoint: URL | null, onChanged: () => void = () => undefined) {
 }
 
 function engineError(code: number): Error {
-  return new EngineDaemonUnavailableError(`Rust engine daemon exited unexpectedly with code ${code}.`);
+  return new EngineDaemonUnavailableError(
+    `Rust engine daemon exited unexpectedly with code ${code}.`,
+  );
 }
 
 const EVERY_KIND: CrashEvent[] = [
@@ -88,7 +103,6 @@ const EVERY_KIND: CrashEvent[] = [
   { kind: "engine", error: engineError(2), stage: "stopped" },
 ];
 
-// Main's dialog, answered the way the test says, and what it was shown.
 function dialog(answer: boolean) {
   const shown: CrashReportSendRequest[] = [];
   return {
@@ -116,7 +130,6 @@ describe("crash report store", () => {
     expect(onChanged).toHaveBeenCalledTimes(EVERY_KIND.length + 2);
     expect(shown.sendTo).toBe(reportServer.url.host);
 
-    // A renderer can open the dialog, but a Cancel there sends nothing.
     const cancelled = dialog(false);
     expect(await reports.send(cancelled.confirm)).toBe(false);
     expect(cancelled.shown).toEqual([{ host: reportServer.url.host, text: shown.report!.text }]);
@@ -127,12 +140,14 @@ describe("crash report store", () => {
     const confirmed = dialog(true);
     expect(await reports.send(confirmed.confirm)).toBe(true);
     expect(fetchSpy).toHaveBeenCalledOnce();
-    expect(reportServer.received).toEqual([{
-      method: "POST",
-      url: "/crash-reports",
-      contentType: "text/plain; charset=utf-8",
-      body: confirmed.shown[0]!.text,
-    }]);
+    expect(reportServer.received).toEqual([
+      {
+        method: "POST",
+        url: "/crash-reports",
+        contentType: "text/plain; charset=utf-8",
+        body: confirmed.shown[0]!.text,
+      },
+    ]);
     expect(reports.read().report).toBeNull();
   });
 
@@ -161,7 +176,12 @@ describe("crash report store", () => {
     const reports = store(reportServer.url);
     reports.record(EVERY_KIND[0]!);
     let answer: (value: boolean) => void = () => undefined;
-    const first = reports.send(() => new Promise<boolean>((resolve) => { answer = resolve; }));
+    const first = reports.send(
+      () =>
+        new Promise<boolean>((resolve) => {
+          answer = resolve;
+        }),
+    );
     const second = dialog(true);
     expect(await reports.send(second.confirm)).toBe(false);
     expect(second.shown).toEqual([]);
@@ -216,17 +236,22 @@ describe("crash report store", () => {
     const refusing = await startReportServer(() => ({ status: 500 }));
     const elsewhere = await startReportServer();
     const redirecting = await startReportServer(() => ({
-      status: 307, headers: { location: elsewhere.url.href },
+      status: 307,
+      headers: { location: elsewhere.url.href },
     }));
     servers.push(refusing.server, elsewhere.server, redirecting.server);
 
     const refused = store(refusing.url);
     refused.record(EVERY_KIND[0]!);
-    await expect(refused.send(dialog(true).confirm)).rejects.toThrow("The report server answered 500.");
+    await expect(refused.send(dialog(true).confirm)).rejects.toThrow(
+      "The report server answered 500.",
+    );
     expect(refused.read().report).not.toBeNull();
 
     const redirected = store(redirecting.url);
-    await expect(redirected.send(dialog(true).confirm)).rejects.toThrow("The connection to the report server failed.");
+    await expect(redirected.send(dialog(true).confirm)).rejects.toThrow(
+      "The connection to the report server failed.",
+    );
     expect(redirected.read().report).not.toBeNull();
     expect(elsewhere.received).toEqual([]);
   });
@@ -254,7 +279,6 @@ describe("crash report store", () => {
     const next = store(null).read().report!;
     expect(next).toMatchObject({ read: true, problems: 2, source: "window" });
 
-    // A mark for fewer problems, or a repeated one, changes nothing.
     reports.markRead(1);
     reports.markRead(next.through);
     expect(onChanged).toHaveBeenCalledTimes(3);
@@ -273,10 +297,16 @@ describe("crash report store", () => {
   });
 
   it("starts a new report from a file an older dohc wrote", () => {
-    writeFileSync(join(directory, "crash-report.json"), JSON.stringify({
-      version: 2, revision: 4, seq: 1, leftOut: 0,
-      problems: [{ seq: 1, atMs: 1_000, source: "utility", text: "dohc crash report" }],
-    }));
+    writeFileSync(
+      join(directory, "crash-report.json"),
+      JSON.stringify({
+        version: 2,
+        revision: 4,
+        seq: 1,
+        leftOut: 0,
+        problems: [{ seq: 1, atMs: 1_000, source: "utility", text: "dohc crash report" }],
+      }),
+    );
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     expect(store(null).read().report).toBeNull();
   });
@@ -296,7 +326,9 @@ describe("report server address", () => {
     expect(crashReportEndpoint(undefined, false)).toBeNull();
     expect(crashReportEndpoint("  ", false)).toBeNull();
     expect(crashReportEndpoint("not a url", false)).toBeNull();
-    expect(crashReportEndpoint("https://reports.example.test/v1", false)?.host).toBe("reports.example.test");
+    expect(crashReportEndpoint("https://reports.example.test/v1", false)?.host).toBe(
+      "reports.example.test",
+    );
     expect(crashReportEndpoint("http://127.0.0.1:4000/r", false)?.host).toBe("127.0.0.1:4000");
     expect(crashReportEndpoint("http://localhost:4000/r", false)?.host).toBe("localhost:4000");
     expect(crashReportEndpoint("http://reports.example.test/v1", false)).toBeNull();

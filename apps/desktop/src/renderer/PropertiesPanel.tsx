@@ -7,7 +7,11 @@ import {
   nullPrototypeRecord,
   sameFrontmatterValue,
 } from "@dohc/ydoc-projection/frontmatter";
-import { frontmatterAsWritten, frontmatterMapValues, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter-map";
+import {
+  frontmatterAsWritten,
+  frontmatterMapValues,
+  patchFrontmatter,
+} from "@dohc/ydoc-projection/frontmatter-map";
 import { Tooltip, useTooltip } from "@dohc/collection-views/tooltip";
 import { EVENT_ALIAS, EVENT_DOCUMENT, EVENT_POP, EVENT_SCALAR, parseEvents } from "js-yaml";
 import { Code, Lock, Plus, X } from "lucide-react";
@@ -54,8 +58,6 @@ export type PropertiesPanelProps = (
 ) & {
   // For a Collection record: the automations that set each field, by name.
   fieldMarks?: ReadonlyMap<string, readonly string[]>;
-  // A document still opening shows its properties where they will be and
-  // refuses edits until it opens: no write, no ×, and the + holds its box.
   opening?: boolean;
   // A note the person can only view shows its pills with no +, no × and no
   // edits.
@@ -97,19 +99,22 @@ function duplicateKeySet(entries: FrontmatterEntry[]): Set<string> {
 // Whether another property has this name, whatever its case: another row, or
 // a key of the note as it is now that this row wasn't read as. The note can
 // hold a property another device added before the rows read it.
-function nameTaken(index: number, key: string, entries: FrontmatterEntry[], noteKeys: readonly string[]): boolean {
-  const name = key.trim().toLowerCase();
-  if (name === "" || isReserved(name)) return false;
-  const same = (other: string | null | undefined) => other?.trim().toLowerCase() === name;
-  return entries.some((entry, i) => i !== index && same(propertyKey(entry)))
-    || noteKeys.some((noteKey) => noteKey !== entries[index]?.sourceKey && same(noteKey));
-}
-
-function shouldDeferKeyCommit(
+function nameTaken(
   index: number,
   key: string,
   entries: FrontmatterEntry[],
+  noteKeys: readonly string[],
 ): boolean {
+  const name = key.trim().toLowerCase();
+  if (name === "" || isReserved(name)) return false;
+  const same = (other: string | null | undefined) => other?.trim().toLowerCase() === name;
+  return (
+    entries.some((entry, i) => i !== index && same(propertyKey(entry))) ||
+    noteKeys.some((noteKey) => noteKey !== entries[index]?.sourceKey && same(noteKey))
+  );
+}
+
+function shouldDeferKeyCommit(index: number, key: string, entries: FrontmatterEntry[]): boolean {
   const normalized = key.trim().toLowerCase();
   if (!normalized) return true;
   if (Array.from(HIDDEN_KEYS).some((reserved) => reserved.startsWith(normalized))) {
@@ -150,14 +155,19 @@ function newRow(entry: FrontmatterEntry): Row {
 // another under the person typing.
 function withRead(read: FrontmatterEntry[], shown: Row[]): Row[] {
   const shownAt = read.map((entry) => shown.findIndex((row) => row.sourceKey === entry.key));
-  const left = shown.flatMap((row, index) => (row.sourceKey === undefined || shownAt.includes(index) ? [] : [index]));
+  const left = shown.flatMap((row, index) =>
+    row.sourceKey === undefined || shownAt.includes(index) ? [] : [index],
+  );
   const added = shownAt.flatMap((index, entry) => (index === -1 ? [entry] : []));
   const place = shownAt.map((index) => (index === -1 ? shown.length : index));
   if (left.length === 1 && added.length === 1) place[added[0]!] = left[0]!;
   const rows = read
     .map((entry, index) => {
       const row = shown[shownAt[index]!];
-      return { row: row ? { ...entry, id: row.id, key: row.key } : newRow(entry), place: place[index]! };
+      return {
+        row: row ? { ...entry, id: row.id, key: row.key } : newRow(entry),
+        place: place[index]!,
+      };
     })
     .sort((first, second) => first.place - second.place)
     .map(({ row }) => row);
@@ -179,10 +189,17 @@ function propertyKey(entry: FrontmatterEntry): string | null {
 // property the rows haven't read yet stays as it is. `saves` holds the key
 // each row saves under. A row given a name another property has keeps the
 // name it was read with, so it never writes over that property.
-function rowChanges(shown: Row[], next: Row[], noteKeys: readonly string[], readNote: () => readonly FrontmatterEntry[]) {
+function rowChanges(
+  shown: Row[],
+  next: Row[],
+  noteKeys: readonly string[],
+  readNote: () => readonly FrontmatterEntry[],
+) {
   const saves = next.map((row, index) => {
     const key = propertyKey(row);
-    return key !== null && key !== row.sourceKey && nameTaken(index, key, next, noteKeys) ? (row.sourceKey ?? null) : key;
+    return key !== null && key !== row.sourceKey && nameTaken(index, key, next, noteKeys)
+      ? (row.sourceKey ?? null)
+      : key;
   });
   const values = new Map<string, unknown>();
   const renamed = new Map<string, string>();
@@ -194,9 +211,10 @@ function rowChanges(shown: Row[], next: Row[], noteKeys: readonly string[], read
     if (key !== row.sourceKey || row.value !== row.sourceValue) {
       // A rename that leaves the value as it was read moves the value the note
       // holds now. Another device can have changed it since the rows read it.
-      const now = key !== row.sourceKey && row.value === row.sourceValue
-        ? (note ??= readNote()).find((entry) => entry.key === row.sourceKey)
-        : undefined;
+      const now =
+        key !== row.sourceKey && row.value === row.sourceValue
+          ? (note ??= readNote()).find((entry) => entry.key === row.sourceKey)
+          : undefined;
       values.set(key, entryValue(now ?? row));
     }
     if (row.sourceKey !== undefined && key !== row.sourceKey && !saves.includes(row.sourceKey)) {
@@ -204,7 +222,8 @@ function rowChanges(shown: Row[], next: Row[], noteKeys: readonly string[], read
     }
   });
   const remove = shown.flatMap((row) =>
-    row.sourceKey === undefined || saves.includes(row.sourceKey) ? [] : [row.sourceKey]);
+    row.sourceKey === undefined || saves.includes(row.sourceKey) ? [] : [row.sourceKey],
+  );
   return { saves, values, remove, renamed };
 }
 
@@ -266,12 +285,21 @@ function everyLineShown(block: string, recordId: string | undefined): boolean {
     return false;
   }
   if (`${rest}${text.slice(at)}`.includes("#")) return false;
-  return frontmatterEntriesFromPairs(read.keys.map((key) => [key, read.meta[key]])).every((entry) => {
-    // PageIdentity shows `title` and `icon`, named just so.
-    const own = entry.key === "title" || entry.key === "icon" || (entry.key === "id" && entry.rawValue === recordId);
-    // A field shows one line, so a line break hides what follows it.
-    return (own || !isReserved(entry.key)) && !entry.readOnly && !/[\r\n]/.test(`${entry.key}${entry.value}`);
-  });
+  return frontmatterEntriesFromPairs(read.keys.map((key) => [key, read.meta[key]])).every(
+    (entry) => {
+      // PageIdentity shows `title` and `icon`, named just so.
+      const own =
+        entry.key === "title" ||
+        entry.key === "icon" ||
+        (entry.key === "id" && entry.rawValue === recordId);
+      // A field shows one line, so a line break hides what follows it.
+      return (
+        (own || !isReserved(entry.key)) &&
+        !entry.readOnly &&
+        !/[\r\n]/.test(`${entry.key}${entry.value}`)
+      );
+    },
+  );
 }
 
 // A value the pill shows but can't change, such as a list with a comma in an
@@ -293,7 +321,9 @@ function ReadOnlyValue(props: { label: string; value: string; reason: string }) 
       <Lock size={11} strokeWidth={1.9} aria-hidden className="shrink-0 text-subtle" />
       <Tooltip {...tooltip.tooltipProps}>
         <span className="block wrap-anywhere">{props.value}</span>
-        <span data-testid="property-read-only" className="mt-0.5 block text-muted">{props.reason}</span>
+        <span data-testid="property-read-only" className="mt-0.5 block text-muted">
+          {props.reason}
+        </span>
       </Tooltip>
     </span>
   );
@@ -308,9 +338,7 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     () => (ydoc ? liveEntries(ydoc) : frontmatterEntries(body)),
     [body, ydoc, ydocRevision],
   );
-  const [entries, setEntries] = useState<Row[]>(() =>
-    editableEntries(sourceEntries).map(newRow),
-  );
+  const [entries, setEntries] = useState<Row[]>(() => editableEntries(sourceEntries).map(newRow));
   // The file as this panel last wrote it, until the parent passes another
   // body. The rows hold what they wrote, so the next save starts from it, and
   // so does a refresh of the rows that lands after that save.
@@ -332,7 +360,8 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     if (!ydoc) return;
     const meta = ydoc.getMap("meta");
     const update = (event: Y.YMapEvent<unknown>) => {
-      if (event.keysChanged.has(FRONTMATTER_SOURCE_META_KEY)) setKeptRevision((revision) => revision + 1);
+      if (event.keysChanged.has(FRONTMATTER_SOURCE_META_KEY))
+        setKeptRevision((revision) => revision + 1);
     };
     meta.observe(update);
     // The text can change after render and before this subscribes.
@@ -341,7 +370,11 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   }, [ydoc]);
   const leading = ydoc ? "" : (LEADING_BLOCK.exec(body)?.[0] ?? "");
   const unshown = useMemo(() => {
-    const text = ydoc ? frontmatterAsWritten(ydoc, true) : leading ? (leadingFrontmatter(leading)?.text ?? "") : "";
+    const text = ydoc
+      ? frontmatterAsWritten(ydoc, true)
+      : leading
+        ? (leadingFrontmatter(leading)?.text ?? "")
+        : "";
     const block = text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
     return block !== "" && !everyLineShown(block, props.recordId);
   }, [leading, ydoc, ydocRevision, keptRevision, props.recordId]);
@@ -375,17 +408,25 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   // The note's keys as it is now. A live note's map can hold a key its update
   // hasn't brought to the rows yet.
   function noteKeys(): string[] {
-    return ydoc ? Array.from(ydoc.getMap(FRONTMATTER_FIELD).keys()) : fileEntries().map((entry) => entry.key);
+    return ydoc
+      ? Array.from(ydoc.getMap(FRONTMATTER_FIELD).keys())
+      : fileEntries().map((entry) => entry.key);
   }
 
   function commit(next: Row[]) {
     if (refused) return;
-    const { saves, values, remove, renamed } = rowChanges(entries, next, noteKeys(), () => (ydoc ? liveEntries(ydoc) : fileEntries()));
+    const { saves, values, remove, renamed } = rowChanges(entries, next, noteKeys(), () =>
+      ydoc ? liveEntries(ydoc) : fileEntries(),
+    );
     try {
       if (values.size > 0 || remove.length > 0) {
         if (ydoc) patchFrontmatter(ydoc, values, remove, renamed);
         else {
-          const to = applyFrontmatter(fileText() ?? body, changedProperties(fileEntries(), values, remove), renamed);
+          const to = applyFrontmatter(
+            fileText() ?? body,
+            changedProperties(fileEntries(), values, remove),
+            renamed,
+          );
           props.onChange?.(to);
           written.current = { from: body, to };
         }
@@ -397,10 +438,14 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     }
     // Each row now holds the key and value it wrote. The document's update
     // reaches the rows later, and a keystroke before then edits from here.
-    setEntries(next.map((row, index) => {
-      const key = saves[index];
-      return key === null ? row : { ...row, sourceKey: key, sourceValue: row.value, rawValue: entryValue(row) };
-    }));
+    setEntries(
+      next.map((row, index) => {
+        const key = saves[index];
+        return key === null
+          ? row
+          : { ...row, sourceKey: key, sourceValue: row.value, rawValue: entryValue(row) };
+      }),
+    );
     setEditRefused(false);
   }
 
@@ -409,7 +454,10 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   // It goes once its pill goes or no other property has the name.
   const [heldName, setHeldName] = useState<{ row: number; text: string } | null>(null);
   const heldRow = heldName
-    ? entries.findIndex((entry, index) => entry.id === heldName.row && nameTaken(index, heldName.text, entries, noteKeys()))
+    ? entries.findIndex(
+        (entry, index) =>
+          entry.id === heldName.row && nameTaken(index, heldName.text, entries, noteKeys()),
+      )
     : -1;
   useLayoutEffect(() => {
     if (heldName && heldRow === -1) setHeldName(null);
@@ -419,9 +467,9 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     const entry = entries[index];
     if (entry && nameTaken(index, key, entries, noteKeys())) {
       setHeldName({ row: entry.id, text: key });
-      // The row keeps the name it was read with until the new name is free.
       const read = entry.sourceKey ?? "";
-      if (entry.key !== read) setEntries(entries.map((row, i) => (i === index ? { ...row, key: read } : row)));
+      if (entry.key !== read)
+        setEntries(entries.map((row, i) => (i === index ? { ...row, key: read } : row)));
       return;
     }
     if (index === heldRow) setHeldName(null);
@@ -439,8 +487,9 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   // the document holds another list, the row shows that.
   const [listDraft, setListDraft] = useState<{ row: number; text: string } | null>(null);
   function draftText(entry: Row): string | undefined {
-    return entry.list && listDraft?.row === entry.id
-      && sameFrontmatterValue(listItems(listDraft.text), entryValue(entry))
+    return entry.list &&
+      listDraft?.row === entry.id &&
+      sameFrontmatterValue(listItems(listDraft.text), entryValue(entry))
       ? listDraft.text
       : undefined;
   }
@@ -466,9 +515,10 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     const target = focusNext.current;
     if (target === null) return;
     focusNext.current = null;
-    const element = target === "add"
-      ? line.current?.querySelector<HTMLElement>('[data-testid="property-add"]')
-      : line.current?.querySelectorAll<HTMLElement>('[data-testid="property-key"]')[target];
+    const element =
+      target === "add"
+        ? line.current?.querySelector<HTMLElement>('[data-testid="property-add"]')
+        : line.current?.querySelectorAll<HTMLElement>('[data-testid="property-key"]')[target];
     element?.focus();
   });
 
@@ -488,9 +538,13 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   const duplicates = duplicateKeySet(entries);
   // A duplicate, held or reserved name on a saved property shows its flag in
   // place of the saved line, so only Source still shows that line.
-  const flagHidesSaved = entries.some((entry, index) =>
-    entry.sourceKey !== undefined
-    && (index === heldRow || isReserved(entry.key) || duplicates.has(entry.key.trim().toLowerCase())));
+  const flagHidesSaved = entries.some(
+    (entry, index) =>
+      entry.sourceKey !== undefined &&
+      (index === heldRow ||
+        isReserved(entry.key) ||
+        duplicates.has(entry.key.trim().toLowerCase())),
+  );
   const showSource = props.onShowSource && (unshown || flagHidesSaved) ? props.onShowSource : null;
   if (readOnly && isEmpty && !showSource) return null;
 
@@ -498,7 +552,11 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     <section data-testid="properties-panel" className={PROPERTIES_PANEL} aria-label="Properties">
       <div ref={line} className={PROPERTIES_LINE}>
         {(locked || editRefused) && !readOnly ? (
-          <ReadOnlyPropertiesFlag testId="properties-locked" label="Properties are read-only" file={props.file} />
+          <ReadOnlyPropertiesFlag
+            testId="properties-locked"
+            label="Properties are read-only"
+            file={props.file}
+          />
         ) : null}
         {entries.map((entry, index) => {
           const reserved = isReserved(entry.key);
@@ -531,7 +589,11 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 <span
                   data-testid="property-duplicate"
                   className={TOPMATTER_FLAG}
-                  title={held === undefined ? "Use a unique property name." : "This name isn't saved. Another property has it."}
+                  title={
+                    held === undefined
+                      ? "Use a unique property name."
+                      : "This name isn't saved. Another property has it."
+                  }
                 >
                   duplicate name
                 </span>
@@ -539,7 +601,9 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                 <ReadOnlyValue
                   label={`Property ${entry.key || index + 1} value`}
                   value={entry.value}
-                  reason={showSource && !refused ? `${entry.readOnly} View it in Source.` : entry.readOnly}
+                  reason={
+                    showSource && !refused ? `${entry.readOnly} View it in Source.` : entry.readOnly
+                  }
                 />
               ) : (
                 <input
@@ -555,11 +619,16 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
                   onChange={(event) => setValue(index, event.target.value)}
                   // Leaving the list shows it as the document holds it. Switching
                   // to another window blurs the field without leaving it.
-                  onBlur={entry.list
-                    ? (event) => {
-                        if (event.currentTarget.ownerDocument.activeElement !== event.currentTarget) setListDraft(null);
-                      }
-                    : undefined}
+                  onBlur={
+                    entry.list
+                      ? (event) => {
+                          if (
+                            event.currentTarget.ownerDocument.activeElement !== event.currentTarget
+                          )
+                            setListDraft(null);
+                        }
+                      : undefined
+                  }
                   className={`${PILL_FIELD} text-ink`}
                 />
               )}
@@ -595,7 +664,9 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
             title="Add a property"
             onClick={add}
             className={`${ADD} transition duration-100 hover:bg-hover hover:text-muted${
-              isEmpty ? " opacity-0 group-hover/topmatter:opacity-100 focus-visible:opacity-100" : ""
+              isEmpty
+                ? " opacity-0 group-hover/topmatter:opacity-100 focus-visible:opacity-100"
+                : ""
             }`}
           >
             <Plus size={12} aria-hidden />

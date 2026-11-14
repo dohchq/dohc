@@ -1,7 +1,7 @@
-//! The durable materialization-**job** ledger (`plan §Filesystem/database crash
-//! boundary`, step 1 & 5). SQLite and the filesystem cannot share one
-//! transaction, so the intent to write a file is made durable first: a job row
-//! is committed in the same transaction as the canonical state it materializes.
+//! The durable materialization-**job** ledger. SQLite and the filesystem
+//! cannot share one transaction, so the intent to write a file is made
+//! durable first: a job row is committed in the same transaction as the
+//! canonical state it materializes.
 //! A separate filesystem pipeline (`dohc-engine-files::materialize`) then
 //! executes pending jobs — temp-write, flush, atomic replace — and marks them
 //! complete, replaying idempotently at startup after any crash.
@@ -20,7 +20,6 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 /// wrote newer content, which must be preserved, never clobbered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Preimage {
-    /// The target is expected to be absent (a create).
     Absent,
     /// The target is expected to still hold exactly this content hash (an
     /// overwrite of known content).

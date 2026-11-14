@@ -17,11 +17,18 @@ export interface DesktopChatBookmarkProjectionState {
 }
 
 type BookmarkWorkspace = { workspaceId: string; rootPath: string; attachmentId?: symbol };
-type BookmarkCapture = Pick<WorkspaceEngineCapture, "writeGeneratedTextFile" | "archiveGeneratedTextFile" | "checkGeneratedTextArchive" | "generatedTextArchiveMoved">;
+type BookmarkCapture = Pick<
+  WorkspaceEngineCapture,
+  | "writeGeneratedTextFile"
+  | "archiveGeneratedTextFile"
+  | "checkGeneratedTextArchive"
+  | "generatedTextArchiveMoved"
+>;
 
 export function chatBookmarkDestination(title: string, targetId: string): string {
-  const stem = title
-    .replace(/[<>:"/\\|?*\u0000-\u001f]/gu, " ")
+  const stem =
+    title
+      .replace(/[<>:"/\\|?*\u0000-\u001f]/gu, " ")
       .replace(/\s+/gu, " ")
       .trim()
       .slice(0, 70) || "Chat";
@@ -43,9 +50,21 @@ export function createDesktopChatBookmarks<
   findWorkspace(workspaceId: string): Workspace | null;
   requireWorkspaceAuthority(workspaceId: string): WorkspaceAuthorityLease<Workspace, State>;
   canonicalWorkspaceFor(lease: WorkspaceAuthorityLease<Workspace, State>): Workspace;
-  linkedChatStoreFor(workspace: Workspace): Pick<DesktopLinkedChatStore,
-    "findBookmark" | "listThreads" | "listMessages" | "listChannels" |
-    "markBookmarkReady" | "markBookmarkFailed" | "listPendingBookmarks" | "archiveBookmark" | "markBookmarkPending" | "retryFailedBookmark">;
+  linkedChatStoreFor(
+    workspace: Workspace,
+  ): Pick<
+    DesktopLinkedChatStore,
+    | "findBookmark"
+    | "listThreads"
+    | "listMessages"
+    | "listChannels"
+    | "markBookmarkReady"
+    | "markBookmarkFailed"
+    | "listPendingBookmarks"
+    | "archiveBookmark"
+    | "markBookmarkPending"
+    | "retryFailedBookmark"
+  >;
   warmCredentialCache(): Promise<void>;
   localUserId(): string;
   sharedViewOf(workspaceId: string): unknown;
@@ -54,8 +73,16 @@ export function createDesktopChatBookmarks<
     engineCaptureFor(workspaceId: string, rootPath?: string): BookmarkCapture | null;
   };
 }) {
-  const { findWorkspace, requireWorkspaceAuthority, canonicalWorkspaceFor,
-    linkedChatStoreFor, warmCredentialCache, localUserId, sharedViewOf, activity } = dependencies;
+  const {
+    findWorkspace,
+    requireWorkspaceAuthority,
+    canonicalWorkspaceFor,
+    linkedChatStoreFor,
+    warmCredentialCache,
+    localUserId,
+    sharedViewOf,
+    activity,
+  } = dependencies;
   type Lease = WorkspaceAuthorityLease<Workspace, State>;
   let timer: ReturnType<typeof setInterval> | null = null;
   let stopped = false;
@@ -82,7 +109,10 @@ export function createDesktopChatBookmarks<
 
   function acquireWorkspace(workspace: Workspace): Lease {
     const lease = requireWorkspaceAuthority(workspace.workspaceId);
-    if (workspace.attachmentId !== undefined && workspace.attachmentId !== lease.binding.attachmentId) {
+    if (
+      workspace.attachmentId !== undefined &&
+      workspace.attachmentId !== lease.binding.attachmentId
+    ) {
       lease.release();
       throw new Error("This workspace was closed. Open it again.");
     }
@@ -95,106 +125,29 @@ export function createDesktopChatBookmarks<
     bookmark: ChatBookmark,
     lease: Lease,
   ): Promise<ChatBookmark> {
-    return runInWorkspaceAuthorityLane(
-      lease,
-      `bookmark:${bookmark.bookmarkId}`,
-      async () => {
-        const store = linkedChatStoreFor(workspace);
-        const current = await store.findBookmark({
-          workspaceId: workspace.workspaceId,
-          ownerUserId: bookmark.ownerUserId,
-          bookmarkId: bookmark.bookmarkId,
-        });
-        if (!current) throw new Error("That bookmark no longer exists.");
-        // A duplicate worker, a newer live generation, or an archive may have
-        // won while this call waited for the bookmark queue.
-        if (
-          current.projectionState !== "pending" ||
-          current.generation !== bookmark.generation
-        ) {
-          return current;
-        }
-        bookmark = current;
-        try {
-          if (bookmark.state === "archived") {
-            const archivedPath = chatBookmarkArchiveDestination(bookmark);
-            // Recovery validates the bookmark-specific frontmatter when legacy
-            // state or a crash left projectionObjectId unclaimed. It can recover
-            // from either side of an already-completed engine rename.
-            const archived = await archiveChatBookmarkProjection({
-              bookmark,
-              archivedPath,
-              capture,
-            });
-            const ready = await store.markBookmarkReady({
-              workspaceId: workspace.workspaceId,
-              ownerUserId: bookmark.ownerUserId,
-              bookmarkId: bookmark.bookmarkId,
-              generation: bookmark.generation,
-              projectionObjectId: archived.objectId,
-              // The store owns the logical active projection path. The capture
-              // layer has already moved this exact object to archivedPath.
-              projectionPath: bookmark.destinationPath,
-            });
-            return ready.bookmark;
-          }
-          const threads = await store.listThreads({
-            workspaceId: workspace.workspaceId,
-          });
-          const thread = threads.find(
-            (entry) => entry.id === bookmark.threadId,
-          );
-          if (!thread) throw new Error("The source chat no longer exists.");
-          const allMessages = await store.listMessages({
-            workspaceId: workspace.workspaceId,
-            threadId: bookmark.threadId,
-          });
-          let selectedMessages = allMessages;
-          if (bookmark.messageId) {
-            const selected = allMessages.find(
-              (message) => message.id === bookmark.messageId,
-            );
-            if (!selected)
-              throw new Error("The bookmarked message no longer exists.");
-            const parent = selected.parentMessageId
-              ? allMessages.find(
-                  (message) => message.id === selected.parentMessageId,
-                )
-              : undefined;
-            selectedMessages = parent ? [parent, selected] : [selected];
-          }
-          const channel = thread.channelId
-            ? (
-                await store.listChannels({ workspaceId: workspace.workspaceId })
-              ).find((entry) => entry.id === thread.channelId)
-            : undefined;
-          const text = formatChatBookmarkProjection({
-            bookmarkId: bookmark.bookmarkId,
-            threadId: bookmark.threadId,
-            ...(bookmark.messageId ? { messageId: bookmark.messageId } : {}),
-            ...(channel
-              ? { channelId: channel.id, channelName: channel.name }
-              : {}),
-            title: thread.title,
-            mode: bookmark.mode,
-            updatedAtMs: Date.now(),
-            ...(bookmark.mode === "snapshot"
-              ? { snapshotAtMs: bookmark.createdAtMs }
-              : {}),
-            messages: selectedMessages.map((message) => ({
-              id: message.id,
-              authorKind: message.author.kind,
-              authorDisplayName: message.author.displayName,
-              body: message.body,
-              createdAtMs: message.createdAtMs,
-              ...(message.parentMessageId
-                ? { parentMessageId: message.parentMessageId }
-                : {}),
-            })),
-          });
-          const written = await writeChatBookmarkProjection({
+    return runInWorkspaceAuthorityLane(lease, `bookmark:${bookmark.bookmarkId}`, async () => {
+      const store = linkedChatStoreFor(workspace);
+      const current = await store.findBookmark({
+        workspaceId: workspace.workspaceId,
+        ownerUserId: bookmark.ownerUserId,
+        bookmarkId: bookmark.bookmarkId,
+      });
+      if (!current) throw new Error("That bookmark no longer exists.");
+      // A duplicate worker, a newer live generation, or an archive may have
+      // won while this call waited for the bookmark queue.
+      if (current.projectionState !== "pending" || current.generation !== bookmark.generation) {
+        return current;
+      }
+      bookmark = current;
+      try {
+        if (bookmark.state === "archived") {
+          const archivedPath = chatBookmarkArchiveDestination(bookmark);
+          // Recovery validates the bookmark-specific frontmatter when legacy
+          // state or a crash left projectionObjectId unclaimed. It can recover
+          // from either side of an already-completed engine rename.
+          const archived = await archiveChatBookmarkProjection({
             bookmark,
-            text,
+            archivedPath,
             capture,
           });
           const ready = await store.markBookmarkReady({
@@ -202,27 +155,81 @@ export function createDesktopChatBookmarks<
             ownerUserId: bookmark.ownerUserId,
             bookmarkId: bookmark.bookmarkId,
             generation: bookmark.generation,
-            projectionObjectId: written.objectId,
+            projectionObjectId: archived.objectId,
+            // The store owns the logical active projection path. The capture
+            // layer has already moved this exact object to archivedPath.
             projectionPath: bookmark.destinationPath,
           });
           return ready.bookmark;
-        } catch (error) {
-          const failed = await store.markBookmarkFailed({
-            workspaceId: workspace.workspaceId,
-            ownerUserId: bookmark.ownerUserId,
-            bookmarkId: bookmark.bookmarkId,
-            generation: bookmark.generation,
-            failureReason:
-              error instanceof Error ? error.message : "Projection failed",
-          });
-          // A page with live editing on keeps its refusal, so Chats can offer Try again and Live documents.
-          if (isLivePageOwnedRefusal(error)) throw error;
-          throw new Error(
-            failed.bookmark.failureReason ?? "Could not save chat bookmark.",
-          );
         }
-      },
-    );
+        const threads = await store.listThreads({
+          workspaceId: workspace.workspaceId,
+        });
+        const thread = threads.find((entry) => entry.id === bookmark.threadId);
+        if (!thread) throw new Error("The source chat no longer exists.");
+        const allMessages = await store.listMessages({
+          workspaceId: workspace.workspaceId,
+          threadId: bookmark.threadId,
+        });
+        let selectedMessages = allMessages;
+        if (bookmark.messageId) {
+          const selected = allMessages.find((message) => message.id === bookmark.messageId);
+          if (!selected) throw new Error("The bookmarked message no longer exists.");
+          const parent = selected.parentMessageId
+            ? allMessages.find((message) => message.id === selected.parentMessageId)
+            : undefined;
+          selectedMessages = parent ? [parent, selected] : [selected];
+        }
+        const channel = thread.channelId
+          ? (await store.listChannels({ workspaceId: workspace.workspaceId })).find(
+              (entry) => entry.id === thread.channelId,
+            )
+          : undefined;
+        const text = formatChatBookmarkProjection({
+          bookmarkId: bookmark.bookmarkId,
+          threadId: bookmark.threadId,
+          ...(bookmark.messageId ? { messageId: bookmark.messageId } : {}),
+          ...(channel ? { channelId: channel.id, channelName: channel.name } : {}),
+          title: thread.title,
+          mode: bookmark.mode,
+          updatedAtMs: Date.now(),
+          ...(bookmark.mode === "snapshot" ? { snapshotAtMs: bookmark.createdAtMs } : {}),
+          messages: selectedMessages.map((message) => ({
+            id: message.id,
+            authorKind: message.author.kind,
+            authorDisplayName: message.author.displayName,
+            body: message.body,
+            createdAtMs: message.createdAtMs,
+            ...(message.parentMessageId ? { parentMessageId: message.parentMessageId } : {}),
+          })),
+        });
+        const written = await writeChatBookmarkProjection({
+          bookmark,
+          text,
+          capture,
+        });
+        const ready = await store.markBookmarkReady({
+          workspaceId: workspace.workspaceId,
+          ownerUserId: bookmark.ownerUserId,
+          bookmarkId: bookmark.bookmarkId,
+          generation: bookmark.generation,
+          projectionObjectId: written.objectId,
+          projectionPath: bookmark.destinationPath,
+        });
+        return ready.bookmark;
+      } catch (error) {
+        const failed = await store.markBookmarkFailed({
+          workspaceId: workspace.workspaceId,
+          ownerUserId: bookmark.ownerUserId,
+          bookmarkId: bookmark.bookmarkId,
+          generation: bookmark.generation,
+          failureReason: error instanceof Error ? error.message : "Projection failed",
+        });
+        // A page with live editing on keeps its refusal, so Chats can offer Try again and Live documents.
+        if (isLivePageOwnedRefusal(error)) throw error;
+        throw new Error(failed.bookmark.failureReason ?? "Could not save chat bookmark.");
+      }
+    });
   }
 
   async function materializePendingForAuthority(
@@ -243,21 +250,21 @@ export function createDesktopChatBookmarks<
       limit: 50,
     });
     for (const bookmark of pending) {
-      await materializeForAuthority(workspace, capture, bookmark, lease).catch(
-        (error) => {
-          console.error("[desktop] chat bookmark projection:", error);
-          // Re-flag so the worker's next tick retries. If markBookmarkFailed
-          // itself failed, the row is still pending and this is the only retry
-          // path; if it succeeded, the row left listPendingBookmarks and the
-          // extra pass finds nothing — no permanent-failure loop.
-          retryProjection(lease);
-        },
-      );
+      await materializeForAuthority(workspace, capture, bookmark, lease).catch((error) => {
+        console.error("[desktop] chat bookmark projection:", error);
+        // Re-flag so the worker's next tick retries. If markBookmarkFailed
+        // itself failed, the row is still pending and this is the only retry
+        // path; if it succeeded, the row left listPendingBookmarks and the
+        // extra pass finds nothing — no permanent-failure loop.
+        retryProjection(lease);
+      });
     }
   }
 
   async function materializeChatBookmark(
-    workspace: Workspace, capture: BookmarkCapture, bookmark: ChatBookmark,
+    workspace: Workspace,
+    capture: BookmarkCapture,
+    bookmark: ChatBookmark,
   ): Promise<ChatBookmark> {
     const lease = acquireWorkspace(workspace);
     try {
@@ -268,7 +275,10 @@ export function createDesktopChatBookmarks<
   }
 
   async function archiveChatBookmark(
-    workspace: Workspace, capture: BookmarkCapture, ownerUserId: string, bookmarkId: string,
+    workspace: Workspace,
+    capture: BookmarkCapture,
+    ownerUserId: string,
+    bookmarkId: string,
   ): Promise<ChatBookmark> {
     const lease = acquireWorkspace(workspace);
     try {
@@ -289,15 +299,34 @@ export function createDesktopChatBookmarks<
           const failed = bookmark.state === "archived" && bookmark.projectionState === "failed";
           // The engine already moved the page, so the archive finishes at
           // this generation's path, where the page is now.
-          if (failed && await capture.generatedTextArchiveMoved({ fromPath: bookmark.destinationPath,
-            toPath: chatBookmarkArchiveDestination(bookmark),
-            ...(bookmark.projectionObjectId ? { expectedObjectId: bookmark.projectionObjectId } : {}) })) {
-            return (await store.retryFailedBookmark({ workspaceId: workspace.workspaceId, ownerUserId, bookmarkId,
-              generation: bookmark.generation })).bookmark;
+          if (
+            failed &&
+            (await capture.generatedTextArchiveMoved({
+              fromPath: bookmark.destinationPath,
+              toPath: chatBookmarkArchiveDestination(bookmark),
+              ...(bookmark.projectionObjectId
+                ? { expectedObjectId: bookmark.projectionObjectId }
+                : {}),
+            }))
+          ) {
+            return (
+              await store.retryFailedBookmark({
+                workspaceId: workspace.workspaceId,
+                ownerUserId,
+                bookmarkId,
+                generation: bookmark.generation,
+              })
+            ).bookmark;
           }
           // A page with live editing on keeps its bookmark and its place.
-          if (bookmark.state === "active" || failed) await capture.checkGeneratedTextArchive(bookmark.destinationPath);
-          if (failed) return store.markBookmarkPending({ workspaceId: workspace.workspaceId, ownerUserId, bookmarkId });
+          if (bookmark.state === "active" || failed)
+            await capture.checkGeneratedTextArchive(bookmark.destinationPath);
+          if (failed)
+            return store.markBookmarkPending({
+              workspaceId: workspace.workspaceId,
+              ownerUserId,
+              bookmarkId,
+            });
           return store.archiveBookmark({
             workspaceId: workspace.workspaceId,
             ownerUserId,
@@ -305,12 +334,7 @@ export function createDesktopChatBookmarks<
           });
         },
       );
-      return await materializeForAuthority(
-        workspace,
-        capture,
-        archived,
-        lease,
-      );
+      return await materializeForAuthority(workspace, capture, archived, lease);
     } finally {
       lease.release();
     }
@@ -357,9 +381,7 @@ export function createDesktopChatBookmarks<
           continue;
         }
         const workspace = canonicalWorkspaceFor(lease);
-        const capture = activity.engineCaptureFor(workspaceId,
-          workspace.rootPath,
-        );
+        const capture = activity.engineCaptureFor(workspaceId, workspace.rootPath);
         if (!capture || sharedViewOf(workspaceId)) {
           lease.release();
           continue;
@@ -388,6 +410,12 @@ export function createDesktopChatBookmarks<
     timer = null;
   }
 
-  return { queueChatBookmarkProjection, materializeChatBookmark, archiveChatBookmark,
-    projectPendingChatBookmarks, start, stop };
+  return {
+    queueChatBookmarkProjection,
+    materializeChatBookmark,
+    archiveChatBookmark,
+    projectPendingChatBookmarks,
+    start,
+    stop,
+  };
 }

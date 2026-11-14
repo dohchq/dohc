@@ -7,7 +7,7 @@ describe("stripMarkdown", () => {
   it("keeps the words of an agent's reply and drops its syntax", () => {
     expect(
       strip(
-        "## Plan for **Friday**\n\nI'm in the *Personal* workspace, with `Hello.md`.\n\n- one\n- [x] two\n3. three\n\n> Remember the ferry.\n\n---\n\nSee [the plan](https://example.com/plan \"Plan\") and ![the cabin](https://example.com/c.png).",
+        '## Plan for **Friday**\n\nI\'m in the *Personal* workspace, with `Hello.md`.\n\n- one\n- [x] two\n3. three\n\n> Remember the ferry.\n\n---\n\nSee [the plan](https://example.com/plan "Plan") and ![the cabin](https://example.com/c.png).',
       ),
     ).toBe(
       "Plan for Friday\n\nI'm in the Personal workspace, with Hello.md.\n\n• one\n• two\n3. three\n\nRemember the ferry.\n\n\nSee the plan and the cabin.",
@@ -15,7 +15,9 @@ describe("stripMarkdown", () => {
   });
 
   it("keeps code exactly, with its fences gone", () => {
-    expect(strip("Run:\n```ts\nconst a = **b** * c_d;\n```\ndone")).toBe("Run:\nconst a = **b** * c_d;\ndone");
+    expect(strip("Run:\n```ts\nconst a = **b** * c_d;\n```\ndone")).toBe(
+      "Run:\nconst a = **b** * c_d;\ndone",
+    );
     expect(strip("use ``a ` b`` and `x*y*z`")).toBe("use a ` b and x*y*z");
   });
 
@@ -27,7 +29,6 @@ describe("stripMarkdown", () => {
       "*not bold* & A &bogus; https://example.com <b>",
     );
     expect(strip("&constructor; &toString;")).toBe("&constructor; &toString;");
-    // A run with nothing to pair keeps its characters.
     expect(strip("file_ and a* b and ~c and __init__")).toBe("file_ and a* b and ~c and init");
   });
 
@@ -38,13 +39,17 @@ describe("stripMarkdown", () => {
   });
 
   it("drops reference definitions and table rules, and spaces table cells", () => {
-    expect(strip("See [the plan][p].\n\n[p]: https://example.com\n\n| Day | Cost |\n| --- | ---: |\n| Fri | $180 |")).toBe(
-      "See the plan.\n\n\n Day · Cost \n Fri · $180 ",
-    );
+    expect(
+      strip(
+        "See [the plan][p].\n\n[p]: https://example.com\n\n| Day | Cost |\n| --- | ---: |\n| Fri | $180 |",
+      ),
+    ).toBe("See the plan.\n\n\n Day · Cost \n Fri · $180 ");
   });
 
   it("keeps line breaks, including CRLF", () => {
-    expect(strip("first **line**\r\nsecond line\n\nthird")).toBe("first line\nsecond line\n\nthird");
+    expect(strip("first **line**\r\nsecond line\n\nthird")).toBe(
+      "first line\nsecond line\n\nthird",
+    );
   });
 
   it("keeps atoms as written and says where they landed", () => {
@@ -56,7 +61,9 @@ describe("stripMarkdown", () => {
       { start: note, end: note + "@[notes/_draft_.md]".length },
     ]);
     expect(result.text).toBe("hi @sam_x_ see the @[notes/_draft_.md] @code");
-    expect(result.atoms.map((atom) => [atom.index, result.text.slice(atom.start, atom.end)])).toEqual([
+    expect(
+      result.atoms.map((atom) => [atom.index, result.text.slice(atom.start, atom.end)]),
+    ).toEqual([
       [0, "@sam_x_"],
       [1, "@[notes/_draft_.md]"],
     ]);
@@ -71,8 +78,12 @@ describe("stripMarkdown", () => {
   });
 
   it("ends a link's target at the parenthesis that balances its opener", () => {
-    expect(strip("See [the dish](https://en.wikipedia.org/wiki/Fish_(food)) today")).toBe("See the dish today");
-    expect(strip("See [a](https://x.com/\\)) and [b](https://x.com/\\() now")).toBe("See a and b now");
+    expect(strip("See [the dish](https://en.wikipedia.org/wiki/Fish_(food)) today")).toBe(
+      "See the dish today",
+    );
+    expect(strip("See [a](https://x.com/\\)) and [b](https://x.com/\\() now")).toBe(
+      "See a and b now",
+    );
     expect(strip("See [a](b (c) now")).toBe("See [a](b (c) now");
   });
 
@@ -80,14 +91,14 @@ describe("stripMarkdown", () => {
     expect(strip("Run this:\n\n    notify **@sam** now\n\n\tand *this*\nthen **stop**")).toBe(
       "Run this:\n\nnotify **@sam** now\n\nand *this*\nthen stop",
     );
-    // An indented line inside a paragraph continues it.
     expect(strip("text\n    more **words**")).toBe("text\nmore words");
   });
 
   // The shapes that make Markdown parsers slow, each built at a given size. A
   // strip that rereads text takes far more steps per character on a larger
   // copy of one of them.
-  const rep = (unit: string, size: number) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+  const rep = (unit: string, size: number) =>
+    unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
   const SHAPES: Record<string, (size: number) => string> = {
     nestedBrackets: (size) => rep("[", size / 2) + rep("]", size / 2),
     linkClosers: (size) => rep("a]", size),
@@ -115,7 +126,10 @@ describe("stripMarkdown", () => {
     unclosedParenTitles: (size) => rep("[a](b (", size),
     unclosedAngles: (size) => rep("[a](<b", size),
     strike: (size) => rep("~~a ", size / 2) + rep("a~~ ", size / 2),
-    backtickRuns: (size) => Array.from({ length: 361 }, (_, run) => `e${"`".repeat(run + 1)}`).join("").slice(0, size),
+    backtickRuns: (size) =>
+      Array.from({ length: 361 }, (_, run) => `e${"`".repeat(run + 1)}`)
+        .join("")
+        .slice(0, size),
     singleTicks: (size) => rep("` ", size),
     angles: (size) => rep("<", size),
     autolinkOpeners: (size) => rep("<a:", size),

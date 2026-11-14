@@ -114,9 +114,11 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
   const showsSearchHit = searchChatTarget !== null && searchChatTarget.tab === focusedTabPath;
   const pendingHit = showsSearchHit && !searchChatTarget.read ? searchChatTarget : null;
   const tab = parseTab(focusedTabPath);
-  const conversationTab = !shareView && !showsSearchHit &&
-    tab?.kind === "chat" && (tab.target.kind === "channel" || tab.target.kind === "dm");
-  // Null for a tab that is not a conversation's.
+  const conversationTab =
+    !shareView &&
+    !showsSearchHit &&
+    tab?.kind === "chat" &&
+    (tab.target.kind === "channel" || tab.target.kind === "dm");
   const published = useAboutConversation(workspaceId, conversationTab ? focusedTabPath : null);
   const conversation = conversationTab ? published : null;
   const [conversationSections, setConversationSections] = useState(CONVERSATION_SECTIONS_OPEN);
@@ -132,82 +134,80 @@ export const ShellAboutRail = memo(function ShellAboutRail(props: {
         {/* Every loading state here puts its lines at the top of the panel,
             so each one takes over from the last without blinking. */}
         <SkeletonSlot>
-        {!captureAvailable && !shareView ? (
-          // Main's capture cannot serve the file's chats here, so mounting
-          // About would issue calls it refuses and show the refusal as an
-          // error. The rail stays where the user left it and states the
-          // fact, with the one next step that can change it. Before the
-          // decision it states nothing.
-          //
-          // A shared view needs no capture and waits for no decision: main
-          // answers its per-file chat from the share scope.
-          //
-          // A file's links come from the engine's own index, not from
-          // capture, so they stay above the fact.
-          !captureDecided ? (
+          {!captureAvailable && !shareView ? (
+            !captureDecided ? (
+              loading
+            ) : activeDocumentPath ? (
+              <Suspense fallback={loading}>
+                <LazyAboutFileChatsOff
+                  workspaceId={workspaceId}
+                  path={activeDocumentPath}
+                  revision={linksRevision}
+                  onOpenLink={openPathAtLine}
+                  notices={aboutNotices}
+                  words={chatsOffCopy(syncStatus)}
+                />
+              </Suspense>
+            ) : (
+              <div
+                data-testid="about-rail-off"
+                className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
+              >
+                {chatsOffCopy(syncStatus)}
+              </div>
+            )
+          ) : conversation === undefined ? (
             loading
-          ) : activeDocumentPath ? (
+          ) : conversation !== null && conversation !== "none" ? (
             <Suspense fallback={loading}>
-              <LazyAboutFileChatsOff
+              <LazyAboutConversationPanel
                 workspaceId={workspaceId}
-                path={activeDocumentPath}
-                revision={linksRevision}
-                onOpenLink={openPathAtLine}
+                conversation={conversation}
+                sectionsOpen={conversationSections}
+                onToggleSection={(id) =>
+                  setConversationSections((open) => ({ ...open, [id]: !open[id] }))
+                }
+                onOpenFile={openPathWithHeading}
                 notices={aboutNotices}
-                words={chatsOffCopy(syncStatus)}
+                accessContext={accessContext}
               />
             </Suspense>
           ) : (
-            <div
-              data-testid="about-rail-off"
-              className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
-            >
-              {chatsOffCopy(syncStatus)}
-            </div>
-          )
-        ) : conversation === undefined ? (
-          loading
-        ) : conversation !== null && conversation !== "none" ? (
-          <Suspense fallback={loading}>
-            <LazyAboutConversationPanel
-              workspaceId={workspaceId}
-              conversation={conversation}
-              sectionsOpen={conversationSections}
-              onToggleSection={(id) => setConversationSections((open) => ({ ...open, [id]: !open[id] }))}
-              onOpenFile={openPathWithHeading}
-              notices={aboutNotices}
-              accessContext={accessContext}
-            />
-          </Suspense>
-        ) : (
-          <Suspense fallback={loading}>
-            <LazyLinkedChatsPanel
-              workspaceId={workspaceId}
-              filePath={activeDocumentPath}
-              tabPath={focusedTabPath}
-              aboutTabOpen={aboutTabOpen}
-              {...(shareView
-                ? { shareReadOnly: true }
-                : { history: { revision: historyRevision, paused: isHistoryPaused(syncStatus), onOpenMoment: openMoment, onOpenHistory: openHistory } })}
-              // Chats that link here are a Chats call, refused without capture.
-              links={{
-                revision: linksRevision,
-                onOpenLink: openPathAtLine,
-                ...(captureAvailable ? { onOpenChat: openChatMention } : {}),
-              }}
-              initialThread={pendingHit?.thread ?? null}
-              initialFocusMessageId={pendingHit?.focusMessageId}
-              onInitialThreadConsumed={onSearchHitRead}
-              onInitialThreadClosed={onSearchHitClosed}
-              onOpenPath={openPathWithHeading}
-              onThreadRead={onChatsThreadRead}
-              onError={reportFailureMessage}
-              onAgentWaitsForTrust={onAgentWaitsForTrust}
-              notices={aboutNotices}
-              accessContext={accessContext}
-            />
-          </Suspense>
-        )}
+            <Suspense fallback={loading}>
+              <LazyLinkedChatsPanel
+                workspaceId={workspaceId}
+                filePath={activeDocumentPath}
+                tabPath={focusedTabPath}
+                aboutTabOpen={aboutTabOpen}
+                {...(shareView
+                  ? { shareReadOnly: true }
+                  : {
+                      history: {
+                        revision: historyRevision,
+                        paused: isHistoryPaused(syncStatus),
+                        onOpenMoment: openMoment,
+                        onOpenHistory: openHistory,
+                      },
+                    })}
+                // Chats that link here are a Chats call, refused without capture.
+                links={{
+                  revision: linksRevision,
+                  onOpenLink: openPathAtLine,
+                  ...(captureAvailable ? { onOpenChat: openChatMention } : {}),
+                }}
+                initialThread={pendingHit?.thread ?? null}
+                initialFocusMessageId={pendingHit?.focusMessageId}
+                onInitialThreadConsumed={onSearchHitRead}
+                onInitialThreadClosed={onSearchHitClosed}
+                onOpenPath={openPathWithHeading}
+                onThreadRead={onChatsThreadRead}
+                onError={reportFailureMessage}
+                onAgentWaitsForTrust={onAgentWaitsForTrust}
+                notices={aboutNotices}
+                accessContext={accessContext}
+              />
+            </Suspense>
+          )}
         </SkeletonSlot>
       </ErrorBoundary>
     </AboutRail>

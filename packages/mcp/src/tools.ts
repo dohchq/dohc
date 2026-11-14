@@ -1,12 +1,20 @@
-import { ChatLinksInput } from "@dohc/workspace-contracts/chat-links";
-import { ChatFileMentionsInput } from "@dohc/workspace-contracts/chat-file-mentions";
-import { LinksEdgesInput, LinksInInput, LinksResolveInput } from "@dohc/workspace-contracts/links";
 import { HistoryOperationId } from "@dohc/workspace-contracts/history-operation";
-import { WorkspaceSyncPause, workspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
+import {
+  WorkspaceSyncPause,
+  workspaceSyncPauseStatus,
+} from "@dohc/workspace-contracts/workspace-sync";
 import { ShareCopyInput } from "@dohc/workspace-contracts/share-copy";
-import { ShareLinkAgentDisconnectInput, ShareLinkAgentsInput } from "@dohc/workspace-contracts/share-link-agents";
+import {
+  ShareLinkAgentDisconnectInput,
+  ShareLinkAgentsInput,
+} from "@dohc/workspace-contracts/share-link-agents";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
-import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
+import { byName, distinct, mapNamed } from "@dohc/workspace-contracts/operation-declaration";
+import {
+  normalizeShareLabel,
+  shareSubjectFallback,
+  shareSenderLabel,
+} from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
 import { generateAppSource } from "@dohc/workspace-core/app-source";
 import { isRecord } from "@dohc/workspace-core/records";
@@ -20,7 +28,30 @@ import { fileVersionError, fileVersionReason } from "@dohc/workspace-contracts/f
 // materialized on this host. Writes are scoped to the root and never
 // auto-apply a boundary crossing.
 
-import { databaseSyncStrategy, DOHC_METADATA_GUARD, frameworkConfigName, hasIgnoredSegment, hasWebDependency, hasWebScript, mediaTypeForPath, notARealFolderRefusal, outsideWorkspaceRefusal, packageManagerFromFiles, validateUserMaterializePath, validateUserReadPath, type DohcPathGuard, type DohcSiteConfig, type PackageJson, type SiteConfidence, type SiteDiagnostic, type SiteKind, type SiteScripts, type WorkspaceSite, isSharedWithMePath, safeRelativeConfigPath } from "@dohc/workspace-core";
+import {
+  databaseSyncStrategy,
+  DOHC_METADATA_GUARD,
+  frameworkConfigName,
+  hasIgnoredSegment,
+  hasWebDependency,
+  hasWebScript,
+  mediaTypeForPath,
+  notARealFolderRefusal,
+  outsideWorkspaceRefusal,
+  packageManagerFromFiles,
+  validateUserMaterializePath,
+  validateUserReadPath,
+  type DohcPathGuard,
+  type DohcSiteConfig,
+  type PackageJson,
+  type SiteConfidence,
+  type SiteDiagnostic,
+  type SiteKind,
+  type SiteScripts,
+  type WorkspaceSite,
+  isSharedWithMePath,
+  safeRelativeConfigPath,
+} from "@dohc/workspace-core";
 import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
 import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
@@ -28,6 +59,7 @@ import { DATASET_CAPABILITIES, DatasetRequest } from "@dohc/cli/dataset";
 import {
   CLI_PROTOCOL_VERSION,
   APP_PUBLICATION_CAPABILITIES,
+  DECLARED_VERBS,
   collectionCreateFieldsSchema,
   collectionQueryCursorSchema,
   collectionQueryFilterSchema,
@@ -41,6 +73,7 @@ import {
   type CliResultByVerb,
   type CliStreamPosition,
   type CliVerb,
+  type DeclaredOperation,
   type VersionResolution,
 } from "@dohc/cli/protocol";
 import type { z } from "zod";
@@ -49,102 +82,99 @@ import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 // The resolved-path rule lives in one place for every surface that decides
 // authority from a path. This surface owns only its wording.
-import { errnoCode,
+import {
+  errnoCode,
   realRelativeInRoot,
   resolvedAreaRefusal,
   type RealTarget,
 } from "@dohc/workspace-core/realPath";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import {
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  realpath,
-  stat,
-} from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 
-export const MCP_TOOL_CAPABILITIES = {
-  dohc_read_share_copy: ["share.copy.read"],
-  dohc_list_link_agents: ["share.link.agents.list"],
-  dohc_disconnect_link_agent: ["share.link.agent.disconnect"],
-  dohc_list_automations: ["automation.list"],
-  dohc_switch_automation: ["automation.switch"],
-  dohc_dataset: Object.values(DATASET_CAPABILITIES),
-  dohc_publish_app: Object.values(APP_PUBLICATION_CAPABILITIES),
-  dohc_list_workspaces: ["workspace.list"],
-  dohc_workspace_status: ["workspace.status"],
-  dohc_stop_workspace_sync: ["workspace.sync.stop"],
-  dohc_list_changes: ["history.list"],
-  dohc_list_kept_copies: ["file.kept.list"],
-  dohc_list_notices: ["notice.list"],
-  dohc_save_kept_copy: ["file.kept.save"],
-  dohc_restore_protected_copy: ["file.protected.restore"],
-  dohc_discard_protected_copy: ["file.protected.discard"],
-  dohc_save_recovery_copy: ["share.live.document.recovery.save"],
-  dohc_retry_kept_edits: ["share.live.document.retry"],
-  dohc_stop_again: ["share.live.document.stop"],
-  dohc_list_live_documents: ["share.live.documents.list"],
-  dohc_stop_live_editing: ["share.live.document.stop"],
-  dohc_resume_live_editing: ["share.live.document.resume"],
-  dohc_list_retained_copies: ["file.retained.list"],
-  dohc_delete_retained_copies: ["file.retained.delete"],
-  dohc_chat_file_mentions: ["chat.read"],
-  dohc_chat_links: ["chat.read"],
-  dohc_link: ["work.reference.make"],
-  dohc_links_edges: ["links.edges"],
-  dohc_links_in: ["links.in"],
-  dohc_links_resolve: ["links.resolve"],
-  dohc_read_change: ["history.read"],
-  dohc_list_files: ["file.list"],
-  dohc_read_file: ["file.read"],
-  dohc_search_files: ["file.search"],
-  dohc_read_document: ["document.read"],
-  dohc_read_held_change: ["document.held.read"],
-  dohc_held_note_change: ["document.held.change"],
-  dohc_edit_document: ["document.edit"],
-  dohc_create_document: ["document.create"],
-  dohc_write_file: ["file.write"],
-  dohc_create_directory: ["folder.create"],
-  dohc_read_operation: ["history.operation.read"],
-  dohc_undo_operation: ["history.operation.undo"],
-  dohc_list_versions: ["version.list"],
-  dohc_compare_version: ["version.compare"],
-  dohc_list_version_conflicts: ["version.conflicts.list"],
-  dohc_create_version: ["version.create"],
-  dohc_switch_version: ["version.switch"],
-  dohc_merge_version: ["version.merge"],
-  dohc_resolve_version_conflict: ["version.conflict.resolve"],
-  dohc_duplicate_file: ["file.duplicate"],
-  dohc_move_path: ["file.move"],
-  dohc_delete_path: ["file.delete"],
-  dohc_detect_apps: ["app.detect"],
-  dohc_create_app: ["app.create"],
-  dohc_test_app: ["app.test"],
-  dohc_import_data: ["data.import"],
-  dohc_query_database: ["data.query"],
-  dohc_list_file_chats: ["file.chats.list"],
-  dohc_wait_for_messages: ["chat.inbox.read"],
-  dohc_read_chat: ["chat.read"],
-  dohc_list_groups: ["group.list"],
-  dohc_create_group: ["group.create"],
-  dohc_start_group_chat: ["chat.post"],
-  dohc_start_file_chat: ["file.chat.start"],
-  dohc_reply_to_chat: ["chat.reply"],
-  dohc_retry_chat_run: ["agent.run.retry"],
-  dohc_query_collection: ["collection.query"],
-  dohc_read_record: ["collection.record.read"],
-  dohc_set_record_fields: ["collection.record.edit"],
-  dohc_create_record: ["collection.record.create"],
-  dohc_list_automation_runs: ["automation.runs.list"],
-  dohc_read_automation_run: ["automation.run.read"],
-  dohc_retry_automation_run: ["automation.run.retry"],
-  dohc_press_button: ["automation.button.press"],
-  dohc_inspect_buttons: ["automation.buttons.inspect"],
-} as const satisfies Record<string, readonly CapabilityId[]>;
+type DeclaredTool = DeclaredOperation["mcp"]["tool"];
+export const DECLARED_TOOLS = byName(
+  Object.values<DeclaredOperation>(DECLARED_VERBS),
+  (operation) => operation.mcp.tool,
+);
+
+export const MCP_TOOL_CAPABILITIES = distinct(
+  mapNamed(DECLARED_TOOLS, (operation) => [operation.capabilityId] as const),
+  {
+    dohc_read_share_copy: ["share.copy.read"],
+    dohc_list_link_agents: ["share.link.agents.list"],
+    dohc_disconnect_link_agent: ["share.link.agent.disconnect"],
+    dohc_list_automations: ["automation.list"],
+    dohc_switch_automation: ["automation.switch"],
+    dohc_dataset: Object.values(DATASET_CAPABILITIES),
+    dohc_publish_app: Object.values(APP_PUBLICATION_CAPABILITIES),
+    dohc_list_workspaces: ["workspace.list"],
+    dohc_workspace_status: ["workspace.status"],
+    dohc_stop_workspace_sync: ["workspace.sync.stop"],
+    dohc_list_changes: ["history.list"],
+    dohc_list_kept_copies: ["file.kept.list"],
+    dohc_list_notices: ["notice.list"],
+    dohc_save_kept_copy: ["file.kept.save"],
+    dohc_restore_protected_copy: ["file.protected.restore"],
+    dohc_discard_protected_copy: ["file.protected.discard"],
+    dohc_save_recovery_copy: ["share.live.document.recovery.save"],
+    dohc_retry_kept_edits: ["share.live.document.retry"],
+    dohc_stop_again: ["share.live.document.stop"],
+    dohc_list_live_documents: ["share.live.documents.list"],
+    dohc_stop_live_editing: ["share.live.document.stop"],
+    dohc_resume_live_editing: ["share.live.document.resume"],
+    dohc_list_retained_copies: ["file.retained.list"],
+    dohc_delete_retained_copies: ["file.retained.delete"],
+    dohc_link: ["work.reference.make"],
+    dohc_read_change: ["history.read"],
+    dohc_list_files: ["file.list"],
+    dohc_read_file: ["file.read"],
+    dohc_search_files: ["file.search"],
+    dohc_read_document: ["document.read"],
+    dohc_read_held_change: ["document.held.read"],
+    dohc_held_note_change: ["document.held.change"],
+    dohc_edit_document: ["document.edit"],
+    dohc_create_document: ["document.create"],
+    dohc_write_file: ["file.write"],
+    dohc_create_directory: ["folder.create"],
+    dohc_read_operation: ["history.operation.read"],
+    dohc_undo_operation: ["history.operation.undo"],
+    dohc_list_versions: ["version.list"],
+    dohc_compare_version: ["version.compare"],
+    dohc_list_version_conflicts: ["version.conflicts.list"],
+    dohc_create_version: ["version.create"],
+    dohc_switch_version: ["version.switch"],
+    dohc_merge_version: ["version.merge"],
+    dohc_resolve_version_conflict: ["version.conflict.resolve"],
+    dohc_duplicate_file: ["file.duplicate"],
+    dohc_move_path: ["file.move"],
+    dohc_delete_path: ["file.delete"],
+    dohc_detect_apps: ["app.detect"],
+    dohc_create_app: ["app.create"],
+    dohc_test_app: ["app.test"],
+    dohc_import_data: ["data.import"],
+    dohc_query_database: ["data.query"],
+    dohc_list_file_chats: ["file.chats.list"],
+    dohc_wait_for_messages: ["chat.inbox.read"],
+    dohc_read_chat: ["chat.read"],
+    dohc_list_groups: ["group.list"],
+    dohc_create_group: ["group.create"],
+    dohc_start_group_chat: ["chat.post"],
+    dohc_start_file_chat: ["file.chat.start"],
+    dohc_reply_to_chat: ["chat.reply"],
+    dohc_retry_chat_run: ["agent.run.retry"],
+    dohc_query_collection: ["collection.query"],
+    dohc_read_record: ["collection.record.read"],
+    dohc_set_record_fields: ["collection.record.edit"],
+    dohc_create_record: ["collection.record.create"],
+    dohc_list_automation_runs: ["automation.runs.list"],
+    dohc_read_automation_run: ["automation.run.read"],
+    dohc_retry_automation_run: ["automation.run.retry"],
+    dohc_press_button: ["automation.button.press"],
+    dohc_inspect_buttons: ["automation.buttons.inspect"],
+  } as const,
+) satisfies Record<string, readonly CapabilityId[]>;
 
 export interface ToolContext {
   // Workspace root the server is scoped to (the --workspace arg). All file
@@ -168,7 +198,10 @@ export interface ToolContext {
   agentId?: string;
   // Injectable CLI transport for tests. Production uses sendCliRequest with
   // the explicit desktop state dir supplied by --home.
-  request?: (request: CliRequestWithoutToken, options?: { signal?: AbortSignal }) => Promise<unknown>;
+  request?: (
+    request: CliRequestWithoutToken,
+    options?: { signal?: AbortSignal },
+  ) => Promise<unknown>;
 }
 
 const DEFAULT_READ_MAX_BYTES = 1024 * 1024;
@@ -272,7 +305,10 @@ function unresolvedPathRefusal(
 
 // A raw write cannot update a live document's state, so each kind names the
 // way that can.
-function liveDocumentWriteRefusal(resolved: { normalized: string; realRelative: string }): string | null {
+function liveDocumentWriteRefusal(resolved: {
+  normalized: string;
+  realRelative: string;
+}): string | null {
   const kinds = [
     liveDocumentKindForPath(resolved.normalized),
     liveDocumentKindForPath(resolved.realRelative),
@@ -290,7 +326,13 @@ async function readFileWindowWithDigest(
   absolute: string,
   offsetBytes: number,
   maxBytes: number,
-): Promise<{ bytes: number; window: Buffer; sha256: string; offsetBytes: number; truncated: boolean }> {
+): Promise<{
+  bytes: number;
+  window: Buffer;
+  sha256: string;
+  offsetBytes: number;
+  truncated: boolean;
+}> {
   const file = await open(absolute, "r");
   try {
     const { size } = await file.stat();
@@ -340,23 +382,12 @@ async function ensureRecordable(ctx: ToolContext) {
   }
 }
 
-// The errno used to pass through whole, so an agent read
-// `EPERM: operation not permitted, lstat 'C:\Users\…\ws\.dohc'` — an absolute
-// host path it never supplied and cannot act on.
-//
-// The two failures are told apart by the errno, not by the message: a guard
-// refusal is an Error this code wrote (ensureGuardedDir) and carries no
-// `code`, so it is already workspace-relative and passes through whole. Only
-// a platform failure is translated. The code stays, as detail rather than as
-// the whole message — an agent can act on "EPERM".
-// A saturated resource is not a permission problem, and the permission
-// instruction sends an agent to widen access that was never the obstacle. Each
-// one names the resource that ran out and how to free it, per the backpressure
-// rule in AGENTS.md. Both descriptor limits are here because the per-process
-// one (EMFILE) and the system-wide one (ENFILE) are freed by different acts.
 const METADATA_CAPACITY_INSTRUCTIONS = new Map<string, string>([
   ["ENOSPC", "The disk holding this workspace is full. Free disk space. Then retry."],
-  ["EDQUOT", "The disk quota for this workspace is used up. Free space, or raise the quota. Then retry."],
+  [
+    "EDQUOT",
+    "The disk quota for this workspace is used up. Free space, or raise the quota. Then retry.",
+  ],
   ["EMFILE", "dohc holds too many open files. Restart dohc. Then retry."],
   ["ENFILE", "This computer holds too many open files. Close other apps. Then retry."],
 ]);
@@ -424,8 +455,6 @@ async function readJson<T>(path: string): Promise<T | null> {
   }
 }
 
-// --- workspace filesystem ---------------------------------------------------
-
 type WorkspaceFileKind = "file" | "directory";
 type WorkspaceSearchMode = "content" | "path" | "both";
 type WorkspaceSearchMatch =
@@ -461,14 +490,19 @@ export async function listWorkspaceFiles(
       : { ok: true as const, absolute: ctx.root, normalized: "" };
   if (!root.ok) return { ok: false as const, reason: root.reason };
 
-  const entries: Array<{ path: string; kind: WorkspaceFileKind; bytes?: number; mediaType?: string }> = [];
+  const entries: Array<{
+    path: string;
+    kind: WorkspaceFileKind;
+    bytes?: number;
+    mediaType?: string;
+  }> = [];
   const recursive = args.recursive ?? true;
 
   async function walk(absolute: string, prefix: string): Promise<void> {
     let dirents;
     try {
       dirents = await readdir(absolute, { withFileTypes: true });
-    } catch (error) {
+    } catch {
       return;
     }
     for (const dirent of dirents) {
@@ -510,10 +544,9 @@ export async function listWorkspaceFiles(
   return { ok: true as const, root: root.normalized, entries };
 }
 
-// Secret-backed files (PR 08, plan agent-access default = deny): dohc-
-// controlled agent surfaces never share secret file contents. The floor is
-// the same classifyEngineFilePath rule the engine enforces everywhere —
-// policy files can never unmark it.
+// Secret-backed files: dohc-controlled agent surfaces never share secret file
+// contents. The floor is the same classifyEngineFilePath rule the engine
+// enforces everywhere, and policy files can never unmark it.
 const SECRET_READ_DENIED_REASON =
   "This file is protected: secret-backed files (like .env) are never shared with agents through dohc tools. Agent access to secret contents is denied by default.";
 
@@ -536,12 +569,18 @@ function isSecretResolvedPath(resolved: { normalized: string; realRelative: stri
 // waits on a busy, starting or hung app: past this deadline the read returns
 // with no warning, as when the app is not running.
 const PENDING_SHARE_ASK_MS = 50;
-export const PENDING_SHARE_READ_WARNING = "This shared note has edits that wait for the server, so its file holds older text. " +
+export const PENDING_SHARE_READ_WARNING =
+  "This shared note has edits that wait for the server, so its file holds older text. " +
   "dohc_read_document returns the note's current text.";
 function askPendingShare(ctx: ToolContext): Promise<readonly string[]> {
   const signal = AbortSignal.timeout(PENDING_SHARE_ASK_MS);
-  const deadline = new Promise<readonly string[]>(resolve => signal.addEventListener("abort", () => resolve([]), { once: true }));
-  return Promise.race([requestCli(ctx, "liveKeptEdits", {}, signal).then(kept => kept.ok ? kept.pendingShare : []), deadline]);
+  const deadline = new Promise<readonly string[]>((resolve) =>
+    signal.addEventListener("abort", () => resolve([]), { once: true }),
+  );
+  return Promise.race([
+    requestCli(ctx, "liveKeptEdits", {}, signal).then((kept) => (kept.ok ? kept.pendingShare : [])),
+    deadline,
+  ]);
 }
 
 export async function readWorkspaceFile(
@@ -560,8 +599,10 @@ export async function readWorkspaceFile(
   }
   // Only a note can wait for the server, so only a note's read asks the app,
   // which answers from what it already knows. No answer adds no warning.
-  const kept = ctx.shareAccess === undefined && liveDocumentKindForPath(resolved.normalized) === "richdoc"
-    ? askPendingShare(ctx) : null;
+  const kept =
+    ctx.shareAccess === undefined && liveDocumentKindForPath(resolved.normalized) === "richdoc"
+      ? askPendingShare(ctx)
+      : null;
   try {
     const maxBytes = Math.min(
       HARD_READ_MAX_BYTES,
@@ -584,7 +625,11 @@ export async function readWorkspaceFile(
       truncated: read.truncated,
       content:
         encoding === "base64" ? read.window.toString("base64") : read.window.toString("utf8"),
-      ...((await kept)?.some(path => path === resolved.normalized || path === resolved.realRelative) ? { warning: PENDING_SHARE_READ_WARNING } : {}),
+      ...((await kept)?.some(
+        (path) => path === resolved.normalized || path === resolved.realRelative,
+      )
+        ? { warning: PENDING_SHARE_READ_WARNING }
+        : {}),
     };
   } catch (error) {
     return {
@@ -619,9 +664,7 @@ function pathMatchesQuery(
     regex.lastIndex = 0;
     return regex.test(path);
   }
-  return caseSensitive
-    ? path.includes(query)
-    : path.toLowerCase().includes(query.toLowerCase());
+  return caseSensitive ? path.includes(query) : path.toLowerCase().includes(query.toLowerCase());
 }
 
 function fixedStringIndexes(line: string, query: string, caseSensitive: boolean): number[] {
@@ -731,7 +774,10 @@ export async function searchWorkspaceFiles(
     // contents nor a path hit that would carry a preview. The skip is
     // reported honestly instead of silently vanishing.
     if (isSecretWorkspacePath(relativePath)) {
-      skipped.push({ path: relativePath, reason: "protected file (secret contents are never searched)" });
+      skipped.push({
+        path: relativePath,
+        reason: "protected file (secret contents are never searched)",
+      });
       return true;
     }
     const info = await stat(absolute);
@@ -846,14 +892,23 @@ export async function writeWorkspaceFile(
   const refusal = liveDocumentWriteRefusal(resolved);
   if (refusal) return { ok: false as const, reason: refusal };
 
-  const contentBase64 = args.encoding === "base64" ? args.content : Buffer.from(args.content, "utf8").toString("base64");
+  const contentBase64 =
+    args.encoding === "base64"
+      ? args.content
+      : Buffer.from(args.content, "utf8").toString("base64");
   const result = await requestCli(ctx, "fileWrite", {
     files: [{ path: resolved.normalized, contentBase64, expectedSha256: args.expectedSha256 }],
-    agent, requestId: randomUUID(),
+    agent,
+    requestId: randomUUID(),
   });
   if (!result.ok) return result;
   const bytes = Buffer.from(contentBase64, "base64");
-  return { ok: true as const, path: resolved.normalized, bytes: bytes.byteLength, sha256: sha256Hex(bytes) };
+  return {
+    ok: true as const,
+    path: resolved.normalized,
+    bytes: bytes.byteLength,
+    sha256: sha256Hex(bytes),
+  };
 }
 
 export async function createWorkspaceDirectory(
@@ -898,29 +953,53 @@ export async function createWorkspaceDirectory(
 // only word an early refusal; the desktop decides.
 export async function moveWorkspacePath(
   ctx: ToolContext,
-  args: { fromPath: string; toPath: string; overwrite?: boolean; confirmNotVersioned?: boolean; summary?: string },
+  args: {
+    fromPath: string;
+    toPath: string;
+    overwrite?: boolean;
+    confirmNotVersioned?: boolean;
+    summary?: string;
+  },
   agent?: string,
 ) {
   const from = await safeResolve(ctx, args.fromPath, "entry");
   if (!from.ok) return { ok: false as const, reason: from.reason };
   const to = await safeResolve(ctx, args.toPath);
   if (!to.ok) return { ok: false as const, reason: to.reason };
-  if (to.normalized === from.normalized || to.normalized.startsWith(`${from.normalized}/`) || from.normalized.startsWith(`${to.normalized}/`)) {
-    return { ok: false as const, reason: `Cannot move ${args.fromPath} to ${args.toPath}: one holds the other. Choose a destination outside both.` };
+  if (
+    to.normalized === from.normalized ||
+    to.normalized.startsWith(`${from.normalized}/`) ||
+    from.normalized.startsWith(`${to.normalized}/`)
+  ) {
+    return {
+      ok: false as const,
+      reason: `Cannot move ${args.fromPath} to ${args.toPath}: one holds the other. Choose a destination outside both.`,
+    };
   }
   return requestCli(ctx, "fileMove", {
-    fromPath: from.normalized, toPath: to.normalized,
+    fromPath: from.normalized,
+    toPath: to.normalized,
     ...(args.overwrite !== undefined ? { overwrite: args.overwrite } : {}),
     ...(args.confirmNotVersioned ? { confirmNotVersioned: true } : {}),
-    agent, requestId: randomUUID(),
+    agent,
+    requestId: randomUUID(),
   });
 }
 
-export async function duplicateWorkspaceFile(ctx: ToolContext, args: {path: string}, agent?: string) {
+export async function duplicateWorkspaceFile(
+  ctx: ToolContext,
+  args: { path: string },
+  agent?: string,
+) {
   const source = await safeResolve(ctx, args.path, "entry");
-  if (!source.ok) return {ok: false as const, reason: source.reason};
-  if (isSecretResolvedPath(source)) return {ok: false as const, reason: SECRET_READ_DENIED_REASON};
-  return requestCli(ctx, "fileDuplicate", {path: source.normalized, agent, requestId: randomUUID()});
+  if (!source.ok) return { ok: false as const, reason: source.reason };
+  if (isSecretResolvedPath(source))
+    return { ok: false as const, reason: SECRET_READ_DENIED_REASON };
+  return requestCli(ctx, "fileDuplicate", {
+    path: source.normalized,
+    agent,
+    requestId: randomUUID(),
+  });
 }
 
 export async function deleteWorkspacePath(
@@ -931,11 +1010,13 @@ export async function deleteWorkspacePath(
   // A link is deleted as a link, not followed.
   const resolved = await safeResolve(ctx, args.path, "entry");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "fileDelete", { path: resolved.normalized,
-    ...(args.confirmNotVersioned ? { confirmNotVersioned: true } : {}), agent, requestId: randomUUID() });
+  return requestCli(ctx, "fileDelete", {
+    path: resolved.normalized,
+    ...(args.confirmNotVersioned ? { confirmNotVersioned: true } : {}),
+    agent,
+    requestId: randomUUID(),
+  });
 }
-
-// --- dohc_list_workspaces / cloud binding helpers ---------------------------
 
 interface RemoteIdentity {
   serverUrl: string;
@@ -943,7 +1024,13 @@ interface RemoteIdentity {
 }
 
 interface RegistryWorkspace {
-  shareView?: {grantedSelector?: unknown; subjectName?: unknown; sharerName?: unknown; granterEmail?: unknown; shareId?: unknown};
+  shareView?: {
+    grantedSelector?: unknown;
+    subjectName?: unknown;
+    sharerName?: unknown;
+    granterEmail?: unknown;
+    shareId?: unknown;
+  };
   workspaceId: string;
   rootPath: string;
   kind: string;
@@ -1104,18 +1191,17 @@ export async function listWorkspaces(ctx: ToolContext) {
   return { workspaces };
 }
 
-// --- dohc_workspace_status --------------------------------------------------
-
 function removedShareStatus(workspace: RegistryWorkspace | null) {
   const removedShares = (workspace?.confirmedRemovedShares ?? []).map(({ shareId }) => ({
     shareId,
     message: "The owner removed your access. Your local copy stays readable.",
   }));
-  return removedShares.length ? {removedShares} : {};
+  return removedShares.length ? { removedShares } : {};
 }
 
 export async function stopWorkspaceSync(ctx: ToolContext, agent?: string) {
-  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to stop its sync." };
+  if (ctx.shareAccess !== undefined)
+    return { ok: false as const, reason: "Open the owning workspace to stop its sync." };
   return requestCli(ctx, "stopSync", { ...(agent ? { agent } : {}) });
 }
 
@@ -1137,19 +1223,29 @@ export async function workspaceStatus(ctx: ToolContext) {
   const synced = !entry?.pausedRemote && (remote !== null || nonEmptyString(manifest?.serverUrl));
   const credential = credentialStatusFor(remote, credentials);
   const pause = !entry?.shareView ? WorkspaceSyncPause.safeParse(entry?.syncPause) : null;
-  let syncPause: import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseStatus | undefined;
+  let syncPause:
+    | import("@dohc/workspace-contracts/workspace-sync").WorkspaceSyncPauseStatus
+    | undefined;
   if (pause?.success) {
-    const identity = pause.data.author.kind === "person"
-      ? await readJson<unknown>(join(ctx.home, "dohc-local-id.json")) : null;
+    const identity =
+      pause.data.author.kind === "person"
+        ? await readJson<unknown>(join(ctx.home, "dohc-local-id.json"))
+        : null;
     const personId = isRecord(identity) && typeof identity.id === "string" ? identity.id : null;
     syncPause = workspaceSyncPauseStatus(pause.data, personId);
   }
   return {
-    ...(entry?.shareView ? {receivedShare: {
-      subjectName: normalizeShareLabel(entry.shareView.subjectName) ?? shareSubjectFallback(entry.shareView.grantedSelector),
-      sharerName: shareSenderLabel(entry.shareView.sharerName, entry.shareView.granterEmail),
-      access: ctx.shareAccess ?? null,
-    }} : {}),
+    ...(entry?.shareView
+      ? {
+          receivedShare: {
+            subjectName:
+              normalizeShareLabel(entry.shareView.subjectName) ??
+              shareSubjectFallback(entry.shareView.grantedSelector),
+            sharerName: shareSenderLabel(entry.shareView.sharerName, entry.shareView.granterEmail),
+            access: ctx.shareAccess ?? null,
+          },
+        }
+      : {}),
     synced,
     ...(syncPause ? { syncPause } : {}),
     ...(waiting.ok ? { collectionsWaiting: waiting.waiting } : {}),
@@ -1159,26 +1255,15 @@ export async function workspaceStatus(ctx: ToolContext) {
     ...removedShareStatus(entry),
     scope: synced ? ("cloud" as const) : ("local" as const),
     ...credential,
-    ...(remote?.workspaceId ?? manifest?.workspaceId
+    ...((remote?.workspaceId ?? manifest?.workspaceId)
       ? { workspaceId: remote?.workspaceId ?? manifest?.workspaceId }
       : {}),
     ...(serverUrl ? { serverUrl } : {}),
   };
 }
 
-// Legacy cloud sync (dohc_sync_now / dohc_sync_cloud) was removed together with
-// the retired workspace-api file/sync routes (/workspaces/:id/files,
-// /sync/apply). Cloud sync is now automatic per workspace via the sync relay;
-// workspace history is read through dohc_list_changes (engine moments) below.
-
-// --- dohc_list_changes / dohc_read_change ----------------------------------
-
-// The workspace engine records history, and desktop main is the sole owner
-// of its database. These tools read moments through the CLI
-// transport. The pre-flip legacy `.dohc/history` change-set relic was retired;
-// a moment carries path/operation/versionId (the legacy kind,
-// boundaryCrossings, and provenance fields no longer exist and are never
-// faked).
+// Cloud sync is automatic per workspace via the sync relay. Workspace history
+// is read through dohc_list_changes (engine moments) below.
 
 const LIST_CHANGES_HARD_LIMIT = 500;
 
@@ -1198,10 +1283,7 @@ export async function readChange(ctx: ToolContext, args: { id: string }) {
   return requestCli(ctx, "moment", args);
 }
 
-// --- dohc app tools ---------------------------------------------------------
-
-type RawDohcSiteConfig = Partial<Record<keyof DohcSiteConfig, unknown>> &
-  Record<string, unknown>;
+type RawDohcSiteConfig = Partial<Record<keyof DohcSiteConfig, unknown>> & Record<string, unknown>;
 
 type SiteCheck = {
   name: string;
@@ -1381,7 +1463,12 @@ async function detectSiteAt(
       const versionError = fileVersionError(parsed.value.version, configPath);
       const versionReason = fileVersionReason(parsed.value.version);
       if (versionError && versionReason) {
-        diagnostics.push({ severity: "error", code: versionReason, path: configPath, message: versionError });
+        diagnostics.push({
+          severity: "error",
+          code: versionReason,
+          path: configPath,
+          message: versionError,
+        });
       } else {
         config = parsed.value;
       }
@@ -1416,9 +1503,7 @@ async function detectSiteAt(
   const configPreviewCommand = configString(config?.preview, "command");
   const configPreviewMode = configString(config?.preview, "mode");
   const configuredPreviewMode =
-    configPreviewMode === "static" ||
-    configPreviewMode === "dev" ||
-    configPreviewMode === "build"
+    configPreviewMode === "static" || configPreviewMode === "dev" || configPreviewMode === "build"
       ? configPreviewMode
       : undefined;
   // Same code and message as workspace-core's parseDohcSiteConfig (packages/
@@ -1505,7 +1590,8 @@ async function detectSiteAt(
       severity: "warning",
       code: "invalid-build-output",
       path: configPath ?? relativeJoin(root, "dohc.json"),
-      message: "dohc.json build.output must be a relative workspace path, not '.', './', or an empty path.",
+      message:
+        "dohc.json build.output must be a relative workspace path, not '.', './', or an empty path.",
     });
   }
   // The conventional-names loop above only ever checks "dist"/"build"/
@@ -1522,11 +1608,12 @@ async function detectSiteAt(
   // Every entry `detectedBuildOutputs` already required a passing isFile()
   // check above; a configured output only joins them once its own check
   // here passes too — so realBuildOutputs never needs a second stat of a
-  // path this function already confirmed. detectApps' own walk used to
-  // re-stat each of these itself to learn the same thing.
+  // path this function already confirmed.
   const realBuildOutputs = [...detectedBuildOutputs];
   if (configuredBuildOutput) {
-    const configuredIndexInfo = await stat(join(absolute, configuredBuildOutput, "index.html")).catch(() => null);
+    const configuredIndexInfo = await stat(
+      join(absolute, configuredBuildOutput, "index.html"),
+    ).catch(() => null);
     if (configuredIndexInfo?.isFile()) {
       builtEntry = relativeJoin(relativeJoin(root, configuredBuildOutput), "index.html");
       realBuildOutputs.push(configuredBuildOutput);
@@ -1542,7 +1629,8 @@ async function detectSiteAt(
   // case (an "invalid-type" diagnostic, the candidate stays visible)
   // rather than treating it as an explicit non-site type that can suppress
   // the whole candidate.
-  const validType = typeof config?.type === "string" && config.type.trim() !== "" ? config.type : undefined;
+  const validType =
+    typeof config?.type === "string" && config.type.trim() !== "" ? config.type : undefined;
   if (config?.type !== undefined && validType === undefined) {
     diagnostics.push({
       severity: "warning",
@@ -1568,11 +1656,18 @@ async function detectSiteAt(
       severity: "warning",
       code: "unexpected_dohc_type",
       path: configPath ?? relativeJoin(root, "dohc.json"),
-      message: "dohc.json has website signals but its type is not \"app\".",
+      message: 'dohc.json has website signals but its type is not "app".',
     });
   }
 
-  if (!configPath && !hasIndex && !hasPublishManifest && !hasPackageSignal && !frameworkConfig && uniqueBuildOutputs.length === 0) {
+  if (
+    !configPath &&
+    !hasIndex &&
+    !hasPublishManifest &&
+    !hasPackageSignal &&
+    !frameworkConfig &&
+    uniqueBuildOutputs.length === 0
+  ) {
     return null;
   }
 
@@ -1582,7 +1677,12 @@ async function detectSiteAt(
   // either one is a high-confidence signal on its own, same as an actual
   // index.html file — the desktop Explorer's Apps section and MCP's dohc_detect_apps must
   // describe the same project the same way.
-  const kind: SiteKind = configPath || hasPublishManifest || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
+  const kind: SiteKind =
+    configPath || hasPublishManifest || frameworkConfig
+      ? "configured"
+      : hasPackageSignal
+        ? "package"
+        : "static";
   // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only
   // counts toward high confidence when it explicitly declares type: "app"
   // — a valid-but-empty config ({}) or one for another dohc feature isn't
@@ -1602,7 +1702,8 @@ async function detectSiteAt(
         : hasPackageSignal || uniqueBuildOutputs.length > 0
           ? "medium"
           : "low";
-  const configuredTitle = typeof config?.title === "string" && config.title.trim() ? config.title : undefined;
+  const configuredTitle =
+    typeof config?.title === "string" && config.title.trim() ? config.title : undefined;
   const packageTitle = typeof pkg?.name === "string" && pkg.name.trim() ? pkg.name : undefined;
   const entry = configuredEntry
     ? siteEntryPathFor(root, configuredEntry)
@@ -1632,7 +1733,10 @@ async function detectSiteAt(
 export async function detectApps(
   ctx: ToolContext,
   args: { path?: string; maxDepth?: number } = {},
-): Promise<{ ok: true; apps: WorkspaceSite[]; count: number; detector: "mcp-local" } | { ok: false; reason: string }> {
+): Promise<
+  | { ok: true; apps: WorkspaceSite[]; count: number; detector: "mcp-local" }
+  | { ok: false; reason: string }
+> {
   const start =
     args.path && args.path.trim().length > 0
       ? await safeResolve(ctx, args.path, "read")
@@ -1641,7 +1745,8 @@ export async function detectApps(
 
   const info = await lstat(start.absolute).catch(() => null);
   if (!info) return { ok: false as const, reason: `path not found: ${args.path ?? "."}` };
-  if (!info.isDirectory()) return { ok: false as const, reason: `not a directory: ${args.path ?? "."}` };
+  if (!info.isDirectory())
+    return { ok: false as const, reason: `not a directory: ${args.path ?? "."}` };
 
   const maxDepth = Math.min(12, Math.max(0, Math.floor(args.maxDepth ?? 5)));
   const apps: WorkspaceSite[] = [];
@@ -1712,7 +1817,10 @@ export async function createApp(
   if (existing) {
     const entries = await readdir(root.absolute);
     if (entries.length > 0) {
-      return { ok: false as const, reason: `app folder already exists and is not empty: ${root.normalized}` };
+      return {
+        ok: false as const,
+        reason: `app folder already exists and is not empty: ${root.normalized}`,
+      };
     }
   }
 
@@ -1740,8 +1848,13 @@ export async function createApp(
   }
 
   const result = await requestCli(ctx, "fileWrite", {
-    files: resolvedFiles.map(file => ({ path: file.normalized, contentBase64: Buffer.from(file.content).toString("base64"), createOnly: true })),
-    agent, requestId: randomUUID(),
+    files: resolvedFiles.map((file) => ({
+      path: file.normalized,
+      contentBase64: Buffer.from(file.content).toString("base64"),
+      createOnly: true,
+    })),
+    agent,
+    requestId: randomUUID(),
   });
   if (!result.ok) return result;
   return {
@@ -1772,7 +1885,8 @@ async function resolveAppRoot(ctx: ToolContext, appRoot: string) {
   }
   const info = await lstat(root.absolute).catch(() => null);
   if (!info) return { ok: false as const, reason: `app root not found: ${appRoot}` };
-  if (!info.isDirectory()) return { ok: false as const, reason: `app root is not a directory: ${appRoot}` };
+  if (!info.isDirectory())
+    return { ok: false as const, reason: `app root is not a directory: ${appRoot}` };
   return root;
 }
 
@@ -1821,8 +1935,6 @@ export async function testApp(ctx: ToolContext, args: { appRoot: string }) {
   return { ok, app, checks };
 }
 
-// --- dohc_import_data -------------------------------------------------------
-
 // A visible user database under both spellings. The strategy is read off the
 // name, so an alias carries its own: `records.sqlite -> notes/data.sqlite-wal`
 // spells a database while the bytes are a sidecar. Both names must qualify.
@@ -1867,8 +1979,11 @@ export async function importData(
   if (!result.ok) return { ok: false as const, reason: `${result.code}: ${result.message}` };
 
   const written = await requestCli(ctx, "fileWrite", {
-    files: [{ path: dbRel.normalized, contentBase64: result.bytes.toString('base64'), createOnly: true }],
-    agent, requestId: randomUUID(),
+    files: [
+      { path: dbRel.normalized, contentBase64: result.bytes.toString("base64"), createOnly: true },
+    ],
+    agent,
+    requestId: randomUUID(),
   });
   if (!written.ok) return written;
   return {
@@ -1879,16 +1994,11 @@ export async function importData(
   };
 }
 
-// --- dohc_query_database ----------------------------------------------------
-
 const MAX_QUERY_ROWS = 1000;
 
 // Opens a visible database READ-ONLY and returns a bounded row window. Only a
 // single read-only SELECT is honored; anything else is refused.
-export async function queryDatabase(
-  ctx: ToolContext,
-  args: { databasePath: string; sql: string },
-) {
+export async function queryDatabase(ctx: ToolContext, args: { databasePath: string; sql: string }) {
   // Registered read-only (SELECT enforcement below): a mounted share's
   // database is queryable like any other readable file.
   const dbRel = await safeResolve(ctx, args.databasePath, "read");
@@ -1930,7 +2040,6 @@ function stripTrailingSemicolon(sql: string): string {
 function isReadOnlySelect(sql: string): boolean {
   const trimmed = sql.trim();
   if (!/^select\b/i.test(trimmed)) return false;
-  // No second statement after the (optional) trailing semicolon.
   return !stripTrailingSemicolon(trimmed).includes(";");
 }
 
@@ -1943,9 +2052,12 @@ function isReadOnlySelect(sql: string): boolean {
 export const DOHC_TRANSPORT_UNAVAILABLE_REASON =
   "dohc is not running. Open the dohc app to read workspace history or chats, or post chats.";
 
-export const FILE_WRITE_UNAVAILABLE_REASON = "dohc is not running. Open dohc to write through it, or write the file yourself. History will record that write without your name.";
-export const FILE_MOVE_UNAVAILABLE_REASON = "dohc is not running. Open dohc to move through it, or move the file yourself. History will record that move without your name.";
-export const FILE_DELETE_UNAVAILABLE_REASON = "dohc is not running. Open dohc to delete through it, or delete the file yourself. History will record that delete without your name.";
+export const FILE_WRITE_UNAVAILABLE_REASON =
+  "dohc is not running. Open dohc to write through it, or write the file yourself. History will record that write without your name.";
+export const FILE_MOVE_UNAVAILABLE_REASON =
+  "dohc is not running. Open dohc to move through it, or move the file yourself. History will record that move without your name.";
+export const FILE_DELETE_UNAVAILABLE_REASON =
+  "dohc is not running. Open dohc to delete through it, or delete the file yourself. History will record that delete without your name.";
 const FILE_UNAVAILABLE_REASONS: Partial<Record<CliVerb, string>> = {
   fileWrite: FILE_WRITE_UNAVAILABLE_REASON,
   fileDuplicate: "dohc is not running. Open dohc to duplicate this file.",
@@ -1981,25 +2093,62 @@ async function requestCli<Verb extends CliVerb>(
     },
   } as unknown as Extract<CliRequestWithoutToken, { verb: Verb }>;
   try {
-    if (ctx.request) return parseCliResult(verb, await (signal ? ctx.request(request, { signal }) : ctx.request(request)));
-    return await sendCliRequest(request, { stateDir: ctx.home, ...(signal ? { signal } : {}), ...(verb === "watch" ? { timeoutMs: 30_000 } : {}), ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
+    if (ctx.request)
+      return parseCliResult(
+        verb,
+        await (signal ? ctx.request(request, { signal }) : ctx.request(request)),
+      );
+    return await sendCliRequest(request, {
+      stateDir: ctx.home,
+      ...(signal ? { signal } : {}),
+      ...(verb === "watch" ? { timeoutMs: 30_000 } : {}),
+      ...(verb === "dataset" || verb === "appPublication" ? { timeoutMs: 90_000 } : {}),
+    });
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
 }
 
-export async function linksIn(ctx: ToolContext, input: LinksInInput) { return requestCli(ctx, "linksIn", LinksInInput.parse(input)); }
-export async function linksResolve(ctx: ToolContext, input: LinksResolveInput) { return requestCli(ctx, "linksResolve", LinksResolveInput.parse(input)); }
+export async function requestDeclaredTool(ctx: ToolContext, tool: DeclaredTool, input: unknown) {
+  const { cli, input: schema } = DECLARED_TOOLS[tool];
+  return requestCli(ctx, cli.verb, schema.parse(input));
+}
 
-export async function readOperation(ctx: ToolContext, args: { operationId: string; cursor?: string }) {
-  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };
-  if (!HistoryOperationId.safeParse(args.operationId).success) return { ok: false as const, reason: "Use an operation id from history list: dohc-operation: followed by a UUID." };
+export async function readOperation(
+  ctx: ToolContext,
+  args: { operationId: string; cursor?: string },
+) {
+  if (ctx.shareAccess !== undefined)
+    return {
+      ok: false as const,
+      reason: "History operations require the owning workspace. Open it to continue.",
+    };
+  if (!HistoryOperationId.safeParse(args.operationId).success)
+    return {
+      ok: false as const,
+      reason: "Use an operation id from history list: dohc-operation: followed by a UUID.",
+    };
   return requestCli(ctx, "historyOperation", args);
 }
-export async function undoOperation(ctx: ToolContext, args: { operationId: string }, agent?: string) {
-  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "History operations require the owning workspace. Open it to continue." };
-  if (!HistoryOperationId.safeParse(args.operationId).success) return { ok: false as const, reason: "Use an operation id from history list: dohc-operation: followed by a UUID." };
-  return requestCli(ctx, "historyUndo", { operationId: args.operationId, ...(agent ? { agent } : {}) });
+export async function undoOperation(
+  ctx: ToolContext,
+  args: { operationId: string },
+  agent?: string,
+) {
+  if (ctx.shareAccess !== undefined)
+    return {
+      ok: false as const,
+      reason: "History operations require the owning workspace. Open it to continue.",
+    };
+  if (!HistoryOperationId.safeParse(args.operationId).success)
+    return {
+      ok: false as const,
+      reason: "Use an operation id from history list: dohc-operation: followed by a UUID.",
+    };
+  return requestCli(ctx, "historyUndo", {
+    operationId: args.operationId,
+    ...(agent ? { agent } : {}),
+  });
 }
 
 // The versions menu's reads. Owner workspace only; files History does not
@@ -2007,7 +2156,10 @@ export async function undoOperation(ctx: ToolContext, args: { operationId: strin
 export async function listVersions(ctx: ToolContext) {
   return requestCli(ctx, "versionList", {});
 }
-export async function compareVersion(ctx: ToolContext, args: { version: string; afterPath?: string }) {
+export async function compareVersion(
+  ctx: ToolContext,
+  args: { version: string; afterPath?: string },
+) {
   return requestCli(ctx, "versionCompare", args);
 }
 export async function listVersionConflicts(ctx: ToolContext, args: { afterConflictId?: string }) {
@@ -2023,12 +2175,16 @@ export async function switchVersion(ctx: ToolContext, args: { version: string })
 export async function mergeVersion(ctx: ToolContext, args: { version: string }) {
   return requestCli(ctx, "versionMerge", args);
 }
-export async function resolveVersionConflict(ctx: ToolContext, args: { conflictId: string; resolution: VersionResolution }) {
+export async function resolveVersionConflict(
+  ctx: ToolContext,
+  args: { conflictId: string; resolution: VersionResolution },
+) {
   return requestCli(ctx, "versionResolve", args);
 }
 
 export async function getShareCopyDetails(ctx: ToolContext, input: unknown) {
-  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Share copy details require the owning workspace." };
+  if (ctx.shareAccess !== undefined)
+    return { ok: false as const, reason: "Share copy details require the owning workspace." };
   const parsed = ShareCopyInput.safeParse(input);
   if (!parsed.success) return { ok: false as const, reason: "Invalid share copy request." };
   return requestCli(ctx, "shareCopy", parsed.data);
@@ -2037,14 +2193,19 @@ export async function getShareCopyDetails(ctx: ToolContext, input: unknown) {
 // The Share dialog's Agents list and Disconnect. The desktop names the
 // workspace; the caller names only the link and the connection.
 export async function listLinkAgents(ctx: ToolContext, input: unknown) {
-  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to list a link's agents." };
+  if (ctx.shareAccess !== undefined)
+    return { ok: false as const, reason: "Open the owning workspace to list a link's agents." };
   const parsed = ShareLinkAgentsInput.safeParse(input);
   if (!parsed.success) return { ok: false as const, reason: "Invalid link agents request." };
   return requestCli(ctx, "shareAgents", parsed.data);
 }
 
 export async function disconnectLinkAgent(ctx: ToolContext, input: unknown) {
-  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to disconnect a link's agent." };
+  if (ctx.shareAccess !== undefined)
+    return {
+      ok: false as const,
+      reason: "Open the owning workspace to disconnect a link's agent.",
+    };
   const parsed = ShareLinkAgentDisconnectInput.safeParse(input);
   if (!parsed.success) return { ok: false as const, reason: "Invalid disconnect request." };
   return requestCli(ctx, "shareDisconnect", parsed.data);
@@ -2052,28 +2213,49 @@ export async function disconnectLinkAgent(ctx: ToolContext, input: unknown) {
 
 /** Publication uses the same owner-local attachment as the CLI. */
 export async function publishApp(ctx: ToolContext, input: unknown) {
-  if (ctx.shareAccess !== undefined) return {ok:false as const,reason:"App publication requires the owning workspace."};
+  if (ctx.shareAccess !== undefined)
+    return { ok: false as const, reason: "App publication requires the owning workspace." };
   const parsed = OwnerAppPublicationRequest.safeParse(input);
-  if (!parsed.success) return {ok:false as const,reason:"Invalid app publication request."};
-  return requestCli(ctx,"appPublication",{request:parsed.data});
+  if (!parsed.success) return { ok: false as const, reason: "Invalid app publication request." };
+  return requestCli(ctx, "appPublication", { request: parsed.data });
 }
 
 /** Dataset authority comes from the owning desktop attachment, never a folder share. */
 export async function dataset(ctx: ToolContext, input: unknown) {
-  if (ctx.shareAccess !== undefined) return {ok:false as const,reason:"Collections require the owning workspace."};
+  if (ctx.shareAccess !== undefined)
+    return { ok: false as const, reason: "Collections require the owning workspace." };
   const parsed = DatasetRequest.safeParse(input);
-  if (!parsed.success) return {ok:false as const,reason: parsed.error.issues.find(issue => issue.path[0] === "datasetPath")?.message ?? "Invalid Collection request. Use a supported action and its required fields."};
-  if (parsed.data.action === "prepareRecovery" && !parsed.data.sourcePath) return {ok:false as const,reason:"Collection recovery requires an explicit sourcePath ending in .dohc-recovery."};
-  if (parsed.data.action === "export" && !parsed.data.savePath) return {ok:false as const,reason:"Collection export requires an explicit absolute savePath outside the workspace ending in .dohc-recovery."};
-  return requestCli(ctx, "dataset", {request:parsed.data});
+  if (!parsed.success)
+    return {
+      ok: false as const,
+      reason:
+        parsed.error.issues.find((issue) => issue.path[0] === "datasetPath")?.message ??
+        "Invalid Collection request. Use a supported action and its required fields.",
+    };
+  if (parsed.data.action === "prepareRecovery" && !parsed.data.sourcePath)
+    return {
+      ok: false as const,
+      reason: "Collection recovery requires an explicit sourcePath ending in .dohc-recovery.",
+    };
+  if (parsed.data.action === "export" && !parsed.data.savePath)
+    return {
+      ok: false as const,
+      reason:
+        "Collection export requires an explicit absolute savePath outside the workspace ending in .dohc-recovery.",
+    };
+  return requestCli(ctx, "dataset", { request: parsed.data });
 }
 
 export async function waitForMessages(
   ctx: ToolContext,
-  args: Omit<Extract<CliRequestWithoutToken, { verb: "watch" }>["args"], "cwd" | "actor" | "agentId">,
+  args: Omit<
+    Extract<CliRequestWithoutToken, { verb: "watch" }>["args"],
+    "cwd" | "actor" | "agentId"
+  >,
   signal?: AbortSignal,
 ) {
-  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Chat waits require the owning workspace." };
+  if (ctx.shareAccess !== undefined)
+    return { ok: false as const, reason: "Chat waits require the owning workspace." };
   return requestCli(ctx, "watch", args, signal);
 }
 
@@ -2081,36 +2263,59 @@ export async function listFileChats(ctx: ToolContext, args: { path: string }) {
   return requestCli(ctx, "fileChats", args);
 }
 
-export async function readChat(ctx: ToolContext, args: {
-  threadId?: string;
-  group?: string;
-  before?: CliStreamPosition;
-  limit?: number;
-}) {
+export async function readChat(
+  ctx: ToolContext,
+  args: {
+    threadId?: string;
+    group?: string;
+    before?: CliStreamPosition;
+    limit?: number;
+  },
+) {
   const { threadId, group, before, limit } = args;
-  if (threadId !== undefined && group === undefined && before === undefined && limit === undefined) {
+  if (
+    threadId !== undefined &&
+    group === undefined &&
+    before === undefined &&
+    limit === undefined
+  ) {
     return requestCli(ctx, "chat", { threadId });
   }
   if (group !== undefined && threadId === undefined) {
-    return requestCli(ctx, "chat", { group, ...(before ? { before } : {}), ...(limit ? { limit } : {}) });
+    return requestCli(ctx, "chat", {
+      group,
+      ...(before ? { before } : {}),
+      ...(limit ? { limit } : {}),
+    });
   }
-  return { ok: false as const, reason: "Pass a threadId to read a thread, or a group to read its stream." };
+  return {
+    ok: false as const,
+    reason: "Pass a threadId to read a thread, or a group to read its stream.",
+  };
 }
 
 // A link to put in a chat message, for exactly one of a chat, thread, message, or path.
-export async function makeLink(ctx: ToolContext, args: { group?: string; thread?: string; message?: string; path?: string }) {
-  const given = (["group", "thread", "message", "path"] as const).filter(kind => args[kind] !== undefined);
-  if (given.length !== 1) return { ok: false as const, reason: "Pass exactly one of group, thread, message, and path." };
+export async function makeLink(
+  ctx: ToolContext,
+  args: { group?: string; thread?: string; message?: string; path?: string },
+) {
+  const given = (["group", "thread", "message", "path"] as const).filter(
+    (kind) => args[kind] !== undefined,
+  );
+  if (given.length !== 1)
+    return { ok: false as const, reason: "Pass exactly one of group, thread, message, and path." };
   const kind = given[0]!;
   const value = args[kind]!;
-  const target = kind === "group" ? { kind, group: value }
-    : kind === "thread" ? { kind, thread: value }
-    : kind === "message" ? { kind, message: value }
-    : { kind, path: value };
+  const target =
+    kind === "group"
+      ? { kind, group: value }
+      : kind === "thread"
+        ? { kind, thread: value }
+        : kind === "message"
+          ? { kind, message: value }
+          : { kind, path: value };
   return requestCli(ctx, "link", { target });
 }
-
-// --- groups (PR 12/15 slice, WS-E) ----------------------------------------
 
 // Group discovery for agents: names, slugs, kinds, and each group's
 // threads (id + display title) so a follow-up reply/read has real ids to
@@ -2135,9 +2340,7 @@ export async function createGroup(
 // Canonical chat verbs return CLI handles. MCP reads use engine ids, so
 // convert write results before returning them to the client.
 function engineId(id: string, handlePrefix: string, enginePrefix: string): string {
-  return id.startsWith(handlePrefix)
-    ? `${enginePrefix}${id.slice(handlePrefix.length)}`
-    : id;
+  return id.startsWith(handlePrefix) ? `${enginePrefix}${id.slice(handlePrefix.length)}` : id;
 }
 
 const engineGroupId = (id: string) => engineId(id, "ch_", "channel-");
@@ -2186,7 +2389,11 @@ export function reportedAgent(
   };
 }
 
-function chatWriteArgs(ctx: ToolContext, input: ChatWriteInput, reported: CliReportedAgent | undefined) {
+function chatWriteArgs(
+  ctx: ToolContext,
+  input: ChatWriteInput,
+  reported: CliReportedAgent | undefined,
+) {
   // The run this server works for wins over a run the caller names.
   const runId = ctx.runId ?? input.runId;
   return {
@@ -2277,7 +2484,11 @@ export async function reportNothing(ctx: ToolContext, args: { threadId: string; 
     ...(runId !== undefined ? { runId } : {}),
   });
   if ("ok" in result) return result;
-  return { ok: true as const, threadId: engineThreadId(result.threadId), nothingToReport: true as const };
+  return {
+    ok: true as const,
+    threadId: engineThreadId(result.threadId),
+    nothingToReport: true as const,
+  };
 }
 
 // --- collections ------------------------------------------------------------
@@ -2297,9 +2508,7 @@ function parsedCollectionArg<Schema extends z.ZodType>(
   schema: Schema,
   value: unknown,
   label: string,
-):
-  | { ok: true; value: z.infer<Schema> }
-  | { ok: false; reason: string } {
+): { ok: true; value: z.infer<Schema> } | { ok: false; reason: string } {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
@@ -2341,9 +2550,7 @@ export async function queryCollection(
     ...(filter ? { filter: filter.value } : {}),
     ...(args.sort !== undefined ? { sort: args.sort } : {}),
     ...(args.groupBy !== undefined ? { groupBy: args.groupBy } : {}),
-    ...(args.resolveRelations !== undefined
-      ? { resolveRelations: args.resolveRelations }
-      : {}),
+    ...(args.resolveRelations !== undefined ? { resolveRelations: args.resolveRelations } : {}),
     ...(args.limit !== undefined ? { limit: args.limit } : {}),
     ...(cursor ? { cursor: cursor.value } : {}),
   });
@@ -2366,9 +2573,7 @@ export async function readRecord(
     collectionPath: resolved.normalized,
     recordId: args.recordId,
     historyLimit: args.historyLimit ?? DEFAULT_RECORD_HISTORY_LIMIT,
-    ...(args.beforeHistoryId !== undefined
-      ? { beforeHistoryId: args.beforeHistoryId }
-      : {}),
+    ...(args.beforeHistoryId !== undefined ? { beforeHistoryId: args.beforeHistoryId } : {}),
   });
 }
 
@@ -2379,11 +2584,7 @@ export async function setRecordFields(
 ) {
   const resolved = await safeResolve(ctx, args.recordPath, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  const fields = parsedCollectionArg(
-    collectionSetFieldsFieldsSchema,
-    args.fields,
-    "fields",
-  );
+  const fields = parsedCollectionArg(collectionSetFieldsFieldsSchema, args.fields, "fields");
   if (!fields.ok) return { ok: false as const, reason: fields.reason };
   return requestCli(ctx, "collectionSetFields", {
     agent,
@@ -2399,11 +2600,7 @@ export async function createRecord(
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  const fields = parsedCollectionArg(
-    collectionCreateFieldsSchema,
-    args.fields ?? {},
-    "fields",
-  );
+  const fields = parsedCollectionArg(collectionCreateFieldsSchema, args.fields ?? {}, "fields");
   if (!fields.ok) return { ok: false as const, reason: fields.reason };
   return requestCli(ctx, "collectionCreateRecord", {
     agent,
@@ -2443,10 +2640,16 @@ export async function discardProtectedCopy(ctx: ToolContext, args: { id: string 
 // A live document's edits the server refused, which dohc keeps on this
 // computer. The desktop's Notices row offers these same steps, and
 // dohc_workspace_status lists the documents as keptEdits.
-export async function saveRecoveryCopy(ctx: ToolContext, args: { path: string; incident?: string }) {
+export async function saveRecoveryCopy(
+  ctx: ToolContext,
+  args: { path: string; incident?: string },
+) {
   const resolved = await safeResolve(ctx, args.path, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "saveRecoveryCopy", { path: resolved.normalized, ...(args.incident === undefined ? {} : { incident: args.incident }) });
+  return requestCli(ctx, "saveRecoveryCopy", {
+    path: resolved.normalized,
+    ...(args.incident === undefined ? {} : { incident: args.incident }),
+  });
 }
 
 export async function retryKeptEdits(ctx: ToolContext, args: { path: string; incident: string }) {
@@ -2464,19 +2667,25 @@ export async function stopAgain(ctx: ToolContext, args: { path: string; incident
 // The Live documents list. The desktop names the workspace and refuses a
 // shared view.
 export async function listLiveDocuments(ctx: ToolContext, args: { cursor?: string }) {
-  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to list its live documents." };
+  if (ctx.shareAccess !== undefined)
+    return { ok: false as const, reason: "Open the owning workspace to list its live documents." };
   return requestCli(ctx, "liveDocuments", args.cursor === undefined ? {} : { cursor: args.cursor });
 }
 
 export async function stopLiveEditing(ctx: ToolContext, args: { path: string; objectId?: string }) {
-  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to stop live editing." };
+  if (ctx.shareAccess !== undefined)
+    return { ok: false as const, reason: "Open the owning workspace to stop live editing." };
   const resolved = await safeResolve(ctx, args.path, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "liveStop", { path: resolved.normalized, ...(args.objectId === undefined ? {} : { objectId: args.objectId }) });
+  return requestCli(ctx, "liveStop", {
+    path: resolved.normalized,
+    ...(args.objectId === undefined ? {} : { objectId: args.objectId }),
+  });
 }
 
 export async function resumeLiveEditing(ctx: ToolContext, args: { path: string }) {
-  if (ctx.shareAccess !== undefined) return { ok: false as const, reason: "Open the owning workspace to resume live editing." };
+  if (ctx.shareAccess !== undefined)
+    return { ok: false as const, reason: "Open the owning workspace to resume live editing." };
   const resolved = await safeResolve(ctx, args.path, "write");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "liveResume", { path: resolved.normalized });
@@ -2509,7 +2718,9 @@ export async function listAutomationRuns(
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   return requestCli(ctx, "automationRuns", {
-    collectionPath: resolved.normalized, automation: args.automation, ...(args.page === undefined ? {} : { page: args.page }),
+    collectionPath: resolved.normalized,
+    automation: args.automation,
+    ...(args.page === undefined ? {} : { page: args.page }),
     ...(args.server ? { server: true } : {}),
   });
 }
@@ -2520,12 +2731,24 @@ export async function listAutomations(ctx: ToolContext, args: { collectionPath: 
   return requestCli(ctx, "automationList", { collectionPath: resolved.normalized });
 }
 
-export async function switchAutomation(ctx: ToolContext, args: {
-  collectionPath: string; automation: string; enabled: boolean; expectedContentHash: string; reformat?: boolean; submitId: string;
-}) {
+export async function switchAutomation(
+  ctx: ToolContext,
+  args: {
+    collectionPath: string;
+    automation: string;
+    enabled: boolean;
+    expectedContentHash: string;
+    reformat?: boolean;
+    submitId: string;
+  },
+) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  return requestCli(ctx, "automationSwitch", { ...args, collectionPath: resolved.normalized, reformat: args.reformat ?? false });
+  return requestCli(ctx, "automationSwitch", {
+    ...args,
+    collectionPath: resolved.normalized,
+    reformat: args.reformat ?? false,
+  });
 }
 
 export async function readAutomationRun(
@@ -2535,7 +2758,11 @@ export async function readAutomationRun(
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
   const { server, ...read } = args;
-  return requestCli(ctx, "automationRun", { ...read, collectionPath: resolved.normalized, ...(server ? { server: true } : {}) });
+  return requestCli(ctx, "automationRun", {
+    ...read,
+    collectionPath: resolved.normalized,
+    ...(server ? { server: true } : {}),
+  });
 }
 
 export async function retryAutomationRun(
@@ -2556,25 +2783,49 @@ export async function retryAutomationRun(
 // The desktop runs it only for someone who may post in the conversation, and
 // a run only in its own workspace.
 export async function retryChatRun(ctx: ToolContext, args: { threadId: string }) {
-  const result = await requestCli(ctx, "chatRetry", { ...(ctx.runId !== undefined ? { runId: ctx.runId } : {}), thread: args.threadId });
+  const result = await requestCli(ctx, "chatRetry", {
+    ...(ctx.runId !== undefined ? { runId: ctx.runId } : {}),
+    thread: args.threadId,
+  });
   return result.ok ? { ...result, threadId: engineThreadId(result.threadId) } : result;
 }
 
 // The desktop checks current access and hosts shared Collection Buttons.
-export async function inspectButtons(ctx: ToolContext, args: { collectionPath: string; table?: string }) {
+export async function inspectButtons(
+  ctx: ToolContext,
+  args: { collectionPath: string; table?: string },
+) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  if (isSharedWithMePath(resolved.normalized)) return { ok: false as const, reason: "path rejected: a mounted share is not a Collection in this workspace" };
-  return requestCli(ctx, "automationButtons", { collectionPath: resolved.normalized, ...(args.table === undefined ? {} : { table: args.table }) });
+  if (isSharedWithMePath(resolved.normalized))
+    return {
+      ok: false as const,
+      reason: "path rejected: a mounted share is not a Collection in this workspace",
+    };
+  return requestCli(ctx, "automationButtons", {
+    collectionPath: resolved.normalized,
+    ...(args.table === undefined ? {} : { table: args.table }),
+  });
 }
 
 export async function pressButton(
   ctx: ToolContext,
-  args: { collectionPath: string; button: string; recordId: string; table?: string; confirm?: string[]; requestId?: string },
+  args: {
+    collectionPath: string;
+    button: string;
+    recordId: string;
+    table?: string;
+    confirm?: string[];
+    requestId?: string;
+  },
 ) {
   const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-  if (isSharedWithMePath(resolved.normalized)) return { ok: false as const, reason: "path rejected: a mounted share is not a Collection in this workspace" };
+  if (isSharedWithMePath(resolved.normalized))
+    return {
+      ok: false as const,
+      reason: "path rejected: a mounted share is not a Collection in this workspace",
+    };
   return requestCli(ctx, "automationPress", {
     collectionPath: resolved.normalized,
     field: args.button,
@@ -2593,15 +2844,30 @@ export async function readDocument(ctx: ToolContext, args: { path: string }) {
   return requestCli(ctx, "documentRead", { path: resolved.normalized });
 }
 
-export async function heldNoteChange(ctx: ToolContext, args: {path: string; action: "review" | "drop" | "undo"; token?: string}) {
-  if (ctx.shareAccess !== undefined) return {ok: false as const, reason: "Only the local owner can drop held edits. Open the owning workspace."};
+export async function heldNoteChange(
+  ctx: ToolContext,
+  args: { path: string; action: "review" | "drop" | "undo"; token?: string },
+) {
+  if (ctx.shareAccess !== undefined)
+    return {
+      ok: false as const,
+      reason: "Only the local owner can drop held edits. Open the owning workspace.",
+    };
   if (args.action !== "review" && !/^[0-9a-f]{64}$/u.test(args.token ?? "")) {
-    return {ok: false as const, reason: "Review the held change first, then use its token for Drop or Undo."};
+    return {
+      ok: false as const,
+      reason: "Review the held change first, then use its token for Drop or Undo.",
+    };
   }
   const resolved = await safeResolve(ctx, args.path, "write");
-  if (!resolved.ok) return {ok: false as const, reason: resolved.reason};
-  return requestCli(ctx, "heldNoteChange", args.action === "review" ? {path: resolved.normalized, action: args.action}
-    : {path: resolved.normalized, action: args.action, token: args.token ?? ""});
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(
+    ctx,
+    "heldNoteChange",
+    args.action === "review"
+      ? { path: resolved.normalized, action: args.action }
+      : { path: resolved.normalized, action: args.action, token: args.token ?? "" },
+  );
 }
 
 export async function readHeldChange(ctx: ToolContext, args: { path: string }) {
@@ -2612,7 +2878,13 @@ export async function readHeldChange(ctx: ToolContext, args: { path: string }) {
 
 export async function editDocument(
   ctx: ToolContext,
-  args: { path: string; find?: string; replacement: string; requestId?: string; allowLossySourceSha256?: string },
+  args: {
+    path: string;
+    find?: string;
+    replacement: string;
+    requestId?: string;
+    allowLossySourceSha256?: string;
+  },
   agent: string | undefined,
 ) {
   const resolved = await safeResolve(ctx, args.path, "write");
@@ -2662,9 +2934,3 @@ export async function startFileChat(
 }
 
 export { safeResolve };
-
-export async function linksEdges(ctx: ToolContext, input: LinksEdgesInput) { return requestCli(ctx, "linksEdges", LinksEdgesInput.parse(input)); }
-
-export async function chatFileMentions(ctx: ToolContext, input: ChatFileMentionsInput) { return requestCli(ctx, "chatFileMentions", ChatFileMentionsInput.parse(input)); }
-
-export async function chatLinks(ctx: ToolContext, input: ChatLinksInput) { return requestCli(ctx, "chatLinks", ChatLinksInput.parse(input)); }

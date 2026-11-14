@@ -26,11 +26,15 @@ function folderOf(path: string): string {
 }
 
 // Several items can mix files and folders, so they are items.
-function subject(done: readonly RecordedTreeChange[], path: (change: RecordedTreeChange["change"]) => string): string {
+function subject(
+  done: readonly RecordedTreeChange[],
+  path: (change: RecordedTreeChange["change"]) => string,
+): string {
   return done.length === 1 ? basenameOf(path(done[0]!.change)) : `${done.length} items`;
 }
 
-const pathOf = (change: RecordedTreeChange["change"]) => ("path" in change ? change.path : change.fromPath);
+const pathOf = (change: RecordedTreeChange["change"]) =>
+  "path" in change ? change.path : change.fromPath;
 
 export function operationWord(change: RecordedTreeChange["change"]): "delete" | "rename" | "move" {
   if ("path" in change) return "delete";
@@ -45,21 +49,27 @@ function deletedPlace(done: readonly RecordedTreeChange[]): string | undefined {
   const system = done.filter((recorded) => recorded.trashed === true).length;
   const workspace = done.filter((recorded) => recorded.trashed === false).length;
   if (system + workspace !== done.length) return undefined;
-  if (workspace === 0) return done.length === 1 ? "It's in the system trash." : "They're in the system trash.";
-  if (system === 0) return done.length === 1 ? `It's in ${WORKSPACE_TRASH}.` : `They're in ${WORKSPACE_TRASH}.`;
+  if (workspace === 0)
+    return done.length === 1 ? "It's in the system trash." : "They're in the system trash.";
+  if (system === 0)
+    return done.length === 1 ? `It's in ${WORKSPACE_TRASH}.` : `They're in ${WORKSPACE_TRASH}.`;
   const are = (count: number) => `${count} ${count === 1 ? "is" : "are"}`;
   return `${are(system)} in the system trash, and ${are(workspace)} in ${WORKSPACE_TRASH}.`;
 }
 
 // One action's changes are all deletes or all moves to one folder.
-export function doneNotice(done: readonly RecordedTreeChange[]): { message: string; undoable: boolean } {
+export function doneNotice(done: readonly RecordedTreeChange[]): {
+  message: string;
+  undoable: boolean;
+} {
   const first = done[0]!.change;
   const word = operationWord(first);
-  const message = "path" in first
-    ? `Deleted ${subject(done, pathOf)}`
-    : word === "rename" && done.length === 1
-      ? `Renamed ${basenameOf(first.fromPath)} to ${basenameOf(first.toPath)}`
-      : `Moved ${subject(done, pathOf)} to ${folderOf(first.toPath)}`;
+  const message =
+    "path" in first
+      ? `Deleted ${subject(done, pathOf)}`
+      : word === "rename" && done.length === 1
+        ? `Renamed ${basenameOf(first.fromPath)} to ${basenameOf(first.toPath)}`
+        : `Moved ${subject(done, pathOf)} to ${folderOf(first.toPath)}`;
   const refused = done.find((recorded) => !recorded.undoable);
   // Without Undo, main's reason already says where the rows are.
   if (!refused) {
@@ -72,11 +82,17 @@ export function doneNotice(done: readonly RecordedTreeChange[]): { message: stri
 // A refused Undo fits a notice's two lines: what failed, then the one thing to
 // do before Try again. A refusal main did not name says only what failed. The
 // cause, in main's own text, goes to Details.
-export function undoRefusedNotice(change: RecordedTreeChange["change"], refusal: UndoHistoryOperationRefusal): string {
+export function undoRefusedNotice(
+  change: RecordedTreeChange["change"],
+  refusal: UndoHistoryOperationRefusal,
+): string {
   const word = operationWord(change);
-  const failed = word === "delete"
-    ? `Cannot restore ${basenameOf(pathOf(change))}.`
-    : word === "rename" ? "Cannot undo the rename." : `Cannot move ${basenameOf(pathOf(change))} back.`;
+  const failed =
+    word === "delete"
+      ? `Cannot restore ${basenameOf(pathOf(change))}.`
+      : word === "rename"
+        ? "Cannot undo the rename."
+        : `Cannot move ${basenameOf(pathOf(change))} back.`;
   if (refusal.code === "unexplained") return failed;
   const name = basenameOf(refusal.path);
   if (refusal.code === "live-page-owned") return `${failed} Stop live editing for ${name} first.`;

@@ -2858,12 +2858,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         let (queued, _) = crate::deferred::read(store, workspace_id, &identity)?;
         let current = crate::read_relay_cursor(store, workspace_id).map_err(local)?;
-        if let Some(cursor) = &current {
-            if cursor.replication_epoch != identity.replication_epoch
-                || cursor.stream_identity != identity.stream_identity
-            {
-                return Err(RelayError::InvalidResponse);
-            }
+        if let Some(cursor) = &current
+            && (cursor.replication_epoch != identity.replication_epoch
+                || cursor.stream_identity != identity.stream_identity)
+        {
+            return Err(RelayError::InvalidResponse);
         }
         let (pull_token, previous_pull_token) = {
             let mut fetching = self
@@ -3561,7 +3560,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         for change in heads {
             insert_changed_path(&mut pass.changed_paths, change);
         }
-        // A document that moved first in a trade of spellings (#2421) shares
+        // A document that moved first in a trade of spellings shares
         // the other's file on a disk that ignores case, whichever change
         // named its path, so its head waits for the pass that makes it ready.
         let unready: BTreeSet<&str> = replica
@@ -4107,8 +4106,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         // it has not retained, which stays in the feed. Nothing reruns the
         // drain for it. One of an archived lineage freezes only that lineage:
         // ingress stops each of its updates, and the head's ops route on.
-        // r1c-2: a dependency-drain hold still routes later ops, which queue
-        // behind it unbounded until its bounded retention lands.
+        // A dependency-drain hold still routes later ops, which queue behind
+        // it without a bound.
         let frozen = match (&p.holding, crate::hosted::hosted_document(op)) {
             (Holding::ByDocument { .. }, Some(object_id)) if recorded.is_none() => store
                 .read_with(|conn| -> Result<Option<crate::HostedHold>, SyncError> {
@@ -5122,13 +5121,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     continue;
                 }
             };
-            // The relay serves `workspace.init` to a path/version share as its
-            // bootstrap op (`services/sync-relay/src/shareFilter.ts`), and this
-            // recipient needs nothing from it: `replay_share_view_op` ensures
-            // the local main version itself. So it is skipped as expected, not
-            // refused — the boundary still admits only `moment.append` and
-            // `version.create`, and reporting this healthy skip as a refusal
-            // would make the first pull of every share look damaged.
             if envelope.op_kind == BOOTSTRAP_OP_KIND {
                 skipped += 1;
                 continue;
@@ -5140,14 +5132,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         refusals: nested_refusals,
                         sharing_declined,
                     } = outcome;
-                    // A share-view CHAT op does mutate chat
-                    // dependencies — that is what applying it means, and the
-                    // replay it unparks can refuse ops of its own. Those
-                    // refusals are recorded below rather than asserted about:
-                    // every coordinate `chat_pending_replication` can hold is
-                    // a chat kind by construction, so an assertion that they
-                    // are chat kinds proves nothing and is absent in release
-                    // anyway.
                     for refusal in nested_refusals {
                         refusals.push(ShareViewRefusal::new(
                             refusal.origin_id,
@@ -5169,11 +5153,6 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         }
                     }
                 }
-                // `share_disposition` decides, and it is exhaustive over
-                // `SyncError` — a new variant fails to compile there until its
-                // author chooses, rather than falling into a catch-all and
-                // wedging this pull. Listing the classes here instead would
-                // put that choice in a place nobody is forced to visit.
                 Err(error) => match error.share_disposition() {
                     // Skip and continue: one op the relay should not have
                     // served must not wedge the share. The reason travels with
@@ -6180,25 +6159,9 @@ pub(crate) fn replication_payloads_match(
 }
 
 pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>, SyncError> {
-    #[cfg(test)]
-    CANONICAL_JSON_CALLS.with(|calls| calls.set(calls.get() + 1));
     dohc_engine_collab::canonical_json::canonical_json_string(value)
         .map(String::into_bytes)
         .ok_or(SyncError::CoordinateDiverged)
-}
-
-#[cfg(test)]
-thread_local! {
-    static CANONICAL_JSON_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn take_canonical_json_call_count() -> usize {
-    CANONICAL_JSON_CALLS.with(|calls| {
-        let count = calls.get();
-        calls.set(0);
-        count
-    })
 }
 
 /// Whether a held op is retained across passes, so the cursor can move past
@@ -6279,8 +6242,8 @@ impl Holding {
     /// unsettled, or its lineage does not project its resulting head yet. The
     /// document is held there, naming why, and retains nothing, as one that
     /// is not ready.
-    // MERGE-REVIEW: main stops these only after a round without progress;
-    // the released-lineage and resulting-head reasons now wait for that too.
+    // Every reason here stops its document only after a round without
+    // progress.
     fn stop_where_it_can_wait(&mut self, op: &ReplicationEnvelope, reason: &str) {
         if let Self::ByDocument { unready, .. } = self
             && matches!(
@@ -6382,7 +6345,6 @@ struct ApplyProgress {
     holding: Holding,
     /// Every round ran; only settling what the ops left pending remains.
     rounds_done: bool,
-    /// The owner settlements the pass reports so far.
     settlements: crate::moment_apply::pending::PendingSettlementReport,
     /// The archived lineages, as `[version, object, lineage]`, that the
     /// inactive drains before its ops found released tails protect. Those
@@ -6395,7 +6357,6 @@ struct ApplyProgress {
     reader: crate::moment_apply::open_artifacts::ReaderWait,
 }
 
-/// What applying a pass came to.
 enum Applying {
     Done(Box<AppliedPass>),
     /// An op or owner settlement waits for released-tail validation; nothing
@@ -7177,7 +7138,6 @@ struct ScanSkips {
     stop_at: BTreeSet<String>,
 }
 
-/// What one scan of this replica's journal found.
 struct ShareProposalScan {
     changes: Vec<NetChange>,
     /// The journal position this scan read through, and the position the
@@ -7277,8 +7237,6 @@ fn collect_share_proposal_changes(
                 "moment.append" => Some(MomentRefs::read(&op.payload)),
                 _ => None,
             };
-            // An open write stops the scan at its file's first op past what
-            // is already settled; a settled op is read past as usual.
             if let Some(object_id) = moment.and_then(|moment| moment.object_id)
                 && skips.stop_at.contains(object_id)
                 && skips
@@ -7575,18 +7533,6 @@ struct RefusedBlob {
     path: String,
 }
 
-/// Turn an op's refused blobs into one durable record.
-///
-/// The recipient's record is keyed by origin coordinate and by nothing else
-/// (`mergeShareSkippedOps` in `apps/desktop/src/workspaces/registryStore.ts`),
-/// because a re-fetched page must not stack the same op up twice. Every blob
-/// in one op shares that coordinate, so emitting a refusal per blob does not
-/// give the reader more detail — the record keeps the first and drops the
-/// rest, uncounted. Two files would go missing and the notice would say one.
-///
-/// So the op is the record and the blobs are its contents. The count leads,
-/// because `ShareViewRefusal::new` bounds the detail and a list that stops
-/// short must still say how many files it is short.
 fn record_refused_blobs<T>(
     context: &mut ShareViewReplayContext<'_, T>,
     envelope: &ReplicationEnvelope,
@@ -7665,7 +7611,6 @@ fn refusal_detail(refused: &[RefusedBlob]) -> String {
     refusal_list(entries.len(), &entries[..listed])
 }
 
-/// The count leads, then the entries that fit, then what was left out.
 fn refusal_list(total: usize, listed: &[String]) -> String {
     let unlisted = format!("and {} more", total - listed.len());
     let mut parts: Vec<&str> = listed.iter().map(String::as_str).collect();
@@ -7720,33 +7665,30 @@ fn replay_share_view_op<T: RelayTransport>(
                     moment.payload_before.path,
                     moment.after_path(),
                     moment.payload_after.blob_sha256,
+                ) && let Err(error) = replay_share_write(
+                    context.transport,
+                    &mut *context.store,
+                    context.workspace_id,
+                    &main_version_id,
+                    context.share_id,
+                    envelope,
+                    after,
+                    sha,
+                    after_kind,
+                    moment.object_id,
+                    Some(before),
+                    context.faults,
+                    &mut *context.applied,
+                    &mut *context.changed,
+                    &mut *context.blob_refusals,
                 ) {
-                    if let Err(error) = replay_share_write(
-                        context.transport,
-                        &mut *context.store,
-                        context.workspace_id,
-                        &main_version_id,
-                        context.share_id,
-                        envelope,
-                        after,
-                        sha,
-                        after_kind,
-                        moment.object_id,
-                        Some(before),
-                        context.faults,
-                        &mut *context.applied,
-                        &mut *context.changed,
-                        &mut *context.blob_refusals,
-                    ) {
-                        refuse_replay_unit(context, &mut refused, after, error)?;
-                    }
+                    refuse_replay_unit(context, &mut refused, after, error)?;
                 }
             }
             Some("write") => {
                 if let (Some(after), Some(sha)) =
                     (moment.after_path(), moment.payload_after.blob_sha256)
-                {
-                    if let Err(error) = replay_share_write(
+                    && let Err(error) = replay_share_write(
                         context.transport,
                         &mut *context.store,
                         context.workspace_id,
@@ -7762,9 +7704,9 @@ fn replay_share_view_op<T: RelayTransport>(
                         &mut *context.applied,
                         &mut *context.changed,
                         &mut *context.blob_refusals,
-                    ) {
-                        refuse_replay_unit(context, &mut refused, after, error)?;
-                    }
+                    )
+                {
+                    refuse_replay_unit(context, &mut refused, after, error)?;
                 }
             }
             _ => {}
@@ -9225,7 +9167,6 @@ mod refusal_tests {
                 detail: "retryable-state: replication state is not ready: ydoc-resulting-head-pending (object zeus, origin peer seq 6); and 1 more".into(),
             }
         );
-        // The engine's log line names no path.
         assert_eq!(
             refusal.to_string(),
             "local sync state failed: retryable-state: replication state is not ready: ydoc-resulting-head-pending (object zeus, origin peer seq 6); and 1 more",

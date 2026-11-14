@@ -16,34 +16,53 @@ describe("chats result decoder rejection", () => {
     const item = {
       position: { createdAtMs: 1, lane: "posts", id: "post" },
       message: {
-        id: "root", workspaceId: "workspace", threadId: "post",
+        id: "root",
+        workspaceId: "workspace",
+        threadId: "post",
         author: { kind: "human", displayName: "Sam" },
-        body: "Train or bus?", createdAtMs: 1, attachments: [],
+        body: "Train or bus?",
+        createdAtMs: 1,
+        attachments: [],
       },
       reactions: [],
       post: { replyCount: 0, repliers: [], openDecisionCount: 0 },
     };
     const open = {
-      threadId: "post", messageId: "root", state: "open", atMs: 1,
+      threadId: "post",
+      messageId: "root",
+      state: "open",
+      atMs: 1,
       options: ["Train", "Bus"],
     };
     const resolved = {
-      ...open, state: "resolved", atMs: 2, chosenOption: "Train", resolvedByMessageId: "answer",
+      ...open,
+      state: "resolved",
+      atMs: 2,
+      chosenOption: "Train",
+      resolvedByMessageId: "answer",
     };
     for (const decision of [open, resolved]) {
       const decoded = decodeChatsResult(CHATS_METHOD.streamList, {
-        items: [{ ...item, decision }], nextBefore: null, readPosition: null,
+        items: [{ ...item, decision }],
+        nextBefore: null,
+        readPosition: null,
       });
       expect(decoded.items[0]?.decision).toEqual(decision);
     }
     const plain = decodeChatsResult(CHATS_METHOD.streamList, {
-      items: [item], nextBefore: null, readPosition: null,
+      items: [item],
+      nextBefore: null,
+      readPosition: null,
     });
     expect(plain.items[0]?.decision).toBeUndefined();
     for (const decision of [null, { ...open, state: "invalid" }, { ...open, options: [1] }]) {
-      expect(() => decodeChatsResult(CHATS_METHOD.streamList, {
-        items: [{ ...item, decision }], nextBefore: null, readPosition: null,
-      })).toThrow(ProtocolShapeError);
+      expect(() =>
+        decodeChatsResult(CHATS_METHOD.streamList, {
+          items: [{ ...item, decision }],
+          nextBefore: null,
+          readPosition: null,
+        }),
+      ).toThrow(ProtocolShapeError);
     }
   });
 
@@ -73,7 +92,10 @@ describe("chats result decoder rejection", () => {
       nextCursor: null,
     });
 
-    expect(Object.getPrototypeOf(decoded.runs), "replacing Object.create(null) with {} drops __proto__ into the prototype setter instead of preserving the caller-supplied message id.").toBeNull();
+    expect(
+      Object.getPrototypeOf(decoded.runs),
+      "replacing Object.create(null) with {} drops __proto__ into the prototype setter instead of preserving the caller-supplied message id.",
+    ).toBeNull();
     expect(Object.keys(decoded.runs)).toEqual(["__proto__", "constructor"]);
     expect(Object.prototype.hasOwnProperty.call(decoded.runs, "__proto__")).toBe(true);
     expect(Object.prototype.hasOwnProperty.call(decoded.runs, "constructor")).toBe(true);
@@ -135,30 +157,32 @@ describe("chats result decoder rejection", () => {
     expect(decodeChatMessage(negativeMessage).createdAtMs).toBe(-40);
 
     const feed = decodeChatsResult(CHATS_METHOD.feedListPersonal, {
-      items: [{
-        message: negativeMessage,
-        thread: {
-          id: "thread",
-          workspaceId: "workspace",
-          title: "Imported",
-          createdAtMs: -41,
-          updatedAtMs: -40,
-          channelId: "channel",
+      items: [
+        {
+          message: negativeMessage,
+          thread: {
+            id: "thread",
+            workspaceId: "workspace",
+            title: "Imported",
+            createdAtMs: -41,
+            updatedAtMs: -40,
+            channelId: "channel",
+          },
+          reactions: [],
+          matchedBy: ["person"],
+          channel: {
+            id: "channel",
+            workspaceId: "workspace",
+            name: "Imported",
+            slug: "imported",
+            kind: "channel",
+            type: "posts",
+            purpose: "",
+            createdAtMs: -42,
+            updatedAtMs: -41,
+          },
         },
-        reactions: [],
-        matchedBy: ["person"],
-        channel: {
-          id: "channel",
-          workspaceId: "workspace",
-          name: "Imported",
-          slug: "imported",
-          kind: "channel",
-          type: "posts",
-          purpose: "",
-          createdAtMs: -42,
-          updatedAtMs: -41,
-        },
-      }],
+      ],
       nextCursor: null,
       headCursor: null,
       readState: {
@@ -184,66 +208,106 @@ describe("chats result decoder rejection", () => {
     expect(agentRead.lastReadCreatedAtMs).toBe(-40);
 
     const summaries = decodeChatsResult(CHATS_METHOD.threadsListForChannel, {
-      threads: [{
-        thread: {
-          id: "thread",
-          workspaceId: "workspace",
-          title: "Imported",
-          createdAtMs: -41,
-          updatedAtMs: -40,
-          channelId: "channel",
+      threads: [
+        {
+          thread: {
+            id: "thread",
+            workspaceId: "workspace",
+            title: "Imported",
+            createdAtMs: -41,
+            updatedAtMs: -40,
+            channelId: "channel",
+          },
+          messageCount: 1,
+          lastReadSequence: 0,
+          unreadCount: 1,
+          openDecisionCount: 0,
+          openingMessage: {
+            id: "negative-message",
+            author: { kind: "human", displayName: "" },
+            createdAtMs: -40,
+            bodySnippet: "Imported",
+            reactions: [],
+          },
         },
-        messageCount: 1,
-        lastReadSequence: 0,
-        unreadCount: 1,
-        openDecisionCount: 0,
-        openingMessage: {
-          id: "negative-message",
-          author: { kind: "human", displayName: "" },
-          createdAtMs: -40,
-          bodySnippet: "Imported",
-          reactions: [],
-        },
-      }],
+      ],
       nextCursor: null,
     });
     expect(summaries.threads[0]?.openingMessage?.createdAtMs).toBe(-40);
 
     const mentions = decodeChatsResult(CHATS_METHOD.mentionsListForHandle, {
-      mentions: [{
-        threadId: "thread",
-        messageId: "negative-message",
-        handle: "agent",
-        authorKind: "human",
-        createdAtMs: -40,
-      }],
+      mentions: [
+        {
+          threadId: "thread",
+          messageId: "negative-message",
+          handle: "agent",
+          authorKind: "human",
+          createdAtMs: -40,
+        },
+      ],
       nextCursor: null,
     });
     expect(mentions.mentions[0]?.createdAtMs).toBe(-40);
 
     const fileMentions = decodeChatsResult(CHATS_METHOD.attachmentsListFileMentions, {
-      versionId: "main", subject: null, unchecked: [], complete: true, indexBuilding: false,
-      mountsCovered: true, sharedChannelRowsUncovered: 0, nextCursor: null,
-      entries: [{
-        attachment: { attachmentId: "attachment", threadId: "thread", messageId: "negative-message",
-          targetKind: "file", objectId: "object", pathHint: "a.md", createdAtMs: -39 },
-        message: { id: "negative-message", authorDisplayName: "Ada", preview: "Preview", createdAtMs: -40 },
-        thread: { id: "thread", title: "Imported", createdAtMs: -41, updatedAtMs: -40 },
-      }],
+      versionId: "main",
+      subject: null,
+      unchecked: [],
+      complete: true,
+      indexBuilding: false,
+      mountsCovered: true,
+      sharedChannelRowsUncovered: 0,
+      nextCursor: null,
+      entries: [
+        {
+          attachment: {
+            attachmentId: "attachment",
+            threadId: "thread",
+            messageId: "negative-message",
+            targetKind: "file",
+            objectId: "object",
+            pathHint: "a.md",
+            createdAtMs: -39,
+          },
+          message: {
+            id: "negative-message",
+            authorDisplayName: "Ada",
+            preview: "Preview",
+            createdAtMs: -40,
+          },
+          thread: { id: "thread", title: "Imported", createdAtMs: -41, updatedAtMs: -40 },
+        },
+      ],
     });
     expect(fileMentions?.entries[0]?.message.createdAtMs).toBe(-40);
   });
 
   it("keeps the agent that wrote a post's opening message", () => {
     const summaries = decodeChatsResult(CHATS_METHOD.threadsListForChannel, {
-      threads: [{
-        thread: { id: "t", workspaceId: "w", title: "Done", createdAtMs: 1, updatedAtMs: 1, channelId: "c" },
-        messageCount: 1, lastReadSequence: 0, unreadCount: 1, openDecisionCount: 0,
-        openingMessage: {
-          id: "m", author: { kind: "agent", displayName: "Codex" }, authorAgentId: "codex",
-          createdAtMs: 1, bodySnippet: "Done", reactions: [],
+      threads: [
+        {
+          thread: {
+            id: "t",
+            workspaceId: "w",
+            title: "Done",
+            createdAtMs: 1,
+            updatedAtMs: 1,
+            channelId: "c",
+          },
+          messageCount: 1,
+          lastReadSequence: 0,
+          unreadCount: 1,
+          openDecisionCount: 0,
+          openingMessage: {
+            id: "m",
+            author: { kind: "agent", displayName: "Codex" },
+            authorAgentId: "codex",
+            createdAtMs: 1,
+            bodySnippet: "Done",
+            reactions: [],
+          },
         },
-      }],
+      ],
       nextCursor: null,
     });
     expect(summaries.threads[0]?.openingMessage?.authorAgentId).toBe("codex");
@@ -307,7 +371,12 @@ describe("chats result decoder rejection", () => {
 });
 
 describe("link messages", () => {
-  const linkAuthor = { kind: "link", displayName: "Guest", grantId: "grant-1", principalId: "principal-1" };
+  const linkAuthor = {
+    kind: "link",
+    displayName: "Guest",
+    grantId: "grant-1",
+    principalId: "principal-1",
+  };
   const linkMessage = {
     id: "m",
     workspaceId: "w",
@@ -321,18 +390,40 @@ describe("link messages", () => {
   it("decodes a link holder's message with its link and name", () => {
     expect(decodeChatMessage(linkMessage).author).toEqual(linkAuthor);
     const opening = decodeChatsResult(CHATS_METHOD.threadsListForChannel, {
-      threads: [{
-        thread: { id: "t", workspaceId: "w", title: "Hello", createdAtMs: 1, updatedAtMs: 1, channelId: "c" },
-        messageCount: 1, lastReadSequence: 0, unreadCount: 1, openDecisionCount: 0,
-        openingMessage: { id: "m", author: linkAuthor, createdAtMs: 1, bodySnippet: "Hello", reactions: [] },
-      }],
+      threads: [
+        {
+          thread: {
+            id: "t",
+            workspaceId: "w",
+            title: "Hello",
+            createdAtMs: 1,
+            updatedAtMs: 1,
+            channelId: "c",
+          },
+          messageCount: 1,
+          lastReadSequence: 0,
+          unreadCount: 1,
+          openDecisionCount: 0,
+          openingMessage: {
+            id: "m",
+            author: linkAuthor,
+            createdAtMs: 1,
+            bodySnippet: "Hello",
+            reactions: [],
+          },
+        },
+      ],
       nextCursor: null,
     });
     expect(opening.threads[0]?.openingMessage?.author).toEqual(linkAuthor);
-    expect(decodeChatsResult(CHATS_METHOD.mentionsListForHandle, {
-      mentions: [{ threadId: "t", messageId: "m", handle: "ada", authorKind: "link", createdAtMs: 1 }],
-      nextCursor: null,
-    }).mentions[0]?.authorKind).toBe("link");
+    expect(
+      decodeChatsResult(CHATS_METHOD.mentionsListForHandle, {
+        mentions: [
+          { threadId: "t", messageId: "m", handle: "ada", authorKind: "link", createdAtMs: 1 },
+        ],
+        nextCursor: null,
+      }).mentions[0]?.authorKind,
+    ).toBe("link");
   });
 
   it("decodes an agent's link message with its connection, and only on a link author", () => {
@@ -343,7 +434,9 @@ describe("link messages", () => {
       { kind: "human", displayName: "Ada", agentConnectionId: "connection-1" },
       { kind: "agent", displayName: "Helper", agentConnectionId: "connection-1" },
     ]) {
-      expect(() => decodeChatMessage({ ...linkMessage, author }), JSON.stringify(author)).toThrow(ProtocolShapeError);
+      expect(() => decodeChatMessage({ ...linkMessage, author }), JSON.stringify(author)).toThrow(
+        ProtocolShapeError,
+      );
     }
   });
 
@@ -351,11 +444,13 @@ describe("link messages", () => {
     for (const extra of [
       { authorUserId: "user-ada" },
       { authorOwnerDisplayName: "Ada" },
-      { authorActorKey: "{\"kind\":\"unknown\"}" },
+      { authorActorKey: '{"kind":"unknown"}' },
       { origin: "cli" },
       { automation: { automationId: "collection:tasks#stamp" } },
     ]) {
-      expect(() => decodeChatMessage({ ...linkMessage, ...extra }), JSON.stringify(extra)).toThrow(ProtocolShapeError);
+      expect(() => decodeChatMessage({ ...linkMessage, ...extra }), JSON.stringify(extra)).toThrow(
+        ProtocolShapeError,
+      );
     }
     for (const author of [
       { kind: "link", displayName: "Guest", grantId: "grant-1" },
@@ -363,15 +458,38 @@ describe("link messages", () => {
       { ...linkAuthor, grantId: "" },
       { ...linkAuthor, kind: "human" },
     ]) {
-      expect(() => decodeChatMessage({ ...linkMessage, author }), JSON.stringify(author)).toThrow(ProtocolShapeError);
+      expect(() => decodeChatMessage({ ...linkMessage, author }), JSON.stringify(author)).toThrow(
+        ProtocolShapeError,
+      );
     }
-    expect(() => decodeChatsResult(CHATS_METHOD.threadsListForChannel, {
-      threads: [{
-        thread: { id: "t", workspaceId: "w", title: "Hello", createdAtMs: 1, updatedAtMs: 1, channelId: "c" },
-        messageCount: 1, lastReadSequence: 0, unreadCount: 1, openDecisionCount: 0,
-        openingMessage: { id: "m", author: linkAuthor, authorUserId: "user-ada", createdAtMs: 1, bodySnippet: "Hello", reactions: [] },
-      }],
-      nextCursor: null,
-    })).toThrow(ProtocolShapeError);
+    expect(() =>
+      decodeChatsResult(CHATS_METHOD.threadsListForChannel, {
+        threads: [
+          {
+            thread: {
+              id: "t",
+              workspaceId: "w",
+              title: "Hello",
+              createdAtMs: 1,
+              updatedAtMs: 1,
+              channelId: "c",
+            },
+            messageCount: 1,
+            lastReadSequence: 0,
+            unreadCount: 1,
+            openDecisionCount: 0,
+            openingMessage: {
+              id: "m",
+              author: linkAuthor,
+              authorUserId: "user-ada",
+              createdAtMs: 1,
+              bodySnippet: "Hello",
+              reactions: [],
+            },
+          },
+        ],
+        nextCursor: null,
+      }),
+    ).toThrow(ProtocolShapeError);
   });
 });

@@ -12,14 +12,35 @@ export async function linuxTrayShown(run: typeof execFile = execFile): Promise<b
     new Promise<boolean>((resolve) => {
       run(
         "gdbus",
-        ["call", "--session", "--dest", destination, "--object-path", objectPath, "--method", method, ...args],
+        [
+          "call",
+          "--session",
+          "--dest",
+          destination,
+          "--object-path",
+          objectPath,
+          "--method",
+          method,
+          ...args,
+        ],
         { timeout: 2000 },
         (error, stdout) => resolve(!error && /\btrue\b/.test(String(stdout))),
       );
     });
   // Asking the watcher before it exists could start one, so check its name first.
   return (
-    (await answer("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus.NameHasOwner", WATCHER)) &&
-    (await answer(WATCHER, "/StatusNotifierWatcher", "org.freedesktop.DBus.Properties.Get", WATCHER, "IsStatusNotifierHostRegistered"))
+    (await answer(
+      "org.freedesktop.DBus",
+      "/org/freedesktop/DBus",
+      "org.freedesktop.DBus.NameHasOwner",
+      WATCHER,
+    )) &&
+    (await answer(
+      WATCHER,
+      "/StatusNotifierWatcher",
+      "org.freedesktop.DBus.Properties.Get",
+      WATCHER,
+      "IsStatusNotifierHostRegistered",
+    ))
   );
 }

@@ -15,18 +15,16 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 //
 // Every pixel must equal its baseline, compared here from the decoded
 // images: Playwright's comparator skips pixels it takes for antialiasing
-// and tolerates a per-pixel distance, and either let a one-step token
-// change pass. The captures are made deterministic by construction:
-// software rendering, no animations or backdrop filters, a viewport as tall
-// as the page so nothing scrolls, a pinned color scheme, states forced
-// through the browser instead of pointer events, the pointer parked outside
-// every part, a paused clock so acknowledged copies hold, fonts checked,
-// each part captured alone at the top of its pane, and each capture
-// repeated until two in a row are equal.
+// and tolerates a per-pixel distance, and either lets a one-step token
+// change pass. The captures are deterministic by construction: software
+// rendering, no animations or backdrop filters, a viewport as tall as the
+// page, a pinned color scheme, states forced through the browser, the
+// pointer parked outside every part, a paused clock, fonts checked, each
+// part captured alone at the top of its pane, and each capture repeated
+// until two in a row are equal.
 // So the baselines do not cover a backdrop blur, an animation's end state,
-// anything only the GPU draws, or how a part looks at a display scale other
-// than 100%. The baselines were taken on Windows; Playwright names them per
-// platform.
+// anything only the GPU draws, or a display scale other than 100%. The
+// baselines were taken on Windows; Playwright names them per platform.
 //
 // A second pass captures each part among all the others and holds it to the
 // same baseline, roughly (IN_CONTEXT_LEVELS): it catches a part whose styles
@@ -43,13 +41,46 @@ const THEMES = ["light", "dark"] as const;
 // Every part the page has, so a section dropped by mistake fails here
 // instead of leaving its baselines unread.
 const PARTS = [
-  "surfaces", "buttons", "copy", "segmented", "switch", "state-mark", "chips", "avatars", "badges", "text-inputs",
-  "steps", "folder-chip", "hue-control", "color-control", "native-controls", "list-rows", "collections-rows", "menu", "document-menu",
-  "explorer-menu-file", "explorer-menu-folder", "explorer-menu-mount",
-  "empty", "loading", "toasts", "undo-toasts", "notice-details", "notices", "dialog", "menu-radio", "new-version", "new-version-from-version", "menu-overflow", "menu-danger",
-  "editor-groups", "editor-groups-empty", "editor-group-focus",
+  "surfaces",
+  "buttons",
+  "copy",
+  "segmented",
+  "switch",
+  "state-mark",
+  "chips",
+  "avatars",
+  "badges",
+  "text-inputs",
+  "steps",
+  "folder-chip",
+  "hue-control",
+  "color-control",
+  "native-controls",
+  "list-rows",
+  "collections-rows",
+  "menu",
+  "document-menu",
+  "explorer-menu-file",
+  "explorer-menu-folder",
+  "explorer-menu-mount",
+  "empty",
+  "loading",
+  "toasts",
+  "undo-toasts",
+  "notice-details",
+  "notices",
+  "dialog",
+  "menu-radio",
+  "new-version",
+  "new-version-from-version",
+  "menu-overflow",
+  "menu-danger",
+  "editor-groups",
+  "editor-groups-empty",
+  "editor-group-focus",
   "kind-glyph",
-  "block-menu", "table-menu",
+  "block-menu",
+  "table-menu",
   "history",
   "history-timeline",
   "tab-row-actions",
@@ -114,14 +145,14 @@ function decode(png: Buffer): Pixels {
   return PNG.sync.read(png);
 }
 
-// What differs between two images, or null when nothing does.
 function mismatch(expected: Pixels, actual: Pixels): string | null {
   if (expected.width !== actual.width || expected.height !== actual.height) {
     return `is ${actual.width}x${actual.height}, the baseline ${expected.width}x${expected.height}`;
   }
   let differing = 0;
   for (let offset = 0; offset < expected.data.length; offset += 4) {
-    if (expected.data.compare(actual.data, offset, offset + 4, offset, offset + 4) !== 0) differing += 1;
+    if (expected.data.compare(actual.data, offset, offset + 4, offset, offset + 4) !== 0)
+      differing += 1;
   }
   return differing === 0 ? null : `differs in ${differing} pixels`;
 }
@@ -137,17 +168,15 @@ function pngMismatch(expected: Buffer, actual: Buffer): string | null {
 // differently. Across four page positions, at most 21 pixels of a capture
 // (in buttons, with its many rounded corners) moved by more than 16 levels
 // in a channel, and none by more than 62. A part whose styles change how
-// others paint moves far more: #1983's mask on a tab strip dropped subpixel
-// text across the page, and moved 1,328 pixels of buttons by more than 16.
-// The limit is three times the worst noise and a twentieth of #1983's 1,328.
+// others paint moves far more: a mask on a tab strip dropped subpixel text
+// across the page, and moved 1,328 pixels of buttons by more than 16. The
+// limit is three times the worst noise and a twentieth of that 1,328.
 const IN_CONTEXT_LEVELS = 16;
 const IN_CONTEXT_PIXELS = 64;
 
-// What differs between a part captured among the others and its baseline,
-// or null when no more than IN_CONTEXT_PIXELS pixels differ by more than
-// IN_CONTEXT_LEVELS in a channel.
 function farFrom(expected: Pixels, actual: Pixels): string | null {
-  if (expected.width !== actual.width || expected.height !== actual.height) return mismatch(expected, actual);
+  if (expected.width !== actual.width || expected.height !== actual.height)
+    return mismatch(expected, actual);
   let far = 0;
   for (let offset = 0; offset < expected.data.length; offset += 4) {
     for (let channel = offset; channel < offset + 4; channel += 1) {
@@ -157,12 +186,18 @@ function farFrom(expected: Pixels, actual: Pixels): string | null {
       }
     }
   }
-  return far <= IN_CONTEXT_PIXELS ? null : `differs by more than ${IN_CONTEXT_LEVELS} levels in ${far} pixels`;
+  return far <= IN_CONTEXT_PIXELS
+    ? null
+    : `differs by more than ${IN_CONTEXT_LEVELS} levels in ${far} pixels`;
 }
 
-// A part's box with BLEED around it, its height rounded up to a whole pixel.
 function around(box: Box): Box {
-  return { x: box.x - BLEED, y: box.y - BLEED, width: box.width + 2 * BLEED, height: Math.ceil(box.height) + 2 * BLEED };
+  return {
+    x: box.x - BLEED,
+    y: box.y - BLEED,
+    width: box.width + 2 * BLEED,
+    height: Math.ceil(box.height) + 2 * BLEED,
+  };
 }
 
 // The baselines are in CSS pixels, whatever the display's scale.
@@ -172,7 +207,10 @@ const STILL_CAPTURES = 20;
 // Captures `clip` until two captures in a row are equal, so no part is
 // compared while it is still settling. When none are, `unsettled` says how
 // the last two differ.
-async function captureStill(page: Page, clip: Box): Promise<{ pixels: Buffer; unsettled: string | null }> {
+async function captureStill(
+  page: Page,
+  clip: Box,
+): Promise<{ pixels: Buffer; unsettled: string | null }> {
   let pixels = await page.screenshot({ ...CSS_PIXELS, clip });
   let unsettled: string | null = null;
   for (let captures = 1; captures < STILL_CAPTURES; captures += 1) {
@@ -194,7 +232,9 @@ async function showOnly(page: Page, name: string): Promise<void> {
   await page.evaluate((name) => {
     const style =
       document.getElementById("states-only") ??
-      document.head.appendChild(Object.assign(document.createElement("style"), { id: "states-only" }));
+      document.head.appendChild(
+        Object.assign(document.createElement("style"), { id: "states-only" }),
+      );
     style.textContent = `[data-part]:not([data-part="${name}"]) { display: none; }`;
   }, name);
 }
@@ -210,17 +250,24 @@ async function compareWithBaseline(name: string, actual: Buffer): Promise<string
   const mode = info.config.updateSnapshots;
   const baseline = existsSync(path) ? readFileSync(path) : null;
   const difference = baseline ? pngMismatch(baseline, actual) : null;
-  const write = baseline === null ? mode !== "none" : mode === "all" || (mode === "changed" && difference !== null);
+  const write =
+    baseline === null
+      ? mode !== "none"
+      : mode === "all" || (mode === "changed" && difference !== null);
   if (write) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, actual);
   }
-  const pass = baseline === null ? mode === "changed" || mode === "all" : difference === null || write;
+  const pass =
+    baseline === null ? mode === "changed" || mode === "all" : difference === null || write;
   if (pass) return null;
   const actualPath = info.outputPath(`${name}-actual.png`);
   writeFileSync(actualPath, actual);
   await info.attach(`${name}-actual`, { path: actualPath, contentType: "image/png" });
-  const reason = baseline === null ? `has no baseline${write ? "; one was written, run again" : ""}` : difference;
+  const reason =
+    baseline === null
+      ? `has no baseline${write ? "; one was written, run again" : ""}`
+      : difference;
   return `${name} ${reason}; the capture is at ${actualPath}`;
 }
 
@@ -246,7 +293,9 @@ async function withDesktop(
 // the root takes the keyboard's mark first.
 type Cdp = Awaited<ReturnType<ReturnType<Page["context"]>["newCDPSession"]>>;
 async function forceMarkedStates(cdp: Cdp, scope: string): Promise<void> {
-  await cdp.send("Runtime.evaluate", { expression: "document.documentElement.toggleAttribute('data-keyboard-nav', true)" });
+  await cdp.send("Runtime.evaluate", {
+    expression: "document.documentElement.toggleAttribute('data-keyboard-nav', true)",
+  });
   const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
   const { nodeIds } = await cdp.send("DOM.querySelectorAll", {
     nodeId: root.nodeId,
@@ -254,21 +303,23 @@ async function forceMarkedStates(cdp: Cdp, scope: string): Promise<void> {
   });
   // Each command waits a round trip on a page this tall, so they go out
   // together; the browser still runs them in order.
-  const forced = await Promise.all(nodeIds.map(async (nodeId) => {
-    const { attributes } = await cdp.send("DOM.getAttributes", { nodeId });
-    const marks = new Map<string, string>();
-    for (let index = 0; index < attributes.length; index += 2) {
-      marks.set(attributes[index] ?? "", attributes[index + 1] ?? "");
-    }
-    const state = marks.get("data-force-state");
-    if (!state) return null;
-    const target = marks.get("data-force-target");
-    const targetId = target
-      ? (await cdp.send("DOM.querySelector", { nodeId, selector: target })).nodeId
-      : nodeId;
-    if (!targetId) throw new Error(`no element matches data-force-target="${target}"`);
-    return { nodeId: targetId, forcedPseudoClasses: state.split(" ") };
-  }));
+  const forced = await Promise.all(
+    nodeIds.map(async (nodeId) => {
+      const { attributes } = await cdp.send("DOM.getAttributes", { nodeId });
+      const marks = new Map<string, string>();
+      for (let index = 0; index < attributes.length; index += 2) {
+        marks.set(attributes[index] ?? "", attributes[index + 1] ?? "");
+      }
+      const state = marks.get("data-force-state");
+      if (!state) return null;
+      const target = marks.get("data-force-target");
+      const targetId = target
+        ? (await cdp.send("DOM.querySelector", { nodeId, selector: target })).nodeId
+        : nodeId;
+      if (!targetId) throw new Error(`no element matches data-force-target="${target}"`);
+      return { nodeId: targetId, forcedPseudoClasses: state.split(" ") };
+    }),
+  );
   await Promise.all(forced.map((force) => force && cdp.send("CSS.forcePseudoState", force)));
 }
 
@@ -325,7 +376,10 @@ test("@states-page @states-baselines every shared part matches its baseline in b
   // host still passes, and a hang fails within seven minutes.
   test.setTimeout(420_000);
   await withDesktop({ DOHC_DEV_TOOLS: "1" }, async (page) => {
-    expect(await page.evaluate(() => window.devicePixelRatio), "the baselines are one device pixel per CSS pixel").toBe(1);
+    expect(
+      await page.evaluate(() => window.devicePixelRatio),
+      "the baselines are one device pixel per CSS pixel",
+    ).toBe(1);
     await page.setViewportSize({ width: WIDTH, height: 900 });
     await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
     // Until the viewport grows to the page, a scrollbar would narrow the
@@ -348,7 +402,6 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       window.location.hash = hash;
     }, STATES_PAGE_HASH);
     await expect(page.getByTestId("states-page")).toBeVisible();
-    // The page holds the document light so its light pane reads light tokens.
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 
     // The page's clock is faked from here. Real time passes while the fonts
@@ -382,7 +435,10 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     await holdSystemClipboard(test.info(), async (remainingMs) => {
       for (const theme of THEMES) {
         const pane = page.getByTestId(`states-${theme}`);
-        for (const [answer, words] of [["copied", "Copied"], ["failed", "Could not copy"]] as const) {
+        for (const [answer, words] of [
+          ["copied", "Copied"],
+          ["failed", "Could not copy"],
+        ] as const) {
           const withWords = pane.getByTestId(`states-copy-words-${answer}-${theme}`);
           await press(page, withWords, remainingMs());
           await expect(withWords).toHaveText(words, { timeout: remainingMs() });
@@ -398,13 +454,20 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     // A send shows its ring only after a second on the timer the page started
     // when it mounted, before the clock was faked. Three composers per theme.
-    await expect(page.locator('[data-part="composer-sending"] button[aria-busy="true"]')).toHaveCount(2 * 3);
-    // The self-test notice exists to show a clipped row: in the 420px Notices
-    // part its body runs past three lines, so the row offers Show more.
+    await expect(
+      page.locator('[data-part="composer-sending"] button[aria-busy="true"]'),
+    ).toHaveCount(2 * 3);
     for (const theme of THEMES) {
-      const more = page.getByTestId(`states-${theme}`).locator('[data-part="notices"]').getByTestId("notice-self-test-more");
+      const more = page
+        .getByTestId(`states-${theme}`)
+        .locator('[data-part="notices"]')
+        .getByTestId("notice-self-test-more");
       await expect(more).toHaveText("Show more");
-      expect(await more.evaluate((button) => button.closest("ul")?.parentElement?.getBoundingClientRect().width)).toBe(420);
+      expect(
+        await more.evaluate(
+          (button) => button.closest("ul")?.parentElement?.getBoundingClientRect().width,
+        ),
+      ).toBe(420);
     }
 
     const failures: string[] = [];
@@ -424,32 +487,57 @@ test("@states-page @states-baselines every shared part matches its baseline in b
           .locator("button")
           .evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
         if (rights.length === 0) failures.push(`a tab row (${theme}) has no document actions`);
-        if (rights.some((right) => right > edge + 0.5)) failures.push(`a document control (${theme}) runs past its tab row`);
+        if (rights.some((right) => right > edge + 0.5))
+          failures.push(`a document control (${theme}) runs past its tab row`);
         const order = await row.evaluate((el) => {
           const list = el.querySelector('[role="tablist"]')!.getBoundingClientRect();
           const tab = el.querySelector('[role="tab"][data-active]');
           const name = tab?.querySelector(".truncate");
           const box = tab?.getBoundingClientRect();
-          const label = el.querySelector('[data-testid="editor-tab-actions"] [data-view-status] .truncate');
+          const label = el.querySelector(
+            '[data-testid="editor-tab-actions"] [data-view-status] .truncate',
+          );
           const nameCut =
-            !!name && (name.scrollWidth > name.clientWidth || (!!box && (box.right > list.right + 0.5 || box.left < list.left - 0.5)));
-          const actionsBox = el.querySelector('[data-testid="editor-tab-actions"]')!.getBoundingClientRect();
-          return { nameCut, statusWidth: label?.clientWidth ?? 0, worded: !!label, actionsWidth: actionsBox.width };
+            !!name &&
+            (name.scrollWidth > name.clientWidth ||
+              (!!box && (box.right > list.right + 0.5 || box.left < list.left - 0.5)));
+          const actionsBox = el
+            .querySelector('[data-testid="editor-tab-actions"]')!
+            .getBoundingClientRect();
+          return {
+            nameCut,
+            statusWidth: label?.clientWidth ?? 0,
+            worded: !!label,
+            actionsWidth: actionsBox.width,
+          };
         });
         if (order.nameCut && order.statusWidth >= 13) {
-          failures.push(`a tab row (${theme}) cut its file name while its save state still had ${order.statusWidth}px of words`);
+          failures.push(
+            `a tab row (${theme}) cut its file name while its save state still had ${order.statusWidth}px of words`,
+          );
         }
         if (!order.worded) widths.push(order.actionsWidth);
       }
       if (widths.length > 0 && Math.max(...widths) - Math.min(...widths) > 0.5) {
-        failures.push(`the tab rows without save-state words (${theme}) draw different widths: ${widths.join(", ")}`);
+        failures.push(
+          `the tab rows without save-state words (${theme}) draw different widths: ${widths.join(", ")}`,
+        );
       }
       const label = page.getByTestId(`states-tab-row-actions-cut-${theme}`).locator(".truncate");
-      if (!(await label.evaluate((el) => getComputedStyle(el).position === "absolute" && el.clientWidth === 1))) {
+      if (
+        !(await label.evaluate(
+          (el) => getComputedStyle(el).position === "absolute" && el.clientWidth === 1,
+        ))
+      ) {
         failures.push(`the narrow tab row's save state (${theme}) does not show only its mark`);
       }
-      await expect(page.getByTestId(`states-tab-row-actions-cut-${theme}`)).toHaveText("Changed outside dohc");
-      await expect(page.getByTestId(`states-mark-changed-on-disk-${theme}`)).toHaveAttribute("title", "This file changed outside dohc.");
+      await expect(page.getByTestId(`states-tab-row-actions-cut-${theme}`)).toHaveText(
+        "Changed outside dohc",
+      );
+      await expect(page.getByTestId(`states-mark-changed-on-disk-${theme}`)).toHaveAttribute(
+        "title",
+        "This file changed outside dohc.",
+      );
     }
     // At the sidebar's default width, a Collection change cuts who made it
     // and what changed before its Collection's name, even a long name, and
@@ -458,44 +546,83 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     // ellipsis. The specimen must really cut something, and its long name's
     // title must really give way, or the check proves nothing.
     for (const theme of THEMES) {
-      const shown = await page.getByTestId(`states-history-collections-narrow-${theme}`).evaluate((el) => {
-        const natural = (node: Element) => {
-          const probe = document.createElement("span");
-          const style = getComputedStyle(node);
-          probe.textContent = node.textContent;
-          probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
-          for (const key of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "fontStretch", "fontFeatureSettings", "fontVariationSettings", "letterSpacing"] as const) {
-            probe.style[key] = style[key];
-          }
-          document.body.append(probe);
-          const width = probe.getBoundingClientRect().width;
-          probe.remove();
-          return width;
-        };
-        const cut = (selector: string) => Array.from(el.querySelectorAll(selector))
-          .filter((node) => natural(node) > node.getBoundingClientRect().width + 0.01).length;
-        const over = (selector: string) => Array.from(el.querySelectorAll(selector)).filter((node) => node.scrollWidth > node.clientWidth).length;
-        const long = Array.from(el.querySelectorAll('[data-testid="history-collection-line"]'))
-          .find((line) => line.querySelector('[data-testid="history-collection-name"]')?.textContent === "Registrations 2026");
-        const longTitle = long?.querySelector('[data-testid="history-collection-title"]');
-        return {
-          longTitleCut: longTitle ? natural(longTitle) > longTitle.getBoundingClientRect().width + 0.01 : false,
-          names: cut('[data-testid="history-collection-name"]'),
-          lines: over('[data-testid="history-collection-line"]'),
-          parts: cut('[data-testid="history-collection-title"], [data-testid="history-collection-agent"]'),
-        };
-      });
-      if (shown.names > 0) failures.push(`a Collection's name (${theme}) is cut at the sidebar's default width`);
-      if (shown.lines > 0) failures.push(`a Collection change's parts (${theme}) run past their line`);
-      if (shown.parts === 0) failures.push(`the default-width Collections (${theme}) cut nothing, so the check proves nothing`);
-      if (!shown.longTitleCut) failures.push(`the long Collection name's title (${theme}) is missing or uncut, so the long-name check proves nothing`);
+      const shown = await page
+        .getByTestId(`states-history-collections-narrow-${theme}`)
+        .evaluate((el) => {
+          const natural = (node: Element) => {
+            const probe = document.createElement("span");
+            const style = getComputedStyle(node);
+            probe.textContent = node.textContent;
+            probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
+            for (const key of [
+              "fontFamily",
+              "fontSize",
+              "fontWeight",
+              "fontStyle",
+              "fontStretch",
+              "fontFeatureSettings",
+              "fontVariationSettings",
+              "letterSpacing",
+            ] as const) {
+              probe.style[key] = style[key];
+            }
+            document.body.append(probe);
+            const width = probe.getBoundingClientRect().width;
+            probe.remove();
+            return width;
+          };
+          const cut = (selector: string) =>
+            Array.from(el.querySelectorAll(selector)).filter(
+              (node) => natural(node) > node.getBoundingClientRect().width + 0.01,
+            ).length;
+          const over = (selector: string) =>
+            Array.from(el.querySelectorAll(selector)).filter(
+              (node) => node.scrollWidth > node.clientWidth,
+            ).length;
+          const long = Array.from(
+            el.querySelectorAll('[data-testid="history-collection-line"]'),
+          ).find(
+            (line) =>
+              line.querySelector('[data-testid="history-collection-name"]')?.textContent ===
+              "Registrations 2026",
+          );
+          const longTitle = long?.querySelector('[data-testid="history-collection-title"]');
+          return {
+            longTitleCut: longTitle
+              ? natural(longTitle) > longTitle.getBoundingClientRect().width + 0.01
+              : false,
+            names: cut('[data-testid="history-collection-name"]'),
+            lines: over('[data-testid="history-collection-line"]'),
+            parts: cut(
+              '[data-testid="history-collection-title"], [data-testid="history-collection-agent"]',
+            ),
+          };
+        });
+      if (shown.names > 0)
+        failures.push(`a Collection's name (${theme}) is cut at the sidebar's default width`);
+      if (shown.lines > 0)
+        failures.push(`a Collection change's parts (${theme}) run past their line`);
+      if (shown.parts === 0)
+        failures.push(
+          `the default-width Collections (${theme}) cut nothing, so the check proves nothing`,
+        );
+      if (!shown.longTitleCut)
+        failures.push(
+          `the long Collection name's title (${theme}) is missing or uncut, so the long-name check proves nothing`,
+        );
     }
     // An overflowing strip fades only the edges it can still scroll past,
     // 40px each, and its active tab sits clear of them. Each specimen must
     // really overflow the way its label says, or its capture proves nothing.
     for (const theme of THEMES) {
-      for (const [at, left, right] of [["start", false, true], ["middle", true, true], ["end", true, false]] as const) {
-        const strip = page.getByTestId(`states-tab-strip-overflow-${at}-${theme}`).getByRole("tablist");
+      for (const [at, left, right] of [
+        ["start", false, true],
+        ["middle", true, true],
+        ["end", true, false],
+      ] as const) {
+        const strip = page
+          .getByTestId(`states-tab-strip-overflow-${at}-${theme}`)
+          .getByRole("tablist");
         const shown = await strip.evaluate((el) => {
           const list = el.getBoundingClientRect();
           const tab = el.querySelector('[role="tab"][data-active]')?.getBoundingClientRect();
@@ -507,10 +634,14 @@ test("@states-page @states-baselines every shared part matches its baseline in b
           };
         });
         if (shown.left !== left || shown.right !== right) {
-          failures.push(`the strip at the ${at} (${theme}) fades left ${shown.left} and right ${shown.right}`);
+          failures.push(
+            `the strip at the ${at} (${theme}) fades left ${shown.left} and right ${shown.right}`,
+          );
         }
         if (shown.before < (left ? 40 : 0) || shown.after < (right ? 40 : 0)) {
-          failures.push(`the strip at the ${at} (${theme}) shows its active tab under a fade or cut`);
+          failures.push(
+            `the strip at the ${at} (${theme}) shows its active tab under a fade or cut`,
+          );
         }
       }
     }
@@ -528,16 +659,22 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         if (!name) throw new Error("every part needs a data-part name");
         if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
         seen.add(`${name}-${theme}`);
-        const menus = (await part.getAttribute("data-menus")) === "rest" ? 0 : await part.locator("[aria-haspopup='menu']").count();
+        const menus =
+          (await part.getAttribute("data-menus")) === "rest"
+            ? 0
+            : await part.locator("[aria-haspopup='menu']").count();
         if (menus > 1) throw new Error(`${name} (${theme}) has ${menus} menus; a part opens one`);
         (menus === 1 ? menuParts : plainParts).add(name);
       }
     }
     // Before any capture, so a part missing from a pane fails here instead
     // of waiting out the timeout for its box.
-    expect([...seen].sort()).toEqual(PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort());
+    expect([...seen].sort()).toEqual(
+      PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort(),
+    );
 
-    const partIn = (theme: string, name: string) => page.getByTestId(`states-${theme}`).locator(`[data-part="${name}"]`);
+    const partIn = (theme: string, name: string) =>
+      page.getByTestId(`states-${theme}`).locator(`[data-part="${name}"]`);
     // Runs `check` on every part in both themes, alone or among the others.
     // A menu's rows exist only while it is open, so a part with a menu is
     // marked after it opens its menu. A part marked data-menus="rest" holds
@@ -545,8 +682,14 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     // Each marking pass starts from a fresh DOM.getDocument, which clears the
     // states forced before it, so the menu parts come last. One menu is open
     // at a time: opening another moves focus and closes the first.
-    const checkEvery = async (alone: boolean, check: (name: string, theme: string) => Promise<void>) => {
-      await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:is([data-menus="rest"], :not(:has([aria-haspopup="menu"])))`);
+    const checkEvery = async (
+      alone: boolean,
+      check: (name: string, theme: string) => Promise<void>,
+    ) => {
+      await forceMarkedStates(
+        cdp,
+        `[data-testid="states-page"] [data-part]:is([data-menus="rest"], :not(:has([aria-haspopup="menu"])))`,
+      );
       for (const name of plainParts) {
         if (alone) await showOnly(page, name);
         for (const theme of THEMES) await check(name, theme);
@@ -572,12 +715,16 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       if (!box) throw new Error(`${name} (${theme}) has no box on the page`);
       const { pixels, unsettled } = await captureStill(page, around(box));
       if (unsettled !== null) {
-        failures.push(`${name}-${theme} did not settle in ${STILL_CAPTURES} captures; the last one ${unsettled}`);
+        failures.push(
+          `${name}-${theme} did not settle in ${STILL_CAPTURES} captures; the last one ${unsettled}`,
+        );
         return;
       }
       const settled = await partIn(theme, name).boundingBox();
       if (JSON.stringify(settled) !== JSON.stringify(box)) {
-        failures.push(`${name}-${theme} moved from ${JSON.stringify(box)} to ${JSON.stringify(settled)} while it settled`);
+        failures.push(
+          `${name}-${theme} moved from ${JSON.stringify(box)} to ${JSON.stringify(settled)} while it settled`,
+        );
         return;
       }
       const failure = await compareWithBaseline(`${name}-${theme}`, pixels);
@@ -613,13 +760,21 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       if (far !== null) {
         const { pixels, unsettled } = await captureStill(page, around(box));
         actual = pixels;
-        far = unsettled === null ? farFrom(expected, decode(pixels)) : `did not settle in ${STILL_CAPTURES} captures; the last one ${unsettled}`;
+        far =
+          unsettled === null
+            ? farFrom(expected, decode(pixels))
+            : `did not settle in ${STILL_CAPTURES} captures; the last one ${unsettled}`;
       }
       if (far === null) return;
       const actualPath = test.info().outputPath(`${name}-${theme}-among-others-actual.png`);
       writeFileSync(actualPath, actual);
-      await test.info().attach(`${name}-${theme}-among-others-actual`, { path: actualPath, contentType: "image/png" });
-      failures.push(`${name}-${theme} among the other parts ${far}; the capture is at ${actualPath}`);
+      await test.info().attach(`${name}-${theme}-among-others-actual`, {
+        path: actualPath,
+        contentType: "image/png",
+      });
+      failures.push(
+        `${name}-${theme} among the other parts ${far}; the capture is at ${actualPath}`,
+      );
     });
     expect(failures, "every part must equal its baseline").toEqual([]);
   });
@@ -661,7 +816,9 @@ test("@states-page @tab-unsaved-width an unsaved tab keeps its width in every st
       const sameWidth = async (tab: string, states: string[]) => {
         const widths = await Promise.all(states.map((state) => width(state, tab)));
         if (Math.max(...widths) - Math.min(...widths) > TAB_WIDTH_SLACK) {
-          failures.push(`${tab} (${theme}) is ${states.map((state, index) => `${widths[index]}px ${state}`).join(", ")}`);
+          failures.push(
+            `${tab} (${theme}) is ${states.map((state, index) => `${widths[index]}px ${state}`).join(", ")}`,
+          );
         }
       };
       await sameWidth(active, ["clean", "dirty", "hover", "close", "focus"]);
@@ -671,11 +828,22 @@ test("@states-page @tab-unsaved-width an unsaved tab keeps its width in every st
       // dot shows at rest, and the close shows in its place on hover and
       // keyboard focus.
       const opacity = (state: string, part: string) =>
-        strip(state).locator(`${active} ${part}`).evaluate((el) => getComputedStyle(el).opacity);
-      for (const [state, dot, close] of [["dirty", "1", "0"], ["hover", "0", "1"], ["focus", "0", "1"]] as const) {
-        const shown = [await opacity(state, '[data-testid="tab-dirty"]'), await opacity(state, "button")];
+        strip(state)
+          .locator(`${active} ${part}`)
+          .evaluate((el) => getComputedStyle(el).opacity);
+      for (const [state, dot, close] of [
+        ["dirty", "1", "0"],
+        ["hover", "0", "1"],
+        ["focus", "0", "1"],
+      ] as const) {
+        const shown = [
+          await opacity(state, '[data-testid="tab-dirty"]'),
+          await opacity(state, "button"),
+        ];
         if (shown[0] !== dot || shown[1] !== close) {
-          failures.push(`the ${state} strip (${theme}) shows the dot at ${shown[0]} and the close at ${shown[1]}`);
+          failures.push(
+            `the ${state} strip (${theme}) shows the dot at ${shown[0]} and the close at ${shown[1]}`,
+          );
         }
       }
     }

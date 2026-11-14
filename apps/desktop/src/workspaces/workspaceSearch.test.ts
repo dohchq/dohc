@@ -21,7 +21,6 @@ describe("buildRipgrepArgs", () => {
     expect(args).toContain("--json");
     expect(args).toContain("--no-config");
     expect(args).toContain("--no-ignore-messages");
-    // Defense-in-depth exclusions are always present, at any nesting depth.
     for (const glob of ["!**/.dohc/**", "!**/.git/**", "!**/node_modules/**"]) {
       const at = args.indexOf(glob);
       expect(at, `${glob} present`).toBeGreaterThan(0);
@@ -29,8 +28,6 @@ describe("buildRipgrepArgs", () => {
     }
     expect(args.slice(args.indexOf("--max-filesize"))[1]).toBe("2M");
     expect(args.slice(args.indexOf("--max-count"))[1]).toBe("200");
-    // The query is always the single element after `--`: a query like
-    // "--pre=/bin/sh" can never read as a flag.
     expect(args.slice(-2)).toEqual(["--", "needle"]);
   });
 
@@ -96,13 +93,10 @@ describe("buildRipgrepArgs", () => {
 describe("toSearchEntries secret floor backstop", () => {
   it("drops matches on secret-classified paths even if globs were out-voted", () => {
     for (const path of [".env", "config/prod.env", "apps/site/.ENV", "secrets%2eenv"]) {
-      const data = parseRipgrepLine(
-        matchEvent({ path, lineText: "API_KEY=super-secret\n" }),
-      );
+      const data = parseRipgrepLine(matchEvent({ path, lineText: "API_KEY=super-secret\n" }));
       expect(data, path).not.toBeNull();
       expect(toSearchEntries(data ?? {}), path).toEqual([]);
     }
-    // Non-secret lookalikes still match ("environment.md" is not .env).
     const ordinary = parseRipgrepLine(
       matchEvent({ path: "environment.md", lineText: "hello needle world\n" }),
     );
@@ -175,7 +169,6 @@ describe("toSearchEntries", () => {
     const [entry] = toSearchEntries(data!);
     expect(entry.preview.length).toBe(SEARCH_MAX_PREVIEW_CHARS);
     expect(entry.preview.slice(entry.matchStart, entry.matchEnd)).toBe("NEEDLE");
-    // The full-line column survives windowing.
     expect(entry.column).toBe(501);
   });
 
@@ -229,8 +222,6 @@ describe("toSearchEntries", () => {
   });
 });
 
-// Real-binary integration: @vscode/ripgrep's rgPath must resolve and run on
-// this platform, and the streamed batches must respect exclusions and caps.
 describe("startRipgrepSearch (real rg)", () => {
   const roots: string[] = [];
   afterAll(async () => {
@@ -283,8 +274,6 @@ describe("startRipgrepSearch (real rg)", () => {
     const batches = await runSearch(root, { query: "sentinelvalue" });
     const entries = batches.flatMap((b) => b.entries);
     const paths = entries.map((e) => e.path).sort();
-    // The real file and the dotfile (explorer parity), never the reserved
-    // dirs or anything through the symlink.
     expect(paths).toEqual([".hidden.md", "notes/real.md"]);
     expect(batches.at(-1)).toMatchObject({ done: true, limitHit: false });
     const real = entries.find((e) => e.path === "notes/real.md")!;
@@ -292,13 +281,6 @@ describe("startRipgrepSearch (real rg)", () => {
     expect(real.preview.slice(real.matchStart, real.matchEnd)).toBe("sentinelvalue");
   });
 
-  // Regression: rg glob precedence is last-match-
-  // wins, so with the built-in exclusions placed before the user include
-  // glob, includeGlob '**/.git/**' — and even benign filters '*', '**/*',
-  // 'config' — surfaced planted .git/node_modules content (e.g. credential
-  // tokens in .git/config remote URLs). Both layers are pinned here: the
-  // built-ins now come last in the argv and toSearchEntries drops ignored
-  // segments regardless of argv shape.
   it("include globs can never re-include .git/.dohc/node_modules content", async () => {
     const root = await makeRoot();
     await mkdir(join(root, ".dohc"), { recursive: true });
@@ -318,8 +300,6 @@ describe("startRipgrepSearch (real rg)", () => {
         `includeGlob=${String(includeGlob)} must not surface reserved segments`,
       ).toEqual([]);
     }
-    // Benign filters still work: '*.md' narrows to the markdown file, a user
-    // exclude still excludes, and 'config' finds the real file named config.
     const md = await runSearch(root, { query: "plantedsecret", includeGlob: "*.md" });
     expect(md.flatMap((b) => b.entries).map((e) => e.path)).toEqual(["real.md"]);
     const named = await runSearch(root, { query: "plantedsecret", includeGlob: "config" });
@@ -363,26 +343,17 @@ describe("startRipgrepSearch (real rg)", () => {
 
   it("filters disallowed paths before they can consume the total-match cap", async () => {
     const root = await makeRoot();
-    const body = Array.from(
-      { length: 300 },
-      (_, i) => `line ${i} capmatch`,
-    ).join("\n");
+    const body = Array.from({ length: 300 }, (_, i) => `line ${i} capmatch`).join("\n");
     await Promise.all(
-      Array.from({ length: 15 }, (_, i) =>
-        writeFile(join(root, `recipient-${i}.md`), body),
-      ),
+      Array.from({ length: 15 }, (_, i) => writeFile(join(root, `recipient-${i}.md`), body)),
     );
     await writeFile(join(root, "canonical.md"), "one capmatch\n");
 
-    const batches = await runSearch(
-      root,
-      { query: "capmatch" },
-      (path) => path === "canonical.md",
-    );
+    const batches = await runSearch(root, { query: "capmatch" }, (path) => path === "canonical.md");
 
-    expect(
-      batches.flatMap((batch) => batch.entries).map((entry) => entry.path),
-    ).toEqual(["canonical.md"]);
+    expect(batches.flatMap((batch) => batch.entries).map((entry) => entry.path)).toEqual([
+      "canonical.md",
+    ]);
     expect(batches.at(-1)).toMatchObject({ done: true, limitHit: false });
   });
 
@@ -397,10 +368,6 @@ describe("startRipgrepSearch (real rg)", () => {
     }
   });
 
-  // Regression: one rg match event carries one entry per submatch, and a
-  // long prose line against a short query carries hundreds. The batch cap
-  // must hold per batch regardless (an oversized batch fails the IPC
-  // contract parse — this once wedged the app mid-keystroke).
   it("keeps batches bounded even when a single line yields hundreds of submatches", async () => {
     const root = await makeRoot();
     await writeFile(join(root, "dense.md"), `${"x ".repeat(300)}\n`);
@@ -476,14 +443,7 @@ describe("createSearchRegistry", () => {
     const root = await createTestScratch("dohc-reg-");
     await registry.startSearch(1, root, "old", { query: "a" }, () => {}, current());
 
-    const replacement = registry.startSearch(
-      1,
-      root,
-      "new",
-      { query: "b" },
-      () => {},
-      current(),
-    );
+    const replacement = registry.startSearch(1, root, "new", { query: "b" }, () => {}, current());
     await vi.waitFor(() => expect(children[0]?.killed).toBe(true));
     expect(children.map((child) => child.searchId)).toEqual(["old"]);
 
@@ -514,27 +474,13 @@ describe("createSearchRegistry", () => {
         };
       },
     });
-    await registry.startSearch(
-      1,
-      root,
-      "old",
-      { query: "a" },
-      () => {},
-      current(),
-    );
+    await registry.startSearch(1, root, "old", { query: "a" }, () => {}, current());
 
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       let replaced = false;
       const replacement = registry
-        .startSearch(
-          1,
-          root,
-          "new",
-          { query: "b" },
-          () => {},
-          current(),
-        )
+        .startSearch(1, root, "new", { query: "b" }, () => {}, current())
         .then(() => {
           replaced = true;
         });
@@ -630,9 +576,9 @@ describe("createSearchRegistry", () => {
         .catch(reject);
     });
 
-    expect(
-      batches.flatMap((batch) => batch.entries).map((entry) => entry.path),
-    ).toEqual(["canonical.md"]);
+    expect(batches.flatMap((batch) => batch.entries).map((entry) => entry.path)).toEqual([
+      "canonical.md",
+    ]);
     await rm(root, { recursive: true, force: true });
   });
 
@@ -651,26 +597,12 @@ describe("createSearchRegistry", () => {
       },
     });
     const root = await createTestScratch("dohc-reg-");
-    await registry.startSearch(
-      1,
-      root,
-      "current",
-      { query: "a" },
-      () => {},
-      current(),
-    );
-    await registry.startSearch(
-      1,
-      root,
-      "stale",
-      { query: "b" },
-      () => {},
-      {
-        attachmentId,
-        signal: new AbortController().signal,
-        isCurrent: () => false,
-      },
-    );
+    await registry.startSearch(1, root, "current", { query: "a" }, () => {}, current());
+    await registry.startSearch(1, root, "stale", { query: "b" }, () => {}, {
+      attachmentId,
+      signal: new AbortController().signal,
+      isCurrent: () => false,
+    });
     expect(started).toEqual(["current"]);
     expect(killed).toEqual([]);
     await rm(root, { recursive: true, force: true });
@@ -800,30 +732,21 @@ describe("createSearchRegistry", () => {
 
 describe("mountScopedIncludeGlob", () => {
   it("keeps projection-targeting globs, scopes basename globs, skips anchored ones", () => {
-    // No user glob: the whole projection.
     expect(mountScopedIncludeGlob(undefined)).toBe("shared-with-me/**");
     expect(mountScopedIncludeGlob("")).toBe("shared-with-me/**");
-    // Projection-targeting globs pass through.
     expect(mountScopedIncludeGlob("shared-with-me/**")).toBe("shared-with-me/**");
-    expect(mountScopedIncludeGlob("shared-with-me/alex/**")).toBe(
-      "shared-with-me/alex/**",
-    );
+    expect(mountScopedIncludeGlob("shared-with-me/alex/**")).toBe("shared-with-me/alex/**");
     // Basename globs float to any depth in rg's gitignore semantics, so
     // they intersect mounts and get scoped.
     expect(mountScopedIncludeGlob("*.md")).toBe("shared-with-me/**/*.md");
     expect(mountScopedIncludeGlob("brief.*")).toBe("shared-with-me/**/brief.*");
     // Case-variant projection globs normalize their prefix to the on-disk
     // casing (rg glob matching is byte-wise).
-    expect(mountScopedIncludeGlob("Shared-With-Me/alex/**")).toBe(
-      "shared-with-me/alex/**",
-    );
+    expect(mountScopedIncludeGlob("Shared-With-Me/alex/**")).toBe("shared-with-me/alex/**");
     // Recursive "**/"-prefixed globs are not root-anchored and do match
     // mounted files — they scope under the projection.
     expect(mountScopedIncludeGlob("**/*.md")).toBe("shared-with-me/**/*.md");
-    expect(mountScopedIncludeGlob("**/docs/**/*.md")).toBe(
-      "shared-with-me/**/docs/**/*.md",
-    );
-    // Anchored path globs outside the projection cannot match under it.
+    expect(mountScopedIncludeGlob("**/docs/**/*.md")).toBe("shared-with-me/**/docs/**/*.md");
     expect(mountScopedIncludeGlob("notes/**")).toBeNull();
     expect(mountScopedIncludeGlob("docs/plan.md")).toBeNull();
   });

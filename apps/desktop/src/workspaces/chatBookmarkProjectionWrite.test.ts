@@ -10,7 +10,7 @@ describe("chat bookmark projection ownership", () => {
       if (
         !input.recoverExistingText ||
         !input.recoverExistingText(
-          "---\ndohc_type: chat-bookmark\nbookmark_id: \"someone-elses-bookmark\"\n---\n",
+          '---\ndohc_type: chat-bookmark\nbookmark_id: "someone-elses-bookmark"\n---\n',
         )
       ) {
         throw new Error("Generated Markdown destination already exists");

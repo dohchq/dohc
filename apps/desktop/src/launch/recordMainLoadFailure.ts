@@ -29,7 +29,13 @@ export function recordMainLoadFailure(error: unknown): void {
       uptimeSeconds: Math.round(process.uptime()),
     }),
     codeFrame: createCodeFrames(
-      [crashReportRoot({ isPackaged: app.isPackaged, appPath: app.getAppPath(), resourcesPath: process.resourcesPath })],
+      [
+        crashReportRoot({
+          isPackaged: app.isPackaged,
+          appPath: app.getAppPath(),
+          resourcesPath: process.resourcesPath,
+        }),
+      ],
       process.platform,
     ),
     onChanged: () => undefined,

@@ -1,5 +1,13 @@
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
-import { FileText, GitFork, ListFilter, MessageSquare, RefreshCw, Search, SlidersHorizontal } from "lucide-react";
+import {
+  FileText,
+  GitFork,
+  ListFilter,
+  MessageSquare,
+  RefreshCw,
+  Search,
+  SlidersHorizontal,
+} from "lucide-react";
 import {
   useCallback,
   useDeferredValue,
@@ -10,7 +18,13 @@ import {
   useState,
 } from "react";
 import type { ChatFileMentionRecord } from "../../ipc/bridgeContract";
-import { graphWalk, emptyGraph, withChatMentions, type GraphData, type GraphNode } from "./graphData";
+import {
+  graphWalk,
+  emptyGraph,
+  withChatMentions,
+  type GraphData,
+  type GraphNode,
+} from "./graphData";
 import { bridge } from "../bridge";
 import { isChatMentionPageChanged, refusalCode } from "../../ipc/errorWords";
 import { ipcErrorMessage } from "../ipcError";
@@ -26,9 +40,27 @@ import {
 } from "./GraphSettings";
 
 type GraphState =
-  | { workspaceId: string; chatMentionsEnabled: boolean; status: "loading"; graph: GraphData | null; error: null }
-  | { workspaceId: string; chatMentionsEnabled: boolean; status: "ready"; graph: GraphData; error: null }
-  | { workspaceId: string; chatMentionsEnabled: boolean; status: "error"; graph: GraphData | null; error: string };
+  | {
+      workspaceId: string;
+      chatMentionsEnabled: boolean;
+      status: "loading";
+      graph: GraphData | null;
+      error: null;
+    }
+  | {
+      workspaceId: string;
+      chatMentionsEnabled: boolean;
+      status: "ready";
+      graph: GraphData;
+      error: null;
+    }
+  | {
+      workspaceId: string;
+      chatMentionsEnabled: boolean;
+      status: "error";
+      graph: GraphData | null;
+      error: string;
+    };
 
 type GraphVariant = "panel" | "page";
 
@@ -50,7 +82,10 @@ const SHAPES = Object.fromEntries(GRAPH_KINDS.map(({ kind, shape }) => [kind, sh
   GraphKind,
   CanvasNode["shape"]
 >;
-const KIND_NAMES = Object.fromEntries(GRAPH_KINDS.map(({ kind, name }) => [kind, name])) as Record<GraphKind, string>;
+const KIND_NAMES = Object.fromEntries(GRAPH_KINDS.map(({ kind, name }) => [kind, name])) as Record<
+  GraphKind,
+  string
+>;
 
 type GraphViewModel = {
   nodes: CanvasNode[];
@@ -65,18 +100,25 @@ type GraphViewModel = {
 };
 
 function matchesSearch(node: GraphNode, query: string): boolean {
-  return node.title.toLocaleLowerCase().includes(query) || node.path.toLocaleLowerCase().includes(query);
+  return (
+    node.title.toLocaleLowerCase().includes(query) || node.path.toLocaleLowerCase().includes(query)
+  );
 }
 
 // The model follows a deferred search, so it can lag the box by a render.
 // Suggestions are filtered again by the box's own text: every one shown
 // matches what the person typed, and Enter can't open a stale result.
-export function searchMatches(model: Pick<GraphViewModel, "nodes" | "sources">, value: string, limit = SEARCH_RESULTS) {
+export function searchMatches(
+  model: Pick<GraphViewModel, "nodes" | "sources">,
+  value: string,
+  limit = SEARCH_RESULTS,
+) {
   const query = value.trim().toLocaleLowerCase();
   const matches: { node: CanvasNode; index: number }[] = [];
   if (!query) return matches;
   for (let index = 0; index < model.nodes.length && matches.length < limit; index++) {
-    if (matchesSearch(model.sources[index]!, query)) matches.push({ node: model.nodes[index]!, index });
+    if (matchesSearch(model.sources[index]!, query))
+      matches.push({ node: model.nodes[index]!, index });
   }
   return matches;
 }
@@ -87,7 +129,13 @@ function buildModel(
   search: string,
   localPath: string | null,
 ): GraphViewModel {
-  const kindCounts: Record<GraphKind, number> = { page: 0, drawing: 0, file: 0, chat: 0, heading: 0 };
+  const kindCounts: Record<GraphKind, number> = {
+    page: 0,
+    drawing: 0,
+    file: 0,
+    chat: 0,
+    heading: 0,
+  };
   const query = search.trim().toLocaleLowerCase();
   const kept = new Map<string, GraphNode>();
   for (const node of graph.nodes) {
@@ -99,7 +147,8 @@ function buildModel(
   }
   const degree = new Map<string, number>();
   let edges = graph.edges.filter((edge) => {
-    if (edge.source === edge.target || !kept.has(edge.source) || !kept.has(edge.target)) return false;
+    if (edge.source === edge.target || !kept.has(edge.source) || !kept.has(edge.target))
+      return false;
     degree.set(edge.source, (degree.get(edge.source) ?? 0) + 1);
     degree.set(edge.target, (degree.get(edge.target) ?? 0) + 1);
     return true;
@@ -113,8 +162,12 @@ function buildModel(
   if (local) {
     const neighbours = new Map<string, string[]>();
     for (const edge of edges) {
-      (neighbours.get(edge.source) ?? neighbours.set(edge.source, []).get(edge.source)!).push(edge.target);
-      (neighbours.get(edge.target) ?? neighbours.set(edge.target, []).get(edge.target)!).push(edge.source);
+      (neighbours.get(edge.source) ?? neighbours.set(edge.source, []).get(edge.source)!).push(
+        edge.target,
+      );
+      (neighbours.get(edge.target) ?? neighbours.set(edge.target, []).get(edge.target)!).push(
+        edge.source,
+      );
     }
     const reached = new Set([localPath]);
     let ring = [localPath];
@@ -142,7 +195,8 @@ function buildModel(
   const linkDegree = new Uint32Array(paths.length);
   const links: [number, number][] = [];
   for (const edge of edges) {
-    const s = index.get(edge.source), t = index.get(edge.target);
+    const s = index.get(edge.source),
+      t = index.get(edge.target);
     if (s === undefined || t === undefined) continue;
     links.push([s, t]);
     linkDegree[s]!++;
@@ -165,8 +219,11 @@ function groupsFor(model: GraphViewModel, groups: GraphSettingsValue["groups"]):
     .filter((group) => group.query);
   if (!queries.length) return result;
   model.sources.forEach((node, i) => {
-    const title = node.title.toLocaleLowerCase(), path = node.path.toLocaleLowerCase();
-    const match = queries.find((group) => title.includes(group.query) || path.includes(group.query));
+    const title = node.title.toLocaleLowerCase(),
+      path = node.path.toLocaleLowerCase();
+    const match = queries.find(
+      (group) => title.includes(group.query) || path.includes(group.query),
+    );
     if (match) result[i] = match.hue;
   });
   return result;
@@ -184,7 +241,11 @@ function coverageNotice(graph: GraphData): string | null {
 }
 
 function nodeSubtitle(node: GraphNode): string {
-  return node.kind === "heading" ? node.filePath : node.kind === "chat-thread" ? "Chat thread" : node.path;
+  return node.kind === "heading"
+    ? node.filePath
+    : node.kind === "chat-thread"
+      ? "Chat thread"
+      : node.path;
 }
 
 // Shows its children only after 150 ms, so a fast answer never flashes.
@@ -213,7 +274,10 @@ function GraphRows(props: {
     () =>
       props.model.sources
         .map((node, index) => ({ node, index }))
-        .sort((a, b) => a.node.title.localeCompare(b.node.title) || a.node.path.localeCompare(b.node.path)),
+        .sort(
+          (a, b) =>
+            a.node.title.localeCompare(b.node.title) || a.node.path.localeCompare(b.node.path),
+        ),
     [props.model],
   );
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -221,7 +285,8 @@ function GraphRows(props: {
   useLayoutEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
-    const measure = () => setViewport({ top: element.scrollTop, height: element.clientHeight || 480 });
+    const measure = () =>
+      setViewport({ top: element.scrollTop, height: element.clientHeight || 480 });
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
@@ -237,16 +302,24 @@ function GraphRows(props: {
     if (!element) return;
     const top = target * ROW_HEIGHT;
     if (top < element.scrollTop) element.scrollTop = top;
-    else if (top + ROW_HEIGHT > element.scrollTop + element.clientHeight) element.scrollTop = top + ROW_HEIGHT - element.clientHeight;
+    else if (top + ROW_HEIGHT > element.scrollTop + element.clientHeight)
+      element.scrollTop = top + ROW_HEIGHT - element.clientHeight;
     setViewport({ top: element.scrollTop, height: element.clientHeight || viewport.height });
-    requestAnimationFrame(() => element.querySelector<HTMLElement>(`[data-row="${target}"]`)?.focus());
+    requestAnimationFrame(() =>
+      element.querySelector<HTMLElement>(`[data-row="${target}"]`)?.focus(),
+    );
   }
 
   return (
     <div
       ref={scrollRef}
       data-testid="graph-rows"
-      onScroll={(event) => setViewport({ top: event.currentTarget.scrollTop, height: event.currentTarget.clientHeight || viewport.height })}
+      onScroll={(event) =>
+        setViewport({
+          top: event.currentTarget.scrollTop,
+          height: event.currentTarget.clientHeight || viewport.height,
+        })
+      }
       className="min-h-0 flex-1 overflow-y-auto px-1 py-2"
     >
       <div style={{ height: order.length * ROW_HEIGHT, position: "relative" }}>
@@ -275,12 +348,19 @@ function GraphRows(props: {
                 }
               }}
               className={`dohc-focus-row flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${
-                active ? "bg-selected font-medium text-ink" : "text-muted hover:bg-hover hover:text-ink"
+                active
+                  ? "bg-selected font-medium text-ink"
+                  : "text-muted hover:bg-hover hover:text-ink"
               }`}
             >
-              <ShapeMark shape={SHAPES[graphKind(node)]} className={active ? "text-ink" : "text-subtle"} />
+              <ShapeMark
+                shape={SHAPES[graphKind(node)]}
+                className={active ? "text-ink" : "text-subtle"}
+              />
               <span className="min-w-0 flex-1 truncate">{node.title}</span>
-              <span className="text-[12px] tabular-nums text-subtle">{props.model.nodes[index]!.degree.toLocaleString()}</span>
+              <span className="text-[12px] tabular-nums text-subtle">
+                {props.model.nodes[index]!.degree.toLocaleString()}
+              </span>
             </button>
           );
         })}
@@ -298,7 +378,10 @@ function GraphSearch(props: {
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
-  const matches = useMemo(() => searchMatches(props.model, props.value), [props.model, props.value]);
+  const matches = useMemo(
+    () => searchMatches(props.model, props.value),
+    [props.model, props.value],
+  );
   const shown = open && matches.length > 0;
   const activeMatch = shown ? matches[Math.min(active, matches.length - 1)] : undefined;
   // The combobox names the active option itself, so it only lights the node.
@@ -309,7 +392,11 @@ function GraphSearch(props: {
 
   return (
     <div className="relative w-56 min-w-0 shrink">
-      <Search size={13} aria-hidden className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-subtle" />
+      <Search
+        size={13}
+        aria-hidden
+        className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-subtle"
+      />
       <input
         data-testid="graph-search"
         role="combobox"
@@ -330,7 +417,12 @@ function GraphSearch(props: {
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
             event.preventDefault();
             setOpen(true);
-            setActive((current) => Math.max(0, Math.min(matches.length - 1, current + (event.key === "ArrowDown" ? 1 : -1))));
+            setActive((current) =>
+              Math.max(
+                0,
+                Math.min(matches.length - 1, current + (event.key === "ArrowDown" ? 1 : -1)),
+              ),
+            );
           } else if (event.key === "Enter" && activeMatch) {
             event.preventDefault();
             props.onOpen(props.model.sources[activeMatch.index]!);
@@ -367,7 +459,9 @@ function GraphSearch(props: {
             >
               <ShapeMark shape={node.shape} className="text-subtle" />
               <span className="min-w-0 flex-1 truncate">{node.title}</span>
-              <span className="text-[12px] tabular-nums text-subtle">{node.degree.toLocaleString()}</span>
+              <span className="text-[12px] tabular-nums text-subtle">
+                {node.degree.toLocaleString()}
+              </span>
             </li>
           ))}
         </ul>
@@ -391,7 +485,12 @@ export function GraphView(props: {
   const [includeChatMentions, setIncludeChatMentions] = useState(false);
   const chatMentionsEnabled = props.chatMentionsAvailable === true && includeChatMentions;
   const requestIdentity = useMemo(
-    () => ({ workspaceId: props.workspaceId, chatMentionsEnabled, refreshKey: props.refreshKey, reloadNonce }),
+    () => ({
+      workspaceId: props.workspaceId,
+      chatMentionsEnabled,
+      refreshKey: props.refreshKey,
+      reloadNonce,
+    }),
     [chatMentionsEnabled, props.refreshKey, props.workspaceId, reloadNonce],
   );
   const requestIdentityRef = useRef(requestIdentity);
@@ -414,7 +513,12 @@ export function GraphView(props: {
   reportError.current = props.onError;
   const [walking, setWalking] = useState(true);
   const completedRequest = useRef<typeof requestIdentity | null>(null);
-  const [chatRows, setChatRows] = useState<{ workspaceId: string; rows: ChatFileMentionRecord[]; complete: boolean; mountsCovered: boolean } | null>(null);
+  const [chatRows, setChatRows] = useState<{
+    workspaceId: string;
+    rows: ChatFileMentionRecord[];
+    complete: boolean;
+    mountsCovered: boolean;
+  } | null>(null);
   const [chatWalking, setChatWalking] = useState(false);
   useEffect(() => {
     let active = true;
@@ -423,19 +527,31 @@ export function GraphView(props: {
     let resumePaint: (() => void) | undefined;
     let retries = 0;
     const current = () => active && requestIdentityRef.current === requestIdentity;
-    const retry = () => { if (requestIdentityRef.current === requestIdentity) load(); };
+    const retry = () => {
+      if (requestIdentityRef.current === requestIdentity) load();
+    };
     setWalking(true);
-    setState(previous => ({ workspaceId: props.workspaceId, chatMentionsEnabled, status: "loading",
-      graph: previous.workspaceId === props.workspaceId ? previous.graph : null, error: null }));
-    const paint = () => new Promise<void>(resolve => {
-      resumePaint = resolve;
-      frame = requestAnimationFrame(() => { timer = setTimeout(resolve, 0); });
-    });
-    const wait = (ms: number) => new Promise<void>(resolve => {
-      resumePaint = resolve;
-      timer = setTimeout(resolve, ms);
-    });
-    let hasDrawnGraph = state.workspaceId === props.workspaceId && (state.graph?.nodes.length ?? 0) > 0;
+    setState((previous) => ({
+      workspaceId: props.workspaceId,
+      chatMentionsEnabled,
+      status: "loading",
+      graph: previous.workspaceId === props.workspaceId ? previous.graph : null,
+      error: null,
+    }));
+    const paint = () =>
+      new Promise<void>((resolve) => {
+        resumePaint = resolve;
+        frame = requestAnimationFrame(() => {
+          timer = setTimeout(resolve, 0);
+        });
+      });
+    const wait = (ms: number) =>
+      new Promise<void>((resolve) => {
+        resumePaint = resolve;
+        timer = setTimeout(resolve, ms);
+      });
+    let hasDrawnGraph =
+      state.workspaceId === props.workspaceId && (state.graph?.nodes.length ?? 0) > 0;
     let restarted = false;
     let busy = 0;
     const walk = async () => {
@@ -445,7 +561,10 @@ export function GraphView(props: {
         for (;;) {
           let page;
           try {
-            page = await bridge().linksEdges({ workspaceId: props.workspaceId, ...(cursor ? { cursor } : {}) });
+            page = await bridge().linksEdges({
+              workspaceId: props.workspaceId,
+              ...(cursor ? { cursor } : {}),
+            });
           } catch (error) {
             if (!current()) return;
             if (cursor && !restarted && String(error).includes("links-edges-source-changed")) {
@@ -472,26 +591,53 @@ export function GraphView(props: {
           // gathering; refreshes replace the drawn graph only at the end.
           if (!hasDrawnGraph || !cursor) {
             const graph = accumulator.snapshot();
-            setState({ workspaceId: props.workspaceId, chatMentionsEnabled, status: "ready", graph, error: null });
+            setState({
+              workspaceId: props.workspaceId,
+              chatMentionsEnabled,
+              status: "ready",
+              graph,
+              error: null,
+            });
             if (!hasDrawnGraph && graph.nodes.length) {
               hasDrawnGraph = true;
-              if (cursor) { await paint(); if (!current()) return; }
+              if (cursor) {
+                await paint();
+                if (!current()) return;
+              }
             }
           }
           if (!cursor) break;
         }
         if (accumulator.snapshot().indexBuilding && retries < 5) {
-          timer = setTimeout(() => { retries++; void walk(); }, Math.min(250 * 2 ** retries, 8000));
-        } else { completedRequest.current = requestIdentity; setWalking(false); }
+          timer = setTimeout(
+            () => {
+              retries++;
+              void walk();
+            },
+            Math.min(250 * 2 ** retries, 8000),
+          );
+        } else {
+          completedRequest.current = requestIdentity;
+          setWalking(false);
+        }
       } catch (error) {
         if (!current()) return;
         setWalking(false);
-        setState(previous => ({ ...previous, status: "error", error: ipcErrorMessage(error, "Graph failed to load") }));
+        setState((previous) => ({
+          ...previous,
+          status: "error",
+          error: ipcErrorMessage(error, "Graph failed to load"),
+        }));
         reportError.current?.("dohc could not load the graph.", error, retry);
       }
     };
     void walk();
-    return () => { active = false; clearTimeout(timer); if (frame !== undefined) cancelAnimationFrame(frame); resumePaint?.(); };
+    return () => {
+      active = false;
+      clearTimeout(timer);
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      resumePaint?.();
+    };
   }, [requestIdentity, load, props.workspaceId, chatMentionsEnabled]);
 
   useEffect(() => {
@@ -500,31 +646,49 @@ export function GraphView(props: {
     let frame: number | undefined;
     let resumePaint: (() => void) | undefined;
     const graph = state.workspaceId === props.workspaceId ? state.graph : null;
-    if (!chatMentionsEnabled || !graph) { setChatRows(null); setChatWalking(false); return; }
+    if (!chatMentionsEnabled || !graph) {
+      setChatRows(null);
+      setChatWalking(false);
+      return;
+    }
     if (walking || completedRequest.current !== requestIdentity) return;
     const current = () => active && requestIdentityRef.current === requestIdentity;
-    const retry = () => { if (requestIdentityRef.current === requestIdentity) load(); };
+    const retry = () => {
+      if (requestIdentityRef.current === requestIdentity) load();
+    };
     let retained = chatRows?.workspaceId === props.workspaceId && chatRows.rows.length > 0;
     let restarted = false;
     setChatWalking(true);
     const walk = async () => {
       const rows = new Map<string, ChatFileMentionRecord>();
-      let complete = true, mountsCovered = true;
+      let complete = true,
+        mountsCovered = true;
       let cursor: string | undefined;
       try {
         do {
-          const page = await bridge().chatFileMentionsPage({ workspaceId: props.workspaceId, ...(cursor ? { cursor } : {}) });
+          const page = await bridge().chatFileMentionsPage({
+            workspaceId: props.workspaceId,
+            ...(cursor ? { cursor } : {}),
+          });
           if (!current()) return;
           for (const row of page?.entries ?? []) rows.set(row.attachment.attachmentId, row);
           complete &&= page?.complete ?? true;
           mountsCovered &&= page?.mountsCovered ?? true;
           cursor = page?.nextCursor ?? undefined;
-          if (!retained || !cursor) setChatRows({ workspaceId: props.workspaceId, rows: [...rows.values()],
-            complete, mountsCovered });
-          if (cursor) await new Promise<void>(resolve => {
-            resumePaint = resolve;
-            frame = requestAnimationFrame(() => { timer = setTimeout(resolve, 0); });
-          });
+          if (!retained || !cursor)
+            setChatRows({
+              workspaceId: props.workspaceId,
+              rows: [...rows.values()],
+              complete,
+              mountsCovered,
+            });
+          if (cursor)
+            await new Promise<void>((resolve) => {
+              resumePaint = resolve;
+              frame = requestAnimationFrame(() => {
+                timer = setTimeout(resolve, 0);
+              });
+            });
           if (!current()) return;
         } while (cursor);
         setChatWalking(false);
@@ -533,32 +697,72 @@ export function GraphView(props: {
         if (isChatMentionPageChanged(error)) {
           setChatRows(null);
           retained = false;
-          if (!restarted) { restarted = true; void walk(); return; }
+          if (!restarted) {
+            restarted = true;
+            void walk();
+            return;
+          }
         }
         setChatWalking(false);
         reportError.current?.("dohc could not load chat mentions.", error, retry);
       }
     };
     void walk();
-    return () => { active = false; clearTimeout(timer); if (frame !== undefined) cancelAnimationFrame(frame); resumePaint?.(); };
-  }, [chatMentionsEnabled, walking, state.graph, state.workspaceId, props.workspaceId, requestIdentity, load]);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      resumePaint?.();
+    };
+  }, [
+    chatMentionsEnabled,
+    walking,
+    state.graph,
+    state.workspaceId,
+    props.workspaceId,
+    requestIdentity,
+    load,
+  ]);
 
   const scopedState: GraphState =
     state.workspaceId === props.workspaceId && state.chatMentionsEnabled === chatMentionsEnabled
       ? state
-      : { workspaceId: props.workspaceId, chatMentionsEnabled, status: "loading", graph: null, error: null };
+      : {
+          workspaceId: props.workspaceId,
+          chatMentionsEnabled,
+          status: "loading",
+          graph: null,
+          error: null,
+        };
   const baseGraph = scopedState.graph ?? EMPTY_GRAPH;
-  const graph = useMemo(() => chatMentionsEnabled && chatRows?.workspaceId === props.workspaceId
-    ? { ...withChatMentions(baseGraph, chatRows.rows), complete: baseGraph.complete && chatRows.complete,
-      mountsCovered: baseGraph.mountsCovered && chatRows.mountsCovered } : baseGraph, [baseGraph, chatRows, chatMentionsEnabled, props.workspaceId]);
+  const graph = useMemo(
+    () =>
+      chatMentionsEnabled && chatRows?.workspaceId === props.workspaceId
+        ? {
+            ...withChatMentions(baseGraph, chatRows.rows),
+            complete: baseGraph.complete && chatRows.complete,
+            mountsCovered: baseGraph.mountsCovered && chatRows.mountsCovered,
+          }
+        : baseGraph,
+    [baseGraph, chatRows, chatMentionsEnabled, props.workspaceId],
+  );
 
   const settingsKey = `${props.workspaceId}\0${variant}`;
-  const [savedSettings, setSettingsState] = useState({ key: settingsKey, value: sessionSettings.get(settingsKey) ?? DEFAULT_SETTINGS });
-  const settings = savedSettings.key === settingsKey ? savedSettings.value : sessionSettings.get(settingsKey) ?? DEFAULT_SETTINGS;
-  const setSettings = useCallback((next: GraphSettingsValue) => {
-    sessionSettings.set(settingsKey, next);
-    setSettingsState({ key: settingsKey, value: next });
-  }, [settingsKey]);
+  const [savedSettings, setSettingsState] = useState({
+    key: settingsKey,
+    value: sessionSettings.get(settingsKey) ?? DEFAULT_SETTINGS,
+  });
+  const settings =
+    savedSettings.key === settingsKey
+      ? savedSettings.value
+      : (sessionSettings.get(settingsKey) ?? DEFAULT_SETTINGS);
+  const setSettings = useCallback(
+    (next: GraphSettingsValue) => {
+      sessionSettings.set(settingsKey, next);
+      setSettingsState({ key: settingsKey, value: next });
+    },
+    [settingsKey],
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
@@ -566,11 +770,17 @@ export function GraphView(props: {
   // graph, it shows the whole workspace.
   const localPath = variant === "panel" ? props.activePath : null;
   const model = useMemo(
-    () => buildModel(graph, { hidden: settings.hidden, orphans: settings.orphans, depth: settings.depth }, variant === "page" ? deferredSearch : "", localPath),
+    () =>
+      buildModel(
+        graph,
+        { hidden: settings.hidden, orphans: settings.orphans, depth: settings.depth },
+        variant === "page" ? deferredSearch : "",
+        localPath,
+      ),
     [graph, settings.hidden, settings.orphans, settings.depth, deferredSearch, localPath, variant],
   );
   const groups = useMemo(() => groupsFor(model, settings.groups), [model, settings.groups]);
-  const activeIndex = props.activePath === null ? -1 : model.index.get(props.activePath) ?? -1;
+  const activeIndex = props.activePath === null ? -1 : (model.index.get(props.activePath) ?? -1);
   const [focusIndex, setFocusIndex] = useState(-1);
   // A pointed node is lit without keyboard focus: a hovered row or the search's active option.
   const [pointIndex, setPointIndex] = useState(-1);
@@ -579,20 +789,27 @@ export function GraphView(props: {
     setPointIndex(-1);
   }, [model]);
 
-  const openNode = useCallback((node: GraphNode) => {
-    if (node.kind === "chat-thread") props.onOpenChatThread?.(node);
-    else if (node.kind === "heading") props.onOpenPath(node.filePath, node.headingAnchor);
-    else props.onOpenPath(node.filePath ?? node.path);
-  }, [props]);
-  const openIndex = useCallback((index: number) => {
-    const node = model.sources[index];
-    if (node) openNode(node);
-  }, [model, openNode]);
+  const openNode = useCallback(
+    (node: GraphNode) => {
+      if (node.kind === "chat-thread") props.onOpenChatThread?.(node);
+      else if (node.kind === "heading") props.onOpenPath(node.filePath, node.headingAnchor);
+      else props.onOpenPath(node.filePath ?? node.path);
+    },
+    [props],
+  );
+  const openIndex = useCallback(
+    (index: number) => {
+      const node = model.sources[index];
+      if (node) openNode(node);
+    },
+    [model, openNode],
+  );
 
   const loadingBlank = scopedState.status === "loading" && !scopedState.graph;
   const showLoading = useDelayed(loadingBlank);
   const gathering = (walking || chatWalking) && scopedState.graph !== null;
-  const filtered = model.filteredNodeCount < graph.nodes.length || model.filteredLinkCount < graph.edges.length;
+  const filtered =
+    model.filteredNodeCount < graph.nodes.length || model.filteredLinkCount < graph.edges.length;
   const more = walking && scopedState.graph !== null ? "+" : "";
   const fileCount = filtered
     ? `${model.filteredNodeCount.toLocaleString()} of ${plural(graph.nodes.length, "file")}`
@@ -629,35 +846,70 @@ export function GraphView(props: {
       data-testid="graph-view"
       data-state={loadingBlank ? "loading" : scopedState.status}
       data-variant={variant}
-      className={variant === "page" ? "flex min-h-0 flex-1 flex-col bg-bg" : "flex min-h-0 flex-1 flex-col"}
+      className={
+        variant === "page" ? "flex min-h-0 flex-1 flex-col bg-bg" : "flex min-h-0 flex-1 flex-col"
+      }
     >
-      <div className={`flex h-9 shrink-0 items-center border-b border-line px-3 ${variant === "page" ? "gap-2" : "gap-1"}`}>
+      <div
+        className={`flex h-9 shrink-0 items-center border-b border-line px-3 ${variant === "page" ? "gap-2" : "gap-1"}`}
+      >
         {/* The side panel's own title names the Graph, so its row keeps the room for the counts. */}
-        {variant === "page" ? <GitFork size={13} aria-hidden className="shrink-0 text-subtle" /> : null}
-        <span title={counts} className="flex min-w-0 items-center gap-1.5 overflow-hidden text-[12px] tabular-nums text-muted">
-          <output data-testid="graph-doc-count" className="shrink-0">{fileCount}</output>
-          <span aria-hidden className="text-subtle">·</span>
-          <output data-testid="graph-link-count" className="min-w-0 truncate">{linkCount}</output>
+        {variant === "page" ? (
+          <GitFork size={13} aria-hidden className="shrink-0 text-subtle" />
+        ) : null}
+        <span
+          title={counts}
+          className="flex min-w-0 items-center gap-1.5 overflow-hidden text-[12px] tabular-nums text-muted"
+        >
+          <output data-testid="graph-doc-count" className="shrink-0">
+            {fileCount}
+          </output>
+          <span aria-hidden className="text-subtle">
+            ·
+          </span>
+          <output data-testid="graph-link-count" className="min-w-0 truncate">
+            {linkCount}
+          </output>
         </span>
         {notice && variant === "page" ? (
-          <span data-testid="graph-unresolved-count" title={notice} className="inline-flex min-w-0 items-center gap-1 text-[12px] text-subtle">
+          <span
+            data-testid="graph-unresolved-count"
+            title={notice}
+            className="inline-flex min-w-0 items-center gap-1 text-[12px] text-subtle"
+          >
             <ListFilter size={12} aria-hidden className="shrink-0" />
             <span className="truncate">{notice}</span>
           </span>
         ) : notice ? (
           // The side panel has room for the counts only, so the notice is its icon.
-          <span data-testid="graph-unresolved-count" role="img" aria-label={notice} title={notice} className="inline-flex shrink-0 text-subtle">
+          <span
+            data-testid="graph-unresolved-count"
+            role="img"
+            aria-label={notice}
+            title={notice}
+            className="inline-flex shrink-0 text-subtle"
+          >
             <ListFilter size={12} aria-hidden />
           </span>
         ) : null}
         {gathering ? (
-          <p role="status" title="Gathering linked mentions" className="min-w-0 truncate text-[12px] text-subtle">
+          <p
+            role="status"
+            title="Gathering linked mentions"
+            className="min-w-0 truncate text-[12px] text-subtle"
+          >
             Gathering linked mentions
           </p>
         ) : null}
         <span className="ml-auto" />
         {variant === "page" ? (
-          <GraphSearch value={search} model={model} onChange={setSearch} onOpen={openNode} onPointNode={setPointIndex} />
+          <GraphSearch
+            value={search}
+            model={model}
+            onChange={setSearch}
+            onOpen={openNode}
+            onPointNode={setPointIndex}
+          />
         ) : null}
         {props.chatMentionsAvailable ? (
           <IconButton
@@ -671,7 +923,12 @@ export function GraphView(props: {
             <MessageSquare size={13} aria-hidden />
           </IconButton>
         ) : null}
-        <IconButton aria-label="Refresh graph" title="Refresh graph" onClick={load} className="shrink-0">
+        <IconButton
+          aria-label="Refresh graph"
+          title="Refresh graph"
+          onClick={load}
+          className="shrink-0"
+        >
           <RefreshCw size={13} aria-hidden />
         </IconButton>
         <IconButton
@@ -689,10 +946,26 @@ export function GraphView(props: {
       {empty ? (
         <EmptyState icon={FileText} title="Add a Markdown file to start building your graph." />
       ) : (
-        <div className={variant === "page" ? "relative flex min-h-0 flex-1" : "relative flex min-h-0 flex-1 flex-col"}>
+        <div
+          className={
+            variant === "page"
+              ? "relative flex min-h-0 flex-1"
+              : "relative flex min-h-0 flex-1 flex-col"
+          }
+        >
           {loadingBlank ? (
-            <div className={variant === "page" ? "flex flex-1 items-center justify-center" : "flex h-72 shrink-0 items-center justify-center"}>
-              {showLoading ? <p role="status" className="text-[12px] text-subtle">Gathering linked mentions</p> : null}
+            <div
+              className={
+                variant === "page"
+                  ? "flex flex-1 items-center justify-center"
+                  : "flex h-72 shrink-0 items-center justify-center"
+              }
+            >
+              {showLoading ? (
+                <p role="status" className="text-[12px] text-subtle">
+                  Gathering linked mentions
+                </p>
+              ) : null}
             </div>
           ) : (
             canvas
@@ -702,7 +975,10 @@ export function GraphView(props: {
               <RetryRow testId="graph-retry" onRetry={load} />
             </div>
           ) : null}
-          {!loadingBlank && model.nodes.length === 0 && deferredSearch.trim() && variant === "page" ? (
+          {!loadingBlank &&
+          model.nodes.length === 0 &&
+          deferredSearch.trim() &&
+          variant === "page" ? (
             <p className="absolute inset-x-0 top-1/2 text-center text-sm text-muted">
               {`No files match "${deferredSearch.trim()}". Try a shorter search.`}
             </p>
@@ -717,7 +993,13 @@ export function GraphView(props: {
             />
           ) : null}
           {variant === "panel" && !loadingBlank ? (
-            <GraphRows model={model} activePath={props.activePath} onOpen={openNode} onFocusNode={setFocusIndex} onPointNode={setPointIndex} />
+            <GraphRows
+              model={model}
+              activePath={props.activePath}
+              onOpen={openNode}
+              onFocusNode={setFocusIndex}
+              onPointNode={setPointIndex}
+            />
           ) : null}
         </div>
       )}

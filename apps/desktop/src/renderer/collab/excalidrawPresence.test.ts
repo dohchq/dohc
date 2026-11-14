@@ -3,15 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { PresencePublishPayload } from "../../ipc/bridgeContract";
 import { bindDocPresence } from "./docPresence";
-import {
-  bindExcalidrawPresence,
-  excalidrawPresenceTopic,
-} from "./excalidrawPresence";
-import type {
-  PresencePeer,
-  PresenceSnapshot,
-  PresenceTransport,
-} from "./presenceChannel";
+import { bindExcalidrawPresence, excalidrawPresenceTopic } from "./excalidrawPresence";
+import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "./presenceChannel";
 
 function sharedRelay() {
   const entries = new Map<string, PresencePeer>();
@@ -33,7 +26,10 @@ function sharedRelay() {
       publishes += 1;
       entries.set(clientId, {
         faceToken: `user-${clientId}`,
-        sessionToken: clientId, isSelf: false, displayName: clientId === "bob" ? "Bob" : clientId === "alice" ? "Alice" : "Someone", paletteSlot: 0,
+        sessionToken: clientId,
+        isSelf: false,
+        displayName: clientId === "bob" ? "Bob" : clientId === "alice" ? "Alice" : "Someone",
+        paletteSlot: 0,
         state,
         updatedAtMs: 0,
       });
@@ -116,12 +112,15 @@ describe("Excalidraw presence", () => {
     await flush();
 
     const latest = aliceApi.updateScene.mock.calls.at(-1)?.[0] as {
-      collaborators: Map<string, {
-        pointer?: { x: number; y: number };
-        button?: string;
-        selectedElementIds?: Record<string, boolean>;
-        username?: string;
-      }>;
+      collaborators: Map<
+        string,
+        {
+          pointer?: { x: number; y: number };
+          button?: string;
+          selectedElementIds?: Record<string, boolean>;
+          username?: string;
+        }
+      >;
     };
     expect(latest.collaborators.size).toBe(1);
     expect([...latest.collaborators.values()][0]).toMatchObject({
@@ -182,13 +181,16 @@ describe("Excalidraw presence", () => {
     await flush();
 
     const latest = api.updateScene.mock.calls.at(-1)?.[0] as {
-      collaborators: Map<string, {
-        pointer?: { x: number; y: number };
-        button?: string;
-        selectedElementIds?: Record<string, boolean>;
-        username?: string;
-        color?: { background: string; stroke: string };
-      }>;
+      collaborators: Map<
+        string,
+        {
+          pointer?: { x: number; y: number };
+          button?: string;
+          selectedElementIds?: Record<string, boolean>;
+          username?: string;
+          color?: { background: string; stroke: string };
+        }
+      >;
     };
     const collaborator = [...latest.collaborators.values()][0]!;
     expect(collaborator.username).toBe("Someone");
@@ -203,9 +205,7 @@ describe("Excalidraw presence", () => {
       ["long".padEnd(513, "x")]: true,
     });
     expect(Object.getPrototypeOf(collaborator.selectedElementIds)).toBeNull();
-    expect(Object.hasOwn(collaborator.selectedElementIds!, "__proto__")).toBe(
-      false,
-    );
+    expect(Object.hasOwn(collaborator.selectedElementIds!, "__proto__")).toBe(false);
     expect(collaborator).not.toHaveProperty("color");
 
     local.destroy();
@@ -254,10 +254,7 @@ describe("Excalidraw presence", () => {
     // 100 fit the 3,072-byte id budget. This pins the budget constant: a
     // different headroom changes the kept count.
     const latest = api.updateScene.mock.calls.at(-1)?.[0] as {
-      collaborators: Map<
-        string,
-        { selectedElementIds?: Record<string, boolean> }
-      >;
+      collaborators: Map<string, { selectedElementIds?: Record<string, boolean> }>;
     };
     const collaborator = [...latest.collaborators.values()][0]!;
     expect(Object.keys(collaborator.selectedElementIds!)).toHaveLength(99);

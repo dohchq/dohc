@@ -1,7 +1,12 @@
 // The Node side of a fetch-style service: one node:http adapter, one response
 // pipe, one token bucket, one parked-waiter registry, and process lifecycle.
 // sync-relay, share-web, and workspace-api import from here instead of carrying copies.
-export { serveFetchHandler, type ServeFetchHandlerOptions } from "./serveFetchHandler";
+export {
+  ClientClosedRequest,
+  RefusedRequest,
+  serveFetchHandler,
+  type ServeFetchHandlerOptions,
+} from "./serveFetchHandler";
 export { carryRequestMark, createRequestLog, type RequestLog } from "./requestLog";
 export { DRAIN_TIMEOUT_HEADER, DRAIN_TIMEOUT_MS, pipeResponseBody } from "./pipeResponseBody";
 export { TokenBucketLimiter } from "./tokenBucketLimiter";

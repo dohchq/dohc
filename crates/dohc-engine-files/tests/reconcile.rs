@@ -1,9 +1,3 @@
-//! Reconcile behavior: plan correctness (added/changed/removed → capture ops),
-//! the rename shape (remove + add), the watcher dirty-generation state machine
-//! (overflow → dirty → full rescan converges), and — the calibration point —
-//! cancellation mid-scan leaving consistent, resumable state (no partial
-//! capture; dirty stays set so the next scan completes it).
-
 use crate::common;
 
 use common::Scratch;
@@ -102,19 +96,16 @@ fn first_reconcile_ingests_everything_then_converges() {
     let mut ctrl = ReconcileController::new();
     let token = CancellationToken::new();
 
-    // Baseline: everything is "added".
     let first = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert_eq!(first.from_generation.0, 0);
     assert_eq!(first.to_generation.0, 1);
     assert!(first.prepared_from_dirty);
     assert_eq!(ingest_paths(&first, IngestReason::Added), ["a.md", "b.md"]);
 
-    // Nothing changed on disk: a dirty-driven reconcile is a no-op...
     assert!(matches!(
         reconcile_if_dirty_and_apply(&mut ctrl, &scanner, ws.path(), &token),
         ReconcileRun::Converged
     ));
-    // ...but a forced full reconcile produces an empty plan (converged).
     let second = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert!(second.is_empty());
     assert_eq!(second.to_generation.0, 2);
@@ -131,7 +122,6 @@ fn reconcile_classifies_added_changed_removed() {
     let token = CancellationToken::new();
     let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
 
-    // Mutate the tree: edit one, add one, remove one, keep one.
     ws.write("edit.md", b"after edit\n");
     ws.write("new.md", b"fresh\n");
     ws.remove("gone.md");
@@ -154,7 +144,6 @@ fn rename_looks_like_remove_plus_add() {
     ws.rename("old-name.md", "new-name.md");
 
     let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
-    // A content-preserving rename is a retire(old) + ingest(new) at this layer.
     assert_eq!(ingest_paths(&p, IngestReason::Added), ["new-name.md"]);
     assert_eq!(retire_paths(&p), ["old-name.md"]);
 }
@@ -520,8 +509,6 @@ fn cancellation_mid_scan_leaves_consistent_resumable_state() {
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let mut ctrl = ReconcileController::new();
 
-    // A cancelled reconcile (token tripped at a between-unit boundary) commits
-    // nothing: generation stays 0, dirty stays set, manifest stays empty.
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(matches!(
@@ -536,8 +523,6 @@ fn cancellation_mid_scan_leaves_consistent_resumable_state() {
     );
     assert_eq!(ctrl.tracked_len(), 0, "no partial capture");
 
-    // Resume with a live token: the work completes exactly as if the cancel
-    // never happened — the baseline is established in full.
     let resumed = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &CancellationToken::new());
     assert_eq!(ctrl.generation().0, 1);
     assert!(!ctrl.is_dirty());
@@ -555,13 +540,9 @@ fn watcher_overflow_sets_dirty_and_full_rescan_converges() {
     let mut ctrl = ReconcileController::new();
     let token = CancellationToken::new();
 
-    // Establish a converged baseline.
     let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert!(!ctrl.is_dirty());
 
-    // A change happens while the watcher is uncertain: an external edit plus an
-    // overflow storm. Many events coalesce to one dirty flag but never drop the
-    // evidence of the change.
     ws.write("a.md", b"two\n");
     ws.write("b.md", b"added under overflow\n");
     let mut source = StubWatchSource::new(4);
@@ -574,7 +555,6 @@ fn watcher_overflow_sets_dirty_and_full_rescan_converges() {
     let marked = source.drain_into(&mut ctrl);
     assert!(marked && ctrl.is_dirty());
 
-    // The dirty-driven full rescan converges disk and engine.
     let converged = plan(reconcile_if_dirty_and_apply(
         &mut ctrl,
         &scanner,
@@ -589,7 +569,6 @@ fn watcher_overflow_sets_dirty_and_full_rescan_converges() {
         "a completed rescan clears the dirty generation"
     );
 
-    // A subsequent dirty-driven reconcile is a no-op (already converged).
     assert!(matches!(
         reconcile_if_dirty_and_apply(&mut ctrl, &scanner, ws.path(), &token),
         ReconcileRun::Converged
@@ -598,8 +577,6 @@ fn watcher_overflow_sets_dirty_and_full_rescan_converges() {
 
 #[test]
 fn overflow_during_cancelled_rescan_is_not_lost() {
-    // Regression for "coalescing never drops the only evidence of a change":
-    // a change marked dirty, then a cancelled rescan, must remain pending.
     let ws = Scratch::new();
     ws.write("a.md", b"one\n");
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
@@ -609,7 +586,6 @@ fn overflow_during_cancelled_rescan_is_not_lost() {
     ws.write("a.md", b"two\n");
     ctrl.mark_dirty();
 
-    // A cancelled rescan must not clear dirty.
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(matches!(
@@ -622,7 +598,6 @@ fn overflow_during_cancelled_rescan_is_not_lost() {
         "cancelled rescan preserves the pending change"
     );
 
-    // The next (live) rescan finally captures the change.
     let p = plan(reconcile_if_dirty_and_apply(
         &mut ctrl,
         &scanner,
@@ -634,7 +609,7 @@ fn overflow_during_cancelled_rescan_is_not_lost() {
 
 #[test]
 fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
-    // P1 REGRESSION: a previously-tracked file edited past the size cap must be
+    // A previously-tracked file edited past the size cap must be
     // retained (still on disk, last-known-good kept), never classified `removed`
     // and Retired — that would forget live user data.
     use dohc_engine_files::OverCapPolicy;
@@ -652,7 +627,6 @@ fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
     assert_eq!(ingest_paths(&base, IngestReason::Added), ["doc.md"]);
     assert_eq!(ctrl.tracked_len(), 1);
 
-    // Grow it past the cap.
     ws.write("doc.md", b"now this content is definitely over the cap\n");
     let grown = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert!(
@@ -666,10 +640,8 @@ fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
         ["doc.md"],
         "distinct retain disposition"
     );
-    // Still tracked at last-known-good (not dropped from the manifest).
     assert_eq!(ctrl.tracked_len(), 1);
 
-    // Shrink back under the cap with new content → detected as a normal change.
     ws.write("doc.md", b"tiny\n");
     let shrunk = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert_eq!(ingest_paths(&shrunk, IngestReason::Changed), ["doc.md"]);
@@ -726,7 +698,6 @@ fn diff_bound_trips_when_change_set_too_large() {
     let bounds = ScanBounds::builder().max_diff_entries(3).build();
     let scanner = Scanner::new(bounds).expect("scanner");
     let mut ctrl = ReconcileController::new();
-    // First reconcile would add 5 files > diff cap of 3 → fail closed.
     let err = ctrl
         .reconcile(&scanner, ws.path(), &CancellationToken::new())
         .expect_err("diff too large");
@@ -914,16 +885,15 @@ fn retire_requires_final_lstat_confirm_and_toctou_reappearance_is_retained() {
     assert!(raced_plan.degraded);
 }
 
-/// R14 robustness: manifest rehydration. A controller seeded from a prior
-/// generation's manifest (standing in for state recovered after a process
-/// restart) must (1) still force a full reconcile (`rehydrated` starts
-/// dirty, same as `new`), and (2) not re-report already-tracked, unchanged
-/// files as freshly `Added` -- only genuinely new/changed/removed paths
-/// should appear. An empty-manifest restart (the pre-R14 behavior) would
-/// mis-report every unchanged file as `Added`. Also the amended-N8 safety
-/// valve: a rehydration seed carries no mtime observation, so the first scan
-/// after open must hash every file rather than trust the seed — and the
-/// pairings that scan records make the rescans after it cheap.
+/// A controller seeded from a prior generation's manifest (standing in for
+/// state recovered after a process restart) must (1) still force a full
+/// reconcile (`rehydrated` starts dirty, same as `new`), and (2) not
+/// re-report already-tracked, unchanged files as freshly `Added` -- only
+/// genuinely new/changed/removed paths should appear. An empty-manifest
+/// restart would mis-report every unchanged file as `Added`. A rehydration
+/// seed carries no mtime observation, so the first scan after open must hash
+/// every file rather than trust the seed, and the pairings that scan records
+/// make the rescans after it cheap.
 #[test]
 fn rehydrated_manifest_reconciles_only_real_changes() {
     let ws = Scratch::new();
@@ -936,7 +906,6 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let token = CancellationToken::new();
 
-    // Establish what a live process's manifest would look like.
     let mut live = ReconcileController::new();
     let baseline = reconcile_and_apply(&mut live, &scanner, ws.path(), &token);
     assert_eq!(
@@ -946,16 +915,12 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
     let recovered_generation = live.generation();
     let baseline_hashed = scanner.pool().gauge().hashed();
 
-    // Simulate a restart: a fresh controller, but rehydrated from the prior
-    // manifest instead of ReconcileController::new()'s empty baseline.
     let manifest = ScanManifest::from_entries([
         (
             "unchanged.md".to_owned(),
             ManifestEntry {
                 size: unchanged_bytes.len() as u64,
                 sha256: dohc_engine_storage::hex_sha256(unchanged_bytes),
-                // A rehydration seed records no mtime observation (the domain
-                // stores none), so it must never authorize hash reuse.
                 mtime_ms: 0,
             },
         ),
@@ -975,7 +940,6 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
     );
     assert_eq!(rehydrated.tracked_len(), 2);
 
-    // Only one file actually changed while the process was "down".
     ws.write("about-to-change.md", b"new content\n");
     ws.age_mtime("about-to-change.md", 10);
 
@@ -994,9 +958,6 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
         "a zero-mtime seed entry must be hashed, never reused"
     );
 
-    // The pairings the post-restart scan recorded (refresh pass for the
-    // unchanged file, acknowledgement for the changed one) make the rescans
-    // after open cheap again.
     rehydrated.mark_dirty();
     let _ = reconcile_if_dirty_and_apply(&mut rehydrated, &scanner, ws.path(), &token);
     assert_eq!(
@@ -1006,7 +967,7 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
     );
 }
 
-// ---- amended N8: the manifest's (size, mtime) pairing short-circuits hashing.
+// ---- the manifest's (size, mtime) pairing short-circuits hashing.
 // The hash stays the source of truth for classification; equal size+mtime
 // reuses the recorded hash; any size or mtime difference re-hashes; a
 // same-size edit that forges its mtime back is the documented git tradeoff.
@@ -1032,7 +993,6 @@ fn unchanged_size_and_mtime_is_not_rehashed_on_the_next_rescan() {
     let baseline_hashed = scanner.pool().gauge().hashed();
     assert_eq!(baseline_hashed, 2, "the baseline hashes everything once");
 
-    // A watcher event forces a full rescan of the untouched workspace.
     ctrl.mark_dirty();
     let rescan = plan(reconcile_if_dirty_and_apply(
         &mut ctrl,
@@ -1063,7 +1023,6 @@ fn touched_mtime_with_same_content_rehashes_without_a_spurious_change() {
     let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     let baseline_hashed = scanner.pool().gauge().hashed();
 
-    // Touch: new mtime (still in the past), identical bytes.
     ws.age_mtime("a.md", 10);
     let touched = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert!(
@@ -1076,7 +1035,6 @@ fn touched_mtime_with_same_content_rehashes_without_a_spurious_change() {
         "a moved mtime invalidates the pairing, so the file is re-hashed"
     );
 
-    // The refresh pass recorded the new pairing, so the next rescan reuses it.
     let converged = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert!(converged.is_empty());
     assert_eq!(
@@ -1102,7 +1060,6 @@ fn forged_mtime_same_size_edit_is_unseen_but_a_size_change_is_not() {
     let baseline_hashed = scanner.pool().gauge().hashed();
     let recorded = ws.mtime("doc.md");
 
-    // Same size, different bytes, mtime forged back to the recorded pairing.
     ws.write("doc.md", b"bbbb\n");
     ws.set_mtime("doc.md", recorded);
     let forged = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
@@ -1116,8 +1073,6 @@ fn forged_mtime_same_size_edit_is_unseen_but_a_size_change_is_not() {
         "the forged pairing is reused without a read"
     );
 
-    // A size change defeats the forgery: the pairing mismatches, the file is
-    // re-hashed, and the edit is captured.
     ws.write("doc.md", b"cccccc\n");
     ws.set_mtime("doc.md", recorded);
     let resized = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
@@ -1137,8 +1092,6 @@ fn forged_mtime_same_size_edit_is_unseen_but_a_size_change_is_not() {
 fn mtime_inside_the_granularity_margin_is_not_recorded() {
     let ws = Scratch::new();
     ws.write("a.md", b"alpha\n");
-    // Exactly "now": strictly below the imminent scan start (a strict fence
-    // would record it) but inside the 2000ms granularity margin (must not).
     ws.age_mtime("a.md", 0);
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let mut ctrl = ReconcileController::new();
@@ -1186,8 +1139,6 @@ fn a_tracked_evicted_file_is_retained_unread_even_when_its_seed_hash_forces_a_re
     let ws = Scratch::new();
     ws.write("photo.bin", b"cloud only");
     ws.write("narrowed.md", b"opted out");
-    // Any read would now fail the scan, so a clean plan proves neither file
-    // was read.
     #[cfg(unix)]
     for rel in ["photo.bin", "narrowed.md"] {
         use std::os::unix::fs::PermissionsExt;
@@ -1225,8 +1176,6 @@ fn a_tracked_evicted_file_is_retained_unread_even_when_its_seed_hash_forces_a_re
     );
     assert!(!prepared.degraded, "{prepared:?}");
     assert!(prepared.ops.is_empty(), "{prepared:?}");
-    // Retained paths reach the driver's policy pass, which retires a narrowed
-    // one without reading it.
     assert_eq!(prepared.retained_unread, ["narrowed.md", "photo.bin"]);
 }
 
@@ -1323,8 +1272,6 @@ fn an_evicted_file_edited_elsewhere_is_rehashed_once_it_downloads() {
     assert_eq!(evicted.retained_unread, ["resized.md", "same-size.md"]);
     apply_then_ack(&mut ctrl, &evicted, &mut AcceptAll, &NoFaults).expect("apply/ack");
 
-    // Another Mac edits both, and each downloads with the new bytes and a
-    // new mtime. One keeps its size, so only the mtime can reveal the edit.
     ws.write("resized.md", b"after, longer");
     ws.write("same-size.md", b"AFTER!");
     ws.age_mtime("resized.md", 30);

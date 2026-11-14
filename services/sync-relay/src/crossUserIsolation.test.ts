@@ -18,36 +18,11 @@ import {
   jsonBody,
   putBlob as upload,
   request,
-  sha256,
   storagePath,
   testHandler,
   testStorage,
   type ChatOp as RawOp,
 } from "./testing";
-
-// MU-C5 — the consolidated cross-user isolation sweep. The per-lane suites
-// (MU-C0 authorship, MU-C1 presence, MU-C2 reactions, MU-C3 DMs, MU-C4 shared
-// channels) each proved one invariant against one surface. This file proves the
-// cross-cutting invariants hold together — across path shares and chat
-// shares AND DMs at once — using planted SENTINEL values so a leak is a literal
-// substring match, not an inference. It deliberately does not re-run the
-// per-lane matrices; it is the sentinel proof that ties them together.
-//
-// The six invariants (one describe block each):
-//   1. Byte-identical denial: every share-scoped route denies a non-recipient
-//      identically to a share that never existed — same status, same body,
-//      before parsing body/origin. A stale agent-channel grant does too.
-//   2. No-forge (MU-C0): a member cannot append a chat op authored as another
-//      user; the member-append gate rejects it 403 authorship_mismatch.
-//   3. Revocation closes cleanly: after revoke, read and append both fail
-//      byte-identically to an absent share.
-//   4. filterOpForShare leak sentinels: across every served op kind, the served
-//      payload excludes every planted internal SENTINEL-* value.
-//   5. Presence never journaled: after presence traffic on a workspace scope
-//      and a share scope, no durable table holds a presence row.
-//   6. In-request revoke race (closed): a revoke that lands between the
-//      member-append route's entry and its transactional insert aborts the
-//      write via the in-transaction guard.
 
 afterEach(closeTestStorages);
 
@@ -107,8 +82,6 @@ function memberAppend(
   return h(request(MEMBER, `/sync/shares/${shareId}/log`, jsonBody({ originId, ops })));
 }
 
-// ---------------------------------------------------------------------------
-
 describe("MU-C5 · byte-identical denial across every share-scoped route", () => {
   it("denies a non-recipient identically to an absent share, on path, chat, AND DM shares", async () => {
     const storage = await testStorage();
@@ -153,7 +126,6 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
       access: "read-write",
     });
 
-    // The baseline: the same routes against a share id that never existed.
     const absentId = "never-existed";
     const absent = {
       read: await denialBytes(await h(request(STRANGER, `/sync/shares/${absentId}`))),
@@ -173,7 +145,13 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
         await h(request(STRANGER, `/sync/shares/${absentId}/blobs/${sharedSha}`)),
       ),
       presence: await denialBytes(
-        await h(request(STRANGER, `/sync/shares/${absentId}/presence?topic=docs/shared.md`, jsonBody({ clientId: "x" }))),
+        await h(
+          request(
+            STRANGER,
+            `/sync/shares/${absentId}/presence?topic=docs/shared.md`,
+            jsonBody({ clientId: "x" }),
+          ),
+        ),
       ),
     };
 
@@ -194,7 +172,9 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
       // share exactly as it does on an absent one.
       expect(
         await denialBytes(
-          await h(request(STRANGER, `/sync/shares/${shareId}/log`, { method: "POST", body: "not-json" })),
+          await h(
+            request(STRANGER, `/sync/shares/${shareId}/log`, { method: "POST", body: "not-json" }),
+          ),
         ),
         `${kind}: member-append POST (pre-parse)`,
       ).toBe(absent.append);
@@ -204,19 +184,21 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
       ).toBe(absent.blob);
       expect(
         await denialBytes(
-          await h(request(STRANGER, `/sync/shares/${shareId}/presence?topic=docs/shared.md`, jsonBody({ clientId: "x" }))),
+          await h(
+            request(
+              STRANGER,
+              `/sync/shares/${shareId}/presence?topic=docs/shared.md`,
+              jsonBody({ clientId: "x" }),
+            ),
+          ),
         ),
         `${kind}: share presence`,
       ).toBe(absent.presence);
     }
 
-    // The granter probing the recipient routes of their own share is a
-    // non-recipient too — same generic 404, no self-leak.
-    expect(await denialBytes(await h(request(OWNER, `/sync/shares/${chatShare}/log?since=0`)))).toBe(
-      absent.log,
-    );
-    // Unauthenticated probes stay 401 (auth precedes the share lookup); the 404
-    // invariant is specifically about AUTHENTICATED non-recipients.
+    expect(
+      await denialBytes(await h(request(OWNER, `/sync/shares/${chatShare}/log?since=0`))),
+    ).toBe(absent.log);
     expect((await h(request(null, `/sync/shares/${chatShare}/log?since=0`))).status).toBe(401);
   });
 
@@ -318,13 +300,11 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
       ),
     };
 
+    expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${poisonedShareId}`)))).toBe(
+      absent.read,
+    );
     expect(
-      await denialBytes(await h(request(MEMBER, `/sync/shares/${poisonedShareId}`))),
-    ).toBe(absent.read);
-    expect(
-      await denialBytes(
-        await h(request(MEMBER, `/sync/shares/${poisonedShareId}/log?since=0`)),
-      ),
+      await denialBytes(await h(request(MEMBER, `/sync/shares/${poisonedShareId}/log?since=0`))),
     ).toBe(absent.log);
     expect(
       await denialBytes(
@@ -394,9 +374,9 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
     const absent = await denialBytes(
       await h(request(MEMBER, "/sync/shares/never-existed/log?since=0")),
     );
-    expect(
-      await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}/log?since=0`))),
-    ).toBe(absent);
+    expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}/log?since=0`)))).toBe(
+      absent,
+    );
     const listed = await json(await h(request(MEMBER, "/sync/shares")));
     expect(listed.received).toEqual([]);
   });
@@ -418,8 +398,6 @@ describe("MU-C5 · no-forge authorship at the member-append gate (MU-C0)", () =>
       access: "read-write",
     });
 
-    // A message forged to speak as the OWNER: rejected at the authorship gate
-    // (server-derived pusher is member, payload claims OWNER).
     const forgedMessage = await memberAppend(h, shareId, [
       memberOp(0, "chat.message.append", {
         messageId: "forge-1",
@@ -434,8 +412,6 @@ describe("MU-C5 · no-forge authorship at the member-append gate (MU-C0)", () =>
     expect(forgedMessage.status).toBe(403);
     expect((await json(forgedMessage)).code).toBe("authorship_mismatch");
 
-    // A reaction forged to another author: authorId is required and must equal
-    // the pusher, so a forged (and a missing) author id both fail closed.
     const forgedReaction = await memberAppend(h, shareId, [
       memberOp(0, "chat.reaction.set", {
         reactionId: "forge-r",
@@ -456,8 +432,6 @@ describe("MU-C5 · no-forge authorship at the member-append gate (MU-C0)", () =>
     const page = await json(await h(request(MEMBER, `/sync/shares/${shareId}/log?since=0`)));
     expect(JSON.stringify(page)).not.toContain("SENTINEL-FORGED-MESSAGE");
 
-    // The honest path (author == pusher) still lands, proving the gate rejects
-    // only the forgery, not the member's own authored writes.
     const honest = await memberAppend(h, shareId, [
       memberOp(0, "chat.message.append", {
         messageId: "honest-1",
@@ -488,7 +462,6 @@ describe("MU-C5 · revocation closes read and append with a recipient removal me
       access: "read-write",
     });
 
-    // Live: read and append both work.
     expect((await h(request(MEMBER, `/sync/shares/${shareId}/log?since=0`))).status).toBe(200);
     expect(
       (
@@ -506,33 +479,48 @@ describe("MU-C5 · revocation closes read and append with a recipient removal me
       ).status,
     ).toBe(200);
 
-    const revoke = await h(
-      request(OWNER, `/sync/shares/${shareId}/revoke`, { method: "POST" }),
-    );
+    const revoke = await h(request(OWNER, `/sync/shares/${shareId}/revoke`, { method: "POST" }));
     expect(revoke.status).toBe(200);
 
     const absentRead = await denialBytes(await h(request(MEMBER, "/sync/shares/never-existed")));
     const absentAppend = await denialBytes(
-      await h(request(MEMBER, "/sync/shares/never-existed/log", jsonBody({ originId: "o", ops: [] }))),
+      await h(
+        request(MEMBER, "/sync/shares/never-existed/log", jsonBody({ originId: "o", ops: [] })),
+      ),
     );
-    const removed = `404:${JSON.stringify({ok: false, error: "The owner removed your access.", code: "share_access_removed"})}`;
+    const removed = `404:${JSON.stringify({ ok: false, error: "The owner removed your access.", code: "share_access_removed" })}`;
     expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}`)))).toBe(removed);
-    expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}`)))).toBe(absentRead);
-    expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}/log`, jsonBody({ originId: "o", ops: [] }))))).toBe(absentAppend);
+    expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}`)))).toBe(
+      absentRead,
+    );
     expect(
       await denialBytes(
         await h(
-          request(MEMBER, `/sync/shares/${shareId}/log`, jsonBody({ originId: "origin-member", ops: [
-            memberOp(1, "chat.message.append", {
-              messageId: "post-revoke",
-              threadId: "thread-granted",
-              authorKind: "human",
-              authorDisplayName: "Member",
-              authorUserId: MEMBER,
-              body: "after revoke",
-              createdAtMs: 5001,
+          request(STRANGER, `/sync/shares/${shareId}/log`, jsonBody({ originId: "o", ops: [] })),
+        ),
+      ),
+    ).toBe(absentAppend);
+    expect(
+      await denialBytes(
+        await h(
+          request(
+            MEMBER,
+            `/sync/shares/${shareId}/log`,
+            jsonBody({
+              originId: "origin-member",
+              ops: [
+                memberOp(1, "chat.message.append", {
+                  messageId: "post-revoke",
+                  threadId: "thread-granted",
+                  authorKind: "human",
+                  authorDisplayName: "Member",
+                  authorUserId: MEMBER,
+                  body: "after revoke",
+                  createdAtMs: 5001,
+                }),
+              ],
             }),
-          ] })),
+          ),
         ),
       ),
     ).toBe(removed);
@@ -643,7 +631,9 @@ describe("MU-C5 · served payloads leak no planted sentinel across every op kind
       // The granted channel's chat ops — each carries an internal field the
       // served allowlist must strip.
       chatChannelCreate(GRANTED_WIRE, "channel", { secretOwnerField: "SENTINEL-CHANNEL-INTERNAL" }),
-      chatThreadCreate(GRANTED_WIRE, "thread-granted", { internalThreadMeta: "SENTINEL-THREAD-INTERNAL" }),
+      chatThreadCreate(GRANTED_WIRE, "thread-granted", {
+        internalThreadMeta: "SENTINEL-THREAD-INTERNAL",
+      }),
       chatMessage("thread-granted", "m-granted", "hello", OWNER, {
         internalCorrelation: "SENTINEL-MSG-CORRELATION",
         deviceId: "SENTINEL-MSG-DEVICE",
@@ -723,9 +713,6 @@ describe("MU-C5 · served payloads leak no planted sentinel across every op kind
       },
     ]);
 
-    // Two shares to the same member, covering all served op kinds:
-    //   - a version share (workspace.init, version.create, moment.append)
-    //   - a chat share (channel/thread/message/reaction for one channel)
     const versionShare = await createShare(h, {
       recipientUserId: MEMBER,
       paths: ["docs"],
@@ -737,9 +724,6 @@ describe("MU-C5 · served payloads leak no planted sentinel across every op kind
       access: "read-write",
     });
 
-    // Every planted internal value. None may appear in either served view —
-    // cross-checking the full set against both proves no kind of leak crosses
-    // any share kind.
     const SENTINELS = [
       "SENTINEL-INIT-NOTE",
       "SENTINEL-VERSION-NAME",
@@ -829,17 +813,31 @@ describe("MU-C5 · presence is never journaled to any durable table", () => {
     const shareId = await createShare(h, { recipientUserId: MEMBER, paths: ["notes/a.md"] });
 
     const PRESENCE_SENTINEL = "SENTINEL-PRESENCE-STATE";
-    // Owner publishes + polls on the workspace scope.
     await h(
-      request(OWNER, "/sync/workspace-x/presence?topic=notes/a.md", jsonBody({ clientId: "o", state: { note: PRESENCE_SENTINEL } })),
+      request(
+        OWNER,
+        "/sync/workspace-x/presence?topic=notes/a.md",
+        jsonBody({ clientId: "o", state: { note: PRESENCE_SENTINEL } }),
+      ),
     );
-    await h(request(OWNER, "/sync/workspace-x/presence?topic=notes/a.md&since=0&hold=0", { method: "GET" }));
-    // Member publishes + polls on the SHARE scope (same underlying scope).
+    await h(
+      request(OWNER, "/sync/workspace-x/presence?topic=notes/a.md&since=0&hold=0", {
+        method: "GET",
+      }),
+    );
     const topic = encodeURIComponent("notes/a.md");
     await h(
-      request(MEMBER, `/sync/shares/${shareId}/presence?topic=${topic}`, jsonBody({ clientId: "m", state: { note: PRESENCE_SENTINEL } })),
+      request(
+        MEMBER,
+        `/sync/shares/${shareId}/presence?topic=${topic}`,
+        jsonBody({ clientId: "m", state: { note: PRESENCE_SENTINEL } }),
+      ),
     );
-    await h(request(MEMBER, `/sync/shares/${shareId}/presence?topic=${topic}&since=0&hold=0`, { method: "GET" }));
+    await h(
+      request(MEMBER, `/sync/shares/${shareId}/presence?topic=${topic}&since=0&hold=0`, {
+        method: "GET",
+      }),
+    );
 
     // The state is live in-memory in the hub only.
     expect(presence.stats().entries).toBe(2);
@@ -873,9 +871,20 @@ describe("MU-C5 · presence is never journaled to any durable table", () => {
       raw.close();
     }
 
-    // Leaving drops the ephemeral state entirely — no residue anywhere.
-    await h(request(OWNER, "/sync/workspace-x/presence?topic=notes/a.md", jsonBody({ clientId: "o", leave: true })));
-    await h(request(MEMBER, `/sync/shares/${shareId}/presence?topic=${topic}`, jsonBody({ clientId: "m", leave: true })));
+    await h(
+      request(
+        OWNER,
+        "/sync/workspace-x/presence?topic=notes/a.md",
+        jsonBody({ clientId: "o", leave: true }),
+      ),
+    );
+    await h(
+      request(
+        MEMBER,
+        `/sync/shares/${shareId}/presence?topic=${topic}`,
+        jsonBody({ clientId: "m", leave: true }),
+      ),
+    );
     expect(presence.stats().entries).toBe(0);
     presence.dispose();
   });
@@ -918,21 +927,27 @@ describe("MU-C5 · in-request revoke race is closed by the in-transaction guard"
         createdAtMs: 5000,
       }),
     ]);
-    // The guard sees the revoke and rolls the whole batch back as the generic
-    // 404 — the write never lands.
     expect(response.status).toBe(404);
-    const ownerLog = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=500`)));
+    const ownerLog = await json(
+      await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0&limit=500`)),
+    );
     expect(JSON.stringify(ownerLog)).not.toContain("SENTINEL-RACE-BODY");
   });
 });
 
-// --- chat op builders (shared across the sentinel + gate tests) --------------
-
-function chatChannelCreate(wireId: string, kind: string, extra: Record<string, unknown> = {}): RawOp {
+function chatChannelCreate(
+  wireId: string,
+  kind: string,
+  extra: Record<string, unknown> = {},
+): RawOp {
   return channelCreate(wireId, { kind, ...extra });
 }
 
-function chatThreadCreate(wireId: string, threadId: string, extra: Record<string, unknown> = {}): RawOp {
+function chatThreadCreate(
+  wireId: string,
+  threadId: string,
+  extra: Record<string, unknown> = {},
+): RawOp {
   return threadCreate(threadId, wireId, extra);
 }
 
@@ -943,5 +958,9 @@ function chatMessage(
   authorUserId: string,
   extra: Record<string, unknown> = {},
 ): RawOp {
-  return chatMessageAppend(messageId, threadId, body, { authorUserId, authorDisplayName: "Owner", ...extra });
+  return chatMessageAppend(messageId, threadId, body, {
+    authorUserId,
+    authorDisplayName: "Owner",
+    ...extra,
+  });
 }

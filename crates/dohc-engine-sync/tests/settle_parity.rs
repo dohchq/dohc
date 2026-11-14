@@ -1,4 +1,3 @@
-//! Native parity with owner settlement without a file snapshot.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
 use dohc_engine_sync::{UpdateProjectionError, project_ydoc_updates, project_ydoc_with_store};

@@ -1,6 +1,13 @@
 import { EventEmitter } from "node:events";
 import { join } from "node:path";
-import type { BrowserWindow, Menu, MenuItem, MenuItemConstructorOptions, WebContents, KeyboardEvent } from "electron";
+import type {
+  BrowserWindow,
+  Menu,
+  MenuItem,
+  MenuItemConstructorOptions,
+  WebContents,
+  KeyboardEvent,
+} from "electron";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDesktopWindows } from "./desktopWindows";
 import { RendererWorkspaceSessionOwner } from "./rendererWorkspaceSessionOwner";
@@ -9,7 +16,10 @@ import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettingsResult } from "../settings/userSettings";
 import { deferred } from "../testing/deferred";
 import * as windowZoom from "./windowZoom";
-import { createWorkspaceRootApproval, registerWorkspaceRegistryIpcHandlers } from "../ipc/workspaceRegistryIpc";
+import {
+  createWorkspaceRootApproval,
+  registerWorkspaceRegistryIpcHandlers,
+} from "../ipc/workspaceRegistryIpc";
 import { createWorkspaceFolderWithFreshness as createWorkspaceFolder } from "../workspaces/createWorkspaceFolder";
 import { createRegistryStore } from "../workspaces/registryStore";
 import { workspaceSummariesFrom } from "../workspaces/workspaceSummaryProjection";
@@ -24,44 +34,92 @@ class Contents extends EventEmitter {
   loading = false;
   setZoomLevel = vi.fn();
   send = vi.fn();
-  isDestroyed() { return this.destroyed; }
+  isDestroyed() {
+    return this.destroyed;
+  }
   // As in Electron, a destroyed webContents throws on use.
-  isCrashed() { if (this.destroyed) throw new TypeError("Object has been destroyed"); return false; }
-  getURL() { return this.url; }
-  isLoadingMainFrame() { return this.loading; }
-  get native(): WebContents { return this as unknown as WebContents; }
+  isCrashed() {
+    if (this.destroyed) throw new TypeError("Object has been destroyed");
+    return false;
+  }
+  getURL() {
+    return this.url;
+  }
+  isLoadingMainFrame() {
+    return this.loading;
+  }
+  get native(): WebContents {
+    return this as unknown as WebContents;
+  }
 }
 
 class Window extends EventEmitter {
   readonly webContents = new Contents();
   destroyed = false;
   minimized = false;
-  show = vi.fn(); focus = vi.fn(); restore = vi.fn();
-  isDestroyed() { return this.destroyed; }
-  isMinimized() { return this.minimized; }
-  destroy() { this.destroyed = true; this.emit("closed"); }
-  get native(): BrowserWindow { return this as unknown as BrowserWindow; }
-  startLoad() { this.webContents.url = ""; this.webContents.loading = true; return this; }
+  show = vi.fn();
+  focus = vi.fn();
+  restore = vi.fn();
+  isDestroyed() {
+    return this.destroyed;
+  }
+  isMinimized() {
+    return this.minimized;
+  }
+  destroy() {
+    this.destroyed = true;
+    this.emit("closed");
+  }
+  get native(): BrowserWindow {
+    return this as unknown as BrowserWindow;
+  }
+  startLoad() {
+    this.webContents.url = "";
+    this.webContents.loading = true;
+    return this;
+  }
   finishLoad() {
-    this.webContents.url = "app://renderer"; this.webContents.loading = false;
+    this.webContents.url = "app://renderer";
+    this.webContents.loading = false;
     this.webContents.emit("did-finish-load");
   }
   failLoad(isMainFrame = true) {
-    this.webContents.emit("did-fail-load", {}, -105, "ERR_NAME_NOT_RESOLVED", "app://renderer", isMainFrame);
+    this.webContents.emit(
+      "did-fail-load",
+      {},
+      -105,
+      "ERR_NAME_NOT_RESOLVED",
+      "app://renderer",
+      isMainFrame,
+    );
   }
 }
 
 type Dependencies = Parameters<typeof createDesktopWindows>[0];
-const workspace = (workspaceId: string, rootPath = `C:\\work\\${workspaceId}`): WorkspaceSummary => ({
-  workspaceId, rootPath, kind: "personal", mode: "local-first",
+const workspace = (
+  workspaceId: string,
+  rootPath = `C:\\work\\${workspaceId}`,
+): WorkspaceSummary => ({
+  workspaceId,
+  rootPath,
+  kind: "personal",
+  mode: "local-first",
 });
 const settings = (zoomLevel = 0): DesktopUserSettingsResult => ({
-  settings: { ...structuredClone(DEFAULT_USER_SETTINGS), appearance: {
-    ...DEFAULT_USER_SETTINGS.appearance, zoomLevel,
-  } }, source: "stored",
+  settings: {
+    ...structuredClone(DEFAULT_USER_SETTINGS),
+    appearance: {
+      ...DEFAULT_USER_SETTINGS.appearance,
+      zoomLevel,
+    },
+  },
+  source: "stored",
 });
 
-function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Dependencies["workspaceSummaries"]) {
+function fixture(
+  platform: NodeJS.Platform = "win32",
+  workspaceSummaries?: Dependencies["workspaceSummaries"],
+) {
   let stored = settings();
   let read: Dependencies["readCachedUserSettingsFile"] = async () => structuredClone(stored);
   let ready = true;
@@ -70,7 +128,10 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
   let retirement: () => Promise<void> = async () => undefined;
   const sessions = new RendererWorkspaceSessionOwner<WebContents>({
     retirement: {
-      retireSender: () => ({ requiredForAdmission: retirement(), detachedFromAdmission: Promise.resolve() }),
+      retireSender: () => ({
+        requiredForAdmission: retirement(),
+        detachedFromAdmission: Promise.resolve(),
+      }),
       retireWorkspace: async () => undefined,
     },
   });
@@ -80,12 +141,19 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
   const templates: MenuItemConstructorOptions[][] = [];
   const dependencies: Dependencies = {
     app: {
-      isReady: () => ready, isPackaged: false, getVersion: () => "1.2.3",
-      clearRecentDocuments: vi.fn(), addRecentDocument: vi.fn(), setUserTasks: vi.fn(() => true),
+      isReady: () => ready,
+      isPackaged: false,
+      getVersion: () => "1.2.3",
+      clearRecentDocuments: vi.fn(),
+      addRecentDocument: vi.fn(),
+      setUserTasks: vi.fn(() => true),
       setAboutPanelOptions: vi.fn(),
     },
     Menu: {
-      buildFromTemplate: vi.fn((template) => { templates.push(template); return { template } as unknown as Menu; }),
+      buildFromTemplate: vi.fn((template) => {
+        templates.push(template);
+        return { template } as unknown as Menu;
+      }),
       setApplicationMenu: vi.fn(),
     },
     dialog: {
@@ -100,21 +168,44 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
     stepWindowZoom: vi.fn(async () => structuredClone(stored)),
     createMainWindow: vi.fn((options) => {
       createdOptions.push(options);
-      const window = new Window().startLoad(); all.push(window); return window.native;
+      const window = new Window().startLoad();
+      all.push(window);
+      return window.native;
     }),
     preloadArguments: ["--dohc-dev-tools"],
-    get rendererWorkspaceSessions() { return currentSessions; },
+    get rendererWorkspaceSessions() {
+      return currentSessions;
+    },
   };
   const windows = createDesktopWindows(dependencies);
   return {
-    windows, dependencies, sessions, all, templates, createdOptions,
-    setRead: (value: typeof read) => { read = value; },
-    setStored: (value: typeof stored) => { stored = value; },
-    setRows: (value: typeof rows) => { rows = value; },
-    setReady: (value: boolean) => { ready = value; },
-    setCanInstall: (value: boolean) => { canInstall = value; },
-    setRetirement: (value: typeof retirement) => { retirement = value; },
-    setSessions: (value: typeof sessions) => { currentSessions = value; },
+    windows,
+    dependencies,
+    sessions,
+    all,
+    templates,
+    createdOptions,
+    setRead: (value: typeof read) => {
+      read = value;
+    },
+    setStored: (value: typeof stored) => {
+      stored = value;
+    },
+    setRows: (value: typeof rows) => {
+      rows = value;
+    },
+    setReady: (value: boolean) => {
+      ready = value;
+    },
+    setCanInstall: (value: boolean) => {
+      canInstall = value;
+    },
+    setRetirement: (value: typeof retirement) => {
+      retirement = value;
+    },
+    setSessions: (value: typeof sessions) => {
+      currentSessions = value;
+    },
   };
 }
 
@@ -156,7 +247,10 @@ describe("desktop workspace windows", () => {
     previous.destroy();
 
     const reopened = await f.windows.showOrCreateMainWindow();
-    expect(f.windows.prioritizePreferredWorkspace(rows, reopened.webContents)).toEqual([rows[1], rows[0]]);
+    expect(f.windows.prioritizePreferredWorkspace(rows, reopened.webContents)).toEqual([
+      rows[1],
+      rows[0],
+    ]);
     expect(f.windows.prioritizePreferredWorkspace(rows, previous.webContents.native)).toBe(rows);
     expect(f.windows.prioritizePreferredWorkspace(rows, new Contents().native)).toBe(rows);
     reopened.destroy();
@@ -169,23 +263,38 @@ describe("desktop workspace windows", () => {
     type Event = { sender: WebContents };
     const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
     registerWorkspaceRegistryIpcHandlers<Event>({
-      registerHandler: (channel, handler) => { handlers.set(channel, handler); },
+      registerHandler: (channel, handler) => {
+        handlers.set(channel, handler);
+      },
       assertTrustedSender: () => undefined,
       app: { isPackaged: true },
       dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
-      roots: createWorkspaceRootApproval(() => "C:/home"), effectiveHome: () => "C:/home", stateDir: () => "C:/home/state",
+      roots: createWorkspaceRootApproval(() => "C:/home"),
+      effectiveHome: () => "C:/home",
+      stateDir: () => "C:/home/state",
       workspaceSummaries: () => rows,
       prioritizePreferredWorkspace: (workspaces, event) =>
         f.windows.prioritizePreferredWorkspace(workspaces, event.sender),
-      createWorkspaceFolder, registerPhysicalWorkspace: () => undefined, thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
+      createWorkspaceFolder,
+      registerPhysicalWorkspace: () => undefined,
+      thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
       trustNewWorkspace: async () => undefined,
-      forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
-      openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
-      forgottenShareViews: { reopen: async (workspace, register) => { register(workspace); return workspace; } },
+      forgetWorkspace: async () => undefined,
+      showItemInFolder: () => undefined,
+      openWorkspaceWindow: async () => undefined,
+      openWorkspaceManager: () => undefined,
+      closeWindowOf: () => undefined,
+      forgottenShareViews: {
+        reopen: async (workspace, register) => {
+          register(workspace);
+          return workspace;
+        },
+      },
       refreshNativeWorkspaceSurfaces: () => undefined,
       desktopMarks: { mark: () => undefined, measureSince: () => undefined },
     });
-    const registry = (sender: WebContents) => handlers.get(CHANNELS.getWorkspaceRegistry)!({ sender }, undefined);
+    const registry = (sender: WebContents) =>
+      handlers.get(CHANNELS.getWorkspaceRegistry)!({ sender }, undefined);
     const openingA = f.windows.openWorkspaceInWindow(rows[1]!, () => false);
     const windowA = f.all[0]!;
     const openingB = f.windows.openWorkspaceInWindow(rows[2]!, () => false);
@@ -193,16 +302,23 @@ describe("desktop workspace windows", () => {
     try {
       expect(windowA.webContents.send).not.toHaveBeenCalled();
       expect(windowB.webContents.send).not.toHaveBeenCalled();
-      expect(registry(windowA.webContents.native)).toEqual({ workspaces: [rows[1], rows[0], rows[2]] });
-      expect(registry(windowB.webContents.native)).toEqual({ workspaces: [rows[2], rows[0], rows[1]] });
+      expect(registry(windowA.webContents.native)).toEqual({
+        workspaces: [rows[1], rows[0], rows[2]],
+      });
+      expect(registry(windowB.webContents.native)).toEqual({
+        workspaces: [rows[2], rows[0], rows[1]],
+      });
       expect(registry(new Contents().native)).toEqual({ workspaces: rows });
     } finally {
-      windowA.finishLoad(); windowB.finishLoad();
+      windowA.finishLoad();
+      windowB.finishLoad();
       await Promise.all([openingA, openingB]);
     }
     await f.windows.sendWorkspaceActivated(windowA.native, rows[0]!);
     expect(registry(windowA.webContents.native)).toEqual({ workspaces: rows });
-    expect(registry(windowB.webContents.native)).toEqual({ workspaces: [rows[2], rows[0], rows[1]] });
+    expect(registry(windowB.webContents.native)).toEqual({
+      workspaces: [rows[2], rows[0], rows[1]],
+    });
     rows.pop();
     expect(registry(windowB.webContents.native)).toEqual({ workspaces: rows });
     await f.windows.sendWorkspaceActivated(windowA.native, rows[1]!);
@@ -217,8 +333,12 @@ describe("desktop workspace windows", () => {
     const before = createRegistryStore(registryFile);
     for (const workspaceId of ["personal", "ordinary"]) {
       const { workspace: created } = await createWorkspaceFolder({
-        rootPath: join(home, workspaceId), homeDir: home, stateDir, kind: "personal",
-        computer: { installId: "install-here", label: "This Mac" }, workspaceId,
+        rootPath: join(home, workspaceId),
+        homeDir: home,
+        stateDir,
+        kind: "personal",
+        computer: { installId: "install-here", label: "This Mac" },
+        workspaceId,
       });
       before.register(created);
     }
@@ -229,8 +349,8 @@ describe("desktop workspace windows", () => {
     // workspace of its own.
     const launch = () => {
       const summaries = workspaceSummariesFrom(createRegistryStore(registryFile).list());
-      return fixture("win32", () => summaries).windows
-        .prioritizePreferredWorkspace(summaries, new Contents().native)
+      return fixture("win32", () => summaries)
+        .windows.prioritizePreferredWorkspace(summaries, new Contents().native)
         .map((row) => row.workspaceId);
     };
     expect(launch()).toEqual(["ordinary", "personal"]);
@@ -240,14 +360,19 @@ describe("desktop workspace windows", () => {
   });
 
   it("keeps registry order for a window with no workspace when nothing was opened", () => {
-    const f = fixture(); const rows = [workspace("a"), workspace("b")];
+    const f = fixture();
+    const rows = [workspace("a"), workspace("b")];
     expect(f.windows.prioritizePreferredWorkspace(rows, new Contents().native)).toBe(rows);
   });
 
   it("tracks workspace windows separately from utility windows and forgets closed windows", () => {
-    const f = fixture(); const utility = new Window(); const first = new Window(); const second = new Window();
+    const f = fixture();
+    const utility = new Window();
+    const first = new Window();
+    const second = new Window();
     f.all.push(utility, first, second);
-    f.windows.trackWorkspaceWindow(first.native); f.windows.trackWorkspaceWindow(second.native);
+    f.windows.trackWorkspaceWindow(first.native);
+    f.windows.trackWorkspaceWindow(second.native);
     expect(f.windows.liveWorkspaceWindow()).toBe(first.native);
     expect(f.windows.targetWindow(undefined)).toBe(first.native);
     // The hidden export window shows nothing, so it is never a target.
@@ -261,11 +386,12 @@ describe("desktop workspace windows", () => {
     expect(f.windows.targetWindow(utility.native)).toBe(manager);
   });
 
-  // A closing window loses its webContents before the window itself goes.
-  // A quit in that gap must find no renderer to ask, not throw.
   it("leaves a closing window's destroyed renderer out of the windows that answer", () => {
-    const f = fixture(); const closing = new Window(); const open = new Window();
-    f.windows.trackWorkspaceWindow(closing.native); f.windows.trackWorkspaceWindow(open.native);
+    const f = fixture();
+    const closing = new Window();
+    const open = new Window();
+    f.windows.trackWorkspaceWindow(closing.native);
+    f.windows.trackWorkspaceWindow(open.native);
     closing.webContents.destroyed = true;
     expect(f.windows.workspaceWindows.answering()).toEqual([open.native]);
     open.destroy();
@@ -273,12 +399,18 @@ describe("desktop workspace windows", () => {
   });
 
   it("activates the target window and prioritizes that workspace without changing the input list", async () => {
-    const f = fixture(); const window = new Window(); f.windows.trackWorkspaceWindow(window.native);
+    const f = fixture();
+    const window = new Window();
+    f.windows.trackWorkspaceWindow(window.native);
     const rows = [workspace("a"), workspace("b"), workspace("c")];
     expect(f.windows.prioritizePreferredWorkspace(rows, window.webContents.native)).toBe(rows);
     await f.windows.sendWorkspaceActivated(undefined, rows[1]!);
     expect(window.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, rows[1]);
-    expect(f.windows.prioritizePreferredWorkspace(rows, window.webContents.native)).toEqual([rows[1], rows[0], rows[2]]);
+    expect(f.windows.prioritizePreferredWorkspace(rows, window.webContents.native)).toEqual([
+      rows[1],
+      rows[0],
+      rows[2],
+    ]);
     expect(rows.map((row) => row.workspaceId)).toEqual(["a", "b", "c"]);
     f.windows.setPreferredWorkspaceId("absent", window.webContents.native);
     expect(f.windows.prioritizePreferredWorkspace(rows, window.webContents.native)).toBe(rows);
@@ -287,11 +419,16 @@ describe("desktop workspace windows", () => {
   });
 
   it("activates into a new workspace window when only the manager or a utility window is live", async () => {
-    const f = fixture(); const rows = [workspace("a"), workspace("b")];
-    const utility = new Window(); f.all.push(utility);
-    const manager = f.windows.showOrCreateManagerWindow(); const managerWindow = f.all[1]!;
+    const f = fixture();
+    const rows = [workspace("a"), workspace("b")];
+    const utility = new Window();
+    f.all.push(utility);
+    const manager = f.windows.showOrCreateManagerWindow();
+    const managerWindow = f.all[1]!;
     const pending = f.windows.sendWorkspaceActivated(manager, rows[1]!);
-    expect(f.windows.prioritizePreferredWorkspace(rows, f.all[2]!.webContents.native)[0]).toBe(rows[1]);
+    expect(f.windows.prioritizePreferredWorkspace(rows, f.all[2]!.webContents.native)[0]).toBe(
+      rows[1],
+    );
     expect(f.dependencies.createMainWindow).toHaveBeenCalledTimes(2);
     const created = f.all[2]!;
     expect(f.createdOptions[1]?.role).toBeUndefined();
@@ -305,8 +442,11 @@ describe("desktop workspace windows", () => {
 
   it("lets a workspace window or the manager show a folder failure, never the utility window", () => {
     const f = fixture();
-    const workspaceWindow = new Window(); f.windows.trackWorkspaceWindow(workspaceWindow.native); f.all.push(workspaceWindow);
-    const utility = new Window(); f.all.push(utility);
+    const workspaceWindow = new Window();
+    f.windows.trackWorkspaceWindow(workspaceWindow.native);
+    f.all.push(workspaceWindow);
+    const utility = new Window();
+    f.all.push(utility);
     const manager = f.windows.showOrCreateManagerWindow();
     expect(f.windows.showsNotices(workspaceWindow.native)).toBe(true);
     expect(f.windows.showsNotices(manager)).toBe(true);
@@ -318,32 +458,45 @@ describe("desktop workspace windows", () => {
   it("reports a failed activation as a dialog, not silence", () => {
     const f = fixture();
     f.windows.reportActivationFailure(workspace("a"), new Error("load failed"));
-    expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith("Open workspace", expect.stringContaining("C:\\work\\a"));
+    expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith(
+      "Open workspace",
+      expect.stringContaining("C:\\work\\a"),
+    );
   });
 
   it("focuses an existing workspace window and creates a tracked window only when none exists", async () => {
-    const f = fixture(); const existing = new Window(); existing.minimized = true;
-    f.windows.trackWorkspaceWindow(existing.native); f.all.push(existing);
+    const f = fixture();
+    const existing = new Window();
+    existing.minimized = true;
+    f.windows.trackWorkspaceWindow(existing.native);
+    f.all.push(existing);
     expect(await f.windows.showOrCreateMainWindow()).toBe(existing.native);
-    expect(existing.restore).toHaveBeenCalledOnce(); expect(existing.show).toHaveBeenCalledOnce(); expect(existing.focus).toHaveBeenCalledOnce();
+    expect(existing.restore).toHaveBeenCalledOnce();
+    expect(existing.show).toHaveBeenCalledOnce();
+    expect(existing.focus).toHaveBeenCalledOnce();
     expect(f.dependencies.createMainWindow).not.toHaveBeenCalled();
-    existing.destroy(); f.all.length = 0;
-    // A live manager alone is not a place for a handoff to land.
+    existing.destroy();
+    f.all.length = 0;
     f.windows.showOrCreateManagerWindow();
     f.windows.seedZoomLevel(2);
-    const created = await f.windows.showOrCreateMainWindow(); const native = f.all[1]!;
+    const created = await f.windows.showOrCreateMainWindow();
+    const native = f.all[1]!;
     expect(created).toBe(native.native);
     expect(f.windows.workspaceWindows.allLive()).toEqual([created]);
     expect(f.createdOptions[1]?.beforeRendererReload).toBe(f.windows.prepareAfterRendererCrash);
     expect(native.webContents.setZoomLevel).toHaveBeenCalledWith(2);
     expect(native.show).not.toHaveBeenCalled();
     native.emit("ready-to-show");
-    expect(native.show).toHaveBeenCalledOnce(); expect(native.focus).toHaveBeenCalledOnce();
+    expect(native.show).toHaveBeenCalledOnce();
+    expect(native.focus).toHaveBeenCalledOnce();
   });
 
   it("hands the manager the app zoom and settings broadcasts, never the utility window", async () => {
-    const f = fixture(); f.windows.seedZoomLevel(1);
-    const manager = f.windows.showOrCreateManagerWindow(); const utility = new Window(); f.all.push(utility);
+    const f = fixture();
+    f.windows.seedZoomLevel(1);
+    const manager = f.windows.showOrCreateManagerWindow();
+    const utility = new Window();
+    f.all.push(utility);
     const managerWindow = f.all[0]!;
     expect(managerWindow.webContents.setZoomLevel).toHaveBeenCalledWith(1);
     expect(f.createdOptions[0]?.preloadArguments).toEqual(["--dohc-dev-tools"]);
@@ -352,7 +505,10 @@ describe("desktop workspace windows", () => {
     expect(utility.webContents.setZoomLevel).not.toHaveBeenCalled();
     expect(f.windows.workspaceWindows.allLive()).toEqual([]);
     f.windows.broadcastUserSettings(settings(3));
-    expect(managerWindow.webContents.send).toHaveBeenCalledWith(CHANNELS.userSettingsChanged, expect.objectContaining({ source: "stored" }));
+    expect(managerWindow.webContents.send).toHaveBeenCalledWith(
+      CHANNELS.userSettingsChanged,
+      expect.objectContaining({ source: "stored" }),
+    );
     expect(utility.webContents.send).not.toHaveBeenCalled();
     managerWindow.destroy();
     expect(manager.isDestroyed()).toBe(true);
@@ -367,7 +523,6 @@ describe("desktop workspace windows", () => {
     const loadListeners = first.webContents.listenerCount("did-finish-load");
     first.destroy();
     await expect(closed).rejects.toThrow("closed before it finished loading");
-    // The open's own listeners are gone: a late load sends nothing.
     expect(first.webContents.listenerCount("did-finish-load")).toBe(loadListeners - 1);
     expect(first.webContents.listenerCount("did-fail-load")).toBe(0);
     first.finishLoad();
@@ -390,7 +545,8 @@ describe("desktop workspace windows", () => {
     const second = f.windows.openWorkspaceInWindow(workspace("a"), () => false);
     const other = f.windows.openWorkspaceInWindow(workspace("b"), () => false);
     expect(f.dependencies.createMainWindow).toHaveBeenCalledTimes(2);
-    f.all[0]!.finishLoad(); f.all[1]!.finishLoad();
+    f.all[0]!.finishLoad();
+    f.all[1]!.finishLoad();
     expect(await first).toBe(await second);
     expect(await other).not.toBe(await first);
     expect(f.all[0]!.webContents.send).toHaveBeenCalledTimes(1);
@@ -399,8 +555,13 @@ describe("desktop workspace windows", () => {
   // Activation is sent, but the renderer has not opened its session yet, so
   // the caller's session lookup still says nothing shows the workspace.
   async function activatedWithoutSession(f: ReturnType<typeof fixture>, id = "a") {
-    const opened = await (() => { const p = f.windows.openWorkspaceInWindow(workspace(id), () => false); f.all.at(-1)!.finishLoad(); return p; })();
-    const showing = (window: BrowserWindow) => f.sessions.current(window.webContents)?.workspaceId === id;
+    const opened = await (() => {
+      const p = f.windows.openWorkspaceInWindow(workspace(id), () => false);
+      f.all.at(-1)!.finishLoad();
+      return p;
+    })();
+    const showing = (window: BrowserWindow) =>
+      f.sessions.current(window.webContents)?.workspaceId === id;
     return { opened, showing, native: f.all.at(-1)! };
   }
 
@@ -416,7 +577,11 @@ describe("desktop workspace windows", () => {
     expect(native.webContents.send).toHaveBeenCalledTimes(1);
     // The renderer opens its session: the association retires and the lookup
     // takes over.
-    await f.sessions.open(native.webContents.native, { workspaceId: "a", attachmentId: Symbol("a") }, "document");
+    await f.sessions.open(
+      native.webContents.native,
+      { workspaceId: "a", attachmentId: Symbol("a") },
+      "document",
+    );
     expect(await f.windows.openWorkspaceInWindow(workspace("a"), showing)).toBe(opened);
     expect(f.dependencies.createMainWindow).toHaveBeenCalledTimes(1);
   });
@@ -424,7 +589,11 @@ describe("desktop workspace windows", () => {
   it("frees the association when the window switches to another workspace", async () => {
     const f = fixture();
     const { showing, native } = await activatedWithoutSession(f);
-    await f.sessions.open(native.webContents.native, { workspaceId: "b", attachmentId: Symbol("b") }, "document");
+    await f.sessions.open(
+      native.webContents.native,
+      { workspaceId: "b", attachmentId: Symbol("b") },
+      "document",
+    );
     const again = f.windows.openWorkspaceInWindow(workspace("a"), showing);
     expect(f.dependencies.createMainWindow).toHaveBeenCalledTimes(2);
     f.all[1]!.finishLoad();
@@ -449,141 +618,228 @@ describe("desktop workspace windows", () => {
     native.minimized = true;
     expect(f.windows.showOrCreateManagerWindow()).toBe(first);
     expect(f.dependencies.createMainWindow).toHaveBeenCalledOnce();
-    expect(native.restore).toHaveBeenCalledOnce(); expect(native.show).toHaveBeenCalledOnce(); expect(native.focus).toHaveBeenCalledOnce();
+    expect(native.restore).toHaveBeenCalledOnce();
+    expect(native.show).toHaveBeenCalledOnce();
+    expect(native.focus).toHaveBeenCalledOnce();
     expect(f.windows.workspaceWindows.allLive()).toEqual([]);
   });
 
   it("restores a minimized window already showing the workspace instead of creating one", async () => {
-    const f = fixture(); const existing = new Window(); existing.minimized = true;
+    const f = fixture();
+    const existing = new Window();
+    existing.minimized = true;
     f.windows.trackWorkspaceWindow(existing.native);
-    expect(await f.windows.openWorkspaceInWindow(workspace("a"), (window) => window === existing.native)).toBe(existing.native);
+    expect(
+      await f.windows.openWorkspaceInWindow(workspace("a"), (window) => window === existing.native),
+    ).toBe(existing.native);
     expect(f.dependencies.createMainWindow).not.toHaveBeenCalled();
-    expect(existing.restore).toHaveBeenCalledOnce(); expect(existing.show).toHaveBeenCalledOnce(); expect(existing.focus).toHaveBeenCalledOnce();
+    expect(existing.restore).toHaveBeenCalledOnce();
+    expect(existing.show).toHaveBeenCalledOnce();
+    expect(existing.focus).toHaveBeenCalledOnce();
     expect(existing.webContents.send).not.toHaveBeenCalled();
   });
 
   it("routes menu commands and recents through a workspace window, restoring it when minimized", async () => {
-    const f = fixture(); const window = new Window(); window.minimized = true;
-    f.windows.trackWorkspaceWindow(window.native); f.windows.refreshApplicationMenu();
+    const f = fixture();
+    const window = new Window();
+    window.minimized = true;
+    f.windows.trackWorkspaceWindow(window.native);
+    f.windows.refreshApplicationMenu();
     const manager = f.windows.showOrCreateManagerWindow();
     const recent = submenu(item(f, "File", "Open recent"))[1]!;
     click(recent, manager);
-    await vi.waitFor(() => expect(window.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, workspace("b")));
+    await vi.waitFor(() =>
+      expect(window.webContents.send).toHaveBeenCalledWith(
+        CHANNELS.workspaceActivated,
+        workspace("b"),
+      ),
+    );
     expect(f.all[0]!.webContents.send).not.toHaveBeenCalled();
-    expect(window.restore).toHaveBeenCalledOnce(); expect(window.focus).toHaveBeenCalledOnce();
+    expect(window.restore).toHaveBeenCalledOnce();
+    expect(window.focus).toHaveBeenCalledOnce();
     f.all[0]!.finishLoad();
     click(item(f, "Go", "Settings"), manager);
     expect(manager.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
   });
 
   it("re-prioritizes an accepted reload only after the actual renderer retirement drains", async () => {
-    const f = fixture(); const sender = new Contents(); const held = deferred();
+    const f = fixture();
+    const sender = new Contents();
+    const held = deferred();
     const rows = [workspace("a"), workspace("b")];
-    await f.sessions.open(sender.native, { workspaceId: "b", attachmentId: Symbol("b") }, "document");
-    f.windows.setPreferredWorkspaceId("a", sender.native); f.setRetirement(() => held.promise);
+    await f.sessions.open(
+      sender.native,
+      { workspaceId: "b", attachmentId: Symbol("b") },
+      "document",
+    );
+    f.windows.setPreferredWorkspaceId("a", sender.native);
+    f.setRetirement(() => held.promise);
     const pending = f.windows.prepareForRendererReload(sender.native, "document");
     try {
       expect(f.sessions.current(sender.native)).toBeUndefined();
       expect(f.windows.prioritizePreferredWorkspace(rows, sender.native)[0]).toBe(rows[0]);
-      held.resolve(); expect(await pending).toBe(true);
+      held.resolve();
+      expect(await pending).toBe(true);
       expect(f.windows.prioritizePreferredWorkspace(rows, sender.native)[0]).toBe(rows[1]);
-    } finally { held.resolve(); await pending; }
+    } finally {
+      held.resolve();
+      await pending;
+    }
   });
 
-  it.each(["manager", "workspace"] as const)("wires %s navigation to document-scoped reload and restores its workspace", async (role) => {
-    const f = fixture();
-    if (role === "manager") f.windows.showOrCreateManagerWindow();
-    else await f.windows.showOrCreateMainWindow();
-    const sender = f.all[0]!.webContents.native;
-    const options = f.createdOptions[0]!;
-    await f.sessions.open(sender, { workspaceId: "b", attachmentId: Symbol("b") }, "document-1");
-    f.windows.setPreferredWorkspaceId("a", sender);
+  it.each(["manager", "workspace"] as const)(
+    "wires %s navigation to document-scoped reload and restores its workspace",
+    async (role) => {
+      const f = fixture();
+      if (role === "manager") f.windows.showOrCreateManagerWindow();
+      else await f.windows.showOrCreateMainWindow();
+      const sender = f.all[0]!.webContents.native;
+      const options = f.createdOptions[0]!;
+      await f.sessions.open(sender, { workspaceId: "b", attachmentId: Symbol("b") }, "document-1");
+      f.windows.setPreferredWorkspaceId("a", sender);
 
-    expect(options.currentRendererDocumentId?.(sender)).toBe("document-1");
-    expect(await options.prepareForRendererReload?.(sender, "document-1")).toBe(true);
+      expect(options.currentRendererDocumentId?.(sender)).toBe("document-1");
+      expect(await options.prepareForRendererReload?.(sender, "document-1")).toBe(true);
 
-    expect(f.sessions.current(sender)).toBeUndefined();
-    expect(options.currentRendererDocumentId?.(sender)).toBeUndefined();
-    expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], sender)[0]!.workspaceId).toBe("b");
-  });
+      expect(f.sessions.current(sender)).toBeUndefined();
+      expect(options.currentRendererDocumentId?.(sender)).toBeUndefined();
+      expect(
+        f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], sender)[0]!
+          .workspaceId,
+      ).toBe("b");
+    },
+  );
 
   it("leaves preference and the active renderer intact when the reload document is stale", async () => {
-    const f = fixture(); const sender = new Contents();
-    const session = await f.sessions.open(sender.native, { workspaceId: "b", attachmentId: Symbol("b") }, "current");
+    const f = fixture();
+    const sender = new Contents();
+    const session = await f.sessions.open(
+      sender.native,
+      { workspaceId: "b", attachmentId: Symbol("b") },
+      "current",
+    );
     f.windows.setPreferredWorkspaceId("a", sender.native);
     expect(await f.windows.prepareForRendererReload(sender.native, "old")).toBe(false);
     expect(f.sessions.current(sender.native)).toBe(session);
-    expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], sender.native)[0]!.workspaceId).toBe("a");
+    expect(
+      f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], sender.native)[0]!
+        .workspaceId,
+    ).toBe("a");
     await f.sessions.retireAfterCrash(sender.native);
   });
 
   it("reads the current session owner and remembers a crashed renderer before retirement finishes", async () => {
-    const f = fixture(); const sender = new Contents(); const held = deferred();
-    const sessions = new RendererWorkspaceSessionOwner<WebContents>({ retirement: {
-      retireSender: () => ({ requiredForAdmission: held.promise, detachedFromAdmission: Promise.resolve() }),
-      retireWorkspace: async () => undefined,
-    } });
+    const f = fixture();
+    const sender = new Contents();
+    const held = deferred();
+    const sessions = new RendererWorkspaceSessionOwner<WebContents>({
+      retirement: {
+        retireSender: () => ({
+          requiredForAdmission: held.promise,
+          detachedFromAdmission: Promise.resolve(),
+        }),
+        retireWorkspace: async () => undefined,
+      },
+    });
     f.setSessions(sessions);
     await sessions.open(sender.native, { workspaceId: "b", attachmentId: Symbol("b") }, "document");
     f.windows.setPreferredWorkspaceId("a", sender.native);
     const pending = f.windows.prepareAfterRendererCrash(sender.native);
     try {
       expect(sessions.current(sender.native)).toBeUndefined();
-      expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], sender.native)[0]!.workspaceId).toBe("b");
-    } finally { held.resolve(); await pending; }
+      expect(
+        f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], sender.native)[0]!
+          .workspaceId,
+      ).toBe("b");
+    } finally {
+      held.resolve();
+      await pending;
+    }
     await f.windows.prepareAfterRendererCrash(sender.native);
-    expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], sender.native)[0]!.workspaceId).toBe("b");
+    expect(
+      f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], sender.native)[0]!
+        .workspaceId,
+    ).toBe("b");
   });
 });
 
 describe("desktop window zoom", () => {
   it("seeds before window creation and never overwrites a newer applied zoom with a later seed", () => {
-    const f = fixture(); const window = new Window();
-    f.windows.seedZoomLevel(1); f.windows.seedZoomLevel(3);
+    const f = fixture();
+    const window = new Window();
+    f.windows.seedZoomLevel(1);
+    f.windows.seedZoomLevel(3);
     f.windows.trackWorkspaceWindow(window.native);
     expect(window.webContents.setZoomLevel).toHaveBeenCalledWith(1);
-    f.windows.applyZoomLevelToWindows(2); f.windows.seedZoomLevel(4);
+    f.windows.applyZoomLevelToWindows(2);
+    f.windows.seedZoomLevel(4);
     expect(window.webContents.setZoomLevel).toHaveBeenLastCalledWith(2);
   });
 
   it("applies the first persisted zoom to tracked windows only", async () => {
-    const f = fixture(); const held = deferred<DesktopUserSettingsResult>(); const window = new Window(); const utility = new Window();
-    f.all.push(window, utility); f.setRead(() => held.promise);
+    const f = fixture();
+    const held = deferred<DesktopUserSettingsResult>();
+    const window = new Window();
+    const utility = new Window();
+    f.all.push(window, utility);
+    f.setRead(() => held.promise);
     f.windows.trackWorkspaceWindow(window.native);
     const reconciled = observePersistedZoomReconciliations();
     try {
       window.emit("ready-to-show");
       expect(window.webContents.setZoomLevel).not.toHaveBeenCalled();
-      held.resolve(settings(3)); await reconciled;
+      held.resolve(settings(3));
+      await reconciled;
       expect(window.webContents.setZoomLevel).toHaveBeenCalledWith(3);
       expect(utility.webContents.setZoomLevel).not.toHaveBeenCalled();
-    } finally { held.resolve(settings(3)); await reconciled; }
+    } finally {
+      held.resolve(settings(3));
+      await reconciled;
+    }
   });
 
   it("keeps a user zoom ahead of a stale persisted read and skips a destroyed window", async () => {
-    const f = fixture(); const held = deferred<DesktopUserSettingsResult>(); const live = new Window(); const closed = new Window();
-    f.setRead(() => held.promise); f.windows.trackWorkspaceWindow(live.native); f.windows.trackWorkspaceWindow(closed.native);
+    const f = fixture();
+    const held = deferred<DesktopUserSettingsResult>();
+    const live = new Window();
+    const closed = new Window();
+    f.setRead(() => held.promise);
+    f.windows.trackWorkspaceWindow(live.native);
+    f.windows.trackWorkspaceWindow(closed.native);
     const reconciled = observePersistedZoomReconciliations(2);
     try {
-      live.emit("ready-to-show"); closed.emit("ready-to-show");
-      f.windows.applyZoomLevelToWindows(2); closed.destroy();
-      closed.webContents.setZoomLevel.mockClear(); live.webContents.setZoomLevel.mockClear();
-      held.resolve(settings(-2)); await reconciled;
+      live.emit("ready-to-show");
+      closed.emit("ready-to-show");
+      f.windows.applyZoomLevelToWindows(2);
+      closed.destroy();
+      closed.webContents.setZoomLevel.mockClear();
+      live.webContents.setZoomLevel.mockClear();
+      held.resolve(settings(-2));
+      await reconciled;
       expect(live.webContents.setZoomLevel).toHaveBeenCalledWith(2);
       expect(closed.webContents.setZoomLevel).not.toHaveBeenCalled();
-    } finally { held.resolve(settings(-2)); await reconciled; }
+    } finally {
+      held.resolve(settings(-2));
+      await reconciled;
+    }
   });
 
   it("reconciles on renderer load and ignores an unavailable persisted setting", async () => {
-    const f = fixture(); const window = new Window(); const held = deferred<DesktopUserSettingsResult>();
-    f.setRead(() => held.promise); f.windows.trackWorkspaceWindow(window.native);
+    const f = fixture();
+    const window = new Window();
+    const held = deferred<DesktopUserSettingsResult>();
+    f.setRead(() => held.promise);
+    f.windows.trackWorkspaceWindow(window.native);
     const reconciled = observePersistedZoomReconciliations();
     try {
       window.webContents.emit("did-finish-load");
       held.reject(new Error("settings unavailable"));
       await reconciled;
       expect(window.webContents.setZoomLevel).not.toHaveBeenCalled();
-    } finally { held.resolve(settings()); await reconciled; }
+    } finally {
+      held.resolve(settings());
+      await reconciled;
+    }
   });
 });
 
@@ -596,19 +852,40 @@ describe("desktop native menus", () => {
     const workspaceSummaries = () => workspaceSummariesFrom(registry.list());
     const f = fixture("win32", workspaceSummaries);
     const roots = createWorkspaceRootApproval(() => home);
-    const handlers = new Map<string, (event: { trusted: boolean; sender: WebContents }, payload: unknown) => unknown>();
+    const handlers = new Map<
+      string,
+      (event: { trusted: boolean; sender: WebContents }, payload: unknown) => unknown
+    >();
     registerWorkspaceRegistryIpcHandlers<{ trusted: boolean; sender: WebContents }>({
-      registerHandler: (channel, handler) => { handlers.set(channel, handler); },
-      assertTrustedSender: (event) => { if (!event.trusted) throw new Error("untrusted"); },
+      registerHandler: (channel, handler) => {
+        handlers.set(channel, handler);
+      },
+      assertTrustedSender: (event) => {
+        if (!event.trusted) throw new Error("untrusted");
+      },
       app: { isPackaged: true },
       dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) },
-      roots, effectiveHome: () => home, stateDir: () => state, workspaceSummaries,
-      prioritizePreferredWorkspace: (rows, event) => f.windows.prioritizePreferredWorkspace(rows, event.sender),
-      createWorkspaceFolder, registerPhysicalWorkspace: registry.register, thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
+      roots,
+      effectiveHome: () => home,
+      stateDir: () => state,
+      workspaceSummaries,
+      prioritizePreferredWorkspace: (rows, event) =>
+        f.windows.prioritizePreferredWorkspace(rows, event.sender),
+      createWorkspaceFolder,
+      registerPhysicalWorkspace: registry.register,
+      thisComputer: () => ({ installId: "install-here", label: "This Mac" }),
       trustNewWorkspace: async () => undefined,
-      forgetWorkspace: async () => undefined, showItemInFolder: () => undefined,
-      openWorkspaceWindow: async () => undefined, openWorkspaceManager: () => undefined, closeWindowOf: () => undefined,
-      forgottenShareViews: { reopen: async (workspace, register) => { register(workspace); return workspace; } },
+      forgetWorkspace: async () => undefined,
+      showItemInFolder: () => undefined,
+      openWorkspaceWindow: async () => undefined,
+      openWorkspaceManager: () => undefined,
+      closeWindowOf: () => undefined,
+      forgottenShareViews: {
+        reopen: async (workspace, register) => {
+          register(workspace);
+          return workspace;
+        },
+      },
       refreshNativeWorkspaceSurfaces: f.windows.refreshNativeWorkspaceSurfaces,
       desktopMarks: { mark: () => undefined, measureSince: () => undefined },
     });
@@ -620,20 +897,29 @@ describe("desktop native menus", () => {
     const recentEntries = () => submenu(item(f, "File", "Open recent"));
     f.windows.refreshNativeWorkspaceSurfaces();
     expect(recentEntries()).toEqual([{ label: "No recent workspaces", enabled: false }]);
-    const root = await invoke(CHANNELS.getDefaultWorkspaceRoot) as string;
-    const created = await invoke(CHANNELS.createLocalWorkspace, {
-      rootPath: join(root, "Created Project"), kind: "personal",
-    }) as WorkspaceSummary;
+    const root = (await invoke(CHANNELS.getDefaultWorkspaceRoot)) as string;
+    const created = (await invoke(CHANNELS.createLocalWorkspace, {
+      rootPath: join(root, "Created Project"),
+      kind: "personal",
+    })) as WorkspaceSummary;
     expect(createRegistryStore(registryFile).list()).toEqual([created]);
-    expect(recentEntries()).toMatchObject([{ label: "Created Project", sublabel: created.rootPath }]);
+    expect(recentEntries()).toMatchObject([
+      { label: "Created Project", sublabel: created.rootPath },
+    ]);
     expect(f.templates).toHaveLength(2);
 
     const attachedPath = roots.usableRoot(join(root, "Attached Project"));
     const { workspace: attached } = await createWorkspaceFolder({
-      rootPath: attachedPath, homeDir: home, stateDir: state, kind: "shared", computer: { installId: "install-here", label: "This Mac" },
+      rootPath: attachedPath,
+      homeDir: home,
+      stateDir: state,
+      kind: "shared",
+      computer: { installId: "install-here", label: "This Mac" },
       workspaceId: "attached-workspace",
     });
-    await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attachedPath })).resolves.toEqual(attached);
+    await expect(
+      invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attachedPath }),
+    ).resolves.toEqual(attached);
     expect(createRegistryStore(registryFile).list()).toEqual([created, attached]);
     expect(recentEntries()).toMatchObject([
       { label: "Created Project", sublabel: created.rootPath },
@@ -642,39 +928,53 @@ describe("desktop native menus", () => {
     expect(f.templates).toHaveLength(3);
     expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(3);
     expect(vi.mocked(f.dependencies.app.addRecentDocument).mock.calls).toEqual([
-      [created.rootPath], [attached.rootPath], [created.rootPath],
+      [created.rootPath],
+      [attached.rootPath],
+      [created.rootPath],
     ]);
     expect(vi.mocked(f.dependencies.app.setUserTasks).mock.calls.at(-1)![0]).toMatchObject([
       { title: "Open Created Project", description: created.rootPath },
       { title: "Open Attached Project", description: attached.rootPath },
     ]);
-    await expect(invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attachedPath })).rejects.toThrow("already attached");
+    await expect(
+      invoke(CHANNELS.attachWorkspaceFolder, { rootPath: attachedPath }),
+    ).rejects.toThrow("already attached");
     expect(f.templates).toHaveLength(3);
     expect(createRegistryStore(registryFile).list()).toEqual([created, attached]);
 
-    const target = new Window(); f.windows.trackWorkspaceWindow(target.native);
+    const target = new Window();
+    f.windows.trackWorkspaceWindow(target.native);
     click(recentEntries()[1]!, target.native);
     expect(target.webContents.send).toHaveBeenCalledOnce();
     expect(target.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, attached);
-    await expect(invoke(CHANNELS.getWorkspaceRegistry, undefined, target.webContents.native)).resolves.toEqual({ workspaces: [attached, created] });
+    await expect(
+      invoke(CHANNELS.getWorkspaceRegistry, undefined, target.webContents.native),
+    ).resolves.toEqual({ workspaces: [attached, created] });
   });
 
   it("does no native work before ready and reads current update availability when rebuilding", () => {
-    const f = fixture(); f.setReady(false);
-    f.windows.refreshNativeWorkspaceSurfaces(); f.windows.refreshApplicationMenu();
+    const f = fixture();
+    f.setReady(false);
+    f.windows.refreshNativeWorkspaceSurfaces();
+    f.windows.refreshApplicationMenu();
     expect(f.dependencies.Menu.setApplicationMenu).not.toHaveBeenCalled();
     expect(f.dependencies.app.clearRecentDocuments).not.toHaveBeenCalled();
     expect(f.windows.applicationMenuCanInstallUpdate).toBeNull();
-    f.setReady(true); f.windows.refreshApplicationMenu();
+    f.setReady(true);
+    f.windows.refreshApplicationMenu();
     expect(item(f, "Help", "Restart to update").enabled).toBe(false);
-    f.setCanInstall(true); f.windows.refreshApplicationMenu();
+    f.setCanInstall(true);
+    f.windows.refreshApplicationMenu();
     expect(item(f, "Help", "Restart to update").enabled).toBe(true);
     expect(f.windows.applicationMenuCanInstallUpdate).toBe(true);
   });
 
   it("routes commands to the live target and opens recent workspaces through activation", () => {
-    const f = fixture(); const first = new Window(); const explicit = new Window();
-    f.windows.trackWorkspaceWindow(first.native); f.windows.trackWorkspaceWindow(explicit.native);
+    const f = fixture();
+    const first = new Window();
+    const explicit = new Window();
+    f.windows.trackWorkspaceWindow(first.native);
+    f.windows.trackWorkspaceWindow(explicit.native);
     f.windows.refreshApplicationMenu();
     click(item(f, "File", "New file"));
     expect(first.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "new-file");
@@ -682,15 +982,29 @@ describe("desktop native menus", () => {
     expect(explicit.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
     const recent = submenu(item(f, "File", "Open recent"))[1]!;
     click(recent, explicit.native);
-    expect(explicit.webContents.send).toHaveBeenCalledWith(CHANNELS.workspaceActivated, workspace("b"));
-    expect(f.windows.prioritizePreferredWorkspace([workspace("a"), workspace("b")], explicit.webContents.native)[0]!.workspaceId).toBe("b");
+    expect(explicit.webContents.send).toHaveBeenCalledWith(
+      CHANNELS.workspaceActivated,
+      workspace("b"),
+    );
+    expect(
+      f.windows.prioritizePreferredWorkspace(
+        [workspace("a"), workspace("b")],
+        explicit.webContents.native,
+      )[0]!.workspaceId,
+    ).toBe("b");
     expect(f.dependencies.app.clearRecentDocuments).toHaveBeenCalledOnce();
   });
 
   it("uses current native windows when an older menu callback fires", () => {
-    const f = fixture(); const first = new Window(); const second = new Window();
-    f.windows.trackWorkspaceWindow(first.native); f.windows.refreshApplicationMenu(); const command = item(f, "Go", "Settings");
-    first.destroy(); f.windows.trackWorkspaceWindow(second.native); click(command);
+    const f = fixture();
+    const first = new Window();
+    const second = new Window();
+    f.windows.trackWorkspaceWindow(first.native);
+    f.windows.refreshApplicationMenu();
+    const command = item(f, "Go", "Settings");
+    first.destroy();
+    f.windows.trackWorkspaceWindow(second.native);
+    click(command);
     expect(first.webContents.send).not.toHaveBeenCalled();
     expect(second.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
   });
@@ -752,7 +1066,9 @@ describe("desktop native menus", () => {
       expect(vi.mocked(f.dependencies.app.addRecentDocument).mock.calls).toEqual(
         lists.flatMap((rows) => [...rows].reverse().map((row) => [row.rootPath])),
       );
-      expect(f.dependencies.app.setUserTasks).toHaveBeenCalledTimes(platform === "win32" ? lists.length : 0);
+      expect(f.dependencies.app.setUserTasks).toHaveBeenCalledTimes(
+        platform === "win32" ? lists.length : 0,
+      );
       expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(lists.length * 2);
     },
   );
@@ -761,91 +1077,130 @@ describe("desktop native menus", () => {
     (["clear", "add", "tasks-false", "tasks-throw"] as const).flatMap((failure) =>
       (["failed", "previous"] as const).map((retry) => ({ failure, retry })),
     ),
-  )(
-    "retries the $retry root list after $failure fails",
-    ({ failure, retry }) => {
-      const f = fixture();
+  )("retries the $retry root list after $failure fails", ({ failure, retry }) => {
+    const f = fixture();
+    f.windows.refreshNativeWorkspaceSurfaces();
+    const fail = () => {
+      throw new Error("native storage failed");
+    };
+    if (failure === "clear")
+      vi.mocked(f.dependencies.app.clearRecentDocuments).mockImplementationOnce(fail);
+    if (failure === "add")
+      vi.mocked(f.dependencies.app.addRecentDocument).mockImplementationOnce(fail);
+    if (failure === "tasks-false")
+      vi.mocked(f.dependencies.app.setUserTasks).mockReturnValueOnce(false);
+    if (failure === "tasks-throw")
+      vi.mocked(f.dependencies.app.setUserTasks).mockImplementationOnce(fail);
+    f.setRows([workspace("c")]);
+    if (failure === "tasks-throw") {
+      expect(() => f.windows.refreshNativeWorkspaceSurfaces()).toThrow("native storage failed");
+    } else {
       f.windows.refreshNativeWorkspaceSurfaces();
-      const fail = () => { throw new Error("native storage failed"); };
-      if (failure === "clear") vi.mocked(f.dependencies.app.clearRecentDocuments).mockImplementationOnce(fail);
-      if (failure === "add") vi.mocked(f.dependencies.app.addRecentDocument).mockImplementationOnce(fail);
-      if (failure === "tasks-false") vi.mocked(f.dependencies.app.setUserTasks).mockReturnValueOnce(false);
-      if (failure === "tasks-throw") vi.mocked(f.dependencies.app.setUserTasks).mockImplementationOnce(fail);
-      f.setRows([workspace("c")]);
-      if (failure === "tasks-throw") {
-        expect(() => f.windows.refreshNativeWorkspaceSurfaces()).toThrow("native storage failed");
-      } else {
-        f.windows.refreshNativeWorkspaceSurfaces();
-      }
-      expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(2);
+    }
+    expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(2);
 
-      f.setRows(retry === "previous" ? [workspace("a"), workspace("b")] : [workspace("c")]);
-      f.windows.refreshNativeWorkspaceSurfaces();
-      f.windows.refreshNativeWorkspaceSurfaces();
-      expect(f.dependencies.app.clearRecentDocuments).toHaveBeenCalledTimes(3);
-      expect(f.dependencies.app.setUserTasks).toHaveBeenCalledTimes(3);
-      expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(4);
-    },
-  );
+    f.setRows(retry === "previous" ? [workspace("a"), workspace("b")] : [workspace("c")]);
+    f.windows.refreshNativeWorkspaceSurfaces();
+    f.windows.refreshNativeWorkspaceSurfaces();
+    expect(f.dependencies.app.clearRecentDocuments).toHaveBeenCalledTimes(3);
+    expect(f.dependencies.app.setUserTasks).toHaveBeenCalledTimes(3);
+    expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledTimes(4);
+  });
 
   it("reverses native recents, limits Windows tasks, and quotes roots exactly", () => {
-    const f = fixture(); const rows = Array.from({ length: 12 }, (_, index) => workspace(`w${index}`));
-    rows[0] = workspace("quoted", "C:\\say\"hi\\"); f.setRows(rows);
+    const f = fixture();
+    const rows = Array.from({ length: 12 }, (_, index) => workspace(`w${index}`));
+    rows[0] = workspace("quoted", 'C:\\say"hi\\');
+    f.setRows(rows);
     f.windows.refreshNativeWorkspaceSurfaces();
-    expect(vi.mocked(f.dependencies.app.addRecentDocument).mock.calls).toEqual([...rows].reverse().map((row) => [row.rootPath]));
+    expect(vi.mocked(f.dependencies.app.addRecentDocument).mock.calls).toEqual(
+      [...rows].reverse().map((row) => [row.rootPath]),
+    );
     const tasks = vi.mocked(f.dependencies.app.setUserTasks).mock.calls[0]![0];
     expect(tasks).toHaveLength(10);
-    expect(tasks[0]).toEqual({ program: "C:\\dohc\\dohc.exe", iconPath: "C:\\dohc\\dohc.exe", iconIndex: 0,
-      arguments: '--open-workspace "C:\\say\\"hi\\\\"', title: 'Open say"hi', description: rows[0].rootPath });
+    expect(tasks[0]).toEqual({
+      program: "C:\\dohc\\dohc.exe",
+      iconPath: "C:\\dohc\\dohc.exe",
+      iconIndex: 0,
+      arguments: '--open-workspace "C:\\say\\"hi\\\\"',
+      title: 'Open say"hi',
+      description: rows[0].rootPath,
+    });
     expect(submenu(item(f, "File", "Open recent"))).toHaveLength(10);
   });
 
   it("tolerates a malformed registry for native menus while leaving strict reads with their caller", () => {
-    const f = fixture(); vi.mocked(f.dependencies.workspaceSummaries).mockImplementation(() => { throw new Error("registry failed"); });
+    const f = fixture();
+    vi.mocked(f.dependencies.workspaceSummaries).mockImplementation(() => {
+      throw new Error("registry failed");
+    });
     f.windows.refreshNativeWorkspaceSurfaces();
     expect(f.dependencies.app.addRecentDocument).not.toHaveBeenCalled();
     expect(f.dependencies.app.setUserTasks).toHaveBeenCalledWith([]);
-    expect(submenu(item(f, "File", "Open recent"))).toEqual([{ label: "No recent workspaces", enabled: false }]);
+    expect(submenu(item(f, "File", "Open recent"))).toEqual([
+      { label: "No recent workspaces", enabled: false },
+    ]);
     expect(() => f.dependencies.workspaceSummaries()).toThrow("registry failed");
   });
 
   it("still rebuilds the menu if native recent-document storage fails on Linux", () => {
-    const f = fixture("linux"); vi.mocked(f.dependencies.app.clearRecentDocuments).mockImplementation(() => { throw new Error("unsupported"); });
+    const f = fixture("linux");
+    vi.mocked(f.dependencies.app.clearRecentDocuments).mockImplementation(() => {
+      throw new Error("unsupported");
+    });
     f.windows.refreshNativeWorkspaceSurfaces();
     expect(f.dependencies.Menu.setApplicationMenu).toHaveBeenCalledOnce();
     expect(f.dependencies.app.setUserTasks).not.toHaveBeenCalled();
   });
 
-  it.each([new Error("dohc did not save settings. Fix the file."), "unreadable settings"])("reports accelerator zoom rejection %s", async (error) => {
-    const f = fixture(); const reported = deferred();
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
-    vi.mocked(f.dependencies.stepWindowZoom).mockRejectedValueOnce(error);
-    vi.mocked(f.dependencies.dialog.showErrorBox).mockImplementation(() => { reported.resolve(); });
-    f.windows.refreshApplicationMenu(); click(item(f, "View", "Zoom in"));
-    await reported.promise;
-    expect(f.dependencies.stepWindowZoom).toHaveBeenCalledExactlyOnceWith("in");
-    // The refusal already names the file and the way out.
-    expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith("Zoom", error instanceof Error
-      ? "dohc did not save settings. Fix the file." : "dohc could not change the window zoom.");
-  });
+  it.each([new Error("dohc did not save settings. Fix the file."), "unreadable settings"])(
+    "reports accelerator zoom rejection %s",
+    async (error) => {
+      const f = fixture();
+      const reported = deferred();
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      vi.mocked(f.dependencies.stepWindowZoom).mockRejectedValueOnce(error);
+      vi.mocked(f.dependencies.dialog.showErrorBox).mockImplementation(() => {
+        reported.resolve();
+      });
+      f.windows.refreshApplicationMenu();
+      click(item(f, "View", "Zoom in"));
+      await reported.promise;
+      expect(f.dependencies.stepWindowZoom).toHaveBeenCalledExactlyOnceWith("in");
+      expect(f.dependencies.dialog.showErrorBox).toHaveBeenCalledWith(
+        "Zoom",
+        error instanceof Error
+          ? "dohc did not save settings. Fix the file."
+          : "dohc could not change the window zoom.",
+      );
+    },
+  );
 
   it("uses the existing About dialog content", () => {
-    const f = fixture(); f.windows.refreshApplicationMenu(); click(item(f, "Help", "About dohc"));
+    const f = fixture();
+    f.windows.refreshApplicationMenu();
+    click(item(f, "Help", "About dohc"));
     expect(f.dependencies.dialog.showMessageBox).toHaveBeenCalledWith({
-      title: "About dohc", message: "dohc", detail: "Version 1.2.3\nYour workspace is a folder.",
+      title: "About dohc",
+      message: "dohc",
+      detail: "Version 1.2.3\nYour workspace is a folder.",
     });
     expect(f.dependencies.app.setAboutPanelOptions).not.toHaveBeenCalled();
   });
 
   it("names dohc and its version in the macOS About panel", () => {
-    const f = fixture("darwin"); f.windows.refreshApplicationMenu();
+    const f = fixture("darwin");
+    f.windows.refreshApplicationMenu();
     expect(f.dependencies.app.setAboutPanelOptions).toHaveBeenCalledWith({
-      applicationName: "dohc", applicationVersion: "1.2.3", version: "",
+      applicationName: "dohc",
+      applicationVersion: "1.2.3",
+      version: "",
     });
   });
 
   it("opens one window for menu commands chosen with none open, and sends each once, in order, when it loads", async () => {
-    const f = fixture("darwin"); f.windows.refreshApplicationMenu();
+    const f = fixture("darwin");
+    f.windows.refreshApplicationMenu();
     const appMenu = submenu(f.templates.at(-1)![0]!);
     click(appMenu.find((entry) => entry.label === "Settings…")!);
     click(item(f, "File", "New file"));
@@ -855,45 +1210,56 @@ describe("desktop native menus", () => {
     expect(f.windows.workspaceWindows.allLive()).toEqual([created.native]);
     expect(created.webContents.send).not.toHaveBeenCalled();
     created.emit("ready-to-show");
-    expect(created.show).toHaveBeenCalledOnce(); expect(created.focus).toHaveBeenCalledOnce();
+    expect(created.show).toHaveBeenCalledOnce();
+    expect(created.focus).toHaveBeenCalledOnce();
     created.finishLoad();
     await vi.waitFor(() => expect(created.webContents.send).toHaveBeenCalledTimes(3));
     expect(created.webContents.send.mock.calls).toEqual([
-      [CHANNELS.menuCommand, "settings"], [CHANNELS.menuCommand, "new-file"], [CHANNELS.menuCommand, "close-tab"],
+      [CHANNELS.menuCommand, "settings"],
+      [CHANNELS.menuCommand, "new-file"],
+      [CHANNELS.menuCommand, "close-tab"],
     ]);
-    // A loaded window takes a command at once.
     click(item(f, "File", "New folder"));
     expect(created.webContents.send).toHaveBeenLastCalledWith(CHANNELS.menuCommand, "new-folder");
     expect(created.webContents.send).toHaveBeenCalledTimes(4);
   });
 
   it("holds menu commands for a window still loading, such as the first one at launch", async () => {
-    const f = fixture("darwin"); const starting = new Window().startLoad();
-    f.windows.trackWorkspaceWindow(starting.native); f.windows.refreshApplicationMenu();
+    const f = fixture("darwin");
+    const starting = new Window().startLoad();
+    f.windows.trackWorkspaceWindow(starting.native);
+    f.windows.refreshApplicationMenu();
     click(item(f, "File", "New file"), starting.native);
     click(item(f, "File", "Close tab"));
     expect(starting.webContents.send).not.toHaveBeenCalled();
     starting.finishLoad();
     await vi.waitFor(() => expect(starting.webContents.send).toHaveBeenCalledTimes(2));
     expect(starting.webContents.send.mock.calls).toEqual([
-      [CHANNELS.menuCommand, "new-file"], [CHANNELS.menuCommand, "close-tab"],
+      [CHANNELS.menuCommand, "new-file"],
+      [CHANNELS.menuCommand, "close-tab"],
     ]);
     expect(f.dependencies.createMainWindow).not.toHaveBeenCalled();
   });
 
   it("sends a command chosen after a window finished loading but before it stopped", async () => {
-    const f = fixture("darwin"); const window = new Window();
+    const f = fixture("darwin");
+    const window = new Window();
     window.webContents.loading = true;
-    f.windows.trackWorkspaceWindow(window.native); f.windows.refreshApplicationMenu();
+    f.windows.trackWorkspaceWindow(window.native);
+    f.windows.refreshApplicationMenu();
     click(item(f, "File", "New file"));
     expect(window.webContents.send).not.toHaveBeenCalled();
     window.webContents.loading = false;
     window.webContents.emit("did-stop-loading");
-    await vi.waitFor(() => expect(window.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "new-file"));
+    await vi.waitFor(() =>
+      expect(window.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "new-file"),
+    );
   });
 
   it("opens a workspace window instead of sending a command to the hidden export window", () => {
-    const f = fixture("darwin"); const exportWindow = new Window(); f.windows.refreshApplicationMenu();
+    const f = fixture("darwin");
+    const exportWindow = new Window();
+    f.windows.refreshApplicationMenu();
     click(item(f, "File", "New file"), exportWindow.native);
     expect(exportWindow.webContents.send).not.toHaveBeenCalled();
     expect(f.dependencies.createMainWindow).toHaveBeenCalledOnce();
@@ -901,7 +1267,8 @@ describe("desktop native menus", () => {
   });
 
   it("drops a window-less menu command when its new window closes before it loads", () => {
-    const f = fixture("darwin"); f.windows.refreshApplicationMenu();
+    const f = fixture("darwin");
+    f.windows.refreshApplicationMenu();
     click(item(f, "File", "New file"));
     const closing = f.all[0]!;
     closing.destroy();
@@ -910,17 +1277,35 @@ describe("desktop native menus", () => {
   });
 });
 
-
 it("sends agent hues only to each window's currently admitted workspace", async () => {
   const f = fixture();
-  const first = new Window(), same = new Window(), other = new Window(), utility = new Window();
+  const first = new Window(),
+    same = new Window(),
+    other = new Window(),
+    utility = new Window();
   for (const window of [first, same, other]) f.windows.trackWorkspaceWindow(window.native);
-  await f.sessions.open(first.webContents.native, { ...workspace("a"), attachmentId: Symbol() }, "doc-first");
-  await f.sessions.open(same.webContents.native, { ...workspace("a"), attachmentId: Symbol() }, "doc-same");
-  await f.sessions.open(other.webContents.native, { ...workspace("b"), attachmentId: Symbol() }, "doc-other");
+  await f.sessions.open(
+    first.webContents.native,
+    { ...workspace("a"), attachmentId: Symbol() },
+    "doc-first",
+  );
+  await f.sessions.open(
+    same.webContents.native,
+    { ...workspace("a"), attachmentId: Symbol() },
+    "doc-same",
+  );
+  await f.sessions.open(
+    other.webContents.native,
+    { ...workspace("b"), attachmentId: Symbol() },
+    "doc-other",
+  );
   const event = { workspaceId: "a", group: "issued", hue: "blue" } as const;
   f.windows.broadcastAgentColor(event);
-  for (const window of [first, same]) expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith(CHANNELS.agentColorChanged, event);
+  for (const window of [first, same])
+    expect(window.webContents.send).toHaveBeenCalledExactlyOnceWith(
+      CHANNELS.agentColorChanged,
+      event,
+    );
   expect(other.webContents.send).not.toHaveBeenCalled();
   expect(utility.webContents.send).not.toHaveBeenCalled();
   await f.sessions.retireAfterCrash(first.webContents.native);

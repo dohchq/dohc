@@ -17,10 +17,7 @@ import {
   updateShareMountRecords,
 } from "../workspaces/shareMounts";
 import { createShareSkipRecorder } from "../workspaces/shareSkipRecorder";
-import {
-  createShareViewFiles,
-  type ShareViewFiles,
-} from "../workspaces/shareViewFiles";
+import { createShareViewFiles, type ShareViewFiles } from "../workspaces/shareViewFiles";
 import { resolveRegisteredShareViewFilesTarget } from "../workspaces/shareViewFilesTarget";
 import { fetchShareViewInfo } from "../workspaces/shareViewInfo";
 import { withExclusiveWorkspaceOperation } from "../workspaces/workspaceAssets";
@@ -55,10 +52,14 @@ export function createRealShareMountHarness(input: {
     input.daemon.relay.closeWorkspace(workspaceId);
   const commands: ShareMountCommands<typeof workspace> = createShareMountCommands({
     readMounts: () => workspace.shareMounts,
-    updateMounts: async (_workspaceId, update) => { workspace.shareMounts = [...update(workspace.shareMounts)]; },
+    updateMounts: async (_workspaceId, update) => {
+      workspace.shareMounts = [...update(workspace.shareMounts)];
+    },
     currentCredentialGeneration: () => 0,
     loadCredentials: async () => ({
-      relayUrl: input.relay.baseUrl, token: input.relay.token, email: input.recipientEmail,
+      relayUrl: input.relay.baseUrl,
+      token: input.relay.token,
+      email: input.recipientEmail,
     }),
     fetchInfo: (relay, shareId) => fetchShareViewInfo({ relay, shareId }),
     listDirectory: (path) => readdir(path).catch(() => []),
@@ -74,21 +75,32 @@ export function createRealShareMountHarness(input: {
   });
   const files: ShareViewFiles = createShareViewFiles({
     resolveTarget: (target) => resolveRegisteredShareViewFilesTarget(workspace, target),
-    openStore: (target) => received.storeFor({
-      engineWorkspaceId: target.storeWorkspaceId, rootPath: target.rootPath,
-    }),
+    openStore: (target) =>
+      received.storeFor({
+        engineWorkspaceId: target.storeWorkspaceId,
+        rootPath: target.rootPath,
+      }),
     resolveRelay: async () => input.relay,
-    pull: (target, relay, pull) => received.relayFor({
-      engineWorkspaceId: target.storeWorkspaceId, rootPath: target.rootPath, relay,
-    }).pullShareView({ shareId: target.shareId, ...pull }),
+    pull: (target, relay, pull) =>
+      received
+        .relayFor({
+          engineWorkspaceId: target.storeWorkspaceId,
+          rootPath: target.rootPath,
+          relay,
+        })
+        .pullShareView({ shareId: target.shareId, ...pull }),
     recordRefusals: async (target, refusals) => {
       await createShareSkipRecorder<ShareMountRecord>({
         update: async (change) => {
-          workspace.shareMounts = [...updateShareMountRecords(workspace.shareMounts, target.shareId, change)];
+          workspace.shareMounts = [
+            ...updateShareMountRecords(workspace.shareMounts, target.shareId, change),
+          ];
         },
       })(refusals);
     },
-    updateUnsavedPaths: async () => { throw new Error("Mounted shares have no unsaved paths"); },
+    updateUnsavedPaths: async () => {
+      throw new Error("Mounted shares have no unsaved paths");
+    },
     markEnded: async (target) => {
       workspace.shareMounts = workspace.shareMounts.map((mount) =>
         mount.shareId === target.shareId ? { ...mount, ended: true } : mount,
@@ -103,13 +115,28 @@ export function createRealShareMountHarness(input: {
     removeMount: (owner, target) => commands.filesLifecycle.removeMount(owner, target),
   });
   const mutations = createWorkspaceFileMutationOwner({
-    historyFor: () => ({ resolveFiles: async () => {throw new Error("Unexpected file resolution");}, readHistoryOperation: async () => {throw new Error("Unexpected History kind read");}, readHistoryPage: async () => { throw new Error("Unexpected History read"); }, undoHistoryOperation: async () => { throw new Error("Unexpected Undo"); } }),
+    historyFor: () => ({
+      resolveFiles: async () => {
+        throw new Error("Unexpected file resolution");
+      },
+      readHistoryOperation: async () => {
+        throw new Error("Unexpected History kind read");
+      },
+      readHistoryPage: async () => {
+        throw new Error("Unexpected History read");
+      },
+      undoHistoryOperation: async () => {
+        throw new Error("Unexpected Undo");
+      },
+    }),
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_event, workspaceId, work) => {
       if (workspaceId !== workspace.workspaceId) throw new Error("Wrong host workspace");
       return work({
         assertCurrent: () => undefined,
-        authorityId: workspace.attachmentId, workspace, capture: null,
+        authorityId: workspace.attachmentId,
+        workspace,
+        capture: null,
         signal: new AbortController().signal,
         yDocSessions: { withDocumentUnowned: unexpected, markDeletedUnderPath: unexpected },
       });
@@ -146,33 +173,49 @@ export function createRealShareMountHarness(input: {
     sharesChanged: unexpected,
     reconcileReceivedShares: unexpected,
   });
-  registerOperations({
-    handle: (channel, handler) => { handlers.set(channel, handler); },
-    assertTrustedSender: () => undefined,
-    withActiveWorkspace: async (_event: Event, workspaceId, message, work) => {
-      if (workspaceId !== workspace.workspaceId) throw new Error(message);
-      return work({workspace, assertCurrent});
+  registerOperations(
+    {
+      handle: (channel, handler) => {
+        handlers.set(channel, handler);
+      },
+      assertTrustedSender: () => undefined,
+      withActiveWorkspace: async (_event: Event, workspaceId, message, work) => {
+        if (workspaceId !== workspace.workspaceId) throw new Error(message);
+        return work({ workspace, assertCurrent });
+      },
     },
-  }, relayShareOperations, ownerHandlers);
+    relayShareOperations,
+    ownerHandlers,
+  );
   return {
     workspace,
     mount: (shareCode: string) => commands.mount({ workspace, shareCode, assertCurrent }),
     refresh: () => commands.refresh({ workspace, assertCurrent }),
     unmount: (shareId: string) => commands.unmount({ workspace, shareId, assertCurrent }),
-    linksEdges: (shareId: string, cursor?: string) => files.linksEdges(
-      { kind: "mount", workspaceId: workspace.workspaceId, shareId }, cursor === undefined ? {} : { cursor },
-    ),
-    writeText: (relativePath: string) => mutations.writeText(undefined, {
-      workspaceId: workspace.workspaceId, relativePath, text: "defaced",
-      expectedContentHash: "0".repeat(64),
-    }),
+    linksEdges: (shareId: string, cursor?: string) =>
+      files.linksEdges(
+        { kind: "mount", workspaceId: workspace.workspaceId, shareId },
+        cursor === undefined ? {} : { cursor },
+      ),
+    writeText: (relativePath: string) =>
+      mutations.writeText(undefined, {
+        workspaceId: workspace.workspaceId,
+        relativePath,
+        text: "defaced",
+        expectedContentHash: "0".repeat(64),
+      }),
     reshare: async (path: string) => {
       const handler = handlers.get(relayShareOperations.createRelayShare.channel);
       if (!handler) throw new Error("Missing create-share handler");
-      return handler({ sender: { id: 1 } }, {
-        workspaceId: workspace.workspaceId, recipientEmail: "third-party@dohc.test",
-        access: "view", paths: [path],
-      });
+      return handler(
+        { sender: { id: 1 } },
+        {
+          workspaceId: workspace.workspaceId,
+          recipientEmail: "third-party@dohc.test",
+          access: "view",
+          paths: [path],
+        },
+      );
     },
   };
 }

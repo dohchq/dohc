@@ -33,8 +33,6 @@ fn record_settled(
     record_text(store, audit, moment, &text, &vector)
 }
 
-/// The retirement form of settlement at `terminal`, through F=10, as the
-/// host records it.
 fn retire_settled(f: &mut Fixture, terminal: Option<LiveUpdateReceipt>, moment: &str) -> Result<LiveSettlementResult, ApplicationError> {
     let key = retirement_key(f, 10);
     let doc_key = f.key.clone();
@@ -44,7 +42,6 @@ fn retire_settled(f: &mut Fixture, terminal: Option<LiveUpdateReceipt>, moment: 
     })
 }
 
-/// The ordinary form of settlement at `terminal`, as the host records it.
 fn settled(f: &mut Fixture, terminal: Option<LiveUpdateReceipt>, moment: &str) -> Result<LiveSettlementResult, ApplicationError> {
     let doc_key = f.key.clone();
     let reconstruction = NativeHistoryReconstruction { working_reserve_bytes: 8 * 1024 * 1024 };
@@ -53,11 +50,6 @@ fn settled(f: &mut Fixture, terminal: Option<LiveUpdateReceipt>, moment: &str) -
     })
 }
 
-/// A root that applied its native update at 3, and whose updates C1 and C2
-/// the relay accepted at 5 and 6 without the host applying them, settled at
-/// B=3 through F and released, its document back in the scope. Its file holds
-/// what it settled at B, while its Y.Doc also holds C1 and C2. Nothing aligns
-/// the file with the Y.Doc. Returns the covered receipt and C1 and C2.
 fn released_at_b() -> (Fixture, LiveUpdateReceipt, CarriedDelivery, CarriedDelivery) {
     let (mut f, covered, c1, _) = covered_and_carried();
     let second = native_tail_edit(&mut f, "# Carried again\n", 13);
@@ -74,14 +66,10 @@ fn released_at_b() -> (Fixture, LiveUpdateReceipt, CarriedDelivery, CarriedDeliv
     (f, covered, c1, c2)
 }
 
-/// The local Y.Doc, as the store holds it.
 fn local_doc(f: &Fixture) -> Ydoc {
     f.store.read_with(|conn| durable::load_doc_in(conn, &f.key)).unwrap()
 }
 
-/// The file, the local Y.Doc and accepted history through `through` agree:
-/// the settlement recorded as `moment` projects the local Y.Doc, which is
-/// structurally the accepted state.
 fn converged(f: &Fixture, moment: &str, through: i64) {
     let local = local_doc(f);
     let file = moment_text(f, moment);
@@ -101,16 +89,6 @@ fn converged(f: &Fixture, moment: &str, through: i64) {
     assert!(crate::replay_parity::structurally_equal_v2(&accepted, &local).unwrap());
 }
 
-/// Sol's round 4b ruling, capture source rule: Release, a fresh capture and
-/// adoption, Carried application, the first settlement and a restart, with
-/// no rewrite aligning the file and the Y.Doc. The file holds what the
-/// released root settled at B and the Y.Doc also holds C1 and C2, so only
-/// the settled-B proof explains the capture. Resume finds that capture still
-/// current. A fresh registration holds every delivery until its activation
-/// adopts. Its seed's receipt is saved before anything applies. Each
-/// settlement holds only what applied, each Carried delivery applies once, a
-/// replay after a restart writes nothing, and the file, the Y.Doc and
-/// accepted history converge.
 #[test]
 fn resume_after_carried_edits_keeps_the_file_its_predecessor_settled() {
     let (mut f, covered, c1, c2) = released_at_b();
@@ -149,13 +127,6 @@ fn resume_after_carried_edits_keeps_the_file_its_predecessor_settled() {
     replays(&mut f, &last, |f| settled(f, Some(seed.clone()), "converged"));
 }
 
-/// Partial application, then a further Stop and Resume. S1 applies C1 alone,
-/// its seed accepted and never applied, settles at C1 and releases with C2
-/// and its seed Carried. S2 captures over the file S1 settled, with C2 and
-/// S1's seed explaining the rest of its Y.Doc, holds C2 until it adopts, and
-/// drains both before its own seed. Each applies once, and the file, the
-/// Y.Doc and accepted history converge, replayed after a restart with no
-/// writes.
 #[test]
 fn a_partly_applied_suffix_resumes_again_from_its_new_boundary() {
     let (mut f, covered, c1, c2) = released_at_b();
@@ -192,14 +163,13 @@ fn a_partly_applied_suffix_resumes_again_from_its_new_boundary() {
     replays(&mut f, &last, |f| settled(f, Some(seed.clone()), "second-resumed"));
 }
 
-/// Sol's merge-review finding 3: a note the reader built stops and resumes
-/// with its file settled at B while its Y.Doc also holds a Carried edit. The
-/// reader cannot prove that file shows the whole Y.Doc, so capture, resume
-/// and adoption each prove accepted state at B and replay the Carried edit
-/// onto it. Sol's merge-fix finding 1: once adopted, the successor proves
-/// that source again at B, by an adoption replay after a lost
-/// acknowledgement and by resume, after a restart and after it settles past
-/// B, with no writes.
+/// A note the reader built stops and resumes with its file settled at B while
+/// its Y.Doc also holds a Carried edit. The reader cannot prove that file
+/// shows the whole Y.Doc, so capture, resume and adoption each prove accepted
+/// state at B and replay the Carried edit onto it. Once adopted, the
+/// successor proves that source again at B, by an adoption replay after a
+/// lost acknowledgement and by resume, after a restart and after it settles
+/// past B, with no writes.
 #[test]
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn a_reader_built_note_resumes_over_the_file_its_predecessor_settled() {
@@ -256,7 +226,6 @@ fn a_reader_built_note_resumes_over_the_file_its_predecessor_settled() {
     }
 }
 
-/// A damage the settled-B proof must refuse, and the refusal it gives.
 type SourceDamage = (&'static str, fn(&ApplicationError) -> bool, fn(&mut Fixture));
 
 fn unexplained(error: &ApplicationError) -> bool {
@@ -267,7 +236,6 @@ fn conflict(error: &ApplicationError) -> bool {
     matches!(error, ApplicationError::Conflict)
 }
 
-/// Write `text` as the file at the document's path, recorded as `moment`.
 fn write_file(f: &mut Fixture, text: &str, moment: &str) {
     VersionedTextStore::new(&mut f.store)
         .write_text(
@@ -313,7 +281,6 @@ fn the_settled_source_proof_refuses_any_unexplained_difference() {
             write(f, &format!("UPDATE live_device_settlements SET source_state_vector_digest='{}'", "f".repeat(64)))
         }),
         ("file not the projection", unexplained, |f| {
-            // A settlement record naming a file that is not accepted state at B.
             write_file(f, "# Forged\n", "forged");
             write(f, &format!(
                 "UPDATE live_device_settlements SET moment_id='forged',markdown_digest='{}'",
@@ -357,7 +324,7 @@ fn the_settled_source_proof_refuses_any_unexplained_difference() {
     }
 }
 
-/// Opus's review of the 4b1c fixes: seeds may share a native sequence with
+/// Seeds may share a native sequence with
 /// each other and one native update, never two native updates. The current
 /// activation's pending native update, its journal row compacted so that any
 /// recorded time passes, settles; a second native update at its sequence
@@ -395,12 +362,11 @@ fn a_second_native_update_at_one_sequence_is_corrupt() {
     )), "a second native update");
 }
 
-/// Whether a settlement recorded its attribution as unavailable.
 fn attribution_unavailable(f: &Fixture) -> bool {
     f.store.table_row_count("live_settlement_attribution_unavailable").unwrap() > 0
 }
 
-/// Opus's review of the 4b1c fixes: only the current adoption's own refusal
+/// Only the current adoption's own refusal
 /// leaves a new settlement without attribution. A root whose own refused
 /// seed sits at its coverage floor settles with attribution unavailable. A
 /// successor whose predecessor's refused seed sits at that floor settles with
@@ -409,8 +375,6 @@ fn attribution_unavailable(f: &Fixture) -> bool {
 #[test]
 fn only_the_current_adoptions_refusal_makes_attribution_unavailable() {
     let mut f = refused_seed();
-    // A collaborator's paragraph on accepted state, which never held the
-    // refused seed's content.
     let accepted = Ydoc::wire();
     accepted.apply(&f.cut.baseline_bytes).unwrap();
     let bytes = accepted.richdoc_append_paragraph("Remote paragraph 3");
@@ -431,7 +395,7 @@ fn only_the_current_adoptions_refusal_makes_attribution_unavailable() {
     assert!(!attribution_unavailable(&f), "a predecessor's refusal its chain already covered");
 }
 
-/// Sol's N1 on round 2: the relay refused the owner's edit X, the owner saved
+/// The relay refused the owner's edit X, the owner saved
 /// the copy, and retirement kept X with its bytes. Settled at B and released
 /// with nothing Carried, the Y.Doc returns to accepted state at B, so Resume
 /// captures from that state with no seed and nothing delivers X again. The

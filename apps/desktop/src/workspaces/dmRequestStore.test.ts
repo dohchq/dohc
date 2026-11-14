@@ -2,11 +2,7 @@ import { chmodSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  clearDeclinedDm,
-  declineDm,
-  readDeclinedDms,
-} from "./dmRequestStore";
+import { clearDeclinedDm, declineDm, readDeclinedDms } from "./dmRequestStore";
 import { createTestScratch } from "./testTemp";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -80,8 +76,12 @@ describe("dmRequestStore", () => {
     expect(declineDm(target, "share-A")).toBe(true);
     const failure = Object.assign(new Error("disk full"), { code: "ENOSPC" });
     vi.mocked(writeFileSync)
-      .mockImplementationOnce(() => { throw failure; })
-      .mockImplementationOnce(() => { throw failure; });
+      .mockImplementationOnce(() => {
+        throw failure;
+      })
+      .mockImplementationOnce(() => {
+        throw failure;
+      });
     expect(declineDm(target, "share-B")).toBe(false);
     expect(clearDeclinedDm(target, "share-A")).toBe(false);
     expect(readDeclinedDms(target)).toEqual(new Set(["share-A"]));

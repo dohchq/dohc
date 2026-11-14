@@ -5,7 +5,11 @@ import { getDohcYDocBodyFragment } from "@dohc/ydoc-projection/body-fragment";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
 import { post } from "./bridge";
 
-export interface PageProperty { readonly name: string; readonly value: string; readonly opens?: boolean }
+export interface PageProperty {
+  readonly name: string;
+  readonly value: string;
+  readonly opens?: boolean;
+}
 export interface PageConfig {
   readonly title: string;
   readonly icon?: string;
@@ -20,7 +24,11 @@ export interface PageConfig {
   readonly autotype?: boolean;
 }
 
-function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
+function element<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className: string,
+  text?: string,
+): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   node.className = className;
   if (text !== undefined) node.textContent = text;
@@ -37,8 +45,6 @@ export function mountDocument(page: PageConfig) {
   if (page.icon && !page.large) root.append(element("div", "icon", page.icon));
   if (!page.large) root.append(element("h1", "title", page.title));
   if (page.properties.length > 0 && !page.large) {
-    // Read-only on the phone for now: a pill each, its name then its value, as on the desktop, with a chevron only on a
-    // value that opens something.
     const list = element("dl", "properties");
     for (const property of page.properties) {
       const row = element("div", property.opens ? "property opens" : "property");
@@ -57,10 +63,17 @@ export function mountDocument(page: PageConfig) {
     // Keystroke to paint: from the browser's `beforeinput` to the frame that shows it.
     const samples: number[] = [];
     let pending: number | null = null;
-    body.addEventListener("beforeinput", () => { pending ??= performance.now(); }, { capture: true });
+    body.addEventListener(
+      "beforeinput",
+      () => {
+        pending ??= performance.now();
+      },
+      { capture: true },
+    );
     const doc = markdownToYDoc(page.markdown);
     // Copy as Markdown copies the page as it is now, with the person's edits.
-    (window as Window & { __dohcCopyMarkdown?: () => void }).__dohcCopyMarkdown = () => post("markdown", { markdown: yDocToMarkdown(doc) });
+    (window as Window & { __dohcCopyMarkdown?: () => void }).__dohcCopyMarkdown = () =>
+      post("markdown", { markdown: yDocToMarkdown(doc) });
     const editor = mountLiveBodyEditor(body, {
       body: getDohcYDocBodyFragment(doc),
       label: page.title,
@@ -69,7 +82,10 @@ export function mountDocument(page: PageConfig) {
         change();
         const started = pending;
         pending = null;
-        if (started !== null) requestAnimationFrame(() => setTimeout(() => samples.push(performance.now() - started), 0));
+        if (started !== null)
+          requestAnimationFrame(() =>
+            setTimeout(() => samples.push(performance.now() - started), 0),
+          );
         return true;
       },
     });
@@ -77,7 +93,9 @@ export function mountDocument(page: PageConfig) {
     if (page.autotype) autotype(body, samples);
     typed = samples;
     // The app turns editing off when the page goes read-only (offline, deleted, access ended).
-    (window as Window & { __dohcSetEditable?: (value: boolean) => void }).__dohcSetEditable = value => {
+    (window as Window & { __dohcSetEditable?: (value: boolean) => void }).__dohcSetEditable = (
+      value,
+    ) => {
       editable = value;
       editor.refresh();
     };
@@ -115,7 +133,10 @@ function autotype(body: HTMLElement, samples: number[]) {
     const text = " Typed on the phone to time each keystroke.";
     let index = 0;
     const timer = setInterval(() => {
-      if (index < text.length) { document.execCommand("insertText", false, text[index++]); return; }
+      if (index < text.length) {
+        document.execCommand("insertText", false, text[index++]);
+        return;
+      }
       clearInterval(timer);
       requestAnimationFrame(() => setTimeout(() => post("typing", typingSummary(samples)), 0));
     }, 80);
@@ -130,18 +151,24 @@ function followCaretAboveKeyboard() {
   const reveal = () => {
     if (covered === 0) return;
     const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0 || !document.activeElement?.closest(".markdown")) return;
+    if (!selection || selection.rangeCount === 0 || !document.activeElement?.closest(".markdown"))
+      return;
     const caret = selection.getRangeAt(0).getBoundingClientRect();
     // WebKit may already shrink the visual viewport for the keyboard; take whichever edge is higher, so the
     // keyboard is never counted twice. A small margin keeps the caret clear of it. The scroll is instant, so it
     // reads the same under Reduce Motion.
     const viewport = window.visualViewport;
-    const visibleBottom = Math.min(document.documentElement.clientHeight - covered,
-      viewport ? viewport.offsetTop + viewport.height : Number.POSITIVE_INFINITY);
+    const visibleBottom = Math.min(
+      document.documentElement.clientHeight - covered,
+      viewport ? viewport.offsetTop + viewport.height : Number.POSITIVE_INFINITY,
+    );
     const bottom = visibleBottom - 12;
-    if (caret.bottom > bottom) document.getElementById("editor")?.scrollBy(0, caret.bottom - bottom);
+    if (caret.bottom > bottom)
+      document.getElementById("editor")?.scrollBy(0, caret.bottom - bottom);
   };
-  (window as Window & { __dohcKeyboard?: (height: number) => void }).__dohcKeyboard = height => { covered = height; reveal(); };
+  (window as Window & { __dohcKeyboard?: (height: number) => void }).__dohcKeyboard = (height) => {
+    covered = height;
+    reveal();
+  };
   document.addEventListener("selectionchange", () => requestAnimationFrame(reveal));
 }
-

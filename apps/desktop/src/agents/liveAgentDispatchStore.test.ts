@@ -1,8 +1,4 @@
-import type {
-  JsonValue,
-  Request,
-  Response,
-} from "@dohc/workspace-engine-client";
+import type { JsonValue, Request, Response } from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AGENT_DISPATCH_RPC_DEADLINE_MS } from "./awaitableAgentDispatchStore";
 import {
@@ -126,9 +122,11 @@ function dispatchResult(request: Request): JsonValue {
 const openSessions: EngineWorkspaceSessions[] = [];
 
 afterEach(async () => {
-  await Promise.all(openSessions.splice(0).map(async (sessions) => {
-    await sessions.closeAll();
-  }));
+  await Promise.all(
+    openSessions.splice(0).map(async (sessions) => {
+      await sessions.closeAll();
+    }),
+  );
 });
 
 describe("live agent dispatch store", () => {
@@ -239,21 +237,15 @@ describe("live agent dispatch store", () => {
         reason: "stop",
       }),
     ).resolves.toBe(1);
-    await expect(
-      store.completeRun({ runId: run.runId, exitCode: 0 }),
-    ).resolves.toEqual(run);
+    await expect(store.completeRun({ runId: run.runId, exitCode: 0 })).resolves.toEqual(run);
     await expect(
       store.failRun({ runId: run.runId, exitCode: 1, reason: "failed" }),
     ).resolves.toEqual(run);
-    await expect(store.listPending(WORKSPACE.workspaceId)).resolves.toEqual([
-      dispatch,
-    ]);
+    await expect(store.listPending(WORKSPACE.workspaceId)).resolves.toEqual([dispatch]);
     await expect(store.openRuns(WORKSPACE.workspaceId)).resolves.toEqual([
       { dispatch, run, chainDepth: 0 },
     ]);
-    await expect(
-      store.markFailureHandled(run.runId, { deadlineMs: 432 }),
-    ).resolves.toEqual({
+    await expect(store.markFailureHandled(run.runId, { deadlineMs: 432 })).resolves.toEqual({
       ...run,
       failureHandled: true,
     });
@@ -265,28 +257,23 @@ describe("live agent dispatch store", () => {
       }),
     ).resolves.toBe(3);
     await expect(
-      store.recordRunMessage({
-        workspaceId: WORKSPACE.workspaceId,
-        messageId: "reply",
-        runId: run.runId,
-      }, { deadlineMs: 321 }),
+      store.recordRunMessage(
+        {
+          workspaceId: WORKSPACE.workspaceId,
+          messageId: "reply",
+          runId: run.runId,
+        },
+        { deadlineMs: 321 },
+      ),
     ).resolves.toBe(true);
     await expect(
-      store.listRunMessages(
-        WORKSPACE.workspaceId,
-        run.runId,
-        { deadlineMs: 543 },
-      ),
+      store.listRunMessages(WORKSPACE.workspaceId, run.runId, { deadlineMs: 543 }),
     ).resolves.toEqual(["reply"]);
-    await expect(
-      store.runIdForMessage(WORKSPACE.workspaceId, "reply"),
-    ).resolves.toBe(run.runId);
-    await expect(
-      store.runRecordsForThread(WORKSPACE.workspaceId, "thread"),
-    ).resolves.toEqual({ trigger: run });
-    await expect(
-      store.getRunRecord(run.runId, { deadlineMs: 654 }),
-    ).resolves.toEqual(run);
+    await expect(store.runIdForMessage(WORKSPACE.workspaceId, "reply")).resolves.toBe(run.runId);
+    await expect(store.runRecordsForThread(WORKSPACE.workspaceId, "thread")).resolves.toEqual({
+      trigger: run,
+    });
+    await expect(store.getRunRecord(run.runId, { deadlineMs: 654 })).resolves.toEqual(run);
     await expect(
       store.setThreadDispatchPaused({
         workspaceId: WORKSPACE.workspaceId,
@@ -295,9 +282,7 @@ describe("live agent dispatch store", () => {
         reason: "budget",
       }),
     ).resolves.toEqual(pause);
-    await expect(
-      store.threadDispatchPaused(WORKSPACE.workspaceId, "thread"),
-    ).resolves.toBe(true);
+    await expect(store.threadDispatchPaused(WORKSPACE.workspaceId, "thread")).resolves.toBe(true);
     await expect(
       store.getThreadDispatchPauseState(WORKSPACE.workspaceId, "thread"),
     ).resolves.toEqual(pause);
@@ -309,26 +294,20 @@ describe("live agent dispatch store", () => {
         runId: run.runId,
       }),
     ).resolves.toBe(true);
-    await expect(
-      handle.listFailedRunRecoveries(WORKSPACE.workspaceId),
-    ).resolves.toEqual([
+    await expect(handle.listFailedRunRecoveries(WORKSPACE.workspaceId)).resolves.toEqual([
       { run: { ...run, endedAtMs: 5 }, attemptCount: 1 },
     ]);
 
     expect(
-      client.requests.find(
-        ({ method }) => method === "chats.dispatch.claimNextPending",
-      )?.deadlineMs,
+      client.requests.find(({ method }) => method === "chats.dispatch.claimNextPending")
+        ?.deadlineMs,
     ).toBe(AGENT_DISPATCH_RPC_DEADLINE_MS);
     expect(
-      client.requests.find(
-        ({ method }) => method === "chats.dispatch.listFailedRunRecoveries",
-      )?.deadlineMs,
+      client.requests.find(({ method }) => method === "chats.dispatch.listFailedRunRecoveries")
+        ?.deadlineMs,
     ).toBe(AGENT_DISPATCH_RPC_DEADLINE_MS);
     expect(
-      client.requests.find(
-        ({ method }) => method === "chats.dispatch.claimNextPending",
-      ),
+      client.requests.find(({ method }) => method === "chats.dispatch.claimNextPending"),
     ).toMatchObject({
       params: {
         runId: "run-fixed",
@@ -338,47 +317,34 @@ describe("live agent dispatch store", () => {
       },
     });
     expect(
-      client.requests.find(
-        ({ method }) => method === "chats.dispatch.markFailureHandled",
-      )?.deadlineMs,
+      client.requests.find(({ method }) => method === "chats.dispatch.markFailureHandled")
+        ?.deadlineMs,
     ).toBe(432);
     expect(
-      client.requests.find(
-        ({ method }) => method === "chats.dispatch.listRunMessages",
-      )?.deadlineMs,
+      client.requests.find(({ method }) => method === "chats.dispatch.listRunMessages")?.deadlineMs,
     ).toBe(543);
     expect(
-      client.requests.find(
-        ({ method }) => method === "chats.dispatch.recordRunMessage",
-      )?.deadlineMs,
+      client.requests.find(({ method }) => method === "chats.dispatch.recordRunMessage")
+        ?.deadlineMs,
     ).toBe(321);
     expect(
-      client.requests
-        .filter(({ method }) => method === "chats.dispatch.getRunRecord")
-        .at(-1)?.deadlineMs,
+      client.requests.filter(({ method }) => method === "chats.dispatch.getRunRecord").at(-1)
+        ?.deadlineMs,
     ).toBe(654);
     expect(
       client.requests
         .filter(
-          ({ method }) =>
-            method === "chats.dispatch.complete" ||
-            method === "chats.dispatch.fail",
+          ({ method }) => method === "chats.dispatch.complete" || method === "chats.dispatch.fail",
         )
         .map(({ deadlineMs }) => deadlineMs),
-        "restore the convenience completeRun/failRun calls -> these terminal attempts (including their read-after-write) lose their deadlines.",
-    ).toEqual([
-      TERMINAL_DISPATCH_DEADLINE_MS,
-      TERMINAL_DISPATCH_DEADLINE_MS,
-    ]);
+      "restore the convenience completeRun/failRun calls -> these terminal attempts (including their read-after-write) lose their deadlines.",
+    ).toEqual([TERMINAL_DISPATCH_DEADLINE_MS, TERMINAL_DISPATCH_DEADLINE_MS]);
     expect(
       client.requests
         .filter(({ method }) => method === "chats.dispatch.getRunRecord")
         .slice(0, 2)
         .map(({ deadlineMs }) => deadlineMs),
-    ).toEqual([
-      TERMINAL_DISPATCH_DEADLINE_MS,
-      TERMINAL_DISPATCH_DEADLINE_MS,
-    ]);
+    ).toEqual([TERMINAL_DISPATCH_DEADLINE_MS, TERMINAL_DISPATCH_DEADLINE_MS]);
     expect(
       new Set(
         client.requests
@@ -462,20 +428,12 @@ describe("live agent dispatch store", () => {
     );
     expect(createRunId).toHaveBeenCalledTimes(1);
     expect(claims).toHaveLength(3);
-    expect(
-      claims.map(
-        ({ params }) => (params as { runId?: JsonValue }).runId,
-      ),
-    ).toEqual([
+    expect(claims.map(({ params }) => (params as { runId?: JsonValue }).runId)).toEqual([
       "run-fixed",
       "run-fixed",
       "run-fixed",
     ]);
-    expect(
-      claims.map(
-        ({ params }) => (params as { logPath?: JsonValue }).logPath,
-      ),
-    ).toEqual([
+    expect(claims.map(({ params }) => (params as { logPath?: JsonValue }).logPath)).toEqual([
       "logs/run-fixed.log",
       "logs/run-fixed.log",
       "logs/run-fixed.log",
@@ -648,10 +606,9 @@ describe("live agent dispatch store", () => {
 
     await expect(store.getRunRecord(run.runId)).resolves.toEqual(run);
 
-    expect(
-      client.requests.find(({ method }) => method === "workspace.open")
-        ?.deadlineMs,
-    ).toBe(WORKSPACE_OPEN_DEADLINE_MS);
+    expect(client.requests.find(({ method }) => method === "workspace.open")?.deadlineMs).toBe(
+      WORKSPACE_OPEN_DEADLINE_MS,
+    );
   });
 
   it("workspace_sessions_surface_typed_error_when_reopen_fails", async () => {
@@ -685,9 +642,7 @@ describe("live agent dispatch store", () => {
     openSessions.push(sessions);
     const { store } = createLiveAgentDispatchStore(WORKSPACE, sessions);
 
-    await expect(store.getRunRecord(run.runId)).rejects.toBeInstanceOf(
-      EngineWorkspaceRebindError,
-    );
+    await expect(store.getRunRecord(run.runId)).rejects.toBeInstanceOf(EngineWorkspaceRebindError);
   });
 
   it("workspace_sessions_reopen_on_lifecycle_client_replacement_and_close", async () => {

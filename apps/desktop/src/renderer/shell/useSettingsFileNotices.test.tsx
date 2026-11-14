@@ -27,30 +27,53 @@ const user = (ignored?: DesktopUserSettingsResult["ignored"]): DesktopUserSettin
 
 describe("settingsFileNotice", () => {
   it("names each ignored key and why, and says the rest applies", () => {
-    expect(settingsFileNotice("dohc-settings.json", user([{ key: "editor.fontSize", reason: "invalid" }])))
-      .toBe("dohc ignored editor.fontSize in dohc-settings.json because its value is not valid. The other settings apply.");
-    expect(settingsFileNotice("dohc-settings.json", user([{ key: "accent", reason: "unknown" }])))
-      .toBe("dohc ignored accent in dohc-settings.json because it is not a setting dohc knows. The other settings apply.");
-    expect(settingsFileNotice("dohc-settings.json", user([
-      { key: "editor.fontSize", reason: "invalid" },
-      { key: "accent", reason: "unknown" },
-    ]))).toBe(
+    expect(
+      settingsFileNotice(
+        "dohc-settings.json",
+        user([{ key: "editor.fontSize", reason: "invalid" }]),
+      ),
+    ).toBe(
+      "dohc ignored editor.fontSize in dohc-settings.json because its value is not valid. The other settings apply.",
+    );
+    expect(
+      settingsFileNotice("dohc-settings.json", user([{ key: "accent", reason: "unknown" }])),
+    ).toBe(
+      "dohc ignored accent in dohc-settings.json because it is not a setting dohc knows. The other settings apply.",
+    );
+    expect(
+      settingsFileNotice(
+        "dohc-settings.json",
+        user([
+          { key: "editor.fontSize", reason: "invalid" },
+          { key: "accent", reason: "unknown" },
+        ]),
+      ),
+    ).toBe(
       "dohc ignored 2 settings in dohc-settings.json: editor.fontSize (value not valid), accent (unknown setting). The other settings apply.",
     );
     expect(settingsFileNotice("dohc-settings.json", user())).toBeNull();
   });
 
   it("reports a file dohc could not use, and leaves a reset's own message to Settings", () => {
-    expect(settingsFileNotice("dohc-settings.json", {
-      ...user(), source: "recovered", warning: "dohc could not use /s/dohc-settings.json: it is not valid JSON.",
-    })).toBe("dohc could not use /s/dohc-settings.json: it is not valid JSON.");
+    expect(
+      settingsFileNotice("dohc-settings.json", {
+        ...user(),
+        source: "recovered",
+        warning: "dohc could not use /s/dohc-settings.json: it is not valid JSON.",
+      }),
+    ).toBe("dohc could not use /s/dohc-settings.json: it is not valid JSON.");
     const reset: WorkspaceSettingsResult = {
-      settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored", warning: "dohc replaced workspace settings.",
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "stored",
+      warning: "dohc replaced workspace settings.",
     };
     expect(settingsFileNotice(".dohc/local/settings.local.json", reset)).toBeNull();
     const notOpened: WorkspaceSettingsResult = {
-      settings: DEFAULT_WORKSPACE_SETTINGS, source: "recovered", notOpened: true,
-      warning: "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "recovered",
+      notOpened: true,
+      warning:
+        "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
     };
     expect(settingsFileNotice(".dohc/local/settings.local.json", notOpened)).toBeNull();
   });
@@ -77,30 +100,32 @@ describe("useSettingsFileNotices", () => {
         });
         return { ...errors, onWorkspaceRead };
       },
-      { initialProps: { userSettings: user([{ key: "accent", reason: "unknown" }]), ready: false } },
+      {
+        initialProps: { userSettings: user([{ key: "accent", reason: "unknown" }]), ready: false },
+      },
     );
     expect(result.current.shellErrors.map((row) => row.message)).toEqual([
       "dohc ignored accent in dohc-settings.json because it is not a setting dohc knows. The other settings apply.",
     ]);
     expect(getWorkspaceSettings).not.toHaveBeenCalled();
 
-    // The workspace file is read once the workspace is open.
     rerender({ userSettings: user([{ key: "accent", reason: "unknown" }]), ready: true });
     await waitFor(() => expect(result.current.shellErrors).toHaveLength(2));
     expect(getWorkspaceSettings).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
-    // The row names the file where this computer keeps the workspace's settings.
-    expect(result.current.shellErrors.find((row) => row.kind === "workspace-settings-file")?.message).toBe(
+    expect(
+      result.current.shellErrors.find((row) => row.kind === "workspace-settings-file")?.message,
+    ).toBe(
       "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
     );
 
-    // The same settings arriving again do not bring back a dismissed row.
     const userRow = result.current.shellErrors[0]!;
     act(() => result.current.dismissShellError(userRow.id));
     rerender({ userSettings: user([{ key: "accent", reason: "unknown" }]), ready: true });
     expect(result.current.shellErrors.map((row) => row.kind)).toEqual(["workspace-settings-file"]);
 
-    // A save from Settings that fixed the file clears its row.
-    act(() => result.current.onWorkspaceRead({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" }));
+    act(() =>
+      result.current.onWorkspaceRead({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" }),
+    );
     expect(result.current.shellErrors).toEqual([]);
     rerender({ userSettings: user([{ key: "editor.fontSize", reason: "invalid" }]), ready: true });
     expect(result.current.shellErrors.map((row) => row.kind)).toEqual(["user-settings-file"]);
@@ -112,11 +137,14 @@ describe("useSettingsFileNotices", () => {
     const notOpened: WorkspaceSettingsResult = {
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "recovered",
-      warning: "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
+      warning:
+        "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
       notOpened: true,
     };
     const ignored: WorkspaceSettingsResult = {
-      settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored", ignored: [{ key: "theme", reason: "unknown" }],
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "stored",
+      ignored: [{ key: "theme", reason: "unknown" }],
     };
     const getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => notOpened);
     const listeners = new Set<(event: { workspaceId?: string }) => void>();
@@ -137,7 +165,6 @@ describe("useSettingsFileNotices", () => {
       return errors;
     });
     await waitFor(() => expect(listeners.size).toBe(1));
-    // It reads once more as it starts listening, and the engine has still not opened it.
     await waitFor(() => expect(getWorkspaceSettings).toHaveBeenCalledTimes(2));
     expect(result.current.shellErrors).toEqual([]);
 
@@ -146,15 +173,18 @@ describe("useSettingsFileNotices", () => {
 
     getWorkspaceSettings.mockResolvedValue(ignored);
     act(() => listeners.forEach((listener) => listener({ workspaceId: "ws-a" })));
-    await waitFor(() => expect(result.current.shellErrors.map((row) => row.message)).toEqual([
-      "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
-    ]));
-    // Once a read gets the file, activity reads nothing more.
+    await waitFor(() =>
+      expect(result.current.shellErrors.map((row) => row.message)).toEqual([
+        "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+      ]),
+    );
     expect(listeners.size).toBe(0);
     expect(getWorkspaceSettings).toHaveBeenCalledTimes(3);
 
-    // The person repairs the file; Try again clears its row.
-    getWorkspaceSettings.mockResolvedValue({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" });
+    getWorkspaceSettings.mockResolvedValue({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "stored",
+    });
     act(() => result.current.retryShellError(result.current.shellErrors[0]!.id));
     await waitFor(() => expect(result.current.shellErrors).toEqual([]));
     expect(getWorkspaceSettings).toHaveBeenCalledTimes(4);
@@ -164,7 +194,8 @@ describe("useSettingsFileNotices", () => {
     const notOpened: WorkspaceSettingsResult = {
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "recovered",
-      warning: "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
+      warning:
+        "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
       notOpened: true,
     };
     const getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => notOpened);
@@ -190,33 +221,47 @@ describe("useSettingsFileNotices", () => {
     await waitFor(() => expect(listeners.size).toBe(1));
     await waitFor(() => expect(getWorkspaceSettings).toHaveBeenCalledTimes(2));
 
-    // The engine opens and the hook reads the file. Before that read answers,
-    // Settings passes on its own slower read from before the open.
     let answer: ((read: WorkspaceSettingsResult) => void) | undefined;
-    getWorkspaceSettings.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    getWorkspaceSettings.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
     act(() => listeners.forEach((listener) => listener({ workspaceId: "ws-a" })));
     expect(getWorkspaceSettings).toHaveBeenCalledTimes(3);
     act(() => result.current.onWorkspaceRead(notOpened));
-    await act(async () => answer?.({
-      settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored", ignored: [{ key: "theme", reason: "unknown" }],
-    }));
-    await waitFor(() => expect(result.current.shellErrors.map((row) => row.message)).toEqual([
-      "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
-    ]));
+    await act(async () =>
+      answer?.({
+        settings: DEFAULT_WORKSPACE_SETTINGS,
+        source: "stored",
+        ignored: [{ key: "theme", reason: "unknown" }],
+      }),
+    );
+    await waitFor(() =>
+      expect(result.current.shellErrors.map((row) => row.message)).toEqual([
+        "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+      ]),
+    );
   });
 
   it("reads again when the engine opened the workspace while the first read was answering", async () => {
     const getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
-      settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored", ignored: [{ key: "theme", reason: "unknown" }],
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "stored",
+      ignored: [{ key: "theme", reason: "unknown" }],
     }));
-    // The open's activity came before this refusal, so no activity follows it.
     getWorkspaceSettings.mockResolvedValueOnce({
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "recovered",
-      warning: "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
+      warning:
+        "dohc is using default settings. dohc has not finished opening this workspace. Try again when it opens.",
       notOpened: true,
     });
-    vi.stubGlobal("dohcDesktop", { getWorkspaceSettings, onWorkspaceActivity: vi.fn(() => () => undefined) });
+    vi.stubGlobal("dohcDesktop", {
+      getWorkspaceSettings,
+      onWorkspaceActivity: vi.fn(() => () => undefined),
+    });
     const { result } = renderHook(() => {
       const errors = useShellError("ws-a");
       useSettingsFileNotices({
@@ -228,9 +273,11 @@ describe("useSettingsFileNotices", () => {
       });
       return errors;
     });
-    await waitFor(() => expect(result.current.shellErrors.map((row) => row.message)).toEqual([
-      "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
-    ]));
+    await waitFor(() =>
+      expect(result.current.shellErrors.map((row) => row.message)).toEqual([
+        "dohc ignored theme in .dohc/local/settings.local.json because it is not a setting dohc knows. The other settings apply.",
+      ]),
+    );
     expect(getWorkspaceSettings).toHaveBeenCalledTimes(2);
   });
 
@@ -238,7 +285,8 @@ describe("useSettingsFileNotices", () => {
     const broken: WorkspaceSettingsResult = {
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "recovered",
-      warning: "Workspace settings could not be read. dohc is using default settings. Fix /w/.dohc/local/settings.local.json. Or select Reset workspace in Advanced to replace it.",
+      warning:
+        "Workspace settings could not be read. dohc is using default settings. Fix /w/.dohc/local/settings.local.json. Or select Reset workspace in Advanced to replace it.",
     };
     const bridge = {
       getWorkspaceSettings: vi.fn(async (): Promise<WorkspaceSettingsResult> => broken),
@@ -270,27 +318,32 @@ describe("useSettingsFileNotices", () => {
     }
 
     act(() => result.current.runShellErrorAction(row("workspace-settings-file").id));
-    expect(bridge.openWorkspaceSettingsFile).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a" });
-    // Opening keeps the row: the file is still wrong until it is saved.
+    expect(bridge.openWorkspaceSettingsFile).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-a",
+    });
     expect(row("workspace-settings-file")).toBeDefined();
 
-    // A failure to open says why and what to do instead.
     act(() => result.current.runShellErrorAction(row("user-settings-file").id));
     await waitFor(() =>
       expect(result.current.shellErrors.map((error) => error.message)).toContain(
         "dohc could not open /s/dohc-settings.json. No app. Open the file in a text editor.",
-      ));
+      ),
+    );
 
-    // Try again on a file that still says the same thing brings its row back.
     act(() => result.current.retryShellError(row("user-settings-file").id));
     await waitFor(() => expect(bridge.reloadUserSettings).toHaveBeenCalledOnce());
     await waitFor(() => expect(row("user-settings-file")).toBeDefined());
 
-    // The person repairs the workspace file; Try again clears its row.
-    bridge.getWorkspaceSettings.mockResolvedValue({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "stored" });
+    bridge.getWorkspaceSettings.mockResolvedValue({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "stored",
+    });
     act(() => result.current.retryShellError(row("workspace-settings-file").id));
     await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2));
     await waitFor(() =>
-      expect(result.current.shellErrors.some((error) => error.kind === "workspace-settings-file")).toBe(false));
+      expect(
+        result.current.shellErrors.some((error) => error.kind === "workspace-settings-file"),
+      ).toBe(false),
+    );
   });
 });

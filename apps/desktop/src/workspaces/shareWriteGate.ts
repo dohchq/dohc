@@ -29,7 +29,6 @@ export interface ShareViewWriteScope {
   // The level the PINNED grant names, or null when the grant cannot be read
   // or the marker lost its identity.
   access: ShareAccess | null;
-  // The granter ended this share.
   ended: boolean;
 }
 
@@ -94,9 +93,7 @@ export function shareViewWriteScopeOf(
   const marker = isRecord(shareView) ? shareView : {};
   return {
     granterEmail: shareViewGranterEmail(marker),
-    access: shareViewIdentityIsIntact(marker)
-      ? readableShareLevel(marker.grantedSelector)
-      : null,
+    access: shareViewIdentityIsIntact(marker) ? readableShareLevel(marker.grantedSelector) : null,
     ended: marker.ended === true,
   };
 }

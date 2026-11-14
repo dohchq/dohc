@@ -1,7 +1,5 @@
 import { validateUserMaterializePath } from "@dohc/workspace-contracts/workspace-paths";
 
-// Long enough for any title, short enough to keep the path well inside
-// Windows' 260-character limit in a nested folder.
 const PAGE_NAME_LIMIT = 120;
 
 // A new page's file name comes from its title. Characters a file name cannot
@@ -14,7 +12,10 @@ export function pageFileStem(title: string, platform: string): string {
     .replace(/[\\/:*?"<>|\u0000-\u001f\u007f]/g, " ")
     .replace(/\s+/g, " ")
     .replace(/^[. ]+|[. ]+$/g, "");
-  const stem = Array.from(cleaned).slice(0, PAGE_NAME_LIMIT).join("").replace(/[. ]+$/, "");
+  const stem = Array.from(cleaned)
+    .slice(0, PAGE_NAME_LIMIT)
+    .join("")
+    .replace(/[. ]+$/, "");
   return stem && validateUserMaterializePath(`${stem}.md`, { platform }).ok ? stem : "Untitled";
 }
 
@@ -26,14 +27,22 @@ const PATH_BYTE_LIMIT = 1_024;
 // fits, and a cut that leaves no name this computer can write falls back to
 // Untitled, cut the same way. `occupied` is lowercase, because Windows and
 // macOS compare names without case.
-export function nextPagePath(folder: string, stem: string, occupied: ReadonlySet<string>, platform: string): string {
+export function nextPagePath(
+  folder: string,
+  stem: string,
+  occupied: ReadonlySet<string>,
+  platform: string,
+): string {
   const prefix = folder ? `${folder}/` : "";
   for (let index = 1; ; index += 1) {
     const ending = `${index === 1 ? "" : ` ${index}`}.md`;
     const bytes = PATH_BYTE_LIMIT - byteLength(prefix + ending);
     const name = [stem, "Untitled"]
       .map((candidate) => fittedStem(candidate, bytes))
-      .find((candidate) => candidate !== "" && validateUserMaterializePath(`${candidate}${ending}`, { platform }).ok);
+      .find(
+        (candidate) =>
+          candidate !== "" && validateUserMaterializePath(`${candidate}${ending}`, { platform }).ok,
+      );
     const path = `${prefix}${name ?? "Untitled"}${ending}`;
     if (!occupied.has(path.toLowerCase())) return path;
   }

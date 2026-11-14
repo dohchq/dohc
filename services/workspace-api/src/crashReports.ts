@@ -12,9 +12,6 @@ export const CRASH_REPORT_HEADER = "dohc crash report";
 // The desktop caps a report at 32,768 UTF-16 code units, which is at most
 // 96 KiB of UTF-8.
 export const CRASH_REPORT_MAX_BYTES = 96 * 1024;
-// Before a 413, the server reads and throws away the rest of an oversized
-// upload, until it has read this many bytes in all, made this many reads, or
-// spent this long. See tooLarge.
 export const CRASH_REPORT_DRAIN_MAX_BYTES = 1024 * 1024;
 export const CRASH_REPORT_DRAIN_MAX_READS = 1024;
 export const CRASH_REPORT_DRAIN_MAX_MS = 10_000;
@@ -42,7 +39,6 @@ export interface StoredCrashReport {
 export interface CrashReportStore {
   // False when storage already holds CRASH_REPORTS_STORED_MAX reports.
   insert(report: StoredCrashReport): Promise<boolean>;
-  // Deletes reports older than the retention period and returns the count.
   deleteExpired(): Promise<number>;
 }
 
@@ -134,7 +130,10 @@ export function createCrashReportIntake(deps: {
   const perClient = new Map<string, number>();
   let draining = 0;
 
-  async function drainRest(reader: ReadableStreamDefaultReader<Uint8Array>, total: number): Promise<void> {
+  async function drainRest(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    total: number,
+  ): Promise<void> {
     if (draining >= CRASH_REPORT_DRAINS_MAX) return;
     draining += 1;
     try {
@@ -153,9 +152,9 @@ export function createCrashReportIntake(deps: {
     }
   }
 
-  // Seconds until the oldest entry that blocks this client leaves the window.
   function retryAfter(now: number, client: string | null): string {
-    const oldest = client === null ? accepted[0] : accepted.find((entry) => entry.client === client);
+    const oldest =
+      client === null ? accepted[0] : accepted.find((entry) => entry.client === client);
     return String(Math.max(1, Math.ceil(((oldest?.atMs ?? now) + HOUR_MS - now) / 1000)));
   }
 
@@ -163,10 +162,14 @@ export function createCrashReportIntake(deps: {
     const now = nowMs();
     prune(now);
     if ((perClient.get(client) ?? 0) >= CRASH_REPORTS_PER_CLIENT_PER_HOUR) {
-      return refuse(429, "too many crash reports from this address", { "retry-after": retryAfter(now, client) });
+      return refuse(429, "too many crash reports from this address", {
+        "retry-after": retryAfter(now, client),
+      });
     }
     if (accepted.length >= CRASH_REPORTS_PER_HOUR) {
-      return refuse(429, "this server is taking no more crash reports this hour", { "retry-after": retryAfter(now, null) });
+      return refuse(429, "this server is taking no more crash reports this hour", {
+        "retry-after": retryAfter(now, null),
+      });
     }
     return null;
   }
@@ -174,7 +177,8 @@ export function createCrashReportIntake(deps: {
   return async (request) => {
     // The desktop posts from its main process, which sends no Origin. A
     // browser always does, so a web page cannot make its visitors post.
-    if (request.headers.get("origin") !== null) return refuse(403, "browsers cannot send crash reports");
+    if (request.headers.get("origin") !== null)
+      return refuse(403, "browsers cannot send crash reports");
     if (!isPlainText(request.headers.get("content-type"))) {
       return refuse(415, "send the report as text/plain; charset=utf-8");
     }
@@ -184,7 +188,8 @@ export function createCrashReportIntake(deps: {
     if (early) return early;
     const declared = Number(request.headers.get("content-length") ?? "0");
     if (declared > CRASH_REPORT_MAX_BYTES) {
-      if (declared <= CRASH_REPORT_DRAIN_MAX_BYTES && request.body) await drainRest(request.body.getReader(), 0);
+      if (declared <= CRASH_REPORT_DRAIN_MAX_BYTES && request.body)
+        await drainRest(request.body.getReader(), 0);
       return tooLarge();
     }
     const bytes = await readAtMost(request, CRASH_REPORT_MAX_BYTES, drainRest);
@@ -197,7 +202,10 @@ export function createCrashReportIntake(deps: {
     }
     // Postgres text cannot hold NUL, and a report never has control
     // characters other than tabs and line breaks.
-    if (!body.startsWith(CRASH_REPORT_HEADER) || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body)) {
+    if (
+      !body.startsWith(CRASH_REPORT_HEADER) ||
+      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(body)
+    ) {
       return refuse(400, "the report is not a dohc crash report");
     }
 
@@ -215,7 +223,11 @@ export function createCrashReportIntake(deps: {
   };
 }
 
-function refuse(status: number, error: string, headers?: Record<string, string>): CrashReportAnswer {
+function refuse(
+  status: number,
+  error: string,
+  headers?: Record<string, string>,
+): CrashReportAnswer {
   return { status, body: { ok: false, error }, ...(headers ? { headers } : {}) };
 }
 
@@ -232,7 +244,9 @@ function isPlainText(value: string | null): boolean {
   if (value === null) return false;
   const [type, ...parameters] = value.split(";").map((part) => part.trim().toLowerCase());
   if (type !== "text/plain") return false;
-  return parameters.every((parameter) => !parameter.startsWith("charset=") || parameter === "charset=utf-8");
+  return parameters.every(
+    (parameter) => !parameter.startsWith("charset=") || parameter === "charset=utf-8",
+  );
 }
 
 async function readAtMost(
@@ -248,15 +262,20 @@ async function readAtMost(
   return "too-large";
 }
 
-// Reads and throws away the rest of an upload until it ends, `total` reaches
-// CRASH_REPORT_DRAIN_MAX_BYTES, it has made CRASH_REPORT_DRAIN_MAX_READS
-// reads, or `maxMs` runs out.
-async function drain(reader: ReadableStreamDefaultReader<Uint8Array>, total: number, maxMs: number): Promise<void> {
+async function drain(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  total: number,
+  maxMs: number,
+): Promise<void> {
   // Releasing the lock rejects the read in progress. A race against one
   // promise that lasts the whole drain would keep every chunk until it ended.
   const timer = setTimeout(() => reader.releaseLock(), maxMs);
   try {
-    for (let reads = 0; total < CRASH_REPORT_DRAIN_MAX_BYTES && reads < CRASH_REPORT_DRAIN_MAX_READS; reads += 1) {
+    for (
+      let reads = 0;
+      total < CRASH_REPORT_DRAIN_MAX_BYTES && reads < CRASH_REPORT_DRAIN_MAX_READS;
+      reads += 1
+    ) {
       const { done, value } = await reader.read();
       if (done) return;
       total += value.byteLength;
@@ -284,8 +303,16 @@ export function clientKey(address: string | null): string {
   const [head = "", tail] = address.split("::");
   const left = head ? head.split(":") : [];
   const right = tail ? tail.split(":") : [];
-  const groups = tail === undefined
-    ? left
-    : [...left, ...Array<string>(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
-  return `${groups.slice(0, 3).map((group) => group.padStart(4, "0")).join(":")}::/48`;
+  const groups =
+    tail === undefined
+      ? left
+      : [
+          ...left,
+          ...Array<string>(Math.max(0, 8 - left.length - right.length)).fill("0"),
+          ...right,
+        ];
+  return `${groups
+    .slice(0, 3)
+    .map((group) => group.padStart(4, "0"))
+    .join(":")}::/48`;
 }

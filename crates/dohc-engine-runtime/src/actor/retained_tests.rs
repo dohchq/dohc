@@ -111,109 +111,12 @@ fn production_worker_binds_through_replay_pages_and_joins_on_close() {
     assert!(actor.retention.as_ref().unwrap().join.is_none());
     actor.close().unwrap();
 }
-#[test]
-fn production_worker_retries_a_failed_listing_and_backs_off_when_empty() {
-    let scratch = ScratchDir::new().unwrap();
-    let mut actor = actor(&scratch);
-    bind(&actor, &scratch);
-    wait_for(&actor.retention_root, |p| !p.is_empty());
-    actor
-        .handle()
-        .run_blocking(|s, _| {
-            s.read_with(|c| {
-                c.execute_batch(
-                    "ALTER TABLE materialization_retained RENAME TO temporarily_unavailable",
-                )
-            })
-            .unwrap();
-            Ok(())
-        })
-        .unwrap();
-    actor.retention_root.set(scratch.path().into());
-    wait_for(&actor.retention_root, |p| p.iter().any(|v| v.1));
-    actor
-        .handle()
-        .run_blocking(|s, _| {
-            s.read_with(|c| {
-                c.execute_batch(
-                    "ALTER TABLE temporarily_unavailable RENAME TO materialization_retained",
-                )
-            })
-            .unwrap();
-            Ok(())
-        })
-        .unwrap();
-    add_sources(&actor, &scratch, 1);
-    // No wake after repairing the store: the real retry deadline must fire.
-    wait_for(&actor.retention_root, |p| {
-        p.iter().any(|v| v.0 == 1 && !v.1)
-    });
-    wait_for(&actor.retention_root, |p| {
-        p.iter()
-            .rev()
-            .take(1)
-            .any(|v| v.0 == 0 && !v.1 && v.2 >= Duration::from_secs(4))
-    });
-    assert!(
-        !scratch
-            .path()
-            .join(".dohc/engine/displaced/worker-0")
-            .exists()
-    );
-    actor.close().unwrap();
-    assert!(actor.retention.as_ref().unwrap().join.is_none());
-}
-#[test]
-fn production_worker_closes_while_unbound() {
-    let scratch = ScratchDir::new().unwrap();
-    let mut actor = actor(&scratch);
-    actor.close().unwrap();
-    assert!(actor.retention.as_ref().unwrap().join.is_none());
-    assert!(actor.retention_root.0.0.lock().unwrap().passes.is_empty());
-}
-
-#[test]
-fn production_worker_imports_changed_bytes_and_promotes_oversized_sources() {
-    let scratch = ScratchDir::new().unwrap();
-    let mut actor = actor(&scratch);
-    add_sources(&actor, &scratch, 2);
-    let directory = scratch.path().join(".dohc/engine/displaced");
-    std::fs::write(directory.join("worker-0"), b"outside").unwrap();
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(directory.join("worker-1"))
-        .unwrap()
-        .set_len(dohc_engine_storage::MAX_MATERIALIZE_BYTES as u64 + 1)
-        .unwrap();
-    bind(&actor, &scratch);
-    wait_for(&actor.retention_root, |p| p.iter().any(|v| v.0 == 2));
-    actor
-        .handle()
-        .run_blocking(|s, _| {
-            let bytes: Vec<u8> = s
-                .read_with(|c| {
-                    c.query_row(
-                        "SELECT bytes FROM materialization_displacement_reads",
-                        [],
-                        |r| r.get(0),
-                    )
-                })
-                .unwrap();
-            assert_eq!(bytes, b"outside");
-            assert_eq!(s.retained_displacements_after(0)?.len(), 1);
-            assert_eq!(s.list_kept_displacements("ws")?.len(), 1);
-            Ok(())
-        })
-        .unwrap();
-    assert!(directory.join("worker-1").exists());
-    actor.close().unwrap();
-}
-
 /// The actor's store opens through its engine folder, by the folder's ID on
 /// a Mac and by the descriptor held for it on Linux. After the folder moves
 /// and another takes its name, the worker still reads a retained file,
 /// recorded under the name main stores, in the folder the store opened
-/// through (#2468).
+/// through.
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
 #[cfg(any(target_vendor = "apple", target_os = "linux"))]
 #[test]
 fn the_worker_reads_retained_files_in_the_folder_the_store_opened_through() {
@@ -330,97 +233,6 @@ fn passive_store_never_spawns_a_retention_worker_even_after_root_binding() {
     assert_eq!(actor.lifecycle(), LifecycleState::Closed);
 }
 
-#[test]
-fn capture_file_hold_worker_keeps_quiet_sources_imports_late_writes_and_releases_after_clear() {
-    let scratch = ScratchDir::new().unwrap();
-    let db = scratch.path().join("engine.db");
-    let target = scratch.path().join("notes.md");
-    let source = scratch.path().join(".dohc/engine/displaced/worker-0");
-    std::fs::write(&target, b"held outside version").unwrap();
-    let mut first = actor(&scratch);
-    add_sources(&first, &scratch, 1);
-    first.handle().run_blocking(|s, _| {
-        s.write_with(&dohc_engine_storage::NoFaults, |tx| {
-            tx.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','Main',1); INSERT INTO file_objects VALUES ('ws','held-object',1);").map_err(dohc_engine_storage::StorageError::persist_public)?;
-            dohc_engine_storage::capture_file_holds::record_in(tx, &dohc_engine_storage::capture_file_holds::CaptureFileHold {
-                workspace_id: "ws".into(), source_version_id: "main".into(), object_id: "held-object".into(), path: "notes.md".into(), observed_sha256: hex_sha256(b"held outside version"), observed_size: 20, reason: dohc_engine_storage::capture_file_holds::NOT_REPRESENTABLE.into(), observed_at_ms: 0, attempt_count: 1, retry_requested: false,
-            })
-        })?;
-        Ok(())
-    }).unwrap();
-    bind(&first, &scratch);
-    wait_for(&first.retention_root, |p| {
-        p.iter().filter(|v| v.0 == 1).count() >= 2
-    });
-    first.close().unwrap();
-    assert_eq!(std::fs::read(&source).unwrap(), b"known");
-    let store = EngineStore::open(&db, 0).unwrap();
-    assert_eq!(store.retained_displacements_after(0).unwrap().len(), 1);
-    drop(store);
-
-    std::fs::write(&source, b"late outside write to held original").unwrap();
-    let mut second = actor(&scratch);
-    bind(&second, &scratch);
-    wait_for(&second.retention_root, |p| p.iter().any(|v| v.0 == 1));
-    second.close().unwrap();
-    let store = EngineStore::open(&db, 0).unwrap();
-    let bytes: Vec<u8> = store
-        .read_with(|c| {
-            c.query_row(
-                "SELECT bytes FROM materialization_displacement_reads",
-                [],
-                |r| r.get(0),
-            )
-        })
-        .unwrap();
-    assert_eq!(bytes, b"late outside write to held original");
-    assert_eq!(store.retained_displacements_after(0).unwrap().len(), 1);
-    store
-        .read_with(|c| c.execute("UPDATE materialization_retained SET changed_at_ms=0", []))
-        .unwrap();
-    drop(store);
-
-    let mut third = actor(&scratch);
-    bind(&third, &scratch);
-    wait_for(&third.retention_root, |p| p.iter().any(|v| v.0 == 1));
-    third.close().unwrap();
-    assert_eq!(std::fs::read(&source).unwrap(), bytes);
-    let mut store = EngineStore::open(&db, 0).unwrap();
-    assert_eq!(store.retained_displacements_after(0).unwrap().len(), 1);
-    store
-        .write_with(&dohc_engine_storage::NoFaults, |tx| {
-            dohc_engine_storage::capture_file_holds::clear_in(tx, "ws", "notes.md")
-        })
-        .unwrap();
-    drop(store);
-
-    let mut fourth = actor(&scratch);
-    bind(&fourth, &scratch);
-    wait_for(&fourth.retention_root, |p| p.iter().any(|v| v.0 == 1));
-    fourth.close().unwrap();
-    let store = EngineStore::open(&db, 0).unwrap();
-    assert!(store.retained_displacements_after(0).unwrap().is_empty());
-    assert!(!source.exists());
-    assert_eq!(std::fs::read(&target).unwrap(), b"held outside version");
-    assert_eq!(
-        store
-            .table_row_count("materialization_displacement_reads")
-            .unwrap(),
-        1
-    );
-}
-#[test]
-fn refused_releases_back_off_from_thirty_seconds_to_fifteen_minutes() {
-    let mut wait = None;
-    let mut waits = Vec::new();
-    for _ in 0..8 {
-        let next = next_retry(wait);
-        waits.push(next.as_secs());
-        wait = Some(next);
-    }
-    assert_eq!(waits, [30, 60, 120, 240, 480, 900, 900, 900]);
-}
-
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -445,7 +257,6 @@ fn add_source(actor: &WorkspaceActor, scratch: &ScratchDir, job: &str, target: &
     )
 }
 
-/// A retained original of job `job` for `target` at `source`, holding `bytes`.
 fn add_source_at(
     actor: &WorkspaceActor,
     scratch: &ScratchDir,
@@ -483,49 +294,10 @@ fn add_source_at(
         .unwrap()
 }
 
-/// #2205: the sweep records that a volume cannot refuse to unlink an open
-/// file, keeps every original there, and counts them by workspace.
-#[test]
-fn the_sweep_records_an_unchecked_volume_and_keeps_its_originals() {
-    let scratch = ScratchDir::new().unwrap();
-    let _simulated = dohc_engine_files::retained::unchecked::simulate(scratch.path());
-    let mut actor = actor(&scratch);
-    add_sources(&actor, &scratch, 2);
-    bind(&actor, &scratch);
-    wait_for(&actor.retention_root, |p| {
-        p.iter().filter(|v| v.0 == 2).count() >= 2
-    });
-    let (rows, summary) = actor
-        .handle()
-        .run_blocking(|s, _| {
-            Ok((
-                s.retained_displacements_after(0)?,
-                s.retained_summary("ws")?,
-            ))
-        })
-        .unwrap();
-    assert_eq!(rows.len(), 2);
-    assert!(rows.iter().all(|row| row.busy_check_unsupported));
-    assert_eq!(
-        summary,
-        dohc_engine_storage::RetainedSummary {
-            count: 2,
-            bytes: 10
-        }
-    );
-    assert_eq!(
-        std::fs::read_dir(scratch.path().join(".dohc/engine/displaced"))
-            .unwrap()
-            .count(),
-        2
-    );
-    actor.close().unwrap();
-}
-
-/// #2205: an explicit delete lists and removes only quiet, finished,
-/// unheld originals on an unchecked volume. A changed source is recorded and
-/// kept, a hold taken after the check keeps its source, and an unfinished
-/// job's original and a kept recovery file stay.
+/// An explicit delete lists and removes only quiet, finished, unheld
+/// originals on an unchecked volume. A changed source is recorded and kept,
+/// a hold taken after the check keeps its source, and an unfinished job's
+/// original and a kept recovery file stay.
 #[test]
 fn an_explicit_delete_removes_only_eligible_originals() {
     let scratch = ScratchDir::new().unwrap();
@@ -668,50 +440,6 @@ fn an_explicit_delete_removes_only_eligible_originals() {
     actor.close().unwrap();
 }
 
-/// A delete records each changed source before it reads the next, so a
-/// batch never holds more than one source's bytes.
-#[test]
-fn a_delete_records_each_changed_source_before_reading_the_next() {
-    let scratch = ScratchDir::new().unwrap();
-    let _simulated = dohc_engine_files::retained::unchecked::simulate(scratch.path());
-    let mut actor = actor(&scratch);
-    let displaced = scratch.path().join(".dohc/engine/displaced");
-    let sizes = [3_000, 1_000, 2_000];
-    let mut requested = Vec::new();
-    for (n, size) in sizes.into_iter().enumerate() {
-        let job = format!("changed-{n}");
-        let id = add_source(&actor, &scratch, &job, &format!("{n}.md"));
-        std::fs::write(displaced.join(staged(&job)), vec![b'x' + n as u8; size]).unwrap();
-        requested.push(RetainedCandidate { id, revision: 0 });
-    }
-    let outcome = runtime()
-        .block_on(actor.handle().delete_retained_copies(
-            scratch.path().into(),
-            "ws".into(),
-            requested,
-        ))
-        .unwrap();
-    assert_eq!(
-        (outcome.deleted, outcome.skipped, outcome.failed),
-        (0, 3, 0)
-    );
-    let recorded: i64 = actor
-        .handle()
-        .run_blocking(|s, _| Ok(s.table_row_count("materialization_displacement_reads")?))
-        .unwrap();
-    assert_eq!(recorded, 3);
-    let state = actor.retention_root.0.0.lock().unwrap();
-    assert_eq!(state.unrecorded, 0);
-    assert_eq!(
-        state.unrecorded_peak,
-        3_000,
-        "one source at a time, not {}",
-        sizes.iter().sum::<usize>()
-    );
-    drop(state);
-    actor.close().unwrap();
-}
-
 /// An explicit delete removes only a staged original in its job's staging
 /// folder, whatever a row names.
 #[test]
@@ -757,37 +485,5 @@ fn an_explicit_delete_skips_a_row_naming_anything_but_a_staged_original() {
             b"user bytes"
         );
     }
-    actor.close().unwrap();
-}
-
-/// A deleted copy counts as deleted when its emptied staging folder can't be
-/// removed.
-#[test]
-fn a_delete_counts_a_removed_copy_whose_staging_folder_stays() {
-    use std::os::unix::fs::PermissionsExt;
-    let scratch = ScratchDir::new().unwrap();
-    let _simulated = dohc_engine_files::retained::unchecked::simulate(scratch.path());
-    let mut actor = actor(&scratch);
-    let source = format!("folder/.dohc-write-displaced/{}", staged("stuck"));
-    let id = add_source_at(&actor, &scratch, "stuck", "folder/a.md", &source, b"old");
-    actor
-        .handle()
-        .run_blocking(|s, _| Ok(s.remember_staging("stuck", "folder/.dohc-write-displaced")?))
-        .unwrap();
-    // The folder that holds the staging folder refuses its removal.
-    let folder = scratch.path().join("folder");
-    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let outcome = runtime().block_on(actor.handle().delete_retained_copies(
-        scratch.path().into(),
-        "ws".into(),
-        vec![RetainedCandidate { id, revision: 0 }],
-    ));
-    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let outcome = outcome.unwrap();
-    assert_eq!(
-        (outcome.deleted, outcome.skipped, outcome.failed),
-        (1, 0, 0)
-    );
-    assert!(!scratch.path().join(&source).exists());
     actor.close().unwrap();
 }

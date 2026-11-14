@@ -1,16 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import {
-  chmod,
-  lstat,
-  mkdtemp,
-  mkdir,
-  readdir,
-  rm,
-  truncate,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readdir, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -22,25 +13,29 @@ import {
 
 // The gate hands its root down from this user's private parent. Every account
 // shares /tmp, so a parent another account owns or can enter is refused.
-test("the gate's scratch parent is private to this user", { skip: process.platform === "win32" }, async () => {
-  const base = await mkdtemp(join(tmpdir(), "dohc-scratch-parent-"));
-  try {
-    const uid = process.getuid();
-    const parent = testScratchParent({ base });
-    assert.equal(parent, join(base, `dohc-scratch-${uid}`));
-    assert.equal((await lstat(parent)).mode & 0o777, 0o700);
-    assert.equal(testScratchParent({ base }), parent, "an existing private parent is reused");
+test(
+  "the gate's scratch parent is private to this user",
+  { skip: process.platform === "win32" },
+  async () => {
+    const base = await mkdtemp(join(tmpdir(), "dohc-scratch-parent-"));
+    try {
+      const uid = process.getuid();
+      const parent = testScratchParent({ base });
+      assert.equal(parent, join(base, `dohc-scratch-${uid}`));
+      assert.equal((await lstat(parent)).mode & 0o777, 0o700);
+      assert.equal(testScratchParent({ base }), parent, "an existing private parent is reused");
 
-    await chmod(parent, 0o755);
-    assert.throws(() => testScratchParent({ base }), /lets other accounts in/);
+      await chmod(parent, 0o755);
+      assert.throws(() => testScratchParent({ base }), /lets other accounts in/);
 
-    // A parent named for another user, but owned by this one.
-    await mkdir(join(base, `dohc-scratch-${uid + 1}`), { mode: 0o700 });
-    assert.throws(() => testScratchParent({ base, uid: uid + 1 }), /belongs to user/);
-  } finally {
-    await rm(base, { recursive: true, force: true });
-  }
-});
+      // A parent named for another user, but owned by this one.
+      await mkdir(join(base, `dohc-scratch-${uid + 1}`), { mode: 0o700 });
+      assert.throws(() => testScratchParent({ base, uid: uid + 1 }), /belongs to user/);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  },
+);
 
 // The payload is a length, not content: `inspectScratchRun` reads `lstat().size`
 // and never opens a file. `truncate` sets that length without writing the
@@ -155,14 +150,6 @@ test("a run root without the sentinel fails instead of reporting clean", async (
   }
 });
 
-// A test that removes and recreates the handed-down root loses the sentinel and
-// can still leave a tree. The row's caller generates this root per run and makes
-// it moments before the tests, so it is the caller's to reclaim — and this is
-// the last point in the gate that can. An earlier version of this file asserted
-// the opposite, on the reasoning that a row should not delete a tree it does not
-// own. That reasoning belonged to the version where the row re-derived the path
-// and could land on an unrelated directory; the root is handed down now, so the
-// only tree this can reach is the one the caller made.
 test("a run root without the sentinel is still reclaimed, tree and all", async () => {
   const parent = await mkdtemp(join(tmpdir(), "dohc-scratch-report-test-"));
   const runRoot = join(parent, "run");
@@ -185,10 +172,6 @@ test("a run root without the sentinel is still reclaimed, tree and all", async (
   }
 });
 
-// One directory holding a thousand empty files is 1 entry and 0 bytes, and both
-// of the row's limits are blind to it. The row still passes — there is no
-// measured healthy descendant count to reject against — but it must not report
-// the shape it cannot see as nothing.
 test("one directory full of empty files is counted, not reported as nothing", async () => {
   const parent = await mkdtemp(join(tmpdir(), "dohc-scratch-report-test-"));
   const runRoot = join(parent, "run");
@@ -237,9 +220,6 @@ async function denyListing(directory) {
   };
 }
 
-// The reporter is the gate's last reclamation point. A measurement that throws
-// is exactly when something is wrong, and it used to take the removal with it:
-// the row failed and the whole run root stayed on disk.
 test("a child that cannot be read still fails the row and still reclaims the root", async (t) => {
   const parent = await mkdtemp(join(tmpdir(), "dohc-scratch-report-test-"));
   const runRoot = join(parent, "run");
@@ -266,8 +246,6 @@ test("a child that cannot be read still fails the row and still reclaims the roo
 
     assert.equal(report.status, "FAIL", "a child that cannot be read is a leak");
     assert.match(report.reason, /scratch measurement failed/);
-    // Both facts, never one: what could not be measured, and whether the tree
-    // is still on disk.
     assert.match(report.reason, /run root reclaimed/);
     assert.equal(
       existsSync(runRoot),
@@ -280,8 +258,6 @@ test("a child that cannot be read still fails the row and still reclaims the roo
   }
 });
 
-// #605 was 196 GB, not 191,851 directories. A row bounding only the count would
-// pass one workspace that grew without limit — the same outage, different shape.
 test("a few huge directories fail on bytes even though the count is small", async () => {
   const parent = await mkdtemp(join(tmpdir(), "dohc-scratch-report-test-"));
   const runRoot = join(parent, "run");

@@ -28,12 +28,7 @@ interface MomentDiffSides {
 export function momentDiffSides(
   moment: Pick<
     EngineMomentDetailRecord,
-    | "protected"
-    | "beforeText"
-    | "afterText"
-    | "beforeBinary"
-    | "afterBinary"
-    | "byteLength"
+    "protected" | "beforeText" | "afterText" | "beforeBinary" | "afterBinary" | "byteLength"
   >,
 ): MomentDiffSides {
   const isProtected = moment.protected === true;
@@ -52,10 +47,7 @@ export function momentDiffSides(
       before === undefined &&
       after === undefined,
     byteLength:
-      moment.afterBinary?.byteLength ??
-      moment.beforeBinary?.byteLength ??
-      moment.byteLength ??
-      0,
+      moment.afterBinary?.byteLength ?? moment.beforeBinary?.byteLength ?? moment.byteLength ?? 0,
     createdFile: !isProtected && moment.beforeText === null && !beforeIsBinary,
   };
 }

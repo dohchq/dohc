@@ -1,4 +1,4 @@
-//! FilesActor traces (the CAL-3 tokio-loop calibration signal): scan/reconcile
+//! FilesActor traces: scan/reconcile
 //! round-trip through the async command loop while the blocking scan/hash work
 //! stays on the dedicated worker thread; the injected watcher-overflow signal
 //! driving a dirty-generation reconcile; a deadline that trips cleanly; and
@@ -95,7 +95,6 @@ async fn actor_reconcile_advances_generation_and_reports_stats() {
     assert_eq!(stats.generation.0, 1);
     assert!(!stats.dirty);
     assert_eq!(stats.tracked, 1);
-    // The bound holds through the actor too.
     assert!(stats.max_hash_concurrency <= ScanBounds::default().hash_workers());
 }
 
@@ -108,7 +107,6 @@ async fn injected_overflow_marks_dirty_then_reconcile_converges() {
         .expect("spawn");
     let handle = actor.handle();
 
-    // Establish a converged baseline.
     let baseline = handle
         .reconcile(CancellationToken::new())
         .await
@@ -116,7 +114,6 @@ async fn injected_overflow_marks_dirty_then_reconcile_converges() {
     acknowledge(&handle, &baseline).await;
     assert!(!handle.stats().await.expect("stats").dirty);
 
-    // Inject a watcher-overflow signal (the stubbed event source) after an edit.
     ws.write("a.md", b"two\n");
     handle.notify_overflow();
     // The signal is async bookkeeping; observe it via stats (ordered behind it
@@ -135,7 +132,6 @@ async fn injected_overflow_marks_dirty_then_reconcile_converges() {
     assert!(plan.prepared_from_dirty);
     assert!(!handle.stats().await.expect("stats").dirty);
 
-    // Converged: a second dirty-driven reconcile is a no-op.
     assert!(matches!(
         handle
             .reconcile_if_dirty(CancellationToken::new())
@@ -163,8 +159,6 @@ async fn overflow_between_prepare_and_ack_is_not_cleared_by_the_older_receipt() 
     };
     let result = apply_reconcile_plan(&plan, &mut AcceptAll, &NoFaults);
 
-    // A real watcher callback can land while the downstream sink is applying.
-    // The ack command folds this newer epoch first and must not clear it.
     handle.notify_overflow();
     handle
         .acknowledge_capture(plan, result)
@@ -231,7 +225,6 @@ async fn expired_deadline_leaves_work_resumable() {
     assert_eq!(err.code(), "deadline-exceeded");
     assert!(token.is_cancelled());
 
-    // An expired deadline leaves the work unchanged and dirty; the retry completes.
     let stats = handle.stats().await.expect("stats");
     assert_eq!(stats.generation.0, 0, "no commit on an expired deadline");
     assert!(stats.dirty);
@@ -272,7 +265,6 @@ async fn close_is_deterministic_and_idempotent() {
     .await
     .expect("join close");
 
-    // The handle now observes the actor gone.
     assert!(handle.scan(CancellationToken::new()).await.is_err());
     assert_eq!(handle.lifecycle(), LifecycleState::Closed);
 }

@@ -1,5 +1,10 @@
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
-import { datasetColumnFields, type DatasetColumnField, type DatasetDefinition, type DatasetTable } from "@dohc/security-contract/dataset";
+import {
+  datasetColumnFields,
+  type DatasetColumnField,
+  type DatasetDefinition,
+  type DatasetTable,
+} from "@dohc/security-contract/dataset";
 import { losslessDatasetNumber } from "@dohc/security-contract/dataset-conversion";
 
 // What one dataset commit changed, record by record, for automation triggers.
@@ -66,7 +71,11 @@ export interface DatasetChangeFact {
 
 const TABLE_HEADER = 0x54;
 const PATCHSET_HEADER = 0x50;
-const OPERATIONS = new Map<number, ChangesetRow["operation"]>([[18, "insert"], [23, "update"], [9, "delete"]]);
+const OPERATIONS = new Map<number, ChangesetRow["operation"]>([
+  [18, "insert"],
+  [23, "update"],
+  [9, "delete"],
+]);
 // SQLite's own ceiling on columns in a table (SQLITE_MAX_COLUMN).
 const MAX_COLUMNS = 32_767;
 const VERSION_COLUMN = "_record_version";
@@ -121,7 +130,8 @@ function text(bytes: Uint8Array, what: string): string {
 }
 
 function safe(value: bigint): number {
-  if (value > BigInt(Number.MAX_SAFE_INTEGER)) fail("The saved change holds a length it cannot have.");
+  if (value > BigInt(Number.MAX_SAFE_INTEGER))
+    fail("The saved change holds a length it cannot have.");
   return Number(value);
 }
 
@@ -147,7 +157,11 @@ function readValue(reader: Reader): ChangesetValue | undefined {
   }
 }
 
-function readRecord(reader: Reader, columns: number, defined: boolean): Array<ChangesetValue | undefined> {
+function readRecord(
+  reader: Reader,
+  columns: number,
+  defined: boolean,
+): Array<ChangesetValue | undefined> {
   const values: Array<ChangesetValue | undefined> = [];
   for (let column = 0; column < columns; column += 1) {
     const value = readValue(reader);
@@ -165,7 +179,8 @@ export function* decodeChangeset(bytes: Uint8Array): Generator<ChangesetRow> {
     if (header === PATCHSET_HEADER) fail("The saved change has the wrong format.");
     if (header !== TABLE_HEADER) fail("The saved change does not name its table.");
     const columns = reader.varint();
-    if (columns < 1 || columns > MAX_COLUMNS) fail("The saved change names a table with an impossible field count.");
+    if (columns < 1 || columns > MAX_COLUMNS)
+      fail("The saved change names a table with an impossible field count.");
     const primaryKey = [...reader.take(columns)].map((flag) => flag !== 0);
     if (!primaryKey.includes(true)) fail("The saved change names a table without a primary key.");
     const end = reader.bytes.indexOf(0, reader.offset);
@@ -174,7 +189,9 @@ export function* decodeChangeset(bytes: Uint8Array): Generator<ChangesetRow> {
     reader.byte();
     if (table.length === 0) fail("The saved change names a table without a name.");
     // A session never writes a table without a change to it.
-    const nextHeader = () => reader.bytes[reader.offset] === TABLE_HEADER || reader.bytes[reader.offset] === PATCHSET_HEADER;
+    const nextHeader = () =>
+      reader.bytes[reader.offset] === TABLE_HEADER ||
+      reader.bytes[reader.offset] === PATCHSET_HEADER;
     if (reader.done || nextHeader()) fail("The saved change names a table without changes.");
     while (!reader.done && !nextHeader()) {
       const operation = OPERATIONS.get(reader.byte());
@@ -182,7 +199,8 @@ export function* decodeChangeset(bytes: Uint8Array): Generator<ChangesetRow> {
       const indirect = reader.byte();
       if (indirect > 1) fail("The saved change holds an unreadable edit.");
       const old = operation === "insert" ? [] : readRecord(reader, columns, operation === "delete");
-      const next = operation === "delete" ? [] : readRecord(reader, columns, operation === "insert");
+      const next =
+        operation === "delete" ? [] : readRecord(reader, columns, operation === "insert");
       if (operation === "update") checkUpdate(primaryKey, old, next);
       yield { table, operation, indirect: indirect === 1, primaryKey, old, new: next };
     }
@@ -216,24 +234,32 @@ function columnIndex(columns: readonly string[], name: string): number {
   return columns.findIndex((column) => column.toLowerCase() === lower);
 }
 
-// Maps a changed table's columns, in the order the worker reported them, to
-// the approved definition's fields. The worker reads the order from the
-// database, because a migration can reorder columns. A record's id is its
-// approved primary key, so the changeset must key the table by that column
-// alone: another key would name other records, and a composite key could
-// fold several records into one id.
-function tableMap(definition: DatasetDefinition, row: ChangesetRow, columns: readonly string[] | undefined): TableMap {
+function tableMap(
+  definition: DatasetDefinition,
+  row: ChangesetRow,
+  columns: readonly string[] | undefined,
+): TableMap {
   const { table } = row;
-  const approved = definition.tables.find((candidate) => candidate.sqlName.toLowerCase() === table.toLowerCase());
-  if (!approved) fail(`The saved change edits ${table}, which the Collection's approved rules do not have.`);
-  if (!Array.isArray(columns) || columns.length !== row.primaryKey.length ||
+  const approved = definition.tables.find(
+    (candidate) => candidate.sqlName.toLowerCase() === table.toLowerCase(),
+  );
+  if (!approved)
+    fail(`The saved change edits ${table}, which the Collection's approved rules do not have.`);
+  if (
+    !Array.isArray(columns) ||
+    columns.length !== row.primaryKey.length ||
     columns.some((column) => typeof column !== "string" || column.length === 0) ||
-    new Set(columns.map((column) => column.toLowerCase())).size !== columns.length) {
+    new Set(columns.map((column) => column.toLowerCase())).size !== columns.length
+  ) {
     fail(`The fields reported for ${table} do not match its changes.`);
   }
   const primaryKey = columnIndex(columns, approved.primaryKey);
-  const fields = datasetColumnFields(approved).map((field) => ({ field, column: columnIndex(columns, field.sqlColumn) }));
-  if (primaryKey < 0 || fields.some(({ column }) => column < 0)) fail(`The fields reported for ${table} lack an approved field.`);
+  const fields = datasetColumnFields(approved).map((field) => ({
+    field,
+    column: columnIndex(columns, field.sqlColumn),
+  }));
+  if (primaryKey < 0 || fields.some(({ column }) => column < 0))
+    fail(`The fields reported for ${table} lack an approved field.`);
   const version = columnIndex(columns, VERSION_COLUMN);
   const map = { table: approved, primaryKey, version: version < 0 ? null : version, fields };
   checkKey(map, row);
@@ -242,7 +268,9 @@ function tableMap(definition: DatasetDefinition, row: ChangesetRow, columns: rea
 
 function checkKey(map: TableMap, row: ChangesetRow): void {
   if (!row.primaryKey.every((key, column) => key === (column === map.primaryKey))) {
-    fail(`The saved change finds records in ${row.table} by something other than its approved primary key, ${map.table.primaryKey}.`);
+    fail(
+      `The saved change finds records in ${row.table} by something other than its approved primary key, ${map.table.primaryKey}.`,
+    );
   }
 }
 
@@ -253,7 +281,11 @@ function jsonArray(value: string, name: string): AppBackendJson[] | null {
   let inexact = false;
   type Reviver = (key: string, parsed: unknown, context?: { source?: string }) => unknown;
   const reviver: Reviver = (_key, parsed, context) => {
-    if (typeof parsed === "number" && (context?.source === undefined || losslessDatasetNumber(context.source) === null)) inexact = true;
+    if (
+      typeof parsed === "number" &&
+      (context?.source === undefined || losslessDatasetNumber(context.source) === null)
+    )
+      inexact = true;
     return parsed;
   };
   let parsed: unknown;
@@ -279,7 +311,8 @@ function fieldValue(field: DatasetColumnField, value: ChangesetValue): AppBacken
   if (value === null) return null;
   if (value instanceof Uint8Array) fail(`${field.name} holds bytes, which no field type can hold.`);
   const number = typeof value === "bigint" ? integer(value, field.name) : value;
-  if (typeof number === "number" && !Number.isFinite(number)) fail(`${field.name} holds a number dohc cannot read.`);
+  if (typeof number === "number" && !Number.isFinite(number))
+    fail(`${field.name} holds a number dohc cannot read.`);
   if (field.type === "checkbox" && (number === 0 || number === 1)) return number === 1;
   if ((field.type === "multi-select" || field.relation?.many) && typeof number === "string") {
     return jsonArray(number, field.name) ?? number;
@@ -325,7 +358,11 @@ export function* datasetChangeFacts(input: {
   for (const row of decodeChangeset(input.changeset)) {
     let map = maps.get(row.table);
     if (!map) {
-      map = tableMap(input.definition, row, Object.hasOwn(input.columns, row.table) ? input.columns[row.table] : undefined);
+      map = tableMap(
+        input.definition,
+        row,
+        Object.hasOwn(input.columns, row.table) ? input.columns[row.table] : undefined,
+      );
       maps.set(row.table, map);
     } else {
       checkKey(map, row);
@@ -340,14 +377,26 @@ export function* datasetChangeFacts(input: {
         version: version(map, values[map.version ?? -1]),
         fields: map.fields.map(({ field, column }) => {
           const value = fieldValue(field, values[column]!);
-          return { fieldId: field.fieldId, previous: row.operation === "insert" ? null : value, next: row.operation === "insert" ? value : null };
+          return {
+            fieldId: field.fieldId,
+            previous: row.operation === "insert" ? null : value,
+            next: row.operation === "insert" ? value : null,
+          };
         }),
       };
       continue;
     }
     const fields = map.fields.flatMap(({ field, column }) => {
       const next = row.new[column];
-      return next === undefined ? [] : [{ fieldId: field.fieldId, previous: fieldValue(field, row.old[column]!), next: fieldValue(field, next) }];
+      return next === undefined
+        ? []
+        : [
+            {
+              fieldId: field.fieldId,
+              previous: fieldValue(field, row.old[column]!),
+              next: fieldValue(field, next),
+            },
+          ];
     });
     if (fields.length === 0) continue;
     yield {

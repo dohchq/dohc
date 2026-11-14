@@ -694,7 +694,6 @@ impl Integration {
         })
     }
 
-    /// How many ranges of clocks it deletes.
     fn deleted_ranges(&self) -> u64 {
         self.deletes
             .iter()
@@ -720,8 +719,6 @@ impl Integration {
     }
 }
 
-/// Each client's ranges of clocks, sorted by where each starts, none
-/// overlapping or touching another.
 #[derive(Default)]
 struct Deletes(HashMap<yrs::ClientID, BTreeMap<u32, u32>>);
 
@@ -734,7 +731,6 @@ impl Deletes {
         Ok(deleted)
     }
 
-    /// The ranges `state` keeps pending until their items arrive.
     fn pending(state: &Ydoc) -> Self {
         let mut pending = Self::default();
         if let Some(set) = state.pending_delete_set() {
@@ -1304,7 +1300,7 @@ mod tests {
         );
     }
 
-    /// Sol's r2a finding 2: A waits for B, and B integrates both, while C
+    /// A waits for B, and B integrates both, while C
     /// stays pending on a dependency nothing supplies. A and B count as
     /// merged, however long C keeps the merge pending, and C has its reason.
     /// The same holds for a second identity naming A's bytes.
@@ -1330,7 +1326,7 @@ mod tests {
         );
         assert_eq!(accounted.preserved, None);
 
-        // Sol's r2c-3c-11 finding 2: B carries what A waits for together with
+        // B carries what A waits for together with
         // C, so B stays partly held while A is wholly held, and A counts.
         let carried = crate::merge_updates(&[first.clone(), orphan.clone()]).unwrap();
         let both = outbox(2, &carried);
@@ -1368,7 +1364,7 @@ mod tests {
         });
     }
 
-    /// Opus's r2c-3c-12 finding 3: an application can integrate what earlier
+    /// An application can integrate what earlier
     /// work waits on and still fail. A parked update names as its parent the
     /// first edit's text, which is no type: applying the first edit
     /// integrates it, then the second edit parked on it, then fails on the
@@ -1425,7 +1421,7 @@ mod tests {
         );
     }
 
-    /// Opus's r2c-3c-10 finding 2: whether a contribution added anything is
+    /// Whether a contribution added anything is
     /// read from its own update, deletions included. A deletion the state
     /// already holds adds nothing; a new one merges; one whose items a later
     /// contribution brings waits, and counts once that one arrives.
@@ -1498,7 +1494,7 @@ mod tests {
         );
     }
 
-    /// Sol's r2c-3c-11 finding 1: what the merge holds deleted is what its
+    /// What the merge holds deleted is what its
     /// state deleted, not only what contributions asked for. One writer
     /// removes a paragraph while another types into it; yrs deletes the
     /// typing as it integrates into the removed paragraph. The typist's later
@@ -1548,7 +1544,7 @@ mod tests {
         );
     }
 
-    /// Opus's r2c-3c-11 finding 3: yrs integrates an edit that depends on
+    /// yrs integrates an edit that depends on
     /// nothing missing past a gap in its writer's clocks, and marks the gap
     /// without parking anything, so nothing is pending. The writer's earlier
     /// edit never arrives, so the later one, inserting into canonical text,
@@ -1631,7 +1627,7 @@ mod tests {
         assert_eq!(malformed.preserved, None);
     }
 
-    /// Sol's r2c-3c-4 finding 2: what a preservation keeps counts its
+    /// What a preservation keeps counts its
     /// findings, each with the contribution it names, as well as its lists
     /// and preserved state, so many contradictions are charged.
     #[test]
@@ -1660,21 +1656,20 @@ mod tests {
         assert!(few.retained_bytes() >= few.preserved.as_ref().unwrap().full_state.len());
     }
 
-    /// Sol's r2c-3c-6 finding 2: a merge reserves what it works with of a
-    /// real proof's memory before it allocates it. Opus's r2c-3c-8 findings 2
-    /// and 3: what applying a contribution holds is given back before the
-    /// projection reserves its own, and the merged list's copy is reserved
-    /// before it is made. Opus's r2c-3c-10 finding 4: what the preservation
-    /// keeps is reserved before the projection is given back, so no gap
-    /// opens between the merge and its caller. With room for all of it, it
-    /// preserves, and the most it reserved is exactly what the state gained,
-    /// the copy, the projection and what the preservation keeps: never
-    /// applying and projecting at once. With room for less, it refuses, too
-    /// large, before it loads the contribution when the state's growth or
-    /// its application does not fit, before it projects when the projection
-    /// does not, and once it projected when what it keeps does not. These
-    /// counts and the exact peak are the evidence; a peak at or under the
-    /// room never fails, as the budget refuses past it.
+    /// A merge reserves what it works with of a real proof's memory before it
+    /// allocates it. What applying a contribution holds is given back before
+    /// the projection reserves its own, and the merged list's copy is
+    /// reserved before it is made. What the preservation keeps is reserved
+    /// before the projection is given back, so no gap opens between the merge
+    /// and its caller. With room for all of it, it preserves, and the most it
+    /// reserved is exactly what the state gained, the copy, the projection
+    /// and what the preservation keeps: never applying and projecting at
+    /// once. With room for less, it refuses, too large, before it loads the
+    /// contribution when the state's growth or its application does not fit,
+    /// before it projects when the projection does not, and once it projected
+    /// when what it keeps does not. These counts and the exact peak are the
+    /// evidence; a peak at or under the room never fails, as the budget
+    /// refuses past it.
     #[test]
     fn a_merge_reserves_what_it_works_with_before_it_allocates_it() {
         let canonical = Ydoc::wire();
@@ -1761,7 +1756,6 @@ mod tests {
         );
         assert_eq!(preserved.merged, [outbox(1, &added)]);
         let retained = preserved.retained_bytes() as u64;
-        // What the merge holds until it ends.
         let held = growth + deleting + copy;
         assert_eq!(
             peak,
@@ -1794,19 +1788,17 @@ mod tests {
         }
     }
 
-    /// Opus's r2c-3c-8 check 1: under the default limit and deadline, a
-    /// lineage merged with 50,000 small contributions proves alone. Every
-    /// one merges, the preservation is complete with its Markdown, and its
-    /// artifact, naming every one, encodes within its cap. The tail's work
-    /// is reserved as the window keeps it. Opus's r2c-3c-10 finding 2: each
-    /// contribution's merge costs its own size, so the whole merge ends
-    /// within the deadline; its wall time is printed. Opus's r2c-3c-11
-    /// finding 5: the lineage's history holds 2,000 other writers, so a
-    /// merge reading the state's vector more than once per contribution
-    /// shows in that time. A real released hold of 50,000 stored entries,
-    /// its window and validation included, is pinned in
-    /// `released_protection_tests`. It runs in release, where its deadline
-    /// is the production one.
+    /// Under the default limit and deadline, a lineage merged with 50,000
+    /// small contributions proves alone. Every one merges, the preservation
+    /// is complete with its Markdown, and its artifact, naming every one,
+    /// encodes within its cap. The tail's work is reserved as the window
+    /// keeps it. Each contribution's merge costs its own size, so the whole
+    /// merge ends within the deadline; its wall time is printed. The
+    /// lineage's history holds 2,000 other writers, so a merge reading the
+    /// state's vector more than once per contribution shows in that time. A
+    /// real released hold of 50,000 stored entries, its window and validation
+    /// included, is pinned in `released_protection_tests`. It runs in
+    /// release, where its deadline is the production one.
     #[test]
     #[cfg_attr(debug_assertions, ignore = "release deadline pin")]
     fn fifty_thousand_contributions_prove_alone_under_the_default_limit() {
@@ -2000,7 +1992,7 @@ mod tests {
         (preserved.unwrap(), stopped, proofs.checks_passed(), elapsed)
     }
 
-    /// Sol's r2c-3c-12 finding 1 and Opus's finding 4: waiting work is
+    /// Waiting work is
     /// reconsidered once, after every contribution applied, not after each.
     /// 2,000 delivery identities name one update whose dependency never
     /// arrives, so each waits; the merge ends pending, having checked each

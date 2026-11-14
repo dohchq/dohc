@@ -1,5 +1,9 @@
 import { afterAll, vi } from "vitest";
-import { restoreOwnProperties, saveOwnProperties, type OwnProperties } from "./testing/ownProperties";
+import {
+  restoreOwnProperties,
+  saveOwnProperties,
+  type OwnProperties,
+} from "./testing/ownProperties";
 
 // A shared project runs its files one after another in one worker. Each file
 // starts from the worker's state before its first file: the same environment
@@ -22,7 +26,8 @@ interface Baseline {
 
 const VITEST_VARIABLE = /^VITEST/u;
 const KEPT_GLOBAL = /^(?:__vitest|__vite|console$)/u;
-const globalNames = (target: object) => Object.getOwnPropertyNames(target).filter((name) => !KEPT_GLOBAL.test(name));
+const globalNames = (target: object) =>
+  Object.getOwnPropertyNames(target).filter((name) => !KEPT_GLOBAL.test(name));
 const store = globalThis as unknown as Record<symbol, Baseline | undefined>;
 const key = Symbol.for("dohc.sharedWorkerBaseline");
 const baseline = (store[key] ??= {
@@ -35,10 +40,12 @@ function reset(): void {
   vi.unstubAllEnvs();
   vi.useRealTimers();
   for (const name of Object.keys(process.env)) {
-    if (!VITEST_VARIABLE.test(name) && !Object.hasOwn(baseline.environment, name)) delete process.env[name];
+    if (!VITEST_VARIABLE.test(name) && !Object.hasOwn(baseline.environment, name))
+      delete process.env[name];
   }
   for (const [name, value] of Object.entries(baseline.environment)) {
-    if (!VITEST_VARIABLE.test(name) && value !== undefined && process.env[name] !== value) process.env[name] = value;
+    if (!VITEST_VARIABLE.test(name) && value !== undefined && process.env[name] !== value)
+      process.env[name] = value;
   }
   restoreOwnProperties(globalThis, baseline.globals);
 }

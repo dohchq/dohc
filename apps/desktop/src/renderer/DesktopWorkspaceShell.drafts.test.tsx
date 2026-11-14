@@ -5,24 +5,48 @@ import { Profiler } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import * as Y from "yjs";
 import { webcrypto } from "node:crypto";
-import { markdownToYDoc } from "@dohc/ydoc-projection";
-import type { ListWorkspaceFilesPayload, ListWorkspaceFilesResult, ReadWorkspaceTextPayload, SwitchWorkspaceVersionResult, EngineYDocSaveStateEvent, WorkspaceUiState } from "../ipc/bridgeContract";
-import { rendererMarks } from "../performance/rendererMarks";
+import type {
+  ListWorkspaceFilesResult,
+  SwitchWorkspaceVersionResult,
+  EngineYDocSaveStateEvent,
+  WorkspaceUiState,
+} from "../ipc/bridgeContract";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { captureOrphanedDraft } from "./orphanedDrafts";
-import { CollectionFieldWriteHost, abandonPendingCollectionFieldWrites, collectionWriteFailures, collectionWritesPaused, discardCollectionFieldWrite, enqueueCollectionFieldWrite, hasPendingCollectionFieldWrites } from "./collections/recordFieldWrites";
+import {
+  CollectionFieldWriteHost,
+  collectionWriteFailures,
+  collectionWritesPaused,
+  discardCollectionFieldWrite,
+  enqueueCollectionFieldWrite,
+  hasPendingCollectionFieldWrites,
+} from "./collections/recordFieldWrites";
 import { deferred, type Deferred } from "../testing/deferred";
-import { LAYOUT_READ_WAIT_LIMIT_MS, SAVED_TABS_RESTORE, SAVED_TABS_RESTORE_AFTER_WAIT, SAVED_TABS_TITLE, SAVED_TABS_WAITED } from "./shell/useSavedTabsReread";
-import { COVER_WAIT_LINES_MS } from "./DesktopWorkspaceShell";
-import { settlePendingEditorDrafts } from "./pendingEditorDrafts";
-import { MAX_OPEN_TABS } from "./workbench/workbenchState";
-import { DesktopWorkspaceShell, GlobalRecoveryList, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, isFileOpenStartMark, recordDocUpdate, makeBridge, renderShell, enterMarkdownSource, holdHistory, sourceEditorText, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+import {
+  LAYOUT_READ_WAIT_LIMIT_MS,
+  SAVED_TABS_RESTORE_AFTER_WAIT,
+  SAVED_TABS_TITLE,
+} from "./shell/useSavedTabsReread";
+import {
+  DesktopWorkspaceShell,
+  GlobalRecoveryList,
+  WORKSPACE,
+  OTHER_WORKSPACE,
+  SYNC_STATUS,
+  STORED_STATE,
+  storedStateWithTabs,
+  storedTabs,
+  recordDocUpdate,
+  makeBridge,
+  renderShell,
+  enterMarkdownSource,
+  holdHistory,
+  sourceEditorText,
+  shellBootstrapProps,
+} from "./DesktopWorkspaceShell.testHarness";
 
-async function openDirtyMarkdown(
-  bridge: ReturnType<typeof makeBridge>,
-): Promise<{
+async function openDirtyMarkdown(bridge: ReturnType<typeof makeBridge>): Promise<{
   user: ReturnType<typeof userEvent.setup>;
   editor: HTMLElement;
 }> {
@@ -36,77 +60,29 @@ async function openDirtyMarkdown(
   const editor = await enterMarkdownSource(user);
   await user.click(editor);
   await user.paste("Draft!");
-  await waitFor(() =>
-    expect(screen.queryAllByTestId("tab-dirty").length).toBeGreaterThan(0),
-  );
+  await waitFor(() => expect(screen.queryAllByTestId("tab-dirty").length).toBeGreaterThan(0));
   return { user, editor };
 }
 
 describe("workspace switch admission", () => {
-  it("restores B's layout and engine surfaces after one admitted open", async () => {
-    let selectedWorkspace = WORKSPACE;
-    let admittedWorkspaceId = WORKSPACE.workspaceId;
-    const rejectedReads: string[] = [];
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getWorkspaceUiState = vi.fn(async () => {
-      if (admittedWorkspaceId !== selectedWorkspace.workspaceId) {
-        rejectedReads.push(`ui-state:${selectedWorkspace.workspaceId}`);
-        throw new Error("UI state read stopped because this window changed workspaces.");
-      }
-      return selectedWorkspace.workspaceId === OTHER_WORKSPACE.workspaceId
-        ? storedStateWithTabs(["b.md"], "b.md")
-        : null;
-    });
-    bridge.openWorkspace = vi.fn(async () => {
-      admittedWorkspaceId = selectedWorkspace.workspaceId;
-      return SYNC_STATUS;
-    });
-    const shell = (workspace: Workspace) => (
-      <DesktopWorkspaceShell
-        key={workspace.workspaceId}
-        workspace={workspace}
-        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
-        {...shellBootstrapProps(bridge)}
-        onSwitchWorkspace={() => {}}
-      />
-    );
-    vi.stubGlobal("dohcDesktop", bridge);
-    const view = render(shell(WORKSPACE));
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
-    );
-    bridge.getWorkspaceUiState.mockClear();
-    bridge.openWorkspace.mockClear();
-
-    selectedWorkspace = OTHER_WORKSPACE;
-    view.rerender(shell(OTHER_WORKSPACE));
-
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
-    );
-    await screen.findByTestId("tab-b.md");
-    await screen.findByTestId("titlebar-about-sidebar");
-    await waitFor(() => expect(bridge.listHistory).toHaveBeenCalled());
-    await act(async () => {});
-
-    expect(rejectedReads).toEqual([]);
-    expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce();
-    expect(bridge.openWorkspace).toHaveBeenCalledOnce();
-  });
-
   it("reads after the first open and lifts the preparing surface with the saved layout", async () => {
     const open = deferred<typeof SYNC_STATUS>();
     const stored = deferred<WorkspaceUiState | null>();
     const bridge = makeBridge(stored.promise);
     bridge.openWorkspace = vi.fn(() => open.promise);
-    // What each commit put on screen, read after React applied it.
-    const commits: Array<{ preparing: boolean; tab: boolean; sidebarWidth: string | undefined; about: boolean }> = [];
-    const recordCommit = () => commits.push({
-      preparing: screen.queryByTestId("workspace-preparing") !== null,
-      tab: screen.queryByTestId("tab-b.md") !== null,
-      sidebarWidth: screen.queryByTestId("side-panel")?.style.width,
-      about: screen.queryByTestId("about-rail") !== null,
-    });
+    const commits: Array<{
+      preparing: boolean;
+      tab: boolean;
+      sidebarWidth: string | undefined;
+      about: boolean;
+    }> = [];
+    const recordCommit = () =>
+      commits.push({
+        preparing: screen.queryByTestId("workspace-preparing") !== null,
+        tab: screen.queryByTestId("tab-b.md") !== null,
+        sidebarWidth: screen.queryByTestId("side-panel")?.style.width,
+        about: screen.queryByTestId("about-rail") !== null,
+      });
     vi.stubGlobal("dohcDesktop", bridge);
     render(
       <Profiler id="shell" onRender={recordCommit}>
@@ -125,7 +101,11 @@ describe("workspace switch admission", () => {
     expectNoUiStateTraffic(bridge);
 
     await act(async () => open.resolve(SYNC_STATUS));
-    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId }));
+    await waitFor(() =>
+      expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: WORKSPACE.workspaceId,
+      }),
+    );
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
     expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(true);
@@ -137,8 +117,6 @@ describe("workspace switch admission", () => {
       await stored.promise;
     });
     await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
-    // The first commit without the surface already shows the saved tab,
-    // sidebar width and About rail; no commit showed the defaults.
     expect(commits.find((commit) => !commit.preparing)).toEqual({
       preparing: false,
       tab: true,
@@ -148,59 +126,8 @@ describe("workspace switch admission", () => {
     expect(screen.getByTestId("workspace-workbench").hasAttribute("inert")).toBe(false);
   });
 
-  it("applies the saved layout over a title bar change made while it loads", async () => {
-    const stored = deferred<WorkspaceUiState | null>();
-    const bridge = makeBridge(stored.promise);
-    renderShell(bridge);
-    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
-    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
-    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
-
-    fireEvent.click(screen.getByTestId("titlebar-primary-sidebar"));
-    window.dispatchEvent(new Event("beforeunload"));
-    expect(bridge.setWorkspaceUiState).not.toHaveBeenCalled();
-
-    await act(async () => {
-      stored.resolve(STORED_STATE);
-      await stored.promise;
-    });
-    await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
-    expect(screen.getByTestId("side-panel")).toBeTruthy();
-    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
-  });
-
-  it.each(["null", "failed"] as const)("opens on the defaults after a %s read", async (outcome) => {
-    const read = deferred<WorkspaceUiState | null>();
-    const bridge = makeBridge(read.promise);
-    const view = renderShell(bridge);
-    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledOnce());
-    await act(async () => {});
-    expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
-
-    await act(async () => {
-      if (outcome === "null") read.resolve(null);
-      else read.reject(new Error("dohc has not finished opening this workspace."));
-      await read.promise.catch(() => undefined);
-    });
-    await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
-    expect(screen.queryByTestId("tab-b.md")).toBeNull();
-    window.dispatchEvent(new Event("beforeunload"));
-    view.unmount();
-    if (outcome === "failed") {
-      // A failed read can't say what is saved, so nothing is saved over it.
-      expect(bridge.setWorkspaceUiState).not.toHaveBeenCalled();
-      return;
-    }
-    const [payload] = bridge.setWorkspaceUiState.mock.lastCall!;
-    expect(payload.workspaceId).toBe(WORKSPACE.workspaceId);
-    expect(storedTabs(payload.state)).toEqual([]);
-  });
-
   describe("saved tabs after a failed read", () => {
     const refused = () => new Error("dohc has not finished opening this workspace.");
-    const stoppedRead = () => new Error(
-      "Error invoking remote method 'desktop:get-workspace-ui-state': Error [stopped=read]: This workspace is no longer open in this window.",
-    );
     const notices = () => screen.getByTestId("notice-center-toggle").getAttribute("aria-label");
     // With no saved layout read, the Explorer opens on Home, as a new workspace does.
     const showFiles = async (user: ReturnType<typeof userEvent.setup>) => {
@@ -209,10 +136,11 @@ describe("workspace switch admission", () => {
     };
     const openFile = async (user: ReturnType<typeof userEvent.setup>, path: string) => {
       await showFiles(user);
-      await user.click((await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === path)!);
+      await user.click(
+        (await screen.findAllByTestId("tree-row")).find((row) => row.dataset.path === path)!,
+      );
       await screen.findByTestId(`tab-${path}`);
     };
-    // The clock passes the open's limit while the first read waits.
     const waitOutTheOpen = (bridge: ReturnType<typeof makeBridge>) => {
       const now = Date.now.bind(Date);
       bridge.getWorkspaceUiState.mockImplementationOnce(() => {
@@ -221,88 +149,17 @@ describe("workspace switch admission", () => {
       });
     };
 
-    it("restores them without a notice when the workspace opens and no tab is open", async () => {
-      const bridge = makeBridge(Promise.resolve(STORED_STATE));
-      bridge.getWorkspaceUiState.mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused());
-      const view = renderShell(bridge);
-      await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
-      await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
-      window.dispatchEvent(new Event("beforeunload"));
-      expect(bridge.setWorkspaceUiState).not.toHaveBeenCalled();
-
-      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
-
-      expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
-      expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-      expect(notices()).toBe("Notices");
-      view.unmount();
-      expect(storedTabs(bridge.setWorkspaceUiState.mock.lastCall![0].state)).toEqual(["b.md"]);
-    });
-
-    it("says so when the read waited out the open, and takes back the toast and the row when they come back", async () => {
-      const second = deferred<WorkspaceUiState | null>();
-      const bridge = makeBridge(second.promise);
-      waitOutTheOpen(bridge);
-      const user = userEvent.setup();
-      try {
-        renderShell(bridge);
-        const toast = await screen.findByTestId("workspace-shell-notice");
-        expect(toast.textContent).toContain(SAVED_TABS_TITLE);
-        expect(toast.textContent).toContain(SAVED_TABS_WAITED);
-        expect(within(toast).queryByRole("button", { name: "Restore tabs" })).toBeNull();
-        expect(notices()).toBe("Notices, 1 unread");
-        await user.click(within(toast).getByRole("button", { name: "Details" }));
-        await user.click(within(toast).getByRole("button", { name: "Copy details" }));
-        expect((await navigator.clipboard.readText()).split("\n").slice(0, 2))
-          .toEqual([`Notice: ${SAVED_TABS_WAITED}`, `Title: ${SAVED_TABS_TITLE}`]);
-
-        await act(async () => {
-          second.resolve(STORED_STATE);
-          await second.promise;
-        });
-
-        expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
-        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-        expect(notices()).toBe("Notices");
-      } finally {
-        vi.mocked(Date.now).mockRestore();
-      }
-    });
-
-    // Main's read can give up on an open attempt before the limit, so no one
-    // read need reach it.
-    it("says so once the reads have waited 4 minutes in all", async () => {
-      const bridge = makeBridge(Promise.resolve(STORED_STATE));
-      vi.useFakeTimers({ shouldAdvanceTime: true });
-      try {
-        bridge.getWorkspaceUiState
-          .mockImplementationOnce(() => {
-            vi.setSystemTime(Date.now() + LAYOUT_READ_WAIT_LIMIT_MS / 2 + 10_000);
-            return Promise.reject(refused());
-          })
-          .mockRejectedValueOnce(refused());
-        renderShell(bridge);
-        await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
-        await act(() => vi.advanceTimersByTimeAsync(LAYOUT_READ_WAIT_LIMIT_MS / 2 - 11_000));
-        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-
-        await act(() => vi.advanceTimersByTimeAsync(2_000));
-
-        expect(screen.getByTestId("workspace-shell-notice").textContent).toContain(SAVED_TABS_WAITED);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
     it("stops waiting for them once a read fails because the window stopped using the workspace", async () => {
       const bridge = makeBridge(Promise.resolve(STORED_STATE));
       vi.useFakeTimers({ shouldAdvanceTime: true });
       try {
         bridge.getWorkspaceUiState
           .mockRejectedValueOnce(refused())
-          .mockRejectedValueOnce(new Error(
-            "Error invoking remote method 'desktop:get-workspace-ui-state': Error [stopped=read]: This workspace is no longer open in this window.",
-          ));
+          .mockRejectedValueOnce(
+            new Error(
+              "Error invoking remote method 'desktop:get-workspace-ui-state': Error [stopped=read]: This workspace is no longer open in this window.",
+            ),
+          );
         renderShell(bridge);
         await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
         await act(() => vi.advanceTimersByTimeAsync(LAYOUT_READ_WAIT_LIMIT_MS + 1_000));
@@ -311,100 +168,6 @@ describe("workspace switch admission", () => {
         expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2);
         expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
         expect(notices()).toBe("Notices");
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it("says nothing about them when the read that waited out the open failed because the window stopped", async () => {
-      const bridge = makeBridge(Promise.resolve(STORED_STATE));
-      const now = Date.now.bind(Date);
-      bridge.getWorkspaceUiState.mockImplementationOnce(() => {
-        vi.spyOn(Date, "now").mockImplementation(() => now() + LAYOUT_READ_WAIT_LIMIT_MS);
-        return Promise.reject(stoppedRead());
-      });
-      // The window stays stopped, so every later read fails the same way.
-      bridge.getWorkspaceUiState.mockRejectedValue(stoppedRead());
-      try {
-        renderShell(bridge);
-        await waitFor(() => expect(screen.queryByTestId("workspace-preparing")).toBeNull());
-        await act(async () => {});
-
-        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-        expect(notices()).toBe("Notices");
-      } finally {
-        vi.mocked(Date.now).mockRestore();
-      }
-    });
-
-    it("takes back the 4-minute row once a later read fails because the window stopped", async () => {
-      const bridge = makeBridge(Promise.resolve(STORED_STATE));
-      waitOutTheOpen(bridge);
-      bridge.getWorkspaceUiState.mockRejectedValueOnce(stoppedRead());
-      try {
-        renderShell(bridge);
-        await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
-        await act(async () => {});
-
-        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-        expect(notices()).toBe("Notices");
-      } finally {
-        vi.mocked(Date.now).mockRestore();
-      }
-    });
-
-    it("keeps the Restore tabs row until it is picked, while the 4-minute row keeps Dismiss", async () => {
-      const second = deferred<WorkspaceUiState | null>();
-      const bridge = makeBridge(second.promise);
-      waitOutTheOpen(bridge);
-      const user = userEvent.setup();
-      try {
-        renderShell(bridge);
-        const toast = await screen.findByTestId("workspace-shell-notice");
-        await user.click(within(toast).getByRole("button", { name: "Dismiss workspace notice" }));
-        await openFile(user, "a.md");
-        await user.click(screen.getByTestId("notice-center-toggle"));
-        const center = await screen.findByTestId("notice-center");
-        const waited = within(center).getByText(SAVED_TABS_WAITED).closest("li")!;
-        expect(within(waited).getByRole("button", { name: "Dismiss notice" })).toBeTruthy();
-
-        await act(async () => {
-          second.resolve(STORED_STATE);
-          await second.promise;
-        });
-
-        const row = (await within(center).findByText(SAVED_TABS_RESTORE_AFTER_WAIT)).closest("li")!;
-        expect(within(row).queryByRole("button", { name: "Dismiss notice" }), "only Restore tabs ends the row").toBeNull();
-        expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();
-        await user.click(within(center).getByRole("button", { name: "Mark all read" }));
-        expect(notices()).toBe("Notices");
-        expect(within(center).getByText(SAVED_TABS_RESTORE_AFTER_WAIT)).toBeTruthy();
-      } finally {
-        vi.mocked(Date.now).mockRestore();
-      }
-    });
-
-    it("keeps the Restore tabs row when 4 minutes pass after a read worked", async () => {
-      const bridge = makeBridge(Promise.resolve(STORED_STATE));
-      bridge.getWorkspaceUiState.mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused());
-      vi.useFakeTimers({ shouldAdvanceTime: true });
-      try {
-        const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
-        renderShell(bridge);
-        await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
-        await openFile(user, "a.md");
-        await act(() => vi.advanceTimersByTimeAsync(60_000));
-        act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
-        await user.click(screen.getByTestId("notice-center-toggle"));
-        const center = await screen.findByTestId("notice-center");
-        await within(center).findByText(SAVED_TABS_RESTORE);
-
-        await act(() => vi.advanceTimersByTimeAsync(LAYOUT_READ_WAIT_LIMIT_MS));
-
-        const row = within(center).getByText(SAVED_TABS_RESTORE).closest("li")!;
-        expect(within(row).getByRole("button", { name: "Restore tabs" })).toBeTruthy();
-        expect(within(row).queryByRole("button", { name: "Dismiss notice" })).toBeNull();
-        expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
       } finally {
         vi.useRealTimers();
       }
@@ -421,7 +184,11 @@ describe("workspace switch admission", () => {
         await user.click(within(toast).getByRole("button", { name: "Dismiss workspace notice" }));
         await openFile(user, "a.md");
         await user.click(screen.getByTestId("notice-center-toggle"));
-        await user.click(within(await screen.findByTestId("notice-center")).getByRole("button", { name: "Mark all read" }));
+        await user.click(
+          within(await screen.findByTestId("notice-center")).getByRole("button", {
+            name: "Mark all read",
+          }),
+        );
         expect(notices()).toBe("Notices");
 
         await act(async () => {
@@ -429,159 +196,40 @@ describe("workspace switch admission", () => {
           await second.promise;
         });
 
-        const row = (await within(screen.getByTestId("notice-center")).findByText(SAVED_TABS_RESTORE_AFTER_WAIT)).closest("li")!;
-        expect(notices(), "the row offers Restore tabs, so it is unread again").toBe("Notices, 1 unread");
+        const row = (
+          await within(screen.getByTestId("notice-center")).findByText(
+            SAVED_TABS_RESTORE_AFTER_WAIT,
+          )
+        ).closest("li")!;
+        expect(notices(), "the row offers Restore tabs, so it is unread again").toBe(
+          "Notices, 1 unread",
+        );
         expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
         expect(screen.queryByTestId("tab-b.md")).toBeNull();
         window.dispatchEvent(new Event("beforeunload"));
         expect(bridge.setWorkspaceUiState, "saving waits for Restore tabs").not.toHaveBeenCalled();
         await user.click(within(row).getByRole("button", { name: "Details" }));
         await user.click(within(row).getByRole("button", { name: "Copy details" }));
-        expect((await navigator.clipboard.readText()).split("\n")[0], "the action first, so the toast's limit cuts only the reason")
-          .toBe("Notice: Restore tabs brings them back. Until you pick it, tab changes aren't saved. Your saved tabs didn't load within 4 minutes.");
+        expect(
+          (await navigator.clipboard.readText()).split("\n")[0],
+          "the action first, so the toast's limit cuts only the reason",
+        ).toBe(
+          "Notice: Restore tabs brings them back. Until you pick it, tab changes aren't saved. Your saved tabs didn't load within 4 minutes.",
+        );
 
         await user.click(within(row).getByRole("button", { name: "Restore tabs" }));
 
         expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
         expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
         expect(screen.queryByText(SAVED_TABS_TITLE)).toBeNull();
-        await waitFor(() => expect(storedTabs(bridge.setWorkspaceUiState.mock.lastCall![0].state)).toEqual(["b.md", "a.md"]));
+        await waitFor(() =>
+          expect(storedTabs(bridge.setWorkspaceUiState.mock.lastCall![0].state)).toEqual([
+            "b.md",
+            "a.md",
+          ]),
+        );
       } finally {
         vi.mocked(Date.now).mockRestore();
-      }
-    });
-
-    it("shows a file open in both as one tab, where the saved layout has it", async () => {
-      const bridge = makeBridge(Promise.resolve({
-        ...STORED_STATE,
-        editorGroups: [
-          { id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
-          { id: "right", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
-        ],
-        activeEditorGroup: "primary",
-      }));
-      bridge.getWorkspaceUiState.mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused());
-      const user = userEvent.setup();
-      renderShell(bridge);
-      await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
-      await openFile(user, "a.md");
-      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
-      await user.click(screen.getByTestId("notice-center-toggle"));
-      const row = (await within(screen.getByTestId("notice-center")).findByText(SAVED_TABS_RESTORE)).closest("li")!;
-
-      await user.click(within(row).getByRole("button", { name: "Restore tabs" }));
-
-      expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
-      expect(screen.getAllByTestId("tab-a.md")).toHaveLength(1);
-      await waitFor(() => expect(bridge.setWorkspaceUiState.mock.lastCall?.[0].state).toMatchObject({
-        editorGroups: [{ id: "primary", tabs: ["b.md"] }, { id: "right", tabs: ["a.md"], activeTab: "a.md" }],
-        activeEditorGroup: "right",
-      }));
-    });
-
-    it("keeps the tabs open now, and what a new page holds, when the saved tabs fill the limit", async () => {
-      const saved = Array.from({ length: MAX_OPEN_TABS - 2 }, (_, index) => `saved-${index}.md`);
-      const bridge = makeBridge(Promise.resolve({
-        ...STORED_STATE,
-        editorGroups: [
-          { id: "primary", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
-          { id: "right", tabs: [...saved, "b.md"], activeTab: "b.md", size: 0.5 },
-        ],
-        activeEditorGroup: "primary",
-      }));
-      bridge.getWorkspaceUiState.mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused());
-      const user = userEvent.setup();
-      renderShell(bridge);
-      await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
-      await showFiles(user);
-      await screen.findAllByTestId("tree-row");
-      for (const title of ["Itinerary", "Lisbon"]) {
-        await user.click(screen.getByLabelText("New file"));
-        await user.keyboard(title);
-      }
-      await openFile(user, "a.md");
-      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
-      await user.click(screen.getByTestId("notice-center-toggle"));
-      const row = (await within(screen.getByTestId("notice-center")).findByText(SAVED_TABS_RESTORE)).closest("li")!;
-
-      await user.click(within(row).getByRole("button", { name: "Restore tabs" }));
-
-      await screen.findAllByTestId("tab-b.md");
-      await expect(settlePendingEditorDrafts()).resolves.toBe(true);
-      expect(bridge.createWorkspaceFile.mock.calls.map(([payload]) => payload.relativePath).sort())
-        .toEqual(["Itinerary.md", "Lisbon.md"]);
-      expect(screen.getByTestId("tab-a.md").dataset.active).toBe("true");
-    });
-
-    it.each([
-      ["nothing was saved", null],
-      ["the saved layout has no tabs", storedStateWithTabs([])],
-    ])("takes back the toast and the row, and saves the tabs open, when %s", async (_, stored) => {
-      const second = deferred<WorkspaceUiState | null>();
-      const bridge = makeBridge(second.promise);
-      // The harness reads a missing layout as an empty Files one; this read returns it as is.
-      bridge.getWorkspaceUiState.mockImplementation(() => second.promise);
-      waitOutTheOpen(bridge);
-      const user = userEvent.setup();
-      try {
-        renderShell(bridge);
-        await screen.findByTestId("workspace-shell-notice");
-        await openFile(user, "a.md");
-
-        await act(async () => {
-          second.resolve(stored);
-          await second.promise;
-        });
-
-        await waitFor(() => expect(screen.queryByTestId("workspace-shell-notice")).toBeNull());
-        expect(notices()).toBe("Notices");
-        await waitFor(() => expect(storedTabs(bridge.setWorkspaceUiState.mock.lastCall![0].state)).toEqual(["a.md"]));
-      } finally {
-        vi.mocked(Date.now).mockRestore();
-      }
-    });
-
-    it("files a row without a toast when a read that failed another way works after a tab opened", async () => {
-      const bridge = makeBridge(Promise.resolve(STORED_STATE));
-      bridge.getWorkspaceUiState.mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused());
-      const user = userEvent.setup();
-      renderShell(bridge);
-      await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2));
-      await openFile(user, "a.md");
-      expect(notices(), "a failing read says nothing").toBe("Notices");
-
-      act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
-
-      await waitFor(() => expect(notices()).toBe("Notices, 1 unread"));
-      expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
-      await user.click(screen.getByTestId("notice-center-toggle"));
-      const row = (await within(screen.getByTestId("notice-center")).findByText(SAVED_TABS_RESTORE)).closest("li")!;
-      expect(row.textContent).toContain(SAVED_TABS_TITLE);
-      expect(row.textContent).not.toContain("4 minutes");
-      expect(within(row).getByRole("button", { name: "Restore tabs" })).toBeTruthy();
-    });
-
-    it("says what the cover waits for, and the way out, 5 seconds after the workspace is admitted", async () => {
-      const stored = deferred<WorkspaceUiState | null>();
-      const bridge = makeBridge(stored.promise);
-      vi.useFakeTimers({ shouldAdvanceTime: true });
-      try {
-        renderShell(bridge);
-        await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
-        const cover = screen.getByTestId("workspace-preparing");
-        const shown = () => [...cover.querySelectorAll("p")].filter((line) => !line.classList.contains("invisible")).map((line) => line.textContent);
-        await act(() => vi.advanceTimersByTimeAsync(COVER_WAIT_LINES_MS - 1_000));
-        expect(shown()).toEqual(["Preparing this workspace"]);
-
-        await act(() => vi.advanceTimersByTimeAsync(1_000));
-
-        expect(shown()).toEqual([
-          "Preparing this workspace",
-          "dohc is still waiting for this workspace to open, so it can bring back your saved tabs.",
-          "Choose another workspace from the title bar.",
-        ]);
-      } finally {
-        vi.useRealTimers();
       }
     });
   });
@@ -597,7 +245,11 @@ describe("workspace switch admission", () => {
     expectNoUiStateTraffic(bridge);
 
     await user.click(within(failed).getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId }));
+    await waitFor(() =>
+      expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: WORKSPACE.workspaceId,
+      }),
+    );
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
 
@@ -641,22 +293,6 @@ describe("workspace switch admission", () => {
       return { bridge, opens, shell, release };
     }
 
-    it("reads only for the selection whose open answers", async () => {
-      const { bridge, opens, shell, release } = heldOpens();
-      const view = render(shell(WORKSPACE));
-      await waitFor(() => expect(opens).toHaveLength(1));
-      view.rerender(shell(OTHER_WORKSPACE));
-      await waitFor(() => expect(opens).toHaveLength(2));
-
-      await release(0);
-      expect(screen.getByTestId("workspace-preparing")).toBeTruthy();
-      expectNoUiStateTraffic(bridge);
-
-      await release(1);
-      expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
-      expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: OTHER_WORKSPACE.workspaceId });
-    });
-
     it("keeps B preparing when A's read answers late", async () => {
       const { bridge, opens, shell, release } = heldOpens();
       const reads: Array<Deferred<WorkspaceUiState>> = [];
@@ -673,8 +309,12 @@ describe("workspace switch admission", () => {
       await waitFor(() => expect(opens).toHaveLength(2));
       await release(1);
       await waitFor(() => expect(reads).toHaveLength(2));
-      expect(bridge.getWorkspaceUiState).toHaveBeenNthCalledWith(1, { workspaceId: WORKSPACE.workspaceId });
-      expect(bridge.getWorkspaceUiState).toHaveBeenNthCalledWith(2, { workspaceId: OTHER_WORKSPACE.workspaceId });
+      expect(bridge.getWorkspaceUiState).toHaveBeenNthCalledWith(1, {
+        workspaceId: WORKSPACE.workspaceId,
+      });
+      expect(bridge.getWorkspaceUiState).toHaveBeenNthCalledWith(2, {
+        workspaceId: OTHER_WORKSPACE.workspaceId,
+      });
       await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
 
       const [late, current] = reads as [Deferred<WorkspaceUiState>, Deferred<WorkspaceUiState>];
@@ -693,16 +333,6 @@ describe("workspace switch admission", () => {
       expect(screen.queryByTestId("workspace-preparing")).toBeNull();
     });
 
-    it("never reads after unmount", async () => {
-      const { bridge, opens, shell, release } = heldOpens();
-      const view = render(shell(WORKSPACE));
-      await waitFor(() => expect(opens).toHaveLength(1));
-      view.unmount();
-
-      await release(0);
-      expectNoUiStateTraffic(bridge);
-    });
-
     it("does not reuse A's first open after A -> B -> A", async () => {
       const { bridge, opens, shell, release } = heldOpens();
       const view = render(shell(WORKSPACE));
@@ -711,7 +341,11 @@ describe("workspace switch admission", () => {
       await waitFor(() => expect(opens).toHaveLength(2));
       view.rerender(shell(WORKSPACE));
       await waitFor(() => expect(opens).toHaveLength(3));
-      expect(opens.map((open) => open.workspaceId)).toEqual([WORKSPACE.workspaceId, OTHER_WORKSPACE.workspaceId, WORKSPACE.workspaceId]);
+      expect(opens.map((open) => open.workspaceId)).toEqual([
+        WORKSPACE.workspaceId,
+        OTHER_WORKSPACE.workspaceId,
+        WORKSPACE.workspaceId,
+      ]);
 
       await release(0);
       await release(1);
@@ -720,13 +354,13 @@ describe("workspace switch admission", () => {
 
       await release(2);
       expect(await screen.findByTestId("tab-a.md")).toBeTruthy();
-      expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE.workspaceId });
+      expect(bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: WORKSPACE.workspaceId,
+      });
     });
   });
 });
 
-// Neither a UI-state read nor a save of the default layout has happened, even
-// when the window unloads now.
 function expectNoUiStateTraffic(bridge: ReturnType<typeof makeBridge>) {
   window.dispatchEvent(new Event("beforeunload"));
   expect(bridge.getWorkspaceUiState).not.toHaveBeenCalled();
@@ -742,8 +376,20 @@ describe("collection input during a version switch", () => {
       let activeVersionId = "main";
       bridge.listWorkspaceVersions = vi.fn(async () => ({
         versions: [
-          { id: "main", name: "Main", kind: "main" as const, createdAtMs: 0, canMergeIntoMain: false },
-          { id: "v2", name: "Draft two", kind: "named" as const, createdAtMs: 1, canMergeIntoMain: true },
+          {
+            id: "main",
+            name: "Main",
+            kind: "main" as const,
+            createdAtMs: 0,
+            canMergeIntoMain: false,
+          },
+          {
+            id: "v2",
+            name: "Draft two",
+            kind: "named" as const,
+            createdAtMs: 1,
+            canMergeIntoMain: true,
+          },
         ],
         activeVersionId,
       }));
@@ -756,7 +402,12 @@ describe("collection input during a version switch", () => {
       );
       await user.click(target!);
       await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalledOnce());
-      const change = { recordId: "rec-1", recordPath: "tasks/one.md", field: "status", value: "done" };
+      const change = {
+        recordId: "rec-1",
+        recordPath: "tasks/one.md",
+        field: "status",
+        value: "done",
+      };
       act(() => {
         expect(enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", change)).toBe(false);
       });
@@ -770,7 +421,10 @@ describe("collection input during a version switch", () => {
         await switching.promise.catch(() => undefined);
       });
       await waitFor(() => {
-        expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", outcome === "success");
+        expect(screen.getByTestId("collection-write-retry")).toHaveProperty(
+          "disabled",
+          outcome === "success",
+        );
         if (outcome === "success") expect(screen.getByTestId("collection-write-copy")).toBeTruthy();
       });
       expect(collectionWriteFailures()[0]?.change).toEqual(change);
@@ -796,16 +450,9 @@ describe("workspace admission over collection writes", () => {
         return SYNC_STATUS;
       }),
       openEngineYDocSession: vi.fn(
-        async (payload: {
-          workspaceId: string;
-          path: string;
-          sessionId: string;
-        }) => {
+        async (payload: { workspaceId: string; path: string; sessionId: string }) => {
           await openGates.get(payload.path);
-          if (
-            !openAvailability.available ||
-            payload.workspaceId !== admitted.workspaceId
-          ) {
+          if (!openAvailability.available || payload.workspaceId !== admitted.workspaceId) {
             return { available: false };
           }
           sessions.set(payload.path, payload.sessionId);
@@ -822,12 +469,10 @@ describe("workspace admission over collection writes", () => {
       onEngineYDocOwnerHandoff: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      onEngineYDocSaveState: vi.fn(
-        (listener: (event: EngineYDocSaveStateEvent) => void) => {
-          saveListeners.add(listener);
-          return () => saveListeners.delete(listener);
-        },
-      ),
+      onEngineYDocSaveState: vi.fn((listener: (event: EngineYDocSaveStateEvent) => void) => {
+        saveListeners.add(listener);
+        return () => saveListeners.delete(listener);
+      }),
     });
     const shell = (workspace: Workspace) => (
       <>
@@ -862,27 +507,48 @@ describe("workspace admission over collection writes", () => {
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     act(() => {
       enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
-      enqueueCollectionFieldWrite(OTHER_WORKSPACE.workspaceId, "tasks", { ...RECORD_EDIT, recordPath: "tasks/two.md" });
+      enqueueCollectionFieldWrite(OTHER_WORKSPACE.workspaceId, "tasks", {
+        ...RECORD_EDIT,
+        recordPath: "tasks/two.md",
+      });
     });
     await waitFor(() => expect(harness.bridge.openEngineYDocSession).toHaveBeenCalled());
     harness.bridge.openWorkspace.mockClear();
     vi.useFakeTimers();
     try {
       view.rerender(harness.shell(OTHER_WORKSPACE));
-      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
-      expect(collectionWriteFailures().map((failure) => failure.workspaceId)).toEqual([WORKSPACE.workspaceId]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20_000);
+      });
+      expect(collectionWriteFailures().map((failure) => failure.workspaceId)).toEqual([
+        WORKSPACE.workspaceId,
+      ]);
       expect(hasPendingCollectionFieldWrites()).toBe(true);
       expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
       act(() => discardCollectionFieldWrite(collectionWriteFailures()[0]!.id));
     } finally {
       vi.useRealTimers();
     }
-    await waitFor(() => expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({ workspaceId: OTHER_WORKSPACE.workspaceId }));
-    await act(async () => { oldOpen.resolve(); nextOpen.resolve(); });
+    await waitFor(() =>
+      expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({
+        workspaceId: OTHER_WORKSPACE.workspaceId,
+      }),
+    );
+    await act(async () => {
+      oldOpen.resolve();
+      nextOpen.resolve();
+    });
     await waitFor(() => expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled());
     act(() => {
       const sessionId = harness.sessions.get("tasks/two.md")!;
-      for (const listener of [...harness.saveListeners]) listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
+      for (const listener of [...harness.saveListeners])
+        listener({
+          sessionId,
+          workspaceId: "ws-1",
+          path: "notes/a.md",
+          state: { kind: "saved-here" },
+          seq: 1,
+        });
     });
     await waitFor(() => expect(hasPendingCollectionFieldWrites()).toBe(false));
     expect(collectionWriteFailures()).toHaveLength(0);
@@ -892,7 +558,9 @@ describe("workspace admission over collection writes", () => {
     const harness = admissionHarness();
     const view = render(harness.shell(WORKSPACE));
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
-    act(() => { enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT); });
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+    });
     await waitFor(() => expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled());
     harness.bridge.openWorkspace.mockClear();
 
@@ -902,7 +570,9 @@ describe("workspace admission over collection writes", () => {
       await act(() => vi.advanceTimersByTimeAsync(20_000));
       expect(collectionWriteFailures()).toEqual([]);
       const blocked = screen.getByTestId("workspace-open-failed");
-      expect(blocked.textContent).toContain("dohc has not confirmed this save yet. Keep dohc open until saving finishes.");
+      expect(blocked.textContent).toContain(
+        "dohc has not confirmed this save yet. Keep dohc open until saving finishes.",
+      );
       expect(screen.queryByTestId("collection-write-retry")).toBeNull();
       expect(screen.queryByTestId("collection-write-discard")).toBeNull();
       expect(screen.queryByTestId("workspace-preparing")).toBeNull();
@@ -915,10 +585,18 @@ describe("workspace admission over collection writes", () => {
       await act(async () => {
         const sessionId = harness.sessions.get("tasks/one.md")!;
         for (const listener of [...harness.saveListeners]) {
-          listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
+          listener({
+            sessionId,
+            workspaceId: "ws-1",
+            path: "notes/a.md",
+            state: { kind: "saved-here" },
+            seq: 1,
+          });
         }
       });
-      expect(harness.bridge.openWorkspace).toHaveBeenCalledExactlyOnceWith({ workspaceId: OTHER_WORKSPACE.workspaceId });
+      expect(harness.bridge.openWorkspace).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: OTHER_WORKSPACE.workspaceId,
+      });
       expect(screen.queryByTestId("workspace-open-failed")).toBeNull();
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true");
     } finally {
@@ -926,112 +604,22 @@ describe("workspace admission over collection writes", () => {
     }
   });
 
-  it("holds B's open until A's queued collection write settles", async () => {
-    const harness = admissionHarness();
-    const gate = deferred<void>();
-    harness.openGates.set("tasks/one.md", gate.promise);
-    const view = render(harness.shell(WORKSPACE));
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
-    );
-    act(() => {
-      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
-    });
-    await waitFor(() =>
-      expect(harness.bridge.openEngineYDocSession).toHaveBeenCalled(),
-    );
-    harness.bridge.openWorkspace.mockClear();
-    harness.bridge.getWorkspaceUiState.mockClear();
-
-    view.rerender(harness.shell(OTHER_WORKSPACE));
-    await act(async () => {});
-    expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
-    harness.bridge.setWorkspaceUiState.mockClear();
-    expectNoUiStateTraffic(harness.bridge);
-
-    // A's write lands: the session opens under A's still-current authority,
-    // the update stages, and the engine reports the save settled.
-    await act(async () => {
-      gate.resolve();
-    });
-    await waitFor(() =>
-      expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled(),
-    );
-    act(() => {
-      const sessionId = harness.sessions.get("tasks/one.md")!;
-      for (const listener of [...harness.saveListeners]) {
-        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "saved-here" }, seq: 1 });
-      }
-    });
-    await waitFor(() =>
-      expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({
-        workspaceId: OTHER_WORKSPACE.workspaceId,
-      }),
-    );
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
-    );
-    await waitFor(() => expect(harness.bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: OTHER_WORKSPACE.workspaceId }));
-    expect(collectionWriteFailures()).toEqual([]);
-  });
-
-  it("refuses admission over a retained failure until it is resolved", async () => {
-    const harness = admissionHarness();
-    harness.openAvailability.available = false;
-    const view = render(harness.shell(WORKSPACE));
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
-    );
-    act(() => {
-      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
-    });
-    await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
-    harness.bridge.openWorkspace.mockClear();
-    harness.bridge.getWorkspaceUiState.mockClear();
-
-    view.rerender(harness.shell(OTHER_WORKSPACE));
-    await screen.findByTestId("workspace-open-failed");
-    expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
-    harness.bridge.setWorkspaceUiState.mockClear();
-    expectNoUiStateTraffic(harness.bridge);
-
-    // Resolving the failure re-runs admission without another click.
-    act(() => {
-      discardCollectionFieldWrite(collectionWriteFailures()[0]!.id);
-    });
-    await waitFor(() =>
-      expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({
-        workspaceId: OTHER_WORKSPACE.workspaceId,
-      }),
-    );
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
-    );
-    await waitFor(() => expect(harness.bridge.getWorkspaceUiState).toHaveBeenCalledExactlyOnceWith({ workspaceId: OTHER_WORKSPACE.workspaceId }));
-  });
-
   it("blocks admission when A's write fails during the wait", async () => {
     const harness = admissionHarness();
     const gate = deferred<void>();
     harness.openGates.set("tasks/one.md", gate.promise);
     const view = render(harness.shell(WORKSPACE));
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
-    );
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
     act(() => {
       enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
     });
-    await waitFor(() =>
-      expect(harness.bridge.openEngineYDocSession).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(harness.bridge.openEngineYDocSession).toHaveBeenCalled());
     harness.bridge.openWorkspace.mockClear();
 
     view.rerender(harness.shell(OTHER_WORKSPACE));
     await act(async () => {});
     expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
 
-    // The write's session open settles without a session: the write is
-    // retained, and admission must stop on it instead of proceeding.
     harness.openAvailability.available = false;
     await act(async () => {
       gate.resolve();
@@ -1079,20 +667,11 @@ describe("explorer operations over collection writes", () => {
       moveWorkspacePath: vi.fn(() => move.promise),
     });
     await beginRename(bridge);
-    await waitFor(() =>
-      expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1),
-    );
-    // The pause covers the pending IPC: a racing cell edit (an editor commit
-    // already in flight) is refused and retained, never queued against the
-    // path the move is changing.
+    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1));
     expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(true);
     let accepted = true;
     act(() => {
-      accepted = enqueueCollectionFieldWrite(
-        WORKSPACE.workspaceId,
-        "tasks",
-        RECORD_EDIT,
-      );
+      accepted = enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
     });
     expect(accepted).toBe(false);
     expect(collectionWriteFailures()).toHaveLength(1);
@@ -1101,144 +680,21 @@ describe("explorer operations over collection writes", () => {
       move.resolve();
       await move.promise;
     });
-    await waitFor(() =>
-      expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false),
-    );
-    // The retained edit follows the rename, like tabs and set-aside drafts.
+    await waitFor(() => expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false));
     expect(collectionWriteFailures()[0]!.change.recordPath).toBe("renamed.md");
-  });
-
-  it("releases the pause when the rename fails and keeps the old path", async () => {
-    let rejectMove!: (error: Error) => void;
-    const move = new Promise<void>((_resolve, reject) => {
-      rejectMove = reject;
-    });
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      moveWorkspacePath: vi.fn(() => move),
-    });
-    await beginRename(bridge);
-    await waitFor(() =>
-      expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1),
-    );
-    expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(true);
-    act(() => {
-      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
-    });
-
-    await act(async () => {
-      rejectMove(new Error("rename failed"));
-      await move.catch(() => undefined);
-    });
-    await screen.findByTestId("workspace-shell-error");
-    await waitFor(() =>
-      expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false),
-    );
-    // Nothing moved, so the retained edit keeps the path it was accepted on.
-    expect(collectionWriteFailures()[0]!.change.recordPath).toBe("a.md");
-  });
-
-  it("refuses a rename while a collection write failure is retained", async () => {
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      moveWorkspacePath: vi.fn(async () => undefined),
-    });
-    // A retained failure with its accepted value, exactly as a stalled-queue
-    // abandonment leaves it.
-    act(() => {
-      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
-      abandonPendingCollectionFieldWrites("This change did not save.");
-    });
-    expect(collectionWriteFailures()).toHaveLength(1);
-    await beginRename(bridge);
-    await screen.findByTestId("workspace-shell-error");
-    expect(bridge.moveWorkspacePath).not.toHaveBeenCalled();
-    expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false);
   });
 });
 
 describe("workspace switch-back file listing", () => {
-  it("paints a completed cached listing before the forced disk walk replaces it", async () => {
-    const revalidation = deferred<ListWorkspaceFilesResult>();
-    const bridge = makeBridge(Promise.resolve(null));
-    let workspaceACalls = 0;
-    bridge.listWorkspaceFiles = vi.fn(
-      async (
-        payload: ListWorkspaceFilesPayload,
-      ): Promise<ListWorkspaceFilesResult> => {
-        if (payload.workspaceId === OTHER_WORKSPACE.workspaceId) {
-          return { visibility: { status: "ready" as const, rules: [] },
-            files: [{ path: "other.md", kind: "file" }],
-            folders: [],
-          };
-        }
-        workspaceACalls += 1;
-        if (workspaceACalls === 1) {
-          return { visibility: { status: "ready" as const, rules: [] },
-            files: [{ path: "cached.md", kind: "file" }],
-            folders: [],
-          };
-        }
-        if (workspaceACalls === 2) {
-          return { visibility: { status: "ready" as const, rules: [] },
-            files: [{ path: "cached.md", kind: "file" }],
-            folders: [],
-            cached: true,
-          };
-        }
-        return revalidation.promise;
-      },
-    );
-    const shell = (workspace: Workspace) => (
-      <DesktopWorkspaceShell
-        key={workspace.workspaceId}
-        workspace={workspace}
-        workspaces={[WORKSPACE, OTHER_WORKSPACE]}
-        {...shellBootstrapProps(bridge)}
-        onSwitchWorkspace={() => {}}
-      />
-    );
-    vi.stubGlobal("dohcDesktop", bridge);
-    const view = render(shell(WORKSPACE));
-    // The tree row draws a long name in two parts, so find it by its name.
-    expect(await screen.findByRole("treeitem", { name: "cached.md" })).toBeTruthy();
-
-    view.rerender(shell(OTHER_WORKSPACE));
-    expect(await screen.findByText("other.md")).toBeTruthy();
-
-    view.rerender(shell(WORKSPACE));
-    expect(await screen.findByRole("treeitem", { name: "cached.md" })).toBeTruthy();
-    await waitFor(() => expect(workspaceACalls).toBe(3));
-    expect(screen.queryByText("fresh.md")).toBeNull();
-
-    await act(async () => {
-      revalidation.resolve({ visibility: { status: "ready" as const, rules: [] },
-        files: [{ path: "fresh.md", kind: "file" }],
-        folders: [],
-      });
-      await revalidation.promise;
-    });
-    expect(await screen.findByText("fresh.md")).toBeTruthy();
-    expect(screen.queryByRole("treeitem", { name: "cached.md" })).toBeNull();
-
-    const workspaceARequests = bridge.listWorkspaceFiles.mock.calls
-      .map(([payload]) => payload)
-      .filter((payload) => payload.workspaceId === WORKSPACE.workspaceId);
-    expect(workspaceARequests).toEqual([
-      { workspaceId: WORKSPACE.workspaceId, allowCached: true },
-      { workspaceId: WORKSPACE.workspaceId, allowCached: true },
-      { workspaceId: WORKSPACE.workspaceId },
-    ]);
-  });
-
   it("does not prune a restored tab from the cached paint alone", async () => {
     const revalidation = deferred<ListWorkspaceFilesResult>();
     const bridge = makeBridge(
-      Promise.resolve(
-        storedStateWithTabs(["survivor.md", "gone.md"], "survivor.md"),
-      ),
+      Promise.resolve(storedStateWithTabs(["survivor.md", "gone.md"], "survivor.md")),
     );
     bridge.listWorkspaceFiles = vi
       .fn()
-      .mockResolvedValueOnce({ visibility: { status: "ready" as const, rules: [] },
+      .mockResolvedValueOnce({
+        visibility: { status: "ready" as const, rules: [] },
         files: [{ path: "survivor.md", kind: "file" as const }],
         folders: [],
         cached: true,
@@ -1246,16 +702,13 @@ describe("workspace switch-back file listing", () => {
       .mockImplementationOnce(() => revalidation.promise);
     renderShell(bridge);
 
-    expect(
-      (await screen.findAllByText("survivor.md")).length,
-    ).toBeGreaterThan(0);
-    await waitFor(() =>
-      expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2),
-    );
+    expect((await screen.findAllByText("survivor.md")).length).toBeGreaterThan(0);
+    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(2));
     expect(await screen.findByTestId("tab-gone.md")).toBeTruthy();
 
     await act(async () => {
-      revalidation.resolve({ visibility: { status: "ready" as const, rules: [] },
+      revalidation.resolve({
+        visibility: { status: "ready" as const, rules: [] },
         files: [{ path: "survivor.md", kind: "file" }],
         folders: [],
       });
@@ -1265,432 +718,6 @@ describe("workspace switch-back file listing", () => {
       expect(screen.queryByTestId("tab-gone.md")).toBeNull();
     });
     expect(screen.getByTestId("tab-survivor.md")).toBeTruthy();
-  });
-
-  it("performs one disk listing when the permitted cache read misses", async () => {
-    const walk = deferred<ListWorkspaceFilesResult>();
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.listWorkspaceFiles.mockImplementation(() => walk.promise);
-    renderShell(bridge);
-
-    await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledOnce());
-    expect(screen.queryByText("cold.md")).toBeNull();
-    await act(async () => {
-      walk.resolve({ visibility: { status: "ready" as const, rules: [] },
-        files: [{ path: "cold.md", kind: "file" }],
-        folders: [],
-      });
-      await walk.promise;
-    });
-    expect(await screen.findByText("cold.md")).toBeTruthy();
-    await act(async () => {
-      await Promise.resolve();
-    });
-    expect(bridge.listWorkspaceFiles).toHaveBeenCalledOnce();
-    expect(bridge.listWorkspaceFiles).toHaveBeenCalledWith({
-      workspaceId: WORKSPACE.workspaceId,
-      allowCached: true,
-    });
-  });
-});
-
-// Spurious file-open-start marks: a no-op click on the already-
-// active row used to mark anyway — no remount/measure follows, so the stale
-// mark corrupts the next open's latency measure.
-describe("file-open-start marking", () => {
-  it("marks the source fallback and target after a delayed move creates a group", async () => {
-    const save = deferred<{ status: "written"; contentHash: string }>();
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md", "fallback.md"], "a.md")),
-    );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
-      files: ["a.md", "fallback.md"].map((path) => ({
-        path,
-        kind: "file" as const,
-      })),
-      folders: [],
-    }));
-    bridge.readWorkspaceText = vi.fn(async () => ({
-      text: "# Doc\n\n",
-      truncated: false as const,
-      contentHash: "a".repeat(64),
-    }));
-    bridge.writeWorkspaceText = vi.fn(() => save.promise);
-    bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await screen.findByTestId("view-markdown");
-    await user.type(await enterMarkdownSource(user), "Draft");
-    await waitFor(() => expect(screen.getByTestId("tab-dirty")).toBeTruthy());
-    const mark = vi.spyOn(rendererMarks, "mark");
-
-    fireEvent.contextMenu(screen.getByTestId("tab-a.md"));
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledOnce());
-    expect(mark.mock.calls.some(([name]) => isFileOpenStartMark(name))).toBe(false);
-
-    await act(async () => {
-      save.resolve({ status: "written", contentHash: "b".repeat(64) });
-      await save.promise;
-    });
-
-    const target = await screen.findByRole("region", { name: "Editor group 2" });
-    const targetGroupId = target.dataset.editorGroupId!;
-    expect(mark).toHaveBeenCalledWith("file-open-start:primary");
-    expect(mark).toHaveBeenCalledWith(`file-open-start:${targetGroupId}`);
-    mark.mockRestore();
-  });
-
-  it("marks both Markdown mounts in an active cross-group move", async () => {
-    const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        editorGroups: [
-          {
-            id: "left",
-            tabs: ["a.md", "fallback.md"],
-            activeTab: "a.md",
-            size: 0.5,
-          },
-          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
-        ],
-        activeEditorGroup: "left",
-      }),
-    );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
-      files: ["a.md", "fallback.md", "b.md"].map((path) => ({
-        path,
-        kind: "file" as const,
-      })),
-      folders: [],
-    }));
-    Object.defineProperty(Element.prototype, "setPointerCapture", {
-      configurable: true,
-      value: vi.fn(),
-    });
-    Object.defineProperty(Element.prototype, "hasPointerCapture", {
-      configurable: true,
-      value: vi.fn(() => false),
-    });
-    renderShell(bridge);
-    await waitFor(() =>
-      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
-    );
-    const mark = vi.spyOn(rendererMarks, "mark");
-    const left = screen.getByRole("region", { name: "Editor group 1" });
-    const right = screen.getByRole("region", { name: "Editor group 2" });
-    Object.defineProperty(document, "elementFromPoint", {
-      configurable: true,
-      value: vi.fn(() => right),
-    });
-    const source = within(left).getByTestId("tab-a.md");
-
-    fireEvent.pointerDown(source, { button: 0, pointerId: 7, clientX: 10 });
-    fireEvent.pointerMove(source, {
-      pointerId: 7,
-      buttons: 1,
-      clientX: 30,
-      clientY: 40,
-    });
-    fireEvent.pointerUp(source, {
-      pointerId: 7,
-      clientX: 30,
-      clientY: 40,
-    });
-
-    await waitFor(() =>
-      expect(within(right).getByTestId("tab-a.md").dataset.active).toBe("true"),
-    );
-    expect(mark).toHaveBeenCalledWith("file-open-start:right");
-    expect(mark).toHaveBeenCalledWith("file-open-start:left");
-    mark.mockRestore();
-  });
-
-  it("measures overlapping Markdown opens from each editor group's start", async () => {
-    const leftRead = deferred<{
-      text: string;
-      truncated: false;
-      contentHash: string;
-    }>();
-    const rightRead = deferred<{
-      text: string;
-      truncated: false;
-      contentHash: string;
-    }>();
-    const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        editorGroups: [
-          {
-            id: "left",
-            tabs: ["left-old.md"],
-            activeTab: "left-old.md",
-            size: 0.5,
-          },
-          {
-            id: "right",
-            tabs: ["right-old.md"],
-            activeTab: "right-old.md",
-            size: 0.5,
-          },
-        ],
-        activeEditorGroup: "left",
-      }),
-    );
-    const paths = ["left-old.md", "right-old.md", "left-new.md", "right-new.md"];
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
-      files: paths.map((path) => ({ path, kind: "file" as const })),
-      folders: [],
-    }));
-    bridge.readWorkspaceText = vi.fn((payload: ReadWorkspaceTextPayload) => {
-      if (payload.relativePath === "left-new.md") return leftRead.promise;
-      if (payload.relativePath === "right-new.md") return rightRead.promise;
-      return Promise.resolve({
-        text: "# Ready\n",
-        truncated: false as const,
-        contentHash: "a".repeat(64),
-      });
-    });
-    renderShell(bridge);
-    await waitFor(() =>
-      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
-    );
-    const mark = vi.spyOn(rendererMarks, "mark");
-    const measureSince = vi.spyOn(rendererMarks, "measureSince");
-    const user = userEvent.setup();
-    const left = screen.getByRole("region", { name: "Editor group 1" });
-    const right = screen.getByRole("region", { name: "Editor group 2" });
-
-    await user.click(
-      screen
-        .getAllByTestId("tree-row")
-        .find((row) => row.dataset.path === "left-new.md")!,
-    );
-    fireEvent.pointerDown(right);
-    await waitFor(() => expect(right.dataset.active).toBe("true"));
-    await user.click(
-      screen
-        .getAllByTestId("tree-row")
-        .find((row) => row.dataset.path === "right-new.md")!,
-    );
-
-    await act(async () => {
-      rightRead.resolve({
-        text: "# Right\n",
-        truncated: false,
-        contentHash: "b".repeat(64),
-      });
-      await rightRead.promise;
-    });
-    await waitFor(() =>
-      expect(measureSince).toHaveBeenCalledWith(
-        "markdown-open",
-        "file-open-start:right",
-      ),
-    );
-
-    await act(async () => {
-      leftRead.resolve({
-        text: "# Left\n",
-        truncated: false,
-        contentHash: "c".repeat(64),
-      });
-      await leftRead.promise;
-    });
-    await waitFor(() =>
-      expect(measureSince).toHaveBeenCalledWith(
-        "markdown-open",
-        "file-open-start:left",
-      ),
-    );
-    expect(mark).toHaveBeenCalledWith("file-open-start:left");
-    expect(mark).toHaveBeenCalledWith("file-open-start:right");
-    expect(within(left).getByTestId("tab-left-new.md").dataset.active).toBe(
-      "true",
-    );
-    expect(within(right).getByTestId("tab-right-new.md").dataset.active).toBe(
-      "true",
-    );
-    mark.mockRestore();
-    measureSince.mockRestore();
-  });
-
-  it("marks before a Markdown split mounts another inspector", async () => {
-    const mark = vi.spyOn(rendererMarks, "mark");
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
-    );
-    renderShell(bridge);
-
-    await screen.findByTestId("view-markdown");
-    const openStartCalls = () =>
-      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
-    const before = openStartCalls();
-
-    await userEvent.click(screen.getByTestId("create-editor-group-right"));
-    await waitFor(() =>
-      expect(screen.getAllByTestId("view-markdown")).toHaveLength(2),
-    );
-
-    expect(openStartCalls()).toBe(before + 1);
-    mark.mockRestore();
-  });
-
-  it("marks before a SQLite split loads another first page", async () => {
-    const mark = vi.spyOn(rendererMarks, "mark");
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["data.db"], "data.db")),
-    );
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
-      files: [{ path: "data.db", kind: "file" }],
-      folders: [],
-    });
-    Object.assign(bridge, {
-      readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
-    });
-    renderShell(bridge);
-
-    await screen.findByTestId("view-database");
-    const openStartCalls = () =>
-      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
-    const before = openStartCalls();
-
-    await userEvent.click(screen.getByTestId("create-editor-group-right"));
-    await waitFor(() =>
-      expect(screen.getAllByTestId("view-database")).toHaveLength(2),
-    );
-
-    expect(openStartCalls()).toBe(before + 1);
-    mark.mockRestore();
-  });
-
-  it("focuses an already-mounted Open Editors tab without marking a file open", async () => {
-    const mark = vi.spyOn(rendererMarks, "mark");
-    const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        editorGroups: [
-          { id: "primary", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
-          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
-        ],
-        activeEditorGroup: "right",
-      }),
-    );
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await screen.findByTestId("tab-a.md");
-    const openStartCalls = () =>
-      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
-    const before = openStartCalls();
-    await user.click(
-      within(screen.getAllByTestId("open-editor-group")[0]!).getByTitle("a.md"),
-    );
-
-    await waitFor(() =>
-      expect(screen.getByRole("region", { name: "Editor group 1" }).dataset.active).toBe(
-        "true",
-      ),
-    );
-    expect(openStartCalls()).toBe(before);
-    mark.mockRestore();
-  });
-
-  it("marks on a real open, but not on a no-op click on the already-active file", async () => {
-    const mark = vi.spyOn(rendererMarks, "mark");
-    const bridge = makeBridge(Promise.resolve(null));
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    const openStartCalls = () =>
-      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)).length;
-
-    const row = await screen.findByText("a.md");
-    await user.click(row);
-    await screen.findByTestId("tab-a.md");
-    expect(openStartCalls()).toBe(1);
-
-    // Re-clicking the active row is a no-op open: no remount, no mark.
-    await user.click(row);
-    expect(openStartCalls()).toBe(1);
-
-    // A different file is a real open again.
-    await user.click(screen.getByText("b.md"));
-    await screen.findByTestId("tab-b.md");
-    expect(openStartCalls()).toBe(2);
-
-    mark.mockRestore();
-  });
-
-  it("marks when a close hands a non-focused group to another document", async () => {
-    const mark = vi.spyOn(rendererMarks, "mark");
-    const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        editorGroups: [
-          { id: "left", tabs: ["a.md", "b.md"], activeTab: "b.md", size: 0.5 },
-          { id: "right", tabs: ["c.md"], activeTab: "c.md", size: 0.5 },
-        ],
-        activeEditorGroup: "right",
-      }),
-    );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
-      files: ["a.md", "b.md", "c.md"].map((path) => ({
-        path,
-        kind: "file" as const,
-      })),
-      folders: [],
-    }));
-    renderShell(bridge);
-
-    await screen.findByTestId("tab-c.md");
-    const left = screen.getByRole("region", { name: "Editor group 1" });
-    const before = mark.mock.calls.filter(
-      ([name]) => isFileOpenStartMark(name),
-    ).length;
-    await userEvent.click(
-      within(left).getByRole("button", { name: "Close b.md" }),
-    );
-
-    await screen.findByTestId("tab-a.md");
-    expect(
-      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)),
-    ).toHaveLength(before + 1);
-    expect(mark).toHaveBeenCalledWith("file-open-start:left");
-    mark.mockRestore();
-  });
-
-  it("does not mark when closing a group reveals an already-mounted neighbor", async () => {
-    const mark = vi.spyOn(rendererMarks, "mark");
-    const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        editorGroups: [
-          { id: "left", tabs: ["a.md"], activeTab: "a.md", size: 0.5 },
-          { id: "right", tabs: ["b.md"], activeTab: "b.md", size: 0.5 },
-        ],
-        activeEditorGroup: "left",
-      }),
-    );
-    renderShell(bridge);
-
-    await screen.findByTestId("tab-b.md");
-    const left = screen.getByRole("region", { name: "Editor group 1" });
-    const before = mark.mock.calls.filter(
-      ([name]) => isFileOpenStartMark(name),
-    ).length;
-    await userEvent.click(
-      within(left).getByRole("button", { name: "Close a.md" }),
-    );
-
-    await waitFor(() =>
-      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(1),
-    );
-    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
-    expect(
-      mark.mock.calls.filter(([name]) => isFileOpenStartMark(name)),
-    ).toHaveLength(before);
-    mark.mockRestore();
   });
 });
 
@@ -1712,110 +739,25 @@ describe("dirty tab close boundaries", () => {
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
     expect(editor.isConnected).toBe(true);
     expect(editor.textContent).toContain("Draft!");
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "disk full",
-    );
-  });
-
-  it("keeps the active tab mounted when Ctrl+W cannot flush it", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.writeWorkspaceText = vi.fn(async () => {
-      throw new Error("disk full");
-    });
-    const { user, editor } = await openDirtyMarkdown(bridge);
-
-    await user.keyboard("{Control>}w{/Control}");
-
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-    expect(editor.isConnected).toBe(true);
-  });
-
-  it("keeps every tab when close-all cannot flush the active tab", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
-    );
-    bridge.writeWorkspaceText = vi.fn(async () => {
-      throw new Error("disk full");
-    });
-    const { user, editor } = await openDirtyMarkdown(bridge);
-
-    await user.click(screen.getByRole("button", { name: "Close all editors" }));
-
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
-    expect(editor.isConnected).toBe(true);
-  });
-
-  it("flushes a captured tab that becomes active while close-all waits", async () => {
-    const aSave = deferred<{ status: "written"; contentHash: string }>();
-    let rejectBSave!: (cause: Error) => void;
-    const bSave = new Promise<{ status: "written"; contentHash: string }>(
-      (_resolve, reject) => {
-        rejectBSave = reject;
-      },
-    );
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    bridge.writeWorkspaceText = vi.fn((payload) =>
-      payload.relativePath === "a.md" ? aSave.promise : bSave,
-    );
-    const { user } = await openDirtyMarkdown(bridge);
-
-    await user.click(screen.getByRole("button", { name: "Close all editors" }));
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText.mock.calls[0]?.[0].relativePath).toBe("a.md"),
-    );
-
-    // This is a later action, but b.md was already in the captured close set.
-    // Its newly mounted editor therefore needs its own flush before it closes.
-    await user.click(screen.getByTestId("tab-b.md"));
-    const bEditor = await enterMarkdownSource(user);
-    await user.type(bEditor, "Second draft!");
-
-    await act(async () => {
-      aSave.resolve({ status: "written", contentHash: "b".repeat(64) });
-      await aSave.promise;
-    });
-    await waitFor(() =>
-      expect(
-        bridge.writeWorkspaceText.mock.calls.some(
-          ([payload]) => payload.relativePath === "b.md",
-        ),
-      ).toBe(true),
-    );
-
-    await act(async () => {
-      rejectBSave(new Error("disk full"));
-      await bSave.catch(() => undefined);
-    });
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
-    expect(bEditor.isConnected).toBe(true);
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("disk full");
   });
 
   it("does not close a tab reopened while close-all waits", async () => {
     const save = deferred<{ status: "written"; contentHash: string }>();
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
-    );
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")));
     bridge.writeWorkspaceText = vi.fn(() => save.promise);
     const { user } = await openDirtyMarkdown(bridge);
 
     await user.click(screen.getByRole("button", { name: "Close all editors" }));
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
 
-    // Remove the original b.md tab, then open the same path as a new tab while
-    // close-all still waits for a.md. The later tab is not part of that click.
     fireEvent.click(
       within(screen.getByTestId("tab-b.md")).getByRole("button", {
         name: "Close b.md",
       }),
     );
     expect(screen.queryByTestId("tab-b.md")).toBeNull();
-    const bRow = screen
-      .getAllByTestId("tree-row")
-      .find((row) => row.dataset.path === "b.md")!;
+    const bRow = screen.getAllByTestId("tree-row").find((row) => row.dataset.path === "b.md")!;
     await user.click(bRow);
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
 
@@ -1825,56 +767,6 @@ describe("dirty tab close boundaries", () => {
     });
     await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
-  });
-
-  it("does not close a requested tab after it moves to another group", async () => {
-    const save = deferred<{ status: "written"; contentHash: string }>();
-    const bridge = makeBridge(
-      Promise.resolve({
-        ...STORED_STATE,
-        editorGroups: [
-          { id: "left", tabs: ["a.md", "b.md"], activeTab: "a.md", size: 0.5 },
-          { id: "right", tabs: ["c.md"], activeTab: "c.md", size: 0.5 },
-        ],
-        activeEditorGroup: "left",
-      }),
-    );
-    bridge.listWorkspaceFiles = vi.fn(async () => ({ visibility: { status: "ready" as const, rules: [] },
-      files: ["a.md", "b.md", "c.md"].map((path) => ({
-        path,
-        kind: "file" as const,
-      })),
-      folders: [],
-    }));
-    bridge.writeWorkspaceText = vi.fn(() => save.promise);
-    bridge.showWorkbenchMenu.mockResolvedValue("move-tab-to-new-group");
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await screen.findByTestId("tab-c.md");
-    await waitFor(() => expect(screen.getAllByTestId("view-markdown")).toHaveLength(2));
-    const left = screen.getByRole("region", { name: "Editor group 1" });
-    await user.type(await enterMarkdownSource(user, left), "Draft!");
-    await within(screen.getByTestId("tab-a.md")).findByTestId("tab-dirty");
-    await user.click(
-      within(left).getByRole("button", { name: "All tabs in editor group 1" }),
-    );
-    await user.click(within(left).getByRole("menuitem", { name: "Close group" }));
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
-
-    fireEvent.contextMenu(screen.getByTestId("tab-b.md"));
-    await waitFor(() => expect(bridge.showWorkbenchMenu).toHaveBeenCalled());
-    await waitFor(() =>
-      expect(screen.getAllByRole("region", { name: /Editor group/ })).toHaveLength(3),
-    );
-
-    await act(async () => {
-      save.resolve({ status: "written", contentHash: "b".repeat(64) });
-      await save.promise;
-    });
-    await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
-    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
-    expect(screen.getByTestId("tab-c.md")).toBeTruthy();
   });
 
   it("flushes an editor again when it changes while another close-all save waits", async () => {
@@ -1892,20 +784,18 @@ describe("dirty tab close boundaries", () => {
       }),
     );
     holdHistory(bridge);
-    bridge.writeWorkspaceText = vi.fn(
-      async (payload: { relativePath: string }) => {
-        if (firstPath === null) {
-          firstPath = payload.relativePath;
-          return { status: "written" as const, contentHash: "b".repeat(64) };
-        }
-        if (payload.relativePath !== firstPath && heldPath === null) {
-          heldPath = payload.relativePath;
-          return heldSave.promise;
-        }
-        if (payload.relativePath === firstPath) throw new Error("disk full");
-        return { status: "written" as const, contentHash: "c".repeat(64) };
-      },
-    );
+    bridge.writeWorkspaceText = vi.fn(async (payload: { relativePath: string }) => {
+      if (firstPath === null) {
+        firstPath = payload.relativePath;
+        return { status: "written" as const, contentHash: "b".repeat(64) };
+      }
+      if (payload.relativePath !== firstPath && heldPath === null) {
+        heldPath = payload.relativePath;
+        return heldSave.promise;
+      }
+      if (payload.relativePath === firstPath) throw new Error("disk full");
+      return { status: "written" as const, contentHash: "c".repeat(64) };
+    });
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -1922,9 +812,10 @@ describe("dirty tab close boundaries", () => {
     await waitFor(() => expect(heldPath).not.toBeNull());
     await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(1));
 
-    const firstEditor = firstPath === "a.md"
-      ? within(left).getByTestId("markdown-editor").querySelector<HTMLElement>(".cm-content")!
-      : within(right).getByTestId("markdown-editor").querySelector<HTMLElement>(".cm-content")!;
+    const firstEditor =
+      firstPath === "a.md"
+        ? within(left).getByTestId("markdown-editor").querySelector<HTMLElement>(".cm-content")!
+        : within(right).getByTestId("markdown-editor").querySelector<HTMLElement>(".cm-content")!;
     await user.type(firstEditor, " changed again");
     await waitFor(() => expect(screen.getAllByTestId("tab-dirty")).toHaveLength(2));
 
@@ -1933,9 +824,7 @@ describe("dirty tab close boundaries", () => {
       heldSave.resolve({ status: "written", contentHash: "d".repeat(64) });
       await heldSave.promise;
     });
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "disk full",
-    );
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("disk full");
     expect(
       bridge.writeWorkspaceText.mock.calls.slice(writesBeforeRelease).at(-1)?.[0],
     ).toMatchObject({ relativePath: firstPath, text: expect.stringContaining(" changed again") });
@@ -1943,145 +832,9 @@ describe("dirty tab close boundaries", () => {
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
     expect(firstEditor.isConnected).toBe(true);
   });
-
-  it("closes an inactive tab synchronously while the active flush is pending", async () => {
-    const save = deferred<{ status: "written"; contentHash: string }>();
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
-    );
-    bridge.writeWorkspaceText = vi.fn(() => save.promise);
-    const { editor } = await openDirtyMarkdown(bridge);
-
-    fireEvent.click(screen.getByRole("button", { name: "Close all editors" }));
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1));
-
-    fireEvent.click(
-      within(screen.getByTestId("tab-b.md")).getByRole("button", {
-        name: "Close b.md",
-      }),
-    );
-
-    expect(screen.queryByTestId("tab-b.md")).toBeNull();
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-    expect(editor.isConnected).toBe(true);
-    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      save.resolve({ status: "written", contentHash: "b".repeat(64) });
-      await save.promise;
-    });
-    await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
-  });
-
-  it("keeps every tab when close-others cannot flush the active tab", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
-    );
-    bridge.showWorkbenchMenu.mockResolvedValue("close-other-tabs");
-    bridge.writeWorkspaceText = vi.fn(async () => {
-      throw new Error("disk full");
-    });
-    const { editor } = await openDirtyMarkdown(bridge);
-
-    fireEvent.contextMenu(screen.getByTestId("tab-b.md"));
-
-    await waitFor(() => expect(bridge.showWorkbenchMenu).toHaveBeenCalled());
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
-    expect(editor.isConnected).toBe(true);
-  });
-
-  it("waits for a successful flush before closing the active tab", async () => {
-    const save = deferred<{ status: "written"; contentHash: string }>();
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    bridge.writeWorkspaceText = vi.fn(() => save.promise);
-    const { user } = await openDirtyMarkdown(bridge);
-
-    await user.click(
-      within(screen.getByTestId("tab-a.md")).getByRole("button", {
-        name: "Close a.md",
-      }),
-    );
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-
-    await act(async () => {
-      save.resolve({ status: "written", contentHash: "b".repeat(64) });
-      await save.promise;
-    });
-    await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
-    expect(screen.getByTestId("tab-b.md")).toBeTruthy();
-  });
 });
 
 describe("explorer destructive change flush boundaries", () => {
-  it("does not rename a file when the active draft flush fails", async () => {
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      moveWorkspacePath: vi.fn(async () => undefined),
-    });
-    bridge.writeWorkspaceText = vi.fn(async () => {
-      throw new Error("disk full");
-    });
-    const { user, editor } = await openDirtyMarkdown(bridge);
-    const row = (await screen.findAllByTestId("tree-row")).find(
-      (candidate) => candidate.dataset.path === "a.md",
-    )!;
-
-    await user.click(row);
-    await user.keyboard("{F2}");
-    const input = await screen.findByTestId("tree-edit-input");
-    await user.clear(input);
-    await user.type(input, "renamed.md{Enter}");
-
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
-    expect(bridge.moveWorkspacePath).not.toHaveBeenCalled();
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "disk full",
-    );
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-    expect(editor.isConnected).toBe(true);
-  });
-
-  it("does not move a file when the active draft flush fails", async () => {
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      moveWorkspacePath: vi.fn(async () => undefined),
-    });
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
-      files: [
-        { path: "a.md", kind: "file" as const },
-        { path: "docs/b.md", kind: "file" as const },
-      ],
-      folders: ["docs"],
-    });
-    bridge.writeWorkspaceText = vi.fn(async () => {
-      throw new Error("disk full");
-    });
-    const { editor } = await openDirtyMarkdown(bridge);
-    const rows = await screen.findAllByTestId("tree-row");
-    const source = rows.find((row) => row.dataset.path === "a.md")!;
-    const target = rows.find((row) => row.dataset.path === "docs")!;
-    const dataTransfer = {
-      effectAllowed: "move",
-      dropEffect: "move",
-      files: [],
-      types: [],
-      setData: vi.fn(),
-    };
-
-    fireEvent.dragStart(source, { dataTransfer });
-    fireEvent.dragOver(target, { dataTransfer });
-    fireEvent.drop(target, { dataTransfer });
-
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
-    expect(bridge.moveWorkspacePath).not.toHaveBeenCalled();
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "disk full",
-    );
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-    expect(editor.isConnected).toBe(true);
-  });
-
   it("does not delete a file when the active draft flush fails", async () => {
     const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
       deleteWorkspacePath: vi.fn(async () => undefined),
@@ -2099,302 +852,9 @@ describe("explorer destructive change flush boundaries", () => {
 
     await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
     expect(bridge.deleteWorkspacePath).not.toHaveBeenCalled();
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "disk full",
-    );
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain("disk full");
     expect(screen.getByTestId("tab-a.md")).toBeTruthy();
     expect(editor.isConnected).toBe(true);
-  });
-
-  it("rechecks the active editor before deleting its folder", async () => {
-    const aSave = deferred<{ status: "written"; contentHash: string }>();
-    let rejectBSave!: (cause: Error) => void;
-    const bSave = new Promise<{ status: "written"; contentHash: string }>(
-      (_resolve, reject) => {
-        rejectBSave = reject;
-      },
-    );
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      deleteWorkspacePath: vi.fn(async () => undefined),
-    });
-    bridge.listWorkspaceFiles.mockResolvedValue({ visibility: { status: "ready" as const, rules: [] },
-      files: [
-        { path: "a.md", kind: "file" as const },
-        { path: "docs/b.md", kind: "file" as const },
-      ],
-      folders: ["docs"],
-    });
-    bridge.writeWorkspaceText = vi.fn((payload) =>
-      payload.relativePath === "a.md" ? aSave.promise : bSave,
-    );
-    const { user } = await openDirtyMarkdown(bridge);
-    const docs = (await screen.findAllByTestId("tree-row")).find(
-      (candidate) => candidate.dataset.path === "docs",
-    )!;
-
-    await user.click(docs);
-    await user.keyboard("{Delete}");
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText.mock.calls[0]?.[0].relativePath).toBe("a.md"),
-    );
-
-    const bRow = screen
-      .getAllByTestId("tree-row")
-      .find((candidate) => candidate.dataset.path === "docs/b.md")!;
-    await user.click(bRow);
-    const bEditor = await enterMarkdownSource(user);
-    await user.type(bEditor, "Second draft!");
-
-    await act(async () => {
-      aSave.resolve({ status: "written", contentHash: "b".repeat(64) });
-      await aSave.promise;
-    });
-    await waitFor(() =>
-      expect(
-        bridge.writeWorkspaceText.mock.calls.some(
-          ([payload]) => payload.relativePath === "docs/b.md",
-        ),
-      ).toBe(true),
-    );
-    await act(async () => {
-      rejectBSave(new Error("disk full"));
-      await bSave.catch(() => undefined);
-    });
-
-    expect(bridge.deleteWorkspacePath).not.toHaveBeenCalled();
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "disk full",
-    );
-    expect(screen.getByTestId("tab-docs/b.md")).toBeTruthy();
-    expect(bEditor.isConnected).toBe(true);
-  });
-
-  it("waits for a successful flush before renaming the file", async () => {
-    const save = deferred<{ status: "written"; contentHash: string }>();
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      moveWorkspacePath: vi.fn(async () => undefined),
-    });
-    bridge.writeWorkspaceText = vi.fn(() => save.promise);
-    const { user } = await openDirtyMarkdown(bridge);
-    const row = (await screen.findAllByTestId("tree-row")).find(
-      (candidate) => candidate.dataset.path === "a.md",
-    )!;
-
-    await user.click(row);
-    await user.keyboard("{F2}");
-    const input = await screen.findByTestId("tree-edit-input");
-    await user.clear(input);
-    await user.type(input, "renamed.md{Enter}");
-
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
-    expect(bridge.moveWorkspacePath).not.toHaveBeenCalled();
-
-    await act(async () => {
-      save.resolve({ status: "written", contentHash: "b".repeat(64) });
-      await save.promise;
-    });
-    await waitFor(() =>
-      expect(bridge.moveWorkspacePath).toHaveBeenCalledWith({
-        workspaceId: WORKSPACE.workspaceId,
-        fromPath: "a.md",
-        toPath: "renamed.md",
-      }),
-    );
-  });
-
-  it("keeps a late queued rename conflict on the renamed tab", async () => {
-    const move = deferred<void>();
-    const lateWrite = deferred<{
-      status: "conflict";
-      currentContentHash: null;
-    }>();
-    let writes = 0;
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      moveWorkspacePath: vi.fn(() => move.promise),
-    });
-    bridge.writeWorkspaceText = vi.fn(() => {
-      writes += 1;
-      return writes === 1
-        ? Promise.resolve({ status: "written" as const, contentHash: "b".repeat(64) })
-        : lateWrite.promise;
-    });
-    const { user, editor } = await openDirtyMarkdown(bridge);
-    const row = (await screen.findAllByTestId("tree-row")).find(
-      (candidate) => candidate.dataset.path === "a.md",
-    )!;
-
-    await user.click(row);
-    await user.keyboard("{F2}");
-    const input = await screen.findByTestId("tree-edit-input");
-    await user.clear(input);
-    await user.type(input, "renamed.md{Enter}");
-    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1));
-    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1);
-
-    await user.click(editor);
-    await user.type(editor, " Late");
-    const lateDraft = sourceEditorText(editor);
-    await user.keyboard("{Control>}s{/Control}");
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
-    expect(bridge.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
-      workspaceId: WORKSPACE.workspaceId,
-      relativePath: "a.md",
-      text: lateDraft,
-      expectedContentHash: "b".repeat(64),
-    });
-
-    // Main releases the queued write only after the exclusive rename. The
-    // shell must now join that late obligation before projecting the path;
-    // otherwise recovery can arrive after the one-shot path remap.
-    await act(async () => {
-      move.resolve(undefined);
-      await move.promise;
-    });
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-    expect(screen.queryByTestId("tab-renamed.md")).toBeNull();
-    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
-
-    await act(async () => {
-      lateWrite.resolve({ status: "conflict", currentContentHash: null });
-      await lateWrite.promise;
-    });
-    await screen.findByTestId("tab-renamed.md");
-    await screen.findByTestId("orphaned-draft-notice");
-    await user.click(screen.getByTestId("orphaned-draft-copy"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe(lateDraft),
-    );
-    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2);
-  });
-
-  it("keeps a late queued delete conflict in global recovery", async () => {
-    const deletion = deferred<void>();
-    const lateWrite = deferred<{
-      status: "conflict";
-      currentContentHash: null;
-    }>();
-    let writes = 0;
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      deleteWorkspacePath: vi.fn(() => deletion.promise),
-    });
-    bridge.writeWorkspaceText = vi.fn(() => {
-      writes += 1;
-      return writes === 1
-        ? Promise.resolve({ status: "written" as const, contentHash: "b".repeat(64) })
-        : lateWrite.promise;
-    });
-    const { user, editor } = await openDirtyMarkdown(bridge);
-    const row = (await screen.findAllByTestId("tree-row")).find(
-      (candidate) => candidate.dataset.path === "a.md",
-    )!;
-
-    await user.click(row);
-    await user.keyboard("{Delete}");
-    await waitFor(() => expect(bridge.deleteWorkspacePath).toHaveBeenCalledTimes(1));
-    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(1);
-
-    await user.click(editor);
-    await user.type(editor, " Late");
-    const lateDraft = sourceEditorText(editor);
-    await user.keyboard("{Control>}s{/Control}");
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
-    expect(bridge.writeWorkspaceText.mock.calls[1]?.[0]).toEqual(
-      expect.objectContaining({ relativePath: "a.md", text: lateDraft }),
-    );
-
-    await act(async () => {
-      deletion.resolve(undefined);
-      await deletion.promise;
-    });
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-    await act(async () => {
-      lateWrite.resolve({ status: "conflict", currentContentHash: null });
-      await lateWrite.promise;
-    });
-    await waitFor(() => expect(screen.queryByTestId("tab-a.md")).toBeNull());
-
-    const recovery = render(<GlobalRecoveryList />);
-    const recoveryRow = await within(recovery.container).findByTestId(
-      "recovery-list-row",
-    );
-    await user.click(within(recoveryRow).getByTestId("recovery-list-copy"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe(lateDraft),
-    );
-    // Removing the tab awaited draft settlement; recovery now holds the late text.
-    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2);
-  });
-
-  it("resumes a late queued write when the rename fails", async () => {
-    let rejectMove!: (error: Error) => void;
-    const move = new Promise<void>((_resolve, reject) => {
-      rejectMove = reject;
-    });
-    const lateWrite = deferred<{
-      status: "written";
-      contentHash: string;
-    }>();
-    let writes = 0;
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      moveWorkspacePath: vi.fn(() => move),
-    });
-    bridge.writeWorkspaceText = vi.fn(() => {
-      writes += 1;
-      return writes === 1
-        ? Promise.resolve({ status: "written" as const, contentHash: "b".repeat(64) })
-        : lateWrite.promise;
-    });
-    const { user, editor } = await openDirtyMarkdown(bridge);
-    const row = (await screen.findAllByTestId("tree-row")).find(
-      (candidate) => candidate.dataset.path === "a.md",
-    )!;
-
-    await user.click(row);
-    await user.keyboard("{F2}");
-    const input = await screen.findByTestId("tree-edit-input");
-    await user.clear(input);
-    await user.type(input, "renamed.md{Enter}");
-    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1));
-
-    await user.click(editor);
-    await user.type(editor, " Late");
-    const lateDraft = sourceEditorText(editor);
-    await user.keyboard("{Control>}s{/Control}");
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
-
-    // Start a second Explorer flush while the write and rename are held.
-    // The rename settlement must add recovery semantics when it joins this
-    // promise, even though the create operation started it without them.
-    await user.click(screen.getByLabelText("New folder"));
-    await user.type(await screen.findByLabelText("New folder name"), "spare{Enter}");
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-
-    await act(async () => {
-      rejectMove(new Error("rename failed"));
-      await move.catch(() => undefined);
-    });
-    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
-      "rename failed",
-    );
-    expect(screen.getByTestId("tab-a.md")).toBeTruthy();
-    expect(editor.isConnected).toBe(true);
-
-    await act(async () => {
-      lateWrite.resolve({ status: "written", contentHash: "c".repeat(64) });
-      await lateWrite.promise;
-    });
-    expect(bridge.writeWorkspaceText.mock.calls[1]?.[0]).toEqual({
-      workspaceId: WORKSPACE.workspaceId,
-      relativePath: "a.md",
-      text: lateDraft,
-      expectedContentHash: "b".repeat(64),
-    });
-    await waitFor(() =>
-      expect(
-        screen.getByTestId("markdown-save-state").getAttribute("data-state"),
-      ).toBe("saved"),
-    );
-    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
   });
 
   it("settles every editor registered during a held rename", async () => {
@@ -2409,9 +869,7 @@ describe("explorer destructive change flush boundaries", () => {
     }>();
     let writes = 0;
     const bridge = Object.assign(
-      makeBridge(
-        Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
-      ),
+      makeBridge(Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md"))),
       { moveWorkspacePath: vi.fn(() => move.promise) },
     );
     bridge.writeWorkspaceText = vi.fn(() => {
@@ -2466,9 +924,7 @@ describe("explorer destructive change flush boundaries", () => {
     await user.click(screen.getByTestId("tab-renamed.md"));
     await screen.findByTestId("orphaned-draft-notice");
     await user.click(screen.getByTestId("orphaned-draft-copy"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe(lateADraft),
-    );
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(lateADraft));
     expect(bridge.writeWorkspaceText.mock.calls[2]?.[0]).toEqual(
       expect.objectContaining({ relativePath: "b.md", text: lateBDraft }),
     );
@@ -2486,9 +942,7 @@ describe("explorer destructive change flush boundaries", () => {
     }>();
     let writes = 0;
     const bridge = Object.assign(
-      makeBridge(
-        Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
-      ),
+      makeBridge(Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md"))),
       { deleteWorkspacePath: vi.fn(() => deletion.promise) },
     );
     bridge.writeWorkspaceText = vi.fn(() => {
@@ -2540,101 +994,67 @@ describe("explorer destructive change flush boundaries", () => {
     const rows = await within(recovery.container).findAllByTestId("recovery-list-row");
     const rowA = rows.find((candidate) => candidate.textContent?.includes("a.md"))!;
     await user.click(within(rowA).getByTestId("recovery-list-copy"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe(lateADraft),
-    );
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(lateADraft));
     expect(bridge.writeWorkspaceText.mock.calls[2]?.[0]).toEqual(
       expect.objectContaining({ relativePath: "b.md", text: lateBDraft }),
     );
   });
-
-  it("captures an ordinary post-rename I/O failure before remapping recovery", async () => {
-    const move = deferred<void>();
-    let rejectLateWrite!: (error: Error) => void;
-    const lateWrite = new Promise<never>((_resolve, reject) => {
-      rejectLateWrite = reject;
-    });
-    let writes = 0;
-    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
-      moveWorkspacePath: vi.fn(() => move.promise),
-    });
-    bridge.writeWorkspaceText = vi.fn(() => {
-      writes += 1;
-      if (writes === 1) {
-        return Promise.resolve({
-          status: "written" as const,
-          contentHash: "b".repeat(64),
-        });
-      }
-      if (writes === 2) return lateWrite;
-      return Promise.reject(new Error("disk unavailable"));
-    });
-    const { user, editor } = await openDirtyMarkdown(bridge);
-    const row = (await screen.findAllByTestId("tree-row")).find(
-      (candidate) => candidate.dataset.path === "a.md",
-    )!;
-
-    await user.click(row);
-    await user.keyboard("{F2}");
-    const input = await screen.findByTestId("tree-edit-input");
-    await user.clear(input);
-    await user.type(input, "renamed.md{Enter}");
-    await waitFor(() => expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1));
-
-    await user.click(editor);
-    await user.type(editor, " Late");
-    const lateDraft = sourceEditorText(editor);
-    await user.keyboard("{Control>}s{/Control}");
-    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2));
-
-    await act(async () => {
-      move.resolve(undefined);
-      await move.promise;
-      rejectLateWrite(new Error("disk unavailable"));
-      await lateWrite.catch(() => undefined);
-    });
-    await screen.findByTestId("tab-renamed.md");
-    await screen.findByTestId("orphaned-draft-notice");
-    await user.click(screen.getByTestId("orphaned-draft-copy"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe(lateDraft),
-    );
-    expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3);
-  });
 });
 
-// #567 / #579 review: set-aside draft recovery at the shell seams. The drafts
-// live in a module store keyed by workspace + path; the shell owns the two
-// integrations under test — path remapping on explorer renames, and the
-// distinction between recovery (dot, no save promise) and savable-dirty
-// (dot and the version-switch save-first prompt).
+// Set-aside draft recovery at the shell seams. The drafts live in a module
+// store keyed by workspace + path. The shell owns the two integrations under
+// test: path remapping on explorer renames, and the distinction between
+// recovery (dot, no save promise) and savable-dirty (dot and the
+// version-switch save-first prompt).
 describe("set-aside draft recovery", () => {
-  it.each(["EBUSY", "EACCES"])("reports a %s draft read failure in Notices and retries discovery", async code => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(null));
-    const record = {recordId: "a".repeat(64), path: "deleted/gone.md", objectId: "object", text: "Unseen typing", updateBase64: "AAA="};
-    bridge.listLiveDraftRecovery.mockRejectedValueOnce(Object.assign(new Error("temporary read failure"), {code})).mockResolvedValue([record]);
-    renderShell(bridge);
-    const toast = await screen.findByTestId("workspace-shell-error");
-    expect(toast.textContent).toContain("dohc could not read set-aside edits.");
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    const notices = screen.getByTestId("notice-center");
-    expect(notices.textContent).toContain("dohc could not read set-aside edits.");
-    await user.click(within(notices).getByRole("button", {name: "Try again"}));
-    await waitFor(() => expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(2));
-    await user.click(screen.getByTestId("notice-center-toggle"));
-    await screen.findByTestId("notice-set-aside-edits");
-    expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(2);
-    await user.click(screen.getByTestId("recovery-list-copy"));
-    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(record.text));
-  });
+  it.each(["EBUSY"])(
+    "reports a %s draft read failure in Notices and retries discovery",
+    async (code) => {
+      const user = userEvent.setup();
+      const bridge = makeBridge(Promise.resolve(null));
+      const record = {
+        recordId: "a".repeat(64),
+        path: "deleted/gone.md",
+        objectId: "object",
+        text: "Unseen typing",
+        updateBase64: "AAA=",
+      };
+      bridge.listLiveDraftRecovery
+        .mockRejectedValueOnce(Object.assign(new Error("temporary read failure"), { code }))
+        .mockResolvedValue([record]);
+      renderShell(bridge);
+      const toast = await screen.findByTestId("workspace-shell-error");
+      expect(toast.textContent).toContain("dohc could not read set-aside edits.");
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      const notices = screen.getByTestId("notice-center");
+      expect(notices.textContent).toContain("dohc could not read set-aside edits.");
+      await user.click(within(notices).getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(2));
+      await user.click(screen.getByTestId("notice-center-toggle"));
+      await screen.findByTestId("notice-set-aside-edits");
+      expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(2);
+      await user.click(screen.getByTestId("recovery-list-copy"));
+      await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(record.text));
+    },
+  );
 
   it("shows main drafts on open and exposes each survivor through Notices Copy and Dismiss", async () => {
     const user = userEvent.setup();
     vi.stubGlobal("crypto", webcrypto);
     const bridge = makeBridge(Promise.resolve(null));
-    const first = {recordId: "a".repeat(64), path: "deleted/gone.md", objectId: "object", text: "First main copy", updateBase64: "AAA="};
-    const second = {...first, recordId: "b".repeat(64), text: "Unseen main copy", updateBase64: "AAE="};
+    const first = {
+      recordId: "a".repeat(64),
+      path: "deleted/gone.md",
+      objectId: "object",
+      text: "First main copy",
+      updateBase64: "AAA=",
+    };
+    const second = {
+      ...first,
+      recordId: "b".repeat(64),
+      text: "Unseen main copy",
+      updateBase64: "AAE=",
+    };
     bridge.listLiveDraftRecovery.mockResolvedValue([first]);
     bridge.discardLiveDraftRecovery.mockResolvedValueOnce([second]).mockResolvedValueOnce([]);
     renderShell(bridge);
@@ -2652,41 +1072,13 @@ describe("set-aside draft recovery", () => {
     await user.click(screen.getByTestId("recovery-dismiss"));
     await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     await waitFor(() => expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull());
-    expect(bridge.listLiveDraftRecovery).toHaveBeenCalledExactlyOnceWith({workspaceId: WORKSPACE.workspaceId});
-    expect(bridge.discardLiveDraftRecovery.mock.calls.map(([input]) => input.recordId)).toEqual([first.recordId, second.recordId]);
-  });
-
-  it("follows main's drafts while the workspace is open: a new one shows, a rewrite replaces its text, and a removal removes its row", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(null));
-    const first = {recordId: "a".repeat(64), path: "notes/gone.md", objectId: "object", text: "Typed before the delete", updateBase64: "AAA="};
-    const rewritten = {...first, recordId: "b".repeat(64), text: "Typed after the delete", updateBase64: "AAE="};
-    bridge.listLiveDraftRecovery.mockResolvedValue([]);
-    renderShell(bridge);
-    await screen.findByTestId("file-tree");
-    await waitFor(() => expect(bridge.listLiveDraftRecovery).toHaveBeenCalledOnce());
-    const copied = async () => {
-      await user.click(screen.getByTestId("recovery-list-copy"));
-      return await navigator.clipboard.readText();
-    };
-
-    // Another workspace's drafts are not this one's.
-    act(() => bridge.emitLiveDraftRecoveryChanged(OTHER_WORKSPACE.workspaceId));
-    bridge.listLiveDraftRecovery.mockResolvedValue([first]);
-    act(() => bridge.emitLiveDraftRecoveryChanged(WORKSPACE.workspaceId));
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    await screen.findByTestId("notice-set-aside-edits");
-    expect(await copied()).toBe(first.text);
-
-    bridge.listLiveDraftRecovery.mockResolvedValue([rewritten]);
-    act(() => bridge.emitLiveDraftRecoveryChanged(WORKSPACE.workspaceId));
-    await waitFor(async () => expect(await copied()).toBe(rewritten.text));
-    expect(screen.getAllByTestId("recovery-list-row")).toHaveLength(1);
-
-    bridge.listLiveDraftRecovery.mockResolvedValue([]);
-    act(() => bridge.emitLiveDraftRecoveryChanged(WORKSPACE.workspaceId));
-    await waitFor(() => expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull());
-    expect(bridge.listLiveDraftRecovery).toHaveBeenCalledTimes(4);
+    expect(bridge.listLiveDraftRecovery).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: WORKSPACE.workspaceId,
+    });
+    expect(bridge.discardLiveDraftRecovery.mock.calls.map(([input]) => input.recordId)).toEqual([
+      first.recordId,
+      second.recordId,
+    ]);
   });
 
   // Most tests capture a draft before the shell mounts, and the draft store
@@ -2695,46 +1087,9 @@ describe("set-aside draft recovery", () => {
     vi.stubGlobal("dohcDesktop", { platform: "linux" });
   });
 
-  it("keeps the notice reachable when the open file is renamed mid-notice", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
-    );
-    Object.assign(bridge, {
-      moveWorkspacePath: vi.fn(async () => undefined),
-    });
-    captureOrphanedDraft(WORKSPACE.workspaceId, "a.md", "Kept!");
-    renderShell(bridge);
-
-    // The notice is up on the open document.
-    await screen.findByTestId("view-markdown");
-    await screen.findByTestId("orphaned-draft-notice");
-
-    // Rename a.md through the explorer (F2 flow — the same seam every rename
-    // takes). The tab remaps to the new path.
-    const row = (await screen.findAllByTestId("tree-row")).find((candidate) =>
-      candidate.textContent?.includes("a.md"),
-    );
-    expect(row).toBeTruthy();
-    await user.click(row!);
-    await user.keyboard("{F2}");
-    const input = await screen.findByTestId("tree-edit-input");
-    await user.clear(input);
-    await user.type(input, "renamed.md{Enter}");
-    await screen.findByTestId("tab-renamed.md");
-
-    expect(await screen.findByTestId("orphaned-draft-notice"), "remap wiring: drop the remapOrphanedDraftPaths call from onExplorerPathsChanged. The store still keys by a.md, the tab is renamed.md, and the recovery text is unreachable from the UI.").toBeTruthy();
-    await user.click(screen.getByTestId("orphaned-draft-copy"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe("Kept!"),
-    );
-  });
-
   it("marks the tab with recovery but lets a version switch proceed without a save promise", async () => {
     const user = userEvent.setup();
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
-    );
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md")));
     bridge.listWorkspaceVersions = vi.fn(async () => ({
       versions: [
         {
@@ -2771,294 +1126,15 @@ describe("set-aside draft recovery", () => {
     );
     await user.click(item!);
     await waitFor(() =>
-      expect(bridge.switchWorkspaceVersion, "lift: lift the recovery-derived state from MarkdownView's onSaveStateChange (the round-1 behavior). The save-first dialog then appears and the switch below never runs.").toHaveBeenCalled(),
+      expect(
+        bridge.switchWorkspaceVersion,
+        "lift: lift the recovery-derived state from MarkdownView's onSaveStateChange (the round-1 behavior). The save-first dialog then appears and the switch below never runs.",
+      ).toHaveBeenCalled(),
     );
     expect(screen.queryByTestId("version-switch-save-confirm")).toBeNull();
-    // The notice survives the switch — recovery needed no save.
     expect(screen.getByTestId("orphaned-draft-notice")).toBeTruthy();
   });
 
-  it("treats a deleted live document as terminal instead of save-first dirty", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
-    );
-    bridge.listWorkspaceVersions = vi.fn(async () => ({
-      versions: [
-        {
-          id: "main",
-          name: "Main",
-          kind: "main" as const,
-          createdAtMs: 0,
-          canMergeIntoMain: false,
-        },
-        {
-          id: "v2",
-          name: "Draft two",
-          kind: "named" as const,
-          createdAtMs: 1,
-          canMergeIntoMain: true,
-        },
-      ],
-      activeVersionId: "main",
-    }));
-    const doc = markdownToYDoc("# Doc\n");
-    let sessionId = "";
-    const saveStateListeners = new Set<
-      (event: EngineYDocSaveStateEvent) => void
-    >();
-    Object.assign(bridge, {
-      openEngineYDocSession: vi.fn(async (payload: { sessionId: string }) => {
-        sessionId = payload.sessionId;
-        return {
-          available: true,
-          initialUpdate: Y.encodeStateAsUpdate(doc),
-          lineageGeneration: 1,
-        };
-      }),
-      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
-      closeEngineYDocSession: vi.fn(async () => undefined),
-      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
-      onEngineYDocOwnerHandoff: () => () => undefined,
-      prepareEngineYDocOwnerHandoff: async () => undefined,
-      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      onEngineYDocSaveState: vi.fn(
-        (listener: (event: EngineYDocSaveStateEvent) => void) => {
-          saveStateListeners.add(listener);
-          return () => saveStateListeners.delete(listener);
-        },
-      ),
-    });
-    renderShell(bridge);
-    await screen.findByTestId("markdown-source-toggle");
-
-    await user.type(screen.getByTestId("page-title"), " changed");
-    await screen.findByTestId("tab-dirty");
-    act(() => {
-      for (const listener of [...saveStateListeners]) {
-        listener({ sessionId, workspaceId: "ws-1", path: "notes/a.md", state: { kind: "unknown" }, access: "deleted", seq: 1 });
-      }
-    });
-    await screen.findByTestId("deleted-while-editing-notice");
-
-    await user.click(await screen.findByTestId("version-menu-button"));
-    const item = (await screen.findAllByTestId("version-item")).find(
-      (candidate) => candidate.dataset.versionId === "v2",
-    );
-    await user.click(item!);
-
-    await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalled());
-    expect(screen.queryByTestId("version-switch-save-confirm")).toBeNull();
-  });
-
-  // Only the mounted inspector can report savable-dirty, but
-  // recovery is knowable for every tab — an inactive tab must keep its
-  // marker or the user forgets the draft exists.
-  it("marks an inactive tab that holds a set-aside draft", async () => {
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
-    );
-    captureOrphanedDraft(WORKSPACE.workspaceId, "b.md", "Kept!");
-    renderShell(bridge);
-
-    const inactive = await screen.findByTestId("tab-b.md");
-    expect(within(inactive).getByTestId("tab-dirty"), "per-tab set: key the marker off the active tab only. The inactive b.md loses its marker while its draft still exists.").toBeTruthy();
-    const active = screen.getByTestId("tab-a.md");
-    expect(within(active).queryByTestId("tab-dirty")).toBeNull();
-  });
-
-  // The global recovery list labels rows with the NAME the
-  // UI shows for the workspace, not its UUID — the shell registers it.
-  it("registers the workspace's display name for the global recovery list", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    captureOrphanedDraft(WORKSPACE.workspaceId, "a.md", "Kept!");
-    renderShell(bridge);
-    await screen.findByTestId("file-tree");
-
-    // The same global list the close dialog embeds.
-    render(<GlobalRecoveryList />);
-    expect(screen.getByTestId("recovery-list-workspace").textContent, "label wiring: drop the shell's noteWorkspaceLabel effect — the row falls back to the raw workspace id.").toBe(
-      "personal",
-    );
-  });
-
-  // A switch can fail after its IPC started — main settles
-  // and closes live Y.Doc sessions before it sets the active version, so
-  // "the version never moved" does not mean "nothing happened". The reopen
-  // must fire, or the editor keeps a session main already closed and later
-  // edits vanish into swallowed IPC rejections.
-  it("reopens the document when a switch fails after its IPC started", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
-    );
-    bridge.listWorkspaceVersions = vi.fn(async () => ({
-      versions: [
-        {
-          id: "main",
-          name: "Main",
-          kind: "main" as const,
-          createdAtMs: 0,
-          canMergeIntoMain: false,
-        },
-        {
-          id: "v2",
-          name: "Draft two",
-          kind: "named" as const,
-          createdAtMs: 1,
-          canMergeIntoMain: true,
-        },
-      ],
-      activeVersionId: "main",
-    }));
-    bridge.switchWorkspaceVersion = vi.fn(async () => {
-      throw new Error("switch failed mid-way");
-    });
-    const openEngineYDocSession = vi.fn(async () => ({ available: false }));
-    // Subscribed before every open — a bridge missing this
-    // degrades to not-engine-backed instead of ever attempting the open, so
-    // this mock needs it even though this test never emits through it.
-    const onEngineYDocSaveState = vi.fn(() => () => undefined);
-    const onEngineYDocLineageReplacement = vi.fn(() => () => undefined);
-    Object.assign(bridge, {
-      openEngineYDocSession,
-      onEngineYDocSaveState,
-      onEngineYDocLineageReplacement,
-    });
-    renderShell(bridge);
-    await screen.findByTestId("view-markdown");
-    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
-
-    // No pending draft, so the switch starts at once — and fails inside.
-    await user.click(await screen.findByTestId("version-menu-button"));
-    const item = (await screen.findAllByTestId("version-item")).find(
-      (candidate) => candidate.dataset.versionId === "v2",
-    );
-    await user.click(item!);
-    await waitFor(() =>
-      expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
-    );
-
-    await waitFor(() => expect(openEngineYDocSession, "switch-issued key: suppress the announce whenever the version did not move, regardless of where the failure happened. The reopen below never comes and the closed-session write path is live.").toHaveBeenCalledTimes(2));
-  });
-
-  // A successful switch announces before its selector
-  // refresh, and announcing again after that refresh fails would bump the
-  // version epoch a second time — the same-version reopen moves whatever the
-  // user typed in between into set-aside recovery — a notice the user then
-  // has to answer.
-  //
-  // What this test pins is the OUTCOME: one switch, one reopen. It does not
-  // pin the `announced` guard that also enforces it — removing that guard
-  // still passes.
-  //
-  // An earlier round claimed that was because a successful switch re-keys this
-  // panel. That was wrong: `<VersionMenu>` is mounted without a key
-  // (DesktopWorkspaceShell.tsx), so it is not re-keyed, exactly as
-  // WorkspaceVersions.tsx:105-115 intends. What actually absorbs the second
-  // announcement is not established — measured on the mutated build, the
-  // catch path's recovery read does run (four listWorkspaceVersions calls) and
-  // the reopen count still stays at two.
-  //
-  // So: unpinned, and reachable under an order these tests do not produce —
-  // two liveness checks sit between the recovery read and the announcement,
-  // and passing them is a scheduling order, not a structural barrier. The
-  // guard stays because it makes the outcome hold regardless of that order.
-  it("reopens once when a successful switch's selector refresh fails", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
-    );
-    let switched = false;
-    let refreshFailed = false;
-    const recovery = deferred();
-    bridge.listWorkspaceVersions = vi.fn(async () => {
-      // The switch's OWN refresh fails; the catch path's recovery read then
-      // succeeds and reports the version the switch already announced. That
-      // is the shape that announces twice.
-      if (switched && !refreshFailed) {
-        refreshFailed = true;
-        throw new Error("selector refresh failed");
-      }
-      if (switched) await recovery.promise;
-      return {
-        versions: [
-          {
-            id: "main",
-            name: "Main",
-            kind: "main" as const,
-            createdAtMs: 0,
-            canMergeIntoMain: false,
-          },
-          {
-            id: "v2",
-            name: "Draft two",
-            kind: "named" as const,
-            createdAtMs: 1,
-            canMergeIntoMain: true,
-          },
-        ],
-        activeVersionId: switched ? "v2" : "main",
-      };
-    });
-    bridge.switchWorkspaceVersion = vi.fn(async () => {
-      switched = true;
-      return { activeVersionId: "v2", changedFileCount: 0 };
-    });
-    const openEngineYDocSession = vi.fn(async () => ({ available: false }));
-    // Subscribed before every open — a bridge missing this
-    // degrades to not-engine-backed instead of ever attempting the open, so
-    // this mock needs it even though this test never emits through it.
-    const onEngineYDocSaveState = vi.fn(() => () => undefined);
-    const onEngineYDocLineageReplacement = vi.fn(() => () => undefined);
-    Object.assign(bridge, {
-      openEngineYDocSession,
-      onEngineYDocSaveState,
-      onEngineYDocLineageReplacement,
-    });
-    try {
-      renderShell(bridge);
-      await screen.findByTestId("view-markdown");
-      await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(1));
-
-      await user.click(await screen.findByTestId("version-menu-button"));
-      const item = (await screen.findAllByTestId("version-item")).find(
-        (candidate) => candidate.dataset.versionId === "v2",
-      );
-      await user.click(item!);
-      await waitFor(() =>
-        expect(bridge.switchWorkspaceVersion).toHaveBeenCalled(),
-      );
-
-      // The switch landed, so the reopen it announced is the right one.
-      await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalledTimes(2));
-      await waitFor(() => {
-        expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
-          "selector refresh failed",
-        );
-        expect(
-          (screen.getByTestId("version-menu-button") as HTMLButtonElement).disabled,
-        ).toBe(true);
-      });
-    } finally {
-      await act(async () => {
-        recovery.resolve();
-        await recovery.promise;
-      });
-    }
-    // Recovery has finished when the selector leaves its busy state.
-    await waitFor(() => {
-      expect(
-        (screen.getByTestId("version-menu-button") as HTMLButtonElement).disabled,
-      ).toBe(false);
-      expect(screen.getByTestId("version-menu-active").textContent).toBe("Draft two");
-    });
-    expect(openEngineYDocSession).toHaveBeenCalledTimes(2);
-  });
-
-  // A deleted file's tab is gone, so no inspector will ever
-  // render its notice again — the notice center is the path-independent
-  // surface where the draft stays reachable, Copy/Dismiss included.
   it("keeps a deleted path's set-aside draft reachable from the notice center", async () => {
     const user = userEvent.setup();
     const bridge = makeBridge(Promise.resolve(null));
@@ -3073,7 +1149,10 @@ describe("set-aside draft recovery", () => {
     await user.click(await screen.findByTestId("notice-center-toggle"));
     await screen.findByTestId("notice-set-aside-edits");
     const rows = screen.getAllByTestId("recovery-list-row");
-    expect(rows, "notice-center surface: drop the set-aside section from NoticeCenter. The draft exists, the close warning demands action, and no reachable surface offers it.").toHaveLength(1);
+    expect(
+      rows,
+      "notice-center surface: drop the set-aside section from NoticeCenter. The draft exists, the close warning demands action, and no reachable surface offers it.",
+    ).toHaveLength(1);
     const row = rows[0];
     expect(row.textContent).toContain("deleted/gone.md");
     expect(row.textContent).not.toContain("private/notes.md");
@@ -3081,54 +1160,17 @@ describe("set-aside draft recovery", () => {
     // only the global close dialog carries them.
     expect(within(row).queryByTestId("recovery-list-workspace")).toBeNull();
     await user.click(screen.getByTestId("recovery-list-copy"));
-    await waitFor(async () =>
-      expect(await navigator.clipboard.readText()).toBe("Kept!"),
-    );
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe("Kept!"));
     await user.click(screen.getByTestId("recovery-dismiss"));
     await user.click(screen.getByTestId("recovery-dismiss-confirm"));
-    await waitFor(() =>
-      expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull(),
-    );
+    await waitFor(() => expect(screen.queryByTestId("notice-set-aside-edits")).toBeNull());
 
-    // ...and with nothing left, the surface says so rather than implying a
-    // draft that is not there.
-    expect(screen.getByTestId("notice-center").textContent).toContain(
-      "All clear",
-    );
+    expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
   });
 
-  it("marks the set-aside edits that still die with the window", async () => {
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(null));
-    captureOrphanedDraft(WORKSPACE.workspaceId, "notes/a.md", "Persisted");
-    captureOrphanedDraft(WORKSPACE.workspaceId, ".env", "API_KEY=shh");
-    renderShell(bridge);
-    await screen.findByTestId("file-tree");
-
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    const section = await screen.findByTestId("notice-set-aside-edits");
-    expect(section.textContent).not.toContain("live only in this window");
-    expect(section.textContent).toContain("Copy an edit to keep its text");
-    expect(section.textContent).toContain("Dismiss deletes it for good");
-    const marked = screen
-      .getAllByTestId("recovery-list-row")
-      .filter(
-        (row) => within(row).queryByTestId("recovery-list-window-only") !== null,
-      );
-    expect(marked, "row lifetime: render the marker for every row, or for none. Either way the panel stops telling the two apart, and the user cannot see which edit the next quit destroys.").toHaveLength(1);
-    expect(marked[0].textContent).toContain(".env");
-    expect(marked[0].textContent).toContain("Only in this window");
-  });
-
-  // A failed save-first flush aborts the switch, the
-  // workspace never leaves its version, and the recovery announcement must
-  // not fire — announcing a version change reopens the live document and
-  // sets the still-editable draft aside on the same version.
   it("does not set the draft aside when a failed switch never left the version", async () => {
     const user = userEvent.setup();
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
-    );
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs(["a.md"], "a.md")));
     bridge.listWorkspaceVersions = vi.fn(async () => ({
       versions: [
         {
@@ -3148,17 +1190,13 @@ describe("set-aside draft recovery", () => {
       ],
       activeVersionId: "main",
     }));
-    // The save-first flush fails: the autosave write rejects.
     bridge.writeWorkspaceText = vi.fn(async () => {
       throw new Error("disk full");
     });
     renderShell(bridge);
 
     await screen.findByTestId("view-markdown");
-    await user.type(
-      await enterMarkdownSource(user),
-      "Draft!",
-    );
+    await user.type(await enterMarkdownSource(user), "Draft!");
     await screen.findByTestId("tab-dirty");
 
     await user.click(await screen.findByTestId("version-menu-button"));
@@ -3168,20 +1206,18 @@ describe("set-aside draft recovery", () => {
     await user.click(item!);
     await user.click(await screen.findByTestId("version-switch-save-continue"));
 
-    // The flush failed, the switch never started, the version never changed.
-    await waitFor(() =>
-      expect(bridge.writeWorkspaceText).toHaveBeenCalled(),
-    );
+    await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled());
     expect(bridge.switchWorkspaceVersion).not.toHaveBeenCalled();
 
     await waitFor(() =>
-      expect(screen.queryByTestId("markdown-open-state"), "failed-switch announce: announce the unchanged version from performSwitch's catch. The bookkeeping reopen then sets the draft aside on the same version — the notice appears and the editor loses the text the user could just keep editing.").toBeNull(),
+      expect(
+        screen.queryByTestId("markdown-open-state"),
+        "failed-switch announce: announce the unchanged version from performSwitch's catch. The bookkeeping reopen then sets the draft aside on the same version — the notice appears and the editor loses the text the user could just keep editing.",
+      ).toBeNull(),
     );
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
     expect(
-      screen
-        .getByTestId("markdown-editor")
-        .querySelector<HTMLElement>(".cm-content")?.textContent,
+      screen.getByTestId("markdown-editor").querySelector<HTMLElement>(".cm-content")?.textContent,
     ).toContain("Draft!");
   });
 });

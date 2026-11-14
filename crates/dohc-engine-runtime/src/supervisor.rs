@@ -316,11 +316,11 @@ impl WorkspaceSupervisor {
         // threads of their own, so its worker's end stopped none of them: a
         // reader past the close bound keeps the store, and the reservation
         // becomes the draining slot.
-        if let Some(mut dead) = dead {
-            if let Err(RuntimeError::StoreInUse) = dead.close() {
-                self.release_markers(&[], [(identity, dead.held_proofs())]);
-                return Err(RuntimeError::StoreInUse);
-            }
+        if let Some(mut dead) = dead
+            && let Err(RuntimeError::StoreInUse) = dead.close()
+        {
+            self.release_markers(&[], [(identity, dead.held_proofs())]);
+            return Err(RuntimeError::StoreInUse);
         }
 
         let held_limit = self.held_proofs.clone();
@@ -399,11 +399,11 @@ impl WorkspaceSupervisor {
         // Close the predecessor outside the lock; a WorkerPanicked from a dead
         // predecessor is expected here, not an error. A held proof's reader
         // past the close bound is: the reservation becomes the draining slot.
-        if let Some(Slot::Active(mut actor)) = old {
-            if let Err(RuntimeError::StoreInUse) = actor.close() {
-                self.release_markers(&[], [(identity, actor.held_proofs())]);
-                return Err(RuntimeError::StoreInUse);
-            }
+        if let Some(Slot::Active(mut actor)) = old
+            && let Err(RuntimeError::StoreInUse) = actor.close()
+        {
+            self.release_markers(&[], [(identity, actor.held_proofs())]);
+            return Err(RuntimeError::StoreInUse);
         }
 
         let spawned = WorkspaceActor::spawn_with_mode(
@@ -891,7 +891,7 @@ mod tests {
     use dohc_macos_files::NotPrivateReason;
 
     /// A workspace folder whose ACL passes read and search to everyone must
-    /// not pass them to the engine's folder or its store (#2207).
+    /// not pass them to the engine's folder or its store.
     #[cfg(target_vendor = "apple")]
     #[test]
     fn a_new_store_takes_none_of_its_workspace_folders_acl() {
@@ -933,7 +933,7 @@ mod tests {
 
     /// A folder put at `.dohc/engine` after the engine checked the real one
     /// gets neither the store nor its journals. They open in the checked
-    /// folder, wherever it has moved (#2375).
+    /// folder, wherever it has moved.
     #[cfg(any(target_vendor = "apple", target_os = "linux"))]
     #[test]
     fn a_store_opens_in_the_folder_the_engine_checked() {

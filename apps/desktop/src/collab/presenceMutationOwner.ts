@@ -37,10 +37,7 @@ interface PresencePublishOperations<Snapshot> {
 
 /** Owns serialized presence writes for one exact renderer workspace lease. */
 export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
-  readonly #states = new WeakMap<
-    RendererWorkspaceSession<Sender>,
-    PresenceMutationSessionState
-  >();
+  readonly #states = new WeakMap<RendererWorkspaceSession<Sender>, PresenceMutationSessionState>();
   readonly #retiredLeaves = new Map<string, RetiredPresenceLeave>();
   readonly #tombstoneTtlMs: number;
   readonly #scheduleExpiry: (callback: () => void, delayMs: number) => unknown;
@@ -51,8 +48,7 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
     // bound explicit instead of importing service internals into the app.
     this.#tombstoneTtlMs = options.tombstoneTtlMs ?? 30_000;
     this.#scheduleExpiry =
-      options.scheduleExpiry ??
-      ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
+      options.scheduleExpiry ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
     this.#cancelExpiry =
       options.cancelExpiry ??
       ((handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>));
@@ -73,27 +69,15 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
     entry.incarnationId = incarnationId;
 
     const operation = entry.tail.then(async () => {
-      if (
-        state.retired ||
-        !session.isCurrent() ||
-        entry.incarnationId !== incarnationId
-      ) {
+      if (state.retired || !session.isCurrent() || entry.incarnationId !== incarnationId) {
         return undefined;
       }
       await this.#drainRetiredLeave(key);
-      if (
-        state.retired ||
-        !session.isCurrent() ||
-        entry.incarnationId !== incarnationId
-      ) {
+      if (state.retired || !session.isCurrent() || entry.incarnationId !== incarnationId) {
         return undefined;
       }
       const transport = await operations.resolve();
-      if (
-        state.retired ||
-        !session.isCurrent() ||
-        entry.incarnationId !== incarnationId
-      ) {
+      if (state.retired || !session.isCurrent() || entry.incarnationId !== incarnationId) {
         return undefined;
       }
       // The relay may apply a request even when its response later fails. Once
@@ -101,9 +85,7 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
       entry.leave = transport.leave;
       entry.mayBePresent = true;
       const snapshot = await transport.publish();
-      return state.retired ||
-        !session.isCurrent() ||
-        entry.incarnationId !== incarnationId
+      return state.retired || !session.isCurrent() || entry.incarnationId !== incarnationId
         ? undefined
         : snapshot;
     });
@@ -128,27 +110,15 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
     }
 
     const operation = entry.tail.then(async () => {
-      if (
-        state.retired ||
-        !session.isCurrent() ||
-        entry.incarnationId !== incarnationId
-      ) {
+      if (state.retired || !session.isCurrent() || entry.incarnationId !== incarnationId) {
         return false;
       }
       await this.#drainRetiredLeave(key);
-      if (
-        state.retired ||
-        !session.isCurrent() ||
-        entry.incarnationId !== incarnationId
-      ) {
+      if (state.retired || !session.isCurrent() || entry.incarnationId !== incarnationId) {
         return false;
       }
       entry.leave ??= await resolveLeave();
-      if (
-        state.retired ||
-        !session.isCurrent() ||
-        entry.incarnationId !== incarnationId
-      ) {
+      if (state.retired || !session.isCurrent() || entry.incarnationId !== incarnationId) {
         return false;
       }
       // A renderer may stop before its initial publish returns. Serialize the
@@ -156,11 +126,7 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
       entry.mayBePresent = true;
       await entry.leave();
       entry.mayBePresent = false;
-      return (
-        !state.retired &&
-        session.isCurrent() &&
-        entry.incarnationId === incarnationId
-      );
+      return !state.retired && session.isCurrent() && entry.incarnationId === incarnationId;
     });
     const tail = operation.then(
       () => undefined,
@@ -168,11 +134,7 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
     );
     entry.tail = tail;
     void tail.then(() => {
-      if (
-        !entry.mayBePresent &&
-        entry.tail === tail &&
-        state.entries.get(key) === entry
-      ) {
+      if (!entry.mayBePresent && entry.tail === tail && state.entries.get(key) === entry) {
         state.entries.delete(key);
       }
     });
@@ -217,9 +179,7 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
     return state.retirement;
   }
 
-  #admit(
-    session: RendererWorkspaceSession<Sender>,
-  ): PresenceMutationSessionState | undefined {
+  #admit(session: RendererWorkspaceSession<Sender>): PresenceMutationSessionState | undefined {
     if (!session.isCurrent()) return undefined;
     const known = this.#states.get(session);
     if (known) return known.retired ? undefined : known;
@@ -232,10 +192,7 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
     return state;
   }
 
-  #entry(
-    state: PresenceMutationSessionState,
-    key: string,
-  ): PresenceMutationEntry {
+  #entry(state: PresenceMutationSessionState, key: string): PresenceMutationEntry {
     const known = state.entries.get(key);
     if (known) return known;
     const entry: PresenceMutationEntry = {
@@ -299,10 +256,7 @@ export class PresenceMutationOwner<Sender extends RendererWorkspaceSender> {
     }
   }
 
-  #armRetiredLeaveExpiry(
-    key: string,
-    tombstone: RetiredPresenceLeave,
-  ): void {
+  #armRetiredLeaveExpiry(key: string, tombstone: RetiredPresenceLeave): void {
     let expiry: unknown;
     expiry = this.#scheduleExpiry(() => {
       if (

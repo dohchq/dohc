@@ -2,14 +2,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { renderMermaidDiagram } from "./mermaidRender";
 
-const mathMLElementDescriptor = Object.getOwnPropertyDescriptor(
-  window,
-  "MathMLElement",
-);
-const getBBoxDescriptor = Object.getOwnPropertyDescriptor(
-  SVGElement.prototype,
-  "getBBox",
-);
+const mathMLElementDescriptor = Object.getOwnPropertyDescriptor(window, "MathMLElement");
+const getBBoxDescriptor = Object.getOwnPropertyDescriptor(SVGElement.prototype, "getBBox");
 
 beforeAll(() => {
   vi.stubGlobal(
@@ -57,11 +51,7 @@ afterAll(() => {
     Reflect.deleteProperty(window, "MathMLElement");
   }
   if (getBBoxDescriptor) {
-    Object.defineProperty(
-      SVGElement.prototype,
-      "getBBox",
-      getBBoxDescriptor,
-    );
+    Object.defineProperty(SVGElement.prototype, "getBBox", getBBoxDescriptor);
   } else {
     Reflect.deleteProperty(SVGElement.prototype, "getBBox");
   }
@@ -80,8 +70,6 @@ describe("renderMermaidDiagram with math", () => {
 
     expect(rendered.querySelector("svg")).not.toBeNull();
     expect(rendered.querySelector(".node .katex math")).not.toBeNull();
-    expect(rendered.textContent).not.toContain(
-      "MathML is unsupported in this environment.",
-    );
+    expect(rendered.textContent).not.toContain("MathML is unsupported in this environment.");
   }, 60_000);
 });

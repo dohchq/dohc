@@ -3,14 +3,30 @@ import { readStoredRoster, type RosterListing } from "@dohc/automation-executor/
 import { z } from "zod";
 import type { ShareRoster } from "../automations/shareRoster";
 import type { RegistryEntry } from "./registryStore";
-import { observationKey, readObservationFile, removeObservationFile, writeObservationFile } from "./shareObservationFile";
+import {
+  observationKey,
+  readObservationFile,
+  removeObservationFile,
+  writeObservationFile,
+} from "./shareObservationFile";
 
-const Metadata = z.object({ formatVersion: z.literal(1), version: z.number().int().positive(), listedAtMs: z.number().int().nonnegative(), pulledAfter: z.literal(true).optional() });
+const Metadata = z.object({
+  formatVersion: z.literal(1),
+  version: z.number().int().positive(),
+  listedAtMs: z.number().int().nonnegative(),
+  pulledAfter: z.literal(true).optional(),
+});
 
 export function createShareRosterStore(directory: string) {
-  const file = (entry: RegistryEntry) => join(directory, `${observationKey([
-    entry.workspaceId, (entry.remote ?? entry.pausedRemote)?.ownerUserId ?? "", (entry.remote ?? entry.pausedRemote)?.serverUrl ?? "",
-  ])}.json`);
+  const file = (entry: RegistryEntry) =>
+    join(
+      directory,
+      `${observationKey([
+        entry.workspaceId,
+        (entry.remote ?? entry.pausedRemote)?.ownerUserId ?? "",
+        (entry.remote ?? entry.pausedRemote)?.serverUrl ?? "",
+      ])}.json`,
+    );
   const cache = new Map<string, ShareRoster | undefined>();
   return {
     file,
@@ -20,21 +36,44 @@ export function createShareRosterStore(directory: string) {
       const raw = readObservationFile(path);
       const metadata = Metadata.safeParse(raw);
       const listing = readStoredRoster(raw);
-      const roster = metadata.success && listing ? { ...listing, version: metadata.data.version,
-        listedAtMs: metadata.data.listedAtMs, ...(metadata.data.pulledAfter ? { pulledAfter: true as const } : {}) } : undefined;
+      const roster =
+        metadata.success && listing
+          ? {
+              ...listing,
+              version: metadata.data.version,
+              listedAtMs: metadata.data.listedAtMs,
+              ...(metadata.data.pulledAfter ? { pulledAfter: true as const } : {}),
+            }
+          : undefined;
       cache.set(path, roster);
       return roster;
     },
-    save(entry: RegistryEntry, listing: RosterListing, pulledAfter: boolean, listedAtMs: number): ShareRoster {
+    save(
+      entry: RegistryEntry,
+      listing: RosterListing,
+      pulledAfter: boolean,
+      listedAtMs: number,
+    ): ShareRoster {
       const parsed = readStoredRoster(listing);
       if (!parsed) throw new Error("Invalid share roster observation.");
       listing = parsed;
       const previous = entry.shareRoster;
-      const unchanged = previous !== undefined && JSON.stringify(readStoredRoster(previous)) === JSON.stringify(listing);
+      const unchanged =
+        previous !== undefined &&
+        JSON.stringify(readStoredRoster(previous)) === JSON.stringify(listing);
       if (unchanged && (previous.pulledAfter === true) === pulledAfter) return previous;
-      const next: ShareRoster = { ...listing, version: (previous?.version ?? 0) + (unchanged ? 0 : 1),
-        listedAtMs, ...(pulledAfter ? { pulledAfter: true as const } : {}) };
-      try { writeObservationFile(file(entry), { ...next, formatVersion: 1 }); } catch (error) { cache.delete(file(entry)); throw error; }
+      const next: ShareRoster = {
+        ...listing,
+        version: (previous?.version ?? 0) + (unchanged ? 0 : 1),
+        listedAtMs,
+        ...(pulledAfter ? { pulledAfter: true as const } : {}),
+      };
+      try {
+        writeObservationFile(file(entry), { ...next, formatVersion: 1 });
+      } catch (error) {
+        cache.delete(file(entry));
+        throw error;
+      }
       cache.set(file(entry), next);
       return next;
     },
@@ -42,11 +81,24 @@ export function createShareRosterStore(directory: string) {
       if (!entry.shareRoster || entry.shareRoster.pulledAfter) return entry.shareRoster;
       const listing = readStoredRoster(entry.shareRoster);
       if (!listing) throw new Error("Invalid share roster observation.");
-      const next = { ...listing, version: entry.shareRoster.version, listedAtMs: entry.shareRoster.listedAtMs, pulledAfter: true as const };
-      try { writeObservationFile(file(entry), { ...next, formatVersion: 1 }); } catch (error) { cache.delete(file(entry)); throw error; }
+      const next = {
+        ...listing,
+        version: entry.shareRoster.version,
+        listedAtMs: entry.shareRoster.listedAtMs,
+        pulledAfter: true as const,
+      };
+      try {
+        writeObservationFile(file(entry), { ...next, formatVersion: 1 });
+      } catch (error) {
+        cache.delete(file(entry));
+        throw error;
+      }
       cache.set(file(entry), next);
       return next;
     },
-    remove(entry: RegistryEntry): void { removeObservationFile(file(entry)); cache.delete(file(entry)); },
+    remove(entry: RegistryEntry): void {
+      removeObservationFile(file(entry));
+      cache.delete(file(entry));
+    },
   };
 }

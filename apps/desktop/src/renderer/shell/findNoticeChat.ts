@@ -28,22 +28,49 @@ export async function findNoticeChat(
 ): Promise<NoticeChatPlace | null> {
   const { channels, fileThreads } = await bridge().listChatChannels({ workspaceId });
   const landing = async (): Promise<{ focusMessageId?: string }> => {
-    const focus = target.message ?? (target.run === undefined ? undefined : await lastMessageOfRun(workspaceId, target.thread, target.run));
+    const focus =
+      target.message ??
+      (target.run === undefined
+        ? undefined
+        : await lastMessageOfRun(workspaceId, target.thread, target.run));
     return focus === undefined ? {} : { focusMessageId: focus };
   };
   const fileThread = fileThreads.find((thread) => thread.id === target.thread);
   if (fileThread) return { open: "file", thread: fileThread, ...(await landing()) };
-  const named = target.channel === undefined ? channels : channels.filter((channel) => channel.id === target.channel);
-  const dm = target.channel === undefined ? undefined : named.find((channel) => channel.kind === "dm");
-  if (dm) return { open: "dm", locator: { channelId: dm.id, threadId: target.thread, ...(await landing()) } };
-  const places = await Promise.all(named.filter((channel) => channel.kind !== "dm").flatMap((channel) =>
-    (["chat", "posts"] as const).map(async (lane) =>
-      ({ channel, lane, threads: (await bridge().listChannelThreads({ workspaceId, channelId: channel.id, lane })).threads }))));
+  const named =
+    target.channel === undefined
+      ? channels
+      : channels.filter((channel) => channel.id === target.channel);
+  const dm =
+    target.channel === undefined ? undefined : named.find((channel) => channel.kind === "dm");
+  if (dm)
+    return {
+      open: "dm",
+      locator: { channelId: dm.id, threadId: target.thread, ...(await landing()) },
+    };
+  const places = await Promise.all(
+    named
+      .filter((channel) => channel.kind !== "dm")
+      .flatMap((channel) =>
+        (["chat", "posts"] as const).map(async (lane) => ({
+          channel,
+          lane,
+          threads: (await bridge().listChannelThreads({ workspaceId, channelId: channel.id, lane }))
+            .threads,
+        })),
+      ),
+  );
   for (const { channel, lane, threads } of places) {
     const thread = threads.find((candidate) => candidate.id === target.thread);
     if (!thread) continue;
     const at = await landing();
-    return { open: "chats", nav: lane === "chat" ? { level: "channel", channel, lane, ...at } : { level: "thread", channel, thread, ...at } };
+    return {
+      open: "chats",
+      nav:
+        lane === "chat"
+          ? { level: "channel", channel, lane, ...at }
+          : { level: "thread", channel, thread, ...at },
+    };
   }
   return null;
 }
@@ -53,22 +80,35 @@ export async function findNoticeChat(
  * workspace has no such chat. A DM opens through its canonical record. A
  * failed read throws.
  */
-export async function findNoticeChannel(workspaceId: string, channelId: string): Promise<NoticeChatPlace | null> {
+export async function findNoticeChannel(
+  workspaceId: string,
+  channelId: string,
+): Promise<NoticeChatPlace | null> {
   const { channels } = await bridge().listChatChannels({ workspaceId });
   const channel = channels.find((candidate) => candidate.id === channelId);
   if (!channel) return null;
   if (channel.kind !== "dm") return { open: "chats", nav: { level: "channel", channel } };
-  const dm = (await bridge().syncDms({ workspaceId })).dms.find((candidate) => candidate.channelId === channelId);
+  const dm = (await bridge().syncDms({ workspaceId })).dms.find(
+    (candidate) => candidate.channelId === channelId,
+  );
   return dm ? { open: "chats", nav: { level: "dm", dm } } : null;
 }
 
 // A run's messages are the ones its records name. Without one, as when the
 // run stopped before it answered, there is nothing to land on.
-async function lastMessageOfRun(workspaceId: string, threadId: string, runId: string): Promise<string | undefined> {
+async function lastMessageOfRun(
+  workspaceId: string,
+  threadId: string,
+  runId: string,
+): Promise<string | undefined> {
   const [{ runs }, { messages }] = await Promise.all([
     bridge().chatRunRecordsForThread({ workspaceId, threadId }),
     bridge().listChatMessages({ workspaceId, threadId }),
   ]);
-  const ofRun = new Set(Object.entries(runs).filter(([, run]) => run.runId === runId).map(([messageId]) => messageId));
+  const ofRun = new Set(
+    Object.entries(runs)
+      .filter(([, run]) => run.runId === runId)
+      .map(([messageId]) => messageId),
+  );
   return messages.findLast((message) => ofRun.has(message.id))?.id;
 }

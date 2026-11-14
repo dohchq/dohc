@@ -1,7 +1,11 @@
 import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
+import {
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  openWorkspaceFromFirstRun,
+} from "./helpers/workspace";
 
 test("@notices-layout workspace fills the window and Notices opens beside the rail", async () => {
   const workspace = await createTempWorkspace();
@@ -13,7 +17,9 @@ test("@notices-layout workspace fills the window and Notices opens beside the ra
     await openWorkspaceFromFirstRun(page, workspace);
     await expect(page.getByTestId("workspace-shell")).toHaveAttribute("data-ready", "true");
     const readyMs = performance.now() - startedAt;
-    await desktop.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1000, 650));
+    await desktop.app.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()[0]!.setSize(1000, 650),
+    );
     await page.emulateMedia({ reducedMotion: "reduce" });
 
     for (const theme of ["Light", "Dark"] as const) {
@@ -23,10 +29,20 @@ test("@notices-layout workspace fills the window and Notices opens beside the ra
       await page.getByRole("button", { name: "Close settings" }).click();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme.toLowerCase());
 
-      const geometry = await page.evaluate((pins) => {
-        const bounds = (id: string) => document.querySelector(`[data-testid="${id}"]`)!.getBoundingClientRect().toJSON();
-        return { workbench: bounds("workspace-workbench"), bell: bounds("notice-center-toggle"), settings: bounds(pins.settings), rail: bounds(pins.rail), height: innerHeight };
-      }, { settings: activityPin("settings"), rail: desktopPins.activityBar });
+      const geometry = await page.evaluate(
+        (pins) => {
+          const bounds = (id: string) =>
+            document.querySelector(`[data-testid="${id}"]`)!.getBoundingClientRect().toJSON();
+          return {
+            workbench: bounds("workspace-workbench"),
+            bell: bounds("notice-center-toggle"),
+            settings: bounds(pins.settings),
+            rail: bounds(pins.rail),
+            height: innerHeight,
+          };
+        },
+        { settings: activityPin("settings"), rail: desktopPins.activityBar },
+      );
       expect(geometry.workbench.bottom).toBe(geometry.height);
       expect(geometry.bell.bottom).toBeLessThanOrEqual(geometry.settings.top);
       expect(geometry.bell.left).toBeGreaterThanOrEqual(geometry.rail.left);
@@ -49,7 +65,10 @@ test("@notices-layout workspace fills the window and Notices opens beside the ra
       await page.keyboard.press("Escape");
       await expect(notices).toHaveCount(0);
       await expect(bell).toBeFocused();
-      await test.info().attach(`timing-${theme}`, { body: JSON.stringify({ readyMs, openMs }), contentType: "application/json" });
+      await test.info().attach(`timing-${theme}`, {
+        body: JSON.stringify({ readyMs, openMs }),
+        contentType: "application/json",
+      });
     }
     expect(desktop.logs.filter((entry) => entry.level === "pageerror")).toEqual([]);
   } finally {

@@ -1,4 +1,9 @@
-import { UpdateActionResult, UpdateCheckResult, updateDownloadOperations, type UpdateStateEvent } from "./bridgeContract";
+import {
+  UpdateActionResult,
+  UpdateCheckResult,
+  updateDownloadOperations,
+  type UpdateStateEvent,
+} from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { registerOperations, type OperationBoundary } from "./operationTable";
 import type { AutoUpdateController } from "../updates/electronUpdater";
@@ -77,7 +82,10 @@ export function registerUpdatesIpcHandlers<Event, Operation>(dependencies: {
   boundary: OperationBoundary<Event, Operation>;
   assertTrustedSender(event: Event): void;
   currentUpdateState(): UpdateStateEvent;
-  readonly autoUpdateController: Pick<AutoUpdateController, "checkForUpdates" | "downloadUpdate"> | null;
+  readonly autoUpdateController: Pick<
+    AutoUpdateController,
+    "checkForUpdates" | "downloadUpdate"
+  > | null;
   installUpdate(): Promise<UpdateActionResult>;
 }): void {
   const { registerHandler, assertTrustedSender, currentUpdateState, installUpdate } = dependencies;
@@ -100,7 +108,10 @@ export function registerUpdatesIpcHandlers<Event, Operation>(dependencies: {
 
   registerOperations(dependencies.boundary, updateDownloadOperations, {
     downloadUpdate: () =>
-      dependencies.autoUpdateController?.downloadUpdate() ?? { accepted: false, state: currentUpdateState() },
+      dependencies.autoUpdateController?.downloadUpdate() ?? {
+        accepted: false,
+        state: currentUpdateState(),
+      },
   });
 
   registerHandler(CHANNELS.installUpdate, async (event) => {

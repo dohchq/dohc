@@ -15,11 +15,16 @@ import { readLocalStateFrom } from "./workspaceLocalState";
 
 const selector = { paths: [], versionId: "main", access: "view" } as const;
 const mount: ShareMountRecord = {
-  shareId: "share-a", label: "alice", granterEmail: "alice@example.com",
-  relayUrl: "https://relay.example", grantedSelector: { ...selector, paths: [] },
+  shareId: "share-a",
+  label: "alice",
+  granterEmail: "alice@example.com",
+  relayUrl: "https://relay.example",
+  grantedSelector: { ...selector, paths: [] },
 };
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
-const unused = (): never => { throw new Error("Unexpected external operation"); };
+const unused = (): never => {
+  throw new Error("Unexpected external operation");
+};
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -29,53 +34,91 @@ afterEach(() => {
 async function fixture(mode: "local" | "standalone" | "mount" = "local") {
   const rootPath = await createTestScratch("desktop-workspace-reads-");
   const workspace: RegistryEntry = {
-    workspaceId: "workspace-a", rootPath, kind: "personal", mode: "local-first",
-    ...(mode === "standalone" ? { shareView: {
-      shareId: mount.shareId, granterEmail: mount.granterEmail, genericChatWritable: false,
-      grantedSelector: { ...selector, paths: [] },
-    } } : {}),
+    workspaceId: "workspace-a",
+    rootPath,
+    kind: "personal",
+    mode: "local-first",
+    ...(mode === "standalone"
+      ? {
+          shareView: {
+            shareId: mount.shareId,
+            granterEmail: mount.granterEmail,
+            genericChatWritable: false,
+            grantedSelector: { ...selector, paths: [] },
+          },
+        }
+      : {}),
     ...(mode === "mount" ? { shareMounts: [mount] } : {}),
   };
-  if (mode === "mount") await mkdir(join(rootPath, "shared-with-me", mount.label), { recursive: true });
+  if (mode === "mount")
+    await mkdir(join(rootPath, "shared-with-me", mount.label), { recursive: true });
   const authority = createWorkspaceAuthorityOwner({
-    findWorkspace: (id) => id === workspace.workspaceId ? workspace : null,
+    findWorkspace: (id) => (id === workspace.workspaceId ? workspace : null),
     canonicalizeRoot: (root) => root,
     createState: () => ({}),
   });
-  const attached = await authority.withOperation(workspace.workspaceId, (operation) => operation.workspace);
+  const attached = await authority.withOperation(
+    workspace.workspaceId,
+    (operation) => operation.workspace,
+  );
   const canonical = new Map<string, { kind: "text" | "binary"; bytes: Buffer }>();
   const beforeRead = { run: async () => undefined as void };
   const store = {
     ensureMainVersion: vi.fn(async () => ({ id: "main" })),
-    resolveFiles: vi.fn(async ({ targets }: { targets: { path: string }[] }) => ({ versionId: "main", results: targets.map(({ path }) => canonical.has(path) ? { status: "found", objectId: `object:${path}`, path } : { status: "absent" }) })),
+    resolveFiles: vi.fn(async ({ targets }: { targets: { path: string }[] }) => ({
+      versionId: "main",
+      results: targets.map(({ path }) =>
+        canonical.has(path)
+          ? { status: "found", objectId: `object:${path}`, path }
+          : { status: "absent" },
+      ),
+    })),
     readTextFile: vi.fn(async ({ path }: { path: string }) => {
       await beforeRead.run();
       const row = canonical.get(path);
-      return row ? {
-        path, contentKind: row.kind, text: row.bytes.toString("utf8"), sha256: hash(row.bytes),
-        latestMomentId: `moment:${path}`,
-      } : null;
+      return row
+        ? {
+            path,
+            contentKind: row.kind,
+            text: row.bytes.toString("utf8"),
+            sha256: hash(row.bytes),
+            latestMomentId: `moment:${path}`,
+          }
+        : null;
     }),
     getMoment: vi.fn(async () => ({ payload: { before: null } })),
     readBinaryFile: vi.fn(async ({ path }: { path: string }) => canonical.get(path)?.bytes ?? null),
-    listTextFileMetadata: vi.fn(async (input?: { under?: string }) => [...canonical].filter(([path]) => input?.under === undefined || path.startsWith(input.under + "/")).map(([path, row]) => ({
-      path, objectId: `object:${path}`, contentKind: row.kind,
-      byteLength: row.bytes.length, sha256: hash(row.bytes), updatedAtMs: 1,
-      latestMomentId: `moment:${path}`, hasYdocMarker: false,
-    }))),
+    listTextFileMetadata: vi.fn(async (input?: { under?: string }) =>
+      [...canonical]
+        .filter(([path]) => input?.under === undefined || path.startsWith(input.under + "/"))
+        .map(([path, row]) => ({
+          path,
+          objectId: `object:${path}`,
+          contentKind: row.kind,
+          byteLength: row.bytes.length,
+          sha256: hash(row.bytes),
+          updatedAtMs: 1,
+          latestMomentId: `moment:${path}`,
+          hasYdocMarker: false,
+        })),
+    ),
   };
   const shareViewFiles = createShareViewFiles({
     resolveTarget: (target) => resolveRegisteredShareViewFilesTarget(workspace, target),
     openStore: () => store as unknown as ShareViewFilesStore,
-    resolveRelay: async () => null, pull: unused, recordRefusals: unused,
+    resolveRelay: async () => null,
+    pull: unused,
+    recordRefusals: unused,
     updateUnsavedPaths: async () => undefined,
-    markEnded: unused, retireTarget: unused,
+    markEnded: unused,
+    retireTarget: unused,
     assertProjectionRoot: async (target) => {
       if (target.kind === "mount" && target.mountLabel) {
         await assertRealMountRoot(target.schedulingRootPath, target.mountLabel);
       }
     },
-    createMount: unused, removeMount: unused,
+    createMount: unused,
+    removeMount: unused,
   });
   const startupAccessed = deferred();
   const startup = { promise: Promise.resolve(true) };
@@ -87,19 +130,41 @@ async function fixture(mode: "local" | "standalone" | "mount" = "local") {
       typeof value === "object" && value !== null && !Array.isArray(value),
     get desktopEngine() {
       lateReads.push("engine");
-      return { get startup() { startupAccessed.resolve(); return startup.promise; } };
+      return {
+        get startup() {
+          startupAccessed.resolve();
+          return startup.promise;
+        },
+      };
     },
-    get shareViewFiles() { lateReads.push("files"); return shareViewFiles; },
-    get ensureOwnedProjectionTargetCurrent() { lateReads.push("repair"); return repair.run; },
+    get shareViewFiles() {
+      lateReads.push("files");
+      return shareViewFiles;
+    },
+    get ensureOwnedProjectionTargetCurrent() {
+      lateReads.push("repair");
+      return repair.run;
+    },
   });
   async function disk(path: string, content: string | Buffer) {
     await mkdir(dirname(join(rootPath, path)), { recursive: true });
     await writeFile(join(rootPath, path), content);
   }
   return {
-    rootPath, workspace, attached, authority, canonical, store, beforeRead,
-    startup, startupAccessed, lateReads, repair, reads, disk,
-    path: (path: string) => mode === "mount" ? `shared-with-me/alice/${path}` : path,
+    rootPath,
+    workspace,
+    attached,
+    authority,
+    canonical,
+    store,
+    beforeRead,
+    startup,
+    startupAccessed,
+    lateReads,
+    repair,
+    reads,
+    disk,
+    path: (path: string) => (mode === "mount" ? `shared-with-me/alice/${path}` : path),
   };
 }
 
@@ -112,35 +177,49 @@ describe("desktop workspace reads", () => {
     const port = test.reads.ownedWorkspaceReadsFor(test.attached);
     const listed = await port.listFiles({ path: "notes", recursive: false });
     expect(listed.files).toEqual([
-      expect.objectContaining({ path: "notes/a.md", icon: "🚀", contentIdentity: expect.any(String) }),
+      expect.objectContaining({
+        path: "notes/a.md",
+        icon: "🚀",
+        contentIdentity: expect.any(String),
+      }),
     ]);
     expect((await test.reads.listOwnedWorkspaceFilesFor(test.attached)).files).toHaveLength(3);
   });
 
-  it.each(["standalone", "mount"] as const)("honors canonical %s listing scopes and depth", async (mode) => {
-    const test = await fixture(mode);
-    await test.disk("local.md", "local");
-    await test.disk(test.path("recipient-only.md"), "stale disk");
-    test.canonical.set("owner.md", { kind: "text", bytes: Buffer.from("owner") });
-    test.canonical.set("notes/child.md", { kind: "text", bytes: Buffer.from("child") });
-    test.canonical.set("notes/deep/other.md", { kind: "text", bytes: Buffer.from("other") });
-    const complete = await test.reads.listOwnedWorkspaceFilesFor(test.attached);
-    const port = test.reads.ownedWorkspaceReadsFor(test.attached);
-    expect((await port.listFiles({ path: test.path("owner.md"), recursive: false })).files.map(file => file.path))
-      .toEqual([test.path("owner.md")]);
-    expect((await port.listFiles({ path: test.path("notes"), recursive: false })).files.map(file => file.path))
-      .toEqual([test.path("notes/child.md")]);
-    expect((await port.listFiles({ path: test.path("notes") })).files.map(file => file.path))
-      .toEqual([test.path("notes/child.md"), test.path("notes/deep/other.md")]);
-    if (mode === "mount") {
-      test.store.listTextFileMetadata.mockClear();
-      const local = await port.listFiles({ path: "local.md" });
-      expect(local.files.map(file => file.path)).toEqual(["local.md"]);
-      expect(local.folders).toEqual([]);
-      expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
-    }
-    expect(complete.files.map((file) => file.path)).not.toContain(test.path("recipient-only.md"));
-  });
+  it.each(["standalone", "mount"] as const)(
+    "honors canonical %s listing scopes and depth",
+    async (mode) => {
+      const test = await fixture(mode);
+      await test.disk("local.md", "local");
+      await test.disk(test.path("recipient-only.md"), "stale disk");
+      test.canonical.set("owner.md", { kind: "text", bytes: Buffer.from("owner") });
+      test.canonical.set("notes/child.md", { kind: "text", bytes: Buffer.from("child") });
+      test.canonical.set("notes/deep/other.md", { kind: "text", bytes: Buffer.from("other") });
+      const complete = await test.reads.listOwnedWorkspaceFilesFor(test.attached);
+      const port = test.reads.ownedWorkspaceReadsFor(test.attached);
+      expect(
+        (await port.listFiles({ path: test.path("owner.md"), recursive: false })).files.map(
+          (file) => file.path,
+        ),
+      ).toEqual([test.path("owner.md")]);
+      expect(
+        (await port.listFiles({ path: test.path("notes"), recursive: false })).files.map(
+          (file) => file.path,
+        ),
+      ).toEqual([test.path("notes/child.md")]);
+      expect(
+        (await port.listFiles({ path: test.path("notes") })).files.map((file) => file.path),
+      ).toEqual([test.path("notes/child.md"), test.path("notes/deep/other.md")]);
+      if (mode === "mount") {
+        test.store.listTextFileMetadata.mockClear();
+        const local = await port.listFiles({ path: "local.md" });
+        expect(local.files.map((file) => file.path)).toEqual(["local.md"]);
+        expect(local.folders).toEqual([]);
+        expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
+      }
+      expect(complete.files.map((file) => file.path)).not.toContain(test.path("recipient-only.md"));
+    },
+  );
 
   it("constructs before late owners exist and keeps local reads concurrent with startup", async () => {
     const test = await fixture();
@@ -150,62 +229,95 @@ describe("desktop workspace reads", () => {
     await test.disk("local.md", "local bytes");
     await test.disk("picture.png", Buffer.from([1, 2, 3]));
     try {
-      expect(await test.reads.readOwnedWorkspaceText({ workspaceId: "workspace-a" }, "local.md"))
-        .toMatchObject({ text: "local bytes", contentHash: hash("local bytes") });
-      expect(await test.reads.readOwnedWorkspaceAsset(test.workspace, "picture.png"))
-        .toMatchObject({ path: "picture.png", bytes: Buffer.from([1, 2, 3]), mediaType: "image/png" });
-      expect((await test.reads.listOwnedWorkspaceFilesFor(test.attached)).files)
-        .toEqual(expect.arrayContaining([expect.objectContaining({ path: "local.md", contentIdentity: expect.any(String) })]));
+      expect(
+        await test.reads.readOwnedWorkspaceText({ workspaceId: "workspace-a" }, "local.md"),
+      ).toMatchObject({ text: "local bytes", contentHash: hash("local bytes") });
+      expect(await test.reads.readOwnedWorkspaceAsset(test.workspace, "picture.png")).toMatchObject(
+        { path: "picture.png", bytes: Buffer.from([1, 2, 3]), mediaType: "image/png" },
+      );
+      expect((await test.reads.listOwnedWorkspaceFilesFor(test.attached)).files).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: "local.md", contentIdentity: expect.any(String) }),
+        ]),
+      );
       expect(await test.reads.shareViewFilesTargetForPath(test.workspace, "local.md")).toBeNull();
       expect(test.lateReads).not.toContain("engine");
       expect(test.store.ensureMainVersion).not.toHaveBeenCalled();
-      await expect(test.reads.readOwnedWorkspaceText({ workspaceId: "missing" }, "local.md")).rejects.toThrow();
-    } finally { handshake.resolve(true); }
+      await expect(
+        test.reads.readOwnedWorkspaceText({ workspaceId: "missing" }, "local.md"),
+      ).rejects.toThrow();
+    } finally {
+      handshake.resolve(true);
+    }
   });
 
-  it.each(["standalone", "mount"] as const)("waits for %s startup and reads canonical text and asset bytes", async (mode) => {
-    const test = await fixture(mode);
-    const handshake = deferred<boolean>();
-    test.startup.promise = handshake.promise;
-    test.canonical.set("note.md", { kind: "text", bytes: Buffer.from("canonical") });
-    test.canonical.set("picture.png", { kind: "binary", bytes: Buffer.from([4, 5, 6]) });
-    await test.disk(test.path("note.md"), "stale projection");
-    await test.disk(test.path("picture.png"), Buffer.from([9]));
-    const reading = test.reads.readOwnedWorkspaceText(test.workspace, test.path("note.md"));
-    try {
-      await test.startupAccessed.promise;
-      expect(test.store.ensureMainVersion).not.toHaveBeenCalled();
-      const target = await test.reads.shareViewFilesTargetForPath(test.workspace, test.path("note.md"));
-      expect(target).toEqual({ path: "note.md", target: mode === "mount"
-        ? { kind: "mount", workspaceId: "workspace-a", shareId: "share-a" }
-        : { kind: "standalone", workspaceId: "workspace-a" } });
-      handshake.resolve(true);
-      expect(await reading).toMatchObject({ text: "canonical", contentHash: hash("canonical") });
-      expect(await test.reads.readOwnedWorkspaceAssetFor(test.attached, test.path("picture.png")))
-        .toMatchObject({ bytes: Buffer.from([4, 5, 6]), mediaType: "image/png" });
-      expect(await readFile(join(test.rootPath, test.path("note.md")), "utf8")).toBe("stale projection");
-    } finally { handshake.resolve(true); await Promise.allSettled([reading]); }
-  });
+  it.each(["standalone", "mount"] as const)(
+    "waits for %s startup and reads canonical text and asset bytes",
+    async (mode) => {
+      const test = await fixture(mode);
+      const handshake = deferred<boolean>();
+      test.startup.promise = handshake.promise;
+      test.canonical.set("note.md", { kind: "text", bytes: Buffer.from("canonical") });
+      test.canonical.set("picture.png", { kind: "binary", bytes: Buffer.from([4, 5, 6]) });
+      await test.disk(test.path("note.md"), "stale projection");
+      await test.disk(test.path("picture.png"), Buffer.from([9]));
+      const reading = test.reads.readOwnedWorkspaceText(test.workspace, test.path("note.md"));
+      try {
+        await test.startupAccessed.promise;
+        expect(test.store.ensureMainVersion).not.toHaveBeenCalled();
+        const target = await test.reads.shareViewFilesTargetForPath(
+          test.workspace,
+          test.path("note.md"),
+        );
+        expect(target).toEqual({
+          path: "note.md",
+          target:
+            mode === "mount"
+              ? { kind: "mount", workspaceId: "workspace-a", shareId: "share-a" }
+              : { kind: "standalone", workspaceId: "workspace-a" },
+        });
+        handshake.resolve(true);
+        expect(await reading).toMatchObject({ text: "canonical", contentHash: hash("canonical") });
+        expect(
+          await test.reads.readOwnedWorkspaceAssetFor(test.attached, test.path("picture.png")),
+        ).toMatchObject({ bytes: Buffer.from([4, 5, 6]), mediaType: "image/png" });
+        expect(await readFile(join(test.rootPath, test.path("note.md")), "utf8")).toBe(
+          "stale projection",
+        );
+      } finally {
+        handshake.resolve(true);
+        await Promise.allSettled([reading]);
+      }
+    },
+  );
 
-  it.each(["standalone", "mount"] as const)("gates the %s listing and replaces stale projection entries", async (mode) => {
-    const test = await fixture(mode);
-    const handshake = deferred<boolean>();
-    test.startup.promise = handshake.promise;
-    test.canonical.set("canonical.md", { kind: "text", bytes: Buffer.from("canonical") });
-    await test.disk(test.path("stale.md"), "stale");
-    if (mode === "mount") await test.disk("local.md", "local");
-    const listing = test.reads.listOwnedWorkspaceFilesFor(test.attached);
-    try {
-      await test.startupAccessed.promise;
-      expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
-      handshake.resolve(true);
-      const listed = await listing;
-      expect(listed.files.map((file) => file.path)).toEqual(mode === "mount"
-        ? ["local.md", test.path("canonical.md")] : ["canonical.md"]);
-      expect(listed.files.find((file) => file.path === test.path("canonical.md")))
-        .toMatchObject({ contentIdentity: `object:canonical.md:${hash("canonical")}:moment:canonical.md` });
-    } finally { handshake.resolve(true); await Promise.allSettled([listing]); }
-  });
+  it.each(["standalone", "mount"] as const)(
+    "gates the %s listing and replaces stale projection entries",
+    async (mode) => {
+      const test = await fixture(mode);
+      const handshake = deferred<boolean>();
+      test.startup.promise = handshake.promise;
+      test.canonical.set("canonical.md", { kind: "text", bytes: Buffer.from("canonical") });
+      await test.disk(test.path("stale.md"), "stale");
+      if (mode === "mount") await test.disk("local.md", "local");
+      const listing = test.reads.listOwnedWorkspaceFilesFor(test.attached);
+      try {
+        await test.startupAccessed.promise;
+        expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
+        handshake.resolve(true);
+        const listed = await listing;
+        expect(listed.files.map((file) => file.path)).toEqual(
+          mode === "mount" ? ["local.md", test.path("canonical.md")] : ["canonical.md"],
+        );
+        expect(listed.files.find((file) => file.path === test.path("canonical.md"))).toMatchObject({
+          contentIdentity: `object:canonical.md:${hash("canonical")}:moment:canonical.md`,
+        });
+      } finally {
+        handshake.resolve(true);
+        await Promise.allSettled([listing]);
+      }
+    },
+  );
 
   it.each([
     { shareMounts: [] },
@@ -221,9 +333,14 @@ describe("desktop workspace reads", () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const listed = await test.reads.listOwnedWorkspaceFilesFor(attached);
     expect(listed.files.map((file) => file.path)).toEqual(["local.md"]);
-    expect(await test.reads.ownedWorkspaceReadsFor(attached).listFiles({ path: "shared-with-me", recursive: false }))
-      .toEqual({ files: [], folders: ["shared-with-me"] });
-    await expect(test.reads.readOwnedWorkspaceTextFor(attached, "shared-with-me/alice/stale.md")).rejects.toThrow();
+    expect(
+      await test.reads
+        .ownedWorkspaceReadsFor(attached)
+        .listFiles({ path: "shared-with-me", recursive: false }),
+    ).toEqual({ files: [], folders: ["shared-with-me"] });
+    await expect(
+      test.reads.readOwnedWorkspaceTextFor(attached, "shared-with-me/alice/stale.md"),
+    ).rejects.toThrow();
     expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
     expect(test.lateReads).toContain("engine");
     if (Array.isArray(shareMounts) && shareMounts.length > 0) {
@@ -236,13 +353,25 @@ describe("desktop workspace reads", () => {
     test.canonical.set("note.md", { kind: "text", bytes: Buffer.from("canonical") });
     const entered = deferred();
     const release = deferred();
-    test.beforeRead.run = async () => { entered.resolve(); await release.promise; };
+    test.beforeRead.run = async () => {
+      entered.resolve();
+      await release.promise;
+    };
     const reading = test.reads.readOwnedWorkspaceText(test.workspace, "note.md");
-    const outcome = expect(reading).resolves.toMatchObject({ text: "canonical", contentHash: hash("canonical") });
+    const outcome = expect(reading).resolves.toMatchObject({
+      text: "canonical",
+      contentHash: hash("canonical"),
+    });
     await entered.promise;
     const retired = test.authority.invalidate("workspace-a");
-    try { release.resolve(); await outcome; await retired; }
-    finally { release.resolve(); await Promise.allSettled([reading, retired]); }
+    try {
+      release.resolve();
+      await outcome;
+      await retired;
+    } finally {
+      release.resolve();
+      await Promise.allSettled([reading, retired]);
+    }
   });
 
   it("keeps a damaged standalone marker on the share path", async () => {
@@ -251,59 +380,87 @@ describe("desktop workspace reads", () => {
     const attached = { ...test.attached, shareView: null } as unknown as typeof test.attached;
     await test.disk("note.md", "projection bytes");
     await expect(test.reads.readOwnedWorkspaceTextFor(attached, "note.md")).rejects.toThrow();
-    await expect(test.reads.listOwnedWorkspaceFilesFor(attached)).resolves.toEqual({ files: [], folders: [] });
-    await expect(test.reads.ownedWorkspaceReadsFor(attached).listFiles({ path: "note.md" }))
-      .resolves.toEqual({ files: [], folders: [] });
+    await expect(test.reads.listOwnedWorkspaceFilesFor(attached)).resolves.toEqual({
+      files: [],
+      folders: [],
+    });
+    await expect(
+      test.reads.ownedWorkspaceReadsFor(attached).listFiles({ path: "note.md" }),
+    ).resolves.toEqual({ files: [], folders: [] });
     expect(test.store.listTextFileMetadata).toHaveBeenCalledTimes(2);
     await expect(test.reads.ownedWorkspaceReadsFor(attached).prepareSearch()).rejects.toThrow();
   });
 
-  it.each(["standalone", "mount"] as const)("repairs %s search projections through the real share owner", async (mode) => {
-    const test = await fixture(mode);
-    test.canonical.set("missing.md", { kind: "text", bytes: Buffer.from("canonical search text") });
-    const port = test.reads.ownedWorkspaceReadsFor(test.attached);
-    const repair = vi.fn(test.repair.run);
-    test.repair.run = repair;
-    const view = await port.prepareSearch();
-    expect(repair).toHaveBeenCalledWith({ rootPath: test.rootPath, target: mode === "mount"
-      ? { kind: "mount", workspaceId: "workspace-a", shareId: "share-a" }
-      : { kind: "standalone", workspaceId: "workspace-a" } });
-    expect(await readFile(join(test.rootPath, test.path("missing.md")), "utf8")).toBe("canonical search text");
-    expect(view.allowPath(test.path("missing.md"))).toBe(true);
-    expect(view.listing?.files.map((file) => file.path)).toContain(test.path("missing.md"));
-  });
+  it.each(["standalone", "mount"] as const)(
+    "repairs %s search projections through the real share owner",
+    async (mode) => {
+      const test = await fixture(mode);
+      test.canonical.set("missing.md", {
+        kind: "text",
+        bytes: Buffer.from("canonical search text"),
+      });
+      const port = test.reads.ownedWorkspaceReadsFor(test.attached);
+      const repair = vi.fn(test.repair.run);
+      test.repair.run = repair;
+      const view = await port.prepareSearch();
+      expect(repair).toHaveBeenCalledWith({
+        rootPath: test.rootPath,
+        target:
+          mode === "mount"
+            ? { kind: "mount", workspaceId: "workspace-a", shareId: "share-a" }
+            : { kind: "standalone", workspaceId: "workspace-a" },
+      });
+      expect(await readFile(join(test.rootPath, test.path("missing.md")), "utf8")).toBe(
+        "canonical search text",
+      );
+      expect(view.allowPath(test.path("missing.md"))).toBe(true);
+      expect(view.listing?.files.map((file) => file.path)).toContain(test.path("missing.md"));
+    },
+  );
 
-  // The view's collision record, readable as when the engine has opened it.
   async function holdBack(test: Awaited<ReturnType<typeof fixture>>, paths: string[]) {
-    readLocalStateFrom({ currentBinding: () => ({ localStateReady: true }), localStateOpenAt: async () => ({ current: () => true }) });
+    readLocalStateFrom({
+      currentBinding: () => ({ localStateReady: true }),
+      localStateOpenAt: async () => ({ current: () => true }),
+    });
     const records = join(test.rootPath, test.path(".dohc/local/share-refresh"));
     await mkdir(records, { recursive: true, mode: 0o700 });
-    await writeFile(join(records, "share-collision-record.json"), JSON.stringify({ shareId: mount.shareId, paths }), { mode: 0o600 });
+    await writeFile(
+      join(records, "share-collision-record.json"),
+      JSON.stringify({ shareId: mount.shareId, paths }),
+      { mode: 0o600 },
+    );
   }
 
   // A held file waits on a person, so search leaves out that one file and
-  // finds the rest of the view (#2424).
-  it.each(["standalone", "mount"] as const)("searches a %s view around a file held behind a local one", async (mode) => {
-    const test = await fixture(mode);
-    test.canonical.set("held.md", { kind: "text", bytes: Buffer.from("shared text") });
-    test.canonical.set("other.md", { kind: "text", bytes: Buffer.from("other text") });
-    await test.disk(test.path("held.md"), "my own file");
-    await holdBack(test, ["held.md"]);
-    const view = await test.reads.ownedWorkspaceReadsFor(test.attached).prepareSearch();
-    const listed = view.listing?.files.map((file) => file.path);
-    expect(listed).toContain(test.path("other.md"));
-    expect(listed).not.toContain(test.path("held.md"));
-    expect(view.allowPath(test.path("other.md"))).toBe(true);
-    expect(view.allowPath(test.path("held.md"))).toBe(false);
-    expect(await readFile(join(test.rootPath, test.path("held.md")), "utf8")).toBe("my own file");
-  });
+  // finds the rest of the view.
+  it.each(["standalone", "mount"] as const)(
+    "searches a %s view around a file held behind a local one",
+    async (mode) => {
+      const test = await fixture(mode);
+      test.canonical.set("held.md", { kind: "text", bytes: Buffer.from("shared text") });
+      test.canonical.set("other.md", { kind: "text", bytes: Buffer.from("other text") });
+      await test.disk(test.path("held.md"), "my own file");
+      await holdBack(test, ["held.md"]);
+      const view = await test.reads.ownedWorkspaceReadsFor(test.attached).prepareSearch();
+      const listed = view.listing?.files.map((file) => file.path);
+      expect(listed).toContain(test.path("other.md"));
+      expect(listed).not.toContain(test.path("held.md"));
+      expect(view.allowPath(test.path("other.md"))).toBe(true);
+      expect(view.allowPath(test.path("held.md"))).toBe(false);
+      expect(await readFile(join(test.rootPath, test.path("held.md")), "utf8")).toBe("my own file");
+    },
+  );
 
   // On a disk that ignores case, Notes.md is held behind notes.md, which owns
   // the one file and stays searchable.
   async function holdSpellingBehindOwner(mode: "standalone" | "mount") {
     const test = await fixture(mode);
     await test.disk("probe.md", "");
-    const ignoresCase = await readFile(join(test.rootPath, "PROBE.md")).then(() => true, () => false);
+    const ignoresCase = await readFile(join(test.rootPath, "PROBE.md")).then(
+      () => true,
+      () => false,
+    );
     await rm(join(test.rootPath, "probe.md"));
     test.canonical.set("notes.md", { kind: "text", bytes: Buffer.from("n\n") });
     test.canonical.set("Notes.md", { kind: "text", bytes: Buffer.from("N\n") });
@@ -322,8 +479,6 @@ describe("desktop workspace reads", () => {
     expect(view.allowPath("notes.md")).toBe(true);
   });
 
-  // In a mount the held spelling resolves on disk to the spelling that owns
-  // its file, so opening it is refused by the spelling asked for.
   it("refuses to open a mounted spelling held behind another", async (context) => {
     const { test, ignoresCase } = await holdSpellingBehindOwner("mount");
     if (!ignoresCase) context.skip("this disk keeps case apart");
@@ -331,60 +486,91 @@ describe("desktop workspace reads", () => {
     const open = async (requested: string) => {
       const routed = await test.reads.shareViewFilesTargetForPath(test.workspace, requested);
       if (routed === null) throw new Error("Expected a shared path");
-      return test.repair.run({ rootPath: test.rootPath, target: routed.target, path: { resolved: routed.path, requested } });
+      return test.repair.run({
+        rootPath: test.rootPath,
+        target: routed.target,
+        path: { resolved: routed.path, requested },
+      });
     };
-    await expect(open(test.path("Notes.md"))).rejects.toThrow(/Notes\.md and notes\.md as the same name/);
+    await expect(open(test.path("Notes.md"))).rejects.toThrow(
+      /Notes\.md and notes\.md as the same name/,
+    );
     await expect(open(test.path("notes.md"))).resolves.toEqual(new Set(["Notes.md"]));
   });
 });
 
-it.each(["local", "standalone", "mount"] as const)("looks up exact %s owner files without the complete listing", async mode => {
-  const test = await fixture(mode);
-  await test.disk(test.path("present.txt"), "raw");
-  await test.disk(test.path("folder/child.txt"), "child");
-  await test.disk(test.path("excluded.txt"), "raw only");
-  test.canonical.set("present.txt", { kind: "text", bytes: Buffer.from("owner") });
-  const list = vi.spyOn(test.reads, "listOwnedWorkspaceFilesFor");
-  const paths = ["present.txt", "folder", "missing", ...(mode === "local" ? [] : ["excluded.txt"])].map(test.path);
-  const found = await test.reads.lookupOwnedWorkspaceFilesFor(test.attached, paths);
-  expect(found.files.map(file => file.path)).toEqual([test.path("present.txt")]);
-  expect(list).not.toHaveBeenCalled();
-  expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
-  if (mode !== "local") expect(test.store.resolveFiles).toHaveBeenCalledWith(expect.objectContaining({ versionId: "main", targets: expect.arrayContaining([{ path: "present.txt" }]) }));
-});
+it.each(["local", "standalone", "mount"] as const)(
+  "looks up exact %s owner files without the complete listing",
+  async (mode) => {
+    const test = await fixture(mode);
+    await test.disk(test.path("present.txt"), "raw");
+    await test.disk(test.path("folder/child.txt"), "child");
+    await test.disk(test.path("excluded.txt"), "raw only");
+    test.canonical.set("present.txt", { kind: "text", bytes: Buffer.from("owner") });
+    const list = vi.spyOn(test.reads, "listOwnedWorkspaceFilesFor");
+    const paths = [
+      "present.txt",
+      "folder",
+      "missing",
+      ...(mode === "local" ? [] : ["excluded.txt"]),
+    ].map(test.path);
+    const found = await test.reads.lookupOwnedWorkspaceFilesFor(test.attached, paths);
+    expect(found.files.map((file) => file.path)).toEqual([test.path("present.txt")]);
+    expect(list).not.toHaveBeenCalled();
+    expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
+    if (mode !== "local")
+      expect(test.store.resolveFiles).toHaveBeenCalledWith(
+        expect.objectContaining({
+          versionId: "main",
+          targets: expect.arrayContaining([{ path: "present.txt" }]),
+        }),
+      );
+  },
+);
 
-it.each(["standalone", "mount"] as const)("gets a %s app through bounded owner probes and only the selected source subtree", async mode => {
-  const test = await fixture(mode);
-  const repair = vi.fn(async () => new Set<string>());
-  test.repair.run = repair;
-  await test.disk(test.path("app/index.html"), "<h1>app</h1>");
-  await test.disk(test.path("unowned/package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
-  test.canonical.set("app/index.html", { kind: "text", bytes: Buffer.from("<h1>app</h1>") });
-  const { createOwnedSiteCatalog } = await import("./ownedSiteCatalog");
-  const { selectListedSitePackage } = await import("../testing/sitePackageTestOracle");
-  const catalog = createOwnedSiteCatalog({ reads: test.reads.ownedWorkspaceReadsFor });
-  const old = await catalog.list(test.attached);
-  test.store.listTextFileMetadata.mockClear();
-  repair.mockClear();
-  expect(await catalog.get(test.attached, test.path("app/index.html"), undefined))
-    .toEqual(await selectListedSitePackage(test.path("app/index.html"), old));
-  expect(repair).toHaveBeenCalledOnce();
-  expect(test.store.listTextFileMetadata).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ under: "app" }));
-  test.store.listTextFileMetadata.mockClear();
-  expect(await catalog.get(test.attached, test.path("unowned"), undefined)).toBeNull();
-  expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
-});
+it.each(["standalone", "mount"] as const)(
+  "gets a %s app through bounded owner probes and only the selected source subtree",
+  async (mode) => {
+    const test = await fixture(mode);
+    const repair = vi.fn(async () => new Set<string>());
+    test.repair.run = repair;
+    await test.disk(test.path("app/index.html"), "<h1>app</h1>");
+    await test.disk(
+      test.path("unowned/package.json"),
+      JSON.stringify({ scripts: { dev: "vite" } }),
+    );
+    test.canonical.set("app/index.html", { kind: "text", bytes: Buffer.from("<h1>app</h1>") });
+    const { createOwnedSiteCatalog } = await import("./ownedSiteCatalog");
+    const { selectListedSitePackage } = await import("../testing/sitePackageTestOracle");
+    const catalog = createOwnedSiteCatalog({ reads: test.reads.ownedWorkspaceReadsFor });
+    const old = await catalog.list(test.attached);
+    test.store.listTextFileMetadata.mockClear();
+    repair.mockClear();
+    expect(await catalog.get(test.attached, test.path("app/index.html"), undefined)).toEqual(
+      await selectListedSitePackage(test.path("app/index.html"), old),
+    );
+    expect(repair).toHaveBeenCalledOnce();
+    expect(test.store.listTextFileMetadata).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ under: "app" }),
+    );
+    test.store.listTextFileMetadata.mockClear();
+    expect(await catalog.get(test.attached, test.path("unowned"), undefined)).toBeNull();
+    expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
+  },
+);
 
 it("bounds shared lookup batches by UTF-8 bytes and pins the main version", async () => {
   const test = await fixture("standalone");
   const paths = Array.from({ length: 40 }, (_, index) => `apps/${"文".repeat(1000)}/${index}.json`);
   for (const path of paths) test.canonical.set(path, { kind: "text", bytes: Buffer.from("{}") });
   const found = await test.reads.lookupOwnedWorkspaceFilesFor(test.attached, paths);
-  expect(found.files.map(file => file.path)).toEqual(paths);
+  expect(found.files.map((file) => file.path)).toEqual(paths);
   expect(test.store.resolveFiles.mock.calls.length).toBeGreaterThan(1);
   for (const [request] of test.store.resolveFiles.mock.calls) {
     expect(request).toMatchObject({ versionId: "main" });
-    expect(Buffer.byteLength(JSON.stringify({ versionId: "main", targets: request.targets }))).toBeLessThanOrEqual(48 * 1024);
+    expect(
+      Buffer.byteLength(JSON.stringify({ versionId: "main", targets: request.targets })),
+    ).toBeLessThanOrEqual(48 * 1024);
   }
   expect(test.store.listTextFileMetadata).not.toHaveBeenCalled();
 });
@@ -398,21 +584,27 @@ it("rejects a failed canonical mount lookup after repair rather than selecting t
   test.store.resolveFiles.mockRejectedValueOnce(error);
   const { createOwnedSiteCatalog } = await import("./ownedSiteCatalog");
   const catalog = createOwnedSiteCatalog({ reads: test.reads.ownedWorkspaceReadsFor });
-  await expect(catalog.get(test.attached, "shared-with-me/alice/app/x", undefined)).rejects.toBe(error);
+  await expect(catalog.get(test.attached, "shared-with-me/alice/app/x", undefined)).rejects.toBe(
+    error,
+  );
   expect(repair).toHaveBeenCalledOnce();
   test.store.resolveFiles.mockClear();
-  expect((await test.reads.lookupOwnedWorkspaceFilesFor(test.attached, ["index.html"])).files)
-    .toEqual([expect.objectContaining({ path: "index.html" })]);
+  expect(
+    (await test.reads.lookupOwnedWorkspaceFilesFor(test.attached, ["index.html"])).files,
+  ).toEqual([expect.objectContaining({ path: "index.html" })]);
   expect(test.store.resolveFiles).not.toHaveBeenCalled();
 });
 
-it.each(["shared-with-me", "SHARED-WITH-ME"])("hides a bare projection-root disk file %s when the registry exists", async path => {
-  const test = await fixture();
-  const attached = { ...test.attached, shareMounts: [] };
-  await test.disk(path, "not an owned file");
-  await test.disk("local.md", "local");
-  const listed = await test.reads.listOwnedWorkspaceFilesFor(attached);
-  const found = await test.reads.lookupOwnedWorkspaceFilesFor(attached, [path, "local.md"]);
-  expect(found.files.map(file => file.path)).toEqual(["local.md"]);
-  expect(found.files.map(file => file.path)).toEqual(listed.files.map(file => file.path));
-});
+it.each(["shared-with-me", "SHARED-WITH-ME"])(
+  "hides a bare projection-root disk file %s when the registry exists",
+  async (path) => {
+    const test = await fixture();
+    const attached = { ...test.attached, shareMounts: [] };
+    await test.disk(path, "not an owned file");
+    await test.disk("local.md", "local");
+    const listed = await test.reads.listOwnedWorkspaceFilesFor(attached);
+    const found = await test.reads.lookupOwnedWorkspaceFilesFor(attached, [path, "local.md"]);
+    expect(found.files.map((file) => file.path)).toEqual(["local.md"]);
+    expect(found.files.map((file) => file.path)).toEqual(listed.files.map((file) => file.path));
+  },
+);

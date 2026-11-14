@@ -25,7 +25,10 @@ interface LifecycleApp {
   on(event: "second-instance", listener: (event: unknown, argv: string[]) => void): unknown;
   on(event: "window-all-closed", listener: () => void): unknown;
   on(event: "activate", listener: () => void): unknown;
-  on(event: "browser-window-created", listener: (event: unknown, window: SessionWindow) => void): unknown;
+  on(
+    event: "browser-window-created",
+    listener: (event: unknown, window: SessionWindow) => void,
+  ): unknown;
 }
 
 // Windows ends a logoff, shutdown, or restart without a quit event. The
@@ -47,7 +50,9 @@ export const LAUNCH_SETTLED_MS = 30_000;
 // Resolves when the work settles or the limit passes, whichever comes first.
 function settledWithin(work: Promise<void>, limitMs: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const limit = new Promise<void>((resolve) => { timer = setTimeout(resolve, limitMs); });
+  const limit = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, limitMs);
+  });
   return Promise.race([work.catch(() => undefined), limit]).finally(() => clearTimeout(timer));
 }
 
@@ -151,7 +156,18 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     reportQuit(line: string): void;
   };
 }) {
-  const { app, runtime, handoff, workLinks, windows, workspaces, bootstrap, services, launch, shutdown } = dependencies;
+  const {
+    app,
+    runtime,
+    handoff,
+    workLinks,
+    windows,
+    workspaces,
+    bootstrap,
+    services,
+    launch,
+    shutdown,
+  } = dependencies;
   let quitting = false;
   let sessionEnded = false;
   let bootstrapComplete = false;
@@ -175,7 +191,9 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     const running = new Set<string>();
     const step = <T>(name: string, work: Promise<T>): Promise<T> => {
       running.add(name);
-      const done = () => { running.delete(name); };
+      const done = () => {
+        running.delete(name);
+      };
       work.then(done, done);
       return work;
     };
@@ -188,17 +206,26 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     shutdown.beginEngineShutdown();
     const searchStop = step("stopSearch", shutdown.stopSearch()).catch(() => undefined);
     const sitePreviewStop = step("stopSitePreviews", shutdown.stopSitePreviews());
-    const chatDispatchStop = step("stopDispatch", settledWithin(services.dispatch.stop(), DISPATCH_STOP_LIMIT_MS));
+    const chatDispatchStop = step(
+      "stopDispatch",
+      settledWithin(services.dispatch.stop(), DISPATCH_STOP_LIMIT_MS),
+    );
     const cliServerStop = chatDispatchStop.then(() =>
-      step("closeCliServer", (cliServerStartup ?? Promise.resolve(cliServer))
-        .then((server) => server?.close()))
-        .catch(() => undefined),
+      step(
+        "closeCliServer",
+        (cliServerStartup ?? Promise.resolve(cliServer)).then((server) => server?.close()),
+      ).catch(() => undefined),
     );
     const engineYDocStop = step("settleYDocs", shutdown.settleYDocs());
-    const agentIntegrationStop = step("stopAgentIntegration", shutdown.stopAgentIntegration()).catch(() => undefined);
+    const agentIntegrationStop = step(
+      "stopAgentIntegration",
+      shutdown.stopAgentIntegration(),
+    ).catch(() => undefined);
     // Reports and copies go alongside teardown, and exit waits for all within the budget.
     const reportsFlush = step("flushReports", shutdown.flushReports()).catch(() => undefined);
-    const markedCopiesRemoval = step("removeMarkedCopies", shutdown.removeMarkedCopies()).catch(() => undefined);
+    const markedCopiesRemoval = step("removeMarkedCopies", shutdown.removeMarkedCopies()).catch(
+      () => undefined,
+    );
     // Starting close early would let a live producer settle onto a closed store.
     const workspaceAuthorityStop = Promise.allSettled([
       noticeRefusalStop,
@@ -229,9 +256,11 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       }),
     ]).finally(() => {
       clearTimeout(shutdownTimer);
-      shutdown.reportQuit(budgetExpired
-        ? `[desktop] quit: shutdown ran past its ${shutdown.budgetMs} ms budget, still running: ${[...running].join(", ")}`
-        : `[desktop] quit: shutdown finished in ${Date.now() - shutdownStarted} ms`);
+      shutdown.reportQuit(
+        budgetExpired
+          ? `[desktop] quit: shutdown ran past its ${shutdown.budgetMs} ms budget, still running: ${[...running].join(", ")}`
+          : `[desktop] quit: shutdown finished in ${Date.now() - shutdownStarted} ms`,
+      );
       app.exit(budgetExpired ? shutdown.deadlineExitCode : 0);
     });
   });
@@ -268,7 +297,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
   ): Promise<Workspace | null> {
     let lastOpened: Workspace | null = null;
     const failures: { path: string; error: unknown }[] = [];
-    const target = paths.length > 0 && failureWindow ? windows.openFailureTarget(failureWindow) : undefined;
+    const target =
+      paths.length > 0 && failureWindow ? windows.openFailureTarget(failureWindow) : undefined;
     for (const path of paths) {
       try {
         const opened = await workspaces.openPath(path, window);
@@ -291,7 +321,10 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     return lastOpened;
   }
 
-  async function flushPendingOpenPaths(window?: Window, failureWindow = window): Promise<Workspace | null> {
+  async function flushPendingOpenPaths(
+    window?: Window,
+    failureWindow = window,
+  ): Promise<Workspace | null> {
     if (pendingOpenPaths.length === 0) return null;
     const paths = pendingOpenPaths.splice(0);
     return openWorkspacePaths(paths, window, failureWindow);
@@ -345,7 +378,8 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
       return;
     }
 
-    cliServerStartup = services.startCli()
+    cliServerStartup = services
+      .startCli()
       .then(async (server) => {
         if (quitting) {
           await server.close();
@@ -363,7 +397,11 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
     });
     void services.refreshTray().catch(services.reportTrayFailure);
 
-    const launchWorkspace = await openWorkspacePaths(collectOpenWorkspaceArgs(runtime.argv), undefined, window);
+    const launchWorkspace = await openWorkspacePaths(
+      collectOpenWorkspaceArgs(runtime.argv),
+      undefined,
+      window,
+    );
     const pendingWorkspace = await flushPendingOpenPaths(undefined, window);
     const activatedWorkspace = pendingWorkspace ?? launchWorkspace;
     workspaces.refreshNativeSurfaces();
@@ -423,7 +461,11 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
 
       app.on("browser-window-created", (_event, window) => {
         window.on("session-end", () => {
-          try {flushTypingCheckpointsSync();} catch {/* Session end cannot be cancelled. */}
+          try {
+            flushTypingCheckpointsSync();
+          } catch {
+            /* Session end cannot be cancelled. */
+          }
           sessionEnded = true;
           launch.finished();
         });
@@ -470,18 +512,25 @@ export function createAppLifecycle<Window, Workspace, Settings>(dependencies: {
 
       app.on("before-quit", (event) => {
         // A hidden export window cannot answer for renderer-held drafts.
-        if (!windows.hasWorkspace()) {dependencies.beforeQuitWithoutWindows?.(event); return;}
+        if (!windows.hasWorkspace()) {
+          dependencies.beforeQuitWithoutWindows?.(event);
+          return;
+        }
         dependencies.beforeQuit(event);
       });
 
-      const ready = app.whenReady().then(whenReady).catch(async (error: unknown) => {
-        bootstrap.reportFailure(error);
-        await quitAfterStartupFailure();
-      });
+      const ready = app
+        .whenReady()
+        .then(whenReady)
+        .catch(async (error: unknown) => {
+          bootstrap.reportFailure(error);
+          await quitAfterStartupFailure();
+        });
 
       app.on("window-all-closed", () => {
         if (runtime.platform === "darwin") return;
-        void services.refreshTray()
+        void services
+          .refreshTray()
           .then((enabled) => {
             if (!enabled && !quitting) app.quit();
             // A failed close leaves the workspace open; it never quits dohc.

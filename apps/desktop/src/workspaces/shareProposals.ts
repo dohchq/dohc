@@ -4,8 +4,8 @@ import type { ShareViewSelector } from "./shareViewInfo";
 import { shareViewIdentityIsIntact, shareViewIsPresent } from "./shareViewMarker";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
 
-// The two lanes of #646 PR3a, and the rule that keeps a workspace in exactly
-// one of them.
+// The two lanes of share proposals, and the rule that keeps a workspace in
+// exactly one of them.
 //
 // GRANTER lane — read the changes recipients sent, then accept or decline
 // them. It acts on a workspace this machine owns.
@@ -72,9 +72,7 @@ export function sameShareViewProposalScope(
  * work in front of a granter who may never answer it. The relay draws the
  * same line: its withdraw route asks for membership, not for edit.
  */
-export function requireShareViewMembership(
-  shareView: unknown,
-): ShareViewProposalScope {
+export function requireShareViewMembership(shareView: unknown): ShareViewProposalScope {
   if (!shareViewIsPresent(shareView)) {
     throw new Error("This workspace is not a shared view.");
   }
@@ -90,9 +88,7 @@ export function requireShareViewMembership(
  * The same scope, for sending: the marker must name its recipient too, the
  * level must positively be `edit`, and the share must not have ended.
  */
-export function requireShareViewProposalScope(
-  shareView: unknown,
-): ShareViewProposalScope {
+export function requireShareViewProposalScope(shareView: unknown): ShareViewProposalScope {
   const scope = requireShareViewMembership(shareView);
   const marker = isRecord(shareView) ? shareView : {};
   if (

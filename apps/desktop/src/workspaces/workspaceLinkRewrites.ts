@@ -1,6 +1,12 @@
 import { DaemonRefusalError, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
-import { canRewriteMoveLinks, listMoveRecoveries, listStoppedMoves, readMoveRecovery, type FileMoveRecoveryRecord } from "./workspaceMoveRecovery";
+import {
+  canRewriteMoveLinks,
+  listMoveRecoveries,
+  listStoppedMoves,
+  readMoveRecovery,
+  type FileMoveRecoveryRecord,
+} from "./workspaceMoveRecovery";
 import type { LocalStateWorkspace } from "./workspaceLocalState";
 import { saveRecoveryRecord } from "./workspaceDeleteRecovery";
 // A function-time cycle: moves schedule link rewrites, and an open settles stopped moves first.
@@ -17,18 +23,27 @@ const states = new Map<string, State>();
 const keyFor = (root: string, id: string) => JSON.stringify([root, id]);
 function retire(root: string, id: string, state: State): void {
   const key = keyFor(root, id);
-  if (states.get(key) === state && !state.undo && !state.scheduled && !state.pass) states.delete(key);
+  if (states.get(key) === state && !state.undo && !state.scheduled && !state.pass)
+    states.delete(key);
 }
 const stateFor = (root: string, id: string) => {
   const key = keyFor(root, id);
   let state = states.get(key);
-  if (!state) { state = { undo: 0 }; states.set(key, state); }
+  if (!state) {
+    state = { undo: 0 };
+    states.set(key, state);
+  }
   return state;
 };
-const eligible = (record: FileMoveRecoveryRecord) => canRewriteMoveLinks(record) && record.links?.state === "updating";
+const eligible = (record: FileMoveRecoveryRecord) =>
+  canRewriteMoveLinks(record) && record.links?.state === "updating";
 
 // Register inside the move lock. The next event-loop turn is after the visible result.
-export function scheduleLinkRewrite(workspace: LocalStateWorkspace, record: FileMoveRecoveryRecord, context: LinkRewriteContext): void {
+export function scheduleLinkRewrite(
+  workspace: LocalStateWorkspace,
+  record: FileMoveRecoveryRecord,
+  context: LinkRewriteContext,
+): void {
   const root = workspace.rootPath;
   if (!eligible(record) || context.signal?.aborted) return;
   const state = stateFor(root, record.operationId);
@@ -44,25 +59,42 @@ export function scheduleLinkRewrite(workspace: LocalStateWorkspace, record: File
     const cancel = new AbortController();
     const retired = () => cancel.abort();
     context.signal?.addEventListener("abort", retired, { once: true });
-    const answer = context.history.rewriteHistoryLinks({workspaceId: context.workspaceId, operationId: record.operationId,
-      ...record.linkRewrite!, cancelSignal: cancel.signal});
+    const answer = context.history.rewriteHistoryLinks({
+      workspaceId: context.workspaceId,
+      operationId: record.operationId,
+      ...record.linkRewrite!,
+      cancelSignal: cancel.signal,
+    });
     const pass = { cancel, answer };
     state.pass = pass;
-    void answer.then(async receipt => {
-      if (context.signal?.aborted) return;
-      await withExclusiveWorkspaceOperation(root, async () => {
-        const current = await readMoveRecovery(root, record.operationId);
-        if (!current || "noUndo" in current || !eligible(current) || context.signal?.aborted) return;
-        current.links = { state: "done", documents: receipt.documents, unchecked: receipt.unchecked, uncheckedCount: receipt.uncheckedCount };
-        await saveRecoveryRecord(workspace, current, "move");
-      }, {markOnSuccess: false});
-    }).catch(() => {
-      // A cancelled or interrupted pass stays updating for refusal/open recovery.
-    }).finally(() => {
-      context.signal?.removeEventListener("abort", retired);
-      if (state.pass === pass) delete state.pass;
-      retire(root, record.operationId, state);
-    });
+    void answer
+      .then(async (receipt) => {
+        if (context.signal?.aborted) return;
+        await withExclusiveWorkspaceOperation(
+          root,
+          async () => {
+            const current = await readMoveRecovery(root, record.operationId);
+            if (!current || "noUndo" in current || !eligible(current) || context.signal?.aborted)
+              return;
+            current.links = {
+              state: "done",
+              documents: receipt.documents,
+              unchecked: receipt.unchecked,
+              uncheckedCount: receipt.uncheckedCount,
+            };
+            await saveRecoveryRecord(workspace, current, "move");
+          },
+          { markOnSuccess: false },
+        );
+      })
+      .catch(() => {
+        // A cancelled or interrupted pass stays updating for refusal/open recovery.
+      })
+      .finally(() => {
+        context.signal?.removeEventListener("abort", retired);
+        if (state.pass === pass) delete state.pass;
+        retire(root, record.operationId, state);
+      });
   });
 }
 
@@ -73,8 +105,9 @@ export async function pauseLinkRewrite(root: string, id: string): Promise<() => 
   state.scheduled = false;
   const pass = state.pass;
   pass?.cancel.abort();
-  try { await pass?.answer; }
-  catch (error) {
+  try {
+    await pass?.answer;
+  } catch (error) {
     if (!(error instanceof DaemonRefusalError)) {
       state.undo--;
       retire(root, id, state);
@@ -88,17 +121,28 @@ export async function pauseLinkRewrite(root: string, id: string): Promise<() => 
   };
 }
 
-export async function resumeWorkspaceLinkRewrites(workspace: LocalStateWorkspace, context: LinkRewriteContext): Promise<void> {
+export async function resumeWorkspaceLinkRewrites(
+  workspace: LocalStateWorkspace,
+  context: LinkRewriteContext,
+): Promise<void> {
   const root = workspace.rootPath;
   // The pass reads again under the lock, where no move is under way.
   if ((await listStoppedMoves(root)).length) {
-    await withExclusiveWorkspaceOperation(root, markChanged => putBackStoppedMoves(workspace, markChanged), {markOnSuccess: false});
+    await withExclusiveWorkspaceOperation(
+      root,
+      (markChanged) => putBackStoppedMoves(workspace, markChanged),
+      { markOnSuccess: false },
+    );
   }
   for (const id of await listMoveRecoveries(root)) {
     if (context.signal?.aborted) return;
-    await withExclusiveWorkspaceOperation(root, async () => {
-      const record = await readMoveRecovery(root, id);
-      if (record && !("noUndo" in record)) scheduleLinkRewrite(workspace, record, context);
-    }, {markOnSuccess: false});
+    await withExclusiveWorkspaceOperation(
+      root,
+      async () => {
+        const record = await readMoveRecovery(root, id);
+        if (record && !("noUndo" in record)) scheduleLinkRewrite(workspace, record, context);
+      },
+      { markOnSuccess: false },
+    );
   }
 }

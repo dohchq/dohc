@@ -6,18 +6,24 @@ import { finished } from "node:stream/promises";
 import { afterEach, expect, test, vi } from "vitest";
 
 const fixture = vi.hoisted(() => ({ output: "", launch: vi.fn(), close: vi.fn() }));
-vi.mock("@playwright/test", () => ({ test: { info: () => ({
-  outputPath: (name: string) => join(fixture.output, name),
-  attach: vi.fn(),
-}) } }));
+vi.mock("@playwright/test", () => ({
+  test: {
+    info: () => ({
+      outputPath: (name: string) => join(fixture.output, name),
+      attach: vi.fn(),
+    }),
+  },
+}));
 vi.mock("playwright", () => ({ _electron: { launch: fixture.launch } }));
-vi.mock("../../../../scripts/verification/build.mjs", () => ({ assertPrepared: () => ({ version: 1 }) }));
+vi.mock("../../../../scripts/verification/build.mjs", () => ({
+  assertPrepared: () => ({ version: 1 }),
+}));
 vi.mock("../../../../scripts/verification/close-electron.mjs", async (original) => ({
-  ...await original<typeof import("../../../../scripts/verification/close-electron.mjs")>(),
+  ...(await original<typeof import("../../../../scripts/verification/close-electron.mjs")>()),
   closeElectronApplication: fixture.close,
 }));
 vi.mock("node:fs", async (original) => ({
-  ...await original<typeof import("node:fs")>(),
+  ...(await original<typeof import("node:fs")>()),
   existsSync: () => true,
 }));
 
@@ -36,17 +42,24 @@ test("desktop evidence decodes split UTF-8 independently on stdout and stderr", 
   const child = { pid: 42, stdout, stderr };
   const page = { on: vi.fn(), isClosed: () => true };
   const app = {
-    process: () => child, firstWindow: async () => page, evaluate: async () => 43,
+    process: () => child,
+    firstWindow: async () => page,
+    evaluate: async () => 43,
     browserWindow: async () => ({ evaluate: async () => true, dispose: async () => undefined }),
   };
   fixture.launch.mockResolvedValue(app);
   fixture.close.mockImplementation(async () => {
-    stdout.end(); stderr.end();
+    stdout.end();
+    stderr.end();
     await Promise.all([finished(stdout), finished(stderr)]);
   });
-  const desktop = await launchDesktopApp({ workspace: {
-    baseDir: fixture.output, homeDir: fixture.output, rootPath: fixture.output,
-  } });
+  const desktop = await launchDesktopApp({
+    workspace: {
+      baseDir: fixture.output,
+      homeDir: fixture.output,
+      rootPath: fixture.output,
+    },
+  });
   const output = "workspace café/日本語/🛠\n";
   const error = "échec 🧪\n";
   for (const byte of Buffer.from(output)) stdout.write(Buffer.from([byte]));
@@ -55,11 +68,26 @@ test("desktop evidence decodes split UTF-8 independently on stdout and stderr", 
   stderr.write(Buffer.from([0xe2]));
   await desktop.close();
   expect(fixture.close).toHaveBeenCalledExactlyOnceWith(app, child, 10_000);
-  const persisted = readFileSync(join(fixture.launch.mock.calls[0][0].artifactsDir, "desktop.jsonl"), "utf8")
-    .trim().split("\n").map((line) => JSON.parse(line));
+  const persisted = readFileSync(
+    join(fixture.launch.mock.calls[0][0].artifactsDir, "desktop.jsonl"),
+    "utf8",
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
   for (const entries of [desktop.logs, persisted]) {
-    expect(entries.filter((entry) => entry.level === "stdout").map((entry) => entry.text).join("")).toBe(output);
-    expect(entries.filter((entry) => entry.level === "stderr").map((entry) => entry.text).join("")).toBe(error + "\ufffd");
+    expect(
+      entries
+        .filter((entry) => entry.level === "stdout")
+        .map((entry) => entry.text)
+        .join(""),
+    ).toBe(output);
+    expect(
+      entries
+        .filter((entry) => entry.level === "stderr")
+        .map((entry) => entry.text)
+        .join(""),
+    ).toBe(error + "\ufffd");
   }
 });
 
@@ -67,24 +95,36 @@ test("failed desktop launch gives cleanup the renderer and teardown budget", asy
   fixture.output = mkdtempSync(join(tmpdir(), "dohc-desktop-launch-failure-"));
   const child = { pid: 42 };
   const failure = new Error("first window failed");
-  const app = { process: () => child, firstWindow: async () => { throw failure; } };
+  const app = {
+    process: () => child,
+    firstWindow: async () => {
+      throw failure;
+    },
+  };
   fixture.launch.mockResolvedValue(app);
   fixture.close.mockResolvedValue(undefined);
-  await expect(launchDesktopApp({ workspace: {
-    baseDir: fixture.output, homeDir: fixture.output, rootPath: fixture.output,
-  } })).rejects.toBe(failure);
+  await expect(
+    launchDesktopApp({
+      workspace: {
+        baseDir: fixture.output,
+        homeDir: fixture.output,
+        rootPath: fixture.output,
+      },
+    }),
+  ).rejects.toBe(failure);
   expect(fixture.close).toHaveBeenCalledExactlyOnceWith(app, child, 10_000);
 });
 
 test("a click helper stops after 5 s without frames and reports the page's state", async () => {
   vi.useFakeTimers();
   try {
-    const evaluate = vi.fn()
+    const evaluate = vi
+      .fn()
       .mockReturnValueOnce(new Promise(() => undefined))
       .mockResolvedValueOnce({ visibilityState: "visible", hasFocus: false });
     const waiting = expect(waitForPaintedFrames({ evaluate } as unknown as Page)).rejects.toThrow(
-      "The desktop window didn't get two animation frames within 5 s, so Playwright can't click in it. "
-      + 'Page: {"visibilityState":"visible","hasFocus":false}. Window: unknown, not launched by launchDesktopApp.',
+      "The desktop window didn't get two animation frames within 5 s, so Playwright can't click in it. " +
+        'Page: {"visibilityState":"visible","hasFocus":false}. Window: unknown, not launched by launchDesktopApp.',
     );
     await vi.advanceTimersByTimeAsync(5_000);
     await waiting;

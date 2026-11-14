@@ -2,11 +2,30 @@ import { datasetBaseFolder } from "@dohc/security-contract/dataset";
 import { createHash } from "node:crypto";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetAutomationClaim } from "@dohc/app-backend-runtime/dataset-automation-claims";
-import type { DatasetDefinition, DatasetOperation, DatasetTable } from "@dohc/security-contract/dataset";
+import type {
+  DatasetDefinition,
+  DatasetOperation,
+  DatasetTable,
+} from "@dohc/security-contract/dataset";
 import type { Automation } from "@dohc/workspace-contracts/automations";
-import { chatReachStepsOf, datasetFindOf, operationsOf, shapeProblem, stepsInOrder, type DatasetFindFilter, type RunClaim } from "./automationPlan";
+import {
+  chatReachStepsOf,
+  datasetFindOf,
+  operationsOf,
+  shapeProblem,
+  stepsInOrder,
+  type DatasetFindFilter,
+  type RunClaim,
+} from "./automationPlan";
 import type { ChatDirectory } from "./automationChat";
-import { checkAutomationReach, datasetFieldKey, type ReachCollection, type ReachDatasetGrants, type ReachRoster, type ReachStep } from "./automationReach";
+import {
+  checkAutomationReach,
+  datasetFieldKey,
+  type ReachCollection,
+  type ReachDatasetGrants,
+  type ReachRoster,
+  type ReachStep,
+} from "./automationReach";
 import { datasetOperationLabel } from "./datasetOperationLabel";
 
 // How a dataset Collection's automation maps onto the dataset's approved
@@ -45,7 +64,11 @@ export type DatasetRecordId = string | number;
  * A dataset record's identity within a run: its dataset, its table, and its
  * id with its type. Two tables can hold the same id.
  */
-export function datasetRecordKey(datasetId: string, tableId: string, recordId: DatasetRecordId): string {
+export function datasetRecordKey(
+  datasetId: string,
+  tableId: string,
+  recordId: DatasetRecordId,
+): string {
   return JSON.stringify([datasetId, tableId, recordId]);
 }
 
@@ -76,12 +99,21 @@ export interface DatasetSteps {
   rereads: ReadonlyMap<number, DatasetOperation>;
 }
 
-const KIND_OF: Record<RecordStep["kind"], Kind> = { set: "edit", "add-record": "create", find: "read" };
+const KIND_OF: Record<RecordStep["kind"], Kind> = {
+  set: "edit",
+  "add-record": "create",
+  find: "read",
+};
 
 /** A dataset's table by name, or its only table for null. */
-export function datasetTableNamed(definition: DatasetDefinition, name: string | null): DatasetTable | undefined {
+export function datasetTableNamed(
+  definition: DatasetDefinition,
+  name: string | null,
+): DatasetTable | undefined {
   return name === null
-    ? (definition.tables.length === 1 ? definition.tables[0] : undefined)
+    ? definition.tables.length === 1
+      ? definition.tables[0]
+      : undefined
     : definition.tables.find((table) => table.name === name);
 }
 
@@ -116,7 +148,12 @@ function fieldIds(table: DatasetTable, names: readonly string[]): string[] | { m
  * the step may use: its one table, or every table for a step that names its
  * table only through its operation.
  */
-function candidates(definition: DatasetDefinition, tables: readonly DatasetTable[], kind: Kind, names: readonly string[]): DatasetOperation[] {
+function candidates(
+  definition: DatasetDefinition,
+  tables: readonly DatasetTable[],
+  kind: Kind,
+  names: readonly string[],
+): DatasetOperation[] {
   const found: Array<{ operation: DatasetOperation; extra: number }> = [];
   for (const operation of definition.operations) {
     const table = tables.find((candidate) => candidate.tableId === operation.tableId);
@@ -126,10 +163,12 @@ function candidates(definition: DatasetDefinition, tables: readonly DatasetTable
     found.push({ operation, extra: operation.fieldIds.length - new Set(ids).size });
   }
   return found
-    .sort((left, right) =>
-      Number(right.operation.reversible === true) - Number(left.operation.reversible === true) ||
-      left.extra - right.extra ||
-      left.operation.name.localeCompare(right.operation.name))
+    .sort(
+      (left, right) =>
+        Number(right.operation.reversible === true) - Number(left.operation.reversible === true) ||
+        left.extra - right.extra ||
+        left.operation.name.localeCompare(right.operation.name),
+    )
     .map(({ operation }) => operation);
 }
 
@@ -139,7 +178,10 @@ function candidates(definition: DatasetDefinition, tables: readonly DatasetTable
  * the dataset's only table, as the panel's Add record takes it. Undefined
  * when a trigger with no table meets a dataset with several.
  */
-export function datasetCodeTable(automation: Automation, definition: DatasetDefinition): DatasetTable | undefined {
+export function datasetCodeTable(
+  automation: Automation,
+  definition: DatasetDefinition,
+): DatasetTable | undefined {
   const trigger = automation.when;
   return datasetTableNamed(definition, "table" in trigger ? trigger.table : null);
 }
@@ -155,7 +197,11 @@ export function datasetCodeOperation(
   kind: Kind,
   names: readonly string[],
 ): DatasetOperation | { problem: string } {
-  return candidates(definition, [table], kind, names)[0] ?? { problem: `${definition.name} has no approved ${fits(kind, names)}.` };
+  return (
+    candidates(definition, [table], kind, names)[0] ?? {
+      problem: `${definition.name} has no approved ${fits(kind, names)}.`,
+    }
+  );
 }
 
 /**
@@ -180,16 +226,20 @@ function resolve(
   if (ownsTrigger && "table" in trigger) {
     const named = datasetTableNamed(definition, trigger.table);
     if (named === undefined) {
-      return { problem: trigger.table === null
-        ? `${definition.name} has several tables. Name the one this automation watches.`
-        : `${definition.name} has no table named ${trigger.table}.` };
+      return {
+        problem:
+          trigger.table === null
+            ? `${definition.name} has several tables. Name the one this automation watches.`
+            : `${definition.name} has no table named ${trigger.table}.`,
+      };
     }
     table = named;
   }
   const ordered = stepsInOrder(automation);
   const bindings = new Map<string, number>();
   for (const { ordinal, step } of ordered) {
-    if ((step.kind === "find" || step.kind === "add-record") && step.as !== null) bindings.set(step.as, ordinal);
+    if ((step.kind === "find" || step.kind === "add-record") && step.as !== null)
+      bindings.set(step.as, ordinal);
   }
   // Fields a Set step changes on the records it names, which the records'
   // read must also show, so a changed record can be compared again.
@@ -206,7 +256,11 @@ function resolve(
   const pinned = new Map<number, string>();
   // One step's operation, or why it has none. A step no operation fits keeps what it names.
   const resolveStep = (ordinal: number, step: RecordStep): string | null => {
-    if (step.kind !== "set" && step.collection !== null && step.collection !== datasetBaseFolder(definition)) {
+    if (
+      step.kind !== "set" &&
+      step.collection !== null &&
+      step.collection !== datasetBaseFolder(definition)
+    ) {
       return `Automations on ${definition.name} can use only its own records for now.`;
     }
     const kind = KIND_OF[step.kind];
@@ -216,7 +270,9 @@ function resolve(
       const filters = datasetFindOf(step.condition);
       if ("problem" in filters) return filters.problem;
       finds.set(ordinal, filters);
-      names = [...new Set([...filters.map((filter) => filter.field), ...(setOn.get(ordinal) ?? [])])];
+      names = [
+        ...new Set([...filters.map((filter) => filter.field), ...(setOn.get(ordinal) ?? [])]),
+      ];
       tables = definition.tables;
     } else if (step.kind === "add-record") {
       names = step.values.map((entry) => entry.field);
@@ -225,41 +281,57 @@ function resolve(
       names = step.values.map((entry) => entry.field);
       const bound = step.records === null ? null : bindings.get(step.records);
       const target = bound === undefined || bound === null ? table : steps.get(bound)?.table;
-      if (target === undefined || target === null) return `Step ${ordinal + 1} changes records that no earlier step found or added.`;
+      if (target === undefined || target === null)
+        return `Step ${ordinal + 1} changes records that no earlier step found or added.`;
       tables = [target];
     }
     const fitting = candidates(definition, tables, kind, names);
-    const named = step.operation === null ? undefined : definition.operations.find((operation) => operation.name === step.operation);
+    const named =
+      step.operation === null
+        ? undefined
+        : definition.operations.find((operation) => operation.name === step.operation);
     let chosen = named !== undefined && fitting.includes(named) ? named : undefined;
     // Pinning never moves an Add record or a Find to another table: it
     // stays in its operation's table, or the trigger's when it names none,
     // which is the table the ⚡ panel built it in. A trigger with no table
     // leaves the dataset's only table. With no fit there, a person names one.
-    const home = step.kind === "set" ? null : (named ?? table ?? datasetTableNamed(definition, null))?.tableId;
+    const home =
+      step.kind === "set" ? null : (named ?? table ?? datasetTableNamed(definition, null))?.tableId;
     if (chosen === undefined && pin && pin(step) && home !== undefined) {
       chosen = fitting.find((operation) => home === null || operation.tableId === home);
     }
     if (chosen === undefined) {
       if (tables.length === 1) {
         const missing = fieldIds(tables[0]!, names);
-        if ("missing" in missing) return `${tables[0]!.name} has no field named ${missing.missing}.`;
+        if ("missing" in missing)
+          return `${tables[0]!.name} has no field named ${missing.missing}.`;
       }
       if (fitting.length === 0) return `${definition.name} has no approved ${fits(kind, names)}.`;
-      if (step.operation === null) return `Name the approved operation step ${ordinal + 1} uses, such as ${fitting[0]!.name}.`;
-      if (named === undefined) return `${definition.name} has no approved operation named ${step.operation}.`;
+      if (step.operation === null)
+        return `Name the approved operation step ${ordinal + 1} uses, such as ${fitting[0]!.name}.`;
+      if (named === undefined)
+        return `${definition.name} has no approved operation named ${step.operation}.`;
       return `${named.name} is not an approved ${fits(kind, names)}.`;
     }
     if (chosen.name !== step.operation) pinned.set(ordinal, chosen.name);
-    steps.set(ordinal, { operation: chosen, table: definition.tables.find((candidate) => candidate.tableId === chosen.tableId)! });
+    steps.set(ordinal, {
+      operation: chosen,
+      table: definition.tables.find((candidate) => candidate.tableId === chosen.tableId)!,
+    });
     return null;
   };
   // An invoke step names its action. Any table's action may run: the action
   // decides what it changes, and reach checks it like any other operation.
   const resolveAction = (ordinal: number, step: InvokeStep): string | null => {
     const action = definition.operations.find((operation) => operation.name === step.operation);
-    if (action === undefined) return `${definition.name} has no approved action named ${step.operation}.`;
-    if (action.kind !== "action") return `${step.operation} is an approved ${action.kind}, not an action. Use a step that changes fields for it.`;
-    steps.set(ordinal, { operation: action, table: definition.tables.find((candidate) => candidate.tableId === action.tableId)! });
+    if (action === undefined)
+      return `${definition.name} has no approved action named ${step.operation}.`;
+    if (action.kind !== "action")
+      return `${step.operation} is an approved ${action.kind}, not an action. Use a step that changes fields for it.`;
+    steps.set(ordinal, {
+      operation: action,
+      table: definition.tables.find((candidate) => candidate.tableId === action.tableId)!,
+    });
     return null;
   };
   for (const { ordinal, step } of ordered) {
@@ -270,7 +342,8 @@ function resolve(
       continue;
     }
     if (step.kind !== "set" && step.kind !== "add-record" && step.kind !== "find") continue;
-    if (!generated && sourceCollection !== undefined) return { problem: GENERATED_ONLY(definition.name) };
+    if (!generated && sourceCollection !== undefined)
+      return { problem: GENERATED_ONLY(definition.name) };
     const problem = resolveStep(ordinal, step);
     // Pinning goes on past a step no operation fits, so the others still get theirs.
     if (problem !== null && !pin) return { problem };
@@ -282,8 +355,15 @@ function resolve(
   if (table !== null && trigger.kind !== "record-removed" && generated) {
     const names = setOn.get("trigger") ?? [];
     const reads = candidates(definition, [table], "read", names);
-    triggerRead = reads.sort((left, right) => right.fieldIds.length - left.fieldIds.length || left.name.localeCompare(right.name))[0] ?? null;
-    if (triggerRead === null && !pin) return { problem: `${definition.name} has no approved ${fits("read", names)} in ${table.name}.` };
+    triggerRead =
+      reads.sort(
+        (left, right) =>
+          right.fieldIds.length - left.fieldIds.length || left.name.localeCompare(right.name),
+      )[0] ?? null;
+    if (triggerRead === null && !pin)
+      return {
+        problem: `${definition.name} has no approved ${fits("read", names)} in ${table.name}.`,
+      };
   }
   const rereads = new Map<number, DatasetOperation>();
   for (const { ordinal, step } of ordered) {
@@ -291,16 +371,34 @@ function resolve(
     if (own === undefined) continue;
     if (step.kind === "add-record" && step.as !== null) {
       // Later steps read the record an Add record step bound through the widest read of its table.
-      const reader = candidates(definition, [own.table], "read", []).sort((left, right) => right.fieldIds.length - left.fieldIds.length || left.name.localeCompare(right.name))[0];
+      const reader = candidates(definition, [own.table], "read", []).sort(
+        (left, right) =>
+          right.fieldIds.length - left.fieldIds.length || left.name.localeCompare(right.name),
+      )[0];
       if (reader) rereads.set(ordinal, reader);
     }
     if (step.kind !== "set") continue;
-    const bound = step.records === null ? null : bindings.get(step.records) ?? null;
-    const source = bound === null ? triggerRead : steps.get(bound)?.operation.kind === "read" ? steps.get(bound)!.operation : undefined;
-    const reader = source ?? candidates(definition, [own.table], "read", step.values.map((entry) => entry.field))[0];
+    const bound = step.records === null ? null : (bindings.get(step.records) ?? null);
+    const source =
+      bound === null
+        ? triggerRead
+        : steps.get(bound)?.operation.kind === "read"
+          ? steps.get(bound)!.operation
+          : undefined;
+    const reader =
+      source ??
+      candidates(
+        definition,
+        [own.table],
+        "read",
+        step.values.map((entry) => entry.field),
+      )[0];
     if (reader) rereads.set(ordinal, reader);
   }
-  return { steps: { trigger: table === null ? null : { table, read: triggerRead }, steps, finds, rereads }, pinned };
+  return {
+    steps: { trigger: table === null ? null : { table, read: triggerRead }, steps, finds, rereads },
+    pinned,
+  };
 }
 
 export const GENERATED_ONLY = (name: string) =>
@@ -314,12 +412,20 @@ const AUTHORED_MATCHING = (name: string) =>
  * needs the record read.
  */
 function authoredProblem(automation: Automation, name: string): string | null {
-  if (stepsInOrder(automation).some(({ step }) => step.kind === "set" || step.kind === "add-record" || step.kind === "find")) return GENERATED_ONLY(name);
+  if (
+    stepsInOrder(automation).some(
+      ({ step }) => step.kind === "set" || step.kind === "add-record" || step.kind === "find",
+    )
+  )
+    return GENERATED_ONLY(name);
   return automation.when.kind === "starts-matching" ? AUTHORED_MATCHING(name) : null;
 }
 
 /** Why dohc cannot run an automation on this dataset, or null. */
-export function datasetAutomationProblem(automation: Automation, dataset: DatasetRules): string | null {
+export function datasetAutomationProblem(
+  automation: Automation,
+  dataset: DatasetRules,
+): string | null {
   if (!dataset.generated) {
     const problem = authoredProblem(automation, dataset.definition.name);
     if (problem !== null) return problem;
@@ -348,7 +454,10 @@ export function datasetStepsOf(automation: Automation, rules: DatasetRules): Dat
 }
 
 /** Static destinations, including the destination inherited by a Set binding. */
-export function recordStepDestinations(automation: Automation, source: string): Map<number, string> {
+export function recordStepDestinations(
+  automation: Automation,
+  source: string,
+): Map<number, string> {
   const bindings = new Map<string, string>();
   const destinations = new Map<number, string>();
   for (const { ordinal, step } of stepsInOrder(automation)) {
@@ -357,7 +466,10 @@ export function recordStepDestinations(automation: Automation, source: string): 
       destinations.set(ordinal, path);
       if (step.as !== null) bindings.set(step.as, path);
     } else if (step.kind === "set") {
-      destinations.set(ordinal, step.records === null ? source : bindings.get(step.records) ?? source);
+      destinations.set(
+        ordinal,
+        step.records === null ? source : (bindings.get(step.records) ?? source),
+      );
     } else if (step.kind === "invoke") {
       destinations.set(ordinal, step.collection ?? source);
     } else if (step.kind === "run" || step.kind === "run-file") {
@@ -376,16 +488,34 @@ function isOwnCollection({ definition, sourceCollection }: DatasetRules): boolea
 // changes are known only once it runs, so it can call every edit, create,
 // and read on the table it changes records in. On a dataset whose
 // operations someone wrote, it changes no record, so it calls none.
-function invokedOperations(automation: Automation, rules: DatasetRules, { trigger, steps, rereads }: DatasetSteps, ownCollection = isOwnCollection(rules)): DatasetOperation[] {
+function invokedOperations(
+  automation: Automation,
+  rules: DatasetRules,
+  { trigger, steps, rereads }: DatasetSteps,
+  ownCollection = isOwnCollection(rules),
+): DatasetOperation[] {
   const { definition, generated } = rules;
-  const codeTable = ownCollection && generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
-    ? datasetCodeTable(automation, definition)
-    : undefined;
-  const code = codeTable === undefined
-    ? []
-    : definition.operations.filter((operation) => operation.tableId === codeTable.tableId && (operation.kind === "edit" || operation.kind === "create" || operation.kind === "read"));
+  const codeTable =
+    ownCollection &&
+    generated &&
+    stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
+      ? datasetCodeTable(automation, definition)
+      : undefined;
+  const code =
+    codeTable === undefined
+      ? []
+      : definition.operations.filter(
+          (operation) =>
+            operation.tableId === codeTable.tableId &&
+            (operation.kind === "edit" || operation.kind === "create" || operation.kind === "read"),
+        );
   const operations = new Map<string, DatasetOperation>();
-  for (const operation of [trigger?.read ?? null, ...[...steps.values()].map((step) => step.operation), ...rereads.values(), ...code]) {
+  for (const operation of [
+    trigger?.read ?? null,
+    ...[...steps.values()].map((step) => step.operation),
+    ...rereads.values(),
+    ...code,
+  ]) {
     if (operation !== null) operations.set(operation.operationId, operation);
   }
   return [...operations.values()];
@@ -400,7 +530,10 @@ function invokedOperations(automation: Automation, rules: DatasetRules, { trigge
  */
 export function datasetOperationsOf(automation: Automation, rules: DatasetRules): string[] {
   const resolved = resolve(automation, rules, false);
-  const reads = "problem" in resolved ? [] : invokedOperations(automation, rules, resolved.steps).map((operation) => operation.name);
+  const reads =
+    "problem" in resolved
+      ? []
+      : invokedOperations(automation, rules, resolved.steps).map((operation) => operation.name);
   const approved = new Set(rules.definition.operations.map((operation) => operation.name));
   return [...new Set([...operationsOf(automation), ...reads])].filter((name) => approved.has(name));
 }
@@ -410,7 +543,10 @@ export function datasetOperationsOf(automation: Automation, rules: DatasetRules)
  * table its approved operation writes to. An automation whose operations do
  * not resolve writes nothing.
  */
-export function datasetFieldWritesOf(automation: Automation, rules: DatasetRules): Array<{ table: string; field: string }> {
+export function datasetFieldWritesOf(
+  automation: Automation,
+  rules: DatasetRules,
+): Array<{ table: string; field: string }> {
   const resolved = resolve(automation, rules, false);
   if ("problem" in resolved) return [];
   return stepsInOrder(automation).flatMap(({ ordinal, step }) => {
@@ -427,23 +563,36 @@ export function datasetFieldWritesOf(automation: Automation, rules: DatasetRules
  * action. Labels need not be unique, so an action whose label another shares
  * reads with its name.
  */
-export function datasetIrreversibleActions(automation: Automation, definition: DatasetDefinition): Array<{ name: string; label: string }> {
+export function datasetIrreversibleActions(
+  automation: Automation,
+  definition: DatasetDefinition,
+): Array<{ name: string; label: string }> {
   const actions = new Map<string, DatasetOperation>();
   for (const { step } of stepsInOrder(automation)) {
     if (step.kind !== "invoke") continue;
-    const action = definition.operations.find((operation) => operation.name === step.operation && operation.kind === "action");
+    const action = definition.operations.find(
+      (operation) => operation.name === step.operation && operation.kind === "action",
+    );
     if (action !== undefined && action.reversedBy === undefined) actions.set(action.name, action);
   }
   const candidates = definition.operations.filter((operation) => operation.kind === "action");
-  return [...actions.values()].map((action) => ({ name: action.name, label: datasetOperationLabel(action, candidates) }));
+  return [...actions.values()].map((action) => ({
+    name: action.name,
+    label: datasetOperationLabel(action, candidates),
+  }));
 }
 
 /** The table and Button field a button automation's trigger names in the rules, or null. */
-export function datasetButtonOf(automation: Automation, definition: DatasetDefinition): { tableId: string; fieldId: string } | null {
+export function datasetButtonOf(
+  automation: Automation,
+  definition: DatasetDefinition,
+): { tableId: string; fieldId: string } | null {
   const trigger = automation.when;
   if (trigger.kind !== "button") return null;
   const table = datasetTableNamed(definition, trigger.table);
-  const field = table?.fields.find((candidate) => candidate.type === "button" && candidate.name === trigger.field);
+  const field = table?.fields.find(
+    (candidate) => candidate.type === "button" && candidate.name === trigger.field,
+  );
   return table && field ? { tableId: table.tableId, fieldId: field.fieldId } : null;
 }
 
@@ -474,24 +623,64 @@ export function datasetReachSteps(
   if ("problem" in resolved) return null;
   const { trigger, steps } = resolved.steps;
   const ownCollection = isOwnCollection(rules);
-  const reach = (operation: DatasetOperation) => ({ operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access });
+  const reach = (operation: DatasetOperation) => ({
+    operationId: operation.operationId,
+    name: operation.name,
+    label: operation.label,
+    access: operation.access,
+  });
   // A code step on a generated dataset reads and changes its table's records, so their fields count too.
-  const code = ownCollection && rules.generated && stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
-    ? datasetCodeTable(automation, definition)
-    : undefined;
-  const tables = new Map([...(trigger === null ? [] : [trigger.table]), ...[...steps.values()].map((step) => step.table), ...(code === undefined ? [] : [code])]
-    .map((table) => [table.tableId, table] as const));
+  const code =
+    ownCollection &&
+    rules.generated &&
+    stepsInOrder(automation).some(({ step }) => step.kind === "run" || step.kind === "run-file")
+      ? datasetCodeTable(automation, definition)
+      : undefined;
+  const tables = new Map(
+    [
+      ...(trigger === null ? [] : [trigger.table]),
+      ...[...steps.values()].map((step) => step.table),
+      ...(code === undefined ? [] : [code]),
+    ].map((table) => [table.tableId, table] as const),
+  );
   const reads = definition.operations.filter((operation) => operation.kind === "read");
   const operations = invokedOperations(automation, rules, resolved.steps, ownCollection);
   const invokedReads = operations.filter((operation) => operation.kind === "read");
   return [
     ...chatReachStepsOf(automation, chat),
-    ...operations.map((operation): ReachStep => ({ kind: "dataset-operation", collection, datasetId: definition.datasetId, operations: definition.operations, grants, operation: reach(operation) })),
-    ...[...tables.values()].flatMap((own) => own.fields.flatMap((field): ReachStep[] => field.type === "button" ||
-      (!ownCollection && !invokedReads.some((read) => read.tableId === own.tableId && read.fieldIds.includes(field.fieldId))) ? [] : [{
-      kind: "dataset-field", collection, datasetId: definition.datasetId, tableId: own.tableId, grants, field: { fieldId: field.fieldId, name: field.name },
-      reads: reads.filter((read) => read.tableId === own.tableId && read.fieldIds.includes(field.fieldId)).map(reach),
-    }])),
+    ...operations.map((operation): ReachStep => ({
+      kind: "dataset-operation",
+      collection,
+      datasetId: definition.datasetId,
+      operations: definition.operations,
+      grants,
+      operation: reach(operation),
+    })),
+    ...[...tables.values()].flatMap((own) =>
+      own.fields.flatMap((field): ReachStep[] =>
+        field.type === "button" ||
+        (!ownCollection &&
+          !invokedReads.some(
+            (read) => read.tableId === own.tableId && read.fieldIds.includes(field.fieldId),
+          ))
+          ? []
+          : [
+              {
+                kind: "dataset-field",
+                collection,
+                datasetId: definition.datasetId,
+                tableId: own.tableId,
+                grants,
+                field: { fieldId: field.fieldId, name: field.name },
+                reads: reads
+                  .filter(
+                    (read) => read.tableId === own.tableId && read.fieldIds.includes(field.fieldId),
+                  )
+                  .map(reach),
+              },
+            ],
+      ),
+    ),
   ];
 }
 
@@ -509,12 +698,25 @@ export function datasetUndoDeletes(
   grants: ReachDatasetGrants,
   codeFiles: readonly string[] = [],
 ): DatasetOperation[] {
-  const deletes = definition.operations.filter((operation) => operation.kind === "delete" && operation.tableId === tableId);
+  const deletes = definition.operations.filter(
+    (operation) => operation.kind === "delete" && operation.tableId === tableId,
+  );
   const verdicts = checkAutomationReach(roster, {
-    id: "", collection, codeFiles,
+    id: "",
+    collection,
+    codeFiles,
     steps: deletes.map((operation): ReachStep => ({
-      kind: "dataset-operation", collection, datasetId: definition.datasetId, operations: definition.operations, grants,
-      operation: { operationId: operation.operationId, name: operation.name, label: operation.label, access: operation.access },
+      kind: "dataset-operation",
+      collection,
+      datasetId: definition.datasetId,
+      operations: definition.operations,
+      grants,
+      operation: {
+        operationId: operation.operationId,
+        name: operation.name,
+        label: operation.label,
+        access: operation.access,
+      },
     })),
   });
   return deletes.filter((_, index) => verdicts[index]!.allowed);
@@ -534,15 +736,19 @@ export function pinDatasetOperations(
   const resolved = resolve(automation, rules, (step) => !kept(step));
   if ("problem" in resolved || resolved.pinned.size === 0) return automation;
   let counter = 0;
-  const pin = (steps: readonly AutomationStep[]): AutomationStep[] => steps.map((step): AutomationStep => {
-    const ordinal = counter++;
-    if (step.kind === "if") {
-      const then = pin(step.do);
-      return { ...step, do: then, otherwise: pin(step.otherwise) };
-    }
-    const name = resolved.pinned.get(ordinal);
-    return name !== undefined && (step.kind === "set" || step.kind === "add-record" || step.kind === "find") ? { ...step, operation: name } : step;
-  });
+  const pin = (steps: readonly AutomationStep[]): AutomationStep[] =>
+    steps.map((step): AutomationStep => {
+      const ordinal = counter++;
+      if (step.kind === "if") {
+        const then = pin(step.do);
+        return { ...step, do: then, otherwise: pin(step.otherwise) };
+      }
+      const name = resolved.pinned.get(ordinal);
+      return name !== undefined &&
+        (step.kind === "set" || step.kind === "add-record" || step.kind === "find")
+        ? { ...step, operation: name }
+        : step;
+    });
   return { ...automation, do: pin(automation.do) };
 }
 
@@ -552,7 +758,12 @@ export function pinDatasetOperations(
  * changed no field and plans as a human trigger. The executor reads actor
  * attribution and chain depth from the dataset ledger claim.
  */
-export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: string, table: DatasetTable, readable: ReadonlySet<string>): RunClaim {
+export function datasetRunClaim(
+  claim: DatasetAutomationClaim,
+  collectionPath: string,
+  table: DatasetTable,
+  readable: ReadonlySet<string>,
+): RunClaim {
   const fact = claim.fact;
   if (fact === null) throw new Error(claim.error ?? "This change cannot be read.");
   const side = (present: boolean, value: JsonValue, truncated: boolean) =>
@@ -561,7 +772,11 @@ export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: s
   for (const change of fact.kind === "button" ? [] : fact.fields) {
     const field = table.fields.find((candidate) => candidate.fieldId === change.fieldId);
     // A claim carries each watched field; formulas see only the readable ones.
-    if (field === undefined || !readable.has(datasetFieldKey(claim.datasetId, table.tableId, field.fieldId))) continue;
+    if (
+      field === undefined ||
+      !readable.has(datasetFieldKey(claim.datasetId, table.tableId, field.fieldId))
+    )
+      continue;
     const truncated = change.truncated === true;
     fields.push({
       field: field.name,
@@ -570,8 +785,16 @@ export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: s
     });
   }
   return {
-    automationId: claim.automationId, claimId: claim.claimId, createdAtMs: claim.createdAtMs, collectionPath,
-    change: { kind: fact.kind, fields, fieldsOmitted: 0, ...(fact.kind === "button" ? { actorKind: "human" as const } : {}) },
+    automationId: claim.automationId,
+    claimId: claim.claimId,
+    createdAtMs: claim.createdAtMs,
+    collectionPath,
+    change: {
+      kind: fact.kind,
+      fields,
+      fieldsOmitted: 0,
+      ...(fact.kind === "button" ? { actorKind: "human" as const } : {}),
+    },
   };
 }
 
@@ -582,7 +805,24 @@ export function datasetRunClaim(claim: DatasetAutomationClaim, collectionPath: s
  * no id yet, so its identity has an empty one, and `part`, the effect's place
  * among its step's effects, tells a code step's added records apart.
  */
-export function datasetEffectKey(claimId: string, keySeed: string, ordinal: number, part: number, recordId: DatasetRecordId | null, replan: number, destination?: { datasetId: string; tableId: string }): string {
-  const identity = JSON.stringify([claimId, keySeed, ordinal, part, destination?.datasetId ?? null, destination?.tableId ?? null, recordId, replan]);
+export function datasetEffectKey(
+  claimId: string,
+  keySeed: string,
+  ordinal: number,
+  part: number,
+  recordId: DatasetRecordId | null,
+  replan: number,
+  destination?: { datasetId: string; tableId: string },
+): string {
+  const identity = JSON.stringify([
+    claimId,
+    keySeed,
+    ordinal,
+    part,
+    destination?.datasetId ?? null,
+    destination?.tableId ?? null,
+    recordId,
+    replan,
+  ]);
   return `a.${createHash("sha256").update(identity).digest("hex")}`;
 }

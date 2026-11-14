@@ -1,16 +1,16 @@
-import type { JSONContent } from '@tiptap/core'
+import type { JSONContent } from "@tiptap/core";
 // The renderer copies and shows a note's Markdown with the projection's own
 // exporter, so it gives the bytes the worker's canonical fallback gives,
 // line endings included.
-export {yDocToArtifactMarkdown, yDocToMarkdown} from '@dohc/ydoc-projection'
-import { getHTMLFromFragment } from '@tiptap/core'
-import { getDohcProseMirrorSchema, parseRichdocMarkdown } from '@dohc/ydoc-projection'
-import { Node as ProseMirrorNode } from '@tiptap/pm/model'
-import * as Y from 'yjs'
+export { yDocToArtifactMarkdown, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { getHTMLFromFragment } from "@tiptap/core";
+import { getDohcProseMirrorSchema, parseRichdocMarkdown } from "@dohc/ydoc-projection";
+import { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import * as Y from "yjs";
 
-const BODY_FIELD = 'body'
+const BODY_FIELD = "body";
 
-const schema = getDohcProseMirrorSchema()
+const schema = getDohcProseMirrorSchema();
 
 // Renders BODY markdown (post-frontmatter — split a full document string
 // with parseFrontmatter first) to HTML through the projection's parser and
@@ -20,8 +20,8 @@ const schema = getDohcProseMirrorSchema()
 // menu (documentExport.ts). Needs a DOM (`document` global): true in the
 // renderer and under vitest's jsdom environment, never in the main process.
 export function markdownBodyToHtml(body: string): string {
-  const node = ProseMirrorNode.fromJSON(schema, parseRichdocMarkdown(body))
-  return getHTMLFromFragment(node.content, schema)
+  const node = ProseMirrorNode.fromJSON(schema, parseRichdocMarkdown(body));
+  return getHTMLFromFragment(node.content, schema);
 }
 
 // undefined for an empty or frontmatter-only body (no first XML element
@@ -36,8 +36,8 @@ export function markdownBodyToHtml(body: string): string {
 // discarding everything but one path — this runs on every collab mount, so
 // its cost is proportional to the path depth, not the document size.
 export function getDohcYDocSelectionSeed(doc: Y.Doc): JSONContent | undefined {
-  const first = firstXmlElementChild(doc.getXmlFragment(BODY_FIELD))
-  return first ? { type: 'doc', content: [xmlElementToSelectionSeed(first)] } : undefined
+  const first = firstXmlElementChild(doc.getXmlFragment(BODY_FIELD));
+  return first ? { type: "doc", content: [xmlElementToSelectionSeed(first)] } : undefined;
 }
 
 // Y.XmlFragment children can be Y.XmlElement, Y.XmlText, or Y.XmlHook — only
@@ -45,18 +45,18 @@ export function getDohcYDocSelectionSeed(doc: Y.Doc): JSONContent | undefined {
 // hook) is skipped in child order, matching `firstNodePath`'s prior rule.
 function firstXmlElementChild(parent: Y.XmlFragment): Y.XmlElement | null {
   for (let i = 0; i < parent.length; i += 1) {
-    const child = parent.get(i)
-    if (child instanceof Y.XmlElement) return child
+    const child = parent.get(i);
+    if (child instanceof Y.XmlElement) return child;
   }
-  return null
+  return null;
 }
 
 function xmlElementToSelectionSeed(element: Y.XmlElement): JSONContent {
-  const attrs = element.getAttributes()
-  const child = firstXmlElementChild(element)
+  const attrs = element.getAttributes();
+  const child = firstXmlElementChild(element);
   return {
     type: element.nodeName,
     ...(Object.keys(attrs).length ? { attrs } : {}),
     ...(child ? { content: [xmlElementToSelectionSeed(child)] } : {}),
-  }
+  };
 }

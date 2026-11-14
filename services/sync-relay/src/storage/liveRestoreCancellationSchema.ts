@@ -29,17 +29,32 @@ const indexName = "sync_relay_live_restore_cancellation_entries";
 const indexSql = `CREATE INDEX ${indexName} ON ${LIVE_RESTORE_CANCELLATIONS}(workspace_id,journal_cursor) WHERE journal_cursor IS NOT NULL`;
 
 export function initializeLiveRestoreCancellationSchema(db: SqliteDb): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(marker) !== undefined;
+  const marked =
+    db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(marker) !==
+    undefined;
   const normalize = (sql: string) => sql.replace(/\s+/g, " ").trim();
-  for (const [name, type, sql] of [[LIVE_RESTORE_CANCELLATIONS, "table", tableSql], [indexName, "index", indexSql]] as const) {
+  for (const [name, type, sql] of [
+    [LIVE_RESTORE_CANCELLATIONS, "table", tableSql],
+    [indexName, "index", indexSql],
+  ] as const) {
     const row = db.prepare("SELECT type,sql FROM sqlite_schema WHERE name=?").get(name);
     if (!marked) {
       if (row) throw new Error("Unmarked live restore cancellation schema already exists.");
       db.exec(sql);
-    } else if (!row || row.type !== type || typeof row.sql !== "string" || normalize(row.sql) !== normalize(sql)) {
+    } else if (
+      !row ||
+      row.type !== type ||
+      typeof row.sql !== "string" ||
+      normalize(row.sql) !== normalize(sql)
+    ) {
       throw new Error("Live restore cancellation schema is missing or damaged.");
     }
   }
-  if (db.prepare(`PRAGMA foreign_key_check(${LIVE_RESTORE_CANCELLATIONS})`).all().length) throw new Error("Live restore cancellation storage is damaged.");
-  if (!marked) db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(marker, Date.now());
+  if (db.prepare(`PRAGMA foreign_key_check(${LIVE_RESTORE_CANCELLATIONS})`).all().length)
+    throw new Error("Live restore cancellation storage is damaged.");
+  if (!marked)
+    db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(
+      marker,
+      Date.now(),
+    );
 }

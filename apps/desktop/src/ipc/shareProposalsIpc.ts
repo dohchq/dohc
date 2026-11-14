@@ -7,31 +7,55 @@ import {
   ReadShareProposalFileContentResult,
   SettleShareProposalResult,
   resolveSubmitShareChangesResult,
-  PushShareDirectWritesResult, MAX_DIRECT_WRITE_ROWS, type DirectWriteRow,
+  PushShareDirectWritesResult,
+  MAX_DIRECT_WRITE_ROWS,
+  type DirectWriteRow,
   ListMyShareChangesResult,
   WithdrawShareChangesResult,
 } from "./bridgeContract";
 import {
-  assertShareProposalGranter, requireShareViewMembership, requireShareViewProposalScope,
-  sameShareViewProposalScope, shareProposalOpPath, type ShareViewProposalScope,
+  assertShareProposalGranter,
+  requireShareViewMembership,
+  requireShareViewProposalScope,
+  sameShareViewProposalScope,
+  shareProposalOpPath,
+  type ShareViewProposalScope,
 } from "../workspaces/shareProposals";
 import { requireCredentials } from "../workspaces/credentialScopedOperation";
 import { workspaceRemoteMatchesCredentials } from "../workspaces/chatRelayIdentity";
 import { relayUrlsMatch } from "../workspaces/syncCode";
 import { assertShareChangesJournalable } from "../workspaces/shareViewRecords";
-import { relayApiFetch, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
+import {
+  relayApiFetch,
+  relayFetchWithTimeout,
+  RELAY_FETCH_TIMEOUT_MS,
+} from "../workspaces/sharedChannels";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "../workspaces/workspaceTextLimits";
-import { RelayConflictError, SharedFileReadOnlyError, ShareUnavailableError, type ShareProposal, type ShareProposalOp, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
+import {
+  RelayConflictError,
+  SharedFileReadOnlyError,
+  ShareUnavailableError,
+  type ShareProposal,
+  type ShareProposalOp,
+  type SyncRelayConnection,
+} from "@dohc/workspace-contracts/relay";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { ShareViewSelector } from "../workspaces/shareViewInfo";
-import type { WorkspaceTextReadResult, withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
+import type {
+  WorkspaceTextReadResult,
+  withStaleSensitiveWorkspaceOperation,
+} from "../workspaces/workspaceAssets";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
 import { createShareDirectWriteQueue } from "../workspaces/shareDirectWriteQueue";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type {
-  listMyShareProposals, listShareProposals, readShareProposal, readShareProposalOp,
-  settleShareProposal, withdrawShareProposal,
+  listMyShareProposals,
+  listShareProposals,
+  readShareProposal,
+  readShareProposalOp,
+  settleShareProposal,
+  withdrawShareProposal,
 } from "../workspaces/shareProposalRelay";
 
 const DIRECT_PUSH_PASSES = 4;
@@ -39,14 +63,21 @@ const DIRECT_PUSH_PASSES = 4;
 // Engine refusals that trying again will not change: the grant, the request,
 // or the relay's decision.
 const LASTING_DIRECT_PUSH_CODES = new Set([
-  "FORBIDDEN", "SHARE_READ_ONLY", "SHARE_OPERATION_REJECTED", "PAYLOAD_TOO_LARGE",
-  "QUOTA_EXCEEDED", "INVALID_PARAMS", "RELAY_METHOD_NOT_ALLOWED", "RELAY_HTTPS_REQUIRED",
+  "FORBIDDEN",
+  "SHARE_READ_ONLY",
+  "SHARE_OPERATION_REJECTED",
+  "PAYLOAD_TOO_LARGE",
+  "QUOTA_EXCEEDED",
+  "INVALID_PARAMS",
+  "RELAY_METHOD_NOT_ALLOWED",
+  "RELAY_HTTPS_REQUIRED",
 ]);
 
 function lastingDirectPushError(error: unknown): boolean {
   // The relay client turns these codes into classes that carry no code.
   if (error instanceof SharedFileReadOnlyError || error instanceof RelayConflictError) return true;
-  const code = typeof error === "object" && error !== null && "wireCode" in error ? error.wireCode : undefined;
+  const code =
+    typeof error === "object" && error !== null && "wireCode" in error ? error.wireCode : undefined;
   return typeof code === "string" && LASTING_DIRECT_PUSH_CODES.has(code);
 }
 
@@ -56,11 +87,12 @@ interface WorkspaceOperation {
   assertCurrent(): void;
 }
 
-export function createShareProposalsIpc<
-  Operation extends WorkspaceOperation,
->(dependencies: {
+export function createShareProposalsIpc<Operation extends WorkspaceOperation>(dependencies: {
   /** Main's own operation on a workspace, whichever workspace its windows show. */
-  withWorkspaceAuthority<Result>(workspaceId: string, work: (operation: WorkspaceOperation) => Promise<Result>): Promise<Result>;
+  withWorkspaceAuthority<Result>(
+    workspaceId: string,
+    work: (operation: WorkspaceOperation) => Promise<Result>,
+  ): Promise<Result>;
   /**
    * Delivers every direct push's feedback, retaining answers until shown.
    */
@@ -70,7 +102,10 @@ export function createShareProposalsIpc<
   currentCredentialGeneration(): number;
   normalizeServerUrl(url: string): string;
   isRecordValue(value: unknown): value is Record<string, unknown>;
-  readOwnedWorkspaceTextFor(workspace: Operation["workspace"], path: string): Promise<WorkspaceTextReadResult>;
+  readOwnedWorkspaceTextFor(
+    workspace: Operation["workspace"],
+    path: string,
+  ): Promise<WorkspaceTextReadResult>;
   activity: { queueCloudSync(workspaceId: string): void };
   listShareProposals: typeof listShareProposals;
   readShareProposal: typeof readShareProposal;
@@ -85,10 +120,22 @@ export function createShareProposalsIpc<
 }) {
   type Handlers = OperationHandlers<typeof shareProposalOperations, unknown, Operation>;
   const {
-    warmCredentialCache, currentCredentials, currentCredentialGeneration, normalizeServerUrl,
-    isRecordValue, readOwnedWorkspaceTextFor, activity, listShareProposals, readShareProposal,
-    readShareProposalOp, settleShareProposal, listMyShareProposals, withdrawShareProposal,
-    withStaleSensitiveWorkspaceOperation, shareViewFiles, receivedShareEngine,
+    warmCredentialCache,
+    currentCredentials,
+    currentCredentialGeneration,
+    normalizeServerUrl,
+    isRecordValue,
+    readOwnedWorkspaceTextFor,
+    activity,
+    listShareProposals,
+    readShareProposal,
+    readShareProposalOp,
+    settleShareProposal,
+    listMyShareProposals,
+    withdrawShareProposal,
+    withStaleSensitiveWorkspaceOperation,
+    shareViewFiles,
+    receivedShareEngine,
   } = dependencies;
   // ---- Share changes ----
   //
@@ -145,10 +192,7 @@ export function createShareProposalsIpc<
       if (!remote) throw new Error("Sync this workspace before sharing.");
       const credentials = requireCredentials(currentCredentials());
       if (!workspaceRemoteMatchesCredentials(remote, credentials)) {
-        if (
-          normalizeServerUrl(credentials.serverUrl) !==
-          normalizeServerUrl(remote.serverUrl)
-        ) {
+        if (normalizeServerUrl(credentials.serverUrl) !== normalizeServerUrl(remote.serverUrl)) {
           throw new Error("Sign in to the cloud server this workspace uses.");
         }
         throw new Error("Sign in to the account that synced this workspace.");
@@ -174,9 +218,7 @@ export function createShareProposalsIpc<
       resolve,
       assert(scope) {
         if (!sameShareProposalGranterScope(scope, resolve())) {
-          throw new Error(
-            "Share changes stopped because this workspace's cloud binding changed.",
-          );
+          throw new Error("Share changes stopped because this workspace's cloud binding changed.");
         }
       },
       readText: (path) => readOwnedWorkspaceTextFor(operation.workspace, path),
@@ -214,11 +256,7 @@ export function createShareProposalsIpc<
       assert(scope: ShareProposalRecipientScope): void;
     }) => Promise<Result>,
   ): Promise<Result> {
-    return withRecipientScope(
-      (inner) => inner(operation),
-      resolveScope,
-      work,
-    );
+    return withRecipientScope((inner) => inner(operation), resolveScope, work);
   }
 
   function withRecipientScope<Result>(
@@ -241,50 +279,48 @@ export function createShareProposalsIpc<
       left.relay.baseUrl === right.relay.baseUrl &&
       left.relay.token === right.relay.token &&
       left.credentialGeneration === right.credentialGeneration;
-    return run(
-      async (operation) => {
-        await warmCredentialCache();
+    return run(async (operation) => {
+      await warmCredentialCache();
+      operation.assertCurrent();
+      const resolve = (): ShareProposalRecipientScope => {
         operation.assertCurrent();
-        const resolve = (): ShareProposalRecipientScope => {
-          operation.assertCurrent();
-          const workspace = operation.workspace;
-          const proposalScope = resolveScope(workspace.shareView);
-          const credentials = currentCredentials();
-          if (!credentials?.relayUrl) {
-            throw new Error("Sign in to your server first.");
-          }
-          const shareRelayUrl = isRecordValue(workspace.shareView)
-            ? workspace.shareView.relayUrl
-            : undefined;
-          if (
-            typeof shareRelayUrl === "string" &&
-            !relayUrlsMatch(credentials.relayUrl, shareRelayUrl)
-          ) {
-            throw new Error("Sign in to the cloud server this share came from.");
-          }
-          return {
-            workspaceId: workspace.workspaceId,
-            attachmentId: workspace.attachmentId,
-            rootPath: workspace.rootPath,
-            ...proposalScope,
-            relay: {
-              baseUrl: normalizeServerUrl(credentials.relayUrl),
-              token: credentials.token,
-              fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
-            },
-            credentialGeneration: currentCredentialGeneration(),
-          };
-        };
-        return await work({
-          resolve,
-          assert(scope) {
-            if (!sameScope(scope, resolve())) {
-              throw new Error("Share changes stopped because this shared view changed.");
-            }
+        const workspace = operation.workspace;
+        const proposalScope = resolveScope(workspace.shareView);
+        const credentials = currentCredentials();
+        if (!credentials?.relayUrl) {
+          throw new Error("Sign in to your server first.");
+        }
+        const shareRelayUrl = isRecordValue(workspace.shareView)
+          ? workspace.shareView.relayUrl
+          : undefined;
+        if (
+          typeof shareRelayUrl === "string" &&
+          !relayUrlsMatch(credentials.relayUrl, shareRelayUrl)
+        ) {
+          throw new Error("Sign in to the cloud server this share came from.");
+        }
+        return {
+          workspaceId: workspace.workspaceId,
+          attachmentId: workspace.attachmentId,
+          rootPath: workspace.rootPath,
+          ...proposalScope,
+          relay: {
+            baseUrl: normalizeServerUrl(credentials.relayUrl),
+            token: credentials.token,
+            fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
           },
-        });
-      },
-    );
+          credentialGeneration: currentCredentialGeneration(),
+        };
+      };
+      return await work({
+        resolve,
+        assert(scope) {
+          if (!sameScope(scope, resolve())) {
+            throw new Error("Share changes stopped because this shared view changed.");
+          }
+        },
+      });
+    });
   }
 
   // The after content of one proposed change. Owner-scoped: the blob was
@@ -339,113 +375,112 @@ export function createShareProposalsIpc<
     });
   }
 
-  const listShareProposalsHandler: Handlers["listShareProposals"] = async (_input, { operation }) => {
+  const listShareProposalsHandler: Handlers["listShareProposals"] = async (
+    _input,
+    { operation },
+  ) => {
     operation.assertCurrent();
     assertShareProposalGranter(operation.workspace.shareView);
     if (!operation.workspace.remote) return ListShareProposalsResult.parse({ proposals: [] });
-    return withShareProposalGranterOperation(
-      operation,
-      async (operation) => {
-        const scope = operation.resolve();
-        const proposals = await listShareProposals({
-          relay: scope.relay,
-          workspaceId: scope.workspaceId,
-        });
-        operation.assert(scope);
-        return ListShareProposalsResult.parse({
-          proposals: proposals.map((proposal) => ({
-            proposalId: proposal.proposalId,
-            shareId: proposal.shareId,
-            proposedByEmail: proposal.proposedByEmail,
-            createdAtMs: proposal.createdAtMs,
-            ops: proposal.ops,
-          })),
-        });
-      },
-    );
-  };
-
-  const readShareProposalChangesHandler: Handlers["readShareProposalChanges"] = async (input, { operation }) => {
-    return withShareProposalGranterOperation(
-      operation,
-      async (operation) => {
-        const scope = operation.resolve();
-        const proposal = await readShareProposal({
-          relay: scope.relay,
-          workspaceId: scope.workspaceId,
-          proposalId: input.proposalId,
-        });
-        operation.assert(scope);
-        return ReadShareProposalChangesResult.parse({
+    return withShareProposalGranterOperation(operation, async (operation) => {
+      const scope = operation.resolve();
+      const proposals = await listShareProposals({
+        relay: scope.relay,
+        workspaceId: scope.workspaceId,
+      });
+      operation.assert(scope);
+      return ListShareProposalsResult.parse({
+        proposals: proposals.map((proposal) => ({
+          proposalId: proposal.proposalId,
+          shareId: proposal.shareId,
           proposedByEmail: proposal.proposedByEmail,
-          files: shareProposalFileRows(proposal).map(({ op, path }) => ({
-            opIndex: op.opIndex,
-            path,
-            operation: op.operation,
-            drifted: op.drifted,
-            afterByteLength: op.afterByteLength,
-          })),
-        });
-      },
-    );
+          createdAtMs: proposal.createdAtMs,
+          ops: proposal.ops,
+        })),
+      });
+    });
   };
 
-  const readShareProposalFileContentHandler: Handlers["readShareProposalFileContent"] = async (input, { operation }) => {
-    return withShareProposalGranterOperation(
-      operation,
-      async (operation) => {
-        const scope = operation.resolve();
-        const op = await readShareProposalOp({
-          relay: scope.relay,
-          workspaceId: scope.workspaceId,
-          proposalId: input.proposalId,
-          opIndex: input.opIndex,
-        });
-        operation.assert(scope);
-        const currentText =
-          op.currentPath === null
-            ? null
-            : await operation.readText(op.currentPath).then(
-                (read) => (read.truncated ? null : read.text),
-                () => null,
-              );
-        operation.assert(scope);
-        const incomingText = await shareProposalIncomingText(
-          scope.relay,
-          scope.workspaceId,
-          op,
-        );
-        operation.assert(scope);
-        return ReadShareProposalFileContentResult.parse({
-          currentText,
-          incomingText,
-        });
-      },
-    );
+  const readShareProposalChangesHandler: Handlers["readShareProposalChanges"] = async (
+    input,
+    { operation },
+  ) => {
+    return withShareProposalGranterOperation(operation, async (operation) => {
+      const scope = operation.resolve();
+      const proposal = await readShareProposal({
+        relay: scope.relay,
+        workspaceId: scope.workspaceId,
+        proposalId: input.proposalId,
+      });
+      operation.assert(scope);
+      return ReadShareProposalChangesResult.parse({
+        proposedByEmail: proposal.proposedByEmail,
+        files: shareProposalFileRows(proposal).map(({ op, path }) => ({
+          opIndex: op.opIndex,
+          path,
+          operation: op.operation,
+          drifted: op.drifted,
+          afterByteLength: op.afterByteLength,
+        })),
+      });
+    });
   };
 
-  const settleShareProposalHandler: Handlers["settleShareProposal"] = async (input, { operation }) => {
-    return withShareProposalGranterOperation(
-      operation,
-      async (operation) => {
-        const scope = operation.resolve();
-        const settled = await settleShareProposal({
-          relay: scope.relay,
-          workspaceId: scope.workspaceId,
-          proposalId: input.proposalId,
-          decision: input.decision,
-        });
-        operation.assert(scope);
-        if (settled.state !== "accepted" && settled.state !== "declined") {
-          throw new Error("Those changes are no longer open. Refresh, then try again.");
-        }
-        if (settled.state === "accepted") operation.queueCloudSync();
-        return SettleShareProposalResult.parse({ state: settled.state });
-      },
-    );
+  const readShareProposalFileContentHandler: Handlers["readShareProposalFileContent"] = async (
+    input,
+    { operation },
+  ) => {
+    return withShareProposalGranterOperation(operation, async (operation) => {
+      const scope = operation.resolve();
+      const op = await readShareProposalOp({
+        relay: scope.relay,
+        workspaceId: scope.workspaceId,
+        proposalId: input.proposalId,
+        opIndex: input.opIndex,
+      });
+      operation.assert(scope);
+      const currentText =
+        op.currentPath === null
+          ? null
+          : await operation.readText(op.currentPath).then(
+              (read) => (read.truncated ? null : read.text),
+              () => null,
+            );
+      operation.assert(scope);
+      const incomingText = await shareProposalIncomingText(scope.relay, scope.workspaceId, op);
+      operation.assert(scope);
+      return ReadShareProposalFileContentResult.parse({
+        currentText,
+        incomingText,
+      });
+    });
   };
 
-  const submitShareChangesHandler: Handlers["submitShareChanges"] = async (_input, { operation }) => {
+  const settleShareProposalHandler: Handlers["settleShareProposal"] = async (
+    input,
+    { operation },
+  ) => {
+    return withShareProposalGranterOperation(operation, async (operation) => {
+      const scope = operation.resolve();
+      const settled = await settleShareProposal({
+        relay: scope.relay,
+        workspaceId: scope.workspaceId,
+        proposalId: input.proposalId,
+        decision: input.decision,
+      });
+      operation.assert(scope);
+      if (settled.state !== "accepted" && settled.state !== "declined") {
+        throw new Error("Those changes are no longer open. Refresh, then try again.");
+      }
+      if (settled.state === "accepted") operation.queueCloudSync();
+      return SettleShareProposalResult.parse({ state: settled.state });
+    });
+  };
+
+  const submitShareChangesHandler: Handlers["submitShareChanges"] = async (
+    _input,
+    { operation },
+  ) => {
     // Sending needs the edit level.
     return withShareProposalRecipientOperation(
       operation,
@@ -475,20 +510,22 @@ export function createShareProposalsIpc<
         const result = await resolveSubmitShareChangesResult(
           reconciled.capturedPaths + reconciled.repairedPaths,
           () =>
-            receivedShareEngine.relayFor({
-              engineWorkspaceId: scope.workspaceId,
-              rootPath: scope.rootPath,
-              attachmentId: scope.attachmentId,
-              relay: scope.relay,
-            }).submitShareProposal({
-              shareId: scope.shareId,
-              grantedSelector: scope.grant,
-              // PR3a mints a fresh key per submit. It makes the relay's idempotency
-              // hold for a retry inside one submit (blobs, then the POST), not for
-              // a second press: a second press sends whatever is pending then,
-              // which is a second set of changes and a second proposal.
-              submitId: randomUUID(),
-            }),
+            receivedShareEngine
+              .relayFor({
+                engineWorkspaceId: scope.workspaceId,
+                rootPath: scope.rootPath,
+                attachmentId: scope.attachmentId,
+                relay: scope.relay,
+              })
+              .submitShareProposal({
+                shareId: scope.shareId,
+                grantedSelector: scope.grant,
+                // Each submit mints a fresh key. It makes the relay's idempotency
+                // hold for a retry inside one submit (blobs, then the POST), not for
+                // a second press: a second press sends whatever is pending then,
+                // which is a second set of changes and a second proposal.
+                submitId: randomUUID(),
+              }),
         );
         operation.assert(scope);
         return result;
@@ -526,12 +563,20 @@ export function createShareProposalsIpc<
             operation.assert(scope);
             for (const write of result.writes) {
               if (writes.length === MAX_DIRECT_WRITE_ROWS) {
-                directWrites.report(workspaceId, PushShareDirectWritesResult.parse({ status: "pushed", writes }));
+                directWrites.report(
+                  workspaceId,
+                  PushShareDirectWritesResult.parse({ status: "pushed", writes }),
+                );
                 writes.length = 0;
               }
               writes.push(
                 write.result === "stale"
-                  ? { result: "stale", paths: write.paths, stalePath: write.stalePath, recoveredDraftPath: write.recoveredDraftPath }
+                  ? {
+                      result: "stale",
+                      paths: write.paths,
+                      stalePath: write.stalePath,
+                      recoveredDraftPath: write.recoveredDraftPath,
+                    }
                   : write,
               );
             }
@@ -561,14 +606,20 @@ export function createShareProposalsIpc<
 
   // A view pushes when it opens, so changes a closed view left go then. The
   // push runs in main's queue for the view.
-  const pushShareDirectWritesHandler: Handlers["pushShareDirectWrites"] = async (_input, { operation }) => {
+  const pushShareDirectWritesHandler: Handlers["pushShareDirectWrites"] = async (
+    _input,
+    { operation },
+  ) => {
     requireShareViewProposalScope(operation.workspace.shareView);
     const workspaceId = operation.workspace.workspaceId;
     await directWrites.pushNow(workspaceId);
     operation.assertCurrent();
   };
 
-  const listMyShareChangesHandler: Handlers["listMyShareChanges"] = async (_input, { operation }) => {
+  const listMyShareChangesHandler: Handlers["listMyShareChanges"] = async (
+    _input,
+    { operation },
+  ) => {
     // SEEING what was already sent needs membership only: a downgrade must
     // not hide the changes it can no longer add to.
     return withShareProposalRecipientOperation(
@@ -593,7 +644,10 @@ export function createShareProposalsIpc<
     );
   };
 
-  const withdrawShareChangesHandler: Handlers["withdrawShareChanges"] = async (input, { operation }) => {
+  const withdrawShareChangesHandler: Handlers["withdrawShareChanges"] = async (
+    input,
+    { operation },
+  ) => {
     // Taking back needs membership only, for the same reason.
     return withShareProposalRecipientOperation(
       operation,
@@ -609,9 +663,7 @@ export function createShareProposalsIpc<
         if (settled.state !== "withdrawn") {
           // The granter settled it first. Saying "withdrawn" here would tell the
           // recipient their changes are back when the granter already has them.
-          throw new Error(
-            "Those changes were already answered. Refresh to see the result.",
-          );
+          throw new Error("Those changes were already answered. Refresh to see the result.");
         }
         return WithdrawShareChangesResult.parse({ state: settled.state });
       },
@@ -629,7 +681,8 @@ export function createShareProposalsIpc<
       listMyShareChanges: listMyShareChangesHandler,
       withdrawShareChanges: withdrawShareChangesHandler,
     },
-    shareViewEdited: directWrites.edited, recordCreated: (workspaceId: string) => {
+    shareViewEdited: directWrites.edited,
+    recordCreated: (workspaceId: string) => {
       void directWrites.pushNow(workspaceId);
     },
   };

@@ -19,7 +19,12 @@ it("counts a reported part in UTF-16 units and refuses what JavaScript trims or 
 });
 
 it("keeps outside-write copies separate from native retained copies for agents", () => {
-  const result = { ok: true, keptCopies: [], more: false, outsideWriteCopies: [["n.md", "n (kept copy).md", "copy-n-1"]] };
+  const result = {
+    ok: true,
+    keptCopies: [],
+    more: false,
+    outsideWriteCopies: [["n.md", "n (kept copy).md", "copy-n-1"]],
+  };
   expect(parseCliResult("keptCopies", result)).toEqual(result);
 });
 
@@ -27,30 +32,84 @@ const token = "a".repeat(64);
 const argsBase = { cwd: "C:/ws", actor: "agent" as const };
 
 it("preserves each save-only restore queue and its incident in kept edits", () => {
-  const keptEdits = ["old-1:delivery:0", "old-2:delivery:0"].map(incident => ({path: "note.md", reason: "restore-fenced",
-    storedOn: "this-computer", recovery: "paused", saveOnly: true, incident}));
-  expect(parseCliResult("liveKeptEdits", {ok: true, keptEdits, pendingShare: []})).toEqual({ok: true, keptEdits, pendingShare: []});
-  expect(() => parseCliResult("liveKeptEdits", {ok: true, keptEdits: [{...keptEdits[0], saveOnly: false}], pendingShare: []})).toThrow();
+  const keptEdits = ["old-1:delivery:0", "old-2:delivery:0"].map((incident) => ({
+    path: "note.md",
+    reason: "restore-fenced",
+    storedOn: "this-computer",
+    recovery: "paused",
+    saveOnly: true,
+    incident,
+  }));
+  expect(parseCliResult("liveKeptEdits", { ok: true, keptEdits, pendingShare: [] })).toEqual({
+    ok: true,
+    keptEdits,
+    pendingShare: [],
+  });
+  expect(() =>
+    parseCliResult("liveKeptEdits", {
+      ok: true,
+      keptEdits: [{ ...keptEdits[0], saveOnly: false }],
+      pendingShare: [],
+    }),
+  ).toThrow();
 });
 
 it("parses Access answers through the field allowlist and refuses caller workspace selectors", () => {
-  const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessSharing", args: { ...argsBase, lane: "received" } };
+  const request = {
+    token,
+    protocolVersion: CLI_PROTOCOL_VERSION,
+    verb: "accessSharing",
+    args: { ...argsBase, lane: "received" },
+  };
   expect(cliRequestSchema.safeParse(request).success).toBe(true);
-  expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, workspaceId: "other" } }).success).toBe(false);
-  expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, accountId: "other" } }).success).toBe(false);
-  const answer = parseCliResult("accessSharing", { ref: null, rows: [{ kind: "share", shareId: "share", grantId: "grant", via: "received", status: "removed",
-      granterUserId: null, granterEmail: null, recipientUserId: "recipient", recipientEmail: null, subjectName: null, sharerName: null,
-      selector: null, access: null, generation: null, removalMessage: "The owner removed your access." }],
-    visibility: "visible", freshness: "stale", checkedAtMs: 7, unknownReason: null,
-    nextCursor: null, coverage: { kind: "received-account", complete: true, observation: "interval" }, bearerUrl: "secret" });
+  expect(
+    cliRequestSchema.safeParse({ ...request, args: { ...request.args, workspaceId: "other" } })
+      .success,
+  ).toBe(false);
+  expect(
+    cliRequestSchema.safeParse({ ...request, args: { ...request.args, accountId: "other" } })
+      .success,
+  ).toBe(false);
+  const answer = parseCliResult("accessSharing", {
+    ref: null,
+    rows: [
+      {
+        kind: "share",
+        shareId: "share",
+        grantId: "grant",
+        via: "received",
+        status: "removed",
+        granterUserId: null,
+        granterEmail: null,
+        recipientUserId: "recipient",
+        recipientEmail: null,
+        subjectName: null,
+        sharerName: null,
+        selector: null,
+        access: null,
+        generation: null,
+        removalMessage: "The owner removed your access.",
+      },
+    ],
+    visibility: "visible",
+    freshness: "stale",
+    checkedAtMs: 7,
+    unknownReason: null,
+    nextCursor: null,
+    coverage: { kind: "received-account", complete: true, observation: "interval" },
+    bearerUrl: "secret",
+  });
   expect(answer).not.toHaveProperty("bearerUrl");
-  expect(JSON.parse(renderCliResult("accessSharing", answer)).rows[0].removalMessage).toBe("The owner removed your access.");
+  expect(JSON.parse(renderCliResult("accessSharing", answer)).rows[0].removalMessage).toBe(
+    "The owner removed your access.",
+  );
 });
 
 it("accepts only CLI and MCP counting labels, with an optional label on the strict envelope", () => {
   const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "groups", args: argsBase };
   expect(cliRequestSchema.parse(request)).not.toHaveProperty("door");
-  for (const door of ["cli", "mcp"]) expect(cliRequestSchema.parse({ ...request, door })).toMatchObject({ door });
+  for (const door of ["cli", "mcp"])
+    expect(cliRequestSchema.parse({ ...request, door })).toMatchObject({ door });
   for (const door of ["automation", "renderer", "unknown", null, 1]) {
     expect(cliRequestSchema.safeParse({ ...request, door }).success).toBe(false);
   }
@@ -59,20 +118,45 @@ it("accepts only CLI and MCP counting labels, with an optional label on the stri
 
 it("refuses a link author on every chat write, for the CLI and MCP doors alike, and reads one back", () => {
   const writes = [
-    { verb: "post", args: { ...argsBase, group: "general", attachments: [], needsDecision: false, body: "Hi" } },
-    { verb: "reply", args: { ...argsBase, thread: "th_1", attachments: [], needsDecision: false, body: "Hi" } },
+    {
+      verb: "post",
+      args: { ...argsBase, group: "general", attachments: [], needsDecision: false, body: "Hi" },
+    },
+    {
+      verb: "reply",
+      args: { ...argsBase, thread: "th_1", attachments: [], needsDecision: false, body: "Hi" },
+    },
   ];
   for (const door of ["cli", "mcp"] as const) {
     for (const write of writes) {
       const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, door, ...write };
       expect(cliRequestSchema.safeParse(request).success).toBe(true);
-      expect(cliRequestSchema.safeParse({ ...request, args: { ...write.args, actor: "link" } }).success).toBe(false);
-      expect(cliRequestSchema.safeParse({ ...request, args: { ...write.args, authorKind: "link" } }).success).toBe(false);
+      expect(
+        cliRequestSchema.safeParse({ ...request, args: { ...write.args, actor: "link" } }).success,
+      ).toBe(false);
+      expect(
+        cliRequestSchema.safeParse({ ...request, args: { ...write.args, authorKind: "link" } })
+          .success,
+      ).toBe(false);
     }
   }
   const shown = parseCliResult("show", {
-    thread: { id: "th_1", title: "Plan", group: { id: "ch_1", name: "General", slug: "general", kind: "group" }, commentCount: 0, openDecisionCount: 0 },
-    messages: [{ id: "msg_1", author: { kind: "link", displayName: "Guest" }, body: "Hi", createdAtMs: 0, attachments: [] }],
+    thread: {
+      id: "th_1",
+      title: "Plan",
+      group: { id: "ch_1", name: "General", slug: "general", kind: "group" },
+      commentCount: 0,
+      openDecisionCount: 0,
+    },
+    messages: [
+      {
+        id: "msg_1",
+        author: { kind: "link", displayName: "Guest" },
+        body: "Hi",
+        createdAtMs: 0,
+        attachments: [],
+      },
+    ],
     dispatch: { paused: null, lastRun: null },
   });
   if ("stream" in shown) throw new Error("expected a thread");
@@ -81,31 +165,60 @@ it("refuses a link author on every chat write, for the CLI and MCP doors alike, 
 });
 
 it("rejects unused agent attribution on automation switches", () => {
-  const args = { ...argsBase, collectionPath: "tasks", automation: "stamp", enabled: false,
-    expectedContentHash: token, reformat: true, submitId: "switch-1" };
+  const args = {
+    ...argsBase,
+    collectionPath: "tasks",
+    automation: "stamp",
+    enabled: false,
+    expectedContentHash: token,
+    reformat: true,
+    submitId: "switch-1",
+  };
   const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "automationSwitch", args };
   expect(cliRequestSchema.safeParse(request).success).toBe(true);
-  expect(cliRequestSchema.safeParse({ ...request, args: { ...args, agent: "Client" } }).success).toBe(false);
+  expect(
+    cliRequestSchema.safeParse({ ...request, args: { ...args, agent: "Client" } }).success,
+  ).toBe(false);
 });
 
 it("bounds fileWrite batches to 256 files", () => {
-  const request = (count: number) => ({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
-    args: { ...argsBase, requestId: "batch", files: Array.from({ length: count }, (_, n) => ({ path: `${n}.txt`, contentBase64: "" })) } });
+  const request = (count: number) => ({
+    token,
+    protocolVersion: CLI_PROTOCOL_VERSION,
+    verb: "fileWrite",
+    args: {
+      ...argsBase,
+      requestId: "batch",
+      files: Array.from({ length: count }, (_, n) => ({ path: `${n}.txt`, contentBase64: "" })),
+    },
+  });
   expect(cliRequestSchema.safeParse(request(MAX_FILE_WRITE_FILES)).success).toBe(true);
   expect(cliRequestSchema.safeParse(request(MAX_FILE_WRITE_FILES + 1)).success).toBe(false);
 });
 
-it.each(["collectionSetFields", "collectionCreateRecord"])("validates the agent label for %s", verb => {
-  const fields = verb === "collectionSetFields" ? { recordPath: "tasks/a.md", fields: { status: "done" } }
-    : { collectionPath: "tasks", name: "a", fields: {} };
-  const request = (agent: string) => ({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb, args: { ...argsBase, ...fields, agent } });
-  expect(cliRequestSchema.safeParse(request("Client")).success).toBe(true);
-  expect(cliRequestSchema.safeParse(request("automation/spoof")).success).toBe(false);
-});
+it.each(["collectionSetFields", "collectionCreateRecord"])(
+  "validates the agent label for %s",
+  (verb) => {
+    const fields =
+      verb === "collectionSetFields"
+        ? { recordPath: "tasks/a.md", fields: { status: "done" } }
+        : { collectionPath: "tasks", name: "a", fields: {} };
+    const request = (agent: string) => ({
+      token,
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb,
+      args: { ...argsBase, ...fields, agent },
+    });
+    expect(cliRequestSchema.safeParse(request("Client")).success).toBe(true);
+    expect(cliRequestSchema.safeParse(request("automation/spoof")).success).toBe(false);
+  },
+);
 
 describe("moment author results", () => {
   it("preserves a relay-confirmed person's public name", () => {
-    const result = momentsResult([{kind: "human", humanId: "recipient", humanName: "Recipient", relayConfirmed: true}]);
+    const result = momentsResult([
+      { kind: "human", humanId: "recipient", humanName: "Recipient", relayConfirmed: true },
+    ]);
     expect(parseCliResult("moments", result)).toEqual(result);
   });
   it.each([
@@ -120,7 +233,10 @@ describe("moment author results", () => {
   });
 
   it("keeps every author of a change and refuses an empty list", () => {
-    const result = momentsResult([{ kind: "human", humanId: "ada" }, { kind: "agent", agentId: "agent" }]);
+    const result = momentsResult([
+      { kind: "human", humanId: "ada" },
+      { kind: "agent", agentId: "agent" },
+    ]);
     expect(parseCliResult("moments", result)).toEqual(result);
     expect(() => parseCliResult("moments", momentsResult([]))).toThrow();
   });
@@ -133,27 +249,58 @@ describe("moment author results", () => {
     ]);
     expect(parseCliResult("moments", result)).toEqual(result);
     const fullHuman = momentsResult([
-      { kind: "human", humanId: "owner", humanName: "Owner", relayConfirmed: true, onBehalfOf: "owner" },
+      {
+        kind: "human",
+        humanId: "owner",
+        humanName: "Owner",
+        relayConfirmed: true,
+        onBehalfOf: "owner",
+      },
     ]);
     expect(parseCliResult("moments", fullHuman)).toEqual(fullHuman);
     for (const author of [
       { kind: "human", humanId: "owner", humanName: "Owner", agentName: "Writer" },
       { kind: "link", publicPrincipalId: "public_1", label: "Anonymous", grantId: "grant" },
-    ]) expect(() => parseCliResult("moments", momentsResult([author]))).toThrow();
+    ])
+      expect(() => parseCliResult("moments", momentsResult([author]))).toThrow();
   });
 
   it("refuses a link author that claims a person", () => {
-    expect(() => parseCliResult("moments", momentsResult([{ kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder", userId: "user_ana" }]))).toThrow();
+    expect(() =>
+      parseCliResult(
+        "moments",
+        momentsResult([
+          {
+            kind: "link",
+            grantId: "grant",
+            grantGeneration: 2,
+            principalId: "holder",
+            userId: "user_ana",
+          },
+        ]),
+      ),
+    ).toThrow();
   });
 });
 
 function momentsResult(authors: unknown[]) {
   return {
-    changes: [{
-      id: "moment-1", recordedAtMs: 1, source: "workspace-engine", operation: "write",
-      path: "tasks/a.md", versionId: "main", fileCount: 1, authors,
-    }],
-    count: 1, totalAvailable: 1, hasMore: false, cursorMs: 1,
+    changes: [
+      {
+        id: "moment-1",
+        recordedAtMs: 1,
+        source: "workspace-engine",
+        operation: "write",
+        path: "tasks/a.md",
+        versionId: "main",
+        fileCount: 1,
+        authors,
+      },
+    ],
+    count: 1,
+    totalAvailable: 1,
+    hasMore: false,
+    cursorMs: 1,
   };
 }
 
@@ -260,7 +407,6 @@ describe("collection request schemas", () => {
         name: "task",
         fields: { id: "rec_impostor" },
       }),
-      // A record name is one file name, not a path.
       request("collectionCreateRecord", {
         collectionPath: "tasks",
         name: "nested/name",
@@ -273,7 +419,9 @@ describe("collection request schemas", () => {
       }),
     ];
     for (const candidate of cases) {
-      expect(cliRequestSchema.safeParse(candidate).success, JSON.stringify(candidate.args)).toBe(false);
+      expect(cliRequestSchema.safeParse(candidate).success, JSON.stringify(candidate.args)).toBe(
+        false,
+      );
     }
   });
 
@@ -349,20 +497,33 @@ describe("collection result schemas", () => {
             depth: 0,
             recordedAtMs: 12,
             automationRun: null,
-            linkAuthor: { kind: "link", grantId: "link", grantGeneration: 2, publicPrincipalId: "public-holder" },
+            linkAuthor: {
+              kind: "link",
+              grantId: "link",
+              grantGeneration: 2,
+              publicPrincipalId: "public-holder",
+            },
           },
         ],
       }),
     ).toMatchObject({
       ok: true,
-      history: [{ historyId: 3, actorKind: "agent", onBehalfOf: "public-holder", linkAuthor: { publicPrincipalId: "public-holder" } }],
+      history: [
+        {
+          historyId: 3,
+          actorKind: "agent",
+          onBehalfOf: "public-holder",
+          linkAuthor: { publicPrincipalId: "public-holder" },
+        },
+      ],
     });
   });
 
   it("parses write results and structured failures", () => {
-    expect(
-      parseCliResult("collectionSetFields", { ok: true, recordPath: "tasks/a.md" }),
-    ).toEqual({ ok: true, recordPath: "tasks/a.md" });
+    expect(parseCliResult("collectionSetFields", { ok: true, recordPath: "tasks/a.md" })).toEqual({
+      ok: true,
+      recordPath: "tasks/a.md",
+    });
     expect(
       parseCliResult("collectionCreateRecord", {
         ok: true,
@@ -371,39 +532,101 @@ describe("collection result schemas", () => {
         kept: { status: "done", priority: null },
       }),
     ).toMatchObject({ ok: true, kept: { status: "done", priority: null } });
-    expect(
-      parseCliResult("collectionSetFields", { ok: false, reason: "refused" }),
-    ).toEqual({ ok: false, reason: "refused" });
+    expect(parseCliResult("collectionSetFields", { ok: false, reason: "refused" })).toEqual({
+      ok: false,
+      reason: "refused",
+    });
   });
 
   it("parses a run's dataset changes with the versions and deletes Undo reads", () => {
     const rules = { datasetId: "d", revision: 2, revisionSha256: "r" };
     const run = {
-      run: "atc_1", state: "done", error: null, createdAtMs: 1, updatedAtMs: 2,
-      trigger: { kind: "changed", recordId: "a", by: "human", sharedAuthor: null, depth: 0 }, definitionChanged: false, neverStarted: false, chainStopped: false, undone: false,
-      steps: [{ step: 1, changes: [
-        { kind: "dataset-edit", rules, operationId: "edit", tableId: "t", recordId: "a", expectedVersion: 1, version: 2, fields: [] },
-        { kind: "dataset-created", rules, operationId: "create", tableId: "t", recordId: 7, version: 1, deletes: ["delete"] },
-      ] }],
-      failedStep: null, startsOver: false,
+      run: "atc_1",
+      state: "done",
+      error: null,
+      createdAtMs: 1,
+      updatedAtMs: 2,
+      trigger: { kind: "changed", recordId: "a", by: "human", sharedAuthor: null, depth: 0 },
+      definitionChanged: false,
+      neverStarted: false,
+      chainStopped: false,
+      undone: false,
+      steps: [
+        {
+          step: 1,
+          changes: [
+            {
+              kind: "dataset-edit",
+              rules,
+              operationId: "edit",
+              tableId: "t",
+              recordId: "a",
+              expectedVersion: 1,
+              version: 2,
+              fields: [],
+            },
+            {
+              kind: "dataset-created",
+              rules,
+              operationId: "create",
+              tableId: "t",
+              recordId: 7,
+              version: 1,
+              deletes: ["delete"],
+            },
+          ],
+        },
+      ],
+      failedStep: null,
+      startsOver: false,
     };
     expect(parseCliResult("automationRun", { ok: true, run })).toEqual({ ok: true, run });
     const timed = { ...run, findMs: 12, planMs: 0, writeMs: 30, writeCount: 2 };
-    expect(parseCliResult("automationRun", { ok: true, run: timed })).toEqual({ ok: true, run: timed });
-    expect(() => parseCliResult("automationRun", { ok: true, run: { ...timed, writeCount: -1 } })).toThrow();
+    expect(parseCliResult("automationRun", { ok: true, run: timed })).toEqual({
+      ok: true,
+      run: timed,
+    });
+    expect(() =>
+      parseCliResult("automationRun", { ok: true, run: { ...timed, writeCount: -1 } }),
+    ).toThrow();
   });
 
   it("parses a server's run, with what it changed and the mark of a lost copy, and renders its changes", () => {
     const run = {
-      run: "atc_lost", state: "failed", error: "Your server lost its copy of this workspace and may not have sent this run's latest changes.",
-      createdAtMs: 1, updatedAtMs: 2, trigger: { kind: null, recordId: null, by: null, sharedAuthor: null, depth: 0 },
-      definitionChanged: false, neverStarted: false, chainStopped: false, undone: false, unsentChangesLost: true, server: true,
-      changes: [{ kind: "field", recordId: "a", path: "tasks/a.md", field: "Status", before: "Open", after: "Paid" }],
+      run: "atc_lost",
+      state: "failed",
+      error:
+        "Your server lost its copy of this workspace and may not have sent this run's latest changes.",
+      createdAtMs: 1,
+      updatedAtMs: 2,
+      trigger: { kind: null, recordId: null, by: null, sharedAuthor: null, depth: 0 },
+      definitionChanged: false,
+      neverStarted: false,
+      chainStopped: false,
+      undone: false,
+      unsentChangesLost: true,
+      server: true,
+      changes: [
+        {
+          kind: "field",
+          recordId: "a",
+          path: "tasks/a.md",
+          field: "Status",
+          before: "Open",
+          after: "Paid",
+        },
+      ],
     };
     expect(parseCliResult("automationRun", { ok: true, run })).toEqual({ ok: true, run });
-    expect(renderCliResult("automationRun", parseCliResult("automationRun", { ok: true, run }))).toContain('set Status on tasks/a.md: "Open" -> "Paid"');
-    expect(() => parseCliResult("automationRun", { ok: true, run: { ...run, unsentChangesLost: false } })).toThrow();
-    expect(() => parseCliResult("automationRun", { ok: true, run: { ...run, steps: [] } })).toThrow();
+    expect(
+      renderCliResult("automationRun", parseCliResult("automationRun", { ok: true, run })),
+    ).toContain('set Status on tasks/a.md: "Open" -> "Paid"');
+    expect(() =>
+      parseCliResult("automationRun", { ok: true, run: { ...run, unsentChangesLost: false } }),
+    ).toThrow();
+    expect(() =>
+      parseCliResult("automationRun", { ok: true, run: { ...run, steps: [] } }),
+    ).toThrow();
   });
 
   it("refuses a result that does not match the verb", () => {
@@ -416,114 +639,257 @@ describe("collection result schemas", () => {
 
 describe("document request schemas", () => {
   it("parses a read, an edit, and an edit that adds at the end", () => {
-    expect(cliRequestSchema.safeParse(request("documentRead", { path: "notes/a.md" })).success).toBe(true);
-    expect(cliRequestSchema.safeParse(request("documentEdit", {
-      agent: "claude-code", path: "notes/a.md", find: "Draft", replacement: "Final",
-    })).success).toBe(true);
-    expect(cliRequestSchema.safeParse(request("documentEdit", {
-      path: "notes/a.md", replacement: "## Next",
-    })).success).toBe(true);
+    expect(
+      cliRequestSchema.safeParse(request("documentRead", { path: "notes/a.md" })).success,
+    ).toBe(true);
+    expect(
+      cliRequestSchema.safeParse(
+        request("documentEdit", {
+          agent: "claude-code",
+          path: "notes/a.md",
+          find: "Draft",
+          replacement: "Final",
+        }),
+      ).success,
+    ).toBe(true);
+    expect(
+      cliRequestSchema.safeParse(
+        request("documentEdit", {
+          path: "notes/a.md",
+          replacement: "## Next",
+        }),
+      ).success,
+    ).toBe(true);
   });
 
   it("refuses an agent name that could pass for an automation, and an empty find", () => {
     for (const agent of ["plugin/automation", "", " padded", "x".repeat(65)]) {
-      expect(cliRequestSchema.safeParse(request("documentEdit", {
-        agent, path: "notes/a.md", replacement: "x",
-      })).success, agent).toBe(false);
+      expect(
+        cliRequestSchema.safeParse(
+          request("documentEdit", {
+            agent,
+            path: "notes/a.md",
+            replacement: "x",
+          }),
+        ).success,
+        agent,
+      ).toBe(false);
     }
-    expect(cliRequestSchema.safeParse(request("documentEdit", {
-      path: "notes/a.md", find: "", replacement: "x",
-    })).success).toBe(false);
+    expect(
+      cliRequestSchema.safeParse(
+        request("documentEdit", {
+          path: "notes/a.md",
+          find: "",
+          replacement: "x",
+        }),
+      ).success,
+    ).toBe(false);
   });
 
   it("parses a document create and a comment on a file", () => {
-    expect(cliRequestSchema.safeParse(request("documentCreate", {
-      agent: "claude-code", path: "notes/new.md", markdown: "# New",
-    })).success).toBe(true);
-    expect(cliRequestSchema.safeParse(request("fileChatStart", {
-      path: "notes/new.md", title: "Budget", body: "Is 400 enough?", runId: "run-1",
-    })).success).toBe(true);
-    expect(cliRequestSchema.safeParse(request("fileChatStart", {
-      path: "notes/new.md", title: "", body: "x",
-    })).success).toBe(false);
-    expect(parseCliResult("fileChatStart", {
-      ok: true, path: "notes/new.md", threadId: "thread-1", messageId: "message-1",
-    })).toMatchObject({ ok: true, threadId: "thread-1" });
-    expect(() => parseCliResult("fileChatStart", {
-      ok: true, path: "notes/new.md", threadId: "th_1", messageId: "message-1",
-    })).toThrow();
+    expect(
+      cliRequestSchema.safeParse(
+        request("documentCreate", {
+          agent: "claude-code",
+          path: "notes/new.md",
+          markdown: "# New",
+        }),
+      ).success,
+    ).toBe(true);
+    expect(
+      cliRequestSchema.safeParse(
+        request("fileChatStart", {
+          path: "notes/new.md",
+          title: "Budget",
+          body: "Is 400 enough?",
+          runId: "run-1",
+        }),
+      ).success,
+    ).toBe(true);
+    expect(
+      cliRequestSchema.safeParse(
+        request("fileChatStart", {
+          path: "notes/new.md",
+          title: "",
+          body: "x",
+        }),
+      ).success,
+    ).toBe(false);
+    expect(
+      parseCliResult("fileChatStart", {
+        ok: true,
+        path: "notes/new.md",
+        threadId: "thread-1",
+        messageId: "message-1",
+      }),
+    ).toMatchObject({ ok: true, threadId: "thread-1" });
+    expect(() =>
+      parseCliResult("fileChatStart", {
+        ok: true,
+        path: "notes/new.md",
+        threadId: "th_1",
+        messageId: "message-1",
+      }),
+    ).toThrow();
   });
 
   it("bounds each side of an edit by its UTF-8 bytes, not its characters", () => {
     // Three bytes per character: 80,000 fit 256 KiB and 90,000 do not.
     const edit = (replacement: string) =>
-      cliRequestSchema.safeParse(request("documentEdit", { path: "notes/a.md", replacement })).success;
+      cliRequestSchema.safeParse(request("documentEdit", { path: "notes/a.md", replacement }))
+        .success;
     expect(edit("日".repeat(80_000))).toBe(true);
     expect(edit("日".repeat(90_000))).toBe(false);
     expect(edit("a".repeat(256 * 1024))).toBe(true);
   });
 
   it("parses document results and structured failures", () => {
-    expect(parseCliResult("documentRead", { ok: true, path: "a.md", markdown: "# A" }))
-      .toEqual({ ok: true, path: "a.md", markdown: "# A" });
-    const pending = { ok: true, path: "a.md", changed: true, warning: "Saved locally. The shared file update is pending. Do not repeat this edit." };
+    expect(parseCliResult("documentRead", { ok: true, path: "a.md", markdown: "# A" })).toEqual({
+      ok: true,
+      path: "a.md",
+      markdown: "# A",
+    });
+    const pending = {
+      ok: true,
+      path: "a.md",
+      changed: true,
+      warning: "Saved locally. The shared file update is pending. Do not repeat this edit.",
+    };
     expect(parseCliResult("documentEdit", pending)).toEqual(pending);
-    expect(parseCliResult("documentEdit", { ok: true, path: "a.md", changed: false }))
-      .toEqual({ ok: true, path: "a.md", changed: false });
-    expect(parseCliResult("documentEdit", { ok: false, reason: "refused" }))
-      .toEqual({ ok: false, reason: "refused" });
+    expect(parseCliResult("documentEdit", { ok: true, path: "a.md", changed: false })).toEqual({
+      ok: true,
+      path: "a.md",
+      changed: false,
+    });
+    expect(parseCliResult("documentEdit", { ok: false, reason: "refused" })).toEqual({
+      ok: false,
+      reason: "refused",
+    });
   });
 });
 
-
 it("preserves a group's purpose and each thread's lane", () => {
-  const group = { id: "c:team", name: "Team", slug: "team", kind: "group", purpose: "Plan the launch" };
+  const group = {
+    id: "c:team",
+    name: "Team",
+    slug: "team",
+    kind: "group",
+    purpose: "Plan the launch",
+  };
   const listed = { ...group, channelWireId: "wire" };
   expect(parseCliResult("groups", { groups: [listed] })).toEqual({ groups: [listed] });
   expect(parseCliResult("groups", { groups: [group] })).toEqual({ groups: [group] });
   const threads = ["posts", "chat"].map((lane, index) => ({
-    id: `t:${index}`, title: lane, lane, commentCount: 0, openDecisionCount: 0, unread: false, updatedAtMs: 1,
+    id: `t:${index}`,
+    title: lane,
+    lane,
+    commentCount: 0,
+    openDecisionCount: 0,
+    unread: false,
+    updatedAtMs: 1,
   }));
   expect(parseCliResult("threads", { group, threads })).toEqual({ group, threads });
 });
 
-
 it("validates file write authors and preserves partial batch results", () => {
-  const input = { token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
-    args: { cwd: "/workspace", actor: "agent", agent: "Client", requestId: "batch", files: [{ path: "file.txt", contentBase64: "eA==", createOnly: true }] } };
+  const input = {
+    token: "a".repeat(64),
+    protocolVersion: CLI_PROTOCOL_VERSION,
+    verb: "fileWrite",
+    args: {
+      cwd: "/workspace",
+      actor: "agent",
+      agent: "Client",
+      requestId: "batch",
+      files: [{ path: "file.txt", contentBase64: "eA==", createOnly: true }],
+    },
+  };
   expect(cliRequestSchema.safeParse(input).success).toBe(true);
-  expect(cliRequestSchema.safeParse({ ...input, args: { ...input.args, agent: "automation/spoof" } }).success).toBe(false);
-  expect(cliRequestSchema.safeParse({ ...input, args: { ...input.args, files: [] } }).success).toBe(false);
-  const failed = { ok: false, written: ["1.txt", "2.txt"], path: "3.txt", reason: "Changed. Read again.", currentSha256: "a".repeat(64) };
+  expect(
+    cliRequestSchema.safeParse({ ...input, args: { ...input.args, agent: "automation/spoof" } })
+      .success,
+  ).toBe(false);
+  expect(cliRequestSchema.safeParse({ ...input, args: { ...input.args, files: [] } }).success).toBe(
+    false,
+  );
+  const failed = {
+    ok: false,
+    written: ["1.txt", "2.txt"],
+    path: "3.txt",
+    reason: "Changed. Read again.",
+    currentSha256: "a".repeat(64),
+  };
   expect(parseCliResult("fileWrite", failed)).toEqual(failed);
 });
 
-it.each(["accessObject", "accessSharing"] as const)("preserves the unknown reason in %s results", verb => {
-  const answer = parseCliResult(verb, { ref: null, rows: [], visibility: "unknown", freshness: "unknown", checkedAtMs: null,
-    unknownReason: "other-account", nextCursor: null, coverage: { kind: "unavailable", complete: false, observation: "interval" } });
-  expect(JSON.parse(renderCliResult(verb, answer))).toHaveProperty("unknownReason", "other-account");
-});
+it.each(["accessObject", "accessSharing"] as const)(
+  "preserves the unknown reason in %s results",
+  (verb) => {
+    const answer = parseCliResult(verb, {
+      ref: null,
+      rows: [],
+      visibility: "unknown",
+      freshness: "unknown",
+      checkedAtMs: null,
+      unknownReason: "other-account",
+      nextCursor: null,
+      coverage: { kind: "unavailable", complete: false, observation: "interval" },
+    });
+    expect(JSON.parse(renderCliResult(verb, answer))).toHaveProperty(
+      "unknownReason",
+      "other-account",
+    );
+  },
+);
 
-it.each(["accessObject", "accessSharing"] as const)("preserves withheld answers in %s results", verb => {
-  const answer = { ref: null, rows: [], visibility: "hidden", freshness: "unknown", checkedAtMs: null,
-    unknownReason: null, nextCursor: null, coverage: { kind: "unavailable", complete: false, observation: "interval" } };
-  expect(JSON.parse(renderCliResult(verb, parseCliResult(verb, answer)))).toMatchObject({ visibility: "hidden", unknownReason: null });
-  expect(() => parseCliResult(verb, { ...answer, unknownReason: "unreadable" })).toThrow();
-});
+it.each(["accessObject", "accessSharing"] as const)(
+  "preserves withheld answers in %s results",
+  (verb) => {
+    const answer = {
+      ref: null,
+      rows: [],
+      visibility: "hidden",
+      freshness: "unknown",
+      checkedAtMs: null,
+      unknownReason: null,
+      nextCursor: null,
+      coverage: { kind: "unavailable", complete: false, observation: "interval" },
+    };
+    expect(JSON.parse(renderCliResult(verb, parseCliResult(verb, answer)))).toMatchObject({
+      visibility: "hidden",
+      unknownReason: null,
+    });
+    expect(() => parseCliResult(verb, { ...answer, unknownReason: "unreadable" })).toThrow();
+  },
+);
 
 it("maps Access refresh and accepts only actionable request outcomes", () => {
-  const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "accessRefresh", args: argsBase };
+  const request = {
+    token,
+    protocolVersion: CLI_PROTOCOL_VERSION,
+    verb: "accessRefresh",
+    args: argsBase,
+  };
   expect(cliRequestSchema.safeParse(request).success).toBe(true);
   expect(CLI_CAPABILITIES.accessRefresh).toEqual(["access.refresh"]);
-  for (const extra of [{ workspaceId: "other" }, { accountId: "other" }, { reason: "sharing-open" }]) {
-    expect(cliRequestSchema.safeParse({ ...request, args: { ...request.args, ...extra } }).success).toBe(false);
+  for (const extra of [
+    { workspaceId: "other" },
+    { accountId: "other" },
+    { reason: "sharing-open" },
+  ]) {
+    expect(
+      cliRequestSchema.safeParse({ ...request, args: { ...request.args, ...extra } }).success,
+    ).toBe(false);
   }
   for (const status of ["requested", "joined", "paced"] as const) {
     expect(parseCliResult("accessRefresh", { status, bearerUrl: "secret" })).toEqual({ status });
     expect(JSON.parse(renderCliResult("accessRefresh", { status }))).toEqual({ status });
   }
   for (const reason of ["signed-out", "unreadable"] as const) {
-    expect(parseCliResult("accessRefresh", { status: "unavailable", reason })).toEqual({ status: "unavailable", reason });
+    expect(parseCliResult("accessRefresh", { status: "unavailable", reason })).toEqual({
+      status: "unavailable",
+      reason,
+    });
   }
   expect(() => parseCliResult("accessRefresh", { status: "finished" })).toThrow();
   expect(() => parseCliResult("accessRefresh", { status: "unavailable" })).toThrow();
@@ -533,11 +899,25 @@ it("accepts one Links target shape for CLI or MCP, and older group listings", ()
   const base = { token: "a".repeat(64), protocolVersion: CLI_PROTOCOL_VERSION, verb: "chatLinks" };
   const args = { cwd: "/workspace", actor: "agent", cursor: "sealed" };
   for (const target of [{ group: "general" }, { channelWireId: "wire" }]) {
-    expect(cliRequestSchema.safeParse({ ...base, args: { ...args, ...target } }).success).toBe(true);
+    expect(cliRequestSchema.safeParse({ ...base, args: { ...args, ...target } }).success).toBe(
+      true,
+    );
   }
   for (const target of [{}, { group: "general", channelWireId: "wire" }]) {
-    expect(cliRequestSchema.safeParse({ ...base, args: { ...args, ...target } }).success).toBe(false);
+    expect(cliRequestSchema.safeParse({ ...base, args: { ...args, ...target } }).success).toBe(
+      false,
+    );
   }
-  const group = { id: "channel-old", name: "Old", slug: "old", kind: "group", threadCount: 0, threads: [] };
-  expect(parseCliResult("groupsFull", { ok: true, groups: [group] })).toEqual({ ok: true, groups: [group] });
+  const group = {
+    id: "channel-old",
+    name: "Old",
+    slug: "old",
+    kind: "group",
+    threadCount: 0,
+    threads: [],
+  };
+  expect(parseCliResult("groupsFull", { ok: true, groups: [group] })).toEqual({
+    ok: true,
+    groups: [group],
+  });
 });

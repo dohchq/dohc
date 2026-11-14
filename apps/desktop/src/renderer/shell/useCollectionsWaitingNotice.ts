@@ -35,11 +35,23 @@ export function useCollectionsWaitingNotice(input: {
   waiting: Waiting | null | undefined;
   retryCloudSync: (workspaceId: string, reason: "person") => Promise<SyncStatusResult>;
   openSyncSettings: () => void;
-  report: (notice: CollectionsWaitingNotice, retry: () => void, openSyncSettings: () => void) => void;
+  report: (
+    notice: CollectionsWaitingNotice,
+    retry: () => void,
+    openSyncSettings: () => void,
+  ) => void;
   reportRetryFailure: (message: string, error: unknown, retry: () => void) => void;
   clear: () => void;
 }): { noteDismissed: () => void } {
-  const { workspaceId, waiting, retryCloudSync, openSyncSettings, report, reportRetryFailure, clear } = input;
+  const {
+    workspaceId,
+    waiting,
+    retryCloudSync,
+    openSyncSettings,
+    report,
+    reportRetryFailure,
+    clear,
+  } = input;
   const workspaceRef = useRef(workspaceId);
   workspaceRef.current = workspaceId;
   const waitingRef = useRef(waiting);
@@ -61,7 +73,12 @@ export function useCollectionsWaitingNotice(input: {
     (forWorkspace: string, state: Waiting, toast: boolean) => {
       filedRef.current = `${forWorkspace}\0${state}`;
       report(
-        { title: COLLECTIONS_WAITING_TITLE, message: collectionsWaitingMessage(state), toast, failed: state === "reopen" },
+        {
+          title: COLLECTIONS_WAITING_TITLE,
+          message: collectionsWaitingMessage(state),
+          toast,
+          failed: state === "reopen",
+        },
         () => retryRef.current(),
         openSyncSettings,
       );
@@ -89,7 +106,9 @@ export function useCollectionsWaitingNotice(input: {
       (error: unknown) => {
         if (!mountedRef.current || workspaceRef.current !== askedFor) return;
         reportRetryFailure(
-          reopen ? "dohc could not reopen this workspace." : "dohc could not retry sync for this workspace.",
+          reopen
+            ? "dohc could not reopen this workspace."
+            : "dohc could not retry sync for this workspace.",
           error,
           () => retryRef.current(),
         );

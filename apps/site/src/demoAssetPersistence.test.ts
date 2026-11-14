@@ -47,10 +47,7 @@ describe("demo asset persistence fallback", () => {
       deletePath: () => undefined,
     });
     const persistenceUnavailable = vi.fn();
-    window.addEventListener(
-      DEMO_ASSET_PERSISTENCE_EVENT,
-      persistenceUnavailable,
-    );
+    window.addEventListener(DEMO_ASSET_PERSISTENCE_EVENT, persistenceUnavailable);
 
     const bridge = window.dohcDesktop;
     if (!bridge) throw new Error("demo bridge was not configured");
@@ -70,9 +67,6 @@ describe("demo asset persistence fallback", () => {
     expect(persistenceUnavailable).toHaveBeenCalledTimes(1);
     expect(open).toHaveBeenCalledTimes(1);
 
-    window.removeEventListener(
-      DEMO_ASSET_PERSISTENCE_EVENT,
-      persistenceUnavailable,
-    );
+    window.removeEventListener(DEMO_ASSET_PERSISTENCE_EVENT, persistenceUnavailable);
   });
 });

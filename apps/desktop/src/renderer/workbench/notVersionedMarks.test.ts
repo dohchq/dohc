@@ -31,22 +31,29 @@ describe("the question before changing them", () => {
       body: "It isn't versioned, so Main and every version have the same copy. Deleted files go to the system trash, or to .dohc/local/trash in this workspace when the system trash refuses them.",
       confirmLabel: "Delete anyway",
     });
-    expect(notVersionedConfirmText("rename", ["Media/clip.mp4"], ["Media/clip.mp4"]).title).toBe("Rename clip.mp4 in Main too?");
+    expect(notVersionedConfirmText("rename", ["Media/clip.mp4"], ["Media/clip.mp4"]).title).toBe(
+      "Rename clip.mp4 in Main too?",
+    );
   });
 
   it("counts the files a folder or a selection carries", () => {
-    expect(notVersionedConfirmText("move", ["Media", "Notes/a.md"], ["Media/clip.mp4", "Media/raw.mov"])).toEqual({
+    expect(
+      notVersionedConfirmText("move", ["Media", "Notes/a.md"], ["Media/clip.mp4", "Media/raw.mov"]),
+    ).toEqual({
       title: "Move 2 items in Main too?",
       body: "2 files here aren't versioned, so Main and every version have the same copy.",
       confirmLabel: "Move anyway",
     });
-    expect(notVersionedConfirmText("delete", ["Media"], ["Media/clip.mp4"]).body)
-      .toBe("1 file here isn't versioned, so Main and every version have the same copy. Deleted files go to the system trash, or to .dohc/local/trash in this workspace when the system trash refuses them.");
+    expect(notVersionedConfirmText("delete", ["Media"], ["Media/clip.mp4"]).body).toBe(
+      "1 file here isn't versioned, so Main and every version have the same copy. Deleted files go to the system trash, or to .dohc/local/trash in this workspace when the system trash refuses them.",
+    );
   });
 });
 
 describe("main's refusal, as the renderer reads it", () => {
-  const refusal = new Error("Error invoking remote method 'desktop:move-workspace-path': NotVersionedError: This change also happens in Main, because 2 files here aren't versioned.\nMedia/clip.mp4\nMedia/raw.mov");
+  const refusal = new Error(
+    "Error invoking remote method 'desktop:move-workspace-path': NotVersionedError: This change also happens in Main, because 2 files here aren't versioned.\nMedia/clip.mp4\nMedia/raw.mov",
+  );
 
   it("carries the files", () => {
     expect(notVersionedPaths(refusal)).toEqual(["Media/clip.mp4", "Media/raw.mov"]);
@@ -54,6 +61,8 @@ describe("main's refusal, as the renderer reads it", () => {
   });
 
   it("reads as its sentence alone", () => {
-    expect(readError(refusal).words).toBe("This change also happens in Main, because 2 files here aren't versioned.");
+    expect(readError(refusal).words).toBe(
+      "This change also happens in Main, because 2 files here aren't versioned.",
+    );
   });
 });

@@ -93,8 +93,9 @@ describe("reserved paths", () => {
   it("read validation allows shared-with-me (write reservation, not a secret)", () => {
     const read = validateUserReadPath("shared-with-me/alex/brief.md", { platform: "win32" });
     expect(read).toEqual({ ok: true, normalized: "shared-with-me/alex/brief.md" });
-    // Case/alias variants normalize the same way they do on the write side.
-    expect(validateUserReadPath("Shared-With-Me./alex/brief.md", { platform: "win32" }).ok).toBe(true);
+    expect(validateUserReadPath("Shared-With-Me./alex/brief.md", { platform: "win32" }).ok).toBe(
+      true,
+    );
   });
 
   it("read validation still refuses .dohc, traversal, and ignored segments", () => {
@@ -184,7 +185,10 @@ describe("Check A — reserved-path (security core, every surface, every platfor
   it("rejects `.dohc` 8.3 aliases as reserved on write, read, and materialize", () => {
     for (const candidate of dohcAliases) {
       expect(validateUserWritePath(candidate)).toEqual({ ok: false, reason: "reserved" });
-      expect(validateUserReadPath(candidate, { platform: "linux" })).toEqual({ ok: false, reason: "reserved" });
+      expect(validateUserReadPath(candidate, { platform: "linux" })).toEqual({
+        ok: false,
+        reason: "reserved",
+      });
       expect(validateUserMaterializePath(candidate, { platform: "win32" })).toMatchObject({
         ok: false,
         reason: "reserved",
@@ -199,13 +203,11 @@ describe("Check A — reserved-path (security core, every surface, every platfor
 
   it("rejects `shared-with-me` 8.3 aliases on write but allows them on read", () => {
     for (const candidate of ["SHARED~1/alex/brief.md", "share~10/x.md", "SHARED~2", "shar~100"]) {
-      // Write reservation (like shared-with-me itself).
       expect(validateUserWritePath(candidate)).toEqual({ ok: false, reason: "reserved" });
       expect(validateUserMaterializePath(candidate, { platform: "win32" })).toMatchObject({
         ok: false,
         reason: "reserved",
       });
-      // Readable, exactly like the long-form shared-with-me projection.
       expect(validateUserReadPath(candidate, { platform: "win32" }).ok).toBe(true);
     }
   });
@@ -280,7 +282,6 @@ describe("Check B — materialize hazard (disk-write only, win32-gated)", () => 
 
   it("allows the same names on the default write path (classify/capture) and non-win32 reads", () => {
     for (const candidate of hazards) {
-      // Check A only — never applies the materialize hazard.
       expect(validateUserWritePath(candidate).ok).toBe(true);
       // Reads accept them on non-Windows (colon is a legal filename byte there).
       expect(validateUserReadPath(candidate, { platform: "linux" }).ok).toBe(true);
@@ -346,12 +347,10 @@ describe("Check B — materialize hazard (disk-write only, win32-gated)", () => 
 
 describe("workspace root choice", () => {
   it("accepts ordinary folders, including outside the default root", () => {
-    expect(
-      validateWorkspaceRootChoice("/home/sam/dohc/personal", "/home/sam", "linux").ok,
-    ).toBe(true);
-    expect(
-      validateWorkspaceRootChoice("/mnt/data/research", "/home/sam", "linux").ok,
-    ).toBe(true);
+    expect(validateWorkspaceRootChoice("/home/sam/dohc/personal", "/home/sam", "linux").ok).toBe(
+      true,
+    );
+    expect(validateWorkspaceRootChoice("/mnt/data/research", "/home/sam", "linux").ok).toBe(true);
   });
 
   it("rejects the filesystem root and the home directory itself", () => {
@@ -364,13 +363,7 @@ describe("workspace root choice", () => {
   });
 
   it("rejects dot-segment disguises of root and home", () => {
-    for (const disguised of [
-      "/.",
-      "/..",
-      "/home/sam/.",
-      "/home/sam/x/..",
-      "/home/./sam",
-    ]) {
+    for (const disguised of ["/.", "/..", "/home/sam/.", "/home/sam/x/..", "/home/./sam"]) {
       const result = validateWorkspaceRootChoice(disguised, "/home/sam", "linux");
       expect(result.ok).toBe(false);
     }
@@ -393,24 +386,24 @@ describe("workspace root choice", () => {
     for (const root of ["C:\\", "d:/", "\\\\server\\share", "//server/share/"]) {
       expect(validateWorkspaceRootChoice(root, "C:/Users/sam", "win32").ok).toBe(false);
     }
-    expect(validateWorkspaceRootChoice("C:\\Users\\sam\\Trip", "C:/Users/sam", "win32"))
-      .toEqual({ ok: true, normalized: "C:/Users/sam/Trip" });
+    expect(validateWorkspaceRootChoice("C:\\Users\\sam\\Trip", "C:/Users/sam", "win32")).toEqual({
+      ok: true,
+      normalized: "C:/Users/sam/Trip",
+    });
   });
 
   it("keeps a backslash in a folder's name outside Windows", () => {
-    expect(validateWorkspaceRootChoice("/home/sam/trip\\2026/.", "/home/sam", "darwin"))
-      .toEqual({ ok: true, normalized: "/home/sam/trip\\2026" });
+    expect(validateWorkspaceRootChoice("/home/sam/trip\\2026/.", "/home/sam", "darwin")).toEqual({
+      ok: true,
+      normalized: "/home/sam/trip\\2026",
+    });
     // Not a separator, so not a disguise of home either.
     expect(validateWorkspaceRootChoice("/home\\sam", "/home/sam", "linux").ok).toBe(true);
     expect(normalizeRootPath("/home/sam/trip\\2026", "win32")).toBe("/home/sam/trip/2026");
   });
 
   it("returns the normalized root so equality checks are canonical", () => {
-    const result = validateWorkspaceRootChoice(
-      "/home/sam/dohc//personal/.",
-      "/home/sam",
-      "linux",
-    );
+    const result = validateWorkspaceRootChoice("/home/sam/dohc//personal/.", "/home/sam", "linux");
     expect(result).toEqual({ ok: true, normalized: "/home/sam/dohc/personal" });
   });
 
@@ -421,25 +414,65 @@ describe("workspace root choice", () => {
 });
 
 describe("a workspace root that overlaps dohc's state folder", () => {
-  // Where each system keeps an app's settings, the folders above it a person
-  // could pick, and folders inside it.
   const cases = [
-    { platform: "win32", state: "C:/Users/sam/AppData/Roaming/dohc", holders: ["C:/Users/sam/AppData", "C:\\Users\\sam\\AppData\\Roaming", "c:/users/sam/appdata/roaming/DOHC"], inside: ["C:\\Users\\sam\\AppData\\Roaming\\dohc\\cli-bin", "c:/users/sam/appdata/roaming/DOHC/live-draft-recovery/notes"] },
-    { platform: "darwin", state: "/Users/sam/Library/Application Support/dohc", holders: ["/Users/sam/Library", "/Users/sam/Library/Application Support", "/users/sam/library/"], inside: ["/Users/sam/Library/Application Support/dohc/cli-bin", "/users/sam/library/application support/DOHC/notes/"] },
-    { platform: "linux", state: "/home/sam/.config/dohc", holders: ["/home/sam/.config", "/home/sam/.config/dohc", "/home/sam/.config/./"], inside: ["/home/sam/.config/dohc/cli-bin", "/home/sam/.config/dohc/live-draft-recovery/notes/"] },
+    {
+      platform: "win32",
+      state: "C:/Users/sam/AppData/Roaming/dohc",
+      holders: [
+        "C:/Users/sam/AppData",
+        "C:\\Users\\sam\\AppData\\Roaming",
+        "c:/users/sam/appdata/roaming/DOHC",
+      ],
+      inside: [
+        "C:\\Users\\sam\\AppData\\Roaming\\dohc\\cli-bin",
+        "c:/users/sam/appdata/roaming/DOHC/live-draft-recovery/notes",
+      ],
+    },
+    {
+      platform: "darwin",
+      state: "/Users/sam/Library/Application Support/dohc",
+      holders: [
+        "/Users/sam/Library",
+        "/Users/sam/Library/Application Support",
+        "/users/sam/library/",
+      ],
+      inside: [
+        "/Users/sam/Library/Application Support/dohc/cli-bin",
+        "/users/sam/library/application support/DOHC/notes/",
+      ],
+    },
+    {
+      platform: "linux",
+      state: "/home/sam/.config/dohc",
+      holders: ["/home/sam/.config", "/home/sam/.config/dohc", "/home/sam/.config/./"],
+      inside: [
+        "/home/sam/.config/dohc/cli-bin",
+        "/home/sam/.config/dohc/live-draft-recovery/notes/",
+      ],
+    },
   ];
 
-  it.each(cases)("refuses the state folder and every folder above it on $platform", ({ platform, state, holders }) => {
-    for (const root of holders) expect(stateFolderOverlap(root, state, platform), root).toBe("holds");
-  });
+  it.each(cases)(
+    "refuses the state folder and every folder above it on $platform",
+    ({ platform, state, holders }) => {
+      for (const root of holders)
+        expect(stateFolderOverlap(root, state, platform), root).toBe("holds");
+    },
+  );
 
-  it.each(cases)("refuses every folder inside the state folder on $platform", ({ platform, state, inside }) => {
-    for (const root of inside) expect(stateFolderOverlap(root, state, platform), root).toBe("inside");
-  });
+  it.each(cases)(
+    "refuses every folder inside the state folder on $platform",
+    ({ platform, state, inside }) => {
+      for (const root of inside)
+        expect(stateFolderOverlap(root, state, platform), root).toBe("inside");
+    },
+  );
 
   it.each(cases)("allows a folder beside the state folder on $platform", ({ platform, state }) => {
     expect(stateFolderOverlap(`${state}-notes`, state, platform)).toBeNull();
-    expect(stateFolderOverlap(`${state.slice(0, state.lastIndexOf("/"))}/notes`, state, platform)).toBeNull();
+    expect(
+      stateFolderOverlap(`${state.slice(0, state.lastIndexOf("/"))}/notes`, state, platform),
+    ).toBeNull();
   });
 });
 
@@ -502,11 +535,22 @@ describe("hasIgnoredSegment (shared tree/watcher ignore rule)", () => {
 
 describe("hasEngineIgnoredSegment (Rust capture floor parity)", () => {
   it.each(["linux", "darwin", "win32"] as const)("folds reserved names on %s", (platform) => {
-    for (const name of [".dohc", ".DOHC", ".Dohc", ".do‍hc", ".GIT", "NODE_MODULES", ".DOHC-WRITE-tmp"]) {
+    for (const name of [
+      ".dohc",
+      ".DOHC",
+      ".Dohc",
+      ".do‍hc",
+      ".GIT",
+      "NODE_MODULES",
+      ".DOHC-WRITE-tmp",
+    ]) {
       const path = `notes/${name}/engine/store`;
       expect(hasEngineIgnoredSegment(path, platform), path).toBe(true);
       expect(validateUserWritePath(path), path).toEqual({ ok: false, reason: "reserved" });
-      expect(validateUserMaterializePath(path, { platform }), path).toEqual({ ok: false, reason: "reserved" });
+      expect(validateUserMaterializePath(path, { platform }), path).toEqual({
+        ok: false,
+        reason: "reserved",
+      });
     }
     for (const name of ["dohc", ".dohc-notes", "my-dohc", "my-node_modules"]) {
       expect(hasEngineIgnoredSegment(`${name}/notes.md`, platform)).toBe(false);
@@ -527,7 +571,15 @@ describe("hasEngineIgnoredSegment (Rust capture floor parity)", () => {
   });
 
   it.each(["linux", "darwin", "win32"] as const)("hides OS metadata on %s", (platform) => {
-    for (const path of [".DS_Store", "notes/.ds_store", "notes/._draft.md", "notes/Icon\r", ".Spotlight-V100/Store-V2/index", "photos/Thumbs.db", "Desktop.ini"]) {
+    for (const path of [
+      ".DS_Store",
+      "notes/.ds_store",
+      "notes/._draft.md",
+      "notes/Icon\r",
+      ".Spotlight-V100/Store-V2/index",
+      "photos/Thumbs.db",
+      "Desktop.ini",
+    ]) {
       expect(hasEngineIgnoredSegment(path, platform), path).toBe(true);
       expect(validateUserWritePath(path), path).toEqual({ ok: false, reason: "reserved" });
     }

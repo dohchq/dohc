@@ -80,11 +80,6 @@ const MAX_ADDED_TEXT_PREPARE_WORKERS: usize = 8;
 mod busy_retry;
 use busy_retry::CaptureBatchRetry;
 
-/// Per-run moment provenance, mirroring the TS capture metadata: a reconcile
-/// pass stamps one summary + correlation id across every moment it records
-/// ("Changed while dohc was closed"); a live watcher batch leaves both unset and
-/// each ingest falls back to a per-file "Updated <basename>" summary with no
-/// correlation id.
 #[derive(Clone, Default)]
 pub struct CaptureProvenance {
     pub summary: Option<String>,
@@ -467,10 +462,10 @@ pub(crate) fn bound_sink_params(
 /// Capture's view of `.dohc/files.toml`, split by why there are no rules.
 #[derive(Clone, PartialEq)]
 pub(crate) enum PolicyState {
-    /// A real answer: absent (default policy), parsed rules, or a MALFORMED
-    /// file — the last lands here as `Known(None)` under the ratified WS-F
-    /// rule (writes are never dropped for a bad policy; search is where a
-    /// broken policy fails closed).
+    /// A real answer: absent (default policy), parsed rules, or a malformed
+    /// file. A malformed file lands here as `Known(None)`: writes are never
+    /// dropped for a bad policy, and search is where a broken policy fails
+    /// closed.
     Known(Option<Vec<FilesPolicyRule>>),
     /// The file uses an unsupported version or could not be read (IO error, symlink refusal,
     /// oversize — possibly a transient editor lock). The narrowing set is
@@ -499,7 +494,7 @@ impl StoreCaptureSink {
         } = params;
         // `.dohc/files.toml` can only narrow engine ownership below the hard
         // floor. Unreadable and unsupported policies hold capture;
-        // malformed policies keep the WS-F floor-only rule.
+        // malformed policies keep capture floor-only.
         let snapshot = Arc::new(read_engine_search_policy(&shadow_root));
         let files_policy = if snapshot.holds_file_capture() {
             PolicyState::Unavailable
@@ -1457,7 +1452,6 @@ impl StoreCaptureSink {
         candidate: AddedTextCandidate<'_>,
         prepared: PreparedTextContent,
     ) -> PreparedTextCapture {
-        // The batch path takes only `Added` ingests.
         let provenance = self
             .provenance
             .for_path(candidate.path)
@@ -2097,9 +2091,9 @@ fn read_contained_current(
     // Between the capture cap and the SCAN cap (64 MiB) the scanner still
     // lists the file, so a grow-past-capture-cap lands here and retires.
     // Past the scan cap the plan classifies it `retained_unread` and the
-    // sink is never called — deliberately not a retire: the ratified CAL-3
-    // delta keeps last-known-good rather than
-    // false-deleting live user data behind an operational scan bound.
+    // sink is never called. That is deliberately not a retire: it keeps
+    // last-known-good rather than false-deleting live user data behind an
+    // operational scan bound.
     let text_media = is_text_media_type(media_type, path);
     let content_cap = if text_media {
         MAX_CAPTURE_TEXT_BYTES
@@ -2117,9 +2111,6 @@ fn read_contained_current(
         return Ok(CurrentContent::NonOwnable);
     }
     if !text_media {
-        // Non-text media is engine-ownable binary content: the TS oracle
-        // routes it to the binary store before any UTF-8 sniffing, so a
-        // UTF-8-clean `.png` must never land in the plaintext store.
         return Ok(CurrentContent::Binary(bytes));
     }
     match String::from_utf8(bytes) {

@@ -65,9 +65,7 @@ import {
   type EngineYDocSessionOutbound,
   type EngineYDocSessionReleaseOutcome,
 } from "./engineYDocSessionOwner";
-import type {
-  WorkspaceFileMutationYDocPort,
-} from "./workspaceFileMutationOwner";
+import type { WorkspaceFileMutationYDocPort } from "./workspaceFileMutationOwner";
 import {
   YDocSessionClosedError,
   isYDocPathNotInVersionError,
@@ -105,10 +103,21 @@ export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession,
 export interface EngineYDocSessionCapture {
   waitForAdmission?(path: string, signal: AbortSignal): Promise<boolean>;
   saveDeletedFileAgain?(path: string): Promise<boolean>;
-  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: ReadOnlyTransitionCause, failure?: unknown) => void}): Promise<EngineYDocSessionProvider>;
+  openYDocSession(
+    input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {
+      onSaveState?: (
+        state: EngineYDocSaveStateName,
+        token: number,
+        event: EngineYDocSaveEvent,
+        authorCapacity?: boolean,
+        readOnlyCause?: ReadOnlyTransitionCause,
+        failure?: unknown,
+      ) => void;
+    },
+  ): Promise<EngineYDocSessionProvider>;
 }
 
-type SharedAdmissionWait = {cancel: AbortController; authorityId: symbol; generation: number};
+type SharedAdmissionWait = { cancel: AbortController; authorityId: symbol; generation: number };
 
 interface EngineYDocWorkspace {
   workspaceId: string;
@@ -124,18 +133,14 @@ export interface EngineYDocRendererSession {
 }
 
 interface EngineYDocSessionIpcOptions {
-  sessionFor: (
-    sender: EngineYDocIpcSender,
-  ) => EngineYDocRendererSession | undefined;
+  sessionFor: (sender: EngineYDocIpcSender) => EngineYDocRendererSession | undefined;
   authorities: Parameters<typeof windowShowsWorkspace>[2];
   acquireWorkspace: (workspaceId: string) => {
     workspace: EngineYDocWorkspace;
     assertCurrent(): void;
     release(): void;
   };
-  captureFor: (
-    workspace: EngineYDocWorkspace,
-  ) => EngineYDocSessionCapture | null;
+  captureFor: (workspace: EngineYDocWorkspace) => EngineYDocSessionCapture | null;
   ensureCaptureFor: (workspace: EngineYDocWorkspace) => Promise<void>;
   isSharedView: (workspace: EngineYDocWorkspace) => boolean;
   // An edit landed, or an editor's note started or stopped waiting for the
@@ -145,10 +150,7 @@ interface EngineYDocSessionIpcOptions {
   // A shared note's current text when no editor holds it, edits still on
   // their way to the server included. Null for a note that is not shared.
   ownerDraftState?: (workspace: EngineYDocWorkspace, path: string) => Promise<Uint8Array | null>;
-  resolveDocumentPath: (
-    workspace: EngineYDocWorkspace,
-    path: string,
-  ) => Promise<string | null>;
+  resolveDocumentPath: (workspace: EngineYDocWorkspace, path: string) => Promise<string | null>;
   onError: (message: string, error?: unknown) => void;
   /** dohc refused an edit to `path` because its queue for the server takes no more. */
   onLiveEditsPaused?: (workspaceId: string, path: string) => void;
@@ -164,7 +166,11 @@ interface EngineYDocSessionIpcOptions {
 // deleted outside dohc. A shared view's file is its host's, so only a local
 // file says so. A file that cannot be checked names no reason. A note too
 // dense to check is refused whatever the file allows.
-function saveFailureReason(absolutePath: string, failure: unknown, shared: boolean): SaveFailureReason {
+function saveFailureReason(
+  absolutePath: string,
+  failure: unknown,
+  shared: boolean,
+): SaveFailureReason {
   if (isDocumentTooDenseCause(failure)) return "document-too-dense";
   if (isVolumeSharesNewFilesCause(failure)) return "volume-shares-new-files";
   try {
@@ -262,7 +268,13 @@ export class EngineYDocArrivals {
   }
 
   person(
-    input: { authorityId: symbol; path: string; source: string; requestId: string; update: Uint8Array },
+    input: {
+      authorityId: symbol;
+      path: string;
+      source: string;
+      requestId: string;
+      update: Uint8Array;
+    },
     current: () => string,
   ): string {
     let arrivals = this.#byAuthority.get(input.authorityId);
@@ -325,7 +337,10 @@ export interface LiveDocumentEdit {
    * current state, or null for no change. `keepBlocks` says someone may be
    * typing in the document.
    */
-  change(state: Uint8Array, options: { keepBlocks: boolean; headSha256?: string | null }): Promise<Uint8Array | null>;
+  change(
+    state: Uint8Array,
+    options: { keepBlocks: boolean; headSha256?: string | null },
+  ): Promise<Uint8Array | null>;
   /**
    * Throws when the document at the resolved `path` is a lossy note
    * (CONTEXT.md), whose next write would rewrite the parts dohc can't show.
@@ -348,14 +363,17 @@ export interface LiveDocumentEditOutcome {
 }
 
 export const DOCUMENT_EDIT_SHARED_WARNING =
-  'The edit is saved. Someone may be changing this document at the same moment, and a change ' +
-  'they make to the same blocks before your edit reaches them can still remove its text. Read ' +
-  'the document to check it is there.';
+  "The edit is saved. Someone may be changing this document at the same moment, and a change " +
+  "they make to the same blocks before your edit reaches them can still remove its text. Read " +
+  "the document to check it is there.";
 
 /** Main-side reads and edits of live documents, for doors other than the editor. */
 export interface LiveDocumentSessions {
   /** `state` is the encoded Y.Doc an open editor holds, or null when none holds it. */
-  readDocument(input: { workspaceId: string; path: string }): Promise<{ path: string; state: Uint8Array | null }>;
+  readDocument(input: {
+    workspaceId: string;
+    path: string;
+  }): Promise<{ path: string; state: Uint8Array | null }>;
   editDocument(input: LiveDocumentEdit): Promise<LiveDocumentEditOutcome>;
 }
 
@@ -374,10 +392,7 @@ type SessionOutbound = EngineYDocSessionOutbound<
   LineageReplacement
 >;
 
-function sameArtifactAsset(
-  left: ArtifactAssetDescriptor,
-  right: ArtifactAssetDescriptor,
-): boolean {
+function sameArtifactAsset(left: ArtifactAssetDescriptor, right: ArtifactAssetDescriptor): boolean {
   return (
     left.id === right.id &&
     left.mimeType === right.mimeType &&
@@ -397,9 +412,7 @@ interface DocumentReservationState {
 
 class LiveDocumentOwnedError extends Error {
   constructor() {
-    super(
-      "The engine owns this live document. Close its editor before writing the file directly.",
-    );
+    super("The engine owns this live document. Close its editor before writing the file directly.");
     this.name = "LiveDocumentOwnedError";
   }
 }
@@ -410,10 +423,7 @@ function liveDocumentMutationRefusal(): Error {
 
 /** Atomic admission shared by canonical Y.Doc opens and direct mutations. */
 class DocumentMutationReservations {
-  readonly #states = new Map<
-    symbol,
-    Map<string, DocumentReservationState>
-  >();
+  readonly #states = new Map<symbol, Map<string, DocumentReservationState>>();
 
   async reserveOpen(authorityId: symbol, path: string): Promise<() => void> {
     const state = this.#state(authorityId, path);
@@ -474,11 +484,7 @@ class DocumentMutationReservations {
     return state;
   }
 
-  #deleteIdle(
-    authorityId: symbol,
-    key: string,
-    state: DocumentReservationState,
-  ): void {
+  #deleteIdle(authorityId: symbol, key: string, state: DocumentReservationState): void {
     if (state.openings !== 0 || state.mutations !== 0) return;
     const byPath = this.#states.get(authorityId);
     if (byPath?.get(key) === state) byPath.delete(key);
@@ -496,9 +502,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   readonly #isSharedView: EngineYDocSessionIpcOptions["isSharedView"];
   readonly #ownerDraftState: EngineYDocSessionIpcOptions["ownerDraftState"];
   readonly #onPendingShareMayChange: EngineYDocSessionIpcOptions["onPendingShareMayChange"];
-  readonly #resolveDocumentPath: EngineYDocSessionIpcOptions[
-    "resolveDocumentPath"
-  ];
+  readonly #resolveDocumentPath: EngineYDocSessionIpcOptions["resolveDocumentPath"];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
   readonly #onLiveEditsPaused: EngineYDocSessionIpcOptions["onLiveEditsPaused"];
   readonly #onOwnerOpened: EngineYDocSessionIpcOptions["onOwnerOpened"];
@@ -549,20 +553,15 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           mutation,
         ),
       markDeletedUnderPath: (authorityId, pathOrPrefix) => {
-        this.#owner.forEachSessionUnderPath(
-          authorityId,
-          pathOrPrefix,
-          (session) => session.markDeleted(),
+        this.#owner.forEachSessionUnderPath(authorityId, pathOrPrefix, (session) =>
+          session.markDeleted(),
         );
       },
     };
     this.#fileMutationPort = Object.freeze(fileMutationPort);
   }
 
-  async open(
-    sender: EngineYDocIpcSender,
-    payload: OpenPayload,
-  ): Promise<OpenResult> {
+  async open(sender: EngineYDocIpcSender, payload: OpenPayload): Promise<OpenResult> {
     const input = OpenEngineYDocSessionPayload.parse(payload);
     const rendererSession = this.#sessionFor(sender);
     if (
@@ -580,12 +579,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
     const authority = this.#acquireWorkspace(input.workspaceId);
     try {
-      return await this.#openWithAuthority(
-        sender,
-        input,
-        authority,
-        rendererSession,
-      );
+      return await this.#openWithAuthority(sender, input, authority, rendererSession);
     } finally {
       authority.release();
     }
@@ -603,16 +597,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     if (this.#isSharedView(workspace) && !this.#sharedCaptureFor) return unavailableOpen();
     const validatedPath = validateUserWritePath(input.path);
     if (!validatedPath.ok) return unavailableOpen();
-    const requestedSpellingKind = liveDocumentKindForPath(
-      validatedPath.normalized,
-    );
+    const requestedSpellingKind = liveDocumentKindForPath(validatedPath.normalized);
     const generation = rendererSession.generation;
     let canonicalPath: string | null;
     try {
-      canonicalPath = await this.#resolveDocumentPath(
-        workspace,
-        validatedPath.normalized,
-      );
+      canonicalPath = await this.#resolveDocumentPath(workspace, validatedPath.normalized);
     } catch (error) {
       this.#onError(
         `[desktop] engine Y.Doc open could not resolve ${validatedPath.normalized}:`,
@@ -638,7 +627,11 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       return unavailableOpen({ documentUnavailable: true });
     }
     if (canonicalKind === null) return unavailableOpen();
-    if (this.#isSharedView(workspace) && (canonicalKind !== "richdoc" || !/\.md$/i.test(canonicalPath))) return unavailableOpen();
+    if (
+      this.#isSharedView(workspace) &&
+      (canonicalKind !== "richdoc" || !/\.md$/i.test(canonicalPath))
+    )
+      return unavailableOpen();
     const releaseOpening = await this.#documentReservations.reserveOpen(
       workspace.attachmentId,
       canonicalPath,
@@ -675,10 +668,18 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     const shared = this.#isSharedView(workspace);
     let capture: EngineYDocSessionCapture | null;
     if (shared && this.#sharedCaptureFor) {
-      try { capture = await this.#sharedCaptureFor?.(workspace) ?? null; }
-      catch (error) { return unavailableOpen(error instanceof SharedDocumentWaitingError ? { sharedWaiting: error.waiting } : { liveHostUnavailable: true }); }
+      try {
+        capture = (await this.#sharedCaptureFor?.(workspace)) ?? null;
+      } catch (error) {
+        return unavailableOpen(
+          error instanceof SharedDocumentWaitingError
+            ? { sharedWaiting: error.waiting }
+            : { liveHostUnavailable: true },
+        );
+      }
       authority.assertCurrent();
-      if (!capture || !rendererSession.isCurrent()) return unavailableOpen({ liveHostUnavailable: true });
+      if (!capture || !rendererSession.isCurrent())
+        return unavailableOpen({ liveHostUnavailable: true });
     } else capture = this.#captureFor(workspace);
     if (!capture) {
       try {
@@ -703,21 +704,16 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     try {
       currentPath = await this.#resolveDocumentPath(workspace, requestedPath);
     } catch (error) {
-      this.#onError(
-        `[desktop] engine Y.Doc open could not recheck ${canonicalPath}:`,
-        error,
-      );
+      this.#onError(`[desktop] engine Y.Doc open could not recheck ${canonicalPath}:`, error);
       return unavailableOpen({ documentUnavailable: true });
     }
     authority.assertCurrent();
-    if (
-      currentPath === null ||
-      currentPath !== canonicalPath
-    ) {
+    if (currentPath === null || currentPath !== canonicalPath) {
       return unavailableOpen({ documentUnavailable: true });
     }
     if (
-      !rendererSession.isCurrent() || this.#isSharedView(workspace) !== shared ||
+      !rendererSession.isCurrent() ||
+      this.#isSharedView(workspace) !== shared ||
       (this.#isSharedView(workspace) && !this.#sharedCaptureFor)
     ) {
       return unavailableOpen();
@@ -735,14 +731,17 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         let currentReadOnlyCause: ReadOnlyTransitionCause = "reconnecting";
         let pendingShare = false;
         const emit = (event: SessionEvent): void => {
-          if (lastEvent?.state === event.state &&
+          if (
+            lastEvent?.state === event.state &&
             (event.state === "settling" || lastEvent.seq === event.seq) &&
             lastEvent.saveFailure?.reason === event.saveFailure?.reason &&
             lastEvent.authorCapacity === event.authorCapacity &&
             lastEvent.readOnlyCause === event.readOnlyCause &&
             lastEvent.changedOutside?.unsaved === event.changedOutside?.unsaved &&
             lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
-            lastEvent.editRefusal?.message === event.editRefusal?.message) return;
+            lastEvent.editRefusal?.message === event.editRefusal?.message
+          )
+            return;
           signals.emit(event);
           lastEvent = event;
         };
@@ -757,22 +756,39 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         let markObjectChanged: () => void = () => undefined;
         try {
           provider = await capture.openYDocSession({
-            ...(!shared && input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
+            ...(!shared && input.allowLossySourceSha256
+              ? { allowLossySourceSha256: input.allowLossySourceSha256 }
+              : {}),
             path: canonicalPath,
             contentKind: documentKind,
             assertRecordWritable: () => {
-              if (recordWriteHeld()) throw new Error(`dohc is handing ${canonicalPath} to its live session, and nothing changed. Try again.`);
+              if (recordWriteHeld())
+                throw new Error(
+                  `dohc is handing ${canonicalPath} to its live session, and nothing changed. Try again.`,
+                );
             },
             onEditRefused: (requestId, message, paused) => {
               if (paused) this.#onLiveEditsPaused?.(workspace.workspaceId, canonicalPath);
-              publish(() => emit({
-                state: "error", seq: saveSeq.dirtySeq,
-                editRefusal: { workspaceId: workspace.workspaceId, path: canonicalPath, requestId, message },
-              }));
+              publish(() =>
+                emit({
+                  state: "error",
+                  seq: saveSeq.dirtySeq,
+                  editRefusal: {
+                    workspaceId: workspace.workspaceId,
+                    path: canonicalPath,
+                    requestId,
+                    message,
+                  },
+                }),
+              );
             },
             onSaveState: (state, token, event, authorCapacity, readOnlyCause, failure) => {
               if (state === "read-only") currentReadOnlyCause = readOnlyCause ?? "reconnecting";
-              if (!shared && (state === "pending-share" || state === "saved-to-host" || state === "saved") && (state === "pending-share") !== pendingShare) {
+              if (
+                !shared &&
+                (state === "pending-share" || state === "saved-to-host" || state === "saved") &&
+                (state === "pending-share") !== pendingShare
+              ) {
                 pendingShare = state === "pending-share";
                 this.#onPendingShareMayChange?.(workspace.workspaceId);
               }
@@ -785,13 +801,25 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
               // A settle that could not write the file. The reason check is
               // one or two access calls, made only on a failure, so the notice
               // can name it.
-              const saveFailure = state === "error" && event === "outcome" && !authorCapacity
-                ? { reason: saveFailureReason(join(workspace.rootPath, canonicalPath), failure, shared) }
-                : undefined;
-              publish(() => emit({
-                state, seq, ...(authorCapacity ? { authorCapacity: true } : {}),
-                ...(readOnlyCause ? { readOnlyCause } : {}), ...(saveFailure ? { saveFailure } : {}),
-              }));
+              const saveFailure =
+                state === "error" && event === "outcome" && !authorCapacity
+                  ? {
+                      reason: saveFailureReason(
+                        join(workspace.rootPath, canonicalPath),
+                        failure,
+                        shared,
+                      ),
+                    }
+                  : undefined;
+              publish(() =>
+                emit({
+                  state,
+                  seq,
+                  ...(authorCapacity ? { authorCapacity: true } : {}),
+                  ...(readOnlyCause ? { readOnlyCause } : {}),
+                  ...(saveFailure ? { saveFailure } : {}),
+                }),
+              );
             },
             onRemoteUpdate: (update, head) => {
               publish(() => signals.remoteUpdate({ update, ...(head ? { head } : {}) }));
@@ -811,9 +839,13 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
               publish(() => markObjectChanged());
             },
             onChangedOutside: (unsaved) => {
-              publish(() => emit({
-                state: unsaved ? "changed-on-disk" : "saved", seq: saveSeq.dirtySeq, changedOutside: { unsaved },
-              }));
+              publish(() =>
+                emit({
+                  state: unsaved ? "changed-on-disk" : "saved",
+                  seq: saveSeq.dirtySeq,
+                  changedOutside: { unsaved },
+                }),
+              );
             },
           });
         } catch (error) {
@@ -823,15 +855,14 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         }
 
         const owned: EngineYDocIpcOwnedSession = {
-          get readOnlyCause() { return currentReadOnlyCause; },
+          get readOnlyCause() {
+            return currentReadOnlyCause;
+          },
           workspace,
           provider,
           saveSeq,
           artifactAssetsById: new Map(
-            (provider.artifactAssets ?? []).map((descriptor) => [
-              descriptor.id,
-              descriptor,
-            ]),
+            (provider.artifactAssets ?? []).map((descriptor) => [descriptor.id, descriptor]),
           ),
           retiredArtifactAssets: [],
           path: canonicalPath,
@@ -885,15 +916,14 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           : unavailableOpen();
       }
       // Only a note the engine holds an owner binding for can be hosted at its owner's open.
-      if (!shared && owned.provider.ownerBound) this.#onOwnerOpened?.(workspace.workspaceId, canonicalPath);
+      if (!shared && owned.provider.ownerBound)
+        this.#onOwnerOpened?.(workspace.workspaceId, canonicalPath);
       return OpenEngineYDocSessionResult.parse({
         available: true,
         headSha256: owned.provider.headSha256,
         initialUpdate: Y.encodeStateAsUpdate(owned.provider.doc),
         ...(owned.provider.objectId ? { objectId: owned.provider.objectId } : {}),
-        ...(owned.provider.versionId
-          ? { versionId: owned.provider.versionId }
-          : {}),
+        ...(owned.provider.versionId ? { versionId: owned.provider.versionId } : {}),
         artifactAssets: owned.provider.artifactAssets ?? [],
         lineageGeneration: opened.lineageGeneration,
       });
@@ -903,20 +933,19 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         ? unavailableOpen({ engineMayHoldDocument: true })
         : unavailableOpen();
     }
-    if (
-      opened.reason === "session-in-use" ||
-      opened.reason === "session-unreleased"
-    ) {
+    if (opened.reason === "session-in-use" || opened.reason === "session-unreleased") {
       return unavailableOpen({ engineMayHoldDocument: true });
     }
     if (opened.reason !== "open-refused") return unavailableOpen();
 
-    this.#onError(
-      `[desktop] engine Y.Doc open refused for ${canonicalPath}:`,
-      opened.error,
-    );
-    return shared ? unavailableOpen(opened.error instanceof SharedDocumentWaitingError
-      ? { sharedWaiting: opened.error.waiting } : { liveHostUnavailable: true }) : this.#openRefusal(opened.error);
+    this.#onError(`[desktop] engine Y.Doc open refused for ${canonicalPath}:`, opened.error);
+    return shared
+      ? unavailableOpen(
+          opened.error instanceof SharedDocumentWaitingError
+            ? { sharedWaiting: opened.error.waiting }
+            : { liveHostUnavailable: true },
+        )
+      : this.#openRefusal(opened.error);
   }
 
   async readArtifactAsset(
@@ -924,29 +953,19 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     payload: ReadArtifactPayload,
   ): Promise<ReadArtifactResult> {
     const input = ReadEngineYDocArtifactAssetPayload.parse(payload);
-    const access = this.#owner.accessSession(
-      this.#caller(sender, input.sessionId),
-      (owned) => {
-        const requested = input.descriptor;
-        const descriptor = [
-          owned.artifactAssetsById.get(requested.id),
-          ...owned.retiredArtifactAssets,
-        ].find(
-          (candidate) =>
-            candidate !== undefined && sameArtifactAsset(candidate, requested),
-        );
-        if (!descriptor) {
-          throw new Error(
-            `The live document does not reference artifact asset ${requested.id}.`,
-          );
-        }
-        return owned.provider.readArtifactAsset(descriptor);
-      },
-    );
+    const access = this.#owner.accessSession(this.#caller(sender, input.sessionId), (owned) => {
+      const requested = input.descriptor;
+      const descriptor = [
+        owned.artifactAssetsById.get(requested.id),
+        ...owned.retiredArtifactAssets,
+      ].find((candidate) => candidate !== undefined && sameArtifactAsset(candidate, requested));
+      if (!descriptor) {
+        throw new Error(`The live document does not reference artifact asset ${requested.id}.`);
+      }
+      return owned.provider.readArtifactAsset(descriptor);
+    });
     if (access.kind === "refused") {
-      throw new Error(
-        "The live document session is no longer available. Open the file again.",
-      );
+      throw new Error("The live document session is no longer available. Open the file again.");
     }
     return ReadEngineYDocArtifactAssetResult.parse(await access.value);
   }
@@ -955,7 +974,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   // window has open for it now, whichever of its editors opened it. The settle reports its outcome
   // as a save state. A settle that cannot start, or that fails, rejects
   // here, so the caller can say so instead of waiting.
-  async retrySave(sender: EngineYDocIpcSender, payload: RetrySavePayload): Promise<RetrySaveResult> {
+  async retrySave(
+    sender: EngineYDocIpcSender,
+    payload: RetrySavePayload,
+  ): Promise<RetrySaveResult> {
     const input = RetryEngineYDocSavePayload.parse(payload);
     const renderer = this.#sessionFor(sender);
     if (!renderer?.isCurrent() || renderer.workspaceId !== input.workspaceId) {
@@ -976,10 +998,12 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       authority.assertCurrent();
       const held = this.#owner.documentSession(authority.workspace.attachmentId, input.path, of);
       if (!held || held.session.deleted) return "closed";
-      if (!held.session.provider.settleNow) throw new Error("dohc could not start a save for this document.");
+      if (!held.session.provider.settleNow)
+        throw new Error("dohc could not start a save for this document.");
       settle = held.session.provider.settleNow(
         !this.#isSharedView(authority.workspace) && input.allowLossySourceSha256
-          ? { allowLossySourceSha256: input.allowLossySourceSha256 } : undefined,
+          ? { allowLossySourceSha256: input.allowLossySourceSha256 }
+          : undefined,
       );
     } finally {
       authority.release();
@@ -1006,10 +1030,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     return "settled";
   }
 
-  applyUpdate(
-    sender: EngineYDocIpcSender,
-    payload: ApplyUpdatePayload,
-  ): ApplyUpdateResult {
+  applyUpdate(sender: EngineYDocIpcSender, payload: ApplyUpdatePayload): ApplyUpdateResult {
     const input = ApplyEngineYDocUpdatePayload.parse(payload);
     const applied = this.#owner.applyUpdate(
       {
@@ -1032,19 +1053,30 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         // A renderer editor update is this computer's person typing: agent
         // and automation writes take the collection write seam, never this
         // IPC. Main names the person; the renderer names no one.
-        const person = this.#arrivals.person({
-          authorityId: owned.workspace.attachmentId, path: owned.path,
-          source: arrivalSource(sender, input.sessionId), requestId: input.requestId, update: input.update,
-        }, this.#localPersonId);
+        const person = this.#arrivals.person(
+          {
+            authorityId: owned.workspace.attachmentId,
+            path: owned.path,
+            source: arrivalSource(sender, input.sessionId),
+            requestId: input.requestId,
+            update: input.update,
+          },
+          this.#localPersonId,
+        );
         try {
           owned.provider.applyLocalUpdate(
             input.update,
             () => noteLocalEdit(owned.saveSeq, input.seq),
-            // Shared-view admission keeps its current contract until A2.
             this.#isSharedView(owned.workspace)
-              ? { idempotencyKey: input.requestId, attribution: { actorKind: "human", onBehalfOf: person } }
-              : { idempotencyKey: input.requestId, actorOriginId: person,
-                  attribution: { actorKind: "human", onBehalfOf: person, depth: 0 } },
+              ? {
+                  idempotencyKey: input.requestId,
+                  attribution: { actorKind: "human", onBehalfOf: person },
+                }
+              : {
+                  idempotencyKey: input.requestId,
+                  actorOriginId: person,
+                  attribution: { actorKind: "human", onBehalfOf: person, depth: 0 },
+                },
           );
         } catch (error) {
           if (error instanceof YDocSessionClosedError) {
@@ -1071,9 +1103,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
    * draft, since its file waits for the server. `state` is null for any other
    * note, and the caller reads the settled file at `path`.
    */
-  async readDocument(
-    input: { workspaceId: string; path: string },
-  ): Promise<{ path: string; state: Uint8Array | null }> {
+  async readDocument(input: {
+    workspaceId: string;
+    path: string;
+  }): Promise<{ path: string; state: Uint8Array | null }> {
     const authority = this.#acquireWorkspace(input.workspaceId);
     try {
       authority.assertCurrent();
@@ -1082,7 +1115,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       if (this.#isSharedView(authority.workspace)) return { path, state: null };
       const held = this.#owner.documentSession(authority.workspace.attachmentId, path);
       if (held) return { path, state: Y.encodeStateAsUpdate(held.session.provider.doc) };
-      const state = await this.#ownerDraftState?.(authority.workspace, path) ?? null;
+      const state = (await this.#ownerDraftState?.(authority.workspace, path)) ?? null;
       authority.assertCurrent();
       return { path, state };
     } finally {
@@ -1118,7 +1151,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             if (!isOwnerOutboxFrozenRefusal(error)) throw error;
             this.#onLiveEditsPaused?.(workspace.workspaceId, path);
             // The editor's words for the same refusal.
-            throw new Error(`dohc could not save this edit to "${path}". Live editing is paused for this file. Notices in dohc says why and how to resume.`, { cause: error });
+            throw new Error(
+              `dohc could not save this edit to "${path}". Live editing is paused for this file. Notices in dohc says why and how to resume.`,
+              { cause: error },
+            );
           }
         });
       this.#documentEdits.set(key, turn);
@@ -1152,7 +1188,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       );
     } catch (error) {
       if (!(error instanceof LiveDocumentOwnedError)) throw error;
-      throw new Error(`${path} opened in an editor as dohc began the edit, and nothing changed. Try again.`);
+      throw new Error(
+        `${path} opened in an editor as dohc began the edit, and nothing changed. Try again.`,
+      );
     }
   }
 
@@ -1180,10 +1218,15 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       try {
         held.assertCurrent();
       } catch {
-        throw new Error(`${path} changed hands while dohc prepared the edit, and nothing changed. Read it again, then retry.`);
+        throw new Error(
+          `${path} changed hands while dohc prepared the edit, and nothing changed. Read it again, then retry.`,
+        );
       }
       if (owned.deleted) throw new Error(`${path} was deleted.`);
-      if (owned.ownerHandoff) throw new Error(`dohc is handing ${path} to its live session, and nothing changed. Try again.`);
+      if (owned.ownerHandoff)
+        throw new Error(
+          `dohc is handing ${path} to its live session, and nothing changed. Try again.`,
+        );
     };
     assertSame();
     return await applyDocumentEdit(owned.provider, path, input, {
@@ -1205,7 +1248,9 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     }
     if (!capture) throw new Error("The workspace engine is not running.");
     const provider = await capture.openYDocSession({
-      ...(input.allowLossySourceSha256 ? { allowLossySourceSha256: input.allowLossySourceSha256 } : {}),
+      ...(input.allowLossySourceSha256
+        ? { allowLossySourceSha256: input.allowLossySourceSha256 }
+        : {}),
       path,
       contentKind: "richdoc",
       // Nothing else reads this session's doc before it closes.
@@ -1225,7 +1270,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       });
     } catch (error) {
       await provider.close().catch((closeError: unknown) => {
-        this.#onError(`[desktop] engine Y.Doc close after a refused edit failed for ${path}:`, closeError);
+        this.#onError(
+          `[desktop] engine Y.Doc close after a refused edit failed for ${path}:`,
+          closeError,
+        );
       });
       throw error;
     }
@@ -1260,7 +1308,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     const authority = this.#acquireWorkspace(binding.workspaceId);
     try {
       authority.assertCurrent();
-      const captured = this.#owner.documentSession(authority.workspace.attachmentId, binding.currentPath);
+      const captured = this.#owner.documentSession(
+        authority.workspace.attachmentId,
+        binding.currentPath,
+      );
       const owned = captured?.session;
       const native = owned?.provider.nativeOwner;
       if (!captured || !owned || !native) throw new Error("Existing owner is unavailable.");
@@ -1269,12 +1320,22 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         const currentAuthority = this.#acquireWorkspace(binding.workspaceId);
         try {
           currentAuthority.assertCurrent();
-          if (currentAuthority.workspace.attachmentId !== owned.workspace.attachmentId) throw new Error("Owner workspace changed.");
-        } finally { currentAuthority.release(); }
+          if (currentAuthority.workspace.attachmentId !== owned.workspace.attachmentId)
+            throw new Error("Owner workspace changed.");
+        } finally {
+          currentAuthority.release();
+        }
         captured.assertCurrent();
-        if (!renderer?.isCurrent() || captured.caller.sender.isDestroyed() || owned.deleted || this.#isSharedView(owned.workspace) ||
-          owned.provider.nativeOwner?.sessionId !== native.sessionId || owned.provider.objectId !== binding.objectId ||
-          owned.provider.versionId !== binding.mainVersionId) throw new Error("Existing owner changed.");
+        if (
+          !renderer?.isCurrent() ||
+          captured.caller.sender.isDestroyed() ||
+          owned.deleted ||
+          this.#isSharedView(owned.workspace) ||
+          owned.provider.nativeOwner?.sessionId !== native.sessionId ||
+          owned.provider.objectId !== binding.objectId ||
+          owned.provider.versionId !== binding.mainVersionId
+        )
+          throw new Error("Existing owner changed.");
         const claim = owned.provider.lineageClaimId ?? null;
         if (claim === null) throw new OwnerClaimNotLearned(() => native.resyncIfNeeded());
         if (claim !== binding.lineageClaimId) throw new Error("Existing owner changed.");
@@ -1291,45 +1352,95 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           return native.onSettlementWanted(handler);
         },
         prepareHandoff: async (signal: AbortSignal) => {
-          assertCurrent(); signal.throwIfAborted();
+          assertCurrent();
+          signal.throwIfAborted();
           if (owned.ownerHandoff) throw new Error("Owner handoff is already active.");
           let ready!: () => void, fail!: (error: unknown) => void, finish!: () => void;
-          const prepared = new Promise<void>((resolve,reject) => { ready = resolve; fail = reject; });
-          const done = new Promise<void>(resolve => { finish = resolve; });
-          const handoff = { ready,fail,done,finish };
+          const prepared = new Promise<void>((resolve, reject) => {
+            ready = resolve;
+            fail = reject;
+          });
+          const done = new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          const handoff = { ready, fail, done, finish };
           owned.ownerHandoff = handoff;
-          const abort = () => { fail(signal.reason); finish(); if (owned.ownerHandoff === handoff) owned.ownerHandoff = undefined; };
-          signal.addEventListener("abort",abort,{once: true});
-          void done.finally(() => signal.removeEventListener("abort",abort));
-          try {captured.caller.sender.send(CHANNELS.engineYDocOwnerHandoff, EngineYDocOwnerHandoff.parse({sessionId: captured.caller.sessionId,lineageGeneration: captured.caller.lineageGeneration}));}
-          catch (error) {fail(error); finish(); if (owned.ownerHandoff === handoff) owned.ownerHandoff = undefined;}
-          await prepared; assertCurrent();
+          const abort = () => {
+            fail(signal.reason);
+            finish();
+            if (owned.ownerHandoff === handoff) owned.ownerHandoff = undefined;
+          };
+          signal.addEventListener("abort", abort, { once: true });
+          void done.finally(() => signal.removeEventListener("abort", abort));
+          try {
+            captured.caller.sender.send(
+              CHANNELS.engineYDocOwnerHandoff,
+              EngineYDocOwnerHandoff.parse({
+                sessionId: captured.caller.sessionId,
+                lineageGeneration: captured.caller.lineageGeneration,
+              }),
+            );
+          } catch (error) {
+            fail(error);
+            finish();
+            if (owned.ownerHandoff === handoff) owned.ownerHandoff = undefined;
+          }
+          await prepared;
+          assertCurrent();
         },
         finishHandoff: async (_adopted: boolean) => {
           const handoff = owned.ownerHandoff;
           if (!handoff) return;
           owned.ownerHandoff = undefined;
-          handoff.fail(new Error("Owner handoff ended.")); handoff.finish();
+          handoff.fail(new Error("Owner handoff ended."));
+          handoff.finish();
         },
-        remoteApplied: async (update: Uint8Array) => { assertCurrent(); await native.applyRemoteUpdate(update); assertCurrent(); },
+        remoteApplied: async (update: Uint8Array) => {
+          assertCurrent();
+          await native.applyRemoteUpdate(update);
+          assertCurrent();
+        },
       };
-    } finally { authority.release(); }
+    } finally {
+      authority.release();
+    }
   }
 
-  async prepareOwnerHandoff(sender: EngineYDocIpcSender, payload: EngineYDocOwnerHandoff): Promise<void> {
+  async prepareOwnerHandoff(
+    sender: EngineYDocIpcSender,
+    payload: EngineYDocOwnerHandoff,
+  ): Promise<void> {
     const input = EngineYDocOwnerHandoff.parse(payload);
-    const caller = { ...this.#caller(sender,input.sessionId),lineageGeneration: input.lineageGeneration };
-    const access = this.#owner.applyUpdate(caller, owned => owned);
+    const caller = {
+      ...this.#caller(sender, input.sessionId),
+      lineageGeneration: input.lineageGeneration,
+    };
+    const access = this.#owner.applyUpdate(caller, (owned) => owned);
     if (access.kind !== "applied") throw new Error("Owner handoff session is unavailable.");
-    const owned = access.value, handoff = owned.ownerHandoff, native = owned.provider.nativeOwner;
-    if (!handoff || !native || owned.deleted || this.#isSharedView(owned.workspace)) throw new Error("Owner handoff was not requested.");
+    const owned = access.value,
+      handoff = owned.ownerHandoff,
+      native = owned.provider.nativeOwner;
+    if (!handoff || !native || owned.deleted || this.#isSharedView(owned.workspace))
+      throw new Error("Owner handoff was not requested.");
     try {
       await native.flush();
-      const current = this.#owner.applyUpdate(caller, value => value === owned && value.ownerHandoff === handoff && value.provider.nativeOwner?.sessionId === native.sessionId);
-      if (current.kind !== "applied" || !current.value) throw new Error("Owner handoff session changed.");
+      const current = this.#owner.applyUpdate(
+        caller,
+        (value) =>
+          value === owned &&
+          value.ownerHandoff === handoff &&
+          value.provider.nativeOwner?.sessionId === native.sessionId,
+      );
+      if (current.kind !== "applied" || !current.value)
+        throw new Error("Owner handoff session changed.");
       handoff.ready();
       await handoff.done;
-    } catch (error) { handoff.fail(error); handoff.finish(); if (owned.ownerHandoff === handoff) owned.ownerHandoff = undefined; throw error; }
+    } catch (error) {
+      handoff.fail(error);
+      handoff.finish();
+      if (owned.ownerHandoff === handoff) owned.ownerHandoff = undefined;
+      throw error;
+    }
   }
 
   acknowledgeLineageReplacement(
@@ -1346,18 +1457,13 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       (owned, replacement) => {
         for (const descriptor of owned.artifactAssetsById.values()) {
           if (
-            !owned.retiredArtifactAssets.some((retired) =>
-              sameArtifactAsset(retired, descriptor),
-            )
+            !owned.retiredArtifactAssets.some((retired) => sameArtifactAsset(retired, descriptor))
           ) {
             owned.retiredArtifactAssets.push(descriptor);
           }
         }
         owned.artifactAssetsById = new Map(
-          replacement.artifactAssets.map((descriptor) => [
-            descriptor.id,
-            descriptor,
-          ]),
+          replacement.artifactAssets.map((descriptor) => [descriptor.id, descriptor]),
         );
       },
     );
@@ -1382,11 +1488,19 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   async waitForAdmission(sender: EngineYDocIpcSender, payload: OpenPayload): Promise<boolean> {
     const input = OpenEngineYDocSessionPayload.parse(payload);
     const renderer = this.#sessionFor(sender);
-    if (!renderer?.isCurrent() || !windowShowsWorkspace(renderer, input.workspaceId, this.#authorities) || sender.isDestroyed()) return false;
+    if (
+      !renderer?.isCurrent() ||
+      !windowShowsWorkspace(renderer, input.workspaceId, this.#authorities) ||
+      sender.isDestroyed()
+    )
+      return false;
     const authority = this.#acquireWorkspace(input.workspaceId);
     const waits = this.#admissionWaits.get(sender) ?? new Map<string, SharedAdmissionWait>();
     // Bound IPC waits too, including requests that have not reached relay authentication.
-    if (waits.size >= 4 || waits.has(input.sessionId)) { authority.release(); return false; }
+    if (waits.size >= 4 || waits.has(input.sessionId)) {
+      authority.release();
+      return false;
+    }
     this.#admissionWaits.set(sender, waits);
     if (!this.#admissionSenders.has(sender)) {
       this.#admissionSenders.add(sender);
@@ -1395,17 +1509,27 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       });
     }
     const cancel = new AbortController();
-    waits.set(input.sessionId, {cancel, authorityId: authority.workspace.attachmentId, generation: renderer.generation});
+    waits.set(input.sessionId, {
+      cancel,
+      authorityId: authority.workspace.attachmentId,
+      generation: renderer.generation,
+    });
     try {
       if (!this.#isSharedView(authority.workspace)) return false;
       const capture = await this.#sharedCaptureFor?.(authority.workspace);
-      authority.assertCurrent(); cancel.signal.throwIfAborted();
+      authority.assertCurrent();
+      cancel.signal.throwIfAborted();
       if (!renderer.isCurrent()) return false;
-      const ready = await capture?.waitForAdmission?.(input.path, AbortSignal.any([cancel.signal, AbortSignal.timeout(45_000)]));
-      authority.assertCurrent(); cancel.signal.throwIfAborted();
+      const ready = await capture?.waitForAdmission?.(
+        input.path,
+        AbortSignal.any([cancel.signal, AbortSignal.timeout(45_000)]),
+      );
+      authority.assertCurrent();
+      cancel.signal.throwIfAborted();
       return ready === true && renderer.isCurrent();
-    } catch { return false; }
-    finally {
+    } catch {
+      return false;
+    } finally {
       waits.delete(input.sessionId);
       if (waits.size === 0) this.#admissionWaits.delete(sender);
       authority.release();
@@ -1416,12 +1540,14 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     sender: EngineYDocIpcSender,
     generation: number,
   ): Promise<EngineYDocSessionReleaseOutcome[]> {
-    for (const wait of this.#admissionWaits.get(sender)?.values() ?? []) if (wait.generation === generation) wait.cancel.abort();
+    for (const wait of this.#admissionWaits.get(sender)?.values() ?? [])
+      if (wait.generation === generation) wait.cancel.abort();
     return this.#owner.retireSender({ sender, generation });
   }
 
   shutdown(): Promise<EngineYDocSessionReleaseOutcome[]> {
-    for (const waits of this.#admissionWaits.values()) for (const wait of waits.values()) wait.cancel.abort();
+    for (const waits of this.#admissionWaits.values())
+      for (const wait of waits.values()) wait.cancel.abort();
     this.#arrivals.clear();
     return this.#owner.shutdown();
   }
@@ -1435,19 +1561,25 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
    * does once its editors closed: refused while an editor holds the
    * document, and an editor that opens meanwhile waits for the change.
    */
-  async withLiveEditingChange<T>(authorityId: symbol, path: string, change: () => Promise<T>): Promise<T> {
+  async withLiveEditingChange<T>(
+    authorityId: symbol,
+    path: string,
+    change: () => Promise<T>,
+  ): Promise<T> {
     try {
       return await this.#fileMutationPort.withDocumentUnowned(authorityId, path, change);
     } catch (error) {
       if (!(error instanceof LiveDocumentOwnedError)) throw error;
-      throw new Error(`${path} is open in an editor in dohc, where someone may be typing. dohc won't change its live editing while it's open. Ask the person using dohc to close it, then try again.`, { cause: error });
+      throw new Error(
+        `${path} is open in an editor in dohc, where someone may be typing. dohc won't change its live editing while it's open. Ask the person using dohc to close it, then try again.`,
+        { cause: error },
+      );
     }
   }
 
-  retireAuthority(
-    authorityId: symbol,
-  ): Promise<EngineYDocSessionReleaseOutcome[]> {
-    for (const waits of this.#admissionWaits.values()) for (const wait of waits.values()) if (wait.authorityId === authorityId) wait.cancel.abort();
+  retireAuthority(authorityId: symbol): Promise<EngineYDocSessionReleaseOutcome[]> {
+    for (const waits of this.#admissionWaits.values())
+      for (const wait of waits.values()) if (wait.authorityId === authorityId) wait.cancel.abort();
     // The attachment's documents and their pending updates go with it.
     this.#arrivals.retireAuthority(authorityId);
     return this.#owner.retireAuthority(authorityId);
@@ -1479,7 +1611,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             workspaceId: outbound.workspaceId,
             path: outbound.path,
             ...message.event,
-            typingUnresolved: isTypingSessionUnresolved(outbound.workspaceId,outbound.path),
+            typingUnresolved: isTypingSessionUnresolved(outbound.workspaceId, outbound.path),
             ...(message.closing ? { closing: true } : {}),
             ...engineSaveState(message.event.state, message.event.editRefusal),
           }),
@@ -1506,10 +1638,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         }),
       );
     } catch (error) {
-      if (
-        rendererSession.isCurrent() &&
-        rendererSession.generation === outbound.generation
-      ) {
+      if (rendererSession.isCurrent() && rendererSession.generation === outbound.generation) {
         this.#onError(
           `[desktop] engine Y.Doc ${message.kind} delivery failed for ${outbound.path}.`,
           error,
@@ -1521,7 +1650,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
 
   #openRefusal(error: unknown): OpenResult {
     if (isCaptureFileHeldRefusal(error)) return unavailableOpen({ captureHeld: true });
-    if (isYDocOutsideWriteWaitingError(error)) return unavailableOpen({ outsideWriteWaiting: true });
+    if (isYDocOutsideWriteWaitingError(error))
+      return unavailableOpen({ outsideWriteWaiting: true });
     if (isYDocPathNotInVersionError(error)) {
       return unavailableOpen({ notInVersion: true });
     }
@@ -1536,17 +1666,15 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     if (isYdocArtifactAssetsInvalidRefusal(error)) {
       return unavailableOpen({ artifactAssetsInvalid: true });
     }
-    if (
-      isEngineWorkspaceOpenRefusedError(error) ||
-      isYDocSessionUnreleasedError(error)
-    ) {
+    if (isEngineWorkspaceOpenRefusedError(error) || isYDocSessionUnreleasedError(error)) {
       return unavailableOpen({ engineMayHoldDocument: true });
     }
     return unavailableOpen();
   }
 }
 
-export const DOCUMENT_EDIT_PENDING_WARNING = "Saved locally. The shared file update is pending. Do not repeat this edit.";
+export const DOCUMENT_EDIT_PENDING_WARNING =
+  "Saved locally. The shared file update is pending. Do not repeat this edit.";
 
 // Admit the edit before reporting a pending owner draft as saved. The editor
 // receives the admitted update, merged with what the person typed meanwhile.
@@ -1565,10 +1693,15 @@ async function applyDocumentEdit(
   if (update === null) return { changed: false };
   session.assertSame();
   const options = { ...input.origin, idempotencyKey: randomUUID() };
-  const append = () => provider.applyDecidedLocalUpdate(() => {
-    session.assertSame();
-    return update;
-  }, undefined, options);
+  const append = () =>
+    provider.applyDecidedLocalUpdate(
+      () => {
+        session.assertSame();
+        return update;
+      },
+      undefined,
+      options,
+    );
   let accepted: boolean;
   try {
     accepted = await append();
@@ -1583,8 +1716,12 @@ async function applyDocumentEdit(
   let pending = false;
   session.show(update);
   try {
-    await settleNow.call(provider, input.allowLossySourceSha256
-      ? { allowLossySourceSha256: input.allowLossySourceSha256 } : undefined);
+    await settleNow.call(
+      provider,
+      input.allowLossySourceSha256
+        ? { allowLossySourceSha256: input.allowLossySourceSha256 }
+        : undefined,
+    );
   } catch (error) {
     if (error instanceof YdocOwnerDraftPendingError) {
       pending = true;
@@ -1598,8 +1735,8 @@ async function applyDocumentEdit(
         isConflictStaleTargetCause(error)
           ? `${path} changed outside dohc, so dohc did not save the edit to the file. The edit stays in the open document, and in History once the document reloads or closes. Read the document before you retry.`
           : isDocumentTooDenseCause(error)
-          ? `The edit is in ${path}. ${DOCUMENT_TOO_DENSE_WORDS} Retrying won't help.`
-          : `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
+            ? `The edit is in ${path}. ${DOCUMENT_TOO_DENSE_WORDS} Retrying won't help.`
+            : `The edit is in ${path}, but dohc has not saved it to the file yet (${cause}). Read the document before you retry.`,
         { cause: error },
       );
     }
@@ -1616,9 +1753,16 @@ async function applyDocumentEdit(
   // before the edit can still be on its way from their editor, and waiting
   // for it would only move the moment: they can change the block again right
   // after. So the answer says so instead of promising the text stays.
-  if (pending) return { changed: true, warning: session.keepBlocks
-    ? `${DOCUMENT_EDIT_PENDING_WARNING} ${DOCUMENT_EDIT_SHARED_WARNING}` : DOCUMENT_EDIT_PENDING_WARNING };
-  return session.keepBlocks ? { changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING } : { changed: true };
+  if (pending)
+    return {
+      changed: true,
+      warning: session.keepBlocks
+        ? `${DOCUMENT_EDIT_PENDING_WARNING} ${DOCUMENT_EDIT_SHARED_WARNING}`
+        : DOCUMENT_EDIT_PENDING_WARNING,
+    };
+  return session.keepBlocks
+    ? { changed: true, warning: DOCUMENT_EDIT_SHARED_WARNING }
+    : { changed: true };
 }
 
 type AppliedEdit = Omit<LiveDocumentEditOutcome, "path">;
@@ -1657,8 +1801,6 @@ export function createEngineYDocSessionIpc(
   return new EngineYDocSessionIpc(options);
 }
 
-function unavailableOpen(
-  details: Omit<OpenResult, "available"> = {},
-): OpenResult {
+function unavailableOpen(details: Omit<OpenResult, "available"> = {}): OpenResult {
   return OpenEngineYDocSessionResult.parse({ available: false, ...details });
 }

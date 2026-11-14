@@ -1,5 +1,5 @@
 import { useRequestSequence } from "../useRequestSequence";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   ReadShareProposalChangesResult,
   ShareProposalOperation,
@@ -8,53 +8,31 @@ import { bridge } from "../bridge";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { Overlay } from "../Overlay";
 import { ipcErrorMessage } from "../ipcError";
-import {
-  UnifiedDiffLines,
-  buildUnifiedDiffLines,
-  computeTextDiff,
-} from "./unifiedDiff";
-
-// The granter's review of one recipient's submitted changes.
-// Modelled on ConflictReviewDialog: a notice opens it, it reads its own
-// window under a liveness token, and it decides one thing.
-//
-// `proposal` is the code and storage word for what the user sees as
-// "changes" — one name for one thing on screen, and the wire keeps its own.
+import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unifiedDiff";
 
 // The name the granter reads. A submitter whose email the relay could not
 // state reads the same way the share banner names an unknown account.
-export function proposerName(
-  sent: { proposedByEmail: string | null } | null,
-): string {
+export function proposerName(sent: { proposedByEmail: string | null } | null): string {
   return sent?.proposedByEmail ?? "another dohc user";
 }
 
-// The words the version compare page already uses for the same two facts.
 function operationLabel(operation: ShareProposalOperation): string {
   return operation === "delete" ? "Removed" : "Changed";
 }
 
 // One submitted file's diff, built once per pair of bodies instead of on
 // every render of the dialog — the bound the compare page relies on.
-function ProposalFileDiff(props: {
-  currentText: string | null;
-  incomingText: string | null;
-}) {
+function ProposalFileDiff(props: { currentText: string | null; incomingText: string | null }) {
   const lines = useMemo(
     () =>
       buildUnifiedDiffLines(
-        computeTextDiff(
-          props.currentText ?? undefined,
-          props.incomingText ?? undefined,
-          800,
-        ),
+        computeTextDiff(props.currentText ?? undefined, props.incomingText ?? undefined, 800),
       ),
     [props.currentText, props.incomingText],
   );
   return <UnifiedDiffLines lines={lines} testId="proposal-review-diff-lines" />;
 }
 
-// What one row says before anyone pays to open it.
 function sizeLabel(bytes: number | null): string | null {
   if (bytes === null) return null;
   if (bytes < 1024) return `${bytes} B`;
@@ -67,11 +45,6 @@ type ContentState =
   | { status: "error"; message: string }
   | { status: "ready"; currentText: string | null; incomingText: string | null };
 
-// One file of the review, closed until the granter opens it.
-//
-// Opening is what fetches the content. A review of a repository-sized folder
-// lists thousands of these, and fetching every file's two sides to show that
-// list is what made such a review impossible to open at all.
 function ProposalFileSection(props: {
   workspaceId: string;
   proposalId: string;
@@ -136,15 +109,9 @@ function ProposalFileSection(props: {
         onClick={toggle}
         className="dohc-focus-row flex min-h-9 w-full cursor-pointer items-center gap-2 border-b border-line bg-panel-2 px-3 py-2 text-left hover:bg-hover"
       >
-        <span className="min-w-0 flex-1 truncate text-[12px] text-ink">
-          {file.path}
-        </span>
-        {size ? (
-          <span className="shrink-0 text-[11px] text-subtle">{size}</span>
-        ) : null}
-        <span className="shrink-0 text-[11px] text-subtle">
-          {operationLabel(file.operation)}
-        </span>
+        <span className="min-w-0 flex-1 truncate text-[12px] text-ink">{file.path}</span>
+        {size ? <span className="shrink-0 text-[11px] text-subtle">{size}</span> : null}
+        <span className="shrink-0 text-[11px] text-subtle">{operationLabel(file.operation)}</span>
       </button>
       {file.drifted ? (
         <p
@@ -167,10 +134,7 @@ function ProposalFileSection(props: {
         </p>
       ) : null}
       {open && content?.status === "ready" ? (
-        <ProposalFileDiff
-          currentText={content.currentText}
-          incomingText={content.incomingText}
-        />
+        <ProposalFileDiff currentText={content.currentText} incomingText={content.incomingText} />
       ) : null}
     </section>
   );
@@ -234,9 +198,7 @@ export function ProposalReviewDialog(props: {
         props.onClose();
       } catch (error) {
         if (!liveToken.isCurrent(token)) return;
-        setSettleError(
-          ipcErrorMessage(error, "dohc couldn't record your decision."),
-        );
+        setSettleError(ipcErrorMessage(error, "dohc couldn't record your decision."));
         setSettling(false);
       }
     },
@@ -262,9 +224,7 @@ export function ProposalReviewDialog(props: {
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-          {load.status === "loading" ? (
-            <SkeletonRows label="Loading these changes…" />
-          ) : null}
+          {load.status === "loading" ? <SkeletonRows label="Loading these changes…" /> : null}
           {load.status === "error" ? (
             <p className="m-0 text-xs leading-5 text-danger" role="alert">
               {load.message}
@@ -306,12 +266,6 @@ export function ProposalReviewDialog(props: {
           >
             Finish later
           </button>
-          {/* Decline is the safe exit, so nothing about reading the changes
-              can take it away. It moves nothing into this workspace, and a
-              granter who cannot see a proposal must still be able to refuse
-              it — otherwise the only way out is ending the share, which
-              discards work without asking. Accept is the opposite: it writes,
-              so it stays disabled until the review actually loaded. */}
           <button
             type="button"
             data-testid="proposal-review-decline"

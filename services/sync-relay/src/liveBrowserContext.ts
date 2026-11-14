@@ -27,7 +27,10 @@ export interface AgentLiveContext {
   readonly resourceHash: string;
 }
 
-export type LiveBrowserContext = NamedLiveBrowserContext | LinkLiveBrowserContext | AgentLiveContext;
+export type LiveBrowserContext =
+  | NamedLiveBrowserContext
+  | LinkLiveBrowserContext
+  | AgentLiveContext;
 
 /**
  * Server-only context for a personal agent in one workspace of its owner: its
@@ -47,17 +50,43 @@ export interface PersonalLiveContext {
 /** Whoever a live ticket is minted for and redeemed by. */
 export type LiveTicketScope = LiveBrowserContext | PersonalLiveContext;
 
-export function liveBrowserActor(scope: LinkLiveBrowserContext | AgentLiveContext): Extract<CurrentLiveBindingRequest["actor"], {kind: "link"}>;
-export function liveBrowserActor(scope: NamedLiveBrowserContext): Extract<CurrentLiveBindingRequest["actor"], {kind: "named"}>;
-export function liveBrowserActor(scope: PersonalLiveContext): Extract<CurrentLiveBindingRequest["actor"], {kind: "personal"}>;
+export function liveBrowserActor(
+  scope: LinkLiveBrowserContext | AgentLiveContext,
+): Extract<CurrentLiveBindingRequest["actor"], { kind: "link" }>;
+export function liveBrowserActor(
+  scope: NamedLiveBrowserContext,
+): Extract<CurrentLiveBindingRequest["actor"], { kind: "named" }>;
+export function liveBrowserActor(
+  scope: PersonalLiveContext,
+): Extract<CurrentLiveBindingRequest["actor"], { kind: "personal" }>;
 export function liveBrowserActor(scope: LiveTicketScope): CurrentLiveBindingRequest["actor"];
 export function liveBrowserActor(scope: LiveTicketScope): CurrentLiveBindingRequest["actor"] {
-  if (scope.kind === "named") return { kind: "named", userId: scope.userId, grantId: scope.grantId };
-  if (scope.kind === "personal") return { kind: "personal", workspaceId: scope.workspaceId, agentId: scope.agentId,
-    connectionId: scope.connectionId, accessTokenHash: scope.accessTokenHash, resourceHash: scope.resourceHash, fenceEpoch: scope.fenceEpoch };
+  if (scope.kind === "named")
+    return { kind: "named", userId: scope.userId, grantId: scope.grantId };
+  if (scope.kind === "personal")
+    return {
+      kind: "personal",
+      workspaceId: scope.workspaceId,
+      agentId: scope.agentId,
+      connectionId: scope.connectionId,
+      accessTokenHash: scope.accessTokenHash,
+      resourceHash: scope.resourceHash,
+      fenceEpoch: scope.fenceEpoch,
+    };
   return "agentConnectionId" in scope
-    ? { kind: "link", workspaceId: scope.workspaceId, grantId: scope.grantId, agentConnectionId: scope.agentConnectionId,
-      accessTokenHash: scope.accessTokenHash, resourceHash: scope.resourceHash }
-    : { kind: "link", workspaceId: scope.workspaceId, grantId: scope.grantId, sessionId: scope.sessionId,
-      profileTokenHash: scope.profileTokenHash };
+    ? {
+        kind: "link",
+        workspaceId: scope.workspaceId,
+        grantId: scope.grantId,
+        agentConnectionId: scope.agentConnectionId,
+        accessTokenHash: scope.accessTokenHash,
+        resourceHash: scope.resourceHash,
+      }
+    : {
+        kind: "link",
+        workspaceId: scope.workspaceId,
+        grantId: scope.grantId,
+        sessionId: scope.sessionId,
+        profileTokenHash: scope.profileTokenHash,
+      };
 }

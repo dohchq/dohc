@@ -91,7 +91,6 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
     return rankEmoji(state.query)
       .slice(0, 24)
       .map((x) => x.entry);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.open ? state.query : ""]);
 
   function commit(entry: EmojiEntry) {
@@ -118,7 +117,11 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
         e.stopPropagation();
-        const next = moveInMenu(e, activeIdx, matches.map((entry) => entry.shortcode));
+        const next = moveInMenu(
+          e,
+          activeIdx,
+          matches.map((entry) => entry.shortcode),
+        );
         if (next !== null) setActiveIdx(next);
       } else if (e.key === "Enter" || e.key === "Tab") {
         // Tab commits (rather than moving focus out of the editor) —
@@ -168,9 +171,7 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
       }}
       role="listbox"
       aria-label="emoji"
-      aria-activedescendant={
-        matches.length > 0 ? optionId(activeIdx) : undefined
-      }
+      aria-activedescendant={matches.length > 0 ? optionId(activeIdx) : undefined}
       onMouseDown={(e) => e.preventDefault()}
     >
       {matches.length === 0 ? (
@@ -197,10 +198,15 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
               }}
               onClick={() => commit(entry)}
             >
-              <span className="grid w-5 shrink-0 place-items-center text-base leading-none" aria-hidden>
+              <span
+                className="grid w-5 shrink-0 place-items-center text-base leading-none"
+                aria-hidden
+              >
                 {entry.emoji}
               </span>
-              <span className="min-w-0 flex-1 truncate font-mono text-[12px]">:{entry.shortcode}:</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
+                :{entry.shortcode}:
+              </span>
             </button>
           ))}
         </div>

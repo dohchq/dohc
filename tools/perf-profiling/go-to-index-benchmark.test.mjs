@@ -5,9 +5,18 @@ import { promisify } from "node:util";
 import { resolve } from "node:path";
 
 test("the pure benchmark exercises first scans, narrowings, slices, and memory", async () => {
-  const { stdout } = await promisify(execFile)(process.execPath,
-    ["--expose-gc", resolve("tools/perf-profiling/go-to-index-benchmark.mjs"), "--samples", "2", "--counts", "100,500"],
-    { cwd: resolve("."), windowsHide: true, maxBuffer: 1024 * 1024 });
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    [
+      "--expose-gc",
+      resolve("tools/perf-profiling/go-to-index-benchmark.mjs"),
+      "--samples",
+      "2",
+      "--counts",
+      "100,500",
+    ],
+    { cwd: resolve("."), windowsHide: true, maxBuffer: 1024 * 1024 },
+  );
   const receipt = JSON.parse(stdout);
   assert.equal(receipt.samples, 2);
   assert.ok(receipt.host.busyPercent >= 0 && receipt.host.busyPercent <= 100);

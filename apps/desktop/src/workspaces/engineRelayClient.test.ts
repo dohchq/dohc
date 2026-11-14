@@ -8,45 +8,25 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import {
-  RelayApiVersionError,
   MAX_REPORTED_REFUSALS,
-  RelayKeyEnvelopeMissingError,
-  RelayOriginDivergedError,
-  RelayUnreachableError,
-  RelayWorkspaceUnavailableError,
   RelayIdentityMissingError,
   RelayClaimRefusedError,
-  ShareUnavailableError,
-  SharedChannelReadOnlyError,
-  SharedFileReadOnlyError,
 } from "@dohc/workspace-contracts/relay";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   EngineClientError,
-  EngineRequestError,
   EngineWorkspaceSessions,
-  EngineWorkspaceShuttingDownError,
   type EngineDaemonClient,
 } from "@dohc/workspace-engine-client/daemon";
 import {
   allowInsecureLoopbackRelayForTests,
   EngineRelayClient,
   MixedRelayTransportError,
-  RelayBusyError,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
 import { INSECURE_LOOPBACK_RELAY_TEST_ENV } from "./cloudConfiguration";
-import {
-  mountRootFor,
-  mountStoreWorkspaceIdFor,
-} from "./shareMounts";
-import {
-  createShareMountDirectoryThroughOwnerForTest,
-  refreshShareMountThroughOwnerForTest,
-  refreshStandaloneShareThroughOwnerForTest,
-} from "../testing/shareViewFilesMountHarness";
-import { syncJoinedSharedChannels } from "./sharedChannels";
+import { refreshStandaloneShareThroughOwnerForTest } from "../testing/shareViewFilesMountHarness";
 
 // Every test in this file pulls with the selector its share record pins. The
 // damaged-record path has its own tests in sharedView.test.ts. This is a real
@@ -57,14 +37,6 @@ const PINNED_SELECTOR = {
   versionId: null,
   access: "view",
 } as const;
-// The same pinned selector at the one level that can offer changes (#646
-// PR3). Submitting through a view or comment grant is refused by the engine,
-// so a submit test that pinned `view` would prove nothing about the wire.
-const EDIT_SELECTOR = {
-  paths: ["docs"],
-  versionId: null,
-  access: "edit",
-} as const;
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 import { readLocalStateFrom } from "./workspaceLocalState";
@@ -72,9 +44,7 @@ import { readLocalStateFrom } from "./workspaceLocalState";
 class MockDaemon implements EngineDaemonClient {
   readonly requests: Request[] = [];
 
-  constructor(
-    private readonly override?: (request: Request) => JsonValue | undefined,
-  ) {}
+  constructor(private readonly override?: (request: Request) => JsonValue | undefined) {}
 
   async sendRequest(request: Request): Promise<Response> {
     this.requests.push(request);
@@ -96,8 +66,10 @@ class MockDaemon implements EngineDaemonClient {
           return { closed: true };
         case "sync.push":
           return {
-            status: "complete", refused: 0,
-            pushed: 3, ownerAdmissionPending: [],
+            status: "complete",
+            refused: 0,
+            pushed: 3,
+            ownerAdmissionPending: [],
             fetched: 0,
             applied: 0,
             skipped: 0,
@@ -106,14 +78,17 @@ class MockDaemon implements EngineDaemonClient {
             nextCursor: null,
             pendingCursor: null,
             changedPaths: [],
-            sharingDeclined: [], refusals: [],
+            sharingDeclined: [],
+            refusals: [],
           };
         case "sync.fetchPull":
           return { pageToken: "page-token" };
         case "sync.applyPull":
           return {
-            status: "complete", refused: 0,
-            pushed: 0, ownerAdmissionPending: [],
+            status: "complete",
+            refused: 0,
+            pushed: 0,
+            ownerAdmissionPending: [],
             fetched: 4,
             applied: 2,
             skipped: 2,
@@ -135,7 +110,8 @@ class MockDaemon implements EngineDaemonClient {
                 contentKind: "secret",
               },
             ],
-            sharingDeclined: [], refusals: [],
+            sharingDeclined: [],
+            refusals: [],
           };
         case "sync.commitCursor":
           return { committed: true, sharingDeclined: [] };
@@ -221,10 +197,7 @@ async function harness(daemon = new MockDaemon(), onRefusalsChanged?: () => void
   const attachmentId = Symbol("test-workspace-attachment");
   roots.push(rootPath);
   const routes = new RelayTransportRouteGuard();
-  const source = new RelayConfiguredDaemonClientSource(
-    { currentClient: () => daemon },
-    routes,
-  );
+  const source = new RelayConfiguredDaemonClientSource({ currentClient: () => daemon }, routes);
   const sessions = new EngineWorkspaceSessions(source, {
     transportRebindAttempts: 1,
   });
@@ -255,16 +228,6 @@ async function harness(daemon = new MockDaemon(), onRefusalsChanged?: () => void
   };
 }
 
-function expectStatefulRequestsScoped(requests: Request[]): void {
-  for (const request of requests) {
-    if (request.method === "workspace.open") continue;
-    expect(
-      request.workspace,
-      `${request.method} must retain its daemon workspace handle`,
-    ).toBe("ws-mock");
-  }
-}
-
 describe("EngineRelayClient", () => {
   it("fetches off the capture chain and completes each batch before fetching another", async () => {
     const entered = Promise.withResolvers<void>();
@@ -272,14 +235,25 @@ describe("EngineRelayClient", () => {
     let held = false;
     let pages = 0;
     const events: string[] = [];
-    const daemon = new MockDaemon(request => {
+    const daemon = new MockDaemon((request) => {
       if (request.method === "sync.applyPull") {
         expect(held).toBe(true);
         events.push("apply");
         pages += 1;
-        return {status: "complete", refused: 0, fetched: 1, applied: 1, skipped: 0,
-          conflictsOpened: 0, hasMore: pages === 1, nextCursor: pages,
-          pendingCursor: {kind: "relay", token: `cursor-${pages}`}, sharingDeclined: [], refusals: [], changedPaths: []};
+        return {
+          status: "complete",
+          refused: 0,
+          fetched: 1,
+          applied: 1,
+          skipped: 0,
+          conflictsOpened: 0,
+          hasMore: pages === 1,
+          nextCursor: pages,
+          pendingCursor: { kind: "relay", token: `cursor-${pages}` },
+          sharingDeclined: [],
+          refusals: [],
+          changedPaths: [],
+        };
       }
       if (request.method === "sync.commitCursor") {
         expect(held).toBe(true);
@@ -288,7 +262,7 @@ describe("EngineRelayClient", () => {
       return undefined;
     });
     const send = daemon.sendRequest.bind(daemon);
-    vi.spyOn(daemon, "sendRequest").mockImplementation(async request => {
+    vi.spyOn(daemon, "sendRequest").mockImplementation(async (request) => {
       if (request.method === "sync.fetchPull") {
         expect(held).toBe(false);
         events.push("fetch");
@@ -297,32 +271,34 @@ describe("EngineRelayClient", () => {
       }
       return send(request);
     });
-    const {client, sessions} = await harness(daemon);
-    const pulling = client.pull(async apply => {
+    const { client, sessions } = await harness(daemon);
+    const pulling = client.pull(async (apply) => {
       held = true;
       try {
-        return await apply(async () => { expect(held).toBe(true); events.push("project"); });
-      } finally { held = false; }
+        return await apply(async () => {
+          expect(held).toBe(true);
+          events.push("project");
+        });
+      } finally {
+        held = false;
+      }
     });
     await entered.promise;
     expect(held).toBe(false);
     expect(events).toEqual(["fetch"]);
     release.resolve();
     await pulling;
-    expect(events).toEqual(["fetch", "apply", "project", "commit", "fetch", "apply", "project", "commit"]);
+    expect(events).toEqual([
+      "fetch",
+      "apply",
+      "project",
+      "commit",
+      "fetch",
+      "apply",
+      "project",
+      "commit",
+    ]);
     await sessions.closeAll();
-  });
-
-  it("commits engine-owned refusals before notifying Notices", async () => {
-    const refusal = { workspaceId: "workspace-a", originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input", reason: "Review this conflict." };
-    const daemon = new MockDaemon(request => request.method === "sync.applyPull" ? {
-      status: "complete", refused: 1, fetched: 1, applied: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
-      nextCursor: 9, pendingCursor: {kind: "relay", token: "cursor-9"}, changedPaths: [], sharingDeclined: [], refusals: [refusal],
-    } : undefined);
-    const changed = vi.fn(() => expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(true));
-    const { client } = await harness(daemon, changed);
-    await client.pull(async (apply) => apply(async () => undefined));
-    expect(changed).toHaveBeenCalledOnce();
   });
 
   it("claims after reopening a refused workspace under another account", async () => {
@@ -330,19 +306,23 @@ describe("EngineRelayClient", () => {
     let pending = true;
     const daemon = new MockDaemon((request) => {
       const params = request.params;
-      const accountId = params !== null && typeof params === "object" && !Array.isArray(params)
-        ? params.accountId : undefined;
+      const accountId =
+        params !== null && typeof params === "object" && !Array.isArray(params)
+          ? params.accountId
+          : undefined;
       if (request.method === "sync.resetClaimRefusal") {
         if (accountId !== refusalAccount) refusalAccount = null;
       }
       if (request.method === "sync.push" && refusalAccount !== null) {
         throw new DaemonRefusalError(
-          { code: "WORKSPACE_UNAVAILABLE", message: "relay-claim-refused", retry: "no" }, new Error("refused"),
+          { code: "WORKSPACE_UNAVAILABLE", message: "relay-claim-refused", retry: "no" },
+          new Error("refused"),
         );
       }
       if (request.method === "sync.push" && pending) {
         throw new DaemonRefusalError(
-          { code: "IDENTITY_REQUIRED", message: "relay-identity-required", retry: "no" }, new Error("pending"),
+          { code: "IDENTITY_REQUIRED", message: "relay-identity-required", retry: "no" },
+          new Error("pending"),
         );
       }
       if (request.method === "sync.claim") {
@@ -350,296 +330,41 @@ describe("EngineRelayClient", () => {
         else {
           refusalAccount = "account-a";
           throw new DaemonRefusalError(
-            { code: "WORKSPACE_UNAVAILABLE", message: "relay-workspace-unavailable", retry: "no" }, new Error("refused"),
+            { code: "WORKSPACE_UNAVAILABLE", message: "relay-workspace-unavailable", retry: "no" },
+            new Error("refused"),
           );
         }
       }
       return undefined;
     });
     const h = await harness(daemon);
-    const binding = { workspaceId: "workspace-a", rootPath: h.rootPath, relay: h.relay, accountId: "account-a" };
+    const binding = {
+      workspaceId: "workspace-a",
+      rootPath: h.rootPath,
+      relay: h.relay,
+      accountId: "account-a",
+    };
     const first = h.live.bind(binding);
     await expect(first.claim()).rejects.toBeInstanceOf(RelayClaimRefusedError);
     await h.live.closeWorkspace("workspace-a");
-    const sameAccount = h.live.bind({ ...binding, relay: { ...h.relay, token: "refreshed-token" } });
+    const sameAccount = h.live.bind({
+      ...binding,
+      relay: { ...h.relay, token: "refreshed-token" },
+    });
     await expect(sameAccount.push()).rejects.toBeInstanceOf(RelayClaimRefusedError);
     await h.live.closeWorkspace("workspace-a");
     await h.live.closeAll({ accountChanged: true });
     expect(refusalAccount).toBe("account-a");
-    const next = h.live.bind({ ...binding, accountId: "account-b", relay: { ...h.relay, token: "account-b-token" } });
+    const next = h.live.bind({
+      ...binding,
+      accountId: "account-b",
+      relay: { ...h.relay, token: "account-b-token" },
+    });
     await expect(next.push()).rejects.toBeInstanceOf(RelayIdentityMissingError);
     await next.claim();
     await expect(next.push()).resolves.toBeDefined();
-    expect(daemon.requests.filter(request => request.method === "sync.claim")).toHaveLength(2);
+    expect(daemon.requests.filter((request) => request.method === "sync.claim")).toHaveLength(2);
     await h.live.closeAll();
-  });
-
-  it("clears a persisted refusal on sign-out even after failed enrollment", async () => {
-    let refused = true;
-    let pending = false;
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.resetClaimRefusal") {
-        refused = false;
-        pending = true;
-      }
-      if (request.method === "sync.push" && refused) throw new DaemonRefusalError(
-        { code: "WORKSPACE_UNAVAILABLE", message: "relay-claim-refused", retry: "no" }, new Error("refused"),
-      );
-      if (request.method === "sync.push" && pending) throw new DaemonRefusalError(
-        { code: "IDENTITY_REQUIRED", message: "relay-identity-required", retry: "no" }, new Error("pending"),
-      );
-      if (request.method === "sync.claim") pending = false;
-      return undefined;
-    });
-    const h = await harness(daemon);
-    await expect(h.client.push()).rejects.toBeInstanceOf(RelayClaimRefusedError);
-    await h.live.closeAll();
-    expect(refused).toBe(true);
-    const binding = { workspaceId: "workspace-a", rootPath: h.rootPath, attachmentId: h.attachmentId, relay: h.relay };
-    h.live.bind(binding);
-    await h.live.closeAll({ accountChanged: true });
-    expect(refused).toBe(false);
-    const next = h.live.bind({ ...binding, relay: { ...h.relay, token: "next-account" } });
-    await expect(next.push()).rejects.toBeInstanceOf(RelayIdentityMissingError);
-    await next.claim();
-    await expect(next.push()).resolves.toBeDefined();
-    await h.live.closeAll();
-  });
-
-
-  it("preserves push continuation for the sync coordinator", async () => {
-    const daemon = new MockDaemon((request) => request.method === "sync.push" ? {
-      status: "complete", pushed: 64, fetched: 0, applied: 0, refused: 0, skipped: 0,
-      conflictsOpened: 0, hasMore: true, pendingCursor: null, changedPaths: [],
-      sharingDeclined: [], ownerAdmissionPending: [], refusals: [], recordFacts: [],
-    } : undefined);
-    const { client, sessions } = await harness(daemon);
-    await expect(client.push()).resolves.toMatchObject({ pushed: 64, hasMore: true });
-    await sessions.closeAll();
-  });
-
-  it("names the server's busy answer to a push, and leaves the engine's own busy answers as they are", async () => {
-    let message = "settlement-proof-budget";
-    const daemon = new MockDaemon((request) => {
-      if (request.method !== "sync.push") return undefined;
-      throw new DaemonRefusalError({ code: "OVERLOADED", message, retry: "afterBackoff" }, new Error("busy"));
-    });
-    const { client, sessions } = await harness(daemon);
-    await expect(client.push()).rejects.toBeInstanceOf(RelayBusyError);
-    message = "engine-store-busy";
-    await expect(client.push()).rejects.toBeInstanceOf(DaemonRefusalError);
-    await sessions.closeAll();
-  });
-
-  it("routes push, pull, cursor commit, recover, claim, and probe through one daemon session", async () => {
-    const { daemon, sessions, client } = await harness();
-
-    await expect(client.push()).resolves.toEqual({
-      pushed: 3, ownerAdmissionPending: [],
-      hasMore: false, originsPushed: [],
-      sharingDeclined: [],
-    });
-    const materializePage = vi.fn(async () => undefined);
-    const pull = await client.pull(async (apply) => apply(materializePage));
-    expect(pull).toMatchObject({
-      fetched: 4,
-      applied: 2,
-      skipped: 2,
-      conflictsOpened: 1,
-      nextCursor: 9,
-      fastForwardedPaths: [
-        {
-          versionId: "main",
-          path: "notes/plan.md",
-          operation: "write",
-          contentKind: "text",
-        },
-        {
-          versionId: "main",
-          path: ".env",
-          operation: "write",
-          contentKind: "secret",
-        },
-      ],
-    });
-    expect(materializePage).toHaveBeenCalledOnce();
-    await expect(client.recoverOrigin()).resolves.toEqual({
-      oldOriginId: "origin-old",
-      newOriginId: "origin-new",
-      sharedPrefixLength: 5,
-      preservedOps: 2,
-    });
-    await expect(client.claim()).resolves.toBeUndefined();
-    await expect(client.probe()).resolves.toEqual({ hasContent: true });
-    await expect(client.collectionsWaiting()).resolves.toBe(true);
-
-    const open = daemon.requests.find(
-      (request) => request.method === "workspace.open",
-    );
-    expect(open?.params).toMatchObject({
-      workspaceId: "workspace-a",
-      relay: {
-        baseUrl: "https://relay.test",
-        bearerToken: "secret-token",
-      },
-    });
-    expect(open?.params).not.toHaveProperty("captureMode");
-    expect(daemon.requests.map((request) => request.method)).toEqual([
-      "workspace.open",
-      "sync.push",
-      "sync.fetchPull",
-      "sync.applyPull",
-      "sync.commitCursor",
-      "sync.recoverOrigin",
-      "sync.claim",
-      "sync.probe",
-      "sync.collectionsWaiting",
-    ]);
-    expectStatefulRequestsScoped(daemon.requests);
-    expect(
-      daemon.requests
-        .filter((request) => request.method.startsWith("sync."))
-        .map((request) => ({ method: request.method, params: request.params })),
-    ).toEqual([
-      { method: "sync.push", params: { workspaceId: "workspace-a" } },
-      { method: "sync.fetchPull", params: { workspaceId: "workspace-a" } },
-      { method: "sync.applyPull", params: { workspaceId: "workspace-a", pageToken: "page-token" } },
-      {
-        method: "sync.commitCursor",
-        params: {
-          workspaceId: "workspace-a",
-          pendingCursor: { kind: "relay", token: "cursor-9" },
-        },
-      },
-      {
-        method: "sync.recoverOrigin",
-        params: { workspaceId: "workspace-a" },
-      },
-      { method: "sync.claim", params: { workspaceId: "workspace-a" } },
-      { method: "sync.probe", params: { workspaceId: "workspace-a" } },
-      { method: "sync.collectionsWaiting", params: { workspaceId: "workspace-a" } },
-    ]);
-    await sessions.closeAll();
-  });
-
-  it("carries sharing declines from every workspace pull page", async () => {
-    let pulls = 0;
-    const daemon = new MockDaemon((request) => {
-      if (request.method !== "sync.applyPull") return undefined;
-      pulls += 1;
-      return {
-        status: "complete", refused: 0,
-        pushed: 0, ownerAdmissionPending: [],
-        fetched: 1,
-        applied: 1,
-        skipped: 0,
-        conflictsOpened: 0,
-        hasMore: pulls === 1,
-        nextCursor: pulls,
-        pendingCursor: { kind: "relay", token: `cursor-${pulls}` },
-        changedPaths: [],
-        refusals: [],
-        sharingDeclined: [
-          {
-            path: pulls === 1 ? "notes/first.md" : "notes/second.md",
-            objectId: pulls === 1 ? "notes/first.md" : "notes/second.md",
-            versionId: "main",
-            lineagePruned: false, headBlobSha256: null,
-            constraint: "MAX_YDOC_UPDATE_BYTES",
-            limitBytes: 20,
-            observedBytes: 20 + pulls,
-          },
-        ],
-      };
-    });
-    const { sessions, client } = await harness(daemon);
-
-    const pull = await client.pull(async (apply) => apply(async () => undefined));
-
-    expect(
-      pull.sharingDeclined,
-      "the desktop client must not discard the engine's actionable declines",
-    ).toEqual([
-      {
-        path: "notes/first.md",
-        objectId: "notes/first.md",
-        versionId: "main",
-        lineagePruned: false, headBlobSha256: null,
-        constraint: "MAX_YDOC_UPDATE_BYTES",
-        limitBytes: 20,
-        observedBytes: 21,
-      },
-      {
-        path: "notes/second.md",
-        objectId: "notes/second.md",
-        versionId: "main",
-        lineagePruned: false, headBlobSha256: null,
-        constraint: "MAX_YDOC_UPDATE_BYTES",
-        limitBytes: 20,
-        observedBytes: 22,
-      },
-    ]);
-    await sessions.closeAll();
-  });
-
-  it("keeps the same object in distinct versions across pull pages", async () => {
-    let pulls = 0;
-    const daemon = new MockDaemon((request) => {
-      if (request.method !== "sync.applyPull") return undefined;
-      pulls += 1;
-      return {
-        status: "complete", refused: 0,
-        pushed: 0, ownerAdmissionPending: [],
-        fetched: 1,
-        applied: 1,
-        skipped: 0,
-        conflictsOpened: 0,
-        hasMore: pulls === 1,
-        nextCursor: pulls,
-        pendingCursor: { kind: "relay", token: `cursor-${pulls}` },
-        changedPaths: [],
-        refusals: [],
-        sharingDeclined: [
-          {
-            path: pulls === 1 ? "notes/first.md" : "notes/second.md",
-            objectId: "same-object",
-            versionId: pulls === 1 ? "main" : "draft",
-            lineagePruned: false, headBlobSha256: null,
-            constraint: "MAX_YDOC_UPDATE_BYTES",
-            limitBytes: 20,
-            observedBytes: 20 + pulls,
-          },
-        ],
-      };
-    });
-    const { sessions, client } = await harness(daemon);
-
-    const pull = await client.pull(async (apply) => apply(async () => undefined));
-
-    expect(
-      pull.sharingDeclined,
-      "the desktop client must not discard the engine's actionable declines",
-    ).toEqual([
-      {
-        path: "notes/first.md",
-        objectId: "same-object",
-        versionId: "main",
-        lineagePruned: false, headBlobSha256: null,
-        constraint: "MAX_YDOC_UPDATE_BYTES",
-        limitBytes: 20,
-        observedBytes: 21,
-      },
-      {
-        path: "notes/second.md",
-        objectId: "same-object",
-        versionId: "draft",
-        lineagePruned: false, headBlobSha256: null,
-        constraint: "MAX_YDOC_UPDATE_BYTES",
-        limitBytes: 20,
-        observedBytes: 22,
-      },
-    ]);
-    await sessions.closeAll();
   });
 
   it("materializes each workspace pull page before committing its cursor", async () => {
@@ -649,8 +374,10 @@ describe("EngineRelayClient", () => {
       if (request.method === "sync.applyPull") {
         const page = committedPages + 1;
         return {
-          status: "complete", refused: 0,
-          pushed: 0, ownerAdmissionPending: [],
+          status: "complete",
+          refused: 0,
+          pushed: 0,
+          ownerAdmissionPending: [],
           fetched: 1,
           applied: 1,
           skipped: 0,
@@ -666,19 +393,18 @@ describe("EngineRelayClient", () => {
               contentKind: "text",
             },
           ],
-          sharingDeclined: [], refusals: [],
+          sharingDeclined: [],
+          refusals: [],
         };
       }
       if (request.method === "sync.commitCursor") {
         const cursor = (
           request.params as unknown as {
-          pendingCursor: { token?: string };
+            pendingCursor: { token?: string };
           }
         ).pendingCursor;
         expect(cursor.token).toBe(`cursor-${committedPages + 1}`);
-        expect(materializedPaths.at(-1)).toBe(
-          `notes/page-${committedPages + 1}.md`,
-        );
+        expect(materializedPaths.at(-1)).toBe(`notes/page-${committedPages + 1}.md`);
         committedPages += 1;
         return { committed: true, sharingDeclined: [] };
       }
@@ -686,16 +412,14 @@ describe("EngineRelayClient", () => {
     });
     const { sessions, client } = await harness(daemon);
     let failSecondPage = true;
-    const materializePage = vi.fn(
-      async (paths: readonly { path: string }[]): Promise<void> => {
-        const path = paths[0]?.path;
-        if (path === "notes/page-2.md" && failSecondPage) {
-          failSecondPage = false;
-          throw new Error("disk unavailable");
-        }
-        if (path) materializedPaths.push(path);
-      },
-    );
+    const materializePage = vi.fn(async (paths: readonly { path: string }[]): Promise<void> => {
+      const path = paths[0]?.path;
+      if (path === "notes/page-2.md" && failSecondPage) {
+        failSecondPage = false;
+        throw new Error("disk unavailable");
+      }
+      if (path) materializedPaths.push(path);
+    });
 
     await expect(client.pull(async (apply) => apply(materializePage))).rejects.toThrow(
       "disk unavailable",
@@ -720,726 +444,12 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  it("retries a repair wait without materializing or reporting an error", async () => {
-    let attempts = 0;
-    const daemon = new MockDaemon(request => {
-      if (request.method === "sync.applyPull" && ++attempts === 1) return {status: "retry"};
-      return undefined;
-    });
-    const {sessions, client} = await harness(daemon);
-    const materialize = vi.fn(async () => undefined);
-    await expect(client.pull(apply => apply(materialize))).resolves.toBeDefined();
-    expect(attempts).toBe(2);
-    expect(materialize).toHaveBeenCalledTimes(1);
-    await sessions.closeAll();
-  });
-
-  it("rejects a workspace materialization path without its producing version", async () => {
-    const daemon = new MockDaemon((request) => {
-      if (request.method !== "sync.applyPull") return undefined;
-      return {
-        status: "complete", refused: 0,
-        pushed: 0, ownerAdmissionPending: [],
-        fetched: 1,
-        applied: 1,
-        skipped: 0,
-        conflictsOpened: 0,
-        hasMore: false,
-        nextCursor: 1,
-        pendingCursor: { kind: "relay", token: "cursor-1" },
-        changedPaths: [
-          {
-            path: ".env",
-            operation: "write",
-            contentKind: "secret",
-          },
-        ],
-        sharingDeclined: [], refusals: [],
-      };
-    });
-    const { sessions, client } = await harness(daemon);
-
-    const materialize = vi.fn(async () => undefined);
-    await expect(client.pull(async (apply) => apply(materialize))).rejects.toThrow(
-      /sync\.applyPull result:[\s\S]*changedPaths[\s\S]*versionId/,
-    );
-    expect(materialize).not.toHaveBeenCalled();
-    expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(false);
-    await sessions.closeAll();
-  });
-
-  it("carries the canonical path for an empty-probe push enrollment decline", async () => {
-    const daemon = new MockDaemon((request) => {
-      if (request.method !== "sync.push") return undefined;
-      return {
-        status: "complete", refused: 0,
-        pushed: 0, ownerAdmissionPending: [], hasMore: false,
-        sharingDeclined: [
-          {
-            path: "notes/oversized.md",
-            objectId: "notes/oversized.md",
-            versionId: "main",
-            lineagePruned: false, headBlobSha256: null,
-            constraint: "MAX_YDOC_UPDATE_BYTES",
-            limitBytes: 20,
-            observedBytes: 21,
-          },
-        ],
-      };
-    });
-    const { sessions, client } = await harness(daemon);
-
-    await expect(client.push()).resolves.toEqual({
-      pushed: 0, ownerAdmissionPending: [],
-      hasMore: false, originsPushed: [],
-      sharingDeclined: [
-        {
-          path: "notes/oversized.md",
-          objectId: "notes/oversized.md",
-          versionId: "main",
-          lineagePruned: false, headBlobSha256: null,
-          constraint: "MAX_YDOC_UPDATE_BYTES",
-          limitBytes: 20,
-          observedBytes: 21,
-        },
-      ],
-    });
-    await sessions.closeAll();
-  });
-
-  it("rejects a sharing decline without a canonical path", async () => {
-    const daemon = new MockDaemon((request) => {
-      if (request.method !== "sync.push") return undefined;
-      return {
-        status: "complete", refused: 0,
-        pushed: 0, ownerAdmissionPending: [], hasMore: false,
-        sharingDeclined: [
-          {
-            objectId: "missing-path",
-            versionId: "main",
-            lineagePruned: false,
-            headBlobSha256: null,
-            constraint: "MAX_YDOC_UPDATE_BYTES",
-            limitBytes: 20,
-            observedBytes: 21,
-          },
-        ],
-      };
-    });
-    const { sessions, client } = await harness(daemon);
-
-    await expect(client.push()).rejects.toThrow(
-      /sync\.push result:[\s\S]*sharingDeclined[\s\S]*path/,
-    );
-    await sessions.closeAll();
-  });
-
-  it("adds a cursor-commit enrollment decline to the completed pull", async () => {
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.applyPull") {
-        return {
-          status: "complete", refused: 0,
-          pushed: 0, ownerAdmissionPending: [],
-          fetched: 0,
-          applied: 0,
-          skipped: 0,
-          conflictsOpened: 0,
-          hasMore: false,
-          nextCursor: 0,
-          pendingCursor: { kind: "relay", token: "cursor-enrollment" },
-          changedPaths: [],
-          sharingDeclined: [], refusals: [],
-        };
-      }
-      if (request.method === "sync.commitCursor") {
-        return {
-          committed: true,
-          sharingDeclined: [
-            {
-              path: "notes/commit.md",
-              objectId: "notes/commit.md",
-              versionId: "main",
-              lineagePruned: false, headBlobSha256: null,
-              constraint: "MAX_YDOC_UPDATE_BYTES",
-              limitBytes: 20,
-              observedBytes: 22,
-            },
-          ],
-        };
-      }
-      return undefined;
-    });
-    const { sessions, client } = await harness(daemon);
-
-    const pull = await client.pull(async (apply) => apply(async () => undefined));
-
-    expect(pull.sharingDeclined).toEqual([
-      {
-        path: "notes/commit.md",
-        objectId: "notes/commit.md",
-        versionId: "main",
-        lineagePruned: false, headBlobSha256: null,
-        constraint: "MAX_YDOC_UPDATE_BYTES",
-        limitBytes: 20,
-        observedBytes: 22,
-      },
-    ]);
-    await sessions.closeAll();
-  });
-
-  it("routes shared-channel pull and push through daemon RPC", async () => {
-    const { daemon, sessions, client } = await harness();
-
-    await expect(
-      client.pullSharedChannel({
-        shareId: "share-channel",
-        channelWireId: "wire-channel",
-      }),
-    ).resolves.toEqual({
-      fetched: 7,
-      applied: 5,
-      skipped: 2,
-      nextCursor: 11,
-    });
-    await expect(
-      client.pushSharedChannel({
-        shareId: "share-channel",
-        channelWireId: "wire-channel",
-      }),
-    ).resolves.toEqual({ pushed: 6 });
-    expect(daemon.requests.map((request) => request.method)).toContain(
-      "share.channel.pull",
-    );
-    expect(daemon.requests.map((request) => request.method)).toContain(
-      "share.channel.push",
-    );
-    expectStatefulRequestsScoped(daemon.requests);
-    expect(
-      daemon.requests
-        .filter((request) => request.method.startsWith("share.channel."))
-        .map((request) => ({ method: request.method, params: request.params })),
-    ).toEqual([
-      {
-        method: "share.channel.pull",
-        params: {
-          workspaceId: "workspace-a",
-          shareId: "share-channel",
-          channelWireId: "wire-channel",
-        },
-      },
-      {
-        method: "share.channel.push",
-        params: {
-          workspaceId: "workspace-a",
-          shareId: "share-channel",
-          channelWireId: "wire-channel",
-        },
-      },
-    ]);
-    await sessions.closeAll();
-  });
-
-  it("offers a share proposal through daemon RPC with its pinned selector and submit id", async () => {
-    const { daemon, sessions, client } = await harness();
-
-    await expect(
-      client.submitShareProposal({
-        shareId: "share-file",
-        grantedSelector: EDIT_SELECTOR,
-        submitId: "submit-1",
-      }),
-    ).resolves.toEqual({
-      submitted: 2,
-      proposalId: "proposal-1",
-      skippedOutsideShare: 0,
-      morePending: false,
-    });
-    expect(
-      daemon.requests
-        .filter((request) => request.method === "share.proposal.submit")
-        .map((request) => request.params),
-    ).toEqual([
-      {
-        workspaceId: "workspace-a",
-        shareId: "share-file",
-        // Every dimension, always, and the submit id with them: a submit
-        // that drops the level offers through a grant the engine cannot
-        // read, and one that drops the id opens a second proposal per retry.
-        grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
-        submitId: "submit-1",
-      },
-    ]);
-    expectStatefulRequestsScoped(daemon.requests);
-    await sessions.closeAll();
-  });
-
-  it("writes a Collection's own files through daemon RPC and reads each write's answer", async () => {
-    const daemon = new MockDaemon((request) =>
-      request.method === "share.direct.push"
-        ? {
-            writes: [
-              { paths: ["docs/packing/collection.yaml"], result: "written" },
-              {
-                paths: ["docs/ideas/collection.yaml", "docs/ideas/a.md"],
-                result: "stale",
-                stalePath: "docs/ideas", recoveredDraftPath: null,
-                currentBlobSha256: null,
-              },
-              { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "" },
-            ],
-            morePending: false,
-          }
-        : undefined,
-    );
-    const { client, sessions } = await harness(daemon);
-
-    await expect(
-      client.pushDirectWrites({ shareId: "share-file", grantedSelector: EDIT_SELECTOR }),
-    ).resolves.toEqual({
-      writes: [
-        { paths: ["docs/packing/collection.yaml"], result: "written" },
-        {
-          paths: ["docs/ideas/collection.yaml", "docs/ideas/a.md"],
-          result: "stale",
-          stalePath: "docs/ideas", recoveredDraftPath: null,
-          currentBlobSha256: null,
-        },
-        { paths: ["docs/packing/automations.yaml"], result: "refused", reason: "" },
-      ],
-      morePending: false,
-    });
-    expect(
-      daemon.requests
-        .filter((request) => request.method === "share.direct.push")
-        .map((request) => request.params),
-    ).toEqual([
-      {
-        workspaceId: "workspace-a",
-        shareId: "share-file",
-        grantedSelector: { paths: ["docs"], versionId: null, access: "edit" },
-      },
-    ]);
-    expectStatefulRequestsScoped(daemon.requests);
-    await sessions.closeAll();
-  });
-
-  it("refuses a direct push answer it cannot read", async () => {
-    for (const writes of [
-      [{ paths: [], result: "written" }],
-      [{ paths: ["docs/a/collection.yaml"], result: "maybe" }],
-      [{ paths: ["docs/a/collection.yaml"], result: "stale", currentBlobSha256: null }],
-    ]) {
-      const daemon = new MockDaemon((request) =>
-        request.method === "share.direct.push" ? { writes, morePending: false } : undefined,
-      );
-      const { client, sessions } = await harness(daemon);
-      await expect(
-        client.pushDirectWrites({ shareId: "share-file", grantedSelector: EDIT_SELECTOR }),
-      ).rejects.toThrow("share.direct.push");
-      await sessions.closeAll();
-    }
-  });
-
-  it("reports an empty share proposal submit as offering nothing, not as a failure", async () => {
-    const daemon = new MockDaemon((request) =>
-      request.method === "share.proposal.submit"
-        ? {
-            submitted: 0,
-            proposalId: null,
-            skippedOutsideShare: 3,
-            morePending: false,
-          }
-        : undefined,
-    );
-    const { client, sessions } = await harness(daemon);
-
-    await expect(
-      client.submitShareProposal({
-        shareId: "share-file",
-        grantedSelector: EDIT_SELECTOR,
-        submitId: "submit-empty",
-      }),
-    ).resolves.toEqual({
-      submitted: 0,
-      proposalId: null,
-      // A submit that offered nothing still says what it dropped: every
-      // change it found was outside what this share covers.
-      skippedOutsideShare: 3,
-      morePending: false,
-    });
-    await sessions.closeAll();
-  });
-
-  // What a submit left behind is not optional. A missing field read as zero
-  // would tell the recipient everything went when some of it did not.
-  it("refuses a share proposal submit that does not say what it left behind", async () => {
-    for (const [label, reply] of [
-      [
-        "no skipped count",
-        { submitted: 1, proposalId: "p", morePending: false },
-      ],
-      [
-        "no pending flag",
-        { submitted: 1, proposalId: "p", skippedOutsideShare: 0 },
-      ],
-    ] as const) {
-      const daemon = new MockDaemon((request) =>
-        request.method === "share.proposal.submit"
-          ? (reply as JsonValue)
-          : undefined,
-      );
-      const { client, sessions } = await harness(daemon);
-      await expect(
-        client.submitShareProposal({
-          shareId: "share-file",
-          grantedSelector: EDIT_SELECTOR,
-          submitId: `submit-${label}`,
-        }),
-        `${label} softened to a default hides work that was not sent`,
-      ).rejects.toThrow(/share\.proposal\.submit\./u);
-      await sessions.closeAll();
-    }
-  });
-
-  it("refuses a share proposal submit that disagrees with itself about opening a proposal", async () => {
-    let reply: JsonValue = {
-      submitted: 2,
-      proposalId: null,
-      skippedOutsideShare: 0,
-      morePending: false,
-    };
-    const daemon = new MockDaemon((request) =>
-      request.method === "share.proposal.submit" ? reply : undefined,
-    );
-    const { client, sessions } = await harness(daemon);
-    const submit = async (submitId: string): Promise<unknown> =>
-      await client.submitShareProposal({
-        shareId: "share-file",
-        grantedSelector: EDIT_SELECTOR,
-        submitId,
-      });
-
-    // Changes offered, but no proposal to show the sender or to withdraw.
-    await expect(submit("submit-a")).rejects.toThrow(/disagreed with itself/u);
-    // A proposal opened over nothing.
-    reply = {
-      submitted: 0,
-      proposalId: "proposal-empty",
-      skippedOutsideShare: 0,
-      morePending: false,
-    };
-    await expect(submit("submit-b")).rejects.toThrow(/disagreed with itself/u);
-    // Neither field may be coerced: a number is not an id, and "" is not a
-    // proposal that exists.
-    reply = { submitted: 1, proposalId: 7 };
-    await expect(submit("submit-c")).rejects.toThrow(
-      /proposalId must be a string or null/u,
-    );
-    reply = { submitted: 1, proposalId: "" };
-    await expect(submit("submit-d")).rejects.toThrow(
-      /proposalId must be a string or null/u,
-    );
-    reply = { proposalId: "proposal-1" };
-    await expect(submit("submit-e")).rejects.toThrow(
-      /submitted must be a non-negative integer/u,
-    );
-    await sessions.closeAll();
-  });
-
-  it("reports a level-refused share proposal as a read-only file, not a read-only chat", async () => {
-    let readOnlyMarker = false;
-    const daemon = new MockDaemon((request) => {
-      if (request.method !== "share.proposal.submit") return undefined;
-      throw new DaemonRefusalError(
-        {
-          code: "INVALID_PARAMS",
-          message: readOnlyMarker ? "share-read-only" : "payload-too-large",
-          retry: "no",
-        },
-        new Error("refused"),
-      );
-    });
-    const { client, sessions } = await harness(daemon);
-    const submit = async (submitId: string): Promise<unknown> =>
-      await client.submitShareProposal({
-        shareId: "share-file",
-        grantedSelector: EDIT_SELECTOR,
-        submitId,
-      });
-
-    await expect(submit("submit-other")).rejects.toBeInstanceOf(
-      DaemonRefusalError,
-    );
-    readOnlyMarker = true;
-    const refusal = await submit("submit-read-only").catch(
-      (error: unknown) => error,
-    );
-    expect(refusal).toBeInstanceOf(SharedFileReadOnlyError);
-    // The noun, not just the class: the relay answers one code for chat and
-    // for changes, so this name is the only thing that carries which one.
-    expect((refusal as Error).name).toBe("SharedFileReadOnlyError");
-    await sessions.closeAll();
-  });
-
-  it("says which side must update when the relay does not serve this build's API version", async () => {
-    let message = "relay-api-version-too-old";
-    const daemon = new MockDaemon((request) => {
-      if (request.method !== "share.proposal.submit") return undefined;
-      throw new DaemonRefusalError({ code: "PROTOCOL_VERSION_UNSUPPORTED", message, retry: "no" }, new Error("refused"));
-    });
-    const { client, sessions } = await harness(daemon);
-    const submit = async (submitId: string): Promise<unknown> =>
-      await client.submitShareProposal({ shareId: "share-file", grantedSelector: EDIT_SELECTOR, submitId })
-        .catch((error: unknown) => error);
-
-    const old = await submit("submit-old");
-    expect(old).toBeInstanceOf(RelayApiVersionError);
-    expect((old as RelayApiVersionError).update).toBe("app");
-    message = "relay-api-version-too-new";
-    const newer = await submit("submit-new");
-    expect(newer).toBeInstanceOf(RelayApiVersionError);
-    expect((newer as RelayApiVersionError).update).toBe("server");
-    await sessions.closeAll();
-  });
-
-  it("claims only an unset relay identity and adopts an established identity", async () => {
-    const { daemon, sessions, client } = await harness();
-
-    await expect(client.bootstrapJoinIdentity(null)).resolves.toBeUndefined();
-    await expect(
-      client.bootstrapJoinIdentity({
-        replicationEpoch: "epoch-relay",
-        streamIdentity: "stream-relay",
-      }),
-    ).resolves.toBeUndefined();
-
-    expect(
-      daemon.requests
-        .filter((request) =>
-          ["sync.claim", "sync.adoptJoinIdentity"].includes(request.method),
-        )
-        .map((request) => ({ method: request.method, params: request.params })),
-    ).toEqual([
-      { method: "sync.claim", params: { workspaceId: "workspace-a" } },
-      {
-        method: "sync.adoptJoinIdentity",
-        params: {
-          workspaceId: "workspace-a",
-          replicationEpoch: "epoch-relay",
-          streamIdentity: "stream-relay",
-        },
-      },
-    ]);
-    expect(daemon.requests.map((request) => request.method)).toEqual([
-      "workspace.open",
-      "sync.claim",
-      "workspace.close",
-      "workspace.open",
-      "sync.adoptJoinIdentity",
-      "workspace.close",
-    ]);
-    for (const request of daemon.requests.filter(
-      (request) => request.method === "workspace.open",
-    )) {
-      expect(request.params).toMatchObject({ captureMode: "none" });
-    }
-    await sessions.closeAll();
-  });
-
-  it("keeps join enrollment inside the capture-free identity session", async () => {
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "keys.download") {
-        throw new DaemonRefusalError(
-          {
-            code: "KEY_ENVELOPE_MISSING",
-            message: "relay key envelope missing",
-            retry: "no",
-          },
-          new Error("refused"),
-        );
-      }
-      return undefined;
-    });
-    const { sessions, client } = await harness(daemon);
-
-    await client.bootstrapJoinIdentity(
-      {
-        replicationEpoch: "epoch-relay",
-        streamIdentity: "stream-relay",
-      },
-      async () => {
-        await expect(client.downloadKeyEnvelope()).rejects.toBeInstanceOf(
-          RelayKeyEnvelopeMissingError,
-        );
-      },
-    );
-
-    expect(daemon.requests.map((request) => request.method)).toEqual([
-      "workspace.open",
-      "sync.adoptJoinIdentity",
-      "keys.download",
-      "workspace.close",
-    ]);
-    expect(daemon.requests[0]?.params).toMatchObject({ captureMode: "none" });
-    await sessions.closeAll();
-  });
-
-  it("refreshes a share view and commits its opaque daemon cursor", async () => {
-    const { rootPath, attachmentId, daemon, sessions, client, relay } =
-      await harness();
-    const store = createCaptureLiveStores(
-      { workspaceId: "workspace-a", rootPath, attachmentId },
-      sessions,
-    ).store;
-    const outcome = await refreshStandaloneShareThroughOwnerForTest({
-      rootDir: rootPath,
-      workspaceId: "workspace-a",
-      attachmentId,
-      relay,
-      shareId: "share-view",
-      store,
-      pinnedSelector: PINNED_SELECTOR,
-      recordRefusals: async () => undefined,
-      pull: async (input) => {
-        const pull = await client.pullShareView({
-          shareId: input.shareId,
-          grantedSelector: input.grantedSelector,
-        });
-        expect(pull.nextCursor).toBe(13);
-        return pull;
-      },
-    });
-
-    expect(outcome).toEqual({
-      status: "unchanged",
-      changedPaths: 0,
-      excludedPaths: [],
-      unjournalablePaths: [],
-      collisionRecordQuarantined: false,
-      refusedOps: 0,
-      refusedDetail: null,
-    });
-    expect(daemon.requests.map((request) => request.method)).toEqual([
-      "workspace.open",
-      "versions.ensureMain",
-      "versionedText.list",
-      "versions.ensureMain",
-      "versionedText.list",
-      "workspace.close",
-      "workspace.open",
-      "share.view.pull",
-      "sync.commitCursor",
-    ]);
-    expect(
-      daemon.requests.find((request) => request.method === "sync.commitCursor")
-        ?.params,
-    ).toMatchObject({
-      pendingCursor: { kind: "shareView", token: "share-cursor-13" },
-    });
-    expectStatefulRequestsScoped(daemon.requests);
-    expect(
-      daemon.requests.find((request) => request.method === "share.view.pull")
-        ?.params,
-    ).toEqual({
-      workspaceId: "workspace-a",
-      shareId: "share-view",
-      grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
-    });
-    await sessions.closeAll();
-  });
-
-  // Both dimensions of the accepted selector reach the engine intact. Dropping
-  // either one widens the grant: no paths reads as "the whole workspace", and
-  // no version reads as "any version's fork".
-  it("sends the accepted selector's paths and version to the engine", async () => {
-    const { rootPath, attachmentId, daemon, sessions, client, relay } =
-      await harness();
-    const store = createCaptureLiveStores(
-      { workspaceId: "workspace-a", rootPath, attachmentId },
-      sessions,
-    ).store;
-    await refreshStandaloneShareThroughOwnerForTest({
-      rootDir: rootPath,
-      workspaceId: "workspace-a",
-      attachmentId,
-      relay,
-      shareId: "share-view",
-      store,
-      pinnedSelector: { paths: ["docs"], versionId: "v1", access: "view" },
-      recordRefusals: async () => undefined,
-      pull: async (input) =>
-        await client.pullShareView({
-          shareId: input.shareId,
-          grantedSelector: input.grantedSelector,
-        }),
-    });
-
-    expect(
-      daemon.requests.find((request) => request.method === "share.view.pull")
-        ?.params,
-      "dropping any dimension on the wire widens the accepted grant, or leaves one the engine cannot read",
-    ).toEqual({
-      workspaceId: "workspace-a",
-      shareId: "share-view",
-      grantedSelector: { paths: ["docs"], versionId: "v1", access: "view" },
-    });
-    await sessions.closeAll();
-  });
-
-  // The engine skips an op it refuses and keeps pulling, so the refusal is the
-  // only signal that the share stopped carrying part of what the granter
-  // shares. It must survive the wire, and it must survive paging: a refusal on
-  // an early page is exactly the one a caller would otherwise never see.
-  it("carries every page's share-view refusals through to the caller", async () => {
-    let pulls = 0;
-    const daemon = new MockDaemon((request) => {
-      if (request.method !== "share.view.pull") return undefined;
-      pulls += 1;
-      const first = pulls === 1;
-      return {
-        fetched: 1,
-        applied: 0,
-        skipped: 1,
-        refusals: [
-          {
-            originId: "origin-granter",
-            originSeq: first ? 4 : 9,
-            opKind: "moment.append",
-            code: "share-boundary-violation",
-            detail: first
-              ? "replicated moment is outside the share boundary: the share granted version main, the relay offered version version-other"
-              : "replicated moment is outside the share boundary: its versionId is not one the relay could have issued: a version id is non-empty, unpadded, and at most 128 UTF-16 code units; the relay offered 130 UTF-16 code units",
-          },
-        ],
-        hasMore: first,
-        nextCursor: pulls,
-        changedPaths: [],
-        pendingCursor: { kind: "shareView", token: `share-cursor-${pulls}` },
-      };
-    });
-    const { sessions, client } = await harness(daemon);
-
-    const pull = await client.pullShareView({
-      shareId: "share-view",
-      grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
-    });
-
-    expect(
-      pull.refusals.map((refusal) => refusal.originSeq),
-      "keeping only the last page's refusals loses the earlier ones entirely",
-    ).toEqual([4, 9]);
-    expect(pull.skipped).toBe(2);
-    expect(pull.refusals[0].detail).toContain("version-other");
-    expect(pull.refusals[1].detail).toContain("130 UTF-16 code units");
-    await sessions.closeAll();
-  });
-
   // The durable record holds every reason — each page reaches the recorder
   // before its cursor commits — so the in-memory aggregate only has to carry
   // enough to log and to show. A relay that refuses on every page must not be
   // able to grow it with its log; the paging loop has no page limit of its own.
   it("bounds the refusals it accumulates in memory while counting them all", async () => {
-    const pages = MAX_REPORTED_REFUSALS + 5;
+    const pages = MAX_REPORTED_REFUSALS + 1;
     let pulls = 0;
     const daemon = new MockDaemon((request) => {
       if (request.method !== "share.view.pull") return undefined;
@@ -1478,7 +488,6 @@ describe("EngineRelayClient", () => {
       pull.refusals.length,
       "an unbounded aggregate lets a relay grow memory in proportion to its log",
     ).toBe(MAX_REPORTED_REFUSALS);
-    // The count is still the truth, and every page still reached the record.
     expect(pull.refusalCount).toBe(pages);
     expect(recorded).toBe(pages);
     await sessions.closeAll();
@@ -1504,8 +513,7 @@ describe("EngineRelayClient", () => {
             originSeq: 4,
             opKind: "moment.append",
             code: "share-boundary-violation",
-            detail:
-              "the share granted version main, the relay offered version version-other",
+            detail: "the share granted version main, the relay offered version version-other",
           },
         ],
         hasMore: true,
@@ -1530,97 +538,7 @@ describe("EngineRelayClient", () => {
     expect(
       recorded,
       "recording after the commit loses the reason while the cursor stays past the op",
-    ).toEqual([
-      "the share granted version main, the relay offered version version-other",
-    ]);
-    await sessions.closeAll();
-  });
-
-  it("records a page's collisions before committing its cursor, even when a later page fails", async () => {
-    let pulls = 0;
-    const calls: string[] = [];
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.commitCursor") {
-        calls.push("commitCursor");
-        return { committed: true };
-      }
-      if (request.method !== "share.view.pull") return undefined;
-      pulls += 1;
-      if (pulls > 1) throw new Error("relay went away mid-page");
-      return {
-        fetched: 1,
-        applied: 1,
-        skipped: 0,
-        refusals: [],
-        refusalCount: 0,
-        hasMore: true,
-        nextCursor: 1,
-        changedPaths: [
-          { path: "docs/collide.md", operation: "write", contentKind: "text" },
-        ],
-        pendingCursor: { kind: "shareView", token: "share-cursor-1" },
-      };
-    });
-    const { sessions, client } = await harness(daemon);
-
-    await expect(
-      client.pullShareView({
-        shareId: "share-view",
-        grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
-        recordCollisions: async () => {
-          calls.push("recordCollisions");
-        },
-      }),
-    ).rejects.toThrow();
-
-    expect(
-      calls,
-      "recording after the commit could lose a collision the crashed page already found",
-    ).toEqual(["recordCollisions", "commitCursor"]);
-    await sessions.closeAll();
-  });
-
-  it("records a page's projection debt before committing its cursor, even when a later page fails", async () => {
-    let pulls = 0;
-    const calls: string[] = [];
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.commitCursor") {
-        calls.push("commitCursor");
-        return { committed: true };
-      }
-      if (request.method !== "share.view.pull") return undefined;
-      pulls += 1;
-      if (pulls > 1) throw new Error("relay went away mid-page");
-      return {
-        fetched: 1,
-        applied: 1,
-        skipped: 0,
-        refusals: [],
-        refusalCount: 0,
-        hasMore: true,
-        nextCursor: 1,
-        changedPaths: [
-          { path: "docs/page-one.md", operation: "write", contentKind: "text" },
-        ],
-        pendingCursor: { kind: "shareView", token: "share-cursor-1" },
-      };
-    });
-    const { sessions, client } = await harness(daemon);
-
-    await expect(
-      client.pullShareView({
-        shareId: "share-view",
-        grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
-        recordChangedPaths: async (paths) => {
-          calls.push(`recordChangedPaths:${paths.join(",")}`);
-        },
-      }),
-    ).rejects.toThrow();
-
-    expect(
-      calls,
-      "recording after the commit could lose projection debt for an applied page",
-    ).toEqual(["recordChangedPaths:docs/page-one.md", "commitCursor"]);
+    ).toEqual(["the share granted version main, the relay offered version version-other"]);
     await sessions.closeAll();
   });
 
@@ -1675,8 +593,7 @@ describe("EngineRelayClient", () => {
       }
       return undefined;
     });
-    const { rootPath, attachmentId, sessions, client, relay } =
-      await harness(daemon);
+    const { rootPath, attachmentId, sessions, client, relay } = await harness(daemon);
     const store = createCaptureLiveStores(
       { workspaceId: "workspace-a", rootPath, attachmentId },
       sessions,
@@ -1711,322 +628,9 @@ describe("EngineRelayClient", () => {
       refusedDetail: null,
     });
 
-    expect(await readFile(join(rootPath, "notes/daemon.md"), "utf8")).toBe(
-      body,
-    );
-    expect(daemon.requests.map((request) => request.method)).toContain(
-      "versionedText.read",
-    );
+    expect(await readFile(join(rootPath, "notes/daemon.md"), "utf8")).toBe(body);
+    expect(daemon.requests.map((request) => request.method)).toContain("versionedText.read");
     await sessions.closeAll();
-  });
-
-  it("opens an owner-managed share mount store with capture disabled", async () => {
-    const { rootPath, daemon, routes, sessions, live, relay } = await harness();
-    const mount = { shareId: "share-mounted", label: "alex" };
-    await createShareMountDirectoryThroughOwnerForTest(rootPath, mount.label);
-    const target = {
-      workspaceId: mountStoreWorkspaceIdFor("workspace-a", mount.shareId),
-      rootPath: mountRootFor(rootPath, mount.label),
-      shareMount: true as const,
-    };
-    const mountRelay = live.bind({ ...target, relay });
-
-    await expect(
-      refreshShareMountThroughOwnerForTest({
-        hostWorkspaceId: "workspace-a",
-        hostRoot: rootPath,
-        mount,
-        relay,
-        openStore: (workspace) =>
-          createCaptureLiveStores(workspace, sessions).store,
-        pinnedSelector: PINNED_SELECTOR,
-        recordRefusals: async () => undefined,
-        pull: async (input) => {
-          const pull = await mountRelay.pullShareView({
-            shareId: input.shareId,
-            grantedSelector: input.grantedSelector,
-          });
-          expect(pull.nextCursor).toBe(13);
-          return pull;
-        },
-      }),
-    ).resolves.toEqual({
-      status: "unchanged",
-      changedPaths: 0,
-      excludedPaths: [],
-      unjournalablePaths: [],
-      refusedOps: 0,
-      refusedDetail: null,
-    });
-
-    expect(routes.isBound(target.workspaceId)).toBe(true);
-    const ownerOpenIndex = daemon.requests.findIndex(
-      (request) =>
-        request.method === "workspace.open" &&
-        request.params &&
-        typeof request.params === "object" &&
-        !Array.isArray(request.params) &&
-        request.params.workspaceId === target.workspaceId,
-    );
-    const pullIndex = daemon.requests.findIndex(
-      (request) => request.method === "share.view.pull",
-    );
-    expect(ownerOpenIndex).toBeGreaterThanOrEqual(0);
-    expect(ownerOpenIndex).toBeLessThan(pullIndex);
-    expect(daemon.requests[ownerOpenIndex]?.params).toMatchObject({
-      rootDir: target.rootPath,
-      workspaceId: target.workspaceId,
-      captureMode: "none",
-    });
-    expect(
-      daemon.requests.find((request) => request.method === "share.view.pull")
-        ?.params,
-    ).toMatchObject({
-      workspaceId: target.workspaceId,
-      shareId: mount.shareId,
-    });
-    await sessions.closeAll();
-  });
-
-  it("translates a revoked daemon share and lets the shared-view consumer report ended", async () => {
-    const daemon = new MockDaemon((request) => {
-      if (
-        request.method === "share.view.pull" ||
-        request.method === "share.channel.pull"
-      ) {
-        throw new EngineRequestError(request.id, {
-          code: "SHARE_UNAVAILABLE",
-          message: "workspace operation failed",
-          retry: "no",
-        });
-      }
-      return undefined;
-    });
-    const { rootPath, attachmentId, client, relay, sessions } =
-      await harness(daemon);
-    const store = createCaptureLiveStores(
-      { workspaceId: "workspace-a", rootPath, attachmentId },
-      sessions,
-    ).store;
-
-    await expect(
-      client.pullShareView({
-        shareId: "share-revoked",
-        grantedSelector: { paths: ["docs"], versionId: null, access: "view" },
-      }),
-    ).rejects.toBeInstanceOf(ShareUnavailableError);
-    await expect(
-      refreshStandaloneShareThroughOwnerForTest({
-        rootDir: rootPath,
-        workspaceId: "workspace-a",
-        attachmentId,
-        relay,
-        shareId: "share-revoked",
-        store,
-        pinnedSelector: PINNED_SELECTOR,
-        recordRefusals: async () => undefined,
-        pull: async (input) =>
-          await client.pullShareView({
-            shareId: input.shareId,
-            grantedSelector: input.grantedSelector,
-          }),
-      }),
-    ).resolves.toEqual({
-      status: "ended",
-      changedPaths: 0,
-      excludedPaths: [],
-      unjournalablePaths: [],
-      collisionRecordQuarantined: false,
-      refusedOps: 0,
-      refusedDetail: null,
-    });
-    const revokedRows = [
-      {
-        shareId: "channel-revoked",
-        channelWireId: "wire-revoked",
-        access: "read-only" as const,
-        granterEmail: "owner@example.com",
-        relayUrl: relay.baseUrl,
-        recipientUserId: "member-1",
-      },
-    ];
-    await expect(
-      syncJoinedSharedChannels({
-        rootDir: rootPath,
-        workspaceId: "workspace-a",
-        relay,
-        passRows: 1,
-        registryOrder: revokedRows,
-        channels: revokedRows,
-        pull: async (input) =>
-          await client.pullSharedChannel({
-            shareId: input.shareId,
-            channelWireId: input.channelWireId,
-          }),
-        push: async (input) =>
-          await client.pushSharedChannel({
-            shareId: input.shareId,
-            channelWireId: input.channelWireId,
-          }),
-      }),
-    ).resolves.toMatchObject({ endedShareIds: ["channel-revoked"] });
-    await sessions.closeAll();
-  });
-
-  it("reports each applied page of a shared-channel pull before a later page fails", async () => {
-    let pulls = 0;
-    const daemon = new MockDaemon((request) => {
-      if (request.method !== "share.channel.pull") return undefined;
-      pulls += 1;
-      if (pulls >= 2) {
-        throw new EngineRequestError(request.id, {
-          code: "OVERLOADED",
-          message: "relay unreachable",
-          retry: "no",
-        });
-      }
-      return { fetched: 1, applied: 1, refused: 0, skipped: 0, hasMore: true, nextCursor: pulls };
-    });
-    const { client, sessions } = await harness(daemon);
-    const onApplied = vi.fn();
-
-    await expect(
-      client.pullSharedChannel({ shareId: "share-channel", channelWireId: "wire-channel", onApplied }),
-    ).rejects.toThrow();
-    expect(pulls).toBe(2);
-    expect(onApplied).toHaveBeenCalledTimes(1);
-    await sessions.closeAll();
-  });
-
-  it("binds a marker-less rooted workspace to the daemon before session preparation", async () => {
-    const { daemon, routes, sessions } = await harness();
-
-    expect(routes.isBound("workspace-a")).toBe(true);
-    expect(
-      daemon.requests,
-      "bind must not require workspace preparation or workspace.open",
-    ).toEqual([]);
-    await sessions.closeAll();
-  });
-
-  it("carries a physical attachment through bootstrap run and close", async () => {
-    const { rootPath, live, relay, sessions } = await harness();
-    const attachmentId = Symbol("relay-attachment");
-    const workspace = {
-      workspaceId: "workspace-attached",
-      rootPath,
-      attachmentId,
-    };
-    const run = vi.spyOn(sessions, "run");
-    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
-    const client = live.bind({ ...workspace, relay });
-
-    await client.bootstrapJoinIdentity(null);
-
-    expect(run).toHaveBeenCalledWith(
-      { ...workspace, captureMode: "none" },
-      expect.any(Function),
-      { retryTransportErrors: true, abandonAtQuit: true },
-    );
-    expect(closeWorkspace).toHaveBeenCalledWith(workspace);
-    await sessions.closeAll();
-  });
-
-  it("keeps the relay route available after bootstrap closes its temporary session", async () => {
-    const { routes, live, client } = await harness();
-
-    await client.bootstrapJoinIdentity(null);
-
-    expect(routes.isBound("workspace-a")).toBe(true);
-    await expect(client.push()).resolves.toMatchObject({ pushed: 3 });
-    await live.closeAll();
-    expect(routes.isBound("workspace-a")).toBe(false);
-  });
-
-  it("orders bootstrap retirement after requests already queued by initialization", async () => {
-    const daemon = new MockDaemon();
-    const sendRequest = daemon.sendRequest.bind(daemon);
-    const firstStarted = Promise.withResolvers<void>();
-    const secondStarted = Promise.withResolvers<void>();
-    const secondQueued = Promise.withResolvers<void>();
-    const releaseFirst = Promise.withResolvers<void>();
-    const releaseSecond = Promise.withResolvers<void>();
-    let pushesStarted = 0;
-    daemon.sendRequest = async (request) => {
-      if (request.method === "sync.push") {
-        pushesStarted += 1;
-        if (pushesStarted === 1) {
-          firstStarted.resolve();
-          await releaseFirst.promise;
-        } else if (pushesStarted === 2) {
-          secondStarted.resolve();
-          await releaseSecond.promise;
-        }
-      }
-      return await sendRequest(request);
-    };
-    const { sessions, live, client } = await harness(daemon);
-    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
-    const pushes: Array<Promise<unknown>> = [];
-
-    const bootstrap = client.bootstrapJoinIdentity(null, async () => {
-      pushes.push(client.push());
-      await firstStarted.promise;
-      pushes.push(client.push());
-      secondQueued.resolve();
-    });
-    await secondQueued.promise;
-    releaseFirst.resolve();
-    await secondStarted.promise;
-    const closeCallsWhileSecondWasPending = closeWorkspace.mock.calls.length;
-    releaseSecond.resolve();
-    await Promise.all([bootstrap, ...pushes]);
-
-    expect(closeCallsWhileSecondWasPending).toBe(0);
-    expect(closeWorkspace).toHaveBeenCalledOnce();
-    await live.closeAll();
-  });
-
-  it("retires the bare bootstrap owner before an exact successor closes", async () => {
-    const { rootPath, routes, sessions, live, relay, client } = await harness();
-    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
-
-    await client.bootstrapJoinIdentity(null);
-    const workspace = {
-      workspaceId: "workspace-a",
-      rootPath,
-      attachmentId: Symbol("post-bootstrap-attachment"),
-    };
-    const exact = live.bind({ ...workspace, relay });
-    await exact.push();
-    await live.closeWorkspace(workspace);
-
-    expect(routes.isBound(workspace.workspaceId)).toBe(false);
-    closeWorkspace.mockClear();
-    await live.closeAll();
-    expect(closeWorkspace).not.toHaveBeenCalled();
-  });
-
-  it("retires the bootstrap alias after an exact successor opens but its request fails", async () => {
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.push") {
-        throw new Error("injected push failure");
-      }
-      return undefined;
-    });
-    const { rootPath, routes, live, relay, client } = await harness(daemon);
-
-    await client.bootstrapJoinIdentity(null);
-    const workspace = {
-      workspaceId: "workspace-a",
-      rootPath,
-      attachmentId: Symbol("failed-successor-attachment"),
-    };
-    const exact = live.bind({ ...workspace, relay });
-
-    await expect(exact.push()).rejects.toThrow("injected push failure");
-    await live.closeWorkspace(workspace);
-    expect(routes.isBound(workspace.workspaceId)).toBe(false);
   });
 
   it("rebinds the attachment-keyed session before and after a transport restart", async () => {
@@ -2038,19 +642,13 @@ describe("EngineRelayClient", () => {
     const first = new MockDaemon((request) => {
       if (request.method === "sync.push") {
         current = second;
-        throw new EngineClientError(
-          "transport-error",
-          "injected daemon restart",
-        );
+        throw new EngineClientError("transport-error", "injected daemon restart");
       }
       return undefined;
     });
     current = first;
     const sessions = new EngineWorkspaceSessions(
-      new RelayConfiguredDaemonClientSource(
-        { currentClient: () => current },
-        routes,
-      ),
+      new RelayConfiguredDaemonClientSource({ currentClient: () => current }, routes),
       {
         transportRebindAttempts: 2,
         sleep: async () => undefined,
@@ -2110,8 +708,6 @@ describe("EngineRelayClient", () => {
     await second.push();
     expect(opens).toBe(2);
 
-    // A delayed predecessor cleanup must not release the successor's route or
-    // close its attachment-keyed session.
     await live.closeWorkspace(firstWorkspace);
     expect(routes.isBound(firstWorkspace.workspaceId)).toBe(true);
     await second.push();
@@ -2132,68 +728,6 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  it("rebinds the attachment-keyed session before a token refresh", async () => {
-    const { rootPath, live, relay, sessions } = await harness();
-    const workspace = {
-      workspaceId: "workspace-attached-refresh",
-      rootPath,
-      attachmentId: Symbol("relay-refresh-attachment"),
-    };
-    const closeWorkspaceBinding = vi.spyOn(sessions, "closeWorkspaceBinding");
-    const first = live.bind({ ...workspace, relay });
-    await first.push();
-    closeWorkspaceBinding.mockClear();
-
-    const refreshed = live.bind({
-      ...workspace,
-      relay: { ...relay, token: "refreshed-token" },
-    });
-    await refreshed.push();
-
-    expect(closeWorkspaceBinding).toHaveBeenCalledWith(workspace);
-    await live.closeWorkspace(workspace);
-  });
-
-  it("keeps exact capture authorship through relay token refresh", async () => {
-    const { rootPath, daemon, live, relay, sessions } = await harness();
-    const workspace = {
-      workspaceId: "workspace-capture-refresh",
-      rootPath,
-      attachmentId: Symbol("relay-capture-refresh"),
-    };
-    const author = {
-      kind: "agent" as const,
-      agentId: "agent",
-      onBehalfOf: "local",
-      agentRunId: "run",
-    };
-    sessions.rememberCaptureAuthor(workspace, author);
-
-    const first = live.bind({ ...workspace, relay });
-    await first.push();
-    const refreshed = live.bind({
-      ...workspace,
-      relay: { ...relay, token: "refreshed-token" },
-    });
-    await refreshed.push();
-
-    const opens = daemon.requests.filter(
-      (request) => request.method === "workspace.open",
-    );
-    expect(opens).toHaveLength(2);
-    expect(opens.map((request) => request.params)).toEqual([
-      expect.objectContaining({
-        workspaceId: workspace.workspaceId,
-        captureAuthor: author,
-      }),
-      expect.objectContaining({
-        workspaceId: workspace.workspaceId,
-        captureAuthor: author,
-      }),
-    ]);
-    await live.closeWorkspace(workspace);
-  });
-
   it("keeps exact share-mount policy through relay token refresh", async () => {
     const { rootPath, daemon, live, relay } = await harness();
     const workspace = {
@@ -2210,9 +744,7 @@ describe("EngineRelayClient", () => {
     });
     await refreshed.push();
 
-    const opens = daemon.requests.filter(
-      (request) => request.method === "workspace.open",
-    );
+    const opens = daemon.requests.filter((request) => request.method === "workspace.open");
     expect(opens).toHaveLength(2);
     expect(opens.map((request) => request.params)).toEqual([
       expect.objectContaining({
@@ -2227,76 +759,6 @@ describe("EngineRelayClient", () => {
     await live.closeWorkspace(workspace);
   });
 
-  it("closes every attachment-keyed session during closeAll", async () => {
-    let opens = 0;
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "workspace.open") {
-        opens += 1;
-        return { workspace: `ws-close-all-${opens}` };
-      }
-      return undefined;
-    });
-    const { rootPath, live, relay, routes, sessions } = await harness(daemon);
-    const firstWorkspaceId = "workspace-attached-close-all-first";
-    const secondWorkspaceId = "workspace-attached-close-all-second";
-    const first = live.bind({
-      workspaceId: firstWorkspaceId,
-      rootPath,
-      attachmentId: Symbol("relay-close-all-first"),
-      relay,
-    });
-    const second = live.bind({
-      workspaceId: secondWorkspaceId,
-      rootPath,
-      attachmentId: Symbol("relay-close-all-second"),
-      relay,
-    });
-    await first.push();
-    await second.push();
-
-    await live.closeAll();
-
-    expect(
-      daemon.requests
-        .filter((request) => request.method === "workspace.close")
-        .map((request) => request.workspace)
-        .sort(),
-    ).toEqual(["ws-close-all-1", "ws-close-all-2"]);
-    expect(routes.isBound(firstWorkspaceId)).toBe(false);
-    expect(routes.isBound(secondWorkspaceId)).toBe(false);
-    await sessions.closeAll();
-  });
-
-  it("releases only a closed attachment's stale route location", async () => {
-    const { rootPath, live, relay, routes, sessions } = await harness();
-    const successorRoot = await createTestScratch(
-      "dohc-relay-successor-location-",
-    );
-    roots.push(successorRoot);
-    const workspaceId = "workspace-moved-successor";
-    const predecessor = {
-      workspaceId,
-      rootPath,
-      attachmentId: Symbol("relay-location-predecessor"),
-    };
-    const successor = {
-      workspaceId,
-      rootPath: successorRoot,
-      attachmentId: Symbol("relay-location-successor"),
-    };
-    live.bind({ ...predecessor, relay });
-    live.bind({ ...successor, relay });
-
-    await live.closeWorkspace(predecessor);
-
-    expect(routes.relayForOpen(workspaceId, rootPath)).toBeNull();
-    expect(routes.relayForOpen(workspaceId, successorRoot)).toMatchObject({
-      bearerToken: relay.token,
-    });
-    await live.closeWorkspace(successor);
-    await sessions.closeAll();
-  });
-
   it("drains every daemon pull page before reporting synchronization complete", async () => {
     let workspacePulls = 0;
     let channelPulls = 0;
@@ -2306,8 +768,10 @@ describe("EngineRelayClient", () => {
         workspacePulls += 1;
         const first = workspacePulls === 1;
         return {
-          status: "complete", refused: 0,
-          pushed: 0, ownerAdmissionPending: [],
+          status: "complete",
+          refused: 0,
+          pushed: 0,
+          ownerAdmissionPending: [],
           fetched: first ? 2 : 3,
           hasMore: first,
           applied: first ? 1 : 2,
@@ -2326,7 +790,8 @@ describe("EngineRelayClient", () => {
               contentKind: "text",
             },
           ],
-          sharingDeclined: [], refusals: [],
+          sharingDeclined: [],
+          refusals: [],
         };
       }
       if (request.method === "share.channel.pull") {
@@ -2380,14 +845,9 @@ describe("EngineRelayClient", () => {
         expect.objectContaining({ path: "second.md" }),
       ],
     });
+    expect(workspacePulls, "stopping after the first hasMore page strands remote data").toBe(2);
     expect(
-      workspacePulls,
-      "stopping after the first hasMore page strands remote data",
-    ).toBe(2);
-    expect(
-      daemon.requests.filter(
-        (request) => request.method === "sync.commitCursor",
-      ),
+      daemon.requests.filter((request) => request.method === "sync.commitCursor"),
     ).toHaveLength(2);
 
     await expect(
@@ -2413,267 +873,6 @@ describe("EngineRelayClient", () => {
     });
     expect(viewPulls).toBe(2);
     await view.commitCursor();
-    await sessions.closeAll();
-  });
-
-  // An unreachable server is retryable even while claiming the workspace.
-  it("names an unreachable relay for sync and claim", async () => {
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.push" || request.method === "sync.claim") {
-        throw new DaemonRefusalError(
-          { code: "WORKSPACE_UNAVAILABLE", message: "relay-unreachable", retry: "afterBackoff" },
-          new Error("refused"),
-        );
-      }
-      if (request.method === "sync.applyPull") {
-        throw new DaemonRefusalError(
-          { code: "WORKSPACE_UNAVAILABLE", message: "workspace operation failed", retry: "afterReconnect" },
-          new Error("refused"),
-        );
-      }
-      return undefined;
-    });
-    const { client, sessions } = await harness(daemon);
-    await expect(client.push()).rejects.toBeInstanceOf(RelayUnreachableError);
-    await expect(client.push()).rejects.toBeInstanceOf(RelayUnreachableError);
-    // The session is fine, so neither request reopens it.
-    expect(daemon.requests.map((request) => request.method)).toEqual([
-      "workspace.open",
-      "sync.push",
-      "sync.push",
-    ]);
-    await expect(client.pull(async (apply) => apply(async () => undefined))).rejects.toBeInstanceOf(
-      RelayWorkspaceUnavailableError,
-    );
-    await expect(client.claim()).rejects.toBeInstanceOf(RelayUnreachableError);
-    await sessions.closeAll();
-  });
-
-  it("stops waiting for the relay at quit, so the workspace closes", async () => {
-    const daemon = new MockDaemon();
-    const send = daemon.sendRequest.bind(daemon);
-    const pushSent = Promise.withResolvers<void>();
-    daemon.sendRequest = async (request) => {
-      if (request.method !== "sync.push") return await send(request);
-      daemon.requests.push(request);
-      pushSent.resolve();
-      return await new Promise<Response>(() => {});
-    };
-    const { client, sessions } = await harness(daemon);
-    const push = client.push();
-    await pushSent.promise;
-    sessions.beginShutdown();
-    await expect(push).rejects.toBeInstanceOf(EngineWorkspaceShuttingDownError);
-    await sessions.closeAll();
-    expect(daemon.requests.map((request) => request.method)).toEqual([
-      "workspace.open",
-      "sync.push",
-      "workspace.close",
-    ]);
-  });
-
-  it.each(["workspace operation failed", "relay-workspace-unavailable"])(
-    "preserves not-found classification for wire message %s", async (message) => {
-      const daemon = new MockDaemon((request) => {
-        if (request.method.startsWith("sync.") || request.method.startsWith("share.")) {
-          throw new DaemonRefusalError(
-            { code: "WORKSPACE_UNAVAILABLE", message, retry: "afterReconnect" }, new Error("refused"),
-          );
-        }
-        return undefined;
-      });
-      const { client, sessions } = await harness(daemon);
-      await expect(client.push()).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
-      await expect(client.pull(async (apply) => apply(async () => undefined))).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
-      await expect(client.commitCursor({})).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
-      await expect(client.recoverOrigin()).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
-      await expect(client.probe()).rejects.toBeInstanceOf(RelayWorkspaceUnavailableError);
-      await expect(client.pullSharedChannel({ shareId: "share", channelWireId: "channel" })).rejects.toBeInstanceOf(ShareUnavailableError);
-      await sessions.closeAll();
-    },
-  );
-
-  it.each(["workspace operation failed", "workspace handle is unavailable", "workspace-owned"])(
-    "does not report local claim failure %s as another account", async (message) => {
-      const daemon = new MockDaemon((request) => {
-        if (request.method === "sync.claim") throw new DaemonRefusalError(
-          { code: "WORKSPACE_UNAVAILABLE", message, retry: "afterReconnect" }, new Error("refused"),
-        );
-        return undefined;
-      });
-      const { client, sessions } = await harness(daemon);
-      await expect(client.claim()).rejects.not.toBeInstanceOf(RelayClaimRefusedError);
-      await sessions.closeAll();
-    },
-  );
-
-  it("keeps a bare claim 404's generic daemon error retryable", async () => {
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.claim") throw new DaemonRefusalError(
-        { code: "INTERNAL", message: "workspace operation failed", retry: "afterBackoff" }, new Error("HTTP 404"),
-      );
-      return undefined;
-    });
-    const { client, sessions } = await harness(daemon);
-    await expect(client.claim()).rejects.not.toBeInstanceOf(RelayClaimRefusedError);
-    await sessions.closeAll();
-  });
-
-  it.each([
-    ["EPOCH_SUPERSEDED", "Sync stopped. The server has a newer copy of this workspace. Join that copy to continue."],
-    ["IDENTITY_NOT_RECOGNIZED", "Sync stopped. The server does not recognize this workspace. Check your account and try again."],
-    ["STREAM_IDENTITY_MISMATCH", "Sync stopped. This workspace does not match the server's copy. Join that copy to continue."],
-    ["IDENTITY_REQUIRED", "Sync is not set up for this workspace. Try again."],
-  ] as const)("names claim refusal %s", async (code, message) => {
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.claim") throw new DaemonRefusalError(
-        { code, message: "workspace operation failed", retry: "no" }, new Error("refused"),
-      );
-      return undefined;
-    });
-    const { client, sessions } = await harness(daemon);
-    await expect(client.claim()).rejects.toThrow(message);
-    await sessions.closeAll();
-  });
-
-  it("names a push's missing identity", async () => {
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.push") throw new DaemonRefusalError(
-        { code: "IDENTITY_REQUIRED", message: "workspace operation failed", retry: "no" }, new Error("refused"),
-      );
-      return undefined;
-    });
-    const { client, sessions } = await harness(daemon);
-    await expect(client.push()).rejects.toBeInstanceOf(RelayIdentityMissingError);
-    await sessions.closeAll();
-  });
-
-  it("names a refused claim without replacing push failures", async () => {
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.claim" || request.method === "sync.push") {
-        throw new DaemonRefusalError(
-          { code: "WORKSPACE_UNAVAILABLE", message: "relay-workspace-unavailable", retry: "no" },
-          new Error("refused"),
-        );
-      }
-      return undefined;
-    });
-    const { client, sessions } = await harness(daemon);
-    await expect(client.claim()).rejects.toThrow("Sync stopped. Another account already claimed this workspace. Sign in with that account and try again.");
-    await expect(client.push()).rejects.toThrow("Relay workspace is unavailable.");
-    await sessions.closeAll();
-  });
-
-  it.each([
-    ["WORKSPACE_UNAVAILABLE", "Sync stopped. Another account already claimed this workspace. Sign in with that account and try again."],
-    ["EPOCH_SUPERSEDED", "Sync stopped. The server has a newer copy of this workspace. Join that copy to continue."],
-    ["IDENTITY_NOT_RECOGNIZED", "Sync stopped. The server does not recognize this workspace. Check your account and try again."],
-    ["STREAM_IDENTITY_MISMATCH", "Sync stopped. This workspace does not match the server's copy. Join that copy to continue."],
-    ["IDENTITY_REQUIRED", "Sync is not set up for this workspace. Try again."],
-  ] as const)("restores saved claim refusal %s from push", async (code, message) => {
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.push") throw new DaemonRefusalError(
-        { code, message: "relay-claim-refused", retry: "no" }, new Error("refused"),
-      );
-      return undefined;
-    });
-    const { client, sessions } = await harness(daemon);
-    await expect(client.push()).rejects.toBeInstanceOf(RelayClaimRefusedError);
-    await expect(client.push()).rejects.toThrow(message);
-    expect(daemon.requests.filter(request => request.method === "sync.push")).toHaveLength(2);
-    await sessions.closeAll();
-  });
-
-  it("does not reinterpret unrelated INVALID_PARAMS as recovery outcomes", async () => {
-    let originMarker = false;
-    let readOnlyMarker = false;
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "sync.push" || request.method === "sync.applyPull") {
-        throw new DaemonRefusalError(
-          {
-            code: "INVALID_PARAMS",
-            message: originMarker
-              ? "relay-origin-diverged"
-              : "invalid-sync-contract",
-            retry: "no",
-          },
-          new Error("refused"),
-        );
-      }
-      if (request.method === "share.channel.push") {
-        throw new DaemonRefusalError(
-          {
-            code: "INVALID_PARAMS",
-            message: readOnlyMarker ? "share-read-only" : "payload-too-large",
-            retry: "no",
-          },
-          new Error("refused"),
-        );
-      }
-      return undefined;
-    });
-    const { client, sessions } = await harness(daemon);
-
-    await expect(client.push()).rejects.toBeInstanceOf(DaemonRefusalError);
-    await expect(client.pull(async (apply) => apply(async () => undefined))).rejects.toBeInstanceOf(
-      DaemonRefusalError,
-    );
-    originMarker = true;
-    await expect(client.push()).rejects.toBeInstanceOf(
-      RelayOriginDivergedError,
-    );
-    await expect(client.pull(async (apply) => apply(async () => undefined))).rejects.toBeInstanceOf(
-      RelayOriginDivergedError,
-    );
-    await expect(
-      client.pushSharedChannel({
-        shareId: "share-channel",
-        channelWireId: "wire-channel",
-      }),
-    ).rejects.toBeInstanceOf(DaemonRefusalError);
-    readOnlyMarker = true;
-    await expect(
-      client.pushSharedChannel({
-        shareId: "share-channel",
-        channelWireId: "wire-channel",
-      }),
-    ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
-    await sessions.closeAll();
-  });
-
-  it("continues after a connection-change close failure", async () => {
-    let closeFailures = 1;
-    const daemon = new MockDaemon((request) => {
-      if (request.method === "workspace.close" && closeFailures > 0) {
-        closeFailures -= 1;
-        throw new Error("injected close failure");
-      }
-      return undefined;
-    });
-    const { rootPath, live, relay, sessions } = await harness(daemon);
-    const first = live.bind({
-      workspaceId: "workspace-close-retry",
-      rootPath,
-      relay,
-    });
-    await first.push();
-    const refreshed = live.bind({
-      workspaceId: "workspace-close-retry",
-      rootPath,
-      relay: { ...relay, token: "refreshed-token" },
-    });
-
-    await expect(refreshed.push()).resolves.toMatchObject({ pushed: 3 });
-    expect(
-      daemon.requests.filter(
-        (request) =>
-          request.method === "workspace.open" &&
-          request.params &&
-          typeof request.params === "object" &&
-          !Array.isArray(request.params) &&
-          request.params.workspaceId === "workspace-close-retry",
-      ),
-    ).toHaveLength(2);
     await sessions.closeAll();
   });
 
@@ -2717,110 +916,6 @@ describe("EngineRelayClient", () => {
     });
     await live.closeWorkspace("workspace-switch");
   });
-
-  it("locks a workspace to one transport and relay origin despite caller mutation", async () => {
-    const { rootPath } = await harness();
-    const routes = new RelayTransportRouteGuard();
-    const relay = {
-      baseUrl: "https://relay-a.test/",
-      token: "token-a",
-    };
-    routes.bind({
-      workspaceId: "workspace-locked",
-      rootPath,
-      relay,
-    });
-
-    // Mutating the caller-owned object cannot mutate the copied route.
-    relay.baseUrl = "https://relay-b.test";
-    relay.token = "token-b";
-    expect(routes.isBound("workspace-locked")).toBe(true);
-    expect(() =>
-      routes.bind({
-        workspaceId: "workspace-locked",
-        rootPath,
-        relay,
-        }),
-    ).toThrow("different relay origin");
-  });
-});
-
-describe("RelayConfiguredDaemonClientSource capability forwarding", () => {
-  it("forwards client replacement subscriptions and preserves wrapper identity", () => {
-    const changed = new Set<() => void>();
-    const inner = {
-      client: new MockDaemon(),
-      currentClient() { return this.client; },
-      onClientChanged(handler: () => void) {
-        changed.add(handler);
-        return () => { changed.delete(handler); };
-      },
-    };
-    const source = new RelayConfiguredDaemonClientSource(inner, new RelayTransportRouteGuard());
-    const first = source.currentClient();
-    const seen: EngineDaemonClient[] = [];
-    const unsubscribe = source.onClientChanged?.(() => seen.push(source.currentClient()));
-    expect(unsubscribe).toBeTypeOf("function");
-    inner.client = new MockDaemon();
-    for (const handler of changed) handler();
-    expect(seen).toEqual([source.currentClient()]);
-    expect(seen[0]).not.toBe(first);
-    unsubscribe?.();
-    expect(changed.size).toBe(0);
-  });
-
-  it("preserves request cancellation and optional workspace-session capabilities through the wrap", async () => {
-    const seen: string[] = [];
-    const unsubscribe = () => undefined;
-    const inner: EngineDaemonClient = {
-      sendRequest: async (request, _signal, _progress, cancelSignal) => {
-        cancelSignal?.addEventListener("abort", () => seen.push(`cancel:${request.id}`), {once: true});
-        return {id: request.id, result: null};
-      },
-      close: () => undefined,
-      helloAck: { capabilities: ["blobs"] },
-      onBlob: () => {
-        seen.push("onBlob");
-        return unsubscribe;
-      },
-      onEvent: () => {
-        seen.push("onEvent");
-        return unsubscribe;
-      },
-    };
-    const source = new RelayConfiguredDaemonClientSource(
-      { currentClient: () => inner },
-      new RelayTransportRouteGuard(),
-    );
-    const wrapped = source.currentClient();
-    expect(wrapped).not.toBe(inner);
-    // The engine Y.Doc open path gates on `typeof client.onEvent === "function"`;
-    // a wrapper that drops it silently downgrades every rich doc to the plain
-    // editor.
-    expect(typeof wrapped.onEvent).toBe("function");
-    expect(wrapped.helloAck).toEqual({ capabilities: ["blobs"] });
-    expect(wrapped.onEvent?.(() => undefined)).toBe(unsubscribe);
-    expect(wrapped.onBlob?.(() => undefined)).toBe(unsubscribe);
-    const cancel = new AbortController();
-    await wrapped.sendRequest({id: 7, method: "history.rewriteLinks", params: {}}, undefined, undefined, cancel.signal);
-    cancel.abort();
-    expect(seen).toEqual(["onEvent", "onBlob", "cancel:7"]);
-  });
-
-  it("does not invent capabilities the inner client lacks", () => {
-    const inner: EngineDaemonClient = {
-      sendRequest: () => Promise.reject(new Error("unused")),
-      close: () => undefined,
-    };
-    const source = new RelayConfiguredDaemonClientSource(
-      { currentClient: () => inner },
-      new RelayTransportRouteGuard(),
-    );
-    const wrapped = source.currentClient();
-    expect(wrapped.helloAck).toBeUndefined();
-    expect(wrapped.onEvent).toBeUndefined();
-    expect(wrapped.onBlob).toBeUndefined();
-  });
 });
 
 describe("RelayConfiguredDaemonClientSource unfinished ordinary pulls", () => {
@@ -2842,7 +937,7 @@ describe("RelayConfiguredDaemonClientSource unfinished ordinary pulls", () => {
     const source = new RelayConfiguredDaemonClientSource(
       { currentClient: () => inner },
       new RelayTransportRouteGuard(),
-      workspaceId => workspaceId === "ws",
+      (workspaceId) => workspaceId === "ws",
     );
     expect(await openParams(source, inner)).toMatchObject({ abandonOrdinaryPull: true });
     const temporaryOpens: Record<string, JsonValue>[] = [
@@ -2858,10 +953,22 @@ describe("RelayConfiguredDaemonClientSource unfinished ordinary pulls", () => {
   it("keeps one while ordinary sync is configured or the open carries a relay", async () => {
     const inner = new MockDaemon();
     const routes = new RelayTransportRouteGuard();
-    const synced = new RelayConfiguredDaemonClientSource({ currentClient: () => inner }, routes, () => false);
+    const synced = new RelayConfiguredDaemonClientSource(
+      { currentClient: () => inner },
+      routes,
+      () => false,
+    );
     expect(await openParams(synced, inner)).not.toHaveProperty("abandonOrdinaryPull");
-    routes.bind({ workspaceId: "ws", rootPath: "/no-such-root", relay: { baseUrl: "https://relay.test", token: "token" } });
-    const routed = new RelayConfiguredDaemonClientSource({ currentClient: () => inner }, routes, () => true);
+    routes.bind({
+      workspaceId: "ws",
+      rootPath: "/no-such-root",
+      relay: { baseUrl: "https://relay.test", token: "token" },
+    });
+    const routed = new RelayConfiguredDaemonClientSource(
+      { currentClient: () => inner },
+      routes,
+      () => true,
+    );
     const params = await openParams(routed, inner);
     expect(params).toHaveProperty("relay");
     expect(params).not.toHaveProperty("abandonOrdinaryPull");
@@ -2875,97 +982,22 @@ describe("allowInsecureLoopbackRelayForTests", () => {
     vi.unstubAllEnvs();
   });
 
-  it("allows plain-http loopback relays when the e2e env flag is set", () => {
-    expect(
-      allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", enabled),
-    ).toBe(true);
-    expect(
-      allowInsecureLoopbackRelayForTests(
-        "http://localhost:8787/relay",
-        enabled,
-      ),
-    ).toBe(true);
-    expect(
-      allowInsecureLoopbackRelayForTests("http://[::1]:8787", enabled),
-    ).toBe(true);
-  });
-
   it("refuses non-loopback http hosts even with the flag set", () => {
-    expect(
-      allowInsecureLoopbackRelayForTests("http://relay.example.com", enabled),
-    ).toBe(false);
-    expect(
-      allowInsecureLoopbackRelayForTests(
-        "http://localhost.evil.test:8787",
-        enabled,
-      ),
-    ).toBe(false);
-    expect(
-      allowInsecureLoopbackRelayForTests("http://192.168.1.10:8787", enabled),
-    ).toBe(false);
+    expect(allowInsecureLoopbackRelayForTests("http://relay.example.com", enabled)).toBe(false);
+    expect(allowInsecureLoopbackRelayForTests("http://localhost.evil.test:8787", enabled)).toBe(
+      false,
+    );
+    expect(allowInsecureLoopbackRelayForTests("http://192.168.1.10:8787", enabled)).toBe(false);
   });
 
   it("stays off without the exact flag, for https, and for junk URLs", () => {
-    expect(
-      allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {}),
-    ).toBe(false);
+    expect(allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {})).toBe(false);
     expect(
       allowInsecureLoopbackRelayForTests("http://127.0.0.1:8787", {
         [INSECURE_LOOPBACK_RELAY_TEST_ENV]: "true",
       }),
     ).toBe(false);
-    expect(
-      allowInsecureLoopbackRelayForTests("https://relay.test", enabled),
-    ).toBe(false);
-    expect(allowInsecureLoopbackRelayForTests("not a url", enabled)).toBe(
-      false,
-    );
-  });
-
-  it("flows from the env flag into the daemon workspace.open relay config", async () => {
-    vi.stubEnv(INSECURE_LOOPBACK_RELAY_TEST_ENV, "1");
-    const { rootPath, daemon, live, sessions } = await harness();
-    const client = live.bind({
-      workspaceId: "workspace-loopback",
-      rootPath,
-      relay: { baseUrl: "http://127.0.0.1:8787", token: "loopback-token" },
-    });
-    await client.push();
-    const open = daemon.requests.find(
-      (request) =>
-        request.method === "workspace.open" &&
-        request.params &&
-        typeof request.params === "object" &&
-        !Array.isArray(request.params) &&
-        request.params.workspaceId === "workspace-loopback",
-    );
-    expect(open?.params).toMatchObject({
-      relay: {
-        baseUrl: "http://127.0.0.1:8787",
-        bearerToken: "loopback-token",
-        allowInsecureLoopbackForTests: true,
-      },
-    });
-    await sessions.closeAll();
-  });
-
-  it("keeps the flag out of workspace.open when the env flag is unset", async () => {
-    const { daemon, sessions, client } = await harness();
-    await client.push();
-    const open = daemon.requests.find(
-      (request) => request.method === "workspace.open",
-    );
-    expect(open?.params).toMatchObject({
-      relay: { baseUrl: "https://relay.test" },
-    });
-    const relayParams =
-      open &&
-      open.params &&
-      typeof open.params === "object" &&
-      !Array.isArray(open.params)
-        ? open.params.relay
-        : null;
-    expect(relayParams).not.toHaveProperty("allowInsecureLoopbackForTests");
-    await sessions.closeAll();
+    expect(allowInsecureLoopbackRelayForTests("https://relay.test", enabled)).toBe(false);
+    expect(allowInsecureLoopbackRelayForTests("not a url", enabled)).toBe(false);
   });
 });

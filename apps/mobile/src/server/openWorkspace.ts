@@ -1,15 +1,11 @@
 import type { SignIn } from "./account";
-import { cacheScope, createWorkspaceData, type ReadCache, type WorkspaceData } from "./workspaceData";
+import {
+  cacheScope,
+  createWorkspaceData,
+  type ReadCache,
+  type WorkspaceData,
+} from "./workspaceData";
 import type { WorkspaceListStore } from "./workspaceList";
-
-// The workspace open on the phone, and the store that reads it. The open workspace is the one the person chose in the
-// switcher, or else the first the list shows on the phone that the server can open. Changing it stops the last store
-// and makes another, so nothing the last one started can reach the screen.
-//
-// A store that the server answers 404 has stopped and cleared itself, and the list is read again to decide. If the
-// list no longer shows the workspace, or the server can't open it, the phone opens the next. If it still shows it, it
-// stays open, empty, as a failed read, until Try again opens it in a new store. Nothing opens again by itself, so a
-// workspace that keeps answering 404 can't make the phone loop.
 
 export interface OpenWorkspaceState {
   readonly currentWorkspaceId: string | null;
@@ -43,7 +39,9 @@ export function createOpenWorkspace(options: {
 
   function open(workspaceId: string): WorkspaceData {
     const data = createWorkspaceData({
-      signIn, workspaceId, cache,
+      signIn,
+      workspaceId,
+      cache,
       onGone: () => list.reload(),
       // Only the store open now reopens; a later one has replaced any other.
       reopen: () => {
@@ -65,9 +63,13 @@ export function createOpenWorkspace(options: {
   function update() {
     if (stopped) return;
     const listed = list.state();
-    const openable = listed.status === "ready"
-      ? listed.workspaces.filter(entry => entry.showOnPhone && entry.canOpen).map(entry => entry.workspaceId) : [];
-    const current = openable.find(workspaceId => workspaceId === chosen) ?? openable[0] ?? null;
+    const openable =
+      listed.status === "ready"
+        ? listed.workspaces
+            .filter((entry) => entry.showOnPhone && entry.canOpen)
+            .map((entry) => entry.workspaceId)
+        : [];
+    const current = openable.find((workspaceId) => workspaceId === chosen) ?? openable[0] ?? null;
     if (current !== state.currentWorkspaceId) show(current);
   }
 

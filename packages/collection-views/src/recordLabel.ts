@@ -10,9 +10,7 @@ import type { CollectionRecord } from "@dohc/workspace-contracts";
  */
 export function recordLabel(record: CollectionRecord): string {
   for (const preferred of ["title", "name"]) {
-    const matches = record.values.filter(
-      (entry) => entry.field.toLowerCase() === preferred,
-    );
+    const matches = record.values.filter((entry) => entry.field.toLowerCase() === preferred);
     const entry =
       matches.find((candidate) => candidate.field === preferred) ??
       matches.sort((a, b) => (a.field < b.field ? -1 : 1))[0];
@@ -22,7 +20,5 @@ export function recordLabel(record: CollectionRecord): string {
     }
   }
   const basename = record.path.split("/").at(-1) ?? record.path;
-  return basename.toLowerCase().endsWith(".md")
-    ? basename.slice(0, -3)
-    : basename;
+  return basename.toLowerCase().endsWith(".md") ? basename.slice(0, -3) : basename;
 }

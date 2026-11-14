@@ -29,8 +29,6 @@ const notice = {
   seen: false,
 };
 
-// Outside the workspace shell, the corner notices own their own failures: a
-// copy refused from one of them is reported to the same owner.
 it("reports a copy refused from a notice to the owner it was given", async () => {
   const user = userEvent.setup();
   const refusal = new Error("Document is not focused.");
@@ -46,8 +44,14 @@ it("reports a copy refused from a notice to the owner it was given", async () =>
     />,
   );
 
-  await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Details" }));
-  await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Copy details" }));
+  await user.click(
+    within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Details" }),
+  );
+  await user.click(
+    within(screen.getByTestId("workspace-shell-error")).getByRole("button", {
+      name: "Copy details",
+    }),
+  );
   expect(reportFailure).toHaveBeenCalledWith({
     message: `${COPY_FAILURE} Document is not focused.`,
     cause: refusal,
@@ -55,15 +59,19 @@ it("reports a copy refused from a notice to the owner it was given", async () =>
   });
 });
 
-// A screen with no notice owner above it, such as the one dohc shows when it
-// cannot read its workspace list, gets its own: a refused copy there becomes a
-// toast with Try again.
 it("gives a copy on a screen with no notice owner a toast and Try again", async () => {
   const user = userEvent.setup();
-  const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("Document is not focused."));
+  const writeText = vi
+    .spyOn(navigator.clipboard, "writeText")
+    .mockRejectedValueOnce(new Error("Document is not focused."));
   render(
     <StandaloneNotices>
-      <CopyButton label="Copy" pinName iconOnly getText={() => "Error: dohc couldn't read its workspace registry"} />
+      <CopyButton
+        label="Copy"
+        pinName
+        iconOnly
+        getText={() => "Error: dohc couldn't read its workspace registry"}
+      />
     </StandaloneNotices>,
   );
 

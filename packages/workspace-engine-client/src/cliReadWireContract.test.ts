@@ -1,11 +1,6 @@
 import { ProtocolShapeError } from "./wireSchema";
 import { describe, expect, it } from "vitest";
-import {
-  CHATS_METHOD,
-  WORKSPACE_METHOD,
-  decodeWorkspaceResult,
-  decodeChatsResult,
-} from "./index";
+import { CHATS_METHOD, WORKSPACE_METHOD, decodeWorkspaceResult, decodeChatsResult } from "./index";
 
 describe("CLI daemon read decoders", () => {
   it("decodes granular chat candidates including the null thread-header id", () => {
@@ -126,9 +121,9 @@ describe("CLI daemon read decoders", () => {
         extra: true,
       },
     ]) {
-      expect(() =>
-        decodeChatsResult(CHATS_METHOD.readStateListUnreadFileThreads, [row]),
-      ).toThrow(ProtocolShapeError);
+      expect(() => decodeChatsResult(CHATS_METHOD.readStateListUnreadFileThreads, [row])).toThrow(
+        ProtocolShapeError,
+      );
     }
   });
 });

@@ -6,10 +6,7 @@ import {
   SitePackageResult,
 } from "./bridgeContract";
 
-type SitesIpcHandler<Event, Result = unknown> = (
-  event: Event,
-  payload: unknown,
-) => Promise<Result>;
+type SitesIpcHandler<Event, Result = unknown> = (event: Event, payload: unknown) => Promise<Result>;
 
 interface SitesIpcHandlers<Event> {
   listSites: SitesIpcHandler<Event>;
@@ -29,22 +26,15 @@ export interface SitesIpcDependencies<Event, Sender, Workspace> {
   catalog: OwnedSiteCatalog<Workspace>;
 }
 
-export function createSitesIpcHandlers<
-  Event,
-  Sender,
-  Workspace,
->(
+export function createSitesIpcHandlers<Event, Sender, Workspace>(
   dependencies: SitesIpcDependencies<Event, Sender, Workspace>,
 ): SitesIpcHandlers<Event> {
-  const handle = <
-    Payload extends { workspaceId: string },
-    RawResult,
-    Result,
-  >(input: {
-    parse(payload: unknown): Payload;
-    run(workspace: Workspace, payload: Payload): Promise<RawResult>;
-    validate(result: RawResult): Result;
-  }): SitesIpcHandler<Event, Result> =>
+  const handle =
+    <Payload extends { workspaceId: string }, RawResult, Result>(input: {
+      parse(payload: unknown): Payload;
+      run(workspace: Workspace, payload: Payload): Promise<RawResult>;
+      validate(result: RawResult): Result;
+    }): SitesIpcHandler<Event, Result> =>
     async (event, rawPayload) => {
       const sender = dependencies.authority.requireTrustedSender(event);
       const payload = input.parse(rawPayload);
@@ -68,11 +58,7 @@ export function createSitesIpcHandlers<
     getSitePackage: handle({
       parse: SitePackagePayload.parse,
       run: (workspace, payload) =>
-        dependencies.catalog.get(
-          workspace,
-          payload.path,
-          payload.effectivePreviewMode,
-        ),
+        dependencies.catalog.get(workspace, payload.path, payload.effectivePreviewMode),
       validate: SitePackageResult.parse,
     }),
   };

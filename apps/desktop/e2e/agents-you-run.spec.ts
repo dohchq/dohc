@@ -4,7 +4,13 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_USER_SETTINGS, type DesktopUserSettings } from "../src/settings/userSettings";
 import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
-import { agentsListening, openAgentChat, openMyAgent, startAgentYouRun, stopAgentYouRun } from "./helpers/agentTools";
+import {
+  agentsListening,
+  openAgentChat,
+  openMyAgent,
+  startAgentYouRun,
+  stopAgentYouRun,
+} from "./helpers/agentTools";
 import { hardKillPid } from "./helpers/daemonKill";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -15,9 +21,6 @@ import {
   trustOpenWorkspace,
 } from "./helpers/workspace";
 
-// An agent you run connects with --agent-id and waits for its messages. While
-// dohc runs another agent, it gets a message in its own chat and replies
-// under its own name and color.
 const fakeRunner = resolve(desktopRoot, "e2e/fixtures/fakeChatRunner.mjs");
 const WORKSPACE_ID = "agents-you-run-e2e";
 const REPLY = "Here. Looking at it now.";
@@ -41,9 +44,17 @@ async function runnerPid(path: string): Promise<number | null> {
 }
 
 async function runActive(page: Page): Promise<boolean> {
-  const state = await page.evaluate((workspaceId) => (window as unknown as {
-    dohcDesktop: { readAgentRunState(payload: { workspaceId: string }): Promise<{ active: boolean }> };
-  }).dohcDesktop.readAgentRunState({ workspaceId }), WORKSPACE_ID);
+  const state = await page.evaluate(
+    (workspaceId) =>
+      (
+        window as unknown as {
+          dohcDesktop: {
+            readAgentRunState(payload: { workspaceId: string }): Promise<{ active: boolean }>;
+          };
+        }
+      ).dohcDesktop.readAgentRunState({ workspaceId }),
+    WORKSPACE_ID,
+  );
   return state.active;
 }
 
@@ -60,19 +71,31 @@ test("an agent you run gets a message in its chat and replies as itself while a 
       profile: { preferredName: "Sam" },
       agents: {
         default: {
-          name: "Nova", hue: "olive", launch: { command: `"${process.execPath}" "${fakeRunner}" hold "${pids}"` },
-          changesFiles: true, enabled: true, timeoutMinutes: 5,
+          name: "Nova",
+          hue: "olive",
+          launch: { command: `"${process.execPath}" "${fakeRunner}" hold "${pids}"` },
+          changesFiles: true,
+          enabled: true,
+          timeoutMinutes: 5,
         },
-        terminal: { name: "Terminal", hue: "rose", changesFiles: true, enabled: false, timeoutMinutes: 1 },
+        terminal: {
+          name: "Terminal",
+          hue: "rose",
+          changesFiles: true,
+          enabled: false,
+          timeoutMinutes: 1,
+        },
       },
     };
-    await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), `${JSON.stringify(settings, null, 2)}\n`);
+    await writeFile(
+      join(temp.homeDir, USER_SETTINGS_FILE),
+      `${JSON.stringify(settings, null, 2)}\n`,
+    );
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
     await trustOpenWorkspace(desktop);
 
-    // Nova's run starts and keeps working.
     await openMyAgent(page);
     await page.getByTestId("chats-lane-composer").fill("keep working");
     await page.getByTestId("chats-lane-composer").press("Enter");
@@ -80,12 +103,10 @@ test("an agent you run gets a message in its chat and replies as itself while a 
     runner = await runnerPid(pids);
     await expect.poll(() => runActive(page)).toBe(true);
 
-    // Terminal connects as itself and waits.
     agent = await startAgentYouRun(page, WORKSPACE_ID, "terminal", REPLY);
     await expect.poll(() => agentsListening(page), { timeout: 30_000 }).toEqual(["terminal"]);
 
     await openAgentChat(page, "terminal", "Terminal");
-    // Its chat has no setup to finish: it answers while it's connected.
     await expect(page.getByTestId("chats-agent-problem")).toHaveCount(0);
     await page.getByTestId("chats-lane-composer").fill("are you there?");
     await page.getByTestId("chats-lane-composer").press("Enter");
@@ -96,11 +117,9 @@ test("an agent you run gets a message in its chat and replies as itself while a 
     await expect(author).toHaveAttribute("data-author-kind", "agent");
     await expect(author.locator(".text-hue-rose")).toHaveText("Terminal");
 
-    // Its wait ended with the message, and it left after replying.
     await expect.poll(() => agent!.exitCode).toBe(0);
     // Listening holds for two seconds after the last wait, so a re-wait never flickers.
     await expect.poll(() => agentsListening(page), { timeout: 10_000 }).toEqual([]);
-    // Nova's run worked on throughout.
     expect(await runActive(page)).toBe(true);
     expect(alive(runner!)).toBe(true);
   } finally {

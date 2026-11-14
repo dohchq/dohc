@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { parseLiveAuthorSnapshot, parseLiveUpdateIdentifier } from "@dohc/live-session-contract";
-import { datasetBaseFolder, DATASET_METADATA_MAX_BYTES, parseDatasetDefinition, parseDatasetRevision } from "@dohc/security-contract/dataset";
+import {
+  datasetBaseFolder,
+  DATASET_METADATA_MAX_BYTES,
+  parseDatasetDefinition,
+  parseDatasetRevision,
+} from "@dohc/security-contract/dataset";
 import {
   MAX_AUTOMATIONS_FILE_BYTES,
   parseAutomationsFile,
@@ -8,11 +13,19 @@ import {
   type AutomationsFileParseResult,
 } from "@dohc/workspace-contracts/automations";
 import { pathCollisionKey } from "../pathCollisionKey";
-import { parseCollectionRecordIdentity, parseCollectionRecordFields, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
+import {
+  parseCollectionRecordIdentity,
+  parseCollectionRecordFields,
+  parseCollectionSchema,
+} from "@dohc/workspace-contracts/collection-values";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { stableJsonStringify } from "../canonicalJson";
 import { notFound, relayError, RelayError } from "../errors";
-import { proposalBase, proposalMomentPayload, type DirectWriteMomentAuthor } from "../recipientMoments";
+import {
+  proposalBase,
+  proposalMomentPayload,
+  type DirectWriteMomentAuthor,
+} from "../recipientMoments";
 import { COLLECTION_FILE_ORIGIN_PREFIX, personalCollectionOrigin } from "../relayLogInputs";
 import { currentCollectionEditGrant } from "../collectionEditGrant";
 import { authorizeLinkShareAction, type AuthorizedShareAction } from "../shareAuthorization";
@@ -35,10 +48,19 @@ import {
   readLinkEnrollment,
   type LinkEnrollment,
 } from "./linkEnrollment";
-import { agentName, agentWriteAuthorityInTransaction, recordAgentConnectionActionInTransaction, type AgentConnectionRow } from "./agentConnections";
+import {
+  agentName,
+  agentWriteAuthorityInTransaction,
+  recordAgentConnectionActionInTransaction,
+  type AgentConnectionRow,
+} from "./agentConnections";
 import { appendLogBatchInTransaction, maxOriginSeq } from "./log";
 import type { PersonalCredential } from "./personalAgentChat";
-import { personalReachIn, readPersonalAuthority, type PersonalConnectionRow } from "./personalAgents";
+import {
+  personalReachIn,
+  readPersonalAuthority,
+  type PersonalConnectionRow,
+} from "./personalAgents";
 import type { SqliteDb } from "./types";
 import { assertWorkspaceQuota } from "./workspaces";
 
@@ -82,12 +104,21 @@ const COLLECTION_WRITES_TABLE = `
 // user id for each write, so its rows are named recipients' and move over
 // unchanged, with the bytes they already count against the quota.
 export function initializeCollectionWriteSchema(db: SqliteDb): void {
-  const migrated = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
-    .get(COLLECTION_WRITE_AUTHORS_MIGRATION) !== undefined;
+  const migrated =
+    db
+      .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+      .get(COLLECTION_WRITE_AUTHORS_MIGRATION) !== undefined;
   if (!migrated) {
-    const earlier = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_collection_writes'")
-      .get() !== undefined;
-    if (earlier) db.exec("ALTER TABLE sync_relay_collection_writes RENAME TO sync_relay_collection_writes_named");
+    const earlier =
+      db
+        .prepare(
+          "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_collection_writes'",
+        )
+        .get() !== undefined;
+    if (earlier)
+      db.exec(
+        "ALTER TABLE sync_relay_collection_writes RENAME TO sync_relay_collection_writes_named",
+      );
     db.exec(COLLECTION_WRITES_TABLE);
     if (earlier) {
       // Dropping the earlier table drops its usage triggers before its rows,
@@ -105,8 +136,9 @@ export function initializeCollectionWriteSchema(db: SqliteDb): void {
         DROP TABLE sync_relay_collection_writes_named;
       `);
     }
-    db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
-      .run(COLLECTION_WRITE_AUTHORS_MIGRATION, Date.now());
+    db.prepare(
+      "INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)",
+    ).run(COLLECTION_WRITE_AUTHORS_MIGRATION, Date.now());
   }
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_sync_relay_collection_writes_grant_seq
@@ -159,7 +191,10 @@ export interface CollectionWriteReceipt {
 // folder is taken. The recipient pulls the current file and tries again. A
 // taken folder names the folder and no hash, never the file that took it.
 export class CollectionWriteStaleError extends RelayError {
-  constructor(readonly path: string, readonly currentBlobSha256: string | null) {
+  constructor(
+    readonly path: string,
+    readonly currentBlobSha256: string | null,
+  ) {
     super("stale");
   }
 }
@@ -235,15 +270,24 @@ export function commitCollectionWrite(
   // The writer's authority first, so content checks answer nobody who may
   // not write. The transaction checks it again, and decides.
   storage.readTx(() => currentWriter(storage, input));
-  const unchecked = validateContent(storage, workspaceId, input.write, writer.kind !== "named"
-    ? suppliedBytes(writer.content)
-    : storedBytes(storage, workspaceId, input.write));
+  const unchecked = validateContent(
+    storage,
+    workspaceId,
+    input.write,
+    writer.kind !== "named"
+      ? suppliedBytes(writer.content)
+      : storedBytes(storage, workspaceId, input.write),
+  );
 
   return storage.tx(() => {
     const current = currentWriter(storage, input);
-    const decision = filterCollectionWriteForShare(current.authorized.effectiveSelector, input.rawChanges, {
-      channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
-    });
+    const decision = filterCollectionWriteForShare(
+      current.authorized.effectiveSelector,
+      input.rawChanges,
+      {
+        channelKind: (wireId) => storage.findChannelCreateKind(workspaceId, wireId),
+      },
+    );
     if (!decision.allowed || writeDigest(input.shareId, decision.write) !== payloadSha256) {
       throw relayError("share_op_rejected");
     }
@@ -253,24 +297,37 @@ export function commitCollectionWrite(
     // content was checked had no personal steps compared. It is stale now,
     // answered only after the writer's authority passed.
     for (const path of unchecked) {
-      throw new CollectionWriteStaleError(path, currentFile(storage, workspaceId, path)?.blobSha256 ?? null);
+      throw new CollectionWriteStaleError(
+        path,
+        currentFile(storage, workspaceId, path)?.blobSha256 ?? null,
+      );
     }
     checkBases(storage, workspaceId, decision.write);
     if (decision.write.kind === "new-record") {
-      checkRecordCreation(storage, workspaceId, decision.write, writer.kind !== "named"
-        ? suppliedBytes(writer.content) : storedBytes(storage, workspaceId, decision.write));
+      checkRecordCreation(
+        storage,
+        workspaceId,
+        decision.write,
+        writer.kind !== "named"
+          ? suppliedBytes(writer.content)
+          : storedBytes(storage, workspaceId, decision.write),
+      );
     }
 
     let addedBytes = 0;
     let principalId: string | null = null;
-    let linkAuthor: {kind: "link"; publicPrincipalId: string; label: string} | undefined;
+    let linkAuthor: { kind: "link"; publicPrincipalId: string; label: string } | undefined;
     if (current.kind === "link") {
       if (linkPrincipalLimitReached(storage, current.enrollment)) {
         throw relayError("quota_exceeded", "This link has as many browsers as it can hold.");
       }
       principalId = current.enrollment.principal?.principalId ?? randomUUID();
       if (!current.enrollment.principal) {
-        addedBytes += linkPrincipalStorageBytes(principalId, input.grantId, current.profileTokenHash);
+        addedBytes += linkPrincipalStorageBytes(
+          principalId,
+          input.grantId,
+          current.profileTokenHash,
+        );
       }
       addedBytes += newBlobBytes(storage, workspaceId, current.content);
       assertWorkspaceQuota(storage, workspaceId, addedBytes);
@@ -284,58 +341,112 @@ export function commitCollectionWrite(
         discussionRevision: Number(current.enrollment.authority.discussion_revision),
       });
       insertNewBlobs(storage, workspaceId, current.content, input.nowMs);
-      linkAuthor = {kind: "link", publicPrincipalId: collectionLinkPublicPrincipal(storage,
-        current.authorized.share.workspaceId, input.grantId, principal.principalId),
-        label: principal.displayName ?? "Anonymous"};
+      linkAuthor = {
+        kind: "link",
+        publicPrincipalId: collectionLinkPublicPrincipal(
+          storage,
+          current.authorized.share.workspaceId,
+          input.grantId,
+          principal.principalId,
+        ),
+        label: principal.displayName ?? "Anonymous",
+      };
     } else if (current.kind === "agent") {
       // The connection's principal, enrolled when the agent signed in.
       principalId = current.connection.principalId;
       addedBytes += newBlobBytes(storage, workspaceId, current.content);
       assertWorkspaceQuota(storage, workspaceId, addedBytes);
       insertNewBlobs(storage, workspaceId, current.content, input.nowMs);
-      linkAuthor = {kind: "link", publicPrincipalId: collectionLinkPublicPrincipal(storage,
-        current.authorized.share.workspaceId, input.grantId, principalId),
-        label: agentName(current.connection.reportedName)};
+      linkAuthor = {
+        kind: "link",
+        publicPrincipalId: collectionLinkPublicPrincipal(
+          storage,
+          current.authorized.share.workspaceId,
+          input.grantId,
+          principalId,
+        ),
+        label: agentName(current.connection.reportedName),
+      };
     }
     const agentConnectionId = current.kind === "agent" ? current.connection.connectionId : null;
-    const author: DirectWriteMomentAuthor = current.kind === "named"
-      ? { kind: "named", userId: current.userId, grantId: input.grantId, grantGeneration: input.grantGeneration }
-      : { kind: "link", grantId: input.grantId, grantGeneration: input.grantGeneration, principalId: principalId! };
-    const admittedAuthorSnapshot = parseLiveAuthorSnapshot(writer.kind === "named"
-      ? [{kind: "human", humanId: writer.userId, humanName: writer.humanName}]
-      : [linkAuthor!]);
+    const author: DirectWriteMomentAuthor =
+      current.kind === "named"
+        ? {
+            kind: "named",
+            userId: current.userId,
+            grantId: input.grantId,
+            grantGeneration: input.grantGeneration,
+          }
+        : {
+            kind: "link",
+            grantId: input.grantId,
+            grantGeneration: input.grantGeneration,
+            principalId: principalId!,
+          };
+    const admittedAuthorSnapshot = parseLiveAuthorSnapshot(
+      writer.kind === "named"
+        ? [{ kind: "human", humanId: writer.userId, humanName: writer.humanName }]
+        : [linkAuthor!],
+    );
     const originId = `${COLLECTION_FILE_ORIGIN_PREFIX}${input.grantId}`;
     const firstOriginSeq = maxOriginSeq(storage, workspaceId, originId) + 1;
     const ops = changesOf(decision.write).map((change, index) => ({
       originSeq: firstOriginSeq + index,
       opKind: "moment.append",
-      payloadJson: stableJsonStringify(momentFor(storage, workspaceId, change, index, author, input)),
+      payloadJson: stableJsonStringify(
+        momentFor(storage, workspaceId, change, index, author, input),
+      ),
       recordedAtMs: input.nowMs,
       admittedAuthorSnapshot,
     }));
     const paths = changesOf(decision.write).map((change) => change.afterPath!);
-    const receipt: CollectionWriteReceipt = { submitId: input.submitId, paths, committedAtMs: input.nowMs };
+    const receipt: CollectionWriteReceipt = {
+      submitId: input.submitId,
+      paths,
+      committedAtMs: input.nowMs,
+    };
     const pathsJson = JSON.stringify(paths);
     const receiptJson = JSON.stringify(receipt);
     const authorId = author.kind === "named" ? author.userId : author.principalId;
-    const storageBytes = Buffer.byteLength(pathsJson) + Buffer.byteLength(receiptJson) +
-      Buffer.byteLength(input.grantId) + Buffer.byteLength(authorId) + Buffer.byteLength(originId) +
-      Buffer.byteLength(agentConnectionId ?? "") + 256;
+    const storageBytes =
+      Buffer.byteLength(pathsJson) +
+      Buffer.byteLength(receiptJson) +
+      Buffer.byteLength(input.grantId) +
+      Buffer.byteLength(authorId) +
+      Buffer.byteLength(originId) +
+      Buffer.byteLength(agentConnectionId ?? "") +
+      256;
     // The ledger row goes first, so the append's quota check counts it.
-    storage.db.prepare(
-      `INSERT INTO sync_relay_collection_writes (
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_collection_writes (
          grant_id, submit_id, workspace_id, share_id, grant_generation, author_kind, user_id, principal_id,
          payload_sha256, origin_id, first_origin_seq, last_origin_seq, paths_json, receipt_json, created_at_ms,
          storage_bytes, agent_connection_id
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      input.grantId, input.submitId, workspaceId, input.shareId, input.grantGeneration, author.kind,
-      author.kind === "named" ? author.userId : null, author.kind === "link" ? author.principalId : null,
-      payloadSha256, originId, firstOriginSeq, firstOriginSeq + ops.length - 1, pathsJson, receiptJson,
-      input.nowMs, storageBytes, agentConnectionId,
-    );
+      )
+      .run(
+        input.grantId,
+        input.submitId,
+        workspaceId,
+        input.shareId,
+        input.grantGeneration,
+        author.kind,
+        author.kind === "named" ? author.userId : null,
+        author.kind === "link" ? author.principalId : null,
+        payloadSha256,
+        originId,
+        firstOriginSeq,
+        firstOriginSeq + ops.length - 1,
+        pathsJson,
+        receiptJson,
+        input.nowMs,
+        storageBytes,
+        agentConnectionId,
+      );
     appendLogBatchInTransaction(storage, { workspaceId, originId, ops });
-    if (agentConnectionId !== null) recordAgentConnectionActionInTransaction(storage, agentConnectionId, input.nowMs);
+    if (agentConnectionId !== null)
+      recordAgentConnectionActionInTransaction(storage, agentConnectionId, input.nowMs);
     return { receipt, created: true };
   });
 }
@@ -350,7 +461,11 @@ export interface PersonalWriterInput extends PersonalCredential {
  * workspace now. The relay reads this before a write's body, and the commit
  * reads it all again.
  */
-export function checkPersonalCollectionWriter(storage: StorageContext, input: PersonalWriterInput, nowMs: number): void {
+export function checkPersonalCollectionWriter(
+  storage: StorageContext,
+  input: PersonalWriterInput,
+  nowMs: number,
+): void {
   storage.readTx(() => personalWriter(storage, input, nowMs));
 }
 
@@ -398,18 +513,29 @@ export function commitPersonalCollectionWrite(
     const { connection, name } = personalWriter(storage, input, nowMs);
     const { agentId, ownerUserId } = connection;
     const payloadSha256 = writeDigest(`personal:${agentId}`, write);
-    const prior = storage.db.prepare(`SELECT payload_sha256, receipt_json FROM sync_relay_personal_collection_writes
-      WHERE agent_id = ? AND workspace_id = ? AND submit_id = ?`).get(agentId, workspaceId, input.submitId);
+    const prior = storage.db
+      .prepare(`SELECT payload_sha256, receipt_json FROM sync_relay_personal_collection_writes
+      WHERE agent_id = ? AND workspace_id = ? AND submit_id = ?`)
+      .get(agentId, workspaceId, input.submitId);
     if (prior) {
-      if (prior.payload_sha256 !== payloadSha256) throw relayError("conflict", "this submitId already names another write");
-      return { receipt: JSON.parse(String(prior.receipt_json)) as CollectionWriteReceipt, created: false };
+      if (prior.payload_sha256 !== payloadSha256)
+        throw relayError("conflict", "this submitId already names another write");
+      return {
+        receipt: JSON.parse(String(prior.receipt_json)) as CollectionWriteReceipt,
+        created: false,
+      };
     }
     for (const path of unchecked) {
-      throw new CollectionWriteStaleError(path, currentFile(storage, workspaceId, path)?.blobSha256 ?? null);
+      throw new CollectionWriteStaleError(
+        path,
+        currentFile(storage, workspaceId, path)?.blobSha256 ?? null,
+      );
     }
     // A new file in a folder that is not a Collection is another file write, and says so.
-    if ((write.kind === "new-record" || write.kind === "automations") &&
-        !automationSwitchableFolder(storage, workspaceId, write.collectionPath)) {
+    if (
+      (write.kind === "new-record" || write.kind === "automations") &&
+      !automationSwitchableFolder(storage, workspaceId, write.collectionPath)
+    ) {
       throw relayError("personal_agent_not_collection");
     }
     checkBases(storage, workspaceId, write);
@@ -417,7 +543,12 @@ export function commitPersonalCollectionWrite(
     assertWorkspaceQuota(storage, workspaceId, newBlobBytes(storage, workspaceId, input.content));
     insertNewBlobs(storage, workspaceId, input.content, nowMs);
 
-    const author: DirectWriteMomentAuthor = { kind: "agent", agentId, agentName: name, onBehalfOf: ownerUserId };
+    const author: DirectWriteMomentAuthor = {
+      kind: "agent",
+      agentId,
+      agentName: name,
+      onBehalfOf: ownerUserId,
+    };
     const admittedAuthorSnapshot = parseLiveAuthorSnapshot([
       { kind: "human", humanId: ownerUserId, humanName: input.ownerName },
       { kind: "agent", agentId, agentName: name, onBehalfOf: ownerUserId },
@@ -427,27 +558,49 @@ export function commitPersonalCollectionWrite(
     const ops = changesOf(write).map((change, index) => ({
       originSeq: firstOriginSeq + index,
       opKind: "moment.append",
-      payloadJson: stableJsonStringify(momentFor(storage, workspaceId, change, index, author, { nowMs, newId: input.newId })),
+      payloadJson: stableJsonStringify(
+        momentFor(storage, workspaceId, change, index, author, { nowMs, newId: input.newId }),
+      ),
       recordedAtMs: nowMs,
       admittedAuthorSnapshot,
     }));
     const receipt: CollectionWriteReceipt = {
-      submitId: input.submitId, paths: changesOf(write).map((change) => change.afterPath!), committedAtMs: nowMs,
+      submitId: input.submitId,
+      paths: changesOf(write).map((change) => change.afterPath!),
+      committedAtMs: nowMs,
     };
     const receiptJson = JSON.stringify(receipt);
-    const storageBytes = Buffer.byteLength(receiptJson) + Buffer.byteLength(originId) +
-      Buffer.byteLength(connection.connectionId) + 256;
+    const storageBytes =
+      Buffer.byteLength(receiptJson) +
+      Buffer.byteLength(originId) +
+      Buffer.byteLength(connection.connectionId) +
+      256;
     // The ledger row goes first, so the append's quota check counts it.
-    storage.db.prepare(
-      `INSERT INTO sync_relay_personal_collection_writes (
+    storage.db
+      .prepare(
+        `INSERT INTO sync_relay_personal_collection_writes (
          agent_id, workspace_id, submit_id, connection_id, payload_sha256, origin_id, first_origin_seq, last_origin_seq,
          receipt_json, created_at_ms, storage_bytes
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(agentId, workspaceId, input.submitId, connection.connectionId, payloadSha256, originId, firstOriginSeq,
-      firstOriginSeq + ops.length - 1, receiptJson, nowMs, storageBytes);
+      )
+      .run(
+        agentId,
+        workspaceId,
+        input.submitId,
+        connection.connectionId,
+        payloadSha256,
+        originId,
+        firstOriginSeq,
+        firstOriginSeq + ops.length - 1,
+        receiptJson,
+        nowMs,
+        storageBytes,
+      );
     appendLogBatchInTransaction(storage, { workspaceId, originId, ops });
-    storage.db.prepare(`UPDATE sync_relay_personal_agents SET last_action_at_ms = MAX(COALESCE(last_action_at_ms, 0), ?)
-      WHERE agent_id = ?`).run(nowMs, agentId);
+    storage.db
+      .prepare(`UPDATE sync_relay_personal_agents SET last_action_at_ms = MAX(COALESCE(last_action_at_ms, 0), ?)
+      WHERE agent_id = ?`)
+      .run(nowMs, agentId);
     return { receipt, created: true };
   });
 }
@@ -465,32 +618,48 @@ function personalWriter(
   const reach = personalReachIn(storage, connection, input.workspaceId);
   if (!reach) throw relayError("personal_agent_out_of_reach");
   if (reach.level !== "edit") throw relayError("personal_agent_edit_needed");
-  const agent = storage.db.prepare("SELECT name FROM sync_relay_personal_agents WHERE agent_id = ?").get(connection.agentId);
+  const agent = storage.db
+    .prepare("SELECT name FROM sync_relay_personal_agents WHERE agent_id = ?")
+    .get(connection.agentId);
   return { connection, name: parseLiveUpdateIdentifier(agent?.name) };
 }
 
-const publicPrincipalStatements = new WeakMap<SqliteDb, {
-  find: ReturnType<SqliteDb["prepare"]>;
-  insert: ReturnType<SqliteDb["prepare"]>;
-}>();
+const publicPrincipalStatements = new WeakMap<
+  SqliteDb,
+  {
+    find: ReturnType<SqliteDb["prepare"]>;
+    insert: ReturnType<SqliteDb["prepare"]>;
+  }
+>();
 
 /** The write transaction has already authenticated and enrolled this principal. */
-function collectionLinkPublicPrincipal(storage: StorageContext, workspaceId: string, grantId: string, principalId: string): string {
+function collectionLinkPublicPrincipal(
+  storage: StorageContext,
+  workspaceId: string,
+  grantId: string,
+  principalId: string,
+): string {
   let statements = publicPrincipalStatements.get(storage.db);
   if (!statements) {
     statements = {
-      find: storage.db.prepare("SELECT workspace_id,public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?"),
-      insert: storage.db.prepare("INSERT INTO sync_relay_app_public_principals(workspace_id,grant_id,principal_id,public_principal_id,storage_bytes) VALUES(?,?,?,?,?)"),
+      find: storage.db.prepare(
+        "SELECT workspace_id,public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?",
+      ),
+      insert: storage.db.prepare(
+        "INSERT INTO sync_relay_app_public_principals(workspace_id,grant_id,principal_id,public_principal_id,storage_bytes) VALUES(?,?,?,?,?)",
+      ),
     };
     publicPrincipalStatements.set(storage.db, statements);
   }
   const mapping = statements.find.get(grantId, principalId);
   if (mapping) {
-    if (mapping.workspace_id !== workspaceId) throw new Error("The public link principal mapping is damaged.");
+    if (mapping.workspace_id !== workspaceId)
+      throw new Error("The public link principal mapping is damaged.");
     return parseLiveUpdateIdentifier(mapping.public_principal_id);
   }
   const publicId = `public_${randomUUID()}`;
-  const storageBytes = Buffer.byteLength(JSON.stringify([workspaceId, grantId, principalId, publicId])) + 128;
+  const storageBytes =
+    Buffer.byteLength(JSON.stringify([workspaceId, grantId, principalId, publicId])) + 128;
   assertWorkspaceQuota(storage, workspaceId, storageBytes);
   statements.insert.run(workspaceId, grantId, principalId, publicId, storageBytes);
   return publicId;
@@ -501,20 +670,36 @@ function changesOf(write: CollectionWrite): ProposedChange[] {
 }
 
 function checkRecordCreation(
-  storage: StorageContext, workspaceId: string,
-  write: Extract<CollectionWrite, { kind: "new-record" }>, bytesOf: ContentBytes,
+  storage: StorageContext,
+  workspaceId: string,
+  write: Extract<CollectionWrite, { kind: "new-record" }>,
+  bytesOf: ContentBytes,
 ): void {
-  const schema = currentFile(storage, workspaceId, `${write.collectionPath}/${COLLECTION_SCHEMA_FILE}`);
+  const schema = currentFile(
+    storage,
+    workspaceId,
+    `${write.collectionPath}/${COLLECTION_SCHEMA_FILE}`,
+  );
   const schemaText = schema && priorText(storage, workspaceId, schema.blobSha256);
-  if (!schemaText || schemaText === "unreadable" || parseCollectionSchema(schemaText).status !== "valid") {
+  if (
+    !schemaText ||
+    schemaText === "unreadable" ||
+    parseCollectionSchema(schemaText).status !== "valid"
+  ) {
     throw refusal("This Collection does not have a current document schema.");
   }
   const bytes = bytesOf(write.change.afterBlobSha256!, write.change.afterByteLength!);
   const id = bytes && parseCollectionRecordIdentity(utf8(bytes) ?? "");
   if (!id) throw refusal("This record needs a valid record ID.");
-  if (storage.db.prepare(`SELECT 1 FROM sync_relay_current_record_ids
-    WHERE workspace_id = ? AND version_id = ? AND record_id = ? LIMIT 1`).get(workspaceId, MAIN_VERSION_ID, id)) {
-    throw refusal("The sync relay could not create this record. Choose a new name and record ID, then try again.");
+  if (
+    storage.db
+      .prepare(`SELECT 1 FROM sync_relay_current_record_ids
+    WHERE workspace_id = ? AND version_id = ? AND record_id = ? LIMIT 1`)
+      .get(workspaceId, MAIN_VERSION_ID, id)
+  ) {
+    throw refusal(
+      "The sync relay could not create this record. Choose a new name and record ID, then try again.",
+    );
   }
 }
 
@@ -529,7 +714,15 @@ function writeDigest(shareId: string, write: CollectionWrite): string {
     afterByteLength: change.afterByteLength,
   }));
   return createHash("sha256")
-    .update(stableJsonStringify(["dohc-collection-write-v1", shareId, write.kind, write.collectionPath, changes]))
+    .update(
+      stableJsonStringify([
+        "dohc-collection-write-v1",
+        shareId,
+        write.kind,
+        write.collectionPath,
+        changes,
+      ]),
+    )
     .digest("hex");
 }
 
@@ -561,31 +754,49 @@ function currentWriter(storage: StorageContext, input: CommitCollectionWriteInpu
     return { kind: "named", userId: writer.userId, authorized };
   }
   if (writer.kind === "agent") {
-    return { kind: "agent", content: writer.content, ...authorizeAgentCollectionWrite(storage, { ...input, ...writer, nowMs: writer.now() }) };
+    return {
+      kind: "agent",
+      content: writer.content,
+      ...authorizeAgentCollectionWrite(storage, { ...input, ...writer, nowMs: writer.now() }),
+    };
   }
-  return { ...writer, ...authorizeLinkCollectionWrite(storage, {
-    ...input, ...writer, nowMs: writer.now(),
-  }) };
+  return {
+    ...writer,
+    ...authorizeLinkCollectionWrite(storage, {
+      ...input,
+      ...writer,
+      nowMs: writer.now(),
+    }),
+  };
 }
 
-export function authorizeLinkCollectionWrite(storage: StorageContext, input: {
-  shareId: string;
-  grantId: string;
-  grantGeneration: number;
-  capabilityHash: string;
-  profileTokenHash: string;
-  nowMs: number;
-}) {
+export function authorizeLinkCollectionWrite(
+  storage: StorageContext,
+  input: {
+    shareId: string;
+    grantId: string;
+    grantGeneration: number;
+    capabilityHash: string;
+    profileTokenHash: string;
+    nowMs: number;
+  },
+) {
   const enrollment = readLinkEnrollment(storage, input, input.nowMs);
   const authority = enrollment?.authority;
   if (
-    !enrollment || linkWriteRefusal(enrollment) ||
-    authority!.grant_id !== input.grantId || authority!.share_id !== input.shareId ||
+    !enrollment ||
+    linkWriteRefusal(enrollment) ||
+    authority!.grant_id !== input.grantId ||
+    authority!.share_id !== input.shareId ||
     Number(authority!.grant_generation) !== input.grantGeneration
   ) {
     throw notFound();
   }
-  const authorized = authorizeLinkShareAction({ storage, grantId: input.grantId, action: "direct-write" });
+  const authorized = authorizeLinkShareAction({
+    storage,
+    grantId: input.grantId,
+    action: "direct-write",
+  });
   if (!authorized.ok || authorized.grant.generation !== input.grantGeneration) throw notFound();
   return { authorized, enrollment };
 }
@@ -593,22 +804,32 @@ export function authorizeLinkCollectionWrite(storage: StorageContext, input: {
 // The same checks for an agent: its token is an unexpired access token of
 // an active connection at this address, on this link at this generation,
 // with Edit access, not paused, and its principal not blocked.
-export function authorizeAgentCollectionWrite(storage: StorageContext, input: {
-  shareId: string;
-  grantId: string;
-  grantGeneration: number;
-  accessTokenHash: string;
-  resourceHash: string;
-  nowMs: number;
-}) {
+export function authorizeAgentCollectionWrite(
+  storage: StorageContext,
+  input: {
+    shareId: string;
+    grantId: string;
+    grantGeneration: number;
+    accessTokenHash: string;
+    resourceHash: string;
+    nowMs: number;
+  },
+) {
   const agent = agentWriteAuthorityInTransaction(storage, input, input.nowMs);
   if (
-    !agent || linkWriteRefusal(agent.enrollment) || agent.connection.grantId !== input.grantId ||
-    agent.connection.shareId !== input.shareId || agent.connection.generation !== input.grantGeneration
+    !agent ||
+    linkWriteRefusal(agent.enrollment) ||
+    agent.connection.grantId !== input.grantId ||
+    agent.connection.shareId !== input.shareId ||
+    agent.connection.generation !== input.grantGeneration
   ) {
     throw notFound();
   }
-  const authorized = authorizeLinkShareAction({ storage, grantId: input.grantId, action: "direct-write" });
+  const authorized = authorizeLinkShareAction({
+    storage,
+    grantId: input.grantId,
+    action: "direct-write",
+  });
   if (!authorized.ok || authorized.grant.generation !== input.grantGeneration) throw notFound();
   return { authorized, enrollment: agent.enrollment, connection: agent.connection };
 }
@@ -623,22 +844,31 @@ function replayed(
   current: CurrentWriter,
   payloadSha256: string,
 ): CollectionWriteReceipt | null {
-  const row = storage.db.prepare(
-    `SELECT author_kind, user_id, principal_id, grant_generation, payload_sha256, receipt_json
+  const row = storage.db
+    .prepare(
+      `SELECT author_kind, user_id, principal_id, grant_generation, payload_sha256, receipt_json
      FROM sync_relay_collection_writes WHERE grant_id = ? AND submit_id = ?`,
-  ).get(input.grantId, input.submitId);
+    )
+    .get(input.grantId, input.submitId);
   if (!row) return null;
-  const same = row.payload_sha256 === payloadSha256 && (current.kind === "named"
-    ? row.author_kind === "named" && row.user_id === current.userId
-    : row.author_kind === "link" && current.enrollment.principal !== null &&
-      row.principal_id === current.enrollment.principal.principalId &&
-      Number(row.grant_generation) === input.grantGeneration);
+  const same =
+    row.payload_sha256 === payloadSha256 &&
+    (current.kind === "named"
+      ? row.author_kind === "named" && row.user_id === current.userId
+      : row.author_kind === "link" &&
+        current.enrollment.principal !== null &&
+        row.principal_id === current.enrollment.principal.principalId &&
+        Number(row.grant_generation) === input.grantGeneration);
   if (!same) throw relayError("conflict", "this submitId already names another write");
   return JSON.parse(String(row.receipt_json)) as CollectionWriteReceipt;
 }
 
 // The bytes a link sent that the workspace does not hold yet.
-function newBlobBytes(storage: StorageContext, workspaceId: string, content: ReadonlyMap<string, Uint8Array>): number {
+function newBlobBytes(
+  storage: StorageContext,
+  workspaceId: string,
+  content: ReadonlyMap<string, Uint8Array>,
+): number {
   const missing = new Set(storage.missingBlobs(workspaceId, [...content.keys()]));
   let bytes = 0;
   for (const [sha256, body] of content) if (missing.has(sha256)) bytes += body.byteLength;
@@ -668,10 +898,12 @@ function currentFile(
   workspaceId: string,
   path: string,
 ): { blobSha256: string } | null {
-  const row = storage.db.prepare(
-    `SELECT blob_sha256 FROM sync_relay_current_files
+  const row = storage.db
+    .prepare(
+      `SELECT blob_sha256 FROM sync_relay_current_files
      WHERE workspace_id = ? AND version_id = ? AND path = ?`,
-  ).get(workspaceId, MAIN_VERSION_ID, path);
+    )
+    .get(workspaceId, MAIN_VERSION_ID, path);
   return row ? { blobSha256: String(row.blob_sha256) } : null;
 }
 
@@ -690,7 +922,13 @@ function checkBases(storage: StorageContext, workspaceId: string, write: Collect
   const schema = currentFile(storage, workspaceId, schemaPath);
   // A folder that stopped being a Collection takes no direct write. A
   // schema stored as binary is still the Collection's schema.
-  if (schema === null && !(write.kind === "automations" && approvedDatasetFolder(storage, workspaceId, write.collectionPath))) {
+  if (
+    schema === null &&
+    !(
+      write.kind === "automations" &&
+      approvedDatasetFolder(storage, workspaceId, write.collectionPath)
+    )
+  ) {
     if (write.kind === "schema") throw new CollectionWriteStaleError(schemaPath, null);
     throw relayError("share_op_rejected");
   }
@@ -707,9 +945,15 @@ function checkBases(storage: StorageContext, workspaceId: string, write: Collect
 }
 
 /** Only automations may use a dataset folder. Rule files keep their approval lane. */
-export function automationSwitchableFolder(storage: StorageContext, workspaceId: string, folder: string): boolean {
-  return currentFile(storage, workspaceId, `${folder}/${COLLECTION_SCHEMA_FILE}`) !== null
-    || approvedDatasetFolder(storage, workspaceId, folder);
+export function automationSwitchableFolder(
+  storage: StorageContext,
+  workspaceId: string,
+  folder: string,
+): boolean {
+  return (
+    currentFile(storage, workspaceId, `${folder}/${COLLECTION_SCHEMA_FILE}`) !== null ||
+    approvedDatasetFolder(storage, workspaceId, folder)
+  );
 }
 
 const DATASET_PREFLIGHT_CACHE_MS = 2_000;
@@ -722,7 +966,11 @@ type CachedDatasetDescriptor = {
 };
 const datasetDescriptors = new WeakMap<StorageContext, Map<string, CachedDatasetDescriptor>>();
 
-function datasetDescriptor(storage: StorageContext, workspaceId: string, folder: string): CachedDatasetDescriptor | null {
+function datasetDescriptor(
+  storage: StorageContext,
+  workspaceId: string,
+  folder: string,
+): CachedDatasetDescriptor | null {
   const descriptor = currentFile(storage, workspaceId, `${folder}/dataset.json`);
   if (!descriptor) return null;
   let cache = datasetDescriptors.get(storage);
@@ -734,7 +982,9 @@ function datasetDescriptor(storage: StorageContext, workspaceId: string, folder:
   const now = Date.now();
   const cached = cache.get(key);
   if (cached?.blobSha256 === descriptor.blobSha256 && cached.expiresAtMs > now) return cached;
-  const row = storage.db.prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?").get(workspaceId, descriptor.blobSha256);
+  const row = storage.db
+    .prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?")
+    .get(workspaceId, descriptor.blobSha256);
   const size = Number(row?.byte_length);
   if (!Number.isSafeInteger(size) || size < 0 || size > DATASET_METADATA_MAX_BYTES) return null;
   const bytes = storedBlob(storage, workspaceId, descriptor.blobSha256, size);
@@ -755,20 +1005,33 @@ function datasetDescriptor(storage: StorageContext, workspaceId: string, folder:
   return result;
 }
 
-function approvedDatasetFolder(storage: StorageContext, workspaceId: string, folder: string): boolean {
+function approvedDatasetFolder(
+  storage: StorageContext,
+  workspaceId: string,
+  folder: string,
+): boolean {
   try {
     const descriptor = datasetDescriptor(storage, workspaceId, folder);
     if (!descriptor) return false;
-    const catalog = storage.db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(workspaceId, descriptor.datasetId);
+    const catalog = storage.db
+      .prepare(
+        "SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?",
+      )
+      .get(workspaceId, descriptor.datasetId);
     if (!catalog) return false;
     const revisionJson = String(catalog.revision_json);
     const revisionSha256 = createHash("sha256").update(revisionJson).digest("hex");
-    if (descriptor.approval?.revisionSha256 === revisionSha256) return descriptor.approval.canSwitch;
+    if (descriptor.approval?.revisionSha256 === revisionSha256)
+      return descriptor.approval.canSwitch;
     const approved = parseDatasetRevision(JSON.parse(revisionJson));
-    const canSwitch = approved.datasetId === descriptor.datasetId && datasetBaseFolder(approved.definition) === folder;
+    const canSwitch =
+      approved.datasetId === descriptor.datasetId &&
+      datasetBaseFolder(approved.definition) === folder;
     descriptor.approval = { revisionSha256, canSwitch };
     return canSwitch;
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
 // Whether the owner has a file at `path`, under it, or at one of its
@@ -780,12 +1043,22 @@ function spellingTaken(storage: StorageContext, workspaceId: string, path: strin
   const key = pathCollisionKey(path);
   const parts = key.split("/");
   const atOrAbove = parts.map((_, index) => parts.slice(0, index + 1).join("/"));
-  const row = storage.db.prepare(
-    `SELECT EXISTS (SELECT 1 FROM sync_relay_current_file_keys
+  const row = storage.db
+    .prepare(
+      `SELECT EXISTS (SELECT 1 FROM sync_relay_current_file_keys
          WHERE workspace_id = ? AND version_id = ? AND collision_key IN (${atOrAbove.map(() => "?").join(", ")}))
        OR EXISTS (SELECT 1 FROM sync_relay_current_file_keys
          WHERE workspace_id = ? AND version_id = ? AND collision_key >= ? AND collision_key < ?) AS taken`,
-  ).get(workspaceId, MAIN_VERSION_ID, ...atOrAbove, workspaceId, MAIN_VERSION_ID, `${key}/`, `${key}0`);
+    )
+    .get(
+      workspaceId,
+      MAIN_VERSION_ID,
+      ...atOrAbove,
+      workspaceId,
+      MAIN_VERSION_ID,
+      `${key}/`,
+      `${key}0`,
+    );
   return Number(row?.taken) === 1;
 }
 
@@ -800,16 +1073,27 @@ function momentFor(
   author: DirectWriteMomentAuthor,
   input: Pick<CommitCollectionWriteInput, "nowMs" | "newId">,
 ): Record<string, unknown> {
-  const stale = () => new CollectionWriteStaleError(change.afterPath!, currentFile(storage, workspaceId, change.afterPath!)?.blobSha256 ?? null);
-  const objectId = change.basedOnPath === null
-    ? null
-    : storage.objectIdAtPathInVersion({ workspaceId, versionId: MAIN_VERSION_ID, path: change.basedOnPath }) ?? null;
+  const stale = () =>
+    new CollectionWriteStaleError(
+      change.afterPath!,
+      currentFile(storage, workspaceId, change.afterPath!)?.blobSha256 ?? null,
+    );
+  const objectId =
+    change.basedOnPath === null
+      ? null
+      : (storage.objectIdAtPathInVersion({
+          workspaceId,
+          versionId: MAIN_VERSION_ID,
+          path: change.basedOnPath,
+        }) ?? null);
   if (change.basedOnPath !== null && objectId === null) throw stale();
   const op = { opIndex: index, basedOnObjectId: objectId, ...change, recordedAtMs: input.nowMs };
   const { head } = proposalBase(storage, workspaceId, MAIN_VERSION_ID, op);
   if (
     change.basedOnPath !== null &&
-    (head === null || head.path !== change.afterPath || head.blobSha256 !== change.basedOnBlobSha256)
+    (head === null ||
+      head.path !== change.afterPath ||
+      head.blobSha256 !== change.basedOnBlobSha256)
   ) {
     throw stale();
   }
@@ -823,7 +1107,8 @@ function momentFor(
     summary: null,
     author,
   });
-  if (!built.ok || built.payload.operation !== "write" || built.payload.path !== change.afterPath) throw stale();
+  if (!built.ok || built.payload.operation !== "write" || built.payload.path !== change.afterPath)
+    throw stale();
   return built.payload;
 }
 
@@ -831,8 +1116,14 @@ function momentFor(
 type ContentBytes = (sha256: string, byteLength: number) => Uint8Array | null;
 
 // A named recipient's content: blobs they uploaded before the write.
-function storedBytes(storage: StorageContext, workspaceId: string, write: CollectionWrite): ContentBytes {
-  const missing = storage.missingBlobs(workspaceId, [...new Set(changesOf(write).map((change) => change.afterBlobSha256!))]);
+function storedBytes(
+  storage: StorageContext,
+  workspaceId: string,
+  write: CollectionWrite,
+): ContentBytes {
+  const missing = storage.missingBlobs(workspaceId, [
+    ...new Set(changesOf(write).map((change) => change.afterBlobSha256!)),
+  ]);
   if (missing.length > 0) {
     throw new SyncRelayBlobMissingError(
       `this write references ${missing.length} blob(s) not stored on the relay (first: ${missing[0]}); upload and retry`,
@@ -860,12 +1151,18 @@ function suppliedBytes(content: ReadonlyMap<string, Uint8Array>): ContentBytes {
  * their personal steps could not be compared. The prior content is read
  * only as the file is now, so a base hash names no other content.
  */
-function validateContent(storage: StorageContext, workspaceId: string, write: CollectionWrite, bytesOf: ContentBytes): string[] {
+function validateContent(
+  storage: StorageContext,
+  workspaceId: string,
+  write: CollectionWrite,
+  bytesOf: ContentBytes,
+): string[] {
   const unchecked: string[] = [];
   const changes = changesOf(write);
   const texts = new Map<string, { text: string; byteLength: number }>();
   const text = (change: ProposedChange, limit: number): string => {
-    if (change.afterByteLength! > limit) throw refusal(`${change.afterPath} is larger than ${limit} bytes`);
+    if (change.afterByteLength! > limit)
+      throw refusal(`${change.afterPath} is larger than ${limit} bytes`);
     const sha256 = change.afterBlobSha256!;
     let read = texts.get(sha256);
     if (read === undefined) {
@@ -885,9 +1182,14 @@ function validateContent(storage: StorageContext, workspaceId: string, write: Co
     const file = change.afterPath!.slice(change.afterPath!.lastIndexOf("/") + 1);
     if (file === COLLECTION_SCHEMA_FILE) {
       const parsed = parseCollectionSchema(text(change, MAX_COLLECTION_SCHEMA_BYTES));
-      const versionError = collectionVersionError(parsed.reasons, change.afterPath ?? undefined, "sync service");
+      const versionError = collectionVersionError(
+        parsed.reasons,
+        change.afterPath ?? undefined,
+        "sync service",
+      );
       if (versionError) throw refusal(versionError);
-      if (parsed.status !== "valid") throw refusal(`${change.afterPath} is not a valid collection.yaml`);
+      if (parsed.status !== "valid")
+        throw refusal(`${change.afterPath} is not a valid collection.yaml`);
     } else if (file === COLLECTION_AUTOMATIONS_FILE) {
       const after = parseAutomationsFile(text(change, MAX_AUTOMATIONS_FILE_BYTES));
       if (after.status !== "read" || after.entries.some((entry) => entry.status !== "valid")) {
@@ -895,21 +1197,25 @@ function validateContent(storage: StorageContext, workspaceId: string, write: Co
       }
       if (
         change.basedOnBlobSha256 !== null &&
-        currentFile(storage, workspaceId, change.afterPath!)?.blobSha256 !== change.basedOnBlobSha256
+        currentFile(storage, workspaceId, change.afterPath!)?.blobSha256 !==
+          change.basedOnBlobSha256
       ) {
         unchecked.push(change.afterPath!);
         continue;
       }
-      const before = change.basedOnBlobSha256 === null
-        ? null
-        : texts.get(change.basedOnBlobSha256)?.text ?? priorText(storage, workspaceId, change.basedOnBlobSha256);
+      const before =
+        change.basedOnBlobSha256 === null
+          ? null
+          : (texts.get(change.basedOnBlobSha256)?.text ??
+            priorText(storage, workspaceId, change.basedOnBlobSha256));
       if (changesPersonalStep(before, after)) {
         throw refusal(`${change.afterPath} changes an automation with a personal step`);
       }
     } else {
       const record = text(change, MAX_COLLECTION_RECORD_BYTES);
       if (records.has(change.afterBlobSha256!)) continue;
-      if (!frontmatterParses(record)) throw refusal(`${change.afterPath} has frontmatter that does not parse`);
+      if (!frontmatterParses(record))
+        throw refusal(`${change.afterPath} has frontmatter that does not parse`);
       records.add(change.afterBlobSha256!);
     }
   }
@@ -925,11 +1231,17 @@ function refusal(reason: string): RelayError {
 // The owner's current automations.yaml, which the compare-and-swap proves
 // is still current when the write commits. "unreadable" when it is too
 // large or not text: nothing about its automations can then be proven.
-function priorText(storage: StorageContext, workspaceId: string, sha256: string): string | "unreadable" {
-  const row = storage.db.prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?")
+function priorText(
+  storage: StorageContext,
+  workspaceId: string,
+  sha256: string,
+): string | "unreadable" {
+  const row = storage.db
+    .prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?")
     .get(workspaceId, sha256);
   const byteLength = Number(row?.byte_length);
-  if (!Number.isSafeInteger(byteLength) || byteLength > MAX_AUTOMATIONS_FILE_BYTES) return "unreadable";
+  if (!Number.isSafeInteger(byteLength) || byteLength > MAX_AUTOMATIONS_FILE_BYTES)
+    return "unreadable";
   const bytes = storedBlob(storage, workspaceId, sha256, byteLength);
   return (bytes && utf8(bytes)) ?? "unreadable";
 }
@@ -937,8 +1249,14 @@ function priorText(storage: StorageContext, workspaceId: string, sha256: string)
 // A stored blob of exactly `byteLength` bytes, read only once its stored
 // length matches. Uploads verify each blob's hash, so it is not computed
 // again here.
-function storedBlob(storage: StorageContext, workspaceId: string, sha256: string, byteLength: number): Uint8Array | null {
-  const row = storage.db.prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?")
+function storedBlob(
+  storage: StorageContext,
+  workspaceId: string,
+  sha256: string,
+  byteLength: number,
+): Uint8Array | null {
+  const row = storage.db
+    .prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?")
     .get(workspaceId, sha256);
   if (!row || Number(row.byte_length) !== byteLength) return null;
   const blob = storage.getBlob(workspaceId, sha256);
@@ -958,16 +1276,21 @@ function utf8(bytes: Uint8Array): string | null {
 // because an entry that is not valid could hide a personal step. The
 // automations with a personal step must then be the same before and after,
 // compared as the parser's model.
-function changesPersonalStep(before: string | "unreadable" | null, after: AutomationsFileParseResult): boolean {
+function changesPersonalStep(
+  before: string | "unreadable" | null,
+  after: AutomationsFileParseResult,
+): boolean {
   try {
     const personalAfter = personalAutomations(after);
     if (personalAfter === null) return true;
     if (before === null) return personalAfter.length > 0;
     if (before === "unreadable") return true;
     const personalBefore = personalAutomations(parseAutomationsFile(before));
-    return personalBefore === null ||
+    return (
+      personalBefore === null ||
       personalBefore.length !== personalAfter.length ||
-      personalBefore.some((text, index) => text !== personalAfter[index]);
+      personalBefore.some((text, index) => text !== personalAfter[index])
+    );
   } catch {
     return true;
   }

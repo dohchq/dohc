@@ -49,7 +49,6 @@ describe("CredentialSessionCache", () => {
     const warming = cache.warm(load);
     cache.clear();
     pending.reject(new Error("stale read failure"));
-    // The sign-out replaced that load, so it reports no failure.
     await expect(warming).resolves.toBeNull();
 
     await cache.warm(load);
@@ -98,7 +97,6 @@ describe("CredentialSessionCache", () => {
     failing.reject(unreadable);
     await expect(first).resolves.toEqual({ error: unreadable });
     await expect(joined).resolves.toEqual({ error: unreadable });
-    // A later load that reads the store says nothing failed, and changes no earlier answer.
     await expect(cache.warm(async () => null)).resolves.toBeNull();
     await expect(first).resolves.toEqual({ error: unreadable });
     expect(cache.snapshot().credentials).toBeNull();
@@ -106,7 +104,9 @@ describe("CredentialSessionCache", () => {
 
   it("marks only a load's placeholder null as unsettled", async () => {
     const changes: Array<[string | null, boolean]> = [];
-    const cache = new CredentialSessionCache<string>((snapshot, settled) => changes.push([snapshot.credentials, settled]));
+    const cache = new CredentialSessionCache<string>((snapshot, settled) =>
+      changes.push([snapshot.credentials, settled]),
+    );
     const loading = deferred<string | null>();
     const warming = cache.warm(() => loading.promise);
     expect(changes).toEqual([[null, false]]);
@@ -114,7 +114,12 @@ describe("CredentialSessionCache", () => {
     await warming;
     cache.clear();
     cache.set("other-account");
-    expect(changes).toEqual([[null, false], ["account", true], [null, true], ["other-account", true]]);
+    expect(changes).toEqual([
+      [null, false],
+      ["account", true],
+      [null, true],
+      ["other-account", true],
+    ]);
   });
 
   it("refuses to adopt a store read that crossed a clear", async () => {

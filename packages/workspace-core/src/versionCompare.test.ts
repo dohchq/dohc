@@ -6,9 +6,6 @@ import {
   compareVersionFilesPage,
 } from "./versionCompare";
 
-// The paged whole-version comparison. The store here is the two seams
-// the pager reads: the differing-path listing, and per-path side reads.
-
 interface FakeFile {
   path: string;
   status: "added" | "modified" | "deleted";
@@ -33,10 +30,7 @@ function storeOf(files: FakeFile[]) {
     reads,
     compareVersionFilesPage: async (input: { afterPath?: string }) => {
       const entries = files
-        .filter(
-          (file) =>
-            input.afterPath === undefined || file.path > input.afterPath,
-        )
+        .filter((file) => input.afterPath === undefined || file.path > input.afterPath)
         .map((file) => ({
           path: file.path,
           status: file.status,
@@ -103,12 +97,8 @@ describe("compareVersionFilesPage", () => {
     });
     expect(page.files.map((file) => file.path)).toEqual(["a.md", "b.md"]);
     expect(page.nextAfterPath).toBe("b.md");
-    // The cut also stops hydration: c.md's sides are never read.
-    expect(
-      store.reads.filter((read) => read.path === "c.md"),
-    ).toHaveLength(0);
+    expect(store.reads.filter((read) => read.path === "c.md")).toHaveLength(0);
 
-    // The continuation reaches the rest, without loss or duplication.
     const rest = await compareVersionFilesPage(store, {
       ...INPUT,
       byteBudget: 100 * 1024,
@@ -136,18 +126,15 @@ describe("compareVersionFilesPage", () => {
     // metadata only — and keeps the cursor only over a real successor. The
     // peeked window is re-fetched by the next page.
     const calls: Array<string | undefined> = [];
-    const pages = new Map<string | undefined, {
-      entries: Array<{ path: string; status: "modified" }>;
-      nextAfterPath: string | null;
-    }>([
-      [
-        undefined,
-        { entries: [{ path: "a.md", status: "modified" }], nextAfterPath: "a.md" },
-      ],
-      [
-        "a.md",
-        { entries: [{ path: "b.md", status: "modified" }], nextAfterPath: null },
-      ],
+    const pages = new Map<
+      string | undefined,
+      {
+        entries: Array<{ path: string; status: "modified" }>;
+        nextAfterPath: string | null;
+      }
+    >([
+      [undefined, { entries: [{ path: "a.md", status: "modified" }], nextAfterPath: "a.md" }],
+      ["a.md", { entries: [{ path: "b.md", status: "modified" }], nextAfterPath: null }],
     ]);
     const store = {
       compareVersionFilesPage: async (input: { afterPath?: string }) => {
@@ -181,22 +168,21 @@ describe("compareVersionFilesPage", () => {
 
   it("drops a continuation with nothing differing behind it", async () => {
     // An exactly-full window's cursor with only identical paths behind it
-    // used to reach the surface, which then said "more than N" over a Show
-    // more that appended nothing.
-    const pages = new Map<string | undefined, {
-      entries: Array<{ path: string; status: "modified" }>;
-      nextAfterPath: string | null;
-    }>([
-      [
-        undefined,
-        { entries: [{ path: "a.md", status: "modified" }], nextAfterPath: "a.md" },
-      ],
+    // must not reach the surface, which would say "more than N" over a Show
+    // more that appends nothing.
+    const pages = new Map<
+      string | undefined,
+      {
+        entries: Array<{ path: string; status: "modified" }>;
+        nextAfterPath: string | null;
+      }
+    >([
+      [undefined, { entries: [{ path: "a.md", status: "modified" }], nextAfterPath: "a.md" }],
       ["a.md", { entries: [], nextAfterPath: "m.md" }],
       ["m.md", { entries: [], nextAfterPath: null }],
     ]);
     const store = {
-      compareVersionFilesPage: async (input: { afterPath?: string }) =>
-        pages.get(input.afterPath)!,
+      compareVersionFilesPage: async (input: { afterPath?: string }) => pages.get(input.afterPath)!,
       readTextFile: async (input: { versionId: string; path: string }) =>
         ({
           objectId: `object-${input.path}`,
@@ -210,7 +196,10 @@ describe("compareVersionFilesPage", () => {
     };
     const page = await compareVersionFilesPage(store, INPUT);
     expect(page.files.map((file) => file.path)).toEqual(["a.md"]);
-    expect(page.nextAfterPath, "drop the lookahead -> 'a.md' comes back and the surface claims more files than exist.").toBeNull();
+    expect(
+      page.nextAfterPath,
+      "drop the lookahead -> 'a.md' comes back and the surface claims more files than exist.",
+    ).toBeNull();
   });
 
   it("counts the budget in UTF-8 bytes, not UTF-16 code units", async () => {
@@ -231,9 +220,6 @@ describe("compareVersionFilesPage", () => {
   });
 
   it("walks through an all-identical window instead of returning an empty page", async () => {
-    // The listing may answer a window in which nothing differed: empty
-    // entries with a continuation. An empty page with a continuation would
-    // read as "no differences" on the surface and hide everything past it.
     const calls: Array<string | undefined> = [];
     const store = {
       compareVersionFilesPage: async (input: { afterPath?: string }) => {
@@ -257,7 +243,10 @@ describe("compareVersionFilesPage", () => {
         }) satisfies TextFileSnapshot,
     };
     const page = await compareVersionFilesPage(store, INPUT);
-    expect(page.files.map((file) => file.path), "return the empty first window -> files [] with a continuation, and z.md is unreachable from the surface.").toEqual(["z.md"]);
+    expect(
+      page.files.map((file) => file.path),
+      "return the empty first window -> files [] with a continuation, and z.md is unreachable from the surface.",
+    ).toEqual(["z.md"]);
     expect(page.nextAfterPath).toBeNull();
     expect(calls).toEqual([undefined, "m.md"]);
   });

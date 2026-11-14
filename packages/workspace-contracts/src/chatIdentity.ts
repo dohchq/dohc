@@ -1,8 +1,5 @@
 import * as Schema from "effect/Schema";
-import {
-  MAX_PREFERRED_NAME_LENGTH,
-  hasPreferredNameControlCharacters,
-} from "./chatIdentityValues";
+import { MAX_PREFERRED_NAME_LENGTH, hasPreferredNameControlCharacters } from "./chatIdentityValues";
 
 /**
  * The human-readable owner name used by chat authorship surfaces. This value is

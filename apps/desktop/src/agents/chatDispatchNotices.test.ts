@@ -33,7 +33,8 @@ it("retains the latest notice per workspace and reason until that row is dismiss
 it("clears a forgotten workspace without clearing another workspace", () => {
   const publish = vi.fn();
   const notices = createChatDispatchNotices(publish);
-  for (const workspace of ["a", "b"]) notices.report(workspace, { reason: "no-runner", threadId: "thread", message: "No runner." });
+  for (const workspace of ["a", "b"])
+    notices.report(workspace, { reason: "no-runner", threadId: "thread", message: "No runner." });
   const before = notices.register("a");
   notices.clearWorkspace("a");
   expect(notices.register("a").notices).toEqual([]);
@@ -47,10 +48,17 @@ it("keeps a pause per thread, and takes back only the thread that resumed", () =
   const notices = createChatDispatchNotices(publish);
   notices.report("a", { reason: "budget-paused", threadId: "t1", message: "Paused in #launch." });
   notices.report("a", { reason: "budget-paused", threadId: "t2", message: "Paused in #general." });
-  notices.report("a", { reason: "budget-paused", threadId: "t1", message: "Paused in #launch again." });
-  expect(notices.register("a").notices.map(({ threadId, message }) => [threadId, message])).toEqual([
-    ["t1", "Paused in #launch again."], ["t2", "Paused in #general."],
-  ]);
+  notices.report("a", {
+    reason: "budget-paused",
+    threadId: "t1",
+    message: "Paused in #launch again.",
+  });
+  expect(notices.register("a").notices.map(({ threadId, message }) => [threadId, message])).toEqual(
+    [
+      ["t1", "Paused in #launch again."],
+      ["t2", "Paused in #general."],
+    ],
+  );
   notices.clear("a", "budget-paused", "t1");
   expect(notices.register("a").notices.map(({ threadId }) => threadId)).toEqual(["t2"]);
   expect(publish).toHaveBeenLastCalledWith(notices.register("a"));
@@ -58,16 +66,30 @@ it("keeps a pause per thread, and takes back only the thread that resumed", () =
 
 it("keeps every snapshot within the IPC contract, however many chats pause", () => {
   const notices = createChatDispatchNotices(vi.fn());
-  notices.report("a", { reason: "restricted", threadId: "r", message: "Restricted." });
-  notices.report("a", { reason: "no-runner", threadId: "n", message: "No runner." });
+  const others = [
+    "restricted",
+    "no-runner",
+    "wake-unreadable",
+    "wake-dropped",
+    "wake-parked",
+    "wake-unconfirmed",
+    "wake-runners-refused",
+    "wake-runners-unreadable",
+    "forward-stuck",
+  ] as const;
+  for (const reason of others)
+    notices.report("a", { reason, threadId: reason, message: `${reason}.` });
   for (let index = 0; index <= CHAT_DISPATCH_NOTICES_MAX; index += 1) {
-    notices.report("a", { reason: "budget-paused", threadId: `t${index}`, message: `Paused in t${index}.` });
+    notices.report("a", {
+      reason: "budget-paused",
+      threadId: `t${index}`,
+      message: `Paused in t${index}.`,
+    });
     expect(ChatDispatchNoticesEvent.safeParse(notices.register("a")).success).toBe(true);
   }
   const threads = notices.register("a").notices.map(({ threadId }) => threadId);
   expect(threads).toHaveLength(CHAT_DISPATCH_NOTICES_MAX);
-  expect(threads.slice(0, 2)).toEqual(["r", "n"]);
-  // The oldest pauses gave way to the newest.
+  expect(threads.slice(0, others.length)).toEqual([...others]);
   expect(threads).not.toContain("t0");
   expect(threads.at(-1)).toBe(`t${CHAT_DISPATCH_NOTICES_MAX}`);
 });

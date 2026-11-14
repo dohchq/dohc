@@ -11,8 +11,6 @@ describe("code highlighting", () => {
     vi.unstubAllGlobals();
   });
 
-  // Each theme sets these variables, so one style reads in light and dark.
-  // A literal color here is what painted #00f on the dark page.
   it("colors tokens only with theme variables", () => {
     const rules = CODE_HIGHLIGHT_STYLE.module?.getRules() ?? "";
     const colors = [...rules.matchAll(/color:\s*([^;}]+)/g)].map((match) => match[1]?.trim());
@@ -39,12 +37,18 @@ describe("code highlighting", () => {
         onSave={() => undefined}
       />,
     );
-    const content = (await screen.findByTestId("code-editor")).querySelector(".cm-content") as HTMLElement;
+    const content = (await screen.findByTestId("code-editor")).querySelector(
+      ".cm-content",
+    ) as HTMLElement;
     const rules = CODE_HIGHLIGHT_STYLE.module?.getRules() ?? "";
     const colorOf = (token: string): string | null => {
-      const span = [...content.querySelectorAll("span")].find((element) => element.textContent === token);
+      const span = [...content.querySelectorAll("span")].find(
+        (element) => element.textContent === token,
+      );
       const rule = span
-        ? rules.split("\n").find((line) => span.classList.contains(line.slice(1, line.indexOf(" "))))
+        ? rules
+            .split("\n")
+            .find((line) => span.classList.contains(line.slice(1, line.indexOf(" "))))
         : undefined;
       return rule?.match(/color:\s*([^;}]+)/)?.[1]?.trim() ?? null;
     };
@@ -90,10 +94,7 @@ function stubCodeMirrorLayout() {
   });
 }
 
-function EchoHarness(props: {
-  externalValue: string;
-  onChange?: (value: string) => void;
-}) {
+function EchoHarness(props: { externalValue: string; onChange?: (value: string) => void }) {
   const [value, setValue] = useState(props.externalValue);
   const [valueRevision, setValueRevision] = useState(0);
 
@@ -131,9 +132,7 @@ describe("SourceCodeEditor value synchronization", () => {
   it("keeps every rapid local keystroke while the parent echoes each value", async () => {
     const user = userEvent.setup();
     const changes: string[] = [];
-    render(
-      <EchoHarness externalValue="" onChange={(value) => changes.push(value)} />,
-    );
+    render(<EchoHarness externalValue="" onChange={(value) => changes.push(value)} />);
     const content = (await screen.findByTestId("source-editor")).querySelector(
       ".cm-content",
     ) as HTMLElement;

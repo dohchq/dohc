@@ -50,8 +50,16 @@ it("forwards deferred writes immediately, rejects malformed payloads and unsubsc
   const { daemon, emit, handlerCount } = fakeDaemon();
   const note = vi.fn();
   const unsubscribe = bridgeWriteDeferred(daemon, note);
-  for (const payload of [null, [], {}, { workspaceId: "w" }, { workspaceId: "", path: "note.md" },
-    { workspaceId: 1, path: "note.md" }, { workspaceId: "w", path: "" }, { workspaceId: "w", path: 1 }]) {
+  for (const payload of [
+    null,
+    [],
+    {},
+    { workspaceId: "w" },
+    { workspaceId: "", path: "note.md" },
+    { workspaceId: 1, path: "note.md" },
+    { workspaceId: "w", path: "" },
+    { workspaceId: "w", path: 1 },
+  ]) {
     emit(captureEvent(CAPTURE_WRITE_DEFERRED_EVENT, payload));
   }
   emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, { workspaceId: "w", path: "note.md" }));
@@ -79,7 +87,13 @@ describe("bridgeCaptureEventsToRenderer", () => {
     const settled = vi.fn();
     bridgeCaptureEventsToRenderer(daemon, notify, 100);
     onWorkspaceCaptureSettled(daemon, "share", settled);
-    emit(captureEvent(COLLECTIONS_PROJECTED_EVENT, { workspaceId: "share", paths: ["tasks/a.md"], projectedCount: 1 }));
+    emit(
+      captureEvent(COLLECTIONS_PROJECTED_EVENT, {
+        workspaceId: "share",
+        paths: ["tasks/a.md"],
+        projectedCount: 1,
+      }),
+    );
     vi.advanceTimersByTime(100);
     expect(notify).toHaveBeenCalledWith({ workspaceId: "share", paths: ["tasks/a.md"] });
     expect(settled).not.toHaveBeenCalled();
@@ -90,12 +104,7 @@ describe("bridgeCaptureEventsToRenderer", () => {
     const notify = vi.fn();
     bridgeCaptureEventsToRenderer(daemon, notify, 100);
 
-    emit(
-      captureEvent(
-        CAPTURE_MOMENT_RECORDED_EVENT,
-        momentPayload("ws-a", ["notes/a.md"]),
-      ),
-    );
+    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["notes/a.md"])));
     expect(notify).not.toHaveBeenCalled();
     vi.advanceTimersByTime(100);
     expect(notify).toHaveBeenCalledExactlyOnceWith({
@@ -110,16 +119,9 @@ describe("bridgeCaptureEventsToRenderer", () => {
     bridgeCaptureEventsToRenderer(daemon, notify, 100);
 
     for (let i = 0; i < 3; i += 1) {
-      emit(
-        captureEvent(
-          CAPTURE_MOMENT_RECORDED_EVENT,
-          momentPayload("ws-a", [`a-${i}.md`]),
-        ),
-      );
+      emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", [`a-${i}.md`])));
     }
-    emit(
-      captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-b", ["b.md"])),
-    );
+    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-b", ["b.md"])));
     vi.advanceTimersByTime(100);
     expect(notify).toHaveBeenCalledTimes(2);
     expect(notify).toHaveBeenCalledWith({
@@ -128,10 +130,7 @@ describe("bridgeCaptureEventsToRenderer", () => {
     });
     expect(notify).toHaveBeenCalledWith({ workspaceId: "ws-b", paths: ["b.md"] });
 
-    // A later batch notifies again — the debounce is a window, not a latch.
-    emit(
-      captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["a.md"])),
-    );
+    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["a.md"])));
     vi.advanceTimersByTime(100);
     expect(notify).toHaveBeenCalledTimes(3);
   });
@@ -161,9 +160,7 @@ describe("bridgeCaptureEventsToRenderer", () => {
     bridgeCaptureEventsToRenderer(daemon, notify, 100);
 
     emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT));
-    emit(
-      captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["a.md"])),
-    );
+    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["a.md"])));
     vi.advanceTimersByTime(100);
     // The global ping already reaches every window; a scoped send on top
     // would only repeat the repaint.
@@ -185,9 +182,7 @@ describe("bridgeCaptureEventsToRenderer", () => {
     const notify = vi.fn();
     const dispose = bridgeCaptureEventsToRenderer(daemon, notify, 100);
 
-    emit(
-      captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["a.md"])),
-    );
+    emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["a.md"])));
     dispose();
     expect(handlerCount()).toBe(0);
     vi.advanceTimersByTime(1_000);
@@ -206,7 +201,6 @@ describe("onWorkspaceCaptureSettled", () => {
     emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-a", ["tasks/two.md"])));
     emit(captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, momentPayload("ws-b", ["tasks/two.md"])));
     emit(captureEvent("record.created", momentPayload("ws-a", ["tasks/two.md"])));
-    // More paths than the payload lists, and a payload that names no workspace.
     emit(
       captureEvent(CAPTURE_MOMENT_RECORDED_EVENT, {
         workspaceId: "ws-a",

@@ -32,16 +32,15 @@ use tokio_util::sync::CancellationToken;
 
 /// One tracked file in a normalized listing.
 ///
-/// N8, amended (formerly `TEST_ORACLE.md` "N8: mtimes never compared"; the
-/// oracle doc was retired from main, so the rule lives here): the content hash
-/// stays the source of truth — the diff classifies added/changed/removed by
-/// size and sha256, never by mtime. `mtime_ms` has exactly one job: when a
-/// file's size AND mtime both equal a prior manifest entry's recorded pairing
-/// (both non-zero), [`Scanner::scan_with_prior`] reuses that entry's hash
-/// without reading the file. Any size or mtime difference, and any entry
-/// without a recorded mtime, re-hashes the bytes. This is the standard git
-/// tradeoff: a same-size edit that forges its mtime back to the recorded value
-/// goes unseen until the next event changes the file's size or mtime.
+/// The content hash is the source of truth: the diff classifies
+/// added/changed/removed by size and sha256, never by mtime. `mtime_ms` has
+/// exactly one job. When a file's size and mtime both equal a prior manifest
+/// entry's recorded pairing (both non-zero), [`Scanner::scan_with_prior`]
+/// reuses that entry's hash without reading the file. Any size or mtime
+/// difference, and any entry without a recorded mtime, re-hashes the bytes.
+/// This is the standard git tradeoff: a same-size edit that forges its mtime
+/// back to the recorded value goes unseen until the next event changes the
+/// file's size or mtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
     pub path: String,
@@ -188,7 +187,7 @@ impl Scanner {
     /// Scan `root`, short-circuiting the hash for any file whose size and
     /// mtime both match its `prior` manifest entry: the entry's recorded hash
     /// is reused and the file is never read. A zero mtime on either side
-    /// always hashes (no recorded pairing exists — see the amended N8 rule on
+    /// always hashes (no recorded pairing exists — see
     /// [`FileEntry`]). A reused file cannot surface a read failure, so a file
     /// that became unreadable without changing size or mtime stays tracked at
     /// its last-known-good content instead of degrading the scan.
@@ -242,7 +241,7 @@ impl Scanner {
             }
         };
 
-        // The hash-reuse short-circuit (amended N8): a candidate whose size
+        // The hash-reuse short-circuit: a candidate whose size
         // and mtime both match its prior entry keeps the recorded hash; every
         // other candidate becomes a hash input. Inputs stay in candidate
         // order, so `outcomes` (indexed by input) can be consumed sequentially
@@ -504,8 +503,6 @@ impl Scanner {
                         }
                     },
                 };
-                // Never follow a symlink: leaf observed only, symlinked dir not
-                // descended.
                 if file_type.is_dir() {
                     if !floor::segment_is_ignored(&floor::normalize_segment(&name)) {
                         stack.push(path);

@@ -3,9 +3,15 @@
 // address must be the one it signed in at. The relay derives the author and
 // every check from them, so nothing here names one.
 export interface AgentChatClient {
-  post(input: {body: string; idempotencyKey: string; threadId?: string}, signal: AbortSignal): Promise<Response>;
+  post(
+    input: { body: string; idempotencyKey: string; threadId?: string },
+    signal: AbortSignal,
+  ): Promise<Response>;
   /** Holds at most `timeoutMs`; the relay never holds longer than its own bound. */
-  wait(input: {cursor?: number; threadId?: string; timeoutMs: number}, signal: AbortSignal): Promise<Response>;
+  wait(
+    input: { cursor?: number; threadId?: string; timeoutMs: number },
+    signal: AbortSignal,
+  ): Promise<Response>;
 }
 
 export function createAgentChatClient(options: {
@@ -17,11 +23,22 @@ export function createAgentChatClient(options: {
   fetchRelay(request: Request): Promise<Response>;
 }): AgentChatClient {
   const call = (action: "post" | "wait", body: Record<string, unknown>, signal: AbortSignal) =>
-    options.fetchRelay(new Request(new URL(`/sync/link/agent-chat/${action}`, options.relayUrl), {
-      method: "POST", signal, redirect: "error",
-      headers: {"content-type": "application/json", "x-dohc-relay-exchange-key": options.exchangeKey},
-      body: JSON.stringify({accessToken: options.accessToken, resource: options.resource, ...body}),
-    }));
+    options.fetchRelay(
+      new Request(new URL(`/sync/link/agent-chat/${action}`, options.relayUrl), {
+        method: "POST",
+        signal,
+        redirect: "error",
+        headers: {
+          "content-type": "application/json",
+          "x-dohc-relay-exchange-key": options.exchangeKey,
+        },
+        body: JSON.stringify({
+          accessToken: options.accessToken,
+          resource: options.resource,
+          ...body,
+        }),
+      }),
+    );
   return {
     post: (input, signal) => call("post", input, signal),
     wait: (input, signal) => call("wait", input, signal),

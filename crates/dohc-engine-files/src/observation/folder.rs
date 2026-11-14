@@ -2,7 +2,7 @@
 //!
 //! On Unix each folder opens from its parent's handle and never through a
 //! link, so a folder swapped for a link during a scan can't send the walk
-//! outside the workspace (#3667). A folder moved out of the workspace while
+//! outside the workspace. A folder moved out of the workspace while
 //! its handle is held is still listed under its old path for that scan.
 //! Windows still reads by path.
 
@@ -57,8 +57,6 @@ fn digest(mut file: impl io::Read, cap: u64) -> Option<[u8; 32]> {
     }
 }
 
-#[cfg(all(unix, test))]
-pub(super) use unix::OPEN;
 #[cfg(unix)]
 pub(super) use unix::{Child, Folder};
 
@@ -276,7 +274,6 @@ mod unix {
 #[cfg(not(unix))]
 pub(super) use by_path::{Child, Folder};
 
-/// Windows reads by path until it lists through handles too.
 #[cfg(not(unix))]
 mod by_path {
     use super::{Contents, Facts, Kind};

@@ -8,7 +8,27 @@ const kinds = {
   "no-runner": "chat-no-runner",
   "budget-paused": "chat-budget-paused",
   restricted: "chat-restricted",
+  "wake-unreadable": "chat-wake-unreadable",
+  "wake-dropped": "chat-wake-dropped",
+  "wake-parked": "chat-wake-parked",
+  "wake-unconfirmed": "chat-wake-unconfirmed",
+  "wake-runners-refused": "chat-wake-runners-refused",
+  "wake-runners-unreadable": "chat-wake-runners-unreadable",
+  "forward-stuck": "chat-forward-stuck",
 } as const satisfies Record<ChatDispatchNotice["reason"], ShellErrorKind>;
+
+// A message from your phone that this computer's agents can't take. Main's
+// message says why, and the next step.
+const wakeTitles = {
+  "wake-unreadable": "dohc could not read the agent requests saved here",
+  "wake-dropped": "An agent did not start for a message from your phone",
+  "wake-parked": "An agent could not start for a message from your phone",
+  "wake-unconfirmed": "dohc could not confirm an agent request from your phone",
+  "wake-runners-refused": "Your phone cannot wake agents on this computer",
+  "wake-runners-unreadable": "dohc could not read where this computer's agents are offered",
+} as const;
+type WakeReason = keyof typeof wakeTitles;
+const isWake = (reason: ChatDispatchNotice["reason"]): reason is WakeReason => reason in wakeTitles;
 
 export function useChatDispatchNotices(
   workspaceId: string,
@@ -35,8 +55,24 @@ export function useChatDispatchNotices(
       notice.reason === "budget-paused" ? `chat-budget-paused:${notice.threadId}` : notice.reason;
     const shown = new Map<string, string>();
     const isCurrent = () => active && currentWorkspace.current === workspaceId;
+    // Try again on a wake row starts this computer's wake reader afresh. Main
+    // takes the row back, and files it again if the cause is still there.
+    const retryWakes = () => {
+      void bridge()
+        .retryChatWakes({ workspaceId })
+        .catch((cause: unknown) => {
+          if (isCurrent())
+            report({
+              message:
+                "dohc could not try the agent requests again. Open this workspace again to try again.",
+              cause,
+            });
+        });
+    };
     const findThread = async (channelId: string, threadId: string, lane: "posts" | "chat") =>
-      (await bridge().listChannelThreads({ workspaceId, channelId, lane })).threads.find((entry) => entry.id === threadId);
+      (await bridge().listChannelThreads({ workspaceId, channelId, lane })).threads.find(
+        (entry) => entry.id === threadId,
+      );
     // Opens the paused thread itself, where Resume is: a post, or a group's
     // conversation as a thread.
     const openPaused = async (channelId: string, threadId: string) => {
@@ -44,13 +80,15 @@ export function useChatDispatchNotices(
         const { channels } = await bridge().listChatChannels({ workspaceId });
         const channel = channels.find((entry) => entry.id === channelId);
         const thread = channel
-          ? await findThread(channelId, threadId, "posts") ?? await findThread(channelId, threadId, "chat")
+          ? ((await findThread(channelId, threadId, "posts")) ??
+            (await findThread(channelId, threadId, "chat")))
           : undefined;
         if (!isCurrent()) return;
         if (!channel || !thread) throw new Error("The paused thread is gone.");
         openChatRef.current({ level: "thread", channel, thread });
       } catch (cause) {
-        if (isCurrent()) report({ message: "dohc could not open the paused thread. Find it in Chats.", cause });
+        if (isCurrent())
+          report({ message: "dohc could not open the paused thread. Find it in Chats.", cause });
       }
     };
     const receive = (event: ChatDispatchNoticesEvent) => {
@@ -71,45 +109,107 @@ export function useChatDispatchNotices(
         if (shown.get(row) === notice.id) continue;
         shown.set(row, notice.id);
         const pausedIn = notice.channelId;
+        const pausedThread = notice.threadId;
+        // Dropped is over: nothing ran here. The others stay until they end. Try again can end all but a refusal,
+        // which ends when the agents in Settings change.
+        const stuck = isWake(reason) && reason !== "wake-dropped";
+        // A message that waits for an agent's thread is tried again the same way.
+        const retries = (stuck && reason !== "wake-runners-refused") || reason === "forward-stuck";
         report({
-          message: notice.message, kind: kinds[reason],
+          message: notice.message,
+          kind: kinds[reason],
           ...(reason === "budget-paused" ? { identity: row } : {}),
+          ...(isWake(reason) ? { title: wakeTitles[reason] } : {}),
+          ...(stuck ? { noDismiss: true } : {}),
+          ...(retries
+            ? {
+                retry: () => {
+                  if (isCurrent()) retryWakes();
+                },
+              }
+            : {}),
           // Nothing failed: the request waits for the person.
-          ...(reason === "restricted" ? {
-            tone: "warning" as const,
-            action: { label: "Trust workspace", run: () => { if (isCurrent()) trustRef.current(); } },
-          } : {}),
+          ...(reason === "restricted"
+            ? {
+                tone: "warning" as const,
+                action: {
+                  label: "Trust workspace",
+                  run: () => {
+                    if (isCurrent()) trustRef.current();
+                  },
+                },
+              }
+            : {}),
           ...(reason === "no-runner" ? { title: "No agent could take this request" } : {}),
-          ...(reason === "budget-paused" ? {
-            tone: "warning" as const, title: "Agent replies paused",
-            ...(pausedIn ? {
-              // Landing in the chat reads the notice: its toast closes and
-              // its row stays until Resume or the person dismisses it.
-              action: { label: "Open", reads: true, run: () => { if (isCurrent()) void openPaused(pausedIn, notice.threadId); } },
-              target: { to: "chat", thread: notice.threadId } as const,
-            } : {}),
-          } : {}),
+          ...(reason === "forward-stuck"
+            ? { tone: "warning" as const, title: "A message is waiting for an agent's thread" }
+            : {}),
+          ...(reason === "budget-paused"
+            ? {
+                tone: "warning" as const,
+                title: "Agent replies paused",
+                ...(pausedIn && pausedThread
+                  ? {
+                      // Landing in the chat reads the notice: its toast closes and
+                      // its row stays until Resume or the person dismisses it.
+                      action: {
+                        label: "Open",
+                        reads: true,
+                        run: () => {
+                          if (isCurrent()) void openPaused(pausedIn, pausedThread);
+                        },
+                      },
+                      target: { to: "chat", thread: pausedThread } as const,
+                    }
+                  : {}),
+              }
+            : {}),
           details: [
-            ["Thread", notice.threadId],
+            ...(notice.threadId ? [["Thread", notice.threadId] as const] : []),
+            ...(notice.messageId ? [["Message", notice.messageId] as const] : []),
+            ...(notice.wakeId ? [["Wake", notice.wakeId] as const] : []),
+            ...(notice.file ? [["File", notice.file] as const] : []),
+            ...(notice.agentId ? [["Agent", notice.agentId] as const] : []),
             ...(notice.runId ? [["Run", notice.runId] as const] : []),
             ...(notice.logPath ? [["Log", notice.logPath] as const] : []),
           ],
-          onDismiss: () => {
-            if (!isCurrent()) return;
-            void bridge().dismissChatDispatchNotice({ workspaceId, id: notice.id }).catch((cause: unknown) => {
-              if (!isCurrent()) return;
-              // A newer notice for the same row keeps its tracking.
-              if (shown.get(row) === notice.id) shown.delete(row);
-              report({ message: "dohc could not dismiss this notice. Open this workspace again to try again.", cause });
-            });
-          },
+          ...(stuck
+            ? {}
+            : {
+                onDismiss: () => {
+                  if (!isCurrent()) return;
+                  void bridge()
+                    .dismissChatDispatchNotice({ workspaceId, id: notice.id })
+                    .catch((cause: unknown) => {
+                      if (!isCurrent()) return;
+                      // A newer notice for the same row keeps its tracking.
+                      if (shown.get(row) === notice.id) shown.delete(row);
+                      report({
+                        message:
+                          "dohc could not dismiss this notice. Open this workspace again to try again.",
+                        cause,
+                      });
+                    });
+                },
+              }),
         });
       }
     };
     const unsubscribe = bridge().onChatDispatchNotices(receive);
-    void bridge().registerChatDispatchNotices({ workspaceId }).then(receive).catch((cause: unknown) => {
-      if (isCurrent()) report({ message: "dohc could not load notices about agent replies. Open this workspace again to try again.", cause });
-    });
-    return () => { active = false; unsubscribe(); };
+    void bridge()
+      .registerChatDispatchNotices({ workspaceId })
+      .then(receive)
+      .catch((cause: unknown) => {
+        if (isCurrent())
+          report({
+            message:
+              "dohc could not load notices about agent replies. Open this workspace again to try again.",
+            cause,
+          });
+      });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [workspaceId, ready, report, clear, clearIdentity]);
 }

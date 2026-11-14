@@ -1,4 +1,11 @@
-import { LinksEdgesInput, LinksEdgesResult, LinksInInput, LinksResolveInput, LinksInResult, LinksResolveResult } from "@dohc/workspace-contracts/links";
+import {
+  LinksEdgesInput,
+  LinksEdgesResult,
+  LinksInInput,
+  LinksResolveInput,
+  LinksInResult,
+  LinksResolveResult,
+} from "@dohc/workspace-contracts/links";
 import { errorMessage } from "./workspaceError";
 import type { ShareUnconfirmedChanges } from "./shareViewInfo";
 import { createHash } from "node:crypto";
@@ -50,18 +57,12 @@ import {
   SharePinInvalidError,
   type UnjournalablePath,
 } from "./shareViewRecords";
-import {
-  SHARE_VIEW_REOPEN_MESSAGE,
-  shareViewIdentityIsIntact,
-} from "./shareViewMarker";
+import { SHARE_VIEW_REOPEN_MESSAGE, shareViewIdentityIsIntact } from "./shareViewMarker";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
 import { resolveEngineFileTargets } from "./resolveEngineFiles";
 import { createShareViewFileChanges } from "./shareViewFileChanges";
-import {
-  type ShareViewFilesOwnerCapability,
-  withShareViewFilesOwner,
-} from "./shareViewFilesOwner";
+import { type ShareViewFilesOwnerCapability, withShareViewFilesOwner } from "./shareViewFilesOwner";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 export type ShareViewFilesTarget =
@@ -168,8 +169,10 @@ export type ShareViewProjectionStatus =
     };
 
 // A recorded collision that waits on a person, not on repair: a local file in
-// its way, or another shared spelling that owns its file on this disk (#2416).
-export type HeldSharePath = UnjournalablePath & { reason: "local-collision" | "spelling-collision" };
+// its way, or another shared spelling that owns its file on this disk.
+export type HeldSharePath = UnjournalablePath & {
+  reason: "local-collision" | "spelling-collision";
+};
 
 export function isHeldSharePath(entry: UnjournalablePath): entry is HeldSharePath {
   return entry.reason === "local-collision" || entry.reason === "spelling-collision";
@@ -200,8 +203,20 @@ export interface ShareViewFiles {
   linksEdges(target: ShareViewFilesTarget, input: LinksEdgesInput): Promise<LinksEdgesResult>;
   linksIn(target: ShareViewFilesTarget, input: LinksInInput): Promise<LinksInResult>;
   linksResolve(target: ShareViewFilesTarget, input: LinksResolveInput): Promise<LinksResolveResult>;
-  end(lease: WorkspaceOperationLease, target: ShareViewFilesTarget, assertCurrent: () => void): Promise<void>;
-  narrow(lease: WorkspaceOperationLease, target: ShareViewFilesTarget, assertCurrent: () => void, commit: (unsavedPaths: string[] | null, unconfirmedChanges: ShareUnconfirmedChanges) => Promise<void>): Promise<void>;
+  end(
+    lease: WorkspaceOperationLease,
+    target: ShareViewFilesTarget,
+    assertCurrent: () => void,
+  ): Promise<void>;
+  narrow(
+    lease: WorkspaceOperationLease,
+    target: ShareViewFilesTarget,
+    assertCurrent: () => void,
+    commit: (
+      unsavedPaths: string[] | null,
+      unconfirmedChanges: ShareUnconfirmedChanges,
+    ) => Promise<void>,
+  ): Promise<void>;
   mount(
     lease: WorkspaceOperationLease,
     target: PreparedShareViewFilesMount,
@@ -220,9 +235,7 @@ export interface ShareViewFiles {
     target: ShareViewFilesTarget,
     options?: { includeContentIdentity?: boolean; under?: string },
   ): Promise<WorkspacePathListing>;
-  projectionStatus(
-    target: ShareViewFilesTarget,
-  ): Promise<ShareViewProjectionStatus>;
+  projectionStatus(target: ShareViewFilesTarget): Promise<ShareViewProjectionStatus>;
   reconcile(
     lease: WorkspaceOperationLease,
     target: ShareViewFilesTarget,
@@ -241,13 +254,9 @@ export type ShareViewFilesStore = CaptureVersionedTextStore;
 export interface ShareViewFilesDependencies {
   stateFor?(target: ResolvedShareViewFilesTarget): ShareViewFilesState;
   /** Synchronous and registry-derived. It is called again after lifecycle wait. */
-  resolveTarget(
-    target: ShareViewFilesTarget,
-  ): ResolvedShareViewFilesTarget | null;
+  resolveTarget(target: ShareViewFilesTarget): ResolvedShareViewFilesTarget | null;
   openStore(target: ResolvedShareViewFilesTarget): ShareViewFilesStore;
-  resolveRelay(
-    target: ActiveShareViewFilesTarget,
-  ): Promise<SyncRelayConnection | null>;
+  resolveRelay(target: ActiveShareViewFilesTarget): Promise<SyncRelayConnection | null>;
   pull(
     target: ActiveShareViewFilesTarget,
     relay: SyncRelayConnection,
@@ -262,7 +271,11 @@ export interface ShareViewFilesDependencies {
     target: ActiveShareViewFilesTarget,
     refusals: readonly ShareViewRefusal[],
   ): Promise<void>;
-  markEnded(target: ActiveShareViewFilesTarget, unsavedPaths?: string[] | null, unconfirmedChanges?: ShareUnconfirmedChanges): Promise<void>;
+  markEnded(
+    target: ActiveShareViewFilesTarget,
+    unsavedPaths?: string[] | null,
+    unconfirmedChanges?: ShareUnconfirmedChanges,
+  ): Promise<void>;
   updateUnsavedPaths(target: ActiveShareViewFilesTarget, paths: string[]): Promise<void>;
   retireTarget(target: ActiveShareViewFilesTarget): Promise<void>;
   assertProjectionRoot(target: ResolvedShareViewFilesTarget): Promise<void>;
@@ -277,10 +290,7 @@ export interface ShareViewFilesDependencies {
 }
 
 export class ShareViewFilesState {
-  readonly iconCache = new Map<
-    string,
-    { stamp: string; icon: string | undefined }
-  >();
+  readonly iconCache = new Map<string, { stamp: string; icon: string | undefined }>();
   // Each share's holds from its last refresh, repair or settle, so its status
   // can say why a recorded collision waits.
   readonly heldPaths = new Map<string, HeldSharePath[]>();
@@ -397,10 +407,7 @@ function assertPathWithinGrant(
   path: string,
 ): void {
   const validated = validateUserWritePath(path);
-  if (
-    !validated.ok ||
-    classifyEngineFilePath(validated.normalized).kind !== "tracked"
-  ) {
+  if (!validated.ok || classifyEngineFilePath(validated.normalized).kind !== "tracked") {
     throw new SharedFileReadOnlyError(
       `This path is not available through the shared view: ${path}`,
     );
@@ -410,8 +417,7 @@ function assertPathWithinGrant(
       ? selector.versionId !== null
       : selector.paths.some(
           (granted) =>
-            validated.normalized === granted ||
-            validated.normalized.startsWith(`${granted}/`),
+            validated.normalized === granted || validated.normalized.startsWith(`${granted}/`),
         );
   if (!selected) {
     throw new SharedFileReadOnlyError(
@@ -594,9 +600,7 @@ function changeIsFullyApplied(
     }
     case "create": {
       const path = normalizedMaterializePath(change.path);
-      const expected = createHash("sha256")
-        .update(change.initialText)
-        .digest("hex");
+      const expected = createHash("sha256").update(change.initialText).digest("hex");
       return path !== null && after.get(path)?.sha256 === expected;
     }
     case "move": {
@@ -606,8 +610,7 @@ function changeIsFullyApplied(
       const sources = pathAndChildren(before, from);
       if (sources.length === 0) return false;
       return sources.every((source) => {
-        const destination =
-          source === from ? to : `${to}/${source.slice(from.length + 1)}`;
+        const destination = source === from ? to : `${to}/${source.slice(from.length + 1)}`;
         const original = before.get(source);
         const moved = after.get(destination);
         return (
@@ -651,9 +654,7 @@ function committedValueAfterFailure(
   }
 }
 
-export function createShareViewFiles(
-  dependencies: ShareViewFilesDependencies,
-): ShareViewFiles {
+export function createShareViewFiles(dependencies: ShareViewFilesDependencies): ShareViewFiles {
   const fallbackState = new ShareViewFilesState();
   const heldPathsFor = (target: ResolvedShareViewFilesTarget) =>
     (dependencies.stateFor?.(target) ?? fallbackState).heldPaths;
@@ -689,10 +690,7 @@ export function createShareViewFiles(
     lease: WorkspaceOperationLease,
     target?: ResolvedShareViewFilesTarget,
   ): void {
-    assertActiveWorkspaceOperationLease(
-      target?.schedulingRootPath ?? lease.rootPath,
-      lease,
-    );
+    assertActiveWorkspaceOperationLease(target?.schedulingRootPath ?? lease.rootPath, lease);
   }
 
   async function withStore<T>(
@@ -709,13 +707,8 @@ export function createShareViewFiles(
     target: ActiveShareViewFilesTarget,
   ): Promise<"current" | "pending"> {
     try {
-      const debt = await readSharedViewProjectionDebt(
-        target.rootPath,
-        target.shareId,
-      );
-      return debt.pendingPaths.size === 0 &&
-        debt.collisionPaths.size === 0 &&
-        !debt.pullInFlight
+      const debt = await readSharedViewProjectionDebt(target.rootPath, target.shareId);
+      return debt.pendingPaths.size === 0 && debt.collisionPaths.size === 0 && !debt.pullInFlight
         ? "current"
         : "pending";
     } catch {
@@ -760,11 +753,7 @@ export function createShareViewFiles(
       assertShareChangesJournalable(captured.unjournalablePaths);
       assertHeldSpellingsUnchanged(captured.unjournalablePaths);
     }
-    const before = await canonicalSnapshot(
-      store,
-      target.storeWorkspaceId,
-      change,
-    );
+    const before = await canonicalSnapshot(store, target.storeWorkspaceId, change);
     const storeResolver = () => store;
     const fileChanges = createShareViewFileChanges(owner);
     try {
@@ -829,10 +818,7 @@ export function createShareViewFiles(
       }
       const effects = canonicalEffects(before, after);
       const projection = await projectionState(target);
-      if (
-        changeIsFullyApplied(change, before, after) &&
-        change.kind !== "import"
-      ) {
+      if (changeIsFullyApplied(change, before, after) && change.kind !== "import") {
         return {
           status: "committed",
           kind: change.kind,
@@ -874,12 +860,8 @@ export function createShareViewFiles(
           schedulingRootPath: target.schedulingRootPath,
           rootPath: target.rootPath,
           shareId: target.shareId,
-          ...(target.mountLabel === undefined
-            ? {}
-            : { mountLabel: target.mountLabel }),
-          ...(target.attachmentId === undefined
-            ? {}
-            : { attachmentId: target.attachmentId }),
+          ...(target.mountLabel === undefined ? {} : { mountLabel: target.mountLabel }),
+          ...(target.attachmentId === undefined ? {} : { attachmentId: target.attachmentId }),
         },
         workspaceLease: lease,
       },
@@ -934,9 +916,7 @@ export function createShareViewFiles(
 
     let recovered: CaptureSharedViewRefreshOutcome;
     if (target.kind === "standalone" && request === "refresh") {
-      const captureOutcome = await lifecycle.captureStandaloneRefresh(
-        standaloneCaptureInput(),
-      );
+      const captureOutcome = await lifecycle.captureStandaloneRefresh(standaloneCaptureInput());
       if (!captureOutcome.ok) {
         return { kind: "refresh", outcome: captureOutcome };
       }
@@ -968,9 +948,7 @@ export function createShareViewFiles(
         refusedOps: 0,
         refusedDetail: null,
       };
-      return target.kind === "standalone"
-        ? { ok: true, ...outcome }
-        : outcome;
+      return target.kind === "standalone" ? { ok: true, ...outcome } : outcome;
     };
 
     try {
@@ -1024,11 +1002,7 @@ export function createShareViewFiles(
                 });
         }
       }
-      if (
-        "ok" in outcome
-          ? outcome.ok && outcome.status === "ended"
-          : outcome.status === "ended"
-      ) {
+      if ("ok" in outcome ? outcome.ok && outcome.status === "ended" : outcome.status === "ended") {
         await dependencies.markEnded(target);
         await dependencies.retireTarget(target);
       }
@@ -1040,32 +1014,55 @@ export function createShareViewFiles(
       if (target.kind !== "standalone") throw new SetAsideRefreshError(error);
       return {
         kind: "refresh",
-        outcome: { ...standaloneShareViewFailureOutcome(error, localChanges), ...setAsideCollisionRecord(recovered) },
+        outcome: {
+          ...standaloneShareViewFailureOutcome(error, localChanges),
+          ...setAsideCollisionRecord(recovered),
+        },
       };
     }
   }
 
-  async function recordRecoveredPaths(target: ActiveShareViewFilesTarget, captured: CaptureSharedViewLocalDivergenceOutcome): Promise<void> {
+  async function recordRecoveredPaths(
+    target: ActiveShareViewFilesTarget,
+    captured: CaptureSharedViewLocalDivergenceOutcome,
+  ): Promise<void> {
     const remaining = captured.remainingPreservedPaths;
-    if (target.kind !== "standalone" || target.unsavedPaths === undefined || remaining === undefined) return;
+    if (
+      target.kind !== "standalone" ||
+      target.unsavedPaths === undefined ||
+      remaining === undefined
+    )
+      return;
     const paths = remaining;
-    if (target.unsavedPaths !== null && JSON.stringify(target.unsavedPaths) === JSON.stringify(paths)) return;
+    if (
+      target.unsavedPaths !== null &&
+      JSON.stringify(target.unsavedPaths) === JSON.stringify(paths)
+    )
+      return;
     await dependencies.updateUnsavedPaths(target, paths);
     target.unsavedPaths = paths;
   }
 
-  async function unconfirmedChanges(target: ActiveShareViewFilesTarget): Promise<ShareUnconfirmedChanges> {
+  async function unconfirmedChanges(
+    target: ActiveShareViewFilesTarget,
+  ): Promise<ShareUnconfirmedChanges> {
     const grant = recordedShareSelector(target.grantedSelector);
     if (!grant || !target.shareId) throw new SharePinInvalidError(target.shareId ?? "");
     return dependencies.openStore(target).listUnconfirmedSharePaths({
-      workspaceId: target.storeWorkspaceId, shareId: target.shareId, grantedSelector: grant,
+      workspaceId: target.storeWorkspaceId,
+      shareId: target.shareId,
+      grantedSelector: grant,
     });
   }
 
-  async function captureUnsavedPaths(lease: WorkspaceOperationLease, target: ActiveShareViewFilesTarget): Promise<string[] | null> {
-    if (target.kind !== "standalone") return target.unsavedPaths === null ? null : target.unsavedPaths ?? [];
+  async function captureUnsavedPaths(
+    lease: WorkspaceOperationLease,
+    target: ActiveShareViewFilesTarget,
+  ): Promise<string[] | null> {
+    if (target.kind !== "standalone")
+      return target.unsavedPaths === null ? null : (target.unsavedPaths ?? []);
     try {
-      return await withOwnerCapability(lease, target, async owner => {
+      return await withOwnerCapability(lease, target, async (owner) => {
         const captured = await createShareViewLifecycle(owner).captureStandalone({
           rootDir: target.rootPath,
           workspaceId: target.storeWorkspaceId,
@@ -1077,12 +1074,16 @@ export function createShareViewFiles(
           preservedPaths: target.unsavedPaths,
           bestEffort: true,
         });
-        return [...new Set([
-          ...(captured.remainingPreservedPaths ?? target.unsavedPaths ?? []),
-          ...(captured.failedPaths ?? []),
-          // A held spelling's file is another spelling's, not unsaved work.
-          ...captured.unjournalablePaths.filter(entry => entry.reason !== "spelling-collision").map(entry => entry.path),
-        ])];
+        return [
+          ...new Set([
+            ...(captured.remainingPreservedPaths ?? target.unsavedPaths ?? []),
+            ...(captured.failedPaths ?? []),
+            // A held spelling's file is another spelling's, not unsaved work.
+            ...captured.unjournalablePaths
+              .filter((entry) => entry.reason !== "spelling-collision")
+              .map((entry) => entry.path),
+          ]),
+        ];
       });
     } catch {
       // Capture cannot veto a relay-confirmed restriction. Keep all disk files
@@ -1091,7 +1092,10 @@ export function createShareViewFiles(
     }
   }
 
-  async function captureBeforeRestriction(lease: WorkspaceOperationLease, target: ActiveShareViewFilesTarget) {
+  async function captureBeforeRestriction(
+    lease: WorkspaceOperationLease,
+    target: ActiveShareViewFilesTarget,
+  ) {
     const unsavedPaths = await captureUnsavedPaths(lease, target);
     let snapshot: ShareUnconfirmedChanges = { paths: [], unchecked: false, checked: 0 };
     if (target.kind === "standalone") {
@@ -1101,12 +1105,20 @@ export function createShareViewFiles(
         snapshot = { paths: [], unchecked: true, checked: 0 };
       }
     }
-    return { unsavedPaths, unconfirmedChanges: {
-      paths: [...new Set([...snapshot.paths, ...(unsavedPaths ?? []),
-        ...(snapshot.unchecked ? target.unconfirmedChanges?.paths ?? [] : [])])],
-      unchecked: snapshot.unchecked || unsavedPaths === null,
-      checked: snapshot.checked,
-    } };
+    return {
+      unsavedPaths,
+      unconfirmedChanges: {
+        paths: [
+          ...new Set([
+            ...snapshot.paths,
+            ...(unsavedPaths ?? []),
+            ...(snapshot.unchecked ? (target.unconfirmedChanges?.paths ?? []) : []),
+          ]),
+        ],
+        unchecked: snapshot.unchecked || unsavedPaths === null,
+        checked: snapshot.checked,
+      },
+    };
   }
 
   return {
@@ -1124,7 +1136,7 @@ export function createShareViewFiles(
     },
     async narrow(lease, requested, assertCurrent, commit) {
       assertLease(lease);
-      return withCurrentTarget(requested, async target => {
+      return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
         assertCurrent();
@@ -1159,12 +1171,7 @@ export function createShareViewFiles(
             }
             assertSameTarget(prepared, registered);
             assertActiveTarget(registered);
-            const reconciled = await reconcileWithOwner(
-              lease,
-              registered,
-              "refresh",
-              owner,
-            );
+            const reconciled = await reconcileWithOwner(lease, registered, "refresh", owner);
             if (reconciled.kind !== "refresh" || "ok" in reconciled.outcome) {
               throw new Error("Share mount refresh returned an invalid result.");
             }
@@ -1177,10 +1184,7 @@ export function createShareViewFiles(
             try {
               const rollback = await dependencies.removeMount(owner, prepared);
               if (rollback.folderLeft) {
-                throw new ShareViewMountRollbackError(
-                  error,
-                  rollback.error,
-                );
+                throw new ShareViewMountRollbackError(error, rollback.error);
               }
             } catch (rollbackError) {
               if (rollbackError instanceof ShareViewMountRollbackError) {
@@ -1207,27 +1211,51 @@ export function createShareViewFiles(
     },
 
     async linksEdges(requested, input) {
-      return withCurrentTarget(requested, target => withStore(target, async store => {
-        const page = await store.linkEdges(LinksEdgesInput.parse(input));
-        const tracked = (path: string) => classifyEngineFilePath(path).kind === "tracked";
-        return { ...page, files: page.files.filter(row => tracked(row.path)),
-          entries: page.entries.filter(row => tracked(row.source) && tracked(row.target)), unchecked: page.unchecked.filter(tracked) };
-      }));
+      return withCurrentTarget(requested, (target) =>
+        withStore(target, async (store) => {
+          const page = await store.linkEdges(LinksEdgesInput.parse(input));
+          const tracked = (path: string) => classifyEngineFilePath(path).kind === "tracked";
+          return {
+            ...page,
+            files: page.files.filter((row) => tracked(row.path)),
+            entries: page.entries.filter((row) => tracked(row.source) && tracked(row.target)),
+            unchecked: page.unchecked.filter(tracked),
+          };
+        }),
+      );
     },
     async linksIn(requested, input) {
-      return withCurrentTarget(requested, target => withStore(target, async store => {
-        const page = await store.incomingLinks(LinksInInput.parse(input));
-        const tracked = (path: string) => classifyEngineFilePath(path).kind === "tracked";
-        return page && tracked(page.subject.path) ? { ...page, entries: page.entries.filter(row => tracked(row.source)), unchecked: page.unchecked.filter(tracked) } : null;
-      }));
+      return withCurrentTarget(requested, (target) =>
+        withStore(target, async (store) => {
+          const page = await store.incomingLinks(LinksInInput.parse(input));
+          const tracked = (path: string) => classifyEngineFilePath(path).kind === "tracked";
+          return page && tracked(page.subject.path)
+            ? {
+                ...page,
+                entries: page.entries.filter((row) => tracked(row.source)),
+                unchecked: page.unchecked.filter(tracked),
+              }
+            : null;
+        }),
+      );
     },
     async linksResolve(requested, input) {
-      return withCurrentTarget(requested, target => withStore(target, async store => {
-        const parsed = LinksResolveInput.parse(input);
-        if (classifyEngineFilePath(validatedReadPath(parsed.source)).kind !== "tracked") throw new SharedFileReadOnlyError("This path is not available through the shared view.");
-        const result = await store.resolveLinks(parsed);
-        return { ...result, results: result.results.map(row => row && classifyEngineFilePath(row.path ?? row.create).kind === "tracked" ? row : null) };
-      }));
+      return withCurrentTarget(requested, (target) =>
+        withStore(target, async (store) => {
+          const parsed = LinksResolveInput.parse(input);
+          if (classifyEngineFilePath(validatedReadPath(parsed.source)).kind !== "tracked")
+            throw new SharedFileReadOnlyError(
+              "This path is not available through the shared view.",
+            );
+          const result = await store.resolveLinks(parsed);
+          return {
+            ...result,
+            results: result.results.map((row) =>
+              row && classifyEngineFilePath(row.path ?? row.create).kind === "tracked" ? row : null,
+            ),
+          };
+        }),
+      );
     },
     async read(requested, request) {
       return withCurrentTarget(requested, async (target) => {
@@ -1237,9 +1265,7 @@ export function createShareViewFiles(
             `This path is not available through the shared view: ${request.path}`,
           );
         }
-        const bytes = await withStore(target, (store) =>
-          storeBytes(store, target, path),
-        );
+        const bytes = await withStore(target, (store) => storeBytes(store, target, path));
         if (request.kind === "asset") {
           if (bytes.byteLength > WORKSPACE_ASSET_MAX_BYTES) {
             throw new Error(
@@ -1260,24 +1286,34 @@ export function createShareViewFiles(
     },
 
     async lookup(requested, paths) {
-      return withCurrentTarget(requested, target => withStore(target, async store => {
-        const main = await store.ensureMainVersion({ workspaceId: target.storeWorkspaceId });
-        const files: WorkspaceFileListingEntry[] = [];
-        const resolved = await resolveEngineFileTargets(store, target.storeWorkspaceId,
-          paths.map(path => ({ path })), undefined, main.id);
-        resolved.forEach((file, index) => {
-          if (file.status === "found" && file.path === paths[index] && classifyEngineFilePath(file.path).kind === "tracked") {
-            files.push({ path: file.path, kind: classifyPath(file.path).kind });
-          }
-        });
-        return { files, folders: [] };
-      }));
+      return withCurrentTarget(requested, (target) =>
+        withStore(target, async (store) => {
+          const main = await store.ensureMainVersion({ workspaceId: target.storeWorkspaceId });
+          const files: WorkspaceFileListingEntry[] = [];
+          const resolved = await resolveEngineFileTargets(
+            store,
+            target.storeWorkspaceId,
+            paths.map((path) => ({ path })),
+            undefined,
+            main.id,
+          );
+          resolved.forEach((file, index) => {
+            if (
+              file.status === "found" &&
+              file.path === paths[index] &&
+              classifyEngineFilePath(file.path).kind === "tracked"
+            ) {
+              files.push({ path: file.path, kind: classifyPath(file.path).kind });
+            }
+          });
+          return { files, folders: [] };
+        }),
+      );
     },
 
     async list(requested, options) {
       return withCurrentTarget(requested, async (target) => {
-        const iconCache =
-          dependencies.stateFor?.(target).iconCache ?? fallbackState.iconCache;
+        const iconCache = dependencies.stateFor?.(target).iconCache ?? fallbackState.iconCache;
         return withStore(target, async (store) => {
           const main = await store.ensureMainVersion({
             workspaceId: target.storeWorkspaceId,
@@ -1293,8 +1329,7 @@ export function createShareViewFiles(
           const markdown = visible.filter(
             (entry) =>
               entry.contentKind === "text" &&
-              (entry.byteLength ?? Number.POSITIVE_INFINITY) <=
-                ICON_SOURCE_MAX_BYTES &&
+              (entry.byteLength ?? Number.POSITIVE_INFINITY) <= ICON_SOURCE_MAX_BYTES &&
               /\.(md|markdown)$/i.test(entry.path),
           );
           const uncached = markdown.filter((entry) => {
@@ -1322,9 +1357,7 @@ export function createShareViewFiles(
                       path: entry.path,
                     });
                     if (snapshot && snapshot.contentKind !== "binary") {
-                      icon = extractFrontmatterIcon(
-                        snapshot.text.slice(0, 1024),
-                      );
+                      icon = extractFrontmatterIcon(snapshot.text.slice(0, 1024));
                     }
                   } catch {
                     // Listing stays available if one optional icon cannot be read.
@@ -1341,16 +1374,10 @@ export function createShareViewFiles(
               kind: classifyPath(entry.path).kind,
             };
             if (options?.includeContentIdentity === true) {
-              file.contentIdentity = [
-                entry.objectId,
-                entry.sha256,
-                entry.latestMomentId,
-              ].join(":");
+              file.contentIdentity = [entry.objectId, entry.sha256, entry.latestMomentId].join(":");
             }
             if (/\.(md|markdown)$/i.test(entry.path)) {
-              const cached = iconCache.get(
-                `${target.storeWorkspaceId}\0${entry.path}`,
-              );
+              const cached = iconCache.get(`${target.storeWorkspaceId}\0${entry.path}`);
               const stamp = entry.sha256 ?? entry.latestMomentId;
               if (cached?.stamp === stamp && cached.icon) {
                 file.icon = cached.icon;
@@ -1372,10 +1399,7 @@ export function createShareViewFiles(
         }
         let debt: Awaited<ReturnType<typeof readSharedViewProjectionDebt>>;
         try {
-          debt = await readSharedViewProjectionDebt(
-            target.rootPath,
-            target.shareId,
-          );
+          debt = await readSharedViewProjectionDebt(target.rootPath, target.shareId);
         } catch {
           return {
             state: "pending",
@@ -1388,18 +1412,14 @@ export function createShareViewFiles(
             pullInFlight: false,
           };
         }
-        if (
-          debt.pendingPaths.size === 0 &&
-          debt.collisionPaths.size === 0 &&
-          !debt.pullInFlight
-        ) {
+        if (debt.pendingPaths.size === 0 && debt.collisionPaths.size === 0 && !debt.pullInFlight) {
           return { state: "current" };
         }
         const pendingPaths = [...debt.pendingPaths].sort();
         const collisionPaths = [...debt.collisionPaths].sort();
         // A hold counts only while its collision is still recorded.
         const heldPaths = (heldPathsFor(target).get(target.shareId) ?? [])
-          .filter(entry => debt.collisionPaths.has(entry.path))
+          .filter((entry) => debt.collisionPaths.has(entry.path))
           .sort((left, right) => left.path.localeCompare(right.path));
         return {
           state: "pending",
@@ -1424,7 +1444,10 @@ export function createShareViewFiles(
         );
         const settled = outcome.kind === "refresh" ? outcome.outcome : outcome;
         if ("unjournalablePaths" in settled) {
-          heldPathsFor(target).set(target.shareId, settled.unjournalablePaths.filter(isHeldSharePath));
+          heldPathsFor(target).set(
+            target.shareId,
+            settled.unjournalablePaths.filter(isHeldSharePath),
+          );
         }
         return outcome;
       });
@@ -1436,9 +1459,7 @@ export function createShareViewFiles(
         assertLease(lease, target);
         assertActiveTarget(target);
         if (target.kind !== "mount") {
-          throw new Error(
-            "Only a mounted share can be removed from a workspace.",
-          );
+          throw new Error("Only a mounted share can be removed from a workspace.");
         }
         return withOwnerCapability(lease, target, (owner) =>
           dependencies.removeMount(owner, target),

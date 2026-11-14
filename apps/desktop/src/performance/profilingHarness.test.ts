@@ -43,20 +43,14 @@ describe("profiling fixture preparation", () => {
 
     expect(scenarioA.rootPath).not.toBe(fixtureRoot);
     expect(scenarioB.rootPath).not.toBe(scenarioA.rootPath);
-    expect(await readFile(join(engineDir, "engine.db"), "utf8")).toBe(
-      "scenario-a engine state",
-    );
+    expect(await readFile(join(engineDir, "engine.db"), "utf8")).toBe("scenario-a engine state");
     expect(existsSync(join(scenarioB.rootPath, ".dohc", "engine"))).toBe(false);
     expect(await readFile(join(scenarioB.rootPath, "notes", "fixture.md"), "utf8")).toBe(
       recordedInput,
     );
-    expect(await readFile(join(fixtureRoot, "notes", "fixture.md"), "utf8")).toBe(
-      recordedInput,
-    );
+    expect(await readFile(join(fixtureRoot, "notes", "fixture.md"), "utf8")).toBe(recordedInput);
     expect(
-      JSON.parse(
-        await readFile(join(scenarioB.rootPath, ".dohc", "manifest.json"), "utf8"),
-      ),
+      JSON.parse(await readFile(join(scenarioB.rootPath, ".dohc", "manifest.json"), "utf8")),
     ).toMatchObject({ workspaceId: "scenario-b" });
   });
 });

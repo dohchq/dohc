@@ -10,7 +10,6 @@ import type {
 } from "./registryStore";
 import { relayUrlsMatch } from "./syncCode";
 
-// Reconcile local copies with the authenticated account listing.
 export interface ConfirmedShareRemoval {
   shareId: string;
   // The relay's time for the removal, from its `removed` listing.
@@ -33,14 +32,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * makes the whole listing unusable: a partial read must not resume anything.
  */
 export function readReceivedShareListing(listing: unknown): ReceivedShareListing | null {
-  if (!isRecord(listing) || "nextCursor" in listing || ("ok" in listing && listing.ok !== true)) return null;
+  if (!isRecord(listing) || "nextCursor" in listing || ("ok" in listing && listing.ok !== true))
+    return null;
   const receivedRows = listing.received;
   const removedRows = listing.removed;
   if (!Array.isArray(receivedRows) || !Array.isArray(removedRows)) return null;
   const received = new Set<string>();
   for (const row of receivedRows) {
-    if (isRecord(row) && row.damaged !== true &&
-        typeof row.shareId === "string" && row.shareId.length > 0) {
+    if (
+      isRecord(row) &&
+      row.damaged !== true &&
+      typeof row.shareId === "string" &&
+      row.shareId.length > 0
+    ) {
       received.add(row.shareId);
     }
   }
@@ -122,9 +126,9 @@ export function reconcileRecipientShares(
   credentials: CloudCredentials,
   confirmedActive: ReadonlySet<string>,
 ): RegistryEntry | null {
-  const listedRemovals = new Set(listing.removed.map(row => row.shareId));
-  const active = (shareId: string) => listing.received.has(shareId) &&
-    confirmedActive.has(shareId) && !listedRemovals.has(shareId);
+  const listedRemovals = new Set(listing.removed.map((row) => row.shareId));
+  const active = (shareId: string) =>
+    listing.received.has(shareId) && confirmedActive.has(shareId) && !listedRemovals.has(shareId);
   // Share ids this listing speaks for: records pinned to its relay and
   // account. Records pinned elsewhere keep their state, ended or not.
   const spokenFor = new Set<string>();
@@ -171,8 +175,8 @@ export function reconcileRecipientShares(
 
   const existing = confirmedRemovals(entry);
   const nextRemovals = [
-    ...existing.filter(
-      (removal) => !spokenFor.has(removal.shareId)
+    ...existing.filter((removal) =>
+      !spokenFor.has(removal.shareId)
         ? heldElsewhere.has(removal.shareId)
         : !active(removal.shareId) && !listedRemovals.has(removal.shareId),
     ),
@@ -199,22 +203,35 @@ export function reconcileRecipientShares(
 // An ended copy needs a fresh listing even after the Undo period: its owner
 // may have restored it while this device was offline.
 export function recipientShareNeedsRecheck(entry: Readonly<RegistryEntry>): boolean {
-  return shareView(entry)?.ended === true ||
-    mounts(entry).some(mount => mount.ended === true) ||
-    channels(entry).some(channel => channel.ended === true && channel.left !== true);
+  return (
+    shareView(entry)?.ended === true ||
+    mounts(entry).some((mount) => mount.ended === true) ||
+    channels(entry).some((channel) => channel.ended === true && channel.left !== true)
+  );
 }
 
 // Only a usable exact-share read can confirm that the recipient still has access.
 export function exactReceivedShareIsActive(body: unknown, shareId: string): boolean {
-  if (!isRecord(body) || body.ok !== true || body.shareId !== shareId ||
-      body.damaged !== undefined || !isRecord(body.selector)) return false;
+  if (
+    !isRecord(body) ||
+    body.ok !== true ||
+    body.shareId !== shareId ||
+    body.damaged !== undefined ||
+    !isRecord(body.selector)
+  )
+    return false;
   const selector = body.selector;
   if (selector.kind === "chat" || selector.kind === "group") {
-    return typeof selector.channelWireId === "string" && selector.channelWireId.length > 0 &&
-      isChatShareAccessValue(body.access);
+    return (
+      typeof selector.channelWireId === "string" &&
+      selector.channelWireId.length > 0 &&
+      isChatShareAccessValue(body.access)
+    );
   }
-  return selector.kind === undefined &&
-    recordedShareSelector({ ...selector, access: body.access }) !== null;
+  return (
+    selector.kind === undefined &&
+    recordedShareSelector({ ...selector, access: body.access }) !== null
+  );
 }
 
 function resumeCandidates(
@@ -223,10 +240,14 @@ function resumeCandidates(
   credentials: CloudCredentials,
 ): Set<string> {
   const candidates = new Set<string>();
-  const removed = new Set(confirmedRemovals(entry).map(row => row.shareId));
+  const removed = new Set(confirmedRemovals(entry).map((row) => row.shareId));
   const add = (shareId: string, ended: boolean) => {
-    if ((ended || removed.has(shareId)) && listing.received.has(shareId) &&
-        !listing.removed.some(row => row.shareId === shareId)) candidates.add(shareId);
+    if (
+      (ended || removed.has(shareId)) &&
+      listing.received.has(shareId) &&
+      !listing.removed.some((row) => row.shareId === shareId)
+    )
+      candidates.add(shareId);
   };
   const view = shareView(entry);
   if (view && shareViewMatches(view, credentials)) add(view.shareId, view.ended === true);
@@ -252,8 +273,9 @@ export async function reconcileRecipientSharesAfterLookup(input: {
 }): Promise<boolean> {
   if (!input.isCurrent() || !input.currentEntry()) return false;
   // Record removals immediately. The inventory alone cannot clear any end marker.
-  let changed = input.updateEntry(entry =>
-    reconcileRecipientShares(entry, input.listing, input.credentials, new Set()));
+  let changed = input.updateEntry((entry) =>
+    reconcileRecipientShares(entry, input.listing, input.credentials, new Set()),
+  );
   const snapshot = input.currentEntry();
   if (!snapshot) return changed;
   const confirmedActive = new Set<string>();
@@ -266,11 +288,15 @@ export async function reconcileRecipientSharesAfterLookup(input: {
       input.onLookupError?.(shareId, error);
     }
   }
-  if (!input.isCurrent() || confirmedActive.size === 0 || input.currentEntry() !== snapshot) return changed;
+  if (!input.isCurrent() || confirmedActive.size === 0 || input.currentEntry() !== snapshot)
+    return changed;
   // Registry writes replace the cached entry, including repeated end observations.
   // Compare inside its synchronous update so no newer observation is overwritten.
-  changed = input.updateEntry(entry => entry === snapshot
-    ? reconcileRecipientShares(entry, input.listing, input.credentials, confirmedActive)
-    : null) || changed;
+  changed =
+    input.updateEntry((entry) =>
+      entry === snapshot
+        ? reconcileRecipientShares(entry, input.listing, input.credentials, confirmedActive)
+        : null,
+    ) || changed;
   return changed;
 }

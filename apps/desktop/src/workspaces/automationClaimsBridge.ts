@@ -1,7 +1,4 @@
-import {
-  AUTOMATION_CLAIMED_EVENT,
-  type Event,
-} from "@dohc/workspace-engine-client";
+import { AUTOMATION_CLAIMED_EVENT, type Event } from "@dohc/workspace-engine-client";
 
 /**
  * The daemon announces each automation claim a LOCAL apply inserted with an

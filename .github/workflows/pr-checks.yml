@@ -80,7 +80,7 @@ jobs:
           token: ""
           base: ${{ steps.merge-base.outputs.sha }}
           filters: |
-            # .cargo/ holds audit.toml, where advisory ignores would hide;
+            # an advisory ignore would go in .cargo/audit.toml;
             # .gitignore decides what the gate's own tree-provenance readings
             # can see, so it is an input to the gate and not just to git --
             # ignoring a path removes it from every reading, and the gate tees
@@ -160,6 +160,9 @@ jobs:
               - 'scripts/**'
               - 'tools/**'
               - 'tsconfig.base.json'
+              # The repository source checks run oxlint and oxfmt with these settings.
+              - '.oxlintrc.json'
+              - '.oxfmtrc.json'
               - 'package.json'
               - '.node-version'
               - '.nvmrc'
@@ -273,7 +276,6 @@ jobs:
           apps/desktop/target/debug/dohc-workspace-engine apps/desktop/dist apps/desktop/resources/cli-bin apps/desktop/resources/app-backend-runtime
           apps/desktop/resources/app-compiler apps/desktop/resources/engine-reader services/share-web/viewer/dist services/sync-relay/dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
         with:
           name: javascript-prepared-${{ github.run_attempt }}
           path: /tmp/javascript-prepared.tar.zst
@@ -449,12 +451,6 @@ jobs:
           - 11
           - 12
           - 13
-          - 14
-          - 15
-          - 16
-          - 17
-          - 18
-          - 19
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
@@ -583,7 +579,6 @@ jobs:
       - name: Compile and inventory every workspace test
         run: node scripts/verification/cloud-rust.mjs archive
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
         with:
           name: rust-tests-${{ github.run_attempt }}
           path: |-
@@ -605,7 +600,7 @@ jobs:
           compression-level: 0
   rust-tests:
     name: Rust tests ${{ matrix.shard }}
-    needs: [changes, rust-archive, javascript-workers]
+    needs: [changes, rust-archive]
     if: >-
       always() && !cancelled() && needs.changes.result == 'success' &&
       ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
@@ -622,18 +617,6 @@ jobs:
           - 5
           - 6
           - 7
-          - 8
-          - 9
-          - 10
-          - 11
-          - 12
-          - 13
-          - 14
-          - 15
-          - 16
-          - 17
-          - 18
-          - 19
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'
@@ -728,7 +711,7 @@ jobs:
           compression-level: 0
   rust:
     name: engine gate
-    needs: [changes, rust-archive, javascript-workers]
+    needs: [changes, rust-archive]
     if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 40

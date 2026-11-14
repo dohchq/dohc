@@ -18,7 +18,8 @@
 import type { VersionRoundMessage } from "./ipc/bridgeContract";
 
 export const VERSION_ROUND_TIMEOUT_MS = 30_000;
-const SILENT_REASON = "A dohc window showing this workspace didn't save its open edits in time, so nothing changed. Try again.";
+const SILENT_REASON =
+  "A dohc window showing this workspace didn't save its open edits in time, so nothing changed. Try again.";
 
 // What the windows hear after the change ran: the version it left active,
 // or nothing when they should ask.
@@ -34,19 +35,28 @@ export function createVersionRounds<Window>(options: {
 }) {
   const timeoutMs = options.timeoutMs ?? VERSION_ROUND_TIMEOUT_MS;
   let sequence = 0;
-  const open = new Map<number, {
-    readonly members: ReadonlyMap<number, Window>;
-    readonly ready: Set<number>;
-    settle(refusal: string | null): void;
-  }>();
+  const open = new Map<
+    number,
+    {
+      readonly members: ReadonlyMap<number, Window>;
+      readonly ready: Set<number>;
+      settle(refusal: string | null): void;
+    }
+  >();
 
   function allReady(round: NonNullable<ReturnType<typeof open.get>>): boolean {
-    return [...round.members].every(([id, window]) => round.ready.has(id) || options.isGone(window));
+    return [...round.members].every(
+      ([id, window]) => round.ready.has(id) || options.isGone(window),
+    );
   }
 
   // An answer from a window outside the round, or for a round that ended,
   // counts for nothing.
-  function answer(windowId: number, roundId: number, reply: { ready: true } | { ready: false; reason: string }): void {
+  function answer(
+    windowId: number,
+    roundId: number,
+    reply: { ready: true } | { ready: false; reason: string },
+  ): void {
     const round = open.get(roundId);
     if (!round?.members.has(windowId)) return;
     if (!reply.ready) {
@@ -63,7 +73,11 @@ export function createVersionRounds<Window>(options: {
     announce: { done(result: Result): VersionChange; failed?: VersionChange },
   ): Promise<Result> {
     const roundId = ++sequence;
-    const members = new Map(options.windowsShowing(workspaceId).map(window => [options.windowId(window), window] as const));
+    const members = new Map(
+      options
+        .windowsShowing(workspaceId)
+        .map((window) => [options.windowId(window), window] as const),
+    );
     const end = (changed: VersionChange | null) => {
       for (const window of members.values()) {
         if (options.isGone(window)) continue;
@@ -71,12 +85,16 @@ export function createVersionRounds<Window>(options: {
       }
     };
     if (members.size > 0) {
-      const refusal = await new Promise<string | null>(resolve => {
+      const refusal = await new Promise<string | null>((resolve) => {
         const ready = new Set<number>();
-        const timer = setTimeout(() => round.settle(allReady(round) ? null : SILENT_REASON), timeoutMs);
+        const timer = setTimeout(
+          () => round.settle(allReady(round) ? null : SILENT_REASON),
+          timeoutMs,
+        );
         timer.unref?.();
         const round = {
-          members, ready,
+          members,
+          ready,
           settle(refusal: string | null) {
             clearTimeout(timer);
             open.delete(roundId);
@@ -84,7 +102,8 @@ export function createVersionRounds<Window>(options: {
           },
         };
         open.set(roundId, round);
-        for (const window of members.values()) options.send(window, { kind: "begin", roundId, workspaceId });
+        for (const window of members.values())
+          options.send(window, { kind: "begin", roundId, workspaceId });
       });
       if (refusal !== null) {
         end(null);

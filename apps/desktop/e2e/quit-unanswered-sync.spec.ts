@@ -15,11 +15,10 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// #2868: with a synced workspace open, quit stays within its 6 s budget
-// while the sync server takes each connection and never answers. One case
-// leaves only the push unanswered. The other also leaves the read of the
-// relay's automation host record unanswered. The pull case comes with the
-// rest of #2868.
+// With a synced workspace open, quit stays within its 6 s budget while the
+// sync server takes each connection and never answers. One case leaves only
+// the push unanswered. The other also leaves the read of the relay's
+// automation host record unanswered. This spec does not cover the pull case.
 
 type Launched = Awaited<ReturnType<typeof launchDesktopApp>>;
 
@@ -35,7 +34,11 @@ const REQUEST_LINE = /^(?:GET|POST|PUT|PATCH|DELETE) [^ \r\n]+ HTTP\/1\.[01]/gmu
 // that it keeps each automation host read open without an answer. In "hold"
 // it takes every new connection, records its request line and never answers.
 // Held requests record whether the app closed them.
-async function startSyncServer(relay: SyncRelayHandle, hostRead: string, mode: "pass" | "hold-reads") {
+async function startSyncServer(
+  relay: SyncRelayHandle,
+  hostRead: string,
+  mode: "pass" | "hold-reads",
+) {
   const relayHost = new URL(relay.baseUrl).hostname;
   const piped = new Set<Socket>();
   const heldSockets = new Map<Socket, HeldRequest>();
@@ -69,7 +72,9 @@ async function startSyncServer(relay: SyncRelayHandle, hostRead: string, mode: "
     let kept = false;
     const upstream = connect(relay.port, relayHost);
     upstream.on("error", () => undefined);
-    upstream.on("close", () => { if (!kept) socket.destroy(); });
+    upstream.on("close", () => {
+      if (!kept) socket.destroy();
+    });
     socket.on("close", () => {
       piped.delete(socket);
       upstream.destroy();
@@ -125,8 +130,8 @@ async function startSyncServer(relay: SyncRelayHandle, hostRead: string, mode: "
   };
 }
 
-// The push sends its blobs and ops with POST.
-const pushRequest = (workspaceId: string) => new RegExp(`^POST /sync/${workspaceId}/(?:log[? ]|blobs/)`, "u");
+const pushRequest = (workspaceId: string) =>
+  new RegExp(`^POST /sync/${workspaceId}/(?:log[? ]|blobs/)`, "u");
 
 // A Group trigger makes this computer claim the automation host once the
 // workspace syncs, and the host then reads the relay's record of the last
@@ -151,7 +156,8 @@ for (const unanswered of ["push", "push and host read"] as const) {
   test(`quits within its budget while ${unanswered === "push" ? "a push waits" : "a push and the automation host read wait"} on a sync server that never answers (#2868)`, async () => {
     test.setTimeout(300_000);
     const temp = await createTempWorkspace();
-    const workspaceId = unanswered === "push" ? "quit-unanswered-push" : "quit-unanswered-push-read";
+    const workspaceId =
+      unanswered === "push" ? "quit-unanswered-push" : "quit-unanswered-push-read";
     const hostRead = `GET /sync/${workspaceId}/automation-host/groups?generation=`;
     const pushed = pushRequest(workspaceId);
     let relay: SyncRelayHandle | null = null;
@@ -162,45 +168,70 @@ for (const unanswered of ["push", "push and host read"] as const) {
       await seedWorkspaceManifest(temp, workspaceId);
       await writeWorkspaceFiles(temp, [
         { path: "notes/plan.md", contents: "draft\n" },
-        { path: "Tasks/collection.yaml", contents: "name: Tasks\nfields:\n  Title:\n    type: text\n" },
+        {
+          path: "Tasks/collection.yaml",
+          contents: "name: Tasks\nfields:\n  Title:\n    type: text\n",
+        },
         { path: "Tasks/automations.yaml", contents: automations },
       ]);
       relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
-      const sync = await startSyncServer(relay, hostRead, unanswered === "push" ? "pass" : "hold-reads");
+      const sync = await startSyncServer(
+        relay,
+        hostRead,
+        unanswered === "push" ? "pass" : "hold-reads",
+      );
       server = sync;
       await seedWorkspaceRegistry(temp, [{ workspaceId, rootPath: temp.rootPath }]);
-      await seedCloudCredentials(temp, { serverUrl: sync.baseUrl, relayUrl: sync.baseUrl, userId: "e2e-user" });
-      quitting = await launchDesktopApp({ workspace: temp, env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150" } });
+      await seedCloudCredentials(temp, {
+        serverUrl: sync.baseUrl,
+        relayUrl: sync.baseUrl,
+        userId: "e2e-user",
+      });
+      quitting = await launchDesktopApp({
+        workspace: temp,
+        env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150" },
+      });
       const { app, page, logs } = quitting;
       await openWorkspaceFromFirstRun(page, temp);
       await page.evaluate(async (id) => {
         await window.dohcDesktop!.cloudEnableSync({ workspaceId: id });
       }, workspaceId);
 
-      // Holds everything, writes an edit and waits for its push to reach the held server.
       const holdPush = async (round: number) => {
         const before = sync.held.length;
         sync.hold();
-        await writeFile(join(temp.rootPath, "notes/plan.md"), `draft\n\nedit ${round} the server never acknowledges\n`);
-        await expect.poll(() => sync.held.slice(before).some((request) => pushed.test(request.line ?? "") && !request.closed), {
-          timeout: 60_000,
-          message: "The push reaches the server that never answers",
-        }).toBe(true);
+        await writeFile(
+          join(temp.rootPath, "notes/plan.md"),
+          `draft\n\nedit ${round} the server never acknowledges\n`,
+        );
+        await expect
+          .poll(
+            () =>
+              sync.held
+                .slice(before)
+                .some((request) => pushed.test(request.line ?? "") && !request.closed),
+            {
+              timeout: 60_000,
+              message: "The push reaches the server that never answers",
+            },
+          )
+          .toBe(true);
       };
-      const synced = () => expect.poll(() => syncStatus(page, workspaceId), { timeout: 60_000 })
-        .toEqual({ state: "synced", pendingChangeCount: 0 });
-      // Writes a file and waits until the relay has its push and the pass,
-      // which pulls after it pushes, has finished.
+      const synced = () =>
+        expect
+          .poll(() => syncStatus(page, workspaceId), { timeout: 60_000 })
+          .toEqual({ state: "synced", pendingChangeCount: 0 });
       const passThroughRelay = async (path: string, contents: string) => {
         const before = sync.seen.length;
         await writeFile(join(temp.rootPath, path), contents);
-        await expect.poll(() => sync.seen.slice(before).some((line) => pushed.test(line)), {
-          timeout: 60_000,
-          message: `The push of ${path} reaches the relay`,
-        }).toBe(true);
+        await expect
+          .poll(() => sync.seen.slice(before).some((line) => pushed.test(line)), {
+            timeout: 60_000,
+            message: `The push of ${path} reaches the relay`,
+          })
+          .toBe(true);
         await synced();
       };
-      // Polls a condition, giving up after `ms`.
       const until = async (ready: () => boolean, ms: number) => {
         const end = Date.now() + ms;
         while (!ready()) {
@@ -212,21 +243,26 @@ for (const unanswered of ["push", "push and host read"] as const) {
 
       let readLine: string | null = null;
       if (unanswered === "push") {
-        await expect.poll(() => sync.seen.some((line) => line.startsWith(hostRead)), {
-          timeout: 60_000,
-          message: "This computer claims the automation host and the relay answers its read",
-        }).toBe(true);
+        await expect
+          .poll(() => sync.seen.some((line) => line.startsWith(hostRead)), {
+            timeout: 60_000,
+            message: "This computer claims the automation host and the relay answers its read",
+          })
+          .toBe(true);
         await synced();
         // Taking the host makes more than one read. Listing the automations
         // waits for the executor's queued work, so every read has been
         // answered and nothing reads the host record again before quit.
         await page.evaluate(async (id) => {
-          await window.dohcDesktop!.listCollectionAutomations({ workspaceId: id, collectionPath: "Tasks" });
+          await window.dohcDesktop!.listCollectionAutomations({
+            workspaceId: id,
+            collectionPath: "Tasks",
+          });
         }, workspaceId);
         await holdPush(1);
         expect(sync.openRead(), "No automation host read is waiting").toBeUndefined();
       } else {
-        // #3406: after a host read fails, the executor reads again only once
+        // After a host read fails, the executor reads again only once
         // a pull reaches the relay. A pass pulls after it pushes, so a write
         // the relay answers makes the next read. A read still pending when
         // the pull lands keeps the next one queued behind it, and once it
@@ -237,7 +273,10 @@ for (const unanswered of ["push", "push and host read"] as const) {
         for (let round = 1; ; round++) {
           let pulls = 0;
           while (sync.openRead() === undefined) {
-            if (++pulls > 3) throw new Error(`In round ${round}, 3 pulls through the relay started no automation host read.`);
+            if (++pulls > 3)
+              throw new Error(
+                `In round ${round}, 3 pulls through the relay started no automation host read.`,
+              );
             await passThroughRelay("notes/warm-up.md", `round ${round}, pull ${pulls}\n`);
             await until(() => sync.openRead() !== undefined, 20_000);
           }
@@ -247,45 +286,67 @@ for (const unanswered of ["push", "push and host read"] as const) {
             readLine = read.line;
             break;
           }
-          if (round === 3) throw new Error("In 3 rounds, the client gave up on the host read before its push reached the server, so quit never had both open.");
+          if (round === 3)
+            throw new Error(
+              "In 3 rounds, the client gave up on the host read before its push reached the server, so quit never had both open.",
+            );
           sync.holdReadsOnly();
         }
       }
 
-      // The measured quit: from asking the app to quit until its process exits, up to 30 s.
       const child = app.process();
-      const exited = new Promise<number>((resolve) => child.once("exit", () => resolve(performance.now())));
+      const exited = new Promise<number>((resolve) =>
+        child.once("exit", () => resolve(performance.now())),
+      );
       const outputEnded = new Promise<true>((resolve) => child.once("close", () => resolve(true)));
       const started = performance.now();
-      await app.evaluate(({ app }) => { app.quit(); });
+      await app.evaluate(({ app }) => {
+        app.quit();
+      });
       const exitedAtMs = await within(exited, 30_000);
       const quitMs = Math.round((exitedAtMs ?? performance.now()) - started);
-      // The app writes its quit line just before it exits.
       await within(outputEnded, 5_000);
-      const quitLine = logs.find((entry) => entry.source === "main" && entry.text.includes("[desktop] quit: shutdown"))?.text.trim() ?? "no quit line";
-      console.log(`#2868 e2e ${unanswered}: ${exitedAtMs !== null ? `quit took ${quitMs} ms` : `app still running after ${quitMs} ms`}; ${quitLine}`);
+      const quitLine =
+        logs
+          .find(
+            (entry) => entry.source === "main" && entry.text.includes("[desktop] quit: shutdown"),
+          )
+          ?.text.trim() ?? "no quit line";
+      console.log(
+        `#2868 e2e ${unanswered}: ${exitedAtMs !== null ? `quit took ${quitMs} ms` : `app still running after ${quitMs} ms`}; ${quitLine}`,
+      );
       expect(exitedAtMs, "The app exits during an unanswered push").not.toBeNull();
       // The app's own quit line. A step that waits on the server, such as
       // closing the workspace, runs past the budget and is named here.
-      expect(quitLine, "Quit finishes within its budget, with no step still running").toMatch(/^\[desktop\] quit: shutdown finished in \d+ ms$/u);
+      expect(quitLine, "Quit finishes within its budget, with no step still running").toMatch(
+        /^\[desktop\] quit: shutdown finished in \d+ ms$/u,
+      );
 
       // The next start, with the server answering, sends what the quit left
       // owed, and reads the host record again at the same generation.
       sync.pass();
       const seenBefore = sync.seen.length;
-      desktop = await launchDesktopApp({ workspace: temp, env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150" } });
+      desktop = await launchDesktopApp({
+        workspace: temp,
+        env: { DOHC_TEST_SYNC_DEBOUNCE_MS: "150" },
+      });
       await openWorkspaceFromFirstRun(desktop.page, temp);
       if (readLine !== null) {
-        await expect.poll(() => sync.seen.slice(seenBefore), {
-          timeout: 60_000,
-          message: "The automation host read reaches the relay again at the same generation",
-        }).toContain(readLine);
+        await expect
+          .poll(() => sync.seen.slice(seenBefore), {
+            timeout: 60_000,
+            message: "The automation host read reaches the relay again at the same generation",
+          })
+          .toContain(readLine);
       }
-      await expect.poll(() => sync.seen.slice(seenBefore), {
-        timeout: 60_000,
-        message: "The unanswered push reaches the relay again",
-      }).toContainEqual(expect.stringMatching(pushed));
-      await expect.poll(() => syncStatus(desktop!.page, workspaceId), { timeout: 60_000 })
+      await expect
+        .poll(() => sync.seen.slice(seenBefore), {
+          timeout: 60_000,
+          message: "The unanswered push reaches the relay again",
+        })
+        .toContainEqual(expect.stringMatching(pushed));
+      await expect
+        .poll(() => syncStatus(desktop!.page, workspaceId), { timeout: 60_000 })
         .toEqual({ state: "synced", pendingChangeCount: 0 });
     } finally {
       await quitting?.close().catch(() => undefined);

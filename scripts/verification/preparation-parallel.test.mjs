@@ -6,7 +6,13 @@ import { join } from "node:path";
 import test from "node:test";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
 
-for (const scenario of ["success", "engine-failure", "desktop-failure", "late-source-change", "cancel"]) {
+for (const scenario of [
+  "success",
+  "engine-failure",
+  "desktop-failure",
+  "late-source-change",
+  "cancel",
+]) {
   test(`parallel preparation settles both builds before releasing ownership: ${scenario}`, () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-prepare-parallel-"));
     try {
@@ -14,7 +20,13 @@ for (const scenario of ["success", "engine-failure", "desktop-failure", "late-so
       mkdirSync(join(root, "crates"));
       writeFileSync(join(root, "crates/engine.rs"), "original engine input");
       const adapter = join(root, "scripts/verification/process.mjs");
-      writeFileSync(adapter, readFileSync(adapter, "utf8").replace("export async function run(", "async function fixtureRun(") + `
+      writeFileSync(
+        adapter,
+        readFileSync(adapter, "utf8").replace(
+          "export async function run(",
+          "async function fixtureRun(",
+        ) +
+          `
         import {setImmediate} from 'node:timers/promises';
         let engineStarted = false, desktopStarted = false, release;
         const bothStarted = new Promise(resolve => {release = resolve;});
@@ -41,8 +53,11 @@ for (const scenario of ["success", "engine-failure", "desktop-failure", "late-so
             return await fixtureRun(command,args,options);
           } finally { completed.add(kind); }
         }
-      `);
-      writeFileSync(join(root, "apps/desktop/scripts/require-e2e-engine.mjs"), `
+      `,
+      );
+      writeFileSync(
+        join(root, "apps/desktop/scripts/require-e2e-engine.mjs"),
+        `
         import assert from 'node:assert/strict';
         import {writeFileSync} from 'node:fs';
         import {completed} from '../../../scripts/verification/process.mjs';
@@ -50,11 +65,32 @@ for (const scenario of ["success", "engine-failure", "desktop-failure", "late-so
           assert.deepEqual([...completed].sort(),['desktop','engine']);
           writeFileSync('.dohc-dev/staged','yes');
         }
-      `);
+      `,
+      );
       execFileSync("git", ["add", "."], { cwd: root });
-      execFileSync("git", ["-c", "commit.gpgsign=false", "-c", `core.hooksPath=${join(root, "no-hooks")}`,
-        "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Parallel preparation fixture"], { cwd: root, stdio: "ignore" });
-      const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "commit.gpgsign=false",
+          "-c",
+          `core.hooksPath=${join(root, "no-hooks")}`,
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          "commit",
+          "-m",
+          "Parallel preparation fixture",
+        ],
+        { cwd: root, stdio: "ignore" },
+      );
+      const result = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
         import assert from 'node:assert/strict';
         import cp from 'node:child_process';
         import {existsSync} from 'node:fs';
@@ -71,9 +107,14 @@ for (const scenario of ["success", "engine-failure", "desktop-failure", "late-so
         assert.equal(existsSync('.dohc-dev/staged'),${scenario === "success"});
         if (${JSON.stringify(scenario)} === 'success') assert.equal(failure,undefined);
         else assert.match(failure.message, /build rejected|inputs changed|interrupted/);
-      `], { cwd: root, encoding: "utf8", timeout: 20_000 });
+      `,
+        ],
+        { cwd: root, encoding: "utf8", timeout: 20_000 },
+      );
       assert.equal(result.error, undefined, result.stderr);
       assert.equal(result.status, scenario === "cancel" ? 143 : 0, result.stderr);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 }

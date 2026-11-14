@@ -1,4 +1,11 @@
-import { AlertTriangle, CheckCircle2, CircleDashed, LoaderCircle, Server, Undo2 } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  CircleDashed,
+  LoaderCircle,
+  Server,
+  Undo2,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ListCollectionAutomationRunsResult,
@@ -31,32 +38,48 @@ function sentence(text: string): string {
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
-/** What an Undo did, for its notice: "Undid 3 changes. 1 field changed since then." */
 export function undoSentence(undone: Undone, onServer = false): string {
   const parts: string[] = [];
   const saved = onServer ? "Reversal saved on your server." : "Reversal saved on this computer.";
-  if (undone.sharedReversals?.some(write => write.state === "pending")) parts.push(`${saved} The shared host has not accepted it yet.`);
-  if (undone.sharedReversals?.some(write => write.state === "not-accepted")) parts.push(`${saved} The shared host did not accept it. Try Undo again.`);
+  if (undone.sharedReversals?.some((write) => write.state === "pending"))
+    parts.push(`${saved} The shared host has not accepted it yet.`);
+  if (undone.sharedReversals?.some((write) => write.state === "not-accepted"))
+    parts.push(`${saved} The shared host did not accept it. Try Undo again.`);
   if (undone.reverted > 0) parts.push(`Undid ${count(undone.reverted, "change", "changes")}.`);
-  if (undone.removed > 0) parts.push(onServer
-    ? `Deleted ${count(undone.removed, "added record", "added records")}. History can restore them.`
-    : `Moved ${count(undone.removed, "added record", "added records")} to the trash.`);
-  if (undone.actionsReversed > 0) parts.push(`Undid ${count(undone.actionsReversed, "action", "actions")}.`);
-  if (undone.deleted > 0) parts.push(`Deleted ${count(undone.deleted, "added record", "added records")}.`);
+  if (undone.removed > 0)
+    parts.push(
+      onServer
+        ? `Deleted ${count(undone.removed, "added record", "added records")}. History can restore them.`
+        : `Moved ${count(undone.removed, "added record", "added records")} to the trash.`,
+    );
+  if (undone.actionsReversed > 0)
+    parts.push(`Undid ${count(undone.actionsReversed, "action", "actions")}.`);
+  if (undone.deleted > 0)
+    parts.push(`Deleted ${count(undone.deleted, "added record", "added records")}.`);
   if (parts.length === 0) parts.push("Nothing was left to undo.");
-  if (undone.kept > 0) parts.push(`${count(undone.kept, "added record stays", "added records stay")}.`);
+  if (undone.kept > 0)
+    parts.push(`${count(undone.kept, "added record stays", "added records stay")}.`);
   if (undone.keptChanged > 0) {
-    parts.push(`${count(undone.keptChanged, "added record stays", "added records stay")} because someone changed ${undone.keptChanged === 1 ? "it" : "them"}.`);
+    parts.push(
+      `${count(undone.keptChanged, "added record stays", "added records stay")} because someone changed ${undone.keptChanged === 1 ? "it" : "them"}.`,
+    );
   }
-  if (undone.gone > 0) parts.push(`${count(undone.gone, "added record was", "added records were")} already gone.`);
-  if (undone.changedSince > 0) parts.push(`${count(undone.changedSince, "field", "fields")} changed since then.`);
+  if (undone.gone > 0)
+    parts.push(`${count(undone.gone, "added record was", "added records were")} already gone.`);
+  if (undone.changedSince > 0)
+    parts.push(`${count(undone.changedSince, "field", "fields")} changed since then.`);
   if (undone.missing > 0) {
-    parts.push(`${count(undone.missing, "field is", "fields are")} on records no longer in the Collection.`);
+    parts.push(
+      `${count(undone.missing, "field is", "fields are")} on records no longer in the Collection.`,
+    );
   }
   if (undone.irreversible > 0) {
-    parts.push(`The Collection's rules do not let dohc undo ${count(undone.irreversible, "change", "changes")}.`);
+    parts.push(
+      `The Collection's rules do not let dohc undo ${count(undone.irreversible, "change", "changes")}.`,
+    );
   }
-  if (undone.actions > 0) parts.push(`${count(undone.actions, "action", "actions")} can't be undone.`);
+  if (undone.actions > 0)
+    parts.push(`${count(undone.actions, "action", "actions")} can't be undone.`);
   return parts.join(" ");
 }
 
@@ -64,23 +87,39 @@ export function undoSentence(undone: Undone, onServer = false): string {
 export function undoPreviewSentences(preview: Preview): string[] {
   const lines: string[] = [];
   const tried = preview.deletes + preview.unchecked;
-  if (preview.reverses > 0) lines.push(`Undo will reverse ${count(preview.reverses, "action", "actions")}.`);
-  if (preview.deletes > 0) lines.push(`Undo will delete ${count(preview.deletes, "added record", "added records")}.`);
+  if (preview.reverses > 0)
+    lines.push(`Undo will reverse ${count(preview.reverses, "action", "actions")}.`);
+  if (preview.deletes > 0)
+    lines.push(`Undo will delete ${count(preview.deletes, "added record", "added records")}.`);
   if (preview.unchecked > 0) {
-    lines.push(`Undo will try to delete ${count(preview.unchecked, "added record", "added records")} that dohc could not check. Any that someone changed will stay.`);
+    lines.push(
+      `Undo will try to delete ${count(preview.unchecked, "added record", "added records")} that dohc could not check. Any that someone changed will stay.`,
+    );
   }
-  if (preview.reverts > 0) lines.push(`Undo will put back ${count(preview.reverts, "change", "changes")}.`);
-  if (tried + preview.reverts > 0) lines.push("A record or field someone else changed stays as they left it.");
+  if (preview.reverts > 0)
+    lines.push(`Undo will put back ${count(preview.reverts, "change", "changes")}.`);
+  if (tried + preview.reverts > 0)
+    lines.push("A record or field someone else changed stays as they left it.");
   if (preview.kept > 0) {
-    lines.push(`${count(preview.kept, "added record", "added records")} will stay. This Collection has no delete action available to the automation.`);
+    lines.push(
+      `${count(preview.kept, "added record", "added records")} will stay. This Collection has no delete action available to the automation.`,
+    );
   }
   if (preview.keptChanged > 0) {
-    lines.push(`${count(preview.keptChanged, "added record", "added records")} will stay because someone changed ${preview.keptChanged === 1 ? "it" : "them"}.`);
+    lines.push(
+      `${count(preview.keptChanged, "added record", "added records")} will stay because someone changed ${preview.keptChanged === 1 ? "it" : "them"}.`,
+    );
   }
-  if (preview.gone > 0) lines.push(`${count(preview.gone, "added record is", "added records are")} already gone.`);
-  if (preview.irreversible > 0) lines.push(`The Collection's rules do not let dohc undo ${count(preview.irreversible, "change", "changes")}.`);
-  if (preview.actions > 0) lines.push(`${count(preview.actions, "action", "actions")} can't be undone.`);
-  if (tried > 0) lines.push(`You cannot undo ${tried === 1 ? "this deletion" : "these deletions"} in dohc.`);
+  if (preview.gone > 0)
+    lines.push(`${count(preview.gone, "added record is", "added records are")} already gone.`);
+  if (preview.irreversible > 0)
+    lines.push(
+      `The Collection's rules do not let dohc undo ${count(preview.irreversible, "change", "changes")}.`,
+    );
+  if (preview.actions > 0)
+    lines.push(`${count(preview.actions, "action", "actions")} can't be undone.`);
+  if (tried > 0)
+    lines.push(`You cannot undo ${tried === 1 ? "this deletion" : "these deletions"} in dohc.`);
   return lines;
 }
 
@@ -103,7 +142,12 @@ function writeText(write: RunWrite): string {
     case "field":
       return `${record} · ${write.field}: ${valueText(write.before)} → ${valueText(write.after)}`;
     case "dataset-edit":
-      return write.fields.map((field) => `${record} · ${field.field}: ${valueText(field.before)} → ${valueText(field.after)}`).join("; ");
+      return write.fields
+        .map(
+          (field) =>
+            `${record} · ${field.field}: ${valueText(field.before)} → ${valueText(field.after)}`,
+        )
+        .join("; ");
     case "dataset-created":
     case "created":
       return `Added ${record}`;
@@ -116,12 +160,18 @@ function writeText(write: RunWrite): string {
   }
 }
 
-function settlementText(state: "pending" | "settled" | "not-accepted" | "absent" | undefined): string | null {
+function settlementText(
+  state: "pending" | "settled" | "not-accepted" | "absent" | undefined,
+): string | null {
   switch (state) {
-    case "pending": return "Awaiting the shared host";
-    case "settled": return "Accepted by the shared host";
-    case "not-accepted": return "Not accepted by the shared host";
-    default: return null;
+    case "pending":
+      return "Awaiting the shared host";
+    case "settled":
+      return "Accepted by the shared host";
+    case "not-accepted":
+      return "Not accepted by the shared host";
+    default:
+      return null;
   }
 }
 
@@ -132,9 +182,21 @@ function runSummary(run: Run): string {
   if (run.sharedSettlementNotAccepted) return "Update not accepted";
   if (run.sharedSettlementPending) return "Update pending";
   if (run.state === "pending" || run.state === "running") return "Running";
-  if (run.state === "failed") return sentence(run.chainStopped ? "The automation chain stopped before this run" : run.error ?? "The run failed");
-  const fields = run.writes.reduce((total, write) => total + (write.kind === "field" ? 1 : write.kind === "dataset-edit" ? write.fields.length : 0), 0);
-  const added = run.writes.filter((write) => write.kind === "created" || write.kind === "dataset-created").length;
+  if (run.state === "failed")
+    return sentence(
+      run.chainStopped
+        ? "The automation chain stopped before this run"
+        : (run.error ?? "The run failed"),
+    );
+  const fields = run.writes.reduce(
+    (total, write) =>
+      total +
+      (write.kind === "field" ? 1 : write.kind === "dataset-edit" ? write.fields.length : 0),
+    0,
+  );
+  const added = run.writes.filter(
+    (write) => write.kind === "created" || write.kind === "dataset-created",
+  ).length;
   const messages = run.writes.filter((write) => write.kind === "message").length;
   const notices = run.writes.filter((write) => write.kind === "notice").length;
   const actions = run.writes.filter((write) => write.kind === "dataset-action").length;
@@ -150,20 +212,38 @@ function runSummary(run: Run): string {
 }
 
 function RunMark({ run }: { run: Run }) {
-  if (run.undoUnfinished) return <CircleDashed size={13} aria-label="Undo unfinished" className="mt-0.5 shrink-0 text-warning" />;
-  if (run.sharedSettlementNotAccepted || run.undoSettlementNotAccepted) return <AlertTriangle size={13} aria-label="Not accepted" className="mt-0.5 shrink-0 text-warning" />;
-  if (run.sharedSettlementPending || run.undoSettlementPending) return <CircleDashed size={13} aria-label="Pending" className="mt-0.5 shrink-0 text-subtle" />;
-  if (run.undone) return <Undo2 size={13} aria-label="Undone" className="mt-0.5 shrink-0 text-subtle" />;
-  if (run.state === "failed") return <AlertTriangle size={13} aria-label="Failed" className="mt-0.5 shrink-0 text-warning" />;
-  if (run.state === "done") return <CheckCircle2 size={13} aria-label="Done" className="mt-0.5 shrink-0 text-success" />;
+  if (run.undoUnfinished)
+    return (
+      <CircleDashed
+        size={13}
+        aria-label="Undo unfinished"
+        className="mt-0.5 shrink-0 text-warning"
+      />
+    );
+  if (run.sharedSettlementNotAccepted || run.undoSettlementNotAccepted)
+    return (
+      <AlertTriangle size={13} aria-label="Not accepted" className="mt-0.5 shrink-0 text-warning" />
+    );
+  if (run.sharedSettlementPending || run.undoSettlementPending)
+    return <CircleDashed size={13} aria-label="Pending" className="mt-0.5 shrink-0 text-subtle" />;
+  if (run.undone)
+    return <Undo2 size={13} aria-label="Undone" className="mt-0.5 shrink-0 text-subtle" />;
+  if (run.state === "failed")
+    return <AlertTriangle size={13} aria-label="Failed" className="mt-0.5 shrink-0 text-warning" />;
+  if (run.state === "done")
+    return <CheckCircle2 size={13} aria-label="Done" className="mt-0.5 shrink-0 text-success" />;
   return <CircleDashed size={13} aria-label="Running" className="mt-0.5 shrink-0 text-subtle" />;
 }
 
-const MISSING_RUN = "This run is no longer in run history. dohc keeps runs for 30 days after they end.";
+const MISSING_RUN =
+  "This run is no longer in run history. dohc keeps runs for 30 days after they end.";
 
 // Newest first, as run history pages them: by when each run's claim was made, then by its id.
 function newer(left: Run, right: Run): boolean {
-  return left.createdAtMs > right.createdAtMs || (left.createdAtMs === right.createdAtMs && left.claimId > right.claimId);
+  return (
+    left.createdAtMs > right.createdAtMs ||
+    (left.createdAtMs === right.createdAtMs && left.claimId > right.claimId)
+  );
 }
 
 /**
@@ -178,12 +258,24 @@ function merged(
   opened: string | null,
 ): { runs: Run[]; next: string | null; opened: Run | null } {
   const last = head.runs.at(-1);
-  const older = shown !== null && head.next !== null && last !== undefined && shown.runs.length > 0 && !newer(last, shown.runs[0]!)
-    ? { runs: shown.runs.filter((run) => newer(last, run)), next: shown.next }
-    : null;
+  const older =
+    shown !== null &&
+    head.next !== null &&
+    last !== undefined &&
+    shown.runs.length > 0 &&
+    !newer(last, shown.runs[0]!)
+      ? { runs: shown.runs.filter((run) => newer(last, run)), next: shown.next }
+      : null;
   const runs = older === null ? head.runs : [...head.runs, ...older.runs];
-  const current = runs.flatMap((run) => (read.has(run.claimId) ? (read.get(run.claimId) === null ? [] : [read.get(run.claimId)!]) : [run]));
-  const openedRun = opened === null ? null : read.has(opened) ? read.get(opened)! : shown?.opened ?? null;
+  const current = runs.flatMap((run) =>
+    read.has(run.claimId)
+      ? read.get(run.claimId) === null
+        ? []
+        : [read.get(run.claimId)!]
+      : [run],
+  );
+  const openedRun =
+    opened === null ? null : read.has(opened) ? read.get(opened)! : (shown?.opened ?? null);
   return { runs: current, next: older === null ? head.next : older.next, opened: openedRun };
 }
 
@@ -202,11 +294,20 @@ function RunRow(props: {
   useEffect(() => {
     if (props.opened) row.current?.scrollIntoView({ block: "nearest" });
   }, [props.opened]);
-  const canRetry = run.undoUnfinished || (run.state === "failed" && !run.neverStarted && !run.undone && !run.unsentChangesLost);
-  const canUndo = (run.state === "done" || run.state === "failed") && !run.undone &&
-    run.writes.some((write) => write.kind === "field" || write.kind === "created" || write.kind === "dataset-edit" ||
-      (write.kind === "dataset-action" && write.undo !== undefined) ||
-      (write.kind === "dataset-created" && write.deletes.length > 0));
+  const canRetry =
+    run.undoUnfinished ||
+    (run.state === "failed" && !run.neverStarted && !run.undone && !run.unsentChangesLost);
+  const canUndo =
+    (run.state === "done" || run.state === "failed") &&
+    !run.undone &&
+    run.writes.some(
+      (write) =>
+        write.kind === "field" ||
+        write.kind === "created" ||
+        write.kind === "dataset-edit" ||
+        (write.kind === "dataset-action" && write.undo !== undefined) ||
+        (write.kind === "dataset-created" && write.deletes.length > 0),
+    );
   return (
     <li
       ref={row}
@@ -216,40 +317,66 @@ function RunRow(props: {
     >
       <div className="flex items-start gap-2">
         <RunMark run={run} />
-        {props.onServer ? <Server size={13} aria-label="Ran on your server" className="mt-0.5 shrink-0 text-subtle" /> : null}
+        {props.onServer ? (
+          <Server
+            size={13}
+            aria-label="Ran on your server"
+            className="mt-0.5 shrink-0 text-subtle"
+          />
+        ) : null}
         <div className="min-w-0 flex-1">
           <p className="m-0 break-words text-[12px] leading-snug text-ink">{runSummary(run)}</p>
-          <time dateTime={new Date(run.updatedAtMs).toISOString()} className="font-mono text-[11px] text-subtle">
+          <time
+            dateTime={new Date(run.updatedAtMs).toISOString()}
+            className="font-mono text-[11px] text-subtle"
+          >
             {relativeTime(run.updatedAtMs)}
           </time>
         </div>
       </div>
       {run.sharedSettlementPending ? (
-        <p role="status" className="m-0 mt-1.5 flex items-start gap-1.5 pl-5 text-[12px] text-muted">
+        <p
+          role="status"
+          className="m-0 mt-1.5 flex items-start gap-1.5 pl-5 text-[12px] text-muted"
+        >
           <CircleDashed aria-hidden size={13} className="mt-0.5 shrink-0" />
-          {props.onServer ? "Saved on your server." : "Saved on this computer."} The shared host has not accepted this update yet.
+          {props.onServer ? "Saved on your server." : "Saved on this computer."} The shared host has
+          not accepted this update yet.
         </p>
       ) : null}
       {run.sharedSettlementNotAccepted ? (
         <p role="status" className="m-0 mt-1.5 pl-5 text-[12px] text-muted">
-          {props.onServer ? "Saved on your server." : "Saved on this computer."} The shared host did not accept this update. Check the shared file before editing again.
+          {props.onServer ? "Saved on your server." : "Saved on this computer."} The shared host did
+          not accept this update. Check the shared file before editing again.
         </p>
       ) : null}
       {run.undoSettlementPending ? (
         <p role="status" className="m-0 mt-1.5 pl-5 text-[12px] text-muted">
-          {props.onServer ? "Reversal saved on your server." : "Reversal saved on this computer."} The shared host has not accepted it yet.
+          {props.onServer ? "Reversal saved on your server." : "Reversal saved on this computer."}{" "}
+          The shared host has not accepted it yet.
         </p>
       ) : null}
       {run.undoSettlementNotAccepted ? (
         <p role="status" className="m-0 mt-1.5 pl-5 text-[12px] text-muted">
-          {props.onServer ? "Reversal saved on your server." : "Reversal saved on this computer."} The shared host did not accept it. Try Undo again.
+          {props.onServer ? "Reversal saved on your server." : "Reversal saved on this computer."}{" "}
+          The shared host did not accept it. Try Undo again.
         </p>
       ) : null}
       {canRetry || canUndo || run.writes.length > 0 ? (
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5 pl-5">
-          {canRetry ? <SecondaryButton size="compact" disabled={props.undoing} onClick={run.undoUnfinished ? props.onUndo : props.onRetry}>Try again</SecondaryButton> : null}
+          {canRetry ? (
+            <SecondaryButton
+              size="compact"
+              disabled={props.undoing}
+              onClick={run.undoUnfinished ? props.onUndo : props.onRetry}
+            >
+              Try again
+            </SecondaryButton>
+          ) : null}
           {canUndo && !run.undoUnfinished ? (
-            <SecondaryButton size="compact" disabled={props.undoing} onClick={props.onUndo}>Undo</SecondaryButton>
+            <SecondaryButton size="compact" disabled={props.undoing} onClick={props.onUndo}>
+              Undo
+            </SecondaryButton>
           ) : null}
           {run.writes.length > 0 ? (
             <button
@@ -268,13 +395,21 @@ function RunRow(props: {
           {run.writes.map((write, index) => (
             <li key={index} className="break-words font-mono text-[11px] leading-snug text-muted">
               {writeText(write)}
-              {write.unconfirmed && run.state !== "running" && run.state !== "pending" ? " · May not be saved" : null}
-              {write.kind === "field" && settlementText(write.sharedFileUpdateState) ? ` · ${settlementText(write.sharedFileUpdateState)}` : null}
+              {write.unconfirmed && run.state !== "running" && run.state !== "pending"
+                ? " · May not be saved"
+                : null}
+              {write.kind === "field" && settlementText(write.sharedFileUpdateState)
+                ? ` · ${settlementText(write.sharedFileUpdateState)}`
+                : null}
             </li>
           ))}
-          {run.reversals?.map(write => (
-            <li key={JSON.stringify([write.recordId, write.field])} className="break-words font-mono text-[11px] leading-snug text-muted">
-              Undo · {recordName(write.path)} · {write.field}{settlementText(write.state) ? ` · ${settlementText(write.state)}` : null}
+          {run.reversals?.map((write) => (
+            <li
+              key={JSON.stringify([write.recordId, write.field])}
+              className="break-words font-mono text-[11px] leading-snug text-muted"
+            >
+              Undo · {recordName(write.path)} · {write.field}
+              {settlementText(write.state) ? ` · ${settlementText(write.state)}` : null}
             </li>
           ))}
         </ul>
@@ -286,7 +421,6 @@ function RunRow(props: {
 export function AutomationRuns(props: {
   workspaceId: string;
   automationId: string;
-  /** The run to open, as a notice names it, or null. */
   run?: string | null;
   /** Rises when the Collection or its automations may have changed. */
   refreshKey: number;
@@ -302,10 +436,16 @@ export function AutomationRuns(props: {
   // null after the oldest. `opened` is the run a notice opened, shown first
   // while no page shown holds it. "unavailable" in a shared view: its
   // automations run on the owner's computer.
-  const [list, setList] = useState<{ runs: Run[]; next: string | null; opened: Run | null } | "unavailable" | null>(null);
+  const [list, setList] = useState<
+    { runs: Run[]; next: string | null; opened: Run | null } | "unavailable" | null
+  >(null);
   const listRef = useRef(list);
   listRef.current = list;
-  const [serverList, setServerList] = useState<{ runs: Run[]; next: string | null; opened: Run | null } | null>(null);
+  const [serverList, setServerList] = useState<{
+    runs: Run[];
+    next: string | null;
+    opened: Run | null;
+  } | null>(null);
   const serverListRef = useRef(serverList);
   serverListRef.current = serverList;
   const serverTouched = useRef(new Set<string>());
@@ -324,7 +464,13 @@ export function AutomationRuns(props: {
   const reportError = useRef(onError);
   reportError.current = onError;
   // An Undo waiting for the person to read what it will do, and their choice of delete per table.
-  const [previewing, setPreviewing] = useState<{ claimId: string; onServer: boolean; epoch: number; preview: Preview; chosen: Record<string, string> } | null>(null);
+  const [previewing, setPreviewing] = useState<{
+    claimId: string;
+    onServer: boolean;
+    epoch: number;
+    preview: Preview;
+    chosen: Record<string, string>;
+  } | null>(null);
   const request = useRequestSequence([workspaceId, automationId, opened]);
   // Rises only when the workspace or automation changes, or the view
   // closes, so an Undo that answers after that reports nothing here.
@@ -339,24 +485,41 @@ export function AutomationRuns(props: {
       if (head.status === "unavailable") return setList("unavailable");
       // Rows further down that are still going change without a person here touching them.
       const shown = listRef.current;
-      const going = shown === null || shown === "unavailable" ? [] : shown.runs.filter((run) => run.state === "pending" || run.state === "running" || run.sharedSettlementPending);
+      const going =
+        shown === null || shown === "unavailable"
+          ? []
+          : shown.runs.filter(
+              (run) =>
+                run.state === "pending" || run.state === "running" || run.sharedSettlementPending,
+            );
       const claims = new Set([...touched.current, ...going.map((run) => run.claimId)]);
       if (opened !== null && !openedGone.current) claims.add(opened);
       const read = new Map<string, Run | null>();
       for (const claimId of claims) {
         if (head.runs.some((run) => run.claimId === claimId)) continue;
-        const result = await bridge().getCollectionAutomationRun({ workspaceId, automationId, claimId, onServer: false });
+        const result = await bridge().getCollectionAutomationRun({
+          workspaceId,
+          automationId,
+          claimId,
+          onServer: false,
+        });
         if (!request.isCurrent(token)) return;
         read.set(claimId, result.status === "found" ? result.run : null);
       }
       if (opened !== null && !openedChecked.current) {
         openedChecked.current = true;
         openedGone.current = read.get(opened) === null;
-        if (openedGone.current && serverOpenedChecked.current && serverOpenedGone.current) reportError.current(MISSING_RUN, new Error(MISSING_RUN));
+        if (openedGone.current && serverOpenedChecked.current && serverOpenedGone.current)
+          reportError.current(MISSING_RUN, new Error(MISSING_RUN));
       }
       setList((current) => merged(current === "unavailable" ? null : current, head, read, opened));
     } catch (error) {
-      if (request.isCurrent(token)) reportError.current("dohc could not read this automation's runs.", error, () => void load());
+      if (request.isCurrent(token))
+        reportError.current(
+          "dohc could not read this automation's runs.",
+          error,
+          () => void load(),
+        );
     }
   }, [workspaceId, automationId, opened]);
   const loadServer = useCallback(async () => {
@@ -365,41 +528,93 @@ export function AutomationRuns(props: {
       const head = await bridge().listServerAutomationRuns({ workspaceId, automationId });
       if (!serverRequest.isCurrent(token)) return;
       const shown = serverListRef.current;
-      const going = shown?.runs.filter((run) => run.state === "pending" || run.state === "running" || run.sharedSettlementPending) ?? [];
+      const going =
+        shown?.runs.filter(
+          (run) =>
+            run.state === "pending" || run.state === "running" || run.sharedSettlementPending,
+        ) ?? [];
       const claims = new Set([...serverTouched.current, ...going.map((run) => run.claimId)]);
       if (opened !== null && !serverOpenedGone.current) claims.add(opened);
       const read = new Map<string, Run | null>();
       for (const claimId of claims) {
         if (head.runs?.some((run) => run.claimId === claimId)) continue;
-        const result = head.runs === null ? null : await bridge().getCollectionAutomationRun({ workspaceId, automationId, claimId, onServer: true });
+        const result =
+          head.runs === null
+            ? null
+            : await bridge().getCollectionAutomationRun({
+                workspaceId,
+                automationId,
+                claimId,
+                onServer: true,
+              });
         if (!serverRequest.isCurrent(token)) return;
         read.set(claimId, result?.status === "found" ? result.run : null);
       }
       if (opened !== null && !serverOpenedChecked.current) {
         serverOpenedChecked.current = true;
         serverOpenedGone.current = read.get(opened) === null;
-        if (serverOpenedGone.current && openedChecked.current && openedGone.current) reportError.current(MISSING_RUN, new Error(MISSING_RUN));
+        if (serverOpenedGone.current && openedChecked.current && openedGone.current)
+          reportError.current(MISSING_RUN, new Error(MISSING_RUN));
       }
-      setServerList(head.runs === null ? null : merged(shown, { runs: head.runs, next: head.next }, read, opened));
+      setServerList(
+        head.runs === null
+          ? null
+          : merged(shown, { runs: head.runs, next: head.next }, read, opened),
+      );
     } catch (error) {
-      if (serverRequest.isCurrent(token)) reportError.current("dohc could not read this automation's runs on your server.", error, () => void loadServer());
+      if (serverRequest.isCurrent(token))
+        reportError.current(
+          "dohc could not read this automation's runs on your server.",
+          error,
+          () => void loadServer(),
+        );
     }
   }, [workspaceId, automationId, opened]);
   useEffect(() => {
     void load();
     void loadServer();
   }, [load, loadServer, props.refreshKey]);
-  useEffect(() => bridge().onWorkspaceActivity((event) => {
-    if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) return;
-    const local = listRef.current;
-    if (local !== null && local !== "unavailable" && (local.opened?.sharedSettlementPending || local.opened?.undoSettlementPending ||
-      local.opened?.reversals?.some(write => write.state === undefined) ||
-      local.opened?.writes.some(write => write.kind === "field" && write.sharedFileUpdate && write.sharedFileUpdateState === undefined) ||
-      local.runs.some(run => run.sharedSettlementPending || run.undoSettlementPending || run.reversals?.some(write => write.state === undefined) ||
-        run.writes.some(write => write.kind === "field" && write.sharedFileUpdate && write.sharedFileUpdateState === undefined)))) void load();
-    const server = serverListRef.current;
-    if (server?.opened?.sharedSettlementPending || server?.opened?.undoSettlementPending || server?.runs.some(run => run.sharedSettlementPending || run.undoSettlementPending)) void loadServer();
-  }), [workspaceId, load, loadServer]);
+  useEffect(
+    () =>
+      bridge().onWorkspaceActivity((event) => {
+        if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) return;
+        const local = listRef.current;
+        if (
+          local !== null &&
+          local !== "unavailable" &&
+          (local.opened?.sharedSettlementPending ||
+            local.opened?.undoSettlementPending ||
+            local.opened?.reversals?.some((write) => write.state === undefined) ||
+            local.opened?.writes.some(
+              (write) =>
+                write.kind === "field" &&
+                write.sharedFileUpdate &&
+                write.sharedFileUpdateState === undefined,
+            ) ||
+            local.runs.some(
+              (run) =>
+                run.sharedSettlementPending ||
+                run.undoSettlementPending ||
+                run.reversals?.some((write) => write.state === undefined) ||
+                run.writes.some(
+                  (write) =>
+                    write.kind === "field" &&
+                    write.sharedFileUpdate &&
+                    write.sharedFileUpdateState === undefined,
+                ),
+            ))
+        )
+          void load();
+        const server = serverListRef.current;
+        if (
+          server?.opened?.sharedSettlementPending ||
+          server?.opened?.undoSettlementPending ||
+          server?.runs.some((run) => run.sharedSettlementPending || run.undoSettlementPending)
+        )
+          void loadServer();
+      }),
+    [workspaceId, load, loadServer],
+  );
   // Relative times stay honest while the view is open.
   const [, tick] = useState(0);
   useEffect(() => {
@@ -407,7 +622,6 @@ export function AutomationRuns(props: {
     return () => clearInterval(interval);
   }, []);
 
-  // Reads only the page after the runs shown.
   const loadOlder = () => {
     if (list === null || list === "unavailable" || loadingOlder) return;
     const before = list.next;
@@ -415,42 +629,76 @@ export function AutomationRuns(props: {
     if (before === null && serverBefore === null) return;
     const epoch = scope.current();
     setLoadingOlder(true);
-    const local = before === null ? Promise.resolve() : bridge()
-      .listCollectionAutomationRuns({ workspaceId, automationId, before })
-      .then((result) => {
-        if (!scope.isCurrent(epoch)) return;
-        if (result.status === "unavailable") return setList("unavailable");
-        // A refresh that dropped the pages this one follows drops it too.
-        setList((current) => current === null || current === "unavailable" || current.next !== before ? current : {
-          ...current,
-          runs: [...current.runs, ...result.runs.filter((run) => !current.runs.some((shown) => shown.claimId === run.claimId))],
-          next: result.next,
-        });
-      })
-      .catch((error: unknown) => {
-        if (scope.isCurrent(epoch)) onError("dohc could not read this automation's older runs.", error, loadOlder);
-      });
-    const server = serverBefore === null ? Promise.resolve() : bridge()
-      .listServerAutomationRuns({ workspaceId, automationId, before: serverBefore })
-      .then((result) => {
-        if (!scope.isCurrent(epoch)) return;
-        if (result.runs === null) return setServerList(null);
-        const runs = result.runs;
-        setServerList((current) => current === null || current.next !== serverBefore ? current : {
-          ...current,
-          runs: [...current.runs, ...runs.filter((run) => !current.runs.some((shown) => shown.claimId === run.claimId))],
-          next: result.next,
-        });
-      })
-      .catch((error: unknown) => {
-        if (scope.isCurrent(epoch)) onError("dohc could not read this automation's older runs on your server.", error, loadOlder);
-      });
+    const local =
+      before === null
+        ? Promise.resolve()
+        : bridge()
+            .listCollectionAutomationRuns({ workspaceId, automationId, before })
+            .then((result) => {
+              if (!scope.isCurrent(epoch)) return;
+              if (result.status === "unavailable") return setList("unavailable");
+              // A refresh that dropped the pages this one follows drops it too.
+              setList((current) =>
+                current === null || current === "unavailable" || current.next !== before
+                  ? current
+                  : {
+                      ...current,
+                      runs: [
+                        ...current.runs,
+                        ...result.runs.filter(
+                          (run) => !current.runs.some((shown) => shown.claimId === run.claimId),
+                        ),
+                      ],
+                      next: result.next,
+                    },
+              );
+            })
+            .catch((error: unknown) => {
+              if (scope.isCurrent(epoch))
+                onError("dohc could not read this automation's older runs.", error, loadOlder);
+            });
+    const server =
+      serverBefore === null
+        ? Promise.resolve()
+        : bridge()
+            .listServerAutomationRuns({ workspaceId, automationId, before: serverBefore })
+            .then((result) => {
+              if (!scope.isCurrent(epoch)) return;
+              if (result.runs === null) return setServerList(null);
+              const runs = result.runs;
+              setServerList((current) =>
+                current === null || current.next !== serverBefore
+                  ? current
+                  : {
+                      ...current,
+                      runs: [
+                        ...current.runs,
+                        ...runs.filter(
+                          (run) => !current.runs.some((shown) => shown.claimId === run.claimId),
+                        ),
+                      ],
+                      next: result.next,
+                    },
+              );
+            })
+            .catch((error: unknown) => {
+              if (scope.isCurrent(epoch))
+                onError(
+                  "dohc could not read this automation's older runs on your server.",
+                  error,
+                  loadOlder,
+                );
+            });
     void Promise.all([local, server]).finally(() => {
-        if (scope.isCurrent(epoch)) setLoadingOlder(false);
-      });
+      if (scope.isCurrent(epoch)) setLoadingOlder(false);
+    });
   };
 
-  const undo = (claimId: string, deletes: { token: string; chosen: Array<{ key: string; operationId: string }> } | null, onServer: boolean) => {
+  const undo = (
+    claimId: string,
+    deletes: { token: string; chosen: Array<{ key: string; operationId: string }> } | null,
+    onServer: boolean,
+  ) => {
     (onServer ? serverTouched : touched).current.add(claimId);
     const epoch = scope.current();
     setUndoing(`${onServer}:${claimId}`);
@@ -468,7 +716,8 @@ export function AutomationRuns(props: {
         }
       })
       .catch((error: unknown) => {
-        if (scope.isCurrent(epoch)) onError("dohc could not undo this run.", error, () => undo(claimId, deletes, onServer));
+        if (scope.isCurrent(epoch))
+          onError("dohc could not undo this run.", error, () => undo(claimId, deletes, onServer));
       })
       .finally(() => {
         if (!scope.isCurrent(epoch)) return;
@@ -479,68 +728,111 @@ export function AutomationRuns(props: {
   };
 
   const shownPreview = previewing !== null && scope.isCurrent(previewing.epoch) ? previewing : null;
-  const dialog = shownPreview === null ? null : (
-    <ConfirmDialog
-      icon={Undo2}
-      title="Undo this run?"
-      intent={shownPreview.preview.deletes + shownPreview.preview.unchecked > 0 ? "danger" : "default"}
-      confirmLabel={shownPreview.preview.deletes + shownPreview.preview.unchecked > 0
-        ? `Undo and delete ${count(shownPreview.preview.deletes + shownPreview.preview.unchecked, "record", "records")}`
-        : "Undo"}
-      testId="automation-undo-preview"
-      cancelTestId="automation-undo-preview-cancel"
-      confirmTestId="automation-undo-preview-confirm"
-      confirmDisabled={shownPreview.preview.choices.some((choice) => shownPreview.chosen[choice.key] === undefined)}
-      onCancel={() => setPreviewing(null)}
-      onConfirm={() => {
-        setPreviewing(null);
-        undo(shownPreview.claimId, {
-          token: shownPreview.preview.token,
-          chosen: Object.entries(shownPreview.chosen).map(([key, operationId]) => ({ key, operationId })),
-        }, shownPreview.onServer);
-      }}
-      details={shownPreview.preview.choices.map((choice, index) => (
-        <fieldset key={choice.key} className="m-0 flex flex-col gap-1 border-0 p-0">
-          <legend className="mb-1 p-0 text-[12px] text-muted">
-            Delete {count(choice.records, "added record", "added records")} in {choice.table} with
-          </legend>
-          {choice.operations.map((operation) => (
-            <label key={operation.operationId} className="flex items-center gap-2 text-[13px] text-ink">
-              <input
-                type="radio"
-                name={`automation-undo-delete-${index}`}
-                checked={shownPreview.chosen[choice.key] === operation.operationId}
-                onChange={() => setPreviewing({ ...shownPreview, chosen: { ...shownPreview.chosen, [choice.key]: operation.operationId } })}
-              />
-              {operation.label}
-            </label>
-          ))}
-        </fieldset>
-      ))}
-    >
-      {undoPreviewSentences(shownPreview.preview).map((line) => (
-        <p key={line}>{line}</p>
-      ))}
-    </ConfirmDialog>
-  );
+  const dialog =
+    shownPreview === null ? null : (
+      <ConfirmDialog
+        icon={Undo2}
+        title="Undo this run?"
+        intent={
+          shownPreview.preview.deletes + shownPreview.preview.unchecked > 0 ? "danger" : "default"
+        }
+        confirmLabel={
+          shownPreview.preview.deletes + shownPreview.preview.unchecked > 0
+            ? `Undo and delete ${count(shownPreview.preview.deletes + shownPreview.preview.unchecked, "record", "records")}`
+            : "Undo"
+        }
+        testId="automation-undo-preview"
+        cancelTestId="automation-undo-preview-cancel"
+        confirmTestId="automation-undo-preview-confirm"
+        confirmDisabled={shownPreview.preview.choices.some(
+          (choice) => shownPreview.chosen[choice.key] === undefined,
+        )}
+        onCancel={() => setPreviewing(null)}
+        onConfirm={() => {
+          setPreviewing(null);
+          undo(
+            shownPreview.claimId,
+            {
+              token: shownPreview.preview.token,
+              chosen: Object.entries(shownPreview.chosen).map(([key, operationId]) => ({
+                key,
+                operationId,
+              })),
+            },
+            shownPreview.onServer,
+          );
+        }}
+        details={shownPreview.preview.choices.map((choice, index) => (
+          <fieldset key={choice.key} className="m-0 flex flex-col gap-1 border-0 p-0">
+            <legend className="mb-1 p-0 text-[12px] text-muted">
+              Delete {count(choice.records, "added record", "added records")} in {choice.table} with
+            </legend>
+            {choice.operations.map((operation) => (
+              <label
+                key={operation.operationId}
+                className="flex items-center gap-2 text-[13px] text-ink"
+              >
+                <input
+                  type="radio"
+                  name={`automation-undo-delete-${index}`}
+                  checked={shownPreview.chosen[choice.key] === operation.operationId}
+                  onChange={() =>
+                    setPreviewing({
+                      ...shownPreview,
+                      chosen: { ...shownPreview.chosen, [choice.key]: operation.operationId },
+                    })
+                  }
+                />
+                {operation.label}
+              </label>
+            ))}
+          </fieldset>
+        ))}
+      >
+        {undoPreviewSentences(shownPreview.preview).map((line) => (
+          <p key={line}>{line}</p>
+        ))}
+      </ConfirmDialog>
+    );
 
   if (list === null) return null;
   if (list === "unavailable") {
-    return <p className="m-0 px-3 py-4 text-[12px] text-muted">This Collection's automations run on its owner's computer.</p>;
+    return (
+      <p className="m-0 px-3 py-4 text-[12px] text-muted">
+        This Collection's automations run on its owner's computer.
+      </p>
+    );
   }
   const openedRun = list.opened;
-  const localShown = openedRun === null || list.runs.some((run) => run.claimId === openedRun.claimId) ? list.runs : [openedRun, ...list.runs];
+  const localShown =
+    openedRun === null || list.runs.some((run) => run.claimId === openedRun.claimId)
+      ? list.runs
+      : [openedRun, ...list.runs];
   const serverOpened = serverList?.opened ?? null;
-  const serverShown = serverOpened === null || serverList?.runs.some((run) => run.claimId === serverOpened.claimId)
-    ? serverList?.runs ?? [] : [serverOpened, ...serverList?.runs ?? []];
-  const shown = [...localShown.map((run) => ({ run, onServer: false })), ...serverShown.map((run) => ({ run, onServer: true }))]
-    .sort((a, b) => {
-      const pinned = ({ run, onServer }: { run: Run; onServer: boolean }) => run.claimId === opened &&
-        !(onServer ? serverList?.runs : list.runs)?.some((row) => row.claimId === run.claimId);
-      return Number(pinned(b)) - Number(pinned(a)) || (newer(a.run, b.run) ? -1 : newer(b.run, a.run) ? 1 : Number(a.onServer) - Number(b.onServer));
-    });
+  const serverShown =
+    serverOpened === null || serverList?.runs.some((run) => run.claimId === serverOpened.claimId)
+      ? (serverList?.runs ?? [])
+      : [serverOpened, ...(serverList?.runs ?? [])];
+  const shown = [
+    ...localShown.map((run) => ({ run, onServer: false })),
+    ...serverShown.map((run) => ({ run, onServer: true })),
+  ].sort((a, b) => {
+    const pinned = ({ run, onServer }: { run: Run; onServer: boolean }) =>
+      run.claimId === opened &&
+      !(onServer ? serverList?.runs : list.runs)?.some((row) => row.claimId === run.claimId);
+    return (
+      Number(pinned(b)) - Number(pinned(a)) ||
+      (newer(a.run, b.run) ? -1 : newer(b.run, a.run) ? 1 : Number(a.onServer) - Number(b.onServer))
+    );
+  });
   if (shown.length === 0) {
-    return <p className="m-0 px-3 py-4 text-[12px] text-muted">{serverList === null ? "This automation has not run on this computer yet." : "This automation has not run on this computer or your server yet."}</p>;
+    return (
+      <p className="m-0 px-3 py-4 text-[12px] text-muted">
+        {serverList === null
+          ? "This automation has not run on this computer yet."
+          : "This automation has not run on this computer or your server yet."}
+      </p>
+    );
   }
   return (
     <>
@@ -562,8 +854,21 @@ export function AutomationRuns(props: {
       </ul>
       {list.next !== null || (serverList !== null && serverList.next !== null) ? (
         <div className="flex justify-center px-3 py-2">
-          <SecondaryButton size="compact" className="inline-flex items-center gap-1.5" disabled={loadingOlder} aria-busy={loadingOlder} onClick={loadOlder}>
-            {loadingOlder ? <LoaderCircle aria-hidden size={12} strokeWidth={1.9} className="shrink-0 animate-spin" /> : null}
+          <SecondaryButton
+            size="compact"
+            className="inline-flex items-center gap-1.5"
+            disabled={loadingOlder}
+            aria-busy={loadingOlder}
+            onClick={loadOlder}
+          >
+            {loadingOlder ? (
+              <LoaderCircle
+                aria-hidden
+                size={12}
+                strokeWidth={1.9}
+                className="shrink-0 animate-spin"
+              />
+            ) : null}
             Older runs
           </SecondaryButton>
         </div>

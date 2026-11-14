@@ -27,7 +27,11 @@ function engineBridge(
   const serverDoc = markdownToYDoc(markdown);
   return {
     onWorkspaceActivity: vi.fn(() => () => undefined),
-    readWorkspaceText: vi.fn(async () => ({ text: markdown, truncated: false, contentHash: "c".repeat(64) })),
+    readWorkspaceText: vi.fn(async () => ({
+      text: markdown,
+      truncated: false,
+      contentHash: "c".repeat(64),
+    })),
     writeWorkspaceText: vi.fn(async () => ({ path: "a.md", recorded: true })),
     listWorkspaceFiles: vi.fn(async () => ({
       files: [{ path: "a.md", kind: "file" }],
@@ -89,9 +93,9 @@ afterEach(async () => {
   vi.clearAllMocks();
 });
 
-// codex r14. The empty-cache guard was one instance of the rule, not the rule.
-// A live engine document is CANONICAL (AGENTS.md product invariant) and
-// `props.body` is the markdown cache beside it — it lags every edit the Y.Doc
+// The empty-cache guard is one instance of the rule, not the rule.
+// A live engine document is canonical (AGENTS.md product invariant) and
+// `props.body` is the markdown cache beside it. It lags every edit the Y.Doc
 // has taken since the read, and it is empty on the failed-read recovery path.
 // Exporting it while the only serializer of the canonical doc is
 // unmounted writes a file that is not the user's document, and says it saved.
@@ -100,7 +104,11 @@ describe("engine-mode export with no mounted serializer", () => {
     const bridge = engineBridge(DOC_MARKDOWN, { captureHeld: true });
     vi.stubGlobal("dohcDesktop", bridge);
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    expect(await screen.findByText('dohc cannot open "a.md" for live editing. dohc cannot take in this file\'s Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file\'s exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.')).toBeTruthy();
+    expect(
+      await screen.findByText(
+        "dohc cannot open \"a.md\" for live editing. dohc cannot take in this file's Markdown. Causes include nested lists in workspaces that sync, or deeply nested quotes. The file on this computer still has the outside edit. Copy the outside edit first. Restore the file's exact contents from before that edit. If dohc still cannot take in the file, add a newline at the end. For nested lists, make the edit in dohc after the file opens again.",
+      ),
+    ).toBeTruthy();
     expect(screen.queryByTestId("markdown-source-toggle")).toBeNull();
     expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
     expect(bridge.applyEngineYDocUpdate).not.toHaveBeenCalled();
@@ -108,27 +116,33 @@ describe("engine-mode export with no mounted serializer", () => {
   it.each([
     ["plain", DOC_MARKDOWN],
     ["shared-type frontmatter", EDGE_MARKDOWN],
-  ])("refuses the export while the engine document has no serializer (%s)", async (_name, markdown) => {
-    const user = userEvent.setup();
-    const bridge = engineBridge(markdown);
-    vi.stubGlobal("dohcDesktop", bridge);
+  ])(
+    "refuses the export while the engine document has no serializer (%s)",
+    async (_name, markdown) => {
+      const user = userEvent.setup();
+      const bridge = engineBridge(markdown);
+      vi.stubGlobal("dohcDesktop", bridge);
 
-    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+      render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    // The engine header is up (the document bound); the editor beneath it
-    // failed to load, so there is nothing to serialize the Y.Doc.
-    await screen.findByTestId("markdown-source-toggle");
-    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+      // The engine header is up (the document bound); the editor beneath it
+      // failed to load, so there is nothing to serialize the Y.Doc.
+      await screen.findByTestId("markdown-source-toggle");
+      expect(screen.queryByTestId("markdown-editor")).toBeNull();
 
-    await user.click(screen.getByTestId("document-menu-trigger"));
-    await user.click(screen.getByTestId("document-menu-item-export-markdown"));
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 
-    expect(await screen.findByText("Document not open"), "gate the refusal on an empty cache -> the stale read body is exported as if it were the live document.").toBeTruthy();
-    expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
-  });
+      expect(
+        await screen.findByText("Document not open"),
+        "gate the refusal on an empty cache -> the stale read body is exported as if it were the live document.",
+      ).toBeTruthy();
+      expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
+    },
+  );
 
-  // codex r19: the same rule, one state over. A timed-out open leaves the
-  // LOCAL branch on screen — the plain editor, read-only, over the file — while
+  // The same rule, one state over. A timed-out open leaves the
+  // local branch on screen (the plain editor, read-only, over the file) while
   // the daemon may still hold a session whose Y.Doc took replicated updates the
   // file has never seen. Exporting the disk body there reports a document that
   // is not the document, which is what the engine branch already refuses to do.
@@ -139,13 +153,15 @@ describe("engine-mode export with no mounted serializer", () => {
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
 
-    // The timeout notice is up and the document is read-only beside it.
     await screen.findByTestId("engine-may-hold-document-notice");
 
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 
-    expect(await screen.findByText("Document not open"), "serialize the disk cache during `engineMayHoldDocument` -> a .md file that is missing whatever the held session already took.").toBeTruthy();
+    expect(
+      await screen.findByText("Document not open"),
+      "serialize the disk cache during `engineMayHoldDocument` -> a .md file that is missing whatever the held session already took.",
+    ).toBeTruthy();
     expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
   });
 
@@ -157,9 +173,7 @@ describe("engine-mode export with no mounted serializer", () => {
       opens += 1;
       // The retry answers "not engine-backed": the file IS the document again,
       // so the refusal must lift with it.
-      return opens === 1
-        ? { available: false, engineMayHoldDocument: true }
-        : { available: false };
+      return opens === 1 ? { available: false, engineMayHoldDocument: true } : { available: false };
     });
     vi.stubGlobal("dohcDesktop", { ...bridge, openEngineYDocSession });
 
@@ -173,35 +187,32 @@ describe("engine-mode export with no mounted serializer", () => {
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 
-    await vi.waitFor(() =>
-      expect(bridge.exportDocumentFile).toHaveBeenCalledTimes(1),
-    );
+    await vi.waitFor(() => expect(bridge.exportDocumentFile).toHaveBeenCalledTimes(1));
     expect(bridge.exportDocumentFile).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "markdown", content: DOC_MARKDOWN }),
     );
   });
 
-  // codex r21: the same rule for the wait, not just for the wait giving up.
-  // While the open is unresolved the disk may not be the document — a session
+  // The same rule for the wait, not just for the wait giving up.
+  // While the open is unresolved the disk may not be the document: a session
   // that binds a moment later can hold replicated updates the file has never
-  // seen — and that window is long now that a refused release can hold it.
+  // seen. That window is long, because a refused release can hold it.
   it("refuses the export while the engine open is still unresolved", async () => {
     const user = userEvent.setup();
     const bridge = engineBridge(DOC_MARKDOWN);
-    // The open never answers: the whole test sits inside the opening window.
-    const openEngineYDocSession = vi.fn(
-      async () => await new Promise<never>(() => {}),
-    );
+    const openEngineYDocSession = vi.fn(async () => await new Promise<never>(() => {}));
     vi.stubGlobal("dohcDesktop", { ...bridge, openEngineYDocSession });
 
     render(<FileInspector workspaceId="ws-1" path="a.md" />);
-    // The document is on screen through the local branch while it opens.
     await screen.findByTestId("document-menu-trigger");
 
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 
-    expect(await screen.findByText("Document not open"), "refuse only `engineMayHoldDocument` -> the disk body exports while the engine is still deciding what this document is.").toBeTruthy();
+    expect(
+      await screen.findByText("Document not open"),
+      "refuse only `engineMayHoldDocument` -> the disk body exports while the engine is still deciding what this document is.",
+    ).toBeTruthy();
     expect(bridge.exportDocumentFile).not.toHaveBeenCalled();
   });
 
@@ -219,9 +230,7 @@ describe("engine-mode export with no mounted serializer", () => {
     await user.click(screen.getByTestId("document-menu-trigger"));
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
 
-    await vi.waitFor(() =>
-      expect(bridge.exportDocumentFile).toHaveBeenCalledTimes(1),
-    );
+    await vi.waitFor(() => expect(bridge.exportDocumentFile).toHaveBeenCalledTimes(1));
     expect(bridge.exportDocumentFile).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "markdown", content: DOC_MARKDOWN }),
     );

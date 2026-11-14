@@ -30,7 +30,7 @@ import {
 // other device's open board. Device B is the real Electron app with the
 // collection's board on screen. Device A is a real daemon-backed workspace
 // over the same relay. The serial single-display harness cannot run two
-// Electron instances (the 0P-C pattern), so device A makes the write its
+// Electron instances, so device A makes the write its
 // board drag makes: the grouped field set in the record's live document
 // session, settled to the file, and pushed. The proof is B's board moving
 // the card without any UI refresh. The view re-renders from the index when
@@ -99,8 +99,6 @@ test("a drag's field write on one device moves the card on the other device's op
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     const relayConfig = { baseUrl: relay.baseUrl, token: TOKEN };
 
-    // Device A: a real daemon workspace seeds the collection the way an
-    // agent does — by writing collection.yaml and record files.
     deviceA = await openLiveDaemonWorkspace(
       { workspaceId, rootPath: sourceRoot },
       { maxRestarts: 0 },
@@ -123,14 +121,8 @@ test("a drag's field write on one device moves the card on the other device's op
     const apolloPath = "tasks/apollo.md";
     const zephyrPath = "tasks/zephyr.md";
     await writeFile(join(sourceRoot, schemaPath), SCHEMA_YAML);
-    await writeFile(
-      join(sourceRoot, apolloPath),
-      recordMd(APOLLO_ID, "Apollo", "Todo"),
-    );
-    await writeFile(
-      join(sourceRoot, zephyrPath),
-      recordMd(ZEPHYR_ID, "Zephyr", "Doing"),
-    );
+    await writeFile(join(sourceRoot, apolloPath), recordMd(APOLLO_ID, "Apollo", "Todo"));
+    await writeFile(join(sourceRoot, zephyrPath), recordMd(ZEPHYR_ID, "Zephyr", "Doing"));
     await Promise.all([
       waitForPathMoments(capture, schemaPath, 1),
       waitForPathMoments(capture, apolloPath, 1),
@@ -138,8 +130,6 @@ test("a drag's field write on one device moves the card on the other device's op
     ]);
     expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);
 
-    // Device B: the real app joins the synced workspace through the
-    // first-run join flow.
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
@@ -154,18 +144,14 @@ test("a drag's field write on one device moves the card on the other device's op
     });
     const page = desktop.page;
     await page.getByTestId("first-run-join-synced").click();
-    await page
-      .getByTestId("join-sync-code")
-      .fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
+    await page.getByTestId("join-sync-code").fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
     await page.getByTestId("join-choose-folder").click();
     await page.getByTestId("join-workspace-start").click();
     await waitForWorkspaceReady(page);
     await showExplorerFiles(page);
     await waitForWorkspaceFile(page, workspaceId, schemaPath);
     await waitForWorkspaceFile(page, workspaceId, apolloPath);
-    expect(await readFile(join(temp.rootPath, apolloPath), "utf8")).toContain(
-      "Status: Todo",
-    );
+    expect(await readFile(join(temp.rootPath, apolloPath), "utf8")).toContain("Status: Todo");
 
     // Open the collection in three separately-named layers: the tree row
     // exposes data-collection once the engine lists the folder as a
@@ -181,8 +167,6 @@ test("a drag's field write on one device moves the card on the other device's op
       timeout: 30_000,
     });
 
-    // The schema's only view is the board, so the open collection IS the
-    // open board: Apollo under Todo, Zephyr under Doing.
     const todoApollo = page.locator(
       'section[aria-label="Todo"] [role="listitem"][aria-label="Apollo"]',
     );
@@ -209,7 +193,6 @@ test("a drag's field write on one device moves the card on the other device's op
     } finally {
       await apolloSession.close();
     }
-    // The settle is confirmed: its moment is recorded and A's file holds it.
     await waitForPathMoments(capture, apolloPath, 2);
     await expect
       .poll(async () => await readFile(join(sourceRoot, apolloPath), "utf8"))
@@ -229,9 +212,9 @@ test("a drag's field write on one device moves the card on the other device's op
             { path: `nudges/sync-nudge-${nudge}.md`, contents: `nudge ${nudge}\n` },
           ]);
           try {
-            return (
-              await readFile(join(temp.rootPath, apolloPath), "utf8")
-            ).includes("Status: Doing");
+            return (await readFile(join(temp.rootPath, apolloPath), "utf8")).includes(
+              "Status: Doing",
+            );
           } catch {
             return false;
           }
@@ -257,13 +240,8 @@ test("a drag's field write on one device moves the card on the other device's op
                 workspaceId: id,
                 collectionPath: "tasks",
               });
-              const apollo = result.records.find(
-                (record) => record.path === "tasks/apollo.md",
-              );
-              return (
-                apollo?.values.find((entry) => entry.field === "Status")
-                  ?.value ?? null
-              );
+              const apollo = result.records.find((record) => record.path === "tasks/apollo.md");
+              return apollo?.values.find((entry) => entry.field === "Status")?.value ?? null;
             } catch (error) {
               // Surface the query failure in the poll's report instead of
               // timing out on a silent null.
@@ -289,13 +267,6 @@ test("a drag's field write on one device moves the card on the other device's op
   }
 });
 
-// An agent on device A saves records as plain files, with no live document
-// session. A is file-only: it runs no desktop capture poll, so it never
-// adopts a record and holds no lineage. Device B opens two records, so each
-// copy holds a claimed Y.Doc lineage. B leaves Zephyr unchanged, so A's save
-// of Zephyr comes in. B types a line in Apollo, so it cannot take A's save of
-// Apollo as a Y.Doc update. B opens a conflict instead, and its board keeps
-// the old value until the person resolves the conflict.
 test("an agent's file save on one device opens a conflict against a record the other device edited", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
@@ -343,8 +314,6 @@ test("an agent's file save on one device opens a conflict against a record the o
     ]);
     expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);
 
-    // A third computer, also file-only, joins now and takes the Todo record.
-    // Its later save starts from Todo, so it does not continue A's side.
     deviceC = await openLiveDaemonWorkspace(
       { workspaceId, rootPath: computerCRoot },
       { maxRestarts: 0 },
@@ -385,9 +354,7 @@ test("an agent's file save on one device opens a conflict against a record the o
     });
     const page = desktop.page;
     await page.getByTestId("first-run-join-synced").click();
-    await page
-      .getByTestId("join-sync-code")
-      .fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
+    await page.getByTestId("join-sync-code").fill(`dohc-sync:${workspaceId}:${relay.baseUrl}`);
     await page.getByTestId("join-choose-folder").click();
     await page.getByTestId("join-workspace-start").click();
     await waitForWorkspaceReady(page);
@@ -471,8 +438,6 @@ test("an agent's file save on one device opens a conflict against a record the o
     // Nudge writes outside the collection only wake B's pull.
     let nudge = 0;
 
-    // B claims Zephyr and changes nothing. A saves it the way an agent does,
-    // with no session, and B takes the save with no conflict.
     await claimOnB(todoZephyr, zephyrPath);
     await writeFile(join(sourceRoot, zephyrPath), recordMd(ZEPHYR_ID, "Zephyr", "Doing"));
     await waitForPathMoments(capture, zephyrPath, 2);
@@ -496,14 +461,12 @@ test("an agent's file save on one device opens a conflict against a record the o
     await expect(doingZephyr).toBeVisible({ timeout: 30_000 });
     await expect(todoZephyr).toHaveCount(0);
 
-    // B types a line in Apollo, an edit A never sees. Then A saves Apollo.
     const typedOnB = "Checked on B.";
     await claimOnB(todoApollo, apolloPath, typedOnB);
     await writeFile(join(sourceRoot, apolloPath), recordMd(APOLLO_ID, "Apollo", "Doing"));
     await waitForPathMoments(capture, apolloPath, 2);
     expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);
 
-    // The conflict opens on B.
     await expect
       .poll(
         async () => {
@@ -524,7 +487,6 @@ test("an agent's file save on one device opens a conflict against a record the o
     expect(conflict.incomingText).toContain("Status: Doing");
     await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "conflict");
 
-    // Until the person resolves it, B's file, index, and board keep Todo.
     expect(await readFile(join(temp.rootPath, apolloPath), "utf8")).toContain("Status: Todo");
     expect(await statusOnB(apolloPath)).toBe("Todo");
     await expect(todoApollo).toBeVisible();
@@ -590,7 +552,6 @@ test("an agent's file save on one device opens a conflict against a record the o
     }
     await page.evaluate(() => document.documentElement.removeAttribute("data-theme"));
 
-    // An agent listing conflicts reads the same fact, named by the path.
     await waitForCliEndpoint(temp.homeDir);
     const listedForAgents = JSON.parse(
       (await runDohcCli(temp, ["--json", "version", "conflicts"])).stdout,
@@ -612,7 +573,6 @@ test("an agent's file save on one device opens a conflict against a record the o
     await page.getByTestId("conflict-review-done").click();
     await expect(page.getByTestId("conflict-review-dialog")).toHaveCount(0);
 
-    // Applying the incoming side moves the card.
     await page.evaluate(
       async ({ id, conflictId }) => {
         const api = (

@@ -32,21 +32,22 @@ afterEach(() => {
 });
 
 describe("what the host allows and has not confirmed", () => {
-  // Column order: title 0, estimate 1, done 2, tags 3.
   const schema = makeSchema([
     { name: "title", type: "text" },
     { name: "estimate", type: "number" },
     { name: "done", type: "checkbox" },
     { name: "tags", type: "multi-select", options: ["alpha", "beta"] },
   ]);
-  const records = () => ["a", "b"].map((id) => makeRecord(`rec-${id}`, [
-    indexedValue("title", `Task ${id}`),
-    indexedValue("estimate", 3),
-    indexedValue("done", false),
-    indexedValue("tags", ["alpha"]),
-  ]));
+  const records = () =>
+    ["a", "b"].map((id) =>
+      makeRecord(`rec-${id}`, [
+        indexedValue("title", `Task ${id}`),
+        indexedValue("estimate", 3),
+        indexedValue("done", false),
+        indexedValue("tags", ["alpha"]),
+      ]),
+    );
 
-  /** A host's unconfirmed cells, by `record:field`. */
   function statusStore(initial: Record<string, TableCellStatus> = {}) {
     let statuses = new Map(Object.entries(initial));
     const listeners = new Set<() => void>();
@@ -57,31 +58,37 @@ describe("what the host allows and has not confirmed", () => {
       },
       get: (recordId, field) => statuses.get(`${recordId}:${field}`),
     };
-    const set = (next: Record<string, TableCellStatus>) => act(() => {
-      statuses = new Map(Object.entries(next));
-      for (const listener of listeners) listener();
-    });
+    const set = (next: Record<string, TableCellStatus>) =>
+      act(() => {
+        statuses = new Map(Object.entries(next));
+        for (const listener of listeners) listener();
+      });
     return { store, set };
   }
 
   function setup(props: Partial<TableViewProps> = {}) {
     const onCellChange = vi.fn((_change: CollectionCellChange) => 1);
-    const view = render(<TableView schema={schema} records={records()} onCellChange={onCellChange} {...props} />);
+    const view = render(
+      <TableView schema={schema} records={records()} onCellChange={onCellChange} {...props} />,
+    );
     const grid = screen.getByRole("grid");
     const cell = (row: number, column: number) => {
-      const found = grid.querySelectorAll<HTMLElement>(`[role="row"][data-index="${row}"] [role="gridcell"]`)[column];
+      const found = grid.querySelectorAll<HTMLElement>(
+        `[role="row"][data-index="${row}"] [role="gridcell"]`,
+      )[column];
       if (!found) throw new Error(`no cell at row ${row}, column ${column}`);
       return found;
     };
     /** Presses a key on the grid. False when the grid kept the key from the browser. */
-    const press = (key: string, modifiers: { shiftKey?: boolean } = {}) => fireEvent.keyDown(grid, { key, ...modifiers });
+    const press = (key: string, modifiers: { shiftKey?: boolean } = {}) =>
+      fireEvent.keyDown(grid, { key, ...modifiers });
     const editor = () => grid.querySelector<HTMLElement>("[data-cell-editor]");
     return { view, grid, cell, press, editor, onCellChange };
   }
 
   it("gives a cell the host refuses no edit path, by click or by key", () => {
-    // The host allows the title and the checkbox of the second record only.
-    const canEditCell = (record: CollectionRecord, field: { name: string }) => record.id === "rec-b" && field.name !== "estimate";
+    const canEditCell = (record: CollectionRecord, field: { name: string }) =>
+      record.id === "rec-b" && field.name !== "estimate";
     const { cell, press, editor, onCellChange } = setup({ canEditCell });
     expect(within(cell(0, 0)).queryByRole("button")).toBeNull();
     expect(within(cell(0, 2)).getByRole<HTMLInputElement>("checkbox").disabled).toBe(true);
@@ -99,10 +106,11 @@ describe("what the host allows and has not confirmed", () => {
     expect(editor()).toBeNull();
     expect(onCellChange).not.toHaveBeenCalled();
 
-    // The cells it allows still edit.
     fireEvent.click(cell(1, 2));
     press(" ");
-    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ recordId: "rec-b", field: "done", value: true }));
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ recordId: "rec-b", field: "done", value: true }),
+    );
     fireEvent.click(cell(1, 0));
     expect(editor()).not.toBeNull();
   });
@@ -110,7 +118,12 @@ describe("what the host allows and has not confirmed", () => {
   it("makes a header the host cannot sort by a label, and gives its mark focus for its words", () => {
     const onSortChange = vi.fn();
     const marks = new Map([["tags", { icon: <svg />, label: '"Stamp" sets this field' }]]);
-    setup({ onSortChange, fieldMarks: marks, canSortField: (field) => field.name !== "tags", sort: [{ field: "tags", direction: "asc" }] });
+    setup({
+      onSortChange,
+      fieldMarks: marks,
+      canSortField: (field) => field.name !== "tags",
+      sort: [{ field: "tags", direction: "asc" }],
+    });
     expect(screen.queryByRole("button", { name: "tags" })).toBeNull();
     const header = screen.getAllByRole("columnheader")[3]!;
     expect(header.textContent).toContain("tags");
@@ -126,8 +139,17 @@ describe("what the host allows and has not confirmed", () => {
   it("shows a pending change on its cell alone, with the value the person gave", () => {
     const drawn = vi.fn();
     const { store, set } = statusStore();
-    // A host-drawn column counts how often the table draws a cell.
-    const hostCells = new Map<string, TableHostCell>([["estimate", { cell: (record) => { drawn(record.id); return <span>host</span>; } }]]);
+    const hostCells = new Map<string, TableHostCell>([
+      [
+        "estimate",
+        {
+          cell: (record) => {
+            drawn(record.id);
+            return <span>host</span>;
+          },
+        },
+      ],
+    ]);
     const { cell } = setup({ cellStatuses: store, hostCells });
     expect(cell(0, 0).querySelector("[data-cell-status]")).toBeNull();
     drawn.mockClear();
@@ -136,7 +158,6 @@ describe("what the host allows and has not confirmed", () => {
     expect(cell(0, 0).textContent).toBe("RenamedSaving");
     expect(cell(0, 0).querySelector('[data-cell-status="pending"]')).not.toBeNull();
     expect(cell(1, 0).textContent).toBe("Task b");
-    // No other cell drew again.
     expect(drawn).not.toHaveBeenCalled();
 
     set({});
@@ -147,7 +168,9 @@ describe("what the host allows and has not confirmed", () => {
   it("offers Try again on a cell the host could not confirm, by pointer and by Tab, without opening its editor", () => {
     const retry = vi.fn();
     const reason = "dohc could not confirm this change.";
-    const { store } = statusStore({ "rec-a:title": { state: "unconfirmed", value: "Renamed", reason, retry } });
+    const { store } = statusStore({
+      "rec-a:title": { state: "unconfirmed", value: "Renamed", reason, retry },
+    });
     const { grid, cell, press, editor } = setup({ cellStatuses: store });
     expect(cell(0, 0).textContent).toContain("Renamed");
     expect(cell(0, 0).querySelector("[data-cell-status]")?.textContent).toBe(reason);
@@ -157,7 +180,6 @@ describe("what the host allows and has not confirmed", () => {
     expect(editor()).toBeNull();
     expect(cell(0, 0).hasAttribute("aria-selected")).toBe(false);
 
-    // Selected from the keyboard, the cell says why under it, and Tab reaches the action.
     grid.focus();
     press("ArrowDown");
     const note = screen.getByRole("note");
@@ -170,7 +192,6 @@ describe("what the host allows and has not confirmed", () => {
     expect(retry).toHaveBeenCalledTimes(2);
     expect(document.activeElement).toBe(grid);
 
-    // Escape from the action goes back to the cell, and Tab goes on to the next one.
     press("Tab");
     fireEvent.keyDown(document.activeElement!, { key: "Escape" });
     expect(document.activeElement).toBe(grid);
@@ -182,12 +203,14 @@ describe("what the host allows and has not confirmed", () => {
   });
 
   it("offers Discard beside Try again when the host gives it, on the cell and under the selected cell, with Tab through both", () => {
-    const retry = vi.fn(), discard = vi.fn();
+    const retry = vi.fn(),
+      discard = vi.fn();
     const reason = "dohc could not confirm this change.";
-    const { store } = statusStore({ "rec-a:title": { state: "unconfirmed", value: "Renamed", reason, retry, discard } });
+    const { store } = statusStore({
+      "rec-a:title": { state: "unconfirmed", value: "Renamed", reason, retry, discard },
+    });
     const { grid, cell, press, editor } = setup({ cellStatuses: store });
     const onCell = within(cell(0, 0)).getByRole("button", { name: "Discard" });
-    // Nothing brings the change back, so the control says what it does.
     expect(onCell.title).toBe("Stop trying to save this change. It may already be saved.");
     fireEvent.click(onCell);
     expect(discard).toHaveBeenCalledOnce();
@@ -208,7 +231,6 @@ describe("what the host allows and has not confirmed", () => {
     fireEvent.click(inNote);
     expect(discard).toHaveBeenCalledTimes(2);
     expect(document.activeElement).toBe(grid);
-    // After the last action, Tab goes on to the next cell.
     press("Tab");
     fireEvent.keyDown(document.activeElement!, { key: "Tab" });
     fireEvent.keyDown(document.activeElement!, { key: "Tab" });
@@ -218,13 +240,21 @@ describe("what the host allows and has not confirmed", () => {
   it("tells its host the text of an edit that goes with its record, its field, or the table, and nothing of one saved, cancelled, or not typed in", () => {
     const onDraftAbandoned = vi.fn();
     const { view, cell, editor, onCellChange } = setup({ onDraftAbandoned });
-    const rerender = (props: Partial<TableViewProps>) => view.rerender(<TableView schema={schema} records={records()} onCellChange={onCellChange} onDraftAbandoned={onDraftAbandoned} {...props} />);
+    const rerender = (props: Partial<TableViewProps>) =>
+      view.rerender(
+        <TableView
+          schema={schema}
+          records={records()}
+          onCellChange={onCellChange}
+          onDraftAbandoned={onDraftAbandoned}
+          {...props}
+        />,
+      );
     const typeInto = (row: number, column: number, text: string) => {
       fireEvent.click(cell(row, column));
       fireEvent.change(editor()!.querySelector("input")!, { target: { value: text } });
     };
 
-    // Saved and cancelled edits, and an editor nobody typed in, leave nothing.
     typeInto(0, 0, "Saved");
     fireEvent.keyDown(editor()!.querySelector("input")!, { key: "Enter" });
     typeInto(0, 0, "Cancelled");
@@ -233,21 +263,36 @@ describe("what the host allows and has not confirmed", () => {
     rerender({ records: records().slice(1) });
     expect(onDraftAbandoned).not.toHaveBeenCalled();
 
-    // The record leaves the table under an edit.
     rerender({});
     typeInto(0, 0, "Typed");
     rerender({ records: records().slice(1) });
-    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({ recordId: "rec-a", field: "title", text: "Typed", value: "Typed" });
-    // The field leaves it.
+    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-a",
+      field: "title",
+      text: "Typed",
+      value: "Typed",
+    });
     typeInto(0, 1, "12");
-    rerender({ records: records().slice(1), schema: makeSchema([{ name: "title", type: "text" }]) });
-    expect(onDraftAbandoned).toHaveBeenLastCalledWith({ recordId: "rec-b", field: "estimate", text: "12", value: 12 });
-    // The table closes. A character that opened the edit was typed too.
+    rerender({
+      records: records().slice(1),
+      schema: makeSchema([{ name: "title", type: "text" }]),
+    });
+    expect(onDraftAbandoned).toHaveBeenLastCalledWith({
+      recordId: "rec-b",
+      field: "estimate",
+      text: "12",
+      value: 12,
+    });
     fireEvent.click(cell(0, 0));
     fireEvent.keyDown(editor()!.querySelector("input")!, { key: "Escape" });
     fireEvent.keyDown(screen.getByRole("grid"), { key: "x" });
     view.unmount();
-    expect(onDraftAbandoned).toHaveBeenLastCalledWith({ recordId: "rec-b", field: "title", text: "x", value: "x" });
+    expect(onDraftAbandoned).toHaveBeenLastCalledWith({
+      recordId: "rec-b",
+      field: "title",
+      text: "x",
+      value: "x",
+    });
     expect(onDraftAbandoned).toHaveBeenCalledTimes(3);
     expect(onCellChange).toHaveBeenCalledOnce();
   });
@@ -255,8 +300,14 @@ describe("what the host allows and has not confirmed", () => {
   it("gives its host the value an edit left open saves as, beside its text, and no value for text its field cannot take", () => {
     const onDraftAbandoned = vi.fn();
     const { view, cell, editor, onCellChange } = setup({ onDraftAbandoned });
-    const table = (shown: CollectionRecord[]) => <TableView schema={schema} records={shown} onCellChange={onCellChange} onDraftAbandoned={onDraftAbandoned} />;
-    /** Types into a cell of the first record, takes the record from the table, and answers what the host got. */
+    const table = (shown: CollectionRecord[]) => (
+      <TableView
+        schema={schema}
+        records={shown}
+        onCellChange={onCellChange}
+        onDraftAbandoned={onDraftAbandoned}
+      />
+    );
     const leave = (column: number, text: string) => {
       fireEvent.click(cell(0, column));
       fireEvent.change(editor()!.querySelector("input")!, { target: { value: text } });
@@ -264,8 +315,12 @@ describe("what the host allows and has not confirmed", () => {
       view.rerender(table(records()));
       return onDraftAbandoned.mock.lastCall?.[0] as object;
     };
-    expect(leave(1, " 12 ")).toEqual({ recordId: "rec-a", field: "estimate", text: " 12 ", value: 12 });
-    // Emptied text saves as no value. That is a value, and not text the field cannot take.
+    expect(leave(1, " 12 ")).toEqual({
+      recordId: "rec-a",
+      field: "estimate",
+      text: " 12 ",
+      value: 12,
+    });
     expect(leave(0, "")).toEqual({ recordId: "rec-a", field: "title", text: "", value: null });
     const refused = leave(1, "12x");
     expect(refused).toEqual({ recordId: "rec-a", field: "estimate", text: "12x" });
@@ -285,7 +340,10 @@ describe("what the host allows and has not confirmed", () => {
     const blurred = vi.fn();
     input.addEventListener("focusout", blurred);
     const removeChild = Node.prototype.removeChild;
-    const removal = vi.spyOn(Node.prototype, "removeChild").mockImplementation(function (this: Node, child: Node) {
+    const removal = vi.spyOn(Node.prototype, "removeChild").mockImplementation(function (
+      this: Node,
+      child: Node,
+    ) {
       if (input.isConnected && child.contains(input)) fireEvent.blur(input);
       return removeChild.call(this, child);
     } as typeof Node.prototype.removeChild);
@@ -294,23 +352,33 @@ describe("what the host allows and has not confirmed", () => {
     // React hears no event while it changes the page, so that blur saves nothing. A blur while the table is open saves (cells.test.tsx).
     expect(blurred).toHaveBeenCalled();
     expect(onCellChange).not.toHaveBeenCalled();
-    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({ recordId: "rec-a", field: "title", text: "Typed", value: "Typed" });
+    expect(onDraftAbandoned).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-a",
+      field: "title",
+      text: "Typed",
+      value: "Typed",
+    });
   });
 
   it("keeps its layers in a stacking context of its own, so its sticky header never covers its host's menus", () => {
     const { grid } = setup();
     expect(grid.classList.contains("isolate")).toBe(true);
-    // Inside it, the header still sits above the editor that scrolls under it.
-    fireEvent.click(grid.querySelectorAll<HTMLElement>('[role="row"][data-index="0"] [role="gridcell"]')[0]!);
+    fireEvent.click(
+      grid.querySelectorAll<HTMLElement>('[role="row"][data-index="0"] [role="gridcell"]')[0]!,
+    );
     expect(grid.querySelector('[role="row"]')!.classList.contains("z-20")).toBe(true);
     expect(grid.querySelector("[data-cell-editor]")!.classList.contains("z-10")).toBe(true);
   });
 
   it("says why a change was refused, starts the next edit from what was typed, and dismisses it", () => {
     const dismiss = vi.fn();
-    const { store, set } = statusStore({ "rec-a:title": { state: "refused", value: "Typed", reason: "Enter a shorter name.", dismiss } });
+    const { store, set } = statusStore({
+      "rec-a:title": { state: "refused", value: "Typed", reason: "Enter a shorter name.", dismiss },
+    });
     const { cell, press, editor } = setup({ cellStatuses: store });
-    expect(cell(0, 0).querySelector('[data-cell-status="refused"]')?.getAttribute("title")).toBe("Enter a shorter name.");
+    expect(cell(0, 0).querySelector('[data-cell-status="refused"]')?.getAttribute("title")).toBe(
+      "Enter a shorter name.",
+    );
 
     fireEvent.click(cell(0, 0));
     expect(editor()!.querySelector("input")!.value).toBe("Typed");
@@ -319,9 +387,16 @@ describe("what the host allows and has not confirmed", () => {
 
     fireEvent.click(within(cell(0, 0)).getByRole("button", { name: "Dismiss" }));
     expect(dismiss).toHaveBeenCalledOnce();
-    // A change that waits says so, with nothing to press.
-    set({ "rec-a:title": { state: "waiting", value: "Typed", reason: "Waiting for an earlier change to this record." } });
-    expect(screen.getByRole("note").textContent).toBe("Waiting for an earlier change to this record.");
+    set({
+      "rec-a:title": {
+        state: "waiting",
+        value: "Typed",
+        reason: "Waiting for an earlier change to this record.",
+      },
+    });
+    expect(screen.getByRole("note").textContent).toBe(
+      "Waiting for an earlier change to this record.",
+    );
     expect(press("Tab")).toBe(false);
     expect(cell(0, 1).getAttribute("aria-selected")).toBe("true");
   });
@@ -332,7 +407,9 @@ describe("what the host allows and has not confirmed", () => {
     expect(within(cell(0, 2)).getByRole<HTMLInputElement>("checkbox").checked).toBe(true);
     fireEvent.click(cell(0, 2));
     press(" ");
-    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ field: "done", value: false }));
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ field: "done", value: false }),
+    );
   });
 
   it("lets the host draw a cell and its editor, and never opens its own editor there", () => {
@@ -347,7 +424,6 @@ describe("what the host allows and has not confirmed", () => {
     expect(cell(0, 0).textContent).toBe("File of rec-a");
     expect(screen.queryByText("Task a")).toBeNull();
 
-    // A typed character and Delete are the host's to take, in its editor.
     fireEvent.click(cell(0, 1));
     press("ArrowLeft");
     expect(cell(0, 0).getAttribute("aria-selected")).toBe("true");
@@ -364,7 +440,6 @@ describe("what the host allows and has not confirmed", () => {
     expect(editor()).toBeNull();
     expect(document.activeElement).toBe(grid);
 
-    // A host cell with no editor does not edit.
     fireEvent.click(cell(0, 1));
     press("Enter");
     expect(editor()).toBeNull();
@@ -372,7 +447,10 @@ describe("what the host allows and has not confirmed", () => {
 
   it("marks the row of the record the host shows open, and no other", () => {
     const { view, grid } = setup({ openRecordId: "rec-b" });
-    const current = () => [...grid.querySelectorAll('[role="row"][aria-current="true"]')].map((row) => row.getAttribute("data-index"));
+    const current = () =>
+      [...grid.querySelectorAll('[role="row"][aria-current="true"]')].map((row) =>
+        row.getAttribute("data-index"),
+      );
     expect(current()).toEqual(["1"]);
     view.rerender(<TableView schema={schema} records={records()} openRecordId={null} />);
     expect(current()).toEqual([]);
@@ -381,25 +459,33 @@ describe("what the host allows and has not confirmed", () => {
   it("keeps the Escape that cancels an edit, and leaves Escape to a host that shows a record open before it clears the selection", () => {
     const escapes = vi.fn();
     const table = (openRecordId: string | null, editingDisabled = false) => (
-      <div onKeyDown={(event) => { if (event.key === "Escape") escapes(); }}>
-        <TableView schema={schema} records={records()} onCellChange={() => 1} openRecordId={openRecordId} editingDisabled={editingDisabled} />
+      <div
+        onKeyDown={(event) => {
+          if (event.key === "Escape") escapes();
+        }}
+      >
+        <TableView
+          schema={schema}
+          records={records()}
+          onCellChange={() => 1}
+          openRecordId={openRecordId}
+          editingDisabled={editingDisabled}
+        />
       </div>
     );
     const view = render(table("rec-a"));
     const grid = screen.getByRole("grid");
-    const title = () => grid.querySelectorAll<HTMLElement>('[role="row"][data-index="0"] [role="gridcell"]')[0]!;
+    const title = () =>
+      grid.querySelectorAll<HTMLElement>('[role="row"][data-index="0"] [role="gridcell"]')[0]!;
     const editor = () => grid.querySelector<HTMLElement>("[data-cell-editor]");
-    // Escape in the editor cancels the edit, and is not the host's.
     fireEvent.click(title());
     fireEvent.keyDown(editor()!.querySelector("input")!, { key: "Escape" });
     expect(editor()).toBeNull();
     expect(escapes).not.toHaveBeenCalled();
-    // So is Escape on the grid while an editor is open.
     fireEvent.click(title());
     fireEvent.keyDown(grid, { key: "Escape" });
     expect(editor()).toBeNull();
     expect(escapes).not.toHaveBeenCalled();
-    // A paused editor stays open with what it holds, and Escape on the grid is still not the host's.
     fireEvent.click(title());
     fireEvent.change(editor()!.querySelector("input")!, { target: { value: "Typed" } });
     view.rerender(table("rec-a", true));
@@ -410,18 +496,23 @@ describe("what the host allows and has not confirmed", () => {
     fireEvent.keyDown(grid, { key: "Escape" });
     expect(editor()).toBeNull();
     expect(escapes).not.toHaveBeenCalled();
-    // With a record open, the next Escape is the host's, and the selection stays.
     fireEvent.keyDown(grid, { key: "Escape" });
     expect(escapes).toHaveBeenCalledOnce();
     expect(title().getAttribute("aria-selected")).toBe("true");
-    // With none open, Escape clears the selection.
     view.rerender(table(null));
     fireEvent.keyDown(grid, { key: "Escape" });
     expect(title().getAttribute("aria-selected")).toBeNull();
   });
 
   it("says what the host gives for a table with no records, beside its New record row", () => {
-    render(<TableView schema={schema} records={[]} onNewRecord={vi.fn()} emptyText="No records match. Try a shorter search." />);
+    render(
+      <TableView
+        schema={schema}
+        records={[]}
+        onNewRecord={vi.fn()}
+        emptyText="No records match. Try a shorter search."
+      />,
+    );
     expect(screen.getByText("No records match. Try a shorter search.")).toBeDefined();
     expect(screen.getByRole("button", { name: "New record" })).toBeDefined();
   });

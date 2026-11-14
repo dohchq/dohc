@@ -14,10 +14,7 @@ import {
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
-import {
-  cleanupTestScratch,
-  createTestScratch,
-} from "../src/workspaces/testTemp";
+import { cleanupTestScratch, createTestScratch } from "../src/workspaces/testTemp";
 
 // A real 2x2 PNG (green/blue pixels). Bytes must decode to a paintable image so
 // the assertions below (naturalWidth > 0) exercise the whole serve→decode path,
@@ -30,13 +27,9 @@ test.afterEach(async () => {
   await cleanupTestScratch();
 });
 
-async function openMarkdownDoc(
-  page: import("@playwright/test").Page,
-  path: string,
-): Promise<void> {
+async function openMarkdownDoc(page: import("@playwright/test").Page, path: string): Promise<void> {
   await revealExplorerPath(page, path);
   await explorerRow(page, path).click();
-  // A plain (non-engine) markdown file opens straight into the WYSIWYG editor.
   await expect(page.getByTestId("markdown-editor")).toBeVisible({ timeout: 15_000 });
 }
 
@@ -44,16 +37,13 @@ async function openMarkdownDoc(
 // privileged dohc-file:// scheme at render time. Assert the <img> actually
 // decoded (naturalWidth > 0) — an attribute-only check would pass even if CSP
 // or the protocol silently blocked the load.
-async function expectEditorImagePainted(
-  page: import("@playwright/test").Page,
-): Promise<void> {
+async function expectEditorImagePainted(page: import("@playwright/test").Page): Promise<void> {
   const img = page.locator(".dohc-editor-image");
   await expect(img).toBeVisible({ timeout: 15_000 });
   await expect
-    .poll(
-      async () => await img.first().evaluate((el) => (el as HTMLImageElement).naturalWidth),
-      { timeout: 15_000 },
-    )
+    .poll(async () => await img.first().evaluate((el) => (el as HTMLImageElement).naturalWidth), {
+      timeout: 15_000,
+    })
     .toBeGreaterThan(0);
 }
 
@@ -132,8 +122,6 @@ test("in-editor image: a link escaping the workspace root does not render", asyn
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    // A real, decodable PNG planted outside the workspace root (temp.baseDir is
-    // the parent of temp.rootPath) at the exact path the escape link targets.
     await writeFile(join(temp.baseDir, "outside.png"), PNG_BYTES);
     await writeWorkspaceFiles(temp, [
       {
@@ -153,7 +141,6 @@ test("in-editor image: a link escaping the workspace root does not render", asyn
     // state read next is final rather than early.
     const img = page.locator('.dohc-editor-image[alt="escape"]');
     await expect(img).toBeAttached({ timeout: 15_000 });
-    // It was never rewritten to the privileged scheme.
     await expect(img).not.toHaveAttribute("src", /^dohc-file:\/\//);
     // No src attribute at all (not `src=""` either, which re-requests the
     // page's own URL), and nothing fetched or decoded.
@@ -175,8 +162,6 @@ test("in-editor image: a link escaping the workspace root does not render", asyn
 
 // ── dragging an image FILE into a document ─────────────────────────────────
 
-// Writes a real PNG to a temp dir outside the workspace — the OS location a
-// user actually drags from — and returns its absolute path.
 async function pngOutsideWorkspace(): Promise<string> {
   const dir = await createTestScratch("dohc-drag-");
   const path = join(dir, "Dragged Shot.png");
@@ -235,17 +220,12 @@ test("dragging an image file onto the editor embeds it into the configured attac
     // The image renders — the whole write → dohc-file:// serve → decode path.
     await expectEditorImagePainted(page);
 
-    // ...and the bytes landed in the configured folder at the workspace root,
-    // under the slug+hash asset name, not next to the document.
     await expect
       .poll(async () => await readdir(join(temp.rootPath, "attachments")).catch(() => []))
       .toEqual([expect.stringMatching(/^dragged-shot-[0-9a-z]+\.png$/)]);
     const [written] = await readdir(join(temp.rootPath, "attachments"));
-    expect(await readFile(join(temp.rootPath, "attachments", written!))).toEqual(
-      PNG_BYTES,
-    );
+    expect(await readFile(join(temp.rootPath, "attachments", written!))).toEqual(PNG_BYTES);
 
-    // The node's src is the document-relative form that climbs to the root.
     await expect(page.locator(".dohc-editor-image").first()).toHaveAttribute(
       "src",
       /^dohc-file:\/\/.*\/attachments\/dragged-shot-[0-9a-z]+\.png$/,
@@ -256,12 +236,11 @@ test("dragging an image file onto the editor embeds it into the configured attac
 });
 
 test("dragging an image onto the page top-matter (outside ProseMirror) still embeds it", async () => {
-  // The regression this guards: file-drop embedding used to live only in
-  // ProseMirror's handleDrop, which never runs for drops outside view.dom.
-  // The document pane is bigger than view.dom — the title/icon/properties
-  // top-matter sits in the same scroller — so dropping an image up there was
-  // silently swallowed (Chromium's default file handling, denied by Electron's
-  // will-navigate guard). The pane-level drop zone makes it embed.
+  // ProseMirror's handleDrop never runs for drops outside view.dom. The
+  // document pane is bigger than view.dom: the title/icon/properties
+  // top-matter sits in the same scroller. Without the pane-level drop zone, an
+  // image dropped up there gets Chromium's default file handling, which
+  // Electron's will-navigate guard denies.
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
@@ -340,9 +319,7 @@ test("opening an image file directly in the media viewer does not crash", async 
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    await writeWorkspaceFiles(temp, [
-      { path: "assets/pic.png", contents: PNG_BYTES },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "assets/pic.png", contents: PNG_BYTES }]);
     desktop = await launchDesktopApp({ workspace: temp });
     const { page } = desktop;
     const workspace = await openWorkspaceFromFirstRun(page, temp);
@@ -354,13 +331,11 @@ test("opening an image file directly in the media viewer does not crash", async 
     await expect(view).toBeVisible({ timeout: 15_000 });
     const img = view.locator("img");
     await expect
-      .poll(
-        async () => await img.evaluate((el) => (el as HTMLImageElement).naturalWidth),
-        { timeout: 15_000 },
-      )
+      .poll(async () => await img.evaluate((el) => (el as HTMLImageElement).naturalWidth), {
+        timeout: 15_000,
+      })
       .toBeGreaterThan(0);
 
-    // The window must still be alive (a crash would tear down the renderer).
     expect(desktop.app.windows().length).toBeGreaterThan(0);
     expect(await page.evaluate(() => 1 + 1)).toBe(2);
   } finally {

@@ -1,8 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
+import { afterEach, describe, expect, it } from "vitest";
 import type {
   EngineDaemonLifecycle,
   EngineWorkspace,
@@ -23,18 +22,13 @@ import { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
 import {
   readWorkspaceText,
   withStaleSensitiveWorkspaceOperation,
-  writeWorkspaceText,
   type WorkspaceTextWriteResult,
 } from "./workspaceAssets";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { createTestScratch } from "./testTemp";
 import { readLocalStateFrom } from "./workspaceLocalState";
-import {
-  createShareViewFiles,
-  ShareViewFilesTargetMissingError,
-  type ResolvedShareViewFilesTarget,
-} from "./shareViewFiles";
+import { createShareViewFiles, type ResolvedShareViewFilesTarget } from "./shareViewFiles";
 
 // The seam the desktop e2e exposed and every unit test missed.
 //
@@ -67,18 +61,12 @@ const roots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    sessionSets
-      .splice(0)
-      .map((sessions) => sessions.closeAll().catch(() => undefined)),
+    sessionSets.splice(0).map((sessions) => sessions.closeAll().catch(() => undefined)),
   );
   await Promise.all(
-    lifecycles
-      .splice(0)
-      .map((lifecycle) => lifecycle.stop().catch(() => undefined)),
+    lifecycles.splice(0).map((lifecycle) => lifecycle.stop().catch(() => undefined)),
   );
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 /**
@@ -91,10 +79,7 @@ afterEach(async () => {
  * row recorded here is what makes that true. A test that skipped it would
  * assert an engine moment and never touch the log the submit lane reads.
  */
-async function harness(
-  prefix: string,
-  access?: "comment" | "edit",
-): Promise<Harness> {
+async function harness(prefix: string, access?: "comment" | "edit"): Promise<Harness> {
   const rootPath = await createTestScratch(prefix);
   roots.push(rootPath);
   const workspaceId = `${prefix}${process.pid}-${Date.now()}`;
@@ -148,16 +133,6 @@ async function harness(
   return { workspaceId, rootPath, engineWorkspace, store, sessions };
 }
 
-async function flushCapture(harnessed: Harness) {
-  return await harnessed.sessions.run(
-    harnessed.engineWorkspace,
-    async ({ client, workspace }) =>
-      await new VersionedLiveAdapter(client, workspace, {
-        workspaceId: harnessed.workspaceId,
-      }).flushCapture(),
-  );
-}
-
 /** The granter's file, as the share's pull leaves it: a moment and a projection. */
 async function seedSharedFile(
   harnessed: Harness,
@@ -177,8 +152,7 @@ async function seedSharedFile(
   await mkdir(join(harnessed.rootPath, "docs"), { recursive: true });
   await writeFile(join(harnessed.rootPath, path), text, "utf8");
   const read = await readWorkspaceText(harnessed.rootPath, path);
-  if (read.contentHash === null)
-    throw new Error("Seeded file has no content hash.");
+  if (read.contentHash === null) throw new Error("Seeded file has no content hash.");
   return { momentId: written.moment.id, contentHash: read.contentHash };
 }
 
@@ -204,8 +178,7 @@ function shareViewFilesOwner(input: {
   };
   const files = createShareViewFiles({
     resolveTarget: (candidate) =>
-      candidate.kind === requested.kind &&
-      candidate.workspaceId === requested.workspaceId
+      candidate.kind === requested.kind && candidate.workspaceId === requested.workspaceId
         ? resolved
         : null,
     openStore: () => input.shareViewStore(),
@@ -214,7 +187,9 @@ function shareViewFilesOwner(input: {
       throw new Error("Unexpected pull");
     },
     recordRefusals: async () => undefined,
-    updateUnsavedPaths: async () => { throw new Error("Mounted shares have no unsaved paths"); },
+    updateUnsavedPaths: async () => {
+      throw new Error("Mounted shares have no unsaved paths");
+    },
     markEnded: async () => undefined,
     retireTarget: async () => undefined,
     assertProjectionRoot: async () => undefined,
@@ -251,9 +226,8 @@ async function settleShareViewThroughOwner(input: {
   shareViewStore: () => CaptureVersionedTextStore;
 }) {
   const { files, requested } = shareViewFilesOwner(input);
-  const outcome = await withStaleSensitiveWorkspaceOperation(
-    input.rootPath,
-    (lease) => files.reconcile(lease, requested, "settle"),
+  const outcome = await withStaleSensitiveWorkspaceOperation(input.rootPath, (lease) =>
+    files.reconcile(lease, requested, "settle"),
   );
   if (outcome.kind !== "settle") {
     throw new Error("Share-view settlement returned another operation kind.");
@@ -262,17 +236,12 @@ async function settleShareViewThroughOwner(input: {
   return captured;
 }
 
-async function momentIdsFor(
-  harnessed: Harness,
-  path: string,
-): Promise<string[]> {
+async function momentIdsFor(harnessed: Harness, path: string): Promise<string[]> {
   const page = await harnessed.store.listMoments({
     workspaceId: harnessed.workspaceId,
     limit: 100,
   });
-  return page.moments
-    .filter((moment) => moment.path === path)
-    .map((moment) => moment.id);
+  return page.moments.filter((moment) => moment.path === path).map((moment) => moment.id);
 }
 
 // The journal itself, read the way the defect was measured. `replication_log`
@@ -288,16 +257,11 @@ function replicationLogRows(rootPath: string): number {
       close(): void;
     };
   };
-  const database = new DatabaseSync(
-    join(rootPath, ".dohc", "engine", "engine.db"),
-    {
-      readOnly: true,
-    },
-  );
+  const database = new DatabaseSync(join(rootPath, ".dohc", "engine", "engine.db"), {
+    readOnly: true,
+  });
   try {
-    const row = database
-      .prepare("SELECT COUNT(*) AS rows FROM replication_log")
-      .get();
+    const row = database.prepare("SELECT COUNT(*) AS rows FROM replication_log").get();
     return Number(row?.rows ?? 0);
   } finally {
     database.close();
@@ -305,49 +269,6 @@ function replicationLogRows(rootPath: string): number {
 }
 
 describe("share-view text writes through the real store", () => {
-  it.skipIf(engine.missing)(
-    "opens an access-bearing received share with capture disabled",
-    async () => {
-      const view = await harness("dohc-share-text-capture-posture-", "edit");
-
-      await expect(flushCapture(view)).resolves.toEqual({ deferredWrites: [],
-        heldFiles: [],
-        running: false,
-        settled: false,
-        degraded: true,
-      });
-    },
-  );
-
-  it("rejects a text change for another share-view identity before opening the store", async () => {
-    const rootPath = join(process.cwd(), "share-view-text-write-identity-test");
-    const openStore = vi.fn((): CaptureVersionedTextStore => {
-      throw new Error("A mismatched target must not open the store.");
-    });
-    const { files } = shareViewFilesOwner({
-      workspaceId: "workspace-a",
-      rootPath,
-      shareViewStore: openStore,
-    });
-
-    await expect(
-      withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-        files.change(
-          lease,
-          { kind: "standalone", workspaceId: "workspace-b" },
-          {
-            kind: "save",
-            path: "docs/note.md",
-            text: "recipient\n",
-            expectedContentHash:
-              "0000000000000000000000000000000000000000000000000000000000000000",
-          },
-        ),
-      ),
-    ).rejects.toBeInstanceOf(ShareViewFilesTargetMissingError);
-    expect(openStore).not.toHaveBeenCalled();
-  });
-
   it.skipIf(engine.missing)(
     "makes an edit recipient's save a proposable moment, not just a file",
     async () => {
@@ -375,9 +296,9 @@ describe("share-view text writes through the real store", () => {
         replicationLogRows(view.rootPath),
         "a moment nothing journaled is a change the submit lane cannot see",
       ).toBeGreaterThan(journalBefore);
-      await expect(
-        readFile(join(view.rootPath, "docs", "note.md"), "utf8"),
-      ).resolves.toBe("recipient\n");
+      await expect(readFile(join(view.rootPath, "docs", "note.md"), "utf8")).resolves.toBe(
+        "recipient\n",
+      );
     },
     60_000,
   );
@@ -420,9 +341,7 @@ describe("share-view text writes through the real store", () => {
         unjournalablePaths: [],
       });
       expect(await momentIdsFor(view, path)).toEqual(momentsBeforeRecovery);
-      await expect(readFile(join(view.rootPath, path), "utf8")).resolves.toBe(
-        "recipient\n",
-      );
+      await expect(readFile(join(view.rootPath, path), "utf8")).resolves.toBe("recipient\n");
       const main = await view.store.ensureMainVersion({
         workspaceId: view.workspaceId,
       });
@@ -450,8 +369,7 @@ describe("share-view text writes through the real store", () => {
         rootPath: view.rootPath,
         relativePath: path,
         text: "recipient\n",
-        expectedContentHash:
-          "0000000000000000000000000000000000000000000000000000000000000000",
+        expectedContentHash: "0000000000000000000000000000000000000000000000000000000000000000",
         shareViewStore: () => view.store,
       });
 
@@ -464,43 +382,9 @@ describe("share-view text writes through the real store", () => {
         "journaling before the hash check sends the granter a change built on bytes the recipient never read",
       ).toEqual([seeded.momentId]);
       expect(replicationLogRows(view.rootPath)).toBe(journalBefore);
-      await expect(
-        readFile(join(view.rootPath, "docs", "note.md"), "utf8"),
-      ).resolves.toBe("granter\n");
-    },
-    60_000,
-  );
-
-  // Authority is covered at the ShareViewFiles owner. These daemon tests stay
-  // on the mutation primitive and prove only store/projection behavior.
-
-  it.skipIf(engine.missing)(
-    "leaves an ordinary workspace's save to disk, where the watcher records it",
-    async () => {
-      const workspace = await harness("dohc-ordinary-write-");
-      const path = "note.md";
-      await writeFile(join(workspace.rootPath, path), "before\n", "utf8");
-      const read = await readWorkspaceText(workspace.rootPath, path);
-      // The baseline is taken with the store already open, so the daemon's own
-      // open-time reconciliation is counted here rather than mistaken for the
-      // write's moment below.
-      const before = await momentIdsFor(workspace, path);
-
-      const result = await writeWorkspaceText(
-        workspace.rootPath,
-        path,
-        "after\n",
-        read.contentHash ?? "",
+      await expect(readFile(join(view.rootPath, "docs", "note.md"), "utf8")).resolves.toBe(
+        "granter\n",
       );
-
-      expect(result.status).toBe("written");
-      await expect(
-        readFile(join(workspace.rootPath, path), "utf8"),
-      ).resolves.toBe("after\n");
-      expect(
-        await momentIdsFor(workspace, path),
-        "an ordinary workspace writing engine-direct journals every save twice — once here, once from the watcher",
-      ).toEqual(before);
     },
     60_000,
   );

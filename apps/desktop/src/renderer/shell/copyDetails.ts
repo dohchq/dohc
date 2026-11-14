@@ -18,7 +18,12 @@ export type ErrorDetailField = readonly [
  * the end of a long one.
  */
 export class TextNotSavedError extends Error {
-  constructor(message: string, readonly typed: string) { super(message); }
+  constructor(
+    message: string,
+    readonly typed: string,
+  ) {
+    super(message);
+  }
 }
 
 export function errorDetails(fields: ReadonlyArray<ErrorDetailField>): string {

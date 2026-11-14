@@ -100,8 +100,8 @@ fn close_stranded(tx: &rusqlite::Transaction<'_>) -> Result<usize, OwnerOutboxEr
     Ok(keys.len())
 }
 
-/// The state a later change enforces: every owner binding left has a text
-/// head at its object and its current path.
+/// Every owner binding left has a text head in its main version, at its
+/// object and its current path.
 fn assert_bindings_have_text_heads(store: &EngineStore) {
     let headless: i64 = store
         .read_with(|conn| {

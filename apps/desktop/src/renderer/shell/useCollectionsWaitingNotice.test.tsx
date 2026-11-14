@@ -25,9 +25,11 @@ const HEALTHY: SyncStatusResult = {
   liveSessionsGeneration: 0,
 };
 
-// A retry whose answer the test sends when it chooses.
 function pendingRetry() {
-  let settle: { resolve: (status: SyncStatusResult) => void; reject: (error: unknown) => void } | null = null;
+  let settle: {
+    resolve: (status: SyncStatusResult) => void;
+    reject: (error: unknown) => void;
+  } | null = null;
   const retryCloudSync = vi.fn(
     (_id: string, _reason: "person") =>
       new Promise<SyncStatusResult>((resolve, reject) => {
@@ -42,10 +44,11 @@ function pendingRetry() {
   };
 }
 
-// The shell's error hook and the notice together, as the shell wires them.
 function renderNotice(
   initial: { workspaceId?: string; waiting: Waiting | undefined },
-  retryCloudSync = vi.fn(async (_id: string, _reason: "person"): Promise<SyncStatusResult> => HEALTHY),
+  retryCloudSync = vi.fn(
+    async (_id: string, _reason: "person"): Promise<SyncStatusResult> => HEALTHY,
+  ),
 ) {
   const openSyncSettings = vi.fn();
   const view = renderHook(
@@ -76,7 +79,9 @@ describe("useCollectionsWaitingNotice", () => {
     expect(view.toasts()).toHaveLength(1);
     const row = view.rows()[0]!;
     expect(row.title).toBe("Collection updates are waiting");
-    expect(row.message).toBe("They continue once sync finishes. To work offline, pause sync in Settings.");
+    expect(row.message).toBe(
+      "They continue once sync finishes. To work offline, pause sync in Settings.",
+    );
     expect(row.tone).toBe("warning");
     expect(row.kind).toBe("collections-waiting");
     expect(row.action?.label).toBe("Sync settings");
@@ -105,7 +110,6 @@ describe("useCollectionsWaitingNotice", () => {
       view.result.current.notice.noteDismissed();
       view.result.current.errors.dismissShellError(view.rows()[0]!.id);
     });
-    // Each pass reports the same wait it found.
     for (let pass = 0; pass < 3; pass += 1) {
       view.rerender({ workspaceId: "ws-a", waiting: "sync" });
     }
@@ -168,7 +172,6 @@ describe("useCollectionsWaitingNotice", () => {
     first.unmount();
     const second = renderNotice({ waiting: "sync" });
     expect(second.rows()).toEqual([]);
-    // The reopen after a pause failing is news.
     second.rerender({ workspaceId: "ws-a", waiting: "reopen" });
     expect(second.toasts()).toHaveLength(1);
     expect(second.rows()[0]!.message).toBe(collectionsWaitingMessage("reopen"));

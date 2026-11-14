@@ -10,28 +10,43 @@ export type AgentLinkServer = "dohc-personal" | "dohc-share";
 // command that holds it runs as pasted. Any other link gets no command.
 const PASTES_AS_TYPED = /^[A-Za-z0-9:/._-]+$/u;
 
-type AgentLinkApp = { id: string; label: string; text: (link: string, server: AgentLinkServer) => string | null };
+type AgentLinkApp = {
+  id: string;
+  label: string;
+  text: (link: string, server: AgentLinkServer) => string | null;
+};
 
 // What each agent needs in place of the bare link: Grok Bot adds an MCP
 // server it is told about in a message, and the two CLIs add one by command.
 const APPS: readonly AgentLinkApp[] = [
-  { id: "grok-bot", label: "Message for Grok Bot", text: (link) => `Add the MCP server ${link} and connect it.` },
+  {
+    id: "grok-bot",
+    label: "Message for Grok Bot",
+    text: (link) => `Add the MCP server ${link} and connect it.`,
+  },
   {
     id: "claude-code",
     label: "Commands for Claude Code",
     text: (link, server) =>
-      PASTES_AS_TYPED.test(link) ? `claude mcp add --transport http ${server} ${link}\nclaude mcp login ${server}` : null,
+      PASTES_AS_TYPED.test(link)
+        ? `claude mcp add --transport http ${server} ${link}\nclaude mcp login ${server}`
+        : null,
   },
   {
     id: "codex",
     label: "Commands for Codex",
     text: (link, server) =>
-      PASTES_AS_TYPED.test(link) ? `codex mcp add ${server} --url ${link}\ncodex mcp login ${server}` : null,
+      PASTES_AS_TYPED.test(link)
+        ? `codex mcp add ${server} --url ${link}\ncodex mcp login ${server}`
+        : null,
   },
 ];
 
 /** What the menu copies for each agent it can serve with this link. */
-export function agentLinkSetups(link: string, server: AgentLinkServer): { id: string; label: string; text: string }[] {
+export function agentLinkSetups(
+  link: string,
+  server: AgentLinkServer,
+): { id: string; label: string; text: string }[] {
   return APPS.flatMap((app) => {
     const text = app.text(link, server);
     return text === null ? [] : [{ id: app.id, label: app.label, text }];
@@ -59,7 +74,6 @@ export function AgentLinkAppMenu(props: {
   const picked = useRef<string | null>(null);
   const current = useRef(setups);
   current.current = setups;
-  // Whether the open list is showing a row's answer.
   const answered = useRef(false);
   const reportTo = useRef(report);
   reportTo.current = report;

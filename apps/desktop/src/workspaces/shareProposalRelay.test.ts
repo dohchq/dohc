@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  RelayUnauthorizedError,
-  ShareUnavailableError,
-} from "@dohc/workspace-contracts/relay";
+import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
 import {
   listMyShareProposals,
   listShareProposals,
@@ -96,15 +93,9 @@ describe("listShareProposals", () => {
         authorization: "Bearer granter-token",
       },
     ]);
-    expect(proposals).toEqual([
-      SUMMARY,
-      { ...SUMMARY, proposalId: "proposal-2", ops: 4 },
-    ]);
+    expect(proposals).toEqual([SUMMARY, { ...SUMMARY, proposalId: "proposal-2", ops: 4 }]);
   });
 
-  // This route serves what the granter still has to answer, so a sender it
-  // could not name is stated rather than invented — and the row stays
-  // reviewable either way.
   it("states a sender the relay could not name", async () => {
     const { relay } = relayAnswering({
       proposals: [{ ...SUMMARY, proposedByEmail: null }],
@@ -142,8 +133,6 @@ describe("listShareProposals", () => {
   });
 });
 
-// One proposal, opened. This is where the op rows are read, so this is where
-// their strictness is proved.
 describe("readShareProposal", () => {
   const read = (relay: Parameters<typeof readShareProposal>[0]["relay"]) =>
     readShareProposal({ relay, workspaceId: "workspace a", proposalId: "proposal-1" });
@@ -164,8 +153,6 @@ describe("readShareProposal", () => {
     expect(proposal.ops[0]?.afterByteLength).toBe(12);
   });
 
-  // The relay answering about another proposal would put one sender's changes
-  // under another sender's name.
   it("refuses a proposal answered for a different id", async () => {
     const { relay } = relayAnswering({
       proposal: { ...PROPOSAL, proposalId: "proposal-9" },
@@ -212,13 +199,8 @@ describe("readShareProposal", () => {
   });
 });
 
-// The lazy review's content door. It names one op, and what comes back must be
-// that op.
 describe("readShareProposalOp", () => {
-  const readOp = (
-    relay: Parameters<typeof readShareProposalOp>[0]["relay"],
-    opIndex = 3,
-  ) =>
+  const readOp = (relay: Parameters<typeof readShareProposalOp>[0]["relay"], opIndex = 3) =>
     readShareProposalOp({
       relay,
       workspaceId: "workspace a",
@@ -234,14 +216,10 @@ describe("readShareProposalOp", () => {
 
     const op = await readOp(relay);
 
-    expect(calls[0]?.url).toBe(
-      "https://relay.test/sync/workspace%20a/proposals/proposal-1/ops/3",
-    );
+    expect(calls[0]?.url).toBe("https://relay.test/sync/workspace%20a/proposals/proposal-1/ops/3");
     expect(op.opIndex).toBe(3);
   });
 
-  // A mismatched index would put one file's content under another file's row —
-  // the granter would read a diff for a file they did not open.
   it("refuses an op answered for a different index", async () => {
     const { relay } = relayAnswering({ op: { ...OP, opIndex: 4 } });
 
@@ -337,9 +315,7 @@ describe("listMyShareProposals", () => {
       ],
     });
 
-    await expect(
-      listMyShareProposals({ relay, shareId: "share/1" }),
-    ).resolves.toEqual([
+    await expect(listMyShareProposals({ relay, shareId: "share/1" })).resolves.toEqual([
       {
         proposalId: "proposal-1",
         state: "open",
@@ -355,9 +331,7 @@ describe("listMyShareProposals", () => {
         ops: 1,
       },
     ]);
-    expect(calls[0]?.url).toBe(
-      "https://relay.test/sync/shares/share%2F1/proposals",
-    );
+    expect(calls[0]?.url).toBe("https://relay.test/sync/shares/share%2F1/proposals");
   });
 
   it("refuses a sent proposal whose op count is not a count", async () => {
@@ -373,9 +347,9 @@ describe("listMyShareProposals", () => {
       ],
     });
 
-    await expect(
-      listMyShareProposals({ relay, shareId: "share-1" }),
-    ).rejects.toThrow(/ops is not a non-negative integer/u);
+    await expect(listMyShareProposals({ relay, shareId: "share-1" })).rejects.toThrow(
+      /ops is not a non-negative integer/u,
+    );
   });
 });
 

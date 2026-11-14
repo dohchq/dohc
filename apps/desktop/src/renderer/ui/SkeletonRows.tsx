@@ -1,20 +1,12 @@
-import { createContext, useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
-// What a surface shows while its content loads. For the first 150ms it shows
-// nothing, so a load that finishes in that time never flashes. After that,
-// quiet lines appear where the content will be, and the content replaces them
-// in the same box. The status keeps its name for a screen reader the whole
-// time. Nothing moves: the lines fade in once (`dohc-reveal-if-slow` in
-// styles.css), and reduced motion drops the fade but keeps the wait.
-//
-// `list` lines fill the box the caller gives them, such as a list in a
-// dialog. `panel` lines fill a whole panel or tab, starting where its rows'
-// text starts. `document` lines sit in the editor's reading column, where a
-// file's text lands when it opens.
-//
-// The line widths repeat the drawing's four. Their fill is the skeleton
-// token, ink at 11%, so the lines read on paper, on a panel and on an inset
-// alike.
 const WIDTHS = ["w-[80%]", "w-[62%]", "w-[90%]", "w-[54%]"] as const;
 
 const LAYOUT = {
@@ -25,7 +17,8 @@ const LAYOUT = {
   // auto margins alone would shrink the column to nothing in a flex parent.
   // Put it in a pane that keeps its scrollbar's room, as document panes do,
   // or it centres 5px off a long document.
-  document: "mx-auto w-full max-w-[calc(720px+2*var(--dohc-editor-gutter))] px-[var(--dohc-editor-gutter)]",
+  document:
+    "mx-auto w-full max-w-[calc(720px+2*var(--dohc-editor-gutter))] px-[var(--dohc-editor-gutter)]",
 } as const;
 
 type LinesProps = {
@@ -74,17 +67,23 @@ function Frame(props: LinesProps & { children?: ReactNode; role?: "status"; test
     >
       {props.children}
       {Array.from({ length: props.rows ?? WIDTHS.length }, (_, row) => (
-        <span key={row} aria-hidden className={`block h-2 shrink-0 rounded bg-skeleton ${WIDTHS[row % WIDTHS.length]}`} />
+        <span
+          key={row}
+          aria-hidden
+          className={`block h-2 shrink-0 rounded bg-skeleton ${WIDTHS[row % WIDTHS.length]}`}
+        />
       ))}
     </div>
   );
 }
 
-export function SkeletonRows(props: LinesProps & {
-  /** What a screen reader hears, such as "Loading history...". */
-  label: string;
-  testId?: string;
-}) {
+export function SkeletonRows(
+  props: LinesProps & {
+    /** What a screen reader hears, such as "Loading history...". */
+    label: string;
+    testId?: string;
+  },
+) {
   return (
     <Frame {...props} role="status">
       <span className="sr-only">{props.label}</span>

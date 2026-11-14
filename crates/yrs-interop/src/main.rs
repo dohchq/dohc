@@ -1,21 +1,3 @@
-// R11 yrs/Yjs interoperability spike harness.
-//
-// A line-delimited JSON stdio server the Node driver (scripts/) talks to.
-// Each request is one JSON object on one line; each response is one JSON
-// object on one line. Binary payloads (Yjs update / state-vector bytes)
-// travel base64-encoded.
-//
-// The harness exposes exactly what the interop criteria need:
-//   - apply Yjs v1 updates into a yrs Doc (malformed input must error
-//     without corrupting the doc),
-//   - re-encode full state / state vectors / diffs (v1),
-//   - merge updates (the compaction primitive),
-//   - drive yrs-side edits (Y.Text + XmlFragment paragraphs + XmlText
-//     formatting) and return the delta yrs encoded for them,
-//   - dump a canonical content JSON (maps, text deltas, XML tree) that the
-//     JS driver computes identically from Yjs, so convergence is compared at
-//     content level, not just state vectors.
-
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, Write};
 
@@ -412,19 +394,6 @@ fn paragraph_text(
         )),
     }
 }
-
-// ---- canonical content JSON -------------------------------------------------
-//
-// The JS driver computes the same shape from Yjs (see scripts/canonical.ts):
-//   { "<rootName>": <root> } for every root type in the doc, where
-//   map        -> {"type":"map","value":{sorted json}}
-//   array      -> {"type":"array","value":[json...]}
-//   text       -> {"type":"text","delta":[{"insert":..,"attrs":{sorted}}...]}
-//   xmlFragment-> {"type":"xmlFragment","children":[node...]}
-//   element    -> {"type":"element","tag":..,"attrs":{sorted},"children":[..]}
-//   xmltext    -> {"type":"xmlText","delta":[...]}
-// Numbers normalize integral floats to JSON integers so f64/bigint encoding
-// differences between the two implementations cannot cause false mismatches.
 
 fn content_json(doc: &Doc, schema: &HashMap<String, RootKind>) -> Value {
     let mut roots = BTreeMap::new();

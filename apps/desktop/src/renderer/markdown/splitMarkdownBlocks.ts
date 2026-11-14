@@ -1,5 +1,5 @@
 // Splits markdown source into block-safe chunks for incremental rendering
-// (Phase 16: a 250KB document parses ~575ms as one tree; the first visible
+// (a 250KB document parses ~575ms as one tree; the first visible
 // window parses in single-digit ms). Chunk boundaries sit only at blank lines
 // outside fenced code, and never between a table and its row-height comment,
 // so each chunk parses to the same blocks it would inside the full document.
@@ -17,7 +17,6 @@ const LINK_DEF_RE = /^\s{0,3}\[[^\]]+\]:\s+\S/;
 export function splitMarkdownBlocks(source: string): string[] {
   const lines = source.split("\n");
 
-  // Segment at blank lines outside fences; collect link definitions.
   const segments: string[] = [];
   const definitions: string[] = [];
   let current: string[] = [];
@@ -69,7 +68,6 @@ export function splitMarkdownBlocks(source: string): string[] {
   return chunks.length > 0 ? chunks : [source];
 }
 
-// How many leading chunks make up the first visible window (~bytes worth).
 export function initialChunkCount(chunks: string[], windowBytes: number): number {
   let bytes = 0;
   for (let i = 0; i < chunks.length; i++) {

@@ -24,10 +24,10 @@ export function isReadableChatChannelRow(row: ShareRow): boolean {
   return kind === "chat" || kind === "group";
 }
 
-export function pathShareLanes(listing: {
-  granted?: ShareRow[];
-  received?: ShareRow[];
-}): { granted: ShareRow[]; received: ShareRow[] } {
+export function pathShareLanes(listing: { granted?: ShareRow[]; received?: ShareRow[] }): {
+  granted: ShareRow[];
+  received: ShareRow[];
+} {
   return {
     granted: (listing.granted ?? []).filter((row) => !isReadableChatChannelRow(row)),
     received: (listing.received ?? []).filter(

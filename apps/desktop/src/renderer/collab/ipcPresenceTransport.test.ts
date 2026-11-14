@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createIpcPresenceTransport } from "./ipcPresenceTransport";
 import type { PresenceScopeInput } from "../../ipc/bridgeContract";
 
-// MU-C5 — the IPC-PROXIED presence transport. It must forward the scope, carry
-// NO relay token, normalize the snapshot, and abort an in-flight poll over IPC
+// The IPC-proxied presence transport. It must forward the scope, carry
+// no relay token, normalize the snapshot, and abort an in-flight poll over IPC
 // (presenceCancel) so a workspace switch can't leak a request or repaint stale.
 
 const SCOPE: PresenceScopeInput = { kind: "workspace", workspaceId: "ws-a" };
@@ -31,8 +31,19 @@ describe("createIpcPresenceTransport", () => {
   it("publish forwards scope/topic/clientId/state and normalizes the snapshot", async () => {
     bridgeMock.presencePublish.mockResolvedValue({
       ok: true,
-      // A peer with NO state exercises the optional→null normalization.
-      snapshot: { version: 3, peers: [{ faceToken: "u", sessionToken: "c", isSelf: false, displayName: null, paletteSlot: 0, updatedAtMs: 7 }] },
+      snapshot: {
+        version: 3,
+        peers: [
+          {
+            faceToken: "u",
+            sessionToken: "c",
+            isSelf: false,
+            displayName: null,
+            paletteSlot: 0,
+            updatedAtMs: 7,
+          },
+        ],
+      },
     });
     const transport = createIpcPresenceTransport(SCOPE);
     const snapshot = await transport.publish({
@@ -50,7 +61,17 @@ describe("createIpcPresenceTransport", () => {
     });
     expect(snapshot).toEqual({
       version: 3,
-      peers: [{ faceToken: "u", sessionToken: "c", isSelf: false, displayName: null, paletteSlot: 0, state: null, updatedAtMs: 7 }],
+      peers: [
+        {
+          faceToken: "u",
+          sessionToken: "c",
+          isSelf: false,
+          displayName: null,
+          paletteSlot: 0,
+          state: null,
+          updatedAtMs: 7,
+        },
+      ],
     });
   });
 
@@ -91,12 +112,27 @@ describe("createIpcPresenceTransport", () => {
       ok: true,
       snapshot: {
         version: 2,
-        peers: [{ faceToken: "u2", sessionToken: "c2", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob" }, updatedAtMs: 9 }],
+        peers: [
+          {
+            faceToken: "u2",
+            sessionToken: "c2",
+            isSelf: false,
+            displayName: "Bob",
+            paletteSlot: 0,
+            state: { displayName: "Bob" },
+            updatedAtMs: 9,
+          },
+        ],
       },
     });
     const transport = createIpcPresenceTransport(SCOPE);
     const controller = new AbortController();
-    const snapshot = await transport.poll({ clientId: "c1", topic: "t", since: 1, signal: controller.signal });
+    const snapshot = await transport.poll({
+      clientId: "c1",
+      topic: "t",
+      since: 1,
+      signal: controller.signal,
+    });
     expect(bridgeMock.presencePoll).toHaveBeenCalledWith(
       expect.objectContaining({ scope: SCOPE, topic: "t", since: 1 }),
     );
@@ -121,7 +157,12 @@ describe("createIpcPresenceTransport", () => {
     );
     const transport = createIpcPresenceTransport(SCOPE);
     const controller = new AbortController();
-    const pending = transport.poll({ clientId: "c1", topic: "t", since: 0, signal: controller.signal });
+    const pending = transport.poll({
+      clientId: "c1",
+      topic: "t",
+      since: 0,
+      signal: controller.signal,
+    });
     // Let the poll register before aborting.
     await Promise.resolve();
     controller.abort();

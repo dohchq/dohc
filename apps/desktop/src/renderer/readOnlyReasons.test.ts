@@ -1,16 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { CONNECTION_LOST_REASON, NOT_SAVED_REASON, readOnlyReasons, transitionReason } from "./readOnlyReasons";
+import {
+  CONNECTION_LOST_REASON,
+  NOT_SAVED_REASON,
+  readOnlyReasons,
+  transitionReason,
+} from "./readOnlyReasons";
 
-const NONE = { gone: false, accessEnded: false, shared: false, transition: undefined, notSaved: false, livePaused: undefined };
+const NONE = {
+  gone: false,
+  accessEnded: false,
+  shared: false,
+  transition: undefined,
+  notSaved: false,
+  livePaused: undefined,
+};
 const TURN = { readOnlyWhileEditing: true, readOnlyCause: "reconnecting" } as const;
 
 describe("readOnlyReasons", () => {
   it("says a shared document is shared to read", () => {
-    expect(readOnlyReasons({ ...NONE, shared: true })).toEqual(["This page is shared with you to read."]);
+    expect(readOnlyReasons({ ...NONE, shared: true })).toEqual([
+      "This page is shared with you to read.",
+    ]);
   });
 
   it("says access ended in place of shared access", () => {
-    expect(readOnlyReasons({ ...NONE, accessEnded: true, shared: true })).toEqual(["Your access to this page ended."]);
+    expect(readOnlyReasons({ ...NONE, accessEnded: true, shared: true })).toEqual([
+      "Your access to this page ended.",
+    ]);
   });
 
   it("adds the reason a session became read-only", () => {
@@ -36,7 +52,14 @@ describe("readOnlyReasons", () => {
 
   it("gives no sentence once the file is gone, whatever else applies", () => {
     expect(
-      readOnlyReasons({ gone: true, accessEnded: true, shared: true, transition: CONNECTION_LOST_REASON, notSaved: true, livePaused: "refused" }),
+      readOnlyReasons({
+        gone: true,
+        accessEnded: true,
+        shared: true,
+        transition: CONNECTION_LOST_REASON,
+        notSaved: true,
+        livePaused: "refused",
+      }),
     ).toEqual([]);
   });
 
@@ -50,7 +73,9 @@ describe("the next step", () => {
     expect(CONNECTION_LOST_REASON).toBe(
       "dohc lost its connection to this page. Close every tab showing it, then reopen it to edit.",
     );
-    expect(NOT_SAVED_REASON).toBe("dohc could not save this page. Close every tab showing it, then reopen it to edit.");
+    expect(NOT_SAVED_REASON).toBe(
+      "dohc could not save this page. Close every tab showing it, then reopen it to edit.",
+    );
   });
 });
 
@@ -60,7 +85,6 @@ describe("transitionReason", () => {
       "dohc could not finish replacing this page. Try again to finish it.",
     );
     expect(transitionReason(TURN)).toBe(CONNECTION_LOST_REASON);
-    // Ended access has its own sentence.
     expect(transitionReason({ ...TURN, readOnlyCause: "access-ended" })).toBeUndefined();
     expect(transitionReason({ ...TURN, readOnlyWhileEditing: false })).toBeUndefined();
   });

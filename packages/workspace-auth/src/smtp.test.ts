@@ -21,9 +21,7 @@ interface FakeServer {
 }
 
 interface FakeOptions {
-  /** Capabilities announced after EHLO. */
   capabilities?: string[];
-  /** Replaces the reply for a command the test wants to fail. */
   refuse?: { command: string; reply: string };
 }
 
@@ -150,7 +148,9 @@ describe("smtpSettingsFromEnv", () => {
   });
 
   it("rejects a partial or malformed configuration instead of disabling email", () => {
-    expect(() => smtpSettingsFromEnv({ DOHC_SMTP_HOST: "smtp.example.com" })).toThrow(SmtpConfigError);
+    expect(() => smtpSettingsFromEnv({ DOHC_SMTP_HOST: "smtp.example.com" })).toThrow(
+      SmtpConfigError,
+    );
     const complete = {
       DOHC_SMTP_HOST: "smtp.example.com",
       DOHC_SMTP_PORT: "587",
@@ -158,9 +158,15 @@ describe("smtpSettingsFromEnv", () => {
       DOHC_SMTP_FROM: "accounts@example.com",
     };
     expect(() => smtpSettingsFromEnv({ ...complete, DOHC_SMTP_PORT: "0" })).toThrow(/1 to 65535/);
-    expect(() => smtpSettingsFromEnv({ ...complete, DOHC_SMTP_SECURE: "yes" })).toThrow(/true or false/);
-    expect(() => smtpSettingsFromEnv({ ...complete, DOHC_SMTP_FROM: "accounts" })).toThrow(/email address/);
-    expect(() => smtpSettingsFromEnv({ ...complete, DOHC_SMTP_USER: "postmaster" })).toThrow(/both/);
+    expect(() => smtpSettingsFromEnv({ ...complete, DOHC_SMTP_SECURE: "yes" })).toThrow(
+      /true or false/,
+    );
+    expect(() => smtpSettingsFromEnv({ ...complete, DOHC_SMTP_FROM: "accounts" })).toThrow(
+      /email address/,
+    );
+    expect(() => smtpSettingsFromEnv({ ...complete, DOHC_SMTP_USER: "postmaster" })).toThrow(
+      /both/,
+    );
   });
 });
 
@@ -168,11 +174,25 @@ describe("createSmtpSender", () => {
   it("requires remote TLS even when the SMTP server needs no password", () => {
     const create = vi.spyOn(nodemailer, "createTransport");
     try {
-      createSmtpSender({ host: "smtp.example.test", port: 587, secure: false, from: "accounts@dohc.test" });
-      expect(create).toHaveBeenCalledWith(expect.objectContaining({ requireTLS: true, secure: false }));
-      createSmtpSender({ host: "127.0.0.1", port: 2525, secure: false, from: "accounts@dohc.test" });
+      createSmtpSender({
+        host: "smtp.example.test",
+        port: 587,
+        secure: false,
+        from: "accounts@dohc.test",
+      });
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({ requireTLS: true, secure: false }),
+      );
+      createSmtpSender({
+        host: "127.0.0.1",
+        port: 2525,
+        secure: false,
+        from: "accounts@dohc.test",
+      });
       expect(create).toHaveBeenLastCalledWith(expect.objectContaining({ requireTLS: false }));
-    } finally { create.mockRestore(); }
+    } finally {
+      create.mockRestore();
+    }
   });
 
   it("submits one message with the envelope, headers and body the server sees", async () => {
@@ -184,7 +204,11 @@ describe("createSmtpSender", () => {
       from: "dohc <accounts@dohc.test>",
     });
 
-    await send({ to: "person@example.com", subject: "Verify your dohc email", text: "Hello\nthere" });
+    await send({
+      to: "person@example.com",
+      subject: "Verify your dohc email",
+      text: "Hello\nthere",
+    });
 
     expect(server.transcript).toContain("MAIL FROM:<accounts@dohc.test>");
     expect(server.transcript).toContain("RCPT TO:<person@example.com>");
@@ -259,9 +283,9 @@ describe("createSmtpSender", () => {
       { timeoutMs: 2000 },
     );
 
-    await expect(send({ to: "person@example.com", subject: "Hi", text: "Body" })).rejects.toBeInstanceOf(
-      SmtpDeliveryError,
-    );
+    await expect(
+      send({ to: "person@example.com", subject: "Hi", text: "Body" }),
+    ).rejects.toBeInstanceOf(SmtpDeliveryError);
   });
 
   it("rejects an address that is not an email address", async () => {

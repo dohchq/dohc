@@ -3,7 +3,6 @@ import {
   effectiveShareSelector,
   chatSideOf,
   fileSideOf,
-  isChatChannelSelector,
   isGroupSelector,
   isLiveEditShareSelector,
   parseStoredAnyShareSelectorJson,
@@ -18,7 +17,10 @@ import type {
   SyncRelayShareWithGrantRow,
   SyncRelayStorage,
 } from "./storage";
-import { readCurrentShareGrant, type CurrentShareGrantPrincipal } from "./storage/currentShareGrant";
+import {
+  readCurrentShareGrant,
+  type CurrentShareGrantPrincipal,
+} from "./storage/currentShareGrant";
 
 export type ShareAction =
   | "read"
@@ -115,10 +117,7 @@ export function authorizeShareAction(
 ): ShareAuthorizationResult<ShareSelector>;
 export function authorizeShareAction(input: ShareAuthorizationInput): ShareAuthorizationResult;
 export function authorizeShareAction(input: ShareAuthorizationInput): ShareAuthorizationResult {
-  const grants = input.storage.listActiveShareGrantsForRecipient(
-    input.shareId,
-    input.actorUserId,
-  );
+  const grants = input.storage.listActiveShareGrantsForRecipient(input.shareId, input.actorUserId);
   let authorized: AuthorizedShareAction | null = null;
   let denied = false;
   for (const grant of grants) {
@@ -146,10 +145,7 @@ export function authorizeShareAction(input: ShareAuthorizationInput): ShareAutho
 export function resolveReceivedShareAuthority(
   input: Omit<ShareAuthorizationInput, "action">,
 ): ReceivedShareAuthorityResult {
-  const grants = input.storage.listActiveShareGrantsForRecipient(
-    input.shareId,
-    input.actorUserId,
-  );
+  const grants = input.storage.listActiveShareGrantsForRecipient(input.shareId, input.actorUserId);
   let readable: AuthorizedShareAction | null = null;
   let genericChatWritable = false;
   let fallback: SyncRelayShareWithGrantRow | null = null;
@@ -179,7 +175,9 @@ export function resolveReceivedShareAuthority(
 // A link's files: a path grant, or a Group's folder. The action is still
 // judged against the whole grant, so a Group folder is never live-edited.
 export function authorizeLinkShareAction(
-  input: Omit<ShareGrantAuthorizationInput, "principal" | "action"> & { action: "read" | "live-edit" | "direct-write" },
+  input: Omit<ShareGrantAuthorizationInput, "principal" | "action"> & {
+    action: "read" | "live-edit" | "direct-write";
+  },
 ): ShareAuthorizationResult<ShareSelector> {
   const result = authorizeShareGrantAction({ ...input, principal: { kind: "link" } });
   const files = result.ok ? fileSideOf(result.effectiveSelector) : null;
@@ -204,9 +202,7 @@ export function authorizeShareGrantAction(
 ): ShareAuthorizationResult {
   const validated = validateShareGrant(input);
   if (!validated.ok) return validated;
-  return actionAllowed(validated, input.action)
-    ? validated
-    : { ok: false, reason: "denied" };
+  return actionAllowed(validated, input.action) ? validated : { ok: false, reason: "denied" };
 }
 
 function validateShareGrant(
@@ -262,12 +258,18 @@ function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): 
     // proposal rule and its own route; neither widens the other.
     case "direct-write": {
       const files = fileSideOf(authorized.effectiveSelector);
-      return authorized.grant.principalKind === "link" &&
-        files !== null && files.paths.length > 0 && files.access === "edit";
+      return (
+        authorized.grant.principalKind === "link" &&
+        files !== null &&
+        files.paths.length > 0 &&
+        files.access === "edit"
+      );
     }
     case "live-edit":
-      return (authorized.grant.principalKind === "user" || authorized.grant.principalKind === "link")
-        && isLiveEditShareSelector(authorized.effectiveSelector);
+      return (
+        (authorized.grant.principalKind === "user" || authorized.grant.principalKind === "link") &&
+        isLiveEditShareSelector(authorized.effectiveSelector)
+      );
   }
 }
 

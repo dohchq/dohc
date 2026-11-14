@@ -8,18 +8,8 @@ import {
 } from "@dohc/workspace-core";
 import { createHash, randomUUID } from "node:crypto";
 import type { FileHandle } from "node:fs/promises";
-import {
-  link,
-  lstat,
-  mkdir,
-  open,
-  realpath,
-  rename,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { link, lstat, mkdir, open, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { TextDecoder } from "node:util";
 import { renameWithRetry } from "../atomicReplaceFile";
 import { isInside } from "../security/pathContainment";
@@ -59,32 +49,19 @@ export function mediaTypeForExtension(path: string): string {
   return MEDIA_TYPES[ext] ?? "application/octet-stream";
 }
 
-const IMAGE_ASSET_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "webp",
-  "gif",
-  "svg",
-  "avif",
-  "bmp",
-]);
+const IMAGE_ASSET_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "gif", "svg", "avif", "bmp"]);
 
 /** Validate the image-attachment contract and return its canonical path. */
 export function normalizeWorkspaceImageAssetPath(relativePath: string): string {
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
-    throw new Error(
-      `Invalid image attachment path (${validated.reason}): ${relativePath}`,
-    );
+    throw new Error(`Invalid image attachment path (${validated.reason}): ${relativePath}`);
   }
   const extension = validated.normalized
     .slice(validated.normalized.lastIndexOf(".") + 1)
     .toLowerCase();
   if (!IMAGE_ASSET_EXTENSIONS.has(extension)) {
-    throw new Error(
-      "The attachment path must end with a supported image extension.",
-    );
+    throw new Error("The attachment path must end with a supported image extension.");
   }
   return validated.normalized;
 }
@@ -116,14 +93,13 @@ async function resolveWorkspaceFileTarget(
   // The reservation is therefore decided on where the path lands, and the
   // caller receives that resolution — resolving the spelling a second time
   // would hand back a target no rule was applied to.
-  const { relative: resolvedPath, resolvedAbsolute } =
-    await assertResolvedWorkspacePath({
-      rootPath,
-      absolutePath: join(rootPath, validated.normalized),
-      spelled: relativePath,
-      label: "Asset path",
-      access,
-    });
+  const { relative: resolvedPath, resolvedAbsolute } = await assertResolvedWorkspacePath({
+    rootPath,
+    absolutePath: join(rootPath, validated.normalized),
+    spelled: relativePath,
+    label: "Asset path",
+    access,
+  });
   return {
     realTarget: resolvedAbsolute,
     normalized: validated.normalized,
@@ -143,9 +119,7 @@ export async function resolveWorkspaceMaterializePath(
 ): Promise<WorkspaceMaterializePath> {
   const validated = validateUserMaterializePath(relativePath, { platform: process.platform });
   if (!validated.ok) {
-    throw new Error(
-      `Invalid materialize path (${validated.reason}): ${relativePath}`,
-    );
+    throw new Error(`Invalid materialize path (${validated.reason}): ${relativePath}`);
   }
   const { relative: resolvedPath } = await assertResolvedWorkspacePath({
     rootPath,
@@ -169,11 +143,7 @@ export async function resolveWorkspaceFile(
   normalized: string;
   resolvedPath: string;
 }> {
-  const target = await resolveWorkspaceFileTarget(
-    rootPath,
-    relativePath,
-    access,
-  );
+  const target = await resolveWorkspaceFileTarget(rootPath, relativePath, access);
   // Public callers need a file that is already there: the OS opener is handed
   // one, the editor's save renames onto one, and the database paths open one.
   // A prepared owner read delays this proof until after owner classification,
@@ -194,15 +164,10 @@ export interface WorkspaceAssetSource {
   mediaType: string;
 }
 
-const FILE_CHANGED_DURING_READ =
-  "This file changed while dohc was reading it. Try again.";
-const FILE_IDENTITY_UNVERIFIABLE =
-  "dohc could not confirm this is the same file. Try again.";
+const FILE_CHANGED_DURING_READ = "This file changed while dohc was reading it. Try again.";
+const FILE_IDENTITY_UNVERIFIABLE = "dohc could not confirm this is the same file. Try again.";
 
-function assertSameFile(
-  expected: FsEntryIdentity,
-  actual: FsEntryIdentity,
-): void {
+function assertSameFile(expected: FsEntryIdentity, actual: FsEntryIdentity): void {
   const comparison = sameFsEntry(expected, actual);
   if (comparison === "replaced") {
     throw new Error(FILE_CHANGED_DURING_READ);
@@ -230,13 +195,9 @@ export interface PreparedWorkspaceFileRead {
   readonly path: string;
   readAsset(): Promise<WorkspaceAssetSource>;
   readText(): Promise<WorkspaceTextReadResult>;
-  withVerifiedPath<T>(
-    run: (absolutePath: string) => Promise<T>,
-  ): Promise<T>;
+  withVerifiedPath<T>(run: (absolutePath: string) => Promise<T>): Promise<T>;
   withVerifiedPathSync<T>(
-    run: (
-      absolutePath: string,
-    ) => T extends PromiseLike<unknown> ? never : T,
+    run: (absolutePath: string) => T extends PromiseLike<unknown> ? never : T,
   ): Promise<T>;
 }
 
@@ -296,9 +257,7 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
     }
   }
 
-  async #withVerifiedHandle<T>(
-    run: (handle: FileHandle) => T | Promise<T>,
-  ): Promise<T> {
+  async #withVerifiedHandle<T>(run: (handle: FileHandle) => T | Promise<T>): Promise<T> {
     const handle = await this.#openVerified();
     try {
       return await run(handle);
@@ -311,14 +270,10 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
     return this.#withVerifiedHandle(async (handle) => {
       let bytes: Buffer;
       try {
-        bytes = (
-          await readFileHandleExact(handle, WORKSPACE_ASSET_MAX_BYTES)
-        ).bytes;
+        bytes = (await readFileHandleExact(handle, WORKSPACE_ASSET_MAX_BYTES)).bytes;
       } catch (error) {
         if (error instanceof BoundedFileReadTooLargeError) {
-          throw new Error(
-            `Asset too large to serve (${error.size} bytes): ${this.#spelledPath}`,
-          );
+          throw new Error(`Asset too large to serve (${error.size} bytes): ${this.#spelledPath}`);
         }
         throwWorkspaceBoundedReadError(error);
       }
@@ -331,17 +286,13 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
   }
 
   readText(): Promise<WorkspaceTextReadResult> {
-    return withOrderedWorkspaceTargetPath(
-      this.#rootPath,
-      this.#realTarget,
-      () => this.#withVerifiedHandle(readTextHandle),
+    return withOrderedWorkspaceTargetPath(this.#rootPath, this.#realTarget, () =>
+      this.#withVerifiedHandle(readTextHandle),
     );
   }
 
   withVerifiedPathSync<T>(
-    run: (
-      absolutePath: string,
-    ) => T extends PromiseLike<unknown> ? never : T,
+    run: (absolutePath: string) => T extends PromiseLike<unknown> ? never : T,
   ): Promise<T> {
     return this.#withVerifiedHandle(async () => {
       await this.#assertCanonicalPath();
@@ -353,9 +304,7 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
           "then" in result &&
           typeof result.then === "function"
         ) {
-          throw new Error(
-            "Verified file path operations must finish synchronously.",
-          );
+          throw new Error("Verified file path operations must finish synchronously.");
         }
         return result;
       } finally {
@@ -364,9 +313,7 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
     });
   }
 
-  withVerifiedPath<T>(
-    run: (absolutePath: string) => Promise<T>,
-  ): Promise<T> {
+  withVerifiedPath<T>(run: (absolutePath: string) => Promise<T>): Promise<T> {
     return this.#withVerifiedHandle(async () => {
       await this.#assertCanonicalPath();
       try {
@@ -473,8 +420,11 @@ export async function resolveWorkspaceFileRead(
   rootPath: string,
   relativePath: string,
 ): Promise<ResolvedWorkspaceFileRead> {
-  const { realTarget, normalized, resolvedPath } =
-    await resolveWorkspaceFileTarget(rootPath, relativePath, "read");
+  const { realTarget, normalized, resolvedPath } = await resolveWorkspaceFileTarget(
+    rootPath,
+    relativePath,
+    "read",
+  );
   return new ResolvedWorkspaceFileReadCapability(
     rootPath,
     realTarget,
@@ -488,9 +438,7 @@ export function prepareWorkspaceFileRead(
   rootPath: string,
   relativePath: string,
 ): Promise<PreparedWorkspaceFileRead> {
-  return resolveWorkspaceFileRead(rootPath, relativePath).then((source) =>
-    source.prepare(),
-  );
+  return resolveWorkspaceFileRead(rootPath, relativePath).then((source) => source.prepare());
 }
 
 // Text views (markdown/CSV/JSON/plain) read content over IPC rather than via a
@@ -547,10 +495,7 @@ class WorkspaceTextRetryConflictError extends Error {
 }
 
 function siblingTempPath(target: string, now: number, uniqueId: string): string {
-  return join(
-    dirname(target),
-    `.dohc-write-${process.pid}-${now}-${uniqueId}.tmp`,
-  );
+  return join(dirname(target), `.dohc-write-${process.pid}-${now}-${uniqueId}.tmp`);
 }
 
 export function createAtomicTextWriter(deps: {
@@ -648,9 +593,7 @@ export interface WorkspaceOperationLease {
 
 class WorkspaceOperationSupersededError extends Error {
   constructor() {
-    super(
-      "A file or folder changed before this write started. Try the action again.",
-    );
+    super("A file or folder changed before this write started. Try the action again.");
     this.name = "WorkspaceOperationSupersededError";
   }
 }
@@ -681,13 +624,10 @@ export function createWorkspaceOperationScheduler() {
       const entry = state.queue.shift();
       if (!entry) return;
       state.activeExclusive = true;
-      void entry.run().then(
-        (outcome) => {
-          if (outcome.changed) state.generation += 1;
-          releaseExclusive();
-        },
-        releaseExclusive,
-      );
+      void entry.run().then((outcome) => {
+        if (outcome.changed) state.generation += 1;
+        releaseExclusive();
+      }, releaseExclusive);
       return;
     }
 
@@ -705,10 +645,7 @@ export function createWorkspaceOperationScheduler() {
   const enqueue = <T>(
     rootPath: string,
     mode: "shared" | "exclusive",
-    operation: (
-      markChanged: () => void,
-      lease: WorkspaceOperationLease,
-    ) => Promise<T>,
+    operation: (markChanged: () => void, lease: WorkspaceOperationLease) => Promise<T>,
     staleSensitive = false,
     markOnSuccess = true,
   ): Promise<T> => {
@@ -733,12 +670,9 @@ export function createWorkspaceOperationScheduler() {
           const lease = Object.freeze({ rootPath }) as WorkspaceOperationLease;
           activeLeases.set(lease, key);
           try {
-            const value = await operation(
-              () => {
-                changed = true;
-              },
-              lease,
-            );
+            const value = await operation(() => {
+              changed = true;
+            }, lease);
             if (mode === "exclusive" && markOnSuccess) changed = true;
             resolve(value);
           } catch (error) {
@@ -760,37 +694,21 @@ export function createWorkspaceOperationScheduler() {
     staleSensitiveShared: <T>(
       rootPath: string,
       operation: (lease: WorkspaceOperationLease) => Promise<T>,
-    ) =>
-      enqueue(
-        rootPath,
-        "shared",
-        (_markChanged, lease) => operation(lease),
-        true,
-      ),
+    ) => enqueue(rootPath, "shared", (_markChanged, lease) => operation(lease), true),
     exclusive: <T>(
       rootPath: string,
-      operation: (
-        markChanged: () => void,
-        lease: WorkspaceOperationLease,
-      ) => Promise<T>,
+      operation: (markChanged: () => void, lease: WorkspaceOperationLease) => Promise<T>,
       options?: { markOnSuccess?: boolean },
     ) => enqueue(rootPath, "exclusive", operation, false, options?.markOnSuccess),
-    assertActiveLease: (
-      rootPath: string,
-      lease: WorkspaceOperationLease,
-    ): void => {
+    assertActiveLease: (rootPath: string, lease: WorkspaceOperationLease): void => {
       if (activeLeases.get(lease) !== resolvedPathKey(rootPath)) {
-        throw new Error(
-          "Workspace operation lease is inactive or belongs to another root.",
-        );
+        throw new Error("Workspace operation lease is inactive or belongs to another root.");
       }
     },
   };
 }
 
-export type WorkspaceOperationScheduler = ReturnType<
-  typeof createWorkspaceOperationScheduler
->;
+export type WorkspaceOperationScheduler = ReturnType<typeof createWorkspaceOperationScheduler>;
 
 export function createOrderedWorkspaceTextAccess(deps: {
   resolveTarget: (
@@ -822,26 +740,15 @@ export function createOrderedWorkspaceTextAccess(deps: {
     let admittedOperation!: Promise<T>;
     await enqueueOrdered(rootTails, workspacePathKey(rootPath), async () => {
       const target = await deps.resolveTarget(rootPath, relativePath, access);
-      admittedOperation = enqueueOrdered(
-        targetTails,
-        workspacePathKey(target),
-        () => run(target),
-      );
+      admittedOperation = enqueueOrdered(targetTails, workspacePathKey(target), () => run(target));
     });
     return admittedOperation;
   };
 
   return {
     read: (rootPath: string, relativePath: string) =>
-      scheduler.shared(rootPath, () =>
-        admit(rootPath, relativePath, "read", deps.readTarget),
-      ),
-    write: (
-      rootPath: string,
-      relativePath: string,
-      text: string,
-      expectedContentHash: string,
-    ) =>
+      scheduler.shared(rootPath, () => admit(rootPath, relativePath, "read", deps.readTarget)),
+    write: (rootPath: string, relativePath: string, text: string, expectedContentHash: string) =>
       scheduler.shared(rootPath, () =>
         admit(rootPath, relativePath, "write", (target) =>
           deps.writeTarget(target, text, expectedContentHash),
@@ -898,15 +805,10 @@ export function createOrderedWorkspaceTextAccess(deps: {
   };
 }
 
-async function readTextHandle(
-  handle: FileHandle,
-): Promise<WorkspaceTextReadResult> {
+async function readTextHandle(handle: FileHandle): Promise<WorkspaceTextReadResult> {
   try {
     const result = await readFileHandleTruncated(handle, MAX_TEXT_BYTES);
-    return workspaceTextReadResultFromBytes(
-      result.bytes,
-      result.totalByteLength,
-    );
+    return workspaceTextReadResultFromBytes(result.bytes, result.totalByteLength);
   } catch (error) {
     throwWorkspaceBoundedReadError(error);
   }
@@ -969,11 +871,7 @@ export function withOrderedWorkspaceTargetPath<T>(
   resolvedTarget: string,
   run: () => Promise<T>,
 ): Promise<T> {
-  return orderedWorkspaceTextAccess.orderedOnResolvedTarget(
-    rootPath,
-    resolvedTarget,
-    run,
-  );
+  return orderedWorkspaceTextAccess.orderedOnResolvedTarget(rootPath, resolvedTarget, run);
 }
 
 export function withOrderedWorkspaceTargetPathInLease<T>(
@@ -999,10 +897,7 @@ export function withSharedWorkspaceOperation<T>(
 
 export function withExclusiveWorkspaceOperation<T>(
   rootPath: string,
-  operation: (
-    markChanged: () => void,
-    lease: WorkspaceOperationLease,
-  ) => Promise<T>,
+  operation: (markChanged: () => void, lease: WorkspaceOperationLease) => Promise<T>,
   options?: { markOnSuccess?: boolean },
 ): Promise<T> {
   return workspaceOperationScheduler.exclusive(rootPath, operation, options);
@@ -1132,13 +1027,10 @@ export async function writeWorkspaceAsset(
   relativePath: string,
   bytes: Uint8Array,
 ): Promise<void> {
-  await workspaceOperationScheduler.staleSensitiveShared(
-    rootPath,
-    async (lease) => {
-      const path = await resolveWorkspaceMaterializePath(rootPath, relativePath);
-      await writeWorkspaceAssetInLease(rootPath, lease, path, bytes);
-    },
-  );
+  await workspaceOperationScheduler.staleSensitiveShared(rootPath, async (lease) => {
+    const path = await resolveWorkspaceMaterializePath(rootPath, relativePath);
+    await writeWorkspaceAssetInLease(rootPath, lease, path, bytes);
+  });
 }
 
 export async function writeWorkspaceAssetInLease(
@@ -1151,9 +1043,7 @@ export async function writeWorkspaceAssetInLease(
   const requestedPath = normalizeWorkspaceImageAssetPath(target.requestedPath);
   const resolvedPath = normalizeWorkspaceImageAssetPath(target.resolvedPath);
   if (bytes.byteLength > MAX_ASSET_WRITE_BYTES) {
-    throw new Error(
-      `Asset exceeds the ${MAX_ASSET_WRITE_BYTES}-byte write limit`,
-    );
+    throw new Error(`Asset exceeds the ${MAX_ASSET_WRITE_BYTES}-byte write limit`);
   }
   try {
     await writeContainedAsset(rootPath, resolvedPath, bytes);
@@ -1176,11 +1066,7 @@ export async function writeWorkspaceAssetInLease(
       `An image attachment already exists at ${requestedPath} and is not a regular file.`,
     );
   }
-  const currentTarget = await resolveWorkspaceFile(
-    rootPath,
-    requestedPath,
-    "read",
-  ).catch(() => {
+  const currentTarget = await resolveWorkspaceFile(rootPath, requestedPath, "read").catch(() => {
     throw changedCollision();
   });
   if (currentTarget.resolvedPath !== resolvedPath) {
@@ -1193,10 +1079,7 @@ export async function writeWorkspaceAssetInLease(
     const openedFile = await handle.stat({ bigint: true }).catch(() => {
       throw changedCollision();
     });
-    if (
-      !openedFile.isFile() ||
-      sameFsEntry(existingLeaf, openedFile) !== "same"
-    ) {
+    if (!openedFile.isFile() || sameFsEntry(existingLeaf, openedFile) !== "same") {
       throw changedCollision();
     }
     const existing = await readFileHandleExact(handle, MAX_ASSET_WRITE_BYTES);
@@ -1209,17 +1092,13 @@ export async function writeWorkspaceAssetInLease(
     ) {
       throw changedCollision();
     }
-    if (
-      !(error instanceof BoundedFileReadTooLargeError)
-    ) {
+    if (!(error instanceof BoundedFileReadTooLargeError)) {
       throw error;
     }
   } finally {
     await handle.close();
   }
-  throw new Error(
-    `An image attachment already exists at ${requestedPath} with different content.`,
-  );
+  throw new Error(`An image attachment already exists at ${requestedPath} with different content.`);
 }
 
 export async function readWorkspaceText(

@@ -55,7 +55,7 @@ export function createLinkReadRoutes(
   admitLinkBlobBytes: (grantId: string, byteLength: number) => (() => void) | null,
   respondWithLinkBytes: ReturnType<typeof createLinkResponseStreams>["respondWithLinkBytes"],
   linkKey?: string | Uint8Array,
-  replica?:ReturnType<SyncRelayStorage["createReplicaLinkReadService"]>,
+  replica?: ReturnType<SyncRelayStorage["createReplicaLinkReadService"]>,
 ) {
   const identity = createReceivedIdentity(linkKey);
 
@@ -63,7 +63,14 @@ export function createLinkReadRoutes(
   // channel. The share's answer and its files' answer both name it.
   const linkChannel = (grantId: string) => {
     const group = authorizeLinkChatAction({ storage, grantId, action: "read" });
-    return group.ok ? { channel: { channelWireId: group.effectiveSelector.channelWireId, access: group.effectiveSelector.access } } : {};
+    return group.ok
+      ? {
+          channel: {
+            channelWireId: group.effectiveSelector.channelWireId,
+            access: group.effectiveSelector.access,
+          },
+        }
+      : {};
   };
   return async function respondToLinkRead(
     request: Request,
@@ -72,14 +79,8 @@ export function createLinkReadRoutes(
     const capabilityRateLimiter =
       route.route === "link-log" ? linkLogReadRateLimiter : linkReadRateLimiter;
     const grantRateLimiter =
-      route.route === "link-log"
-        ? linkGrantLogReadRateLimiter
-        : linkGrantReadRateLimiter;
-    const capability = linkAuthority.require(
-      request,
-      capabilityRateLimiter,
-      grantRateLimiter,
-    );
+      route.route === "link-log" ? linkGrantLogReadRateLimiter : linkGrantReadRateLimiter;
+    const capability = linkAuthority.require(request, capabilityRateLimiter, grantRateLimiter);
     const requireFresh = () => linkAuthority.fresh(capability);
     if (request.method !== "GET") throw relayError("method_not_allowed");
     const share = storage.getShare(capability.shareId);
@@ -93,29 +94,38 @@ export function createLinkReadRoutes(
         epochLogFloor,
       );
       const fresh = requireFresh();
-      const presentation = createAccountlessPathProjection(
-        fresh.effectiveSelector,
+      const presentation = createAccountlessPathProjection(fresh.effectiveSelector);
+      return linkJsonResponse(
+        fresh,
+        {
+          ok: true,
+          receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
+          effectiveSelector: presentation.selector,
+          access: fresh.access,
+          subjectName: storage.getShareLabels(fresh.shareId, "link").subjectName,
+          ...linkChannel(fresh.grantId),
+          ...freshness,
+          // share-web learns a holder's grant at exchange. It learns an agent's
+          // here, to count the agent with the link's holders, and keeps it to itself.
+          ...(fresh.credential.kind === "agent" ? { grantId: fresh.grantId } : {}),
+        },
+        request.signal,
       );
-      return linkJsonResponse(fresh, {
-        ok: true,
-        receivedSource: identity.source(["link", fresh.grantId], share.workspaceId),
-        effectiveSelector: presentation.selector,
-        access: fresh.access,
-        subjectName: storage.getShareLabels(fresh.shareId).subjectName,
-        ...linkChannel(fresh.grantId),
-        ...freshness,
-        // share-web learns a holder's grant at exchange. It learns an agent's
-        // here, to count the agent with the link's holders, and keeps it to itself.
-        ...(fresh.credential.kind === "agent" ? { grantId: fresh.grantId } : {}),
-      }, request.signal);
     }
 
     if (route.route === "link-current") {
-      if(replica) {
-        const body=replica.inventory({grantId:capability.grantId,generation:capability.generation},
-          ()=>requireFresh(),new URL(request.url).searchParams.get("collectionPath"));
-        if(body.files.length>linkCurrentFileLimit)throw notFound();
-        return linkJsonResponse(capability,{...body,...linkChannel(capability.grantId)},request.signal);
+      if (replica) {
+        const body = replica.inventory(
+          { grantId: capability.grantId, generation: capability.generation },
+          () => requireFresh(),
+          new URL(request.url).searchParams.get("collectionPath"),
+        );
+        if (body.files.length > linkCurrentFileLimit) throw notFound();
+        return linkJsonResponse(
+          capability,
+          { ...body, ...linkChannel(capability.grantId) },
+          request.signal,
+        );
       }
       const snapshot = storage.readCurrentFileState({
         workspaceId: share.workspaceId,
@@ -130,70 +140,115 @@ export function createLinkReadRoutes(
         snapshot.epochLogFloor,
       );
       const fresh = requireFresh();
-      const presentation = createAccountlessPathProjection(
-        fresh.effectiveSelector,
-      );
+      const presentation = createAccountlessPathProjection(fresh.effectiveSelector);
       const requestedFolder = new URL(request.url).searchParams.get("collectionPath");
       const observed: Parameters<SyncRelayStorage["indexReceivedWorkTargets"]>[0][number][] = [];
-      const identity = createReceivedIdentity(linkKey, (recipient, workspaceId, objectId, objectToken) => {
-        const sourceHandle = identity.source(recipient, workspaceId);
-        if (sourceHandle) observed.push({recipient, workspaceId, objectId, objectToken, sourceHandle});
-      });
+      const identity = createReceivedIdentity(
+        linkKey,
+        (recipient, workspaceId, objectId, objectToken) => {
+          const sourceHandle = identity.source(recipient, workspaceId);
+          if (sourceHandle)
+            observed.push({ recipient, workspaceId, objectId, objectToken, sourceHandle });
+        },
+      );
       const files = snapshot.files.map((file) => {
         const path = presentation.projectPath(file.path);
         if (path === null) throw notFound();
         return {
           path,
-          objectId: identity.object(["link", fresh.grantId], share.workspaceId, storage.currentFileObjectId({ workspaceId: share.workspaceId, versionId: targetVersionId(fresh.effectiveSelector), path: file.path })),
+          objectId: identity.object(
+            ["link", fresh.grantId],
+            share.workspaceId,
+            storage.currentFileObjectId({
+              workspaceId: share.workspaceId,
+              versionId: targetVersionId(fresh.effectiveSelector),
+              path: file.path,
+            }),
+          ),
           blobSha256: file.blobSha256,
           contentKind: file.contentKind,
-          ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml` ? { automationSwitchable: fresh.access === "edit"
-            && fresh.effectiveSelector.versionId === null
-            && fresh.effectiveSelector.paths.some(root => file.path.slice(0, -"/automations.yaml".length) === root
-              || file.path.startsWith(`${root}/`))
-            && storage.automationSwitchableFolder(share.workspaceId, file.path.slice(0, -"/automations.yaml".length)) } : {}),
+          ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml`
+            ? {
+                automationSwitchable:
+                  fresh.access === "edit" &&
+                  fresh.effectiveSelector.versionId === null &&
+                  fresh.effectiveSelector.paths.some(
+                    (root) =>
+                      file.path.slice(0, -"/automations.yaml".length) === root ||
+                      file.path.startsWith(`${root}/`),
+                  ) &&
+                  storage.automationSwitchableFolder(
+                    share.workspaceId,
+                    file.path.slice(0, -"/automations.yaml".length),
+                  ),
+              }
+            : {}),
         };
       });
       storage.indexReceivedWorkTargets(observed);
-      return linkJsonResponse(fresh, {
-        ok: true,
-        effectiveSelector: presentation.selector,
-        access: fresh.access,
-        subjectName: storage.getShareLabels(fresh.shareId).subjectName,
-        ...linkChannel(fresh.grantId),
-        files,
-        nextCursor: snapshot.nextCursor,
-        epochLogFloor: snapshot.epochLogFloor,
-        ...freshness,
-      }, request.signal);
+      return linkJsonResponse(
+        fresh,
+        {
+          ok: true,
+          effectiveSelector: presentation.selector,
+          access: fresh.access,
+          subjectName: storage.getShareLabels(fresh.shareId, "link").subjectName,
+          ...linkChannel(fresh.grantId),
+          files,
+          nextCursor: snapshot.nextCursor,
+          epochLogFloor: snapshot.epochLogFloor,
+          ...freshness,
+        },
+        request.signal,
+      );
     }
 
     const epochLogFloor = storage.getEpochLogFloor(share.workspaceId);
     if (route.route === "link-log") {
       const url = new URL(request.url);
       const currentOnly = url.searchParams.get("current") === "true";
-      if(replica && currentOnly) {
-        const input={grantId:capability.grantId,generation:capability.generation};
-        let since=parseCursor(url.searchParams.get("since"));
-        if(!Number.isSafeInteger(since))throw notFound();
-        const limit=parseLimit(url.searchParams.get("limit")),hold=parseLinkLogHold(url.searchParams.get("hold"));
-        const deadline=Date.now()+hold;
-        const read=()=>replica.feed(input,()=>requireFresh(),since,limit);
-        let page=read();
-        while(hold>0 && !page.ops.length && !page.hasMore && Date.now()<deadline && !request.signal.aborted) {
-          since=page.nextCursor;
+      if (replica && currentOnly) {
+        const input = { grantId: capability.grantId, generation: capability.generation };
+        let since = parseCursor(url.searchParams.get("since"));
+        if (!Number.isSafeInteger(since)) throw notFound();
+        const limit = parseLimit(url.searchParams.get("limit")),
+          hold = parseLinkLogHold(url.searchParams.get("hold"));
+        const deadline = Date.now() + hold;
+        const read = () => replica.feed(input, () => requireFresh(), since, limit);
+        let page = read();
+        while (
+          hold > 0 &&
+          !page.ops.length &&
+          !page.hasMore &&
+          Date.now() < deadline &&
+          !request.signal.aborted
+        ) {
+          since = page.nextCursor;
           try {
-            await discussionActivity.wait(linkLogWaitGroup(share.workspaceId),`link:${capability.callerKey}`,{
-              holdMs:Math.max(0,deadline-Date.now()),signal:request.signal,shouldPark:()=>{
-                try {const checked=read();return !checked.ops.length && !checked.hasMore;}catch{return false;}
-              }});
-          }catch(error) {
-            if(error instanceof DiscussionActivityCapacityError)throw relayError("link_read_rate_limited");
+            await discussionActivity.wait(
+              linkLogWaitGroup(share.workspaceId),
+              `link:${capability.callerKey}`,
+              {
+                holdMs: Math.max(0, deadline - Date.now()),
+                signal: request.signal,
+                shouldPark: () => {
+                  try {
+                    const checked = read();
+                    return !checked.ops.length && !checked.hasMore;
+                  } catch {
+                    return false;
+                  }
+                },
+              },
+            );
+          } catch (error) {
+            if (error instanceof DiscussionActivityCapacityError)
+              throw relayError("link_read_rate_limited");
             throw error;
           }
-          page=read();
+          page = read();
         }
-        return linkJsonResponse(capability,{ok:true,...page},request.signal);
+        return linkJsonResponse(capability, { ok: true, ...page }, request.signal);
       }
       if (!currentOnly && capability.access !== "edit") throw notFound();
       const freshRead = () => {
@@ -241,9 +296,7 @@ export function createLinkReadRoutes(
                 shouldPark: () => {
                   try {
                     const fresh = freshRead();
-                    const currentEpochLogFloor = storage.getEpochLogFloor(
-                      share.workspaceId,
-                    );
+                    const currentEpochLogFloor = storage.getEpochLogFloor(share.workspaceId);
                     if (currentEpochLogFloor !== epochLogFloor) return false;
                     const checked = filteredLogPage(
                       share.workspaceId,
@@ -276,9 +329,7 @@ export function createLinkReadRoutes(
           }
 
           const fresh = freshRead();
-          const currentEpochLogFloor = storage.getEpochLogFloor(
-            share.workspaceId,
-          );
+          const currentEpochLogFloor = storage.getEpochLogFloor(share.workspaceId);
           page = filteredLogPage(
             share.workspaceId,
             share.shareId,
@@ -302,17 +353,19 @@ export function createLinkReadRoutes(
             request.signal.aborted
           ) {
             freshRead();
-            return linkJsonResponse(capability, {
-              ok: true,
-              ...page,
-              epochLogFloor: currentEpochLogFloor,
-            }, request.signal);
+            return linkJsonResponse(
+              capability,
+              {
+                ok: true,
+                ...page,
+                epochLogFloor: currentEpochLogFloor,
+              },
+              request.signal,
+            );
           }
         }
         const fresh = freshRead();
-        const currentEpochLogFloor = storage.getEpochLogFloor(
-          share.workspaceId,
-        );
+        const currentEpochLogFloor = storage.getEpochLogFloor(share.workspaceId);
         page = filteredLogPage(
           share.workspaceId,
           share.shareId,
@@ -328,39 +381,68 @@ export function createLinkReadRoutes(
           currentEpochLogFloor,
         );
         freshRead();
-        return linkJsonResponse(capability, {
-          ok: true,
-          ...page,
-          epochLogFloor: currentEpochLogFloor,
-        }, request.signal);
+        return linkJsonResponse(
+          capability,
+          {
+            ok: true,
+            ...page,
+            epochLogFloor: currentEpochLogFloor,
+          },
+          request.signal,
+        );
       }
       freshRead();
-      return linkJsonResponse(capability, {
-        ok: true,
-        ...page,
-        epochLogFloor,
-      }, request.signal);
+      return linkJsonResponse(
+        capability,
+        {
+          ok: true,
+          ...page,
+          epochLogFloor,
+        },
+        request.signal,
+      );
     }
 
     assertSha256(route.sha256);
-    const replicaInput={grantId:capability.grantId,generation:capability.generation};
-    const readReplicaBlob=(includeBytes=true)=>replica!.blob(replicaInput,()=>requireFresh(),route.sha256,includeBytes);
-    let historicalByteLength:number|null|undefined;
-    const historicalLength=()=>historicalByteLength===undefined ? historicalByteLength=capability.access === "edit" ? linkRevisionByteLength(
-      share.workspaceId,capability.effectiveSelector,route.sha256,epochLogFloor) : null : historicalByteLength;
-    let replicaMetadata:ReturnType<typeof readReplicaBlob>=null;
-    if(replica) {
-      try {replicaMetadata=readReplicaBlob(false);}
-      catch(error) {if(!(error instanceof RelayError) || error.code!=="link_read_rate_limited" || historicalLength()===null)throw error;}
+    const replicaInput = { grantId: capability.grantId, generation: capability.generation };
+    const readReplicaBlob = (includeBytes = true) =>
+      replica!.blob(replicaInput, () => requireFresh(), route.sha256, includeBytes);
+    let historicalByteLength: number | null | undefined;
+    const historicalLength = () =>
+      historicalByteLength === undefined
+        ? (historicalByteLength =
+            capability.access === "edit"
+              ? linkRevisionByteLength(
+                  share.workspaceId,
+                  capability.effectiveSelector,
+                  route.sha256,
+                  epochLogFloor,
+                )
+              : null)
+        : historicalByteLength;
+    let replicaMetadata: ReturnType<typeof readReplicaBlob> = null;
+    if (replica) {
+      try {
+        replicaMetadata = readReplicaBlob(false);
+      } catch (error) {
+        if (
+          !(error instanceof RelayError) ||
+          error.code !== "link_read_rate_limited" ||
+          historicalLength() === null
+        )
+          throw error;
+      }
     }
     // A current file first, then an earlier revision of a file still in the share.
-    const currentByteLength = replica ? replicaMetadata?.byteLength ?? null : storage.currentFileBlobByteLength({
-      workspaceId: share.workspaceId,
-      versionId: targetVersionId(capability.effectiveSelector),
-      selectorPaths: capability.effectiveSelector.paths,
-      sha256: route.sha256,
-      epochLogFloor,
-    });
+    const currentByteLength = replica
+      ? (replicaMetadata?.byteLength ?? null)
+      : storage.currentFileBlobByteLength({
+          workspaceId: share.workspaceId,
+          versionId: targetVersionId(capability.effectiveSelector),
+          selectorPaths: capability.effectiveSelector.paths,
+          sha256: route.sha256,
+          epochLogFloor,
+        });
     const byteLength = currentByteLength ?? historicalLength();
     if (
       byteLength === null ||
@@ -371,10 +453,7 @@ export function createLinkReadRoutes(
       throw notFound();
     }
 
-    const releaseBytes = admitLinkBlobBytes(
-      capability.grantId,
-      byteLength,
-    );
+    const releaseBytes = admitLinkBlobBytes(capability.grantId, byteLength);
     if (!releaseBytes) throw relayError("link_read_rate_limited");
     const settleEgress = linkGrantEgressRateLimiter.reserve(
       capability.grantId,
@@ -387,16 +466,29 @@ export function createLinkReadRoutes(
     }
     let streamOwnsAdmission = false;
     try {
-      const replicaBlob=replicaMetadata ? readReplicaBlob() : null;
-      const blob = replicaMetadata ? replicaBlob?.bytes : storage.getBlob(share.workspaceId, route.sha256);
+      const replicaBlob = replicaMetadata ? readReplicaBlob() : null;
+      const blob = replicaMetadata
+        ? replicaBlob?.bytes
+        : storage.getBlob(share.workspaceId, route.sha256);
       if (!blob || blob.byteLength !== byteLength) throw notFound();
       const fresh = requireFresh();
       if (currentByteLength === null && fresh.access !== "edit") throw notFound();
       // An agent's download checks its token before every chunk, so it stops
       // once the token expires or its connection or link ends.
       const replicaGuard = replicaBlob?.guard;
-      const agentGuard = capability.credential.kind === "agent" ? () => { requireFresh(); } : undefined;
-      const guard = replicaGuard && agentGuard ? () => { replicaGuard(); agentGuard(); } : replicaGuard ?? agentGuard;
+      const agentGuard =
+        capability.credential.kind === "agent"
+          ? () => {
+              requireFresh();
+            }
+          : undefined;
+      const guard =
+        replicaGuard && agentGuard
+          ? () => {
+              replicaGuard();
+              agentGuard();
+            }
+          : (replicaGuard ?? agentGuard);
       const response = respondWithLinkBytes(
         blob,
         capability.shareId,
@@ -407,7 +499,7 @@ export function createLinkReadRoutes(
           "content-length": String(byteLength),
           "content-type": "application/octet-stream",
         },
-        guard ? {signal:request.signal,guard} : undefined,
+        guard ? { signal: request.signal, guard } : undefined,
       );
       streamOwnsAdmission = true;
       return response;

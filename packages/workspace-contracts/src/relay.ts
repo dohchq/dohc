@@ -17,9 +17,7 @@ export interface RelayMaterializedPath {
 // Called once for each relay pull page. The pull commits that page's cursor
 // only after this resolves, so a failed or interrupted disk projection makes
 // the relay offer the same page again on the next pass.
-export type MaterializeRelayPullPage = (
-  paths: readonly RelayMaterializedPath[],
-) => Promise<void>;
+export type MaterializeRelayPullPage = (paths: readonly RelayMaterializedPath[]) => Promise<void>;
 
 // Apply, project, reconcile, and commit one fetched batch on the capture chain.
 export type RunRelayPullBatch = <T>(
@@ -120,7 +118,7 @@ export class RelayConflictError extends Error {
 // is ahead of local reality, or holds the same origin seq with different
 // content). That means the local engine.db was restored/cloned from an older
 // snapshot — pushing must fail closed rather than silently drop local ops.
-// Recovering via an origin reset is 0P-C follow-up work.
+// Recovering via an origin reset is follow-up work.
 export class RelayOriginDivergedError extends Error {
   constructor(message = "Relay log for this origin diverged from the local journal.") {
     super(message);
@@ -203,9 +201,7 @@ function relayIdentityValue(value: unknown): string | null {
   return value;
 }
 
-export function decodeRelayWorkspaceBootstrap(
-  value: unknown,
-): RelayWorkspaceBootstrapResult {
+export function decodeRelayWorkspaceBootstrap(value: unknown): RelayWorkspaceBootstrapResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Relay bootstrap response is invalid.");
   }
@@ -257,9 +253,7 @@ export interface PushSharedChannelResult {
 }
 
 export class ShareUnavailableError extends Error {
-  constructor(
-    message = "This share was ended, or the code does not match your account.",
-  ) {
+  constructor(message = "This share was ended, or the code does not match your account.") {
     super(message);
     this.name = "ShareUnavailableError";
   }
@@ -274,10 +268,7 @@ export class ShareUnavailableError extends Error {
 //
 // "not-required" is a `view` share, which may push nothing and so is given no
 // identity — the absence is what keeps its local writes local.
-type ShareViewEnrolment =
-  | "recorded"
-  | "already-recorded"
-  | "not-required";
+type ShareViewEnrolment = "recorded" | "already-recorded" | "not-required";
 
 export interface RecordShareViewIdentityResult {
   identity: ShareViewEnrolment;
@@ -329,11 +320,7 @@ export interface PullShareViewResult {
 // A proposal is the set of changes a recipient offered in one
 // submit. It exists only from submit — there is no draft state at the relay —
 // and it leaves `open` exactly once.
-export type ShareProposalState =
-  | "open"
-  | "accepted"
-  | "declined"
-  | "withdrawn";
+export type ShareProposalState = "open" | "accepted" | "declined" | "withdrawn";
 
 export type ShareProposalDecision = "accept" | "decline";
 
@@ -362,7 +349,13 @@ export interface SubmitShareProposalResult {
 // changes still offers it.
 export type DirectWriteReport =
   | { paths: string[]; result: "written" }
-  | { paths: string[]; result: "stale"; stalePath: string; currentBlobSha256: string | null; recoveredDraftPath: string | null }
+  | {
+      paths: string[];
+      result: "stale";
+      stalePath: string;
+      currentBlobSha256: string | null;
+      recoveredDraftPath: string | null;
+    }
   | { paths: string[]; result: "refused"; reason: string };
 
 // What one direct push wrote. Empty when nothing was eligible, or the share
@@ -462,10 +455,13 @@ export const NOTICE_KINDS = {
   // One of your personal agents signed in. The relay writes it from the
   // agent when a sign-in is redeemed.
   "personal-agent-signed-in": { senderKind: "agent", recipients: "relay" },
-} as const satisfies Record<string, {
-  senderKind: NoticeSenderKind;
-  recipients: "self" | "readers" | "relay";
-}>;
+} as const satisfies Record<
+  string,
+  {
+    senderKind: NoticeSenderKind;
+    recipients: "self" | "readers" | "relay";
+  }
+>;
 
 export type NoticeKind = keyof typeof NOTICE_KINDS;
 
@@ -474,7 +470,6 @@ export type NoticeKind = keyof typeof NOTICE_KINDS;
 // start with these, so the owner's computers can act on them there.
 export const SERVER_RUN_FAILED_NOTICE_PREFIX = "server-automation-failed:";
 export const SERVER_HOLD_NOTICE_PREFIX = "automation-held:";
-// The kinds a person or agent may post.
 export type PostableNoticeKind = {
   [Kind in NoticeKind]: (typeof NOTICE_KINDS)[Kind]["recipients"] extends "relay" ? never : Kind;
 }[NoticeKind];
@@ -482,12 +477,10 @@ export type PostableNoticeKind = {
 // Lengths count code points, as a person counts characters.
 export const NOTICE_TITLE_MAX_CHARS = 120;
 export const NOTICE_BODY_MAX_CHARS = 500;
-// The relay's display-name limit for a sender.
 export const NOTICE_SENDER_LABEL_MAX_CHARS = 40;
 // The target as JSON, in UTF-8 bytes.
 const NOTICE_TARGET_MAX_BYTES = 2_048;
 export const NOTICE_TARGET_FIELD_MAX_CHARS = 1_024;
-// The id a sender posts.
 export const NOTICE_POSTED_ID_MAX_CHARS = 256;
 // The id the relay stores and serves. A notice from another person is
 // stored as `from:<sender user id, percent-encoded>:<posted id>`, so no
@@ -496,6 +489,12 @@ export const NOTICE_ID_MAX_CHARS = 1_024;
 export const NOTICE_FROM_PREFIX = "from:";
 export const NOTICE_MARKS_PER_REQUEST = 100;
 export const NOTICE_PAGE_MAX = 200;
+// GET /sync/notices?wait=<ms> holds a caught-up read at most this long.
+export const NOTICE_WAIT_MAX_MS = 25_000;
+// GET /sync/notices?scope=phone. The phone's display scope, not an access
+// boundary: any account session may read the whole list without it.
+export const NOTICE_SCOPES = ["phone"] as const;
+export type NoticeScope = (typeof NOTICE_SCOPES)[number];
 
 // A person's notice list keeps at most this many rows. A new notice past it
 // removes read and dismissed rows first, oldest first, then the oldest unread.
@@ -515,13 +514,21 @@ const BODY_CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f]/u;
 // A non-empty, trimmed line of at most `maxChars` code points with no
 // control characters. Titles, ids, labels, and target fields are lines.
 export function isNoticeLine(value: unknown, maxChars: number): value is string {
-  return typeof value === "string" && value.length > 0 && value === value.trim() &&
-    !CONTROL_CHARS.test(value) && [...value].length <= maxChars;
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value === value.trim() &&
+    !CONTROL_CHARS.test(value) &&
+    [...value].length <= maxChars
+  );
 }
 
 export function isNoticeBody(value: unknown): value is string {
-  return typeof value === "string" && !BODY_CONTROL_CHARS.test(value) &&
-    [...value].length <= NOTICE_BODY_MAX_CHARS;
+  return (
+    typeof value === "string" &&
+    !BODY_CONTROL_CHARS.test(value) &&
+    [...value].length <= NOTICE_BODY_MAX_CHARS
+  );
 }
 
 // What a notice points at. Every field is optional; a notice for someone
@@ -535,7 +542,6 @@ export interface NoticeTarget {
   automation?: string;
   run?: string;
   recovery?: "automation-controls";
-  // A Settings page to open.
   settings?: "agents";
   // The personal agent (p-…) whose page opens in Settings › Agents. Only
   // with `settings: "agents"`.
@@ -548,28 +554,48 @@ export interface AutomationControlsTarget extends NoticeTarget {
   path: string;
 }
 
-export function isAutomationControlsTarget(target: NoticeTarget): target is AutomationControlsTarget {
-  return target.recovery === "automation-controls" && typeof target.automation === "string" &&
-    typeof target.path === "string" && target.path.endsWith("/automations.yaml") && target.path.length > "/automations.yaml".length;
+export function isAutomationControlsTarget(
+  target: NoticeTarget,
+): target is AutomationControlsTarget {
+  return (
+    target.recovery === "automation-controls" &&
+    typeof target.automation === "string" &&
+    typeof target.path === "string" &&
+    target.path.endsWith("/automations.yaml") &&
+    target.path.length > "/automations.yaml".length
+  );
 }
 
 const NOTICE_TARGET_FIELDS = [
-  "path", "record", "thread", "message", "share", "automation", "run", "recovery", "settings", "agent",
+  "path",
+  "record",
+  "thread",
+  "message",
+  "share",
+  "automation",
+  "run",
+  "recovery",
+  "settings",
+  "agent",
 ] as const satisfies readonly (keyof NoticeTarget)[];
 
 export function isNoticeTarget(value: unknown): value is NoticeTarget {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const recovery = Object.getOwnPropertyDescriptor(value, "recovery")?.value as unknown;
   if (recovery !== undefined) {
-    if (recovery !== "automation-controls" || !isAutomationControlsTarget(value as NoticeTarget)) return false;
+    if (recovery !== "automation-controls" || !isAutomationControlsTarget(value as NoticeTarget))
+      return false;
   }
   const settings = Object.getOwnPropertyDescriptor(value, "settings")?.value as unknown;
   if (settings !== undefined && settings !== "agents") return false;
   if (Object.hasOwn(value, "agent") && settings !== "agents") return false;
-  return Object.entries(value).every(([field, fieldValue]) =>
-    (NOTICE_TARGET_FIELDS as readonly string[]).includes(field) &&
-    isNoticeLine(fieldValue, NOTICE_TARGET_FIELD_MAX_CHARS)) &&
-    new TextEncoder().encode(JSON.stringify(value)).byteLength <= NOTICE_TARGET_MAX_BYTES;
+  return (
+    Object.entries(value).every(
+      ([field, fieldValue]) =>
+        (NOTICE_TARGET_FIELDS as readonly string[]).includes(field) &&
+        isNoticeLine(fieldValue, NOTICE_TARGET_FIELD_MAX_CHARS),
+    ) && new TextEncoder().encode(JSON.stringify(value)).byteLength <= NOTICE_TARGET_MAX_BYTES
+  );
 }
 
 // How the sender reaches the notice's workspace: the owner names the
@@ -593,18 +619,19 @@ export type NoticeRecipient =
 // "readers" kind and a `target.path` both people can read, and only the
 // workspace owner or a person the work was shared with by name can send one.
 // `toWorkspaceOwner` needs a `shareId` reach.
-export type PostNoticeRequest = NoticeReach & NoticeRecipient & {
-  noticeId: string;
-  kind: PostableNoticeKind;
-  title: string;
-  body: string;
-  target: NoticeTarget;
-  // The computer that posted. It names where a notice started and grants
-  // nothing: an action a notice offers, such as Try again on a failed
-  // automation, must check that the notice's sender is the person acting,
-  // never this value.
-  originInstallId: string;
-};
+export type PostNoticeRequest = NoticeReach &
+  NoticeRecipient & {
+    noticeId: string;
+    kind: PostableNoticeKind;
+    title: string;
+    body: string;
+    target: NoticeTarget;
+    // The computer that posted. It names where a notice started and grants
+    // nothing: an action a notice offers, such as Try again on a failed
+    // automation, must check that the notice's sender is the person acting,
+    // never this value.
+    originInstallId: string;
+  };
 
 export const AUTOMATION_WAKE_PREFIX = "automation-wake:";
 
@@ -619,16 +646,22 @@ export interface AutomationWake {
 export function isAutomationWake(value: unknown): value is AutomationWake {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const wake = value as Record<string, unknown>;
-  return isNoticeLine(wake.automationId, 1024) && isNoticeLine(wake.name, 120) &&
-    Number.isInteger(wake.depth) && Number(wake.depth) >= 1 && Number(wake.depth) <= 4 &&
-    typeof wake.body === "string" && new TextEncoder().encode(wake.body).byteLength <= 65_536 &&
-    Object.keys(wake).every((key) => ["automationId", "name", "depth", "body"].includes(key));
+  return (
+    isNoticeLine(wake.automationId, 1024) &&
+    isNoticeLine(wake.name, 120) &&
+    Number.isInteger(wake.depth) &&
+    Number(wake.depth) >= 1 &&
+    Number(wake.depth) <= 4 &&
+    typeof wake.body === "string" &&
+    new TextEncoder().encode(wake.body).byteLength <= 65_536 &&
+    Object.keys(wake).every((key) => ["automationId", "name", "depth", "body"].includes(key))
+  );
 }
 
 // One row of GET /sync/notices?cursor=<nextCursor>. `changeSeq` rises on every
 // change to the row, including read and dismissed, and counts per person.
 export interface RelayNotice {
-  /** Only the relay creates wake payloads. */
+  /** Only the relay creates wake payloads. The phone's scope never carries one. */
   wake?: AutomationWake;
   noticeId: string;
   changeSeq: number;
@@ -649,11 +682,25 @@ export interface RelayNotice {
   createdAtMs: number;
   readAtMs: number | null;
   dismissedAtMs: number | null;
+  // When the relay lets the row go. Each mark starts the row's retention
+  // again, so a computer keeps its copy until this time and no longer.
+  expiresAtMs: number;
   // The relay removed the row to make room in the list. Drop it; its body
   // and target are gone.
   removed: boolean;
 }
 
+// With `scope=phone`, a page leaves out rows in owned workspaces whose owner
+// turned off "Show on phone", rows whose target is a secret or ignored file or
+// a thread on one, and every row whose kind's words the relay can't confirm:
+// an automation's rows without their Collection's path, a mention or agent run
+// naming no place, an automation wake, and any kind it doesn't know. A
+// removed row carries no title, body, sender name, or target. When a row read
+// through a share loses its target, as when the recipient loses the share,
+// the next page starts the list over with `replace`, and the whole list
+// leaves that row out. The cursor still moves past what it left out, so a
+// page can be empty with `hasMore`. With `wait`, a read whose cursor is
+// caught up waits for the next change.
 export interface RelayNoticePage {
   notices: RelayNotice[];
   // Opaque. Pass it back as `cursor` for the changes after this page; no
@@ -661,7 +708,8 @@ export interface RelayNoticePage {
   nextCursor: string;
   hasMore: boolean;
   // The page starts the list over, because the cursor is older than the
-  // relay keeps removed rows or came from another relay history. Drop every
+  // relay keeps removed rows or came from another relay history, or, on the
+  // phone's scope, a row read through a share lost its target. Drop every
   // cached row, keep your own waiting posts and marks, and take this page
   // and the pages after it as the whole list.
   replace: boolean;
@@ -671,9 +719,18 @@ export interface RelayNoticePage {
   personalAgentsRevision: number;
 }
 
-// POST /sync/notices/marks. Read and dismissed are one-way: marking a row
-// again, or a row the relay no longer holds, changes nothing.
-export type NoticeMark = "read" | "dismissed";
+// POST /sync/notices/marks. Marking a row again, or a row the relay no
+// longer holds, changes nothing. `unread` clears a read mark and `restore`
+// clears a dismissal; each keeps the other mark and starts the row's
+// retention again. A dismissal's first-dismissal receipt outlives a restore,
+// so dismissing again is never first. Only the owner's phone sends `unread`
+// and `restore`, with `?scope=phone` and its account session.
+export type NoticeMark = "read" | "dismissed" | "unread" | "restore";
+export type ComputerNoticeMark = Extract<NoticeMark, "read" | "dismissed">;
+// A phone's request body is exactly `{ marks: [{ noticeId, mark }] }`, at most
+// this many bytes. A computer's may add `installId` and, on a dismissal,
+// `withdraw: true`.
+export const NOTICE_MARKS_MAX_BODY_BYTES = 512 * 1024;
 
 // The answer to POST /sync/notices/marks. `dismissed` lists the notices this
 // request dismissed first, so of all the computers that dismiss one notice,
@@ -715,7 +772,8 @@ export const AUTOMATION_SERVER_MAX_WORKSPACES = 64;
 // Why the relay refuses to make the server a workspace's host. The owner's
 // settings show these words as they are.
 export const AUTOMATION_SERVER_OFF = "This server does not run automations.";
-export const AUTOMATION_SERVER_FULL = "This server is running automations for as many workspaces as it can. Choose one of your computers.";
+export const AUTOMATION_SERVER_FULL =
+  "This server is running automations for as many workspaces as it can. Choose one of your computers.";
 export const AUTOMATION_HOST_MAX_BODY_BYTES = 16 * 1024;
 // A release carries, as `groups`, what the next host needs so each Group
 // message starts its automations exactly once across the handover: the
@@ -831,11 +889,22 @@ export interface RelayAutomationPress {
 }
 
 /** Inspection names the authored id in automations.yaml. The host answers with its Collection-bound Button id. */
-export interface RelayButtonTarget { automationId: string; collectionPath: string; definitionHash: string }
+export interface RelayButtonTarget {
+  automationId: string;
+  collectionPath: string;
+  definitionHash: string;
+}
 export type RelayButtonInspection =
-  | { kind: "ready"; automationId: string; definitionHash: string; irreversible: Array<{ name: string; label: string }> }
+  | {
+      kind: "ready";
+      automationId: string;
+      definitionHash: string;
+      irreversible: Array<{ name: string; label: string }>;
+    }
   | { kind: "denied" | "unchecked"; reason: string };
-export interface RelayButtonInspectionRequest extends RelayButtonTarget { inspectionId: string }
+export interface RelayButtonInspectionRequest extends RelayButtonTarget {
+  inspectionId: string;
+}
 /** Identity and grants come from the relay's stored authority.
  * The recipient supplies the Button id. The owner's host resolves and checks it
  * against its own index and the relay-checked path. Inspection carries the

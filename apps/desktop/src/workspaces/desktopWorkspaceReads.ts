@@ -4,20 +4,24 @@ import type { createOwnedProjectionRepairer } from "./ownedProjectionRepair";
 import { createOwnedWorkspaceFileReader } from "./ownedWorkspaceFileReader";
 import { createOwnedWorkspaceReads } from "./ownedWorkspaceReads";
 import type { RegistryEntry } from "./registryStore";
-import { classifyResolvedShareProjectionPath, overlayCanonicalShareMountFiles } from "./shareMounts";
+import {
+  classifyResolvedShareProjectionPath,
+  overlayCanonicalShareMountFiles,
+} from "./shareMounts";
 import type { ShareViewFiles, ShareViewFilesTarget } from "./shareViewFiles";
 import { shareMountRegistryIsPresent, storedShareMounts } from "./shareViewFilesTarget";
 import { shareViewIsPresent } from "./shareViewMarker";
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { listFiles } from "./workspaceFiles";
-import { matchesFileListingScope, type WorkspaceFileListingScope } from "@dohc/workspace-contracts/workspace-paths";
+import {
+  matchesFileListingScope,
+  type WorkspaceFileListingScope,
+} from "@dohc/workspace-contracts/workspace-paths";
 
 export interface DesktopWorkspaceReadsDependencies {
   readonly desktopEngine: Pick<ReturnType<typeof createDesktopEngine>, "startup">;
   readonly shareViewFiles: Pick<ShareViewFiles, "read" | "list" | "lookup">;
-  readonly ensureOwnedProjectionTargetCurrent: ReturnType<
-    typeof createOwnedProjectionRepairer
-  >;
+  readonly ensureOwnedProjectionTargetCurrent: ReturnType<typeof createOwnedProjectionRepairer>;
   withPhysicalWorkspaceOperation<Result>(
     workspaceId: string,
     work: (
@@ -56,10 +60,7 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
     },
   };
 
-  async function readOwnedWorkspaceText(
-    workspace: { workspaceId: string },
-    relativePath: string,
-  ) {
+  async function readOwnedWorkspaceText(workspace: { workspaceId: string }, relativePath: string) {
     return withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
       readOwnedWorkspaceTextFor(operation.workspace, relativePath),
     );
@@ -75,10 +76,7 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
     }).readText(relativePath);
   }
 
-  async function readOwnedWorkspaceAsset(
-    workspace: { workspaceId: string },
-    relativePath: string,
-  ) {
+  async function readOwnedWorkspaceAsset(workspace: { workspaceId: string }, relativePath: string) {
     return withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
       readOwnedWorkspaceAssetFor(operation.workspace, relativePath),
     );
@@ -95,11 +93,15 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
   }
 
   async function lookupOwnedWorkspaceFilesFor(
-    workspace: RegistryEntry & { readonly attachmentId: symbol }, paths: readonly string[],
+    workspace: RegistryEntry & { readonly attachmentId: symbol },
+    paths: readonly string[],
   ) {
     if (shareViewIsPresent(workspace.shareView)) {
       await dependencies.desktopEngine.startup;
-      return dependencies.shareViewFiles.lookup({ kind: "standalone", workspaceId: workspace.workspaceId }, paths);
+      return dependencies.shareViewFiles.lookup(
+        { kind: "standalone", workspaceId: workspace.workspaceId },
+        paths,
+      );
     }
     const files: Awaited<ReturnType<typeof listFiles>>["files"] = [];
     const local: string[] = [];
@@ -109,8 +111,11 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
     for (const path of paths) {
       if (hasMountRegistry) {
         let projection;
-        try { projection = classifyResolvedShareProjectionPath(path, mounts); }
-        catch { continue; }
+        try {
+          projection = classifyResolvedShareProjectionPath(path, mounts);
+        } catch {
+          continue;
+        }
         if (projection.kind === "projection-root") continue;
         if (projection.kind === "mount") {
           const prefix = `shared-with-me/${projection.mount.label}/`;
@@ -123,11 +128,18 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
       }
       local.push(path);
     }
-    if (local.length) files.push(...(await (dependencies.listDiskFiles ?? listFiles)(workspace.rootPath, { paths: local })).files);
+    if (local.length)
+      files.push(
+        ...(await (dependencies.listDiskFiles ?? listFiles)(workspace.rootPath, { paths: local }))
+          .files,
+      );
     for (const [shareId, group] of routed) {
       await dependencies.desktopEngine.startup;
-      const listed = await dependencies.shareViewFiles.lookup({ kind: "mount", workspaceId: workspace.workspaceId, shareId }, group.paths);
-      files.push(...listed.files.map(file => ({ ...file, path: group.prefix + file.path })));
+      const listed = await dependencies.shareViewFiles.lookup(
+        { kind: "mount", workspaceId: workspace.workspaceId, shareId },
+        group.paths,
+      );
+      files.push(...listed.files.map((file) => ({ ...file, path: group.prefix + file.path })));
     }
     files.sort((a, b) => a.path.localeCompare(b.path));
     return { files, folders: [] };
@@ -135,8 +147,8 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
 
   function scoped(listed: WorkspacePathListing, scope?: WorkspaceFileListingScope) {
     return {
-      files: listed.files.filter(file => matchesFileListingScope(file.path, scope)),
-      folders: (listed.folders ?? []).filter(path => matchesFileListingScope(path, scope)),
+      files: listed.files.filter((file) => matchesFileListingScope(file.path, scope)),
+      folders: (listed.folders ?? []).filter((path) => matchesFileListingScope(path, scope)),
     };
   }
 
@@ -164,7 +176,13 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
       // that the window loads during it; the share store needs sessions. A
       // plain workspace's disk listing below stays ungated on purpose.
       await dependencies.desktopEngine.startup;
-      return scoped(await listCanonicalFiles({ kind: "standalone", workspaceId: workspace.workspaceId }, scope?.path), scope);
+      return scoped(
+        await listCanonicalFiles(
+          { kind: "standalone", workspaceId: workspace.workspaceId },
+          scope?.path,
+        ),
+        scope,
+      );
     }
     const mounts = storedShareMounts(workspace);
     const disk = await (dependencies.listDiskFiles ?? listFiles)(workspace.rootPath, {
@@ -179,7 +197,13 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
       listCanonical: (mount) => {
         const prefix = `shared-with-me/${mount.label}`;
         const path = scope?.path;
-        if (path && path !== "." && path !== prefix && !path.startsWith(prefix + "/") && !prefix.startsWith(path + "/")) {
+        if (
+          path &&
+          path !== "." &&
+          path !== prefix &&
+          !path.startsWith(prefix + "/") &&
+          !prefix.startsWith(path + "/")
+        ) {
           return Promise.resolve({ files: [], folders: [] });
         }
         return listCanonicalFiles(
@@ -195,18 +219,13 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
         const identity = isRecordValue(mount)
           ? `"${String(mount.label)}" (${String(mount.shareId)})`
           : "from an unreadable registry record";
-        console.error(
-          `[desktop] could not list mounted share ${identity}`,
-          error,
-        );
+        console.error(`[desktop] could not list mounted share ${identity}`, error);
       },
     });
     return scoped(overlaid, scope);
   }
 
-  function ownedWorkspaceReadsFor(
-    workspace: RegistryEntry & { readonly attachmentId: symbol },
-  ) {
+  function ownedWorkspaceReadsFor(workspace: RegistryEntry & { readonly attachmentId: symbol }) {
     return createOwnedWorkspaceReads({
       workspace,
       listFiles: (scope) => listOwnedWorkspaceFilesFor(workspace, scope),

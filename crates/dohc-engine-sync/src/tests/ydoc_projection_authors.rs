@@ -98,7 +98,6 @@ fn replay_keeps_authors(converged: bool) {
                 .drained,
             1,
         );
-        // The projection committed, but cleanup failed and retained its row.
         f.store.write_with(&NoFaults, |tx| {
             tx.execute("INSERT INTO ydoc_deferred_updates \
                 (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms,lineage_claim_id,relay_seq) \

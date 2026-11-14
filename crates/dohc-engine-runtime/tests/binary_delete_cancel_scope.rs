@@ -1,12 +1,3 @@
-//! #738/#739 follow-up: `cancel_pending_jobs_for_path`
-//! must not cancel a prior pending DELETE job for the same path -- only a
-//! superseded WRITE. A delete -> recreate -> delete sequence, each blocked
-//! from reaching disk, otherwise strands the original bytes: the old delete
-//! (the only one whose preimage matches disk) gets cancelled, and the newest
-//! delete's preimage no longer matches the untouched disk bytes, so replay
-//! conflicts instead of clearing the path -- the old file survives on disk at
-//! a path the user deleted twice.
-
 use dohc_engine_domain::{DeleteTextFile, WriteBinary};
 use dohc_engine_runtime::{CancellationToken, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::FaultPoint;
@@ -64,7 +55,6 @@ async fn a_second_delete_does_not_strand_the_first_deletes_own_pending_job() {
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
 
-    // v1 materializes cleanly: disk holds B0.
     actor
         .versioned_binary_write(
             binary_input("obj-v1", "moment-v1", "req-v1", vec![1, 1, 1], 10),
@@ -139,8 +129,6 @@ async fn a_second_delete_does_not_strand_the_first_deletes_own_pending_job() {
         .await
         .expect("replay pending jobs");
 
-    // The path was deleted twice; nothing must survive on disk, and no stale
-    // B0 bytes may resurrect under a job nothing will ever revisit.
     assert!(
         !target.exists(),
         "a path deleted twice must not survive replay: {:?}",

@@ -39,7 +39,11 @@ export interface PersonalAgentRosterCache {
   revisionSeen(accountKey: string, revision: number): void;
   // The signed-in account may have changed.
   accountChanged(): void;
-  change(accountKey: string, agentId: string, change: PersonalAgentChange): Promise<PersonalAgentChangeResult>;
+  change(
+    accountKey: string,
+    agentId: string,
+    change: PersonalAgentChange,
+  ): Promise<PersonalAgentChangeResult>;
 }
 
 const RelayAgent = z.object({
@@ -66,7 +70,10 @@ const OTHER_ACCOUNT = "Sign in to the account this agent belongs to, then try ag
 // A refusal whose words this module chose. `refresh` re-reads the roster,
 // because the refusal means the cache is behind the relay.
 class Refusal extends Error {
-  constructor(message: string, readonly refresh: boolean) {
+  constructor(
+    message: string,
+    readonly refresh: boolean,
+  ) {
     super(message);
   }
 }
@@ -83,7 +90,7 @@ function toAgent(agent: RelayAgent): PersonalAgent | null {
     createdAtMs: agent.createdAtMs,
     signedInAtMs: agent.signedInAtMs,
     lastActionAtMs: agent.lastActionAtMs,
-    reach: agent.reach.map(entry => ({ workspaceId: entry.workspaceId, level: entry.level })),
+    reach: agent.reach.map((entry) => ({ workspaceId: entry.workspaceId, level: entry.level })),
   };
 }
 
@@ -91,17 +98,27 @@ function hostOf(origin: string): string {
   return new URL(origin).host;
 }
 
-function requestFor(agentId: string, change: PersonalAgentChange): { path: string; init: RequestInit } {
+function requestFor(
+  agentId: string,
+  change: PersonalAgentChange,
+): { path: string; init: RequestInit } {
   const base = `/sync/personal-agents/${encodeURIComponent(agentId)}`;
   if (change.kind === "sign-out" || change.kind === "remove" || change.kind === "restore") {
     return { path: `${base}/${change.kind}`, init: { method: "POST" } };
   }
-  const body = change.kind === "name" ? { name: change.name }
-    : change.kind === "hue" ? { hue: change.hue }
-    : { reach: change.reach };
+  const body =
+    change.kind === "name"
+      ? { name: change.name }
+      : change.kind === "hue"
+        ? { hue: change.hue }
+        : { reach: change.reach };
   return {
     path: `${base}/${change.kind}`,
-    init: { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+    init: {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
   };
 }
 
@@ -114,7 +131,10 @@ function invalidWords(change: PersonalAgentChange, host: string): string {
 // What a failed read or change says, when the cause is not a refusal above.
 function failureWords(error: unknown, host: string, what: string): string {
   if (error instanceof RelayApiVersionError) return error.message;
-  if (error instanceof TypeError || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))) {
+  if (
+    error instanceof TypeError ||
+    (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
+  ) {
     return `dohc could not reach ${host}. Check your connection.`;
   }
   return `${host} could not ${what}.`;
@@ -125,7 +145,12 @@ export function createPersonalAgentRoster(deps: {
   session(): Promise<PersonalAgentSession | null>;
   onChanged(view: PersonalAgentsEvent): void;
 }): PersonalAgentRosterCache {
-  type Cached = { key: string; origin: string; roster: PersonalAgentRoster | null; failure: string | null };
+  type Cached = {
+    key: string;
+    origin: string;
+    roster: PersonalAgentRoster | null;
+    failure: string | null;
+  };
   let cached: Cached | null = null;
   // Rises with each change answer applied, so a read that started before one
   // can't put back what the change replaced.
@@ -141,13 +166,15 @@ export function createPersonalAgentRoster(deps: {
   function view(): PersonalAgentsEvent {
     if (!cached) return { accounts: [] };
     return {
-      accounts: [{
-        accountKey: cached.key,
-        host: hostOf(cached.origin),
-        agentLinkOrigin: cached.origin,
-        roster: cached.roster,
-        failure: cached.failure,
-      }],
+      accounts: [
+        {
+          accountKey: cached.key,
+          host: hostOf(cached.origin),
+          agentLinkOrigin: cached.origin,
+          roster: cached.roster,
+          failure: cached.failure,
+        },
+      ],
     };
   }
 
@@ -157,14 +184,18 @@ export function createPersonalAgentRoster(deps: {
       if (cached) set(null);
       return;
     }
-    if (cached?.key !== session.key) set({ key: session.key, origin: session.origin, roster: null, failure: null });
+    if (cached?.key !== session.key)
+      set({ key: session.key, origin: session.origin, roster: null, failure: null });
     const changesAtStart = changes;
     const host = hostOf(session.origin);
     try {
       const response = await relayRequest({
         relay: session.relay,
         path: "/sync/personal-agents",
-        errors: { 404: () => new Refusal(`${host} has no personal agents. Its server needs an update.`, false) },
+        errors: {
+          404: () =>
+            new Refusal(`${host} has no personal agents. Its server needs an update.`, false),
+        },
         label: "Personal agents",
       });
       const answer = RelayRoster.parse(await response.json());
@@ -177,17 +208,25 @@ export function createPersonalAgentRoster(deps: {
         ...cached,
         roster: {
           revision: answer.revision,
-          agents: answer.agents.map(toAgent).filter((agent): agent is PersonalAgent => agent !== null),
-          workspaces: answer.workspaces.map(workspace => ({ workspaceId: workspace.workspaceId, name: workspace.name })),
+          agents: answer.agents
+            .map(toAgent)
+            .filter((agent): agent is PersonalAgent => agent !== null),
+          workspaces: answer.workspaces.map((workspace) => ({
+            workspaceId: workspace.workspaceId,
+            name: workspace.name,
+          })),
         },
         failure: null,
       });
     } catch (error) {
       if (error instanceof RelayUnauthorizedError) await session.unauthorized();
       if (!session.isCurrent() || cached?.key !== session.key) return;
-      const failure = error instanceof RelayUnauthorizedError ? SESSION_EXPIRED
-        : error instanceof Refusal ? error.message
-        : failureWords(error, host, "list your personal agents");
+      const failure =
+        error instanceof RelayUnauthorizedError
+          ? SESSION_EXPIRED
+          : error instanceof Refusal
+            ? error.message
+            : failureWords(error, host, "list your personal agents");
       set({ ...cached, failure });
     }
   }
@@ -219,13 +258,21 @@ export function createPersonalAgentRoster(deps: {
     }
     changes++;
     const agent = toAgent(answer.agent);
-    const others = cached.roster.agents.filter(entry => entry.agentId !== answer.agent.agentId);
-    const agents = agent === null ? others
-      : [...others, agent].sort((a, b) => a.createdAtMs - b.createdAtMs || (a.agentId < b.agentId ? -1 : 1));
+    const others = cached.roster.agents.filter((entry) => entry.agentId !== answer.agent.agentId);
+    const agents =
+      agent === null
+        ? others
+        : [...others, agent].sort(
+            (a, b) => a.createdAtMs - b.createdAtMs || (a.agentId < b.agentId ? -1 : 1),
+          );
     const caughtUp = answer.revision === cached.roster.revision + 1;
     set({
       ...cached,
-      roster: { ...cached.roster, agents, revision: caughtUp ? answer.revision : cached.roster.revision },
+      roster: {
+        ...cached.roster,
+        agents,
+        revision: caughtUp ? answer.revision : cached.roster.revision,
+      },
       failure: null,
     });
     if (!caughtUp) void refresh();
@@ -252,9 +299,10 @@ export function createPersonalAgentRoster(deps: {
       const session = await deps.session();
       if (!session || session.key !== accountKey) return { ok: false, error: OTHER_ACCOUNT };
       const host = hostOf(session.origin);
-      const name = cached?.key === accountKey
-        ? cached.roster?.agents.find(agent => agent.agentId === agentId)?.name ?? "this agent"
-        : "this agent";
+      const name =
+        cached?.key === accountKey
+          ? (cached.roster?.agents.find((agent) => agent.agentId === agentId)?.name ?? "this agent")
+          : "this agent";
       const { path, init } = requestFor(agentId, change);
       try {
         const response = await relayRequest({
@@ -265,7 +313,8 @@ export function createPersonalAgentRoster(deps: {
             400: () => new Refusal(invalidWords(change, host), change.kind === "reach"),
             404: () => new Refusal(`dohc could not find ${name} on ${host}.`, true),
             409: () => new Refusal(`Sign out ${name} before you remove it.`, true),
-            503: () => new Refusal(`${host} could not change ${name} right now. Try again shortly.`, false),
+            503: () =>
+              new Refusal(`${host} could not change ${name} right now. Try again shortly.`, false),
           },
           label: "Personal agent change",
         });

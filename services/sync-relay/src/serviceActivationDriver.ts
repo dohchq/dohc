@@ -1,176 +1,396 @@
-import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import type {OwnerOutboxAdmission} from "./ownerOutboxDelivery";
-import {OwnerKnownRefusals} from "@dohc/workspace-engine-client/owner-ydoc-drainer";
-import {isDeepStrictEqual} from "node:util";
-import {EngineRequestError,isHostedDocumentUnready,isLiveDocumentWithoutLineage,type EngineClient,type NativeOwnerActivation,type RetainedPrefixBody} from "@dohc/workspace-engine-client/daemon";
-import type {JsonValue} from "@dohc/workspace-engine-client";
-import {hostedWindowCovers,type HostedWindow} from "@dohc/workspace-engine-client/relay-wire";
-import {parseLiveDocumentKey,parseLiveUpdateIdentifier,type LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
-import {validateUserWritePath} from "@dohc/workspace-core";
-import {liveDocumentKindForPath} from "@dohc/workspace-contracts/live-documents";
-import type {OrderedLiveUpdateCutPolicy} from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
-import {configRecord} from "./deviceLiveHostConfig";
-import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
-import {settlementResponse,settlementPending,type CommittedSettlement} from "./liveSettlement";
-import {authorityInteger} from "./storage/liveDocumentAuthority";
-import {liveValidation} from "./liveValidation.js";
-import {serviceOwnerTransport} from "./serviceOwnerTransport";
-import {ServiceActivationBusy,ServiceActivationHistoryOverBudget,ServiceActivationStaleCut,ServiceActivationTooLarge,type ServiceActivationStore} from "./storage/serviceActivation";
-import type {ServiceActivationAccess} from "./storage/serviceActivationAccess";
-import type {SyncRelayStorage,LiveHostConnectionCoordinate} from "./storage";
-import type {DepartedOwnerDelivery} from "./storage/liveCommittedDelivery";
-import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
-import type {LiveRestorePreparation} from "./liveRestorePreparation";
-import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
-import type {ServiceHostedHold,ServiceHostedPullPage} from "./serviceHostedReplication";
-import type {ServiceKeptEditsIdentity} from "./storage/serviceKeptEdits";
-import type {RetirableServiceActivation} from "./storage/serviceActivationRetirement";
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery";
+import { OwnerKnownRefusals } from "@dohc/workspace-engine-client/owner-ydoc-drainer";
+import { isDeepStrictEqual } from "node:util";
+import {
+  EngineRequestError,
+  isHostedDocumentUnready,
+  isLiveDocumentWithoutLineage,
+  type EngineClient,
+  type NativeOwnerActivation,
+  type RetainedPrefixBody,
+} from "@dohc/workspace-engine-client/daemon";
+import type { JsonValue } from "@dohc/workspace-engine-client";
+import { hostedWindowCovers, type HostedWindow } from "@dohc/workspace-engine-client/relay-wire";
+import {
+  parseLiveDocumentKey,
+  parseLiveUpdateIdentifier,
+  type LiveDocumentKey,
+} from "@dohc/live-session-contract/live-update-admission";
+import { validateUserWritePath } from "@dohc/workspace-core";
+import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
+import type { OrderedLiveUpdateCutPolicy } from "../../../packages/ydoc-projection/src/orderedLiveUpdateCut";
+import { configRecord } from "./deviceLiveHostConfig";
+import { OwnerCommittedDelivery } from "./ownerCommittedDelivery";
+import { settlementResponse, settlementPending, type CommittedSettlement } from "./liveSettlement";
+import { authorityInteger } from "./storage/liveDocumentAuthority";
+import { liveValidation } from "./liveValidation.js";
+import { serviceOwnerTransport } from "./serviceOwnerTransport";
+import {
+  ServiceActivationBusy,
+  ServiceActivationCaptureOverBudget,
+  ServiceActivationHistoryOverBudget,
+  ServiceActivationRefused,
+  ServiceActivationStaleCut,
+  ServiceActivationTooLarge,
+  type ServiceActivationStore,
+} from "./storage/serviceActivation";
+import { knownRefusalWord, refusalHead, type KnownRefusalWord } from "./serverLogWords";
+import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
+import type { SyncRelayStorage, LiveHostConnectionCoordinate } from "./storage";
+import type { DepartedOwnerDelivery } from "./storage/liveCommittedDelivery";
+import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
+import type { LiveRestorePreparation } from "./liveRestorePreparation";
+import type { StopRestoreLookup } from "./storage/liveRestoreOperation";
+import type { ServiceHostedHold, ServiceHostedPullPage } from "./serviceHostedReplication";
+import type { ServiceKeptEditsIdentity } from "./storage/serviceKeptEdits";
+import type { RetirableServiceActivation } from "./storage/serviceActivationRetirement";
 
-const positive=(value:unknown)=>{
-  if(typeof value!=="number" || !Number.isSafeInteger(value) || value<1 || value>2_147_483_647)throw new Error("Invalid service activation budget.");
+const positive = (value: unknown) => {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > 2_147_483_647
+  )
+    throw new Error("Invalid service activation budget.");
   return value;
 };
-export function parseServiceActivationTarget(value:unknown){
-  const item=configRecord(value,["workspaceId","path"]);
-  const checked=typeof item.path==="string"?validateUserWritePath(item.path):undefined;
-  if(typeof item.path!=="string" || !checked?.ok || checked.normalized!==item.path || liveDocumentKindForPath(item.path)!=="richdoc")throw new Error("Invalid service activation path.");
-  return Object.freeze({workspaceId:parseLiveUpdateIdentifier(item.workspaceId),path:item.path});
+export function parseServiceActivationTarget(value: unknown) {
+  const item = configRecord(value, ["workspaceId", "path"]);
+  const checked = typeof item.path === "string" ? validateUserWritePath(item.path) : undefined;
+  if (
+    typeof item.path !== "string" ||
+    !checked?.ok ||
+    checked.normalized !== item.path ||
+    liveDocumentKindForPath(item.path) !== "richdoc"
+  )
+    throw new Error("Invalid service activation path.");
+  return Object.freeze({
+    workspaceId: parseLiveUpdateIdentifier(item.workspaceId),
+    path: item.path,
+  });
 }
-export type ServiceActivationTarget=ReturnType<typeof parseServiceActivationTarget>;
-const targetKey=(target:ServiceActivationTarget)=>JSON.stringify([target.workspaceId,target.path]);
+export type ServiceActivationTarget = ReturnType<typeof parseServiceActivationTarget>;
+const targetKey = (target: ServiceActivationTarget) =>
+  JSON.stringify([target.workspaceId, target.path]);
+const keptKey = (workspaceId: string, objectId: string) => JSON.stringify([workspaceId, objectId]);
+type TargetBlock =
+  | { reason: "refused" | "live-edit-unadmitted" }
+  | { reason: "without-lineage"; update: number }
+  | { reason: "released-lineage-unsettled"; digest: string };
+type TargetFailure = {
+  count: number;
+  at: number;
+  until: number;
+  overBudget: boolean;
+  run?: { since: number; failures: number; word: KnownRefusalWord; shown: boolean };
+};
 // A moved document's target is keyed by its object too, so a document now at its old path keeps its own state.
-const movedKey=(target:ServiceActivationTarget,objectId:string)=>JSON.stringify([target.workspaceId,target.path,objectId]);
+const movedKey = (target: ServiceActivationTarget, objectId: string) =>
+  JSON.stringify([target.workspaceId, target.path, objectId]);
 /** A host can start with no targets; the self-hosted supervisor adds them as documents are shared. */
-export function parseServiceActivationConfig(value:unknown){
-  if(value===undefined)return undefined;
-  const row=configRecord(value,["targets","validation","maxCaptureBytes","maxActivationHistoryEntries","maxEntriesPerDrain","maxBytesPerDrain","maxDocumentsPerPass","pollIntervalMs","passDeadlineMs","idleUnloadMs","idleRetryMs"]);
-  if(!Array.isArray(row.targets) || row.targets.length>64)throw new Error("Invalid service activation targets.");
-  const targets=row.targets.map(parseServiceActivationTarget);
-  if(new Set(targets.map(targetKey)).size!==targets.length)throw new Error("Duplicate service activation target.");
-  const policy=configRecord(row.validation,["maxStructVisits","maxValueNodeVisits","maxDecodedPayloadByteVisits","maxStructClientGroupVisits","maxDeleteClientGroupVisits","maxDeleteIntervalVisits","maxIndexOperations"]);
-  for(const value of Object.values(policy))positive(value);
-  const validation=Object.freeze({...policy}) as unknown as OrderedLiveUpdateCutPolicy;
-  return Object.freeze({targets:Object.freeze(targets),validateActivation:liveValidation.ordinaryActivation(validation),
-    validateAdmission:liveValidation.validator(validation),maxCaptureBytes:positive(row.maxCaptureBytes),
-    maxActivationHistoryEntries:positive(row.maxActivationHistoryEntries),
-    maxEntriesPerDrain:positive(row.maxEntriesPerDrain),maxBytesPerDrain:positive(row.maxBytesPerDrain),
-    maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs),
-    idleUnloadMs:positive(row.idleUnloadMs),idleRetryMs:positive(row.idleRetryMs)});
+export function parseServiceActivationConfig(value: unknown) {
+  if (value === undefined) return undefined;
+  const row = configRecord(value, [
+    "targets",
+    "validation",
+    "maxCaptureBytes",
+    "maxActivationHistoryEntries",
+    "maxEntriesPerDrain",
+    "maxBytesPerDrain",
+    "maxDocumentsPerPass",
+    "pollIntervalMs",
+    "idlePollIntervalMs",
+    "passDeadlineMs",
+    "idleUnloadMs",
+    "idleRetryMs",
+  ]);
+  if (!Array.isArray(row.targets) || row.targets.length > 64)
+    throw new Error("Invalid service activation targets.");
+  const targets = row.targets.map(parseServiceActivationTarget);
+  if (new Set(targets.map(targetKey)).size !== targets.length)
+    throw new Error("Duplicate service activation target.");
+  const policy = configRecord(row.validation, [
+    "maxStructVisits",
+    "maxValueNodeVisits",
+    "maxDecodedPayloadByteVisits",
+    "maxStructClientGroupVisits",
+    "maxDeleteClientGroupVisits",
+    "maxDeleteIntervalVisits",
+    "maxIndexOperations",
+  ]);
+  for (const value of Object.values(policy)) positive(value);
+  const validation = Object.freeze({ ...policy }) as unknown as OrderedLiveUpdateCutPolicy;
+  return Object.freeze({
+    targets: Object.freeze(targets),
+    validateActivation: liveValidation.ordinaryActivation(validation),
+    validateAdmission: liveValidation.validator(validation),
+    maxCaptureBytes: positive(row.maxCaptureBytes),
+    maxActivationHistoryEntries: positive(row.maxActivationHistoryEntries),
+    maxEntriesPerDrain: positive(row.maxEntriesPerDrain),
+    maxBytesPerDrain: positive(row.maxBytesPerDrain),
+    maxDocumentsPerPass: positive(row.maxDocumentsPerPass),
+    pollIntervalMs: positive(row.pollIntervalMs),
+    // The longest an idle host goes without a pass. A pass visits maxDocumentsPerPass awake documents, so its longest
+    // pause is this divided by the passes that visit them all, and never less than pollIntervalMs: while the same
+    // documents stay awake, each is visited at least this often, apart from the passes' own time.
+    idlePollIntervalMs: positive(row.idlePollIntervalMs),
+    passDeadlineMs: positive(row.passDeadlineMs),
+    idleUnloadMs: positive(row.idleUnloadMs),
+    idleRetryMs: positive(row.idleRetryMs),
+  });
 }
-export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceActivationConfig>>;
+export type ServiceActivationConfig = NonNullable<ReturnType<typeof parseServiceActivationConfig>>;
 /**
- * Why a document waits for its owner: the engine refused it or its capture ran validation out of memory,
- * its copy here is missing an owner edit, it has no Y.Doc lineage to activate, or its history is past what the relay reads or checks.
+ * Why a document cannot go live: the engine refused it or its capture ran validation out of memory,
+ * its copy here is missing an owner edit, or it has no Y.Doc lineage to activate; each waits for its owner.
+ * One whose history is past what the relay reads or checks tries again on its own, waiting longer each time.
  */
-export type ServiceActivationBlock="refused"|"live-edit-unadmitted"|"without-lineage"|"history-over-budget";
-type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;
-  binding:LiveObjectBinding;target:string;ownerUserId:string};
-const fenced={kind:"pending" as const,reason:"Service binding is fenced or unavailable."};
+export type ServiceActivationBlock =
+  | "refused"
+  | "live-edit-unadmitted"
+  | "without-lineage"
+  | "history-over-budget";
+type Owner = {
+  consumer: OwnerCommittedDelivery;
+  transport: ReturnType<typeof serviceOwnerTransport>;
+  completed: boolean;
+  activationPending: boolean;
+  binding: LiveObjectBinding;
+  target: string;
+  ownerUserId: string;
+};
+const fenced = { kind: "pending" as const, reason: "Service binding is fenced or unavailable." };
 // A target backing off after failed activations. Returning it is not a success, so it keeps the count of failures.
-const backingOff=Object.freeze({kind:"pending" as const,reason:"Hosted document waits before it tries again."});
-const validationBusy=Object.freeze({kind:"pending" as const,reason:"Live validation is busy."});
+const backingOff = Object.freeze({
+  kind: "pending" as const,
+  reason: "Hosted document waits before it tries again.",
+});
+const validationBusy = Object.freeze({
+  kind: "pending" as const,
+  reason: "Live validation is busy.",
+});
 /** How a departed document's settlement ended. The engine refuses an `unready` document's registration, as once it parked. */
-export type DepartedSettlement={kind:"settled";settlement:CommittedSettlement}|{kind:"pending";reason:string}|{kind:"unready"};
+export type DepartedSettlement =
+  | { kind: "settled"; settlement: CommittedSettlement }
+  | { kind: "pending"; reason: string }
+  | { kind: "unready" };
 /** A workspace's hosted replica, as activation uses it. */
 export interface ServiceActivationReplica {
-  pull(signal:AbortSignal):Promise<{hasMore:boolean}>;
-  publish(signal?:AbortSignal):Promise<{pushed:number;hasMore:boolean}>;
+  pull(signal: AbortSignal): Promise<{ hasMore: boolean }>;
+  publish(signal?: AbortSignal): Promise<{ pushed: number; hasMore: boolean }>;
 }
 /** One activation pass's catch-up pull of each workspace, with the relay log head it started at. */
-export type ServiceCatchUp=Map<string,Promise<{head:number;hasMore:boolean}>>;
+export type ServiceCatchUp = Map<string, Promise<{ head: number; hasMore: boolean }>>;
 /** What the document's hosted replica confirmed of it since it began departing. */
 export interface RetirementScope {
-  /** A pull confirmed the document left the hosted scope. */
-  departed():boolean;
+  /** Undefined once a pull confirmed the document left the hosted scope; until then, why none has. */
+  departureWait(): string | undefined;
   /** A pull confirmed it parked: it is no longer departed. */
-  parked():boolean;
+  parked(): boolean;
 }
 /**
  * How one retirement pass ended. Held: the journal proved what the engine asked, and a refused
  * adoption seed it cannot abandon still holds the retirement, which no later pass changes by itself.
  */
-export type RetirementStep={kind:"retired"}|{kind:"held"}|{kind:"pending";reason:string};
-const RETIREMENT_ROUNDS=4;
-const retiring={kind:"pending" as const,reason:"Service activation is retiring."};
+export type RetirementStep =
+  | { kind: "retired" }
+  | { kind: "held" }
+  | { kind: "pending"; reason: string };
+const RETIREMENT_ROUNDS = 4;
+const retiring = { kind: "pending" as const, reason: "Service activation is retiring." };
 // The engine's answer for its `status`, with exactly that status's keys.
-function answer(value:unknown,statuses:Record<string,readonly string[]>):Record<string,unknown>&{status:string}{
-  const status=value && typeof value==="object"?(value as {status?:unknown}).status:undefined;
-  if(typeof status!=="string" || !Object.hasOwn(statuses,status))throw new Error("Invalid live retirement response.");
-  return {...configRecord(value,["status",...statuses[status]!]),status};
+function answer(
+  value: unknown,
+  statuses: Record<string, readonly string[]>,
+): Record<string, unknown> & { status: string } {
+  const status =
+    value && typeof value === "object" ? (value as { status?: unknown }).status : undefined;
+  if (typeof status !== "string" || !Object.hasOwn(statuses, status))
+    throw new Error("Invalid live retirement response.");
+  return { ...configRecord(value, ["status", ...statuses[status]!]), status };
+}
+// A failed activation's word for its owner and the server log: an engine refusal's code word when the known list has it,
+// otherwise a fixed word for the failure's class. A message never becomes the word, since it can name the document.
+function failureWord(error: unknown, timedOut: boolean): KnownRefusalWord {
+  if (timedOut) return "deadline";
+  if (error instanceof EngineRequestError)
+    return knownRefusalWord(refusalHead(error.message)) ?? "engine-refused";
+  if (error instanceof ServiceActivationRefused) return "activation-refused";
+  if (error instanceof ServiceActivationCaptureOverBudget) return "capture-over-budget";
+  return "relay-error";
 }
 
 export class ServiceActivationDriver {
   readonly #store;
   readonly #delivery;
-  #targets:readonly ServiceActivationTarget[];
-  readonly #completedTargets=new Set<string>();
-  readonly #staleLeases=new Map<string,{activationId:string;sessionId:string}>();
-  readonly #owners=new Map<string,Owner>();
+  #targets: readonly ServiceActivationTarget[];
+  readonly #completedTargets = new Set<string>();
+  readonly #staleLeases = new Map<string, { activationId: string; sessionId: string }>();
+  readonly #owners = new Map<string, Owner>();
   // Targets this driver may have loaded into the engine since it started.
-  readonly #loaded=new Set<string>();
-  // Hosted targets the engine unloaded while idle, with their documents. Passes skip them until they wake.
-  readonly #dormant=new Map<string,string>();
-  // Targets a hosted pass left held, with the reason, until the engine captures them again.
-  readonly #held=new Map<string,ServiceHostedHold["reason"]>();
+  readonly #loaded = new Set<string>();
+  readonly #dormant = new Map<string, string>();
+  readonly #held = new Map<string, ServiceHostedHold["reason"]>();
   // Targets that cannot progress, with why. Each failed its one capture; passes skip it until `unblock` allows one more.
   // One without lineage also tries once more when the relay holds a Y.Doc update for its document newer than `update`, the latest before that capture's pull.
-  // One whose history is past its budget tries once more when the relay holds a new base for its document after `checked`.
   // One held for released retained work never captures: only the resolution of the binding whose digest it keeps clears it.
-  readonly #blocked=new Map<string,{reason:"refused"|"live-edit-unadmitted"}|{reason:"without-lineage";update:number}|
-    {reason:"history-over-budget";checked:number}|{reason:"released-lineage-unsettled";digest:string}>();
-  // Targets whose activation failed, with how many times in a row and when the next try may start.
-  readonly #failures=new Map<string,{count:number;until:number}>();
+  readonly #blocked = new Map<string, TargetBlock>();
+  // Targets whose activation failed, with how many times in a row, when the next try may start, and whether the last
+  // failure was a history past the read budget. `run` is the failures in that row that have a word: when the first came,
+  // how many, the latest one's word, and whether its owner sees them.
+  readonly #failures = new Map<string, TargetFailure>();
+  // Blocks and waits kept for documents that left while no owner stopped them, by document. Adding the same document
+  // again applies its entry and removes it.
+  readonly #kept = new Map<string, { block?: TargetBlock; failure?: TargetFailure }>();
   // Each target's document, once known, so a hold applies before the target has an owner, as after a restart.
-  readonly #objects=new Map<string,string>();
+  readonly #objects = new Map<string, string>();
   // How often each target's activation began to retire. An activation that started before then never becomes ready.
-  readonly #retirements=new Map<string,number>();
+  readonly #retirements = new Map<string, number>();
   // Each enrolled target's document, from `addTarget`. Its activation reads name it, so they never read another document's activation at the same path.
-  readonly #enrolled=new Map<string,string>();
+  readonly #enrolled = new Map<string, string>();
   // Owner refusals received but not yet recorded, kept across every owner this driver replaces.
-  readonly #refusals=new OwnerKnownRefusals();
+  readonly #refusals = new OwnerKnownRefusals();
+  // Targets whose last activation neither finished nor blocked, so a later pass continues it.
+  readonly #unfinished = new Set<string>();
   // Whether a wait for the validation slot a capture found busy is running. It wakes the pass that captures again.
-  #awaitingCapacity=false;
-  constructor(readonly options:{trustedAccount: OwnerOutboxAdmission["trustedAccount"];storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
-    /** An attached workspace whose replica checked its origin. Activation, restore and departures reach no other. */
-    workspace(workspaceId:string):{handle:string;replica:ServiceActivationReplica;identity:ServiceKeptEditsIdentity}|undefined;config:ServiceActivationConfig;
-    adoption:{maxBytes:number;maxEvents:number};restore?:LiveRestorePreparation;nextRequestId():number;deadlineMs:number;
-    /** The engine's settlement bound, which also bounds a retirement's applications. Configuration admission requires it. */
-    maxApplications?:number;
-    assertCurrent():void;registered():void;
-    runDocument<T>(document:LiveDocumentKey,signal:AbortSignal,operation:()=>Promise<T>):Promise<T>;
-    /** Ends with the host, and ends the wait for a validation slot with it. */
-    lifetime:AbortSignal;
-    /** Runs another pass soon: validation may have a slot for a capture it found busy. */
-    wake():void;}){
-    this.#store=options.storage.createServiceActivationStore(options.history);
-    this.#delivery=options.storage.createLiveCommittedDeliveryStore(options.history);
-    this.#targets=options.config.targets;
+  #awaitingCapacity = false;
+  constructor(
+    readonly options: {
+      trustedAccount: OwnerOutboxAdmission["trustedAccount"];
+      storage: SyncRelayStorage;
+      history: LiveJournalHistoryAuthority;
+      client: EngineClient;
+      host: LiveHostConnectionCoordinate;
+      /** An attached workspace whose replica checked its origin. Activation, restore and departures reach no other. */
+      workspace(
+        workspaceId: string,
+      ):
+        | { handle: string; replica: ServiceActivationReplica; identity: ServiceKeptEditsIdentity }
+        | undefined;
+      config: ServiceActivationConfig;
+      adoption: { maxBytes: number; maxEvents: number };
+      restore?: LiveRestorePreparation;
+      nextRequestId(): number;
+      deadlineMs: number;
+      /** The engine's settlement bound, which also bounds a retirement's applications. Configuration admission requires it. */
+      maxApplications?: number;
+      assertCurrent(): void;
+      registered(): void;
+      runDocument<T>(
+        document: LiveDocumentKey,
+        signal: AbortSignal,
+        operation: () => Promise<T>,
+      ): Promise<T>;
+      /** Ends with the host, and ends the wait for a validation slot with it. */
+      lifetime: AbortSignal;
+      /** Runs another pass soon: validation may have a slot for a capture it found busy. */
+      wake(): void;
+    },
+  ) {
+    this.#store = options.storage.createServiceActivationStore(options.history);
+    this.#delivery = options.storage.createLiveCommittedDeliveryStore(options.history);
+    this.#targets = options.config.targets;
   }
   /** The documents activation passes visit, in pass order. */
-  get targets(){return this.#targets;}
+  get targets() {
+    return this.#targets;
+  }
   /** Adds one document to activation passes, replacing an earlier target at its path. */
-  addTarget(target:ServiceActivationTarget,objectId:string){
-    this.#targets=[...this.#targets.filter(row=>targetKey(row)!==targetKey(target)),target];
-    this.#objects.set(targetKey(target),objectId);this.#enrolled.set(targetKey(target),objectId);
+  addTarget(target: ServiceActivationTarget, objectId: string) {
+    this.#targets = [
+      ...this.#targets.filter((row) => targetKey(row) !== targetKey(target)),
+      target,
+    ];
+    this.#objects.set(targetKey(target), objectId);
+    this.#enrolled.set(targetKey(target), objectId);
+    const document = keptKey(target.workspaceId, objectId),
+      kept = this.#kept.get(document);
+    this.#kept.delete(document);
+    if (kept?.block) this.#blocked.set(targetKey(target), kept.block);
+    if (kept?.failure) this.#failures.set(targetKey(target), kept.failure);
+  }
+  /**
+   * Keeps the target's block and wait for its document, if it has either, so they apply when the document is added again.
+   * A hold the engine or the relay reports keeps no block here: the next pass finds it again.
+   */
+  keep(target: ServiceActivationTarget, objectId: string) {
+    const block = this.#blocked.get(targetKey(target)),
+      failure = this.#failures.get(targetKey(target));
+    const kept =
+      block?.reason === "refused" || block?.reason === "without-lineage" ? block : undefined;
+    if (kept || failure)
+      this.#kept.set(keptKey(target.workspaceId, objectId), { block: kept, failure });
+  }
+  /** The block a document's kept entry applies when it is added again, if it has one. */
+  keptBlock(document: {
+    workspaceId: string;
+    objectId: string;
+  }): ServiceActivationBlock | undefined {
+    const kept = this.#kept.get(keptKey(document.workspaceId, document.objectId));
+    if (kept?.block)
+      return kept.block.reason === "released-lineage-unsettled" ? undefined : kept.block.reason;
+    return kept?.failure?.overBudget ? "history-over-budget" : undefined;
+  }
+  /** Removes a document's kept block and wait. Returns whether it had a block or a failure run its owner saw. */
+  forgetKept(document: { workspaceId: string; objectId: string }) {
+    const key = keptKey(document.workspaceId, document.objectId);
+    const named =
+      this.keptBlock(document) !== undefined || this.#kept.get(key)?.failure?.run?.shown === true;
+    this.#kept.delete(key);
+    return named;
+  }
+  keptDocuments() {
+    return [...this.#kept.keys()].map((key) => {
+      const [workspaceId, objectId] = JSON.parse(key) as [string, string];
+      return { workspaceId, objectId };
+    });
   }
   /** Whether this driver may have loaded the document into the engine. */
-  loaded(target:ServiceActivationTarget){return this.#loaded.has(targetKey(target));}
+  loaded(target: ServiceActivationTarget) {
+    return this.#loaded.has(targetKey(target));
+  }
   /** Whether the target's last pass delivered and settled it. */
-  completed(target:ServiceActivationTarget){return this.#completedTargets.has(targetKey(target));}
+  completed(target: ServiceActivationTarget) {
+    return this.#completedTargets.has(targetKey(target));
+  }
   /** The document a target's owner delivery holds, if one does. */
-  ownerDocument(target:ServiceActivationTarget){
-    for(const [document,owner] of this.#owners)if(owner.target===targetKey(target))return parseLiveDocumentKey(JSON.parse(document));
+  ownerDocument(target: ServiceActivationTarget) {
+    for (const [document, owner] of this.#owners)
+      if (owner.target === targetKey(target)) return parseLiveDocumentKey(JSON.parse(document));
     return undefined;
   }
   /** Forgets a document the engine no longer holds, so a later pass activates it from its retained source. */
-  removeTarget(target:ServiceActivationTarget){this.#forget(targetKey(target));}
+  removeTarget(target: ServiceActivationTarget) {
+    this.#forget(targetKey(target));
+  }
   /** Forgets the target of a moved document's restore, which `restoreConsumer` and `retire` were given as moved. */
-  forgetMoved(target:ServiceActivationTarget,objectId:string){this.#forget(movedKey(target,objectId));}
-  #forget(key:string){
-    this.#targets=this.#targets.filter(row=>targetKey(row)!==key);
-    this.#completedTargets.delete(key);this.#staleLeases.delete(key);this.#loaded.delete(key);this.#dormant.delete(key);this.#held.delete(key);this.#blocked.delete(key);this.#objects.delete(key);this.#enrolled.delete(key);
+  forgetMoved(target: ServiceActivationTarget, objectId: string) {
+    this.#forget(movedKey(target, objectId));
+  }
+  #forget(key: string) {
+    this.#targets = this.#targets.filter((row) => targetKey(row) !== key);
+    this.#completedTargets.delete(key);
+    this.#staleLeases.delete(key);
+    this.#loaded.delete(key);
+    this.#dormant.delete(key);
+    this.#held.delete(key);
+    this.#blocked.delete(key);
+    this.#objects.delete(key);
+    this.#enrolled.delete(key);
     this.#failures.delete(key);
-    for(const [document,owner] of this.#owners)if(owner.target===key)this.#owners.delete(document);
+    this.#unfinished.delete(key);
+    for (const [document, owner] of this.#owners)
+      if (owner.target === key) this.#owners.delete(document);
+  }
+  /**
+   * Whether a target's last activation left work for a later pass: it failed, or ended pending without blocking.
+   * A finished one found no owner edit waiting in the engine. A blocked one waits for its owner or the relay instead.
+   * One that waits out its back-off after a failure does not count until its wait lapses.
+   */
+  get unfinished() {
+    return [...this.#unfinished].some((key) => !this.#waitingOut(key));
   }
   /**
    * Clears readiness of documents a hosted pass left held. The engine has
@@ -185,137 +405,212 @@ export class ServiceActivationDriver {
    * pass, where the engine refuses it if it is held. Returns how many owners
    * it dropped that way.
    */
-  hold(workspaceId:string,holds:readonly ServiceHostedHold[],window:HostedWindow,newlyHeld:ServiceHostedPullPage["newlyHeld"]){
-    let dropped=0;
-    for(const [key,objectId] of this.#objects){
-      if(JSON.parse(key)[0]!==workspaceId)continue;
-      const covered=hostedWindowCovers(window,objectId);
-      const hold=covered?holds.find(row=>row.objectId===objectId):newlyHeld.listed.find(row=>row.objectId===objectId);
-      if(covered && hold?.reason!=="released-lineage-unsettled" && this.#blocked.get(key)?.reason==="released-lineage-unsettled")this.#blocked.delete(key);
-      if(!hold){
-        if(!covered && !newlyHeld.complete && this.#drop(key))dropped++;
+  hold(
+    workspaceId: string,
+    holds: readonly ServiceHostedHold[],
+    window: HostedWindow,
+    newlyHeld: ServiceHostedPullPage["newlyHeld"],
+  ) {
+    let dropped = 0;
+    for (const [key, objectId] of this.#objects) {
+      if (JSON.parse(key)[0] !== workspaceId) continue;
+      const covered = hostedWindowCovers(window, objectId);
+      const hold = covered
+        ? holds.find((row) => row.objectId === objectId)
+        : newlyHeld.listed.find((row) => row.objectId === objectId);
+      if (
+        covered &&
+        hold?.reason !== "released-lineage-unsettled" &&
+        this.#blocked.get(key)?.reason === "released-lineage-unsettled"
+      )
+        this.#blocked.delete(key);
+      if (!hold) {
+        if (!covered && !newlyHeld.complete && this.#drop(key)) dropped++;
         continue;
       }
-      this.#drop(key);this.#dormant.delete(key);this.#held.set(key,hold.reason);
+      this.#drop(key);
+      this.#dormant.delete(key);
+      this.#held.set(key, hold.reason);
       // A fresh binding replaces the one held before; that resolves nothing.
-      if(hold.reason==="released-lineage-unsettled")this.#blocked.set(key,{reason:hold.reason,digest:hold.bindingDigest});
+      if (hold.reason === "released-lineage-unsettled")
+        this.#blocked.set(key, { reason: hold.reason, digest: hold.bindingDigest });
     }
     return dropped;
   }
-  // Ends the target's readiness and its owner, if it has one. Returns whether it had one.
-  #drop(key:string){
+  #drop(key: string) {
     this.#completedTargets.delete(key);
-    let owned=false;
-    for(const [document,owner] of this.#owners)if(owner.target===key){owner.completed=false;this.#owners.delete(document);owned=true;}
+    let owned = false;
+    for (const [document, owner] of this.#owners)
+      if (owner.target === key) {
+        owner.completed = false;
+        this.#owners.delete(document);
+        owned = true;
+      }
     return owned;
   }
-  /** Why the target failed the one capture it gets while it cannot progress, if it did. Activation skips it. */
-  blocked(target:ServiceActivationTarget):ServiceActivationBlock|undefined{
-    const block=this.#blocked.get(targetKey(target));
-    return block?.reason==="released-lineage-unsettled"?undefined:block?.reason;
+  /**
+   * Why the target cannot go live, if it cannot. A blocked target failed the one capture it gets, and activation skips it
+   * until `unblock`. One whose last capture found its history past the read budget tries again after its wait.
+   */
+  blocked(target: ServiceActivationTarget): ServiceActivationBlock | undefined {
+    const key = targetKey(target),
+      block = this.#blocked.get(key);
+    if (block) return block.reason === "released-lineage-unsettled" ? undefined : block.reason;
+    return this.#failures.get(key)?.overBudget ? "history-over-budget" : undefined;
   }
   /** How many of the workspace's targets a hosted pass left held. A later pull's held list frees them. */
-  heldIn(workspaceId:string){
-    let count=0;
-    for(const key of this.#held.keys())if(JSON.parse(key)[0]===workspaceId)count++;
+  heldIn(workspaceId: string) {
+    let count = 0;
+    for (const key of this.#held.keys()) if (JSON.parse(key)[0] === workspaceId) count++;
     return count;
   }
   // Waits outside the pass for the validation slot a capture found busy, then wakes a pass that captures again.
   // One wait serves every target: they share the slot. A validator that offers no wait leaves the retry to the next periodic pass.
-  #awaitCapacity(){
-    const o=this.options,wait=o.config.validateActivation.waitForCapacity;
-    if(!wait || this.#awaitingCapacity || o.lifetime.aborted)return;
-    this.#awaitingCapacity=true;
-    wait(o.lifetime).then(()=>{this.#awaitingCapacity=false;o.wake();},()=>{this.#awaitingCapacity=false;});
+  #awaitCapacity() {
+    const o = this.options,
+      wait = o.config.validateActivation.waitForCapacity;
+    if (!wait || this.#awaitingCapacity || o.lifetime.aborted) return;
+    this.#awaitingCapacity = true;
+    wait(o.lifetime).then(
+      () => {
+        this.#awaitingCapacity = false;
+        o.wake();
+      },
+      () => {
+        this.#awaitingCapacity = false;
+      },
+    );
   }
   /** Why the hosted pass left this target held, until a capture succeeds. */
-  holdReason(target:ServiceActivationTarget):ServiceHostedHold["reason"]|undefined{return this.#held.get(targetKey(target));}
-  /** Allows a blocked target one more capture. Returns whether it was blocked. A hold for released retained work stays. */
-  unblock(target:ServiceActivationTarget){this.#failures.delete(targetKey(target));return this.#unblock(targetKey(target));}
-  #unblock(key:string){return this.#blocked.get(key)?.reason!=="released-lineage-unsettled" && this.#blocked.delete(key);}
+  holdReason(target: ServiceActivationTarget): ServiceHostedHold["reason"] | undefined {
+    return this.#held.get(targetKey(target));
+  }
+  /** Why the target's activation keeps failing, once its owner sees it. Passes keep trying it. */
+  failing(target: ServiceActivationTarget) {
+    const run = this.#failures.get(targetKey(target))?.run;
+    return run?.shown ? { word: run.word, since: run.since } : undefined;
+  }
+  /**
+   * Allows a target that cannot go live one more capture, and a failing one a capture now, on the next pass. Returns whether
+   * `blocked` named a reason or its owner saw it failing. A hold for released retained work stays.
+   */
+  unblock(target: ServiceActivationTarget) {
+    const key = targetKey(target),
+      failure = this.#failures.get(key),
+      named = failure?.overBudget === true || failure?.run?.shown === true;
+    this.#failures.delete(key);
+    return this.#unblock(key) || named;
+  }
+  #unblock(key: string) {
+    return (
+      this.#blocked.get(key)?.reason !== "released-lineage-unsettled" && this.#blocked.delete(key)
+    );
+  }
   /** The digest of the binding the target is held with for released retained work, if it is. Activation skips it. */
-  releasedHold(target:ServiceActivationTarget){
-    const block=this.#blocked.get(targetKey(target));
-    return block?.reason==="released-lineage-unsettled"?block.digest:undefined;
+  releasedHold(target: ServiceActivationTarget) {
+    const block = this.#blocked.get(targetKey(target));
+    return block?.reason === "released-lineage-unsettled" ? block.digest : undefined;
   }
   /** Ends the target's hold for released retained work once the binding `digest` names is resolved. Returns whether it did. */
-  clearResolvedHold(target:ServiceActivationTarget,digest:string){
-    return this.releasedHold(target)===digest && this.#blocked.delete(targetKey(target));
+  clearResolvedHold(target: ServiceActivationTarget, digest: string) {
+    return this.releasedHold(target) === digest && this.#blocked.delete(targetKey(target));
   }
-  // Keeps the target's hold for released retained work through `clear`.
-  #keepReleasedHold(key:string,clear:()=>void){
-    const block=this.#blocked.get(key);
+  #keepReleasedHold(key: string, clear: () => void) {
+    const block = this.#blocked.get(key);
     clear();
-    if(block?.reason==="released-lineage-unsettled")this.#blocked.set(key,block);
+    if (block?.reason === "released-lineage-unsettled") this.#blocked.set(key, block);
   }
   // A document with no Y.Doc lineage has nothing to activate until one reaches the relay, a held
   // document whose live edit was never admitted cannot become ready, and a retained activation
   // the engine refuses as diverged cannot resume. Each blocks after its failed capture. A document
   // that is only not ready, or whose first capture met another conflict, waits.
-  #refused(key:string,resuming:boolean,update:number,error:unknown){
-    const diverged=resuming && error instanceof EngineRequestError && error.wireError?.code==="CONFLICT" && !isHostedDocumentUnready(error);
+  #refused(key: string, resuming: boolean, update: number, error: unknown) {
+    const diverged =
+      resuming &&
+      error instanceof EngineRequestError &&
+      error.wireError?.code === "CONFLICT" &&
+      !isHostedDocumentUnready(error);
     // A pull during this capture may have held it for released retained work.
-    if(this.#blocked.get(key)?.reason==="released-lineage-unsettled")return;
-    if(isLiveDocumentWithoutLineage(error))this.#blocked.set(key,{reason:"without-lineage",update});
-    else if(this.#held.get(key)==="hosted-live-edit-unadmitted")this.#blocked.set(key,{reason:"live-edit-unadmitted"});
-    else if(diverged)this.#blocked.set(key,{reason:"refused"});
+    if (this.#blocked.get(key)?.reason === "released-lineage-unsettled") return;
+    if (isLiveDocumentWithoutLineage(error))
+      this.#blocked.set(key, { reason: "without-lineage", update });
+    else if (this.#held.get(key) === "hosted-live-edit-unadmitted")
+      this.#blocked.set(key, { reason: "live-edit-unadmitted" });
+    else if (diverged) this.#blocked.set(key, { reason: "refused" });
     else this.#blocked.delete(key);
   }
-  #objectId(target:ServiceActivationTarget){
-    return this.#objects.get(targetKey(target)) ??
-      this.options.storage.objectIdAtPathInVersion({workspaceId:target.workspaceId,versionId:"main",path:target.path});
+  #objectId(target: ServiceActivationTarget) {
+    return (
+      this.#objects.get(targetKey(target)) ??
+      this.options.storage.objectIdAtPathInVersion({
+        workspaceId: target.workspaceId,
+        versionId: "main",
+        path: target.path,
+      })
+    );
   }
   // The relay sequence of the latest Y.Doc update for the target's document, or 0 while it has none.
-  #latestUpdate(target:ServiceActivationTarget){
-    const objectId=this.#objectId(target);
-    return objectId===undefined?0:this.options.storage.latestServiceHostDocumentUpdate({workspaceId:target.workspaceId,objectId});
-  }
-  // Whether the relay holds a base for the target's document after `block.checked`: the one change that gives its history a new start.
-  // A call that finds none reads only the rows the last one did not. One that finds a base keeps `checked`, so a pass that ends
-  // before its capture finds the base again.
-  #newBase(target:ServiceActivationTarget,block:{checked:number}){
-    const objectId=this.#objectId(target),latest=this.#latestUpdate(target);
-    if(objectId===undefined || latest<=block.checked)return false;
-    const found=this.options.storage.serviceHostDocumentBaseAfter({workspaceId:target.workspaceId,objectId,afterRelaySeq:block.checked});
-    if(!found)block.checked=latest;
-    return found;
+  #latestUpdate(target: ServiceActivationTarget) {
+    const objectId = this.#objectId(target);
+    return objectId === undefined
+      ? 0
+      : this.options.storage.latestServiceHostDocumentUpdate({
+          workspaceId: target.workspaceId,
+          objectId,
+        });
   }
   /**
    * Forgets a document the engine unloaded while it stays a target, and ends
    * its registration. Passes skip it until it wakes, then activate it again
-   * from its retained source.
+   * from its retained source. Its block and its wait stay, since it is the same document.
    */
-  sleep(target:ServiceActivationTarget,document:LiveDocumentKey){
-    const key=JSON.stringify(parseLiveDocumentKey(document)),owner=this.#owners.get(key);
+  sleep(target: ServiceActivationTarget, document: LiveDocumentKey) {
+    const key = JSON.stringify(parseLiveDocumentKey(document)),
+      owner = this.#owners.get(key),
+      slot = targetKey(target);
     owner?.consumer.release(document);
-    this.#keepReleasedHold(targetKey(target),()=>{this.removeTarget(target);this.addTarget(target,document.objectId);});
-    this.#dormant.set(targetKey(target),key);
+    const block = this.#blocked.get(slot),
+      failure = this.#failures.get(slot);
+    this.removeTarget(target);
+    this.addTarget(target, document.objectId);
+    if (block) this.#blocked.set(slot, block);
+    if (failure) this.#failures.set(slot, failure);
+    this.#dormant.set(slot, key);
   }
-  dormant(target:ServiceActivationTarget){return this.#dormant.has(targetKey(target));}
+  dormant(target: ServiceActivationTarget) {
+    return this.#dormant.has(targetKey(target));
+  }
   /** Whether the document belongs to a dormant target, which wakes when it is opened. */
-  asleep(document:LiveDocumentKey){
-    const key=JSON.stringify(parseLiveDocumentKey(document));
+  asleep(document: LiveDocumentKey) {
+    const key = JSON.stringify(parseLiveDocumentKey(document));
     return [...this.#dormant.values()].includes(key);
   }
-  wake(target:ServiceActivationTarget){this.#dormant.delete(targetKey(target));}
-  hasRetained(){
-    return this.#targets.some(target=>this.retained(target));
+  wake(target: ServiceActivationTarget) {
+    this.#dormant.delete(targetKey(target));
+  }
+  hasRetained() {
+    return this.#targets.some((target) => this.retained(target));
   }
   /** Whether the relay retains an activation of the document at the target's path. `objectId` is as for `activationId`. */
-  retained(target:ServiceActivationTarget,objectId?:string){
-    return this.activationId(target,objectId)!==undefined;
+  retained(target: ServiceActivationTarget, objectId?: string) {
+    return this.activationId(target, objectId) !== undefined;
   }
   /**
    * The activation the relay retains at the target's path, which an unload of its document names.
    * A host that holds a document without its target, or removed the target while the document parks,
    * names that document as `objectId`.
    */
-  activationId(target:ServiceActivationTarget,objectId?:string){
-    return this.#read(target,objectId)?.activationId;
+  activationId(target: ServiceActivationTarget, objectId?: string) {
+    return this.#read(target, objectId)?.activationId;
   }
   /** The activation retained at the target's path, its enrolled document's when the target has one. A static target reads by path alone. */
-  #read(target:ServiceActivationTarget,objectId=this.#enrolled.get(targetKey(target))){
-    return this.#store.read(target.workspaceId,target.path,this.options.config.maxCaptureBytes,objectId);
+  #read(target: ServiceActivationTarget, objectId = this.#enrolled.get(targetKey(target))) {
+    return this.#store.read(
+      target.workspaceId,
+      target.path,
+      this.options.config.maxCaptureBytes,
+      objectId,
+    );
   }
   /**
    * The owner through which a restore step reaches the document. `moved` is the
@@ -324,69 +619,171 @@ export class ServiceActivationDriver {
    * the document's own activation is read, and a target at the same path that
    * holds another document is passed over.
    */
-  restoreConsumer(document:LiveDocumentKey,lookup:StopRestoreLookup,moved?:ServiceActivationTarget){
-    const o=this.options,key=JSON.stringify(parseLiveDocumentKey(document));
-    let target:ServiceActivationTarget|undefined,saved:ReturnType<ServiceActivationStore["read"]>=null;
-    for(const row of moved?[moved]:this.#targets){
-      const object=moved?undefined:this.#objects.get(targetKey(row));
-      if(row.workspaceId!==document.workspaceId || (object!==undefined && object!==document.objectId))continue;
-      const read=this.#store.read(row.workspaceId,row.path,o.config.maxCaptureBytes,document.objectId);
-      if(read?.completed && read.source.objectId===document.objectId && read.source.lineageClaimId===document.lineageClaimId){
-        target=row;saved=read;break;
+  restoreConsumer(
+    document: LiveDocumentKey,
+    lookup: StopRestoreLookup,
+    moved?: ServiceActivationTarget,
+  ) {
+    const o = this.options,
+      key = JSON.stringify(parseLiveDocumentKey(document));
+    let target: ServiceActivationTarget | undefined,
+      saved: ReturnType<ServiceActivationStore["read"]> = null;
+    for (const row of moved ? [moved] : this.#targets) {
+      const object = moved ? undefined : this.#objects.get(targetKey(row));
+      if (
+        row.workspaceId !== document.workspaceId ||
+        (object !== undefined && object !== document.objectId)
+      )
+        continue;
+      const read = this.#store.read(
+        row.workspaceId,
+        row.path,
+        o.config.maxCaptureBytes,
+        document.objectId,
+      );
+      if (
+        read?.completed &&
+        read.source.objectId === document.objectId &&
+        read.source.lineageClaimId === document.lineageClaimId
+      ) {
+        target = row;
+        saved = read;
+        break;
       }
     }
-    const workspace=o.workspace(document.workspaceId);
-    if(!target || !saved || !workspace)throw new Error("Service restore source is unavailable.");
+    const workspace = o.workspace(document.workspaceId);
+    if (!target || !saved || !workspace) throw new Error("Service restore source is unavailable.");
     // Stopping access re-registers the retained owner. Only the activated session's
     // verified transport can check that adoption.
-    const activated=this.#owners.get(key);
-    if(activated && !activated.activationPending)return activated.consumer;
+    const activated = this.#owners.get(key);
+    if (activated && !activated.activationPending) return activated.consumer;
     // Without that session, as for a dormant document or after a restart, the
     // owner takes the operation's binding, whose adoption must be that activation.
     // Only a step that registers reloads the retained activation into a new native session.
-    const operation=o.storage.readStopRestore(lookup),origin=operation?.basis.ownerOrigin;
-    if(!operation || operation.intent.deliveryKind!=="owner" || !isDeepStrictEqual(operation.intent.document,parseLiveDocumentKey(document)) ||
-      operation.intent.ownerUserId!==saved.ownerUserId || !origin ||
-      JSON.parse(origin)?.adoptionId!==saved.activationId)throw new Error("Service restore owner adoption is unavailable.");
-    const slot=moved?movedKey(target,document.objectId):targetKey(target);
-    const owner:Owner=this.#owner(target,async signal=>{
-      const sleeping=this.#dormant.get(slot);
-      // Once sent, the capture may load the session whatever its reply, so a dormant target
-      // rejoins passes, which settle it and resume its session as for an awake document.
-      // Only the engine's refusal, which loads nothing, leaves it dormant.
-      this.#loaded.add(slot);this.#dormant.delete(slot);
-      let capture:NativeOwnerActivation;
-      try{
-        capture=await o.client.captureOwnerActivation({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs},
-          target.path,o.config.maxCaptureBytes,signal,saved.activationId);
-      }catch(error){
-        if(sleeping!==undefined && error instanceof EngineRequestError && error.wireError?.code==="INVALID_PARAMS")this.#dormant.set(slot,sleeping);
-        throw error;
-      }
-      signal?.throwIfAborted();o.assertCurrent();this.#held.delete(slot);this.#objects.set(slot,document.objectId);
-      if(capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source))throw new Error("Native service activation source changed.");
-      this.#owners.set(key,owner);
-      return capture;
-    },{binding:operation.basis.ownerBinding,activationPending:false,ownerUserId:saved.ownerUserId},undefined,slot);
+    const operation = o.storage.readStopRestore(lookup),
+      origin = operation?.basis.ownerOrigin;
+    if (
+      !operation ||
+      operation.intent.deliveryKind !== "owner" ||
+      !isDeepStrictEqual(operation.intent.document, parseLiveDocumentKey(document)) ||
+      operation.intent.ownerUserId !== saved.ownerUserId ||
+      !origin ||
+      JSON.parse(origin)?.adoptionId !== saved.activationId
+    )
+      throw new Error("Service restore owner adoption is unavailable.");
+    const slot = moved ? movedKey(target, document.objectId) : targetKey(target);
+    const owner: Owner = this.#owner(
+      target,
+      async (signal) => {
+        const sleeping = this.#dormant.get(slot);
+        // Once sent, the capture may load the session whatever its reply, so a dormant target
+        // rejoins passes, which settle it and resume its session as for an awake document.
+        // Only the engine's refusal, which loads nothing, leaves it dormant.
+        this.#loaded.add(slot);
+        this.#dormant.delete(slot);
+        let capture: NativeOwnerActivation;
+        try {
+          capture = await o.client.captureOwnerActivation(
+            { id: o.nextRequestId(), workspace: workspace.handle, deadlineMs: o.deadlineMs },
+            target.path,
+            o.config.maxCaptureBytes,
+            signal,
+            saved.activationId,
+          );
+        } catch (error) {
+          if (
+            sleeping !== undefined &&
+            error instanceof EngineRequestError &&
+            error.wireError?.code === "INVALID_PARAMS"
+          )
+            this.#dormant.set(slot, sleeping);
+          throw error;
+        }
+        signal?.throwIfAborted();
+        o.assertCurrent();
+        this.#held.delete(slot);
+        this.#objects.set(slot, document.objectId);
+        if (
+          capture.activationId !== saved.activationId ||
+          !isDeepStrictEqual(capture.source, saved.source)
+        )
+          throw new Error("Native service activation source changed.");
+        this.#owners.set(key, owner);
+        return capture;
+      },
+      {
+        binding: operation.basis.ownerBinding,
+        activationPending: false,
+        ownerUserId: saved.ownerUserId,
+      },
+      undefined,
+      slot,
+    );
     return owner.consumer;
   }
-  workspaceReady(workspaceId:string){
-    return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target) && !this.#held.has(targetKey(target)) &&
-      !this.#blocked.has(targetKey(target))).every(target=>this.#completedTargets.has(targetKey(target)));
+  workspaceReady(workspaceId: string) {
+    return this.#targets
+      .filter(
+        (target) =>
+          target.workspaceId === workspaceId &&
+          !this.dormant(target) &&
+          !this.#held.has(targetKey(target)) &&
+          !this.#blocked.has(targetKey(target)),
+      )
+      .every((target) => this.#completedTargets.has(targetKey(target)));
   }
   // Whether an unready workspace may still push. A document with no owner that waits out a backoff after a failed
-  // activation does not hold the push back, so its siblings' settled edits still publish while it waits. It still
-  // holds readiness, so the workspace keeps pulling as an unready one does.
-  workspacePushes(workspaceId:string){
-    return this.#targets.filter(target=>target.workspaceId===workspaceId && !this.dormant(target) && !this.#held.has(targetKey(target)) &&
-      !this.#blocked.has(targetKey(target)) && !this.#backingOff(targetKey(target))).every(target=>this.#completedTargets.has(targetKey(target)));
+  // activation does not hold the push back, so its siblings' settled edits still publish while it waits. A workspace
+  // that may push also passes `workspaceWaiting`.
+  workspacePushes(workspaceId: string) {
+    return this.#targets
+      .filter(
+        (target) =>
+          target.workspaceId === workspaceId &&
+          !this.dormant(target) &&
+          !this.#held.has(targetKey(target)) &&
+          !this.#blocked.has(targetKey(target)) &&
+          !this.#backingOff(targetKey(target)),
+      )
+      .every((target) => this.#completedTargets.has(targetKey(target)));
   }
-  #backingOff(key:string){return this.#waiting(key) && ![...this.#owners.values()].some(owner=>owner.target===key);}
-  // Whether a failed activation's wait before its next capture has not yet lapsed.
-  #waiting(key:string){return Date.now()<(this.#failures.get(key)?.until ?? 0);}
-  consumer(value:LiveDocumentKey){
-    const document=parseLiveDocumentKey(value),owner=this.#owners.get(JSON.stringify(document));
-    if(!owner?.completed || this.#invalidated(owner,document))throw new Error("Service document activation is incomplete.");
+  // Whether each document that holds a workspace's readiness has completed or waits out a back-off. Until a wait lapses,
+  // such a workspace has nothing more to do than a ready one.
+  workspaceWaiting(workspaceId: string) {
+    return this.#targets
+      .filter(
+        (target) =>
+          target.workspaceId === workspaceId &&
+          !this.dormant(target) &&
+          !this.#held.has(targetKey(target)) &&
+          !this.#blocked.has(targetKey(target)),
+      )
+      .every(
+        (target) =>
+          this.#completedTargets.has(targetKey(target)) || this.#waitingOut(targetKey(target)),
+      );
+  }
+  #backingOff(key: string) {
+    return this.#waiting(key) && ![...this.#owners.values()].some((owner) => owner.target === key);
+  }
+  // Whether a target that has not completed waits out a failed activation's back-off, as `#activate` checks before it
+  // tries again.
+  #waitingOut(key: string) {
+    const owner = [...this.#owners.values()].find((owner) => owner.target === key);
+    return !owner?.completed && this.#waiting(key, owner !== undefined);
+  }
+  // Whether a failed activation's wait before its next capture or drain has not yet lapsed. A target whose owner the host
+  // holds waits at most 30 s: its document, its Stop and its workspace's push wait for that owner to complete.
+  #waiting(key: string, owned = false) {
+    const failure = this.#failures.get(key);
+    if (!failure) return false;
+    return Date.now() < (owned ? Math.min(failure.until, failure.at + 30_000) : failure.until);
+  }
+  consumer(value: LiveDocumentKey) {
+    const document = parseLiveDocumentKey(value),
+      owner = this.#owners.get(JSON.stringify(document));
+    if (!owner?.completed || this.#invalidated(owner, document))
+      throw new Error("Service document activation is incomplete.");
     return owner;
   }
   /**
@@ -394,14 +791,29 @@ export class ServiceActivationDriver {
    * once this connection has standing for it, whatever its owner's authority.
    * Undefined when it retains none. `objectId` is as for `activationId`.
    */
-  departing(target:ServiceActivationTarget,signal:AbortSignal,objectId?:string){
-    const o=this.options,saved=this.#read(target,objectId);
-    if(!saved)return undefined;
-    const document=parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,
-      objectId:saved.source.objectId,lineageClaimId:saved.source.lineageClaimId});
-    const check=()=>{signal.throwIfAborted();o.assertCurrent();};
-    this.#store.departing({document,activationId:saved.activationId,host:o.host,registeredAtMs:Date.now(),guard:check});
-    o.registered();check();
+  departing(target: ServiceActivationTarget, signal: AbortSignal, objectId?: string) {
+    const o = this.options,
+      saved = this.#read(target, objectId);
+    if (!saved) return undefined;
+    const document = parseLiveDocumentKey({
+      workspaceId: saved.source.workspaceId,
+      mainVersionId: saved.source.mainVersionId,
+      objectId: saved.source.objectId,
+      lineageClaimId: saved.source.lineageClaimId,
+    });
+    const check = () => {
+      signal.throwIfAborted();
+      o.assertCurrent();
+    };
+    this.#store.departing({
+      document,
+      activationId: saved.activationId,
+      host: o.host,
+      registeredAtMs: Date.now(),
+      guard: check,
+    });
+    o.registered();
+    check();
     return document;
   }
   /**
@@ -413,15 +825,32 @@ export class ServiceActivationDriver {
    * Runs in the work of the document `departing` returned. Null when nothing
    * was adopted here.
    */
-  async settleDeparted(target:ServiceActivationTarget,value:LiveDocumentKey,signal:AbortSignal):Promise<DepartedSettlement|null>{
-    const reconciled=await this.#reconcile(target,value,signal,false);
-    if(reconciled?.kind!=="reconciled")return reconciled;
-    const o=this.options,{registrationId,tip}=reconciled;
-    const settled=await settlementResponse(o.client.sendRequest({id:o.nextRequestId(),workspace:o.workspace(target.workspaceId)!.handle,deadlineMs:o.deadlineMs,
-      method:"liveApplication.settle",params:{registrationId,terminalReceipt:tip?{...tip}:null}},signal),tip);
-    signal.throwIfAborted();o.assertCurrent();
-    if(settlementPending(settled))return settled;
-    return {kind:"settled",settlement:settled};
+  async settleDeparted(
+    target: ServiceActivationTarget,
+    value: LiveDocumentKey,
+    signal: AbortSignal,
+  ): Promise<DepartedSettlement | null> {
+    const reconciled = await this.#reconcile(target, value, signal, false);
+    if (reconciled?.kind !== "reconciled") return reconciled;
+    const o = this.options,
+      { registrationId, tip } = reconciled;
+    const settled = await settlementResponse(
+      o.client.sendRequest(
+        {
+          id: o.nextRequestId(),
+          workspace: o.workspace(target.workspaceId)!.handle,
+          deadlineMs: o.deadlineMs,
+          method: "liveApplication.settle",
+          params: { registrationId, terminalReceipt: tip ? { ...tip } : null },
+        },
+        signal,
+      ),
+      tip,
+    );
+    signal.throwIfAborted();
+    o.assertCurrent();
+    if (settlementPending(settled)) return settled;
+    return { kind: "settled", settlement: settled };
   }
   /**
    * Records what the engine applied of a document whose owner lost live
@@ -432,52 +861,106 @@ export class ServiceActivationDriver {
    * owner applied every accepted row. Runs in the work of the document
    * `departing` returned.
    */
-  reconcileDeparted(target:ServiceActivationTarget,value:LiveDocumentKey,signal:AbortSignal){
-    return this.#reconcile(target,value,signal,true);
+  reconcileDeparted(target: ServiceActivationTarget, value: LiveDocumentKey, signal: AbortSignal) {
+    return this.#reconcile(target, value, signal, true);
   }
   // Registers the departed document through the engine client and records
   // each accepted row the engine applied, with this connection's standing.
   // Null when nothing was adopted here or, with `behind`, nothing is past the tip.
-  async #reconcile(target:ServiceActivationTarget,value:LiveDocumentKey,signal:AbortSignal,behind:boolean):
-    Promise<{kind:"reconciled";registrationId:number;tip:DepartedOwnerDelivery["tip"]}|Exclude<DepartedSettlement,{kind:"settled"}>|null>{
-    const o=this.options,workspace=o.workspace(target.workspaceId);
-    if(!workspace)throw new Error("Service activation workspace is not attached.");
-    const check=()=>{signal.throwIfAborted();o.assertCurrent();};
-    const request=()=>({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs});
-    const document=parseLiveDocumentKey(value),saved=this.#store.read(target.workspaceId,target.path,o.config.maxCaptureBytes,document.objectId);
-    if(!saved || saved.source.objectId!==document.objectId || saved.source.lineageClaimId!==document.lineageClaimId) {
+  async #reconcile(
+    target: ServiceActivationTarget,
+    value: LiveDocumentKey,
+    signal: AbortSignal,
+    behind: boolean,
+  ): Promise<
+    | { kind: "reconciled"; registrationId: number; tip: DepartedOwnerDelivery["tip"] }
+    | Exclude<DepartedSettlement, { kind: "settled" }>
+    | null
+  > {
+    const o = this.options,
+      workspace = o.workspace(target.workspaceId);
+    if (!workspace) throw new Error("Service activation workspace is not attached.");
+    const check = () => {
+      signal.throwIfAborted();
+      o.assertCurrent();
+    };
+    const request = () => ({
+      id: o.nextRequestId(),
+      workspace: workspace.handle,
+      deadlineMs: o.deadlineMs,
+    });
+    const document = parseLiveDocumentKey(value),
+      saved = this.#store.read(
+        target.workspaceId,
+        target.path,
+        o.config.maxCaptureBytes,
+        document.objectId,
+      );
+    if (
+      !saved ||
+      saved.source.objectId !== document.objectId ||
+      saved.source.lineageClaimId !== document.lineageClaimId
+    ) {
       throw new Error("Retained service activation changed.");
     }
     check();
-    const input={host:o.host,document,adoptionId:saved.activationId};
-    let delivery=this.#delivery.departedOwnerDelivery(input);
-    if(!delivery || (behind && !delivery.next))return null;
+    const input = { host: o.host, document, adoptionId: saved.activationId };
+    let delivery = this.#delivery.departedOwnerDelivery(input);
+    if (!delivery || (behind && !delivery.next)) return null;
     // Registering retires the engine registration a cached owner holds. That owner
     // registers again, and the document is ready again, only if it returns. The
     // path's readiness ends only if it is this object's: after a move, it is the replacement's.
-    const owner=this.#owners.get(JSON.stringify(document)),key=targetKey(target);
-    if(owner){owner.consumer.release(document);owner.completed=false;}
-    if(owner?.target===key || this.#objects.get(key)===document.objectId)this.#completedTargets.delete(key);
+    const owner = this.#owners.get(JSON.stringify(document)),
+      key = targetKey(target);
+    if (owner) {
+      owner.consumer.release(document);
+      owner.completed = false;
+    }
+    if (owner?.target === key || this.#objects.get(key) === document.objectId)
+      this.#completedTargets.delete(key);
     let registered;
-    try{
-      registered=await o.client.sendRequest({...request(),method:"liveApplication.register",
-        params:{binding:{...delivery.binding,selectorPaths:[...delivery.binding.selectorPaths]},activationId:saved.activationId}},signal);
-    }catch(error){
+    try {
+      registered = await o.client.sendRequest(
+        {
+          ...request(),
+          method: "liveApplication.register",
+          params: {
+            binding: { ...delivery.binding, selectorPaths: [...delivery.binding.selectorPaths] },
+            activationId: saved.activationId,
+          },
+        },
+        signal,
+      );
+    } catch (error) {
       // A parked document, or one its replica's scope still holds but not ready.
-      if(isHostedDocumentUnready(error))return {kind:"unready"};
+      if (isHostedDocumentUnready(error)) return { kind: "unready" };
       throw error;
     }
     check();
-    const registrationId=authorityInteger(configRecord(registered.result,["registrationId"]).registrationId,1);
+    const registrationId = authorityInteger(
+      configRecord(registered.result, ["registrationId"]).registrationId,
+      1,
+    );
     // Record each accepted row the engine applied. One it did not apply stays unapplied, and so do those after it.
-    for(let read=0;delivery.next;read++){
-      if(read===o.adoption.maxEvents)return {kind:"pending",reason:"Departed document reconciliation reached its work budget."};
-      const ack=await o.client.readLiveApplicationAck({...request(),registrationId},delivery.next,signal);
+    for (let read = 0; delivery.next; read++) {
+      if (read === o.adoption.maxEvents)
+        return {
+          kind: "pending",
+          reason: "Departed document reconciliation reached its work budget.",
+        };
+      const ack = await o.client.readLiveApplicationAck(
+        { ...request(), registrationId },
+        delivery.next,
+        signal,
+      );
       check();
-      if(!ack)break;
-      delivery=this.#delivery.recordDepartedApplication({...input,binding:delivery.binding},ack);
+      if (!ack) break;
+      delivery = this.#delivery.recordDepartedApplication(
+        { ...input, binding: delivery.binding },
+        ack,
+      );
     }
-    return {kind:"reconciled",registrationId,tip:delivery.tip};
+    return { kind: "reconciled", registrationId, tip: delivery.tip };
   }
   /**
    * Asks the engine, through the workspace `handle`, to refuse new local edits
@@ -486,20 +969,52 @@ export class ServiceActivationDriver {
    * ends at its release, once the engine begins the activation's retirement,
    * or with this connection.
    */
-  async prepareRetirement(handle:string,objectId:string,activation:RetirableServiceActivation,signal:AbortSignal):Promise<boolean>{
-    const o=this.options;
-    const response=await o.client.sendRequest({id:o.nextRequestId(),workspace:handle,deadlineMs:o.deadlineMs,
-      method:"liveApplication.prepareRetirement",params:{objectId,...activation}},signal);
-    const reply=answer(response.result,{prepared:[],pending:["reason"]});
-    if(reply.status==="pending" && reply.reason!=="native-pending" && reply.reason!=="retry-outstanding")throw new Error("Invalid live retirement response.");
-    return reply.status==="prepared";
+  async prepareRetirement(
+    handle: string,
+    objectId: string,
+    activation: RetirableServiceActivation,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const o = this.options;
+    const response = await o.client.sendRequest(
+      {
+        id: o.nextRequestId(),
+        workspace: handle,
+        deadlineMs: o.deadlineMs,
+        method: "liveApplication.prepareRetirement",
+        params: { objectId, ...activation },
+      },
+      signal,
+    );
+    const reply = answer(response.result, { prepared: [], pending: ["reason"] });
+    if (
+      reply.status === "pending" &&
+      reply.reason !== "native-pending" &&
+      reply.reason !== "retry-outstanding"
+    )
+      throw new Error("Invalid live retirement response.");
+    return reply.status === "prepared";
   }
   /** Ends the block `prepareRetirement` set, if it stands. */
-  async releaseRetirementPreparation(handle:string,objectId:string,activation:RetirableServiceActivation,signal:AbortSignal){
-    const o=this.options;
-    const response=await o.client.sendRequest({id:o.nextRequestId(),workspace:handle,deadlineMs:o.deadlineMs,
-      method:"liveApplication.releaseRetirementPreparation",params:{objectId,...activation}},signal);
-    if(typeof configRecord(response.result,["released"]).released!=="boolean")throw new Error("Invalid live retirement response.");
+  async releaseRetirementPreparation(
+    handle: string,
+    objectId: string,
+    activation: RetirableServiceActivation,
+    signal: AbortSignal,
+  ) {
+    const o = this.options;
+    const response = await o.client.sendRequest(
+      {
+        id: o.nextRequestId(),
+        workspace: handle,
+        deadlineMs: o.deadlineMs,
+        method: "liveApplication.releaseRetirementPreparation",
+        params: { objectId, ...activation },
+      },
+      signal,
+    );
+    if (typeof configRecord(response.result, ["released"]).released !== "boolean")
+      throw new Error("Invalid live retirement response.");
   }
   /**
    * Moves the document's open retirement as far as it can. The engine proves
@@ -513,88 +1028,206 @@ export class ServiceActivationDriver {
    * `restoreConsumer` takes it, is forgotten instead, and no target at its path
    * changes.
    */
-  async retire(target:ServiceActivationTarget,objectId:string,signal:AbortSignal,scope:RetirementScope,moved=false):Promise<RetirementStep|undefined>{
-    const o=this.options,open=o.storage.serviceActivationRetirement({workspaceId:target.workspaceId,objectId});
-    if(!open)return undefined;
-    const slot=moved?movedKey(target,objectId):targetKey(target);
+  async retire(
+    target: ServiceActivationTarget,
+    objectId: string,
+    signal: AbortSignal,
+    scope: RetirementScope,
+    moved = false,
+  ): Promise<RetirementStep | undefined> {
+    const o = this.options,
+      open = o.storage.serviceActivationRetirement({ workspaceId: target.workspaceId, objectId });
+    if (!open) return undefined;
+    const slot = moved ? movedKey(target, objectId) : targetKey(target);
     // An unfinished restore moves the generation the key names and continues through the
     // document's owner and target, so nothing retires, or leaves activation, until it ends.
-    if(o.storage.serviceRestoreInProgress(open))return {kind:"pending",reason:"Waiting for its restore to finish."};
-    const workspace=o.workspace(target.workspaceId),maxApplications=o.maxApplications;
-    if(!workspace)throw new Error("Service activation workspace is not attached.");
-    if(maxApplications===undefined)throw new Error("Service activation retirement requires live settlement.");
-    const check=()=>{signal.throwIfAborted();o.assertCurrent();};
-    const send=async(method:string,params:JsonValue)=>{
-      const response=await o.client.sendRequest({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs,method,params},signal);
+    if (o.storage.serviceRestoreInProgress(open))
+      return { kind: "pending", reason: "Waiting for its restore to finish." };
+    const workspace = o.workspace(target.workspaceId),
+      maxApplications = o.maxApplications;
+    if (!workspace) throw new Error("Service activation workspace is not attached.");
+    if (maxApplications === undefined)
+      throw new Error("Service activation retirement requires live settlement.");
+    const check = () => {
+      signal.throwIfAborted();
+      o.assertCurrent();
+    };
+    const send = async (method: string, params: JsonValue) => {
+      const response = await o.client.sendRequest(
+        {
+          id: o.nextRequestId(),
+          workspace: workspace.handle,
+          deadlineMs: o.deadlineMs,
+          method,
+          params,
+        },
+        signal,
+      );
       check();
       return response.result;
     };
-    this.#retirements.set(slot,(this.#retirements.get(slot)??0)+1);
-    this.#drop(slot);this.#dormant.delete(slot);this.#targets=this.#targets.filter(row=>targetKey(row)!==slot);
-    const document=parseLiveDocumentKey({workspaceId:open.workspaceId,mainVersionId:"main",objectId:open.objectId,lineageClaimId:open.lineageClaimId});
-    const key={objectId:open.objectId,lineageClaimId:open.lineageClaimId,activationId:open.activationId,
-      restoreFenceGeneration:open.restoreFenceGeneration,acceptedThrough:open.acceptedThrough};
-    const input={host:o.host,document,adoptionId:open.activationId};
-    this.#store.departing({document,activationId:open.activationId,host:o.host,registeredAtMs:Date.now(),guard:check});
-    o.registered();check();
+    this.#retirements.set(slot, (this.#retirements.get(slot) ?? 0) + 1);
+    this.#drop(slot);
+    this.#dormant.delete(slot);
+    this.#targets = this.#targets.filter((row) => targetKey(row) !== slot);
+    const document = parseLiveDocumentKey({
+      workspaceId: open.workspaceId,
+      mainVersionId: "main",
+      objectId: open.objectId,
+      lineageClaimId: open.lineageClaimId,
+    });
+    const key = {
+      objectId: open.objectId,
+      lineageClaimId: open.lineageClaimId,
+      activationId: open.activationId,
+      restoreFenceGeneration: open.restoreFenceGeneration,
+      acceptedThrough: open.acceptedThrough,
+    };
+    const input = { host: o.host, document, adoptionId: open.activationId };
+    this.#store.departing({
+      document,
+      activationId: open.activationId,
+      host: o.host,
+      registeredAtMs: Date.now(),
+      guard: check,
+    });
+    o.registered();
+    check();
     // Each round answers what the engine asked for last.
-    let journal:JsonValue|undefined,settle=false;
-    for(let round=0;;round++){
-      if(round===RETIREMENT_ROUNDS)return {kind:"pending",reason:"Retirement reconciliation reached its work budget."};
-      let owned=this.#delivery.departedOwnerDelivery(input);
-      const tip=owned?.tip ?? null;
-      const reply=answer(await send("liveApplication.reconcileActivation",{...key,afterReceipt:tip && {...tip},maxApplications,...(journal?{journal}:{})}),
-        {pending:["reason","deliveries"],reconciled:["adoption","applications","hasMoreApplications","settle"]});
-      const proved=journal!==undefined;
-      journal=undefined;
-      if(reply.status==="pending"){
-        if(proved && reply.reason==="seed-quarantined")return {kind:"held"};
-        if(!Array.isArray(reply.deliveries) || !reply.deliveries.every(id=>typeof id==="string"))throw new Error("Invalid live retirement response.");
-        const evidence=o.storage.retirementJournalEvidence(open,reply.deliveries);
-        journal={receipts:evidence.receipts.map(receipt=>({...receipt})),absent:evidence.absent};
+    let journal: JsonValue | undefined,
+      settle = false;
+    for (let round = 0; ; round++) {
+      if (round === RETIREMENT_ROUNDS)
+        return { kind: "pending", reason: "Retirement reconciliation reached its work budget." };
+      let owned = this.#delivery.departedOwnerDelivery(input);
+      const tip = owned?.tip ?? null;
+      const reply = answer(
+        await send("liveApplication.reconcileActivation", {
+          ...key,
+          afterReceipt: tip && { ...tip },
+          maxApplications,
+          ...(journal ? { journal } : {}),
+        }),
+        {
+          pending: ["reason", "deliveries"],
+          reconciled: ["adoption", "applications", "hasMoreApplications", "settle"],
+        },
+      );
+      const proved = journal !== undefined;
+      journal = undefined;
+      if (reply.status === "pending") {
+        if (proved && reply.reason === "seed-quarantined") return { kind: "held" };
+        if (
+          !Array.isArray(reply.deliveries) ||
+          !reply.deliveries.every((id) => typeof id === "string")
+        )
+          throw new Error("Invalid live retirement response.");
+        const evidence = o.storage.retirementJournalEvidence(open, reply.deliveries);
+        journal = {
+          receipts: evidence.receipts.map((receipt) => ({ ...receipt })),
+          absent: evidence.absent,
+        };
         continue;
       }
-      if(reply.adoption!==null && !owned){
+      if (reply.adoption !== null && !owned) {
         // The engine adopted the activation, but its ACK never reached the relay.
-        const adoption=configRecord(reply.adoption,["adoptionId","localYDocSequence","terminalCursor","adoptionReplayed"]);
-        const cut=this.#delivery.captureOwnerCut({...input,expectedLocalSequence:authorityInteger(adoption.localYDocSequence),
-          maxBytes:o.adoption.maxBytes,maxEvents:o.adoption.maxEvents,throughCursor:authorityInteger(adoption.terminalCursor)});
-        this.#delivery.acknowledgeOwnerAdoption(cut,adoption);
+        const adoption = configRecord(reply.adoption, [
+          "adoptionId",
+          "localYDocSequence",
+          "terminalCursor",
+          "adoptionReplayed",
+        ]);
+        const cut = this.#delivery.captureOwnerCut({
+          ...input,
+          expectedLocalSequence: authorityInteger(adoption.localYDocSequence),
+          maxBytes: o.adoption.maxBytes,
+          maxEvents: o.adoption.maxEvents,
+          throughCursor: authorityInteger(adoption.terminalCursor),
+        });
+        this.#delivery.acknowledgeOwnerAdoption(cut, adoption);
         continue;
       }
-      if(!Array.isArray(reply.applications) || typeof reply.hasMoreApplications!=="boolean" || typeof reply.settle!=="boolean")throw new Error("Invalid live retirement response.");
-      if((reply.adoption===null)!==(owned===null))throw new Error("Retiring activation's adoption differs from the engine's.");
-      for(const ack of reply.applications)owned=this.#delivery.recordDepartedApplication({...input,binding:owned!.binding},ack);
-      settle=reply.settle;
-      if(!reply.hasMoreApplications)break;
+      if (
+        !Array.isArray(reply.applications) ||
+        typeof reply.hasMoreApplications !== "boolean" ||
+        typeof reply.settle !== "boolean"
+      )
+        throw new Error("Invalid live retirement response.");
+      if ((reply.adoption === null) !== (owned === null))
+        throw new Error("Retiring activation's adoption differs from the engine's.");
+      for (const ack of reply.applications)
+        owned = this.#delivery.recordDepartedApplication(
+          { ...input, binding: owned!.binding },
+          ack,
+        );
+      settle = reply.settle;
+      if (!reply.hasMoreApplications) break;
     }
-    const owned=this.#delivery.departedOwnerDelivery(input),tip=owned?.tip ?? null;
-    if(settle){
-      const settled=await settlementResponse(send("liveApplication.settle",{retirement:key,terminalReceipt:tip && {...tip}}).then(result=>({result})),tip);
-      if(settlementPending(settled))return settled;
-      if(!settled.materialized)return {kind:"pending",reason:"Settlement has not reached the file."};
+    const owned = this.#delivery.departedOwnerDelivery(input),
+      tip = owned?.tip ?? null;
+    if (settle) {
+      const settled = await settlementResponse(
+        send("liveApplication.settle", {
+          retirement: key,
+          terminalReceipt: tip && { ...tip },
+        }).then((result) => ({ result })),
+        tip,
+      );
+      if (settlementPending(settled)) return settled;
+      if (!settled.materialized)
+        return { kind: "pending", reason: "Settlement has not reached the file." };
     }
     // Retained output publishes whether or not this pass settled any.
-    if((await workspace.replica.publish(signal)).hasMore){check();return {kind:"pending",reason:"Hosted publication has more pages."};}
+    if ((await workspace.replica.publish(signal)).hasMore) {
+      check();
+      return { kind: "pending", reason: "Hosted publication has more pages." };
+    }
     check();
-    if(!scope.departed())return {kind:"pending",reason:"Waiting for its hosted replica to confirm the document left."};
-    const released=answer(await send("liveApplication.releaseActivation",{...key}),{pending:["reason"],released:["replayed","boundary"]});
-    if(released.status==="pending"){
-      if(released.reason==="parking")return {kind:"pending",reason:"Waiting for its hosted replica to confirm the document parked."};
-      if(released.reason==="reconciliation")return {kind:"pending",reason:"Retirement reconciliation is unfinished."};
+    const waiting = scope.departureWait();
+    if (waiting !== undefined)
+      return {
+        kind: "pending",
+        reason: `Waiting for its hosted replica to confirm the document left: ${waiting}.`,
+      };
+    const released = answer(await send("liveApplication.releaseActivation", { ...key }), {
+      pending: ["reason"],
+      released: ["replayed", "boundary"],
+    });
+    if (released.status === "pending") {
+      if (released.reason === "parking")
+        return {
+          kind: "pending",
+          reason: "Waiting for its hosted replica to confirm the document parked.",
+        };
+      if (released.reason === "reconciliation")
+        return { kind: "pending", reason: "Retirement reconciliation is unfinished." };
       throw new Error("Invalid live retirement response.");
     }
     // An activation that never adopted may release before its document parks; it retires only once it has.
-    if(!owned && !scope.parked())return {kind:"pending",reason:"Waiting for its hosted replica to confirm the document parked."};
+    if (!owned && !scope.parked())
+      return {
+        kind: "pending",
+        reason: "Waiting for its hosted replica to confirm the document parked.",
+      };
     // A key at a restore's accepted row waits for that restore's settlement to publish; the next pass replays the release.
-    if(this.#store.completeRetirement({workspaceId:open.workspaceId,key,boundary:released.boundary as RetainedPrefixBody|null,
-      host:o.host,registeredAtMs:Date.now(),nowMs:Date.now(),guard:check}).status==="pending"){
-      return {kind:"pending",reason:"Waiting for its restore to finish."};
+    if (
+      this.#store.completeRetirement({
+        workspaceId: open.workspaceId,
+        key,
+        boundary: released.boundary as RetainedPrefixBody | null,
+        host: o.host,
+        registeredAtMs: Date.now(),
+        nowMs: Date.now(),
+        guard: check,
+      }).status === "pending"
+    ) {
+      return { kind: "pending", reason: "Waiting for its restore to finish." };
     }
-    o.registered();check();
-    if(moved)this.#forget(slot);
-    else this.#keepReleasedHold(slot,()=>this.removeTarget(target));
-    return {kind:"retired"};
+    o.registered();
+    check();
+    if (moved) this.#forget(slot);
+    else this.#keepReleasedHold(slot, () => this.removeTarget(target));
+    return { kind: "retired" };
   }
   /**
    * Activates the target and drains it. A target with no owner here first pulls
@@ -603,187 +1236,393 @@ export class ServiceActivationDriver {
    * Without it, a retained activation resumes without that pull: its
    * caller pulled already, or the document left the hosted set, and a pull
    * would adopt the scope it left, after which the engine no longer captures it.
-   * `objectId` is as for `activationId`.
+   * `objectId` is as for `activationId`. `settle` runs only right after the document's drain returned done.
    */
-  async activate(target:ServiceActivationTarget,signal:AbortSignal,
-    settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>,catchUp?:ServiceCatchUp,objectId?:string){
-    const key=targetKey(target),endedBefore=signal.aborted;
-    try{
-      const outcome=await this.#activate(target,signal,settle,catchUp,objectId);
+  async activate(
+    target: ServiceActivationTarget,
+    signal: AbortSignal,
+    settle?: (
+      consumer: OwnerCommittedDelivery,
+      document: LiveDocumentKey,
+      signal: AbortSignal,
+    ) => Promise<unknown>,
+    catchUp?: ServiceCatchUp,
+    objectId?: string,
+  ) {
+    const key = targetKey(target),
+      endedBefore = signal.aborted;
+    try {
+      const outcome = await this.#activate(target, signal, settle, catchUp, objectId);
       // Only an activation that finished ends the count: a pass that only waits can alternate with failures.
-      if(outcome.kind==="done")this.#failures.delete(key);
+      if (outcome.kind === "done") this.#failures.delete(key);
+      if (outcome.kind === "done" || this.#blocked.has(key)) this.#unfinished.delete(key);
+      else this.#unfinished.add(key);
       return outcome;
-    }catch(error){
+    } catch (error) {
+      this.#unfinished.add(key);
       // A document the engine has not readied only waits for it, and a pass that was stopped, or had ended before it reached
       // the document, says nothing about the document. One that ran out of its deadline here counts, so a document that keeps running past it backs off.
-      const stopped=signal.aborted && (endedBefore || !(signal.reason instanceof DOMException && signal.reason.name==="TimeoutError"));
-      if(!isHostedDocumentUnready(error) && !stopped)this.#fail(key);
+      const timedOut =
+        signal.aborted &&
+        !endedBefore &&
+        signal.reason instanceof DOMException &&
+        signal.reason.name === "TimeoutError";
+      if (!isHostedDocumentUnready(error) && (!signal.aborted || timedOut))
+        this.#fail(key, failureWord(error, timedOut));
       throw error;
     }
   }
-  #fail(key:string){
-    const count=(this.#failures.get(key)?.count ?? 0)+1;
+  // A failure with a word counts toward the run its owner sees. One without, a stale cut or a history past the read budget,
+  // only waits.
+  #fail(key: string, word?: KnownRefusalWord, overBudget = false) {
+    const previous = this.#failures.get(key),
+      count = (previous?.count ?? 0) + 1,
+      now = Date.now();
+    let run = previous?.run;
+    if (word !== undefined) {
+      run = {
+        since: run?.since ?? now,
+        failures: (run?.failures ?? 0) + 1,
+        word,
+        shown: run?.shown ?? false,
+      };
+      // Two failures in a row that have lasted a minute: a brief engine or relay restart never reaches it.
+      if (!run.shown && run.failures >= 2 && now - run.since >= 60_000) {
+        run.shown = true;
+        // The object ID and word only. The key holds the document's path, which the log never shows.
+        const [workspaceId, path] = JSON.parse(key) as [string, string];
+        console.error(
+          `Live editing cannot start. workspace ${workspaceId} object ${this.#objectId({ workspaceId, path }) ?? "unknown"} ${word}`,
+        );
+      }
+    }
     // The first retry is the next pass. Each later one waits twice as long as the one before, up to five minutes.
-    this.#failures.set(key,{count,until:count<2?0:Date.now()+Math.min(300_000,1000*2**(count-2))});
+    this.#failures.set(key, {
+      count,
+      at: now,
+      until: count < 2 ? 0 : now + Math.min(300_000, 1000 * 2 ** (count - 2)),
+      overBudget,
+      ...(run ? { run } : {}),
+    });
   }
-  async #activate(target:ServiceActivationTarget,signal:AbortSignal,
-    settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>,catchUp?:ServiceCatchUp,objectId?:string){
-    const o=this.options,c=o.config,workspace=o.workspace(target.workspaceId);
-    if(!workspace)throw new Error("Service activation workspace is not attached.");
-    const check=()=>{signal.throwIfAborted();o.assertCurrent();};
-    const request=()=>({id:o.nextRequestId(),workspace:workspace.handle,deadlineMs:o.deadlineMs});
+  async #activate(
+    target: ServiceActivationTarget,
+    signal: AbortSignal,
+    settle?: (
+      consumer: OwnerCommittedDelivery,
+      document: LiveDocumentKey,
+      signal: AbortSignal,
+    ) => Promise<unknown>,
+    catchUp?: ServiceCatchUp,
+    objectId?: string,
+  ) {
+    const o = this.options,
+      c = o.config,
+      workspace = o.workspace(target.workspaceId);
+    if (!workspace) throw new Error("Service activation workspace is not attached.");
+    const check = () => {
+      signal.throwIfAborted();
+      o.assertCurrent();
+    };
+    const request = () => ({
+      id: o.nextRequestId(),
+      workspace: workspace.handle,
+      deadlineMs: o.deadlineMs,
+    });
     check();
-    const key=targetKey(target),generation=this.#retirements.get(key);
+    const key = targetKey(target),
+      generation = this.#retirements.get(key);
     // A retirement that began while this pass waited keeps the activation from becoming ready.
-    const retired=()=>this.#retirements.get(key)!==generation;
-    const releaseStale=async()=>{
-      const lease=this.#staleLeases.get(key);
-      if(!lease)return;
-      const released=await o.client.sendRequest({...request(),method:"liveApplication.releaseOwnerActivation",params:lease},signal);check();
-      if(configRecord(released.result,["released"]).released!==true)throw new Error("Stale native activation lease was not released.");
+    const retired = () => this.#retirements.get(key) !== generation;
+    const releaseStale = async () => {
+      const lease = this.#staleLeases.get(key);
+      if (!lease) return;
+      const released = await o.client.sendRequest(
+        { ...request(), method: "liveApplication.releaseOwnerActivation", params: lease },
+        signal,
+      );
+      check();
+      if (configRecord(released.result, ["released"]).released !== true)
+        throw new Error("Stale native activation lease was not released.");
       this.#staleLeases.delete(key);
     };
     // A blocked target still releases the lease its failed capture left.
     await releaseStale();
-    const block=this.#blocked.get(key);
-    if(block?.reason==="released-lineage-unsettled"){
-      return {kind:"pending" as const,reason:"Hosted document is held until its retained work is resolved."};
+    const block = this.#blocked.get(key);
+    if (block?.reason === "released-lineage-unsettled") {
+      return {
+        kind: "pending" as const,
+        reason: "Hosted document is held until its retained work is resolved.",
+      };
     }
-    if(block && !(block.reason==="without-lineage" && this.#latestUpdate(target)>block.update) &&
-      !(block.reason==="history-over-budget" && this.#newBase(target,block))){
-      return {kind:"pending" as const,reason:"Hosted document is blocked until the owner tries again."};
+    if (
+      block &&
+      !(block.reason === "without-lineage" && this.#latestUpdate(target) > block.update)
+    ) {
+      return {
+        kind: "pending" as const,
+        reason: "Hosted document is blocked until the owner tries again.",
+      };
     }
-    let saved=this.#read(target,objectId);
-    if(!saved)this.#completedTargets.delete(key);
-    if(saved)this.#objects.set(key,saved.source.objectId);
+    let saved = this.#read(target, objectId);
+    if (!saved) this.#completedTargets.delete(key);
+    if (saved) this.#objects.set(key, saved.source.objectId);
     // An activation whose retirement is open leaves only through `retire`, even once Resume hosts its document again.
-    if(saved && o.storage.serviceActivationRetirement({workspaceId:target.workspaceId,objectId:saved.source.objectId}))return retiring;
-    let document=saved?parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,
-      objectId:saved.source.objectId,lineageClaimId:saved.source.lineageClaimId}):undefined;
-    let owner=document?this.#owners.get(JSON.stringify(document)):undefined;
-    if(owner?.completed && document && this.#invalidated(owner,document)){
+    if (
+      saved &&
+      o.storage.serviceActivationRetirement({
+        workspaceId: target.workspaceId,
+        objectId: saved.source.objectId,
+      })
+    )
+      return retiring;
+    let document = saved
+      ? parseLiveDocumentKey({
+          workspaceId: saved.source.workspaceId,
+          mainVersionId: saved.source.mainVersionId,
+          objectId: saved.source.objectId,
+          lineageClaimId: saved.source.lineageClaimId,
+        })
+      : undefined;
+    let owner = document ? this.#owners.get(JSON.stringify(document)) : undefined;
+    if (owner?.completed && document && this.#invalidated(owner, document)) {
       // A fenced binding keeps its owner for the restore; another binding activates again.
-      owner=this.#owners.get(JSON.stringify(document));
-      if(owner)return fenced;
+      owner = this.#owners.get(JSON.stringify(document));
+      if (owner) return fenced;
     }
-    if(!owner){
-      // Waiting applies to capturing: a document already live keeps draining on every pass.
-      if(this.#waiting(key))return backingOff;
-      let update=this.#latestUpdate(target);
-      if(catchUp || !saved){
-        let pulling=catchUp?.get(target.workspaceId);
-        if(!pulling){
+    // A failed activation waits before it captures or drains again. A document already live keeps draining on every pass.
+    if (!owner?.completed && this.#waiting(key, owner !== undefined)) return backingOff;
+    if (!owner) {
+      let update = this.#latestUpdate(target);
+      if (catchUp || !saved) {
+        let pulling = catchUp?.get(target.workspaceId);
+        if (!pulling) {
           // Read first: the pull brings every update through the head, so the capture has seen them all.
-          const head=o.storage.automationWorkspaceLogHead(target.workspaceId);
-          pulling=workspace.replica.pull(signal).then(({hasMore})=>({head,hasMore}));
-          catchUp?.set(target.workspaceId,pulling);
+          const head = o.storage.automationWorkspaceLogHead(target.workspaceId);
+          pulling = workspace.replica.pull(signal).then(({ hasMore }) => ({ head, hasMore }));
+          catchUp?.set(target.workspaceId, pulling);
         }
-        const pulled=await pulling;check();
-        if(pulled.hasMore)return {kind:"pending" as const,reason:"Hosted replication has more pages."};
+        const pulled = await pulling;
+        check();
+        if (pulled.hasMore)
+          return { kind: "pending" as const, reason: "Hosted replication has more pages." };
         // An update after the head is one the capture may not have seen.
-        update=Math.min(this.#latestUpdate(target),pulled.head);
+        update = Math.min(this.#latestUpdate(target), pulled.head);
       }
       // A capture that needs validation waits for a free slot, checked just before it captures, and the wait counts nothing against the document.
-      if(!saved && c.validateActivation.hasCapacity?.()===false){this.#awaitCapacity();return validationBusy;}
+      if (!saved && c.validateActivation.hasCapacity?.() === false) {
+        this.#awaitCapacity();
+        return validationBusy;
+      }
       this.#loaded.add(key);
-      let capture:NativeOwnerActivation;
-      try{capture=await o.client.captureOwnerActivation(request(),target.path,c.maxCaptureBytes,signal,saved?.activationId);}
-      catch(error){this.#refused(key,saved!==null,update,error);throw error;}
+      let capture: NativeOwnerActivation;
+      try {
+        capture = await o.client.captureOwnerActivation(
+          request(),
+          target.path,
+          c.maxCaptureBytes,
+          signal,
+          saved?.activationId,
+        );
+      } catch (error) {
+        this.#refused(key, saved !== null, update, error);
+        throw error;
+      }
       // A fresh capture's lease stays recorded until the relay retains it, so a pass releases it after any failure, as at the pass deadline.
-      if(!saved)this.#staleLeases.set(key,{activationId:capture.activationId,sessionId:capture.sessionId});
+      if (!saved)
+        this.#staleLeases.set(key, {
+          activationId: capture.activationId,
+          sessionId: capture.sessionId,
+        });
       check();
-      this.#unblock(key);this.#held.delete(key);this.#objects.set(key,capture.source.objectId);
-      if(capture.source.workspaceId!==target.workspaceId || capture.source.relayDatabaseNamespace!==o.history.namespace ||
-        (saved && (capture.activationId!==saved.activationId || !isDeepStrictEqual(capture.source,saved.source)))) {
+      this.#unblock(key);
+      this.#held.delete(key);
+      this.#objects.set(key, capture.source.objectId);
+      if (
+        capture.source.workspaceId !== target.workspaceId ||
+        capture.source.relayDatabaseNamespace !== o.history.namespace ||
+        (saved &&
+          (capture.activationId !== saved.activationId ||
+            !isDeepStrictEqual(capture.source, saved.source)))
+      ) {
         throw new Error("Native service activation source changed.");
       }
-      if(!saved){
-        try{
-          await this.#store.prepare({capture,host:o.host,registeredAtMs:Date.now(),guard:check,signal,
-            validate:c.validateActivation,bounds:{maxCaptureBytes:c.maxCaptureBytes,
-              maxHistoryEntries:c.maxActivationHistoryEntries,maxBytesPerDrain:c.maxBytesPerDrain}});
-        }catch(error){
-          const tooLarge=error instanceof ServiceActivationTooLarge,overBudget=error instanceof ServiceActivationHistoryOverBudget;
-          if(!(error instanceof ServiceActivationStaleCut) && !(error instanceof ServiceActivationBusy) && !tooLarge && !overBudget)throw error;
+      if (!saved) {
+        try {
+          await this.#store.prepare({
+            capture,
+            host: o.host,
+            registeredAtMs: Date.now(),
+            guard: check,
+            signal,
+            validate: c.validateActivation,
+            bounds: {
+              maxCaptureBytes: c.maxCaptureBytes,
+              maxHistoryEntries: c.maxActivationHistoryEntries,
+              maxBytesPerDrain: c.maxBytesPerDrain,
+            },
+          });
+        } catch (error) {
+          const tooLarge = error instanceof ServiceActivationTooLarge,
+            overBudget = error instanceof ServiceActivationHistoryOverBudget;
+          if (
+            !(error instanceof ServiceActivationStaleCut) &&
+            !(error instanceof ServiceActivationBusy) &&
+            !tooLarge &&
+            !overBudget
+          )
+            throw error;
           // The same capture would run its validation out of memory again, so it waits for its owner.
-          if(tooLarge)this.#blocked.set(key,{reason:"refused"});
-          // The same history refuses the same way until the document has a new base.
-          if(overBudget)this.#blocked.set(key,{reason:"history-over-budget",checked:capture.source.committedCursor});
+          if (tooLarge) this.#blocked.set(key, { reason: "refused" });
           await releaseStale();
-          // A cut that keeps going stale would repeat the capture on every pass, so it waits as a failure does.
+          // A cut that keeps going stale would repeat the capture on every pass, and a history past the read budget refuses
+          // until it changes, so each waits as a failure does, longer each time. Only time or the owner's Resume ends the wait.
           // Only the capture lies between the slot check and validation, so a busy answer counts nothing.
-          if(error instanceof ServiceActivationStaleCut)this.#fail(key);
-          if(error instanceof ServiceActivationBusy)this.#awaitCapacity();
-          return {kind:"pending" as const,reason:error instanceof ServiceActivationStaleCut?"Hosted replication advanced before activation.":error.message};
+          if (error instanceof ServiceActivationStaleCut || overBudget)
+            this.#fail(key, undefined, overBudget);
+          if (error instanceof ServiceActivationBusy) this.#awaitCapacity();
+          return {
+            kind: "pending" as const,
+            reason:
+              error instanceof ServiceActivationStaleCut
+                ? "Hosted replication advanced before activation."
+                : error.message,
+          };
         }
         this.#staleLeases.delete(key);
+        // The history passed its check, so the document no longer reads as one past its budget.
+        const failure = this.#failures.get(key);
+        if (failure) failure.overBudget = false;
         o.registered();
-        saved=this.#read(target,objectId)!;
+        saved = this.#read(target, objectId)!;
       }
-      document=parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,
-        objectId:saved.source.objectId,lineageClaimId:saved.source.lineageClaimId});
-      const resumed=this.#store.resume({document,activationId:saved.activationId,host:o.host,registeredAtMs:Date.now(),guard:check});
-      o.registered();check();
-      owner=this.#owner(target,async()=>capture,{binding:resumed.binding,activationPending:!resumed.completed,
-        ownerUserId:saved.ownerUserId},resumed.access);
-      if(retired())return retiring;
-      this.#owners.set(JSON.stringify(document),owner);
-    }
-    const held=owner;
-    return o.runDocument(document!,signal,async()=>{
-    // A restore can fence the binding while this pass waits for the document
-    // or for the engine. Readiness waits until the exact binding opens again;
-    // another binding reactivates on a later pass.
-    if(!held.activationPending && this.#invalidated(held,document!))return fenced;
-    try{
-      // The consumer materializes any retained handover cut before draining edits.
-      const outcome=await held.consumer.drain(document!,signal);check();
-      if(outcome.kind!=="done")return outcome;
-      if(held.activationPending){
-        const nativeState=await held.transport.state(request(),signal);check();
-        this.#store.complete({document:document!,host:o.host,access:this.#store.pending(document!,o.host),nativeState,guard:check});
-        held.activationPending=false;
-      }
-      if(settle)await settle(held.consumer,document!,signal);
-    }catch(error){
-      // Storage refuses delivery on a fenced binding. Only that is pending;
-      // cancellation, lost standing, and damage on the same binding still fail.
+      document = parseLiveDocumentKey({
+        workspaceId: saved.source.workspaceId,
+        mainVersionId: saved.source.mainVersionId,
+        objectId: saved.source.objectId,
+        lineageClaimId: saved.source.lineageClaimId,
+      });
+      const resumed = this.#store.resume({
+        document,
+        activationId: saved.activationId,
+        host: o.host,
+        registeredAtMs: Date.now(),
+        guard: check,
+      });
+      o.registered();
       check();
-      if(!held.activationPending && this.#invalidated(held,document!))return fenced;
-      throw error;
+      owner = this.#owner(
+        target,
+        async () => capture,
+        {
+          binding: resumed.binding,
+          activationPending: !resumed.completed,
+          ownerUserId: saved.ownerUserId,
+        },
+        resumed.access,
+      );
+      if (retired()) return retiring;
+      this.#owners.set(JSON.stringify(document), owner);
     }
-    check();
-    if(retired())return retiring;
-    if(this.#invalidated(held,document!))return fenced;
-    held.completed=true;this.#completedTargets.add(key);
-    return {kind:"done" as const,document:document!};
+    const held = owner;
+    return o.runDocument(document!, signal, async () => {
+      // A restore can fence the binding while this pass waits for the document
+      // or for the engine. Readiness waits until the exact binding opens again;
+      // another binding reactivates on a later pass.
+      if (!held.activationPending && this.#invalidated(held, document!)) return fenced;
+      try {
+        // The consumer materializes any retained handover cut before draining edits.
+        const outcome = await held.consumer.drain(document!, signal);
+        check();
+        if (outcome.kind !== "done") return outcome;
+        if (held.activationPending) {
+          const nativeState = await held.transport.state(request(), signal);
+          check();
+          this.#store.complete({
+            document: document!,
+            host: o.host,
+            access: this.#store.pending(document!, o.host),
+            nativeState,
+            guard: check,
+          });
+          held.activationPending = false;
+        }
+        if (settle) await settle(held.consumer, document!, signal);
+      } catch (error) {
+        // Storage refuses delivery on a fenced binding. Only that is pending;
+        // cancellation, lost standing, and damage on the same binding still fail.
+        check();
+        if (!held.activationPending && this.#invalidated(held, document!)) return fenced;
+        throw error;
+      }
+      check();
+      if (retired()) return retiring;
+      if (this.#invalidated(held, document!)) return fenced;
+      held.completed = true;
+      this.#completedTargets.add(key);
+      return { kind: "done" as const, document: document! };
     });
   }
   // Owner delivery through the native session's verified transport.
-  #owner(target:ServiceActivationTarget,capture:(signal?:AbortSignal)=>Promise<NativeOwnerActivation>,state:Pick<Owner,"binding"|"ownerUserId"|"activationPending">,
-    access?:ServiceActivationAccess,slot=targetKey(target)):Owner{
-    const o=this.options,c=o.config,workspace=o.workspace(target.workspaceId)!;
-    const transport=serviceOwnerTransport({client:o.client,workspace:workspace.handle,capture,binding:state.binding,
-      storage:o.storage,host:o.host,nextRequestId:o.nextRequestId,assertCurrent:o.assertCurrent});
-    const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,
-      host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
-      publish:signal=>workspace.replica.publish(signal),seedDelivery:transport.seedDelivery,
-      ownerAdmission:{trustedAccount:o.trustedAccount,activation:access,workspaceIds:new Set([target.workspaceId]),
-        maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,refusals:this.#refusals,keptOnServer:workspace.identity,validate:c.validateAdmission}});
-    return {consumer,transport,completed:false,target:slot,...state};
+  #owner(
+    target: ServiceActivationTarget,
+    capture: (signal?: AbortSignal) => Promise<NativeOwnerActivation>,
+    state: Pick<Owner, "binding" | "ownerUserId" | "activationPending">,
+    access?: ServiceActivationAccess,
+    slot = targetKey(target),
+  ): Owner {
+    const o = this.options,
+      c = o.config,
+      workspace = o.workspace(target.workspaceId)!;
+    const transport = serviceOwnerTransport({
+      client: o.client,
+      workspace: workspace.handle,
+      capture,
+      binding: state.binding,
+      storage: o.storage,
+      host: o.host,
+      nextRequestId: o.nextRequestId,
+      assertCurrent: o.assertCurrent,
+    });
+    const consumer = new OwnerCommittedDelivery(o.storage, o.history, {
+      client: transport.client,
+      workspace: workspace.handle,
+      host: o.host,
+      deadlineMs: o.deadlineMs,
+      nextRequestId: o.nextRequestId,
+      bounds: o.adoption,
+      restore: o.restore,
+      publish: (signal) => workspace.replica.publish(signal),
+      seedDelivery: transport.seedDelivery,
+      ownerAdmission: {
+        trustedAccount: o.trustedAccount,
+        activation: access,
+        workspaceIds: new Set([target.workspaceId]),
+        maxEntriesPerDrain: c.maxEntriesPerDrain,
+        maxBytesPerDrain: c.maxBytesPerDrain,
+        refusals: this.#refusals,
+        keptOnServer: workspace.identity,
+        validate: c.validateAdmission,
+      },
+    });
+    return { consumer, transport, completed: false, target: slot, ...state };
   }
   // Clears readiness when the owner may no longer use its exact binding.
-  #invalidated(owner:Owner,document:LiveDocumentKey){
-    const current=this.#currentBinding(document,owner.ownerUserId);
-    if(isDeepStrictEqual(current,owner.binding))return false;
-    owner.completed=false;this.#completedTargets.delete(owner.target);
-    const key=JSON.stringify(document);
-    if(current && this.#owners.get(key)===owner)this.#owners.delete(key);
+  #invalidated(owner: Owner, document: LiveDocumentKey) {
+    const current = this.#currentBinding(document, owner.ownerUserId);
+    if (isDeepStrictEqual(current, owner.binding)) return false;
+    owner.completed = false;
+    this.#completedTargets.delete(owner.target);
+    const key = JSON.stringify(document);
+    if (current && this.#owners.get(key) === owner) this.#owners.delete(key);
     return true;
   }
   // The exact binding the owner may use now, or null while it is fenced or unavailable.
-  #currentBinding(document:LiveDocumentKey,ownerUserId:string){
-    const current=this.options.storage.resolveCurrentLiveDocumentBinding({document,actor:{kind:"owner",userId:ownerUserId}});
-    return current.kind==="current"?current.binding:null;
+  #currentBinding(document: LiveDocumentKey, ownerUserId: string) {
+    const current = this.options.storage.resolveCurrentLiveDocumentBinding({
+      document,
+      actor: { kind: "owner", userId: ownerUserId },
+    });
+    return current.kind === "current" ? current.binding : null;
   }
 }

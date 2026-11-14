@@ -1,25 +1,17 @@
 // One rule for naming an entry in <workspace>/.dohc/local/trash, because two
 // surfaces move files there and both must produce a name the filesystem can
-// hold.
+// hold. A ~51-character timestamp+uuid prefix joined onto an untruncated
+// basename can pass the per-component limit: a legal 230-character name, fine
+// on NTFS, ext4 and APFS, then fails its rename with ENOENT, which reads as a
+// delete that never happened.
 //
-// The MCP server did not. It joined a ~51-character timestamp+uuid prefix onto
-// an untruncated basename, so a legal 230-character name -- fine on NTFS, ext4
-// and APFS -- produced a rename target past the per-component limit. The
-// calling agent received "ENOENT: no such file or directory, rename ..." about
-// a file that was right there, and would reasonably read that as a delete that
-// never happened. The desktop had a fix and kept it to itself.
-//
-// Then this module predicted the filesystem's answer twice, and was wrong both
-// times. First it assumed the per-component limit was the only one, which is
-// false on Windows without long paths. Then it assumed the composed-path limit
-// always binds, which is false wherever long paths are enabled -- and that
-// took deletion away from deep workspaces that had been working.
-//
-// So it stopped predicting. The rule offers candidates, longest first, and the
-// caller renames its way down them: the real name is attempted before anything
-// is thrown away, and a shorter one is used only when the platform actually
-// refused the longer one. A name that fits is never shortened for a limit that
-// did not apply -- which matters, because the trash keeps no record of the
+// The rule does not predict which limit applies. The per-component limit is
+// not the only one on Windows without long paths, and the composed-path limit
+// does not bind where long paths are enabled. The rule offers candidates,
+// longest first, and the caller renames its way down them: the real name is
+// attempted before anything is thrown away, and a shorter one is used only
+// when the platform refused the longer one. A name that fits is never
+// shortened for a limit that did not apply. The trash keeps no record of the
 // original name, so a character dropped here is gone for good.
 //
 // The entropy stays with the caller: this module takes the prefix already
@@ -74,19 +66,10 @@ function utf16CutAt(value: string, budget: number): number {
   if (end <= 0 || end >= value.length) return Math.max(0, end);
   const before = value.charCodeAt(end - 1);
   const after = value.charCodeAt(end);
-  const splitsPair =
-    before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
+  const splitsPair = before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
   return splitsPair ? end - 1 : end;
 }
 
-// Where to cut a UTF-8 byte array so the cut does not split a multibyte
-// sequence: back up over continuation bytes to the start of the character the
-// cut landed inside.
-//
-// The old rule decoded first and stripped every trailing U+FFFD, which cannot
-// tell a sequence this cut broke from a U+FFFD that is genuinely IN the
-// filename -- and deleted the second. Backing up distinguishes them by
-// construction, so a real U+FFFD whose bytes fit is kept.
 function utf8CutAt(bytes: Uint8Array, budget: number): number {
   let end = Math.min(budget, bytes.length);
   while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end -= 1;
@@ -156,9 +139,7 @@ export function trashEntryPlan(
   if (!exhausted && Number.isFinite(maxEntryChars)) {
     rungs.push(`${prefix}${fitWithinNameMax(name, prefix, options)}`);
   }
-  const candidates = rungs.filter(
-    (rung, index) => index === 0 || rung !== rungs[index - 1],
-  );
+  const candidates = rungs.filter((rung, index) => index === 0 || rung !== rungs[index - 1]);
   return { candidates, exhausted };
 }
 
@@ -189,11 +170,6 @@ export function collisionVariantPlan(
   return rungs[0] === rungs[1] ? [rungs[0]!] : rungs;
 }
 
-// How many characters an entry name may use inside `directory` IF the legacy
-// composed-path limit turns out to apply. Only Windows has one worth
-// budgeting -- PATH_MAX is 4096 on Linux and 1024 on macOS, both far past
-// anything the component limit allows -- so every other platform answers
-// Infinity and the component rule alone governs.
 export function entryCharBudget(directory: string, platform: string): number {
   if (platform !== "win32") return Number.POSITIVE_INFINITY;
   return WINDOWS_MAX_PATH_CHARS - directory.length - 1; // 1 for the separator

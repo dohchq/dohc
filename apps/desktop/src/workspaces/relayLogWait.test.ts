@@ -17,7 +17,11 @@ function fakeRelay(answers: Array<{ status: number; body: unknown; afterMs?: num
     clock += answer.afterMs ?? 0;
     return Response.json(answer.body, { status: answer.status });
   };
-  return { relay: { baseUrl: "http://relay.test/", token: "token", fetch }, urls, nowMs: () => clock };
+  return {
+    relay: { baseUrl: "http://relay.test/", token: "token", fetch },
+    urls,
+    nowMs: () => clock,
+  };
 }
 
 describe("held relay log reads", () => {
@@ -28,8 +32,8 @@ describe("held relay log reads", () => {
     ]);
     const wait = createRelayLogWait({ workspaceId: "work space", ...relay, holdMs: 25_000 });
     const signal = new AbortController().signal;
-    await expect(wait(4, signal)).resolves.toEqual({hasMore: true, watched: false});
-    await expect(wait(9, signal)).resolves.toEqual({hasMore: false, watched: false});
+    await expect(wait(4, signal)).resolves.toEqual({ hasMore: true, watched: false });
+    await expect(wait(9, signal)).resolves.toEqual({ hasMore: false, watched: false });
     expect(relay.urls).toEqual([
       "http://relay.test/sync/work%20space/bootstrap",
       "http://relay.test/sync/work%20space/log?since=4&hold=25000&replicationEpoch=epoch-1&streamIdentity=stream-1",
@@ -53,7 +57,7 @@ describe("held relay log reads", () => {
     const wait = createRelayLogWait({ workspaceId: "workspace", ...relay, holdMs: 25_000 });
     const signal = new AbortController().signal;
     await expect(wait(4, signal)).rejects.toThrow(/coordinate/u);
-    await expect(wait(4, signal)).resolves.toEqual({hasMore: true, watched: false});
+    await expect(wait(4, signal)).resolves.toEqual({ hasMore: true, watched: false });
     expect(relay.urls.filter((url) => url.endsWith("/bootstrap"))).toHaveLength(2);
   });
 
@@ -72,7 +76,7 @@ describe("held relay log reads", () => {
       holdMs: 25_000,
     });
     const caller = new AbortController();
-    await expect(wait(4, caller.signal)).resolves.toEqual({hasMore: true, watched: false});
+    await expect(wait(4, caller.signal)).resolves.toEqual({ hasMore: true, watched: false });
     expect(timeout.mock.calls).toEqual([[40_000]]);
     expect(signals).toHaveLength(2);
     expect(signals[0]).toBe(signals[1]);
@@ -85,9 +89,24 @@ describe("held relay log reads", () => {
     let release!: () => void;
     let cancelled = 0;
     const refused = (status: number, cancel: () => Promise<void>) =>
-      new Response(new ReadableStream({ cancel: () => { cancelled += 1; return cancel(); } }), { status });
+      new Response(
+        new ReadableStream({
+          cancel: () => {
+            cancelled += 1;
+            return cancel();
+          },
+        }),
+        { status },
+      );
     const answers = [
-      () => refused(401, () => new Promise<void>((resolve) => { release = resolve; })),
+      () =>
+        refused(
+          401,
+          () =>
+            new Promise<void>((resolve) => {
+              release = resolve;
+            }),
+        ),
       () => refused(401, () => Promise.reject(new Error("socket gone"))),
     ];
     const fetch = async (resource: string | URL | Request) =>
@@ -99,13 +118,17 @@ describe("held relay log reads", () => {
       relay: { baseUrl: "http://relay.test", token: "token", fetch },
     });
     let settled = false;
-    const first = wait(4, new AbortController().signal).finally(() => { settled = true; });
+    const first = wait(4, new AbortController().signal).finally(() => {
+      settled = true;
+    });
     await vi.waitFor(() => expect(cancelled).toBe(1));
     await Promise.resolve();
     expect(settled).toBe(false);
     release();
     await expect(first).rejects.toBeInstanceOf(RelayUnauthorizedError);
-    await expect(wait(4, new AbortController().signal)).rejects.toBeInstanceOf(RelayUnauthorizedError);
+    await expect(wait(4, new AbortController().signal)).rejects.toBeInstanceOf(
+      RelayUnauthorizedError,
+    );
     expect(cancelled).toBe(2);
   });
 });

@@ -2,19 +2,12 @@ import { describe, expect, it } from "vitest";
 import vectors from "./liveObjectBinding.vectors.json";
 import { parseLiveObjectBinding } from "./liveObjectBinding.js";
 
-const canonical = vectors.accepted.find(
-  (row) => row.name === "canonical-binding",
-)!;
+const canonical = vectors.accepted.find((row) => row.name === "canonical-binding")!;
 const illFormedSurrogates = [
   ["leading", "\ud800"],
   ["trailing", "\udc00"],
 ] as const;
-const identifierFields = [
-  "workspaceId",
-  "mainVersionId",
-  "objectId",
-  "lineageClaimId",
-] as const;
+const identifierFields = ["workspaceId", "mainVersionId", "objectId", "lineageClaimId"] as const;
 
 describe("LiveObjectBinding shared vectors", () => {
   for (const row of vectors.accepted) {
@@ -35,10 +28,7 @@ describe("LiveObjectBinding shared vectors", () => {
   for (const field of identifierFields) {
     for (const [kind, surrogate] of illFormedSurrogates) {
       it(`refuses an unpaired ${kind} surrogate in ${field}`, () => {
-        const input = structuredClone(canonical.input) as Record<
-          string,
-          unknown
-        >;
+        const input = structuredClone(canonical.input) as Record<string, unknown>;
         input[field] = `before${surrogate}after`;
 
         expect(() => parseLiveObjectBinding(input)).toThrow(TypeError);

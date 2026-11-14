@@ -329,7 +329,6 @@ pub fn prove_held_document(
     object_id: &str,
 ) -> Result<HeldProof, SyncError> {
     let stop = job.stop();
-    // What the decoded binding holds, until the artifact names it.
     let mut working = stop.working();
     let mut reader = job.reader().map_err(protection_failure)?;
     let (tx, engine) = job.snapshot(&mut reader).map_err(protection_failure)?;
@@ -674,8 +673,8 @@ fn binding_matches(key: &HeldKey, binding: &ReleasedLineageBinding) -> bool {
 mod tests {
     use super::*;
 
-    /// Opus's r2a F4: inspection's transaction rolls back, so a write made
-    /// inside it, by inspection or anything it calls, never lands.
+    /// Inspection's transaction rolls back, so a write made inside it, by
+    /// inspection or anything it calls, never lands.
     #[test]
     fn inspection_rolls_its_transaction_back() {
         let conn = Connection::open_in_memory().unwrap();
@@ -696,11 +695,10 @@ mod tests {
         assert!(conn.is_autocommit(), "the transaction ended");
     }
 
-    /// Sol's r2c-3c-2 finding 6 and Opus's finding 4: a stopped read stays
-    /// cancelled and a locked store locked, never corrupt evidence. Opus's
-    /// r2c-3c-4 finding 5: a failure a proof's callers share keeps, for
-    /// each, the class, disposition and message of the original, whatever
-    /// its class.
+    /// A stopped read stays cancelled and a locked store locked, never
+    /// corrupt evidence. A failure a proof's callers share keeps, for each,
+    /// the class, disposition and message of the original, whatever its
+    /// class.
     #[test]
     fn a_shared_failure_keeps_its_class_for_every_caller() {
         use dohc_engine_collab::live_update_application::ApplicationError;

@@ -8,7 +8,6 @@ export function MarkdownContent(props: {
   resolveImage?: (href: string) => string | null;
   resolveLink?: (href: string) => string | null;
   onNavigate?: (path: string) => void;
-  /** Keep the properties closed until the reader opens them. */
   collapseProperties?: boolean;
 }) {
   const { block, body } = useMemo(() => splitFrontmatter(props.markdown), [props.markdown]);

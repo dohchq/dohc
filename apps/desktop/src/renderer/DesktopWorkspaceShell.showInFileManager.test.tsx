@@ -26,8 +26,13 @@ const LEFT = new Error(
 const ESCAPES = new Error(
   "Error invoking remote method 'desktop:reveal-explorer-path': Error: Asset path escapes workspace: report.pdf",
 );
-const WORDS = "dohc could not show report.pdf in File Explorer. The file or folder is not there anymore.";
-const REVEAL_ENTRY: ExplorerMenuEntry = { kind: "item", label: "Show in File Explorer", id: "open-externally" };
+const WORDS =
+  "dohc could not show report.pdf in File Explorer. The file or folder is not there anymore.";
+const REVEAL_ENTRY: ExplorerMenuEntry = {
+  kind: "item",
+  label: "Show in File Explorer",
+  id: "open-externally",
+};
 
 function bridgeListing() {
   const bridge = makeBridge(Promise.resolve(null), "win32");
@@ -41,7 +46,9 @@ function bridgeListing() {
 }
 
 async function showReport() {
-  const row = (await screen.findAllByTestId("tree-row")).find((candidate) => candidate.dataset.path === "report.pdf");
+  const row = (await screen.findAllByTestId("tree-row")).find(
+    (candidate) => candidate.dataset.path === "report.pdf",
+  );
   if (!row) throw new Error("report.pdf row missing");
   fireEvent.contextMenu(row);
   fireEvent.click(await screen.findByTestId("explorer-menu-item-open-externally"));
@@ -73,14 +80,19 @@ describe("Show in File Explorer", () => {
     expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(within(toast).getByRole("button", { name: "Details" })).toBeTruthy();
     await user.click(screen.getByTestId("notice-center-toggle"));
-    const row = (await within(await screen.findByTestId("notice-center")).findByText(WORDS)).closest("li")!;
+    const row = (
+      await within(await screen.findByTestId("notice-center")).findByText(WORDS)
+    ).closest("li")!;
     expect(within(row).getByRole("button", { name: "Details" })).toBeTruthy();
     await nextTurn();
     expect(unhandled).toEqual([]);
 
     await user.click(within(row).getByRole("button", { name: "Try again" }));
     expect(bridge.revealExplorerPath).toHaveBeenCalledTimes(2);
-    expect(bridge.revealExplorerPath).toHaveBeenLastCalledWith({ workspaceId: WORKSPACE.workspaceId, path: "report.pdf" });
+    expect(bridge.revealExplorerPath).toHaveBeenLastCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      path: "report.pdf",
+    });
     await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
   });
 
@@ -96,9 +108,6 @@ describe("Show in File Explorer", () => {
     );
   });
 
-  // DesktopRoot remounts the shell on a switch. Keeping the same shell is the
-  // stricter case, and coming back to the first workspace does not revive the
-  // old answer. Each time main answers that the window left.
   it.each(["remounts its shell", "keeps its shell", "keeps its shell and switches back"] as const)(
     "says nothing when the reveal answers after the window switches workspaces and %s",
     async (mode) => {

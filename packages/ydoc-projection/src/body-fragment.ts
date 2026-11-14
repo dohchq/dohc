@@ -1,7 +1,7 @@
-import type * as Y from 'yjs'
+import type * as Y from "yjs";
 
-const BODY_FIELD = 'body'
+const BODY_FIELD = "body";
 
 export function getDohcYDocBodyFragment(doc: Y.Doc): Y.XmlFragment {
-  return doc.getXmlFragment(BODY_FIELD)
+  return doc.getXmlFragment(BODY_FIELD);
 }

@@ -14,13 +14,18 @@ export function useMenuCommandsWithoutWorkspace(
   reportError: ReportError,
   runUpdate: (action: UpdateAction) => Promise<void>,
 ): void {
-  useEffect(() => bridge().onMenuCommand((command) => {
-    if (command === "check-updates") void runUpdate("check");
-    else if (command === "install-update") void runUpdate("install");
-    else if (command === "toggle-theme") toggleTheme();
-    else if (command === "close-tab" && bridge().platform === "darwin") {
-      void bridge().closeThisWindow().catch((error) =>
-        reportError("dohc could not close this window.", error));
-    }
-  }), [reportError, runUpdate]);
+  useEffect(
+    () =>
+      bridge().onMenuCommand((command) => {
+        if (command === "check-updates") void runUpdate("check");
+        else if (command === "install-update") void runUpdate("install");
+        else if (command === "toggle-theme") toggleTheme();
+        else if (command === "close-tab" && bridge().platform === "darwin") {
+          void bridge()
+            .closeThisWindow()
+            .catch((error) => reportError("dohc could not close this window.", error));
+        }
+      }),
+    [reportError, runUpdate],
+  );
 }

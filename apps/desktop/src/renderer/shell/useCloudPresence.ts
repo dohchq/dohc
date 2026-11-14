@@ -9,12 +9,13 @@ export function useCloudPresence(
   onStatusUnavailable: (retry: () => void) => void,
   workspaceIsReady: boolean,
 ) {
-  // MU-C5 presence: the signed-in relay session, if any. Drives whether Chats
+  // Presence: the signed-in relay session, if any. Drives whether Chats
   // gets a live presence transport (connected + relayUrl) or stays dormant.
   // Scope the first render after a workspace switch, before effects run.
-  const [scopedStatus, setScopedStatus] = useState<
-    { workspaceId: string; status: CloudStatusResult } | null
-  >(null);
+  const [scopedStatus, setScopedStatus] = useState<{
+    workspaceId: string;
+    status: CloudStatusResult;
+  } | null>(null);
   const cloudStatus =
     workspaceIsReady && scopedStatus?.workspaceId === workspaceId ? scopedStatus.status : null;
   // The workspace whose last status read failed, so "not read yet" and
@@ -26,11 +27,6 @@ export function useCloudPresence(
   // per render would churn the presence channel.
   const [presenceClientId] = useState(() => crypto.randomUUID());
 
-  // MU-C5 presence: track the signed-in relay session for this workspace. The
-  // request token + workspaceId key uphold the no-repaint invariant — a slow
-  // cloud-status response for workspace A must never set state after a switch
-  // to B. `refreshCloudStatus` is also called when the cloud dialog closes so a
-  // fresh sign-in lights presence up without waiting for a workspace switch.
   const cloudStatusToken = useRef(0);
   // A workspace still taking in files is busy, not unreadable: its refusal
   // keeps the last status, and the next workspace activity reads again. An

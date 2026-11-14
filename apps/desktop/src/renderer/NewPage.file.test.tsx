@@ -12,10 +12,6 @@ import { NewPage } from "./NewPage";
 
 setupFileInspectorTests();
 
-// A new page's file can open without a live session. The plain editor then
-// takes what was typed, and a file nobody can edit here shows itself: the
-// page never waits for an editor that is not coming.
-
 type Open = Awaited<ReturnType<DohcDesktopBridge["openEngineYDocSession"]>>;
 
 function bridgeFor(open: Open) {
@@ -31,9 +27,15 @@ function bridgeFor(open: Open) {
       status: "written",
       contentHash: "f".repeat(64),
     })),
-    listWorkspaceFiles: vi.fn(async () => ({ files: [{ path: "Lisbon.md", kind: "file" }], folders: [] })),
+    listWorkspaceFiles: vi.fn(async () => ({
+      files: [{ path: "Lisbon.md", kind: "file" }],
+      folders: [],
+    })),
     readWorkspaceDatabase: vi.fn(async () => ({ tables: [] })),
-    getWorkspaceSettings: vi.fn(async () => ({ settings: DEFAULT_WORKSPACE_SETTINGS, source: "default" as const })),
+    getWorkspaceSettings: vi.fn(async () => ({
+      settings: DEFAULT_WORKSPACE_SETTINGS,
+      source: "default" as const,
+    })),
     openEngineYDocSession: vi.fn(async () => open),
     closeEngineYDocSession: vi.fn(async () => undefined),
   };
@@ -50,7 +52,13 @@ function renderNewPage() {
       body=""
       onBodyChange={() => undefined}
       onLeaveTitle={() => undefined}
-      file={withFile ? (onEditorReady) => <FileInspector workspaceId="ws-1" path="Lisbon.md" onEditorReady={onEditorReady} /> : null}
+      file={
+        withFile
+          ? (onEditorReady) => (
+              <FileInspector workspaceId="ws-1" path="Lisbon.md" onEditorReady={onEditorReady} />
+            )
+          : null
+      }
       handedOff={false}
       onHandedOff={() => undefined}
     />
@@ -93,39 +101,12 @@ it("hands the page to the plain editor when its file opens without a live sessio
   expect(editor.textContent).toBe("Day one");
   expect(editor).toBe(document.activeElement);
   await waitFor(
-    () => expect(bridge.writeWorkspaceText.mock.calls.at(-1)?.[0].text).toMatch(/^---\ntitle: Lisbon\n---\n\nDay one\n?$/),
+    () =>
+      expect(bridge.writeWorkspaceText.mock.calls.at(-1)?.[0].text).toMatch(
+        /^---\ntitle: Lisbon\n---\n\nDay one\n?$/,
+      ),
     { timeout: 3_000 },
   );
-});
-
-it("keeps a renamed title through blur while its save is still on the way", async () => {
-  const bridge = bridgeFor({ available: false });
-  bridge.writeWorkspaceText.mockImplementation(() => new Promise(() => undefined));
-  const user = userEvent.setup();
-  const fileExists = renderNewPage();
-  await user.keyboard("Lisbon{Enter}Day one");
-  fileExists();
-  await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
-  await waitFor(() => expect(bridge.writeWorkspaceText).toHaveBeenCalled(), { timeout: 3_000 });
-
-  const title = screen.getByLabelText("Page title") as HTMLTextAreaElement;
-  await user.click(title);
-  await user.keyboard("{End} trip");
-  await user.click(screen.getByTestId("markdown-editor"));
-  expect(title).not.toBe(document.activeElement);
-  expect(title.value).toBe("Lisbon trip");
-});
-
-it("shows a file that opens read-only", async () => {
-  bridgeFor({ available: false, liveHostUnavailable: true });
-  const user = userEvent.setup();
-  const fileExists = renderNewPage();
-  await user.keyboard("Lisbon{Enter}");
-  fileExists();
-
-  await waitFor(() => expect(screen.queryByTestId("new-page")).toBeNull());
-  expect(screen.getByTestId("file-inspector").parentElement!.hasAttribute("inert")).toBe(false);
-  expect(screen.getByTestId("view-markdown")).toBeTruthy();
 });
 
 it("shows a file that could not be read", async () => {

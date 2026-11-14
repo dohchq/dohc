@@ -1,154 +1,263 @@
-import {afterEach, expect, it, vi} from "vitest";
-import {createLinkLiveHttp} from "./linkLiveHttp";
-import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
-import {createLiveTickets} from "./liveTickets";
-import {hashLinkBearer, hashLinkProfileSecret} from "./linkSecurity";
-import {audience, binding, fixture as ticketFixture, holderLinkAuthority, key, report, scope, seedLinkAgent} from "./liveTickets.test-helper";
-import {AGENT_ACCESS_TOKEN_TTL_MS} from "./storage/agentConnections";
+import { afterEach, expect, it, vi } from "vitest";
+import { createLinkLiveHttp } from "./linkLiveHttp";
+import { linkRefusalBody } from "@dohc/security-contract/link-refusal";
+import { createLiveTickets } from "./liveTickets";
+import { hashLinkBearer, hashLinkProfileSecret } from "./linkSecurity";
+import {
+  audience,
+  binding,
+  fixture as ticketFixture,
+  holderLinkAuthority,
+  key,
+  report,
+  scope,
+  seedLinkAgent,
+} from "./liveTickets.test-helper";
+import { AGENT_ACCESS_TOKEN_TTL_MS } from "./storage/agentConnections";
 
-const bearer = Buffer.alloc(32, 1).toString("base64url"), profile = Buffer.alloc(32, 2).toString("base64url");
-const exchangeKey = "private-link-metadata-exchange-at-least-32", discriminator = "abcdefghijkl";
-const limits = {maxConnections: 8, maxConnectionsPerWorkspace: 96, reservedOwnerConnections: 0, maxConnectionsPerSession: 2, maxConnectionsPerPrincipal: 3, maxConnectionsPerGrant: 4, maxBufferedBytes: 134217728,
-  maxPendingRequests: 4, maxRequestBytes: 4096, maxResponseBytes: 4096, maxPendingBytes: 4096, maxFragments: 8, maxBufferedChunks: 16,
-  upgradeTimeoutMs: 1000, idleTimeoutMs: 5000, drainTimeoutMs: 100};
+const bearer = Buffer.alloc(32, 1).toString("base64url"),
+  profile = Buffer.alloc(32, 2).toString("base64url");
+const exchangeKey = "private-link-metadata-exchange-at-least-32",
+  discriminator = "abcdefghijkl";
+const limits = {
+  maxConnections: 8,
+  maxConnectionsPerWorkspace: 96,
+  reservedOwnerConnections: 0,
+  maxConnectionsPerSession: 2,
+  maxConnectionsPerPrincipal: 3,
+  maxConnectionsPerGrant: 4,
+  maxBufferedBytes: 134217728,
+  maxPendingRequests: 4,
+  maxRequestBytes: 4096,
+  maxResponseBytes: 4096,
+  maxPendingBytes: 4096,
+  maxFragments: 8,
+  maxBufferedChunks: 16,
+  upgradeTimeoutMs: 1000,
+  idleTimeoutMs: 5000,
+  drainTimeoutMs: 100,
+};
 const cleanups: (() => Promise<void>)[] = [];
-afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanups.splice(0)) await close();});
-async function fixture(sessionHostBlocked?: (document: {workspaceId: string; objectId: string}) => boolean) {
-  const f = await ticketFixture(); cleanups.push(f.close); vi.spyOn(Date, "now").mockReturnValue(1000);
+afterEach(async () => {
+  vi.restoreAllMocks();
+  for (const close of cleanups.splice(0)) await close();
+});
+async function fixture(
+  sessionHostBlocked?: (document: { workspaceId: string; objectId: string }) => boolean,
+) {
+  const f = await ticketFixture();
+  cleanups.push(f.close);
+  vi.spyOn(Date, "now").mockReturnValue(1000);
   // Synthetic private authority fixture. Public Edit creation/exchange remains closed.
   f.raw.exec("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL");
-  expect(f.storage.mintLinkSession({session: {sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, key),
-    grantId: scope.grantId, generation: 4, mintedAtMs: 999, expiresAtMs: 61_000}})).toBe(true);
-  const context = {kind: "link" as const, workspaceId: scope.workspaceId, shareId: scope.shareId, grantId: scope.grantId,
-    sessionId: "link-session", capabilityHash: hashLinkBearer(bearer, key), profileTokenHash: hashLinkProfileSecret(profile, key)};
-  const tickets = createLiveTickets({storage: f.storage, audience, key, hostReports: {currentBinding: async () => report}});
+  expect(
+    f.storage.mintLinkSession({
+      session: {
+        sessionId: "link-session",
+        capabilityHash: hashLinkBearer(bearer, key),
+        grantId: scope.grantId,
+        generation: 4,
+        mintedAtMs: 999,
+        expiresAtMs: 61_000,
+      },
+    }),
+  ).toBe(true);
+  const context = {
+    kind: "link" as const,
+    workspaceId: scope.workspaceId,
+    shareId: scope.shareId,
+    grantId: scope.grantId,
+    sessionId: "link-session",
+    capabilityHash: hashLinkBearer(bearer, key),
+    profileTokenHash: hashLinkProfileSecret(profile, key),
+  };
+  const tickets = createLiveTickets({
+    storage: f.storage,
+    audience,
+    key,
+    hostReports: { currentBinding: async () => report },
+  });
   const linkAuthority = holderLinkAuthority(f.storage, key, exchangeKey);
-  const handle = createLinkLiveHttp({publicEditRelease:{version:1},storage: f.storage, linkKey: key, hosts: new Set(["relay.test"]), publicOrigin: audience, exchangeKey, limits, sessionHostBlocked, linkAuthority});
-  return {...f, context, tickets, handle};
+  const handle = createLinkLiveHttp({
+    publicEditRelease: { version: 1 },
+    storage: f.storage,
+    linkKey: key,
+    hosts: new Set(["relay.test"]),
+    publicOrigin: audience,
+    exchangeKey,
+    limits,
+    sessionHostBlocked,
+    linkAuthority,
+  });
+  return { ...f, context, tickets, handle };
 }
-function request(body: unknown = {discriminator, path: binding.currentPath}, path = "/sync/live/link-document", headers: Record<string, string> = {}) {
-  return new Request(`https://relay.test${path}`, {method: "POST", body: JSON.stringify(body), headers: {host: "relay.test", origin: audience,
-    "content-type": "application/json", "x-dohc-relay-exchange-key": exchangeKey, authorization: `LinkCapability ${bearer}`,
-    "x-dohc-link-profile-secret": profile, ...headers}});
+function request(
+  body: unknown = { discriminator, path: binding.currentPath },
+  path = "/sync/live/link-document",
+  headers: Record<string, string> = {},
+) {
+  return new Request(`https://relay.test${path}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    headers: {
+      host: "relay.test",
+      origin: audience,
+      "content-type": "application/json",
+      "x-dohc-relay-exchange-key": exchangeKey,
+      authorization: `LinkCapability ${bearer}`,
+      "x-dohc-link-profile-secret": profile,
+      ...headers,
+    },
+  });
 }
-function agentRequest(agent: ReturnType<typeof seedLinkAgent>, body: unknown = {discriminator, path: binding.currentPath}, path = "/sync/live/link-document",
-  headers: Record<string, string> = {}) {
-  return new Request(`https://relay.test${path}`, {method: "POST", body: JSON.stringify(body), headers: {host: "relay.test", origin: audience,
-    "content-type": "application/json", "x-dohc-relay-exchange-key": exchangeKey, ...agent.headers, ...headers}});
+function agentRequest(
+  agent: ReturnType<typeof seedLinkAgent>,
+  body: unknown = { discriminator, path: binding.currentPath },
+  path = "/sync/live/link-document",
+  headers: Record<string, string> = {},
+) {
+  return new Request(`https://relay.test${path}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    headers: {
+      host: "relay.test",
+      origin: audience,
+      "content-type": "application/json",
+      "x-dohc-relay-exchange-key": exchangeKey,
+      ...agent.headers,
+      ...headers,
+    },
+  });
 }
 it("finds a document for a connected agent, and never opens a browser gateway session for one", async () => {
-  const f = await fixture(), handle = f.handle;
-  const agent = seedLinkAgent(f.raw, {connectionId: "agent-connection", workspaceId: scope.workspaceId, shareId: scope.shareId, grantId: scope.grantId,
-    generation: 4, expiresAtMs: 1000 + AGENT_ACCESS_TOKEN_TTL_MS});
-  expect(await (await handle(agentRequest(agent))).json()).toEqual({objectId: binding.objectId});
-  expect(await (await handle(request())).json()).toEqual({objectId: binding.objectId});
-  // A capability is never read under another scheme, and a holder's capability is not an agent's token.
+  const f = await fixture(),
+    handle = f.handle;
+  const agent = seedLinkAgent(f.raw, {
+    connectionId: "agent-connection",
+    workspaceId: scope.workspaceId,
+    shareId: scope.shareId,
+    grantId: scope.grantId,
+    generation: 4,
+    expiresAtMs: 1000 + AGENT_ACCESS_TOKEN_TTL_MS,
+  });
+  expect(await (await handle(agentRequest(agent))).json()).toEqual({ objectId: binding.objectId });
+  expect(await (await handle(request())).json()).toEqual({ objectId: binding.objectId });
   for (const authorization of [`Bearer ${bearer}`, `DohcAgent ${bearer}`])
-    expect((await handle(request(undefined, undefined, {authorization}))).status).toBe(404);
-  const refused: Record<string, string>[] = [{"x-dohc-agent-resource": `${audience}/mcp/s/elsewhere`}, {"x-dohc-link-profile-secret": profile}, {cookie: "account=reader"}];
+    expect((await handle(request(undefined, undefined, { authorization }))).status).toBe(404);
+  const refused: Record<string, string>[] = [
+    { "x-dohc-agent-resource": `${audience}/mcp/s/elsewhere` },
+    { "x-dohc-link-profile-secret": profile },
+    { cookie: "account=reader" },
+  ];
   for (const headers of refused)
     expect((await handle(agentRequest(agent, undefined, undefined, headers))).status).toBe(404);
-  expect((await handle(agentRequest(agent, {discriminator}, "/sync/live/link-session"))).status).toBe(404);
+  expect(
+    (await handle(agentRequest(agent, { discriminator }, "/sync/live/link-session"))).status,
+  ).toBe(404);
   vi.mocked(Date.now).mockReturnValue(agent.expiresAtMs);
   expect((await handle(agentRequest(agent))).status).toBe(404);
 });
-it("resolves only the existing current Markdown object within the link selector", async () => {
-  const f = await fixture(); expect(await (await f.handle(request())).json()).toEqual({objectId: binding.objectId});
-  for (const path of ["private/a.md", "docs/missing.md", "docs/a.excalidraw"]) expect((await f.handle(request({discriminator, path}))).status).toBe(404);
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["elsewhere"], versionId: null}));
-  expect((await f.handle(request())).status).toBe(404);
-});
-it("opens a selected file by its public path and refuses hidden paths and aliases", async () => {
-  const f = await fixture();
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["docs/a.md"], versionId: null}));
-  expect(await (await f.handle(request({discriminator, path: "a.md"}))).json()).toEqual({objectId: binding.objectId});
-  for (const path of ["docs/a.md", "a.md/../a.md", "./a.md", "/a.md", "a.md\\..\\a.md"])
-    expect((await f.handle(request({discriminator, path}))).status).toBe(404);
-});
+
 it("derives gateway authority only after ticket enrollment and refuses a different profile", async () => {
   const f = await fixture();
-  const resolve = () => f.handle(request({discriminator}, "/sync/live/link-session"));
+  const resolve = () => f.handle(request({ discriminator }, "/sync/live/link-session"));
   expect((await resolve()).status).toBe(404);
-  expect(await f.tickets.mint({objectId: binding.objectId}, f.context)).not.toBeNull();
+  expect(await f.tickets.mint({ objectId: binding.objectId }, f.context)).not.toBeNull();
   const value = await (await resolve()).json();
-  expect(value).toEqual({kind: "link", workspaceId: scope.workspaceId, shareId: scope.shareId, grantId: scope.grantId,
-    sessionId: "link-session", principalId: f.storage.getLinkPrincipalForGrantProfile(scope.grantId, f.context.profileTokenHash)!.principalId});
+  expect(value).toEqual({
+    kind: "link",
+    workspaceId: scope.workspaceId,
+    shareId: scope.shareId,
+    grantId: scope.grantId,
+    sessionId: "link-session",
+    principalId: f.storage.getLinkPrincipalForGrantProfile(
+      scope.grantId,
+      f.context.profileTokenHash,
+    )!.principalId,
+  });
   const other = Buffer.alloc(32, 3).toString("base64url");
-  expect((await f.handle(request({discriminator}, "/sync/live/link-session", {"x-dohc-link-profile-secret": other}))).status).toBe(404);
-  for (const secret of [bearer, profile, f.context.capabilityHash, f.context.profileTokenHash]) expect(JSON.stringify(value)).not.toContain(secret);
+  expect(
+    (
+      await f.handle(
+        request({ discriminator }, "/sync/live/link-session", {
+          "x-dohc-link-profile-secret": other,
+        }),
+      )
+    ).status,
+  ).toBe(404);
+  for (const secret of [bearer, profile, f.context.capabilityHash, f.context.profileTokenHash])
+    expect(JSON.stringify(value)).not.toContain(secret);
 });
 it.each([
-  {origin: "https://foreign.test"}, {host: "foreign.test"}, {"x-dohc-relay-exchange-key": "wrong"},
-  {authorization: ""}, {"x-dohc-link-profile-secret": ""},
-] as Record<string, string>[])("refuses missing or mismatched private authority %j", async headers => {
-  const f = await fixture(); expect((await f.handle(request(undefined, undefined, headers))).status).toBe(404);
-});
-it.each(["revoked", "expired", "pinned"])("refuses current authority after %s transition", async mode => {
-  const f = await fixture();
-  if (mode === "revoked") f.storage.revokeShareGrant({shareId: scope.shareId, grantId: scope.grantId, revokedAtMs: 1000});
-  if (mode === "expired") vi.mocked(Date.now).mockReturnValue(61_000);
-  if (mode === "pinned") f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["docs"], versionId: "side"}));
-  const response = await f.handle(request());
-  expect(response.status).toBe(404);
-  expect(await response.text()).toBe('{"ok":false,"error":"not found"}');
-});
+  { origin: "https://foreign.test" },
+  { host: "foreign.test" },
+  { "x-dohc-relay-exchange-key": "wrong" },
+  { authorization: "" },
+  { "x-dohc-link-profile-secret": "" },
+] as Record<string, string>[])(
+  "refuses missing or mismatched private authority %j",
+  async (headers) => {
+    const f = await fixture();
+    expect((await f.handle(request(undefined, undefined, headers))).status).toBe(404);
+  },
+);
 
-it.each(["view", "comment"] as const)("explains %s access only for an existing file in scope", async access => {
-  const f = await fixture();
-  f.raw.prepare("UPDATE sync_relay_share_grants SET access=?").run(access);
-  const response = await f.handle(request());
-  expect(response.status).toBe(403);
-  expect(await response.json()).toEqual(linkRefusalBody(access === "view" ? "link_view_access" : "link_comment_access"));
-  for (const path of ["private/a.md", "docs/missing.md", "../docs/a.md"]) {
-    const refused = await f.handle(request({discriminator, path}));
-    expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
-  }
-});
+it.each(["revoked", "expired", "pinned"])(
+  "refuses current authority after %s transition",
+  async (mode) => {
+    const f = await fixture();
+    if (mode === "revoked")
+      f.storage.revokeShareGrant({
+        shareId: scope.shareId,
+        grantId: scope.grantId,
+        revokedAtMs: 1000,
+      });
+    if (mode === "expired") vi.mocked(Date.now).mockReturnValue(61_000);
+    if (mode === "pinned")
+      f.raw
+        .prepare("UPDATE sync_relay_shares SET selector_json=?")
+        .run(JSON.stringify({ paths: ["docs"], versionId: "side" }));
+    const response = await f.handle(request());
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe('{"ok":false,"error":"not found"}');
+  },
+);
 
-it("explains an unavailable live session only after proving the file is shared", async () => {
-  const f = await fixture();
-  vi.spyOn(f.storage, "resolveLiveObjectHostBinding").mockReturnValue({kind: "refused", reason: "host-unavailable"});
-  const response = await f.handle(request());
-  expect(response.status).toBe(503);
-  expect(await response.json()).toEqual(linkRefusalBody("link_live_unavailable"));
-  for (const headers of [{authorization: ""}, {authorization: `LinkCapability ${"z".repeat(43)}`}]) {
-    const refused = await f.handle(request(undefined, undefined, headers));
-    expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
-  }
-  const hidden = await f.handle(request({discriminator, path: "private/a.md"}));
-  expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
-});
+it.each(["view"] as const)(
+  "explains %s access only for an existing file in scope",
+  async (access) => {
+    const f = await fixture();
+    f.raw.prepare("UPDATE sync_relay_share_grants SET access=?").run(access);
+    const response = await f.handle(request());
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual(
+      linkRefusalBody(access === "view" ? "link_view_access" : "link_comment_access"),
+    );
+    for (const path of ["private/a.md", "docs/missing.md", "../docs/a.md"]) {
+      const refused = await f.handle(request({ discriminator, path }));
+      expect([refused.status, await refused.text()]).toEqual([
+        404,
+        '{"ok":false,"error":"not found"}',
+      ]);
+    }
+  },
+);
 
 it("explains a document the session host blocked as unavailable until the block lifts", async () => {
   let blocked = true;
-  const asked: {workspaceId: string; objectId: string}[] = [];
-  const f = await fixture(document => {asked.push(document); return blocked;});
+  const asked: { workspaceId: string; objectId: string }[] = [];
+  const f = await fixture((document) => {
+    asked.push(document);
+    return blocked;
+  });
   const response = await f.handle(request());
-  expect([response.status, await response.json()]).toEqual([503, linkRefusalBody("link_live_unavailable")]);
-  expect(asked).toEqual([{workspaceId: scope.workspaceId, objectId: binding.objectId}]);
-  const hidden = await f.handle(request({discriminator, path: "private/a.md"}));
+  expect([response.status, await response.json()]).toEqual([
+    503,
+    linkRefusalBody("link_live_unavailable"),
+  ]);
+  expect(asked).toEqual([{ workspaceId: scope.workspaceId, objectId: binding.objectId }]);
+  const hidden = await f.handle(request({ discriminator, path: "private/a.md" }));
   expect([hidden.status, await hidden.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
   blocked = false;
-  expect(await (await f.handle(request())).json()).toEqual({objectId: binding.objectId});
-});
-
-// A link sees each share root by its own name, so a nested folder named
-// shared-with-me shows as the reserved top-level folder, which no binding can
-// hold. The share is valid and covers the file, so only the link's view refuses.
-const unviewable = JSON.stringify({paths: ["docs", "notes/shared-with-me"], versionId: null});
-it("refuses a link's host binding when its share's projected view can't form a binding", async () => {
-  const f = await fixture();
-  expect(f.storage.resolveLiveObjectHostBinding(f.context, binding.objectId)).toMatchObject({kind: "current", binding: {objectId: binding.objectId}});
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(unviewable);
-  expect(f.storage.resolveLiveObjectHostBinding(f.context, binding.objectId)).toEqual({kind: "refused", reason: "stale-selector"});
-});
-it("refuses to mint a link ticket for such a share before it writes a ticket row", async () => {
-  const f = await fixture();
-  const ticketRows = () => Number(f.raw.prepare("SELECT count(*) AS count FROM sync_relay_live_session_tickets").get()!.count);
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(unviewable);
-  expect(await f.tickets.mint({objectId: binding.objectId}, f.context)).toBeNull();
-  expect(ticketRows()).toBe(0);
-  f.raw.prepare("UPDATE sync_relay_shares SET selector_json=?").run(JSON.stringify({paths: ["docs"], versionId: null}));
-  expect(await f.tickets.mint({objectId: binding.objectId}, f.context)).not.toBeNull();
-  expect(ticketRows()).toBe(1);
+  expect(await (await f.handle(request())).json()).toEqual({ objectId: binding.objectId });
 });

@@ -30,7 +30,6 @@ describe("createWorkspaceFileOpens", () => {
     expect(h.send).not.toHaveBeenCalled();
     h.opens.shown(loading, "ws-notes");
     expect(h.send).toHaveBeenCalledWith(loading, notes, "a.md");
-    // It goes once.
     h.opens.shown(loading, "ws-notes");
     expect(h.send).toHaveBeenCalledTimes(1);
   });
@@ -55,7 +54,11 @@ describe("createWorkspaceFileOpens", () => {
 
   it("holds a message from a work link the same way", () => {
     const send = vi.fn();
-    const opens = createWorkspaceFileOpens<object, typeof notes, { threadId: string; messageId: string }>({
+    const opens = createWorkspaceFileOpens<
+      object,
+      typeof notes,
+      { threadId: string; messageId: string }
+    >({
       shownWorkspaceId: () => undefined,
       send,
     });

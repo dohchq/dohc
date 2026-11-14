@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import {
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { posix, win32 } from "node:path";
 import { parse } from "smol-toml";
@@ -24,20 +31,34 @@ export interface CodexConfigFiles {
 // The person's own Codex files. Null when CODEX_HOME is relative, because
 // Codex resolves it against the workspace, and dohc never reads a
 // workspace's config.
-export function codexConfigFiles(env: NodeJS.ProcessEnv, platform: NodeJS.Platform, home = homedir(), user?: string): CodexConfigFiles | null {
+export function codexConfigFiles(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  home = homedir(),
+  user?: string,
+): CodexConfigFiles | null {
   const path = platform === "win32" ? win32 : posix;
   if (env.CODEX_HOME && !path.isAbsolute(env.CODEX_HOME)) return null;
   const codexHome = env.CODEX_HOME || path.join(home, ".codex");
-  const system = platform === "win32" ? path.join(env.ProgramData || "C:\\ProgramData", "OpenAI", "Codex") : "/etc/codex";
+  const system =
+    platform === "win32"
+      ? path.join(env.ProgramData || "C:\\ProgramData", "OpenAI", "Codex")
+      : "/etc/codex";
   return {
     requirements: [path.join(system, "requirements.toml")],
     config: [
-      path.join(system, "config.toml"), path.join(codexHome, "config.toml"),
+      path.join(system, "config.toml"),
+      path.join(codexHome, "config.toml"),
       ...(platform === "win32" ? [] : [path.join(system, "managed_config.toml")]),
     ],
-    managedPreferences: platform === "darwin"
-      ? ["", user ?? shortName()].flatMap((folder) => folder === undefined ? [] : [path.join("/Library/Managed Preferences", folder, "com.openai.codex.plist")])
-      : [],
+    managedPreferences:
+      platform === "darwin"
+        ? ["", user ?? shortName()].flatMap((folder) =>
+            folder === undefined
+              ? []
+              : [path.join("/Library/Managed Preferences", folder, "com.openai.codex.plist")],
+          )
+        : [],
   };
 }
 
@@ -53,7 +74,10 @@ function shortName(): string | undefined {
 
 // Null when a file exists that dohc can't read or parse. Then dohc adds
 // nothing it would have taken from the person's config.
-function readConfigTables(files: readonly string[], read: (path: string) => string): ConfigTable[] | null {
+function readConfigTables(
+  files: readonly string[],
+  read: (path: string) => string,
+): ConfigTable[] | null {
   const tables: ConfigTable[] = [];
   for (const file of files) {
     let text: string;
@@ -72,7 +96,12 @@ function readConfigTables(files: readonly string[], read: (path: string) => stri
   return tables;
 }
 
-const WINDOWS_SANDBOX_FEATURES = ["elevated_windows_sandbox", "experimental_windows_sandbox", "enable_experimental_windows_sandbox", "prefer_mxc"];
+const WINDOWS_SANDBOX_FEATURES = [
+  "elevated_windows_sandbox",
+  "experimental_windows_sandbox",
+  "enable_experimental_windows_sandbox",
+  "prefer_mxc",
+];
 
 // Whether the person or their organization picked a Windows sandbox
 // anywhere, profiles included. Requirements can also list the sandboxes they
@@ -82,13 +111,21 @@ function choosesWindowsSandbox(value: unknown): boolean {
   if (!isTable(value)) return false;
   const { windows } = value;
   const features = value.features ?? value.feature_requirements;
-  if (isTable(windows) && ("sandbox" in windows || "allowed_sandbox_implementations" in windows)) return true;
+  if (isTable(windows) && ("sandbox" in windows || "allowed_sandbox_implementations" in windows))
+    return true;
   if (isTable(features) && WINDOWS_SANDBOX_FEATURES.some((key) => key in features)) return true;
   return Object.values(value).some(choosesWindowsSandbox);
 }
 
 // The older names Codex still reads for features a read-only run turns off.
-const READ_ONLY_FEATURE_ALIASES = ["connectors", "experimental_use_unified_exec_tool", "imagegenext", "collab", "memory_tool", "codex_hooks"];
+const READ_ONLY_FEATURE_ALIASES = [
+  "connectors",
+  "experimental_use_unified_exec_tool",
+  "imagegenext",
+  "collab",
+  "memory_tool",
+  "codex_hooks",
+];
 
 // Whether the system requirements would override what a read-only run sets,
 // which Codex does with a warning instead of refusing: they allow only listed
@@ -106,26 +143,57 @@ export function codexRequirementsRefuseReadOnly(
   read: (path: string) => string = (path) => readFileSync(path, "utf8"),
 ): boolean {
   const tables = files && readConfigTables(files.requirements, read);
-  const managed = files && readConfigTables(files.config.filter((file) => posix.basename(file) === "managed_config.toml"), read);
-  if (tables === null || managed === null || managed.some(({ table }) => Object.keys(table).length > 0)) return true;
-  const disabled = new Set<string>([...READ_ONLY_DISABLED_FEATURES, ...REPLY_ONLY_DISABLED_FEATURES, ...READ_ONLY_FEATURE_ALIASES]);
-  const lacks = (list: unknown, value: string) => list !== undefined && !(Array.isArray(list) && list.includes(value));
+  const managed =
+    files &&
+    readConfigTables(
+      files.config.filter((file) => posix.basename(file) === "managed_config.toml"),
+      read,
+    );
+  if (
+    tables === null ||
+    managed === null ||
+    managed.some(({ table }) => Object.keys(table).length > 0)
+  )
+    return true;
+  const disabled = new Set<string>([
+    ...READ_ONLY_DISABLED_FEATURES,
+    ...REPLY_ONLY_DISABLED_FEATURES,
+    ...READ_ONLY_FEATURE_ALIASES,
+  ]);
+  const lacks = (list: unknown, value: string) =>
+    list !== undefined && !(Array.isArray(list) && list.includes(value));
   return tables.some(({ table }) => {
     if ("allowed_permission_profiles" in table || "config_server" in table) return true;
-    if (lacks(table.allowed_approval_policies, "never") || lacks(table.allowed_approvals_reviewers, "user")) return true;
+    if (
+      lacks(table.allowed_approval_policies, "never") ||
+      lacks(table.allowed_approvals_reviewers, "user")
+    )
+      return true;
     const models = isTable(table.auto_review) ? table.auto_review.required_on_models : undefined;
     if (models !== undefined && !(Array.isArray(models) && models.length === 0)) return true;
-    if ([table.features, table.feature_requirements].some((features) =>
-      isTable(features) && Object.entries(features).some(([key, on]) => on === true && disabled.has(key)))) return true;
+    if (
+      [table.features, table.feature_requirements].some(
+        (features) =>
+          isTable(features) &&
+          Object.entries(features).some(([key, on]) => on === true && disabled.has(key)),
+      )
+    )
+      return true;
     if (platform !== "win32" || !isTable(table.windows)) return false;
     const allowed = table.windows.allowed_sandbox_implementations;
-    return table.windows.require_mxc === true || (allowed !== undefined && !(Array.isArray(allowed) && allowed.includes("unelevated")));
+    return (
+      table.windows.require_mxc === true ||
+      (allowed !== undefined && !(Array.isArray(allowed) && allowed.includes("unelevated")))
+    );
   });
 }
 
 // Codex applies [sandbox_workspace_write] only without a named profile, so
 // the run's profile carries these over itself.
-function workspaceWrite(tables: readonly ConfigTable[], key: "network_access" | "exclude_tmpdir_env_var" | "exclude_slash_tmp"): boolean {
+function workspaceWrite(
+  tables: readonly ConfigTable[],
+  key: "network_access" | "exclude_tmpdir_env_var" | "exclude_slash_tmp",
+): boolean {
   let value = false;
   for (const { table } of tables) {
     const section = table.sandbox_workspace_write;
@@ -158,7 +226,8 @@ export function codexMayRunWithoutLogin(
   const tables = files && readConfigTables([...files.config, ...files.requirements], read);
   if (tables === null) return true;
   let provider = "openai";
-  for (const { table } of tables) if (typeof table.model_provider === "string") provider = table.model_provider;
+  for (const { table } of tables)
+    if (typeof table.model_provider === "string") provider = table.model_provider;
   return provider !== "openai";
 }
 
@@ -168,7 +237,11 @@ const lowerAscii = (key: string) => key.replace(/[A-Z]/gu, (letter) => letter.to
 // then the path it was given. On Windows Codex lowercases ASCII letters only,
 // and one of its lookups keeps the \\?\ prefix of the canonical path. Under
 // WSL it lowercases the canonical path of a folder on a Windows drive.
-export function codexTrustKeys(rootPath: string, platform: NodeJS.Platform, realPath: (path: string) => string = realpathSync.native): string[] {
+export function codexTrustKeys(
+  rootPath: string,
+  platform: NodeJS.Platform,
+  realPath: (path: string) => string = realpathSync.native,
+): string[] {
   const path = platform === "win32" ? win32 : posix;
   const given = path.resolve(rootPath);
   let real = given;
@@ -176,7 +249,8 @@ export function codexTrustKeys(rootPath: string, platform: NodeJS.Platform, real
     real = realPath(given);
   } catch {}
   if (platform !== "win32") {
-    const wsl = platform === "linux" && /^\/mnt\/[a-z](\/|$)/iu.test(real) ? [lowerAscii(real)] : [];
+    const wsl =
+      platform === "linux" && /^\/mnt\/[a-z](\/|$)/iu.test(real) ? [lowerAscii(real)] : [];
     return [...new Set([...wsl, real, given])];
   }
   const extended = real.startsWith("\\\\") ? `\\\\?\\UNC\\${real.slice(2)}` : `\\\\?\\${real}`;
@@ -192,7 +266,9 @@ function needsBasicString(value: string): boolean {
 }
 
 function tomlKey(value: string): string {
-  return needsBasicString(value) ? JSON.stringify(value).replace(/\u007f/gu, "\\u007f") : `'${value}'`;
+  return needsBasicString(value)
+    ? JSON.stringify(value).replace(/\u007f/gu, "\\u007f")
+    : `'${value}'`;
 }
 
 function attempt<T>(read: () => T): T | null {
@@ -215,27 +291,35 @@ function attempt<T>(read: () => T): T | null {
 //   would follow;
 // - contains the workspace, because the run could move the workspace away
 //   from .dohc's rule.
-function writableRootEntries(tables: readonly ConfigTable[], input: {
-  rootPath: string;
-  platform: NodeJS.Platform;
-  env: NodeJS.ProcessEnv;
-  home: string;
-  realPath: (path: string) => string;
-  readLink: (path: string) => string | null;
-  fileId: (path: string) => string;
-  listFolder: (path: string) => readonly string[];
-  behindCmd: boolean;
-}): string[] {
+function writableRootEntries(
+  tables: readonly ConfigTable[],
+  input: {
+    rootPath: string;
+    platform: NodeJS.Platform;
+    env: NodeJS.ProcessEnv;
+    home: string;
+    realPath: (path: string) => string;
+    readLink: (path: string) => string | null;
+    fileId: (path: string) => string;
+    listFolder: (path: string) => readonly string[];
+    behindCmd: boolean;
+  },
+): string[] {
   let setting: { file: string; roots: string[] } | undefined;
   for (const { file, table } of tables) {
-    const roots = isTable(table.sandbox_workspace_write) ? table.sandbox_workspace_write.writable_roots : undefined;
-    if (Array.isArray(roots) && roots.every((root: unknown): root is string => typeof root === "string")) setting = { file, roots };
+    const roots = isTable(table.sandbox_workspace_write)
+      ? table.sandbox_workspace_write.writable_roots
+      : undefined;
+    if (
+      Array.isArray(roots) &&
+      roots.every((root: unknown): root is string => typeof root === "string")
+    )
+      setting = { file, roots };
   }
   if (!setting) return [];
   const workspace = attempt(() => input.fileId(input.rootPath));
   if (workspace === null) return [];
   const path = input.platform === "win32" ? win32 : posix;
-  // The ids of a folder and every folder above it.
   const above = (folder: string): string[] => {
     const ids: string[] = [];
     for (let at = folder; ; at = path.dirname(at)) {
@@ -262,8 +346,12 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
         // it can be in a folder that tells case apart.
         const real = input.realPath(here);
         const [name, stored] = [path.basename(here), path.basename(real)];
-        const same = stored === name || (stored.toLowerCase() === name.toLowerCase() && !input.listFolder(up.path).includes(name));
-        if (!same || input.fileId(path.dirname(real)) !== input.fileId(up.path)) throw new Error("Unreported link");
+        const same =
+          stored === name ||
+          (stored.toLowerCase() === name.toLowerCase() &&
+            !input.listFolder(up.path).includes(name));
+        if (!same || input.fileId(path.dirname(real)) !== input.fileId(up.path))
+          throw new Error("Unreported link");
       }
       return { path: here, through };
     }
@@ -271,37 +359,68 @@ function writableRootEntries(tables: readonly ConfigTable[], input: {
     const next = follow(path.resolve(up.path, target), hops);
     return { path: next.path, through: [...through, ...next.through] };
   };
-  const writable = new Set([
-    workspace, attempt(() => input.fileId(path.join(input.rootPath, ".dohc"))),
-    ...[input.env.TMPDIR, input.env.TEMP, input.env.TMP, ...(input.platform === "win32" ? [] : ["/tmp", "/var/tmp"])]
-      .map((folder) => folder && path.isAbsolute(folder) ? attempt(() => input.fileId(folder)) : null),
-  ].filter((id): id is string => id !== null));
+  const writable = new Set(
+    [
+      workspace,
+      attempt(() => input.fileId(path.join(input.rootPath, ".dohc"))),
+      ...[
+        input.env.TMPDIR,
+        input.env.TEMP,
+        input.env.TMP,
+        ...(input.platform === "win32" ? [] : ["/tmp", "/var/tmp"]),
+      ].map((folder) =>
+        folder && path.isAbsolute(folder) ? attempt(() => input.fileId(folder)) : null,
+      ),
+    ].filter((id): id is string => id !== null),
+  );
   const listed: { id: string; real: string; above: string[] }[] = [];
   for (const root of setting.roots) {
-    const expanded = (input.platform === "win32" ? /^~(?:[\\/]|$)/u : /^~(?:\/|$)/u).test(root) ? path.join(input.home, root.slice(1)) : root;
+    const expanded = (input.platform === "win32" ? /^~(?:[\\/]|$)/u : /^~(?:\/|$)/u).test(root)
+      ? path.join(input.home, root.slice(1))
+      : root;
     if (input.platform === "win32" && /^[a-z]:(?![\\/])/iu.test(expanded)) continue;
     const written = path.resolve(path.dirname(setting.file), expanded);
     const real = attempt(() => input.realPath(written));
     const id = real === null ? null : attempt(() => input.fileId(real));
     const reached = attempt(() => follow(written));
-    // The id of the folder follow reaches, then of each folder it looks in.
-    const ids = reached === null ? [] : [reached.path, ...reached.through].map((folder) => attempt(() => input.fileId(folder)));
+    const ids =
+      reached === null
+        ? []
+        : [reached.path, ...reached.through].map((folder) => attempt(() => input.fileId(folder)));
     // Codex reads these characters as a pattern, and a colon past the drive as an error.
-    if (real === null || id === null || /[*?[\]]/u.test(real) || (input.platform === "win32" && real.includes(":", 2))) continue;
+    if (
+      real === null ||
+      id === null ||
+      /[*?[\]]/u.test(real) ||
+      (input.platform === "win32" && real.includes(":", 2))
+    )
+      continue;
     if (input.behindCmd && needsBasicString(real)) continue;
     // A `..` after a link can take Codex somewhere follow didn't go, and a
     // link inside the folder itself lets the run point it elsewhere.
     if (ids[0] !== id || ids.includes(id, 1)) continue;
-    listed.push({ id, real, above: [...above(real), ...ids.filter((each): each is string => each !== null)] });
+    listed.push({
+      id,
+      real,
+      above: [...above(real), ...ids.filter((each): each is string => each !== null)],
+    });
   }
   // Codex may name the workspace by either path.
-  const aboveWorkspace = new Set([input.rootPath, attempt(() => input.realPath(input.rootPath)) ?? input.rootPath].flatMap(above));
-  const safe = listed.filter((root) => !aboveWorkspace.has(root.id) && !root.above.some((each) => writable.has(each)));
+  const aboveWorkspace = new Set(
+    [input.rootPath, attempt(() => input.realPath(input.rootPath)) ?? input.rootPath].flatMap(
+      above,
+    ),
+  );
+  const safe = listed.filter(
+    (root) => !aboveWorkspace.has(root.id) && !root.above.some((each) => writable.has(each)),
+  );
   const safeIds = new Set(safe.map((root) => root.id));
   // One entry per folder, however many of its spellings are safe.
-  const kept = new Map(safe
-    .filter((root) => !root.above.some((each) => each !== root.id && safeIds.has(each)))
-    .map((root): [string, string] => [root.id, root.real]));
+  const kept = new Map(
+    safe
+      .filter((root) => !root.above.some((each) => each !== root.id && safeIds.has(each)))
+      .map((root): [string, string] => [root.id, root.real]),
+  );
   return [...kept.values()].map((real) => `${tomlKey(real)}='write'`);
 }
 
@@ -348,46 +467,67 @@ export function codexRunConfig(input: {
     env: input.env ?? process.env,
     home: input.home ?? homedir(),
     realPath: input.realPath ?? realpathSync.native,
-    readLink: input.readLink ?? ((path: string) => lstatSync(path).isSymbolicLink() ? readlinkSync(path) : null),
-    fileId: input.fileId ?? ((path: string) => {
-      const { dev, ino } = statSync(path, { bigint: true });
-      return `${dev}:${ino}`;
-    }),
+    readLink:
+      input.readLink ??
+      ((path: string) => (lstatSync(path).isSymbolicLink() ? readlinkSync(path) : null)),
+    fileId:
+      input.fileId ??
+      ((path: string) => {
+        const { dev, ino } = statSync(path, { bigint: true });
+        return `${dev}:${ino}`;
+      }),
     listFolder: input.listFolder ?? ((path: string) => readdirSync(path)),
   };
   const tables = input.files && readConfigTables(input.files.config, read);
-  const requirements = input.platform === "win32" && input.files && tables ? readConfigTables(input.files.requirements, read) : null;
+  const requirements =
+    input.platform === "win32" && input.files && tables
+      ? readConfigTables(input.files.requirements, read)
+      : null;
   const filesystem = [
     "':workspace_roots'={'.dohc'='read'}",
     ...(tables && workspaceWrite(tables, "exclude_tmpdir_env_var") ? ["':tmpdir'='read'"] : []),
     ...(tables && workspaceWrite(tables, "exclude_slash_tmp") ? ["':slash_tmp'='read'"] : []),
     ...(tables && !input.readOnly ? writableRootEntries(tables, roots) : []),
   ];
-  const network = tables && workspaceWrite(tables, "network_access") ? ",network={enabled=true}" : "";
+  const network =
+    tables && workspaceWrite(tables, "network_access") ? ",network={enabled=true}" : "";
   const profile = `dohc_run_${createHash("sha256").update(input.runId).digest("hex").slice(0, 16)}`;
-  const projects = codexTrustKeys(input.rootPath, input.platform, input.realPath)
-    .map((key) => `${tomlKey(key)}={trust_level='untrusted'}`);
+  const projects = codexTrustKeys(input.rootPath, input.platform, input.realPath).map(
+    (key) => `${tomlKey(key)}={trust_level='untrusted'}`,
+  );
   return [
     ...[
       ...(input.readOnly
         ? [
-          `permissions.${profile}={filesystem={':workspace_roots'={'.'='read','.dohc'='deny'}}}`, `default_permissions='${profile}'`,
-          ...ownerServers(tables ?? []).map((name) => `mcp_servers.${name}.enabled=false`), "web_search='disabled'", "notify=[]",
-          // A model can start sub-agents whatever multi_agent says, unless
-          // agents.enabled is false and multi_agent_v2 is off.
-          "agents.enabled=false",
-          // The person's own auto-review setting can't approve a request. It
-          // goes to the person, who isn't there to approve it.
-          "approvals_reviewer='user'",
-        ]
-        : [`permissions.${profile}={extends=':workspace',filesystem={${filesystem.join(",")}}${network}}`, `default_permissions='${profile}'`]),
+            `permissions.${profile}={filesystem={':workspace_roots'={'.'='read','.dohc'='deny'}}}`,
+            `default_permissions='${profile}'`,
+            ...ownerServers(tables ?? []).map((name) => `mcp_servers.${name}.enabled=false`),
+            "web_search='disabled'",
+            "notify=[]",
+            // A model can start sub-agents whatever multi_agent says, unless
+            // agents.enabled is false and multi_agent_v2 is off.
+            "agents.enabled=false",
+            // The person's own auto-review setting can't approve a request. It
+            // goes to the person, who isn't there to approve it.
+            "approvals_reviewer='user'",
+          ]
+        : [
+            `permissions.${profile}={extends=':workspace',filesystem={${filesystem.join(",")}}${network}}`,
+            `default_permissions='${profile}'`,
+          ]),
       `projects={${projects.join(",")}}`,
       ...(input.platform === "win32" && input.readOnly
         ? ["windows.sandbox='unelevated'", "windows.allow_mxc=false"]
-        : tables && requirements && ![...tables, ...requirements].some(({ table }) => choosesWindowsSandbox(table)) ? ["windows.sandbox='unelevated'"] : []),
+        : tables &&
+            requirements &&
+            ![...tables, ...requirements].some(({ table }) => choosesWindowsSandbox(table))
+          ? ["windows.sandbox='unelevated'"]
+          : []),
     ].flatMap((entry) => ["--config", entry]),
-    ...(input.readOnly ? [...READ_ONLY_DISABLED_FEATURES, ...(input.replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])] : [])
-      .flatMap((feature) => ["--disable", feature]),
+    ...(input.readOnly
+      ? [...READ_ONLY_DISABLED_FEATURES, ...(input.replyOnly ? REPLY_ONLY_DISABLED_FEATURES : [])]
+      : []
+    ).flatMap((feature) => ["--disable", feature]),
   ];
 }
 
@@ -396,17 +536,32 @@ export function codexRunConfig(input: {
 // reply. Codex refuses a name it doesn't know. The code-mode host stays on,
 // because a model that uses only code mode makes every tool call through it.
 export const READ_ONLY_DISABLED_FEATURES = [
-  "plugins", "remote_plugin", "apps", "computer_use", "browser_use", "browser_use_external", "hooks",
-  "multi_agent", "multi_agent_v2", "memories", "skill_search", "tool_suggest", "skill_mcp_dependency_install", "image_generation", "goals", "token_budget",
+  "plugins",
+  "remote_plugin",
+  "apps",
+  "computer_use",
+  "browser_use",
+  "browser_use_external",
+  "hooks",
+  "multi_agent",
+  "multi_agent_v2",
+  "memories",
+  "skill_search",
+  "tool_suggest",
+  "skill_mcp_dependency_install",
+  "image_generation",
+  "goals",
+  "token_budget",
 ] as const;
 
-// A reply-only run also turns off the shell and view_image.
 export const REPLY_ONLY_DISABLED_FEATURES = ["shell_tool", "unified_exec", "view_image"] as const;
 
 // The MCP servers the person's config names, other than dohc's. A --config
 // key splits at each dot, so a name with other characters stays on, and the
 // check before a read-only run refuses it (chatRunnerProcess.ts).
 function ownerServers(tables: readonly ConfigTable[]): string[] {
-  const names = tables.flatMap(({ table }) => isTable(table.mcp_servers) ? Object.keys(table.mcp_servers) : []);
+  const names = tables.flatMap(({ table }) =>
+    isTable(table.mcp_servers) ? Object.keys(table.mcp_servers) : [],
+  );
   return [...new Set(names)].filter((name) => name !== "dohc" && /^[A-Za-z0-9_-]+$/u.test(name));
 }

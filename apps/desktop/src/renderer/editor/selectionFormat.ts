@@ -6,7 +6,15 @@ export function hasFormattableSelection(selection: Selection): selection is Text
   return selection instanceof TextSelection && !selection.empty;
 }
 
-const FORMAT_MARKS = ["bold", "italic", "underline", "strike", "code", "highlight", "link"] as const;
+const FORMAT_MARKS = [
+  "bold",
+  "italic",
+  "underline",
+  "strike",
+  "code",
+  "highlight",
+  "link",
+] as const;
 type FormatMark = (typeof FORMAT_MARKS)[number];
 
 export type SelectionFormat = { block: BlockMenuTurnIntoId } & Record<FormatMark, boolean>;

@@ -19,11 +19,21 @@ function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function userProjection(value: unknown, withEmail: boolean): { id: string; name: string; email?: string } | null {
-  if (!record(value) || typeof value.id !== "string" || value.id.length === 0 ||
-      typeof value.name !== "string") return null;
+function userProjection(
+  value: unknown,
+  withEmail: boolean,
+): { id: string; name: string; email?: string } | null {
+  if (
+    !record(value) ||
+    typeof value.id !== "string" ||
+    value.id.length === 0 ||
+    typeof value.name !== "string"
+  )
+    return null;
   if (!withEmail) return { id: value.id, name: value.name };
-  return typeof value.email === "string" && value.email.length > 0 ? { id: value.id, name: value.name, email: value.email } : null;
+  return typeof value.email === "string" && value.email.length > 0
+    ? { id: value.id, name: value.name, email: value.email }
+    : null;
 }
 
 // share-web's own session reads that may see the account's email, such as an
@@ -57,17 +67,25 @@ export function createAccountAuthHandler(options: AccountAuthOptions) {
     const seen = new Set<string>();
     for (const line of lines) {
       const parsed = parseSetCookieHeader(line);
-      if (splitSetCookieHeader(line).length !== 1 || parsed.size !== 1) throw new Error("invalid auth cookie");
+      if (splitSetCookieHeader(line).length !== 1 || parsed.size !== 1)
+        throw new Error("invalid auth cookie");
       const [name, attributes] = [...parsed][0]!;
-      if (!responseCookieNames.has(name) || seen.has(name) ||
-          attributes.path !== "/" || "domain" in attributes ||
-          !attributes.secure || !attributes.httponly || attributes.samesite !== "lax") {
+      if (
+        !responseCookieNames.has(name) ||
+        seen.has(name) ||
+        attributes.path !== "/" ||
+        "domain" in attributes ||
+        !attributes.secure ||
+        !attributes.httponly ||
+        attributes.samesite !== "lax"
+      ) {
         throw new Error("invalid auth cookie");
       }
       seen.add(name);
       if (name === cookies.sessionToken.name) {
         const maxAge = attributes["max-age"];
-        hasSession = attributes.value.length > 0 &&
+        hasSession =
+          attributes.value.length > 0 &&
           (maxAge === undefined || (Number.isSafeInteger(maxAge) && maxAge > 0));
         clearsSession = attributes.value === "" && attributes["max-age"] === 0;
       }
@@ -82,13 +100,20 @@ export function createAccountAuthHandler(options: AccountAuthOptions) {
     const operation = url.pathname.slice("/api/account/".length);
     const mutation = operation === "sign-in" || operation === "sign-out";
     const refuse = (status: number): Response => Response.json({ ok: false }, { status });
-    if (url.search || (operation !== "session" && !mutation) ||
-        request.method !== (mutation ? "POST" : "GET") ||
-        request.headers.get("host") !== origin.host ||
-        request.headers.get("sec-fetch-site") === "cross-site" ||
-        (mutation && request.headers.get("origin") !== options.publicOrigin) ||
-        (!mutation && request.headers.has("origin") && request.headers.get("origin") !== options.publicOrigin) ||
-        (mutation && request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json")) {
+    if (
+      url.search ||
+      (operation !== "session" && !mutation) ||
+      request.method !== (mutation ? "POST" : "GET") ||
+      request.headers.get("host") !== origin.host ||
+      request.headers.get("sec-fetch-site") === "cross-site" ||
+      (mutation && request.headers.get("origin") !== options.publicOrigin) ||
+      (!mutation &&
+        request.headers.has("origin") &&
+        request.headers.get("origin") !== options.publicOrigin) ||
+      (mutation &&
+        request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
+          "application/json")
+    ) {
       return refuse(404);
     }
 
@@ -117,8 +142,12 @@ export function createAccountAuthHandler(options: AccountAuthOptions) {
         const input = await readBoundedJson(request, options.maxRequestBytes, controller.signal);
         if (!record(input)) return refuse(404);
         if (operation === "sign-in") {
-          if (Object.keys(input).sort().join(",") !== "email,password" ||
-              typeof input.email !== "string" || typeof input.password !== "string") return refuse(404);
+          if (
+            Object.keys(input).sort().join(",") !== "email,password" ||
+            typeof input.email !== "string" ||
+            typeof input.password !== "string"
+          )
+            return refuse(404);
           body = JSON.stringify({ email: input.email, password: input.password });
         } else {
           if (Object.keys(input).length !== 0) return refuse(404);
@@ -127,26 +156,52 @@ export function createAccountAuthHandler(options: AccountAuthOptions) {
         headers.set("content-type", "application/json");
       }
       controller.signal.throwIfAborted();
-      const path = operation === "session" ? "get-session" : operation === "sign-in" ? "sign-in/email" : "sign-out";
+      const path =
+        operation === "session"
+          ? "get-session"
+          : operation === "sign-in"
+            ? "sign-in/email"
+            : "sign-out";
       upstreamStarted = true;
-      const upstream = await fetchAuth(new Request(new URL(`/api/auth/${path}`, options.upstreamUrl), {
-        method: request.method, headers, body, redirect: "manual", signal: controller.signal,
-      }));
+      const upstream = await fetchAuth(
+        new Request(new URL(`/api/auth/${path}`, options.upstreamUrl), {
+          method: request.method,
+          headers,
+          body,
+          redirect: "manual",
+          signal: controller.signal,
+        }),
+      );
       upstreamResponse = upstream;
       if (upstream.status === 429) {
         await upstream.body?.cancel().catch(() => undefined);
         const response = refuse(429);
-        const retryAfter = upstream.headers.get("x-retry-after") ?? upstream.headers.get("retry-after");
-        if (retryAfter !== null && /^[0-9]{1,16}$/.test(retryAfter) && Number.isSafeInteger(Number(retryAfter))) {
+        const retryAfter =
+          upstream.headers.get("x-retry-after") ?? upstream.headers.get("retry-after");
+        if (
+          retryAfter !== null &&
+          /^[0-9]{1,16}$/.test(retryAfter) &&
+          Number.isSafeInteger(Number(retryAfter))
+        ) {
           response.headers.set("retry-after", String(Number(retryAfter)));
         }
         return response;
       }
-      if (operation === "sign-in" && upstream.status === 403 && !upstream.headers.has("location") && !upstream.redirected &&
-          upstream.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() === "application/json") {
+      if (
+        operation === "sign-in" &&
+        upstream.status === 403 &&
+        !upstream.headers.has("location") &&
+        !upstream.redirected &&
+        upstream.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ===
+          "application/json"
+      ) {
         let refusal: unknown;
-        try { refusal = await readBoundedJson(upstream, options.maxResponseBytes, controller.signal); }
-        catch { controller.signal.throwIfAborted(); return refuse(401); }
+        try {
+          refusal = await readBoundedJson(upstream, options.maxResponseBytes, controller.signal);
+        } catch {
+          controller.signal.throwIfAborted();
+          return refuse(401);
+        }
         // Better Auth checks the password before EMAIL_NOT_VERIFIED. Expose only that fixed refusal.
         if (record(refusal) && refusal.code === "EMAIL_NOT_VERIFIED") {
           return Response.json({ ok: false, code: "EMAIL_NOT_VERIFIED" }, { status: 403 });
@@ -156,7 +211,10 @@ export function createAccountAuthHandler(options: AccountAuthOptions) {
         await upstream.body?.cancel().catch(() => undefined);
         return refuse(upstream.status >= 400 && upstream.status < 500 ? 401 : 503);
       }
-      if (upstream.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+      if (
+        upstream.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
+        "application/json"
+      ) {
         await upstream.body?.cancel().catch(() => undefined);
         return refuse(503);
       }
@@ -168,11 +226,16 @@ export function createAccountAuthHandler(options: AccountAuthOptions) {
         if (!record(result) || result.success !== true) return refuse(503);
         output = { ok: true };
       } else {
-        const user = record(result) ? userProjection(result.user, operation === "session" && emailReads.has(request)) : null;
+        const user = record(result)
+          ? userProjection(result.user, operation === "session" && emailReads.has(request))
+          : null;
         if (!user || !record(result)) return refuse(503);
         if (operation === "sign-in" && result.redirect !== false) return refuse(503);
-        if (operation === "session" &&
-            (!record(result.session) || result.session.userId !== user.id)) return refuse(503);
+        if (
+          operation === "session" &&
+          (!record(result.session) || result.session.userId !== user.id)
+        )
+          return refuse(503);
         output = operation === "sign-in" ? { ok: true, user } : { user };
       }
       const response = Response.json(output);

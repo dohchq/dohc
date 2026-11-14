@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type {
-  RefreshShareMountsResult,
-  WorkspaceSummary,
-} from "../../ipc/bridgeContract";
-import { shareNoticePaths, shareUnjournalableRow, shareUnjournalableTitle } from "../shareUnjournalableNotice";
+import type { RefreshShareMountsResult, WorkspaceSummary } from "../../ipc/bridgeContract";
+import {
+  shareNoticePaths,
+  shareUnjournalableRow,
+  shareUnjournalableTitle,
+} from "../shareUnjournalableNotice";
 import type { ErrorDetailField } from "./copyDetails";
 import { bridge } from "../bridge";
 import { SHELL_ERROR_MAX_CHARS, type ShellErrorKind } from "./useShellError";
@@ -18,10 +19,8 @@ import {
 // .dohc/local/share-refresh, so the person finds this one under its label.
 const collisionRecordPath = (label: string) =>
   `shared-with-me/${label}/.dohc/local/share-refresh/share-collision-record.json`;
-const collisionRecordRefusal = (shareId: string) =>
-  `share-mount-collision-record:${shareId}`;
-const keptPathsNotice = (shareId: string) =>
-  `share-mount-kept-paths:${shareId}`;
+const collisionRecordRefusal = (shareId: string) => `share-mount-collision-record:${shareId}`;
+const keptPathsNotice = (shareId: string) => `share-mount-kept-paths:${shareId}`;
 const collisionRecordSetAside = (shareId: string) =>
   `share-mount-collision-record-set-aside:${shareId}`;
 // A share whose refresh files its own refusal row.
@@ -61,9 +60,7 @@ export function useShareMounts(
   // live copy of this workspace's mounts — reloaded after every mount /
   // unmount / refresh — otherwise the poll gate and unmount lookups would
   // run against a stale boot-time snapshot.
-  const [shareMounts, setShareMounts] = useState(
-    workspaceShareMounts,
-  );
+  const [shareMounts, setShareMounts] = useState(workspaceShareMounts);
   // Bumped whenever a share pull changed files: mounted content has no host
   // history, so the open-file refresh key needs its own signal or an open
   // mounted tab keeps showing pre-pull content.
@@ -104,20 +101,13 @@ export function useShareMounts(
     try {
       const workspaces = await refreshWorkspaceRegistry();
       if (token !== shareMountsToken.current) return;
-      const entry = workspaces.find(
-        (candidate) => candidate.workspaceId === workspaceId,
-      );
+      const entry = workspaces.find((candidate) => candidate.workspaceId === workspaceId);
       commitShareMounts(entry?.shareMounts ?? []);
     } catch {
       // Keep the last known set; the next reload corrects it.
     }
   }, [commitShareMounts, refreshWorkspaceRegistry, workspaceId]);
 
-  // Share mounts: pull every mount's share once (quietly — offline or
-  // signed-out refreshes are no-ops main-side). `announce` adds the visible
-  // summary for the explicit "Refresh Share(s)" menu action.
-  // Announced refreshes share one Notices row, so only the newest may write
-  // it: an older one that finishes late must not replace a newer failure.
   const announcedRefreshToken = useRef(0);
   // Every refresh, polled or not, may file or end a share's refusal row, so
   // only the newest one to start writes it.
@@ -149,8 +139,11 @@ export function useShareMounts(
         } else if (newest && row.status !== "failed" && row.status !== "damaged") {
           clearIdentity(collisionRecordRefusal(row.shareId));
         }
-        if (newest && (row.status === "updated" || row.status === "unchanged" || row.status === "ended")) {
-          const paths = row.status === "ended" ? [] : row.unjournalablePaths ?? [];
+        if (
+          newest &&
+          (row.status === "updated" || row.status === "unchanged" || row.status === "ended")
+        ) {
+          const paths = row.status === "ended" ? [] : (row.unjournalablePaths ?? []);
           if (paths.length === 0) {
             clearIdentity(keptPathsNotice(row.shareId));
           } else {
@@ -163,7 +156,7 @@ export function useShareMounts(
               identity: keptPathsNotice(row.shareId),
               tone: "warning",
               retry: () => void refreshShareMountsRef.current(true),
-              paths: shareNoticePaths(paths).map(path => `shared-with-me/${row.label}/${path}`),
+              paths: shareNoticePaths(paths).map((path) => `shared-with-me/${row.label}/${path}`),
               noDismiss: true,
               ...(announce ? {} : { repeat: true }),
             });
@@ -207,7 +200,12 @@ export function useShareMounts(
       if (results.some((row) => row.status === "ended")) void reloadShareMounts();
       if (!newest()) return;
       if (abortMessage !== undefined) {
-        reportShellError("Couldn't refresh shares.", new Error(abortMessage), null, "share-refresh");
+        reportShellError(
+          "Couldn't refresh shares.",
+          new Error(abortMessage),
+          null,
+          "share-refresh",
+        );
         return;
       }
       // A share dohc cannot read or did not refresh is a failure the person
@@ -220,7 +218,12 @@ export function useShareMounts(
       }
       const summary = shareRefreshSummary(results);
       if (results.some((row) => row.status === "failed")) {
-        reportShellError(summary, null, () => void refreshShareMountsRef.current(true), "share-refresh");
+        reportShellError(
+          summary,
+          null,
+          () => void refreshShareMountsRef.current(true),
+          "share-refresh",
+        );
       } else if (results.some((row) => row.status === "damaged")) {
         reportShellError(summary, null, null, "share-refresh");
       } else if (warned) {
@@ -228,12 +231,26 @@ export function useShareMounts(
         // Notices without one. Ending the last summary first keeps its open
         // toast from coming back after the warning's.
         clearKind("share-refresh");
-        reportShellFailure({ message: summary, tone: "success", kind: "share-refresh", quiet: true });
+        reportShellFailure({
+          message: summary,
+          tone: "success",
+          kind: "share-refresh",
+          quiet: true,
+        });
       } else {
         showSuccessNotice(summary, undefined, "share-refresh");
       }
     },
-    [workspaceId, refreshFiles, reportShellError, showSuccessNotice, reportShellFailure, reloadShareMounts, reportCollisionRecords, clearKind],
+    [
+      workspaceId,
+      refreshFiles,
+      reportShellError,
+      showSuccessNotice,
+      reportShellFailure,
+      reloadShareMounts,
+      reportCollisionRecords,
+      clearKind,
+    ],
   );
   refreshShareMountsRef.current = refreshShareMounts;
 
@@ -263,7 +280,11 @@ export function useShareMounts(
         });
         folderLeft = result?.folderLeft === true;
       } catch (error) {
-        reportShellError("Couldn't remove the share.", error, () => void unmountShareRef.current(path));
+        reportShellError(
+          "Couldn't remove the share.",
+          error,
+          () => void unmountShareRef.current(path),
+        );
         return;
       }
       // Reproject tabs/pins exactly like a folder delete — but only when the
@@ -276,9 +297,7 @@ export function useShareMounts(
         // until that reload consumes it.
         foldersLeftBehind.current.add(mount.shareId);
       }
-      onExplorerPathsChanged(
-        shareUnmountProjection({ shareId: mount.shareId, label, folderLeft }),
-      );
+      onExplorerPathsChanged(shareUnmountProjection({ shareId: mount.shareId, label, folderLeft }));
       await refreshFiles().catch(() => undefined);
       void reloadShareMounts();
       // The record went but its folder stayed, because its label is not one

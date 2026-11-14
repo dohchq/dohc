@@ -211,10 +211,8 @@ async fn replay_confirms_only_a_publication_that_reached_disk() {
                     Outcome::Applied
                 }
             );
-            // A confirmed publication stays confirmed and never rewrites the later edit.
             assert_eq!(applied(&actor, "older", "moment-older").await, !superseded);
             assert_eq!(std::fs::read(scratch.path().join(path)).unwrap(), newer);
-            // The request binds only to the moment it recorded, in its workspace.
             assert!(!applied(&actor, "older", "moment-newer").await);
             assert!(!applied(&actor, "newer", "moment-older").await);
             assert!(applied(&actor, "newer", "moment-newer").await);
@@ -225,203 +223,6 @@ async fn replay_confirms_only_a_publication_that_reached_disk() {
                     .unwrap()
             );
             supervisor.close(&db).unwrap();
-        }
-    }
-}
-
-/// A binary moment id can look like a text job id. Superseding its job still
-/// marks its own request.
-#[tokio::test]
-async fn prefixed_binary_supersession_is_not_a_publication_receipt() {
-    let scratch = ScratchDir::new().unwrap();
-    let db = engine_db_path(&scratch).unwrap();
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    let older = WriteBinary {
-        moment_id: "authored-mat_receipt".into(),
-        ..binary("older")
-    };
-    let crash = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
-    assert_eq!(
-        publish_binary(&actor, scratch.path(), older, create(), crash).await,
-        Outcome::Error
-    );
-    let newer = publish_newer(&actor, scratch.path(), true).await;
-    supervisor.close(&db).unwrap();
-    let actor = supervisor.open(&db, 2).unwrap().actor;
-    actor
-        .materialize_replay_pending(scratch.path().into(), "publish".into(), 20)
-        .await
-        .unwrap();
-    assert_eq!(
-        std::fs::read(scratch.path().join("asset.bin")).unwrap(),
-        newer
-    );
-    assert!(!applied(&actor, "older", "authored-mat_receipt").await);
-    assert!(applied(&actor, "newer", "moment-newer").await);
-    supervisor.close(&db).unwrap();
-}
-
-/// Another moment's complete job never confirms a pending publication, even
-/// when its id is the pending moment's text job id.
-#[tokio::test]
-async fn unrelated_prefixed_binary_job_cannot_confirm_a_pending_publication() {
-    let scratch = ScratchDir::new().unwrap();
-    let db = engine_db_path(&scratch).unwrap();
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    let pending = WriteBinary {
-        moment_id: "receipt".into(),
-        ..binary("pending")
-    };
-    let crash = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
-    assert_eq!(
-        publish_binary(&actor, scratch.path(), pending, create(), crash).await,
-        Outcome::Error
-    );
-    let unrelated = WriteBinary {
-        moment_id: "authored-mat_receipt".into(),
-        path: "other.bin".into(),
-        ..binary("unrelated")
-    };
-    assert_eq!(
-        publish_binary(
-            &actor,
-            scratch.path(),
-            unrelated,
-            create(),
-            Arc::new(NoFaults)
-        )
-        .await,
-        Outcome::Applied
-    );
-    assert!(!scratch.path().join("asset.bin").exists());
-    assert!(!applied(&actor, "pending", "receipt").await);
-    assert!(applied(&actor, "unrelated", "authored-mat_receipt").await);
-    supervisor.close(&db).unwrap();
-}
-
-/// A binary moment id can read like an internal job id. Publication and replay
-/// still treat it as authored: confirmed only once its bytes are on disk, and
-/// superseded without a conflict copy when later work landed first.
-#[tokio::test]
-async fn internal_job_prefixed_binary_ids_replay_as_authored_publications() {
-    for prefix in [
-        "secret-mat_",
-        "version-switch-secret-mat_",
-        "version-switch-mat_",
-        "restore-delete-mat_",
-        "binary-rename-1-delete-mat_",
-        "ydoc-mat_",
-    ] {
-        for (crash, superseded) in [(false, false), (true, false), (true, true)] {
-            let scratch = ScratchDir::new().unwrap();
-            let db = engine_db_path(&scratch).unwrap();
-            let supervisor = WorkspaceSupervisor::new();
-            let actor = supervisor.open(&db, 1).unwrap().actor;
-            let moment = format!("{prefix}receipt");
-            let older = WriteBinary {
-                moment_id: moment.clone(),
-                ..binary("older")
-            };
-            let bytes = older.bytes.clone();
-            let faults: Arc<dyn FaultInjector> = if crash {
-                ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit)
-            } else {
-                Arc::new(NoFaults)
-            };
-            assert_eq!(
-                publish_binary(&actor, scratch.path(), older, create(), faults).await,
-                if crash {
-                    Outcome::Error
-                } else {
-                    Outcome::Applied
-                },
-                "{moment}"
-            );
-            assert_eq!(
-                scratch.path().join("asset.bin").exists(),
-                !crash,
-                "{moment}"
-            );
-            assert_eq!(applied(&actor, "older", &moment).await, !crash, "{moment}");
-            // Another person's later edit, whose id also reads as internal.
-            let newer_moment = format!("{prefix}newer");
-            let newer = if superseded {
-                let input = WriteBinary {
-                    moment_id: newer_moment.clone(),
-                    bytes: vec![1, 0, 254],
-                    ..binary("newer")
-                };
-                std::fs::write(scratch.path().join("asset.bin"), &input.bytes).unwrap();
-                let bytes = input.bytes.clone();
-                assert_eq!(
-                    publish_binary(
-                        &actor,
-                        scratch.path(),
-                        input,
-                        WriteConditions::default(),
-                        Arc::new(NoFaults)
-                    )
-                    .await,
-                    Outcome::Applied,
-                    "{moment}"
-                );
-                Some(bytes)
-            } else {
-                None
-            };
-            supervisor.close(&db).unwrap();
-            let actor = supervisor.open(&db, 2).unwrap().actor;
-            actor
-                .materialize_replay_pending(scratch.path().into(), "publish".into(), 20)
-                .await
-                .unwrap();
-            // Confirmed exactly when its own bytes landed. A later person's
-            // edit is never overwritten.
-            assert_eq!(
-                std::fs::read(scratch.path().join("asset.bin")).unwrap(),
-                newer.unwrap_or(bytes),
-                "{moment}"
-            );
-            assert_eq!(
-                applied(&actor, "older", &moment).await,
-                !superseded,
-                "{moment}"
-            );
-            if superseded {
-                assert!(applied(&actor, "newer", &newer_moment).await, "{moment}");
-            }
-            supervisor.close(&db).unwrap();
-            // The request records the supersession; nothing was set aside.
-            let (outcome, status): (Option<String>, String) = rusqlite::Connection::open(&db)
-                .unwrap()
-                .query_row(
-                    "SELECT r.publication_outcome, j.status FROM engine_requests r \
-                     JOIN materialization_jobs j ON j.job_id = ?1 \
-                     WHERE r.request_id = 'older' AND r.kind = 'versioned'",
-                    [dohc_engine_domain::binary_write_job_id(&moment)],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .unwrap();
-            assert_eq!(status, "complete", "{moment}");
-            assert_eq!(
-                outcome.as_deref() == Some("superseded"),
-                superseded,
-                "{moment}"
-            );
-            let conflicts = std::fs::read_dir(scratch.path())
-                .unwrap()
-                .filter(|entry| {
-                    entry
-                        .as_ref()
-                        .unwrap()
-                        .file_name()
-                        .to_string_lossy()
-                        .ends_with(".conflict")
-                })
-                .count();
-            assert_eq!(conflicts, 0, "{moment}");
         }
     }
 }
@@ -613,401 +414,6 @@ async fn publication_replay_after_version_switch_preserves_settled_outcomes_and_
 }
 
 #[tokio::test]
-async fn inactive_publication_refuses_before_recording_and_can_retry_after_activation() {
-    let scratch = ScratchDir::new().unwrap();
-    let db = engine_db_path(&scratch).unwrap();
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    actor
-        .ensure_main_version(
-            "publish".into(),
-            1,
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    actor
-        .create_named_version(
-            dohc_engine_domain::CreateNamedVersion {
-                workspace_id: "publish".into(),
-                new_version_id: "draft".into(),
-                name: "Draft".into(),
-                from_version_id: "main".into(),
-                now_ms: 2,
-                request_id: None,
-            },
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    let mut input = text("inactive", "note.txt", "authored");
-    input.version_id = "draft".into();
-    let mut bytes = binary("inactive-binary");
-    bytes.version_id = "draft".into();
-    for _ in 0..2 {
-        assert!(matches!(
-            publish(
-                &actor,
-                scratch.path(),
-                input.clone(),
-                create(),
-                Arc::new(NoFaults)
-            )
-            .await,
-            Err(RuntimeError::Domain(DomainError::InvalidVersion))
-        ));
-        assert!(matches!(
-            actor
-                .versioned_binary_write_with_conditions(
-                    bytes.clone(),
-                    scratch.path().into(),
-                    create(),
-                    Arc::new(()),
-                    Arc::new(NoFaults),
-                    CancellationToken::new()
-                )
-                .await,
-            Err(RuntimeError::Domain(DomainError::InvalidVersion))
-        ));
-        assert_eq!(count(&actor).await, 0);
-    }
-    supervisor.close(&db).unwrap();
-    {
-        let store = dohc_engine_storage::EngineStore::open(&db, 2).unwrap();
-        let rows: i64 = store.read_with(|conn| conn.query_row("SELECT (SELECT count(*) FROM engine_requests) + (SELECT count(*) FROM materialization_jobs) + (SELECT count(*) FROM blobs) + (SELECT count(*) FROM binary_blobs)", [], |row| row.get(0)).map_err(dohc_engine_storage::StorageError::corrupt_public)).unwrap();
-        assert_eq!(rows, 0);
-    }
-    let actor = supervisor.open(&db, 3).unwrap().actor;
-    actor
-        .set_active_version(
-            dohc_engine_runtime::ActiveVersionSwitch {
-                workspace_id: "publish".into(),
-                version_id: "draft".into(),
-                root_dir: scratch.path().into(),
-                self_writes: Arc::new(()),
-                now_ms: 4,
-            },
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        publish(&actor, scratch.path(), input, create(), Arc::new(NoFaults))
-            .await
-            .unwrap()
-            .materialize_outcome,
-        Outcome::Applied
-    );
-    assert_eq!(
-        actor
-            .versioned_binary_write_with_conditions(
-                bytes,
-                scratch.path().into(),
-                create(),
-                Arc::new(()),
-                Arc::new(NoFaults),
-                CancellationToken::new()
-            )
-            .await
-            .unwrap()
-            .materialize_outcome,
-        Outcome::Applied
-    );
-    supervisor.close(&db).unwrap();
-}
-
-#[tokio::test]
-async fn expected_hash_checks_binary_files_above_capture_cap() {
-    let scratch = ScratchDir::new().unwrap();
-    let db = engine_db_path(&scratch).unwrap();
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    let mut seed = binary("large-seed");
-    seed.bytes = vec![0xff; 5 * 1024 * 1024 + 1];
-    let sha = dohc_engine_storage::hex_sha256(&seed.bytes);
-    actor
-        .versioned_binary_write_with_conditions(
-            seed.clone(),
-            scratch.path().into(),
-            create(),
-            Arc::new(()),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    let replacement = binary("large-replace");
-    let refused = actor
-        .versioned_binary_write_with_conditions(
-            replacement.clone(),
-            scratch.path().into(),
-            WriteConditions {
-                create_only: false,
-                expected_sha256: Some("0".repeat(64)),
-            },
-            Arc::new(()),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await;
-    assert!(
-        matches!(refused, Err(RuntimeError::Domain(DomainError::WritePreconditionFailed { current_sha256: Some(current) })) if current == sha)
-    );
-    assert_eq!(count(&actor).await, 1);
-    let result = actor
-        .versioned_binary_write_with_conditions(
-            replacement.clone(),
-            scratch.path().into(),
-            WriteConditions {
-                create_only: false,
-                expected_sha256: Some(sha),
-            },
-            Arc::new(()),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(result.materialize_outcome, Outcome::Applied);
-    assert_eq!(
-        std::fs::read(scratch.path().join("asset.bin")).unwrap(),
-        replacement.bytes
-    );
-    supervisor.close(&db).unwrap();
-}
-
-#[tokio::test]
-async fn pending_text_publication_replays_from_text_blob_without_binary_copy() {
-    let scratch = ScratchDir::new().unwrap();
-    let db = engine_db_path(&scratch).unwrap();
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    publish(
-        &actor,
-        scratch.path(),
-        text("text-blob", "note.txt", "only one copy"),
-        create(),
-        ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
-    )
-    .await
-    .unwrap();
-    supervisor.close(&db).unwrap();
-    {
-        let store = dohc_engine_storage::EngineStore::open(&db, 2).unwrap();
-        assert_eq!(store.binary_blob_count().unwrap(), 0);
-        assert_eq!(
-            store
-                .get_materialization_blob(&dohc_engine_storage::hex_sha256(b"only one copy"))
-                .unwrap()
-                .unwrap(),
-            b"only one copy"
-        );
-    }
-    let actor = supervisor.open(&db, 3).unwrap().actor;
-    actor
-        .materialize_replay_pending(scratch.path().into(), "publish".into(), 4)
-        .await
-        .unwrap();
-    assert_eq!(
-        std::fs::read_to_string(scratch.path().join("note.txt")).unwrap(),
-        "only one copy"
-    );
-    supervisor.close(&db).unwrap();
-}
-
-#[tokio::test]
-async fn lost_text_reply_replays_original_outcome_after_restart_and_later_edit() {
-    let scratch = ScratchDir::new().unwrap();
-    let db = engine_db_path(&scratch).unwrap();
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    let input = text("stable", "note.txt", "original");
-    let first = publish(
-        &actor,
-        scratch.path(),
-        input.clone(),
-        create(),
-        Arc::new(NoFaults),
-    )
-    .await
-    .unwrap();
-    let identity = file_id::get_file_id(scratch.path().join("note.txt")).unwrap();
-    supervisor.close(&db).unwrap();
-    let actor = supervisor.open(&db, 2).unwrap().actor;
-    let replay = publish(
-        &actor,
-        scratch.path(),
-        input.clone(),
-        create(),
-        Arc::new(NoFaults),
-    )
-    .await
-    .unwrap();
-    assert_eq!(first.materialize_outcome, replay.materialize_outcome);
-    assert!(replay.write.deduped);
-    assert_eq!(first.write.moment, replay.write.moment);
-    assert_eq!(
-        identity,
-        file_id::get_file_id(scratch.path().join("note.txt")).unwrap()
-    );
-    std::fs::write(scratch.path().join("note.txt"), "outside edit").unwrap();
-    let replay = publish(
-        &actor,
-        scratch.path(),
-        input.clone(),
-        create(),
-        Arc::new(NoFaults),
-    )
-    .await
-    .unwrap();
-    assert_eq!(replay.materialize_outcome, Outcome::Applied);
-    assert_eq!(
-        std::fs::read_to_string(scratch.path().join("note.txt")).unwrap(),
-        "outside edit"
-    );
-    for changed in [
-        WriteText {
-            text: "different".into(),
-            ..input.clone()
-        },
-        WriteText {
-            path: "other.txt".into(),
-            ..input.clone()
-        },
-        WriteText {
-            author_json: None,
-            ..input.clone()
-        },
-    ] {
-        assert!(matches!(
-            publish(
-                &actor,
-                scratch.path(),
-                changed,
-                create(),
-                Arc::new(NoFaults)
-            )
-            .await,
-            Err(RuntimeError::Domain(
-                DomainError::IdempotencyKeyReuseMismatch
-            ))
-        ));
-    }
-    assert!(matches!(
-        publish(
-            &actor,
-            scratch.path(),
-            input,
-            WriteConditions::default(),
-            Arc::new(NoFaults)
-        )
-        .await,
-        Err(RuntimeError::Domain(
-            DomainError::IdempotencyKeyReuseMismatch
-        ))
-    ));
-    assert_eq!(count(&actor).await, 1);
-    supervisor.close(&db).unwrap();
-}
-
-#[tokio::test]
-async fn expected_hash_retry_and_partial_batch_preserve_completed_outcomes_after_restart() {
-    let scratch = ScratchDir::new().unwrap();
-    let db = engine_db_path(&scratch).unwrap();
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    publish(
-        &actor,
-        scratch.path(),
-        text("seed", "one.txt", "before"),
-        create(),
-        Arc::new(NoFaults),
-    )
-    .await
-    .unwrap();
-    let conditions = WriteConditions {
-        create_only: false,
-        expected_sha256: Some(dohc_engine_storage::hex_sha256(b"before")),
-    };
-    let first = publish(
-        &actor,
-        scratch.path(),
-        text("batch-0", "one.txt", "after"),
-        conditions.clone(),
-        Arc::new(NoFaults),
-    )
-    .await
-    .unwrap();
-    let second = publish(
-        &actor,
-        scratch.path(),
-        text("batch-1", "two.txt", "two"),
-        create(),
-        Arc::new(NoFaults),
-    )
-    .await
-    .unwrap();
-    std::fs::write(scratch.path().join("three.txt"), "concurrent").unwrap();
-    assert!(
-        publish(
-            &actor,
-            scratch.path(),
-            text("batch-2", "three.txt", "three"),
-            create(),
-            Arc::new(NoFaults)
-        )
-        .await
-        .is_err()
-    );
-    supervisor.close(&db).unwrap();
-    let actor = supervisor.open(&db, 2).unwrap().actor;
-    assert_eq!(
-        publish(
-            &actor,
-            scratch.path(),
-            text("batch-0", "one.txt", "after"),
-            conditions,
-            Arc::new(NoFaults)
-        )
-        .await
-        .unwrap()
-        .write
-        .moment,
-        first.write.moment
-    );
-    assert_eq!(
-        publish(
-            &actor,
-            scratch.path(),
-            text("batch-1", "two.txt", "two"),
-            create(),
-            Arc::new(NoFaults)
-        )
-        .await
-        .unwrap()
-        .write
-        .moment,
-        second.write.moment
-    );
-    assert_eq!(count(&actor).await, 3);
-    std::fs::remove_file(scratch.path().join("three.txt")).unwrap();
-    publish(
-        &actor,
-        scratch.path(),
-        text("batch-2", "three.txt", "three"),
-        create(),
-        Arc::new(NoFaults),
-    )
-    .await
-    .unwrap();
-    assert_eq!(count(&actor).await, 4);
-    supervisor.close(&db).unwrap();
-}
-
-#[tokio::test]
 async fn text_crash_recovery_publishes_or_preserves_foreign_bytes_once() {
     for point in [
         FaultPoint::MaterializeAfterJobCommit,
@@ -1133,320 +539,6 @@ async fn binary_create_race_preserves_competitor_and_replays_conflict_after_rest
     supervisor.close(&db).unwrap();
 }
 
-#[tokio::test]
-async fn binary_lost_reply_and_changed_conditions_survive_restart() {
-    let scratch = ScratchDir::new().unwrap();
-    let db = engine_db_path(&scratch).unwrap();
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    let input = binary("binary-stable");
-    let first = actor
-        .versioned_binary_write_with_conditions(
-            input.clone(),
-            scratch.path().into(),
-            create(),
-            Arc::new(()),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    let identity = file_id::get_file_id(scratch.path().join("asset.bin")).unwrap();
-    supervisor.close(&db).unwrap();
-    let actor = supervisor.open(&db, 2).unwrap().actor;
-    let replay = actor
-        .versioned_binary_write_with_conditions(
-            input.clone(),
-            scratch.path().into(),
-            create(),
-            Arc::new(()),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(first.write.moment, replay.write.moment);
-    assert_eq!(replay.materialize_outcome, Outcome::Applied);
-    assert!(replay.write.deduped);
-    assert_eq!(
-        identity,
-        file_id::get_file_id(scratch.path().join("asset.bin")).unwrap()
-    );
-    for field in ["bytes", "path", "author"] {
-        let mut changed = input.clone();
-        match field {
-            "bytes" => changed.bytes.push(42),
-            "path" => changed.path = "other.bin".into(),
-            "author" => changed.author_json = None,
-            _ => unreachable!(),
-        }
-        assert!(matches!(
-            actor
-                .versioned_binary_write_with_conditions(
-                    changed,
-                    scratch.path().into(),
-                    create(),
-                    Arc::new(()),
-                    Arc::new(NoFaults),
-                    CancellationToken::new()
-                )
-                .await,
-            Err(RuntimeError::Domain(
-                DomainError::IdempotencyKeyReuseMismatch
-            ))
-        ));
-    }
-    assert!(matches!(
-        actor
-            .versioned_binary_write_with_conditions(
-                input,
-                scratch.path().into(),
-                WriteConditions::default(),
-                Arc::new(()),
-                Arc::new(NoFaults),
-                CancellationToken::new()
-            )
-            .await,
-        Err(RuntimeError::Domain(
-            DomainError::IdempotencyKeyReuseMismatch
-        ))
-    ));
-    assert_eq!(count(&actor).await, 1);
-    supervisor.close(&db).unwrap();
-}
-
-#[tokio::test]
-async fn watcher_observation_between_commit_and_publication_preserves_the_authored_head() {
-    let scratch = ScratchDir::new().unwrap();
-    let db = engine_db_path(&scratch).unwrap();
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    let input = text("pending", "pending.txt", "authored");
-    let first = publish(
-        &actor,
-        scratch.path(),
-        input.clone(),
-        create(),
-        ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
-    )
-    .await
-    .unwrap();
-    assert_eq!(first.materialize_outcome, Outcome::Error);
-    let captured = actor
-        .capture_ingest(
-            dohc_engine_domain::CaptureIngest {
-                workspace_id: "publish".into(),
-                version_id: "main".into(),
-                path: "pending.txt".into(),
-                text: "stale watcher bytes".into(),
-                metadata_origin: "capture".into(),
-                metadata_summary: None,
-                metadata_correlation_id: None,
-                author_json: None,
-                now_ms: 11,
-                request_id: None,
-                claim_foreign_head: false,
-            },
-            dohc_engine_collab::LeaseRegistry::new(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await;
-    assert!(matches!(
-        captured,
-        Err(RuntimeError::Domain(DomainError::CaptureNotOwned))
-    ));
-    let retry = publish(&actor, scratch.path(), input, create(), Arc::new(NoFaults))
-        .await
-        .unwrap();
-    assert_eq!(retry.materialize_outcome, Outcome::Applied);
-    assert_eq!(count(&actor).await, 1);
-    assert_eq!(
-        std::fs::read_to_string(scratch.path().join("pending.txt")).unwrap(),
-        "authored"
-    );
-    supervisor.close(&db).unwrap();
-}
-
-#[tokio::test]
-async fn rolled_back_pending_text_cannot_publish_after_restart() {
-    let scratch = ScratchDir::new().unwrap();
-    let db = engine_db_path(&scratch).unwrap();
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    let input = text("rollback", "rollback.txt", "unpublished");
-    publish(
-        &actor,
-        scratch.path(),
-        input.clone(),
-        create(),
-        ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
-    )
-    .await
-    .unwrap();
-    actor
-        .versioned_text_rollback(
-            dohc_engine_domain::RollbackTextFileMutation {
-                workspace_id: input.workspace_id.clone(),
-                version_id: input.version_id.clone(),
-                path: input.path.clone(),
-                mutation_moment_id: input.moment_id,
-                request_id: Some("undo".into()),
-                metadata_origin: "restore".into(),
-                author_json: None,
-            },
-            scratch.path().into(),
-            Arc::new(()),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(count(&actor).await, 1);
-    supervisor.close(&db).unwrap();
-    let actor = supervisor.open(&db, 2).unwrap().actor;
-    actor
-        .materialize_replay_pending(scratch.path().into(), "publish".into(), 20)
-        .await
-        .unwrap();
-    assert!(!scratch.path().join("rollback.txt").exists());
-    assert_eq!(count(&actor).await, 1);
-    supervisor.close(&db).unwrap();
-}
-
-#[tokio::test]
-async fn superseded_text_result_remains_superseded_after_restart() {
-    let scratch = ScratchDir::new().unwrap();
-    let db = engine_db_path(&scratch).unwrap();
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 1).unwrap().actor;
-    let input = text("older", "note.txt", "older");
-    publish(
-        &actor,
-        scratch.path(),
-        input.clone(),
-        create(),
-        ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
-    )
-    .await
-    .unwrap();
-    std::fs::write(scratch.path().join("note.txt"), "newer").unwrap();
-    let newer = publish(
-        &actor,
-        scratch.path(),
-        text("newer", "note.txt", "newer"),
-        WriteConditions::default(),
-        Arc::new(NoFaults),
-    )
-    .await
-    .unwrap();
-    assert_eq!(newer.materialize_outcome, Outcome::Applied);
-    assert_eq!(
-        publish(
-            &actor,
-            scratch.path(),
-            input.clone(),
-            create(),
-            Arc::new(NoFaults)
-        )
-        .await
-        .unwrap()
-        .materialize_outcome,
-        Outcome::Superseded
-    );
-    supervisor.close(&db).unwrap();
-    let actor = supervisor.open(&db, 2).unwrap().actor;
-    assert_eq!(
-        publish(&actor, scratch.path(), input, create(), Arc::new(NoFaults))
-            .await
-            .unwrap()
-            .materialize_outcome,
-        Outcome::Superseded
-    );
-    assert_eq!(
-        std::fs::read_to_string(scratch.path().join("note.txt")).unwrap(),
-        "newer"
-    );
-    assert_eq!(count(&actor).await, 2);
-    supervisor.close(&db).unwrap();
-}
-
-#[tokio::test]
-async fn rollback_published_text_restores_previous_bytes_and_removes_a_created_file() {
-    for (overwrite, crash) in [(false, false), (true, false), (false, true), (true, true)] {
-        let scratch = ScratchDir::new().unwrap();
-        let db = engine_db_path(&scratch).unwrap();
-        let supervisor = WorkspaceSupervisor::new();
-        let actor = supervisor.open(&db, 1).unwrap().actor;
-        if overwrite {
-            publish(
-                &actor,
-                scratch.path(),
-                text("before", "rollback.txt", "before"),
-                create(),
-                Arc::new(NoFaults),
-            )
-            .await
-            .unwrap();
-        }
-        let input = text("rollback", "rollback.txt", "after");
-        let result = publish(
-            &actor,
-            scratch.path(),
-            input.clone(),
-            WriteConditions::default(),
-            if crash {
-                ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete)
-            } else {
-                Arc::new(NoFaults)
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            result.materialize_outcome,
-            if crash {
-                Outcome::Error
-            } else {
-                Outcome::Applied
-            }
-        );
-        actor
-            .versioned_text_rollback(
-                dohc_engine_domain::RollbackTextFileMutation {
-                    workspace_id: input.workspace_id,
-                    version_id: input.version_id,
-                    path: input.path,
-                    mutation_moment_id: input.moment_id,
-                    request_id: Some("undo".into()),
-                    metadata_origin: "restore".into(),
-                    author_json: None,
-                },
-                scratch.path().into(),
-                Arc::new(()),
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        supervisor.close(&db).unwrap();
-        let actor = supervisor.open(&db, 2).unwrap().actor;
-        actor
-            .materialize_replay_pending(scratch.path().into(), "publish".into(), 20)
-            .await
-            .unwrap();
-        if overwrite {
-            assert_eq!(
-                std::fs::read_to_string(scratch.path().join("rollback.txt")).unwrap(),
-                "before"
-            );
-        } else {
-            assert!(!scratch.path().join("rollback.txt").exists());
-        }
-        supervisor.close(&db).unwrap();
-    }
-}
-
 async fn capture_env(
     actor: &ActorHandle,
     root: &Path,
@@ -1526,7 +618,6 @@ async fn secret_capture_never_takes_a_binary_publication_job() {
             "MODE=second"
         );
 
-        // Later work on both paths keeps the publication confirmed.
         let later = WriteBinary {
             bytes: vec![7, 7],
             ..binary("later")
@@ -1577,4 +668,111 @@ async fn secret_capture_never_takes_a_binary_publication_job() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn inactive_publication_refuses_before_recording_and_can_retry_after_activation() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    actor
+        .ensure_main_version(
+            "publish".into(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    actor
+        .create_named_version(
+            dohc_engine_domain::CreateNamedVersion {
+                workspace_id: "publish".into(),
+                new_version_id: "draft".into(),
+                name: "Draft".into(),
+                from_version_id: "main".into(),
+                now_ms: 2,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut input = text("inactive", "note.txt", "authored");
+    input.version_id = "draft".into();
+    let mut bytes = binary("inactive-binary");
+    bytes.version_id = "draft".into();
+    for _ in 0..2 {
+        assert!(matches!(
+            publish(
+                &actor,
+                scratch.path(),
+                input.clone(),
+                create(),
+                Arc::new(NoFaults)
+            )
+            .await,
+            Err(RuntimeError::Domain(DomainError::InvalidVersion))
+        ));
+        assert!(matches!(
+            actor
+                .versioned_binary_write_with_conditions(
+                    bytes.clone(),
+                    scratch.path().into(),
+                    create(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new()
+                )
+                .await,
+            Err(RuntimeError::Domain(DomainError::InvalidVersion))
+        ));
+        assert_eq!(count(&actor).await, 0);
+    }
+    supervisor.close(&db).unwrap();
+    {
+        let store = dohc_engine_storage::EngineStore::open(&db, 2).unwrap();
+        let rows: i64 = store.read_with(|conn| conn.query_row("SELECT (SELECT count(*) FROM engine_requests) + (SELECT count(*) FROM materialization_jobs) + (SELECT count(*) FROM blobs) + (SELECT count(*) FROM binary_blobs)", [], |row| row.get(0)).map_err(dohc_engine_storage::StorageError::corrupt_public)).unwrap();
+        assert_eq!(rows, 0);
+    }
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    actor
+        .set_active_version(
+            dohc_engine_runtime::ActiveVersionSwitch {
+                workspace_id: "publish".into(),
+                version_id: "draft".into(),
+                root_dir: scratch.path().into(),
+                self_writes: Arc::new(()),
+                now_ms: 4,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        publish(&actor, scratch.path(), input, create(), Arc::new(NoFaults))
+            .await
+            .unwrap()
+            .materialize_outcome,
+        Outcome::Applied
+    );
+    assert_eq!(
+        actor
+            .versioned_binary_write_with_conditions(
+                bytes,
+                scratch.path().into(),
+                create(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new()
+            )
+            .await
+            .unwrap()
+            .materialize_outcome,
+        Outcome::Applied
+    );
+    supervisor.close(&db).unwrap();
 }

@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
-import type {
-  EngineRelayClient,
-  EngineRelayWorkspaceClient,
-} from "./engineRelayClient";
+import type { EngineRelayClient, EngineRelayWorkspaceClient } from "./engineRelayClient";
 import { createReceivedShareEngineAccess } from "./receivedShareEngineAccess";
 import type { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 
@@ -18,8 +15,7 @@ describe("received share engine access", () => {
     const access = createReceivedShareEngineAccess({
       sessions: () => sessions,
       relayClient: () => ({ bind }) as Pick<EngineRelayClient, "bind">,
-      createStores:
-        createStores as unknown as typeof createCaptureLiveStores,
+      createStores: createStores as unknown as typeof createCaptureLiveStores,
     });
     const location = {
       engineWorkspaceId: "received-share-1",

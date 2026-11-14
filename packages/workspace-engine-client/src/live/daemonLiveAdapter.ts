@@ -42,7 +42,12 @@ export interface DaemonWireError extends Omit<WireError, "code"> {
 }
 
 export interface DaemonRequesterClient {
-  sendRequest(request: Request, signal?: AbortSignal, onProgress?: () => void, cancelSignal?: AbortSignal): Promise<Response>;
+  sendRequest(
+    request: Request,
+    signal?: AbortSignal,
+    onProgress?: () => void,
+    cancelSignal?: AbortSignal,
+  ): Promise<Response>;
   readonly helloAck?: {
     readonly capabilities: readonly string[];
   };
@@ -61,17 +66,13 @@ export interface CompletedDaemonBlob {
   readonly bytes: Uint8Array;
 }
 
-export type DaemonRefusalDisposition =
-  | "terminal"
-  | Exclude<Retryability, "no">;
+export type DaemonRefusalDisposition = "terminal" | Exclude<Retryability, "no">;
 
 export class DaemonClientCapabilityError extends Error {
   readonly capability: "blobs";
 
   constructor() {
-    super(
-      'The daemon session did not negotiate the "blobs" capability.',
-    );
+    super('The daemon session did not negotiate the "blobs" capability.');
     this.name = "DaemonClientCapabilityError";
     this.capability = "blobs";
   }
@@ -97,16 +98,14 @@ export class DaemonRefusalError extends Error {
     this.retry = wireError.retry;
     // afterReconnect is not an ordinary retry: callers must establish a new
     // session, re-open the workspace, and bind a new adapter to its new handle.
-    this.disposition =
-      wireError.retry === "no" ? "terminal" : wireError.retry;
+    this.disposition = wireError.retry === "no" ? "terminal" : wireError.retry;
     this.cause = cause;
   }
 }
 
 export function isDaemonReconnectError(error: unknown): boolean {
   return (
-    (error instanceof DaemonRefusalError &&
-      error.disposition === "afterReconnect") ||
+    (error instanceof DaemonRefusalError && error.disposition === "afterReconnect") ||
     (typeof error === "object" &&
       error !== null &&
       "code" in error &&
@@ -118,10 +117,7 @@ export function isDaemonReconnectError(error: unknown): boolean {
 // INVALID_PARAMS, so only the MESSAGE names which refusal this is. Keep each
 // discriminator at this protocol boundary so a caller cannot accidentally
 // reinterpret every INVALID_PARAMS refusal as the one it handles.
-function refusalMessageOf(
-  error: unknown,
-  code: DaemonErrorCode = "INVALID_PARAMS",
-): string | null {
+function refusalMessageOf(error: unknown, code: DaemonErrorCode = "INVALID_PARAMS"): string | null {
   const wireError =
     error instanceof DaemonRefusalError
       ? { code: error.wireCode, message: error.message }
@@ -148,8 +144,10 @@ export function isWorkspaceUpdatingRefusal(error: unknown): boolean {
 // capture wake follows, so the open does not wait; it stays read-only until
 // the person opens it again.
 export function isYdocFileNotReadRefusal(error: unknown): boolean {
-  return refusalMessageOf(error, "OVERLOADED") ===
-    "dohc has not read this file yet. Open it again once dohc has read it.";
+  return (
+    refusalMessageOf(error, "OVERLOADED") ===
+    "dohc has not read this file yet. Open it again once dohc has read it."
+  );
 }
 
 // The engine refused a request's input as its domain states it. The daemon
@@ -215,8 +213,8 @@ export function isVolumeSharesNewFilesRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "INTERNAL") === "volume-shares-new-files";
 }
 
-// The engine's Markdown reader refused the note as too dense to check
-// (#3575). A note's past edits count, so asking again never clears it.
+// The engine's Markdown reader refused the note as too dense to check.
+// A note's past edits count, so asking again never clears it.
 export function isDocumentTooDenseRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "INTERNAL") === "document-too-dense";
 }
@@ -273,26 +271,49 @@ function isMarkdownReaderRetryableRefusal(error: unknown): boolean {
 }
 
 export function isTransientEngineRefusal(error: unknown): boolean {
-  return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error) || isYdocAuthorCapacityRefusal(error) || isYdocSettlementPendingRefusal(error) || isBlobEgressCapacityRefusal(error) || isMarkdownReaderRetryableRefusal(error);
+  return (
+    isFileLockedRefusal(error) ||
+    isEngineStoreBusyRefusal(error) ||
+    isLiveSettlementCapacityRefusal(error) ||
+    isYdocAuthorCapacityRefusal(error) ||
+    isYdocSettlementPendingRefusal(error) ||
+    isBlobEgressCapacityRefusal(error) ||
+    isMarkdownReaderRetryableRefusal(error)
+  );
 }
 
 // Retryability does not prove non-admission: cancellation or an internal
 // failure can answer after the spawned record task commits. Only input and
 // permission refusals prove that this original did not land.
 export function isYdocUpdateAdmissionRefusal(error: unknown): boolean {
-  const wire = error instanceof DaemonRefusalError
-    ? { code: error.wireCode, retry: error.retry }
-    : wireErrorFrom(error);
-  return wire?.retry === "no" &&
-    ["INVALID_PARAMS", "LIMIT_EXCEEDED", "FORBIDDEN", "SHARE_READ_ONLY",
-      "PAYLOAD_TOO_LARGE", "AUTHORSHIP_MISMATCH"].includes(wire.code) &&
+  const wire =
+    error instanceof DaemonRefusalError
+      ? { code: error.wireCode, retry: error.retry }
+      : wireErrorFrom(error);
+  return (
+    wire?.retry === "no" &&
+    [
+      "INVALID_PARAMS",
+      "LIMIT_EXCEEDED",
+      "FORBIDDEN",
+      "SHARE_READ_ONLY",
+      "PAYLOAD_TOO_LARGE",
+      "AUTHORSHIP_MISMATCH",
+    ].includes(wire.code) &&
     !isTransientEngineRefusal(error) &&
     !isDaemonReconnectError(error) &&
     !isYdocSessionNotFoundRefusal(error) &&
     !isConflictStaleTargetRefusal(error) &&
-    !["ydoc-lineage-stale", "lineage-changed", "lineage-write-stale", "lineage-epoch-changed", "lineage-predecessor-mismatch",
-      "lineage-state-vector-mismatch"].includes(refusalMessageOf(error) ?? "") &&
-    !isYdocRemoteUpdatesPendingRefusal(error);
+    ![
+      "ydoc-lineage-stale",
+      "lineage-changed",
+      "lineage-write-stale",
+      "lineage-epoch-changed",
+      "lineage-predecessor-mismatch",
+      "lineage-state-vector-mismatch",
+    ].includes(refusalMessageOf(error) ?? "") &&
+    !isYdocRemoteUpdatesPendingRefusal(error)
+  );
 }
 
 // The store refusals the desktop names and recovers from. Each is the
@@ -307,9 +328,7 @@ export type EngineStoreRefusal = (typeof ENGINE_STORE_REFUSALS)[number];
 
 export function engineStoreRefusalOf(error: unknown): EngineStoreRefusal | null {
   return (
-    ENGINE_STORE_REFUSALS.find((code) =>
-      causeChainHasRefusal(error, "INTERNAL", code),
-    ) ?? null
+    ENGINE_STORE_REFUSALS.find((code) => causeChainHasRefusal(error, "INTERNAL", code)) ?? null
   );
 }
 
@@ -333,16 +352,10 @@ export function isMarkdownWriteHeldRefusal(error: unknown): boolean {
 
 const REFUSAL_DETAIL_DELIMITER = ": ";
 
-function refusalMessageMatchesToken(
-  message: string | null,
-  token: string,
-): boolean {
+function refusalMessageMatchesToken(message: string | null, token: string): boolean {
   if (message === token) return true;
   const detailPrefix = `${token}${REFUSAL_DETAIL_DELIMITER}`;
-  return (
-    message?.startsWith(detailPrefix) === true &&
-    message.length > detailPrefix.length
-  );
+  return message?.startsWith(detailPrefix) === true && message.length > detailPrefix.length;
 }
 
 // The engine's own words after a store refusal's code, or null when it gave
@@ -367,11 +380,7 @@ export function engineStoreRefusalDetailOf(error: unknown): string | null {
   return null;
 }
 
-function causeChainHasRefusal(
-  error: unknown,
-  code: DaemonErrorCode,
-  token: string,
-): boolean {
+function causeChainHasRefusal(error: unknown, code: DaemonErrorCode, token: string): boolean {
   const seen = new Set<unknown>();
   let current: unknown = error;
   while (current !== null && typeof current === "object" && !seen.has(current)) {
@@ -388,11 +397,7 @@ function causeChainHasRefusal(
 // binary files are still waiting for their durable materialization job. A
 // writable file fallback would race that lineage. Retry only the engine open.
 export function isYdocArtifactAssetsPendingRefusal(error: unknown): boolean {
-  return causeChainHasRefusal(
-    error,
-    "OVERLOADED",
-    "ydoc-artifact-assets-pending",
-  );
+  return causeChainHasRefusal(error, "OVERLOADED", "ydoc-artifact-assets-pending");
 }
 
 // A durable scene's linked-asset record conflicts with authoritative storage.
@@ -407,11 +412,7 @@ export function isYdocOpenStorageFailureRefusal(error: unknown): boolean {
 }
 
 export function isYdocOpenOperationCrashedRefusal(error: unknown): boolean {
-  return causeChainHasRefusal(
-    error,
-    "INTERNAL",
-    "ydoc-open-operation-crashed",
-  );
+  return causeChainHasRefusal(error, "INTERNAL", "ydoc-open-operation-crashed");
 }
 
 // Every code the engine answers with. A crash report keeps only these.
@@ -490,10 +491,7 @@ interface SharedRequestIdState {
   nextRequestId: number;
 }
 
-const requestIdsByClient = new WeakMap<
-  DaemonRequesterClient,
-  SharedRequestIdState
->();
+const requestIdsByClient = new WeakMap<DaemonRequesterClient, SharedRequestIdState>();
 
 function sharedRequestIds(client: DaemonRequesterClient): SharedRequestIdState {
   const existing = requestIdsByClient.get(client);
@@ -538,8 +536,7 @@ export class WorkspaceDaemonRequester {
     blob: CompletedDaemonBlob | null;
   }> {
     const id = this.allocateRequestId();
-    const blobCapabilityNegotiated =
-      this.client.helloAck?.capabilities.includes("blobs") === true;
+    const blobCapabilityNegotiated = this.client.helloAck?.capabilities.includes("blobs") === true;
     let completedBlob: CompletedDaemonBlob | null = null;
     const unsubscribe = blobCapabilityNegotiated
       ? this.client.onBlob?.((blob) => {
@@ -587,29 +584,28 @@ export class WorkspaceDaemonRequester {
   ): Promise<Response["result"]> {
     let response: Response;
     try {
-      response = await this.client.sendRequest({
-        id,
-        method,
-        ...(options?.workspace !== undefined
-          ? { workspace: options.workspace }
-          : {}),
-        ...(options?.idempotencyKey !== undefined
-          ? { idempotencyKey: options.idempotencyKey }
-          : {}),
-        ...(options?.deadlineMs !== undefined
-          ? { deadlineMs: options.deadlineMs }
-          : {}),
-        params,
-      }, undefined, undefined, options?.cancelSignal);
+      response = await this.client.sendRequest(
+        {
+          id,
+          method,
+          ...(options?.workspace !== undefined ? { workspace: options.workspace } : {}),
+          ...(options?.idempotencyKey !== undefined
+            ? { idempotencyKey: options.idempotencyKey }
+            : {}),
+          ...(options?.deadlineMs !== undefined ? { deadlineMs: options.deadlineMs } : {}),
+          params,
+        },
+        undefined,
+        undefined,
+        options?.cancelSignal,
+      );
     } catch (error) {
       const refusal = wireErrorFrom(error);
       if (refusal !== null) throw new DaemonRefusalError(refusal, error);
       throw error;
     }
     if (response.id !== id) {
-      throw new DaemonProtocolError(
-        `Expected response ${id}, received ${response.id}.`,
-      );
+      throw new DaemonProtocolError(`Expected response ${id}, received ${response.id}.`);
     }
     return response.result;
   }

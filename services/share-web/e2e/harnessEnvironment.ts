@@ -5,8 +5,8 @@ export function buildHarnessEnvironment(
   overrides: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   const environment = Object.fromEntries(
-    Object.entries(inherited).filter(([name]) =>
-      !SERVICE_ENVIRONMENT_PREFIXES.some((prefix) => name.startsWith(prefix))
+    Object.entries(inherited).filter(
+      ([name]) => !SERVICE_ENVIRONMENT_PREFIXES.some((prefix) => name.startsWith(prefix)),
     ),
   );
   return { ...environment, ...overrides };

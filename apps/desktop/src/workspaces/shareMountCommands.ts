@@ -45,10 +45,7 @@ export interface ShareMountCommandCredentials {
   email?: string | null;
 }
 
-type ShareMountFilesLifecycle = Pick<
-  ShareViewFilesDependencies,
-  "createMount" | "removeMount"
->;
+type ShareMountFilesLifecycle = Pick<ShareViewFilesDependencies, "createMount" | "removeMount">;
 
 export interface ShareMountCommandDependencies<WorkspaceSummary> {
   readMounts(workspaceId: string): readonly ShareMountRecord[];
@@ -148,10 +145,7 @@ export function createShareMountCommands<WorkspaceSummary>(
   // snapshot or recreate a projection after unmount removes it.
   const locks = new Map<string, Promise<void>>();
 
-  function withCommandAdmission<T>(
-    workspaceId: string,
-    run: () => Promise<T>,
-  ): Promise<T> {
+  function withCommandAdmission<T>(workspaceId: string, run: () => Promise<T>): Promise<T> {
     const previous = locks.get(workspaceId) ?? Promise.resolve();
     const result = previous.then(run, run);
     const tail = result.then(
@@ -170,11 +164,7 @@ export function createShareMountCommands<WorkspaceSummary>(
   // cannot remove the projection it just created.
   const filesLifecycle: ShareMountFilesLifecycle = {
     async createMount(owner, target) {
-      assertShareMountLifecycleOwner(
-        owner,
-        target,
-        "Only a prepared share mount can be created.",
-      );
+      assertShareMountLifecycleOwner(owner, target, "Only a prepared share mount can be created.");
       if (!target.relayUrl) {
         throw new Error("Only a prepared share mount can be created.");
       }
@@ -189,10 +179,7 @@ export function createShareMountCommands<WorkspaceSummary>(
           recipientEmail: target.recipientEmail ?? null,
           grantedSelector: target.grantedSelector,
         };
-        await dependencies.updateMounts(target.workspaceId, (mounts) => [
-          ...mounts,
-          mount,
-        ]);
+        await dependencies.updateMounts(target.workspaceId, (mounts) => [...mounts, mount]);
       } catch (error) {
         let rollback: Awaited<ReturnType<typeof projection.remove>>;
         try {
@@ -213,20 +200,12 @@ export function createShareMountCommands<WorkspaceSummary>(
         target,
         "Only a registered share mount can be removed.",
       );
-      await dependencies.closeRelayWorkspace(target.storeWorkspaceId).catch(
-        (error) => {
-          reportFailure(
-            `could not close share mount relay ${target.storeWorkspaceId}:`,
-            error,
-          );
-        },
-      );
+      await dependencies.closeRelayWorkspace(target.storeWorkspaceId).catch((error) => {
+        reportFailure(`could not close share mount relay ${target.storeWorkspaceId}:`, error);
+      });
       const removed = await dependencies.projectionFor(owner).remove();
       if (removed.error) {
-        reportFailure(
-          `could not remove share mount folder ${target.mountLabel}:`,
-          removed.error,
-        );
+        reportFailure(`could not remove share mount folder ${target.mountLabel}:`, removed.error);
       }
       await dependencies.updateMounts(target.workspaceId, (mounts) =>
         withoutShareMountRecords(mounts, target.shareId),
@@ -255,19 +234,13 @@ export function createShareMountCommands<WorkspaceSummary>(
       try {
         dependencies.refreshNativeWorkspaceSurfaces();
       } catch (error) {
-        reportFailure(
-          `could not refresh native surfaces ${context}:`,
-          error,
-        );
+        reportFailure(`could not refresh native surfaces ${context}:`, error);
       }
     }
     try {
       dependencies.notifyRenderer({ workspaceId });
     } catch (error) {
-      reportFailure(
-        `could not notify renderer ${context}:`,
-        error,
-      );
+      reportFailure(`could not notify renderer ${context}:`, error);
     }
   }
 
@@ -279,16 +252,15 @@ export function createShareMountCommands<WorkspaceSummary>(
         assertCurrent();
         const parsed = parseShareCode(shareCode);
         if (!parsed) {
-          throw new Error(
-            "That doesn't look like a share code. Copy it again and retry.",
-          );
+          throw new Error("That doesn't look like a share code. Copy it again and retry.");
         }
         const credentials = await dependencies.loadCredentials();
         assertCurrent();
         const generation = dependencies.currentCredentialGeneration();
         const assertIdentityCurrent = () => {
           assertCurrent();
-          if (generation !== dependencies.currentCredentialGeneration()) throw new Error("The server session changed.");
+          if (generation !== dependencies.currentCredentialGeneration())
+            throw new Error("The server session changed.");
         };
         if (!credentials) throw new Error("Sign in to your server first.");
         const relayUrl = credentials.relayUrl;
@@ -316,9 +288,7 @@ export function createShareMountCommands<WorkspaceSummary>(
             );
           }
           if (error instanceof RelayUnauthorizedError) {
-            throw new Error(
-              "Your server session expired. Sign in again, then retry.",
-            );
+            throw new Error("Your server session expired. Sign in again, then retry.");
           }
           throw error;
         }
@@ -327,117 +297,95 @@ export function createShareMountCommands<WorkspaceSummary>(
 
         // Relay preflight stays under command admission. Local mount state
         // begins only after the process-wide workspace lease is active.
-        return dependencies.withWorkspaceOperation(
-          workspace.rootPath,
-          async (lease) => {
-            const onDisk = await dependencies.listDirectory(
-              join(workspace.rootPath, SHARED_WITH_ME_FOLDER),
-            );
-            assertCurrent();
-            assertIdentityCurrent();
-            const mount = {
-              shareId: parsed.shareId,
-              label: allocateShareMountLabel({
-                storedMounts: existing,
-                onDiskNames: onDisk,
-                granterEmail: info.granterEmail,
-                ...(labelHint === undefined ? {} : { labelHint }),
-              }),
+        return dependencies.withWorkspaceOperation(workspace.rootPath, async (lease) => {
+          const onDisk = await dependencies.listDirectory(
+            join(workspace.rootPath, SHARED_WITH_ME_FOLDER),
+          );
+          assertCurrent();
+          assertIdentityCurrent();
+          const mount = {
+            shareId: parsed.shareId,
+            label: allocateShareMountLabel({
+              storedMounts: existing,
+              onDiskNames: onDisk,
               granterEmail: info.granterEmail,
-              relayUrl,
-              recipientEmail: credentials.email ?? null,
-              grantedSelector,
-              recipientUserId: credentials.userId,
-              receivedIdentity: info.receivedIdentity,
+              ...(labelHint === undefined ? {} : { labelHint }),
+            }),
+            granterEmail: info.granterEmail,
+            relayUrl,
+            recipientEmail: credentials.email ?? null,
+            grantedSelector,
+            recipientUserId: credentials.userId,
+            receivedIdentity: info.receivedIdentity,
+          };
+          const prepared: PreparedShareViewFilesMount = {
+            kind: "mount",
+            workspaceId: workspace.workspaceId,
+            storeWorkspaceId: mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId),
+            schedulingRootPath: workspace.rootPath,
+            rootPath: mountRootFor(workspace.rootPath, mount.label),
+            shareId: mount.shareId,
+            mountLabel: mount.label,
+            granterEmail: mount.granterEmail,
+            relayUrl: mount.relayUrl,
+            recipientEmail: mount.recipientEmail,
+            grantedSelector: mount.grantedSelector,
+            ended: false,
+          };
+          const files = dependencies.files();
+          let mounted = false;
+          try {
+            const outcome = await files.mount(lease, prepared);
+            mounted = true;
+            presentWorkspace(workspace.workspaceId, `after mounting ${mount.label}`, {
+              refreshNativeSurfaces: true,
+            });
+            return {
+              workspace: dependencies.workspaceSummary(workspace.workspaceId),
+              mount: {
+                shareId: mount.shareId,
+                label: mount.label,
+                status: outcome.status,
+                changedPaths: outcome.changedPaths,
+              },
             };
-            const prepared: PreparedShareViewFilesMount = {
-              kind: "mount",
-              workspaceId: workspace.workspaceId,
-              storeWorkspaceId: mountStoreWorkspaceIdFor(
-                workspace.workspaceId,
-                mount.shareId,
-              ),
-              schedulingRootPath: workspace.rootPath,
-              rootPath: mountRootFor(workspace.rootPath, mount.label),
-              shareId: mount.shareId,
-              mountLabel: mount.label,
-              granterEmail: mount.granterEmail,
-              relayUrl: mount.relayUrl,
-              recipientEmail: mount.recipientEmail,
-              grantedSelector: mount.grantedSelector,
-              ended: false,
-            };
-            const files = dependencies.files();
-            let mounted = false;
-            try {
-              const outcome = await files.mount(lease, prepared);
-              mounted = true;
-              presentWorkspace(
-                workspace.workspaceId,
-                `after mounting ${mount.label}`,
-                { refreshNativeSurfaces: true },
-              );
-              return {
-                workspace: dependencies.workspaceSummary(workspace.workspaceId),
-                mount: {
+          } catch (error) {
+            let mountError = error;
+            if (mounted) {
+              try {
+                const rollback = await files.unmount(lease, {
+                  kind: "mount",
+                  workspaceId: workspace.workspaceId,
                   shareId: mount.shareId,
-                  label: mount.label,
-                  status: outcome.status,
-                  changedPaths: outcome.changedPaths,
-                },
-              };
-            } catch (error) {
-              let mountError = error;
-              if (mounted) {
-                try {
-                  const rollback = await files.unmount(lease, {
-                    kind: "mount",
-                    workspaceId: workspace.workspaceId,
-                    shareId: mount.shareId,
-                  });
-                  if (
-                    rollback.folderLeft ||
-                    rollback.error !== undefined
-                  ) {
-                    mountError = new ShareViewMountRollbackError(
-                      error,
-                      rollback.error,
-                    );
-                  }
-                } catch (rollbackError) {
-                  mountError = new ShareViewMountRollbackError(
-                    error,
-                    rollbackError,
-                  );
+                });
+                if (rollback.folderLeft || rollback.error !== undefined) {
+                  mountError = new ShareViewMountRollbackError(error, rollback.error);
                 }
+              } catch (rollbackError) {
+                mountError = new ShareViewMountRollbackError(error, rollbackError);
               }
-              reportFailure(
-                `mount-share rollback for ${mount.label}:`,
-                mountError,
-              );
-              presentWorkspace(
-                workspace.workspaceId,
-                `after mount failure for ${mount.label}`,
-                { refreshNativeSurfaces: true },
-              );
-              if (mountError instanceof ShareUnavailableError) {
-                throw new Error(
-                  "This share was ended before it could be added. Nothing was added to this workspace.",
-                );
-              }
-              if (mountError instanceof ShareViewMountRollbackError) {
-                throw new Error(
-                  "dohc could not add this share, and cleanup did not finish. " +
-                    "If the share still appears, remove it from this workspace. " +
-                    "Also remove any leftover folder from shared-with-me. Then try again.",
-                );
-              }
+            }
+            reportFailure(`mount-share rollback for ${mount.label}:`, mountError);
+            presentWorkspace(workspace.workspaceId, `after mount failure for ${mount.label}`, {
+              refreshNativeSurfaces: true,
+            });
+            if (mountError instanceof ShareUnavailableError) {
               throw new Error(
-                "Couldn't add the share. Nothing was added to this workspace — check your connection and try again.",
+                "This share was ended before it could be added. Nothing was added to this workspace.",
               );
             }
-          },
-        );
+            if (mountError instanceof ShareViewMountRollbackError) {
+              throw new Error(
+                "dohc could not add this share, and cleanup did not finish. " +
+                  "If the share still appears, remove it from this workspace. " +
+                  "Also remove any leftover folder from shared-with-me. Then try again.",
+              );
+            }
+            throw new Error(
+              "Couldn't add the share. Nothing was added to this workspace — check your connection and try again.",
+            );
+          }
+        });
       });
     },
 
@@ -453,19 +401,31 @@ export function createShareMountCommands<WorkspaceSummary>(
           assertCurrent();
           mounts = dependencies.readMounts(workspace.workspaceId);
         }
-        const credentials = mounts.some(mount => record(mount) && !mount.ended && mount.recipientUserId && !receivedReferencePin(mount.receivedIdentity)) ? await dependencies.loadCredentials() : null;
+        const credentials = mounts.some(
+          (mount) =>
+            record(mount) &&
+            !mount.ended &&
+            mount.recipientUserId &&
+            !receivedReferencePin(mount.receivedIdentity),
+        )
+          ? await dependencies.loadCredentials()
+          : null;
         assertCurrent();
         const generation = dependencies.currentCredentialGeneration();
         const assertIdentityCurrent = () => {
           assertCurrent();
-          if (generation !== dependencies.currentCredentialGeneration()) throw new Error("The server session changed.");
+          if (generation !== dependencies.currentCredentialGeneration())
+            throw new Error("The server session changed.");
         };
         const results: ShareMountStatusRow[] = [];
         const pushResult = (
           mount: unknown,
           status: ShareMountStatusRow["status"],
           changedPaths: number,
-          collisionRecord?: Pick<ShareMountStatusRow, "errorKind" | "collisionRecordQuarantined" | "unjournalablePaths">,
+          collisionRecord?: Pick<
+            ShareMountStatusRow,
+            "errorKind" | "collisionRecordQuarantined" | "unjournalablePaths"
+          >,
         ): void => {
           if (!record(mount)) return;
           const row = shareMountResultRow({
@@ -485,17 +445,39 @@ export function createShareMountCommands<WorkspaceSummary>(
             }
             assertCurrent();
             try {
-              if (!mount.ended && !receivedReferencePin(mount.receivedIdentity) && mount.recipientUserId && credentials?.userId === mount.recipientUserId && credentials.relayUrl && relayUrlsMatch(credentials.relayUrl, mount.relayUrl)) {
+              if (
+                !mount.ended &&
+                !receivedReferencePin(mount.receivedIdentity) &&
+                mount.recipientUserId &&
+                credentials?.userId === mount.recipientUserId &&
+                credentials.relayUrl &&
+                relayUrlsMatch(credentials.relayUrl, mount.relayUrl)
+              ) {
                 // Recover a missing pin once; ordinary refresh uses the pinned projection.
                 let info: Awaited<ReturnType<typeof dependencies.fetchInfo>> | undefined;
                 try {
-                  info = await dependencies.fetchInfo({ baseUrl: credentials.relayUrl, token: credentials.token }, mount.shareId);
+                  info = await dependencies.fetchInfo(
+                    { baseUrl: credentials.relayUrl, token: credentials.token },
+                    mount.shareId,
+                  );
                 } catch (error) {
                   reportFailure(`share metadata refresh for ${mount.label}:`, error);
                 }
                 assertIdentityCurrent();
                 if (info) {
-                  await dependencies.updateMounts(workspace.workspaceId, rows => rows.map(row => row.shareId === mount.shareId ? { ...row, receivedIdentity: refreshReceivedReferencePin(row.receivedIdentity, info) } : row));
+                  await dependencies.updateMounts(workspace.workspaceId, (rows) =>
+                    rows.map((row) =>
+                      row.shareId === mount.shareId
+                        ? {
+                            ...row,
+                            receivedIdentity: refreshReceivedReferencePin(
+                              row.receivedIdentity,
+                              info,
+                            ),
+                          }
+                        : row,
+                    ),
+                  );
                   assertIdentityCurrent();
                 }
               }
@@ -514,23 +496,15 @@ export function createShareMountCommands<WorkspaceSummary>(
                     "refresh",
                   ),
               );
-              if (
-                reconciled.kind !== "refresh" ||
-                "ok" in reconciled.outcome
-              ) {
-                throw new Error(
-                  "Share mount refresh returned an invalid result.",
-                );
+              if (reconciled.kind !== "refresh" || "ok" in reconciled.outcome) {
+                throw new Error("Share mount refresh returned an invalid result.");
               }
-              pushResult(
-                mount,
-                reconciled.outcome.status,
-                reconciled.outcome.changedPaths,
-                {
-                  ...(reconciled.outcome.collisionRecordQuarantined ? { collisionRecordQuarantined: true } : {}),
-                  unjournalablePaths: reconciled.outcome.unjournalablePaths,
-                },
-              );
+              pushResult(mount, reconciled.outcome.status, reconciled.outcome.changedPaths, {
+                ...(reconciled.outcome.collisionRecordQuarantined
+                  ? { collisionRecordQuarantined: true }
+                  : {}),
+                unjournalablePaths: reconciled.outcome.unjournalablePaths,
+              });
             } catch (thrown) {
               // A refresh that set the record aside before it failed says so
               // on its row.
@@ -539,15 +513,10 @@ export function createShareMountCommands<WorkspaceSummary>(
               const setAsideRow = setAside ? { collisionRecordQuarantined: true as const } : {};
               const verdict = classifyShareMountRefreshError(error);
               if (verdict.kind === "abort") {
-                // The refresh stops here, and its rows still say which
-                // records it set aside.
                 pushResult(mount, "failed", 0, setAsideRow);
                 return { results, abortMessage: verdict.message };
               }
-              reportFailure(
-                `share-mount refresh failed for ${mount.label}:`,
-                error,
-              );
+              reportFailure(`share-mount refresh failed for ${mount.label}:`, error);
               pushResult(mount, verdict.status, 0, {
                 ...(verdict.status === "failed" && isCollisionRecordRefusal(error)
                   ? { errorKind: "collision-record" as const }
@@ -558,73 +527,54 @@ export function createShareMountCommands<WorkspaceSummary>(
           }
           return { results };
         } finally {
-          presentWorkspace(
-            workspace.workspaceId,
-            "after share-mount refresh",
-            { refreshNativeSurfaces: false },
-          );
+          presentWorkspace(workspace.workspaceId, "after share-mount refresh", {
+            refreshNativeSurfaces: false,
+          });
         }
       });
     },
 
     unmount({ workspace, shareId, assertCurrent }) {
       return withCommandAdmission(workspace.workspaceId, () =>
-        dependencies.withWorkspaceOperation(
-          workspace.rootPath,
-          async (lease) => {
-            assertCurrent();
-            const registeredMounts = dependencies.readMounts(
-              workspace.workspaceId,
+        dependencies.withWorkspaceOperation(workspace.rootPath, async (lease) => {
+          assertCurrent();
+          const registeredMounts = dependencies.readMounts(workspace.workspaceId);
+          const removal = planShareMountRemoval(registeredMounts, shareId);
+          if (removal.kind === "missing") {
+            throw new Error("This share is not added to this workspace.");
+          }
+          if (removal.kind === "registry-only") {
+            await dependencies
+              .closeRelayWorkspace(mountStoreWorkspaceIdFor(workspace.workspaceId, shareId))
+              .catch((error) => {
+                reportFailure(`could not close removed share relay ${shareId}:`, error);
+              });
+            // The empty array is a durable ownership tombstone. Removing
+            // the registry field could promote leftover projection bytes.
+            await dependencies.updateMounts(workspace.workspaceId, (mounts) =>
+              withoutShareMountRecords(mounts, shareId),
             );
-            const removal = planShareMountRemoval(
-              registeredMounts,
-              shareId,
-            );
-            if (removal.kind === "missing") {
-              throw new Error("This share is not added to this workspace.");
-            }
-            if (removal.kind === "registry-only") {
-              await dependencies
-                .closeRelayWorkspace(
-                  mountStoreWorkspaceIdFor(workspace.workspaceId, shareId),
-                )
-                .catch((error) => {
-                  reportFailure(
-                    `could not close removed share relay ${shareId}:`,
-                    error,
-                  );
-                });
-              // The empty array is a durable ownership tombstone. Removing
-              // the registry field could promote leftover projection bytes.
-              await dependencies.updateMounts(workspace.workspaceId, (mounts) =>
-                withoutShareMountRecords(mounts, shareId),
-              );
-              presentWorkspace(
-                workspace.workspaceId,
-                `after unmount for ${shareId}`,
-                { refreshNativeSurfaces: true },
-              );
-              return {
-                workspace: dependencies.workspaceSummary(workspace.workspaceId),
-                folderLeft: true as const,
-              };
-            }
-            const removed = await dependencies.files().unmount(lease, {
-              kind: "mount",
-              workspaceId: workspace.workspaceId,
-              shareId: removal.mount.shareId,
+            presentWorkspace(workspace.workspaceId, `after unmount for ${shareId}`, {
+              refreshNativeSurfaces: true,
             });
-            presentWorkspace(
-              workspace.workspaceId,
-              `after unmount for ${shareId}`,
-              { refreshNativeSurfaces: true },
-            );
             return {
               workspace: dependencies.workspaceSummary(workspace.workspaceId),
-              ...(removed.folderLeft ? { folderLeft: true as const } : {}),
+              folderLeft: true as const,
             };
-          },
-        ),
+          }
+          const removed = await dependencies.files().unmount(lease, {
+            kind: "mount",
+            workspaceId: workspace.workspaceId,
+            shareId: removal.mount.shareId,
+          });
+          presentWorkspace(workspace.workspaceId, `after unmount for ${shareId}`, {
+            refreshNativeSurfaces: true,
+          });
+          return {
+            workspace: dependencies.workspaceSummary(workspace.workspaceId),
+            ...(removed.folderLeft ? { folderLeft: true as const } : {}),
+          };
+        }),
       );
     },
   };

@@ -26,30 +26,64 @@ export interface UpdateStep {
   Icon: LucideIcon | null;
 }
 
-export function updateStep(state: UpdateStateEvent | null, pending: "check" | "install" | null): UpdateStep | null {
+export function updateStep(
+  state: UpdateStateEvent | null,
+  pending: "check" | "install" | null,
+): UpdateStep | null {
   if (!state) return null;
   const version = state.version ?? "";
   if (pending === "install") {
-    return { action: null, label: "Restarting…", title: `Restarting to install update ${version}`, Icon: RefreshCw };
+    return {
+      action: null,
+      label: "Restarting…",
+      title: `Restarting to install update ${version}`,
+      Icon: RefreshCw,
+    };
   }
   switch (state.status) {
     case "available":
-      return { action: "download", label: "Update", title: `Download update ${version}`, Icon: Download };
+      return {
+        action: "download",
+        label: "Update",
+        title: `Download update ${version}`,
+        Icon: Download,
+      };
     case "downloading": {
       if (state.percent === undefined) {
-        return { action: null, label: "Downloading…", title: `Downloading update ${version}`, Icon: Download };
+        return {
+          action: null,
+          label: "Downloading…",
+          title: `Downloading update ${version}`,
+          Icon: Download,
+        };
       }
       const percent = Math.round(state.percent);
-      return { action: null, label: "Downloading", percent, title: `Downloading update ${version}, ${percent}%`, Icon: Download };
+      return {
+        action: null,
+        label: "Downloading",
+        percent,
+        title: `Downloading update ${version}, ${percent}%`,
+        Icon: Download,
+      };
     }
     case "ready":
-      return { action: "install", label: "Restart to update", title: `Restart to install update ${version}`, Icon: RefreshCw };
+      return {
+        action: "install",
+        label: "Restart to update",
+        title: `Restart to install update ${version}`,
+        Icon: RefreshCw,
+      };
     case "checking":
       return { action: null, label: "Checking…", title: "Checking for updates", Icon: null };
     default:
       return pending === "check"
         ? { action: null, label: "Checking…", title: "Checking for updates", Icon: null }
-        : { action: state.canCheck === false ? null : "check", label: "Check for updates", title: "Check for updates", Icon: null };
+        : {
+            action: state.canCheck === false ? null : "check",
+            label: "Check for updates",
+            title: "Check for updates",
+            Icon: null,
+          };
   }
 }
 
@@ -76,9 +110,13 @@ export function updateStatusLine(state: UpdateStateEvent): string {
   if (!state.failure) return state.message;
   const step = failedStep(state.failure);
   const version = state.failure.notInstalled ?? state.version;
-  const said = step === "check" || !version ? updateFailureTitle(step) : `dohc could not ${step} version ${version}`;
+  const said =
+    step === "check" || !version
+      ? updateFailureTitle(step)
+      : `dohc could not ${step} version ${version}`;
   // One sentence, so it names dohc once.
-  if (state.failure.notInstalled && state.currentVersion) return `${said} and is still on version ${state.currentVersion}.`;
+  if (state.failure.notInstalled && state.currentVersion)
+    return `${said} and is still on version ${state.currentVersion}.`;
   return readError(state.message).words ? `${said}. ${state.message}` : `${said}.`;
 }
 
@@ -122,44 +160,47 @@ export function useDesktopUpdate(report: ReportShellFailure | null): DesktopUpda
   // stopped.
   useEffect(() => onRestartStopped(() => setPending(null)), []);
 
-  const run = useCallback(async function run(action: UpdateAction): Promise<void> {
-    const failed = (cause: unknown) =>
-      reportRef.current?.({
-        message: `${updateFailureTitle(action)}.`,
-        cause,
-        retry: () => void run(action),
-      });
-    if (action === "download") {
-      try {
-        acceptUpdateResult((await bridge().downloadUpdate({})).state);
-      } catch (error) {
-        failed(error);
-      }
-      return;
-    }
-    setPending(action);
-    let restarting = false;
-    try {
-      if (action === "check") {
-        acceptUpdateResult((await bridge().checkForUpdates()).state);
+  const run = useCallback(
+    async function run(action: UpdateAction): Promise<void> {
+      const failed = (cause: unknown) =>
+        reportRef.current?.({
+          message: `${updateFailureTitle(action)}.`,
+          cause,
+          retry: () => void run(action),
+        });
+      if (action === "download") {
+        try {
+          acceptUpdateResult((await bridge().downloadUpdate({})).state);
+        } catch (error) {
+          failed(error);
+        }
         return;
       }
-      // Through the guard: with set-aside drafts present the recovery
-      // dialog opens instead of the one-shot install. Null means the dialog
-      // took over or someone went back.
-      const result = await requestGuardedUpdateInstall();
-      if (result === null) return;
-      acceptUpdateResult(result.state);
-      restarting = result.accepted;
-      if (!result.accepted && !result.state.failure) {
-        failed(result.reason === undefined ? undefined : new Error(result.reason));
+      setPending(action);
+      let restarting = false;
+      try {
+        if (action === "check") {
+          acceptUpdateResult((await bridge().checkForUpdates()).state);
+          return;
+        }
+        // Through the guard: with set-aside drafts present the recovery
+        // dialog opens instead of the one-shot install. Null means the dialog
+        // took over or someone went back.
+        const result = await requestGuardedUpdateInstall();
+        if (result === null) return;
+        acceptUpdateResult(result.state);
+        restarting = result.accepted;
+        if (!result.accepted && !result.state.failure) {
+          failed(result.reason === undefined ? undefined : new Error(result.reason));
+        }
+      } catch (error) {
+        failed(error);
+      } finally {
+        if (!restarting) setPending(null);
       }
-    } catch (error) {
-      failed(error);
-    } finally {
-      if (!restarting) setPending(null);
-    }
-  }, [acceptUpdateResult]);
+    },
+    [acceptUpdateResult],
+  );
 
   return { state: updateState, step: updateStep(updateState, pending), run };
 }
@@ -209,7 +250,9 @@ export function useUpdateFailureNotices(
     report({
       kind: "update",
       quiet,
-      ...(readError(state.message).words ? { title, message: state.message } : { message: `${title}.` }),
+      ...(readError(state.message).words
+        ? { title, message: state.message }
+        : { message: `${title}.` }),
       ...(state.installCommand ? { command: state.installCommand } : {}),
       // dohc does not know why an update it opened without did not install.
       details: failure.notInstalled ? [] : [["Cause", state.message]],

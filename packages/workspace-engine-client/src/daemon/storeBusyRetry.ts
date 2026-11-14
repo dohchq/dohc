@@ -1,5 +1,8 @@
 import policy from "./storeBusyRetry.json" with { type: "json" };
-import { isEngineStoreBusyRefusal, isLiveSettlementCapacityRefusal } from "../live/daemonLiveAdapter";
+import {
+  isEngineStoreBusyRefusal,
+  isLiveSettlementCapacityRefusal,
+} from "../live/daemonLiveAdapter";
 
 // Maximal-write checkpoint measurements must retain at least fourfold headroom.
 export const STORE_BUSY_RETRY_BUDGET_MS = policy.engineStoreBusyRetryMs;
@@ -20,7 +23,11 @@ export async function retryWhileEngineBusy<T>(
     try {
       return await operation();
     } catch (error) {
-      if (!(isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error)) || signal.aborted) throw error;
+      if (
+        !(isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error)) ||
+        signal.aborted
+      )
+        throw error;
       deadline ??= Date.now() + STORE_BUSY_RETRY_BUDGET_MS;
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw error;
@@ -30,10 +37,13 @@ export async function retryWhileEngineBusy<T>(
           signal.removeEventListener("abort", abort);
           reject(error);
         };
-        const timer = setTimeout(() => {
-          signal.removeEventListener("abort", abort);
-          resolve();
-        }, Math.min(storeBusyBackoffMs(attempt), remaining));
+        const timer = setTimeout(
+          () => {
+            signal.removeEventListener("abort", abort);
+            resolve();
+          },
+          Math.min(storeBusyBackoffMs(attempt), remaining),
+        );
         signal.addEventListener("abort", abort, { once: true });
         if (signal.aborted) abort();
       });

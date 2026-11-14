@@ -6,10 +6,7 @@ export interface FileMentionNavigationTarget {
   headingAnchor?: string;
 }
 
-export function fileReferenceKey(reference: {
-  path: string;
-  headingAnchor?: string;
-}): string {
+export function fileReferenceKey(reference: { path: string; headingAnchor?: string }): string {
   return `${reference.path}\u0000${reference.headingAnchor ?? ""}`;
 }
 
@@ -60,16 +57,13 @@ export function resolveFileMentionNavigationTargets(
       unused.delete(index);
       targets.set(key, {
         path: attachment.pathHint,
-        ...(attachment.headingAnchor
-          ? { headingAnchor: attachment.headingAnchor }
-          : {}),
+        ...(attachment.headingAnchor ? { headingAnchor: attachment.headingAnchor } : {}),
       });
     }
   };
 
   assign(
-    (token, attachment) =>
-      attachment.pathHint === token.path && sameHeading(token, attachment),
+    (token, attachment) => attachment.pathHint === token.path && sameHeading(token, attachment),
   );
   assign(
     (token, attachment) =>

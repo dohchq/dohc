@@ -20,10 +20,16 @@ class TestWindow extends EventEmitter {
     destroyed: false,
     setWindowOpenHandler: vi.fn(),
     send: vi.fn(),
-    isDestroyed() { return this.destroyed; },
+    isDestroyed() {
+      return this.destroyed;
+    },
   });
-  isFullScreen() { return this.fullScreen; }
-  isFocused() { return this.focused; }
+  isFullScreen() {
+    return this.fullScreen;
+  }
+  isFocused() {
+    return this.focused;
+  }
   show = vi.fn();
   loadFile = vi.fn();
 }
@@ -41,7 +47,6 @@ afterEach(() => {
   resetChromeThemeForTests();
 });
 
-// What a window told its renderer on one channel.
 const sentOn = (window: TestWindow, channel: string) =>
   window.webContents.send.mock.calls.filter(([sent]) => sent === channel);
 
@@ -54,7 +59,6 @@ describe("main-window full-screen state", () => {
     window.webContents.emit("dom-ready");
     window.fullScreen = true;
     window.emit("enter-full-screen");
-    // A reload while full screen starts from the current state.
     window.webContents.emit("dom-ready");
     window.fullScreen = false;
     window.emit("leave-full-screen");
@@ -72,7 +76,9 @@ describe("main-window full-screen state", () => {
     const window = createMainWindow() as unknown as TestWindow;
     window.fullScreen = true;
     window.webContents.emit("dom-ready");
-    expect(sentOn(window, CHANNELS.windowFullScreen)).toEqual([[CHANNELS.windowFullScreen, { fullScreen: true }]]);
+    expect(sentOn(window, CHANNELS.windowFullScreen)).toEqual([
+      [CHANNELS.windowFullScreen, { fullScreen: true }],
+    ]);
   });
 
   it("sends nothing once its renderer is gone", () => {
@@ -92,7 +98,6 @@ describe("main-window focus", () => {
     window.webContents.emit("dom-ready");
     window.focused = true;
     window.emit("focus");
-    // A reload while focused starts from the current state.
     window.webContents.emit("dom-ready");
     window.focused = false;
     window.emit("blur");
@@ -110,7 +115,9 @@ describe("main-window focus", () => {
     const window = createMainWindow() as unknown as TestWindow;
     window.focused = true;
     window.webContents.emit("dom-ready");
-    expect(sentOn(window, CHANNELS.windowFocused)).toEqual([[CHANNELS.windowFocused, { focused: true }]]);
+    expect(sentOn(window, CHANNELS.windowFocused)).toEqual([
+      [CHANNELS.windowFocused, { focused: true }],
+    ]);
   });
 
   it("sends nothing once its renderer is gone", () => {

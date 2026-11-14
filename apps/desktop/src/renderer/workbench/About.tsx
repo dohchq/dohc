@@ -18,8 +18,22 @@ import {
   Share2,
   type LucideIcon,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import type { ChatFileMentionRecord, ChatThreadRecord, EngineMomentRecord } from "../../ipc/bridgeContract";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
+import type {
+  ChatFileMentionRecord,
+  ChatThreadRecord,
+  EngineMomentRecord,
+} from "../../ipc/bridgeContract";
 import { isChatMentionPageChanged, isWorkspaceUpdatingError } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
@@ -32,10 +46,27 @@ import { SkeletonLines } from "../ui/SkeletonRows";
 import { StateMark } from "../ui/StateMark";
 import { PresenceFaces } from "../collab/PresenceIndicators";
 import type { AboutConversation } from "./aboutConversation";
-import { accessReasonForLane, serverName, type AccessContext, type AccessFacts, type AccessReason } from "./accessReason";
+import {
+  accessReasonForLane,
+  serverName,
+  type AccessContext,
+  type AccessFacts,
+  type AccessReason,
+} from "./accessReason";
 import { ChatAvatar, LinkMark } from "./ChatAvatar";
-import { neutralPresentation, ownPresentation, ownAgentPresentation, relayPresentation } from "./actorPresentation";
-import { HistoryPaused, HistoryRow, HistoryUpdating, MARK_BOX, groupTimeline } from "./EngineHistory";
+import {
+  neutralPresentation,
+  ownPresentation,
+  ownAgentPresentation,
+  relayPresentation,
+} from "./actorPresentation";
+import {
+  HistoryPaused,
+  HistoryRow,
+  HistoryUpdating,
+  MARK_BOX,
+  groupTimeline,
+} from "./EngineHistory";
 import { historyHiddenWords } from "./HistoryPolicyStates";
 
 // The About tab: everything about the open file or chat, one section each. A
@@ -57,7 +88,6 @@ export type AboutNotices = {
 
 export type AccessSetup = {
   reason: AccessReason;
-  // The server's address, when dohc knows it.
   server?: string | null;
   openSyncSettings: () => void;
   connect: () => void;
@@ -71,7 +101,10 @@ export type AccessSetup = {
 // can still go unanswered: the account or server the share went to differs,
 // or the list has not arrived. The renderer cannot tell those apart.
 export function accessReasonFor(facts: AccessFacts, path: string): AccessReason {
-  return accessReasonForLane(facts, facts.shareView || isSharedWithMePath(path) ? "received" : "granted");
+  return accessReasonForLane(
+    facts,
+    facts.shareView || isSharedWithMePath(path) ? "received" : "granted",
+  );
 }
 
 // A row in a section, inset from the panel's edges like the drawing's rows.
@@ -80,13 +113,16 @@ export const ABOUT_ROW =
 export const ABOUT_ROW_BUTTON = `${ABOUT_ROW} cursor-pointer hover:bg-hover hover:text-ink dohc-focus-row`;
 // A row of two lines, as History draws a change: its mark, what it is and
 // when, then the words under it.
-const ABOUT_TWO_LINES = "grid h-12 w-full min-w-0 cursor-pointer grid-cols-[18px_minmax(0,1fr)_auto] content-center gap-x-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-row";
+const ABOUT_TWO_LINES =
+  "grid h-12 w-full min-w-0 cursor-pointer grid-cols-[18px_minmax(0,1fr)_auto] content-center gap-x-2 rounded-md px-2 text-left text-[13px] text-muted transition-colors duration-75 hover:bg-hover hover:text-ink dohc-focus-row";
 
-// The open object: its mark, its name, then who is here.
 export function AboutHeader(props: { subject: { path: string } | AboutConversation }) {
   const { subject } = props;
   const name = "path" in subject ? basenameOf(subject.path) : subject.name;
-  const person = "path" in subject || subject.kind !== "person" ? undefined : subject.present.find(peer => !peer.isSelf);
+  const person =
+    "path" in subject || subject.kind !== "person"
+      ? undefined
+      : subject.present.find((peer) => !peer.isSelf);
   return (
     <div
       data-testid="about-header"
@@ -97,14 +133,30 @@ export function AboutHeader(props: { subject: { path: string } | AboutConversati
       ) : subject.kind === "group" ? (
         <ObjectGlyph kind="group" size={14} className="text-muted" />
       ) : (
-        <ChatAvatar presentation={subject.kind === "agent" ? ownAgentPresentation : person ? relayPresentation(person.paletteSlot) : neutralPresentation} name={subject.name} kind={subject.kind === "agent" ? "agent" : "human"} size="strip" />
+        <ChatAvatar
+          presentation={
+            subject.kind === "agent"
+              ? ownAgentPresentation
+              : person
+                ? relayPresentation(person.paletteSlot)
+                : neutralPresentation
+          }
+          name={subject.name}
+          kind={subject.kind === "agent" ? "agent" : "human"}
+          size="strip"
+        />
       )}
-      <span title={"path" in subject ? subject.path : subject.name} className="min-w-0 truncate font-semibold text-ink">
+      <span
+        title={"path" in subject ? subject.path : subject.name}
+        className="min-w-0 truncate font-semibold text-ink"
+      >
         {name}
       </span>
       {/* The conversation's own header announces who arrives; this copy
           only shows them. */}
-      {"path" in subject ? null : <PresenceFaces others={subject.present} live={false} className="ml-auto" />}
+      {"path" in subject ? null : (
+        <PresenceFaces others={subject.present} live={false} className="ml-auto" />
+      )}
     </div>
   );
 }
@@ -130,17 +182,21 @@ export function AboutSection(props: {
 }) {
   const bodyId = useId();
   const label = <span className="min-w-0 truncate">{props.label}</span>;
-  const count = props.count !== undefined && (props.empty || props.count !== "0") ? (
-    <span
-      data-testid={`about-${props.id}-count`}
-      className="rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-subtle"
-    >
-      {props.count}
-    </span>
-  ) : null;
+  const count =
+    props.count !== undefined && (props.empty || props.count !== "0") ? (
+      <span
+        data-testid={`about-${props.id}-count`}
+        className="rounded bg-line/70 px-1.5 py-0.5 text-[10px] leading-none tabular-nums text-subtle"
+      >
+        {props.count}
+      </span>
+    ) : null;
   return (
     <section data-testid={`about-${props.id}`} aria-label={props.label} className="mt-4 first:mt-2">
-      <div title={props.title} className={`group mx-1 flex h-6 items-center gap-1 rounded-md ${props.empty ? "" : "hover:bg-hover"}`}>
+      <div
+        title={props.title}
+        className={`group mx-1 flex h-6 items-center gap-1 rounded-md ${props.empty ? "" : "hover:bg-hover"}`}
+      >
         {props.empty ? (
           <h3 className="dohc-section-label m-0 flex h-full min-w-0 flex-1 items-center gap-2 px-2">
             {label}
@@ -159,11 +215,17 @@ export function AboutSection(props: {
             >
               {label}
               {count}
-              <ChevronRight size={11} aria-hidden className={`shrink-0 transition-transform ${props.expanded ? "rotate-90" : ""}`} />
+              <ChevronRight
+                size={11}
+                aria-hidden
+                className={`shrink-0 transition-transform ${props.expanded ? "rotate-90" : ""}`}
+              />
             </button>
           </h3>
         )}
-        {props.actions ? <div className="flex shrink-0 items-center gap-1">{props.actions}</div> : null}
+        {props.actions ? (
+          <div className="flex shrink-0 items-center gap-1">{props.actions}</div>
+        ) : null}
       </div>
       {props.expanded && !props.empty ? (
         <div id={bodyId} className="px-1">
@@ -174,7 +236,6 @@ export function AboutSection(props: {
   );
 }
 
-// An icon control in a section's head, as the Explorer's heads have.
 export function AboutSectionAction(props: {
   testId: string;
   label: string;
@@ -209,7 +270,11 @@ export function AboutNote(props: {
 }) {
   const Icon = props.icon;
   return (
-    <div data-testid={props.testId} data-reason={props.reason} className="flex flex-col items-start gap-2 px-2 py-1">
+    <div
+      data-testid={props.testId}
+      data-reason={props.reason}
+      className="flex flex-col items-start gap-2 px-2 py-1"
+    >
       <p className="m-0 flex items-start gap-1.5 text-[12px] leading-4 text-muted">
         {Icon ? <Icon size={12} aria-hidden className="mt-0.5 shrink-0 text-subtle" /> : null}
         <span>{props.children}</span>
@@ -227,7 +292,11 @@ export function AboutNote(props: {
 // where a row's name does.
 export function AboutGathering(props: { testId: string }) {
   return (
-    <p role="status" data-testid={props.testId} className="m-0 flex items-center gap-2 px-2 py-1 text-[12px] text-muted">
+    <p
+      role="status"
+      data-testid={props.testId}
+      className="m-0 flex items-center gap-2 px-2 py-1 text-[12px] text-muted"
+    >
       <span aria-hidden className={`${MARK_BOX} text-subtle`}>
         <LoaderCircle size={12} className="motion-safe:animate-spin" />
       </span>
@@ -293,7 +362,11 @@ export function AboutChatRow(props: { thread: ChatThreadRecord; onOpen: () => vo
         <MessageSquare size={14} />
       </span>
       <span className="min-w-0 flex-1 truncate">{props.thread.title}</span>
-      <time dateTime={when.iso} title={when.label} className="shrink-0 text-[11px] tabular-nums text-subtle">
+      <time
+        dateTime={when.iso}
+        title={when.label}
+        className="shrink-0 text-[11px] tabular-nums text-subtle"
+      >
         {formatShortTime(props.thread.updatedAtMs)}
       </time>
     </button>
@@ -335,14 +408,15 @@ export function useSectionRead<View>(key: string, identity: string, notices: Abo
     token.current += 1;
   }, []);
   // A new read key, even for the same path, ends the last one's row.
-  useEffect(() => () => {
-    token.current += 1;
-    notices.clear(identity);
-  }, [identity, key, notices]);
+  useEffect(
+    () => () => {
+      token.current += 1;
+      notices.clear(identity);
+    },
+    [identity, key, notices],
+  );
   return { view: state.key === key ? state.view : LOADING, begin, cancel };
 }
-
-// ---- Links ----
 
 type LinkEntry = NonNullable<LinksInResult>["entries"][number];
 
@@ -361,15 +435,22 @@ export type ChatLinksView = typeof LOADING | { status: "failed" } | ReadyChatLin
 
 const GATHER_FIRST_MS = 250;
 const GATHER_LAST_MS = 8_000;
-export const gatherDelay = (reads: number) => Math.min(GATHER_FIRST_MS * 2 ** (reads - 1), GATHER_LAST_MS);
+export const gatherDelay = (reads: number) =>
+  Math.min(GATHER_FIRST_MS * 2 ** (reads - 1), GATHER_LAST_MS);
 // A read the engine refused while it reads the workspace's files keeps the
 // rows it would replace and gathers on.
-const gatheringOn = <Row,>(kept: PagedRows<Row> | undefined): PagedRows<Row> =>
-  ({ status: "ready", rows: kept?.rows ?? [], next: kept?.next ?? null, gathering: (kept?.gathering ?? 0) + 1 });
+const gatheringOn = <Row,>(kept: PagedRows<Row> | undefined): PagedRows<Row> => ({
+  status: "ready",
+  rows: kept?.rows ?? [],
+  next: kept?.next ?? null,
+  gathering: (kept?.gathering ?? 0) + 1,
+});
 // A read that failed keeps the rows it would replace and stops gathering.
 // With no rows to keep, only Try again shows, so nothing claims the list is
 // empty.
-const failedOver = <Row,>(kept: PagedRows<Row> | undefined): PagedRows<Row> | { status: "failed" } =>
+const failedOver = <Row,>(
+  kept: PagedRows<Row> | undefined,
+): PagedRows<Row> | { status: "failed" } =>
   kept && kept.rows.length > 0 ? { ...kept, gathering: 0 } : { status: "failed" };
 
 // One read at a time for one list. A read from the start replaces one in
@@ -389,7 +470,6 @@ function asksMore(guard: ReadGuard, seen: boolean | undefined): boolean {
   if (guard.reading === "start" && !seen) guard.moreAfter = true;
   return guard.reading === null;
 }
-// The read that ends, if it is still the newest: whether Show more waits on it.
 function readEnds(guard: ReadGuard, landed: boolean): boolean {
   const more = guard.moreAfter && landed;
   guard.reading = null;
@@ -411,7 +491,6 @@ export function AboutLinks(props: {
   expanded: boolean;
   onToggle: () => void;
   onOpenLink: (path: string, line: number) => void;
-  // Where this workspace's chats can be read: what opens a chat that links here.
   onOpenChat?: (mention: ChatFileMentionRecord) => void;
   notices: AboutNotices;
 }) {
@@ -439,89 +518,114 @@ export function AboutLinks(props: {
 
   // A read from the start, until it holds as many rows as `again` showed, or
   // the page after `after`. A read that fails keeps the rows it would replace.
-  const loadLinks = useCallback(async (from: { after?: ReadyLinks; again?: ReadyLinks }) => {
-    const request = beginLinks();
-    linksGuard.current.reading = from.after ? "more" : "start";
-    const kept = from.after ?? from.again;
-    let rows = from.after?.rows ?? [];
-    let cursor = from.after?.next ?? undefined;
-    let building = false;
-    let landed: ReadyLinks | null = null;
-    try {
-      do {
-        const page = await bridge().linksIn({ workspaceId, subject: { path }, ...(cursor ? { cursor } : {}) });
-        if (!request.current()) return;
-        rows = rows.concat(page?.entries ?? []);
-        building ||= page?.indexBuilding ?? false;
-        cursor = page?.nextCursor ?? undefined;
-      } while (cursor && rows.length < (from.again?.rows.length ?? 0));
-      landed = {
-        status: "ready",
-        rows,
-        next: cursor ?? null,
-        // Rows read while the index built are read again, even when the
-        // index finished before the page after them.
-        gathering: building ? (kept?.gathering ?? 0) + 1 : (from.after?.gathering ?? 0),
-      };
-      shownLinks.current = landed;
-      request.settle(landed);
-    } catch (error) {
-      if (!request.current()) return;
-      if (isWorkspaceUpdatingError(error)) {
-        shownLinks.current = gatheringOn(kept);
-        request.settle(shownLinks.current);
-      } else {
-        const view = failedOver(kept);
-        shownLinks.current = view.status === "ready" ? view : null;
-        request.fail(view, ipcErrorMessage(error, LINKS_FAILED), error,
-          () => void loadLinks({ again: shownLinks.current ?? undefined }));
-      }
-    } finally {
-      if (request.current() && readEnds(linksGuard.current, landed !== null) && landed?.next) void loadLinks({ after: landed });
-    }
-  }, [beginLinks, path, workspaceId]);
-
-  const loadChats = useCallback(async (from: { after?: ReadyChatLinks; again?: ReadyChatLinks; restarted?: boolean }) => {
-    const request = beginChats();
-    chatsGuard.current.reading = from.after ? "more" : "start";
-    // A row repeated across pages shows once.
-    const rows = new Map((from.after?.rows ?? []).map((row) => [row.attachment.attachmentId, row]));
-    let cursor = from.after?.next ?? undefined;
-    let landed: ReadyChatLinks | null = null;
-    try {
-      do {
-        const page = await bridge().chatFileMentionsPage({ workspaceId, subject: { path }, ...(cursor ? { cursor } : {}) });
-        if (!request.current()) return;
-        for (const row of page?.entries ?? []) rows.set(row.attachment.attachmentId, row);
-        cursor = page?.nextCursor ?? undefined;
-      } while (cursor && rows.size < (from.again?.rows.length ?? 0));
-      landed = { status: "ready", rows: [...rows.values()], next: cursor ?? null, gathering: 0 };
-      shownChats.current = landed;
-      request.settle(landed);
-    } catch (error) {
-      if (!request.current()) return;
-      // A cursor that lost the access or version its rows were read under
-      // takes those rows with it, and the list reads once from the start.
-      if (isChatMentionPageChanged(error) && !from.restarted) {
-        shownChats.current = null;
-        request.settle(LOADING);
-        void loadChats({ restarted: true });
-        return;
-      }
+  const loadLinks = useCallback(
+    async (from: { after?: ReadyLinks; again?: ReadyLinks }) => {
+      const request = beginLinks();
+      linksGuard.current.reading = from.after ? "more" : "start";
       const kept = from.after ?? from.again;
-      if (isWorkspaceUpdatingError(error)) {
-        shownChats.current = gatheringOn(kept);
-        request.settle(shownChats.current);
-      } else {
-        const view = failedOver(kept);
-        shownChats.current = view.status === "ready" ? view : null;
-        request.fail(view, ipcErrorMessage(error, CHAT_LINKS_FAILED), error,
-          () => void loadChats({ again: shownChats.current ?? undefined }));
+      let rows = from.after?.rows ?? [];
+      let cursor = from.after?.next ?? undefined;
+      let building = false;
+      let landed: ReadyLinks | null = null;
+      try {
+        do {
+          const page = await bridge().linksIn({
+            workspaceId,
+            subject: { path },
+            ...(cursor ? { cursor } : {}),
+          });
+          if (!request.current()) return;
+          rows = rows.concat(page?.entries ?? []);
+          building ||= page?.indexBuilding ?? false;
+          cursor = page?.nextCursor ?? undefined;
+        } while (cursor && rows.length < (from.again?.rows.length ?? 0));
+        landed = {
+          status: "ready",
+          rows,
+          next: cursor ?? null,
+          // Rows read while the index built are read again, even when the
+          // index finished before the page after them.
+          gathering: building ? (kept?.gathering ?? 0) + 1 : (from.after?.gathering ?? 0),
+        };
+        shownLinks.current = landed;
+        request.settle(landed);
+      } catch (error) {
+        if (!request.current()) return;
+        if (isWorkspaceUpdatingError(error)) {
+          shownLinks.current = gatheringOn(kept);
+          request.settle(shownLinks.current);
+        } else {
+          const view = failedOver(kept);
+          shownLinks.current = view.status === "ready" ? view : null;
+          request.fail(
+            view,
+            ipcErrorMessage(error, LINKS_FAILED),
+            error,
+            () => void loadLinks({ again: shownLinks.current ?? undefined }),
+          );
+        }
+      } finally {
+        if (request.current() && readEnds(linksGuard.current, landed !== null) && landed?.next)
+          void loadLinks({ after: landed });
       }
-    } finally {
-      if (request.current() && readEnds(chatsGuard.current, landed !== null) && landed?.next) void loadChats({ after: landed });
-    }
-  }, [beginChats, path, workspaceId]);
+    },
+    [beginLinks, path, workspaceId],
+  );
+
+  const loadChats = useCallback(
+    async (from: { after?: ReadyChatLinks; again?: ReadyChatLinks; restarted?: boolean }) => {
+      const request = beginChats();
+      chatsGuard.current.reading = from.after ? "more" : "start";
+      const rows = new Map(
+        (from.after?.rows ?? []).map((row) => [row.attachment.attachmentId, row]),
+      );
+      let cursor = from.after?.next ?? undefined;
+      let landed: ReadyChatLinks | null = null;
+      try {
+        do {
+          const page = await bridge().chatFileMentionsPage({
+            workspaceId,
+            subject: { path },
+            ...(cursor ? { cursor } : {}),
+          });
+          if (!request.current()) return;
+          for (const row of page?.entries ?? []) rows.set(row.attachment.attachmentId, row);
+          cursor = page?.nextCursor ?? undefined;
+        } while (cursor && rows.size < (from.again?.rows.length ?? 0));
+        landed = { status: "ready", rows: [...rows.values()], next: cursor ?? null, gathering: 0 };
+        shownChats.current = landed;
+        request.settle(landed);
+      } catch (error) {
+        if (!request.current()) return;
+        // A cursor that lost the access or version its rows were read under
+        // takes those rows with it, and the list reads once from the start.
+        if (isChatMentionPageChanged(error) && !from.restarted) {
+          shownChats.current = null;
+          request.settle(LOADING);
+          void loadChats({ restarted: true });
+          return;
+        }
+        const kept = from.after ?? from.again;
+        if (isWorkspaceUpdatingError(error)) {
+          shownChats.current = gatheringOn(kept);
+          request.settle(shownChats.current);
+        } else {
+          const view = failedOver(kept);
+          shownChats.current = view.status === "ready" ? view : null;
+          request.fail(
+            view,
+            ipcErrorMessage(error, CHAT_LINKS_FAILED),
+            error,
+            () => void loadChats({ again: shownChats.current ?? undefined }),
+          );
+        }
+      } finally {
+        if (request.current() && readEnds(chatsGuard.current, landed !== null) && landed?.next)
+          void loadChats({ after: landed });
+      }
+    },
+    [beginChats, path, workspaceId],
+  );
 
   // Coming back to the window reads again: an edit in another app may have
   // added or removed a link.
@@ -535,10 +639,13 @@ export function AboutLinks(props: {
 
   // Another file, or the section closing, ends every read and what waited on
   // one. Declared before the reads, so it ends them before the next begins.
-  useEffect(() => () => {
-    linksGuard.current = { ...NO_READ };
-    chatsGuard.current = { ...NO_READ };
-  }, [key, reads]);
+  useEffect(
+    () => () => {
+      linksGuard.current = { ...NO_READ };
+      chatsGuard.current = { ...NO_READ };
+    },
+    [key, reads],
+  );
 
   useEffect(() => {
     if (!reads) return;
@@ -555,13 +662,19 @@ export function AboutLinks(props: {
   const linksView = links.view;
   useEffect(() => {
     if (!reads || linksView.status !== "ready" || linksView.gathering === 0) return;
-    const timer = setTimeout(() => void loadLinks({ again: linksView }), gatherDelay(linksView.gathering));
+    const timer = setTimeout(
+      () => void loadLinks({ again: linksView }),
+      gatherDelay(linksView.gathering),
+    );
     return () => clearTimeout(timer);
   }, [linksView, loadLinks, reads]);
   const chatsView = chats.view;
   useEffect(() => {
     if (!readsChats || chatsView.status !== "ready" || chatsView.gathering === 0) return;
-    const timer = setTimeout(() => void loadChats({ again: chatsView }), gatherDelay(chatsView.gathering));
+    const timer = setTimeout(
+      () => void loadChats({ again: chatsView }),
+      gatherDelay(chatsView.gathering),
+    );
     return () => clearTimeout(timer);
   }, [chatsView, loadChats, readsChats]);
 
@@ -570,11 +683,15 @@ export function AboutLinks(props: {
   // About turns to that file, where the row pressed goes.
   const toggleRef = useRef<HTMLButtonElement>(null);
   const { onOpenLink } = props;
-  const openLink = useCallback((source: string, line: number) => {
-    const toggle = toggleRef.current;
-    if (source !== path && toggle?.closest("section")?.contains(document.activeElement)) toggle.focus();
-    onOpenLink(source, line);
-  }, [onOpenLink, path]);
+  const openLink = useCallback(
+    (source: string, line: number) => {
+      const toggle = toggleRef.current;
+      if (source !== path && toggle?.closest("section")?.contains(document.activeElement))
+        toggle.focus();
+      onOpenLink(source, line);
+    },
+    [onOpenLink, path],
+  );
 
   return (
     <AboutLinksView
@@ -635,7 +752,10 @@ export function AboutFileChatsOff(props: {
 // while the index builds, a page can hold only files not yet read in.
 function linksCount(links: ReadyLinks, chats: ReadyChatLinks | null): string | undefined {
   const shown = links.rows.length + (chats?.rows.length ?? 0);
-  const more = links.next !== null || links.gathering > 0 || (chats !== null && (chats.next !== null || chats.gathering > 0));
+  const more =
+    links.next !== null ||
+    links.gathering > 0 ||
+    (chats !== null && (chats.next !== null || chats.gathering > 0));
   if (shown === 0) return more ? undefined : "0";
   return `${shown}${more ? "+" : ""}`;
 }
@@ -643,7 +763,8 @@ function linksCount(links: ReadyLinks, chats: ReadyChatLinks | null): string | u
 // Show more reads a list's next page, though not while the list gathers with
 // no rows: its pages then hold only files not yet read in, and the gathering
 // reads the list again from the start.
-const pagesOn = <Row,>(list: PagedRows<Row>) => list.next !== null && (list.rows.length > 0 || list.gathering === 0);
+const pagesOn = <Row,>(list: PagedRows<Row>) =>
+  list.next !== null && (list.rows.length > 0 || list.gathering === 0);
 
 // A link as its reader sees it: a wikilink's alias or target, a Markdown
 // link's label, without the brackets.
@@ -701,18 +822,16 @@ function LinkRow(props: { link: LinkEntry; onOpen: () => void }) {
   );
 }
 
-// The rows render again only when a read lands, not on every render of the
-// panel around them, so a long list costs nothing while someone types there.
-// A row out of the rail's view skips layout and paint until it scrolls in;
-// its focus ring and hover fill sit inside it, so nothing is clipped.
 export const OFFSCREEN_ROW = "[content-visibility:auto] [contain-intrinsic-size:auto_28px]";
 const OFFSCREEN_TWO_LINES = "[content-visibility:auto] [contain-intrinsic-size:auto_48px]";
 
-// What makes a row the same row from one page to the next.
 const linkKey = (link: LinkEntry) => `${link.source}\0${link.ordinal}`;
 const chatLinkKey = (mention: ChatFileMentionRecord) => mention.attachment.attachmentId;
 
-const LinkList = memo(function LinkList(props: { rows: LinkEntry[]; onOpenLink: (path: string, line: number) => void }) {
+const LinkList = memo(function LinkList(props: {
+  rows: LinkEntry[];
+  onOpenLink: (path: string, line: number) => void;
+}) {
   return (
     <ul data-testid="about-links-list" className="m-0 list-none p-0">
       {props.rows.map((link) => (
@@ -758,11 +877,16 @@ function ChatLinkRow(props: { mention: ChatFileMentionRecord; onOpen: () => void
         <ObjectGlyph kind={mention.channelKind === "channel" ? "group" : "chat"} size={14} />
       </span>
       <span className="min-w-0 truncate text-ink">{where}</span>
-      <time dateTime={when.iso} title={when.label} className="shrink-0 text-[11px] tabular-nums text-subtle">
+      <time
+        dateTime={when.iso}
+        title={when.label}
+        className="shrink-0 text-[11px] tabular-nums text-subtle"
+      >
         {formatShortTime(mention.message.createdAtMs)}
       </time>
       <span className="col-start-2 col-end-4 min-w-0 truncate text-[12px] leading-4 text-subtle">
-        <span className="text-muted">{mention.message.authorDisplayName}</span> {mention.message.preview}
+        <span className="text-muted">{mention.message.authorDisplayName}</span>{" "}
+        {mention.message.preview}
       </span>
     </button>
   );
@@ -792,14 +916,18 @@ export function useFocusAddedRow<Row>(
     // A page adds rows after the ones shown, the same rows by key, though a
     // row the page repeats is a new record. A read from the start that lands
     // first replaces them instead, and the press waits on its page.
-    const added = before !== null && rows.length > before.length &&
+    const added =
+      before !== null &&
+      rows.length > before.length &&
       before.every((row, index) => keyOf(rows[index]!) === keyOf(row));
     if (!added) return;
     pressedFrom.current = undefined;
     const section = toggle.current?.closest("section");
     const active = document.activeElement;
-    const lost = active === null || active === document.body || (section != null && active.contains(section));
-    if (active === from || lost) section?.querySelectorAll<HTMLElement>(selector)[before.length]?.focus();
+    const lost =
+      active === null || active === document.body || (section != null && active.contains(section));
+    if (active === from || lost)
+      section?.querySelectorAll<HTMLElement>(selector)[before.length]?.focus();
   }, [keyOf, rows, selector, toggle]);
   return useCallback(() => {
     pressedFrom.current = document.activeElement;
@@ -828,15 +956,35 @@ export function AboutLinksView(props: {
   const { links, chats } = props;
   const linkRows = links?.status === "ready" ? links : null;
   const chatRows = chats?.status === "ready" ? chats : null;
-  const count = linkRows !== null && (chats === null || chatRows !== null) ? linksCount(linkRows, chatRows) : undefined;
+  const count =
+    linkRows !== null && (chats === null || chatRows !== null)
+      ? linksCount(linkRows, chatRows)
+      : undefined;
   const empty = count === "0";
   const ownToggle = useRef<HTMLButtonElement>(null);
   const toggleRef = props.toggleRef ?? ownToggle;
-  const focusAddedLink = useFocusAddedRow(linkRows?.rows ?? null, linkKey, toggleRef, '[data-testid="about-link"]');
-  const focusAddedChat = useFocusAddedRow(chatRows?.rows ?? null, chatLinkKey, toggleRef, '[data-testid="chat-file-mention"]');
+  const focusAddedLink = useFocusAddedRow(
+    linkRows?.rows ?? null,
+    linkKey,
+    toggleRef,
+    '[data-testid="about-link"]',
+  );
+  const focusAddedChat = useFocusAddedRow(
+    chatRows?.rows ?? null,
+    chatLinkKey,
+    toggleRef,
+    '[data-testid="chat-file-mention"]',
+  );
   return (
-    <AboutSection id="links" label="Links" count={count} empty={empty} expanded={props.expanded} onToggle={props.onToggle}
-      toggleRef={toggleRef}>
+    <AboutSection
+      id="links"
+      label="Links"
+      count={count}
+      empty={empty}
+      expanded={props.expanded}
+      onToggle={props.onToggle}
+      toggleRef={toggleRef}
+    >
       {links === null ? (
         <AboutNote testId="about-links-shared" icon={Link2Off}>
           dohc does not list links into files shared with you yet.
@@ -847,15 +995,22 @@ export function AboutLinksView(props: {
         <RetryRow testId="about-links-failed" onRetry={props.onRetryLinks} />
       ) : (
         <>
-          {links.gathering > 0 || (chatRows?.gathering ?? 0) > 0 ? <AboutGathering testId="about-links-gathering" /> : null}
-          {links.rows.length > 0 ? <LinkList rows={links.rows} onOpenLink={props.onOpenLink} /> : null}
+          {links.gathering > 0 || (chatRows?.gathering ?? 0) > 0 ? (
+            <AboutGathering testId="about-links-gathering" />
+          ) : null}
+          {links.rows.length > 0 ? (
+            <LinkList rows={links.rows} onOpenLink={props.onOpenLink} />
+          ) : null}
           {pagesOn(links) ? (
-            <AboutMore testId="about-links-more" watch={links.rows}
+            <AboutMore
+              testId="about-links-more"
+              watch={links.rows}
               onMore={(focused) => {
                 if (focused) focusAddedLink();
                 props.onMoreLinks();
               }}
-              onSeen={() => props.onMoreLinks(true)} />
+              onSeen={() => props.onMoreLinks(true)}
+            />
           ) : null}
         </>
       )}
@@ -869,22 +1024,25 @@ export function AboutLinksView(props: {
         <RetryRow testId="about-chat-links-failed" onRetry={props.onRetryChats} />
       ) : (
         <>
-          {chats.rows.length > 0 ? <ChatLinkList rows={chats.rows} onOpenChat={props.onOpenChat} /> : null}
+          {chats.rows.length > 0 ? (
+            <ChatLinkList rows={chats.rows} onOpenChat={props.onOpenChat} />
+          ) : null}
           {pagesOn(chats) ? (
-            <AboutMore testId="about-chat-links-more" watch={chats.rows}
+            <AboutMore
+              testId="about-chat-links-more"
+              watch={chats.rows}
               onMore={(focused) => {
                 if (focused) focusAddedChat();
                 props.onMoreChats();
               }}
-              onSeen={() => props.onMoreChats(true)} />
+              onSeen={() => props.onMoreChats(true)}
+            />
           ) : null}
         </>
       )}
     </AboutSection>
   );
 }
-
-// ---- History ----
 
 // The file History asks about. Its object id comes from the file's chats
 // read: loading until that answers, updating while the engine still reads the
@@ -939,28 +1097,51 @@ export function AboutHistory(props: {
   // revision is sure to come: an updating answer schedules the next read.
   // Any read that starts first replaces it.
   const nextRead = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const load = useCallback(async (updatingReads = 0) => {
-    if (objectId === null) return;
-    clearTimeout(nextRead.current);
-    const request = begin();
-    const failed = { status: "failed", retry: () => void load() } as const;
-    try {
-      const response = await bridge().listEngineMoments({ workspaceId, objectId, limit: HISTORY_READ });
-      if (!("status" in response)) {
-        request.settle({ status: "ready", moments: response.moments, more: response.nextCursor !== null });
-        return;
+  const load = useCallback(
+    async (updatingReads = 0) => {
+      if (objectId === null) return;
+      clearTimeout(nextRead.current);
+      const request = begin();
+      const failed = { status: "failed", retry: () => void load() } as const;
+      try {
+        const response = await bridge().listEngineMoments({
+          workspaceId,
+          objectId,
+          limit: HISTORY_READ,
+        });
+        if (!("status" in response)) {
+          request.settle({
+            status: "ready",
+            moments: response.moments,
+            more: response.nextCursor !== null,
+          });
+          return;
+        }
+        if (response.status === "updating") {
+          if (!request.current()) return;
+          request.settle({ status: "updating" });
+          nextRead.current = setTimeout(
+            () => void load(updatingReads + 1),
+            gatherDelay(updatingReads + 1),
+          );
+          return;
+        }
+        request.settle({
+          status: "held",
+          words: historyHiddenWords(response.unreadable),
+          retry: failed.retry,
+        });
+      } catch (error) {
+        request.fail(
+          failed,
+          ipcErrorMessage(error, "Could not load History for this file."),
+          error,
+          failed.retry,
+        );
       }
-      if (response.status === "updating") {
-        if (!request.current()) return;
-        request.settle({ status: "updating" });
-        nextRead.current = setTimeout(() => void load(updatingReads + 1), gatherDelay(updatingReads + 1));
-        return;
-      }
-      request.settle({ status: "held", words: historyHiddenWords(response.unreadable), retry: failed.retry });
-    } catch (error) {
-      request.fail(failed, ipcErrorMessage(error, "Could not load History for this file."), error, failed.retry);
-    }
-  }, [begin, objectId, workspaceId]);
+    },
+    [begin, objectId, workspaceId],
+  );
   useEffect(() => {
     if (!props.expanded || objectId === null) return;
     void load();
@@ -971,13 +1152,22 @@ export function AboutHistory(props: {
   }, [cancel, load, objectId, props.expanded, props.revision]);
 
   const view: HistoryView =
-    file.status === "loading" || file.status === "updating" ? file
-    : file.status === "failed" ? { status: "failed", retry: file.retry }
-    : file.objectId === null ? { status: "untracked" }
-    : read.view;
+    file.status === "loading" || file.status === "updating"
+      ? file
+      : file.status === "failed"
+        ? { status: "failed", retry: file.retry }
+        : file.objectId === null
+          ? { status: "untracked" }
+          : read.view;
   return (
-    <AboutHistoryView view={view} paused={props.paused} expanded={props.expanded} onToggle={props.onToggle}
-      onOpenMoment={props.onOpenMoment} {...(props.onOpenHistory ? { onOpenHistory: props.onOpenHistory } : {})} />
+    <AboutHistoryView
+      view={view}
+      paused={props.paused}
+      expanded={props.expanded}
+      onToggle={props.onToggle}
+      onOpenMoment={props.onOpenMoment}
+      {...(props.onOpenHistory ? { onOpenHistory: props.onOpenHistory } : {})}
+    />
   );
 }
 
@@ -995,25 +1185,30 @@ export function AboutHistoryView(props: {
   const { view } = props;
   // Consecutive changes fold as History folds them, so a run of edits is one row.
   const groups = useMemo(
-    () => view.status === "ready"
-      ? groupTimeline(view.moments.map((moment) => ({ kind: "file" as const, moment })))
-        .flatMap((item) => item.kind === "files" ? [item.group] : [])
-      : [],
+    () =>
+      view.status === "ready"
+        ? groupTimeline(view.moments.map((moment) => ({ kind: "file" as const, moment }))).flatMap(
+            (item) => (item.kind === "files" ? [item.group] : []),
+          )
+        : [],
     [view],
   );
   const shown = groups.slice(0, HISTORY_GROUPS);
   const readMore = view.status === "ready" && view.more;
   // The head counts changes, as a run's "5+ changes" does, not rows.
-  const count = view.status === "ready" ? `${view.moments.length}${readMore ? "+" : ""}` : undefined;
-  // The runs opened in place, by their key, which a newer edit on top keeps.
+  const count =
+    view.status === "ready" ? `${view.moments.length}${readMore ? "+" : ""}` : undefined;
   const [openRuns, setOpenRuns] = useState<ReadonlySet<string>>(() => new Set());
-  const toggleRun = (key: string) => setOpenRuns((open) => {
-    const next = new Set(open);
-    if (!next.delete(key)) next.add(key);
-    return next;
-  });
+  const toggleRun = (key: string) =>
+    setOpenRuns((open) => {
+      const next = new Set(open);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
   // Its words start where a row's name does.
-  const paused = props.paused ? <HistoryPaused testId="about-history-paused" className="px-2 py-1" /> : null;
+  const paused = props.paused ? (
+    <HistoryPaused testId="about-history-paused" className="px-2 py-1" />
+  ) : null;
   return (
     <AboutSection
       id="history"
@@ -1022,21 +1217,34 @@ export function AboutHistoryView(props: {
       empty={view.status === "ready" && view.moments.length === 0 && !view.more && !paused}
       expanded={props.expanded}
       onToggle={props.onToggle}
-      actions={props.onOpenHistory ? (
-        <AboutSectionAction testId="about-history-all" label="Open History" icon={History} onClick={props.onOpenHistory} />
-      ) : undefined}
+      actions={
+        props.onOpenHistory ? (
+          <AboutSectionAction
+            testId="about-history-all"
+            label="Open History"
+            icon={History}
+            onClick={props.onOpenHistory}
+          />
+        ) : undefined
+      }
     >
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />
       ) : view.status === "failed" ? (
         <RetryRow testId="about-history-failed" onRetry={view.retry} />
       ) : view.status === "untracked" ? (
-        <AboutNote testId="about-history-untracked">History does not track this file yet.</AboutNote>
+        <AboutNote testId="about-history-untracked">
+          History does not track this file yet.
+        </AboutNote>
       ) : view.status === "updating" ? (
-        paused ?? <HistoryUpdating testId="about-history-updating" className="px-2 py-1" />
+        (paused ?? <HistoryUpdating testId="about-history-updating" className="px-2 py-1" />)
       ) : view.status === "held" ? (
         // The words end in "try again", so the control they name is here.
-        <AboutNote testId="about-history-held" icon={EyeOff} action={{ label: "Try again", run: view.retry }}>
+        <AboutNote
+          testId="about-history-held"
+          icon={EyeOff}
+          action={{ label: "Try again", run: view.retry }}
+        >
           {view.words}
         </AboutNote>
       ) : view.moments.length === 0 ? (
@@ -1053,14 +1261,29 @@ export function AboutHistoryView(props: {
                   moment={newest!}
                   context="file"
                   onOpen={props.onOpenMoment}
-                  {...(earlier.length > 0 ? {
-                    // The read's last group may go on past it.
-                    fold: { count: moments.length, more: readMore && index === groups.length - 1, expanded, onToggle: () => toggleRun(key) },
-                  } : {})}
+                  {...(earlier.length > 0
+                    ? {
+                        // The read's last group may go on past it.
+                        fold: {
+                          count: moments.length,
+                          more: readMore && index === groups.length - 1,
+                          expanded,
+                          onToggle: () => toggleRun(key),
+                        },
+                      }
+                    : {})}
                 />
-                {expanded ? earlier.map((moment) => (
-                  <HistoryRow key={moment.id} moment={moment} context="file" nested={run ? "run" : "pass"} onOpen={props.onOpenMoment} />
-                )) : null}
+                {expanded
+                  ? earlier.map((moment) => (
+                      <HistoryRow
+                        key={moment.id}
+                        moment={moment}
+                        context="file"
+                        nested={run ? "run" : "pass"}
+                        onOpen={props.onOpenMoment}
+                      />
+                    ))
+                  : null}
               </li>
             );
           })}
@@ -1069,8 +1292,6 @@ export function AboutHistoryView(props: {
     </AboutSection>
   );
 }
-
-// ---- Access ----
 
 export type AccessView =
   | typeof LOADING
@@ -1098,9 +1319,15 @@ export type AccessNoun = "file" | "chat";
 // permission on a Collection, leaves only its owner: one row says so. A
 // listing that has not finished claims nothing.
 type EmptyWithin = { only: true } | { only: false; words: string };
-const EMPTY_WITHIN: Record<Exclude<AccessAnswer["coverage"]["kind"], "unavailable">, (noun: AccessNoun) => EmptyWithin> = {
+const EMPTY_WITHIN: Record<
+  Exclude<AccessAnswer["coverage"]["kind"], "unavailable">,
+  (noun: AccessNoun) => EmptyWithin
+> = {
   granted: () => ({ only: true }),
-  "received-own-grant": (noun) => ({ only: false, words: `No share to you includes this ${noun}.` }),
+  "received-own-grant": (noun) => ({
+    only: false,
+    words: `No share to you includes this ${noun}.`,
+  }),
   "received-account": (noun) => ({ only: false, words: `No share to you includes this ${noun}.` }),
   collection: () => ({ only: true }),
 };
@@ -1110,10 +1337,12 @@ function emptyWithin(answer: AccessAnswer, noun: AccessNoun): EmptyWithin | null
   return answer.freshness === "unknown" || kind === "unavailable" ? null : EMPTY_WITHIN[kind](noun);
 }
 
-// The one row an answer with nobody else shows.
 function OnlyYou() {
   return (
-    <span data-testid="about-access-empty" className="flex min-w-0 items-center gap-1 text-[12px] font-normal text-muted">
+    <span
+      data-testid="about-access-empty"
+      className="flex min-w-0 items-center gap-1 text-[12px] font-normal text-muted"
+    >
       <Lock size={12} aria-hidden className="shrink-0" />
       <span className="truncate">Only you</span>
     </span>
@@ -1134,7 +1363,9 @@ function OnlyYouRow() {
 // The count is who has access now: ended and damaged grants stay listed, but
 // do not count.
 function grantedCount(answer: AccessAnswer): string {
-  const active = answer.rows.filter((row) => row.kind === "collection" || row.status === "active").length;
+  const active = answer.rows.filter(
+    (row) => row.kind === "collection" || row.status === "active",
+  ).length;
   return `${active}${answer.nextCursor ? "+" : ""}`;
 }
 
@@ -1144,7 +1375,12 @@ function AccessRowView(props: { row: AccessRow }) {
     return (
       <div className={`${ABOUT_ROW} h-7`}>
         {row.appId === null ? (
-          <ChatAvatar presentation={neutralPresentation} name={row.principal} kind="human" size="strip" />
+          <ChatAvatar
+            presentation={neutralPresentation}
+            name={row.principal}
+            kind="human"
+            size="strip"
+          />
         ) : (
           <span className={`${MARK_BOX} text-subtle`}>
             <ObjectGlyph kind="app" size={14} />
@@ -1173,10 +1409,17 @@ function AccessRowView(props: { row: AccessRow }) {
       {row.via === "link" ? (
         <LinkMark />
       ) : (
-        <ChatAvatar presentation={row.via === "received" ? ownPresentation : neutralPresentation} name={who} kind="human" size="strip" />
+        <ChatAvatar
+          presentation={row.via === "received" ? ownPresentation : neutralPresentation}
+          name={who}
+          kind="human"
+          size="strip"
+        />
       )}
       {/* An ended or damaged grant is listed but not counted, so its name steps down from ink. */}
-      <span className={`min-w-0 flex-1 truncate ${row.status === "active" ? "text-ink" : ""}`}>{who}</span>
+      <span className={`min-w-0 flex-1 truncate ${row.status === "active" ? "text-ink" : ""}`}>
+        {who}
+      </span>
       {row.status !== "active" ? (
         <span className="shrink-0 text-[11px] text-muted">
           {row.status === "damaged" ? "damaged" : "ended"}
@@ -1189,7 +1432,9 @@ function AccessRowView(props: { row: AccessRow }) {
 }
 
 // What Access asks about: a file by its path, or a chat by its wire identity.
-export type AccessSubject = { kind: "path"; path: string } | { kind: "chat"; channelWireId: string };
+export type AccessSubject =
+  | { kind: "path"; path: string }
+  | { kind: "chat"; channelWireId: string };
 
 export function AboutAccess(props: {
   workspaceId: string;
@@ -1206,29 +1451,42 @@ export function AboutAccess(props: {
   const { facts, openSyncSettings, connect } = props.context;
   const noun = subject.kind === "path" ? "file" : "chat";
   const reason: AccessReason =
-    subject.kind === "path" ? accessReasonFor(facts, subject.path)
-    : props.received == null ? "unexplained"
-    : accessReasonForLane(facts, props.received ? "received" : "granted");
+    subject.kind === "path"
+      ? accessReasonFor(facts, subject.path)
+      : props.received == null
+        ? "unexplained"
+        : accessReasonForLane(facts, props.received ? "received" : "granted");
   // The workspace's server answers for its own shares only. What was shared
   // with this account may live on another, so that cause names none.
-  const owned = subject.kind === "path" ? !facts.shareView && !isSharedWithMePath(subject.path) : props.received === false;
+  const owned =
+    subject.kind === "path"
+      ? !facts.shareView && !isSharedWithMePath(subject.path)
+      : props.received === false;
   const server = owned ? props.context.server : null;
   // Only the owner shares a file further, from the same dialog as its header's Share.
   const { share } = props.context;
   const sharePath = owned && subject.kind === "path" && share ? subject.path : null;
   // The key names the subject in full, kind first so a path never reads as a
   // wire id, and a read keyed on it asks about the ref it was built from.
-  const subjectKey = subject.kind === "path" ? `file:${subject.path}` : `chat:${subject.channelWireId}`;
-  const ref: AccessObjectRef = subject.kind === "path"
-    ? { kind: "path", path: subject.path, versionId: null }
-    : { kind: "chat", channelWireId: subject.channelWireId };
+  const subjectKey =
+    subject.kind === "path" ? `file:${subject.path}` : `chat:${subject.channelWireId}`;
+  const ref: AccessObjectRef =
+    subject.kind === "path"
+      ? { kind: "path", path: subject.path, versionId: null }
+      : { kind: "chat", channelWireId: subject.channelWireId };
   // The server connection the last refresh was asked under. A new one, such
   // as a Connect server that signed in, refreshes and reads again. A session
   // change reads the status twice, passing through "checking" each time, so
   // only a connection that was read counts.
-  const connection = typeof facts.cloud === "string" ? facts.cloud
-    : `${facts.cloud.connected}:${facts.cloud.workspaceSynced}:${facts.cloud.workspaceSyncConnected}`;
-  const read = useSectionRead<AccessView>(`${workspaceId}\0${subjectKey}`, `about-access:${subjectKey}`, props.notices);
+  const connection =
+    typeof facts.cloud === "string"
+      ? facts.cloud
+      : `${facts.cloud.connected}:${facts.cloud.workspaceSynced}:${facts.cloud.workspaceSyncConnected}`;
+  const read = useSectionRead<AccessView>(
+    `${workspaceId}\0${subjectKey}`,
+    `about-access:${subjectKey}`,
+    props.notices,
+  );
   const { begin, cancel } = read;
   // One read: from the start, or the page after `after`. Asking main to
   // check again happens when a person opens the section or tries again, not
@@ -1240,7 +1498,9 @@ export function AboutAccess(props: {
       const retry = () => void load({ refresh: true });
       try {
         if (options.refresh) {
-          await bridge().requestAccessRefresh({ workspaceId, reason: "access-expand" }).catch(() => undefined);
+          await bridge()
+            .requestAccessRefresh({ workspaceId, reason: "access-expand" })
+            .catch(() => undefined);
           if (!request.current()) return;
         }
         const cursor = options.after?.nextCursor ?? undefined;
@@ -1257,10 +1517,17 @@ export function AboutAccess(props: {
         }
         request.settle({
           status: "ready",
-          answer: options.after ? { ...answer, rows: [...options.after.rows, ...answer.rows] } : answer,
+          answer: options.after
+            ? { ...answer, rows: [...options.after.rows, ...answer.rows] }
+            : answer,
         });
       } catch (error) {
-        request.fail({ status: "failed" }, ipcErrorMessage(error, `Could not check who has access to this ${noun}.`), error, retry);
+        request.fail(
+          { status: "failed" },
+          ipcErrorMessage(error, `Could not check who has access to this ${noun}.`),
+          error,
+          retry,
+        );
       }
     },
     // `ref` follows `subjectKey`.
@@ -1288,7 +1555,10 @@ export function AboutAccess(props: {
     if (closed && props.expanded) void load({ refresh: true });
   }, [load, props.expanded, sharing]);
 
-  const setup = useMemo<AccessSetup>(() => ({ reason, server, openSyncSettings, connect }), [connect, openSyncSettings, reason, server]);
+  const setup = useMemo<AccessSetup>(
+    () => ({ reason, server, openSyncSettings, connect }),
+    [connect, openSyncSettings, reason, server],
+  );
   return (
     <AboutAccessView
       view={read.view}
@@ -1308,7 +1578,12 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
   const { answer } = props;
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 px-2 pb-1">
-      <StateMark testId={props.testId} state={answer.freshness} shown={`access-${answer.freshness}`} className="shrink-0" />
+      <StateMark
+        testId={props.testId}
+        state={answer.freshness}
+        shown={`access-${answer.freshness}`}
+        className="shrink-0"
+      />
       {answer.checkedAtMs !== null ? (
         <time
           dateTime={formatChatTime(answer.checkedAtMs).iso}
@@ -1319,7 +1594,10 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
         </time>
       ) : null}
       {props.scope ? (
-        <span data-testid={`${props.testId}-scope`} className="whitespace-nowrap text-[11px] text-subtle">
+        <span
+          data-testid={`${props.testId}-scope`}
+          className="whitespace-nowrap text-[11px] text-subtle"
+        >
           {props.scope}
         </span>
       ) : null}
@@ -1350,7 +1628,11 @@ export function AccessUnknown(props: {
 }) {
   const { answer, setup, testId } = props;
   if (answer.visibility === "hidden") {
-    return <AboutNote testId={`${testId}-unknown`} reason="hidden" icon={EyeOff}>Shares do not include this {props.noun ?? "file"}.</AboutNote>;
+    return (
+      <AboutNote testId={`${testId}-unknown`} reason="hidden" icon={EyeOff}>
+        Shares do not include this {props.noun ?? "file"}.
+      </AboutNote>
+    );
   }
   if (answer.visibility === "missing") {
     return (
@@ -1360,29 +1642,46 @@ export function AccessUnknown(props: {
     );
   }
   switch (setup.reason) {
-    // Nothing explains the answer until the server connection is read, so
-    // nothing is claimed: it reads as still loading.
     case "checking":
       return <SkeletonLines rows={2} className="px-2 py-1" />;
     case "not-synced":
       return (
-        <AboutNote testId={`${testId}-unknown`} reason="not-synced" icon={CloudOff}
-          action={{ label: "Sync and sharing", run: setup.openSyncSettings }}>
+        <AboutNote
+          testId={`${testId}-unknown`}
+          reason="not-synced"
+          icon={CloudOff}
+          action={{ label: "Sync and sharing", run: setup.openSyncSettings }}
+        >
           Shares need sync, and this workspace does not sync.
         </AboutNote>
       );
     case "signed-out":
       return (
-        <AboutNote testId={`${testId}-unknown`} reason="signed-out" icon={LogIn}
-          action={{ label: "Connect server", run: setup.connect }}>
-          {setup.server ? <>Connect to <span className="font-medium">{serverName(setup.server)}</span> to check who has access.</> : props.signedOut}
+        <AboutNote
+          testId={`${testId}-unknown`}
+          reason="signed-out"
+          icon={LogIn}
+          action={{ label: "Connect server", run: setup.connect }}
+        >
+          {setup.server ? (
+            <>
+              Connect to <span className="font-medium">{serverName(setup.server)}</span> to check
+              who has access.
+            </>
+          ) : (
+            props.signedOut
+          )}
         </AboutNote>
       );
     // Settings' Sync and sharing says the same, and holds what resumes it.
     case "other-account":
       return (
-        <AboutNote testId={`${testId}-unknown`} reason="other-account" icon={CloudOff}
-          action={{ label: "Sync and sharing", run: setup.openSyncSettings }}>
+        <AboutNote
+          testId={`${testId}-unknown`}
+          reason="other-account"
+          icon={CloudOff}
+          action={{ label: "Sync and sharing", run: setup.openSyncSettings }}
+        >
           {SYNC_UNCONFIRMED_ACCOUNT} Resume sync to check who has access.
         </AboutNote>
       );
@@ -1390,9 +1689,18 @@ export function AccessUnknown(props: {
       return (
         <>
           <div className="px-2 pb-1">
-            <StateMark testId={`${testId}-freshness`} state={answer.freshness} shown="access-unknown" title={props.unexplained} />
+            <StateMark
+              testId={`${testId}-freshness`}
+              state={answer.freshness}
+              shown="access-unknown"
+              title={props.unexplained}
+            />
           </div>
-          <AboutNote testId={`${testId}-unknown`} reason="unexplained" action={{ label: "Try again", run: props.onRetry }}>
+          <AboutNote
+            testId={`${testId}-unknown`}
+            reason="unexplained"
+            action={{ label: "Try again", run: props.onRetry }}
+          >
             {props.unexplained}
           </AboutNote>
         </>
@@ -1430,12 +1738,21 @@ export function AboutAccessView(props: {
       count={view.status === "ready" && empty !== null ? grantedCount(view.answer) : undefined}
       empty={onlyYou}
       summary={onlyYou ? <OnlyYou /> : undefined}
-      {...(quietCheck && answer !== null && answer.checkedAtMs !== null ? { title: `Checked ${formatChatTime(answer.checkedAtMs).label}` } : {})}
+      {...(quietCheck && answer !== null && answer.checkedAtMs !== null
+        ? { title: `Checked ${formatChatTime(answer.checkedAtMs).label}` }
+        : {})}
       expanded={props.expanded}
       onToggle={props.onToggle}
-      actions={props.onShare ? (
-        <AboutSectionAction testId="about-access-share" label="Share file" icon={Share2} onClick={props.onShare} />
-      ) : undefined}
+      actions={
+        props.onShare ? (
+          <AboutSectionAction
+            testId="about-access-share"
+            label="Share file"
+            icon={Share2}
+            onClick={props.onShare}
+          />
+        ) : undefined
+      }
     >
       {view.status === "loading" ? (
         <SkeletonLines rows={2} className="px-2 py-1" />
@@ -1449,11 +1766,20 @@ export function AboutAccessView(props: {
           data-visibility={view.answer.visibility}
         >
           {empty === null ? (
-            <AccessUnknown testId="about-access" unexplained={unexplainedFor(noun)} signedOut={SIGNED_OUT_ACCESS} noun={noun}
-              answer={view.answer} setup={props.setup} onRetry={props.onRetry} />
+            <AccessUnknown
+              testId="about-access"
+              unexplained={unexplainedFor(noun)}
+              signedOut={SIGNED_OUT_ACCESS}
+              noun={noun}
+              answer={view.answer}
+              setup={props.setup}
+              onRetry={props.onRetry}
+            />
           ) : (
             <>
-              {quietCheck ? null : <AccessChecked testId="about-access-freshness" answer={view.answer} />}
+              {quietCheck ? null : (
+                <AccessChecked testId="about-access-freshness" answer={view.answer} />
+              )}
               {view.answer.rows.length > 0 ? null : !empty.only ? (
                 <AboutNote testId="about-access-empty">{empty.words}</AboutNote>
               ) : view.answer.coverage.complete && view.answer.nextCursor === null ? (
@@ -1463,13 +1789,22 @@ export function AboutAccessView(props: {
                 <>
                   <ul className="m-0 list-none p-0">
                     {view.answer.rows.map((row) => (
-                      <li key={row.kind === "share" ? `${row.shareId}\0${row.grantId}\0${row.via}` : row.principal}>
+                      <li
+                        key={
+                          row.kind === "share"
+                            ? `${row.shareId}\0${row.grantId}\0${row.via}`
+                            : row.principal
+                        }
+                      >
                         <AccessRowView row={row} />
                       </li>
                     ))}
                   </ul>
                   {view.answer.nextCursor !== null ? (
-                    <AboutMore testId="about-access-more" onMore={() => props.onMore(view.answer)} />
+                    <AboutMore
+                      testId="about-access-more"
+                      onMore={() => props.onMore(view.answer)}
+                    />
                   ) : null}
                 </>
               )}

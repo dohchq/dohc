@@ -17,7 +17,9 @@ export function RemoveAgentDialog(props: {
   if (automationAgent(settings)?.id === agent.id) {
     const { [agent.id]: _removed, ...rest } = settings.agents;
     const next = automationAgent({ agents: rest });
-    automations = next ? `Automations will wake ${next.name} instead.` : "Automations will have no agent to wake.";
+    automations = next
+      ? `Automations will wake ${next.name} instead.`
+      : "Automations will have no agent to wake.";
   }
   return (
     <ConfirmDialog
@@ -37,7 +39,11 @@ export function RemoveAgentDialog(props: {
 }
 
 /** Asks before a removed agent's chat leaves Archived. Its messages stay. */
-export function HideAgentChatDialog(props: { name: string; onCancel: () => void; onConfirm: () => void }) {
+export function HideAgentChatDialog(props: {
+  name: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
   return (
     <ConfirmDialog
       title={`Remove ${props.name}'s chat from the list?`}

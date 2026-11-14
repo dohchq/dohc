@@ -23,13 +23,26 @@ describe("updateMachine", () => {
     expect(checking).toMatchObject({ status: "checking", message: "Checking for updates…" });
 
     const available = transition(checking, { type: "available", version: "1.2.0" });
-    expect(available).toEqual({ status: "available", version: "1.2.0", message: "dohc 1.2.0 is available." });
+    expect(available).toEqual({
+      status: "available",
+      version: "1.2.0",
+      message: "dohc 1.2.0 is available.",
+    });
 
     const started = transition(available, { type: "download" });
-    expect(started).toEqual({ status: "downloading", version: "1.2.0", message: "Downloading update 1.2.0…" });
+    expect(started).toEqual({
+      status: "downloading",
+      version: "1.2.0",
+      message: "Downloading update 1.2.0…",
+    });
 
     const downloading = transition(started, { type: "progress", percent: 41.5 });
-    expect(downloading).toEqual({ status: "downloading", version: "1.2.0", percent: 41.5, message: "Downloading update 1.2.0, 42%" });
+    expect(downloading).toEqual({
+      status: "downloading",
+      version: "1.2.0",
+      percent: 41.5,
+      message: "Downloading update 1.2.0, 42%",
+    });
 
     const done = transition(downloading, { type: "downloaded", version: "1.2.0" });
     expect(done).toMatchObject({ status: "ready", version: "1.2.0" });
@@ -40,7 +53,9 @@ describe("updateMachine", () => {
     const available = run([{ type: "check" }, { type: "available", version: "1.2.0" }]);
     expect(transition(available, { type: "progress", percent: 10 })).toBe(available);
     expect(transition(available, { type: "downloaded", version: "1.2.0" })).toBe(available);
-    expect(run([{ type: "check" }, { type: "downloaded", version: "1.2.0" }]).status).toBe("checking");
+    expect(run([{ type: "check" }, { type: "downloaded", version: "1.2.0" }]).status).toBe(
+      "checking",
+    );
     expect(transition(initialUpdateState, { type: "download" })).toBe(initialUpdateState);
   });
 
@@ -52,7 +67,10 @@ describe("updateMachine", () => {
   });
 
   it("surfaces a failed check with its reason, then recovers via check", () => {
-    const failed = transition(run([{ type: "check" }]), { type: "error", message: "feed returned 500" });
+    const failed = transition(run([{ type: "check" }]), {
+      type: "error",
+      message: "feed returned 500",
+    });
     expect(failed).toEqual({ status: "error", message: "feed returned 500" });
     expect(transition(failed, { type: "check" }).status).toBe("checking");
   });
@@ -64,9 +82,16 @@ describe("updateMachine", () => {
       { type: "download" },
       { type: "progress", percent: 50 },
     ]);
-    for (const event of [{ type: "error", message: "sha512 checksum mismatch" }, { type: "offline" }] as const) {
+    for (const event of [
+      { type: "error", message: "sha512 checksum mismatch" },
+      { type: "offline" },
+    ] as const) {
       const failed = transition(downloading, event);
-      expect(failed).toEqual({ status: "available", version: "1.2.0", message: "dohc 1.2.0 is available." });
+      expect(failed).toEqual({
+        status: "available",
+        version: "1.2.0",
+        message: "dohc 1.2.0 is available.",
+      });
       expect(transition(failed, { type: "download" }).status).toBe("downloading");
     }
   });
@@ -109,8 +134,12 @@ describe("updateMachine", () => {
   });
 
   it("ignores stray progress/downloaded events outside a download", () => {
-    expect(transition(initialUpdateState, { type: "progress", percent: 10 })).toBe(initialUpdateState);
-    expect(transition(initialUpdateState, { type: "downloaded", version: "1.0.0" })).toBe(initialUpdateState);
+    expect(transition(initialUpdateState, { type: "progress", percent: 10 })).toBe(
+      initialUpdateState,
+    );
+    expect(transition(initialUpdateState, { type: "downloaded", version: "1.0.0" })).toBe(
+      initialUpdateState,
+    );
     const upToDate = run([{ type: "check" }, { type: "not-available" }]);
     expect(transition(upToDate, { type: "progress", percent: 10 })).toBe(upToDate);
   });
@@ -118,8 +147,12 @@ describe("updateMachine", () => {
 
 describe("release channel preload argument", () => {
   it("carries the build's channel from main to the preload", () => {
-    expect(releaseChannelFromArgv(["electron", ...releaseChannelPreloadArguments("nightly")])).toBe("nightly");
-    expect(releaseChannelFromArgv(["electron", ...releaseChannelPreloadArguments("latest")])).toBe("latest");
+    expect(releaseChannelFromArgv(["electron", ...releaseChannelPreloadArguments("nightly")])).toBe(
+      "nightly",
+    );
+    expect(releaseChannelFromArgv(["electron", ...releaseChannelPreloadArguments("latest")])).toBe(
+      "latest",
+    );
     expect(releaseChannelFromArgv(["electron"])).toBe("latest");
   });
 });

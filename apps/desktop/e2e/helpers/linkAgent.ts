@@ -74,13 +74,19 @@ export type LinkAgent = {
   // unless another is given.
   rpc(method: string, params?: Record<string, unknown>, accessToken?: string): Promise<Response>;
   // One tools/call: its HTTP status, and the tool's structured result when it answered.
-  tool(name: string, args?: Record<string, unknown>, accessToken?: string): Promise<{ status: number; result: Record<string, unknown> | null }>;
+  tool(
+    name: string,
+    args?: Record<string, unknown>,
+    accessToken?: string,
+  ): Promise<{ status: number; result: Record<string, unknown> | null }>;
   // A refresh_token grant at the token endpoint, naming this link's address unless another is given.
   refresh(refreshToken: string, resource?: string): Promise<Response>;
 };
 
 function record(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function text(value: unknown, field: string): string {
@@ -96,11 +102,13 @@ export function shareWebRequest(
   const target = new URL(url);
   const headers = new Headers(init.headers);
   headers.set("host", target.host);
-  return handle(new Request(target.href, {
-    method: init.method ?? "GET",
-    headers,
-    ...(init.body === undefined ? {} : { body: init.body }),
-  }));
+  return handle(
+    new Request(target.href, {
+      method: init.method ?? "GET",
+      headers,
+      ...(init.body === undefined ? {} : { body: init.body }),
+    }),
+  );
 }
 
 async function json(response: Response, status: number): Promise<Record<string, unknown>> {
@@ -113,7 +121,10 @@ async function json(response: Response, status: number): Promise<Record<string, 
 export async function rpcResult(response: Response): Promise<Record<string, unknown>> {
   const body = await response.text();
   const message = (response.headers.get("content-type") ?? "").startsWith("text/event-stream")
-    ? body.split("\n").find((line) => line.startsWith("data:"))?.slice("data:".length) ?? ""
+    ? (body
+        .split("\n")
+        .find((line) => line.startsWith("data:"))
+        ?.slice("data:".length) ?? "")
     : body;
   return record(record(JSON.parse(message)).result);
 }
@@ -121,7 +132,13 @@ export async function rpcResult(response: Response): Promise<Record<string, unkn
 // share-web serves MCP without transport sessions: each request builds its
 // own server, so a call needs no initialize first. remoteMcp.test.ts proves
 // that a real SDK client's initialize works there too.
-function rpc(handle: ShareWebHandle, resource: string, method: string, params: Record<string, unknown> | undefined, accessToken: string | undefined) {
+function rpc(
+  handle: ShareWebHandle,
+  resource: string,
+  method: string,
+  params: Record<string, unknown> | undefined,
+  accessToken: string | undefined,
+) {
   return shareWebRequest(handle, resource, {
     method: "POST",
     headers: {
@@ -147,17 +164,29 @@ export async function signInLinkAgent(input: {
   const { redirectUri } = callback;
   const unsigned = await rpc(handle, resource, "tools/list", undefined, undefined);
   expect(unsigned.status).toBe(401);
-  const metadataUrl = text(/resource_metadata="([^"]+)"/u.exec(unsigned.headers.get("www-authenticate") ?? "")?.[1], "resource_metadata");
+  const metadataUrl = text(
+    /resource_metadata="([^"]+)"/u.exec(unsigned.headers.get("www-authenticate") ?? "")?.[1],
+    "resource_metadata",
+  );
   const protectedResource = await json(await shareWebRequest(handle, metadataUrl), 200);
   expect(protectedResource.resource).toBe(resource);
   const servers = protectedResource.authorization_servers;
   const issuer = text(Array.isArray(servers) ? servers[0] : undefined, "authorization_servers");
-  const server = await json(await shareWebRequest(handle, `${issuer}/.well-known/oauth-authorization-server`), 200);
-  const registered = await json(await shareWebRequest(handle, text(server.registration_endpoint, "registration_endpoint"), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ redirect_uris: [redirectUri],...(input.clientName === undefined ? {} : { client_name: input.clientName }) }),
-  }), 201);
+  const server = await json(
+    await shareWebRequest(handle, `${issuer}/.well-known/oauth-authorization-server`),
+    200,
+  );
+  const registered = await json(
+    await shareWebRequest(handle, text(server.registration_endpoint, "registration_endpoint"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: [redirectUri],
+        ...(input.clientName === undefined ? {} : { client_name: input.clientName }),
+      }),
+    }),
+    201,
+  );
   const clientId = text(registered.client_id, "client_id");
 
   const verifier = randomBytes(32).toString("base64url");
@@ -171,7 +200,8 @@ export async function signInLinkAgent(input: {
     code_challenge_method: "S256",
     state,
     resource,
-  })) authorize.searchParams.set(name, value);
+  }))
+    authorize.searchParams.set(name, value);
 
   // A fresh context, so no consent cookie carries over from another agent.
   const context = await input.browser.newContext();
@@ -181,12 +211,20 @@ export async function signInLinkAgent(input: {
     await page.goto(authorize.href);
     await expect(page.getByRole("heading", { name: CONSENT_HEADING })).toBeVisible();
     // The page quotes the name the agent gave, and says nothing when it gave none.
-    if (input.clientName === undefined) await expect(page.getByText("is the name the agent gave")).toHaveCount(0);
-    else await expect(page.getByText(`"${input.clientName}" is the name the agent gave.`)).toBeVisible();
+    if (input.clientName === undefined)
+      await expect(page.getByText("is the name the agent gave")).toHaveCount(0);
+    else
+      await expect(
+        page.getByText(`"${input.clientName}" is the name the agent gave.`),
+      ).toBeVisible();
     // Allow posts the form, and the browser follows the 303 to the listener.
     await page.getByRole("button", { name: "Allow", exact: true }).click();
-    await page.waitForURL((url) =>
-      url.origin === callback.origin && url.pathname === "/callback" && url.searchParams.get("state") === state);
+    await page.waitForURL(
+      (url) =>
+        url.origin === callback.origin &&
+        url.pathname === "/callback" &&
+        url.searchParams.get("state") === state,
+    );
     await expect(page.getByRole("heading", { name: CALLBACK_HEADING })).toBeVisible();
     const answers = callback.received.filter((answer) => answer.query.get("state") === state);
     expect(answers).toHaveLength(1);
@@ -197,22 +235,28 @@ export async function signInLinkAgent(input: {
   }
 
   const tokenEndpoint = text(server.token_endpoint, "token_endpoint");
-  const tokens = await json(await shareWebRequest(handle, tokenEndpoint, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: clientId,
-      code,
-      code_verifier: verifier,
-      redirect_uri: redirectUri,
-      resource,
-    }).toString(),
-  }), 200);
+  const tokens = await json(
+    await shareWebRequest(handle, tokenEndpoint, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: clientId,
+        code,
+        code_verifier: verifier,
+        redirect_uri: redirectUri,
+        resource,
+      }).toString(),
+    }),
+    200,
+  );
   expect(tokens.token_type).toBe("Bearer");
   const accessToken = text(tokens.access_token, "access_token");
-  const call = (method: string, params: Record<string, unknown> | undefined, token: string | undefined) =>
-    rpc(handle, resource, method, params, token ?? accessToken);
+  const call = (
+    method: string,
+    params: Record<string, unknown> | undefined,
+    token: string | undefined,
+  ) => rpc(handle, resource, method, params, token ?? accessToken);
   return {
     clientId,
     accessToken,
@@ -226,12 +270,21 @@ export async function signInLinkAgent(input: {
         return { status: response.status, result: null };
       }
       const result = await rpcResult(response);
-      return { status: response.status, result: result.structuredContent === undefined ? null : record(result.structuredContent) };
+      return {
+        status: response.status,
+        result: result.structuredContent === undefined ? null : record(result.structuredContent),
+      };
     },
-    refresh: (refreshToken, target = resource) => shareWebRequest(handle, tokenEndpoint, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "refresh_token", client_id: clientId, refresh_token: refreshToken, resource: target }).toString(),
-    }),
+    refresh: (refreshToken, target = resource) =>
+      shareWebRequest(handle, tokenEndpoint, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: clientId,
+          refresh_token: refreshToken,
+          resource: target,
+        }).toString(),
+      }),
   };
 }

@@ -1,6 +1,24 @@
 import { useEffect, useId, useRef, useState, type ReactNode, type Ref } from "react";
-import { ChevronLeft, ChevronRight, CircleAlert, Clock, Eye, Link, LogIn, LogOut, MessageSquare, Minus, Package, Palette, Pencil, Trash2 } from "lucide-react";
-import { normalizeShareDiscussionDisplayName, SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT } from "@dohc/security-contract/share-discussion";
+import {
+  ChevronLeft,
+  ChevronRight,
+  CircleAlert,
+  Clock,
+  Eye,
+  Link,
+  LogIn,
+  LogOut,
+  MessageSquare,
+  Minus,
+  Package,
+  Palette,
+  Pencil,
+  Trash2,
+} from "lucide-react";
+import {
+  normalizeShareDiscussionDisplayName,
+  SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT,
+} from "@dohc/security-contract/share-discussion";
 import {
   PERSONAL_AGENT_REACH_LIMIT,
   type PersonalAgent,
@@ -45,11 +63,16 @@ const REACH_SHOWN = {
 } as const;
 
 // What each level lets the agent do, in the sign-in screen's words.
-const REACH_MEANINGS ="View reads files and chats. Comment also posts in chats and Comments. " +
+const REACH_MEANINGS =
+  "View reads files and chats. Comment also posts in chats and Comments. " +
   "Edit also changes Collections, but no other files.";
 
 /** One personal agent and the server account that holds it. */
-export type PersonalEntry = { account: PersonalAgentsAccount; roster: PersonalAgentRoster; agent: PersonalAgent };
+export type PersonalEntry = {
+  account: PersonalAgentsAccount;
+  roster: PersonalAgentRoster;
+  agent: PersonalAgent;
+};
 
 /** Every personal agent of every account whose roster dohc has read, in the account's order. */
 export function personalEntries(accounts: readonly PersonalAgentsAccount[]): PersonalEntry[] {
@@ -65,20 +88,33 @@ export function syncsTo(roster: PersonalAgentRoster | null, workspaceId: string)
 }
 
 /** The link an agent signs in with to reach this workspace. */
-export function agentLink(account: Pick<PersonalAgentsAccount, "agentLinkOrigin">, workspaceId: string): string {
+export function agentLink(
+  account: Pick<PersonalAgentsAccount, "agentLinkOrigin">,
+  workspaceId: string,
+): string {
   return `${account.agentLinkOrigin}/mcp/agent/w/${encodeURIComponent(workspaceId)}`;
 }
 
 /** Why a personal agent can't take this name, or null when it can. */
-export function personalNameProblem(value: string, taken: (name: string) => boolean): string | null {
+export function personalNameProblem(
+  value: string,
+  taken: (name: string) => boolean,
+): string | null {
   const name = normalizeShareDiscussionDisplayName(value);
-  if (!name.ok) return name.reason === "empty" ? "Enter an agent name." : `Use ${SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT} characters or fewer.`;
+  if (!name.ok)
+    return name.reason === "empty"
+      ? "Enter an agent name."
+      : `Use ${SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT} characters or fewer.`;
   return taken(name.value) ? NAME_TAKEN : null;
 }
 
 // The product and version the agent's program reported, or null when it reported neither.
-function reportedWords(agent: Pick<PersonalAgent, "reportedProduct" | "reportedVersion">): string | null {
-  const parts = [agent.reportedProduct, agent.reportedVersion].filter((part): part is string => part !== null);
+function reportedWords(
+  agent: Pick<PersonalAgent, "reportedProduct" | "reportedVersion">,
+): string | null {
+  const parts = [agent.reportedProduct, agent.reportedVersion].filter(
+    (part): part is string => part !== null,
+  );
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
@@ -90,7 +126,11 @@ export async function changePersonalAgent(
   failure: string,
 ): Promise<PersonalAgentChangeResult> {
   try {
-    return await bridge().changePersonalAgent({ accountKey: account.accountKey, agentId: agent.agentId, change });
+    return await bridge().changePersonalAgent({
+      accountKey: account.accountKey,
+      agentId: agent.agentId,
+      change,
+    });
   } catch (cause) {
     return { ok: false, error: ipcErrorMessage(cause, failure) };
   }
@@ -107,25 +147,45 @@ export function PersonalReachSheet(props: {
 }) {
   const { agent, roster } = props;
   const id = useId();
-  const [choices, setChoices] = useState<ReadonlyMap<string, Reach>>(() =>
-    new Map(roster.workspaces.map((workspace) => [
-      workspace.workspaceId,
-      agent.reach.find((entry) => entry.workspaceId === workspace.workspaceId)?.level ?? "none",
-    ] as const)));
+  const [choices, setChoices] = useState<ReadonlyMap<string, Reach>>(
+    () =>
+      new Map(
+        roster.workspaces.map(
+          (workspace) =>
+            [
+              workspace.workspaceId,
+              agent.reach.find((entry) => entry.workspaceId === workspace.workspaceId)?.level ??
+                "none",
+            ] as const,
+        ),
+      ),
+  );
   const [failure, setFailure] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const open = useRef(true);
-  useEffect(() => () => { open.current = false; }, []);
+  useEffect(
+    () => () => {
+      open.current = false;
+    },
+    [],
+  );
   const save = async () => {
     if (saving) return;
-    const reach = [...choices].flatMap(([workspaceId, level]) => (level === "none" ? [] : [{ workspaceId, level }]));
+    const reach = [...choices].flatMap(([workspaceId, level]) =>
+      level === "none" ? [] : [{ workspaceId, level }],
+    );
     if (reach.length > PERSONAL_AGENT_REACH_LIMIT) {
       setFailure(`Choose up to ${PERSONAL_AGENT_REACH_LIMIT} workspaces.`);
       return;
     }
     setSaving(true);
     setFailure(null);
-    const result = await changePersonalAgent(props.account, agent, { kind: "reach", reach }, "dohc could not save the reach.");
+    const result = await changePersonalAgent(
+      props.account,
+      agent,
+      { kind: "reach", reach },
+      "dohc could not save the reach.",
+    );
     if (!open.current) {
       if (!result.ok) props.onLateFailure(result.error);
       return;
@@ -149,17 +209,25 @@ export function PersonalReachSheet(props: {
         className="dohc-elevated dohc-pop-in flex w-[min(520px,calc(100vw-32px))] flex-col gap-4 rounded-xl border border-line bg-panel p-5"
       >
         <div className="flex flex-col gap-1">
-          <h2 id={`${id}-title`} className="m-0 break-words text-base font-semibold text-ink">Change what {agent.name} can reach</h2>
+          <h2 id={`${id}-title`} className="m-0 break-words text-base font-semibold text-ink">
+            Change what {agent.name} can reach
+          </h2>
           <p className="m-0 text-[12px] text-muted">{REACH_MEANINGS}</p>
         </div>
         {roster.workspaces.length === 0 ? (
-          <p className="m-0 text-[13px] text-muted">Sync a workspace to {props.account.host} to let {agent.name} reach it.</p>
+          <p className="m-0 text-[13px] text-muted">
+            Sync a workspace to {props.account.host} to let {agent.name} reach it.
+          </p>
         ) : (
           <div className="max-h-[min(360px,50vh)] overflow-y-auto rounded-lg border border-line bg-bg">
             {roster.workspaces.map((workspace) => {
               const name = workspace.name ?? "Unnamed workspace";
               return (
-                <div key={workspace.workspaceId} data-testid="personal-agent-reach-row" className={ROW}>
+                <div
+                  key={workspace.workspaceId}
+                  data-testid="personal-agent-reach-row"
+                  className={ROW}
+                >
                   <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{name}</span>
                   <span className="shrink-0">
                     <SegmentedControl
@@ -168,7 +236,9 @@ export function PersonalReachSheet(props: {
                       value={choices.get(workspace.workspaceId) ?? "none"}
                       options={REACH_OPTIONS}
                       disabled={saving}
-                      onChange={(level) => setChoices((current) => new Map(current).set(workspace.workspaceId, level))}
+                      onChange={(level) =>
+                        setChoices((current) => new Map(current).set(workspace.workspaceId, level))
+                      }
                     />
                   </span>
                 </div>
@@ -177,13 +247,23 @@ export function PersonalReachSheet(props: {
           </div>
         )}
         {failure ? (
-          <p role="alert" data-testid="personal-agent-reach-error" className="m-0 flex items-start gap-1.5 text-[12px] text-danger">
+          <p
+            role="alert"
+            data-testid="personal-agent-reach-error"
+            className="m-0 flex items-start gap-1.5 text-[12px] text-danger"
+          >
             <CircleAlert size={12} aria-hidden className="mt-0.5 shrink-0" />
             <span className="min-w-0">{failure}</span>
           </p>
         ) : null}
         <div className="flex items-center justify-end gap-2">
-          <SecondaryButton data-testid="personal-agent-reach-cancel" disabled={saving} onClick={props.onClose}>Cancel</SecondaryButton>
+          <SecondaryButton
+            data-testid="personal-agent-reach-cancel"
+            disabled={saving}
+            onClick={props.onClose}
+          >
+            Cancel
+          </SecondaryButton>
           <PrimaryButton type="submit" data-testid="personal-agent-reach-save" disabled={saving}>
             {saving ? "Saving…" : "Save reach"}
           </PrimaryButton>
@@ -203,7 +283,6 @@ export function PersonalReachSheet(props: {
 export function PersonalAgentPage(props: {
   entry: PersonalEntry;
   workspaceId: string;
-  // The rename field, shown in place of the name.
   nameField: ReactNode | null;
   onRename: () => void;
   onRemove: () => void;
@@ -222,10 +301,16 @@ export function PersonalAgentPage(props: {
   const reported = reportedWords(agent);
   const synced = syncsTo(roster, props.workspaceId);
   const signedIn = agent.signedInAtMs === null ? null : formatChatTime(agent.signedInAtMs);
-  const level = (workspaceId: string): Reach => agent.reach.find((entry) => entry.workspaceId === workspaceId)?.level ?? "none";
+  const level = (workspaceId: string): Reach =>
+    agent.reach.find((entry) => entry.workspaceId === workspaceId)?.level ?? "none";
 
   return (
-    <section data-testid="agent-page" data-agent-id={agent.agentId} data-status={agent.status} aria-label={agent.name}>
+    <section
+      data-testid="agent-page"
+      data-agent-id={agent.agentId}
+      data-status={agent.status}
+      aria-label={agent.name}
+    >
       <button
         ref={props.backRef}
         type="button"
@@ -233,32 +318,59 @@ export function PersonalAgentPage(props: {
         onClick={props.onBack}
         className="-ml-1 mb-4 inline-flex items-center gap-1 rounded px-1 text-[13px] text-muted hover:text-ink"
       >
-        <ChevronLeft size={14} aria-hidden />Agents
+        <ChevronLeft size={14} aria-hidden />
+        Agents
       </button>
       <div className="flex items-center gap-3">
         {/* A signed-out agent's header dims, as its row does. */}
-        <ChatAvatar name={agent.name} kind="agent" presentation={{ group: "", hue: agent.hue === "olive" ? null : agent.hue, self: false }} size="post"
-          className={signedOut ? "opacity-50" : undefined} />
+        <ChatAvatar
+          name={agent.name}
+          kind="agent"
+          presentation={{ group: "", hue: agent.hue === "olive" ? null : agent.hue, self: false }}
+          size="post"
+          className={signedOut ? "opacity-50" : undefined}
+        />
         <div className={`min-w-0 flex-1 ${signedOut ? "opacity-50" : ""}`}>
           {props.nameField ?? (
-            <button type="button" title="Rename" aria-label={`Rename ${agent.name}`} onClick={props.onRename}
-              className="block min-w-0 max-w-full truncate rounded text-left text-[15px] font-semibold text-ink">
+            <button
+              type="button"
+              title="Rename"
+              aria-label={`Rename ${agent.name}`}
+              onClick={props.onRename}
+              className="block min-w-0 max-w-full truncate rounded text-left text-[15px] font-semibold text-ink"
+            >
               {agent.name}
             </button>
           )}
           {props.nameField ? null : (
-            <p data-testid="agent-page-subtitle" className="m-0 mt-0.5 flex flex-wrap items-center gap-1 text-[12px] text-muted">
-              {handle ? <>
-                <span className="font-mono">@{handle}</span>
-                <span aria-hidden className="text-subtle">·</span>
-              </> : null}
-              <span className="inline-flex items-center gap-1"><Link size={12} aria-hidden />Through agent link</span>
-              <span aria-hidden className="text-subtle">·</span>
+            <p
+              data-testid="agent-page-subtitle"
+              className="m-0 mt-0.5 flex flex-wrap items-center gap-1 text-[12px] text-muted"
+            >
+              {handle ? (
+                <>
+                  <span className="font-mono">@{handle}</span>
+                  <span aria-hidden className="text-subtle">
+                    ·
+                  </span>
+                </>
+              ) : null}
+              <span className="inline-flex items-center gap-1">
+                <Link size={12} aria-hidden />
+                Through agent link
+              </span>
+              <span aria-hidden className="text-subtle">
+                ·
+              </span>
               <span className="min-w-0 truncate">{account.host}</span>
-              {signedOut ? <>
-                <span aria-hidden className="text-subtle">·</span>
-                <span>Signed out</span>
-              </> : null}
+              {signedOut ? (
+                <>
+                  <span aria-hidden className="text-subtle">
+                    ·
+                  </span>
+                  <span>Signed out</span>
+                </>
+              ) : null}
             </p>
           )}
         </div>
@@ -269,12 +381,25 @@ export function PersonalAgentPage(props: {
           onOpenChange={setMenuOpen}
           width={200}
           items={[
-            { id: "rename", label: "Rename", icon: <Pencil size={14} aria-hidden />, onSelect: props.onRename },
+            {
+              id: "rename",
+              label: "Rename",
+              icon: <Pencil size={14} aria-hidden />,
+              onSelect: props.onRename,
+            },
             // Remove waits for sign-out, so an agent at work never just goes.
-            ...(signedOut ? [
-              MENU_SEPARATOR,
-              { id: "remove", label: "Remove", icon: <Trash2 size={14} aria-hidden />, danger: true, onSelect: props.onRemove },
-            ] satisfies MenuEntry[] : []),
+            ...(signedOut
+              ? ([
+                  MENU_SEPARATOR,
+                  {
+                    id: "remove",
+                    label: "Remove",
+                    icon: <Trash2 size={14} aria-hidden />,
+                    danger: true,
+                    onSelect: props.onRemove,
+                  },
+                ] satisfies MenuEntry[])
+              : []),
           ]}
         />
       </div>
@@ -282,57 +407,93 @@ export function PersonalAgentPage(props: {
       <div data-testid="personal-agent-color" className={`${BOX} mt-5`}>
         <PageRow icon={<Palette size={14} />} label="Color" wrap>
           <span className="ml-auto">
-            <HueControl label={`Color of ${agent.name}`} shape="agent" value={agent.hue}
-              onChange={(hue) => void props.onChange({ kind: "hue", hue }, `dohc could not change ${agent.name}'s color.`)} />
+            <HueControl
+              label={`Color of ${agent.name}`}
+              shape="agent"
+              value={agent.hue}
+              onChange={(hue) =>
+                void props.onChange(
+                  { kind: "hue", hue },
+                  `dohc could not change ${agent.name}'s color.`,
+                )
+              }
+            />
           </span>
         </PageRow>
       </div>
 
       {/* A signed-out agent reaches nothing, so its page has no reach. */}
-      {signedOut ? null : <>
-        <div className="mb-1.5 mt-5 flex min-h-6 items-center gap-2">
-          <h4 className="m-0 mr-auto text-[12px] font-medium text-subtle">Reach</h4>
-          {roster.workspaces.length > 0 ? (
-            <SecondaryButton data-testid="personal-agent-reach" size="row" aria-label={`Change what ${agent.name} can reach`} onClick={() => setReaching(true)}>
-              Change
-            </SecondaryButton>
-          ) : null}
-        </div>
-        {roster.workspaces.length === 0 ? (
-          <p className="m-0 text-[12px] text-muted">Sync a workspace to {account.host} to let {agent.name} reach it.</p>
-        ) : (<>
-          <div data-testid="personal-agent-reach-list" className={BOX}>
-            {/* None rows stay, so the page lists every workspace Change offers. */}
-            {roster.workspaces.map((workspace) => {
-              const shown = REACH_SHOWN[level(workspace.workspaceId)];
-              const Icon = shown.icon;
-              return (
-                <PageRow key={workspace.workspaceId} testId="personal-agent-reach-entry" label={workspace.name ?? "Unnamed workspace"}>
-                  <span className={`${VALUE} ${shown.label === "None" ? "text-subtle" : ""}`}>
-                    <Icon size={12} aria-hidden />{shown.label}
-                  </span>
-                </PageRow>
-              );
-            })}
+      {signedOut ? null : (
+        <>
+          <div className="mb-1.5 mt-5 flex min-h-6 items-center gap-2">
+            <h4 className="m-0 mr-auto text-[12px] font-medium text-subtle">Reach</h4>
+            {roster.workspaces.length > 0 ? (
+              <SecondaryButton
+                data-testid="personal-agent-reach"
+                size="row"
+                aria-label={`Change what ${agent.name} can reach`}
+                onClick={() => setReaching(true)}
+              >
+                Change
+              </SecondaryButton>
+            ) : null}
           </div>
-          <p data-testid="personal-agent-reach-meanings" className="m-0 mt-1.5 text-[12px] text-muted">{REACH_MEANINGS}</p>
-        </>)}
-      </>}
+          {roster.workspaces.length === 0 ? (
+            <p className="m-0 text-[12px] text-muted">
+              Sync a workspace to {account.host} to let {agent.name} reach it.
+            </p>
+          ) : (
+            <>
+              <div data-testid="personal-agent-reach-list" className={BOX}>
+                {/* None rows stay, so the page lists every workspace Change offers. */}
+                {roster.workspaces.map((workspace) => {
+                  const shown = REACH_SHOWN[level(workspace.workspaceId)];
+                  const Icon = shown.icon;
+                  return (
+                    <PageRow
+                      key={workspace.workspaceId}
+                      testId="personal-agent-reach-entry"
+                      label={workspace.name ?? "Unnamed workspace"}
+                    >
+                      <span className={`${VALUE} ${shown.label === "None" ? "text-subtle" : ""}`}>
+                        <Icon size={12} aria-hidden />
+                        {shown.label}
+                      </span>
+                    </PageRow>
+                  );
+                })}
+              </div>
+              <p
+                data-testid="personal-agent-reach-meanings"
+                className="m-0 mt-1.5 text-[12px] text-muted"
+              >
+                {REACH_MEANINGS}
+              </p>
+            </>
+          )}
+        </>
+      )}
 
       <h4 className={SECTION}>Activity</h4>
       <div data-testid="personal-agent-activity" className={BOX}>
         {signedIn ? (
           <PageRow icon={<LogIn size={14} />} label="Signed in">
-            <span className={VALUE}><time dateTime={signedIn.iso}>{signedIn.label}</time></span>
+            <span className={VALUE}>
+              <time dateTime={signedIn.iso}>{signedIn.label}</time>
+            </span>
           </PageRow>
         ) : null}
         <PageRow icon={<Clock size={14} />} label="Last action">
-          <span className={VALUE}>{agent.lastActionAtMs === null ? "None yet" : relativeTime(agent.lastActionAtMs)}</span>
+          <span className={VALUE}>
+            {agent.lastActionAtMs === null ? "None yet" : relativeTime(agent.lastActionAtMs)}
+          </span>
         </PageRow>
         {reported ? (
           <PageRow icon={<Package size={14} />} label="Product">
             <span className={VALUE}>
-              <span className="min-w-0 break-words">{reported} <span className="text-subtle">as reported</span></span>
+              <span className="min-w-0 break-words">
+                {reported} <span className="text-subtle">as reported</span>
+              </span>
             </span>
           </PageRow>
         ) : null}

@@ -265,7 +265,6 @@ impl ImportPriority {
         }
     }
 
-    /// Ask the running import to capture `path` next.
     pub fn request(&self, path: &str) {
         let mut requested = self
             .requested

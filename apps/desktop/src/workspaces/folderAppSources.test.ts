@@ -13,8 +13,11 @@ describe("folder discovery sources", () => {
   });
   it("never requests a recursive workspace listing for a root app", async () => {
     const list = vi.fn(async () => ["dohc.json", "web/output/index.html", "neighbor/index.html"]);
-    const source = vi.fn(async (path: string) => path === "dohc.json"
-      ? { path, body: JSON.stringify({ type: "app", build: { output: "web/output" } }) } : path);
+    const source = vi.fn(async (path: string) =>
+      path === "dohc.json"
+        ? { path, body: JSON.stringify({ type: "app", build: { output: "web/output" } }) }
+        : path,
+    );
     const sources = await readFolderAppSources(".", { list, source });
     expect(list.mock.calls[0]).toEqual([{ path: ".", recursive: false }]);
     expect(list.mock.calls).not.toContainEqual([{ path: ".", recursive: true }]);

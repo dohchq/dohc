@@ -24,11 +24,25 @@ function mount(label: string, shareId = "share-target-test"): ShareMountRecord {
 
 describe("resolveRegisteredShareViewFilesTarget", () => {
   it("reads prior display paths without letting damaged display data affect protection", () => {
-    for (const snapshot of [{ paths: ["docs/local.yaml"], unchecked: true, checked: 1 }, { paths: null }]) {
-      const resolved = resolveRegisteredShareViewFilesTarget({ workspaceId, rootPath,
-        shareView: { shareId: "share", granterEmail: null, ended: false,
-          grantedSelector: { access: "view", paths: ["docs"], versionId: null },
-          unsavedPaths: ["docs/locked.md"], unconfirmedChanges: snapshot } }, { kind: "standalone", workspaceId });
+    for (const snapshot of [
+      { paths: ["docs/local.yaml"], unchecked: true, checked: 1 },
+      { paths: null },
+    ]) {
+      const resolved = resolveRegisteredShareViewFilesTarget(
+        {
+          workspaceId,
+          rootPath,
+          shareView: {
+            shareId: "share",
+            granterEmail: null,
+            ended: false,
+            grantedSelector: { access: "view", paths: ["docs"], versionId: null },
+            unsavedPaths: ["docs/locked.md"],
+            unconfirmedChanges: snapshot,
+          },
+        },
+        { kind: "standalone", workspaceId },
+      );
       expect(resolved?.unsavedPaths).toEqual(["docs/locked.md"]);
       expect(resolved?.unconfirmedChanges).toEqual(snapshot.paths === null ? undefined : snapshot);
     }
@@ -60,22 +74,30 @@ describe("resolveRegisteredShareViewFilesTarget", () => {
       rootPath: mountRootFor(rootPath, "owner"),
       mountLabel: "owner",
     });
-    expect(resolve(resolved!.rootPath)).not.toBe(
-      resolve(resolved!.schedulingRootPath),
-    );
+    expect(resolve(resolved!.rootPath)).not.toBe(resolve(resolved!.schedulingRootPath));
   });
 
-  // The engine keys a standalone view's open by its attachment, and that open
-  // is what lets the view write its refresh records in `.dohc/local`.
   it("carries a standalone view's attachment, and none for a mount's own store", () => {
     const attachmentId = Symbol("attached view");
     const record = mount("owner");
-    const shareView = { shareId: "share", granterEmail: null, ended: false,
-      grantedSelector: { access: "view", paths: ["docs"], versionId: null } };
-    expect(resolveRegisteredShareViewFilesTarget({ workspaceId, rootPath, attachmentId, shareView },
-      { kind: "standalone", workspaceId })?.attachmentId).toBe(attachmentId);
-    expect(resolveRegisteredShareViewFilesTarget({ workspaceId, rootPath, attachmentId, shareMounts: [record] },
-      { kind: "mount", workspaceId, shareId: record.shareId })).not.toHaveProperty("attachmentId");
+    const shareView = {
+      shareId: "share",
+      granterEmail: null,
+      ended: false,
+      grantedSelector: { access: "view", paths: ["docs"], versionId: null },
+    };
+    expect(
+      resolveRegisteredShareViewFilesTarget(
+        { workspaceId, rootPath, attachmentId, shareView },
+        { kind: "standalone", workspaceId },
+      )?.attachmentId,
+    ).toBe(attachmentId);
+    expect(
+      resolveRegisteredShareViewFilesTarget(
+        { workspaceId, rootPath, attachmentId, shareMounts: [record] },
+        { kind: "mount", workspaceId, shareId: record.shareId },
+      ),
+    ).not.toHaveProperty("attachmentId");
   });
 
   it("refuses an invalid mount label instead of falling back to the host root", () => {

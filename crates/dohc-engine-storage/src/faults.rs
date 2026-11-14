@@ -1,6 +1,4 @@
-//! Named fault points for the in-process crash-injection tier (`TEST_ORACLE.md`
-//! §3, tier 1). The storage crate implements the two highest-leverage storage-lane points;
-//! the registry grows one row per point as capability shards land.
+//! Named fault points for the in-process crash-injection tier.
 //!
 //! The trait seam lives here (not in the testkit) so `dohc-engine-storage`
 //! stays independent of its test harness while the *positions* — which are
@@ -8,21 +6,20 @@
 //! guard. The testkit depends on this crate and supplies a [`FaultInjector`]
 //! implementation.
 
-/// A stable-named position in the storage write pipeline. Names mirror the
-/// registry in `TEST_ORACLE.md` §3.1 (`family.position`).
+/// A stable-named position in the storage write pipeline. Names follow
+/// `family.position`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FaultPoint {
     /// Inside the open `BEGIN IMMEDIATE`, all mutation SQL issued, **before**
     /// the commit is made durable. A crash here ⇒ ROLLBACK ⇒ restart shows
-    /// the pre-op state (atomic rollback). `TEST_ORACLE.md` §3.1 point 2/3.
+    /// the pre-op state (atomic rollback).
     StorageBeforePersist,
     /// The transaction is durably committed but the response has **not** been
     /// delivered. A crash here ⇒ restart shows the post-op state; a retry with
-    /// the same idempotency key must be exactly-once. `TEST_ORACLE.md` §3.1
-    /// point 4 (the highest-priority gap in the TS engine).
+    /// the same idempotency key must be exactly-once.
     StorageAfterCommitBeforeAck,
 
-    // ---- migration runner (TEST_ORACLE §3.2 points 10/11) -----------------
+    // ---- migration runner -----------------
     /// Migration N committed, before migration N+1 begins. A crash here ⇒
     /// restart resumes idempotently from the ledger; no consumer observes the
     /// gap. `migrate.between-steps`.
@@ -34,7 +31,7 @@ pub enum FaultPoint {
     /// passes either way. `migrate.before-ledger-commit`.
     MigrateBeforeLedgerCommit,
 
-    // ---- backup pipeline (TEST_ORACLE §3.9 points 33/34) ------------------
+    // ---- backup pipeline ------------------
     /// Backup bytes copied, manifest not yet written. A crash here ⇒ the backup
     /// is invalid-by-absence-of-manifest; retention never counts it; retry
     /// produces a fresh verified backup. `backup.after-copy-before-manifest`.
@@ -43,7 +40,7 @@ pub enum FaultPoint {
     /// the "verified" flag is never set. `backup.during-restore-verify`.
     BackupDuringRestoreVerify,
 
-    // ---- materialization pipeline (TEST_ORACLE §3.3 points 12-16) ---------
+    // ---- materialization pipeline ---------
     // These positions live on the filesystem side (`dohc-engine-files`) but the
     // fault registry is shared and owned here, the core crate the testkit
     // depends on, so there is exactly one `FaultPoint` enum across the engine.
@@ -93,7 +90,7 @@ pub enum FaultPoint {
     /// `rollback.before-active-version-lookup`.
     RollbackBeforeActiveVersionLookup,
 
-    // ---- capture apply/ack (TEST_ORACLE §3.8 point 36) -------------------
+    // ---- capture apply/ack -------------------
     // This position lives on the filesystem/capture side
     // (`dohc-engine-files`) but the registry is shared here so the engine and
     // testkit still have exactly one `FaultPoint` enum.
@@ -110,7 +107,7 @@ pub enum FaultPoint {
     /// connection — the savepoint is what makes that hold. `search.mid-rebuild`.
     SearchIndexMidRebuild,
 
-    // ---- replication (TEST_ORACLE §3.5 points 22-26) --------------------
+    // ---- replication --------------------
     /// Inside the compound domain-mutation transaction.
     /// A crash leaves neither half visible. `sync.during-journal-txn`.
     SyncDuringJournalTxn,

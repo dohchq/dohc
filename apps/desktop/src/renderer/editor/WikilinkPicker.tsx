@@ -51,7 +51,11 @@ type Props = {
 function defaultDisplayName(file: WikilinkFile): string {
   return (
     (file.title ?? "").trim() ||
-    (file.path.replace(/\.(md|markdown)$/i, "").split("/").pop() ?? file.path)
+    (file.path
+      .replace(/\.(md|markdown)$/i, "")
+      .split("/")
+      .pop() ??
+      file.path)
   );
 }
 
@@ -97,13 +101,7 @@ export function applyWikilinkPick(
   view.focus();
 }
 
-export function WikilinkPicker({
-  state,
-  files,
-  view,
-  insertMode = "text",
-  onDismiss,
-}: Props) {
+export function WikilinkPicker({ state, files, view, insertMode = "text", onDismiss }: Props) {
   const [activeIdx, setActiveIdx] = useState(0);
   const listRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -169,7 +167,11 @@ export function WikilinkPicker({
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
         e.stopPropagation();
-        const next = moveInMenu(e, activeIdx, matches.map((file) => file.path));
+        const next = moveInMenu(
+          e,
+          activeIdx,
+          matches.map((file) => file.path),
+        );
         if (next !== null) setActiveIdx(next);
       } else if (e.key === "Enter") {
         e.preventDefault();
@@ -216,9 +218,7 @@ export function WikilinkPicker({
       }}
       role="listbox"
       aria-label="page links"
-      aria-activedescendant={
-        matches.length > 0 ? optionId(activeIdx) : undefined
-      }
+      aria-activedescendant={matches.length > 0 ? optionId(activeIdx) : undefined}
       onMouseDown={(e) => e.preventDefault()}
     >
       {matches.length === 0 ? (

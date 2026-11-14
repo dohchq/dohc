@@ -23,8 +23,7 @@ const slashStateRef: { current: SlashCommandState } = {
   current: CLOSED_SLASH_COMMAND_STATE,
 };
 const applySlashState: Dispatch<SetStateAction<SlashCommandState>> = (next) => {
-  slashStateRef.current =
-    typeof next === "function" ? next(slashStateRef.current) : next;
+  slashStateRef.current = typeof next === "function" ? next(slashStateRef.current) : next;
 };
 
 // Mirrors MarkdownEditor's dohcDecorations plugin order: the slash-command
@@ -149,7 +148,6 @@ describe("blockExit Mod-Enter escape", () => {
 
     expect(topLevelTypes(editor)).toEqual(["callout", "paragraph"]);
     expect(editor.state.doc.toString()).not.toContain("hardBreak");
-    // Caret sits in the new paragraph, ready to type.
     expect(editor.state.selection.$from.parent.type.name).toBe("paragraph");
     expect(editor.state.selection.$from.depth).toBe(1);
   });
@@ -312,7 +310,6 @@ describe("blockExit ArrowDown at document end", () => {
 
     press(editor, { key: "ArrowDown" });
 
-    // The menu consumed the key: selection moved in the menu, doc untouched.
     expect(editor.getJSON()).toEqual(before);
     expect(slashStateRef.current.open && slashStateRef.current.selected).toBe(1);
   });
@@ -344,7 +341,6 @@ describe("blockExit folded callout (toggle) guards", () => {
 
     press(editor, { key: "Backspace" });
 
-    // First press: nothing joined into the hidden body, callout selected.
     expect(editor.getJSON()).toEqual(before);
     expect(selectedNodeName(editor)).toBe("callout");
 
@@ -355,10 +351,7 @@ describe("blockExit folded callout (toggle) guards", () => {
   });
 
   it("Ctrl/Cmd-Backspace after a folded callout selects it without changing the doc", () => {
-    const modifiers: KeyboardEventInit[] = [
-      { ctrlKey: true },
-      { metaKey: true },
-    ];
+    const modifiers: KeyboardEventInit[] = [{ ctrlKey: true }, { metaKey: true }];
 
     for (const modifier of modifiers) {
       const editor = makeEditor("> [!note]- Title\n> hidden\n\nafter");
@@ -414,8 +407,6 @@ describe("blockExit folded callout (toggle) guards", () => {
   });
 });
 
-// These lock the DEFAULT escape/delete paths the fixes above build on — if a
-// future extension swallows them, callouts become traps again.
 describe("blockExit locked defaults", () => {
   it("Enter on the empty last child lifts out of the callout", () => {
     const editor = makeEditor("> [!note] Title\n> hello");
@@ -445,5 +436,4 @@ describe("blockExit locked defaults", () => {
 
     expect(topLevelTypes(editor)).toEqual(["mathBlock", "paragraph"]);
   });
-
 });

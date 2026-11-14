@@ -1,11 +1,4 @@
-import {
-  Files,
-  History,
-  MessageCircle,
-  Search,
-  Workflow,
-  type LucideIcon,
-} from "lucide-react";
+import { Files, History, MessageCircle, Search, Workflow, type LucideIcon } from "lucide-react";
 import type { ViewId } from "./workbenchState";
 
 // What the rail, the panel header, Settings and the palette call each of

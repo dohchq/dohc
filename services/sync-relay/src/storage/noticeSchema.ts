@@ -91,16 +91,25 @@ function sameSql(left: string, right: string): boolean {
   return normalize(left) === normalize(right);
 }
 
-function assertSchema(db: SqliteDb, schema: Record<string, string>, tables: readonly string[]): void {
+function assertSchema(
+  db: SqliteDb,
+  schema: Record<string, string>,
+  tables: readonly string[],
+): void {
   const objects = db
-    .prepare(`SELECT name, sql FROM sqlite_schema WHERE tbl_name IN (${tables.map(() => "?").join(", ")}) AND sql IS NOT NULL ORDER BY name`)
+    .prepare(
+      `SELECT name, sql FROM sqlite_schema WHERE tbl_name IN (${tables.map(() => "?").join(", ")}) AND sql IS NOT NULL ORDER BY name`,
+    )
     .all(...tables);
   const expected = Object.keys(schema).sort();
   if (
     objects.length !== expected.length ||
-    objects.some((row, index) => row.name !== expected[index] ||
-      typeof row.sql !== "string" ||
-      !sameSql(row.sql, schema[row.name as string]!))
+    objects.some(
+      (row, index) =>
+        row.name !== expected[index] ||
+        typeof row.sql !== "string" ||
+        !sameSql(row.sql, schema[row.name as string]!),
+    )
   ) {
     throw new Error("notice schema is missing or damaged");
   }
@@ -120,8 +129,15 @@ export function initializeShareNoticeDeliverySchema(db: SqliteDb): void {
     DELETE FROM sync_relay_share_notice_deliveries WHERE grant_id = NEW.grant_id; END`);
 }
 
-function initializeSchema(db: SqliteDb, schema: Record<string, string>, tables: readonly string[], marker: string): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(marker);
+function initializeSchema(
+  db: SqliteDb,
+  schema: Record<string, string>,
+  tables: readonly string[],
+  marker: string,
+): void {
+  const marked = db
+    .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+    .get(marker);
   if (marked) {
     assertSchema(db, schema, tables);
     return;
@@ -133,24 +149,42 @@ function initializeSchema(db: SqliteDb, schema: Record<string, string>, tables: 
   if (existing.length) throw new Error("unmarked notice schema already exists");
   for (const sql of Object.values(schema)) db.exec(sql);
   assertSchema(db, schema, tables);
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
-    .run(marker, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    marker,
+    Date.now(),
+  );
 }
 
 export function initializeNoticeSchema(db: SqliteDb): void {
   const postIndexMarker = "notice-post-index-v1";
-  const postIndexMarked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(postIndexMarker);
-  if (!postIndexMarked && db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(MARKER)) {
-    if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'idx_sync_relay_notices_post'").get()) {
+  const postIndexMarked = db
+    .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+    .get(postIndexMarker);
+  if (
+    !postIndexMarked &&
+    db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(MARKER)
+  ) {
+    if (
+      !db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'idx_sync_relay_notices_post'").get()
+    ) {
       db.exec(NOTICE_SCHEMA.idx_sync_relay_notices_post);
     }
   }
   initializeSchema(db, NOTICE_SCHEMA, [NOTICE_LISTS, NOTICES], MARKER);
-  if (!postIndexMarked) db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
-    .run(postIndexMarker, Date.now());
-  initializeSchema(db, DISMISSAL_SCHEMA, [NOTICE_DISMISSALS, NOTICE_DISMISSAL_FLOORS], DISMISSALS_MARKER);
-  initializeSchema(db, {
-    sync_relay_automation_wakes: `CREATE TABLE sync_relay_automation_wakes (
+  if (!postIndexMarked)
+    db.prepare(
+      "INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)",
+    ).run(postIndexMarker, Date.now());
+  initializeSchema(
+    db,
+    DISMISSAL_SCHEMA,
+    [NOTICE_DISMISSALS, NOTICE_DISMISSAL_FLOORS],
+    DISMISSALS_MARKER,
+  );
+  initializeSchema(
+    db,
+    {
+      sync_relay_automation_wakes: `CREATE TABLE sync_relay_automation_wakes (
       recipient_user_id TEXT NOT NULL,
       notice_id TEXT NOT NULL,
       payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
@@ -160,8 +194,8 @@ export function initializeNoticeSchema(db: SqliteDb): void {
       FOREIGN KEY (recipient_user_id, notice_id)
         REFERENCES sync_relay_notices(recipient_user_id, notice_id) ON DELETE CASCADE
     ) STRICT`,
-    // Receipts cover the server wake retry window, including superseded runs.
-    sync_relay_automation_wake_receipts: `CREATE TABLE sync_relay_automation_wake_receipts (
+      // Receipts cover the server wake retry window, including superseded runs.
+      sync_relay_automation_wake_receipts: `CREATE TABLE sync_relay_automation_wake_receipts (
       recipient_user_id TEXT NOT NULL,
       notice_id TEXT NOT NULL,
       workspace_id TEXT NOT NULL REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
@@ -172,7 +206,10 @@ export function initializeNoticeSchema(db: SqliteDb): void {
       winner_install_id TEXT,
       PRIMARY KEY (recipient_user_id, notice_id)
     ) STRICT`,
-    idx_sync_relay_wake_receipts_age: `CREATE INDEX idx_sync_relay_wake_receipts_age ON sync_relay_automation_wake_receipts(dismissed_at_ms)`,
-    idx_sync_relay_wake_superseded: `CREATE INDEX idx_sync_relay_wake_superseded ON sync_relay_automation_wake_receipts(recipient_user_id, superseded_by)`,
-  }, ["sync_relay_automation_wakes", "sync_relay_automation_wake_receipts"], "automation-wakes-v1");
+      idx_sync_relay_wake_receipts_age: `CREATE INDEX idx_sync_relay_wake_receipts_age ON sync_relay_automation_wake_receipts(dismissed_at_ms)`,
+      idx_sync_relay_wake_superseded: `CREATE INDEX idx_sync_relay_wake_superseded ON sync_relay_automation_wake_receipts(recipient_user_id, superseded_by)`,
+    },
+    ["sync_relay_automation_wakes", "sync_relay_automation_wake_receipts"],
+    "automation-wakes-v1",
+  );
 }

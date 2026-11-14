@@ -19,10 +19,6 @@ const asFile = { isSymbolicLink: () => false, isFile: () => true };
 const asLink = { isSymbolicLink: () => true, isFile: () => false };
 const asOther = { isSymbolicLink: () => false, isFile: () => false };
 
-// These four strings are the whole point of the module: the desktop and the
-// MCP server both refuse with them, so a noun that drifts here drifts on both
-// surfaces at once. Pinned by exact match, byte for byte — swapping "folder"
-// back to "directory" fails these first.
 describe("dohc guard refusals", () => {
   it("names a file's other link and a change during opening with recovery steps", () => {
     const guard = { ...DOHC_DATABASES_GUARD, path: ".dohc/databases/data/operations.jsonl" };
@@ -32,7 +28,9 @@ describe("dohc guard refusals", () => {
     expect(fileChangedWhileOpeningRefusal(guard)).toBe(
       "dohc could not save this database edit. The file at .dohc/databases/data/operations.jsonl changed while dohc opened it. Stop other programs from changing this file. Then retry.",
     );
-    expect(folderChangedBeforeWritingRefusal({ ...DOHC_DATABASES_GUARD, path: ".dohc/databases/data" })).toBe(
+    expect(
+      folderChangedBeforeWritingRefusal({ ...DOHC_DATABASES_GUARD, path: ".dohc/databases/data" }),
+    ).toBe(
       "dohc could not save this database edit. The folder at .dohc/databases/data changed before dohc could save the edit. Stop other programs from changing this folder. Then retry.",
     );
   });
@@ -52,7 +50,9 @@ describe("dohc guard refusals", () => {
     expect(notARealFolderRefusal(DOHC_ENGINE_GUARD, asFile)).toBe(
       "dohc could not start the engine for this workspace. A file is at .dohc/engine, which must be a real folder. Remove or rename that file. Then retry.",
     );
-    expect(notAFileRefusal({ ...DOHC_SYNC_HISTORY_GUARD, path: ".dohc/sync-history/synced" }, asLink)).toBe(
+    expect(
+      notAFileRefusal({ ...DOHC_SYNC_HISTORY_GUARD, path: ".dohc/sync-history/synced" }, asLink),
+    ).toBe(
       "dohc could not record this workspace's sync history. A link is at .dohc/sync-history/synced, which must be a file. Remove or rename that link. Then retry.",
     );
     expect(notAFileRefusal(DOHC_COLLECTIONS_GUARD, asLink)).toBe(
@@ -89,8 +89,6 @@ describe("dohc guard refusals", () => {
     );
   });
 
-  // The register test: no refusal may carry developer vocabulary, and none may
-  // stop before telling the user what to do.
   it("keeps every refusal in the user register with a next step", () => {
     const all = [
       notARealFolderRefusal(DOHC_TRASH_GUARD, asFile),

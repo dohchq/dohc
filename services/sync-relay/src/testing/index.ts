@@ -540,7 +540,8 @@ export function seedFullNoticeList(
     db.exec("BEGIN");
     db.prepare(
       `INSERT INTO sync_relay_notice_lists (recipient_user_id, change_seq, floor_seq, reach_token)
-       VALUES (?, ?, 0, NULL)`,
+       VALUES (?, ?, 0, NULL)
+       ON CONFLICT (recipient_user_id) DO UPDATE SET change_seq = MAX(change_seq, excluded.change_seq)`,
     ).run(input.recipientUserId, NOTICE_LIST_ROW_LIMIT);
     const insert = db.prepare(
       `INSERT INTO sync_relay_notices (
@@ -552,9 +553,17 @@ export function seedFullNoticeList(
     );
     for (let index = 0; index < NOTICE_LIST_ROW_LIMIT; index += 1) {
       const at = input.nowMs + index * (input.timeStepMs ?? 1);
-      insert.run(input.recipientUserId, `${input.idPrefix}${index}`, index + 1, input.workspaceId,
-        input.recipientUserId, input.senderLabel ?? "Self", input.originInstallId ?? "install-a",
-        at, at + NOTICE_UNREAD_RETENTION_MS);
+      insert.run(
+        input.recipientUserId,
+        `${input.idPrefix}${index}`,
+        index + 1,
+        input.workspaceId,
+        input.recipientUserId,
+        input.senderLabel ?? "Self",
+        input.originInstallId ?? "install-a",
+        at,
+        at + NOTICE_UNREAD_RETENTION_MS,
+      );
     }
     db.exec("COMMIT");
   } finally {

@@ -84,7 +84,8 @@ export function CloudAccountRow(props: {
   const latest = useRef(props);
   latest.current = props;
   const server =
-    canonicalCloudOrigin(props.serverUrl, bridge().insecureLoopbackServersForTests) ?? props.serverUrl.trim();
+    canonicalCloudOrigin(props.serverUrl, bridge().insecureLoopbackServersForTests) ??
+    props.serverUrl.trim();
 
   async function disconnect() {
     const request = requests.next();
@@ -100,12 +101,25 @@ export function CloudAccountRow(props: {
   return (
     <SettingRow
       title={props.email}
-      lead={<ChatAvatar presentation={props.presentation ?? ownPresentation} name={props.email} kind="human" size="row" />}
+      lead={
+        <ChatAvatar
+          presentation={props.presentation ?? ownPresentation}
+          name={props.email}
+          kind="human"
+          size="row"
+        />
+      }
       description={
         <span className="flex flex-wrap items-center gap-x-2">
-          <span data-testid="cloud-connected-server" className="font-mono">{server}</span>
+          <span data-testid="cloud-connected-server" className="font-mono">
+            {server}
+          </span>
           {props.networkAccess === "private" ? (
-            <Explained explanation={PRIVATE_NETWORK_EXPLANATION} testId="cloud-network-access-explanation" align="start">
+            <Explained
+              explanation={PRIVATE_NETWORK_EXPLANATION}
+              testId="cloud-network-access-explanation"
+              align="start"
+            >
               {(target) => (
                 <span
                   {...target}
@@ -126,7 +140,11 @@ export function CloudAccountRow(props: {
       }
       testId="settings-row-account"
     >
-      <Explained explanation={DISCONNECT_EXPLANATION} testId="cloud-disconnect-explanation" align="end">
+      <Explained
+        explanation={DISCONNECT_EXPLANATION}
+        testId="cloud-disconnect-explanation"
+        align="end"
+      >
         {({ show: _show, ...target }) => (
           <SecondaryButton
             {...target}

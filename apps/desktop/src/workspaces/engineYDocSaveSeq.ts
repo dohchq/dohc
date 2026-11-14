@@ -1,24 +1,3 @@
-// Per-session edit/settle bookkeeping behind the honest save indicator.
-//
-// Extracted from main.ts's IPC handlers because the interleaving that matters
-// cannot be driven through the Electron bootstrap.
-//
-// Pairing is by TOKEN, never by order. The capture mints one identity per
-// settle across provider generations and echoes it on the outcome, so this
-// module never reasons about which settle completes when. Arrival order does
-// not hold, for two independent reasons:
-//
-//   - An aborting settle (failed journal, or a synchronous local-edit throw)
-//     throws before it ever reaches `settleChain`, so it completes ahead of
-//     settles that queued before it.
-//   - `settleChain` is per GENERATION while this state is per SESSION, so a
-//     daemon revive races the old generation's in-flight settle against the
-//     new generation's.
-//
-// Both produce the same defect: a settle vouching for edits it never carried,
-// which is the single thing this mechanism exists to prevent. An order-based
-// queue was tried twice and was wrong twice.
-
 export interface EngineYDocSaveSeqState {
   /** Highest local-edit seq main has received from the renderer. */
   dirtySeq: number;
@@ -51,10 +30,7 @@ export function noteLocalEdit(state: EngineYDocSaveSeqState, seq: number): void 
  * A settle announced itself. Everything journaled up to now is what it is
  * guaranteed to carry, so that is the seq it may later vouch for.
  */
-export function noteSettleStart(
-  state: EngineYDocSaveSeqState,
-  token: number,
-): number {
+export function noteSettleStart(state: EngineYDocSaveSeqState, token: number): number {
   state.inFlight.set(token, state.dirtySeq);
   return state.dirtySeq;
 }
@@ -67,10 +43,7 @@ export function noteSettleStart(
  * 0 claims nothing, so the renderer keeps showing unsaved work — the safe
  * direction for an indicator whose whole job is to not lie.
  */
-export function noteSettleOutcome(
-  state: EngineYDocSaveSeqState,
-  token: number,
-): number {
+export function noteSettleOutcome(state: EngineYDocSaveSeqState, token: number): number {
   const seq = state.inFlight.get(token);
   if (seq === undefined) return 0;
   state.inFlight.delete(token);

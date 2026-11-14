@@ -4,7 +4,14 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ViewActions } from "../fileInspectorUi";
 import type { SettingsSaveState } from "../settings/SettingsDialog";
-import { ACCESS_STATE, SAVE_STATE, StateMark, type AccessStateKey, type SaveStateKey, type StatePresentation } from "./StateMark";
+import {
+  ACCESS_STATE,
+  SAVE_STATE,
+  StateMark,
+  type AccessStateKey,
+  type SaveStateKey,
+  type StatePresentation,
+} from "./StateMark";
 
 afterEach(cleanup);
 
@@ -23,13 +30,30 @@ describe("StateMark", () => {
     for (const key of KEYS) expect(SAVE_STATE[key].label).not.toBe("");
   });
 
-  it.each([false, true])("shows no chip for unknown, truncated=%s, and can later show Saved", truncate => {
-    const { rerender } = render(<StateMark testId="mark" state={{ kind: "unknown" }} shown={{ kind: "unknown" }} truncate={truncate} />);
-    expect(screen.queryByTestId("mark")).toBeNull();
-    rerender(<StateMark testId="mark" state={{ kind: "saved-here" }} shown={{ kind: "saved-here" }} truncate={truncate} />);
-    expect(screen.getByTestId("mark").textContent).toBe("Saved");
-    expect(screen.getByTestId("mark").getAttribute("data-state")).toBe("saved");
-  });
+  it.each([false, true])(
+    "shows no chip for unknown, truncated=%s, and can later show Saved",
+    (truncate) => {
+      const { rerender } = render(
+        <StateMark
+          testId="mark"
+          state={{ kind: "unknown" }}
+          shown={{ kind: "unknown" }}
+          truncate={truncate}
+        />,
+      );
+      expect(screen.queryByTestId("mark")).toBeNull();
+      rerender(
+        <StateMark
+          testId="mark"
+          state={{ kind: "saved-here" }}
+          shown={{ kind: "saved-here" }}
+          truncate={truncate}
+        />,
+      );
+      expect(screen.getByTestId("mark").textContent).toBe("Saved");
+      expect(screen.getByTestId("mark").getAttribute("data-state")).toBe("saved");
+    },
+  );
 
   it("fills the mark only for a state the file on disk has settled", () => {
     // "saved" is reported by the engine lease only after the settle that
@@ -53,7 +77,11 @@ describe("StateMark", () => {
   it("settles an access list only when main checked it within its window", () => {
     // Stale is the last list dohc received, and unknown is no list at all:
     // neither may read as done, and unknown must never read as no access.
-    expect((Object.keys(ACCESS_STATE) as AccessStateKey[]).filter((key) => ACCESS_STATE[key].mark === "settled")).toEqual(["access-fresh"]);
+    expect(
+      (Object.keys(ACCESS_STATE) as AccessStateKey[]).filter(
+        (key) => ACCESS_STATE[key].mark === "settled",
+      ),
+    ).toEqual(["access-fresh"]);
     // A stale list is settled but old: no check runs for it, so it never
     // takes the ring that says dohc is still working.
     expect(ACCESS_STATE["access-stale"].mark).toBe("dated");
@@ -72,7 +100,6 @@ describe("StateMark", () => {
       expect(chip.getAttribute("data-state")).toBe(key);
       expect(chip.textContent).toBe(SAVE_STATE[key].label);
       expect(chip.getAttribute("title")).toBe(SAVE_STATE[key].title ?? null);
-      // One decorative mark before the words, never a second accessible name.
       expect(container.querySelectorAll("[aria-hidden]")).toHaveLength(1);
       // Nothing moves, so reduced motion has nothing to switch off.
       expect(container.innerHTML).not.toMatch(/animate-|animation/u);
@@ -81,8 +108,6 @@ describe("StateMark", () => {
   });
 
   it("keeps the stored state when a different row is shown", () => {
-    // A disabled editor over a saved draft: the chip says why, but
-    // the shell still sees the draft's own state.
     render(<StateMark testId="mark" state="saved" shown="too-large" />);
     const chip = screen.getByTestId("mark");
     expect(chip.getAttribute("data-state")).toBe("saved");
@@ -108,25 +133,33 @@ describe("StateMark", () => {
   // narrow row hides the chip's words, never Try again.
   it("keeps Try again whole beside a state mark", () => {
     const { container } = render(
-      <ViewActions status={<StateMark testId="mark" truncate state="read-only" shown="read-only-transition" action={{ label: "Try again", run: () => undefined }} />} />,
+      <ViewActions
+        status={
+          <StateMark
+            testId="mark"
+            truncate
+            state="read-only"
+            shown="read-only-transition"
+            action={{ label: "Try again", run: () => undefined }}
+          />
+        }
+      />,
     );
     const status = container.querySelector<HTMLElement>("[data-view-status]")!;
     // Each column is as narrow as its item allows, so the button's own minimum counts.
     expect(status.className).toContain("auto-cols-[minmax(auto,max-content)]");
     const retry = screen.getByTestId("mark-action");
     expect(retry.parentElement).toBe(status);
-    expect(retry.className.split(" ")).toEqual(expect.arrayContaining(["shrink-0", "whitespace-nowrap"]));
+    expect(retry.className.split(" ")).toEqual(
+      expect.arrayContaining(["shrink-0", "whitespace-nowrap"]),
+    );
     expect(retry.closest(".truncate")).toBeNull();
-    // The chip has its own column and keeps room for its mark and an ellipsis.
     const chip = screen.getByTestId("mark");
     expect(chip.parentElement!.parentElement).toBe(status);
     expect(chip.parentElement!.className.split(" ")).toContain("min-w-[28px]");
     expect(chip.querySelector(".truncate")?.textContent).toBe("Read-only");
   });
 
-  // A narrow header cuts the label short. The chip then takes focus and its
-  // tooltip carries the whole label and what it means. Its test id and text
-  // stay as they were, and its title gives way to the tooltip while cut.
   describe("cut short", () => {
     // jsdom lays nothing out, so the test says how wide the label is.
     function laidOut(scrollWidth: number, clientWidth: number) {
@@ -135,7 +168,6 @@ describe("StateMark", () => {
         client: vi.spyOn(Element.prototype, "clientWidth", "get").mockReturnValue(clientWidth),
       };
     }
-    // ResizeObservers that report a resize when the test says so.
     function resizes() {
       const live = new Set<() => void>();
       vi.stubGlobal(
@@ -152,10 +184,14 @@ describe("StateMark", () => {
       );
       return () => act(() => live.forEach((callback) => callback()));
     }
-    // What a screen reader hears as the chip's description.
     function description(chip: HTMLElement) {
       const ids = chip.getAttribute("aria-describedby");
-      return ids === null ? null : ids.split(" ").map((id) => document.getElementById(id)?.textContent).join(" ");
+      return ids === null
+        ? null
+        : ids
+            .split(" ")
+            .map((id) => document.getElementById(id)?.textContent)
+            .join(" ");
     }
     afterEach(() => {
       vi.restoreAllMocks();
@@ -167,7 +203,10 @@ describe("StateMark", () => {
       render(<StateMark testId="mark" state="pending-share" shown="pending-share" truncate />);
       const chip = screen.getByTestId("mark");
       expect(chip.getAttribute("tabindex")).toBe("0");
-      expect(chip.getAttribute("title"), "the browser's own tooltip repeats this one a moment after hover").toBeNull();
+      expect(
+        chip.getAttribute("title"),
+        "the browser's own tooltip repeats this one a moment after hover",
+      ).toBeNull();
       expect(screen.queryByRole("tooltip")).toBeNull();
 
       await userEvent.setup().tab();
@@ -176,7 +215,6 @@ describe("StateMark", () => {
         "Saved locally · Pending shareYour edits are saved on this device. The shared file update is pending.",
       );
       expect(chip.textContent).toBe("Saved locally · Pending share");
-      // The chip's words are its label: its description is the explanation alone.
       expect(description(chip)).toBe(SAVE_STATE["pending-share"].title);
       expect(description(chip), "the label is read twice").not.toContain("Saved locally");
 
@@ -193,8 +231,6 @@ describe("StateMark", () => {
       expect(description(screen.getByTestId("mark"))).toBeNull();
     });
 
-    // Widening the pane, or a share going through, lets the label fit while
-    // the chip has focus.
     it("keeps focus when its label stops being cut, and leaves the tab order on blur", async () => {
       const widths = laidOut(300, 100);
       const resize = resizes();
@@ -221,20 +257,30 @@ describe("StateMark", () => {
       expect(chip.getAttribute("tabindex")).toBeNull();
     });
 
-    // A chip near a pane's left edge would push a right-aligned tooltip off
-    // the window, where a pane or panel edge cuts it off.
     it("keeps its tooltip under the chip and inside the window", async () => {
       laidOut(300, 100);
-      vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({ left: 40, right: 120, top: 10, bottom: 26, width: 80, height: 16, x: 40, y: 10, toJSON: () => ({}) });
+      vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
+        left: 40,
+        right: 120,
+        top: 10,
+        bottom: 26,
+        width: 80,
+        height: 16,
+        x: 40,
+        y: 10,
+        toJSON: () => ({}),
+      });
       vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(288);
       render(<StateMark testId="mark" state="pending-share" shown="pending-share" truncate />);
       await userEvent.setup().tab();
       const tooltip = screen.getByRole("tooltip");
-      expect(tooltip.style.left, "right-aligned to the chip, it starts 168px left of the window").toBe("4px");
+      expect(
+        tooltip.style.left,
+        "right-aligned to the chip, it starts 168px left of the window",
+      ).toBe("4px");
       expect(tooltip.style.top).toBe("30px");
     });
 
-    // The window shrinks, or the split moves, while the tooltip shows.
     it("follows the chip when the window or the chip changes size while it shows", async () => {
       laidOut(300, 100);
       const resize = resizes();
@@ -257,7 +303,10 @@ describe("StateMark", () => {
       act(() => {
         window.dispatchEvent(new Event("resize"));
       });
-      expect([tooltip.style.left, tooltip.style.top], "placed once, the tooltip stays where the chip was").toEqual(["180px", "70px"]);
+      expect(
+        [tooltip.style.left, tooltip.style.top],
+        "placed once, the tooltip stays where the chip was",
+      ).toEqual(["180px", "70px"]);
 
       chipBox = { left: 280, right: 330, top: 36, bottom: 52 };
       resize();

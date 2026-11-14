@@ -180,8 +180,6 @@ async fn accepted_frame_editor_case(case: EditorCase) {
     let claim = opened["lineageClaimId"].as_str().unwrap();
     let encoded = base64::engine::general_purpose::STANDARD.encode(&update);
     let attribution = json!({"actorKind":"agent","onBehalfOf":"local-person","depth":0});
-    // A draft append made against another claim, or against none, is refused
-    // before the draft changes.
     for stale in [json!(null), json!("replaced-claim")] {
         let error = service
             .ydoc_record_update(
@@ -237,7 +235,6 @@ async fn accepted_frame_editor_case(case: EditorCase) {
             .unwrap_err();
         assert_eq!(error.message, "owner-outbox-append-key-mismatch");
     }
-    // A person's edit declares no agent.
     let typed = doc.richdoc_append_paragraph("typed pending edit");
     let typed = json!({
         "sessionId":sid,
@@ -264,7 +261,6 @@ async fn accepted_frame_editor_case(case: EditorCase) {
         .await
         .unwrap_err();
     assert_eq!(error.message, "owner-outbox-frozen");
-    // Exercise the authenticated owner RPC while this real native editor stays open.
     let mut events = service.events.subscribe();
     let remote = Ydoc::wire();
     remote.apply(&bytes).unwrap();
@@ -374,8 +370,6 @@ async fn accepted_frame_editor_case(case: EditorCase) {
                 .await
                 .unwrap(),
         );
-        // Older frame rows are pruned. Their refusal must leave the newer
-        // session position intact.
         assert_eq!(
             service
                 .owner_delivery_apply(ctx, request, input)

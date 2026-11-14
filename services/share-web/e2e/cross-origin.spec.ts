@@ -1,11 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { type CDPSession, type Page } from "@playwright/test";
-import {
-  expect,
-  seedShare,
-  test,
-} from "./harness";
+import { expect, seedShare, test } from "./harness";
 
 interface ObservedNetworkResponse {
   body: Buffer;
@@ -51,15 +47,10 @@ async function fetchFromProbe(
           });
           await cdp.send("Fetch.continueResponse", { requestId: event.requestId });
           resolve({
-            body: Buffer.from(
-              encodedBody.body,
-              encodedBody.base64Encoded ? "base64" : "utf8",
-            ),
+            body: Buffer.from(encodedBody.body, encodedBody.base64Encoded ? "base64" : "utf8"),
             requestHeaders: lowerCaseHeaders(event.request.headers),
             responseHeaders: lowerCaseHeaders(
-              Object.fromEntries(
-                event.responseHeaders.map(({ name, value }) => [name, value]),
-              ),
+              Object.fromEntries(event.responseHeaders.map(({ name, value }) => [name, value])),
             ),
             status: event.responseStatusCode,
           });
@@ -125,10 +116,7 @@ test("separates cross-site Strict-cookie withholding from same-site CORS protect
   probe,
   stack,
 }) => {
-  const targetBytes = Buffer.from(
-    `iso8crossorigin-${randomBytes(24).toString("hex")}`,
-    "utf8",
-  );
+  const targetBytes = Buffer.from(`iso8crossorigin-${randomBytes(24).toString("hex")}`, "utf8");
   const seeded = await seedShare({
     relayUrl: stack.relayUrl,
     paths: ["docs"],
@@ -166,14 +154,12 @@ test("separates cross-site Strict-cookie withholding from same-site CORS protect
     const crossSite = await fetchFromProbe(cdp, page, probe.url, blobUrl);
     expect(crossSite.status).toBe(404);
     expectNoCorsPermission(crossSite);
-    expect(crossSite.requestHeaders["x-dohc-link-session"])
-      .toBeUndefined();
+    expect(crossSite.requestHeaders["x-dohc-link-session"]).toBeUndefined();
 
     const sameSite = await fetchFromProbe(cdp, page, probe.sameHostnameUrl, blobUrl);
     expect(sameSite.status).toBe(200);
     expectNoCorsPermission(sameSite);
-    expect(sameSite.requestHeaders["x-dohc-link-session"])
-      .toBeUndefined();
+    expect(sameSite.requestHeaders["x-dohc-link-session"]).toBeUndefined();
     expect(sameSite.body).toEqual(targetBytes);
   } finally {
     await cdp?.send("Fetch.disable").catch(() => {});

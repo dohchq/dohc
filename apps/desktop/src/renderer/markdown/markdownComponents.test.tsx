@@ -12,17 +12,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const TABLE = [
-  "| Field | Limit |",
-  "| --- | ---: |",
-  "| name | 214 |",
-  "| entry | 1024 |",
-].join("\n");
+const TABLE = ["| Field | Limit |", "| --- | ---: |", "| name | 214 |", "| entry | 1024 |"].join(
+  "\n",
+);
 
 function renderMarkdown(body: string) {
-  return render(
-    <IncrementalMarkdownDocument body={body} components={MARKDOWN_COMPONENTS} />,
-  );
+  return render(<IncrementalMarkdownDocument body={body} components={MARKDOWN_COMPONENTS} />);
 }
 
 describe("MARKDOWN_COMPONENTS tables", () => {
@@ -31,15 +26,18 @@ describe("MARKDOWN_COMPONENTS tables", () => {
 
     const table = view.container.querySelector("table");
     expect(table).not.toBeNull();
-    expect(
-      Array.from(table!.querySelectorAll("th")).map((cell) => cell.textContent),
-    ).toEqual(["Field", "Limit"]);
-    expect(
-      Array.from(table!.querySelectorAll("td")).map((cell) => cell.textContent),
-    ).toEqual(["name", "214", "entry", "1024"]);
+    expect(Array.from(table!.querySelectorAll("th")).map((cell) => cell.textContent)).toEqual([
+      "Field",
+      "Limit",
+    ]);
+    expect(Array.from(table!.querySelectorAll("td")).map((cell) => cell.textContent)).toEqual([
+      "name",
+      "214",
+      "entry",
+      "1024",
+    ]);
     expect(table!.querySelectorAll("tr")).toHaveLength(3);
 
-    // The whole point of the fix: the reader sees a table, never the source.
     expect(view.container.textContent).not.toContain("|");
     expect(view.container.textContent).not.toContain("---");
   });
@@ -77,7 +75,10 @@ describe("MARKDOWN_COMPONENTS tables", () => {
     // Tiptap's TableView: each column at least 120px, the table at least
     // their sum, so ten columns outgrow the 752px frame and scroll.
     const table = view.container.querySelector("table");
-    expect(table?.style.minWidth, "The table keeps only `width: 100%`, so a wide table squeezes its columns, then widens when the editor replaces it.").toBe("1200px");
+    expect(
+      table?.style.minWidth,
+      "The table keeps only `width: 100%`, so a wide table squeezes its columns, then widens when the editor replaces it.",
+    ).toBe("1200px");
     const cols = table?.querySelectorAll(":scope > colgroup > col") ?? [];
     expect(cols).toHaveLength(10);
     expect((cols[0] as HTMLTableColElement).style.minWidth).toBe("120px");
@@ -107,7 +108,10 @@ describe("read table row heights", () => {
   it("sets each stored row height on its row and hides the comment", () => {
     const view = renderMarkdown(`${annotated("1:84,2:120")}\n\nBelow the table.`);
 
-    expect(rowHeights(view.container), "The read body draws every row at its natural height, so rows grow when the editor replaces it.").toEqual(["", "84px", "120px"]);
+    expect(
+      rowHeights(view.container),
+      "The read body draws every row at its natural height, so rows grow when the editor replaces it.",
+    ).toEqual(["", "84px", "120px"]);
     expect(view.container.textContent).not.toContain("dohc:table");
     expect(view.container.textContent).toContain("Below the table.");
   });
@@ -150,7 +154,9 @@ describe("read table row heights", () => {
       expect(view.container.textContent, body).toContain(body.trim().split("\n")[0]);
       view.unmount();
     }
-    const fenced = renderMarkdown("```\n<!-- dohc:table row-heights=1:84 -->\n| A |\n| --- |\n| a |\n```");
+    const fenced = renderMarkdown(
+      "```\n<!-- dohc:table row-heights=1:84 -->\n| A |\n| --- |\n| a |\n```",
+    );
     expect(fenced.container.querySelector("table")).toBeNull();
     expect(fenced.container.querySelector("pre")?.textContent).toContain("row-heights=1:84");
   });
@@ -159,7 +165,9 @@ describe("read table row heights", () => {
     const view = renderMarkdown(annotated("1:84"));
     expect(rowHeights(view.container)).toEqual(["", "84px", ""]);
 
-    view.rerender(<IncrementalMarkdownDocument body={annotated("1:120")} components={MARKDOWN_COMPONENTS} />);
+    view.rerender(
+      <IncrementalMarkdownDocument body={annotated("1:120")} components={MARKDOWN_COMPONENTS} />,
+    );
     expect(rowHeights(view.container)).toEqual(["", "120px", ""]);
     view.rerender(<IncrementalMarkdownDocument body={TABLE} components={MARKDOWN_COMPONENTS} />);
     expect(rowHeights(view.container)).toEqual(["", "", ""]);
@@ -176,7 +184,9 @@ describe("read table row heights", () => {
     const view = renderMarkdown(body("1:84"));
     expect(rowHeights(view.container)).toEqual(["", "84px", ""]);
     expect(view.container.textContent).not.toContain("dohc:table");
-    view.rerender(<IncrementalMarkdownDocument body={body("2:120")} components={MARKDOWN_COMPONENTS} />);
+    view.rerender(
+      <IncrementalMarkdownDocument body={body("2:120")} components={MARKDOWN_COMPONENTS} />,
+    );
     expect(rowHeights(view.container)).toEqual(["", "", "120px"]);
   });
 });
@@ -202,7 +212,9 @@ describe("MARKDOWN_COMPONENTS code blocks", () => {
   it("shows an unknown language by its own name", () => {
     const view = renderMarkdown("```elixir\nIO.puts(1)\n```");
 
-    expect(view.container.querySelector(".dohc-code-block-toolbar-left")?.textContent).toBe("elixir");
+    expect(view.container.querySelector(".dohc-code-block-toolbar-left")?.textContent).toBe(
+      "elixir",
+    );
   });
 
   it("puts the toolbar just before its pre, where the editor's widget sits", async () => {

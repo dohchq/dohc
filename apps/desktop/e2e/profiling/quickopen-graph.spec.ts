@@ -1,11 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { activityPin, desktopPins } from "../../src/testPins";
 import { startLongTaskObserver, stopLongTaskObserver } from "./cdpCapture";
-import {
-  launchFixture,
-  readRendererMarks,
-  writeProfileArtifact,
-} from "./harness";
+import { launchFixture, readRendererMarks, writeProfileArtifact } from "./harness";
 
 test("profiles eight Quick Open keystrokes and Graph construction", async () => {
   const context = await launchFixture("large-flat", "profile-quickopen-graph");

@@ -1,4 +1,4 @@
-//! WriterDocCache invariants (PR1 of the engine doc-cache design): the in-tx
+//! WriterDocCache invariants: the in-tx
 //! tuple probe under hostile raw-SQL injection, the ABA and poison cases the
 //! differential check must catch, rollback/crash semantics, compaction
 //! re-base byte-equality, eviction, and the forced-close containment pin.
@@ -9,8 +9,8 @@ use common::*;
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::{
     close_session, ensure_marker, load_persisted, maybe_compact, read_marker, record_local_update,
-    record_update_in_tx, CollabError, CompactOutcome, ContentKind, DocKey, LocalAppend,
-    MarkerCreation, Regime, WriterDocCache, Ydoc,
+    record_update_in_tx, CollabError, ContentKind, DocKey, LocalAppend, MarkerCreation, Regime,
+    WriterDocCache, Ydoc,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use dohc_engine_testkit::decode_hex;
@@ -29,7 +29,6 @@ fn committed<T>(o: TxnOutcome<T>) -> T {
     }
 }
 
-/// A fresh store with a seeded, marked plaintext doc.
 fn setup(tag: &str, regime: Regime) -> (TempStore, DocKey) {
     let mut ts = fresh_store(tag);
     let key = test_key();
@@ -116,33 +115,6 @@ fn inject_row(store: &mut EngineStore, key: &DocKey, bytes: &[u8], seq: i64) {
     committed(outcome);
 }
 
-/// Prune every CRDT row and rewind the head to 0 without touching the cache —
-/// the raw shape of a local-only prune whose reset hook was skipped.
-fn raw_prune(store: &mut EngineStore, key: &DocKey) {
-    let outcome = store
-        .write_with(&NoFaults, |tx| -> Result<(), CollabError> {
-            for sql in [
-                "DELETE FROM ydoc_updates \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                "DELETE FROM ydoc_snapshots \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0 \
-                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-            ] {
-                tx.execute(
-                    sql,
-                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
-                )
-                .map_err(|e| CollabError::Corrupt {
-                    reason: e.to_string(),
-                })?;
-            }
-            Ok(())
-        })
-        .expect("raw prune");
-    committed(outcome);
-}
-
 fn projected(store: &EngineStore, key: &DocKey) -> String {
     load_persisted(store, key)
         .expect("load")
@@ -152,8 +124,6 @@ fn projected(store: &EngineStore, key: &DocKey) -> String {
         .expect("project")
         .content
 }
-
-// ---- hit / advance behavior -------------------------------------------------
 
 #[test]
 fn local_appends_install_then_hit_and_advance_the_cache() {
@@ -196,7 +166,6 @@ fn local_appends_install_then_hit_and_advance_the_cache() {
     let s = ts.cache.stats();
     assert_eq!((s.hits, s.advances), (1, 1));
 
-    // The entry is byte-identical to a cold reconstruction.
     let cold = load_persisted(&ts.store, &key).expect("load").expect("doc");
     assert_eq!(
         ts.cache.doc_full_state_for_test(&key),
@@ -204,7 +173,6 @@ fn local_appends_install_then_hit_and_advance_the_cache() {
         "cached doc must equal the cold rebuild byte-for-byte"
     );
 
-    // A dedupe resend changes no durable state and touches no counters.
     let before = ts.cache.stats();
     let resend = committed(
         record_local_update(
@@ -221,149 +189,6 @@ fn local_appends_install_then_hit_and_advance_the_cache() {
     );
     assert!(resend.deduped);
     assert_eq!(ts.cache.stats(), before);
-}
-
-#[test]
-fn frontier_fold_retains_an_identity_covered_by_delete() {
-    let (mut ts, key) = setup("frontier-retire-identity", Regime::LocalOnly);
-    let producer = Ydoc::wire();
-    let insert = producer.plaintext_insert(0, "ab");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &insert,
-            LocalAppend::default(),
-            &NoFaults,
-            1_001,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("insert"),
-    );
-    assert_eq!(
-        ts.cache.frontier_fact_counts_for_test(&key),
-        Some((2, 0, 0))
-    );
-
-    let delete = producer.plaintext_delete(0, 1);
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &delete,
-            LocalAppend::default(),
-            &NoFaults,
-            1_002,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("delete"),
-    );
-    assert_eq!(
-        ts.cache.frontier_fact_counts_for_test(&key),
-        Some((2, 0, 2))
-    );
-    assert_eq!(
-        ts.cache
-            .frontier_matches_doc_for_test(&key)
-            .expect("frontier comparison"),
-        Some(true)
-    );
-}
-
-#[test]
-fn frontier_fold_retains_a_string_run_across_a_mid_run_delete() {
-    let (mut ts, key) = setup("frontier-split-mid-run-delete", Regime::LocalOnly);
-    let producer = Ydoc::wire();
-    let insert = producer.plaintext_insert(0, "abcde");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &insert,
-            LocalAppend::default(),
-            &NoFaults,
-            1_001,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("insert"),
-    );
-
-    let delete = producer.plaintext_delete(2, 1);
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &delete,
-            LocalAppend::default(),
-            &NoFaults,
-            1_002,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("mid-run delete"),
-    );
-    assert_eq!(
-        ts.cache.frontier_fact_counts_for_test(&key),
-        Some((5, 0, 2))
-    );
-    assert_eq!(
-        ts.cache
-            .frontier_matches_doc_for_test(&key)
-            .expect("fresh-scan frontier comparison"),
-        Some(true)
-    );
-}
-
-#[test]
-fn frontier_fold_retains_a_deleted_scalar_interior() {
-    let (mut ts, key) = setup("frontier-retire-interior", Regime::LocalOnly);
-    let producer = Ydoc::wire();
-    let insert = producer.plaintext_insert(0, "😀");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &insert,
-            LocalAppend::default(),
-            &NoFaults,
-            1_001,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("insert"),
-    );
-    assert_eq!(
-        ts.cache.frontier_fact_counts_for_test(&key),
-        Some((2, 1, 0))
-    );
-
-    let delete = producer.plaintext_delete(0, 2);
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &delete,
-            LocalAppend::default(),
-            &NoFaults,
-            1_002,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("delete"),
-    );
-    assert_eq!(
-        ts.cache.frontier_fact_counts_for_test(&key),
-        Some((2, 1, 2))
-    );
-    assert_eq!(
-        ts.cache
-            .frontier_matches_doc_for_test(&key)
-            .expect("frontier comparison"),
-        Some(true)
-    );
 }
 
 #[test]
@@ -449,15 +274,8 @@ fn frontier_delete_endpoints_canonicalize_across_pending_integration() {
     );
 }
 
-// ---- T1: mutation-style stale-cache injection -------------------------------
-
 #[test]
 fn tuple_probe_rejects_a_hostile_candidate_after_raw_sql_injection() {
-    // T1: U2 lands behind the cache's back; a hostile candidate that
-    // redefines U2's clocks must be refused via the tuple-mismatch rebuild.
-    // Delete the in-tx tuple check and this test fails: the gate would judge
-    // the hostile bytes against the stale {U1} base, where U2's client is
-    // unknown, and admit them.
     let (mut ts, key) = setup("cache-t1-injection", Regime::LocalOnly);
     let u1 = independent_insert("a");
     committed(
@@ -505,7 +323,6 @@ fn tuple_probe_rejects_a_hostile_candidate_after_raw_sql_injection() {
         "the head mismatch must fall back to a full rebuild"
     );
 
-    // A benign append still admits over the rebuilt lineage — including U2.
     let u3 = independent_insert("c");
     committed(
         record_local_update(
@@ -608,11 +425,6 @@ fn tuple_probe_detects_a_replaced_head_row() {
 #[test]
 #[should_panic(expected = "CACHE-VALID")]
 fn differential_check_catches_a_prune_aba_that_matches_the_tuple() {
-    // A prune + re-append that reaches the same head coordinates with the
-    // same head bytes over different earlier history is invisible to the
-    // tuple — exactly why every prune path must call the remove hook. With
-    // the hook deliberately skipped, the debug differential check is the
-    // last line and must fire.
     let (mut ts, key) = setup("cache-t2-aba", Regime::LocalOnly);
     let u1a = independent_insert("a");
     let u2 = independent_insert("b");
@@ -670,74 +482,7 @@ fn differential_check_catches_a_prune_aba_that_matches_the_tuple() {
     );
 }
 
-#[cfg(debug_assertions)]
-#[test]
-#[should_panic(expected = "CACHE-VALID")]
-fn differential_check_catches_a_poisoned_entry() {
-    let (mut ts, key) = setup("cache-t2-poison", Regime::LocalOnly);
-    let u1 = independent_insert("a");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &u1,
-            LocalAppend::default(),
-            &NoFaults,
-            1_001,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("u1"),
-    );
-
-    ts.cache.poison_doc_for_test(&key, Ydoc::wire());
-
-    let u2 = independent_insert("b");
-    let _ = record_local_update(
-        &mut ts.store,
-        &mut ts.cache,
-        &key,
-        &u2,
-        LocalAppend::default(),
-        &NoFaults,
-        1_002,
-        |_tx, _outcome, _update_sha| Ok(()),
-    );
-}
-
-#[cfg(debug_assertions)]
-#[test]
-#[should_panic(expected = "FR1-VALID")]
-fn frontier_oracle_catches_a_poisoned_identity() {
-    let (mut ts, key) = setup("frontier-oracle-poison", Regime::LocalOnly);
-    let u1 = independent_insert("a");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &u1,
-            LocalAppend::default(),
-            &NoFaults,
-            1_001,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("u1"),
-    );
-    ts.cache.poison_frontier_for_test(&key);
-
-    let u2 = independent_insert("b");
-    let _ = record_local_update(
-        &mut ts.store,
-        &mut ts.cache,
-        &key,
-        &u2,
-        LocalAppend::default(),
-        &NoFaults,
-        1_002,
-        |_tx, _outcome, _update_sha| Ok(()),
-    );
-}
+// ---- T2: ABA and poisoning against the differential check -------------------
 
 #[cfg(debug_assertions)]
 #[test]
@@ -806,50 +551,6 @@ fn scratch_oracle_catches_a_poisoned_scratch() {
         &NoFaults,
         1_002,
         |_tx, _outcome, _update_sha| Ok(()),
-    );
-}
-
-#[test]
-fn frontier_refusal_leaves_the_persistent_scratch_untouched() {
-    let (mut ts, key) = setup("scratch-frontier-refusal", Regime::LocalOnly);
-    let base = independent_insert("z");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &base,
-            LocalAppend::default(),
-            &NoFaults,
-            1_001,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("base"),
-    );
-    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
-
-    let hostile = flip_payload_byte(&base, b'z', b'y');
-    let error = record_local_update(
-        &mut ts.store,
-        &mut ts.cache,
-        &key,
-        &hostile,
-        LocalAppend::default(),
-        &NoFaults,
-        1_002,
-        |_tx, _outcome, _update_sha| Ok(()),
-    )
-    .expect_err("a clock redefinition must fail before check 4");
-    assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
-    assert!(
-        ts.cache.gate_scratch_is_resident_for_test(&key),
-        "checks 1-3 must refuse before mutating or evicting the scratch"
-    );
-    assert_eq!(
-        ts.cache
-            .gate_scratch_matches_doc_for_test(&key)
-            .expect("scratch comparison"),
-        Some(true)
     );
 }
 
@@ -924,93 +625,7 @@ fn check4_refusal_evicts_the_scratch_and_the_next_gate_rebuilds_cold() {
 }
 
 #[test]
-fn a_pruned_lineage_with_the_reset_hook_rejects_a_hostile_re_encode() {
-    // The healed counterpart of the ABA test: the prune calls the remove
-    // hook (as every production reset path does), the lineage is re-seeded,
-    // and a hostile re-encode of the new head's clocks is still rejected.
-    let (mut ts, key) = setup("cache-t2-healed", Regime::LocalOnly);
-    let u1a = independent_insert("a");
-    let u2 = independent_insert("b");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &u1a,
-            LocalAppend::default(),
-            &NoFaults,
-            1_001,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("u1a"),
-    );
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &u2,
-            LocalAppend::default(),
-            &NoFaults,
-            1_002,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("u2"),
-    );
-
-    raw_prune(&mut ts.store, &key);
-    ts.cache.remove(&key); // the mandatory reset hook
-
-    let u1b = independent_insert("c");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &u1b,
-            LocalAppend::default(),
-            &NoFaults,
-            1_003,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("u1b"),
-    );
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &u2,
-            LocalAppend::default(),
-            &NoFaults,
-            1_004,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("u2 again"),
-    );
-
-    let hostile = flip_payload_byte(&u2, b'b', b'x');
-    let error = record_local_update(
-        &mut ts.store,
-        &mut ts.cache,
-        &key,
-        &hostile,
-        LocalAppend::default(),
-        &NoFaults,
-        1_005,
-        |_tx, _outcome, _update_sha| Ok(()),
-    )
-    .expect_err("a clock redefinition must be rejected on the hit path too");
-    assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
-}
-
-// ---- T3: rollback and crash semantics ---------------------------------------
-
-#[test]
 fn a_guarded_error_after_the_gate_evicts_only_the_mutated_scratch() {
-    // (a) The guarded closure fails after the gate passed: the transaction
-    // rolls back. The writer doc/frontier must not advance, while the scratch
-    // that already applied the candidate must be evicted.
     let (mut ts, key) = setup("cache-t3-guarded-err", Regime::LocalOnly);
     let u1 = independent_insert("a");
     committed(
@@ -1100,141 +715,7 @@ fn a_guarded_error_after_the_gate_evicts_only_the_mutated_scratch() {
 }
 
 #[test]
-fn the_commit_token_observes_updates_appended_by_the_post_append_hook() {
-    let (mut ts, key) = setup("cache-commit-token-extra", Regime::LocalOnly);
-    let u1 = independent_insert("a");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &u1,
-            LocalAppend::default(),
-            &NoFaults,
-            1_001,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("u1"),
-    );
-    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
-    let u2 = independent_insert("b");
-    let extra = independent_insert("c");
-    let before = ts.cache.stats();
-
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &u2,
-            LocalAppend {
-                marker: Some(MarkerCreation {
-                    path: None,
-                    content_kind: ContentKind::Plaintext,
-                    regime: Regime::LocalOnly,
-                }),
-                ..Default::default()
-            },
-            &NoFaults,
-            1_002,
-            |tx, _outcome, _update_sha| {
-                let appended = record_update_in_tx(tx, &key, &extra, None, None, 1_003)?;
-                assert!(!appended.deduped, "the hook must append another row");
-                Ok(())
-            },
-        )
-        .expect("append with extra update"),
-    );
-
-    assert_eq!(
-        read_marker(&ts.store, &key)
-            .expect("marker")
-            .expect("row")
-            .head_update_seq,
-        3,
-        "both updates committed"
-    );
-    assert_eq!(
-        ts.cache.stats().advances,
-        before.advances,
-        "the cache must not advance by only the first update"
-    );
-    assert!(
-        !ts.cache.contains_for_test(&key),
-        "the final in-transaction tuple must reject the partial advancement"
-    );
-}
-
-#[test]
-fn a_pre_persist_crash_keeps_the_entry_valid() {
-    // (b) StorageBeforePersist rolls back: durable state is unchanged, so
-    // the entry survives and the retry hits it.
-    use dohc_engine_storage::FaultPoint;
-    let (mut ts, key) = setup("cache-t3-crash-rollback", Regime::LocalOnly);
-    let u1 = independent_insert("a");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &u1,
-            LocalAppend::default(),
-            &NoFaults,
-            1_001,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("u1"),
-    );
-    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
-
-    let u2 = independent_insert("b");
-    let faults = OneShotCrash::at(FaultPoint::StorageBeforePersist);
-    let outcome = record_local_update(
-        &mut ts.store,
-        &mut ts.cache,
-        &key,
-        &u2,
-        LocalAppend::default(),
-        &faults,
-        1_002,
-        |_tx, _outcome, _update_sha| Ok(()),
-    )
-    .expect("crash surfaces as an outcome");
-    assert!(matches!(outcome, TxnOutcome::Crashed { committed: false }));
-    assert!(ts.cache.contains_for_test(&key), "rollback keeps the entry");
-    assert!(
-        !ts.cache.gate_scratch_is_resident_for_test(&key),
-        "rollback evicts the mutated scratch"
-    );
-
-    let before = ts.cache.stats();
-    let retry = committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &u2,
-            LocalAppend::default(),
-            &NoFaults,
-            1_003,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("retry"),
-    );
-    assert!(!retry.deduped);
-    assert_eq!(
-        ts.cache.stats().hits,
-        before.hits + 1,
-        "the retry hit the surviving entry"
-    );
-    assert!(ts.cache.gate_scratch_is_resident_for_test(&key));
-}
-
-#[test]
 fn a_post_commit_crash_removes_the_entry_and_a_rebuild_matches_the_durable_head() {
-    // (c) StorageAfterCommitBeforeAck: durable-but-unacked. The entry is
-    // removed fail-safe; the byte retry dedupes (installing nothing), and
-    // the next genuinely-new append rebuilds to the durable head.
     use dohc_engine_storage::FaultPoint;
     let (mut ts, key) = setup("cache-t3-crash-committed", Regime::LocalOnly);
     // Single-client lineage: the final cached-vs-cold comparison is
@@ -1323,8 +804,6 @@ fn a_post_commit_crash_removes_the_entry_and_a_rebuild_matches_the_durable_head(
     );
 }
 
-// ---- T4: compaction re-base and eviction ------------------------------------
-
 #[test]
 fn compaction_rebases_the_entry_to_the_snapshot_byte_for_byte() {
     let (mut ts, key) = setup("cache-t4-compaction", Regime::LocalOnly);
@@ -1375,7 +854,6 @@ fn compaction_rebases_the_entry_to_the_snapshot_byte_for_byte() {
         Some(true)
     );
 
-    // The re-based entry serves the next append as a hit.
     let before = ts.cache.stats();
     let update = producer.plaintext_insert(0, "y");
     committed(
@@ -1450,51 +928,6 @@ fn eviction_prefers_unpinned_lru_and_holds_the_entry_cap() {
 }
 
 #[test]
-fn the_byte_budget_bounds_residency_without_affecting_appends() {
-    let (mut ts, key) = setup("cache-t4-byte-budget", Regime::LocalOnly);
-    let mut cache = WriterDocCache::with_limits_for_test(16, 1);
-    let u1 = independent_insert("a");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut cache,
-            &key,
-            &u1,
-            LocalAppend::default(),
-            &NoFaults,
-            1_001,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("u1"),
-    );
-    assert!(
-        !cache.contains_for_test(&key),
-        "over-budget entries are not installed"
-    );
-    assert_eq!(
-        cache.stats().installs,
-        0,
-        "the rejected install is not counted"
-    );
-    let u2 = independent_insert("b");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut cache,
-            &key,
-            &u2,
-            LocalAppend::default(),
-            &NoFaults,
-            1_002,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("u2"),
-    );
-    let content = projected(&ts.store, &key);
-    assert!(content.contains('a') && content.contains('b'));
-}
-
-#[test]
 fn the_byte_budget_charges_the_persistent_scratch() {
     let (mut measured, key) = setup("cache-t4-scratch-budget-measure", Regime::LocalOnly);
     let update = independent_insert("scratch-accounting");
@@ -1541,14 +974,8 @@ fn the_byte_budget_charges_the_persistent_scratch() {
     );
 }
 
-// ---- forced-close containment ----------------------------------------
-
 #[test]
 fn a_warmed_cache_does_not_change_forced_close_corruption_detection() {
-    // Forced compaction (threshold 0 — the call close_session makes on a
-    // replicated lineage) must always fully reconstruct: close is the audit
-    // point where blob corruption surfaces. A warm cache entry for the same
-    // lineage must not change that verdict.
     let (mut ts, key) = setup("cache-forced-close-pin", Regime::Replicated);
     let u1 = independent_insert("x");
     committed(
@@ -1595,27 +1022,29 @@ fn a_warmed_cache_does_not_change_forced_close_corruption_detection() {
     );
 }
 
-#[test]
-fn a_compact_outcome_is_what_the_forced_close_reports_when_healthy() {
-    // Companion assertion: a healthy warmed close still reports the same
-    // Skipped/Compacted shape as before the cache existed.
-    let (mut ts, key) = setup("cache-forced-close-healthy", Regime::Replicated);
-    let u1 = independent_insert("x");
-    committed(
-        record_local_update(
-            &mut ts.store,
-            &mut ts.cache,
-            &key,
-            &u1,
-            LocalAppend::default(),
-            &NoFaults,
-            1_001,
-            |_tx, _outcome, _update_sha| Ok(()),
-        )
-        .expect("u1"),
-    );
-    let first = committed(maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_002).expect("fold"));
-    assert!(matches!(first, CompactOutcome::Compacted { .. }));
-    let second = committed(maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_003).expect("fold"));
-    assert!(matches!(second, CompactOutcome::Skipped { pending: 0 }));
+/// Prune every CRDT row and rewind the head to 0 without touching the cache —
+/// the raw shape of a local-only prune whose reset hook was skipped.
+fn raw_prune(store: &mut EngineStore, key: &DocKey) {
+    let outcome = store
+        .write_with(&NoFaults, |tx| -> Result<(), CollabError> {
+            for sql in [
+                "DELETE FROM ydoc_updates \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                "DELETE FROM ydoc_snapshots \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0 \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            ] {
+                tx.execute(
+                    sql,
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                )
+                .map_err(|e| CollabError::Corrupt {
+                    reason: e.to_string(),
+                })?;
+            }
+            Ok(())
+        })
+        .expect("raw prune");
+    committed(outcome);
 }

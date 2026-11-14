@@ -103,13 +103,15 @@ const results = {
         slug: "general",
         kind: "group" as const,
         threadCount: 1,
-        threads: [{
-          id: thread.id,
-          title: thread.title,
-          messageCount: 1,
-          unreadCount: 0,
-          updatedAtMs: thread.updatedAtMs,
-        }],
+        threads: [
+          {
+            id: thread.id,
+            title: thread.title,
+            messageCount: 1,
+            unreadCount: 0,
+            updatedAtMs: thread.updatedAtMs,
+          },
+        ],
       },
     ],
   },
@@ -128,10 +130,12 @@ const results = {
     warning: PROVENANCE_WARNING,
   },
 } satisfies {
-  [Verb in Extract<
-    CliVerb,
-    "moments" | "moment" | "fileChats" | "chat" | "groupsFull" | "post" | "reply"
-  >]: CliResultByVerb[Verb];
+  [
+    Verb in Extract<
+      CliVerb,
+      "moments" | "moment" | "fileChats" | "chat" | "groupsFull" | "post" | "reply"
+    >
+  ]: CliResultByVerb[Verb];
 };
 
 async function withWorkspace<T>(fn: (ctx: ToolContext) => Promise<T>): Promise<T> {
@@ -167,8 +171,9 @@ describe("desktop CLI proxy", () => {
     await withWorkspace(async (base) => {
       const { ctx, requests } = recordingContext(base);
 
-      await expect(listChanges(ctx, { sinceMs: 5, limit: 20, includeFiles: true }))
-        .resolves.toEqual(results.moments);
+      await expect(
+        listChanges(ctx, { sinceMs: 5, limit: 20, includeFiles: true }),
+      ).resolves.toEqual(results.moments);
       await expect(readChange(ctx, { id: moment.id })).resolves.toEqual(results.moment);
       await expect(listFileChats(ctx, { path: moment.path })).resolves.toEqual(results.fileChats);
       await expect(readChat(ctx, { threadId: thread.id })).resolves.toEqual(results.chat);
@@ -225,49 +230,59 @@ describe("desktop CLI proxy", () => {
         body: "Shipping.",
       });
 
-      // The bare call carries the CLI's own defaults: no attachments, no
-      // decision, no run. Nothing is invented on the agent's behalf.
       expect(requests.map((request) => [request.verb, request.args])).toEqual([
-        ["post", {
-          cwd: base.root,
-          actor: "agent",
-          group: "general",
-          title: "Agenda review",
-          attachments: [],
-          needsDecision: false,
-          body: "On it.",
-        }],
-        ["post", {
-          cwd: base.root,
-          actor: "agent",
-          runId: "run_1",
-          group: "#general",
-          attachments: ["notes/agenda.md"],
-          needsDecision: true,
-          options: ["Ship", "Hold"],
-          body: "Ship it?",
-        }],
-        ["reply", {
-          cwd: base.root,
-          actor: "agent",
-          thread: thread.id,
-          attachments: [],
-          needsDecision: false,
-          body: "On it.",
-        }],
-        ["reply", {
-          cwd: base.root,
-          actor: "agent",
-          runId: "run_1",
-          thread: thread.id,
-          to: message.id,
-          resolve: message.id,
-          choose: "Ship",
-          attachments: ["notes/agenda.md"],
-          needsDecision: true,
-          options: ["Ship", "Hold"],
-          body: "Shipping.",
-        }],
+        [
+          "post",
+          {
+            cwd: base.root,
+            actor: "agent",
+            group: "general",
+            title: "Agenda review",
+            attachments: [],
+            needsDecision: false,
+            body: "On it.",
+          },
+        ],
+        [
+          "post",
+          {
+            cwd: base.root,
+            actor: "agent",
+            runId: "run_1",
+            group: "#general",
+            attachments: ["notes/agenda.md"],
+            needsDecision: true,
+            options: ["Ship", "Hold"],
+            body: "Ship it?",
+          },
+        ],
+        [
+          "reply",
+          {
+            cwd: base.root,
+            actor: "agent",
+            thread: thread.id,
+            attachments: [],
+            needsDecision: false,
+            body: "On it.",
+          },
+        ],
+        [
+          "reply",
+          {
+            cwd: base.root,
+            actor: "agent",
+            runId: "run_1",
+            thread: thread.id,
+            to: message.id,
+            resolve: message.id,
+            choose: "Ship",
+            attachments: ["notes/agenda.md"],
+            needsDecision: true,
+            options: ["Ship", "Hold"],
+            body: "Shipping.",
+          },
+        ],
       ]);
       for (const request of requests) {
         expect(request.protocolVersion).toBe(CLI_PROTOCOL_VERSION);
@@ -298,19 +313,14 @@ describe("desktop CLI proxy", () => {
     await withWorkspace(async (base) => {
       const { ctx } = recordingContext(base);
 
-      await expect(
-        startGroupChat(ctx, { group: "general", body: "On it." }),
-      ).resolves.toEqual({
+      await expect(startGroupChat(ctx, { group: "general", body: "On it." })).resolves.toEqual({
         ok: true,
         group: { id: "channel-1", slug: "general", kind: "group" },
         threadId: "thread-2",
         messageId: "message-2",
         title: "Agenda review",
       });
-      // A partial success (posted, provenance still pending) stays visible.
-      await expect(
-        replyToChat(ctx, { threadId: thread.id, body: "On it." }),
-      ).resolves.toEqual({
+      await expect(replyToChat(ctx, { threadId: thread.id, body: "On it." })).resolves.toEqual({
         ok: true,
         threadId: "thread-1",
         messageId: "message-3",
@@ -334,9 +344,10 @@ describe("desktop CLI proxy", () => {
         },
       };
 
-      await expect(
-        startGroupChat(ctx, { group: "nope", body: "Must not post" }),
-      ).resolves.toEqual({ ok: false, reason: "dohc: no such group: nope" });
+      await expect(startGroupChat(ctx, { group: "nope", body: "Must not post" })).resolves.toEqual({
+        ok: false,
+        reason: "dohc: no such group: nope",
+      });
       await expect(
         replyToChat(ctx, { threadId: thread.id, resolve: message.id, body: "Must not post" }),
       ).resolves.toEqual({
@@ -350,13 +361,25 @@ describe("desktop CLI proxy", () => {
     await withWorkspace(async (base) => {
       const requests: CliRequestWithoutToken[] = [];
       let answer: CliResultByVerb["chatRetry"] = { ok: true, status: "queued", threadId: "th_1" };
-      const ctx: ToolContext = { ...base, request: async (request) => { requests.push(request); return answer; } };
+      const ctx: ToolContext = {
+        ...base,
+        request: async (request) => {
+          requests.push(request);
+          return answer;
+        },
+      };
 
-      await expect(retryChatRun(ctx, { threadId: thread.id }))
-        .resolves.toEqual({ ok: true, status: "queued", threadId: "thread-1" });
+      await expect(retryChatRun(ctx, { threadId: thread.id })).resolves.toEqual({
+        ok: true,
+        status: "queued",
+        threadId: "thread-1",
+      });
       answer = { ok: false, reason: "No agent request in this conversation has stopped." };
       await expect(retryChatRun(ctx, { threadId: thread.id })).resolves.toEqual(answer);
-      const sent = { verb: "chatRetry", args: { cwd: base.root, actor: "agent", thread: "thread-1" } };
+      const sent = {
+        verb: "chatRetry",
+        args: { cwd: base.root, actor: "agent", thread: "thread-1" },
+      };
       expect(requests.map(({ verb, args }) => ({ verb, args }))).toEqual([sent, sent]);
     });
   });
@@ -366,7 +389,10 @@ describe("desktop CLI proxy", () => {
       const reported = { product: "Claude Code", version: "2.1", model: "Claude Opus 5.5" };
       const chat = {
         ...results.chat,
-        messages: [{ ...message, authorReported: reported }, { ...message, id: "message-3" }],
+        messages: [
+          { ...message, authorReported: reported },
+          { ...message, id: "message-3" },
+        ],
       };
       const ctx: ToolContext = { ...base, request: async () => chat };
       const read = await readChat(ctx, { threadId: thread.id });
@@ -386,7 +412,6 @@ describe("desktop CLI proxy", () => {
         ok: false,
         reason: expect.stringContaining("invalid_union"),
       });
-      // A malformed write response is never widened into a success.
       await expect(
         startGroupChat(ctx, { group: "general", body: "On it." }),
       ).resolves.toMatchObject({ ok: false, reason: expect.any(String) });
@@ -411,8 +436,9 @@ describe("desktop CLI proxy", () => {
 describe("desktop unavailable failures", () => {
   it("maps a missing production desktop endpoint to a failed tool result", async () => {
     await withWorkspace(async (ctx) => {
-      await expect(startGroupChat(ctx, { group: "general", body: "Must not be stored" }))
-        .resolves.toEqual({ ok: false, reason: DOHC_TRANSPORT_UNAVAILABLE_REASON });
+      await expect(
+        startGroupChat(ctx, { group: "general", body: "Must not be stored" }),
+      ).resolves.toEqual({ ok: false, reason: DOHC_TRANSPORT_UNAVAILABLE_REASON });
       await expect(readdir(ctx.root)).resolves.toEqual([]);
       await expect(readdir(ctx.home)).resolves.toEqual([]);
     });

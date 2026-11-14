@@ -33,7 +33,7 @@ fn normalize_projection_field(field: &str, value: &str) -> Result<String, Domain
 
 /// The content-addressed read-only projection path for a linked chat thread:
 /// `.dohc/chats/v1-<base32(sha256("v1\0ws\0thread\0kind"))>.md`
-/// (`linkedChatProjectionPath`, matrix 4.1b). NFC-normalizes each field so an
+/// (`linkedChatProjectionPath`). NFC-normalizes each field so an
 /// NFD input yields the byte-identical path.
 pub fn linked_chat_projection_path(
     workspace_id: &str,

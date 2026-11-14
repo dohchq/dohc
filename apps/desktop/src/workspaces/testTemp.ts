@@ -1,20 +1,6 @@
 import { errorMessage } from "./workspaceError.ts";
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  realpathSync,
-  type Stats,
-} from "node:fs";
-import {
-  lstat,
-  mkdir,
-  mkdtemp,
-  readdir,
-  rm,
-  rmdir,
-} from "node:fs/promises";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, type Stats } from "node:fs";
+import { lstat, mkdir, mkdtemp, readdir, rm, rmdir } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -272,11 +258,7 @@ async function removeEmptyDirectory(path: string): Promise<boolean> {
 function scratchRunId(): string {
   const configured = process.env.DOHC_TEST_SCRATCH_RUN;
   if (configured) {
-    if (
-      !/^[A-Za-z0-9._-]+$/u.test(configured) ||
-      configured === "." ||
-      configured === ".."
-    ) {
+    if (!/^[A-Za-z0-9._-]+$/u.test(configured) || configured === "." || configured === "..") {
       throw new Error(
         "DOHC_TEST_SCRATCH_RUN must contain only ASCII letters, digits, periods, hyphens, or underscores",
       );
@@ -330,8 +312,8 @@ async function isIdleSince(path: string, nowMs: number): Promise<boolean> {
 
 // `.` and `..` are not names, they are directions. `join` folds them away
 // before `mkdtemp` appends its suffix, so a `.` prefix would put the scratch
-// beside the run root and a `..` prefix beside the managed parent — loose in
-// %TEMP%, which is the shape of #605 itself. Neither the reporter, which reads
+// beside the run root and a `..` prefix beside the managed parent, loose in
+// %TEMP%. Neither the reporter, which reads
 // the run root's children, nor the sweep, which reads run roots, would ever see
 // it. They fall back like every other prefix that cannot be a name.
 //

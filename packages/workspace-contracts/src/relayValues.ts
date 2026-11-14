@@ -1,11 +1,11 @@
 export const MAX_RELAY_URL_LENGTH = 2048;
 
 // Canonical relay identity, or null when the value is not an acceptable
-// relay URL (0P-C gate fix). Beyond scheme/length checks this rejects
-// credentials, query strings, and fragments outright: buildSyncCode would
-// otherwise expose secrets in a copyable/screenshot-readable code,
-// parseSyncCode would accept them from pasted input, and relayUrlsMatch is
-// an authz gate that must compare relay identities, not secret carriers.
+// relay URL. Beyond scheme/length checks this rejects credentials, query
+// strings, and fragments outright: buildSyncCode would otherwise expose
+// secrets in a copyable/screenshot-readable code, parseSyncCode would accept
+// them from pasted input, and relayUrlsMatch is an authz gate that must
+// compare relay identities, not secret carriers.
 export function canonicalRelayUrl(value: string): string | null {
   const raw = value.trim();
   if (raw.length === 0 || raw.length > MAX_RELAY_URL_LENGTH) return null;

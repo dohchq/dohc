@@ -6,9 +6,21 @@ import { createDesktopAppRuntimeLauncher } from "./localAppBackendRuntime";
 function fixture(closeAfterReply: boolean) {
   const child = Object.assign(new EventEmitter(), { postMessage: vi.fn(), kill: vi.fn() });
   const fork = vi.fn(() => child);
-  const onMessage = vi.fn(), onError = vi.fn(), onExit = vi.fn();
-  const launch = createDesktopAppRuntimeLauncher({ fork } as unknown as Pick<typeof utilityProcess, "fork">, closeAfterReply);
-  const handle = launch({ entryPath: "C:/runtime/worker.mjs", cwd: "C:/workspace/private-worker", env: {}, onMessage, onError, onExit });
+  const onMessage = vi.fn(),
+    onError = vi.fn(),
+    onExit = vi.fn();
+  const launch = createDesktopAppRuntimeLauncher(
+    { fork } as unknown as Pick<typeof utilityProcess, "fork">,
+    closeAfterReply,
+  );
+  const handle = launch({
+    entryPath: "C:/runtime/worker.mjs",
+    cwd: "C:/workspace/private-worker",
+    env: {},
+    onMessage,
+    onError,
+    onExit,
+  });
   return { child, fork, handle, onMessage, onError, onExit };
 }
 
@@ -21,9 +33,16 @@ describe("desktop app runtime lifetimes", () => {
     f.handle.postMessage({ kind: "finalize", id: "one" });
     f.child.emit("message", { kind: "finalized", id: "one" });
     expect(f.onMessage).toHaveBeenCalledTimes(2);
-    expect(f.child.postMessage.mock.calls).toEqual([[{ kind: "prepare", id: "one" }], [{ kind: "finalize", id: "one" }]]);
+    expect(f.child.postMessage.mock.calls).toEqual([
+      [{ kind: "prepare", id: "one" }],
+      [{ kind: "finalize", id: "one" }],
+    ]);
     expect(f.child.kill).not.toHaveBeenCalled();
-    expect(f.fork.mock.calls[0]).toEqual(["C:/runtime/worker.mjs", [], expect.objectContaining({ env: {}, cwd: "C:/workspace/private-worker" })]);
+    expect(f.fork.mock.calls[0]).toEqual([
+      "C:/runtime/worker.mjs",
+      [],
+      expect.objectContaining({ env: {}, cwd: "C:/workspace/private-worker" }),
+    ]);
   });
 
   it("closes a one-shot worker after returning its reply", () => {
@@ -41,6 +60,8 @@ describe("desktop app runtime lifetimes", () => {
     f.child.emit("spawn");
     expect(f.child.kill).toHaveBeenCalledTimes(2);
     f.child.emit("error", new Error("private runtime detail"));
-    expect(f.onError).toHaveBeenCalledWith(expect.objectContaining({ message: "The app operation process failed." }));
+    expect(f.onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "The app operation process failed." }),
+    );
   });
 });

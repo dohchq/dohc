@@ -3,7 +3,13 @@ import { isCodeBlockNode, isEditableEditor, stopEditorMouseEvent } from "./pmHel
 import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
-import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
+import {
+  NodeSelection,
+  Plugin,
+  PluginKey,
+  TextSelection,
+  type Transaction,
+} from "@tiptap/pm/state";
 import { ReplaceStep } from "@tiptap/pm/transform";
 import { Fragment, type Node as ProseMirrorNode, type ResolvedPos } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
@@ -49,8 +55,6 @@ import { escapeHighlightMarkdown } from "@dohc/ydoc-projection/markdown-extensio
 
 const blockControlsKey = new PluginKey("dohc-block-controls");
 
-// ── drag payload ──────────────────────────────────────────────────────────
-
 /** The ghost a plugin instance currently has parked on the document. One slot,
  * because it tracks a lifetime rather than a drag: every path that ends a
  * ghost's life — `dragend`, the next `dragstart`, and the plugin's destroy
@@ -59,9 +63,7 @@ type DragGhostSlot = { current: HTMLElement | null };
 
 function createDragGhost(blockDom: HTMLElement): HTMLElement {
   const ghost = blockDom.cloneNode(true) as HTMLElement;
-  ghost
-    .querySelectorAll(".dohc-block-affordance")
-    .forEach((el) => el.remove());
+  ghost.querySelectorAll(".dohc-block-affordance").forEach((el) => el.remove());
   ghost.className = "dohc-block-drag-ghost";
   // The clone carries the block's text off-screen; without this a screen
   // reader reads it as a second copy of the block.
@@ -149,7 +151,6 @@ function buildBlockControlDecorations(
   doc.forEach((node, pos) => {
     const ownerKey = owners.get(pos) ?? nextOwnerKey();
     const hang = gutterHang(node);
-    // A numbered list hangs as many digits as its first number has.
     const digits = hang === "number" ? String(node.attrs.start ?? 1).length : 0;
     decorations.push(
       Decoration.widget(
@@ -206,16 +207,9 @@ function buildBlockControlDecorations(
             // Whatever the slot still holds can no longer be reached: parking
             // a new ghost over it would strand the old one on `document.body`.
             removeBlockDragGhost(ghostSlot);
-            ghostSlot.current = startBlockDrag(
-              view,
-              currentPos,
-              handle,
-              dragEvent.dataTransfer,
-            );
+            ghostSlot.current = startBlockDrag(view, currentPos, handle, dragEvent.dataTransfer);
           });
-          handle.addEventListener("dragend", () =>
-            removeBlockDragGhost(ghostSlot),
-          );
+          handle.addEventListener("dragend", () => removeBlockDragGhost(ghostSlot));
 
           handle.addEventListener("click", (event) => {
             stopEditorMouseEvent(event);
@@ -223,9 +217,7 @@ function buildBlockControlDecorations(
             if (currentPos === undefined) return;
             if (view.state.doc.nodeAt(currentPos)) {
               view.dispatch(
-                view.state.tr.setSelection(
-                  NodeSelection.create(view.state.doc, currentPos),
-                ),
+                view.state.tr.setSelection(NodeSelection.create(view.state.doc, currentPos)),
               );
             }
             onOpenMenuRef.current(currentPos, handle);
@@ -254,9 +246,7 @@ function buildBlockControlDecorations(
  * node replacements, and multi-step transactions still take the
  * full rebuild path below.
  */
-function isSingleTextblockReplacement(
-  tr: Transaction,
-): boolean {
+function isSingleTextblockReplacement(tr: Transaction): boolean {
   if (tr.steps.length !== 1) return false;
   const step = tr.steps[0];
   if (!(step instanceof ReplaceStep)) return false;
@@ -273,16 +263,9 @@ function isSingleTextblockReplacement(
  * the nearest gutter widget before the block's element, with nothing but
  * other widgets between them. Another widget, such as a Mermaid preview,
  * belongs to no block. */
-function blockControlAt(
-  view: EditorView,
-  target: EventTarget | null,
-): HTMLElement | null {
+function blockControlAt(view: EditorView, target: EventTarget | null): HTMLElement | null {
   let element =
-    target instanceof Element
-      ? target
-      : target instanceof Node
-        ? target.parentElement
-        : null;
+    target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
   while (element && element.parentElement !== view.dom) {
     element = element.parentElement;
   }
@@ -348,9 +331,7 @@ export function makeBlockControlsPlugin({
       apply(tr, old) {
         if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
         if (isSingleTextblockReplacement(tr)) {
-          return tr.doc.content.size === tr.before.content.size
-            ? old
-            : old.map(tr.mapping, tr.doc);
+          return tr.doc.content.size === tr.before.content.size ? old : old.map(tr.mapping, tr.doc);
         }
         return buildBlockControlDecorations(
           tr.doc,
@@ -406,21 +387,16 @@ export function insertBlockAfter(
   const paragraph = state.schema.nodes.paragraph;
   if (!node || !paragraph) return;
 
-  const canReuseEmptyParagraph =
-    node.type.name === "paragraph" && node.textContent.length === 0;
+  const canReuseEmptyParagraph = node.type.name === "paragraph" && node.textContent.length === 0;
   const selectionPos = canReuseEmptyParagraph ? pos + 1 : pos + node.nodeSize + 1;
   const tr = canReuseEmptyParagraph
     ? state.tr
     : state.tr.insert(pos + node.nodeSize, paragraph.create());
-  tr
-    .setSelection(TextSelection.near(tr.doc.resolve(selectionPos)))
-    .scrollIntoView();
+  tr.setSelection(TextSelection.near(tr.doc.resolve(selectionPos))).scrollIntoView();
   view.dispatch(tr);
   view.focus();
   openSlashMenuAtPosition(selectionPos);
 }
-
-// ── block context menu ─────────────────────────────────────────────────────
 
 export type BlockMenuTurnIntoId =
   | "paragraph"
@@ -473,10 +449,7 @@ const ACTION_ENTRIES: BlockMenuEntry[] = [
   { kind: "action", id: "delete", label: "Delete", icon: X },
 ];
 
-const BLOCK_MENU_ENTRIES: BlockMenuEntry[] = [
-  ...TURN_INTO_ENTRIES,
-  ...ACTION_ENTRIES,
-];
+const BLOCK_MENU_ENTRIES: BlockMenuEntry[] = [...TURN_INTO_ENTRIES, ...ACTION_ENTRIES];
 
 const TURN_INTO_COUNT = TURN_INTO_ENTRIES.length;
 
@@ -523,11 +496,7 @@ export function deleteBlock(editor: Editor | null, pos: number): void {
   view.focus();
 }
 
-export function turnBlockInto(
-  editor: Editor | null,
-  pos: number,
-  id: BlockMenuTurnIntoId,
-): void {
+export function turnBlockInto(editor: Editor | null, pos: number, id: BlockMenuTurnIntoId): void {
   const view = editor?.view;
   if (!editor || !view || !isEditableEditor(editor)) return;
   const node = view.state.doc.nodeAt(pos);
@@ -608,9 +577,7 @@ export function turnIntoIdAt($pos: ResolvedPos): BlockMenuTurnIntoId {
 
 /** Serialize one block through the shared projection contract. */
 export function serializeBlockToMarkdown(node: ProseMirrorNode): string {
-  return serializeRichdocBody(
-    escapeHighlightMarkdown({ type: "doc", content: [node.toJSON()] }),
-  );
+  return serializeRichdocBody(escapeHighlightMarkdown({ type: "doc", content: [node.toJSON()] }));
 }
 
 async function writeClipboardText(text: string): Promise<void> {
@@ -623,10 +590,7 @@ async function writeClipboardText(text: string): Promise<void> {
   }
 }
 
-export async function copyBlockAsMarkdown(
-  editor: Editor | null,
-  pos: number,
-): Promise<void> {
+export async function copyBlockAsMarkdown(editor: Editor | null, pos: number): Promise<void> {
   if (!editor) return;
   const node = editor.view.state.doc.nodeAt(pos);
   if (!node) return;
@@ -738,7 +702,12 @@ export function BlockMenu({
       aria-activedescendant={rowId(active)}
       tabIndex={-1}
       data-placement={state.placement}
-      style={{ left: state.x, top: state.y, maxHeight: state.maxHeight, ...menuEnterFrom(state.placement) }}
+      style={{
+        left: state.x,
+        top: state.y,
+        maxHeight: state.maxHeight,
+        ...menuEnterFrom(state.placement),
+      }}
       onMouseDown={(event) => event.preventDefault()}
       onKeyDown={(event) => {
         const next = moveInMenu(event, active, labels);
@@ -807,9 +776,7 @@ export function resolveTurnIntoDropdown(
   const { placement, maxHeight } = resolveFloatingMenuPosition({
     cursorRect: triggerRect,
     menuWidth: TURN_INTO_MENU_WIDTH,
-    ...(viewport
-      ? { viewportWidth: viewport.width, viewportHeight: viewport.height }
-      : {}),
+    ...(viewport ? { viewportWidth: viewport.width, viewportHeight: viewport.height } : {}),
   });
   return { placement, maxHeight };
 }
@@ -854,7 +821,6 @@ export function TurnIntoMenu({
     setSelected(activeIndex >= 0 ? activeIndex : 0);
     menuRef.current?.focus({ preventScroll: true });
     // Only reset when the dropdown opens, not on every editor selection tick.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // Only the list scrolls to show the active option.

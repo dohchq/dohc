@@ -27,9 +27,7 @@ afterEach(async () => {
   await Promise.all(
     tempRoots
       .splice(0)
-      .map((root) =>
-        rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }),
-      ),
+      .map((root) => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })),
   );
 });
 
@@ -41,9 +39,10 @@ async function tempDir(): Promise<string> {
 
 describe("resolveSpawnCommand", () => {
   it("returns the input untouched off Windows", () => {
-    expect(
-      resolveSpawnCommand("npm", ["run", "dev"], { platform: "linux" }),
-    ).toEqual({ command: "npm", args: ["run", "dev"] });
+    expect(resolveSpawnCommand("npm", ["run", "dev"], { platform: "linux" })).toEqual({
+      command: "npm",
+      args: ["run", "dev"],
+    });
   });
 
   it("quotes every token on the cmd.exe line so metacharacters stay inert", () => {
@@ -109,9 +108,7 @@ describe("resolveSpawnCommand", () => {
       exists: (candidate) => candidate === "C:\\npm\\npm.CMD",
     });
     expect(resolved.command).toBe("cmd.exe");
-    expect(resolved.args[3]).toBe(
-      '""C:\\npm\\npm.CMD" "a&b" "c|d" "e<f" "g>h" "i^j""',
-    );
+    expect(resolved.args[3]).toBe('""C:\\npm\\npm.CMD" "a&b" "c|d" "e<f" "g>h" "i^j""');
   });
 
   it("doubles a trailing backslash run so it cannot escape the closing quote", () => {
@@ -123,9 +120,7 @@ describe("resolveSpawnCommand", () => {
     // CommandLineToArgvW parses 2n backslashes before a quote as n literal
     // backslashes; without doubling, \" would read as a literal quote and
     // swallow the argument boundary.
-    expect(resolved.args[3]).toBe(
-      '""C:\\npm\\npm.CMD" "C:\\site\\\\" "C:\\deep\\\\\\\\""',
-    );
+    expect(resolved.args[3]).toBe('""C:\\npm\\npm.CMD" "C:\\site\\\\" "C:\\deep\\\\\\\\""');
   });
 
   it("resolves relative path-segment commands against the spawn cwd, not the process cwd", () => {
@@ -145,18 +140,10 @@ describe("resolveSpawnCommand", () => {
   });
 });
 
-// processDescendantsWin32 was consolidated into posixSpawn.ts's own
-// processDescendants (it took its process-table reader as an argument, so
-// the tree-walk arithmetic it wrapped was byte-identical to the POSIX
-// version — see posixSpawn.test.ts's own "processDescendants" suite, which
-// exercises the same arithmetic this block used to, and windowsSpawn.ts's
-// module comment for why the reader is the only genuinely platform-specific
-// part). This module now exports only readProcessTableWithPowershell, the
-// Windows-specific text source.
+// Both platforms share posixSpawn.ts's processDescendants, which its own
+// "processDescendants" suite in posixSpawn.test.ts covers. windowsSpawn.ts
+// supplies only readProcessTableWithPowershell, the Windows text source.
 
-// Real shim topology: the unit fakes elsewhere spawn process.execPath
-// directly, so the cmd.exe wrapper path (quoting round-trip, exit-code
-// propagation, tree kill) is only exercised here, with a genuine .cmd.
 const describeWin32 = process.platform === "win32" ? describe : describe.skip;
 
 describeWin32("real .cmd shim topology (win32)", () => {
@@ -171,7 +158,13 @@ describeWin32("real .cmd shim topology (win32)", () => {
       `@echo off\r\nnode "%~dp0echo-args.mjs" %*\r\nexit /b %errorlevel%\r\n`,
     );
 
-    const args = ["run", "dev", "--url=http://x/?a=1&b=2", "with space", "C:\\ends\\in\\backslash\\"];
+    const args = [
+      "run",
+      "dev",
+      "--url=http://x/?a=1&b=2",
+      "with space",
+      "C:\\ends\\in\\backslash\\",
+    ];
     const resolved = resolveSpawnCommand("fake", args, {
       env: { ...process.env, Path: dir },
     });
@@ -193,8 +186,6 @@ describeWin32("real .cmd shim topology (win32)", () => {
       },
     );
 
-    // The metacharacter token arrives intact (no second command ran) and the
-    // shim's real exit code survives the cmd.exe wrapper.
     expect(JSON.parse(stdout.trim())).toEqual(args);
     expect(code).toBe(7);
   });
@@ -239,7 +230,6 @@ describeWin32("real .cmd shim topology (win32)", () => {
     const killed = await killChildTreeWin32(child);
     expect(killed).toBe(true);
 
-    // The grandchild — not just the cmd.exe wrapper — must be dead.
     const gone = await new Promise<boolean>((resolve) => {
       const check = () => {
         try {
@@ -272,7 +262,9 @@ describe.runIf(process.platform === "win32")("the PowerShell process-table read"
     await expect(readProcessTableWithPowershell(50)).rejects.toThrow();
     expect(performance.now() - started).toBeLessThan(800);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    await expect(processDescendants(process.pid, () => readProcessTableWithPowershell(50))).resolves.toEqual([]);
+    await expect(
+      processDescendants(process.pid, () => readProcessTableWithPowershell(50)),
+    ).resolves.toEqual([]);
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
   });

@@ -25,7 +25,6 @@ describe("jsonStringEncodedLength", () => {
 
   for (const [name, sample] of Object.entries(vectors)) {
     it(`counts ${name} the way JSON.stringify writes it`, () => {
-      // UTF-8 bytes, the unit a frame is measured in — not UTF-16 units.
       expect(jsonStringEncodedLength(sample)).toBe(
         Buffer.byteLength(JSON.stringify(sample), "utf8"),
       );

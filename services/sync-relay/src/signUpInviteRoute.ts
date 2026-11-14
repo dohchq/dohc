@@ -1,4 +1,8 @@
-import { normalizeEmail, presentsSignUpInviteKey, SIGN_UP_INVITE_KEY_HEADER } from "@dohc/workspace-auth/signUp";
+import {
+  normalizeEmail,
+  presentsSignUpInviteKey,
+  SIGN_UP_INVITE_KEY_HEADER,
+} from "@dohc/workspace-auth/signUp";
 import { guardRelayResponses } from "./relayResponseStanding";
 import type { SyncRelayStorage } from "./storage";
 
@@ -12,11 +16,15 @@ export function createSignUpInviteRoute(options: {
   key: string;
 }) {
   return guardRelayResponses(options.storage, async (request: Request): Promise<Response> => {
-    if (request.method !== "POST" || !presentsSignUpInviteKey(request.headers.get(SIGN_UP_INVITE_KEY_HEADER), options.key)) {
+    if (
+      request.method !== "POST" ||
+      !presentsSignUpInviteKey(request.headers.get(SIGN_UP_INVITE_KEY_HEADER), options.key)
+    ) {
       return Response.json({ ok: false, error: "not found" }, { status: 404 });
     }
     const body: unknown = await request.json().catch(() => null);
-    const email = body !== null && typeof body === "object" && "email" in body ? body.email : undefined;
+    const email =
+      body !== null && typeof body === "object" && "email" in body ? body.email : undefined;
     if (typeof email !== "string" || email.length > MAX_EMAIL_CHARS || !normalizeEmail(email)) {
       return Response.json({ ok: false, error: "email required" }, { status: 400 });
     }

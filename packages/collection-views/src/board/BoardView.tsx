@@ -3,7 +3,15 @@ import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import type { Range } from "@tanstack/react-virtual";
 import { DragDropProvider, useDraggable, useDroppable } from "@dnd-kit/react";
 import type { DragEndEvent, DragStartEvent } from "@dnd-kit/react";
-import { CalendarDays, CheckSquare, Link, Maximize2, MoreHorizontal, Plus, Square } from "lucide-react";
+import {
+  CalendarDays,
+  CheckSquare,
+  Link,
+  Maximize2,
+  MoreHorizontal,
+  Plus,
+  Square,
+} from "lucide-react";
 import type {
   CollectionIndexedValue,
   CollectionRecord,
@@ -73,8 +81,8 @@ interface BoardColumnModel {
   groupIndex: number | null;
 }
 
-const valueKey = (value: CollectionValue) => JSON.stringify(value, (_key, raw: unknown) =>
-  typeof raw === "bigint" ? `${raw}n` : raw);
+const valueKey = (value: CollectionValue) =>
+  JSON.stringify(value, (_key, raw: unknown) => (typeof raw === "bigint" ? `${raw}n` : raw));
 
 /**
  * A select field's columns follow its options, so empty ones still show.
@@ -87,7 +95,11 @@ function boardColumns(
   groupField: FieldDefinition | null,
   paged: boolean,
 ): BoardColumnModel[] {
-  const fromQuery = groups.map((group, groupIndex) => ({ value: group.value, records: group.records, groupIndex }));
+  const fromQuery = groups.map((group, groupIndex) => ({
+    value: group.value,
+    records: group.records,
+    groupIndex,
+  }));
   if (paged || groupField?.type !== "select") return fromQuery;
   const byKey = new Map(fromQuery.map((column) => [valueKey(column.value), column]));
   const used = new Set<string>();
@@ -98,14 +110,25 @@ function boardColumns(
   };
   const columns = byKey.has(valueKey(null)) ? [take(null)] : [];
   for (const option of groupField.options) columns.push(take(option));
-  for (const column of fromQuery) if (!used.has(valueKey(column.value)) && column.value !== null) columns.push(column);
+  for (const column of fromQuery)
+    if (!used.has(valueKey(column.value)) && column.value !== null) columns.push(column);
   return columns;
 }
 
-function columnLabel(value: CollectionValue, groupField: FieldDefinition | null, personLabel?: PersonLabel, fieldLabel?: FieldLabel): string {
-  if (value === null) return groupField ? `No ${fieldLabel?.(groupField.name) ?? groupField.name}` : "No value";
+function columnLabel(
+  value: CollectionValue,
+  groupField: FieldDefinition | null,
+  personLabel?: PersonLabel,
+  fieldLabel?: FieldLabel,
+): string {
+  if (value === null)
+    return groupField ? `No ${fieldLabel?.(groupField.name) ?? groupField.name}` : "No value";
   if (!groupField) return asText(value);
-  return fieldDisplayText(groupField, { field: groupField.name, value, validation: { status: "valid" }, resolvedRelations: [] }, personLabel);
+  return fieldDisplayText(
+    groupField,
+    { field: groupField.name, value, validation: { status: "valid" }, resolvedRelations: [] },
+    personLabel,
+  );
 }
 
 function isFlagged(record: CollectionRecord): boolean {
@@ -113,9 +136,13 @@ function isFlagged(record: CollectionRecord): boolean {
 }
 
 /** One field on a card. Text takes its own lines; the rest sit in a row. */
-function CardProperty({ field, label, indexed, personLabel }: {
+function CardProperty({
+  field,
+  label,
+  indexed,
+  personLabel,
+}: {
   field: FieldDefinition;
-  /** The field's name as people read it. */
   label: string;
   indexed: CollectionIndexedValue | undefined;
   personLabel?: PersonLabel;
@@ -124,13 +151,19 @@ function CardProperty({ field, label, indexed, personLabel }: {
   if (field.type === "checkbox") {
     const Icon = value === true ? CheckSquare : Square;
     return (
-      <span className={`inline-flex items-center gap-1 text-[12px] ${value === true ? "text-ink" : "text-subtle"}`}>
+      <span
+        className={`inline-flex items-center gap-1 text-[12px] ${value === true ? "text-ink" : "text-subtle"}`}
+      >
         <Icon size={13} strokeWidth={1.9} aria-hidden />
         {label}
       </span>
     );
   }
-  if (field.type === "date" && typeof value === "string" && indexed?.validation.status !== "flagged") {
+  if (
+    field.type === "date" &&
+    typeof value === "string" &&
+    indexed?.validation.status !== "flagged"
+  ) {
     return (
       <span className="inline-flex items-center gap-1 text-[12px] text-muted">
         <CalendarDays size={13} strokeWidth={1.9} aria-hidden />
@@ -139,7 +172,11 @@ function CardProperty({ field, label, indexed, personLabel }: {
     );
   }
   if (field.type === "number") {
-    return <span className="text-[12px] text-muted">{label} <span className="tabular-nums text-ink">{asText(value)}</span></span>;
+    return (
+      <span className="text-[12px] text-muted">
+        {label} <span className="tabular-nums text-ink">{asText(value)}</span>
+      </span>
+    );
   }
   if (field.type === "relation" || field.type === "url") {
     return (
@@ -150,7 +187,11 @@ function CardProperty({ field, label, indexed, personLabel }: {
     );
   }
   if (indexed?.validation.status === "flagged") {
-    return <span className="truncate text-[12px] text-warning">{fieldDisplayText(field, indexed, personLabel)}</span>;
+    return (
+      <span className="truncate text-[12px] text-warning">
+        {fieldDisplayText(field, indexed, personLabel)}
+      </span>
+    );
   }
   return <FieldValue field={field} indexed={indexed} personLabel={personLabel} />;
 }
@@ -167,7 +208,16 @@ interface BoardCardProps {
   open: boolean;
 }
 
-function BoardCard({ record, fields, onOpen, personLabel, fieldLabel, recordName, canDrag, open }: BoardCardProps) {
+function BoardCard({
+  record,
+  fields,
+  onOpen,
+  personLabel,
+  fieldLabel,
+  recordName,
+  canDrag,
+  open,
+}: BoardCardProps) {
   const { ref, isDragging } = useDraggable({ id: record.id, disabled: !canDrag });
   // Click opens the record. Enter belongs to the keyboard drag sensor (it
   // lifts the card), so it must not also open; keyboard users open through
@@ -178,7 +228,11 @@ function BoardCard({ record, fields, onOpen, personLabel, fieldLabel, recordName
   if (isDragging) dragged.current = true;
   const [titleField, ...rest] = fields;
   const title = titleField
-    ? fieldDisplayText(titleField, record.values.find((entry) => entry.field === titleField.name), personLabel)
+    ? fieldDisplayText(
+        titleField,
+        record.values.find((entry) => entry.field === titleField.name),
+        personLabel,
+      )
     : "";
   const shown = rest.flatMap((field) => {
     if (field.type === "button") return [];
@@ -228,7 +282,9 @@ function BoardCard({ record, fields, onOpen, personLabel, fieldLabel, recordName
             />
           </span>
         ) : null}
-        <span className={`min-w-0 break-words text-[13px] font-medium leading-5 ${title ? "text-ink" : "text-muted"}`}>
+        <span
+          className={`min-w-0 break-words text-[13px] font-medium leading-5 ${title ? "text-ink" : "text-muted"}`}
+        >
           {title || "Untitled"}
         </span>
       </div>
@@ -248,14 +304,23 @@ function BoardCard({ record, fields, onOpen, personLabel, fieldLabel, recordName
         </button>
       ) : null}
       {lines.map(({ field, indexed }) => (
-        <p key={field.name} className="m-0 line-clamp-2 break-words text-[12px] leading-4 text-muted">
+        <p
+          key={field.name}
+          className="m-0 line-clamp-2 break-words text-[12px] leading-4 text-muted"
+        >
           {fieldDisplayText(field, indexed, personLabel)}
         </p>
       ))}
       {chips.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2">
           {chips.map(({ field, indexed }) => (
-            <CardProperty key={field.name} field={field} label={fieldLabel?.(field.name) ?? field.name} indexed={indexed} personLabel={personLabel} />
+            <CardProperty
+              key={field.name}
+              field={field}
+              label={fieldLabel?.(field.name) ?? field.name}
+              indexed={indexed}
+              personLabel={personLabel}
+            />
           ))}
         </div>
       ) : null}
@@ -264,7 +329,15 @@ function BoardCard({ record, fields, onOpen, personLabel, fieldLabel, recordName
 }
 
 /** The column header's menu: the option's color. Closes on a choice, Escape, or a click elsewhere. */
-function ColumnMenu({ label, color, onColor }: { label: string; color: OptionColor; onColor: (color: OptionColor) => void }) {
+function ColumnMenu({
+  label,
+  color,
+  onColor,
+}: {
+  label: string;
+  color: OptionColor;
+  onColor: (color: OptionColor) => void;
+}) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -414,7 +487,9 @@ function BoardColumn({
         ) : (
           <span className="truncate text-[12px] font-medium text-muted">{label}</span>
         )}
-        <span data-testid="board-column-count" className="text-[12px] tabular-nums text-subtle">{count ?? records.length}</span>
+        <span data-testid="board-column-count" className="text-[12px] tabular-nums text-subtle">
+          {count ?? records.length}
+        </span>
         <span className="ml-auto flex items-center">
           {color && onColor ? <ColumnMenu label={label} color={color} onColor={onColor} /> : null}
           {onNew ? (
@@ -430,16 +505,13 @@ function BoardColumn({
           ) : null}
         </span>
       </div>
-      <div
-        ref={scrollRef}
-        role="list"
-        aria-label={label}
-        className="min-h-2 overflow-y-auto"
-      >
+      <div ref={scrollRef} role="list" aria-label={label} className="min-h-2 overflow-y-auto">
         {/* Clipped: the virtualizer rounds card heights, so at fractional
             display scaling the last card's padding can overhang by a
             fraction of a pixel and show a scrollbar. */}
-        <div style={{ height: virtualizer.getTotalSize(), position: "relative", overflow: "hidden" }}>
+        <div
+          style={{ height: virtualizer.getTotalSize(), position: "relative", overflow: "hidden" }}
+        >
           {virtualizer.getVirtualItems().map((item) => {
             const record = records[item.index];
             if (!record) return null;
@@ -510,7 +582,10 @@ export function BoardView({
     [schema, groupBy],
   );
   const paged = groupFooter !== undefined;
-  const columns = useMemo(() => boardColumns(groups, groupField, paged), [groups, groupField, paged]);
+  const columns = useMemo(
+    () => boardColumns(groups, groupField, paged),
+    [groups, groupField, paged],
+  );
   const cardIndex = useMemo(() => {
     const map = new Map<string, { record: CollectionRecord; columnIndex: number }>();
     columns.forEach((column, columnIndex) => {
@@ -541,8 +616,13 @@ export function BoardView({
     });
   };
 
-  if (columns.length === 0 || (cardIndex.size === 0 && !groupFooter && groupField?.type !== "select")) {
-    return <div className="px-5 py-6 text-[13px] text-muted">No records in this collection yet.</div>;
+  if (
+    columns.length === 0 ||
+    (cardIndex.size === 0 && !groupFooter && groupField?.type !== "select")
+  ) {
+    return (
+      <div className="px-5 py-6 text-[13px] text-muted">No records in this collection yet.</div>
+    );
   }
 
   const options = groupField?.type === "select" ? new Set(groupField.options) : null;
@@ -550,8 +630,9 @@ export function BoardView({
     <DragDropProvider onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
       <div className="flex h-full items-start gap-3 overflow-x-auto px-5 pb-4 pt-3">
         {columns.map((column, index) => {
-          const group = column.groupIndex === null ? null : groups[column.groupIndex] ?? null;
-          const option = typeof column.value === "string" && options?.has(column.value) ? column.value : null;
+          const group = column.groupIndex === null ? null : (groups[column.groupIndex] ?? null);
+          const option =
+            typeof column.value === "string" && options?.has(column.value) ? column.value : null;
           const label = columnLabel(column.value, groupField, personLabel, fieldLabel);
           return (
             <BoardColumn
@@ -564,13 +645,29 @@ export function BoardView({
               draggingId={draggingId}
               onOpen={onOpenRecord}
               openRecordId={openRecordId}
-              onNew={onNewRecord && (option !== null || column.value === null) ? () => onNewRecord(column.value) : undefined}
-              onColor={option !== null && onOptionColorChange ? (color) => onOptionColorChange(option, color) : undefined}
+              onNew={
+                onNewRecord && (option !== null || column.value === null)
+                  ? () => onNewRecord(column.value)
+                  : undefined
+              }
+              onColor={
+                option !== null && onOptionColorChange
+                  ? (color) => onOptionColorChange(option, color)
+                  : undefined
+              }
               personLabel={personLabel}
               fieldLabel={fieldLabel}
               recordName={recordName}
-              footer={group && column.groupIndex !== null ? groupFooter?.(group, column.groupIndex) : undefined}
-              count={group && column.groupIndex !== null ? groupCount?.(group, column.groupIndex) : undefined}
+              footer={
+                group && column.groupIndex !== null
+                  ? groupFooter?.(group, column.groupIndex)
+                  : undefined
+              }
+              count={
+                group && column.groupIndex !== null
+                  ? groupCount?.(group, column.groupIndex)
+                  : undefined
+              }
               canDrag={!!onCellChange}
             />
           );

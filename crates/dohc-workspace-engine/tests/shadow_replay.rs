@@ -215,7 +215,6 @@ async fn root_bound_replay_composes_real_domains_end_to_end() {
             )
         })
         .expect("bound token");
-    // The daemon minted the binding on first open and stamped the store with it.
     assert_eq!(
         read_root_binding(scratch.path()).expect("root binding"),
         Some(bound_token)

@@ -9,14 +9,14 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// Renderer stability (bullet 11: "the app crashes a lot when just playing
-// around and clicking stuff — blank screen"). Two regression gates:
+// Renderer stability: clicking around the app must never end in a blank
+// screen. Two regression gates:
 //
 //   1. An aggressive click-around session (open/close/switch tabs across
 //      every file kind, toggle panels and views, quick-open, history rail)
-//      must leave the shell mounted with zero uncaught renderer errors —
-//      any pageerror here is exactly the class of throw that used to unmount
-//      the whole React tree to a blank window.
+//      must leave the shell mounted with zero uncaught renderer errors. Any
+//      pageerror here is the class of throw that unmounts the whole React
+//      tree to a blank window.
 //   2. A real renderer-process crash must recover: main's render-process-gone
 //      handler reloads the window instead of leaving it permanently blank.
 
@@ -66,24 +66,20 @@ test("aggressive click-around keeps the shell mounted with no renderer errors", 
       "readme.txt",
     ];
 
-    // Reveal the folders once, then hammer the hot paths.
     for (const folder of ["notes", "data"]) {
       await explorerRow(page, folder).click();
     }
 
     for (let round = 0; round < 2; round += 1) {
-      // Open every file kind (markdown WYSIWYG, csv table, json/text editors).
       for (const path of paths) {
         await explorerRow(page, path).click();
         await expect(page.getByTestId(editorTabTestId(path))).toBeVisible();
       }
 
-      // Rapid tab switching straight across the strip.
       for (const path of paths) {
         await page.getByTestId(editorTabTestId(path)).click();
       }
 
-      // Panel toggles: sidebar off/on, activity views, history rail off/on.
       await page.keyboard.press("ControlOrMeta+b");
       await page.keyboard.press("ControlOrMeta+b");
       for (const view of ["search", "graph", "history", "explorer"]) {
@@ -95,12 +91,10 @@ test("aggressive click-around keeps the shell mounted with no renderer errors", 
         await page.getByTestId("history-restore").click();
       }
 
-      // Quick-open in and out.
       await page.keyboard.press("ControlOrMeta+p");
       await expect(page.getByTestId("quick-open")).toBeVisible();
       await page.keyboard.press("Escape");
 
-      // Close every tab from the strip while views remount underneath.
       for (const path of [...paths].reverse()) {
         await page
           .getByTestId(editorTabTestId(path))
@@ -127,15 +121,10 @@ test("a crashed renderer reloads back to the workspace instead of staying blank"
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await writeWorkspaceFiles(temp, [
-      { path: "hello.md", contents: "# Hello\n\ncontent\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "hello.md", contents: "# Hello\n\ncontent\n" }]);
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
 
-    // Kill the renderer process for real — exactly the "blank window" failure
-    // users hit. Before the render-process-gone handler this stayed blank
-    // forever; now main reloads the window.
     await desktop.app.evaluate(({ BrowserWindow }) => {
       BrowserWindow.getAllWindows()[0]?.webContents.forcefullyCrashRenderer();
     });
@@ -149,11 +138,7 @@ test("a crashed renderer reloads back to the workspace instead of staying blank"
         () =>
           desktop!.app.evaluate(async ({ BrowserWindow }) => {
             const window = BrowserWindow.getAllWindows()[0];
-            if (
-              !window ||
-              window.webContents.isCrashed() ||
-              window.webContents.isLoading()
-            ) {
+            if (!window || window.webContents.isCrashed() || window.webContents.isLoading()) {
               return false;
             }
             const mounted = window.webContents
@@ -170,11 +155,8 @@ test("a crashed renderer reloads back to the workspace instead of staying blank"
       )
       .toBe(true);
 
-    // The handler must have logged the crash + reload decision.
     expect(
-      desktop.logs.some((entry) =>
-        entry.text.includes("[desktop] renderer process gone"),
-      ),
+      desktop.logs.some((entry) => entry.text.includes("[desktop] renderer process gone")),
     ).toBe(true);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);

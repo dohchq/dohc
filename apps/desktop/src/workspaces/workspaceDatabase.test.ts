@@ -18,8 +18,20 @@ import { openedLocalState } from "../testing/preparedLocalState";
 let root: string;
 const AUTHOR = { kind: "user", userId: "local" } as const;
 const { editWorkspaceDatabaseInWorker } = createWorkspaceDatabaseAccess(workspaceDatabaseWorker);
-function editDatabase(relativePath: string, edit: DatabaseEdit, nowMs: number, operationId?: string) {
-  return editWorkspaceDatabaseInWorker({ workspace: { workspaceId: "workspace-db", rootPath: root }, relativePath, edit, author: AUTHOR, nowMs, operationId });
+function editDatabase(
+  relativePath: string,
+  edit: DatabaseEdit,
+  nowMs: number,
+  operationId?: string,
+) {
+  return editWorkspaceDatabaseInWorker({
+    workspace: { workspaceId: "workspace-db", rootPath: root },
+    relativePath,
+    edit,
+    author: AUTHOR,
+    nowMs,
+    operationId,
+  });
 }
 const WALLET_SOURCE = {
   path: "imports/wallet.csv",
@@ -30,10 +42,7 @@ beforeEach(async () => {
   root = await createTestScratch("dohc-db-");
   await openedLocalState({ workspaceId: "workspace-db", rootPath: root });
   await mkdir(join(root, "imports"), { recursive: true });
-  await writeFile(
-    join(root, "imports", "wallet.csv"),
-    WALLET_SOURCE.body,
-  );
+  await writeFile(join(root, "imports", "wallet.csv"), WALLET_SOURCE.body);
 });
 
 describe("importToDatabase", () => {
@@ -45,24 +54,35 @@ describe("importToDatabase", () => {
       },
     });
     try {
-      await expect(importToDatabase(root, WALLET_SOURCE, "cancelled.sqlite", "transactions", {
-        worker, signal: abort.signal,
-      })).rejects.toThrow("Database import was cancelled.");
-      await expect(readFile(join(root, "cancelled.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
-    } finally { await worker.dispose(); }
+      await expect(
+        importToDatabase(root, WALLET_SOURCE, "cancelled.sqlite", "transactions", {
+          worker,
+          signal: abort.signal,
+        }),
+      ).rejects.toThrow("Database import was cancelled.");
+      await expect(readFile(join(root, "cancelled.sqlite"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await worker.dispose();
+    }
   });
   it("refuses to replace an existing database (edits are never silently dropped)", async () => {
     await importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions");
     await editDatabase(
       "finance/wallet.sqlite",
-      { table: "transactions", op: "update", pkColumn: "id", rowId: "txn_001", payload: { category: "Edited" } },
+      {
+        table: "transactions",
+        op: "update",
+        pkColumn: "id",
+        rowId: "txn_001",
+        payload: { category: "Edited" },
+      },
       1_700_000_000_000,
     );
-    // Re-importing the same CSV over the canonical, user-edited file must fail…
     await expect(
       importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions"),
     ).rejects.toThrow(/already exists/i);
-    // …and the user's edit survives untouched.
     const snapshot = await readDatabaseSnapshot(root, "finance/wallet.sqlite");
     const row = snapshot.tables[0]?.rows.find((r) => String(r.id) === "txn_001");
     expect(row?.category).toBe("Edited");
@@ -95,13 +115,16 @@ describe("editing a database", () => {
 
     const after = await editDatabase(
       "finance/wallet.sqlite",
-      { table: "transactions", op: "update", pkColumn: "id", rowId: "txn_001", payload: { category: "Groceries" } },
+      {
+        table: "transactions",
+        op: "update",
+        pkColumn: "id",
+        rowId: "txn_001",
+        payload: { category: "Groceries" },
+      },
       1_700_000_000_000,
     );
-    expect(
-      after.page.rows.find((row) => String(row.id) === "txn_001")
-        ?.category,
-    ).toBe("Groceries");
+    expect(after.page.rows.find((row) => String(row.id) === "txn_001")?.category).toBe("Groceries");
     expect(after).toMatchObject({
       path: "finance/wallet.sqlite",
       table: "transactions",
@@ -110,11 +133,11 @@ describe("editing a database", () => {
 
     // The structured edit is recorded as inspectable JSONL under .dohc — raw
     // bytes are never the sync unit; this op log is.
-    const log = await readFile(
-      join(root, databaseOpLogPath("finance/wallet.sqlite")),
-      "utf8",
-    );
-    const ops = log.trim().split("\n").map((l) => JSON.parse(l));
+    const log = await readFile(join(root, databaseOpLogPath("finance/wallet.sqlite")), "utf8");
+    const ops = log
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
     expect(ops).toHaveLength(1);
     expect(ops[0]).toMatchObject({
       databasePath: "finance/wallet.sqlite",
@@ -130,13 +153,21 @@ describe("editing a database", () => {
     await importToDatabase(root, WALLET_SOURCE, "finance/wallet.sqlite", "transactions");
     await editDatabase(
       "finance/wallet.sqlite",
-      { table: "transactions", op: "update", pkColumn: "id", rowId: "txn_001", payload: { category: "Groceries" } },
+      {
+        table: "transactions",
+        op: "update",
+        pkColumn: "id",
+        rowId: "txn_001",
+        payload: { category: "Groceries" },
+      },
       1_700_000_000_000,
       "op_fixed_0001",
     );
     const log = await readFile(join(root, databaseOpLogPath("finance/wallet.sqlite")), "utf8");
-    const ops = log.trim().split("\n").map((l) => JSON.parse(l));
-    // Both the injected id and the injected clock are deterministic in the log.
+    const ops = log
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
     expect(ops[0]).toMatchObject({ operationId: "op_fixed_0001", appliedAt: 1_700_000_000_000 });
   });
 
@@ -169,7 +200,13 @@ describe("editing a database", () => {
     const second = rows.find((r) => String(r.amount) === "2");
     await editDatabase(
       "finance/dups.sqlite",
-      { table: "rows", op: "update", pkColumn: "rowid", rowId: Number(second?.__dohc_rowid), payload: { amount: 99 } },
+      {
+        table: "rows",
+        op: "update",
+        pkColumn: "rowid",
+        rowId: Number(second?.__dohc_rowid),
+        payload: { amount: 99 },
+      },
       1_700_000_000_002,
     );
 
@@ -201,7 +238,10 @@ describe("containment of '..'-prefixed names", () => {
       "..cache/wallet.sqlite",
       "transactions",
     );
-    expect(result.rowCount, "..-segment: a bare '..-prefix' isInside refuses this real contained name.").toBe(2);
+    expect(
+      result.rowCount,
+      "..-segment: a bare '..-prefix' isInside refuses this real contained name.",
+    ).toBe(2);
 
     const snapshot = await readDatabaseSnapshot(root, "..cache/wallet.sqlite");
     expect(snapshot.tables.find((t) => t.name === "transactions")?.rows).toHaveLength(2);
@@ -212,12 +252,7 @@ describe("prepared local database reads", () => {
   it("refuses a canonical pathname replacement even when it names the same file", async () => {
     await importToDatabase(root, WALLET_SOURCE, "data.sqlite", "transactions");
     const dataPath = join(root, "data.sqlite");
-    const projectionPath = join(
-      root,
-      "shared-with-me",
-      "alice",
-      "data.sqlite",
-    );
+    const projectionPath = join(root, "shared-with-me", "alice", "data.sqlite");
     await mkdir(join(root, "shared-with-me", "alice"), { recursive: true });
     await link(dataPath, projectionPath);
     const prepared = await prepareWorkspaceFileRead(root, "data.sqlite");
@@ -225,8 +260,8 @@ describe("prepared local database reads", () => {
     await rm(dataPath);
     await symlink(projectionPath, dataPath);
 
-    await expect(
-      readPreparedDatabaseSnapshot("data.sqlite", prepared),
-    ).rejects.toThrow(/file changed/i);
+    await expect(readPreparedDatabaseSnapshot("data.sqlite", prepared)).rejects.toThrow(
+      /file changed/i,
+    );
   });
 });

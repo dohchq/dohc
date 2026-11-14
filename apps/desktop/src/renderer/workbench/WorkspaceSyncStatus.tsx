@@ -23,11 +23,6 @@ const SYNC_DESCRIPTION: Partial<Record<SyncStatusResult["state"], string>> = {
   "sign-in-expired": "Not syncing. Your sign-in expired.",
 };
 
-// The dot's shape says the kind of state before its color does: filled is
-// settled, a ring is still working or waiting, a crossed-out cloud is sync
-// off until the person connects, and a triangle needs the person. The cloud
-// and the triangle show their words; the rest keep them for the accessible
-// name and the tooltip.
 type DotKind = "saved" | "working" | "waiting" | "off" | "attention";
 
 const SYNC_DOT: Record<SyncStatusResult["state"], DotKind> = {
@@ -46,20 +41,44 @@ const SYNC_DOT: Record<SyncStatusResult["state"], DotKind> = {
 function Dot(props: { kind: DotKind }) {
   switch (props.kind) {
     case "saved":
-      return <span aria-hidden data-dot="saved" className="size-1.5 shrink-0 rounded-full bg-success" />;
+      return (
+        <span aria-hidden data-dot="saved" className="size-1.5 shrink-0 rounded-full bg-success" />
+      );
     case "working":
-      return <span aria-hidden data-dot="working" className="size-2 shrink-0 rounded-full border-[1.5px] border-warning" />;
+      return (
+        <span
+          aria-hidden
+          data-dot="working"
+          className="size-2 shrink-0 rounded-full border-[1.5px] border-warning"
+        />
+      );
     case "waiting":
-      return <span aria-hidden data-dot="waiting" className="size-2 shrink-0 rounded-full border-[1.5px] border-subtle" />;
+      return (
+        <span
+          aria-hidden
+          data-dot="waiting"
+          className="size-2 shrink-0 rounded-full border-[1.5px] border-subtle"
+        />
+      );
     case "off":
       return <CloudOff aria-hidden data-dot="off" size={12} className="shrink-0 text-subtle" />;
     case "attention":
-      return <TriangleAlert aria-hidden data-dot="attention" size={12} className="shrink-0 text-danger" />;
+      return (
+        <TriangleAlert
+          aria-hidden
+          data-dot="attention"
+          size={12}
+          className="shrink-0 text-danger"
+        />
+      );
   }
 }
 
 // Sync stopped until one side updates, so the title bar names that side.
-export const UPDATE_REQUIRED_LABEL: Record<NonNullable<SyncStatusResult["updateRequired"]>, string> = {
+export const UPDATE_REQUIRED_LABEL: Record<
+  NonNullable<SyncStatusResult["updateRequired"]>,
+  string
+> = {
   app: "Update dohc to sync",
   server: "Server needs an update",
 };
@@ -75,8 +94,18 @@ function liveDeliveryLabel(
   if (delivery === "active") return "Live editing active";
   // A named reason is a state that stays until someone acts on it; an
   // unnamed one is a connection dohc is still dialling.
-  if (reason === "session-host-refused" || reason === "session-host-diverged" || reason === "live-edit-unadmitted") return "Live editing stopped";
-  if (reason === "live-document-without-lineage" || reason === "live-history-over-budget") return "Live editing can't start";
+  if (
+    reason === "session-host-refused" ||
+    reason === "session-host-diverged" ||
+    reason === "live-edit-unadmitted"
+  )
+    return "Live editing stopped";
+  if (
+    reason === "live-document-without-lineage" ||
+    reason === "live-history-over-budget" ||
+    reason === "live-start-failing"
+  )
+    return "Live editing can't start";
   if (reason === "conflict-parent-withheld") return "Live editing can't resume";
   return reason ? "Live editing paused" : "Live editing retrying";
 }
@@ -85,7 +114,9 @@ function liveDeliveryLabel(
 // account dohc can't confirm, or an expired sign-in is not the server's
 // fault, so none of them does.
 export function syncNamesServer(syncStatus: SyncStatusResult | null | undefined): boolean {
-  return syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-unreachable";
+  return (
+    syncStatus?.state === "sync-failed" && syncStatus.syncFailure?.cause === "server-unreachable"
+  );
 }
 
 // The server said it is busy, and dohc syncs again by itself, so the title
@@ -100,9 +131,15 @@ const SERVER_BUSY_DESCRIPTION = "Server busy. dohc keeps trying to sync.";
 // then add no indicator, toast or row of their own, since the server's
 // report covers them. A failed save or a required update takes the title
 // bar's words, and then they show again.
-export function titleBarNamesServer(syncStatus: SyncStatusResult | null | undefined, failedSaves: number): boolean {
-  return syncNamesServer(syncStatus) && !syncStatus?.updateRequired &&
-    saveFailedLabel(syncStatus ?? null, failedSaves) === null;
+export function titleBarNamesServer(
+  syncStatus: SyncStatusResult | null | undefined,
+  failedSaves: number,
+): boolean {
+  return (
+    syncNamesServer(syncStatus) &&
+    !syncStatus?.updateRequired &&
+    saveFailedLabel(syncStatus ?? null, failedSaves) === null
+  );
 }
 
 // A file that couldn't save outranks every state but those that stop sync
@@ -118,13 +155,15 @@ function saveFailedLabel(syncStatus: SyncStatusResult | null, failedSaves: numbe
 // The workspace's save and sync state. An editor's own edits in flight show
 // on its tab, not here: this is a live region, and typing must not make it
 // speak.
-export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
+export function WorkspaceSyncStatus({
+  syncStatus,
+  failedSaves,
+}: {
   syncStatus: SyncStatusResult | null;
-  // Files in this workspace whose save failed.
   failedSaves: number;
 }) {
   const state = syncStatus?.state;
-  const conflictCount = state === "conflict" ? syncStatus?.conflictCount ?? 0 : 0;
+  const conflictCount = state === "conflict" ? (syncStatus?.conflictCount ?? 0) : 0;
   // A failed sync names the server when the server is what failed.
   const busy = syncWaitsOnBusyServer(syncStatus);
   const stateLabel =
@@ -139,27 +178,36 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
     ? `${stateLabel}${conflictCount > 0 ? ` (${conflictCount})` : ""}`
     : "Checking status";
   const saveFailed = saveFailedLabel(syncStatus, failedSaves);
-  const shownLabel = saveFailed ?? (syncStatus?.updateRequired
-    ? UPDATE_REQUIRED_LABEL[syncStatus.updateRequired]
-    : state === "syncing" && syncStatus?.claimingIdentity
-      ? "Setting up sync…"
-      : label);
-  const stateDescription = busy ? SERVER_BUSY_DESCRIPTION : state ? SYNC_DESCRIPTION[state] : undefined;
+  const shownLabel =
+    saveFailed ??
+    (syncStatus?.updateRequired
+      ? UPDATE_REQUIRED_LABEL[syncStatus.updateRequired]
+      : state === "syncing" && syncStatus?.claimingIdentity
+        ? "Setting up sync…"
+        : label);
+  const stateDescription = busy
+    ? SERVER_BUSY_DESCRIPTION
+    : state
+      ? SYNC_DESCRIPTION[state]
+      : undefined;
   const description = (shownLabel === label ? stateDescription : undefined) ?? shownLabel;
-  const dot: DotKind = saveFailed || syncStatus?.updateRequired
-    ? "attention"
-    : busy
-      ? "working"
-      : state
-        ? SYNC_DOT[state]
-        : "waiting";
+  const dot: DotKind =
+    saveFailed || syncStatus?.updateRequired
+      ? "attention"
+      : busy
+        ? "working"
+        : state
+          ? SYNC_DOT[state]
+          : "waiting";
   // A state that needs the person, or waits on the person to connect, says
   // so in words beside the mark.
   const worded = dot === "attention" || dot === "off";
   // Absent means this workspace has nothing to say about live delivery, so
   // the title bar says nothing either. Live editing waits on a server the
   // title bar already names.
-  const liveDelivery = titleBarNamesServer(syncStatus, failedSaves) ? undefined : syncStatus?.ownerLiveDelivery;
+  const liveDelivery = titleBarNamesServer(syncStatus, failedSaves)
+    ? undefined
+    : syncStatus?.ownerLiveDelivery;
   const liveLabel = liveDelivery
     ? liveDeliveryLabel(liveDelivery, syncStatus?.ownerLiveDeliveryReason)
     : null;
@@ -169,7 +217,7 @@ export function WorkspaceSyncStatus({ syncStatus, failedSaves }: {
     <>
       <span
         data-testid="sync-status"
-        data-state={saveFailed ? "save-failed" : state ?? "unknown"}
+        data-state={saveFailed ? "save-failed" : (state ?? "unknown")}
         role="status"
         aria-label={description}
         title={description}

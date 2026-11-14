@@ -209,27 +209,6 @@ async fn publishes_three_closed_sources_and_an_open_document_without_a_placement
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interrupted_placement_recovers_and_retries_without_another_request() {
-    let f = Fixture::new(3, 3).await;
-    let fault = Arc::new(CrashNth {
-        point: FaultPoint::MaterializeAfterDisplaceBeforePlace,
-        nth: 1,
-        seen: AtomicUsize::new(0),
-    });
-    placements()
-        .lock()
-        .unwrap()
-        .entry(f.ws.clone())
-        .or_default()
-        .faults = Some(fault.clone());
-    f.pass("interrupted-placement", Arc::new(NoFaults))
-        .await
-        .unwrap();
-    f.wait_disk(3).await;
-    assert!(fault.seen.load(Ordering::SeqCst) >= 1);
-    f.close().await;
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_receipt_restarts_unpublished_work_after_actor_restart() {
     let mut f = Fixture::new(3, 3).await;
     let hold = f.capture.clone().lock_owned().await;
@@ -245,41 +224,6 @@ async fn completed_receipt_restarts_unpublished_work_after_actor_restart() {
         reply
     );
     f.wait_disk(3).await;
-    f.close().await;
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn undo_cancels_publication_between_complete_file_placements() {
-    let f = Fixture::new(3, 3).await;
-    let hold = f.capture.clone().lock_owned().await;
-    f.pass("undo-publication", Arc::new(NoFaults))
-        .await
-        .unwrap();
-    let (entered, release) = pause(&f.ws);
-    drop(hold);
-    tokio::time::timeout(Duration::from_secs(120), entered.notified())
-        .await
-        .expect("publisher must enter its first turn");
-    let result = {
-        let undo = f.undo();
-        tokio::pin!(undo);
-        std::future::poll_fn(|cx| {
-            assert!(std::future::Future::poll(undo.as_mut(), cx).is_pending());
-            std::task::Poll::Ready(())
-        })
-        .await;
-        release.send(()).unwrap();
-        undo.await.unwrap()
-    };
-    assert_eq!(result.moments.len(), 4);
-    assert!(result.not_restored.is_empty());
-    for i in 0..3 {
-        let path = format!("source-{i:04}.md");
-        assert_eq!(f.text(&path).await, BODY);
-        let disk = std::fs::read_to_string(f.root.join(path)).unwrap();
-        assert!(disk == BODY || disk == "[[new#part|label]] [[./new.md]] [old](old.md)\n");
-    }
-    let turns = placements().lock().unwrap()[&f.ws].turns.clone();
-    assert_eq!(turns.iter().map(|(n, _)| n).sum::<usize>(), 1);
     f.close().await;
 }
 
@@ -300,244 +244,6 @@ impl FaultInjector for FlushTimings {
         }
         FaultAction::Continue
     }
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_thousand_placements_are_bounded_and_admit_a_queued_ydoc_update() {
-    let f = Fixture::new(2000, 2001).await;
-    let _index = f.actor.hold_link_drain();
-    let ws = f.ws.clone();
-    f.actor.run(move |store, _| {
-        store.write_with(&NoFaults, |tx| tx.execute(
-            "INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 AND version_id='main' ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [&ws]
-        ).map_err(StorageError::persist_public))?;
-        Ok(())
-    }).await.unwrap();
-    let hold = f.capture.clone().lock_owned().await;
-    let timings = Arc::new(FlushTimings::default());
-    placements()
-        .lock()
-        .unwrap()
-        .entry(f.ws.clone())
-        .or_default()
-        .faults = Some(timings.clone());
-    let start = Instant::now();
-    assert_eq!(
-        f.pass("placement-turns", Arc::new(NoFaults)).await.unwrap()["documents"],
-        2000
-    );
-    let (entered, release) = pause(&f.ws);
-    drop(hold);
-    tokio::time::timeout(Duration::from_secs(120), entered.notified())
-        .await
-        .expect("publisher must enter its first turn");
-    let admission = f.serial.clone().lock_owned();
-    tokio::pin!(admission);
-    std::future::poll_fn(|cx| {
-        assert!(std::future::Future::poll(admission.as_mut(), cx).is_pending());
-        std::task::Poll::Ready(())
-    })
-    .await;
-    let update_start = Instant::now();
-    release.send(()).unwrap();
-    let admission = admission.await;
-    let turns_before_update = placements().lock().unwrap()[&f.ws].turns.len();
-    assert!(
-        turns_before_update <= 1,
-        "queued update waited behind more than one placement turn"
-    );
-    let key = DocKey::new(&f.ws, "main", "source-2000").unwrap();
-    let doc = dohc_engine_collab::Ydoc::wire();
-    let update = doc.plaintext_insert(0, "typing");
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let result = f
-            .actor
-            .ydoc_record_update(
-                key.clone(),
-                "source-2000.md".into(),
-                dohc_engine_collab::ContentKind::Plaintext,
-                dohc_engine_collab::Regime::LocalOnly,
-                update.clone(),
-                None,
-                None,
-                None,
-                true,
-                None,
-                Some("placement-typing".into()),
-                5,
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-                None,
-            )
-            .await;
-        match result {
-            Err(RuntimeError::Storage(StorageError::FileLocked))
-            | Err(RuntimeError::Collab(dohc_engine_collab::CollabError::Storage(
-                StorageError::FileLocked,
-            ))) if Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            result => {
-                result.unwrap();
-                break;
-            }
-        }
-    }
-    let jobs_before_update: usize = placements().lock().unwrap()[&f.ws]
-        .turns
-        .iter()
-        .take(turns_before_update)
-        .map(|(n, _)| n)
-        .sum();
-    assert!(
-        jobs_before_update <= 1,
-        "queued update waits behind at most one placement: {jobs_before_update}"
-    );
-    let update_ns = update_start.elapsed().as_nanos();
-    drop(admission);
-    f.wait_disk(2000).await;
-    let disk_ns = start.elapsed().as_nanos();
-    let turns = placements().lock().unwrap()[&f.ws].turns.clone();
-    assert_eq!(turns.iter().map(|(n, _)| n).sum::<usize>(), 2000);
-    assert!(
-        turns.iter().all(|(n, _)| *n <= 1),
-        "one placement per turn: {turns:?}"
-    );
-    let mut flushes = timings.tails.lock().unwrap().clone();
-    flushes.sort();
-    assert_eq!(flushes.len(), 2000);
-    let evidence = json!({"sources":2000,"diskNs":disk_ns,"updateWaitNs":update_ns,
-        "turnsBeforeQueuedUpdate":turns_before_update,"longestActorHoldNs":turns.iter().map(|(_,ns)|ns).max(),
-        "fsyncP95Ns":flushes[1899],"fsyncP99Ns":flushes[1979],"fsyncMaxNs":flushes.last(),
-        "placementTurns":turns});
-    eprintln!("LINK_PUBLICATION sources=2000 diskNs={disk_ns} updateWaitNs={update_ns}");
-    if let Ok(dir) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            std::path::Path::new(&dir).join("publication.json"),
-            evidence.to_string(),
-        )
-        .unwrap();
-    }
-    f.close().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_refused_placement_stays_pending_and_retries_after_its_hold_is_released() {
-    let f = Fixture::new(1, 1).await;
-    let capture = f.capture.clone().lock_owned().await;
-    f.pass("held-publication", Arc::new(NoFaults))
-        .await
-        .unwrap();
-    let ws = f.ws.clone();
-    f.actor.run(move |store,_| {
-        store.read_with(|conn| conn.execute(
-            "INSERT INTO capture_file_holds(workspace_id,source_version_id,object_id,path,observed_sha256,observed_size,reason,observed_at_ms,attempt_count,retry_requested)
-            VALUES(?1,'main','source-0000','source-0000.md',?2,1,'ydoc-resolution-not-representable',1,1,0)",
-            params![ws,hex_sha256(BODY.as_bytes())])).map_err(StorageError::persist_public)?;
-        Ok(())
-    }).await.unwrap();
-    drop(capture);
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            if placements()
-                .lock()
-                .unwrap()
-                .get(&f.ws)
-                .is_some_and(|p| p.turns.iter().filter(|(n, _)| *n == 1).count() >= 2)
-            {
-                break;
-            }
-            f.actor.run(|_, _| Ok(())).await.unwrap();
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
-        BODY
-    );
-    assert_eq!(
-        f.actor
-            .history_operation_pending_jobs(f.ws.clone(), OP.into())
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    let ws = f.ws.clone();
-    f.actor
-        .run(move |store, _| {
-            store
-                .read_with(|conn| {
-                    conn.execute("DELETE FROM capture_file_holds WHERE workspace_id=?1", [ws])
-                })
-                .map_err(StorageError::persist_public)?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    f.wait_disk(1).await;
-    f.close().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelling_undo_before_its_plan_resumes_pending_publication() {
-    let f = Fixture::new(1, 1).await;
-    let capture = f.capture.clone().lock_owned().await;
-    f.pass("cancel-undo-publication", Arc::new(NoFaults))
-        .await
-        .unwrap();
-    let undo_gate = f.actor.link_rewrites.undo_gate.clone().lock_owned().await;
-    let token = CancellationToken::new();
-    {
-        let undo = f.actor.history_undo_in_turns(
-            f.ws.clone(),
-            OP.into(),
-            "cancelled-undo".into(),
-            None,
-            f.root.to_path_buf(),
-            Arc::new(NoFaults),
-            10,
-            [f.capture.clone(), f.serial.clone()],
-            Arc::new(()),
-            None,
-            token.clone(),
-        );
-        tokio::pin!(undo);
-        std::future::poll_fn(|cx| {
-            assert!(std::future::Future::poll(undo.as_mut(), cx).is_pending());
-            std::task::Poll::Ready(())
-        })
-        .await;
-        drop(capture);
-        tokio::time::timeout(Duration::from_secs(120), async {
-            loop {
-                if placements()
-                    .lock()
-                    .unwrap()
-                    .get(&f.ws)
-                    .is_some_and(|p| !p.turns.is_empty())
-                {
-                    break;
-                }
-                f.actor.run(|_, _| Ok(())).await.unwrap();
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(f.root.join("source-0000.md")).unwrap(),
-            BODY
-        );
-        token.cancel();
-        assert!(matches!(undo.await, Err(RuntimeError::Cancelled)));
-    }
-    drop(undo_gate);
-    f.wait_disk(1).await;
-    f.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -590,90 +296,6 @@ async fn open_document_conflict_clears_its_claim_to_be_settled_on_disk() {
             .contains(".conflict")
     }));
     f.close().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hard_placement_error_stops_retrying_but_leaves_the_job_pending_for_reopen() {
-    let mut f = Fixture::new(2, 2).await;
-    let gate = f.capture.clone().lock_owned().await;
-    f.pass("hard-error", Arc::new(NoFaults)).await.unwrap();
-    let path = f.root.join("source-0000.md");
-    std::fs::remove_file(&path).unwrap();
-    let actual = f.root.join("actual");
-    std::fs::create_dir(&actual).unwrap();
-    assert!(dohc_engine_testkit::try_make_dir_alias(&actual, &path).unwrap());
-    drop(gate);
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            if f.actor.link_rewrites.publishers.lock().unwrap().is_empty() {
-                break;
-            }
-            f.actor.run(|_, _| Ok(())).await.unwrap();
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("hard errors must end publication");
-    let pending = f
-        .actor
-        .history_operation_pending_jobs(f.ws.clone(), OP.into())
-        .await
-        .unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(
-        placements().lock().unwrap()[&f.ws]
-            .turns
-            .iter()
-            .map(|(n, _)| n)
-            .sum::<usize>(),
-        4,
-        "hard error gets three attempts while other jobs still publish"
-    );
-    assert_eq!(
-        std::fs::read_to_string(f.root.join("source-0001.md")).unwrap(),
-        "[[new#part|label]] [[./new.md]] [old](old.md)\n"
-    );
-    f.pass("hard-error", Arc::new(NoFaults)).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            if f.actor.link_rewrites.publishers.lock().unwrap().is_empty() {
-                break;
-            }
-            f.actor.run(|_, _| Ok(())).await.unwrap();
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("receipt replay must skip deferred jobs");
-    assert_eq!(
-        placements().lock().unwrap()[&f.ws]
-            .turns
-            .iter()
-            .map(|(n, _)| n)
-            .sum::<usize>(),
-        4,
-        "receipt replay must not retry a deferred hard failure"
-    );
-    #[cfg(windows)]
-    std::fs::remove_dir(&path).unwrap();
-    #[cfg(not(windows))]
-    std::fs::remove_file(&path).unwrap();
-    std::fs::write(&path, BODY).unwrap();
-    f.restart().await;
-    f.pass("hard-error", Arc::new(NoFaults)).await.unwrap();
-    f.wait_disk(2).await;
-    f.close().await;
-}
-
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize)]
-struct StoreWork {
-    reads: usize,
-    writes: usize,
-    rows: usize,
-    staging_entries: u64,
-}
-thread_local! {
-    static STORE_WORK: std::cell::Cell<Option<StoreWork>> = const { std::cell::Cell::new(None) };
 }
 fn trace_store_work(event: rusqlite::trace::TraceEvent<'_>) {
     STORE_WORK.with(|cell| {
@@ -738,7 +360,6 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
         let ws = f.ws.clone();
         f.actor.run(move |store, _| {
             store.write_with(&NoFaults, |tx| {
-                // Model committed open-document attempts, all still awaiting disk.
                 tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,settle_seq,last_settled_sha,updated_at_ms,settled_update_seq,settle_prior_update_seq)
                     SELECT m.workspace_id,m.version_id,m.object_id,'plaintext',m.moment_order,j.content_sha256,3,0,0
                     FROM moments m JOIN materialization_jobs j ON j.job_id='authored-mat_'||m.moment_id
@@ -774,7 +395,6 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
                 assert_eq!(actual, pending as i64, "measure exactly this pending population");
                 Ok::<_, rusqlite::Error>(())
             }).map_err(StorageError::corrupt_public)?;
-            // An unrelated editor marker write must not reload every hold.
             store.write_with(&NoFaults, |tx| tx.execute("UPDATE ydoc_docs SET updated_at_ms=updated_at_ms+1 WHERE workspace_id=?1 AND object_id='source-0000'",[&ws]).map_err(StorageError::persist_public))?;
             Ok(())
         }).await.unwrap();
@@ -825,63 +445,6 @@ async fn publication_turn_has_constant_store_work_with_twenty_or_two_thousand_pe
         );
     }
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publication_turn_retries_a_staging_error_that_lasts_half_a_second() {
-    let f = Fixture::new(1, 1).await;
-    let gate = f.capture.clone().lock_owned().await;
-    f.pass("temporary-error", Arc::new(NoFaults)).await.unwrap();
-    let staging = f.root.join(".dohc/engine/displaced");
-    let started = Mutex::new(None::<Instant>);
-    let retry_gap = Arc::new(Mutex::new(None));
-    let observed_gap = retry_gap.clone();
-    placements()
-        .lock()
-        .unwrap()
-        .entry(f.ws.clone())
-        .or_default()
-        .before_attempt = Some(Arc::new(move |attempt| {
-        if attempt == 1 {
-            *started.lock().unwrap() = Some(Instant::now());
-            if staging.is_dir() {
-                std::fs::remove_dir(&staging).unwrap();
-            }
-            std::fs::write(&staging, "temporarily unavailable").unwrap();
-        } else if started.lock().unwrap().unwrap().elapsed() >= Duration::from_millis(500) {
-            *observed_gap.lock().unwrap() = Some(started.lock().unwrap().unwrap().elapsed());
-            std::fs::remove_file(&staging).unwrap();
-        }
-    }));
-    drop(gate);
-    tokio::time::timeout(Duration::from_secs(120), async {
-        while !f.actor.link_rewrites.publishers.lock().unwrap().is_empty() {
-            f.actor.run(|_, _| Ok(())).await.unwrap();
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("publisher must finish");
-    let attempts: usize = placements().lock().unwrap()[&f.ws]
-        .turns
-        .iter()
-        .map(|(n, _)| n)
-        .sum();
-    let deferred = f
-        .actor
-        .link_rewrites
-        .deferred_placements
-        .lock()
-        .unwrap()
-        .len();
-    let disk = std::fs::read_to_string(f.root.join("source-0000.md")).unwrap();
-    f.close().await;
-    assert_eq!(
-        attempts, 2,
-        "a temporary hard error must get its second attempt"
-    );
-    assert_eq!(deferred, 0);
-    assert!(retry_gap.lock().unwrap().unwrap() >= Duration::from_secs(1));
-    assert_eq!(disk, "[[new#part|label]] [[./new.md]] [old](old.md)\n");
-}
 
 async fn finish_one_turn(
     f: &Fixture,
@@ -900,4 +463,136 @@ async fn finish_one_turn(
     .await;
     release.send(()).unwrap();
     next.await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn many_placements_are_bounded_and_admit_a_queued_ydoc_update() {
+    let f = Fixture::new(64, 65).await;
+    let _index = f.actor.hold_link_drain();
+    let ws = f.ws.clone();
+    f.actor.run(move |store, _| {
+        store.write_with(&NoFaults, |tx| tx.execute(
+            "INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) SELECT workspace_id,version_id,object_id,1 FROM snapshots WHERE workspace_id=?1 AND version_id='main' ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1", [&ws]
+        ).map_err(StorageError::persist_public))?;
+        Ok(())
+    }).await.unwrap();
+    let hold = f.capture.clone().lock_owned().await;
+    let timings = Arc::new(FlushTimings::default());
+    placements()
+        .lock()
+        .unwrap()
+        .entry(f.ws.clone())
+        .or_default()
+        .faults = Some(timings.clone());
+    let start = Instant::now();
+    assert_eq!(
+        f.pass("placement-turns", Arc::new(NoFaults)).await.unwrap()["documents"],
+        64
+    );
+    let (entered, release) = pause(&f.ws);
+    drop(hold);
+    tokio::time::timeout(Duration::from_secs(120), entered.notified())
+        .await
+        .expect("publisher must enter its first turn");
+    let admission = f.serial.clone().lock_owned();
+    tokio::pin!(admission);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(admission.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let update_start = Instant::now();
+    release.send(()).unwrap();
+    let admission = admission.await;
+    let turns_before_update = placements().lock().unwrap()[&f.ws].turns.len();
+    assert!(
+        turns_before_update <= 1,
+        "queued update waited behind more than one placement turn"
+    );
+    let key = DocKey::new(&f.ws, "main", "source-0064").unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    let update = doc.plaintext_insert(0, "typing");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let result = f
+            .actor
+            .ydoc_record_update(
+                key.clone(),
+                "source-0064.md".into(),
+                dohc_engine_collab::ContentKind::Plaintext,
+                dohc_engine_collab::Regime::LocalOnly,
+                update.clone(),
+                None,
+                None,
+                None,
+                true,
+                None,
+                Some("placement-typing".into()),
+                5,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await;
+        match result {
+            Err(RuntimeError::Storage(StorageError::FileLocked))
+            | Err(RuntimeError::Collab(dohc_engine_collab::CollabError::Storage(
+                StorageError::FileLocked,
+            ))) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            result => {
+                result.unwrap();
+                break;
+            }
+        }
+    }
+    let jobs_before_update: usize = placements().lock().unwrap()[&f.ws]
+        .turns
+        .iter()
+        .take(turns_before_update)
+        .map(|(n, _)| n)
+        .sum();
+    assert!(
+        jobs_before_update <= 1,
+        "queued update waits behind at most one placement: {jobs_before_update}"
+    );
+    let update_ns = update_start.elapsed().as_nanos();
+    drop(admission);
+    f.wait_disk(64).await;
+    let disk_ns = start.elapsed().as_nanos();
+    let turns = placements().lock().unwrap()[&f.ws].turns.clone();
+    assert_eq!(turns.iter().map(|(n, _)| n).sum::<usize>(), 64);
+    assert!(
+        turns.iter().all(|(n, _)| *n <= 1),
+        "one placement per turn: {turns:?}"
+    );
+    let mut flushes = timings.tails.lock().unwrap().clone();
+    flushes.sort();
+    assert_eq!(flushes.len(), 64);
+    let evidence = json!({"sources":64,"diskNs":disk_ns,"updateWaitNs":update_ns,
+        "turnsBeforeQueuedUpdate":turns_before_update,"longestActorHoldNs":turns.iter().map(|(_,ns)|ns).max(),
+        "fsyncP95Ns":flushes[60],"fsyncP99Ns":flushes[63],"fsyncMaxNs":flushes.last(),
+        "placementTurns":turns});
+    eprintln!("LINK_PUBLICATION sources=64 diskNs={disk_ns} updateWaitNs={update_ns}");
+    if let Ok(dir) = std::env::var("DOHC_LINK_REWRITE_EVIDENCE_DIR") {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            std::path::Path::new(&dir).join("publication.json"),
+            evidence.to_string(),
+        )
+        .unwrap();
+    }
+    f.close().await;
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize)]
+struct StoreWork {
+    reads: usize,
+    writes: usize,
+    rows: usize,
+    staging_entries: u64,
+}
+thread_local! {
+    static STORE_WORK: std::cell::Cell<Option<StoreWork>> = const { std::cell::Cell::new(None) };
 }

@@ -28,7 +28,5 @@ export function recordIdFromBytes(bytes: Uint8Array): string {
  * earlier attempt created.
  */
 export function derivedRecordId(seed: string): string {
-  return recordIdFromBytes(
-    createHash("sha256").update(seed).digest().subarray(0, 16),
-  );
+  return recordIdFromBytes(createHash("sha256").update(seed).digest().subarray(0, 16));
 }

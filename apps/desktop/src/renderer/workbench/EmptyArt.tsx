@@ -1,9 +1,17 @@
 import { Check } from "lucide-react";
 import type { ReactNode } from "react";
 
-export type EmptyArtKind = "posts" | "history" | "shares" | "automations" | "table" | "versions" | "search";
+export type EmptyArtKind =
+  | "posts"
+  | "history"
+  | "shares"
+  | "automations"
+  | "table"
+  | "versions"
+  | "search";
 
-const CARD = "absolute inset-x-3 top-1.5 -bottom-2.5 overflow-hidden rounded-md border border-line bg-bg";
+const CARD =
+  "absolute inset-x-3 top-1.5 -bottom-2.5 overflow-hidden rounded-md border border-line bg-bg";
 const ROW = "flex items-center gap-1.25";
 const LINE = "h-1.25 shrink-0 rounded-full bg-ink/13";
 const HEAD = "shrink-0 rounded-full bg-ink/55";
@@ -11,8 +19,20 @@ const SQUARE = "size-1.75 shrink-0 rounded-xs";
 const DOT = "size-2.5 shrink-0 rounded-full";
 const AVATAR = `${DOT} border-[1.5px] border-bg`;
 
-// A table's cells, row by row: a header row, then text and tag cells.
-const CELLS = ["head", "head", "head", "text", "tag", "text", "text", "text", "tag", "text", "tag", "text"] as const;
+const CELLS = [
+  "head",
+  "head",
+  "head",
+  "text",
+  "tag",
+  "text",
+  "text",
+  "text",
+  "tag",
+  "text",
+  "tag",
+  "text",
+] as const;
 
 // The picture on each empty state: a sketch of what the surface holds once it
 // has items. Decorative; EmptyState hides it and its line names what is missing.
@@ -39,7 +59,13 @@ export const EMPTY_ART: Record<EmptyArtKind, ReactNode> = {
   history: (
     <span className={`${CARD} flex flex-col gap-2.25 p-2 pl-5.5`}>
       <span className="absolute top-2.5 bottom-0 left-3 w-px bg-line" />
-      {([["bg-hue-blue", "w-[60%]"], ["bg-agent", "w-[48%]"], ["bg-hue-blue", "w-[55%]"]] as const).map(([hue, width]) => (
+      {(
+        [
+          ["bg-hue-blue", "w-[60%]"],
+          ["bg-agent", "w-[48%]"],
+          ["bg-hue-blue", "w-[55%]"],
+        ] as const
+      ).map(([hue, width]) => (
         <span key={width} className={ROW}>
           <span className={`absolute left-2 size-2.25 rounded-full ${hue}`} />
           <span className={`${LINE} ${width}`} />
@@ -51,15 +77,21 @@ export const EMPTY_ART: Record<EmptyArtKind, ReactNode> = {
   shares: (
     <span className={`${CARD} flex flex-col gap-2.25 p-2`}>
       <span className={ROW}>
-        <span className={`${SQUARE} bg-ink/55`} /><span className={`${LINE} w-[44%]`} />
-        <span className="ml-auto flex"><span className={`${AVATAR} bg-hue-blue`} /><span className={`${AVATAR} -ml-1 bg-hue-rose`} /></span>
+        <span className={`${SQUARE} bg-ink/55`} />
+        <span className={`${LINE} w-[44%]`} />
+        <span className="ml-auto flex">
+          <span className={`${AVATAR} bg-hue-blue`} />
+          <span className={`${AVATAR} -ml-1 bg-hue-rose`} />
+        </span>
       </span>
       <span className={ROW}>
-        <span className={`${SQUARE} bg-hue-teal`} /><span className={`${LINE} w-[36%]`} />
+        <span className={`${SQUARE} bg-hue-teal`} />
+        <span className={`${LINE} w-[36%]`} />
         <span className={`${AVATAR} ml-auto bg-agent`} />
       </span>
       <span className={ROW}>
-        <span className={`${SQUARE} bg-hue-amber`} /><span className={`${LINE} w-1/2`} />
+        <span className={`${SQUARE} bg-hue-amber`} />
+        <span className={`${LINE} w-1/2`} />
         <span className={`${AVATAR} ml-auto bg-hue-blue`} />
       </span>
     </span>
@@ -80,9 +112,16 @@ export const EMPTY_ART: Record<EmptyArtKind, ReactNode> = {
   table: (
     <span className={`${CARD} grid auto-rows-[15px] grid-cols-[1.4fr_1fr_1fr]`}>
       {CELLS.map((cell, index) => (
-        <span key={index} className={`relative border-b border-line ${index % 3 === 2 ? "" : "border-r"} ${cell === "head" ? "bg-hue-teal/15" : ""}`}>
-          {cell === "text" ? <span className="absolute top-1.25 left-1.25 h-1.25 w-[55%] rounded-full bg-ink/13" /> : null}
-          {cell === "tag" ? <span className="absolute inset-x-1.25 top-1 h-1.75 rounded-full bg-hue-teal/35" /> : null}
+        <span
+          key={index}
+          className={`relative border-b border-line ${index % 3 === 2 ? "" : "border-r"} ${cell === "head" ? "bg-hue-teal/15" : ""}`}
+        >
+          {cell === "text" ? (
+            <span className="absolute top-1.25 left-1.25 h-1.25 w-[55%] rounded-full bg-ink/13" />
+          ) : null}
+          {cell === "tag" ? (
+            <span className="absolute inset-x-1.25 top-1 h-1.75 rounded-full bg-hue-teal/35" />
+          ) : null}
         </span>
       ))}
     </span>

@@ -35,10 +35,7 @@ function record(value: unknown): Record<string, unknown> {
   const keys = Object.keys(candidate);
   if (
     keys.length !== LIVE_OBJECT_BINDING_FIELDS.length ||
-    keys.some(
-      (key) =>
-        !(LIVE_OBJECT_BINDING_FIELDS as readonly string[]).includes(key),
-    )
+    keys.some((key) => !(LIVE_OBJECT_BINDING_FIELDS as readonly string[]).includes(key))
   ) {
     throw new TypeError("LiveObjectBinding must contain exactly its seven fields.");
   }
@@ -136,11 +133,7 @@ export function parseLiveObjectBinding(value: unknown): LiveObjectBinding {
   }
 
   const selectorPaths = [
-    ...new Set(
-      Array.from(rawSelectorPaths, (path) =>
-        normalizedPath(path, "selectorPaths"),
-      ),
-    ),
+    ...new Set(Array.from(rawSelectorPaths, (path) => normalizedPath(path, "selectorPaths"))),
   ].sort(compareUtf8);
 
   const restoreFenceGeneration = candidate.restoreFenceGeneration;
@@ -149,9 +142,7 @@ export function parseLiveObjectBinding(value: unknown): LiveObjectBinding {
     !Number.isSafeInteger(restoreFenceGeneration) ||
     restoreFenceGeneration < 0
   ) {
-    throw new TypeError(
-      "restoreFenceGeneration must be a non-negative safe integer.",
-    );
+    throw new TypeError("restoreFenceGeneration must be a non-negative safe integer.");
   }
 
   return {

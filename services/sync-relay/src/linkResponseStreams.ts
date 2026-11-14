@@ -8,13 +8,17 @@ const LINK_BLOB_INFLIGHT_BYTES_PER_GRANT = 64 * 1024 * 1024;
  * and returns its unregister. `release` runs once, with the bytes sent,
  * however the stream ends.
  */
-export function guardedByteResponse(bytes: Uint8Array, headers: Record<string, string>, options: {
-  register(terminate: () => void): () => void;
-  release(emittedByteLength: number): void;
-  terminatedMessage: string;
-  guard?(): void | Promise<void>;
-  signal?: AbortSignal;
-}): Response {
+export function guardedByteResponse(
+  bytes: Uint8Array,
+  headers: Record<string, string>,
+  options: {
+    register(terminate: () => void): () => void;
+    release(emittedByteLength: number): void;
+    terminatedMessage: string;
+    guard?(): void | Promise<void>;
+    signal?: AbortSignal;
+  },
+): Response {
   let offset = 0;
   let active = true;
   let unregister = (): void => undefined;
@@ -36,12 +40,14 @@ export function guardedByteResponse(bytes: Uint8Array, headers: Record<string, s
         };
         unregister = options.register(terminate);
         abort = terminate;
-        options.signal?.addEventListener("abort", abort, {once: true});
+        options.signal?.addEventListener("abort", abort, { once: true });
         if (options.signal?.aborted) abort();
       },
       async pull(controller) {
         if (!active) return;
-        try {await options.guard?.();} catch (error) {
+        try {
+          await options.guard?.();
+        } catch (error) {
           if (!active) return;
           release();
           controller.error(error);
@@ -83,10 +89,7 @@ export function createLinkResponseStreams(nowMs: () => number) {
   // response.
   const activeLinkStreams = new Map<string, Set<ActiveLinkStream>>();
   const activeLinkBlobBytes = new Map<string, number>();
-  const admitLinkBlobBytes = (
-    grantId: string,
-    byteLength: number,
-  ): (() => void) | null => {
+  const admitLinkBlobBytes = (grantId: string, byteLength: number): (() => void) | null => {
     const retainedBytes = activeLinkBlobBytes.get(grantId) ?? 0;
     if (byteLength > LINK_BLOB_INFLIGHT_BYTES_PER_GRANT - retainedBytes) {
       return null;
@@ -101,10 +104,7 @@ export function createLinkResponseStreams(nowMs: () => number) {
       else activeLinkBlobBytes.delete(grantId);
     };
   };
-  const registerLinkStream = (
-    grantId: string,
-    stream: ActiveLinkStream,
-  ): (() => void) => {
+  const registerLinkStream = (grantId: string, stream: ActiveLinkStream): (() => void) => {
     let streams = activeLinkStreams.get(grantId);
     if (!streams) {
       streams = new Set();
@@ -137,16 +137,17 @@ export function createLinkResponseStreams(nowMs: () => number) {
     releaseRetainedBytes: () => void,
     settleEgress: (emittedByteLength: number, settledAtMs: number) => void,
     headers: Record<string, string>,
-    options?: {guard(): void; signal: AbortSignal},
-  ): Response => guardedByteResponse(bytes, headers, {
-    register: terminate => registerLinkStream(grantId, {shareId, terminate}),
-    release: emitted => {
-      releaseRetainedBytes();
-      settleEgress(emitted, nowMs());
-    },
-    terminatedMessage: "link grant changed during stream",
-    ...options,
-  });
+    options?: { guard(): void; signal: AbortSignal },
+  ): Response =>
+    guardedByteResponse(bytes, headers, {
+      register: (terminate) => registerLinkStream(grantId, { shareId, terminate }),
+      release: (emitted) => {
+        releaseRetainedBytes();
+        settleEgress(emitted, nowMs());
+      },
+      terminatedMessage: "link grant changed during stream",
+      ...options,
+    });
 
   return {
     admitLinkBlobBytes,

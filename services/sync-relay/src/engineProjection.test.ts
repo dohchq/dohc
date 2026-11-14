@@ -3,21 +3,13 @@ import { PassThrough } from "node:stream";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  ChildProcessWithoutNullStreams,
-  SpawnOptionsWithoutStdio,
-} from "node:child_process";
+import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  startEngineProjection,
-  type EngineProjectionOptions,
-} from "./engineProjection";
+import { startEngineProjection, type EngineProjectionOptions } from "./engineProjection";
 const roots: string[] = [];
 afterEach(async () => {
   vi.useRealTimers();
-  await Promise.all(
-    roots.splice(0).map((path) => rm(path, { recursive: true, force: true })),
-  );
+  await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 const limits = {
   maxFrameBytes: 14 * 1024 * 1024,
@@ -57,14 +49,9 @@ class FakeChild extends EventEmitter {
     let pending = Buffer.alloc(0);
     this.stdin.on("data", (data: Buffer) => {
       pending = Buffer.concat([pending, data]);
-      while (
-        pending.length >= 12 &&
-        pending.length >= 12 + pending.readUInt32LE(8)
-      ) {
+      while (pending.length >= 12 && pending.length >= 12 + pending.readUInt32LE(8)) {
         const length = pending.readUInt32LE(8);
-        const row = JSON.parse(
-          pending.subarray(12, 12 + length).toString(),
-        ) as {
+        const row = JSON.parse(pending.subarray(12, 12 + length).toString()) as {
           type: string;
           id: number;
           method: string;
@@ -153,9 +140,7 @@ async function harness(overrides: Partial<EngineProjectionOptions> = {}) {
       .poll(
         () => {
           const child = children.at(-1);
-          return child?.exitCode === null && child?.signalCode === null
-            ? child.requests.length
-            : 0;
+          return child?.exitCode === null && child?.signalCode === null ? child.requests.length : 0;
         },
         { timeout: 30_000 },
       )
@@ -194,9 +179,9 @@ describe("isolated engine projection", () => {
   it.each(["win32", "darwin"] as const)(
     "refuses %s without explicit development opt-in",
     async (platform) => {
-      await expect(
-        startEngineProjection({ engineExecutable: "unused", platform }),
-      ).rejects.toThrow(/requires Linux/);
+      await expect(startEngineProjection({ engineExecutable: "unused", platform })).rejects.toThrow(
+        /requires Linux/,
+      );
       const h = await harness({ platform, allowUnisolatedProjection: true });
       expect(h.launches[0]!.command).toBe(h.engineExecutable);
       expect(h.launches[0]!.args).toEqual(["--projection-only"]);
@@ -270,9 +255,10 @@ describe("isolated engine projection", () => {
     const h = await harness({ maxQueued: 32, maxQueuedBytes: 1200 });
     const first = h.service.project(input);
     const child = await h.pending();
-    expect(
-      await h.service.project({ ...input, updates: [new Uint8Array(256)] }),
-    ).toMatchObject({ kind: "refused", reason: "busy" });
+    expect(await h.service.project({ ...input, updates: [new Uint8Array(256)] })).toMatchObject({
+      kind: "refused",
+      reason: "busy",
+    });
     expect(h.children).toHaveLength(2);
     child.reply("done");
     await first;

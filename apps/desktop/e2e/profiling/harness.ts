@@ -52,7 +52,10 @@ export function fixtureDirectory(name: FixtureName): string {
 }
 
 export async function readSeedManifest(): Promise<SeedManifest> {
-  const text = await readFile(join(requiredEnv("DOHC_PROFILE_FIXTURES"), "seed-manifest.json"), "utf8");
+  const text = await readFile(
+    join(requiredEnv("DOHC_PROFILE_FIXTURES"), "seed-manifest.json"),
+    "utf8",
+  );
   return JSON.parse(text) as SeedManifest;
 }
 
@@ -103,8 +106,7 @@ export async function launchFixture(
       fixture: name,
       manifest: fixture.manifest,
       workspace,
-      close: () =>
-        cleanupDesktopWorkspace(launched, sandbox),
+      close: () => cleanupDesktopWorkspace(launched, sandbox),
     };
   } catch (error) {
     await cleanupDesktopWorkspace(desktop, sandbox);
@@ -159,17 +161,13 @@ export function largestDrawing(manifest: SeedManifest): { path: string; elementC
 }
 
 export function editableBigDoc(manifest: SeedManifest): { path: string; bytes: number } {
-  const doc = manifest.fixtures["big-docs"].files.find(({ path }) =>
-    path.endsWith("doc-250kb.md"),
-  );
+  const doc = manifest.fixtures["big-docs"].files.find(({ path }) => path.endsWith("doc-250kb.md"));
   if (!doc) throw new Error("The big-docs fixture has no doc-250kb.md.");
   return doc;
 }
 
 export function oversizedReadDoc(manifest: SeedManifest): { path: string; bytes: number } {
-  const doc = manifest.fixtures["big-docs"].files.find(({ path }) =>
-    path.endsWith("doc-3mb.md"),
-  );
+  const doc = manifest.fixtures["big-docs"].files.find(({ path }) => path.endsWith("doc-3mb.md"));
   if (!doc) throw new Error("The big-docs fixture has no doc-3mb.md.");
   return doc;
 }

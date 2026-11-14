@@ -1,8 +1,5 @@
 import { isAbsolute } from "node:path";
-import {
-  isSiteSourcePath,
-  mediaTypeForPath as coreMediaTypeForPath,
-} from "@dohc/workspace-core";
+import { isSiteSourcePath, mediaTypeForPath as coreMediaTypeForPath } from "@dohc/workspace-core";
 
 export function assertSafeWorkspacePath(path: string): string {
   const clean = path.trim().replace(/\\/g, "/");
@@ -53,23 +50,99 @@ export function isSqliteMediaType(mediaType: string, path = "") {
 // stored as binary. The engine's `TEXT_EXTENSIONS` is the same list, and
 // `text-media-cases.json` holds both rules to the same answers.
 const TEXT_EXTENSIONS = new Set([
-  // Data and documents.
-  ".json", ".geojson", ".json5", ".json-seq", ".jsonl", ".ndjson", ".csv", ".excalidraw", ".md", ".markdown", ".txt",
-  // Code.
-  ".ts", ".tsx", ".cts", ".mts", ".vue", ".svelte", ".astro", ".less", ".sass",
-  ".py", ".pyi", ".rs", ".go", ".java", ".kt", ".kts", ".scala", ".groovy", ".gradle",
-  ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".cs", ".swift",
-  ".rb", ".php", ".pl", ".pm", ".lua", ".r", ".dart", ".ex", ".exs", ".erl", ".hrl", ".hs",
-  ".clj", ".cljs", ".cljc", ".edn", ".zig", ".sql", ".graphql", ".gql", ".proto",
-  ".sh", ".bash", ".zsh", ".fish", ".ps1", ".psm1", ".bat", ".cmd",
-  // Configuration.
-  ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".properties", ".xml", ".tf", ".hcl", ".nix",
-  ".editorconfig", ".gitignore", ".gitattributes", ".dockerignore", ".nvmrc",
+  ".json",
+  ".geojson",
+  ".json5",
+  ".json-seq",
+  ".jsonl",
+  ".ndjson",
+  ".csv",
+  ".excalidraw",
+  ".md",
+  ".markdown",
+  ".txt",
+  ".ts",
+  ".tsx",
+  ".cts",
+  ".mts",
+  ".vue",
+  ".svelte",
+  ".astro",
+  ".less",
+  ".sass",
+  ".py",
+  ".pyi",
+  ".rs",
+  ".go",
+  ".java",
+  ".kt",
+  ".kts",
+  ".scala",
+  ".groovy",
+  ".gradle",
+  ".c",
+  ".h",
+  ".cc",
+  ".cpp",
+  ".cxx",
+  ".hpp",
+  ".hh",
+  ".hxx",
+  ".cs",
+  ".swift",
+  ".rb",
+  ".php",
+  ".pl",
+  ".pm",
+  ".lua",
+  ".r",
+  ".dart",
+  ".ex",
+  ".exs",
+  ".erl",
+  ".hrl",
+  ".hs",
+  ".clj",
+  ".cljs",
+  ".cljc",
+  ".edn",
+  ".zig",
+  ".sql",
+  ".graphql",
+  ".gql",
+  ".proto",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".fish",
+  ".ps1",
+  ".psm1",
+  ".bat",
+  ".cmd",
+  ".toml",
+  ".yaml",
+  ".yml",
+  ".ini",
+  ".cfg",
+  ".conf",
+  ".properties",
+  ".xml",
+  ".tf",
+  ".hcl",
+  ".nix",
+  ".editorconfig",
+  ".gitignore",
+  ".gitattributes",
+  ".dockerignore",
+  ".nvmrc",
 ]);
 
 export function isTextMediaType(mediaType: string, path = "") {
   const type = mediaType.split(";")[0]?.trim().toLowerCase() ?? "";
-  const extension = fileName(path).toLowerCase().match(/(\.[^.]+)$/)?.[1] ?? "";
+  const extension =
+    fileName(path)
+      .toLowerCase()
+      .match(/(\.[^.]+)$/)?.[1] ?? "";
   return (
     !isSqliteMediaType(mediaType, path) &&
     (type.startsWith("text/") ||

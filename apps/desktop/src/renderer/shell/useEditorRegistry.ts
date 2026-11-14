@@ -20,10 +20,7 @@ type EditorRegistrationCallbacks = {
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
 };
 
-export function useEditorRegistry(
-  workspaceId: string,
-  openTabs: readonly WorkbenchTab[],
-) {
+export function useEditorRegistry(workspaceId: string, openTabs: readonly WorkbenchTab[]) {
   // Mounted editors are group-scoped. A split keeps every active surface
   // mounted, so a singleton flush/source/undo slot would let either pane
   // overwrite the other and could discard the surviving pane during cleanup.
@@ -37,9 +34,7 @@ export function useEditorRegistry(
   // An Explorer operation retains every closure that is current while its
   // disk mutation is active. This keeps late drafts tied to the editor that
   // created them, including editors in inactive groups.
-  const draftOperationScopesRef = useRef(
-    new Set<{ flushes: Set<DraftFlush> }>(),
-  );
+  const draftOperationScopesRef = useRef(new Set<{ flushes: Set<DraftFlush> }>());
   const callbacksForEditor = useCallback(
     (groupId: string, tab: WorkbenchTab): EditorRegistrationCallbacks => {
       let byGroup = editorCallbacksRef.current.get(tab);
@@ -76,10 +71,7 @@ export function useEditorRegistry(
           if (dirty === dirtyTabsRef.current.has(tab)) return;
           if (dirty) {
             dirtyTabsRef.current.add(tab);
-            dirtyEpochsRef.current.set(
-              tab,
-              (dirtyEpochsRef.current.get(tab) ?? 0) + 1,
-            );
+            dirtyEpochsRef.current.set(tab, (dirtyEpochsRef.current.get(tab) ?? 0) + 1);
           } else {
             dirtyTabsRef.current.delete(tab);
           }
@@ -105,9 +97,7 @@ export function useEditorRegistry(
     [],
   );
   const flushStableDrafts = useCallback(
-    async (
-      shouldFlush: (groupId: string, tab: WorkbenchTab) => boolean = () => true,
-    ) => {
+    async (shouldFlush: (groupId: string, tab: WorkbenchTab) => boolean = () => true) => {
       const flushedAtEpoch = new Map<DraftFlush, number>();
       while (true) {
         const batch = [...mountedEditorsRef.current.entries()]
@@ -187,9 +177,7 @@ export function useEditorRegistry(
         let failed = false;
         try {
           while (true) {
-            const batch = [...scope.flushes].filter(
-              (flush) => !drained.has(flush),
-            );
+            const batch = [...scope.flushes].filter((flush) => !drained.has(flush));
             if (batch.length === 0) break;
             for (const flush of batch) {
               drained.add(flush);
@@ -214,12 +202,7 @@ export function useEditorRegistry(
   }, [flushStableDrafts, workspaceId]);
 
   const dirtyPaths = useMemo(
-    () =>
-      new Set(
-        openTabs
-          .filter((tab) => dirtyTabsRef.current.has(tab))
-          .map((tab) => tab.path),
-      ),
+    () => new Set(openTabs.filter((tab) => dirtyTabsRef.current.has(tab)).map((tab) => tab.path)),
     [dirtyRevision, openTabs],
   );
 

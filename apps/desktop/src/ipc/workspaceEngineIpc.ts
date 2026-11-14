@@ -1,42 +1,94 @@
 import { agentColorsForPresentation } from "../settings/userSettingsStore";
 import { createWorkspaceHandler } from "./rendererWorkspaceHandler";
 import { shareRecordStatuses } from "../workspaces/shareRecordStatus";
-import { WorkspaceDaemonRequester, type HistoryCursor, type VersionedLiveAdapter } from "@dohc/workspace-engine-client";
-import { z } from "zod";
-import type { EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
+import {
+  WorkspaceDaemonRequester,
+  type HistoryCursor,
+  type VersionedLiveAdapter,
+} from "@dohc/workspace-engine-client";
+import type {
+  EngineWorkspace,
+  EngineWorkspaceSessions,
+} from "@dohc/workspace-engine-client/daemon";
 import {
   historyOperations,
-  CaptureRecoveryStatusResult, captureRecoveryOperations, fileObservationOperations,
-  ListCollectionsPayload, ListCollectionsResult, GetCollectionPayload, GetCollectionResult,
-  QueryCollectionRecordsPayload, QueryCollectionRecordsResult, ListEngineMomentsPayload,
-  ReadEngineMomentPayload, ReadEngineMomentResult, HistoryPolicyUnreadableResult, RestoreEngineMomentFilePayload,
-  RestoreEngineMomentFileResult, RetryCloudSyncPayload, WorkspaceIdPayload, SyncStatusResult,
-  RebuildEngineStorePayload, RebuildEngineStoreResult, engineStoreRefusalRecovery,
-  GetCollectionRecordHistoryPayload, GetCollectionRecordHistoryResult, RECORD_HISTORY_PAGE,
-  LocateRecordHistoryRunPayload, LocateRecordHistoryRunResult,
+  CaptureRecoveryStatusResult,
+  captureRecoveryOperations,
+  fileObservationOperations,
+  ListCollectionsPayload,
+  ListCollectionsResult,
+  GetCollectionPayload,
+  GetCollectionResult,
+  QueryCollectionRecordsPayload,
+  QueryCollectionRecordsResult,
+  ListEngineMomentsPayload,
+  ReadEngineMomentPayload,
+  ReadEngineMomentResult,
+  HistoryPolicyUnreadableResult,
+  RestoreEngineMomentFilePayload,
+  RestoreEngineMomentFileResult,
+  RetryCloudSyncPayload,
+  WorkspaceIdPayload,
+  SyncStatusResult,
+  RebuildEngineStorePayload,
+  RebuildEngineStoreResult,
+  engineStoreRefusalRecovery,
+  GetCollectionRecordHistoryPayload,
+  GetCollectionRecordHistoryResult,
+  RECORD_HISTORY_PAGE,
+  LocateRecordHistoryRunPayload,
+  LocateRecordHistoryRunResult,
   engineYDocAdmissionOperations,
   engineYDocSaveOperations,
 } from "./bridgeContract";
 import { registerOperations } from "./operationTable";
 import { CHANNELS } from "./channels";
-import { engineMomentDetailForIpc, listEngineMomentsForIpc, momentPersonName, type EngineMomentAuthorNames } from "./engineHistoryIpc";
+import {
+  engineMomentDetailForIpc,
+  listEngineMomentsForIpc,
+  momentPersonName,
+  type EngineMomentAuthorNames,
+} from "./engineHistoryIpc";
 import { shownAgentName } from "@dohc/workspace-contracts/actor-presentation";
-import { createRunLocator, recordHistoryForIpc, type RecordHistoryAuthors } from "./recordHistoryIpc";
-import { rebuildEngineStoreRequest, type moveEngineStoreAside } from "../workspaces/engineStoreRebuild";
+import {
+  createRunLocator,
+  recordHistoryForIpc,
+  type RecordHistoryAuthors,
+} from "./recordHistoryIpc";
+import {
+  rebuildEngineStoreRequest,
+  type moveEngineStoreAside,
+} from "../workspaces/engineStoreRebuild";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
 import type { WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { ServerRuns } from "../automations/serverRuns";
-import type { WorkspaceEngineCapture, probeEngineStoreRefusal } from "../workspaces/workspaceEngineCapture";
+import type {
+  WorkspaceEngineCapture,
+  probeEngineStoreRefusal,
+} from "../workspaces/workspaceEngineCapture";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
-import type { createEngineYDocSessionIpc, EngineYDocIpcSender } from "../workspaces/engineYDocSessionIpc";
+import type {
+  createEngineYDocSessionIpc,
+  EngineYDocIpcSender,
+} from "../workspaces/engineYDocSessionIpc";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { createHistoryTimeline, type TimelineReads } from "../workspaces/historyTimeline";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
 import { sharedViewHistory } from "../workspaces/sharedViewHistory";
-import { historyPathAdmission, historyMomentPathsAdmitted, type readWorkspaceEnginePolicy, type WorkspaceEnginePolicySnapshot } from "../workspaces/workspaceEnginePolicyFile";
+import {
+  historyPathAdmission,
+  historyMomentPathsAdmitted,
+  type readWorkspaceEnginePolicy,
+  type WorkspaceEnginePolicySnapshot,
+} from "../workspaces/workspaceEnginePolicyFile";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { collectionListSources, collectionReadSource, mountedCollectionSchema, receivedCollectionQuery } from "../workspaces/receivedShareCollections";
+import {
+  collectionListSources,
+  collectionReadSource,
+  mountedCollectionSchema,
+  receivedCollectionQuery,
+} from "../workspaces/receivedShareCollections";
 import { resolveRegisteredShareViewFilesTarget } from "../workspaces/shareViewFilesTarget";
 import { resolveOwnedWorkspaceSharePath } from "../workspaces/ownedWorkspaceFileReader";
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
@@ -58,25 +110,59 @@ export function createWorkspaceEngineIpc<
   Event extends { sender: Sender },
   Workspace extends RegistryEntry,
   State extends EngineStoreAuthorityState,
-  Operation extends { workspace: Workspace & { attachmentId: symbol }; signal: AbortSignal; scope?: string; assertCurrent(): void },
+  Operation extends {
+    workspace: Workspace & { attachmentId: symbol };
+    signal: AbortSignal;
+    scope?: string;
+    assertCurrent(): void;
+  },
 >(dependencies: {
   registerHandler(channel: string, handler: (event: Event, payload: any) => unknown): void;
   assertTrustedSender(event: Event): void;
   withRendererWorkspaceOperation<Result>(
-    sender: Sender, workspaceId: string, retiredMessage: string,
+    sender: Sender,
+    workspaceId: string,
+    retiredMessage: string,
     work: (operation: Operation) => Promise<Result>,
   ): Promise<Result>;
-  receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "workspaceFor" | "workspaceForRegistered" | "storeFor">;
+  receivedShareEngine: Pick<
+    ReturnType<typeof createReceivedShareEngineAccess>,
+    "workspaceFor" | "workspaceForRegistered" | "storeFor"
+  >;
   withEngineAdapter<Result>(
     workspace: EngineWorkspace,
-    work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus" | "getCollectionRecord" | "clearCaptureRecovery" | "retryHeldCapture">) => Promise<Result>,
+    work: (
+      adapter: Pick<
+        VersionedLiveAdapter,
+        | "listCollections"
+        | "getCollection"
+        | "queryCollectionRecords"
+        | "reconcileCapture"
+        | "watcherStatus"
+        | "getCollectionRecord"
+        | "clearCaptureRecovery"
+        | "retryHeldCapture"
+      >,
+    ) => Promise<Result>,
   ): Promise<Result | null>;
-  requireEngineCapture(workspaceId: string, feature: "Engine history"): Promise<{
-    capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment" | "retryHistoryCapture" | "listVersions">;
+  requireEngineCapture(
+    workspaceId: string,
+    feature: "Engine history",
+  ): Promise<{
+    capture: Pick<
+      WorkspaceEngineCapture,
+      | "listMoments"
+      | "readMoment"
+      | "restoreFileToBeforeMoment"
+      | "retryHistoryCapture"
+      | "listVersions"
+    >;
   }>;
   readWorkspaceEnginePolicy: typeof readWorkspaceEnginePolicy;
   readSyncHistory: typeof readSyncHistory;
-  historyCollections(operation: Operation): Promise<Pick<TimelineReads, "local" | "remote" | "scope">>;
+  historyCollections(
+    operation: Operation,
+  ): Promise<Pick<TimelineReads, "local" | "remote" | "scope">>;
   /** Folders whose dataset.json names no Collection this computer keeps. None on a computer that doesn't keep them. */
   unclaimedDatasetFolders(operation: Operation): Promise<string[]>;
   /** The name Settings gives one of this computer's agents, while Settings lists it. */
@@ -93,60 +179,123 @@ export function createWorkspaceEngineIpc<
   warmCredentialCache(): Promise<void>;
   currentCredentials(): CloudCredentials | null;
   /** An automation author as History shows it, in one workspace. */
-  automationAuthor(workspaceId: string, automationId: string): ReturnType<EngineMomentAuthorNames["automation"]>;
+  automationAuthor(
+    workspaceId: string,
+    automationId: string,
+  ): ReturnType<EngineMomentAuthorNames["automation"]>;
   /** A person the owner shared with, as History names their direct write. */
   /** How one History read names the people the owner shared with, reading the roster once. */
-  namedAuthorLabels(workspaceId: string, sender: Sender): Pick<EngineMomentAuthorNames, "named" | "prepare">;
+  namedAuthorLabels(
+    workspaceId: string,
+    sender: Sender,
+  ): Pick<EngineMomentAuthorNames, "named" | "prepare">;
   /** Whether this computer keeps an automation's run, so a record's history can open it. */
-  automationRunOnThisComputer(workspaceId: string, automationId: string, claimId: string): Promise<boolean>;
+  automationRunOnThisComputer(
+    workspaceId: string,
+    automationId: string,
+    claimId: string,
+  ): Promise<boolean>;
   /** The owner's server's runs; the relay answers only the workspace's owner. */
   serverRuns: Pick<ServerRuns, "shownTo">;
-  /** The signed-in account now, or null when signed out. */
   signedInAccount(): string | null;
   isOnline?(): boolean;
   notifyRenderer(target: { workspaceId: string }): void;
-  recordHeldFiles(workspace: EngineWorkspace, files: NonNullable<SyncStatusResult["heldFiles"]>): void;
+  recordHeldFiles(
+    workspace: EngineWorkspace,
+    files: NonNullable<SyncStatusResult["heldFiles"]>,
+  ): void;
   retryOwnerLiveDelivery?(workspaceId: string): void;
   retryCloudSync(workspaceId: string, reason: RetryCloudSyncPayload["reason"]): Promise<void>;
   retryFileObservation(workspaceId: string): Promise<void>;
   assertWritableWorkspace(workspace: Workspace): void;
-  syncStatusWithOwnedProjection(workspace: Workspace, status: SyncStatusResult): Promise<SyncStatusResult>;
+  syncStatusWithOwnedProjection(
+    workspace: Workspace,
+    status: SyncStatusResult,
+  ): Promise<SyncStatusResult>;
   activity: {
     getStatus(workspaceId: string): SyncStatusResult;
     hasAgentRun(workspaceId: string, rootPath: string): boolean;
   };
   workspaceAuthorities: {
-    withAuthority<Result>(workspaceId: string, work: (lease: WorkspaceAuthorityLease<Workspace, State>) => Promise<Result>): Promise<Result>;
+    withAuthority<Result>(
+      workspaceId: string,
+      work: (lease: WorkspaceAuthorityLease<Workspace, State>) => Promise<Result>,
+    ): Promise<Result>;
   };
-  canonicalWorkspaceFor(lease: WorkspaceAuthorityLease<Workspace, State>): Workspace & { attachmentId: symbol };
+  canonicalWorkspaceFor(
+    lease: WorkspaceAuthorityLease<Workspace, State>,
+  ): Workspace & { attachmentId: symbol };
   requireEngineSessions(): EngineWorkspaceSessions;
-  closeDispatchRunActivity(workspace: Workspace, options: { notifyRenderer: boolean }): Promise<void>;
+  closeDispatchRunActivity(
+    workspace: Workspace,
+    options: { notifyRenderer: boolean },
+  ): Promise<void>;
   probeEngineStoreRefusal: typeof probeEngineStoreRefusal;
   moveEngineStoreAside: typeof moveEngineStoreAside;
-  openWorkspaceActivityUnderEngineStoreLock(workspace: Workspace, options: { afterReopenRecoverySettled: () => void }): Promise<SyncStatusResult>;
-  engineYDocSessionIpc: Pick<ReturnType<typeof createEngineYDocSessionIpc>,
-    "open" | "waitForAdmission" | "retrySave" | "readArtifactAsset" | "applyUpdate" | "acknowledgeLineageReplacement" | "prepareOwnerHandoff" | "close">;
+  openWorkspaceActivityUnderEngineStoreLock(
+    workspace: Workspace,
+    options: { afterReopenRecoverySettled: () => void },
+  ): Promise<SyncStatusResult>;
+  engineYDocSessionIpc: Pick<
+    ReturnType<typeof createEngineYDocSessionIpc>,
+    | "open"
+    | "waitForAdmission"
+    | "retrySave"
+    | "readArtifactAsset"
+    | "applyUpdate"
+    | "acknowledgeLineageReplacement"
+    | "prepareOwnerHandoff"
+    | "close"
+  >;
 }) {
   const {
-    registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
-    receivedShareEngine, withEngineAdapter, requireEngineCapture, agentName, localPersonId, localPersonName, localPerson,
-    localInstallationId, warmCredentialCache, currentCredentials, automationAuthor, namedAuthorLabels, readWorkspaceEnginePolicy, readSyncHistory,
-    automationRunOnThisComputer, serverRuns, signedInAccount,
-    notifyRenderer, assertWritableWorkspace, syncStatusWithOwnedProjection,
-    activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
-    closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
-    openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
+    registerHandler,
+    assertTrustedSender,
+    withRendererWorkspaceOperation,
+    receivedShareEngine,
+    withEngineAdapter,
+    requireEngineCapture,
+    agentName,
+    localPersonId,
+    localPersonName,
+    localPerson,
+    localInstallationId,
+    warmCredentialCache,
+    currentCredentials,
+    automationAuthor,
+    namedAuthorLabels,
+    readWorkspaceEnginePolicy,
+    readSyncHistory,
+    automationRunOnThisComputer,
+    serverRuns,
+    signedInAccount,
+    notifyRenderer,
+    assertWritableWorkspace,
+    syncStatusWithOwnedProjection,
+    activity,
+    workspaceAuthorities,
+    canonicalWorkspaceFor,
+    requireEngineSessions,
+    closeDispatchRunActivity,
+    probeEngineStoreRefusal,
+    moveEngineStoreAside,
+    openWorkspaceActivityUnderEngineStoreLock,
+    engineYDocSessionIpc,
   } = dependencies;
   const timeline = createHistoryTimeline();
-  // This computer's agent by its name now, or by its id once Settings no longer lists it.
-  const localAgentName = (agentId: string) => agentId === "dohc-mcp" ? "Agent" : agentName(agentId) ?? agentId;
+  const localAgentName = (agentId: string) =>
+    agentId === "dohc-mcp" ? "Agent" : (agentName(agentId) ?? agentId);
   const runLocator = createRunLocator({
     onThisComputer: automationRunOnThisComputer,
-    onServer: (workspaceId, automationId, claimId) => serverRuns.shownTo(workspaceId, automationId, claimId),
+    onServer: (workspaceId, automationId, claimId) =>
+      serverRuns.shownTo(workspaceId, automationId, claimId),
     signedInAccount,
   });
 
-  const workspaceHandler = createWorkspaceHandler({ assertTrustedSender, withRendererWorkspaceOperation });
+  const workspaceHandler = createWorkspaceHandler({
+    assertTrustedSender,
+    withRendererWorkspaceOperation,
+  });
 
   function registerCollections(): void {
     // Collections: read-only engine index queries. list answers
@@ -161,12 +310,17 @@ export function createWorkspaceEngineIpc<
         input.workspaceId,
         "Collection listing stopped because this window changed workspaces.",
         async (operation) => {
-          const [required, ...mounts] = collectionListSources(operation.workspace, receivedShareEngine);
+          const [required, ...mounts] = collectionListSources(
+            operation.workspace,
+            receivedShareEngine,
+          );
           const read = async (source: NonNullable<typeof required>) => {
-            const result = await withEngineAdapter(source.workspace, adapter => adapter.listCollections());
+            const result = await withEngineAdapter(source.workspace, (adapter) =>
+              adapter.listCollections(),
+            );
             return (result?.collections ?? [])
-              .filter(collection => source.selected(`${collection.path}/collection.yaml`))
-              .map(collection => ({ ...collection, path: source.prefix + collection.path }));
+              .filter((collection) => source.selected(`${collection.path}/collection.yaml`))
+              .map((collection) => ({ ...collection, path: source.prefix + collection.path }));
           };
           const collections = required ? await read(required) : [];
           const mounted = await Promise.allSettled(mounts.map(read));
@@ -174,7 +328,9 @@ export function createWorkspaceEngineIpc<
             if (result.status === "fulfilled") collections.push(...result.value);
           }
           // Only for the workspace's own folders. Without an answer, Home keeps hiding every Collection's folder.
-          const unclaimedDatasetFolders = operation.workspace.shareView ? [] : await dependencies.unclaimedDatasetFolders(operation).catch(() => []);
+          const unclaimedDatasetFolders = operation.workspace.shareView
+            ? []
+            : await dependencies.unclaimedDatasetFolders(operation).catch(() => []);
           return ListCollectionsResult.parse({ collections, unclaimedDatasetFolders });
         },
       );
@@ -188,14 +344,21 @@ export function createWorkspaceEngineIpc<
         input.workspaceId,
         "Collection read stopped because this window changed workspaces.",
         async (operation) => {
-          const { source, path } = await collectionReadSource(operation.workspace, input.collectionPath, receivedShareEngine);
+          const { source, path } = await collectionReadSource(
+            operation.workspace,
+            input.collectionPath,
+            receivedShareEngine,
+          );
           const result = await withEngineAdapter(
             source.workspace,
-            async (adapter) =>
-              await adapter.getCollection({ collectionPath: path }),
+            async (adapter) => await adapter.getCollection({ collectionPath: path }),
           );
           if (!result) throw new Error("The workspace engine is not running.");
-          return GetCollectionResult.parse({ ...result, path: source.prefix + result.path, schema: mountedCollectionSchema(result.schema, source.prefix) });
+          return GetCollectionResult.parse({
+            ...result,
+            path: source.prefix + result.path,
+            schema: mountedCollectionSchema(result.schema, source.prefix),
+          });
         },
       );
     });
@@ -209,32 +372,75 @@ export function createWorkspaceEngineIpc<
         input.workspaceId,
         "Collection query stopped because this window changed workspaces.",
         async (operation) => {
-          const { source, path } = await collectionReadSource(operation.workspace, input.collectionPath, receivedShareEngine);
+          const { source, path } = await collectionReadSource(
+            operation.workspace,
+            input.collectionPath,
+            receivedShareEngine,
+          );
           const cursor = params.cursor;
-          if (cursor && (!cursor.recordPath.startsWith(source.prefix) || !source.selected(cursor.recordPath.slice(source.prefix.length)))) {
+          if (
+            cursor &&
+            (!cursor.recordPath.startsWith(source.prefix) ||
+              !source.selected(cursor.recordPath.slice(source.prefix.length)))
+          ) {
             throw new Error("This record is outside the files shared with you.");
           }
           const result = await withEngineAdapter(
             source.workspace,
-            async (adapter) => await adapter.queryCollectionRecords({ ...params, collectionPath: path,
-              ...(cursor ? { cursor: { ...cursor, recordPath: cursor.recordPath.slice(source.prefix.length) } } : {}) }),
+            async (adapter) =>
+              await adapter.queryCollectionRecords({
+                ...params,
+                collectionPath: path,
+                ...(cursor
+                  ? {
+                      cursor: {
+                        ...cursor,
+                        recordPath: cursor.recordPath.slice(source.prefix.length),
+                      },
+                    }
+                  : {}),
+              }),
           );
           if (!result) throw new Error("The workspace engine is not running.");
-          const found = await resolveOwnedWorkspaceSharePath(operation.workspace, `${input.collectionPath}/collection.yaml`);
-          const target = found && resolveRegisteredShareViewFilesTarget(operation.workspace, found.target);
+          const found = await resolveOwnedWorkspaceSharePath(
+            operation.workspace,
+            `${input.collectionPath}/collection.yaml`,
+          );
+          const target =
+            found && resolveRegisteredShareViewFilesTarget(operation.workspace, found.target);
           const grant = target && recordedShareSelector(target.grantedSelector);
           if (target?.shareId && grant?.versionId === null) {
-            const records = [...result.records, ...(result.groups?.flatMap(group => group.records) ?? [])];
-            const paths = [...new Set(records.map(record => record.path))];
-            const statuses = await dependencies.requireEngineSessions().run(source.workspace, async binding =>
-              shareRecordStatuses(new WorkspaceDaemonRequester(binding.client), {
-                workspaceId: target.storeWorkspaceId, shareId: target.shareId!, paths,
-                grantedSelector: { paths: grant.paths, versionId: grant.versionId, access: grant.access },
-              }, { workspace: binding.workspace })).catch((): Awaited<ReturnType<typeof shareRecordStatuses>> => ({}));
+            const records = [
+              ...result.records,
+              ...(result.groups?.flatMap((group) => group.records) ?? []),
+            ];
+            const paths = [...new Set(records.map((record) => record.path))];
+            const statuses = await dependencies
+              .requireEngineSessions()
+              .run(source.workspace, async (binding) =>
+                shareRecordStatuses(
+                  new WorkspaceDaemonRequester(binding.client),
+                  {
+                    workspaceId: target.storeWorkspaceId,
+                    shareId: target.shareId!,
+                    paths,
+                    grantedSelector: {
+                      paths: grant.paths,
+                      versionId: grant.versionId,
+                      access: grant.access,
+                    },
+                  },
+                  { workspace: binding.workspace },
+                ),
+              )
+              .catch((): Awaited<ReturnType<typeof shareRecordStatuses>> => ({}));
             for (const record of records) {
               const status = statuses[record.path];
               if (status) {
-                record.creationDelivery = status.state === "pending" && dependencies.isOnline?.() === false ? "offline" : status.state;
+                record.creationDelivery =
+                  status.state === "pending" && dependencies.isOnline?.() === false
+                    ? "offline"
+                    : status.state;
                 record.creationRefusal = status.reason;
                 record.creationCanDiscard = status.canDiscard;
               }
@@ -255,26 +461,39 @@ export function createWorkspaceEngineIpc<
         input.workspaceId,
         "Record history stopped loading because this window changed workspaces.",
         async (operation) => {
-          const { source, path } = await collectionReadSource(operation.workspace, input.collectionPath, receivedShareEngine);
+          const { source, path } = await collectionReadSource(
+            operation.workspace,
+            input.collectionPath,
+            receivedShareEngine,
+          );
           const result = await withEngineAdapter(
             source.workspace,
-            async (adapter) => await adapter.getCollectionRecord({
-              collectionPath: path,
-              recordId: input.recordId,
-              historyLimit: RECORD_HISTORY_PAGE,
-              ...(input.beforeHistoryId === undefined ? {} : { beforeHistoryId: input.beforeHistoryId }),
-            }),
+            async (adapter) =>
+              await adapter.getCollectionRecord({
+                collectionPath: path,
+                recordId: input.recordId,
+                historyLimit: RECORD_HISTORY_PAGE,
+                ...(input.beforeHistoryId === undefined
+                  ? {}
+                  : { beforeHistoryId: input.beforeHistoryId }),
+              }),
           );
           if (!result) throw new Error("The workspace engine is not running.");
-          if (!source.selected(result.record.path)) throw new Error("This record is outside the files shared with you.");
+          if (!source.selected(result.record.path))
+            throw new Error("This record is outside the files shared with you.");
           result.record.path = source.prefix + result.record.path;
           const { workspaceId } = operation.workspace;
           const authors: RecordHistoryAuthors = {
-            prepare: userIds => dependencies.prepareRecordHistoryPeople(workspaceId, userIds, event.sender),
-            person: userId => dependencies.recordHistoryPersonName(workspaceId, userId, event.sender),
-            agent: (agentId, onBehalfOf) => onBehalfOf === localPersonId() ? localAgentName(agentId) : "Agent",
-            automationName: (automationId) => automationAuthor(workspaceId, automationId)?.name ?? null,
-            runAvailable: (automationId, claimId) => runLocator.available(workspaceId, automationId, claimId),
+            prepare: (userIds) =>
+              dependencies.prepareRecordHistoryPeople(workspaceId, userIds, event.sender),
+            person: (userId) =>
+              dependencies.recordHistoryPersonName(workspaceId, userId, event.sender),
+            agent: (agentId, onBehalfOf) =>
+              onBehalfOf === localPersonId() ? localAgentName(agentId) : "Agent",
+            automationName: (automationId) =>
+              automationAuthor(workspaceId, automationId)?.name ?? null,
+            runAvailable: (automationId, claimId) =>
+              runLocator.available(workspaceId, automationId, claimId),
           };
           return GetCollectionRecordHistoryResult.parse(await recordHistoryForIpc(result, authors));
         },
@@ -290,9 +509,14 @@ export function createWorkspaceEngineIpc<
         event.sender,
         input.workspaceId,
         "Record history stopped loading because this window changed workspaces.",
-        async (operation) => LocateRecordHistoryRunResult.parse({
-          location: await runLocator.locate(operation.workspace.workspaceId, input.automationId, input.claimId),
-        }),
+        async (operation) =>
+          LocateRecordHistoryRunResult.parse({
+            location: await runLocator.locate(
+              operation.workspace.workspaceId,
+              input.automationId,
+              input.claimId,
+            ),
+          }),
       );
     });
   }
@@ -300,10 +524,19 @@ export function createWorkspaceEngineIpc<
   // Your agents use the Settings name of their id, as record History does, with or without a run.
   // Another person's runs show as "Agent". Their other agents use their handshake label,
   // or "Agent" when a character in it could hide or reorder text.
-  function authorNames(workspaceId: string, sender: Sender, presentations: EngineMomentAuthorNames["presentations"]): EngineMomentAuthorNames {
+  function authorNames(
+    workspaceId: string,
+    sender: Sender,
+    presentations: EngineMomentAuthorNames["presentations"],
+  ): EngineMomentAuthorNames {
     return {
-      agent: (author) => author.onBehalfOf === localPersonId() ? localAgentName(author.agentId) : author.agentRunId || author.agentId === "dohc-mcp" ? "Agent" : shownAgentName(author.agentId) ?? "Agent",
-      person: (author) => author.humanId === localPersonId() ? localPersonName() : undefined,
+      agent: (author) =>
+        author.onBehalfOf === localPersonId()
+          ? localAgentName(author.agentId)
+          : author.agentRunId || author.agentId === "dohc-mcp"
+            ? "Agent"
+            : (shownAgentName(author.agentId) ?? "Agent"),
+      person: (author) => (author.humanId === localPersonId() ? localPersonName() : undefined),
       automation: (automationId) => automationAuthor(workspaceId, automationId),
       presentations,
       ...namedAuthorLabels(workspaceId, sender),
@@ -311,7 +544,7 @@ export function createWorkspaceEngineIpc<
   }
 
   function registerHistory(): void {
-    // Engine history + linked Chats (PR 0M-5). Workspaces read their
+    // Engine history + linked Chats. Workspaces read their
     // timeline from engine moments through the admitted workspace. Owner
     // history rejects when the engine capture is not attached.
 
@@ -326,25 +559,42 @@ export function createWorkspaceEngineIpc<
       const assertCurrent = () => {
         operation.assertCurrent();
         const current = operation.workspace;
-        if (current.remote?.serverUrl !== entry.remote?.serverUrl || shareViewIsPresent(current.shareView) !== shared) {
+        if (
+          current.remote?.serverUrl !== entry.remote?.serverUrl ||
+          shareViewIsPresent(current.shareView) !== shared
+        ) {
           throw new Error("History stopped loading because the workspace changed.");
         }
       };
       const presentations = async (): Promise<EngineMomentAuthorNames["presentations"]> => {
         const agentColors = await agentColorsForPresentation(dependencies.stateDir());
         assertCurrent();
-        if (shared) return createHistoryPresentationRequest({ agentColors, source: "received", workspaceId: entry.workspaceId, assertCurrent });
+        if (shared)
+          return createHistoryPresentationRequest({
+            agentColors,
+            source: "received",
+            workspaceId: entry.workspaceId,
+            assertCurrent,
+          });
         await warmCredentialCache();
         assertCurrent();
         const credentials = currentCredentials();
         // A folder that records a sync but has no remote can't say which server its ids
         // belong to. An unreadable record may say it synced.
-        const synced = entry.remote !== undefined
-          || (credentials !== null && ["synced", "unknown"].includes(await readSyncHistory(entry.rootPath)));
+        const synced =
+          entry.remote !== undefined ||
+          (credentials !== null &&
+            ["synced", "unknown"].includes(await readSyncHistory(entry.rootPath)));
         assertCurrent();
         return createHistoryPresentationRequest({
-          agentColors, source: "own-store", workspaceId: entry.workspaceId, assertCurrent, serverUrl: entry.remote?.serverUrl, synced,
-          installationId: localInstallationId(), credentials,
+          agentColors,
+          source: "own-store",
+          workspaceId: entry.workspaceId,
+          assertCurrent,
+          serverUrl: entry.remote?.serverUrl,
+          synced,
+          installationId: localInstallationId(),
+          credentials,
         });
       };
       return { entry, shared, assertCurrent, presentations };
@@ -357,7 +607,8 @@ export function createWorkspaceEngineIpc<
     async function readHistory<Result>(
       operation: Operation,
       read: (
-        history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> & Partial<Pick<WorkspaceEngineCapture, "filePathForObjectId">>,
+        history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> &
+          Partial<Pick<WorkspaceEngineCapture, "filePathForObjectId">>,
         rootPath: string | null,
         presentations: EngineMomentAuthorNames["presentations"],
         // Call after each await, so nothing returns from a replaced window, folder, server, or shared view.
@@ -371,286 +622,431 @@ export function createWorkspaceEngineIpc<
         return read(capture, entry.rootPath, await presentations(), assertCurrent);
       }
       const store = receivedShareEngine.storeFor({
-        engineWorkspaceId: entry.workspaceId, rootPath: entry.rootPath, attachmentId: entry.attachmentId,
+        engineWorkspaceId: entry.workspaceId,
+        rootPath: entry.rootPath,
+        attachmentId: entry.attachmentId,
       });
-      return read(sharedViewHistory(store, entry.workspaceId), null, await presentations(), assertCurrent);
+      return read(
+        sharedViewHistory(store, entry.workspaceId),
+        null,
+        await presentations(),
+        assertCurrent,
+      );
     }
 
-    const policyUnreadable = (policy: WorkspaceEnginePolicySnapshot) => HistoryPolicyUnreadableResult.parse({
-      status: "policy-unreadable", unreadable: policy.unreadable, policyErrors: policy.errors,
-    });
+    const policyUnreadable = (policy: WorkspaceEnginePolicySnapshot) =>
+      HistoryPolicyUnreadableResult.parse({
+        status: "policy-unreadable",
+        unreadable: policy.unreadable,
+        policyErrors: policy.errors,
+      });
 
-    registerOperations<typeof historyOperations, Event, Operation>({
-      handle: registerHandler, assertTrustedSender,
-      withActiveWorkspace: (event, workspaceId, message, work) => withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
-    }, historyOperations, {
-      listHistory: async (input, { event, operation }) => {
-        // The timeline draws file authors as the moment list does, with the same checks.
-        const identity = historyIdentity(operation);
-        const { entry: workspace, shared, assertCurrent } = identity;
-        assertCurrent();
-        const policy = shared ? null : await readWorkspaceEnginePolicy(workspace.rootPath);
-        assertCurrent();
-        if (policy?.errors.length) return policyUnreadable(policy);
-        const engine = shared ? sharedViewHistory(receivedShareEngine.storeFor({ engineWorkspaceId: workspace.workspaceId,
-          rootPath: workspace.rootPath, attachmentId: workspace.attachmentId }), workspace.workspaceId)
-          : (await requireEngineCapture(workspace.workspaceId, "Engine history")).capture;
-        assertCurrent();
-        const presentations = await identity.presentations();
-        let resolved: Awaited<ReturnType<typeof dependencies.historyCollections>> | undefined;
-        let pending: Promise<NonNullable<typeof resolved>> | undefined;
-        // No Collection moments, for a History without them.
-        const without = (why: Error): Pick<TimelineReads, "scope" | "local" | "remote"> => ({ scope: operation.scope ?? workspace.workspaceId,
-          local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }), remote: async () => { throw why; } });
-        // Another computer keeps the Collections: History shows files and documents without them.
-        const getCollections = () => pending ??= dependencies.historyCollections(operation).catch((error: unknown) => {
-          if (error instanceof CollectionsRefusalError) return without(error);
-          throw error;
-        }).then(value => { assertCurrent(); resolved = value; return value; });
-        const collections: Pick<TimelineReads, "scope" | "local" | "remote"> = shared
-          ? without(new Error("Collection History is unavailable in a received share."))
-          : { get scope() { return resolved?.scope ?? operation.scope ?? workspace.workspaceId; },
-            local: async (positions, limit, sourceIds) => (await getCollections()).local(positions, limit, sourceIds),
-            remote: async (datasetId, beforeRevision, signal) => (await getCollections()).remote(datasetId, beforeRevision, signal) };
-        return timeline(input, { ...collections, get scope() { return collections.scope; }, engine, signal: operation.signal, assertCurrent,
-          names: authorNames(workspace.workspaceId, event.sender, presentations), ...(policy ? { admitted: historyPathAdmission(policy) } : {}) });
+    registerOperations<typeof historyOperations, Event, Operation>(
+      {
+        handle: registerHandler,
+        assertTrustedSender,
+        withActiveWorkspace: (event, workspaceId, message, work) =>
+          withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
       },
-      // Each version's newest change of its own, for the Versions page. A version's history
-      // also holds what it was made from, so its own changes are the moments it recorded.
-      // A received share keeps no versions.
-      listVersionLastChanges: async (input, { event, operation }) => {
-        const { entry: workspace, shared, assertCurrent } = historyIdentity(operation);
-        if (shared) return { versions: [] };
-        const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
-        assertCurrent();
-        if (policy.errors.length) throw new Error("History can't read this folder's settings.");
-        const admitted = historyPathAdmission(policy);
-        const { capture } = await requireEngineCapture(input.workspaceId, "Engine history");
-        assertCurrent();
-        const { versions } = await capture.listVersions();
-        assertCurrent();
-        // A page also holds version markers and hidden paths, so reading goes on
-        // until an own shown moment, the end, or a page older than the version:
-        // a version records nothing before it was made. Past the last page read,
-        // the version shows no change of its own.
-        const latest = await Promise.all(versions.map(async (version) => {
-          let cursor: HistoryCursor | undefined;
-          for (let read = 0; read < LAST_CHANGE_PAGES_MAX; read += 1) {
-            const page = await capture.listMoments({ versionId: version.id, limit: LAST_CHANGE_PAGE_ROWS, ...(cursor ? { cursor } : {}) });
-            assertCurrent();
-            const own = page.moments.find(moment => moment.versionId === version.id && (moment.protected || admitted(moment.path)));
-            if (own !== undefined) return own;
-            const oldest = Math.min(...page.moments.map(moment => moment.recordedAtMs), ...page.versionMarkers.map(marker => marker.createdAtMs));
-            if (page.nextCursor === null || oldest < version.createdAtMs) return undefined;
-            cursor = page.nextCursor;
-          }
-          return undefined;
-        }));
-        assertCurrent();
-        // Only person names are read here, so no presentations are drawn.
-        const names = authorNames(input.workspaceId, event.sender, () => []);
-        names.prepare?.(latest.flatMap(moment => moment?.authors ?? []));
-        return {
-          versions: versions.map((version, index) => {
-            const moment = latest[index];
-            if (moment === undefined) return { versionId: version.id, lastChange: null };
-            const personName = momentPersonName(moment, names);
-            return { versionId: version.id, lastChange: { atMs: moment.recordedAtMs, ...(personName !== undefined ? { personName } : {}) } };
-          }),
-        };
-      },
-    });
-
-    registerHandler(CHANNELS.listEngineMoments, workspaceHandler(async (event, payload, operation) => {
-      const input = ListEngineMomentsPayload.parse(payload);
-      return readHistory(operation, async (history, rootPath, presentations, assertCurrent) => {
-        const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
-        assertCurrent();
-        if (policy?.errors.length) return policyUnreadable(policy);
-        const admitted = policy ? historyPathAdmission(policy) : null;
-        return listEngineMomentsForIpc(
-          async () => {
-            let cursor = input.cursor;
-            let startCursor = input.cursor;
-            const versionMarkers: Awaited<ReturnType<typeof history.listMoments>>["versionMarkers"] = [];
-            // Today's view shows moments. Keep skipped markers for the later timeline UI.
-            const pageReach = Math.min(40, Math.ceil(2_000 / (input.limit ?? 50)));
-            for (let pageIndex = 0; ; pageIndex += 1) {
-              const page = await history.listMoments({
-                ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
-                ...(input.limit !== undefined ? { limit: input.limit } : {}),
-                ...(cursor !== undefined ? { cursor } : {}),
-              });
-              assertCurrent();
-              startCursor ??= page.startCursor;
-              versionMarkers.push(...page.versionMarkers);
-              const moments = admitted ? page.moments.filter(moment => moment.protected || admitted(moment.path)) : page.moments;
-              if (moments.length > 0 || page.nextCursor === null || pageIndex + 1 >= pageReach) {
-                return { ...page, moments, startCursor, versionMarkers };
-              }
-              if (pageIndex === 0 && admitted && input.objectId !== undefined) {
-                const objectPath = await history.filePathForObjectId?.(input.objectId);
+      historyOperations,
+      {
+        listHistory: async (input, { event, operation }) => {
+          // The timeline draws file authors as the moment list does, with the same checks.
+          const identity = historyIdentity(operation);
+          const { entry: workspace, shared, assertCurrent } = identity;
+          assertCurrent();
+          const policy = shared ? null : await readWorkspaceEnginePolicy(workspace.rootPath);
+          assertCurrent();
+          if (policy?.errors.length) return policyUnreadable(policy);
+          const engine = shared
+            ? sharedViewHistory(
+                receivedShareEngine.storeFor({
+                  engineWorkspaceId: workspace.workspaceId,
+                  rootPath: workspace.rootPath,
+                  attachmentId: workspace.attachmentId,
+                }),
+                workspace.workspaceId,
+              )
+            : (await requireEngineCapture(workspace.workspaceId, "Engine history")).capture;
+          assertCurrent();
+          const presentations = await identity.presentations();
+          let resolved: Awaited<ReturnType<typeof dependencies.historyCollections>> | undefined;
+          let pending: Promise<NonNullable<typeof resolved>> | undefined;
+          const without = (why: Error): Pick<TimelineReads, "scope" | "local" | "remote"> => ({
+            scope: operation.scope ?? workspace.workspaceId,
+            local: () => ({ pages: [], transferred: [], sourceIds: [], sourceCount: 0 }),
+            remote: async () => {
+              throw why;
+            },
+          });
+          // Another computer keeps the Collections: History shows files and documents without them.
+          const getCollections = () =>
+            (pending ??= dependencies
+              .historyCollections(operation)
+              .catch((error: unknown) => {
+                if (error instanceof CollectionsRefusalError) return without(error);
+                throw error;
+              })
+              .then((value) => {
                 assertCurrent();
-                if (objectPath != null && !admitted(objectPath)) {
-                  return { ...page, moments, nextCursor: null, startCursor, versionMarkers };
-                }
+                resolved = value;
+                return value;
+              }));
+          const collections: Pick<TimelineReads, "scope" | "local" | "remote"> = shared
+            ? without(new Error("Collection History is unavailable in a received share."))
+            : {
+                get scope() {
+                  return resolved?.scope ?? operation.scope ?? workspace.workspaceId;
+                },
+                local: async (positions, limit, sourceIds) =>
+                  (await getCollections()).local(positions, limit, sourceIds),
+                remote: async (datasetId, beforeRevision, signal) =>
+                  (await getCollections()).remote(datasetId, beforeRevision, signal),
+              };
+          return timeline(input, {
+            ...collections,
+            get scope() {
+              return collections.scope;
+            },
+            engine,
+            signal: operation.signal,
+            assertCurrent,
+            names: authorNames(workspace.workspaceId, event.sender, presentations),
+            ...(policy ? { admitted: historyPathAdmission(policy) } : {}),
+          });
+        },
+        // Each version's newest change of its own, for the Versions page. A version's history
+        // also holds what it was made from, so its own changes are the moments it recorded.
+        // A received share keeps no versions.
+        listVersionLastChanges: async (input, { event, operation }) => {
+          const { entry: workspace, shared, assertCurrent } = historyIdentity(operation);
+          if (shared) return { versions: [] };
+          const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+          assertCurrent();
+          if (policy.errors.length) throw new Error("History can't read this folder's settings.");
+          const admitted = historyPathAdmission(policy);
+          const { capture } = await requireEngineCapture(input.workspaceId, "Engine history");
+          assertCurrent();
+          const { versions } = await capture.listVersions();
+          assertCurrent();
+          // A page also holds version markers and hidden paths, so reading goes on
+          // until an own shown moment, the end, or a page older than the version:
+          // a version records nothing before it was made. Past the last page read,
+          // the version shows no change of its own.
+          const latest = await Promise.all(
+            versions.map(async (version) => {
+              let cursor: HistoryCursor | undefined;
+              for (let read = 0; read < LAST_CHANGE_PAGES_MAX; read += 1) {
+                const page = await capture.listMoments({
+                  versionId: version.id,
+                  limit: LAST_CHANGE_PAGE_ROWS,
+                  ...(cursor ? { cursor } : {}),
+                });
+                assertCurrent();
+                const own = page.moments.find(
+                  (moment) =>
+                    moment.versionId === version.id && (moment.protected || admitted(moment.path)),
+                );
+                if (own !== undefined) return own;
+                const oldest = Math.min(
+                  ...page.moments.map((moment) => moment.recordedAtMs),
+                  ...page.versionMarkers.map((marker) => marker.createdAtMs),
+                );
+                if (page.nextCursor === null || oldest < version.createdAtMs) return undefined;
+                cursor = page.nextCursor;
               }
-              cursor = page.nextCursor;
-            }
-          },
-          authorNames(input.workspaceId, event.sender, presentations),
-        );
-      });
-    }));
+              return undefined;
+            }),
+          );
+          assertCurrent();
+          // Only person names are read here, so no presentations are drawn.
+          const names = authorNames(input.workspaceId, event.sender, () => []);
+          names.prepare?.(latest.flatMap((moment) => moment?.authors ?? []));
+          return {
+            versions: versions.map((version, index) => {
+              const moment = latest[index];
+              if (moment === undefined) return { versionId: version.id, lastChange: null };
+              const personName = momentPersonName(moment, names);
+              return {
+                versionId: version.id,
+                lastChange: {
+                  atMs: moment.recordedAtMs,
+                  ...(personName !== undefined ? { personName } : {}),
+                },
+              };
+            }),
+          };
+        },
+      },
+    );
 
-    registerHandler(CHANNELS.readEngineMoment, workspaceHandler(async (event, payload, operation) => {
-      const input = ReadEngineMomentPayload.parse(payload);
-      return readHistory(operation, async (history, rootPath, presentations, assertCurrent) => {
-        const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
-        assertCurrent();
-        if (policy?.errors.length) return ReadEngineMomentResult.parse({ ...policyUnreadable(policy), moment: null });
-        const moment = await history.readMoment(input.momentId);
-        assertCurrent();
-        if (moment && !moment.protected && policy && !historyMomentPathsAdmitted(historyPathAdmission(policy), moment.moment)) {
-          return ReadEngineMomentResult.parse({ status: "untracked", moment: null });
-        }
-        const names = authorNames(input.workspaceId, event.sender, presentations);
-        if (moment && !moment.protected && moment.moment.authors) names.prepare?.(moment.moment.authors);
-        return ReadEngineMomentResult.parse({
-          moment: moment ? engineMomentDetailForIpc(moment, names) : null,
+    registerHandler(
+      CHANNELS.listEngineMoments,
+      workspaceHandler(async (event, payload, operation) => {
+        const input = ListEngineMomentsPayload.parse(payload);
+        return readHistory(operation, async (history, rootPath, presentations, assertCurrent) => {
+          const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
+          assertCurrent();
+          if (policy?.errors.length) return policyUnreadable(policy);
+          const admitted = policy ? historyPathAdmission(policy) : null;
+          return listEngineMomentsForIpc(
+            async () => {
+              let cursor = input.cursor;
+              let startCursor = input.cursor;
+              const versionMarkers: Awaited<
+                ReturnType<typeof history.listMoments>
+              >["versionMarkers"] = [];
+              // Today's view shows moments. Keep skipped markers for the later timeline UI.
+              const pageReach = Math.min(40, Math.ceil(2_000 / (input.limit ?? 50)));
+              for (let pageIndex = 0; ; pageIndex += 1) {
+                const page = await history.listMoments({
+                  ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
+                  ...(input.limit !== undefined ? { limit: input.limit } : {}),
+                  ...(cursor !== undefined ? { cursor } : {}),
+                });
+                assertCurrent();
+                startCursor ??= page.startCursor;
+                versionMarkers.push(...page.versionMarkers);
+                const moments = admitted
+                  ? page.moments.filter((moment) => moment.protected || admitted(moment.path))
+                  : page.moments;
+                if (moments.length > 0 || page.nextCursor === null || pageIndex + 1 >= pageReach) {
+                  return { ...page, moments, startCursor, versionMarkers };
+                }
+                if (pageIndex === 0 && admitted && input.objectId !== undefined) {
+                  const objectPath = await history.filePathForObjectId?.(input.objectId);
+                  assertCurrent();
+                  if (objectPath != null && !admitted(objectPath)) {
+                    return { ...page, moments, nextCursor: null, startCursor, versionMarkers };
+                  }
+                }
+                cursor = page.nextCursor;
+              }
+            },
+            authorNames(input.workspaceId, event.sender, presentations),
+          );
         });
-      });
-    }));
+      }),
+    );
 
-    registerHandler(CHANNELS.restoreEngineMomentFile, workspaceHandler(async (event, payload) => {
-      const input = RestoreEngineMomentFilePayload.parse(payload);
-      const person = await localPerson();
-      const { capture } = await requireEngineCapture(
-        input.workspaceId,
-        "Engine history",
-      );
-      const result = await capture.restoreFileToBeforeMoment(input.momentId, person);
-      notifyRenderer({ workspaceId: input.workspaceId });
-      return RestoreEngineMomentFileResult.parse(result);
-    }));
+    registerHandler(
+      CHANNELS.readEngineMoment,
+      workspaceHandler(async (event, payload, operation) => {
+        const input = ReadEngineMomentPayload.parse(payload);
+        return readHistory(operation, async (history, rootPath, presentations, assertCurrent) => {
+          const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
+          assertCurrent();
+          if (policy?.errors.length)
+            return ReadEngineMomentResult.parse({ ...policyUnreadable(policy), moment: null });
+          const moment = await history.readMoment(input.momentId);
+          assertCurrent();
+          if (
+            moment &&
+            !moment.protected &&
+            policy &&
+            !historyMomentPathsAdmitted(historyPathAdmission(policy), moment.moment)
+          ) {
+            return ReadEngineMomentResult.parse({ status: "untracked", moment: null });
+          }
+          const names = authorNames(input.workspaceId, event.sender, presentations);
+          if (moment && !moment.protected && moment.moment.authors)
+            names.prepare?.(moment.moment.authors);
+          return ReadEngineMomentResult.parse({
+            moment: moment ? engineMomentDetailForIpc(moment, names) : null,
+          });
+        });
+      }),
+    );
+
+    registerHandler(
+      CHANNELS.restoreEngineMomentFile,
+      workspaceHandler(async (event, payload) => {
+        const input = RestoreEngineMomentFilePayload.parse(payload);
+        const person = await localPerson();
+        const { capture } = await requireEngineCapture(input.workspaceId, "Engine history");
+        const result = await capture.restoreFileToBeforeMoment(input.momentId, person);
+        notifyRenderer({ workspaceId: input.workspaceId });
+        return RestoreEngineMomentFileResult.parse(result);
+      }),
+    );
   }
 
   function registerStatusAndRepair(): void {
-    registerHandler(CHANNELS.getSyncStatus, workspaceHandler(async (event, payload, operation) => {
-      const input = WorkspaceIdPayload.parse(payload);
-      const workspace = operation.workspace;
-      return SyncStatusResult.parse(
-        await syncStatusWithOwnedProjection(
-          workspace,
-          activity.getStatus(input.workspaceId),
-        ),
-      );
-    }));
-    registerOperations<typeof captureRecoveryOperations, Event, Operation>({
-      handle: registerHandler,
-      assertTrustedSender,
-      withActiveWorkspace: (event, workspaceId, message, work) =>
-        withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
-    }, captureRecoveryOperations, {
-      retryHeldCapture: async (input, { event }) => {
-        return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
-          const result = await withEngineAdapter(operation.workspace, adapter => adapter.retryHeldCapture(input.path));
-          if (result === null) throw new Error("The workspace engine is not running.");
-          dependencies.recordHeldFiles(operation.workspace, result.heldFiles);
-          return result;
-        });
+    registerHandler(
+      CHANNELS.getSyncStatus,
+      workspaceHandler(async (event, payload, operation) => {
+        const input = WorkspaceIdPayload.parse(payload);
+        const workspace = operation.workspace;
+        return SyncStatusResult.parse(
+          await syncStatusWithOwnedProjection(workspace, activity.getStatus(input.workspaceId)),
+        );
+      }),
+    );
+    registerOperations<typeof captureRecoveryOperations, Event, Operation>(
+      {
+        handle: registerHandler,
+        assertTrustedSender,
+        withActiveWorkspace: (event, workspaceId, message, work) =>
+          withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
       },
-      getCaptureRecoveryStatus: async (input, { event }) => {
-        return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
-          const result = await withEngineAdapter(operation.workspace, async adapter => ({ captureRecoveries: (await adapter.watcherStatus()).captureRecoveries }));
-          if (result === null) throw new Error("The workspace engine is not running.");
-          return CaptureRecoveryStatusResult.parse(result);
-        });
-      },
-      clearCaptureRecovery: async (input, { event }) => {
-        return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
-          const result = await withEngineAdapter(operation.workspace, async adapter => {
-            await adapter.clearCaptureRecovery(input.momentId);
-            return true;
-          });
-          if (result === null) throw new Error("The workspace engine is not running.");
-        });
-      },
-      // The restart starts inside the workspace operation and is awaited
-      // outside it, so its folder scan does not hold the workspace open.
-      retryHistoryCapture: async (input, { event }) => {
-        const started = await withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
-          assertWritableWorkspace(operation.workspace);
-          const { capture } = await requireEngineCapture(operation.workspace.workspaceId, "Engine history");
-          const retry = capture.retryHistoryCapture();
-          // Observe rejection while the workspace operation is still completing.
-          void retry.catch(() => {});
-          return { workspaceId: operation.workspace.workspaceId, retry };
-        });
-        try {
-          await started.retry;
-        } finally {
-          notifyRenderer({ workspaceId: started.workspaceId });
-        }
-      },
-      retrySecretKey: async (input, { event }) => {
-        return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
-          assertWritableWorkspace(operation.workspace);
-          const result = await withEngineAdapter(operation.workspace, async adapter => {
-            const capture = await adapter.reconcileCapture();
-            return { capture, status: await adapter.watcherStatus() };
-          });
-          if (!result?.status) throw new Error("The workspace engine is not running.");
-          const { capture, status } = result;
-          notifyRenderer({ workspaceId: operation.workspace.workspaceId });
-          // Until a pass settles, a restarted engine has not tried the key, so
-          // a missing reason does not mean it works.
-          if (!capture.settled || !capture.running || capture.degraded) {
-            throw new Error("dohc is still checking this workspace's files.");
+      captureRecoveryOperations,
+      {
+        retryHeldCapture: async (input, { event }) => {
+          return withRendererWorkspaceOperation(
+            event.sender,
+            input.workspaceId,
+            "This workspace is no longer active.",
+            async (operation) => {
+              const result = await withEngineAdapter(operation.workspace, (adapter) =>
+                adapter.retryHeldCapture(input.path),
+              );
+              if (result === null) throw new Error("The workspace engine is not running.");
+              dependencies.recordHeldFiles(operation.workspace, result.heldFiles);
+              return result;
+            },
+          );
+        },
+        getCaptureRecoveryStatus: async (input, { event }) => {
+          return withRendererWorkspaceOperation(
+            event.sender,
+            input.workspaceId,
+            "This workspace is no longer active.",
+            async (operation) => {
+              const result = await withEngineAdapter(operation.workspace, async (adapter) => ({
+                captureRecoveries: (await adapter.watcherStatus()).captureRecoveries,
+              }));
+              if (result === null) throw new Error("The workspace engine is not running.");
+              return CaptureRecoveryStatusResult.parse(result);
+            },
+          );
+        },
+        clearCaptureRecovery: async (input, { event }) => {
+          return withRendererWorkspaceOperation(
+            event.sender,
+            input.workspaceId,
+            "This workspace is no longer active.",
+            async (operation) => {
+              const result = await withEngineAdapter(operation.workspace, async (adapter) => {
+                await adapter.clearCaptureRecovery(input.momentId);
+                return true;
+              });
+              if (result === null) throw new Error("The workspace engine is not running.");
+            },
+          );
+        },
+        // The restart starts inside the workspace operation and is awaited
+        // outside it, so its folder scan does not hold the workspace open.
+        retryHistoryCapture: async (input, { event }) => {
+          const started = await withRendererWorkspaceOperation(
+            event.sender,
+            input.workspaceId,
+            "This workspace is no longer active.",
+            async (operation) => {
+              assertWritableWorkspace(operation.workspace);
+              const { capture } = await requireEngineCapture(
+                operation.workspace.workspaceId,
+                "Engine history",
+              );
+              const retry = capture.retryHistoryCapture();
+              // Observe rejection while the workspace operation is still completing.
+              void retry.catch(() => {});
+              return { workspaceId: operation.workspace.workspaceId, retry };
+            },
+          );
+          try {
+            await started.retry;
+          } finally {
+            notifyRenderer({ workspaceId: started.workspaceId });
           }
-          if (status.secretKeyUnavailable) throw new Error("dohc still cannot use the workspace secret key.");
-        });
+        },
+        retrySecretKey: async (input, { event }) => {
+          return withRendererWorkspaceOperation(
+            event.sender,
+            input.workspaceId,
+            "This workspace is no longer active.",
+            async (operation) => {
+              assertWritableWorkspace(operation.workspace);
+              const result = await withEngineAdapter(operation.workspace, async (adapter) => {
+                const capture = await adapter.reconcileCapture();
+                return { capture, status: await adapter.watcherStatus() };
+              });
+              if (!result?.status) throw new Error("The workspace engine is not running.");
+              const { capture, status } = result;
+              notifyRenderer({ workspaceId: operation.workspace.workspaceId });
+              // Until a pass settles, a restarted engine has not tried the key, so
+              // a missing reason does not mean it works.
+              if (!capture.settled || !capture.running || capture.degraded) {
+                throw new Error("dohc is still checking this workspace's files.");
+              }
+              if (status.secretKeyUnavailable)
+                throw new Error("dohc still cannot use the workspace secret key.");
+            },
+          );
+        },
       },
-    });
-    registerOperations<typeof fileObservationOperations, Event, Operation>({
-      handle: registerHandler, assertTrustedSender,
-      withActiveWorkspace: (event, workspaceId, message, work) => withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
-    }, fileObservationOperations, {
-      retryFileObservation: async (input, { event }) => {
-        const started = await withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
-          const read = dependencies.retryFileObservation(operation.workspace.workspaceId);
-          // Observe rejection while the workspace operation is still completing.
-          void read.catch(() => {});
-          return { workspaceId: operation.workspace.workspaceId, read };
-        });
-        // A stalled read must not hold the workspace operation open.
-        await started.read;
-        return activity.getStatus(started.workspaceId);
+    );
+    registerOperations<typeof fileObservationOperations, Event, Operation>(
+      {
+        handle: registerHandler,
+        assertTrustedSender,
+        withActiveWorkspace: (event, workspaceId, message, work) =>
+          withRendererWorkspaceOperation(event.sender, workspaceId, message, work),
       },
-    });
+      fileObservationOperations,
+      {
+        retryFileObservation: async (input, { event }) => {
+          const started = await withRendererWorkspaceOperation(
+            event.sender,
+            input.workspaceId,
+            "This workspace is no longer active.",
+            async (operation) => {
+              const read = dependencies.retryFileObservation(operation.workspace.workspaceId);
+              // Observe rejection while the workspace operation is still completing.
+              void read.catch(() => {});
+              return { workspaceId: operation.workspace.workspaceId, read };
+            },
+          );
+          // A stalled read must not hold the workspace operation open.
+          await started.read;
+          return activity.getStatus(started.workspaceId);
+        },
+      },
+    );
     registerHandler(CHANNELS.retryFileRecovery, async (event, payload) => {
       assertTrustedSender(event);
       const input = WorkspaceIdPayload.parse(payload);
-      return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
-        assertWritableWorkspace(operation.workspace);
-        const recovered = await withEngineAdapter(operation.workspace, async adapter => {
-          await adapter.reconcileCapture();
-          if ((await adapter.watcherStatus()).recoveryUnavailable) {
-            throw new Error("dohc still cannot read the recovery folder. Check folder access, then try again.");
-          }
-          return true;
-        });
-        if (!recovered) throw new Error("The workspace engine is not running.");
-        notifyRenderer({ workspaceId: operation.workspace.workspaceId });
-      });
+      return withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "This workspace is no longer active.",
+        async (operation) => {
+          assertWritableWorkspace(operation.workspace);
+          const recovered = await withEngineAdapter(operation.workspace, async (adapter) => {
+            await adapter.reconcileCapture();
+            if ((await adapter.watcherStatus()).recoveryUnavailable) {
+              throw new Error(
+                "dohc still cannot read the recovery folder. Check folder access, then try again.",
+              );
+            }
+            return true;
+          });
+          if (!recovered) throw new Error("The workspace engine is not running.");
+          notifyRenderer({ workspaceId: operation.workspace.workspaceId });
+        },
+      );
     });
     registerHandler(CHANNELS.retryOwnerLiveDelivery, async (event, payload) => {
       assertTrustedSender(event);
       const input = WorkspaceIdPayload.parse(payload);
-      return withRendererWorkspaceOperation(event.sender, input.workspaceId, "This workspace is no longer active.", async operation => {
-        assertWritableWorkspace(operation.workspace);
-        dependencies.retryOwnerLiveDelivery?.(operation.workspace.workspaceId);
-      });
+      return withRendererWorkspaceOperation(
+        event.sender,
+        input.workspaceId,
+        "This workspace is no longer active.",
+        async (operation) => {
+          assertWritableWorkspace(operation.workspace);
+          dependencies.retryOwnerLiveDelivery?.(operation.workspace.workspaceId);
+        },
+      );
     });
     // Answers with the status after the pass, so the notice that offered
     // Try again can say whether it worked. Only the renderer's own workspace
@@ -682,127 +1078,123 @@ export function createWorkspaceEngineIpc<
       );
     });
 
-    registerHandler(CHANNELS.rebuildEngineStore, workspaceHandler(async (event, payload, operation) => {
-      const input = RebuildEngineStorePayload.parse(payload);
-      const registered = operation.workspace;
-      assertWritableWorkspace(registered);
-      return workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
-        runInWorkspaceAuthorityLane(lease, "engine-store",
-        async () => {
-          const workspace = canonicalWorkspaceFor(lease);
-          const sessions = requireEngineSessions();
-          return RebuildEngineStoreResult.parse(
-            await rebuildEngineStoreRequest(workspace.rootPath, {
-              // A store this build could not migrate is intact; only a
-              // refusal the rebuild can repair admits the move.
-              isStoreRefused: () => {
-                const refusal =
-                  activity.getStatus(workspace.workspaceId).engineStoreRefused;
-                return (
-                  refusal != null &&
-                  engineStoreRefusalRecovery(refusal) === "rebuild"
-                );
-              },
-              hasActiveAgentRun: () =>
-                activity.hasAgentRun(workspace.workspaceId, workspace.rootPath),
-              previousResult: () =>
-                lease.state.lastEngineStoreRebuildResult ?? undefined,
-              rememberResult: (result) =>
-                (lease.state.lastEngineStoreRebuildResult = result),
-              closeActivity: async () => {
-                try {
-                  await closeDispatchRunActivity(workspace, {
-                    notifyRenderer: false,
-                  });
-                } catch (error) {
-                  notifyRenderer({ workspaceId: workspace.workspaceId });
-                  throw error;
-                }
-              },
-              probeStoreRefusal: () =>
-                probeEngineStoreRefusal(
-                  workspace,
-                  sessions,
-                ),
-              rebuildGate: {
-                begin: () => sessions.beginRebuild(workspace),
-                end: () => sessions.endRebuild(workspace),
-              },
-              moveStoreAside: moveEngineStoreAside,
-              reopenActivity: async () => {
-                try {
-                  await openWorkspaceActivityUnderEngineStoreLock(workspace, {
-                    afterReopenRecoverySettled: () =>
-                      sessions.endRebuild(workspace),
-                  });
-                } finally {
-                  notifyRenderer({ workspaceId: workspace.workspaceId });
-                }
-              },
-            }),
-          );
-        }),
-      );
-    }));
+    registerHandler(
+      CHANNELS.rebuildEngineStore,
+      workspaceHandler(async (event, payload, operation) => {
+        const input = RebuildEngineStorePayload.parse(payload);
+        const registered = operation.workspace;
+        assertWritableWorkspace(registered);
+        return workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
+          runInWorkspaceAuthorityLane(lease, "engine-store", async () => {
+            const workspace = canonicalWorkspaceFor(lease);
+            const sessions = requireEngineSessions();
+            return RebuildEngineStoreResult.parse(
+              await rebuildEngineStoreRequest(workspace.rootPath, {
+                // A store this build could not migrate is intact; only a
+                // refusal the rebuild can repair admits the move.
+                isStoreRefused: () => {
+                  const refusal = activity.getStatus(workspace.workspaceId).engineStoreRefused;
+                  return refusal != null && engineStoreRefusalRecovery(refusal) === "rebuild";
+                },
+                hasActiveAgentRun: () =>
+                  activity.hasAgentRun(workspace.workspaceId, workspace.rootPath),
+                previousResult: () => lease.state.lastEngineStoreRebuildResult ?? undefined,
+                rememberResult: (result) => (lease.state.lastEngineStoreRebuildResult = result),
+                closeActivity: async () => {
+                  try {
+                    await closeDispatchRunActivity(workspace, {
+                      notifyRenderer: false,
+                    });
+                  } catch (error) {
+                    notifyRenderer({ workspaceId: workspace.workspaceId });
+                    throw error;
+                  }
+                },
+                probeStoreRefusal: () => probeEngineStoreRefusal(workspace, sessions),
+                rebuildGate: {
+                  begin: () => sessions.beginRebuild(workspace),
+                  end: () => sessions.endRebuild(workspace),
+                },
+                moveStoreAside: moveEngineStoreAside,
+                reopenActivity: async () => {
+                  try {
+                    await openWorkspaceActivityUnderEngineStoreLock(workspace, {
+                      afterReopenRecoverySettled: () => sessions.endRebuild(workspace),
+                    });
+                  } finally {
+                    notifyRenderer({ workspaceId: workspace.workspaceId });
+                  }
+                },
+              }),
+            );
+          }),
+        );
+      }),
+    );
   }
 
   function registerYDoc(): void {
-    registerOperations<typeof engineYDocAdmissionOperations, Event, Operation>({
-      handle: registerHandler,
-      assertTrustedSender,
-      withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
-        withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
-    }, engineYDocAdmissionOperations, {
-      waitForEngineYDocAdmission: (payload, { event }) =>
-        engineYDocSessionIpc.waitForAdmission(event.sender, payload),
-    });
-    registerOperations<typeof engineYDocSaveOperations, Event, Operation>({
-      handle: registerHandler,
-      assertTrustedSender,
-      withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
-        withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
-    }, engineYDocSaveOperations, {
-      retryEngineYDocSave: (payload, { event }) =>
-        engineYDocSessionIpc.retrySave(event.sender, payload),
-    });
+    registerOperations<typeof engineYDocAdmissionOperations, Event, Operation>(
+      {
+        handle: registerHandler,
+        assertTrustedSender,
+        withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
+          withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
+      },
+      engineYDocAdmissionOperations,
+      {
+        waitForEngineYDocAdmission: (payload, { event }) =>
+          engineYDocSessionIpc.waitForAdmission(event.sender, payload),
+      },
+    );
+    registerOperations<typeof engineYDocSaveOperations, Event, Operation>(
+      {
+        handle: registerHandler,
+        assertTrustedSender,
+        withActiveWorkspace: (event, workspaceId, inactiveMessage, work) =>
+          withRendererWorkspaceOperation(event.sender, workspaceId, inactiveMessage, work),
+      },
+      engineYDocSaveOperations,
+      {
+        retryEngineYDocSave: (payload, { event }) =>
+          engineYDocSessionIpc.retrySave(event.sender, payload),
+      },
+    );
     registerHandler(CHANNELS.engineYDocOpen, async (event, payload) => {
       assertTrustedSender(event);
       return engineYDocSessionIpc.open(event.sender, payload);
     });
 
-    registerHandler(
-      CHANNELS.engineYDocReadArtifactAsset,
-      async (event, payload) => {
-        assertTrustedSender(event);
-        return engineYDocSessionIpc.readArtifactAsset(event.sender, payload);
-      },
-    );
+    registerHandler(CHANNELS.engineYDocReadArtifactAsset, async (event, payload) => {
+      assertTrustedSender(event);
+      return engineYDocSessionIpc.readArtifactAsset(event.sender, payload);
+    });
 
     registerHandler(CHANNELS.engineYDocApplyUpdate, (event, payload) => {
       assertTrustedSender(event);
       return engineYDocSessionIpc.applyUpdate(event.sender, payload);
     });
 
-    registerHandler(
-      CHANNELS.engineYDocAcknowledgeLineageReplacement,
-      (event, payload) => {
-        assertTrustedSender(event);
-        return engineYDocSessionIpc.acknowledgeLineageReplacement(
-          event.sender,
-          payload,
-        );
-      },
-    );
+    registerHandler(CHANNELS.engineYDocAcknowledgeLineageReplacement, (event, payload) => {
+      assertTrustedSender(event);
+      return engineYDocSessionIpc.acknowledgeLineageReplacement(event.sender, payload);
+    });
 
     registerHandler(CHANNELS.engineYDocClose, async (event, payload) => {
       assertTrustedSender(event);
       await engineYDocSessionIpc.close(event.sender, payload);
     });
-    registerHandler(CHANNELS.engineYDocPrepareOwnerHandoff, (event,payload) => {
+    registerHandler(CHANNELS.engineYDocPrepareOwnerHandoff, (event, payload) => {
       assertTrustedSender(event);
-      return engineYDocSessionIpc.prepareOwnerHandoff(event.sender,payload);
+      return engineYDocSessionIpc.prepareOwnerHandoff(event.sender, payload);
     });
   }
 
-  return { authorNames, registerCollections, registerHistory, registerStatusAndRepair, registerYDoc };
+  return {
+    authorNames,
+    registerCollections,
+    registerHistory,
+    registerStatusAndRepair,
+    registerYDoc,
+  };
 }

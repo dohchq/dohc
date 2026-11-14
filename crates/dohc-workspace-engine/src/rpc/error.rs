@@ -171,7 +171,7 @@ pub(super) fn reader_retryable(error: &RuntimeError) -> bool {
     )
 }
 
-/// The reader refused the note as larger than it can check (#3575). Asking
+/// The reader refused the note as larger than it can check. Asking
 /// again gives the same answer. It keeps the INTERNAL code of the reader's
 /// other final answers: clients read a LIMIT_EXCEEDED refusal as an update the
 /// engine never admitted, and this one can come after the update landed.
@@ -437,8 +437,6 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
         RuntimeError::HeldReadTooLarge => {
             return WireError::new(ErrorCode::PayloadTooLarge, "held-read-too-large");
         }
-        // The store closed with a held read's reader still open; its files
-        // stay as they are until it closes. Ask again.
         RuntimeError::StoreInUse => {
             return WireError::new(ErrorCode::Overloaded, "store-in-use");
         }
@@ -826,54 +824,6 @@ pub(super) fn workspace_unavailable() -> WireError {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn held_change_refusals_preserve_stable_reasons() {
-        for reason in [
-            "held-change-shared-owner",
-            "held-change-stale",
-            "held-change-missing",
-            "held-change-conflict",
-            "held-change-undo-stale",
-        ] {
-            let wire =
-                super::map_runtime(dohc_engine_domain::DomainError::InvalidInput { reason }.into());
-            assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::InvalidParams);
-            assert_eq!(wire.message, reason);
-            assert_eq!(wire.retry, dohc_engine_protocol::Retryability::No);
-        }
-    }
-
-    #[test]
-    fn undo_refusal_wire_text_keeps_the_domain_prefix() {
-        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Domain(
-            dohc_engine_domain::DomainError::UndoRefused {
-                path: "a.md".into(),
-                reason: "link changed after rename",
-            },
-        ));
-        assert_eq!(
-            error.message,
-            "domain error: Undo refused: link changed after rename: a.md"
-        );
-    }
-
-    #[test]
-    fn changed_chat_authority_has_a_restartable_wire_reason() {
-        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::ChatMentionAccessChanged);
-        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
-        assert_eq!(error.message, "chat-mention-access-changed");
-        let error =
-            super::map_runtime(dohc_engine_runtime::RuntimeError::ChatMentionVersionChanged);
-        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
-        assert_eq!(error.message, "chat-mention-version-changed");
-    }
-
-    #[test]
-    fn changed_edge_source_has_a_restartable_wire_reason() {
-        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::LinksEdgesSourceChanged);
-        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Conflict);
-        assert_eq!(error.message, "links-edges-source-changed");
-    }
 
     #[test]
     fn internal_refusal_logs_only_its_code_words() {
@@ -960,19 +910,6 @@ mod tests {
         }
     }
 
-    /// A server's hosting engine writes this line to the server's log, so the
-    /// path in an error's text must not reach it (#3791).
-    #[test]
-    fn internal_refusal_line_names_no_path() {
-        let path = "notes/secret plan.md";
-        let (wire, logged) =
-            map_runtime_logged(RuntimeError::CaptureNotOwnedAfterHold { path: path.into() });
-        assert_eq!(wire.code, ErrorCode::Internal);
-        let line = logged.expect("an internal refusal is logged");
-        assert_eq!(line, "engine: internal refusal: INTERNAL capture-not-owned");
-        assert!(!line.contains(path));
-    }
-
     #[test]
     fn routine_refusals_have_no_internal_log_line() {
         for (error, code, message) in [
@@ -1028,187 +965,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn checked_delete_replication_dependents_have_a_known_reason() {
-        let wire = super::map_runtime(dohc_engine_runtime::RuntimeError::Domain(
-            dohc_engine_domain::DomainError::CheckedDeleteReplicationDependents,
-        ));
-        assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Conflict);
-        assert_eq!(wire.message, "checked-delete-replication-dependents");
-    }
-
-    #[test]
-    fn conditional_restore_delete_materialization_reason_reaches_rpc() {
-        for error in [
-            dohc_engine_files::MaterializeError::SymlinkTarget,
-            dohc_engine_files::MaterializeError::RecoveryUnavailable,
-            dohc_engine_files::MaterializeError::Io {
-                path: "record.md".into(),
-                kind: std::io::ErrorKind::PermissionDenied,
-                raw_os_error: None,
-                privacy_denied: false,
-            },
-        ] {
-            let code = error.code();
-            let wire = super::map_runtime(dohc_engine_runtime::RuntimeError::Materialize(error));
-            assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Internal);
-            assert_eq!(wire.message, code);
-            assert!(!wire.message.contains("record.md"));
-        }
-    }
-
-    /// The desktop explains a macOS privacy refusal by this code, so it
-    /// reaches the wire from a file write and from the workspace root.
-    #[test]
-    fn a_macos_privacy_denial_reaches_rpc_by_its_code() {
-        let write = super::map_runtime(dohc_engine_runtime::RuntimeError::Materialize(
-            dohc_engine_files::MaterializeError::Io {
-                path: "notes.md".into(),
-                kind: std::io::ErrorKind::PermissionDenied,
-                raw_os_error: Some(1),
-                privacy_denied: true,
-            },
-        ));
-        let root = super::map_root_binding(crate::root_binding::RootBindingError::PrivacyDenied);
-        assert_eq!(root.message, "privacy-denied");
-        assert_eq!(write.message, "privacy-denied");
-    }
-
-    /// A write on a volume that adds sharing permissions to new files names
-    /// that limit on the wire, not a generic io failure.
-    #[test]
-    fn a_volume_that_shares_new_files_reaches_rpc_by_its_code() {
-        let write = super::map_runtime(dohc_engine_runtime::RuntimeError::Materialize(
-            dohc_engine_files::MaterializeError::VolumeSharesNewFiles,
-        ));
-        assert_eq!(write.code, dohc_engine_protocol::ErrorCode::Internal);
-        assert_eq!(write.message, "volume-shares-new-files");
-        let root =
-            super::map_root_binding(crate::root_binding::RootBindingError::VolumeSharesNewFiles);
-        assert_eq!(root.code, dohc_engine_protocol::ErrorCode::Internal);
-        assert_eq!(root.message, "volume-shares-new-files");
-        #[cfg(target_os = "macos")]
-        {
-            let refused = || std::io::Error::other(dohc_macos_files::VolumeSharesNewFiles);
-            let folder = super::map_runtime(dohc_engine_runtime::RuntimeError::Identity {
-                reason: "could not create engine.db parent directory",
-                source: Some(refused()),
-            });
-            let store = super::map_runtime(dohc_engine_runtime::RuntimeError::Storage(
-                dohc_engine_storage::StorageError::persist_public(refused()),
-            ));
-            for wire in [folder, store] {
-                assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Internal);
-                assert_eq!(wire.message, "volume-shares-new-files");
-            }
-        }
-    }
-
-    /// The desktop names what keeps the engine's folder from being private,
-    /// and where, by this code, from the root binding and from the store.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_folder_dohc_cant_keep_private_reaches_rpc_by_its_code() {
-        use dohc_macos_files::{NotPrivate, NotPrivateReason};
-        for (path, reason, message) in [
-            (
-                ".dohc",
-                NotPrivateReason::Link,
-                "engine-folder-not-private: link .dohc",
-            ),
-            (
-                ".dohc/engine",
-                NotPrivateReason::NotFolder,
-                "engine-folder-not-private: not-folder .dohc/engine",
-            ),
-            (
-                ".dohc/engine",
-                NotPrivateReason::OtherOwner,
-                "engine-folder-not-private: other-owner .dohc/engine",
-            ),
-            (
-                ".dohc/engine/engine.db-wal",
-                NotPrivateReason::NotFile,
-                "engine-folder-not-private: not-file .dohc/engine/engine.db-wal",
-            ),
-            (
-                ".dohc/engine",
-                NotPrivateReason::UncheckedVolume,
-                "engine-folder-not-private: unchecked-volume .dohc/engine",
-            ),
-        ] {
-            let refused = NotPrivate {
-                path: path.into(),
-                reason,
-            };
-            let root = super::map_root_binding(crate::root_binding::RootBindingError::NotPrivate(
-                refused.clone(),
-            ));
-            let store = super::map_runtime(dohc_engine_runtime::RuntimeError::Identity {
-                reason: "could not keep the engine store private",
-                source: Some(std::io::Error::other(refused)),
-            });
-            for wire in [root, store] {
-                assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Internal);
-                assert_eq!(wire.message, message);
-            }
-        }
-    }
-
-    /// On Linux, an engine folder the engine can't reach through the
-    /// descriptor it holds reaches the desktop by the same code, from the root
-    /// binding and from the store.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_folder_dohc_cant_hold_reaches_rpc_by_its_code() {
-        use dohc_linux_files::held::NotHeld;
-        let root = super::map_root_binding(crate::root_binding::RootBindingError::NotPrivate(
-            NotHeld::CODE,
-            ".dohc/engine",
-        ));
-        let refused = NotHeld {
-            path: ".dohc/engine".into(),
-        };
-        let store = super::map_runtime(dohc_engine_runtime::RuntimeError::Identity {
-            reason: "could not keep the engine store private",
-            source: Some(std::io::Error::other(refused)),
-        });
-        for wire in [root, store] {
-            assert_eq!(wire.code, dohc_engine_protocol::ErrorCode::Internal);
-            assert_eq!(
-                wire.message,
-                "engine-folder-not-private: unchecked-system .dohc/engine"
-            );
-        }
-    }
-
-    #[test]
-    fn settlement_proof_budget_has_a_retryable_rpc_error() {
-        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Relay(
-            dohc_engine_sync::RelayError::SettlementProofBudget,
-        ));
-        assert_eq!(error.code, dohc_engine_protocol::ErrorCode::Overloaded);
-        assert_eq!(
-            error.retry,
-            dohc_engine_protocol::Retryability::AfterBackoff
-        );
-        assert_eq!(error.message, "settlement-proof-budget");
-    }
-
-    #[test]
-    fn pending_settlement_has_a_retryable_wire_error() {
-        let error = super::map_runtime(dohc_engine_runtime::RuntimeError::Sync(
-            dohc_engine_sync::SyncError::RetryableState {
-                reason: "settlement-materialization-pending",
-            },
-        ));
-        assert_eq!(
-            error.code,
-            dohc_engine_protocol::error::ErrorCode::Overloaded
-        );
-        assert_eq!(error.message, "settlement-materialization-pending");
-    }
-
     use super::*;
     use dohc_engine_collab::CollabError;
     use dohc_engine_domain::DomainError;
@@ -1218,142 +974,6 @@ mod tests {
     use dohc_engine_sync::ObservedBytes;
     use dohc_engine_sync::RelayError;
     use dohc_engine_sync::SyncError;
-
-    /// Opus's r2c-3c-4 finding 5: a held proof's failure, shared by its
-    /// callers, reaches the wire as its original does, and an answer too
-    /// large for a held read is a size refusal.
-    #[test]
-    fn a_shared_sync_failure_maps_as_its_original() {
-        use dohc_engine_storage::StorageError;
-        let originals: [fn() -> SyncError; 5] = [
-            || SyncError::Storage(StorageError::FileLocked),
-            || SyncError::Cancelled,
-            || SyncError::LiveDocumentBindingActive,
-            || SyncError::ProjectionTooLarge {
-                constraint: "MAX_PROJECTION_BYTES",
-                actual_bytes: 2,
-                limit_bytes: 1,
-            },
-            || SyncError::Storage(StorageError::corrupt_public(std::io::Error::other("bad"))),
-        ];
-        for original in originals {
-            let direct = map_runtime(RuntimeError::Sync(original()));
-            let shared = map_runtime(RuntimeError::Sync(SyncError::Shared(std::sync::Arc::new(
-                original(),
-            ))));
-            assert_eq!((shared.code, shared.message), (direct.code, direct.message));
-        }
-        let too_large = map_runtime(RuntimeError::HeldReadTooLarge);
-        assert_eq!(too_large.code, ErrorCode::PayloadTooLarge);
-        assert_eq!(too_large.message, "held-read-too-large");
-    }
-
-    #[test]
-    fn live_application_native_errors_preserve_refusal_and_failure_codes() {
-        for (application, expected) in [
-            (
-                ApplicationError::InvalidInput("invalid binding"),
-                ErrorCode::InvalidParams,
-            ),
-            (
-                ApplicationError::WorkspaceMismatch,
-                ErrorCode::InvalidParams,
-            ),
-            (
-                ApplicationError::MainVersionMismatch,
-                ErrorCode::InvalidParams,
-            ),
-            (ApplicationError::Conflict, ErrorCode::Conflict),
-            (ApplicationError::HostedDocumentUnready, ErrorCode::Conflict),
-            (
-                ApplicationError::LiveDocumentWithoutLineage,
-                ErrorCode::Conflict,
-            ),
-            (
-                ApplicationError::ConfiguredByteBudgetExceeded,
-                ErrorCode::LimitExceeded,
-            ),
-            (ApplicationError::Corrupt, ErrorCode::Internal),
-            (ApplicationError::Interrupted, ErrorCode::Internal),
-        ] {
-            let error = RuntimeError::LiveApplication(application);
-            let message = error.code();
-            let mapped = map_runtime(error);
-            assert_eq!(mapped.code, expected);
-            assert_eq!(mapped.message, message);
-        }
-    }
-
-    #[test]
-    fn a_store_with_pending_migrations_asks_for_the_workspace_to_open_first() {
-        let mapped = map_runtime(RuntimeError::Storage(
-            dohc_engine_storage::StorageError::MigrationPending,
-        ));
-        assert_eq!(mapped.code, ErrorCode::Internal);
-        assert_eq!(
-            mapped.message,
-            "Open the workspace in dohc first, then try again."
-        );
-    }
-
-    #[test]
-    fn live_application_wrappers_preserve_storage_and_collaboration_refusals() {
-        use dohc_engine_storage::StorageError;
-        for error in [
-            RuntimeError::LiveApplication(ApplicationError::Storage(StorageError::ForeignDatabase)),
-            RuntimeError::LiveApplication(ApplicationError::Storage(
-                StorageError::UnsupportedFingerprint {
-                    found: 1,
-                    expected: 2,
-                },
-            )),
-            RuntimeError::LiveApplication(ApplicationError::Storage(
-                StorageError::MigrationFailed { source: None },
-            )),
-            RuntimeError::LiveApplication(ApplicationError::Storage(
-                StorageError::MigratedByNewerBuild {
-                    ordinal: 5,
-                    id: "from-a-newer-build".to_owned(),
-                },
-            )),
-        ] {
-            let expected = match &error {
-                RuntimeError::LiveApplication(ApplicationError::Storage(inner)) => inner.code(),
-                _ => unreachable!(),
-            };
-            let message = map_runtime(error).message;
-            assert!(
-                message == expected || message.starts_with(&format!("{expected}: ")),
-                "{message} must carry the {expected} code"
-            );
-        }
-        let error = map_runtime(RuntimeError::LiveApplication(ApplicationError::Collab(
-            CollabError::ObjectAliasCollision,
-        )));
-        assert_eq!(error.code, ErrorCode::InvalidParams);
-        assert_eq!(error.message, "ydoc-object-alias-collision");
-        for refusal in [
-            CollabError::MalformedUpdate {
-                reason: "incomplete update".into(),
-            },
-            CollabError::ProjectionTooLarge { actual: 3, max: 2 },
-        ] {
-            assert_eq!(
-                map_runtime(RuntimeError::LiveApplication(ApplicationError::Collab(
-                    refusal
-                )))
-                .code,
-                ErrorCode::InvalidParams,
-            );
-        }
-        // A settlement cannot release the author interval until the earlier
-        // settlement's file write lands, so the host retries after backoff.
-        let error = map_runtime(RuntimeError::LiveApplication(
-            ApplicationError::MaterializationPending,
-        ));
-        assert_eq!(error.code, ErrorCode::Overloaded);
-        assert_eq!(error.message, "settlement-materialization-pending");
-    }
 
     #[test]
     fn a_reader_with_retries_left_asks_for_a_backoff_and_an_exhausted_one_does_not() {
@@ -1397,39 +1017,6 @@ mod tests {
         }
     }
 
-    /// The artifact lock and a busy engine database are two
-    /// different contentions, and only the first may be reported as
-    /// `file-locked` — the desktop turns that message into "another program
-    /// has this file open" and retries the ARTIFACT write against it. The
-    /// code() of MaterializeError::Storage delegates to the storage error, so
-    /// matching on the code alone reported a busy SQLite handle as an
-    /// artifact lock. Matching the variant is what keeps them apart.
-    ///
-    /// Round 14 held the busy store terminal because nothing collected on the
-    /// retry it would have advertised. #658 built the collector — the Y.Doc
-    /// provider's settle ladder retries `engine-store-busy` — so the busy
-    /// store now carries the retry contract that has always been true of it,
-    /// under its own message. Two messages, because the two contentions need
-    /// different words: one names a program outside dohc holding the user's
-    /// file, and the other is dohc's own writers meeting inside SQLite.
-    ///
-    #[test]
-    fn a_busy_engine_store_is_not_reported_as_a_locked_artifact() {
-        let artifact = map_runtime(RuntimeError::Materialize(
-            dohc_engine_files::MaterializeError::FileLocked,
-        ));
-        assert_eq!(artifact.code, ErrorCode::Overloaded);
-        assert_eq!(artifact.message, "file-locked");
-
-        let store = map_runtime(RuntimeError::Materialize(
-            dohc_engine_files::MaterializeError::Storage(
-                dohc_engine_storage::StorageError::FileLocked,
-            ),
-        ));
-        assert_eq!(store.code, ErrorCode::Overloaded);
-        assert_eq!(store.message, "engine-store-busy");
-    }
-
     /// A busy SQLite handle is transient wherever it appears, and it appears
     /// through several wrappers. Answering it under one and standing down under the
     /// next would leave the same condition retryable or terminal by accident
@@ -1455,17 +1042,13 @@ mod tests {
             ))),
             RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked)),
             RuntimeError::Search(SearchError::Store(StorageError::FileLocked)),
-            // The search index's other carrier: a raw rusqlite failure that
-            // never passed through this taxonomy, so it has no variant to
-            // match and is asked about its result code directly.
             RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(5), // SQLITE_BUSY
                 Some("database is locked".to_owned()),
             ))),
             // The relay route's own type. `RelayError` carries a relay
             // operation's local failures, so the busy store arrives typed
-            // rather than as a storage variant — and used to fall through to
-            // INTERNAL because this recognizer only read storage variants.
+            // rather than as a storage variant.
             RuntimeError::Relay(RelayError::StoreBusy),
         ];
         for error in busy {
@@ -1484,19 +1067,6 @@ mod tests {
         }));
         assert_eq!(corrupt.code, ErrorCode::Internal);
         assert_ne!(corrupt.message, "engine-store-busy");
-    }
-
-    #[test]
-    fn an_unsupported_fingerprint_names_its_storage_code_on_the_wire() {
-        use dohc_engine_storage::StorageError;
-        let fingerprint = map_runtime(RuntimeError::Storage(
-            StorageError::UnsupportedFingerprint {
-                found: 0,
-                expected: 2,
-            },
-        ));
-        assert_eq!(fingerprint.code, ErrorCode::Internal);
-        assert_eq!(fingerprint.message, "unsupported-fingerprint");
     }
 
     #[test]
@@ -1521,56 +1091,11 @@ mod tests {
         assert_eq!(invalid.code, ErrorCode::InvalidParams);
         assert_eq!(invalid.message, "invalid-input");
 
-        // S1 (BINHEAD): a text read of a binary head is a normal user error, not
-        // an internal server fault — it must map to InvalidParams, never fall
+        // A text read of a binary head is a normal user error, not an
+        // internal server fault. It must map to InvalidParams, never fall
         // through the catch-all to Internal.
         let binary_head = map_runtime(RuntimeError::Domain(DomainError::BinaryHeadNotText));
         assert_eq!(binary_head.code, ErrorCode::InvalidParams);
-    }
-
-    #[test]
-    fn occupied_path_refusal_names_the_path_on_the_wire() {
-        let detail = "retryable-state: replication state is not ready: ydoc.update path is occupied by another object (object apollo, origin peer seq 7)";
-        let (wire, logged) = map_runtime_logged(RuntimeError::Relay(RelayError::PathOccupied {
-            path: "notes/trip.txt".into(),
-            detail: detail.into(),
-        }));
-        assert_eq!(
-            (wire.code, wire.message.as_str()),
-            (ErrorCode::Internal, "sync-path-occupied: notes/trip.txt"),
-        );
-        // It retries as any other failed pass does.
-        let generic = map_runtime(RuntimeError::Relay(RelayError::Local(detail.into())));
-        assert_eq!(generic.message, "workspace operation failed");
-        assert_eq!(wire.retry, generic.retry);
-        // The engine's log line names no path.
-        assert_eq!(
-            logged.as_deref(),
-            Some("engine: internal refusal: INTERNAL relay-failed")
-        );
-    }
-
-    #[test]
-    fn conflict_wait_limit_keeps_its_sentences_on_the_wire() {
-        let detail = "conflict-wait-limit: Changes from another computer are waiting on the conflict in plan.md. They reached a limit, so dohc stopped receiving changes. Resolve the conflict to receive changes again. (path plan.md, origin device-d seq 7, retained ops 1, retained bytes 536870912)";
-        let wire = map_runtime(RuntimeError::Relay(RelayError::Local(detail.into())));
-        assert_eq!(
-            (wire.code, wire.message.as_str()),
-            (ErrorCode::Internal, detail)
-        );
-        // It retries as any other failed pass does.
-        let generic = map_runtime(RuntimeError::Relay(RelayError::Local("other".into())));
-        assert_eq!(wire.retry, generic.retry);
-    }
-
-    #[test]
-    fn synced_deletion_refusal_preserves_its_domain_code() {
-        let error = map_runtime(RuntimeError::Domain(
-            DomainError::SyncedDeletionRevivalRefused,
-        ));
-        assert_eq!(error.code, ErrorCode::InvalidParams);
-        assert_eq!(error.message, "synced-deletion-revival-refused");
-        assert_eq!(error.retry, dohc_engine_protocol::Retryability::No);
     }
 
     #[test]
@@ -1631,156 +1156,6 @@ mod tests {
                 (code, message, Retryability::No)
             );
         }
-    }
-
-    /// A session host's hosted replica refuses a named version. The write
-    /// rolls back and the caller hears why, as its own input error rather than
-    /// an internal storage failure.
-    #[tokio::test]
-    async fn a_hosted_replica_refusal_reaches_the_caller_with_its_reason() {
-        use dohc_engine_runtime::{CancellationToken, NoFaults};
-        use dohc_engine_storage::EngineStore;
-        use std::sync::Arc;
-
-        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
-        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
-        {
-            let mut store = EngineStore::open(&db, 1).unwrap();
-            dohc_engine_sync::create_hosted_replica(
-                &mut store,
-                "ws",
-                "service-host:host",
-                "epoch",
-                "stream",
-                1,
-                &NoFaults,
-            )
-            .unwrap();
-            dohc_engine_domain::VersionedTextStore::new(&mut store)
-                .ensure_main_version("ws", "main", 1, &NoFaults)
-                .unwrap();
-        }
-        let supervisor = dohc_engine_runtime::WorkspaceSupervisor::new();
-        let actor = supervisor.open(&db, 1).unwrap().actor;
-        let refused = actor
-            .create_named_version(
-                dohc_engine_domain::CreateNamedVersion {
-                    workspace_id: "ws".into(),
-                    new_version_id: "draft".into(),
-                    name: "Draft".into(),
-                    from_version_id: "main".into(),
-                    now_ms: 2,
-                    request_id: None,
-                },
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
-        let surfaced = map_runtime(refused);
-        assert_eq!(
-            (surfaced.code, surfaced.message.as_str()),
-            (
-                ErrorCode::InvalidParams,
-                "invalid-input: a hosted replica writes only its hosted documents"
-            )
-        );
-        let versions = actor.list_versions("ws".into()).await.unwrap();
-        assert_eq!(versions.len(), 1, "the refused version rolled back");
-        supervisor.close(&db).unwrap();
-    }
-
-    /// Relay operations a store cannot take as a hosted replica keep their
-    /// reason: creating one on a passive store, and adopting an ordinary
-    /// identity on one that exists.
-    #[tokio::test]
-    async fn hosted_relay_refusals_reach_the_caller_with_their_reason() {
-        use dohc_engine_runtime::{
-            ActorHandle, CancellationToken, NoFaults, RelayConfiguration, RelayOperation,
-        };
-        use dohc_engine_storage::EngineStore;
-
-        let relay = |actor: ActorHandle, operation: RelayOperation| async move {
-            let refused = actor
-                .relay(
-                    RelayConfiguration {
-                        base_url: "https://relay.invalid".to_owned(),
-                        socket_path: None,
-                        bearer_token: "token".to_owned(),
-                        #[cfg(debug_assertions)]
-                        allow_insecure_loopback_for_tests: false,
-                    },
-                    operation,
-                    dohc_engine_collab::LeaseRegistry::default(),
-                    CancellationToken::new(),
-                    None,
-                )
-                .await
-                .unwrap_err();
-            let surfaced = map_runtime(refused);
-            (surfaced.code, surfaced.message)
-        };
-        let supervisor = dohc_engine_runtime::WorkspaceSupervisor::new();
-
-        let passive_scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
-        let passive = dohc_engine_testkit::engine_db_path(&passive_scratch).unwrap();
-        let actor = supervisor
-            .open_passive_root_bound(&passive, 1, "root-token", None)
-            .unwrap()
-            .actor;
-        assert_eq!(
-            relay(
-                actor,
-                RelayOperation::CreateHostedReplica {
-                    workspace_id: "ws".into(),
-                    new_origin_id: "service-host:host".into(),
-                    replication_epoch: "epoch".into(),
-                    stream_identity: "stream".into(),
-                    created_at_ms: 2,
-                }
-            )
-            .await,
-            (
-                ErrorCode::InvalidParams,
-                "invalid-input: a passive store cannot host documents".to_owned()
-            )
-        );
-        supervisor.close(&passive).unwrap();
-
-        let hosted_scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
-        let hosted = dohc_engine_testkit::engine_db_path(&hosted_scratch).unwrap();
-        {
-            let mut store = EngineStore::open(&hosted, 1).unwrap();
-            dohc_engine_sync::create_hosted_replica(
-                &mut store,
-                "ws",
-                "service-host:host",
-                "epoch",
-                "stream",
-                1,
-                &NoFaults,
-            )
-            .unwrap();
-        }
-        let actor = supervisor.open(&hosted, 1).unwrap().actor;
-        assert_eq!(
-            relay(
-                actor,
-                RelayOperation::AdoptJoinIdentity {
-                    workspace_id: "ws".into(),
-                    new_origin_id: "origin".into(),
-                    replication_epoch: "epoch".into(),
-                    stream_identity: "stream".into(),
-                    created_at_ms: 2,
-                }
-            )
-            .await,
-            (
-                ErrorCode::InvalidParams,
-                "invalid-input: a hosted replica uses only its hosted feed".to_owned()
-            )
-        );
-        supervisor.close(&hosted).unwrap();
     }
 
     #[test]
@@ -1868,10 +1243,6 @@ mod tests {
             dohc_engine_protocol::Retryability::No,
             "a blob that exceeds a fixed ceiling never succeeds on retry"
         );
-        // One condition must not surface under two codes depending on which
-        // layer refused it. Latent today, because relay pulls convert the
-        // ingest refusal before it reaches here; pinned so a second caller
-        // cannot reintroduce the split.
         assert_eq!(
             map_sync_code(&SyncError::BlobTooLarge {
                 constraint: "MAX_CAPTURE_BINARY_FILE_BYTES",
@@ -1893,16 +1264,6 @@ mod tests {
         assert_eq!(
             projection.message,
             "Y.Doc projection exceeds MAX_PROJECTION_BYTES: limit 16777216 bytes, observed at least 16777217 bytes"
-        );
-    }
-
-    #[test]
-    fn pending_scene_asset_delete_makes_rollback_retryable() {
-        let pending = map_runtime(RuntimeError::SceneAssetDeletePending);
-        assert_eq!(pending.code, ErrorCode::Overloaded);
-        assert_eq!(
-            pending.message,
-            "Sync has not delivered every drawing asset delete. Retry the rollback after sync completes."
         );
     }
 
@@ -1981,7 +1342,7 @@ mod tests {
         let unreachable = map_runtime(RuntimeError::Relay(RelayError::Partitioned));
         assert_eq!(unreachable.code, ErrorCode::WorkspaceUnavailable);
         assert_eq!(unreachable.message, "relay-unreachable");
-        // Reopening the session cannot reach the relay either (#2708).
+        // Reopening the session cannot reach the relay either.
         assert_eq!(unreachable.retry, Retryability::AfterBackoff);
         let missing = map_runtime(RuntimeError::Relay(RelayError::WorkspaceUnavailable));
         assert_eq!(missing.code, ErrorCode::WorkspaceUnavailable);

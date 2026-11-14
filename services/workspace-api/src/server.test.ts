@@ -27,7 +27,6 @@ async function listen(
   return (server!.address() as AddressInfo).port;
 }
 
-/** Opens a connection and resolves with the server's side of it. */
 async function open(port: number): Promise<{ client: Socket; socket: Socket }> {
   const accepted = once(server!, "connection");
   const client = connect(port, "127.0.0.1");
@@ -37,7 +36,6 @@ async function open(port: number): Promise<{ client: Socket; socket: Socket }> {
   return { client, socket };
 }
 
-/** Writes `text` on a new connection and resolves with everything the server sent once it closes. */
 function exchange(port: number, text: string): Promise<{ reply: string; ms: number }> {
   return new Promise((resolve) => {
     const started = Date.now();
@@ -63,7 +61,10 @@ describe("workspace server", () => {
 
   it("answers 408 and closes a connection that stops sending its headers", async () => {
     const port = await listen(SHORT);
-    const { reply, ms } = await exchange(port, "GET /health HTTP/1.1\r\nHost: api.example.test\r\n");
+    const { reply, ms } = await exchange(
+      port,
+      "GET /health HTTP/1.1\r\nHost: api.example.test\r\n",
+    );
     expect(reply).toMatch(/^HTTP\/1\.1 408 /);
     // Node checks its limits every 30 s by default, so this fails if the check interval isn't set.
     expect(ms).toBeLessThan(5_000);
@@ -73,7 +74,7 @@ describe("workspace server", () => {
     const port = await listen(SHORT);
     const { reply, ms } = await exchange(
       port,
-      "POST /api/auth/sign-in/email HTTP/1.1\r\nHost: api.example.test\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{\"a\"",
+      'POST /api/auth/sign-in/email HTTP/1.1\r\nHost: api.example.test\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{"a"',
     );
     expect(reply).toMatch(/^HTTP\/1\.1 408 /);
     expect(ms).toBeLessThan(5_000);
@@ -81,16 +82,30 @@ describe("workspace server", () => {
 
   it("answers 400 to a request the adapter can't read, and keeps serving", async () => {
     const port = await listen();
-    const unreadable = await exchange(port, "GET /health HTTP/1.1\r\nHost: a b\r\nConnection: close\r\n\r\n");
+    const unreadable = await exchange(
+      port,
+      "GET /health HTTP/1.1\r\nHost: a b\r\nConnection: close\r\n\r\n",
+    );
     expect(unreadable.reply).toMatch(/^HTTP\/1\.1 400 /);
-    const { reply } = await exchange(port, "GET /health HTTP/1.1\r\nHost: api.example.test\r\nConnection: close\r\n\r\n");
+    const { reply } = await exchange(
+      port,
+      "GET /health HTTP/1.1\r\nHost: api.example.test\r\nConnection: close\r\n\r\n",
+    );
     expect(reply).toMatch(/^HTTP\/1\.1 200 /);
     expect(reply).toContain("read 0");
   });
 
   it("closes a connection when its answer stops moving for the idle limit", async () => {
     // An answer with no end, so it stops moving once the client stops reading.
-    const port = await listen(SHORT, async () => new Response(new ReadableStream({ pull: (controller) => controller.enqueue(new Uint8Array(64 * 1024)) })));
+    const port = await listen(
+      SHORT,
+      async () =>
+        new Response(
+          new ReadableStream({
+            pull: (controller) => controller.enqueue(new Uint8Array(64 * 1024)),
+          }),
+        ),
+    );
     const { client, socket } = await open(port);
     client.pause();
     const started = Date.now();
@@ -102,13 +117,15 @@ describe("workspace server", () => {
   it("finishes an answer that takes longer than the idle limit", async () => {
     let accepted: Promise<unknown[]> | undefined;
     const port = await listen(SHORT, async () => {
-      // Answers only once its connection has been idle past the limit.
       const [socket] = (await accepted!) as [Socket];
       await once(socket, "timeout");
       return new Response("slow answer");
     });
     accepted = once(server!, "connection");
-    const { reply } = await exchange(port, "GET / HTTP/1.1\r\nHost: api.example.test\r\nConnection: close\r\n\r\n");
+    const { reply } = await exchange(
+      port,
+      "GET / HTTP/1.1\r\nHost: api.example.test\r\nConnection: close\r\n\r\n",
+    );
     expect(reply).toMatch(/^HTTP\/1\.1 200 /);
     expect(reply).toContain("slow answer");
   });

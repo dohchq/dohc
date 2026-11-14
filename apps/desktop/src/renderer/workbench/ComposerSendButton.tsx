@@ -18,13 +18,6 @@ function useSlowSend(sending: boolean): boolean {
   return sending && slow;
 }
 
-// The submit control every chat composer shares, in three looks: the accent
-// fill when there is something to send, an empty outline with a faint mark
-// when there is not, and a quiet fill with a full-strength ring once a send
-// is slow, so a send in progress never reads as either. It is disabled while
-// a send is in flight; a quicker send keeps the ready look. The busy control
-// is busy to assistive tech and a polite status says so. The control keeps
-// its size and accessible name in every look.
 const LOOK = {
   ready: "border-transparent bg-accent text-bg cursor-pointer hover:opacity-90",
   off: "border-line text-subtle cursor-not-allowed",
@@ -54,11 +47,16 @@ export function ComposerSendButton(props: {
         data-look={look}
         disabled={props.sending || props.disabled}
         className={`relative shrink-0 rounded-md border ${LOOK[look]} ${
-          props.shape === "box" ? "grid size-7 place-items-center" : "h-7 px-3 text-[12px] font-medium"
+          props.shape === "box"
+            ? "grid size-7 place-items-center"
+            : "h-7 px-3 text-[12px] font-medium"
         }`}
       >
-        {props.shape === "box" ? <ArrowUp size={15} strokeWidth={2} aria-hidden className={hidden} />
-          : <span className={hidden}>Post</span>}
+        {props.shape === "box" ? (
+          <ArrowUp size={15} strokeWidth={2} aria-hidden className={hidden} />
+        ) : (
+          <span className={hidden}>Post</span>
+        )}
         {slow ? (
           <LoaderCircle
             data-testid={`${props.testId}-pending`}

@@ -129,9 +129,7 @@ test("renders a representative Excalidraw scene without leaving the viewer origi
   });
 
   const navigation = await page.goto(`${stack.shareWebUrl}/s/#${seeded.secret}`);
-  expect(navigation?.headers()["content-security-policy"]).toContain(
-    "font-src 'self'",
-  );
+  expect(navigation?.headers()["content-security-policy"]).toContain("font-src 'self'");
 
   const drawing = page.locator(".excalidraw-view");
   await expect(drawing).toBeVisible();
@@ -139,67 +137,65 @@ test("renders a representative Excalidraw scene without leaving the viewer origi
   await expect(page.locator(".download-card")).toHaveCount(0);
 
   const readPixelCounts = async (): Promise<PixelCounts> =>
-    drawing.locator("canvas").evaluateAll((canvases, colors) => {
-      const near = (
-        value: number,
-        expected: number,
-      ): boolean => Math.abs(value - expected) <= 8;
-      const counts = { rectangle: 0, text: 0 };
-      for (const canvas of canvases as HTMLCanvasElement[]) {
-        const context = canvas.getContext("2d", { willReadFrequently: true });
-        if (!context) continue;
-        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-        for (let offset = 0; offset < pixels.length; offset += 4) {
-          if (
-            near(pixels[offset]!, colors.rectangle.red) &&
-            near(pixels[offset + 1]!, colors.rectangle.green) &&
-            near(pixels[offset + 2]!, colors.rectangle.blue)
-          ) {
-            counts.rectangle += 1;
-          }
-          if (
-            near(pixels[offset]!, colors.text.red) &&
-            near(pixels[offset + 1]!, colors.text.green) &&
-            near(pixels[offset + 2]!, colors.text.blue)
-          ) {
-            counts.text += 1;
+    drawing.locator("canvas").evaluateAll(
+      (canvases, colors) => {
+        const near = (value: number, expected: number): boolean => Math.abs(value - expected) <= 8;
+        const counts = { rectangle: 0, text: 0 };
+        for (const canvas of canvases as HTMLCanvasElement[]) {
+          const context = canvas.getContext("2d", { willReadFrequently: true });
+          if (!context) continue;
+          const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+          for (let offset = 0; offset < pixels.length; offset += 4) {
+            if (
+              near(pixels[offset]!, colors.rectangle.red) &&
+              near(pixels[offset + 1]!, colors.rectangle.green) &&
+              near(pixels[offset + 2]!, colors.rectangle.blue)
+            ) {
+              counts.rectangle += 1;
+            }
+            if (
+              near(pixels[offset]!, colors.text.red) &&
+              near(pixels[offset + 1]!, colors.text.green) &&
+              near(pixels[offset + 2]!, colors.text.blue)
+            ) {
+              counts.text += 1;
+            }
           }
         }
-      }
-      return counts;
-    }, { rectangle: RECTANGLE_FILL, text: TEXT_STROKE });
+        return counts;
+      },
+      { rectangle: RECTANGLE_FILL, text: TEXT_STROKE },
+    );
 
-  await expect.poll(async () => (await readPixelCounts()).rectangle)
-    .toBeGreaterThan(10_000);
-  await expect.poll(async () => (await readPixelCounts()).text)
-    .toBeGreaterThan(100);
+  await expect.poll(async () => (await readPixelCounts()).rectangle).toBeGreaterThan(10_000);
+  await expect.poll(async () => (await readPixelCounts()).text).toBeGreaterThan(100);
 
   await page.evaluate(() => document.fonts.ready);
-  await expect.poll(() => failedExternalRequests.size)
-    .toBe(externalRequests.size);
+  await expect.poll(() => failedExternalRequests.size).toBe(externalRequests.size);
   expect(externalResponses).toEqual([]);
   expect([...failedExternalRequests].sort()).toEqual([...externalRequests].sort());
-  expect(localFontResponses).toEqual(expect.arrayContaining([
-    expect.objectContaining({
-      contentType: "font/woff2",
-      status: 200,
-    }),
-  ]));
+  expect(localFontResponses).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        contentType: "font/woff2",
+        status: 200,
+      }),
+    ]),
+  );
 });
 
-test("keeps a malformed Excalidraw scene inside the file fallback", async ({
-  page,
-  stack,
-}) => {
+test("keeps a malformed Excalidraw scene inside the file fallback", async ({ page, stack }) => {
   const seeded = await seedShare({
     relayUrl: stack.relayUrl,
-    files: [{
-      path: "docs/malformed.excalidraw",
-      content: JSON.stringify({
-        type: "excalidraw",
-        elements: [{ type: "line", width: 10, height: 10 }],
-      }),
-    }],
+    files: [
+      {
+        path: "docs/malformed.excalidraw",
+        content: JSON.stringify({
+          type: "excalidraw",
+          elements: [{ type: "line", width: 10, height: 10 }],
+        }),
+      },
+    ],
     paths: ["docs"],
   });
 

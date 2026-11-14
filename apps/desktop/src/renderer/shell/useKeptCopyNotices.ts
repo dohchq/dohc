@@ -42,11 +42,14 @@ export function useKeptCopyNotices(input: {
     try {
       const { keptCopies, more } = await bridge().listKeptCopies({ workspaceId });
       if (!reads.isCurrent(request)) return;
-      latest.current.show(keptCopies.map((copy) => ({
-        id: copy.id,
-        message: keptCopyMessage(copy.path),
-        save: () => save(copy),
-      })), more);
+      latest.current.show(
+        keptCopies.map((copy) => ({
+          id: copy.id,
+          message: keptCopyMessage(copy.path),
+          save: () => save(copy),
+        })),
+        more,
+      );
     } catch (error) {
       if (!reads.isCurrent(request)) return;
       latest.current.reportShellError(
@@ -64,10 +67,10 @@ export function useKeptCopyNotices(input: {
           if (!workspace.isCurrent(epoch)) return;
           if (saved.status === "saved") {
             const { path } = saved;
-            latest.current.showSaved(
-              `Saved the other copy of ${copy.path} as ${path}`,
-              { path, open: () => latest.current.openFile(path) },
-            );
+            latest.current.showSaved(`Saved the other copy of ${copy.path} as ${path}`, {
+              path,
+              open: () => latest.current.openFile(path),
+            });
           } else if (saved.status === "gone") {
             // A crash, an agent or another window got there first.
             latest.current.showSaved(
@@ -75,11 +78,7 @@ export function useKeptCopyNotices(input: {
               null,
             );
           } else {
-            // The copy and its row stay; this says why.
-            latest.current.reportFailure(
-              keptCopyNoNameMessage(copy.path),
-              () => save(copy),
-            );
+            latest.current.reportFailure(keptCopyNoNameMessage(copy.path), () => save(copy));
           }
           await refresh();
         })

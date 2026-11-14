@@ -122,7 +122,6 @@ export interface StartInput extends MessageInput {
   channelId: string;
   // A title names a new thread. A running conversation keeps its own.
   title?: string;
-  // The thread a new post starts.
   threadId?: string;
 }
 
@@ -208,11 +207,16 @@ function checkedChoice(options: readonly string[], chosen: string | undefined): 
     if (choice !== undefined) throw new Error("This question has no choices to pick from.");
     return undefined;
   }
-  if (choice === undefined || !options.includes(choice)) throw new Error("Pick one of the poll's choices.");
+  if (choice === undefined || !options.includes(choice))
+    throw new Error("Pick one of the poll's choices.");
   return choice;
 }
 
-async function start(host: ChatWriteHost, input: StartInput, lane: ChatThreadLane): Promise<Started> {
+async function start(
+  host: ChatWriteHost,
+  input: StartInput,
+  lane: ChatThreadLane,
+): Promise<Started> {
   const started = await host.start({
     channelId: input.channelId,
     lane,
@@ -224,7 +228,6 @@ async function start(host: ChatWriteHost, input: StartInput, lane: ChatThreadLan
   return { threadId: started.thread.id, thread: started.thread, message: started.message };
 }
 
-// Starts a post in a Group.
 export async function postToGroup(host: ChatWriteHost, input: StartInput): Promise<Started> {
   return await start(host, input, "posts");
 }
@@ -244,7 +247,11 @@ function replyCommand(input: ReplyInput): ReplyCommand {
   };
 }
 
-async function checkInThread(host: ChatWriteHost, messageId: string | undefined, threadId: string): Promise<void> {
+async function checkInThread(
+  host: ChatWriteHost,
+  messageId: string | undefined,
+  threadId: string,
+): Promise<void> {
   if (!messageId || !host.findMessage) return;
   if ((await host.findMessage(messageId)).threadId !== threadId) {
     throw new OperationError(`no such message in this thread: ${messageId}`);
@@ -270,10 +277,17 @@ export function answerOutcome(message: ChatMessage, decision: ChatDecision): Ans
 // checked before the reply, so a refused choice writes nothing. A question
 // another reply already answered is not refused: the reply stays, and the
 // outcome is lost.
-export async function answerDecision(host: ChatWriteHost, input: AnswerInput): Promise<AnswerOutcome> {
+export async function answerDecision(
+  host: ChatWriteHost,
+  input: AnswerInput,
+): Promise<AnswerOutcome> {
   const command = replyCommand(input);
   const choose = (question: ChatDecision | undefined) => {
-    if (!question || question.messageId !== input.resolves.messageId || question.threadId !== input.threadId) {
+    if (
+      !question ||
+      question.messageId !== input.resolves.messageId ||
+      question.threadId !== input.threadId
+    ) {
       throw new OperationError(`no such question in this thread: ${input.resolves.messageId}`);
     }
     return checkedChoice(question.options ?? [], input.resolves.chosenOption);
@@ -285,21 +299,29 @@ export async function answerDecision(host: ChatWriteHost, input: AnswerInput): P
   let checked = Boolean(input.question);
   const checkTargets = async () => {
     if (input.question) return;
-    chosenOption = choose((await host.store.listThreadDecisions(host.workspaceId, input.threadId))
-      .find((decision) => decision.messageId === input.resolves.messageId));
+    chosenOption = choose(
+      (await host.store.listThreadDecisions(host.workspaceId, input.threadId)).find(
+        (decision) => decision.messageId === input.resolves.messageId,
+      ),
+    );
     checked = true;
   };
   return await host.answer(command, checkTargets, async ({ reply, resolve }) => {
     if (!checked) throw new Error("The question wasn't checked before the reply.");
     const message = await reply();
     try {
-      return answerOutcome(message, await resolve({
-        threadId: input.threadId,
-        messageId: input.resolves.messageId,
-        resolvedByMessageId: message.id,
-        ...(chosenOption !== undefined ? { chosenOption } : {}),
-        ...(input.resolves.idempotencyKey ? { idempotencyKey: input.resolves.idempotencyKey } : {}),
-      }));
+      return answerOutcome(
+        message,
+        await resolve({
+          threadId: input.threadId,
+          messageId: input.resolves.messageId,
+          resolvedByMessageId: message.id,
+          ...(chosenOption !== undefined ? { chosenOption } : {}),
+          ...(input.resolves.idempotencyKey
+            ? { idempotencyKey: input.resolves.idempotencyKey }
+            : {}),
+        }),
+      );
     } catch (failure) {
       return { state: "failed", message, failure };
     }
@@ -308,19 +330,25 @@ export async function answerDecision(host: ChatWriteHost, input: AnswerInput): P
 
 // Marks a question answered with a reply that already saved. It posts
 // nothing, and the question need not be open: the winner says who answered.
-export async function answerWithReply(host: ChatWriteHost, input: AnswerWithInput): Promise<Answered> {
+export async function answerWithReply(
+  host: ChatWriteHost,
+  input: AnswerWithInput,
+): Promise<Answered> {
   await checkInThread(host, input.messageId, input.threadId);
   await checkInThread(host, input.replyId, input.threadId);
   return await host.answerWith(
     { threadId: input.threadId, questionId: input.messageId, replyId: input.replyId },
     async ({ reply, resolve }) => {
-      const outcome = answerOutcome(reply, await resolve({
-        threadId: input.threadId,
-        messageId: input.messageId,
-        resolvedByMessageId: reply.id,
-        ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
-        ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
-      }));
+      const outcome = answerOutcome(
+        reply,
+        await resolve({
+          threadId: input.threadId,
+          messageId: input.messageId,
+          resolvedByMessageId: reply.id,
+          ...(input.chosenOption !== undefined ? { chosenOption: input.chosenOption } : {}),
+          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+        }),
+      );
       if (outcome.state === "failed") throw outcome.failure;
       return outcome;
     },
@@ -329,8 +357,12 @@ export async function answerWithReply(host: ChatWriteHost, input: AnswerWithInpu
 
 // Sets exactly the state asked for. A toggle is the caller's to resolve
 // first, so a retry sets the same state instead of flipping it back.
-export async function reactToMessage(host: ChatWriteHost, input: ReactInput): Promise<ChatReaction> {
-  if (input.state !== "added" && input.state !== "removed") throw new Error("A reaction is added or removed.");
+export async function reactToMessage(
+  host: ChatWriteHost,
+  input: ReactInput,
+): Promise<ChatReaction> {
+  if (input.state !== "added" && input.state !== "removed")
+    throw new Error("A reaction is added or removed.");
   await checkInThread(host, input.messageId, input.threadId);
   return await host.react({
     threadId: input.threadId,

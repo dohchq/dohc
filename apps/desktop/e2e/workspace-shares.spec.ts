@@ -36,15 +36,13 @@ import {
 // Spec 1 (grant side): the app user shares a file by email from the
 //   explorer context menu, gets a copyable share code, manages it under
 //   Settings → Sync and sharing, and ends it — after which the recipient's relay
-//   access returns 404 with the removed-recipient explanation (#1438).
+//   access returns 404 with the removed-recipient explanation.
 // Spec 2 (receive side, the full loop): grant → open the share in the app
 //   → browse/search the read-only view → granter edits → refresh sees it →
 //   revoke → refresh surfaces "this share was ended" honestly.
 
 const GRANTER_TOKEN = "test:e2e-granter";
-// How a recipient sees the granter: the relay's sharer name with their email.
 const GRANTER_LABEL = "e2e-granter (e2e-granter@dohc.test)";
-// What an Edit share view's banner says; Send changes sits beside it.
 const EDIT_BANNER = `Shared view from ${GRANTER_LABEL}. Markdown edits save to the live host. Other file changes need their acceptance.`;
 const UNUSED_CONTENT_HASH = "0".repeat(64);
 const RECIPIENT_TOKEN = "test:e2e-recipient";
@@ -173,9 +171,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await writeWorkspaceFiles(temp, [
-      { path: "docs/plan.md", contents: "# Plan\n\nShare me.\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: "docs/plan.md", contents: "# Plan\n\nShare me.\n" }]);
 
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
@@ -207,7 +203,6 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // Right-click the file → "Share…" → the share dialog.
     await revealExplorerPath(page, "docs/plan.md");
     await explorerRow(page, "docs/plan.md").click({ button: "right" });
     await page.getByTestId("explorer-menu-item-share").click();
@@ -225,8 +220,6 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     const shareId = shareCode.split(":")[1]!;
     await dialog.getByTestId("share-done").click();
 
-    // The recipient can fetch the shared log; a stranger cannot, and the
-    // denial is byte-identical to a share that never existed.
     const recipientFetch = await relayJson(
       relay.baseUrl,
       RECIPIENT_TOKEN,
@@ -246,13 +239,11 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     expect(strangerFetch.status).toBe(404);
     expect(strangerFetch.body).toBe(missingFetch.body);
 
-    // Sharing → "Shared by me": the grant is listed and endable.
     await page.getByTestId(activityPin("sharing")).click();
     const row = page.locator(`[data-testid="sharing-granted-row"][data-share-id="${shareId}"]`);
     await expect(row).toBeVisible();
     await expect(row).toContainText("plan.md");
     await expect(row.getByTestId("sharing-row-who")).toHaveText(`${RECIPIENT_EMAIL} can view`);
-    // Ending asks before it ends: the menu opens the confirm.
     await row.hover();
     await row.getByRole("button", { name: "Share actions" }).click();
     await page.getByRole("menuitem", { name: "End share…" }).click();
@@ -262,7 +253,7 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     await expect(row.getByTestId("sharing-row-status")).toHaveText("Ended");
 
     // Revocation is live: the recipient's next fetch returns 404 with the
-    // owner-removed explanation (#1438).
+    // owner-removed explanation.
     const revokedFetch = await relayJson(
       relay.baseUrl,
       RECIPIENT_TOKEN,
@@ -296,438 +287,425 @@ confidentialTest.use({ screenshot: "off", trace: "off" });
 confidentialTest.describe("View link lifecycle", () => {
   // A failed lifecycle run must not retain its one-time URL in Playwright
   // diagnostics. The assertions below report only status, copy, and UI state.
-  confidentialTest("creates, resets, and ends a link while dependent named access follows the warnings", async () => {
-    confidentialTest.setTimeout(300_000);
-    const temp = await createTempWorkspace();
-    const workspaceId = "share-view-link-lifecycle-e2e";
-    const selectedText = "# Shared\n\nThe lantern route.\n";
-    const privateText = "The private harbor ledger stays private.\n";
-    const linkKey = randomBytes(32).toString("base64url");
-    const relayExchangeKey = randomBytes(32).toString("base64url");
-    const publicViewerOrigin = "http://127.0.0.1:4173";
-    const neverValidCredential = "A".repeat(43);
-    let relay: SyncRelayHandle | null = null;
-    let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  confidentialTest(
+    "creates, resets, and ends a link while dependent named access follows the warnings",
+    async () => {
+      confidentialTest.setTimeout(300_000);
+      const temp = await createTempWorkspace();
+      const workspaceId = "share-view-link-lifecycle-e2e";
+      const selectedText = "# Shared\n\nThe lantern route.\n";
+      const privateText = "The private harbor ledger stays private.\n";
+      const linkKey = randomBytes(32).toString("base64url");
+      const relayExchangeKey = randomBytes(32).toString("base64url");
+      const publicViewerOrigin = "http://127.0.0.1:4173";
+      const neverValidCredential = "A".repeat(43);
+      let relay: SyncRelayHandle | null = null;
+      let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
-    try {
-      await seedWorkspaceManifest(temp, workspaceId);
-      await writeWorkspaceFiles(temp, [
-        { path: "docs/shared.md", contents: selectedText },
-        { path: "private/hidden.md", contents: privateText },
-      ]);
+      try {
+        await seedWorkspaceManifest(temp, workspaceId);
+        await writeWorkspaceFiles(temp, [
+          { path: "docs/shared.md", contents: selectedText },
+          { path: "private/hidden.md", contents: privateText },
+        ]);
 
-      relay = await spawnSyncRelay({
-        dbPath: join(temp.baseDir, "relay", "relay.sqlite"),
-        linkBoundary: { linkKey, relayExchangeKey, publicViewerOrigin },
-      });
-      await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
-      await seedWorkspaceRegistry(temp, [
-        {
-          workspaceId,
-          rootPath: temp.rootPath,
-          remote: {
-            serverUrl: relay.baseUrl,
-            ownerUserId: "e2e-granter",
+        relay = await spawnSyncRelay({
+          dbPath: join(temp.baseDir, "relay", "relay.sqlite"),
+          linkBoundary: { linkKey, relayExchangeKey, publicViewerOrigin },
+        });
+        await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
+        await seedWorkspaceRegistry(temp, [
+          {
+            workspaceId,
+            rootPath: temp.rootPath,
+            remote: {
+              serverUrl: relay.baseUrl,
+              ownerUserId: "e2e-granter",
+            },
           },
-        },
-      ]);
-      await seedCloudCredentials(temp, {
-        serverUrl: relay.baseUrl,
-        relayUrl: relay.baseUrl,
-        email: "e2e-granter@dohc.test",
-        userId: "e2e-granter",
-        token: GRANTER_TOKEN,
-      });
+        ]);
+        await seedCloudCredentials(temp, {
+          serverUrl: relay.baseUrl,
+          relayUrl: relay.baseUrl,
+          email: "e2e-granter@dohc.test",
+          userId: "e2e-granter",
+          token: GRANTER_TOKEN,
+        });
 
-      desktop = await launchDesktopApp({
-        workspace: temp,
-        env: {
-          DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
-          DOHC_TEST_SYNC_BACKOFF_MS: "250",
-        },
-      });
-      const page = desktop.page;
-      await openWorkspaceFromFirstRun(page, temp);
-
-      // The walkthrough starts only after both selected and private local
-      // files reached the owned relay workspace.
-      let identity: RelayWorkspaceIdentity | null = null;
-      await expect
-        .poll(
-          async () => {
-            identity ??= relayAdoptedIdentity(relay!.dbPath, workspaceId);
-            if (identity === null) return false;
-            const query = new URLSearchParams({
-              since: "0",
-              limit: "500",
-              replicationEpoch: identity.replicationEpoch,
-              streamIdentity: identity.streamIdentity,
-            });
-            const response = await fetch(
-              `${relay!.baseUrl}/sync/${encodeURIComponent(workspaceId)}/log?${query.toString()}`,
-              { headers: { authorization: `Bearer ${GRANTER_TOKEN}` } },
-            );
-            if (response.status === 409) {
-              identity = null;
-              return false;
-            }
-            if (!response.ok) return false;
-            const body = (await response.json()) as {
-              ops: Array<{ payload?: { path?: string; payloadAfterPath?: string } }>;
-            };
-            const paths = body.ops.flatMap((op) => [
-              op.payload?.path,
-              op.payload?.payloadAfterPath,
-            ]);
-            return paths.includes("docs/shared.md") && paths.includes("private/hidden.md");
+        desktop = await launchDesktopApp({
+          workspace: temp,
+          env: {
+            DOHC_TEST_SYNC_DEBOUNCE_MS: "150",
+            DOHC_TEST_SYNC_BACKOFF_MS: "250",
           },
-          { timeout: 90_000, intervals: [1_000] },
-        )
-        .toBe(true);
+        });
+        const page = desktop.page;
+        await openWorkspaceFromFirstRun(page, temp);
 
-      await revealExplorerPath(page, "docs/shared.md");
-      await explorerRow(page, "docs/shared.md").click({ button: "right" });
-      await page.getByTestId("explorer-menu-item-share").click();
-      let dialog = page.getByTestId("share-dialog");
-      await expect(dialog).toBeVisible();
-      await expect(dialog).toContainText("docs/shared.md");
-
-      const linkScope = dialog.getByRole("radio", { name: "Anyone with the link" });
-      await linkScope.click();
-      await expect(linkScope).toHaveAttribute("aria-checked", "true");
-      const linkAccess = dialog.getByRole("radiogroup", { name: "Link access" });
-      await expect(
-        linkAccess.getByRole("radio", { name: "Comment", exact: true }),
-      ).toBeVisible();
-      await expect(
-        linkAccess.getByRole("radio", { name: "View", exact: true }),
-      ).toBeVisible();
-      await expect(dialog).toContainText(
-        "If files are added to this selection later, the link includes them.",
-      );
-      await expect(dialog).toContainText(
-        "The sync relay serves the link, so it can read this content.",
-      );
-      await expect(dialog).toContainText(
-        "Anyone with the link can open it without an account.",
-      );
-
-      await dialog.getByRole("button", { name: "Create link", exact: true }).click();
-      const oneTimeUrl = await dialog.getByTestId("share-link-url").textContent();
-      if (oneTimeUrl === null) throw new Error("The Share dialog did not expose the link.");
-      const oldUrl = new URL(oneTimeUrl);
-      expect(oldUrl.origin === publicViewerOrigin).toBe(true);
-      const oldSecret = oldUrl.hash.slice(1);
-      expect(/^[A-Za-z0-9_-]{43}$/u.test(oldSecret)).toBe(true);
-      const copyButton = dialog.getByRole("button", { name: "Copy link", exact: true });
-      await holdSystemClipboard(test.info(), async (remainingMs) => {
-        await copyButton.click({ timeout: remainingMs() });
-        await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible({ timeout: remainingMs() });
-      });
-
-      const firstExchange = await exchangeViewLink(
-        relay.baseUrl,
-        relayExchangeKey,
-        oldSecret,
-      );
-      expect(firstExchange.status).toBe(200);
-      const exchanged = JSON.parse(firstExchange.body) as {
-        shareId?: unknown;
-        grantId?: unknown;
-        access?: unknown;
-        capabilityToken?: unknown;
-      };
-      if (
-        typeof exchanged.shareId !== "string" ||
-        typeof exchanged.grantId !== "string" ||
-        typeof exchanged.capabilityToken !== "string"
-      ) {
-        throw new Error("The relay returned an incomplete View link exchange.");
-      }
-      expect(exchanged.access).toBe("view");
-      const shareId = exchanged.shareId;
-      const linkGrantId = exchanged.grantId;
-      const oldCapability = exchanged.capabilityToken;
-
-      const shippedRoute = await readViewLink(
-        relay.baseUrl,
-        oldCapability,
-        "/sync/link/share",
-      );
-      expect(shippedRoute.status).toBe(200);
-      const shippedShare = JSON.parse(shippedRoute.body) as {
-        access?: unknown;
-        effectiveSelector?: { paths?: unknown };
-      };
-      expect(shippedShare.access).toBe("view");
-      expect(shippedShare.effectiveSelector?.paths).toEqual(["shared.md"]);
-
-      const linkLogResponse = await readViewLink(
-        relay.baseUrl,
-        oldCapability,
-        "/sync/link/log?since=0&limit=500&current=true",
-      );
-      expect(linkLogResponse.status).toBe(200);
-      const linkLog = JSON.parse(linkLogResponse.body) as {
-        ops?: Array<{ opKind?: unknown; payload?: Record<string, unknown> }>;
-      };
-      const selectedOp = linkLog.ops?.find(
-        (op) =>
-          op.opKind === "file.current" &&
-          (op.payload?.file as Record<string, unknown> | undefined)?.path === "shared.md",
-      );
-      if (selectedOp === undefined) {
-        throw new Error("The shipped link log did not include the selected file.");
-      }
-      const selectedDigest = (selectedOp.payload?.file as Record<string, unknown> | undefined)?.blobSha256;
-      if (typeof selectedDigest !== "string") {
-        throw new Error("The selected file operation did not name its content.");
-      }
-      expect(JSON.stringify(linkLog).includes("hidden.md")).toBe(false);
-      const selectedBlob = await readViewLink(
-        relay.baseUrl,
-        oldCapability,
-        `/sync/link/blobs/${selectedDigest}`,
-      );
-      expect(selectedBlob.status).toBe(200);
-      expect(selectedBlob.body).toBe(selectedText);
-      const privateDigest = createHash("sha256").update(privateText).digest("hex");
-      const privateBlob = await readViewLink(
-        relay.baseUrl,
-        oldCapability,
-        `/sync/link/blobs/${privateDigest}`,
-      );
-      expect(privateBlob.status).toBe(404);
-
-      const handoffResponse = await mintLinkHandoff(
-        relay.baseUrl,
-        relayExchangeKey,
-        oldCapability,
-      );
-      expect(handoffResponse.status).toBe(200);
-      const handoff = JSON.parse(handoffResponse.body) as { code?: unknown };
-      if (typeof handoff.code !== "string") {
-        throw new Error("The relay did not mint a handoff code.");
-      }
-      const redeemed = await relayJson(relay.baseUrl, RECIPIENT_TOKEN, "/sync/link-redeem", {
-        method: "POST",
-        body: JSON.stringify({ code: handoff.code }),
-      });
-      expect(redeemed.status).toBe(200);
-      const namedGrant = JSON.parse(redeemed.body) as {
-        shareId?: unknown;
-        grantId?: unknown;
-        access?: unknown;
-      };
-      expect(namedGrant.shareId === shareId).toBe(true);
-      expect(typeof namedGrant.grantId === "string").toBe(true);
-      expect(namedGrant.access).toBe("view");
-      const namedBeforeReset = await relayJson(
-        relay.baseUrl,
-        RECIPIENT_TOKEN,
-        `/sync/shares/${shareId}/log?since=0&limit=500`,
-      );
-      expect(namedBeforeReset.status).toBe(200);
-      expect(namedBeforeReset.body.includes("docs/shared.md")).toBe(true);
-      expect(namedBeforeReset.body.includes("private/hidden.md")).toBe(false);
-
-      await dialog.getByRole("button", { name: "Close" }).click();
-      await expect(dialog).not.toBeVisible();
-      await explorerRow(page, "docs/shared.md").click({ button: "right" });
-      await page.getByTestId("explorer-menu-item-share").click();
-      dialog = page.getByTestId("share-dialog");
-      await expect(dialog).toBeVisible();
-      await dialog.getByRole("radio", { name: "Anyone with the link" }).click();
-      const linkRows = dialog.locator('article[data-testid^="share-link-row-"]');
-      await expect(linkRows).toHaveCount(1);
-      const linkRow = linkRows.first();
-      const linkRowTestId = await linkRow.getAttribute("data-testid");
-      expect(linkRowTestId === `share-link-row-${linkGrantId}`).toBe(true);
-      await expect(linkRow).toContainText(/Used .+ · Created /u);
-      await expect(linkRow.getByTestId(`share-link-access-${linkGrantId}`)).toHaveText("Can view");
-      // A separate share is one step away while this one has a link.
-      await expect(dialog.getByRole("button", { name: "Create separate link" })).toBeVisible();
-      await expect(linkAccess).toHaveCount(0);
-      const reachableRetuneTargets = await dialog
-        .getByRole("button", { name: /^(?:View|Comment|Edit)$/u })
-        .allTextContents();
-      expect(reachableRetuneTargets).toEqual([]);
-
-      await linkRow.getByRole("button", { name: "Link options" }).click();
-      await dialog.getByRole("menuitem", { name: "Reset link" }).click();
-      let confirmation = dialog.getByTestId("share-link-confirmation");
-      await expect(confirmation).toContainText(RECIPIENT_EMAIL);
-      await expect(confirmation).toContainText("keep access");
-      await confirmation.getByRole("button", { name: "Cancel" }).click();
-      await expect(confirmation).not.toBeVisible();
-      const afterResetCancel = await exchangeViewLink(
-        relay.baseUrl,
-        relayExchangeKey,
-        oldSecret,
-      );
-      expect(afterResetCancel.status).toBe(200);
-      const afterResetCancelBody = JSON.parse(afterResetCancel.body) as {
-        capabilityToken?: unknown;
-      };
-      if (typeof afterResetCancelBody.capabilityToken !== "string") {
-        throw new Error("The canceled reset left no usable link exchange.");
-      }
-      expect(
-        (
-          await readViewLink(
-            relay.baseUrl,
-            afterResetCancelBody.capabilityToken,
-            "/sync/link/share",
+        // The walkthrough starts only after both selected and private local
+        // files reached the owned relay workspace.
+        let identity: RelayWorkspaceIdentity | null = null;
+        await expect
+          .poll(
+            async () => {
+              identity ??= relayAdoptedIdentity(relay!.dbPath, workspaceId);
+              if (identity === null) return false;
+              const query = new URLSearchParams({
+                since: "0",
+                limit: "500",
+                replicationEpoch: identity.replicationEpoch,
+                streamIdentity: identity.streamIdentity,
+              });
+              const response = await fetch(
+                `${relay!.baseUrl}/sync/${encodeURIComponent(workspaceId)}/log?${query.toString()}`,
+                { headers: { authorization: `Bearer ${GRANTER_TOKEN}` } },
+              );
+              if (response.status === 409) {
+                identity = null;
+                return false;
+              }
+              if (!response.ok) return false;
+              const body = (await response.json()) as {
+                ops: Array<{ payload?: { path?: string; payloadAfterPath?: string } }>;
+              };
+              const paths = body.ops.flatMap((op) => [
+                op.payload?.path,
+                op.payload?.payloadAfterPath,
+              ]);
+              return paths.includes("docs/shared.md") && paths.includes("private/hidden.md");
+            },
+            { timeout: 90_000, intervals: [1_000] },
           )
-        ).status,
-      ).toBe(200);
+          .toBe(true);
 
-      await linkRow.getByRole("button", { name: "Link options" }).click();
-      await dialog.getByRole("menuitem", { name: "Reset link" }).click();
-      confirmation = dialog.getByTestId("share-link-confirmation");
-      await confirmation.getByRole("button", { name: "Reset link" }).click();
-      // The kept URL shows until the reset answers with its replacement.
-      await expect(dialog.getByTestId("share-link-url")).not.toContainText(oldSecret);
-      const resetUrlText = await dialog.getByTestId("share-link-url").textContent();
-      if (resetUrlText === null) throw new Error("Reset did not expose the replacement link.");
-      const resetUrl = new URL(resetUrlText);
-      const currentSecret = resetUrl.hash.slice(1);
-      expect(resetUrl.origin === publicViewerOrigin).toBe(true);
-      expect(/^[A-Za-z0-9_-]{43}$/u.test(currentSecret)).toBe(true);
-      expect(currentSecret === oldSecret).toBe(false);
+        await revealExplorerPath(page, "docs/shared.md");
+        await explorerRow(page, "docs/shared.md").click({ button: "right" });
+        await page.getByTestId("explorer-menu-item-share").click();
+        let dialog = page.getByTestId("share-dialog");
+        await expect(dialog).toBeVisible();
+        await expect(dialog).toContainText("docs/shared.md");
 
-      const neverValidExchange = await exchangeViewLink(
-        relay.baseUrl,
-        relayExchangeKey,
-        neverValidCredential,
-      );
-      expect(neverValidExchange.status).toBe(404);
-      const oldSecretAfterReset = await exchangeViewLink(
-        relay.baseUrl,
-        relayExchangeKey,
-        oldSecret,
-      );
-      expect(oldSecretAfterReset).toEqual(neverValidExchange);
-      const neverValidRead = await readViewLink(
-        relay.baseUrl,
-        neverValidCredential,
-        "/sync/link/share",
-      );
-      // #1422 normalizes unverified link refusals to the same opaque 404.
-      expect(neverValidRead.status).toBe(404);
-      expect(JSON.parse(neverValidRead.body)).toEqual({
-        ok: false,
-        error: "not found",
-      });
-      const oldCapabilityAfterReset = await readViewLink(
-        relay.baseUrl,
-        oldCapability,
-        "/sync/link/share",
-      );
-      expect(oldCapabilityAfterReset).toEqual(neverValidRead);
+        const linkAccess = dialog.getByRole("radiogroup", { name: "Link access" });
+        await expect(linkAccess.getByRole("radio", { name: "Comment", exact: true })).toBeVisible();
+        await expect(linkAccess.getByRole("radio", { name: "View", exact: true })).toBeVisible();
+        await expect(dialog).toContainText(
+          "If files are added to this selection later, the link includes them.",
+        );
+        await expect(dialog).toContainText(
+          "The sync relay serves the link, so it can read this content.",
+        );
+        await expect(dialog).toContainText("Anyone with the link can open it without an account.");
 
-      const currentExchange = await exchangeViewLink(
-        relay.baseUrl,
-        relayExchangeKey,
-        currentSecret,
-      );
-      expect(currentExchange.status).toBe(200);
-      const currentExchangeBody = JSON.parse(currentExchange.body) as {
-        capabilityToken?: unknown;
-      };
-      if (typeof currentExchangeBody.capabilityToken !== "string") {
-        throw new Error("The replacement link exchange was incomplete.");
+        await dialog.getByRole("button", { name: "Create link", exact: true }).click();
+        const oneTimeUrl = await dialog.getByTestId("share-link-url").textContent();
+        if (oneTimeUrl === null) throw new Error("The Share dialog did not expose the link.");
+        const oldUrl = new URL(oneTimeUrl);
+        expect(oldUrl.origin === publicViewerOrigin).toBe(true);
+        const oldSecret = oldUrl.hash.slice(1);
+        expect(/^[A-Za-z0-9_-]{43}$/u.test(oldSecret)).toBe(true);
+        const copyButton = dialog.getByRole("button", { name: "Copy link", exact: true });
+        await holdSystemClipboard(test.info(), async (remainingMs) => {
+          await copyButton.click({ timeout: remainingMs() });
+          await expect(dialog.getByRole("button", { name: "Copied", exact: true })).toBeVisible({
+            timeout: remainingMs(),
+          });
+        });
+
+        const firstExchange = await exchangeViewLink(relay.baseUrl, relayExchangeKey, oldSecret);
+        expect(firstExchange.status).toBe(200);
+        const exchanged = JSON.parse(firstExchange.body) as {
+          shareId?: unknown;
+          grantId?: unknown;
+          access?: unknown;
+          capabilityToken?: unknown;
+        };
+        if (
+          typeof exchanged.shareId !== "string" ||
+          typeof exchanged.grantId !== "string" ||
+          typeof exchanged.capabilityToken !== "string"
+        ) {
+          throw new Error("The relay returned an incomplete View link exchange.");
+        }
+        expect(exchanged.access).toBe("view");
+        const shareId = exchanged.shareId;
+        const linkGrantId = exchanged.grantId;
+        const oldCapability = exchanged.capabilityToken;
+
+        const shippedRoute = await readViewLink(relay.baseUrl, oldCapability, "/sync/link/share");
+        expect(shippedRoute.status).toBe(200);
+        const shippedShare = JSON.parse(shippedRoute.body) as {
+          access?: unknown;
+          effectiveSelector?: { paths?: unknown };
+        };
+        expect(shippedShare.access).toBe("view");
+        expect(shippedShare.effectiveSelector?.paths).toEqual(["shared.md"]);
+
+        const linkLogResponse = await readViewLink(
+          relay.baseUrl,
+          oldCapability,
+          "/sync/link/log?since=0&limit=500&current=true",
+        );
+        expect(linkLogResponse.status).toBe(200);
+        const linkLog = JSON.parse(linkLogResponse.body) as {
+          ops?: Array<{ opKind?: unknown; payload?: Record<string, unknown> }>;
+        };
+        const selectedOp = linkLog.ops?.find(
+          (op) =>
+            op.opKind === "file.current" &&
+            (op.payload?.file as Record<string, unknown> | undefined)?.path === "shared.md",
+        );
+        if (selectedOp === undefined) {
+          throw new Error("The shipped link log did not include the selected file.");
+        }
+        const selectedDigest = (selectedOp.payload?.file as Record<string, unknown> | undefined)
+          ?.blobSha256;
+        if (typeof selectedDigest !== "string") {
+          throw new Error("The selected file operation did not name its content.");
+        }
+        expect(JSON.stringify(linkLog).includes("hidden.md")).toBe(false);
+        const selectedBlob = await readViewLink(
+          relay.baseUrl,
+          oldCapability,
+          `/sync/link/blobs/${selectedDigest}`,
+        );
+        expect(selectedBlob.status).toBe(200);
+        expect(selectedBlob.body).toBe(selectedText);
+        const privateDigest = createHash("sha256").update(privateText).digest("hex");
+        const privateBlob = await readViewLink(
+          relay.baseUrl,
+          oldCapability,
+          `/sync/link/blobs/${privateDigest}`,
+        );
+        expect(privateBlob.status).toBe(404);
+
+        const handoffResponse = await mintLinkHandoff(
+          relay.baseUrl,
+          relayExchangeKey,
+          oldCapability,
+        );
+        expect(handoffResponse.status).toBe(200);
+        const handoff = JSON.parse(handoffResponse.body) as { code?: unknown };
+        if (typeof handoff.code !== "string") {
+          throw new Error("The relay did not mint a handoff code.");
+        }
+        const redeemed = await relayJson(relay.baseUrl, RECIPIENT_TOKEN, "/sync/link-redeem", {
+          method: "POST",
+          body: JSON.stringify({ code: handoff.code }),
+        });
+        expect(redeemed.status).toBe(200);
+        const namedGrant = JSON.parse(redeemed.body) as {
+          shareId?: unknown;
+          grantId?: unknown;
+          access?: unknown;
+        };
+        expect(namedGrant.shareId === shareId).toBe(true);
+        expect(typeof namedGrant.grantId === "string").toBe(true);
+        expect(namedGrant.access).toBe("view");
+        const namedBeforeReset = await relayJson(
+          relay.baseUrl,
+          RECIPIENT_TOKEN,
+          `/sync/shares/${shareId}/log?since=0&limit=500`,
+        );
+        expect(namedBeforeReset.status).toBe(200);
+        expect(namedBeforeReset.body.includes("docs/shared.md")).toBe(true);
+        expect(namedBeforeReset.body.includes("private/hidden.md")).toBe(false);
+
+        await dialog.getByRole("button", { name: "Close" }).click();
+        await expect(dialog).not.toBeVisible();
+        await explorerRow(page, "docs/shared.md").click({ button: "right" });
+        await page.getByTestId("explorer-menu-item-share").click();
+        dialog = page.getByTestId("share-dialog");
+        await expect(dialog).toBeVisible();
+        const linkRows = dialog.locator('article[data-testid^="share-link-row-"]');
+        await expect(linkRows).toHaveCount(1);
+        const linkRow = linkRows.first();
+        const linkRowTestId = await linkRow.getAttribute("data-testid");
+        expect(linkRowTestId === `share-link-row-${linkGrantId}`).toBe(true);
+        await expect(linkRow).toContainText(/Used .+ · Created /u);
+        await expect(linkRow.getByTestId(`share-link-access-${linkGrantId}`)).toHaveText(
+          "Can view",
+        );
+        await expect(dialog.getByRole("button", { name: "Create separate link" })).toBeVisible();
+        await expect(linkAccess).toHaveCount(0);
+        const reachableRetuneTargets = await dialog
+          .getByRole("button", { name: /^(?:View|Comment|Edit)$/u })
+          .allTextContents();
+        expect(reachableRetuneTargets).toEqual([]);
+
+        await linkRow.getByRole("button", { name: "Link options" }).click();
+        await dialog.getByRole("menuitem", { name: "Reset link" }).click();
+        let confirmation = dialog.getByTestId("share-link-confirmation");
+        await expect(confirmation).toContainText(RECIPIENT_EMAIL);
+        await expect(confirmation).toContainText("keep access");
+        await confirmation.getByRole("button", { name: "Cancel" }).click();
+        await expect(confirmation).not.toBeVisible();
+        const afterResetCancel = await exchangeViewLink(relay.baseUrl, relayExchangeKey, oldSecret);
+        expect(afterResetCancel.status).toBe(200);
+        const afterResetCancelBody = JSON.parse(afterResetCancel.body) as {
+          capabilityToken?: unknown;
+        };
+        if (typeof afterResetCancelBody.capabilityToken !== "string") {
+          throw new Error("The canceled reset left no usable link exchange.");
+        }
+        expect(
+          (
+            await readViewLink(
+              relay.baseUrl,
+              afterResetCancelBody.capabilityToken,
+              "/sync/link/share",
+            )
+          ).status,
+        ).toBe(200);
+
+        await linkRow.getByRole("button", { name: "Link options" }).click();
+        await dialog.getByRole("menuitem", { name: "Reset link" }).click();
+        confirmation = dialog.getByTestId("share-link-confirmation");
+        await confirmation.getByRole("button", { name: "Reset link" }).click();
+        // The kept URL shows until the reset answers with its replacement.
+        await expect(dialog.getByTestId("share-link-url")).not.toContainText(oldSecret);
+        const resetUrlText = await dialog.getByTestId("share-link-url").textContent();
+        if (resetUrlText === null) throw new Error("Reset did not expose the replacement link.");
+        const resetUrl = new URL(resetUrlText);
+        const currentSecret = resetUrl.hash.slice(1);
+        expect(resetUrl.origin === publicViewerOrigin).toBe(true);
+        expect(/^[A-Za-z0-9_-]{43}$/u.test(currentSecret)).toBe(true);
+        expect(currentSecret === oldSecret).toBe(false);
+
+        const neverValidExchange = await exchangeViewLink(
+          relay.baseUrl,
+          relayExchangeKey,
+          neverValidCredential,
+        );
+        expect(neverValidExchange.status).toBe(404);
+        const oldSecretAfterReset = await exchangeViewLink(
+          relay.baseUrl,
+          relayExchangeKey,
+          oldSecret,
+        );
+        expect(oldSecretAfterReset).toEqual(neverValidExchange);
+        const neverValidRead = await readViewLink(
+          relay.baseUrl,
+          neverValidCredential,
+          "/sync/link/share",
+        );
+        // The relay normalizes unverified link refusals to the same opaque 404.
+        expect(neverValidRead.status).toBe(404);
+        expect(JSON.parse(neverValidRead.body)).toEqual({
+          ok: false,
+          error: "not found",
+        });
+        const oldCapabilityAfterReset = await readViewLink(
+          relay.baseUrl,
+          oldCapability,
+          "/sync/link/share",
+        );
+        expect(oldCapabilityAfterReset).toEqual(neverValidRead);
+
+        const currentExchange = await exchangeViewLink(
+          relay.baseUrl,
+          relayExchangeKey,
+          currentSecret,
+        );
+        expect(currentExchange.status).toBe(200);
+        const currentExchangeBody = JSON.parse(currentExchange.body) as {
+          capabilityToken?: unknown;
+        };
+        if (typeof currentExchangeBody.capabilityToken !== "string") {
+          throw new Error("The replacement link exchange was incomplete.");
+        }
+        const currentCapability = currentExchangeBody.capabilityToken;
+        const namedAfterReset = await relayJson(
+          relay.baseUrl,
+          RECIPIENT_TOKEN,
+          `/sync/shares/${shareId}/log?since=0&limit=500`,
+        );
+        expect(namedAfterReset.status).toBe(200);
+
+        await linkRow.getByRole("button", { name: "Link options" }).click();
+        await dialog.getByRole("menuitem", { name: "End link" }).click();
+        confirmation = dialog.getByTestId("share-link-confirmation");
+        await expect(confirmation).toContainText(RECIPIENT_EMAIL);
+        await expect(confirmation).toContainText("lose access");
+        await expect(confirmation).toContainText("Copies they already made stay with them.");
+        await confirmation.getByRole("button", { name: "Cancel" }).click();
+        await expect(confirmation).not.toBeVisible();
+        expect(
+          (await readViewLink(relay.baseUrl, currentCapability, "/sync/link/share")).status,
+        ).toBe(200);
+        expect(
+          (
+            await relayJson(
+              relay.baseUrl,
+              RECIPIENT_TOKEN,
+              `/sync/shares/${shareId}/log?since=0&limit=500`,
+            )
+          ).status,
+        ).toBe(200);
+
+        await linkRow.getByRole("button", { name: "Link options" }).click();
+        await dialog.getByRole("menuitem", { name: "End link" }).click();
+        confirmation = dialog.getByTestId("share-link-confirmation");
+        await confirmation.getByRole("button", { name: "End link" }).click();
+        await expect(confirmation).not.toBeVisible();
+        // An ended link waits under "more links".
+        await expect(linkRows).toHaveCount(0);
+        await dialog.getByTestId("share-links-more").click();
+        await expect(linkRow).toContainText("Ended");
+
+        const currentSecretAfterEnd = await exchangeViewLink(
+          relay.baseUrl,
+          relayExchangeKey,
+          currentSecret,
+        );
+        expect(currentSecretAfterEnd).toEqual(neverValidExchange);
+        const currentCapabilityAfterEnd = await readViewLink(
+          relay.baseUrl,
+          currentCapability,
+          "/sync/link/share",
+        );
+        expect(currentCapabilityAfterEnd).toEqual(neverValidRead);
+        const namedAfterEnd = await relayJson(
+          relay.baseUrl,
+          RECIPIENT_TOKEN,
+          `/sync/shares/${shareId}/log?since=0&limit=500`,
+        );
+        const missingNamedShare = await relayJson(
+          relay.baseUrl,
+          RECIPIENT_TOKEN,
+          "/sync/shares/never-valid/log?since=0&limit=500",
+        );
+        expect(missingNamedShare.status).toBe(404);
+        expect(JSON.parse(missingNamedShare.body)).toEqual({
+          ok: false,
+          error: "not found",
+          code: "not_found",
+        });
+        // The relay explains removal to former recipients while strangers stay opaque.
+        expect(namedAfterEnd.status).toBe(404);
+        expect(JSON.parse(namedAfterEnd.body)).toEqual({
+          ok: false,
+          error: "The owner removed your access.",
+          code: "share_access_removed",
+        });
+        const strangerAfterRemoval = await relayJson(
+          relay.baseUrl,
+          "test:e2e-stranger",
+          `/sync/shares/${shareId}/log?since=0&limit=500`,
+        );
+        const missingFetch = await relayJson(
+          relay.baseUrl,
+          "test:e2e-stranger",
+          "/sync/shares/never-valid/log?since=0&limit=500",
+        );
+        expect(strangerAfterRemoval.status).toBe(404);
+        expect(strangerAfterRemoval.body).toBe(missingFetch.body);
+      } finally {
+        await relay?.stop();
+        if (desktop) await cleanupDesktopWorkspace(desktop, temp);
+        else await temp.cleanup();
       }
-      const currentCapability = currentExchangeBody.capabilityToken;
-      const namedAfterReset = await relayJson(
-        relay.baseUrl,
-        RECIPIENT_TOKEN,
-        `/sync/shares/${shareId}/log?since=0&limit=500`,
-      );
-      expect(namedAfterReset.status).toBe(200);
-
-      await linkRow.getByRole("button", { name: "Link options" }).click();
-      await dialog.getByRole("menuitem", { name: "End link" }).click();
-      confirmation = dialog.getByTestId("share-link-confirmation");
-      await expect(confirmation).toContainText(RECIPIENT_EMAIL);
-      await expect(confirmation).toContainText("lose access");
-      await expect(confirmation).toContainText("Copies they already made stay with them.");
-      await confirmation.getByRole("button", { name: "Cancel" }).click();
-      await expect(confirmation).not.toBeVisible();
-      expect(
-        (await readViewLink(relay.baseUrl, currentCapability, "/sync/link/share"))
-          .status,
-      ).toBe(200);
-      expect(
-        (
-          await relayJson(
-            relay.baseUrl,
-            RECIPIENT_TOKEN,
-            `/sync/shares/${shareId}/log?since=0&limit=500`,
-          )
-        ).status,
-      ).toBe(200);
-
-      await linkRow.getByRole("button", { name: "Link options" }).click();
-      await dialog.getByRole("menuitem", { name: "End link" }).click();
-      confirmation = dialog.getByTestId("share-link-confirmation");
-      await confirmation.getByRole("button", { name: "End link" }).click();
-      await expect(confirmation).not.toBeVisible();
-      await expect(linkRow).toContainText("Ended");
-
-      const currentSecretAfterEnd = await exchangeViewLink(
-        relay.baseUrl,
-        relayExchangeKey,
-        currentSecret,
-      );
-      expect(currentSecretAfterEnd).toEqual(neverValidExchange);
-      const currentCapabilityAfterEnd = await readViewLink(
-        relay.baseUrl,
-        currentCapability,
-        "/sync/link/share",
-      );
-      expect(currentCapabilityAfterEnd).toEqual(neverValidRead);
-      const namedAfterEnd = await relayJson(
-        relay.baseUrl,
-        RECIPIENT_TOKEN,
-        `/sync/shares/${shareId}/log?since=0&limit=500`,
-      );
-      const missingNamedShare = await relayJson(
-        relay.baseUrl,
-        RECIPIENT_TOKEN,
-        "/sync/shares/never-valid/log?since=0&limit=500",
-      );
-      expect(missingNamedShare.status).toBe(404);
-      expect(JSON.parse(missingNamedShare.body)).toEqual({
-        ok: false,
-        error: "not found",
-        code: "not_found",
-      });
-      // #1438 explains removal to former recipients while strangers stay opaque.
-      expect(namedAfterEnd.status).toBe(404);
-      expect(JSON.parse(namedAfterEnd.body)).toEqual({
-        ok: false,
-        error: "The owner removed your access.",
-        code: "share_access_removed",
-      });
-      const strangerAfterRemoval = await relayJson(
-        relay.baseUrl,
-        "test:e2e-stranger",
-        `/sync/shares/${shareId}/log?since=0&limit=500`,
-      );
-      const missingFetch = await relayJson(
-        relay.baseUrl,
-        "test:e2e-stranger",
-        "/sync/shares/never-valid/log?since=0&limit=500",
-      );
-      expect(strangerAfterRemoval.status).toBe(404);
-      expect(strangerAfterRemoval.body).toBe(missingFetch.body);
-    } finally {
-      await relay?.stop();
-      if (desktop) await cleanupDesktopWorkspace(desktop, temp);
-      else await temp.cleanup();
-    }
-  });
+    },
+  );
 });
 
 test("receive side: open a share read-only, follow the granter's edits, and see the honest end", async () => {
@@ -738,8 +716,6 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    // A test-only remote peer seeds shared and unshared content through the
-    // relay protocol under the granter account.
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({ baseUrl: relay.baseUrl, token: GRANTER_TOKEN, workspaceId });
     const granter = new RelayFilePeer({
@@ -753,21 +729,14 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
       { path: "private/hidden.md", text: "The kraken ledger stays private.\n" },
     ]);
 
-    // The grant: docs/ (folder selector), addressed to the recipient email.
-    const create = await relayJson(
-      relay.baseUrl,
-      GRANTER_TOKEN,
-      `/sync/${workspaceId}/shares`,
-      {
-        method: "POST",
-        body: JSON.stringify({ recipientEmail: RECIPIENT_EMAIL, paths: ["docs"], access: "view" }),
-      },
-    );
+    const create = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/${workspaceId}/shares`, {
+      method: "POST",
+      body: JSON.stringify({ recipientEmail: RECIPIENT_EMAIL, paths: ["docs"], access: "view" }),
+    });
     expect(create.status).toBe(200);
     const shareId = (JSON.parse(create.body) as { shareId: string }).shareId;
     const shareCode = `dohc-share:${shareId}:${relay.baseUrl}`;
 
-    // The app is the recipient: fresh home, signed in as the recipient.
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
@@ -785,7 +754,6 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     await expect(page.getByTestId("open-shared-view")).toContainText(temp.rootPath);
     await page.getByTestId("open-share-start").click();
 
-    // The shared view opens: banner, shared files, and not the private one.
     await expect(page.getByTestId("workspace-shell")).toBeVisible();
     const banner = page.getByTestId("shared-view-banner");
     await expect(banner).toBeVisible();
@@ -796,11 +764,9 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     await expect(explorerRow(page, "private")).toHaveCount(0);
     await expect(explorerRow(page, "private/hidden.md")).toHaveCount(0);
 
-    // Browse: the file opens and shows the granter's content.
     await explorerRow(page, "docs/shared.md").click();
     await expect(page.getByText("The comet-tail draft.")).toBeVisible();
 
-    // Search: the shared view is locally searchable.
     await page.getByTestId(activityPin("search")).click();
     await page.getByTestId("search-input").fill("comet-tail");
     await expect(
@@ -809,15 +775,12 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     await page.getByTestId("search-input").fill("kraken");
     await expect(page.locator('[data-testid="search-result-group"]')).toHaveCount(0);
 
-    // Writes are refused with the honest copy — at the IPC boundary, not
-    // just in the UI.
     const writeAttempt = await page.evaluate(async (unusedContentHash) => {
-      const api = (window as unknown as {
-        dohcDesktop: Pick<
-          DohcDesktopBridge,
-          "getWorkspaceRegistry" | "writeWorkspaceText"
-        >;
-      }).dohcDesktop;
+      const api = (
+        window as unknown as {
+          dohcDesktop: Pick<DohcDesktopBridge, "getWorkspaceRegistry" | "writeWorkspaceText">;
+        }
+      ).dohcDesktop;
       const registry = await api.getWorkspaceRegistry();
       try {
         await api.writeWorkspaceText({
@@ -847,23 +810,25 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     const sharedFilePath = join(temp.rootPath, "docs/shared.md");
     const originalSharedContents = await readFile(sharedFilePath, "utf8");
     const bypassAttempts = await page.evaluate(async () => {
-      const api = (window as unknown as {
-        dohcDesktop: {
-          getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
-          startAgentRun: DohcDesktopBridge["startAgentRun"];
-          startSitePreview: DohcDesktopBridge["startSitePreview"];
-          getMcpConfig(payload: { workspaceId: string }): Promise<{ args: string[] }>;
-          openEngineYDocSession(payload: {
-            workspaceId: string;
-            sessionId: string;
-            path: string;
-          }): Promise<{ available: boolean }>;
-          // Taken from the CONTRACT, not re-typed here. The hand-written
-          // shape drifted once already, so the call was rejected at the
-          // schema and never reached the refusal this asserts.
-          applyEngineYDocUpdate: DohcDesktopBridge["applyEngineYDocUpdate"];
-        };
-      }).dohcDesktop;
+      const api = (
+        window as unknown as {
+          dohcDesktop: {
+            getWorkspaceRegistry(): Promise<{ workspaces: Array<{ workspaceId: string }> }>;
+            startAgentRun: DohcDesktopBridge["startAgentRun"];
+            startSitePreview: DohcDesktopBridge["startSitePreview"];
+            getMcpConfig(payload: { workspaceId: string }): Promise<{ args: string[] }>;
+            openEngineYDocSession(payload: {
+              workspaceId: string;
+              sessionId: string;
+              path: string;
+            }): Promise<{ available: boolean }>;
+            // Taken from the CONTRACT, not re-typed here. The hand-written
+            // shape drifted once already, so the call was rejected at the
+            // schema and never reached the refusal this asserts.
+            applyEngineYDocUpdate: DohcDesktopBridge["applyEngineYDocUpdate"];
+          };
+        }
+      ).dohcDesktop;
       const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
       const capture = async (run: () => Promise<unknown>) => {
         try {
@@ -875,10 +840,16 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
       };
       const agent = await capture(() => api.startAgentRun({ workspaceId, agentId: "default" }));
       const sitePreview = await capture(() =>
-        api.startSitePreview({ workspaceId, siteRoot: "docs", mode: "dev", holderId: "e2e", restart: false }),
+        api.startSitePreview({
+          workspaceId,
+          siteRoot: "docs",
+          mode: "dev",
+          holderId: "e2e",
+          restart: false,
+        }),
       );
       const mcp = await api.getMcpConfig({ workspaceId });
-      // WS-G2-C-2 gate fix 4: a live engine Y.Doc session is writable, so opening
+      // A live engine Y.Doc session is writable, so opening
       // one in a read-only shared view must be refused at the IPC boundary (same
       // class as the write bypass above). applyEngineYDocUpdate on the refused
       // session must be an inert no-op — it must never throw and never write.
@@ -891,10 +862,8 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         api.applyEngineYDocUpdate({
           sessionId: "shared-view-bypass",
           update: new Uint8Array([1, 2, 3]),
-          lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111",
-          // Typing this from the contract surfaced a second drift the
-          // hand-written shape hid: `seq` is required too, so the call would
-          // have been rejected at the schema again.
+          lineageGeneration: 1,
+          requestId: "11111111-1111-4111-8111-111111111111",
           seq: 1,
         }),
       );
@@ -912,8 +881,6 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     // the launched server registers only the write tools that level grants.
     // This share was created at "view", which grants none.
     expect(bypassAttempts.mcpArgs.join(" ")).toContain("--share-access view");
-    // The engine Y.Doc editor session is refused (never opens a writable session
-    // in a shared view), and applying an update to it is an inert no-op.
     expect(bypassAttempts.engineYDocAvailable).toBe(false);
     expect(bypassAttempts.engineYDocApply).toBe("allowed");
     // "allowed" only proves the apply didn't throw — a regression that dropped
@@ -923,19 +890,13 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     // unchanged after the apply attempt.
     expect(await readFile(sharedFilePath, "utf8")).toBe(originalSharedContents);
 
-    // The granter keeps working; the recipient refreshes and sees it.
     await granter.writeText("docs/shared.md", "# Shared\n\nThe comet-tail draft, round two.\n");
     await page.getByTestId("shared-view-refresh").click();
     await expect(page.getByText("The comet-tail draft, round two.")).toBeVisible();
 
-    // The granter ends the share; the next refresh says so honestly and the
-    // local copy stays readable.
-    const revoke = await relayJson(
-      relay.baseUrl,
-      GRANTER_TOKEN,
-      `/sync/shares/${shareId}/revoke`,
-      { method: "POST" },
-    );
+    const revoke = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/shares/${shareId}/revoke`, {
+      method: "POST",
+    });
     expect(revoke.status).toBe(200);
     await page.getByTestId("shared-view-refresh").click();
     await expect(banner).toContainText("This share was ended");
@@ -960,7 +921,6 @@ test("mount side: add a share into a workspace and open it beside local files", 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    // A test-only remote peer seeds shared and unshared content on the relay.
     relay = await spawnSyncRelay({ dbPath: join(temp.baseDir, "relay", "relay.sqlite") });
     await claimRelayWorkspace({
       baseUrl: relay.baseUrl,
@@ -995,20 +955,21 @@ test("mount side: add a share into a workspace and open it beside local files", 
       `/sync/${granterWorkspaceId}/shares`,
       {
         method: "POST",
-        body: JSON.stringify({ recipientEmail: RECIPIENT_EMAIL, paths: ["reviews"], access: "comment" }),
+        body: JSON.stringify({
+          recipientEmail: RECIPIENT_EMAIL,
+          paths: ["reviews"],
+          access: "comment",
+        }),
       },
     );
     expect(commentCreate.status).toBe(200);
     const commentShareId = (JSON.parse(commentCreate.body) as { shareId: string }).shareId;
 
-    // The recipient's ordinary workspace (the mount host) with its own files.
     await seedWorkspaceManifest(temp, hostWorkspaceId);
     await writeWorkspaceFiles(temp, [
       { path: "notes/mine.md", contents: "# Mine\n\nHost workspace file.\n" },
     ]);
-    await seedWorkspaceRegistry(temp, [
-      { workspaceId: hostWorkspaceId, rootPath: temp.rootPath },
-    ]);
+    await seedWorkspaceRegistry(temp, [{ workspaceId: hostWorkspaceId, rootPath: temp.rootPath }]);
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
@@ -1021,15 +982,10 @@ test("mount side: add a share into a workspace and open it beside local files", 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // Titlebar → "Open a share…" → the dialog defaults to MOUNTING into
-    // this workspace (no folder picker in mount mode).
     await page.getByTestId("workspace-switcher").click();
     await page.getByTestId("workspace-switcher-open-share").click();
     await expect(page.getByTestId("open-shared-view")).toBeVisible();
-    await expect(page.getByTestId("open-share-mode-mount")).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
+    await expect(page.getByTestId("open-share-mode-mount")).toHaveAttribute("aria-checked", "true");
     await expect(page.getByTestId("open-share-choose-folder")).toHaveCount(0);
 
     // Open waits for the relay to state the grant. View and Comment codes
@@ -1045,8 +1001,6 @@ test("mount side: add a share into a workspace and open it beside local files", 
     }
     await page.getByTestId("open-share-start").click();
 
-    // The mount lands: a toast, tree rows under shared-with-me/e2e-granter,
-    // the private file never crosses, and the host file is untouched.
     await expect(page.getByTestId("workspace-shell-notice")).toContainText(
       "Added e2e-granter to shared-with-me. Its files are read-only and stay up to date.",
     );
@@ -1054,24 +1008,30 @@ test("mount side: add a share into a workspace and open it beside local files", 
     await expect(explorerRow(page, "shared-with-me/e2e-granter/private")).toHaveCount(0);
     await revealExplorerPath(page, "notes/mine.md");
 
-    // The mounted file opens read-only with the granter's content.
     await explorerRow(page, "shared-with-me/e2e-granter/docs/brief.md").click();
     await expect(page.getByText("The lighthouse memo.")).toBeVisible();
     // The mount has capture disabled. An external projection write still
     // refreshes the host's shared view without making it canonical content.
     const mountPath = "shared-with-me/e2e-granter/docs/brief.md";
-    await page.evaluate(({ workspaceId, path }) => {
-      const api = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;
-      Reflect.set(window, "mountObservationSeen", false);
-      const off = api.onWorkspaceActivity(event => {
-        if (event.workspaceId === workspaceId && event.paths?.includes(path)) {
-          Reflect.set(window, "mountObservationSeen", true);
-          off();
-        }
-      });
-    }, { workspaceId: hostWorkspaceId, path: mountPath });
+    await page.evaluate(
+      ({ workspaceId, path }) => {
+        const api = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;
+        Reflect.set(window, "mountObservationSeen", false);
+        const off = api.onWorkspaceActivity((event) => {
+          if (event.workspaceId === workspaceId && event.paths?.includes(path)) {
+            Reflect.set(window, "mountObservationSeen", true);
+            off();
+          }
+        });
+      },
+      { workspaceId: hostWorkspaceId, path: mountPath },
+    );
     await writeFile(join(temp.rootPath, mountPath), "External projection edit, never canonical.\n");
-    await expect.poll(() => page.evaluate(() => Reflect.get(window, "mountObservationSeen")), { timeout: 60_000 }).toBe(true);
+    await expect
+      .poll(() => page.evaluate(() => Reflect.get(window, "mountObservationSeen")), {
+        timeout: 60_000,
+      })
+      .toBe(true);
     await expect(page.getByText("The lighthouse memo.")).toBeVisible();
   } finally {
     await relay?.stop();
@@ -1120,9 +1080,7 @@ test("mount side: an Edit code opens separately by default, and added to a works
     await writeWorkspaceFiles(temp, [
       { path: "notes/mine.md", contents: "# Mine\n\nHost workspace file.\n" },
     ]);
-    await seedWorkspaceRegistry(temp, [
-      { workspaceId: hostWorkspaceId, rootPath: temp.rootPath },
-    ]);
+    await seedWorkspaceRegistry(temp, [{ workspaceId: hostWorkspaceId, rootPath: temp.rootPath }]);
     await seedCloudCredentials(temp, {
       serverUrl: relay.baseUrl,
       relayUrl: relay.baseUrl,
@@ -1135,8 +1093,6 @@ test("mount side: an Edit code opens separately by default, and added to a works
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // Once the relay states the grant, an Edit code defaults to Open
-    // separately. This person chooses Add to this workspace anyway.
     await page.getByTestId("workspace-switcher").click();
     await page.getByTestId("workspace-switcher-open-share").click();
     await page.getByTestId("open-share-code").fill(shareCode);
@@ -1147,26 +1103,27 @@ test("mount side: an Edit code opens separately by default, and added to a works
     await page.getByTestId("open-share-mode-mount").click();
     await expect(page.getByTestId("open-share-start")).toHaveText("Add share");
     await page.getByTestId("open-share-start").click();
-    // The message arrives as a toast, not a bar across the workbench, and
-    // says where Edit works.
     await expect(page.getByTestId("workspace-shell-notice")).toContainText(
       "Added e2e-granter to shared-with-me. Its files are read-only in this workspace. To use your Edit access, choose Open a share, then Open separately.",
     );
     await expect(page.getByTestId("shell-notice")).toHaveCount(0);
     await revealExplorerPath(page, "shared-with-me/e2e-granter/docs/brief.md");
 
-    // Read-only is true: the file does not open for editing, and main refuses
-    // both a write and a send from the host workspace.
     await explorerRow(page, "shared-with-me/e2e-granter/docs/brief.md").click();
     await expect(page.getByText("The lighthouse memo.")).toBeVisible();
     await expect(page.getByTestId("markdown-edit-toggle")).toBeDisabled();
     const refused = await page.evaluate(async () => {
-      const api = (window as unknown as {
-        dohcDesktop: Pick<
-          DohcDesktopBridge,
-          "getWorkspaceRegistry" | "readWorkspaceText" | "writeWorkspaceText" | "submitShareChanges"
-        >;
-      }).dohcDesktop;
+      const api = (
+        window as unknown as {
+          dohcDesktop: Pick<
+            DohcDesktopBridge,
+            | "getWorkspaceRegistry"
+            | "readWorkspaceText"
+            | "writeWorkspaceText"
+            | "submitShareChanges"
+          >;
+        }
+      ).dohcDesktop;
       const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
       const relativePath = "shared-with-me/e2e-granter/docs/brief.md";
       const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -1194,8 +1151,6 @@ test("mount side: an Edit code opens separately by default, and added to a works
     expect(refused.write).toContain("reserved");
     expect(refused.submit).toContain("This workspace is not a shared view.");
 
-    // Pasted again with the defaults, the code opens the live-editing view
-    // with Send changes.
     await page.getByTestId("workspace-switcher").click();
     await page.getByTestId("workspace-switcher-open-share").click();
     await page.getByTestId("open-share-code").fill(shareCode);
@@ -1261,34 +1216,26 @@ test("Comment handoff opens files without creating a second generic chat", async
       throw new Error("The relay returned an incomplete Comment link.");
     }
     const secret = new URL(link.url).hash.slice(1);
-    const exchanged = await exchangeViewLink(
-      relay.baseUrl,
-      relayExchangeKey,
-      secret,
-    );
+    const exchanged = await exchangeViewLink(relay.baseUrl, relayExchangeKey, secret);
     expect(exchanged.status).toBe(200);
-    const capability = (JSON.parse(exchanged.body) as {
-      capabilityToken?: unknown;
-    }).capabilityToken;
+    const capability = (
+      JSON.parse(exchanged.body) as {
+        capabilityToken?: unknown;
+      }
+    ).capabilityToken;
     if (typeof capability !== "string") {
       throw new Error("The relay did not exchange the Comment link.");
     }
-    const minted = await mintLinkHandoff(
-      relay.baseUrl,
-      relayExchangeKey,
-      capability,
-    );
+    const minted = await mintLinkHandoff(relay.baseUrl, relayExchangeKey, capability);
     expect(minted.status).toBe(200);
     const code = (JSON.parse(minted.body) as { code?: unknown }).code;
     if (typeof code !== "string") {
       throw new Error("The relay did not mint a Comment handoff.");
     }
-    const redeemed = await relayJson(
-      relay.baseUrl,
-      RECIPIENT_TOKEN,
-      "/sync/link-redeem",
-      { method: "POST", body: JSON.stringify({ code }) },
-    );
+    const redeemed = await relayJson(relay.baseUrl, RECIPIENT_TOKEN, "/sync/link-redeem", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    });
     expect(redeemed.status).toBe(200);
     expect(JSON.parse(redeemed.body)).toMatchObject({
       shareId: link.shareId,
@@ -1305,9 +1252,7 @@ test("Comment handoff opens files without creating a second generic chat", async
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await page.getByTestId("first-run-open-share").click();
-    await page.getByTestId("open-share-code").fill(
-      `dohc-share:${link.shareId}:${relay.baseUrl}`,
-    );
+    await page.getByTestId("open-share-code").fill(`dohc-share:${link.shareId}:${relay.baseUrl}`);
     await page.getByTestId("open-share-choose-folder").click();
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("workspace-shell")).toBeVisible();
@@ -1324,12 +1269,14 @@ test("Comment handoff opens files without creating a second generic chat", async
     await expect(page.getByTestId("linked-chat-composer")).toHaveCount(0);
 
     const generic = await page.evaluate(async () => {
-      const api = (window as unknown as {
-        dohcDesktop: Pick<
-          DohcDesktopBridge,
-          "getWorkspaceRegistry" | "createFileChat" | "listFileChats"
-        >;
-      }).dohcDesktop;
+      const api = (
+        window as unknown as {
+          dohcDesktop: Pick<
+            DohcDesktopBridge,
+            "getWorkspaceRegistry" | "createFileChat" | "listFileChats"
+          >;
+        }
+      ).dohcDesktop;
       const workspace = (await api.getWorkspaceRegistry()).workspaces[0]!;
       const workspaceId = workspace.workspaceId;
       let refusal = "answered";
@@ -1366,9 +1313,7 @@ test("Comment handoff opens files without creating a second generic chat", async
       JSON.parse(granterLog.body) as {
         ops: Array<{ opKind?: unknown }>;
       }
-    ).ops.filter((op) =>
-      typeof op.opKind === "string" && op.opKind.startsWith("chat."),
-    );
+    ).ops.filter((op) => typeof op.opKind === "string" && op.opKind.startsWith("chat."));
     expect(pushedGenericRows).toEqual([]);
   } finally {
     await relay?.stop();
@@ -1378,10 +1323,6 @@ test("Comment handoff opens files without creating a second generic chat", async
 });
 
 test("direct named Comment keeps desktop generic chat read-only", async () => {
-  // A direct named Comment share carries independent relay append authority.
-  // Phase 3 keeps generic desktop chat read-only because the local store has
-  // no durable per-row relay receipt. The IPC attempt must leave no local row
-  // and no chat operation in the granter's relay log.
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "share-comment-e2e";
@@ -1401,19 +1342,14 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
       { path: "private/hidden.md", text: "The kraken ledger stays private.\n" },
     ]);
 
-    const create = await relayJson(
-      relay.baseUrl,
-      GRANTER_TOKEN,
-      `/sync/${workspaceId}/shares`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          recipientEmail: RECIPIENT_EMAIL,
-          paths: ["docs"],
-          access: "comment",
-        }),
-      },
-    );
+    const create = await relayJson(relay.baseUrl, GRANTER_TOKEN, `/sync/${workspaceId}/shares`, {
+      method: "POST",
+      body: JSON.stringify({
+        recipientEmail: RECIPIENT_EMAIL,
+        paths: ["docs"],
+        access: "comment",
+      }),
+    });
     expect(create.status).toBe(200);
     const shareId = (JSON.parse(create.body) as { shareId: string }).shareId;
 
@@ -1454,15 +1390,14 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
     // Call the authorization surface directly. Renderer affordances are not
     // part of this refusal proof.
     const chat = await page.evaluate(async () => {
-      const api = (window as unknown as {
-        dohcDesktop: Pick<
-          DohcDesktopBridge,
-          | "getWorkspaceRegistry"
-          | "createFileChat"
-          | "listFileChats"
-          | "listChatChannels"
-        >;
-      }).dohcDesktop;
+      const api = (
+        window as unknown as {
+          dohcDesktop: Pick<
+            DohcDesktopBridge,
+            "getWorkspaceRegistry" | "createFileChat" | "listFileChats" | "listChatChannels"
+          >;
+        }
+      ).dohcDesktop;
       const workspace = (await api.getWorkspaceRegistry()).workspaces[0]!;
       const workspaceId = workspace.workspaceId;
       let refusal = "answered";
@@ -1477,8 +1412,6 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
       }
       const threads = await api.listFileChats({ workspaceId, path: "docs/shared.md" });
       if ("status" in threads) throw new Error(threads.code);
-      // Listing is a read in a received share. It must answer without
-      // creating General or storing generic chat rows.
       const channels = await api.listChatChannels({ workspaceId });
       return {
         refusal,
@@ -1502,9 +1435,7 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
     expect(granterLog.status).toBe(200);
     const pushedGenericRows = (
       JSON.parse(granterLog.body) as { ops: Array<{ opKind?: unknown }> }
-    ).ops.filter(
-      (op) => typeof op.opKind === "string" && op.opKind.startsWith("chat."),
-    );
+    ).ops.filter((op) => typeof op.opKind === "string" && op.opKind.startsWith("chat."));
     expect(pushedGenericRows).toEqual([]);
   } finally {
     await relay?.stop();
@@ -1514,12 +1445,6 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
 });
 
 test("edit side: a recipient edits a shared file, sends the changes, and the granter accepts them", async () => {
-  // The whole proposal loop, through the real app and a real
-  // relay. This is the only place in the repo where a real engine and a real
-  // relay meet, so it is the only place that can prove the loop rather than
-  // one half of it: the recipient's engine journals the edit, the relay holds
-  // it as a change, the granter accepts, and the change lands in the
-  // GRANTER's log carrying a base the granter's own log can name.
   test.setTimeout(300_000);
   const temp = await createTempWorkspace();
   const workspaceId = "share-edit-e2e";
@@ -1569,14 +1494,11 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("workspace-shell")).toBeVisible();
 
-    // The banner states the right the share actually grants.
     const banner = page.getByTestId("shared-view-banner");
     await expect(banner).toBeVisible();
     await expect(banner).toContainText(EDIT_BANNER);
     await expect(page.getByTestId("share-changes-send")).toBeVisible();
 
-    // The edit, written through the IPC boundary main owns. At view and
-    // comment this same call is refused; the receive-side spec pins that.
     const wrote = await page.evaluate(async (text) => {
       const api = (
         window as unknown as {
@@ -1617,10 +1539,7 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
           await page.evaluate(async () => {
             const api = (
               window as unknown as {
-                dohcDesktop: Pick<
-                  DohcDesktopBridge,
-                  "getWorkspaceRegistry" | "submitShareChanges"
-                >;
+                dohcDesktop: Pick<DohcDesktopBridge, "getWorkspaceRegistry" | "submitShareChanges">;
               }
             ).dohcDesktop;
             const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
@@ -1636,20 +1555,17 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
       )
       .toBe(1);
 
-    // The granter's side, read over HTTP as the granter.
     const { summary, proposal } = await openOnlyProposal(relay.baseUrl, workspaceId);
     // Who sent them, resolved by the relay from the server-derived user id on
     // the proposal row — never rebuilt by the client from its share list.
     expect(summary.proposedByEmail).toBe("e2e-recipient@dohc.test");
     expect(summary.ops).toBe(1);
     const proposalId = summary.proposalId;
-    // One change, on the shared file, not drifted.
     const ops = proposal.ops as Array<{ afterPath: string; drifted: boolean }>;
     expect(ops.length).toBe(1);
     expect(ops[0]!.afterPath).toBe("docs/shared.md");
     expect(ops[0]!.drifted).toBe(false);
 
-    // Nothing is in the granter's log until the granter says so.
     const beforeAccept = await relayJson(
       relay.baseUrl,
       GRANTER_TOKEN,
@@ -1691,8 +1607,6 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
     expect(landed[0]!.payload.payloadAfterPath).toBe("docs/shared.md");
     expect(landed[0]!.payload.operation).toBe("write");
 
-    // And the content really crossed: the granter can read the recipient's
-    // bytes out of its own workspace.
     const digest = String(landed[0]!.payload.payloadAfterBlobSha256);
     const blob = await relayJson(
       relay.baseUrl,
@@ -1709,12 +1623,6 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
 });
 
 test("edit side: a recipient creates, renames, deletes and imports, and the granter accepts all four", async () => {
-  // The other four writes a share view admits, through the real app,
-  // the real engine and a real relay. The text edit's loop is proved above;
-  // what this proves is that each of these operations becomes a change the
-  // submit lane can see, and that the accept door derives the right intent
-  // for each: a create, a rename, a delete, and an import that lands as a
-  // create.
   test.setTimeout(300_000);
   const temp = await createTempWorkspace();
   const workspaceId = "share-file-ops-e2e";
@@ -1772,10 +1680,12 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
     await expect(page.getByTestId("shared-view-banner")).toContainText(EDIT_BANNER);
     await expect(page.getByTestId("share-changes-send")).toBeVisible();
 
-    // The four operations, each through the IPC boundary main owns.
-    await desktop.app.evaluate((_electron, paths: string[]) => {
-      process.env.DOHC_TEST_IMPORT_PATHS = JSON.stringify(paths);
-    }, [importSource]);
+    await desktop.app.evaluate(
+      (_electron, paths: string[]) => {
+        process.env.DOHC_TEST_IMPORT_PATHS = JSON.stringify(paths);
+      },
+      [importSource],
+    );
 
     const outcome = await page.evaluate(async () => {
       const api = (
@@ -1818,9 +1728,7 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
         await attempt("delete", () =>
           api.deleteWorkspacePath({ workspaceId, relativePath: "docs/delete-me.md" }),
         ),
-        await attempt("import", () =>
-          api.importWorkspaceFiles({ workspaceId, targetDir: "docs" }),
-        ),
+        await attempt("import", () => api.importWorkspaceFiles({ workspaceId, targetDir: "docs" })),
         // The one operation that stays refused at every level, because the
         // engine has no folder object for it to write.
         await attempt("folder", () =>
@@ -1828,16 +1736,10 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
         ),
       ];
     });
-    expect(outcome.slice(0, 4)).toEqual([
-      "create: ok",
-      "rename: ok",
-      "delete: ok",
-      "import: ok",
-    ]);
-    expect(
-      outcome[4],
-      "routing create-folder promises a change no moment can state",
-    ).toContain("shared view");
+    expect(outcome.slice(0, 4)).toEqual(["create: ok", "rename: ok", "delete: ok", "import: ok"]);
+    expect(outcome[4], "routing create-folder promises a change no moment can state").toContain(
+      "shared view",
+    );
 
     // Each landed in the projection, because the projection follows the
     // moment that made it.
@@ -1853,10 +1755,7 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
           await page.evaluate(async () => {
             const api = (
               window as unknown as {
-                dohcDesktop: Pick<
-                  DohcDesktopBridge,
-                  "getWorkspaceRegistry" | "submitShareChanges"
-                >;
+                dohcDesktop: Pick<DohcDesktopBridge, "getWorkspaceRegistry" | "submitShareChanges">;
               }
             ).dohcDesktop;
             const workspaceId = (await api.getWorkspaceRegistry()).workspaces[0]!.workspaceId;
@@ -1870,12 +1769,8 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
           }),
         { timeout: 120_000, intervals: [2_000] },
       )
-      // FOUR changes in one submit: `submitted` counts the files this press
-      // sent, and one press sends everything pending.
       .toBe(4);
 
-    // One proposal holding FOUR net changes — one per object, which is what
-    // the submit consolidates to.
     const { summary, proposal } = await openOnlyProposal(relay.baseUrl, workspaceId);
     expect(summary.ops).toBe(4);
     const proposalId = summary.proposalId;
@@ -1883,7 +1778,6 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
       String(left.afterPath).localeCompare(String(right.afterPath)),
     );
     expect(ops.length).toBe(4);
-    // The review shows WHERE each change lands, per the intent rule.
     expect(ops.map((op) => op.afterPath)).toEqual([
       "docs/created.md",
       "docs/delete-me.md",
@@ -1921,7 +1815,6 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
       ]),
     );
 
-    // A create: no base in the granter's log, because the granter never had it.
     const created = byPath.get("docs/created.md");
     expect(created, "the recipient's new file must reach the granter").toBeTruthy();
     expect(created!.operation).toBe("write");
@@ -1939,18 +1832,12 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
     expect(renamed!.beforeLatestMomentId).toBe(renameSource!.latestMomentId);
     expect(renamed!.payloadBeforePath).toBe("docs/rename-me.md");
 
-    // A delete: at the path the granter has it now.
     const deleted = byPath.get("docs/delete-me.md");
     expect(deleted, "the recipient's delete must reach the granter").toBeTruthy();
-    expect(
-      deleted!.operation,
-      "a delete that lands as a write resurrects the file",
-    ).toBe("delete");
+    expect(deleted!.operation, "a delete that lands as a write resurrects the file").toBe("delete");
     expect(deleted!.objectId).toBe(deleteSource!.objectId);
     expect(deleted!.beforeLatestMomentId).toBe(deleteSource!.latestMomentId);
 
-    // An import: a create carrying the bytes, which the granter can read out
-    // of its own workspace.
     const imported = byPath.get("docs/ledger.md");
     expect(imported, "the recipient's import must reach the granter").toBeTruthy();
     expect(imported!.operation).toBe("write");

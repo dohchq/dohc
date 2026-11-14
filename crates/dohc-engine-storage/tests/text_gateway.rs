@@ -217,7 +217,6 @@ fn batch_reader_keeps_metadata_snapshot_across_write_and_delete() {
     let path = scratch.join("test.db");
     let writer = Connection::open(&path).unwrap();
     writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,byte_length INTEGER,text TEXT); CREATE TABLE heads(sha TEXT); INSERT INTO blobs VALUES('old',3,'old'); INSERT INTO heads VALUES('old');").unwrap();
-    // The second connection reads while the first commits a replacement and GC.
     let reader = Connection::open(&path).unwrap();
     let snapshot = text::ReadSnapshot::new(&reader).unwrap();
     let key: String = reader

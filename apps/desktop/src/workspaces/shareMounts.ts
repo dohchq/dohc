@@ -17,10 +17,7 @@ import { ShareMountStatusRow } from "../ipc/bridgeContract";
 import { SharePinInvalidError } from "./shareViewRecords";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import type { ShareMountRecord } from "./registryStore";
-import {
-  resolveWorkspaceFileRead,
-  type PreparedWorkspaceFileRead,
-} from "./workspaceAssets";
+import { resolveWorkspaceFileRead, type PreparedWorkspaceFileRead } from "./workspaceAssets";
 import {
   assertActiveShareViewFilesOwner,
   type ShareViewFilesOwnerCapability,
@@ -41,8 +38,6 @@ import {
 // workspace is resolved via requireWorkspace and the relay connection is
 // built from the machine's own credentials — never from renderer input.
 
-// Folder-name budget for a mount label; generous but bounded (labels become
-// one path component under shared-with-me/).
 const MOUNT_LABEL_MAX = 64;
 const SHARE_ID_MAX = 200;
 const INVALID_SHARE_MOUNT_DETAILS =
@@ -54,11 +49,7 @@ const UNOWNED_SHARE_PROJECTION_PATH =
 // data, not a write path into the tree — labels are re-validated on every
 // use so an edited registry cannot smuggle traversal into materialization.
 function validShareMountId(shareId: unknown): shareId is string {
-  return (
-    typeof shareId === "string" &&
-    shareId.length > 0 &&
-    shareId.length <= SHARE_ID_MAX
-  );
+  return typeof shareId === "string" && shareId.length > 0 && shareId.length <= SHARE_ID_MAX;
 }
 
 export function validMountLabel(label: unknown): label is string {
@@ -76,10 +67,7 @@ export function validMountLabel(label: unknown): label is string {
 // group's channel name. The name is reduced to a conservative charset and
 // deduplicated against existing labels the same way imports deduplicate
 // basenames ("alex", "alex (2)", …).
-function mountLabelFor(
-  name: string | null,
-  existingLabels: readonly string[],
-): string {
+function mountLabelFor(name: string | null, existingLabels: readonly string[]): string {
   const localPart = name ?? "";
   let base =
     localPart
@@ -129,9 +117,7 @@ function storedMountLabel(mount: unknown): string | null {
 // Allocation reserves every stored string, not only records healthy enough
 // to use. A damaged record still claims its spelling until it is removed;
 // reusing that label would make two registry records name one projection.
-function reservedShareMountLabels<Mount>(
-  mounts: readonly Mount[],
-): string[] {
+function reservedShareMountLabels<Mount>(mounts: readonly Mount[]): string[] {
   return mounts.flatMap((mount) => {
     const label = storedMountLabel(mount);
     return label === null ? [] : [label];
@@ -165,8 +151,7 @@ export function shareMountRecordsForId<Mount>(
   shareId: string,
 ): Array<Mount & { shareId: string }> {
   return mounts.filter(
-    (mount): mount is Mount & { shareId: string } =>
-      mountField(mount, "shareId") === shareId,
+    (mount): mount is Mount & { shareId: string } => mountField(mount, "shareId") === shareId,
   );
 }
 
@@ -177,9 +162,7 @@ export function updateShareMountRecords<Mount>(
   change: (mount: Mount) => Mount,
 ): readonly Mount[] {
   if (shareMountRecordsForId(mounts, shareId).length === 0) return mounts;
-  return mounts.map((mount) =>
-    mountField(mount, "shareId") === shareId ? change(mount) : mount,
-  );
+  return mounts.map((mount) => (mountField(mount, "shareId") === shareId ? change(mount) : mount));
 }
 
 // Every record but the share's. With none, returns `mounts` itself.
@@ -220,10 +203,7 @@ export function planShareMountRemoval<Mount>(
     } {
   const matches = shareMountRecordsForId(mounts, shareId);
   if (matches.length === 0) return { kind: "missing" };
-  if (
-    matches.length === 1 &&
-    usableShareMountRecord(mounts, matches[0]!)
-  ) {
+  if (matches.length === 1 && usableShareMountRecord(mounts, matches[0]!)) {
     return { kind: "owner", mount: matches[0]! };
   }
   return { kind: "registry-only" };
@@ -253,10 +233,7 @@ export function classifyResolvedShareProjectionPath<Mount>(
     if (label === null) return false;
     const prefix = `${SHARED_WITH_ME_FOLDER}/${label}`;
     const comparedPrefix = mountLabelKey(prefix);
-    return (
-      comparedPath === comparedPrefix ||
-      comparedPath.startsWith(`${comparedPrefix}/`)
-    );
+    return comparedPath === comparedPrefix || comparedPath.startsWith(`${comparedPrefix}/`);
   });
   if (matches.length === 0) {
     if (isSharedWithMePath(normalizedPath)) {
@@ -273,10 +250,7 @@ export function classifyResolvedShareProjectionPath<Mount>(
   return {
     kind: "mount",
     mount,
-    path:
-      comparedPath === comparedPrefix
-        ? ""
-        : normalizedPath.split("/").slice(2).join("/"),
+    path: comparedPath === comparedPrefix ? "" : normalizedPath.split("/").slice(2).join("/"),
   };
 }
 
@@ -341,14 +315,8 @@ export async function resolveShareMountPath<Mount>(
   path: string;
 } | null> {
   if (mounts.length === 0 && !hasMountRegistry) return null;
-  const resolved = await resolveShareProjectionPath(
-    hostRoot,
-    relativePath,
-    mounts,
-  );
-  return resolved.kind === "mount"
-    ? { mount: resolved.mount, path: resolved.path }
-    : null;
+  const resolved = await resolveShareProjectionPath(hostRoot, relativePath, mounts);
+  return resolved.kind === "mount" ? { mount: resolved.mount, path: resolved.path } : null;
 }
 
 export async function refuseMoveAcrossShareMount(
@@ -377,15 +345,8 @@ export async function refuseImportIntoShareProjection(
 ): Promise<void> {
   if (targetDir === undefined || targetDir === "") return;
   if (mounts.length === 0 && !hasMountRegistry) return;
-  const destination = await resolveShareProjectionPath(
-    hostRoot,
-    targetDir,
-    mounts,
-  );
-  if (
-    destination.kind === "local" ||
-    destination.kind === "workspace-root"
-  ) {
+  const destination = await resolveShareProjectionPath(hostRoot, targetDir, mounts);
+  if (destination.kind === "local" || destination.kind === "workspace-root") {
     return;
   }
   throw new Error(
@@ -408,9 +369,7 @@ export async function overlayCanonicalShareMountFiles<
   // adding owner listings: a malformed record may not carry a label that can
   // identify its stale disk prefix, and preserving that unknown prefix would
   // turn registry damage into recipient-owned bytes becoming authoritative.
-  const files = input.disk.files.filter(
-    (file) => !isSharedWithMePath(file.path),
-  );
+  const files = input.disk.files.filter((file) => !isSharedWithMePath(file.path));
   const folders = (input.disk.folders ?? []).filter((folder) => {
     if (!isSharedWithMePath(folder)) return true;
     return !folder.replaceAll("\\", "/").includes("/");
@@ -441,16 +400,12 @@ export async function overlayCanonicalShareMountFiles<
         path: `${prefix}/${file.path}`,
       })),
     );
-    folders.push(
-      ...(canonical.folders ?? []).map((folder) => `${prefix}/${folder}`),
-    );
+    folders.push(...(canonical.folders ?? []).map((folder) => `${prefix}/${folder}`));
   }
   files.sort((left, right) => left.path.localeCompare(right.path));
   return {
     files,
-    folders: [...new Set(folders)].sort((left, right) =>
-      left.localeCompare(right),
-    ),
+    folders: [...new Set(folders)].sort((left, right) => left.localeCompare(right)),
   };
 }
 
@@ -460,15 +415,9 @@ export async function overlayCanonicalShareMountFiles<
 // planted at either level must never redirect those writes outside the
 // workspace. The workspace root itself is realpath'd first,
 // so ancestor system symlinks above the workspace stay legal.
-export async function assertRealMountRoot(
-  hostRoot: string,
-  label: string,
-): Promise<void> {
+export async function assertRealMountRoot(hostRoot: string, label: string): Promise<void> {
   const realHost = await realpath(hostRoot);
-  for (const relative of [
-    SHARED_WITH_ME_FOLDER,
-    `${SHARED_WITH_ME_FOLDER}/${label}`,
-  ]) {
+  for (const relative of [SHARED_WITH_ME_FOLDER, `${SHARED_WITH_ME_FOLDER}/${label}`]) {
     const absolute = join(realHost, ...relative.split("/"));
     const stat = await lstat(absolute).catch(() => null);
     if (stat === null) continue; // not created yet — mkdir will make a real dir
@@ -480,8 +429,8 @@ export async function assertRealMountRoot(
 
 // Creates the mount directory, guarding the container first: a symlinked
 // shared-with-me must be refused before mkdir would follow it and create the
-// label outside the workspace (codex P2 — the refresh guard alone ran after
-// this write). The label directory itself is created exclusively: a mount
+// label outside the workspace. The refresh guard runs after this write, so it
+// cannot stand in. The label directory itself is created exclusively: a mount
 // only ever owns a directory it created — a leftover or hand-made folder
 // must never be adopted (pulls would overwrite it; rollback/unmount would
 // delete it).
@@ -509,9 +458,7 @@ export function assertMountableSelector(
   selector: ShareViewSelector | null,
 ): asserts selector is ShareViewSelector {
   if (selector === null) {
-    throw new Error(
-      "This code is for a shared group. Join it from Chats instead of mounting it.",
-    );
+    throw new Error("This code is for a shared group. Join it from Chats instead of mounting it.");
   }
 }
 
@@ -531,20 +478,17 @@ function hostDigest(hostWorkspaceId: string): string {
   return createHash("sha256").update(hostWorkspaceId).digest("hex").slice(0, 16);
 }
 
-export function mountStoreWorkspaceIdFor(
-  hostWorkspaceId: string,
-  shareId: string,
-): string {
+export function mountStoreWorkspaceIdFor(hostWorkspaceId: string, shareId: string): string {
   return `share-mount-${shareId}-${hostDigest(hostWorkspaceId)}`;
 }
 
 /**
  * One refresh result row, built so the wire schema can always carry it.
  *
- * The loop used to push the registry's raw `shareId` and `label` and parse
- * the whole array at the end, so one record with a 65-character label threw
- * after every pull had already run — no row survived, and the user was told
- * "Couldn't refresh shares." while the healthy mounts had in fact refreshed.
+ * Each row is validated as it is built. Parsing the whole array at the end
+ * would let one record with a 65-character label throw after every pull had
+ * already run: no row would survive, and the user would be told "Couldn't
+ * refresh shares." while the healthy mounts had in fact refreshed.
  *
  * Identity damage is contained exactly like grant damage: a row that cannot
  * state its own identity is dropped from the report rather than allowed to
@@ -623,9 +567,7 @@ async function removeMountFolder(
   const containerStat = await lstat(container).catch(() => null);
   if (containerStat === null) return; // nothing to remove
   if (containerStat.isSymbolicLink() || !containerStat.isDirectory()) {
-    throw new Error(
-      `Share mount path is not a real directory: ${SHARED_WITH_ME_FOLDER}`,
-    );
+    throw new Error(`Share mount path is not a real directory: ${SHARED_WITH_ME_FOLDER}`);
   }
   const leaf = join(container, label);
   const leafStat = await lstat(leaf).catch(() => null);
@@ -647,14 +589,9 @@ function activeMountResource(owner: ShareViewFilesOwnerCapability) {
   if (resource.mountLabel === undefined) {
     throw new Error("Share-view mount ownership has no label.");
   }
-  const rootPath = mountRootFor(
-    resource.schedulingRootPath,
-    resource.mountLabel,
-  );
+  const rootPath = mountRootFor(resource.schedulingRootPath, resource.mountLabel);
   if (resolve(rootPath) !== resolve(resource.rootPath)) {
-    throw new Error(
-      "Share-view file ownership admission belongs to another target.",
-    );
+    throw new Error("Share-view file ownership admission belongs to another target.");
   }
   return {
     hostRoot: resource.schedulingRootPath,
@@ -662,35 +599,25 @@ function activeMountResource(owner: ShareViewFilesOwnerCapability) {
   };
 }
 
-export function shareViewFilesMountProjection(
-  owner: ShareViewFilesOwnerCapability,
-) {
+export function shareViewFilesMountProjection(owner: ShareViewFilesOwnerCapability) {
   const active = () => activeMountResource(owner);
   return {
     create: async (): Promise<void> => {
-      await withActiveShareViewFilesOwnerOperation(
-        owner,
-        { kind: "mount" },
-        async () => {
-          const resource = active();
-          await createMountDirectory(resource.hostRoot, resource.label, active);
-        },
-      );
+      await withActiveShareViewFilesOwnerOperation(owner, { kind: "mount" }, async () => {
+        const resource = active();
+        await createMountDirectory(resource.hostRoot, resource.label, active);
+      });
     },
     remove: async (): Promise<{ folderLeft: boolean; error?: unknown }> => {
-      return withActiveShareViewFilesOwnerOperation(
-        owner,
-        { kind: "mount" },
-        async () => {
-          const resource = active();
-          try {
-            await removeMountFolder(resource.hostRoot, resource.label, active);
-            return { folderLeft: false };
-          } catch (error) {
-            return { folderLeft: true, error };
-          }
-        },
-      );
+      return withActiveShareViewFilesOwnerOperation(owner, { kind: "mount" }, async () => {
+        const resource = active();
+        try {
+          await removeMountFolder(resource.hostRoot, resource.label, active);
+          return { folderLeft: false };
+        } catch (error) {
+          return { folderLeft: true, error };
+        }
+      });
     },
   };
 }

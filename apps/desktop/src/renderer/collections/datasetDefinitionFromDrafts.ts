@@ -1,4 +1,10 @@
-import type { DatasetColumnField, DatasetColumnFieldType, DatasetDefinition, DatasetOperation, DatasetTable } from "@dohc/security-contract/dataset";
+import type {
+  DatasetColumnField,
+  DatasetColumnFieldType,
+  DatasetDefinition,
+  DatasetOperation,
+  DatasetTable,
+} from "@dohc/security-contract/dataset";
 import type { AppBackendJson } from "@dohc/security-contract/app-backend";
 
 export interface TransactionalFieldDraft {
@@ -23,28 +29,74 @@ export function datasetDefinitionFromDrafts(input: {
   const tableId = input.tableId ?? crypto.randomUUID();
   const primaryFieldId = crypto.randomUUID();
   const primary: DatasetColumnField = {
-    fieldId: primaryFieldId, name: "Record ID", sqlColumn: "id", type: "text", required: true, unique: true, generated: "record-id",
+    fieldId: primaryFieldId,
+    name: "Record ID",
+    sqlColumn: "id",
+    type: "text",
+    required: true,
+    unique: true,
+    generated: "record-id",
   };
-  const fields: DatasetColumnField[] = [primary, ...input.fields.map(draft => {
-    const fieldId = crypto.randomUUID();
-    const sqlColumn = `f_${fieldId.replaceAll("-", "")}`;
-    const field: DatasetColumnField = {
-      fieldId, name: draft.name.trim(), sqlColumn, type: draft.type,
-      required: draft.required, unique: draft.unique,
-      ...(draft.default === undefined ? {} : { default: draft.default }),
-    };
-    if (draft.type === "select" || draft.type === "multi-select") field.options = [...(draft.options ?? [])];
-    return field;
-  })];
-  const table: DatasetTable = { tableId, name: input.name, sqlName: "records", primaryKey: "id", fields };
-  const userFieldIds = fields.slice(1).map(field => field.fieldId);
-  const op = (kind: DatasetOperation["kind"], access: DatasetOperation["access"], readOnly: boolean, label: string, operationName: string, fieldIds: string[]): DatasetOperation => ({
-    operationId: crypto.randomUUID(), name: operationName, label, tableId, kind, access, readOnly, fieldIds,
+  const fields: DatasetColumnField[] = [
+    primary,
+    ...input.fields.map((draft) => {
+      const fieldId = crypto.randomUUID();
+      const sqlColumn = `f_${fieldId.replaceAll("-", "")}`;
+      const field: DatasetColumnField = {
+        fieldId,
+        name: draft.name.trim(),
+        sqlColumn,
+        type: draft.type,
+        required: draft.required,
+        unique: draft.unique,
+        ...(draft.default === undefined ? {} : { default: draft.default }),
+      };
+      if (draft.type === "select" || draft.type === "multi-select")
+        field.options = [...(draft.options ?? [])];
+      return field;
+    }),
+  ];
+  const table: DatasetTable = {
+    tableId,
+    name: input.name,
+    sqlName: "records",
+    primaryKey: "id",
+    fields,
+  };
+  const userFieldIds = fields.slice(1).map((field) => field.fieldId);
+  const op = (
+    kind: DatasetOperation["kind"],
+    access: DatasetOperation["access"],
+    readOnly: boolean,
+    label: string,
+    operationName: string,
+    fieldIds: string[],
+  ): DatasetOperation => ({
+    operationId: crypto.randomUUID(),
+    name: operationName,
+    label,
+    tableId,
+    kind,
+    access,
+    readOnly,
+    fieldIds,
   });
   return {
-    formatVersion: 1, datasetId, name: input.name, schemaPath: input.schemaPath, operationsPath: input.operationsPath, tables: [table],
+    formatVersion: 1,
+    datasetId,
+    name: input.name,
+    schemaPath: input.schemaPath,
+    operationsPath: input.operationsPath,
+    tables: [table],
     operations: [
-      op("read", "helper", true, "View records", "records.list", fields.map(field => field.fieldId)),
+      op(
+        "read",
+        "helper",
+        true,
+        "View records",
+        "records.list",
+        fields.map((field) => field.fieldId),
+      ),
       op("create", "link", false, "Create record", "records.create", userFieldIds),
       op("edit", "helper", false, "Edit record", "records.edit", userFieldIds),
       op("delete", "owner", false, "Delete record", "records.delete", []),

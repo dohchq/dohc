@@ -13,9 +13,7 @@ describe("listFileChatsForIpc", () => {
       null,
     );
 
-    await expect(
-      listFileChatsForIpc(vi.fn(() => Promise.reject(updating))),
-    ).resolves.toEqual({
+    await expect(listFileChatsForIpc(vi.fn(() => Promise.reject(updating)))).resolves.toEqual({
       status: "refused",
       code: "workspace-updating",
     });
@@ -31,8 +29,6 @@ describe("listFileChatsForIpc", () => {
       null,
     );
 
-    await expect(
-      listFileChatsForIpc(() => Promise.reject(overloaded)),
-    ).rejects.toBe(overloaded);
+    await expect(listFileChatsForIpc(() => Promise.reject(overloaded))).rejects.toBe(overloaded);
   });
 });

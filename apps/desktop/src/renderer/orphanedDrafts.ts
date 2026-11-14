@@ -35,7 +35,7 @@ export type OrphanedDraft = {
   // an allocator can hand out again after a dismissal frees it, so the newest
   // draft in a run can hold a lower id than a survivor captured before it.
   // A capture time is the same number on both sides of a restart, and storage
-  // has carried it since #600.
+  // carries it.
   capturedAtMs: number;
   recovery?: DraftRecoveryIdentity;
 };
@@ -68,10 +68,7 @@ let notifyQueued = false;
 // Bumped on every mutation; snapshot caches key off it so useSyncExternalStore
 // sees stable references between mutations.
 let storeVersion = 0;
-const pathSetCache = new Map<
-  string,
-  { version: number; paths: ReadonlySet<string> }
->();
+const pathSetCache = new Map<string, { version: number; paths: ReadonlySet<string> }>();
 // The drafts a restart brings back. Everything else — a secret-classified
 // path the plaintext store refuses, and a draft whose write the storage quota
 // refused — dies with this app run, and only those stay behind the close
@@ -81,50 +78,76 @@ const recoveryRequests = new Map<string, Promise<void>>();
 
 // A late list or dismiss reply must not reintroduce a record a later dismiss removed.
 function withRecoveryRequest(workspaceId: string, work: () => Promise<void>): Promise<void> {
-  const request = (recoveryRequests.get(workspaceId) ?? Promise.resolve()).catch(() => {}).then(work);
+  const request = (recoveryRequests.get(workspaceId) ?? Promise.resolve())
+    .catch(() => {})
+    .then(work);
   recoveryRequests.set(workspaceId, request);
-  void request.finally(() => {
-    if (recoveryRequests.get(workspaceId) === request) recoveryRequests.delete(workspaceId);
-  }).catch(() => {});
+  void request
+    .finally(() => {
+      if (recoveryRequests.get(workspaceId) === request) recoveryRequests.delete(workspaceId);
+    })
+    .catch(() => {});
   return request;
 }
 
-function captureLiveDraftRecovery(workspaceId: string, records: readonly LiveDraftRecoveryRecord[]): void {
+function captureLiveDraftRecovery(
+  workspaceId: string,
+  records: readonly LiveDraftRecoveryRecord[],
+): void {
   for (const record of records) {
-    if (findWorkspaceDraft(workspaceId, draft => draft.recovery?.recordId === record.recordId)) continue;
+    if (findWorkspaceDraft(workspaceId, (draft) => draft.recovery?.recordId === record.recordId))
+      continue;
     const current = drafts.get(keyFor(workspaceId, record.path)) ?? EMPTY;
-    const recovery = {objectId: record.objectId, updateBase64: record.updateBase64, recordId: record.recordId, ...(record.reason ? {reason: record.reason} : {})};
-    const existing = current.find(draft => draft.recovery?.recordId === undefined &&
-      draft.recovery?.objectId === record.objectId && draft.recovery.updateBase64 === record.updateBase64 && draft.text === record.text);
-    if (existing) replaceOrphanedDraft(workspaceId, record.path, existing.id, record.text, recovery);
+    const recovery = {
+      objectId: record.objectId,
+      updateBase64: record.updateBase64,
+      recordId: record.recordId,
+      ...(record.reason ? { reason: record.reason } : {}),
+    };
+    const existing = current.find(
+      (draft) =>
+        draft.recovery?.recordId === undefined &&
+        draft.recovery?.objectId === record.objectId &&
+        draft.recovery.updateBase64 === record.updateBase64 &&
+        draft.text === record.text,
+    );
+    if (existing)
+      replaceOrphanedDraft(workspaceId, record.path, existing.id, record.text, recovery);
     else captureOrphanedDraft(workspaceId, record.path, record.text, recovery);
   }
 }
 
-function findWorkspaceDraft(workspaceId: string, matches: (draft: OrphanedDraft) => boolean): {path: string; draft: OrphanedDraft} | undefined {
+function findWorkspaceDraft(
+  workspaceId: string,
+  matches: (draft: OrphanedDraft) => boolean,
+): { path: string; draft: OrphanedDraft } | undefined {
   for (const [key, kept] of drafts) {
     const [keyWorkspaceId, path] = JSON.parse(key) as [string, string];
     if (keyWorkspaceId !== workspaceId) continue;
     const draft = kept.find(matches);
-    if (draft) return {path, draft};
+    if (draft) return { path, draft };
   }
 }
 
 // Every draft main keeps for the workspace, as main lists them now. A row of
 // main's draft that is no longer listed goes: main removed it, or replaced it
 // with a draft of newer text, which the listing adds.
-export function loadLiveDraftRecovery(workspaceId: string, isCurrent: () => boolean): Promise<void> {
+export function loadLiveDraftRecovery(
+  workspaceId: string,
+  isCurrent: () => boolean,
+): Promise<void> {
   return withRecoveryRequest(workspaceId, async () => {
     if (!isCurrent()) return;
-    const records = await bridge().listLiveDraftRecovery({workspaceId});
+    const records = await bridge().listLiveDraftRecovery({ workspaceId });
     if (!isCurrent()) return;
-    const listed = new Set(records.map(record => record.recordId));
+    const listed = new Set(records.map((record) => record.recordId));
     for (const [key, kept] of [...drafts]) {
       const [keyWorkspaceId, path] = JSON.parse(key) as [string, string];
       if (keyWorkspaceId !== workspaceId) continue;
       for (const draft of kept) {
         const recordId = draft.recovery?.recordId;
-        if (recordId !== undefined && !listed.has(recordId)) retireOrphanedDraft(workspaceId, path, draft.id);
+        if (recordId !== undefined && !listed.has(recordId))
+          retireOrphanedDraft(workspaceId, path, draft.id);
       }
     }
     captureLiveDraftRecovery(workspaceId, records);
@@ -207,10 +230,21 @@ export function replaceOrphanedDraft(
   const current = drafts.get(key) ?? EMPTY;
   const captured = current.find((draft) => draft.id === id);
   // Unchanged text still retries a write storage refused.
-  if (!captured || (captured.text === text && recovery === undefined && !orphanedDraftStorageRefused(path, id))) return;
+  if (
+    !captured ||
+    (captured.text === text && recovery === undefined && !orphanedDraftStorageRefused(path, id))
+  )
+    return;
   let replacementRecovery = recovery ?? captured.recovery;
-  if (recovery === undefined && text !== captured.text && replacementRecovery?.recordId !== undefined) {
-    replacementRecovery = {objectId: replacementRecovery.objectId, updateBase64: replacementRecovery.updateBase64};
+  if (
+    recovery === undefined &&
+    text !== captured.text &&
+    replacementRecovery?.recordId !== undefined
+  ) {
+    replacementRecovery = {
+      objectId: replacementRecovery.objectId,
+      updateBase64: replacementRecovery.updateBase64,
+    };
   }
   const replacement = { ...captured, text, recovery: replacementRecovery };
   drafts.set(
@@ -264,16 +298,20 @@ export async function dismissOrphanedDraft(
   id: number,
 ): Promise<void> {
   const key = keyFor(workspaceId, path);
-  const captured = drafts.get(key)?.find(draft => draft.id === id);
+  const captured = drafts.get(key)?.find((draft) => draft.id === id);
   if (!captured) return;
   const recovery = captured.recovery;
   if (recovery) {
     const discardedAtMs = Date.now();
     await withRecoveryRequest(workspaceId, async () => {
       const assertCurrent = () => {
-        const current = findWorkspaceDraft(workspaceId, draft => draft.id === id);
-        if (!current || current.draft.text !== captured.text ||
-          current.draft.recovery?.objectId !== recovery.objectId || current.draft.recovery.updateBase64 !== recovery.updateBase64) {
+        const current = findWorkspaceDraft(workspaceId, (draft) => draft.id === id);
+        if (
+          !current ||
+          current.draft.text !== captured.text ||
+          current.draft.recovery?.objectId !== recovery.objectId ||
+          current.draft.recovery.updateBase64 !== recovery.updateBase64
+        ) {
           throw new Error("This draft changed while dohc dismissed it. Review it and try again.");
         }
         return current;
@@ -282,13 +320,20 @@ export async function dismissOrphanedDraft(
       const bytes = base64ToBytes(recovery.updateBase64);
       const hash = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
       const current = assertCurrent();
-      const snapshotSha256 = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");
+      const snapshotSha256 = Array.from(new Uint8Array(hash), (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("");
       const records = await bridge().discardLiveDraftRecovery({
-        workspaceId, path: current.path, objectId: recovery.objectId, snapshotSha256, discardedAtMs, recordId: current.draft.recovery?.recordId,
+        workspaceId,
+        path: current.path,
+        objectId: recovery.objectId,
+        snapshotSha256,
+        discardedAtMs,
+        recordId: current.draft.recovery?.recordId,
       });
       captureLiveDraftRecovery(workspaceId, records);
       const latest = assertCurrent();
-      if (!records.some(record => record.recordId === latest.draft.recovery?.recordId)) {
+      if (!records.some((record) => record.recordId === latest.draft.recovery?.recordId)) {
         retireOrphanedDraft(workspaceId, latest.path, id);
       }
     });
@@ -299,9 +344,7 @@ export async function dismissOrphanedDraft(
 
 function retireOrphanedDraft(workspaceId: string, path: string, id: number): void {
   const key = keyFor(workspaceId, path);
-  const remaining = (drafts.get(key) ?? EMPTY).filter(
-    (draft) => draft.id !== id,
-  );
+  const remaining = (drafts.get(key) ?? EMPTY).filter((draft) => draft.id !== id);
   if (remaining.length === 0) drafts.delete(key);
   else drafts.set(key, remaining);
   // The stored copy goes with the in-memory one. This is the one path that
@@ -325,8 +368,8 @@ export function remapOrphanedDraftPaths(
   project: (path: string) => string | null,
 ): void {
   // The stored copies move with them, and a rename onto a secret-classified
-  // path drops its plaintext row instead (#446 floor) — those drafts stop
-  // being durable and go back behind the close warning.
+  // path drops its plaintext row instead. Those drafts stop being durable
+  // and go back behind the close warning.
   const demoted = remapStoredDraftPaths(workspaceId, project);
   for (const id of demoted) storedIds.delete(id);
   let changed = demoted.size > 0;
@@ -341,10 +384,7 @@ export function remapOrphanedDraftPaths(
     // `byCaptureOrder` is what keeps this run's reading and the next launch's
     // reading the same — appending would read one way here and the other way
     // after a restart, reordering the Copy edits buttons under the user.
-    drafts.set(
-      nextKey,
-      [...(drafts.get(nextKey) ?? EMPTY), ...kept].sort(byCaptureOrder),
-    );
+    drafts.set(nextKey, [...(drafts.get(nextKey) ?? EMPTY), ...kept].sort(byCaptureOrder));
     changed = true;
   }
   if (changed) scheduleNotify();
@@ -355,10 +395,7 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-export function useOrphanedDrafts(
-  workspaceId: string,
-  path: string,
-): readonly OrphanedDraft[] {
+export function useOrphanedDrafts(workspaceId: string, path: string): readonly OrphanedDraft[] {
   return useSyncExternalStore(subscribe, () => {
     return drafts.get(keyFor(workspaceId, path)) ?? EMPTY;
   });
@@ -368,8 +405,18 @@ export function useOrphanedDrafts(
 // marks inactive tabs with it — only the mounted inspector
 // can report savable-dirty, but recovery is knowable for every tab.
 export function retainedOrphanedDraftPaths(workspaceId: string): string[] {
-  const paths = [...drafts.keys()].map(key => JSON.parse(key) as [string, string]).filter(([id]) => id === workspaceId).map(([, path]) => path);
-  return [...new Set([...paths, ...loadStoredDrafts(Date.now(), {bindHandles: false}).filter(draft => draft.workspaceId === workspaceId).map(draft => draft.path)])];
+  const paths = [...drafts.keys()]
+    .map((key) => JSON.parse(key) as [string, string])
+    .filter(([id]) => id === workspaceId)
+    .map(([, path]) => path);
+  return [
+    ...new Set([
+      ...paths,
+      ...loadStoredDrafts(Date.now(), { bindHandles: false })
+        .filter((draft) => draft.workspaceId === workspaceId)
+        .map((draft) => draft.path),
+    ]),
+  ];
 }
 
 export function useOrphanedDraftPaths(workspaceId: string): ReadonlySet<string> {
@@ -410,7 +457,6 @@ export function atRiskOrphanedDraftIds(): readonly number[] {
   return ids;
 }
 
-// Whether a restart brings this draft back.
 export function isOrphanedDraftStored(id: number): boolean {
   return storedIds.has(id) && isStoredDraftCurrent(id);
 }
@@ -445,14 +491,13 @@ export function noteWorkspaceLabel(workspaceId: string, label: string): void {
   scheduleNotify();
 }
 
-let allRowsCache: { version: number; rows: readonly OrphanedDraftRow[] } | null =
-  null;
+let allRowsCache: { version: number; rows: readonly OrphanedDraftRow[] } | null = null;
 const EMPTY_ROWS: readonly OrphanedDraftRow[] = [];
 
-// Every unresolved draft, across workspaces, path-independent (#579 review,
-// r5): a deleted file has no inspector left to render its notice, so the
-// recovery surfaces that use this — the close-warning dialog and the notice
-// center — must not depend on any path still existing.
+// Every unresolved draft, across workspaces, path-independent. A deleted
+// file has no inspector left to render its notice, so the recovery surfaces
+// that use this (the close-warning dialog and the notice center) must not
+// depend on any path still existing.
 export function useAllOrphanedDrafts(): readonly OrphanedDraftRow[] {
   return useSyncExternalStore(subscribe, () => {
     if (allRowsCache && allRowsCache.version === storeVersion) {

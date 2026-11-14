@@ -41,12 +41,7 @@ test("runs the inherited pnpm JavaScript CLI without a shell", () => {
     }),
     {
       command: "/Program Files/node",
-      args: [
-        "/Package Tools/pnpm.mjs",
-        "--filter",
-        "@dohc/desktop",
-        "build",
-      ],
+      args: ["/Package Tools/pnpm.mjs", "--filter", "@dohc/desktop", "build"],
     },
   );
 });
@@ -99,9 +94,7 @@ function pngHeader(width, height) {
 }
 
 async function writeAuditShots(directory, image) {
-  await Promise.all(
-    expectedUiAuditShots.map((name) => writeFile(join(directory, name), image)),
-  );
+  await Promise.all(expectedUiAuditShots.map((name) => writeFile(join(directory, name), image)));
 }
 
 async function writeCaptureManifest(
@@ -155,10 +148,7 @@ test("rejects a capture below the byte floor", async (t) => {
   await writeAuditShots(directory, image);
   await writeCaptureManifest(directory, image);
 
-  assert.throws(
-    () => validateUiAuditDirectory(directory, COMMIT, BUNDLES),
-    /capture may be blank/,
-  );
+  assert.throws(() => validateUiAuditDirectory(directory, COMMIT, BUNDLES), /capture may be blank/);
 });
 
 test("rejects a capture below the dimension floor", async (t) => {
@@ -197,10 +187,7 @@ test("attributes each validated screenshot to its filesystem capture time", asyn
   const result = validateUiAuditDirectory(directory, COMMIT, BUNDLES);
   assert.equal(result.shots.length, expectedUiAuditShots.length);
   assert.equal(result.shots[0].modifiedAt, capturedAt.toISOString());
-  assert.equal(
-    result.shots[0].sha256,
-    createHash("sha256").update(image).digest("hex"),
-  );
+  assert.equal(result.shots[0].sha256, createHash("sha256").update(image).digest("hex"));
 });
 
 test("rejects screenshots captured from a different commit", async (t) => {
@@ -242,10 +229,7 @@ test("rejects an incomplete capture", async (t) => {
   await writeAuditShots(directory, image);
   await writeCaptureManifest(directory, image, { state: "in-progress" });
 
-  assert.throws(
-    () => validateUiAuditDirectory(directory, COMMIT, BUNDLES),
-    /has an invalid shape/,
-  );
+  assert.throws(() => validateUiAuditDirectory(directory, COMMIT, BUNDLES), /has an invalid shape/);
 });
 
 test("rejects screenshots from a different desktop build", async (t) => {
@@ -299,26 +283,14 @@ test("binds every main and preload artifact to the build stamp", async (t) => {
   ]);
   const bundles = currentUiAuditBundles(desktopRoot, "linux");
   const distBefore = sha256Tree(join(desktopRoot, "dist"));
-  writeUiAuditBuildProvenance(
-    desktopRoot,
-    COMMIT,
-    bundles,
-    "2026-08-30T03:59:00.000Z",
-  );
+  writeUiAuditBuildProvenance(desktopRoot, COMMIT, bundles, "2026-08-30T03:59:00.000Z");
   assert.equal(sha256Tree(join(desktopRoot, "dist")), distBefore);
-  assert.deepEqual(
-    readUiAuditBuildProvenance(desktopRoot, COMMIT, bundles).bundles,
-    bundles,
-  );
+  assert.deepEqual(readUiAuditBuildProvenance(desktopRoot, COMMIT, bundles).bundles, bundles);
 
   await writeFile(join(desktopRoot, "dist/main/lazy-chunk.js"), "new main chunk");
   assert.throws(
     () =>
-      readUiAuditBuildProvenance(
-        desktopRoot,
-        COMMIT,
-        currentUiAuditBundles(desktopRoot, "linux"),
-      ),
+      readUiAuditBuildProvenance(desktopRoot, COMMIT, currentUiAuditBundles(desktopRoot, "linux")),
     /mainTreeSha256 does not match the current desktop build/,
   );
 });

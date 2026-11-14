@@ -16,7 +16,6 @@ import {
   type TempWorkspace,
 } from "./helpers/workspace";
 
-// Set UI_AUDIT_SHOT_DIR to also save each frame in both themes.
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR ?? "";
 const GROUP = "Agent work";
 const LINK = "https://example.com/threads/7";
@@ -38,25 +37,49 @@ async function shoot(page: Page, name: string): Promise<void> {
 type Work = { status: "working" | "waiting" | "done" | "failed" | "stopped"; url?: string };
 
 function post(temp: TempWorkspace, body: string, work?: Work) {
-  return sendCliRequest<"post">({
-    protocolVersion: CLI_PROTOCOL_VERSION,
-    verb: "post",
-    args: {
-      cwd: temp.rootPath, actor: "agent", agent: "Nova", group: GROUP, body,
-      attachments: [], needsDecision: false, ...(work ? { work } : {}),
+  return sendCliRequest<"post">(
+    {
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "post",
+      args: {
+        cwd: temp.rootPath,
+        actor: "agent",
+        agent: "Nova",
+        group: GROUP,
+        body,
+        attachments: [],
+        needsDecision: false,
+        ...(work ? { work } : {}),
+      },
     },
-  }, { stateDir: temp.homeDir });
+    { stateDir: temp.homeDir },
+  );
 }
 
-function reply(temp: TempWorkspace, thread: string, body: string, work: Work, actor: "agent" | "human" = "agent") {
-  return sendCliRequest<"reply">({
-    protocolVersion: CLI_PROTOCOL_VERSION,
-    verb: "reply",
-    args: {
-      cwd: temp.rootPath, actor, ...(actor === "agent" ? { agent: "Nova" } : {}), thread, body,
-      attachments: [], needsDecision: false, work,
+function reply(
+  temp: TempWorkspace,
+  thread: string,
+  body: string,
+  work: Work,
+  actor: "agent" | "human" = "agent",
+) {
+  return sendCliRequest<"reply">(
+    {
+      protocolVersion: CLI_PROTOCOL_VERSION,
+      verb: "reply",
+      args: {
+        cwd: temp.rootPath,
+        actor,
+        ...(actor === "agent" ? { agent: "Nova" } : {}),
+        thread,
+        body,
+        attachments: [],
+        needsDecision: false,
+        work,
+      },
     },
-  }, { stateDir: temp.homeDir });
+    { stateDir: temp.homeDir },
+  );
 }
 
 test("an agent's work report shows as the thread's Work card, which is its newest report", async () => {
@@ -80,8 +103,10 @@ test("an agent's work report shows as the thread's Work card, which is its newes
     await expect(main.getByTestId("chats-channel-title")).toHaveText(GROUP);
     await waitForCliEndpoint(temp.homeDir);
 
-    // An agent working elsewhere posts where its work is and how it stands.
-    const started = await post(temp, "Fix the login redirect\nReproducing it in a thread.", { status: "working", url: LINK });
+    const started = await post(temp, "Fix the login redirect\nReproducing it in a thread.", {
+      status: "working",
+      url: LINK,
+    });
     await post(temp, "Notes from the review\nNothing is running for this one.");
     const card = main.getByTestId("chats-post-card").filter({ hasText: "Fix the login redirect" });
     const status = card.getByTestId("chats-post-work");
@@ -94,43 +119,56 @@ test("an agent's work report shows as the thread's Work card, which is its newes
     await expect(plain.getByTestId("chats-post-work")).toHaveCount(0);
     await shoot(page, "a-post-working");
 
-    // A person's message reports no work.
-    await expect(reply(temp, started.threadId, "Mine", { status: "done" }, "human"))
-      .rejects.toThrow("Only an agent reports work");
+    await expect(
+      reply(temp, started.threadId, "Mine", { status: "done" }, "human"),
+    ).rejects.toThrow("Only an agent reports work");
 
-    // The agent reports again without a link. The card becomes that report,
-    // with no reload: its status, and no link, because it gave none.
-    await reply(temp, started.threadId, "Waiting for a review on the pull request.", { status: "waiting" });
+    await reply(temp, started.threadId, "Waiting for a review on the pull request.", {
+      status: "waiting",
+    });
     await expect(status).toHaveAttribute("data-status", "waiting");
     await expect(card.getByTestId("chats-post-work-open")).toHaveCount(0);
     await expect(card.getByTestId("chats-post-work-reporter")).toHaveText("Nova");
     await shoot(page, "b-post-waiting");
-    await reply(temp, started.threadId, "Merged.", { status: "done", url: "https://example.com/pull/12" });
+    await reply(temp, started.threadId, "Merged.", {
+      status: "done",
+      url: "https://example.com/pull/12",
+    });
     await expect(status).toHaveAttribute("data-status", "done");
-    await expect(card.getByTestId("chats-post-work-open")).toHaveAttribute("title", "https://example.com/pull/12");
+    await expect(card.getByTestId("chats-post-work-open")).toHaveAttribute(
+      "title",
+      "https://example.com/pull/12",
+    );
     await shoot(page, "c-post-done");
 
-    // Inside the thread, each report shows on its own message, the opening
-    // post's included.
     await card.click();
     await expect(main.getByTestId("chats-thread-view")).toBeVisible();
     await expect(main.getByTestId("chats-message-work")).toHaveAttribute("data-status", "working");
     await expect(main.getByTestId("chats-message-work-open")).toHaveAttribute("title", LINK);
-    await expect.poll(() => main.getByTestId("chats-comment-work").evaluateAll(
-      (reports) => reports.map((report) => report.getAttribute("data-status")),
-    )).toEqual(["waiting", "done"]);
+    await expect
+      .poll(() =>
+        main
+          .getByTestId("chats-comment-work")
+          .evaluateAll((reports) => reports.map((report) => report.getAttribute("data-status"))),
+      )
+      .toEqual(["waiting", "done"]);
     await expect(main.getByTestId("chats-comment-work-open")).toHaveCount(1);
     await shoot(page, "d-thread-done");
 
-    // An agent reading the chat gets the same card.
-    const shown = await sendCliRequest<"show">({
-      protocolVersion: CLI_PROTOCOL_VERSION,
-      verb: "show",
-      args: { cwd: temp.rootPath, actor: "agent", target: GROUP, peek: true },
-    }, { stateDir: temp.homeDir });
+    const shown = await sendCliRequest<"show">(
+      {
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb: "show",
+        args: { cwd: temp.rootPath, actor: "agent", target: GROUP, peek: true },
+      },
+      { stateDir: temp.homeDir },
+    );
     if (!("stream" in shown)) throw new Error("Expected the group's stream.");
     const posted = shown.stream.items.find((item) => item.threadId === started.threadId);
-    expect(posted?.post?.work).toMatchObject({ status: "done", url: "https://example.com/pull/12" });
+    expect(posted?.post?.work).toMatchObject({
+      status: "done",
+      url: "https://example.com/pull/12",
+    });
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

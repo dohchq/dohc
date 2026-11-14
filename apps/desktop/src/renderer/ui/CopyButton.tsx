@@ -4,21 +4,13 @@ import { withErrorWords } from "../../ipc/errorWords";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
 import { PrimaryButton } from "./controls";
 
-// The one copy control. It says what happened in place, says it again to a
-// screen reader, and hands a failure to the shell's error hook, so the toast
-// and the Notices row still carry it after the surface that failed has closed.
-// `createCopy` is its behavior; `CopyButton` draws it in React, and the
-// editor's code-block toolbar draws it in the DOM ProseMirror owns.
-//
-// The caller owns the text. `getText` runs at the click, so the copy is of
-// what the surface holds then; null means there is nothing to copy. Text that
-// arrives after a newer click, or after the control is gone, is not written:
-// it may be stale, and the surface may have retired it, as it retires a share
-// link it has reset.
 export const COPY_FEEDBACK_MS = 2000;
 export const COPY_FAILURE = "dohc could not copy to the clipboard.";
 export type CopyFeedback = "copied" | "failed";
-export const COPY_WORDS: Record<CopyFeedback, string> = { copied: "Copied", failed: "Could not copy" };
+export const COPY_WORDS: Record<CopyFeedback, string> = {
+  copied: "Copied",
+  failed: "Could not copy",
+};
 
 // The tile, shared with the code-block toolbar. A copy is feedback on an
 // action, not a sign the work is safe, so Copied keeps the control's own
@@ -59,7 +51,12 @@ export type CopySecret = { what: string; again: string };
 // A failure's words: what happened, why if the error says, then, for a secret
 // whose control is gone, where to copy it again. `failure` names what could
 // not be copied when the text comes from dohc rather than the screen.
-function failureWords(secret: CopySecret | undefined, error: unknown, gone: boolean, failure = COPY_FAILURE): string {
+function failureWords(
+  secret: CopySecret | undefined,
+  error: unknown,
+  gone: boolean,
+  failure = COPY_FAILURE,
+): string {
   const said = withErrorWords(secret ? `dohc could not copy ${secret.what}.` : failure, error);
   return secret && gone ? `${said} ${secret.again}` : said;
 }
@@ -93,7 +90,11 @@ function retryAfter(
       return;
     }
     write(text).catch((next: unknown) =>
-      report({ message: failureWords(secret, next, true, failure), cause: next, retry: retryAfter(control, report, secret, next, text, failure) }),
+      report({
+        message: failureWords(secret, next, true, failure),
+        cause: next,
+        retry: retryAfter(control, report, secret, next, text, failure),
+      }),
     );
   };
 }
@@ -208,7 +209,10 @@ export function CopyButton(props: {
 }) {
   const report = useContext(ShellErrorReporter);
   const label = props.label ?? "Copy";
-  const words: Record<CopyFeedback, string> = { ...COPY_WORDS, ...(props.copiedLabel ? { copied: props.copiedLabel } : {}) };
+  const words: Record<CopyFeedback, string> = {
+    ...COPY_WORDS,
+    ...(props.copiedLabel ? { copied: props.copiedLabel } : {}),
+  };
   const [feedback, setFeedback] = useState<CopyFeedback | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const getText = useRef<typeof props.getText | null>(props.getText);
@@ -253,7 +257,7 @@ export function CopyButton(props: {
   }, []);
 
   const shown = feedback ? words[feedback] : label;
-  const Icon = feedback ? ICON[feedback] : props.icon ?? Copy;
+  const Icon = feedback ? ICON[feedback] : (props.icon ?? Copy);
   if (props.primary) {
     return (
       <>
@@ -290,7 +294,11 @@ export function CopyButton(props: {
             : `${wordsClass} ${WORDS_SIZE[props.size ?? "row"]}`
         }
       >
-        <Icon size={props.size === "header" ? 12 : 13} aria-hidden className={!props.iconOnly && feedback === "failed" ? "text-danger" : undefined} />
+        <Icon
+          size={props.size === "header" ? 12 : 13}
+          aria-hidden
+          className={!props.iconOnly && feedback === "failed" ? "text-danger" : undefined}
+        />
         {props.iconOnly ? null : shown}
       </button>
       <span role="status" aria-live="polite" className="sr-only">

@@ -1,24 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { WaiterRegistry } from "@dohc/service-http";
 
-// MU-C1 — the EPHEMERAL awareness transport (presence / typing / co-viewing).
+// The ephemeral awareness transport: presence, typing, and co-viewing. It is
+// separate from the durable op log (storage.ts / sync_relay_log). Presence is
+// last-writer, self-expiring, dropped on disconnect, and must never be
+// journaled. Nothing in this module touches `storage`: it holds no sqlite
+// handle, writes no row, and is lost entirely on relay restart. It rides the
+// relay process a self-hoster already runs. If a proxy blocks the presence
+// routes, chat and co-editing still work; only presence degrades.
 //
-// This is the in-memory pub/sub the design calls "the ephemeral awareness
-// channel over the relay transport". It is deliberately separate from the
-// durable op log (storage.ts / sync_relay_log): presence, typing, and
-// "viewing this channel/doc" are last-writer, self-expiring, dropped on
-// disconnect, and must never be journaled (0P Risk 2 / the G2-C awareness
-// rule). Nothing in this module touches `storage` — it holds no sqlite handle,
-// writes no row, and is lost entirely on relay restart. That is the contract.
-//
-// It rides the same relay process a self-hoster already runs (no new service),
-// so presence is fully self-hostable. If a proxy blocks the presence routes,
-// chat/co-editing still work fully — only presence degrades, exactly the
-// G2-C/design contract.
-//
-// Transport shape: long-poll, not a websocket. A long-poll GET holds until a
+// The transport is long-poll, not a websocket. A long-poll GET holds until a
 // change or a bounded timeout, then returns a finite snapshot plus version
-// cursor. A publisher heartbeats faster than the entry TTL to stay "present";
+// cursor. A publisher heartbeats faster than the entry TTL to stay present;
 // a peer polls with the last version and re-parks.
 //
 // Identity is never trusted from the client. The relay stamps each entry's
@@ -26,14 +19,12 @@ import { WaiterRegistry } from "@dohc/service-http";
 // state and project snapshots per viewer before sending them. Account IDs and
 // transport client IDs remain internal to the hub.
 //
-// RESOURCE SAFETY (the load-bearing part): everything in the hub is bounded
-// and time-expired. Expiry is TIME-DRIVEN — a sweep timer removes entries past
-// their TTL and reclaims empty scopes even if nothing ever touches that scope
-// again, so a client that sprays unique topics and disconnects cannot grow
-// memory forever. On top of the TTL there are hard caps: global and
-// per-workspace scope/entry caps bound publishes, and global / per-scope /
-// per-actor caps bound parked long-poll waiters. Past a cap the hub refuses
-// (PresenceCapacityError -> 429); it never grows unboundedly.
+// Everything in the hub is bounded and time-expired. A sweep timer removes
+// entries past their TTL and reclaims empty scopes even if nothing touches
+// them again, so a client that sprays unique topics and disconnects cannot
+// grow memory. Hard caps sit on top: global and per-workspace scope/entry
+// caps bound publishes, and global, per-scope, and per-actor caps bound parked
+// long-poll waiters. Past a cap the hub refuses (PresenceCapacityError -> 429).
 
 export interface PresenceEntry {
   // Server-derived: the authenticated actor's user id. Never client-supplied.
@@ -72,7 +63,6 @@ export interface PresenceHubOptions {
   // misbehaving client spraying clientIds. Updates to existing entries are
   // always allowed; only new distinct entries past the cap are refused.
   maxEntriesPerScope?: number;
-  // Global caps across all scopes: total scope count and total entry count.
   maxScopes?: number;
   maxTotalEntries?: number;
   // Per-workspace (scope group) caps, so one workspace spraying topics cannot
@@ -281,7 +271,9 @@ export class PresenceHub {
     const groups = new Set(workspaceIds);
     for (const [key, scope] of this.scopes) {
       let changed = false;
-      for (const [entryKey, entry] of scope.entries) if (entry.userId === userId || groups.has(scope.group)) changed = this.deleteEntry(scope, entryKey) || changed;
+      for (const [entryKey, entry] of scope.entries)
+        if (entry.userId === userId || groups.has(scope.group))
+          changed = this.deleteEntry(scope, entryKey) || changed;
       if (changed) this.bump(key, scope);
       this.gc(key, scope);
     }

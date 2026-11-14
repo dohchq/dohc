@@ -121,9 +121,19 @@ Do not weaken authorization, ownership, isolation, or configured controls for co
   Raw full-body Markdown patches cannot be the source of truth for live editing.
 - Give reversible state changes a visible reverse path. Warn before irreversible actions.
 - Show a top bar only for whole-workspace degradation. Other errors belong in bottom-right toasts and durable Notices rows.
-  Include Try again and copy. Put copy beside its text. Follow [dohc-interface](.agents/skills/dohc-interface/SKILL.md).
-- Guard async renderer responses with a workspace/request token, abort signal, or equivalent before changing workspace-scoped state.
-  A slow workspace A response must never repaint workspace B.
+  Include Try again and copy. Put copy beside its text.
+  [dohc-interface](.agents/skills/dohc-interface/SKILL.md) names the errors that show in place instead, such as a control's own input or an open dialog's action.
+- A slow workspace A response must never repaint workspace B.
+  In a renderer component or hook, read workspace data with `useWorkspaceQuery`.
+  Guard any other async result with a request token or abort signal before it changes workspace-scoped state.
+
+A check enforces some of these rules. Its limit says what it does not catch.
+
+| Rule | Check | Limit |
+| --- | --- | --- |
+| Read workspace data with `useWorkspaceQuery`. | `scripts/check-bridge-reads.mjs`. `scripts/bridge-reads.json` lists older reads. A ceiling in the script stops that list from growing. | The check does not see reads in a file that is not a hook or component, methods outside its read list, or a bridge passed through a parameter or a longer helper. A new read can take an older entry for the same method in the same file. A read above the workspace provider, or one already in a file that gains a hook or component, is listed by raising the ceiling in a reviewed change. A loader that calls a setter it captured can still write late. Keep loaders to reading and returning. |
+| Show a failure as a toast and a Notices row, with Try again and copy. | `pnpm typecheck` on notices through `NoticeOwner` (`apps/desktop/src/notices/noticeOwner.ts`). A view gets a notice only by giving `open` its Try again, a caller cannot pass a failure count, and `FailureWords` must have words for each failure code. | Only the Versions page's reads report through the owner. Every other failure still calls the shell's report hooks, which take any sentence and an optional Try again. The shell can drop a report, such as a stopped workspace's read, or drop its Try again for an error that cannot be retried. The words of the error that caused a failure come from `readError`, which shows the plain message of an error it does not list. Try again stops once the view calls `close`, and nothing checks that it does. Nothing checks that a view calls `failed` when a failure arrives. Without that call, a dismissed notice does not come back. Nothing finds a failure that reports nothing. |
+| Declare a read once, in its family's `*Declarations.ts` file in `packages/workspace-contracts/src`. List each family once, in `allDeclarations.ts`. Declare only reads. The CLI socket gives a declared verb no write admission and its reader no actor or agent id. The declaration supplies the IPC row, the CLI command and socket verb, the MCP tool, and the capability entries. Write the CLI parser, socket reader, and IPC handler by hand. The types require each one. If you add or change a declaration, run `pnpm write:operation-pins`. Read the pin diff closely. It is the review gate for a change in exposure. | The capability table, the CLI, and the IPC tables take their families from `allDeclarations.ts`. The type refuses an `access` other than read, and an input that names a request, args, or workspace field. `allDeclarations.ts` refuses either one hidden by a cast when it loads. At load, the CLI and capability table refuse a declared command, verb, operation name, or tool that repeats another. `operationTables.ts` refuses a repeated IPC channel, or a listed declaration with no IPC row, when it loads. `scripts/check-renderer-declarations.mjs` refuses a renderer that loads a declaration at run time. The `capabilityExposure.test.ts` files in the desktop and MCP packages compare each door with its pin. | Only five reads are declared: `dohc links edges`, `links in`, `links resolve`, `chat links`, and `chat file-mentions`. Other operations keep their entries at each door by hand. The `chat links` Group input and its socket branch stay hand-written, and no type requires them. A declaration grants MCP access: `mcp.levels` decides at which share levels the MCP server registers a tool. A socket request carries no share level, so for these reads the levels are the only difference between share levels. Each door keeps its own guard, and the CLI received-share rules stay hand-written. Only tests load `operationTables.ts`. The pin script replaces a declared channel's admission row, with `handlerCheck` null. It deletes a declared tool's pin at a level its declaration no longer lists. It leaves the entries of a removed declaration and does not write `channelKeys.main.json`. |
 
 Within these boundaries, app authors choose frameworks and services and own app behavior, including where received data goes.
 
@@ -231,6 +241,9 @@ Preserve required evidence and source.
 Read [the verification procedure](docs/engineering/verify-agent-work.md) for setup, desktop QA, debug access, and PR evidence.
 Run the smallest check that proves the change.
 Run affected-package typechecks and focused tests while editing and during review.
+Run `pnpm lint` after you change JavaScript or TypeScript. It runs oxlint with the rules in `.oxlintrc.json`, and the JavaScript gate runs it too.
+Fix a report in the code. If the code is correct, put `// oxlint-disable-next-line <rule> -- <reason>` above the line.
+Run `pnpm fmt` before you commit JavaScript or TypeScript. The JavaScript gate fails on a file that oxfmt would change.
 Test observable behavior that can break. Mock-call assertions and callback wiring alone do not prove it.
 Leave facts already guaranteed by types to the typechecker.
 Extend an existing case or table when it covers the behavior.
@@ -292,8 +305,8 @@ Only `verify:pr` holds the verification lane. Run focused checks, benchmarks, an
   Combine correctness and simplification; provide the diff, relevant source, and required behavior.
 - Authorization, isolation, security, privacy, migration, durability, and major integrations need a second independent risk reviewer.
   Disputed blockers also need a second reviewer. Name reviewers and scopes in the PR.
-- Keep appointed reviewers through fix rounds. Replace an unavailable reviewer once and record why.
-  The replacement owns remaining review; the original reviewer's return adds no extra pass.
+- Keep appointed reviewers through fix rounds. Replace an unavailable reviewer once.
+  The replacement owns the remaining review; the original reviewer's return adds no extra pass.
 
 ### Review findings
 
@@ -310,7 +323,7 @@ Further rounds need a new verified blocker or unresolved high-risk concern.
 Unchanged rebases need a recorded comparison, not restarted review. Review conflict resolutions and substantive integration changes.
 Before merge, account for the full diff, later deltas, and every known finding on the final head. Resolve all verified blockers.
 Optional bot approval and reviewer unanimity are not merge conditions.
-Maintain one PR review note with reviewed commits, delta coverage, dispositions, round count, useful fixes, and reviewer/verification delays.
-Use local step durations; mark unknown times as unknown.
-Use these records to identify repeated delays and overlapping tests before changing coverage.
+Maintain one PR review note with reviewed commits, delta coverage, dispositions, and round count.
+Record reviewer and verification delays only when investigating a process problem. Use local step durations; mark unknown times as unknown.
+Use those records to identify repeated delays and overlapping tests before changing coverage.
 Narrower gates must account for shared dependencies in both the runner and workflow filters.

@@ -19,9 +19,9 @@ import { recordedShareSelector } from "./shareViewRecords";
 //   Absent -> an ordinary workspace.
 //   Present -> a share view, restricted, whether or not it can be read.
 //
-// A stored `null` is PRESENT. It is a share-view field that lost its value,
-// not a workspace that never had one, and `?? null` used to read the two as
-// the same thing.
+// A stored `null` is present. It is a share-view field that lost its value,
+// not a workspace that never had one. Do not read it with `?? null`, which
+// reads the two as the same thing.
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

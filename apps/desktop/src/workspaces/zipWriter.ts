@@ -1,10 +1,3 @@
-// Store-only zip writer (PKWARE APPNOTE container format, method 0 — no
-// compression). Pure and dependency-free on purpose: workspace exports are
-// local folders where deflate buys little, no zip dependency exists anywhere
-// in the lockfile, and ~120 auditable lines beat a third-party archiver on a
-// privileged-main-process surface. If compression ever becomes a requirement,
-// yazl is the smallest credible dep — decide once at review.
-
 export interface ZipEntry {
   // Forward-slash relative path inside the archive ("notes/today.md").
   path: string;
@@ -41,19 +34,11 @@ export function crc32(data: Uint8Array): number {
 function dosDateTime(date: Date): { time: number; date: number } {
   const year = Math.max(date.getFullYear(), 1980);
   return {
-    time:
-      (date.getHours() << 11) |
-      (date.getMinutes() << 5) |
-      Math.floor(date.getSeconds() / 2),
+    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
     date: ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
   };
 }
 
-// Entry names must be relative POSIX paths. Many extractors honor an absolute
-// path, a drive letter, backslashes (Windows separators), or a ".." segment to
-// write outside the extraction directory (zip-slip). This is the container
-// boundary, so refuse them here — no buildStoreZip caller can emit a slip name
-// even if its own name construction is ever wrong.
 function assertSafeEntryName(name: string): void {
   if (name.length === 0) throw new Error("Zip entry name is empty");
   if (name.startsWith("/")) throw new Error(`Zip entry name is absolute: ${name}`);

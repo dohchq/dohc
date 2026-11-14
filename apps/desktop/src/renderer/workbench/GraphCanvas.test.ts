@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { contrastRatio, mixHex } from "../accentColor";
 import { identityHues, palette } from "../tokens";
-import { GROUP_HUES, LABEL_DIM, NODE_DIM, NODE_TOKEN, fitCamera, followCamera, labelOpacity, shortTitle } from "./GraphCanvas";
+import {
+  GROUP_HUES,
+  LABEL_DIM,
+  NODE_DIM,
+  NODE_TOKEN,
+  fitCamera,
+  followCamera,
+  labelOpacity,
+  shortTitle,
+} from "./GraphCanvas";
 
 // The Graph page draws on bg, the side panel on panel.
 const SURFACES = ["bg", "panel"] as const;
@@ -16,7 +25,10 @@ function lowest(theme: "light" | "dark", colors: readonly string[], alpha: numbe
 }
 
 describe.each(["light", "dark"] as const)("dimmed Graph nodes in %s", (theme) => {
-  const nodeColors = [palette[theme][NODE_TOKEN[theme]], ...GROUP_HUES.map((hue) => identityHues[theme][hue])];
+  const nodeColors = [
+    palette[theme][NODE_TOKEN[theme]],
+    ...GROUP_HUES.map((hue) => identityHues[theme][hue]),
+  ];
 
   it("keep every node colour at 3:1, and dim no further than that needs", () => {
     expect(lowest(theme, nodeColors, NODE_DIM[theme])).toBeGreaterThanOrEqual(3);
@@ -32,12 +44,12 @@ describe.each(["light", "dark"] as const)("dimmed Graph nodes in %s", (theme) =>
     for (const emphasis of [0.1, 0.5, 1]) {
       for (const fade of [0.05, 0.5, 0.95, 1]) {
         const alpha = labelOpacity(fade, emphasis, LABEL_DIM[theme], false);
-        if (alpha > 0) expect(lowest(theme, [palette[theme].muted], alpha)).toBeGreaterThanOrEqual(4.5);
+        if (alpha > 0)
+          expect(lowest(theme, [palette[theme].muted], alpha)).toBeGreaterThanOrEqual(4.5);
       }
     }
     expect(labelOpacity(0.5, 1, LABEL_DIM[theme], false)).toBe(0);
     expect(labelOpacity(1, 1, LABEL_DIM[theme], false)).toBeCloseTo(LABEL_DIM[theme]);
-    // With nothing emphasised, the zoom fade is unchanged; the emphasised node's own label shows whole.
     expect(labelOpacity(0.5, 0, LABEL_DIM[theme], false)).toBe(0.5);
     expect(labelOpacity(0.5, 1, LABEL_DIM[theme], true)).toBe(1);
   });

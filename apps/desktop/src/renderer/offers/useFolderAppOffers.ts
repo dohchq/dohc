@@ -32,16 +32,18 @@ export function useFolderAppOffers(input: {
   const failing = useRef(new Set<string>());
   const onError = useRef(input.onError);
   onError.current = input.onError;
-  const activeFolder = input.activePath && !TAB_KINDS[parseTab(input.activePath).kind].virtual
-    ? dirnameOf(input.activePath) || null
-    : null;
+  const activeFolder =
+    input.activePath && !TAB_KINDS[parseTab(input.activePath).kind].virtual
+      ? dirnameOf(input.activePath) || null
+      : null;
   const activeFolderRef = useRef(activeFolder);
   activeFolderRef.current = activeFolder;
 
   const apply = useCallback((answer: FolderAppAnswer) => {
     setApps((current) => {
       const held = current.get(answer.folder);
-      if (answer.isApp ? held && JSON.stringify(held.run) === JSON.stringify(answer.run) : !held) return current;
+      if (answer.isApp ? held && JSON.stringify(held.run) === JSON.stringify(answer.run) : !held)
+        return current;
       const next = new Map(current);
       if (answer.isApp) next.set(answer.folder, answer);
       else next.delete(answer.folder);
@@ -49,31 +51,31 @@ export function useFolderAppOffers(input: {
     });
   }, []);
 
-  // Every failure keeps the folder's Notices row. Only the first raises a
-  // toast: asking again on its own, as focus does, stays quiet until the
-  // folder reads or the person presses Try again.
-  const ask = useCallback((folder: string, retried = false) => {
-    asked.current.add(folder);
-    const failed = failing.current;
-    readFolderAppOffer({
-      token: token.current,
-      currentToken: () => token.current,
-      folder,
-      read: (workspaceId, folder) => bridge().getFolderApp({ workspaceId, folder }),
-    }).then(
-      (answer) => {
-        if (!answer) return;
-        failed.delete(folder);
-        apply(answer);
-      },
-      (error: unknown) => {
-        if (failed !== failing.current) return;
-        const quiet = failed.has(folder) && !retried;
-        failed.add(folder);
-        onError.current(folder, error, () => ask(folder, true), quiet);
-      },
-    );
-  }, [apply]);
+  const ask = useCallback(
+    (folder: string, retried = false) => {
+      asked.current.add(folder);
+      const failed = failing.current;
+      readFolderAppOffer({
+        token: token.current,
+        currentToken: () => token.current,
+        folder,
+        read: (workspaceId, folder) => bridge().getFolderApp({ workspaceId, folder }),
+      }).then(
+        (answer) => {
+          if (!answer) return;
+          failed.delete(folder);
+          apply(answer);
+        },
+        (error: unknown) => {
+          if (failed !== failing.current) return;
+          const quiet = failed.has(folder) && !retried;
+          failed.add(folder);
+          onError.current(folder, error, () => ask(folder, true), quiet);
+        },
+      );
+    },
+    [apply],
+  );
 
   // A new token on every workspace, so a late answer for A never lands after
   // A -> B -> A.

@@ -1,6 +1,8 @@
 import { engineStoreRefusalCopy, type SyncStatusResult } from "../../ipc/bridgeContract";
 
-export function fileObservationFailureCopy(reason: NonNullable<SyncStatusResult["fileObservationFailure"]>): string {
+export function fileObservationFailureCopy(
+  reason: NonNullable<SyncStatusResult["fileObservationFailure"]>,
+): string {
   return reason === "read-failed"
     ? "dohc could not read file changes for this workspace."
     : "dohc could not watch file changes for this workspace.";
@@ -29,15 +31,6 @@ export function historyOffPlaceholderCopy(syncStatus: SyncStatusResult | null): 
   return "History is unavailable. dohc could not confirm whether this workspace records history. Restart dohc to try again.";
 }
 
-// What a persisted version-compare tab may claim when the version surface is
-// off and the workspace is not a shared view. Same rule as
-// `historyOffPlaceholderCopy` above, and one rule of its own: **a capability
-// flag is not a count**. `historyRecordingUnavailable` says the recorder
-// could not be built this session; versions created before it can still be on
-// disk and reachable after the restart this copy prescribes. "You have no
-// versions" is a claim about durable data, and dohc does not make one it has
-// not established. Every line here says what dohc cannot do now, and none of
-// them says what does not exist.
 export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): string {
   if (syncStatus?.engineStoreRefused) {
     return engineStoreRefusalCopy(syncStatus.engineStoreRefused);

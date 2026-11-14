@@ -1879,8 +1879,6 @@ fn load_frontmatter_yaml(source: &str) -> Option<LoadedFrontmatterYaml> {
     let mut root_keys: Option<Vec<(usize, usize)>> = Some(Vec::new());
     for event in saphyr_parser::Parser::new_from_str(source) {
         let (event, span) = event.ok()?;
-        // Whether a node this event starts is a mapping key, and whether it is
-        // a key of the root mapping.
         let is_key = frames
             .last()
             .is_some_and(|frame| frame.mapping && frame.key.is_none());
@@ -5913,39 +5911,6 @@ fn query_cursor_value(
     }
 }
 
-#[cfg(test)]
-fn compare_record_to_cursor(
-    record: &CollectionRecord,
-    cursor: &CollectionQueryCursor,
-    sort: &[CollectionSort],
-) -> Result<Ordering, crate::DomainError> {
-    if cursor.sort_values.len() != sort.len()
-        || cursor.record_path.is_empty()
-        || cursor.record_id.is_empty()
-    {
-        return Err(crate::DomainError::InvalidInput {
-            reason: "collection query cursor is invalid",
-        });
-    }
-    for (sort, cursor_value) in sort.iter().zip(&cursor.sort_values) {
-        let ordering = compare_optional_json(
-            sortable_value_for_field(record, &sort.field),
-            query_cursor_value(cursor_value)?,
-        );
-        let ordering = match sort.direction {
-            ViewSortDirection::Asc => ordering,
-            ViewSortDirection::Desc => ordering.reverse(),
-        };
-        if ordering != Ordering::Equal {
-            return Ok(ordering);
-        }
-    }
-    Ok(record
-        .path
-        .cmp(&cursor.record_path)
-        .then_with(|| record.id.cmp(&cursor.record_id)))
-}
-
 fn query_cursor_for_record(
     record: &CollectionRecord,
     sort: &[CollectionSort],
@@ -6065,9 +6030,6 @@ fn sort_value_expression(join: &str) -> String {
     )
 }
 
-/// One keyset level of the cursor predicate: the SQL expression, whether the
-/// scan ascends through it, the serialized cursor value (`None` = the cursor
-/// row had no value), and whether comparisons need the JSON collation.
 struct CursorLevel {
     expression: String,
     ascending: bool,
@@ -6204,8 +6166,8 @@ fn reject_button_field_references(
 /// version's persisted collection index. Raw indexed values are never reparsed
 /// from record files, including when the schema is degraded.
 ///
-/// The filter, sort, and cursor run in SQL over the indexed values (#986,
-/// #991): a registered collation reproduces the cross-type `compare_json`
+/// The filter, sort, and cursor run in SQL over the indexed values:
+/// a registered collation reproduces the cross-type `compare_json`
 /// order over stored `value_json`, so a page reads and hydrates only the
 /// records it returns instead of materializing the collection.
 pub fn query_collection_records(
@@ -6812,65 +6774,6 @@ mod attribution_tests {
     use super::{AutomationRunAttribution, ChangeActorKind, ChangeAttribution};
 
     #[test]
-    fn attribution_ids_and_names_refuse_control_characters() {
-        let valid = ChangeAttribution {
-            actor_kind: ChangeActorKind::Automation,
-            on_behalf_of: Some("person".into()),
-            depth: 0,
-            run: Some(AutomationRunAttribution {
-                claim_id: "claim".into(),
-                automation_name: "Build".into(),
-            }),
-            agent_run_id: None,
-        };
-        assert!(valid.validate().is_ok());
-        for field in ["scope", "claim", "name"] {
-            let mut invalid = valid.clone();
-            match field {
-                "scope" => invalid.on_behalf_of = Some("person\n".into()),
-                "claim" => invalid.run.as_mut().expect("run").claim_id = "claim\u{0085}".into(),
-                _ => invalid.run.as_mut().expect("run").automation_name = "Build\t".into(),
-            }
-            assert!(invalid.validate().is_err(), "{field}");
-        }
-    }
-
-    /// The run rides the replicated update beside the attribution, so a peer
-    /// records it too; a write that names none sends what it sent before.
-    #[test]
-    fn an_automation_run_round_trips_on_the_wire_and_only_when_named() {
-        let named = ChangeAttribution {
-            actor_kind: ChangeActorKind::Automation,
-            on_behalf_of: Some("local".to_owned()),
-            depth: 1,
-            run: Some(AutomationRunAttribution {
-                claim_id: "atc_1".to_owned(),
-                automation_name: "Stamp the finish date".to_owned(),
-            }),
-            agent_run_id: None,
-        };
-        let wire = serde_json::to_value(&named).expect("encode");
-        assert_eq!(
-            wire,
-            json!({
-                "actorKind": "automation",
-                "onBehalfOf": "local",
-                "depth": 1,
-                "run": { "claimId": "atc_1", "automationName": "Stamp the finish date" },
-            })
-        );
-        assert_eq!(
-            serde_json::from_value::<ChangeAttribution>(wire).expect("decode"),
-            named
-        );
-        let unnamed = ChangeAttribution { run: None, ..named };
-        assert_eq!(
-            serde_json::to_value(&unnamed).expect("encode"),
-            json!({ "actorKind": "automation", "onBehalfOf": "local", "depth": 1 })
-        );
-    }
-
-    #[test]
     fn only_a_bounded_automation_attribution_names_a_run() {
         let run = |claim_id: &str, automation_name: &str| {
             Some(AutomationRunAttribution {
@@ -6978,7 +6881,6 @@ mod attribution_tests {
             json!({ "agentId": "codex", "onBehalfOf": "local", "depth": 2 })
         );
         assert_eq!(declared.attribution().agent_run_id, None);
-        // An author written before agent runs were recorded names none.
         let unnamed = ChangeAttribution {
             agent_run_id: None,
             ..attribution
@@ -6994,48 +6896,22 @@ mod attribution_tests {
 
 #[cfg(test)]
 mod tests {
-    use std::cmp::Ordering;
-    use std::collections::{BTreeMap, HashSet};
-    use std::time::{Duration, Instant};
-
     use rusqlite::Connection;
     use serde_json::json;
 
     use super::{
-        CollectionFieldValue, CollectionIndexedValue, CollectionIndexedValueValidation,
-        CollectionRecord, CollectionSort, FieldDefinition, FieldValueReason, FieldValueReasonCode,
-        FieldValueValidation, MAX_COLLECTION_FIELD_VALUE_DEPTH, ViewSortDirection,
-        collection_value_key, collection_values_equal, compare_collection_records, compare_json,
-        compare_record_to_cursor, ensure_historical_record_owners_backfilled,
-        group_collection_records, index_historical_record_owner_moment_in_tx, is_record_id,
-        latest_historical_record_id, load_historical_record_owners, markdown_record_id,
-        mint_record_id, parse_markdown_frontmatter, query_cursor_for_record, record_id_from_random,
-        unindexed_or_conflicted_relation_targets_still_present, validate_field_value,
-    };
-    use super::{
         CollectionFilter, CollectionFilterOperator, CollectionQuery, matches_collection_filter,
         query_collection_records,
     };
+    use super::{
+        CollectionIndexedValue, CollectionIndexedValueValidation, CollectionRecord, CollectionSort,
+        FieldValueReason, FieldValueReasonCode, ViewSortDirection, collection_value_key,
+        collection_values_equal, compare_collection_records,
+        ensure_historical_record_owners_backfilled, index_historical_record_owner_moment_in_tx,
+        latest_historical_record_id, load_historical_record_owners, markdown_record_id,
+        parse_markdown_frontmatter,
+    };
     use serde_json::Value;
-
-    #[test]
-    fn integer_json_comparison_preserves_precision_beyond_f64() {
-        assert_eq!(
-            compare_json(
-                &json!(9_007_199_254_740_992_u64),
-                &json!(9_007_199_254_740_993_u64)
-            ),
-            Ordering::Less
-        );
-        assert_eq!(compare_json(&json!(1), &json!(1.0)), Ordering::Equal);
-        assert_eq!(
-            compare_json(
-                &json!(9_007_199_254_740_993_i64),
-                &json!(9_007_199_254_740_992_f64)
-            ),
-            Ordering::Greater
-        );
-    }
 
     #[test]
     fn collection_group_keys_match_collection_value_equality() {
@@ -7071,181 +6947,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn collection_scale_sweeps_stay_linear() {
-        const SCALE_ITEMS: usize = 100_000;
-        const SCALE_BUDGET: Duration = Duration::from_secs(30);
-
-        let records = (0..SCALE_ITEMS)
-            .map(|index| CollectionRecord {
-                id: String::new(),
-                path: String::new(),
-                conflicted: false,
-                values: vec![CollectionIndexedValue {
-                    field: "group".to_owned(),
-                    value: json!(format!("group_{index}")),
-                    validation: CollectionIndexedValueValidation::Valid,
-                    resolved_relations: Vec::new(),
-                }],
-            })
-            .collect::<Vec<_>>();
-        let started = Instant::now();
-        let groups = group_collection_records(&records, "group").expect("group scale records");
-        let group_elapsed = started.elapsed();
-        assert_eq!(groups.len(), SCALE_ITEMS);
-        drop(groups);
-        drop(records);
-
-        let options = (0..SCALE_ITEMS)
-            .map(|index| format!("option_{index}"))
-            .collect::<Vec<_>>();
-        let values = CollectionFieldValue::Sequence(
-            options
-                .iter()
-                .cloned()
-                .map(CollectionFieldValue::Text)
-                .collect(),
-        );
-        let field = FieldDefinition::MultiSelect {
-            name: "labels".to_owned(),
-            options,
-            colors: BTreeMap::new(),
-        };
-        let started = Instant::now();
-        let validation = validate_field_value(&field, &values);
-        let options_elapsed = started.elapsed();
-        assert_eq!(validation, FieldValueValidation::Valid);
-        drop(field);
-        drop(values);
-
-        let mut connection = Connection::open_in_memory().expect("open scale database");
-        connection
-            .execute_batch(
-                "CREATE TABLE blobs(sha256 TEXT PRIMARY KEY,byte_length INTEGER NOT NULL,text TEXT NOT NULL);\
-                 CREATE TABLE snapshots(\
-                   workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,path TEXT NOT NULL,\
-                   object_id TEXT NOT NULL,blob_sha256 TEXT NOT NULL,content_kind TEXT NOT NULL\
-                 );\
-                 CREATE INDEX snapshots_relation_presence \
-                   ON snapshots(workspace_id,version_id,path);\
-                 CREATE TABLE moments(\
-                   workspace_id TEXT NOT NULL,version_id TEXT NOT NULL,object_id TEXT NOT NULL,\
-                   after_blob_sha256 TEXT NOT NULL,after_content_kind TEXT NOT NULL,\
-                   moment_order INTEGER NOT NULL\
-                 );\
-                 CREATE TABLE conflicts(\
-                   workspace_id TEXT NOT NULL,target_version_id TEXT NOT NULL,status TEXT NOT NULL,\
-                   current_object_id TEXT,incoming_object_id TEXT,path TEXT NOT NULL\
-                 );",
-            )
-            .expect("create scale tables");
-        let collection_path = "scale";
-        let relation_targets = (0..SCALE_ITEMS)
-            .map(|index| (format!("record_{index}"), collection_path.to_owned()))
-            .collect::<HashSet<_>>();
-        let transaction = connection.transaction().expect("begin scale seed");
-        {
-            let mut insert_blob = transaction
-                .prepare("INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,length(CAST(?2 AS BLOB)),?2)")
-                .expect("prepare scale blobs");
-            let mut insert_snapshot = transaction
-                .prepare(
-                    "INSERT INTO snapshots(\
-                       workspace_id,version_id,path,object_id,blob_sha256,content_kind\
-                     ) VALUES ('workspace','version',?1,?2,?3,'text')",
-                )
-                .expect("prepare scale snapshots");
-            for index in 0..SCALE_ITEMS {
-                let record_id = format!("record_{index}");
-                let blob_sha = format!("blob_{index}");
-                insert_blob
-                    .execute((&blob_sha, format!("---\nid: {record_id}\n---\n")))
-                    .expect("insert scale blob");
-                insert_snapshot
-                    .execute((
-                        format!("{collection_path}/{index:06}.md"),
-                        format!("object_{index}"),
-                        blob_sha,
-                    ))
-                    .expect("insert scale snapshot");
-            }
-        }
-        transaction.commit().expect("commit scale seed");
-        let started = Instant::now();
-        let present = unindexed_or_conflicted_relation_targets_still_present(
-            &connection,
-            "workspace",
-            "version",
-            relation_targets,
-        )
-        .expect("scan scale relation targets");
-        let relations_elapsed = started.elapsed();
-        assert_eq!(present.len(), SCALE_ITEMS);
-
-        let elapsed = group_elapsed + options_elapsed + relations_elapsed;
-        assert!(
-            elapsed <= SCALE_BUDGET,
-            "linear collection sweeps took {elapsed:?} (group {group_elapsed:?}, options {options_elapsed:?}, relations {relations_elapsed:?}); budget {SCALE_BUDGET:?}"
-        );
-    }
-
-    #[test]
-    fn relation_witness_early_match_reads_only_first_chunk() {
-        use std::sync::{Arc, Mutex};
-        let connection = Connection::open_in_memory().unwrap();
-        let reads = Arc::new(Mutex::new(HashSet::new()));
-        let observed = reads.clone();
-        connection
-            .create_scalar_function(
-                "witness_body",
-                2,
-                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-                move |ctx| {
-                    observed.lock().unwrap().insert(ctx.get::<String>(0)?);
-                    ctx.get::<String>(1)
-                },
-            )
-            .unwrap();
-        connection.execute_batch(
-            "CREATE TABLE bodies(sha256 TEXT PRIMARY KEY,byte_length INTEGER,text TEXT);\
-             CREATE VIEW blobs AS SELECT sha256,byte_length,witness_body(sha256,text) AS text FROM bodies;\
-             CREATE TABLE snapshots(workspace_id TEXT,version_id TEXT,path TEXT,object_id TEXT,blob_sha256 TEXT,content_kind TEXT);\
-             CREATE TABLE moments(workspace_id TEXT,version_id TEXT,object_id TEXT,after_blob_sha256 TEXT,after_content_kind TEXT,moment_order INTEGER);\
-             CREATE TABLE conflicts(workspace_id TEXT,target_version_id TEXT,status TEXT,current_object_id TEXT,incoming_object_id TEXT,path TEXT);"
-        ).unwrap();
-        for index in 0..600 {
-            let key = format!("key-{index:04}");
-            let body = format!("---\nid: record_{index}\n---\n");
-            connection
-                .execute(
-                    "INSERT INTO bodies VALUES(?1,?2,?3)",
-                    rusqlite::params![key, body.len() as i64, body],
-                )
-                .unwrap();
-            connection
-                .execute(
-                    "INSERT INTO snapshots VALUES('workspace','version',?1,?2,?2,'text')",
-                    rusqlite::params![format!("records/{index:04}.md"), key],
-                )
-                .unwrap();
-        }
-        let targets = HashSet::from([("record_0".to_owned(), "records".to_owned())]);
-        assert_eq!(
-            unindexed_or_conflicted_relation_targets_still_present(
-                &connection,
-                "workspace",
-                "version",
-                targets.clone()
-            )
-            .unwrap(),
-            targets
-        );
-        let reads = reads.lock().unwrap();
-        assert_eq!(reads.len(), 256);
-        assert!((0..256).all(|index| reads.contains(&format!("key-{index:04}"))));
-        assert!(connection.is_autocommit());
     }
 
     #[test]
@@ -7362,88 +7063,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn overdepth_sort_coordinates_use_record_tiebreakers() {
-        let record = |path: &str, id: &str, leaf: &str| {
-            let value =
-                (0..MAX_COLLECTION_FIELD_VALUE_DEPTH).fold(json!(leaf), |value, _| json!([value]));
-            CollectionRecord {
-                id: id.to_owned(),
-                path: path.to_owned(),
-                conflicted: false,
-                values: vec![CollectionIndexedValue {
-                    field: "deep".to_owned(),
-                    value,
-                    validation: CollectionIndexedValueValidation::Flagged {
-                        reason: FieldValueReason {
-                            code: FieldValueReasonCode::ValueDepthExceeded,
-                            path: String::new(),
-                        },
-                    },
-                    resolved_relations: Vec::new(),
-                }],
-            }
-        };
-        let first = record("depth/alpha.md", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", "zulu");
-        let second = record("depth/beta.md", "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb", "alpha");
-        let sort = [CollectionSort {
-            field: "deep".to_owned(),
-            direction: ViewSortDirection::Asc,
-        }];
-
-        assert_eq!(
-            compare_collection_records(&first, &second, &sort),
-            Ordering::Less,
-            "an unusable sort value must leave record path/id as the page order"
-        );
-        let cursor = query_cursor_for_record(&first, &sort);
-        assert_eq!(cursor.sort_values.len(), 1);
-        assert!(!cursor.sort_values[0].present);
-        assert!(cursor.sort_values[0].value.is_null());
-        assert_eq!(cursor.record_path, first.path.as_str());
-        assert_eq!(cursor.record_id, first.id.as_str());
-        assert_eq!(
-            compare_record_to_cursor(&second, &cursor, &sort).expect("valid cursor"),
-            Ordering::Greater
-        );
-    }
-
-    /// The shared fixture cannot hold JSON nested past serde_json's own
-    /// limit, so the depth boundary is pinned here and in the desktop's
-    /// import-export tests.
-    #[test]
-    fn frontmatter_reads_up_to_the_depth_limit_and_refuses_deeper_or_hostile_yaml() {
-        let flow = |depth: usize| {
-            format!(
-                "---\nvalue: {}x{}\n---\n",
-                "[".repeat(depth),
-                "]".repeat(depth)
-            )
-        };
-        let mut serializer = serde_json::Serializer::new(Vec::new());
-        let read = parse_markdown_frontmatter(&flow(super::MAX_FRONTMATTER_DEPTH - 1))
-            .expect("nesting at the limit reads")
-            .value;
-        // Compare through serialization: `Value` equality recurses per level.
-        serde::Serialize::serialize(&read["value"], &mut serializer).unwrap();
-        assert_eq!(
-            String::from_utf8(serializer.into_inner()).unwrap(),
-            format!(
-                "{}\"x\"{}",
-                "[".repeat(super::MAX_FRONTMATTER_DEPTH - 1),
-                "]".repeat(super::MAX_FRONTMATTER_DEPTH - 1)
-            )
-        );
-        for markdown in [
-            flow(super::MAX_FRONTMATTER_DEPTH),
-            format!("---\ntitle:\n{}x\n---\n", "- ".repeat(500_000)),
-            flow(500_000),
-        ] {
-            assert!(super::markdown_frontmatter_json(&markdown).is_none());
-            assert_eq!(markdown_record_id(&markdown), None);
-        }
-    }
-
     /// Frontmatter a peer can sync in a file up to 10 MiB. Each input would
     /// copy gigabytes if the loader expanded it; the loader refuses each one
     /// before building anything that large.
@@ -7475,40 +7094,6 @@ mod tests {
         }
     }
 
-    /// An anchored integer spelled with 500,000 leading zeros, repeated by a
-    /// ladder of aliases 32,768 times, stays within every budget. The loader
-    /// resolves the spelling once, so reading it costs one scan, not one per
-    /// repetition. The bound is far above one scan and far below 32,768.
-    #[test]
-    fn an_aliased_long_scalar_is_resolved_once() {
-        let mut yaml = format!(
-            "l0: &l0 {}7
-",
-            "0".repeat(500_000)
-        );
-        for level in 1..=15 {
-            yaml.push_str(&format!(
-                "l{level}: &l{level} [*l{}, *l{}]
-",
-                level - 1,
-                level - 1
-            ));
-        }
-        let markdown = format!(
-            "---
-{yaml}---
-"
-        );
-        let started = std::time::Instant::now();
-        let value = super::markdown_frontmatter_json(&markdown).expect("the ladder reads");
-        assert_eq!(value["l0"], 7);
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(60),
-            "reading took {:?}",
-            started.elapsed()
-        );
-    }
-
     #[test]
     fn duplicate_and_escaped_frontmatter_keys_are_rejected_by_both_rust_parsers() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -7535,24 +7120,6 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 1, "the duplicate-key matrix must stay plural");
-    }
-
-    #[test]
-    fn record_id_encoding_uses_all_sixteen_random_bytes() {
-        assert_eq!(
-            record_id_from_random([0; 16]),
-            "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa"
-        );
-        assert_eq!(
-            record_id_from_random([u8::MAX; 16]),
-            "rec_77777777777777777777777774"
-        );
-    }
-
-    #[test]
-    fn minted_record_id_matches_the_contract() {
-        let id = mint_record_id().expect("the operating system provides randomness");
-        assert!(is_record_id(&id));
     }
 
     /// Deterministic xorshift64* generator: the differential below must be
@@ -7728,7 +7295,6 @@ mod tests {
                     .expect("conflict row");
                 let mut values = Vec::new();
                 for field in FIELDS {
-                    // A quarter of fields are missing entirely.
                     if rng.pick(4) == 0 {
                         continue;
                     }

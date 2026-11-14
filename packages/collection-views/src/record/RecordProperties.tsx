@@ -1,4 +1,11 @@
-import { useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import {
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { CircleAlert, Clock, TriangleAlert } from "lucide-react";
 import type { CollectionRecord, FieldDefinition } from "@dohc/workspace-contracts";
 import { deriveColumns } from "../columns";
@@ -27,29 +34,28 @@ import {
  * and edited as a table cell is. A host gives it what it gives the table,
  * so a change the host has not confirmed shows the same in both.
  */
-export interface RecordPropertiesProps
-  extends Pick<
-    TableViewProps,
-    | "schema"
-    | "visibleFields"
-    | "onCellChange"
-    | "onDraftAbandoned"
-    | "editingDisabled"
-    | "canEditCell"
-    | "cellStatuses"
-    | "hostCells"
-    | "acknowledgedWriteId"
-    | "subscribeToDiscardedWrites"
-    | "onCreateOption"
-    | "onOptionColorChange"
-    | "people"
-    | "onOpenLink"
-    | "relationExecutor"
-    | "personLabel"
-    | "fieldLabel"
-    | "fieldMarks"
-    | "renderButton"
-  > {
+export interface RecordPropertiesProps extends Pick<
+  TableViewProps,
+  | "schema"
+  | "visibleFields"
+  | "onCellChange"
+  | "onDraftAbandoned"
+  | "editingDisabled"
+  | "canEditCell"
+  | "cellStatuses"
+  | "hostCells"
+  | "acknowledgedWriteId"
+  | "subscribeToDiscardedWrites"
+  | "onCreateOption"
+  | "onOptionColorChange"
+  | "people"
+  | "onOpenLink"
+  | "relationExecutor"
+  | "personLabel"
+  | "fieldLabel"
+  | "fieldMarks"
+  | "renderButton"
+> {
   record: CollectionRecord;
   /** Fields the rows leave out, such as the one a panel shows as the record's heading. */
   omitFields?: readonly string[];
@@ -64,7 +70,8 @@ export interface RecordPropertiesProps
 /** The room a field's name gets before its value. */
 const LABEL_WIDTH = 112;
 const EMPTY = "Empty";
-const NOTE_BUTTON = "h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover";
+const NOTE_BUTTON =
+  "h-6 rounded-md border border-line px-2 text-[12px] text-ink transition-colors duration-75 hover:bg-hover";
 
 type Unconfirmed = Exclude<TableCellStatus, { state: "pending" }>;
 
@@ -74,10 +81,24 @@ type Unconfirmed = Exclude<TableCellStatus, { state: "pending" }>;
  * its selected cell. `onAct` runs before an action, which removes the note.
  */
 function StatusNote({ status, onAct }: { status: Unconfirmed; onAct?: () => void }) {
-  const Icon = status.state === "waiting" ? Clock : status.state === "unconfirmed" ? TriangleAlert : CircleAlert;
-  const tone = status.state === "waiting" ? "text-muted" : status.state === "unconfirmed" ? "text-warning" : "text-danger";
+  const Icon =
+    status.state === "waiting"
+      ? Clock
+      : status.state === "unconfirmed"
+        ? TriangleAlert
+        : CircleAlert;
+  const tone =
+    status.state === "waiting"
+      ? "text-muted"
+      : status.state === "unconfirmed"
+        ? "text-warning"
+        : "text-danger";
   return (
-    <div role="note" data-cell-status={status.state} className="flex flex-col items-start gap-1 px-2 pb-1 text-[12px]">
+    <div
+      role="note"
+      data-cell-status={status.state}
+      className="flex flex-col items-start gap-1 px-2 pb-1 text-[12px]"
+    >
       <p className={`m-0 flex items-start gap-1 ${tone}`}>
         <span aria-hidden className="flex h-lh shrink-0 items-center">
           <Icon size={12} strokeWidth={1.9} />
@@ -121,21 +142,43 @@ function StatusNote({ status, onAct }: { status: Unconfirmed; onAct?: () => void
  * the properties, as a panel draws the record's name as its heading. It
  * shows nothing for a cell with no change.
  */
-export function CellStatusNote(props: { statuses: TableCellStatuses; recordId: string; field: string; onAct?: () => void }) {
+export function CellStatusNote(props: {
+  statuses: TableCellStatuses;
+  recordId: string;
+  field: string;
+  onAct?: () => void;
+}) {
   const { statuses, recordId, field } = props;
   const status = useSyncExternalStore(statuses.subscribe, () => statuses.get(recordId, field));
   if (!status) return null;
-  return status.state === "pending" ? <StatusMark status={status} /> : <StatusNote status={status} onAct={props.onAct} />;
+  return status.state === "pending" ? (
+    <StatusMark status={status} />
+  ) : (
+    <StatusNote status={status} onAct={props.onAct} />
+  );
 }
 
 function isEmpty(value: unknown): boolean {
-  return value === null || value === undefined || value === "" || (Array.isArray(value) && value.length === 0);
+  return (
+    value === null ||
+    value === undefined ||
+    value === "" ||
+    (Array.isArray(value) && value.length === 0)
+  );
 }
 
-interface RowProps extends Omit<RecordPropertiesProps, "schema" | "visibleFields" | "omitFields" | "hostCells" | "fieldMarks" | "cellStatuses" | "problems"> {
+interface RowProps extends Omit<
+  RecordPropertiesProps,
+  | "schema"
+  | "visibleFields"
+  | "omitFields"
+  | "hostCells"
+  | "fieldMarks"
+  | "cellStatuses"
+  | "problems"
+> {
   field: FieldDefinition;
   label: string;
-  /** What is wrong with the value, if the host says anything is. */
   problem: string | undefined;
   statuses: TableCellStatuses;
   host: TableHostCell | undefined;
@@ -152,14 +195,29 @@ interface RowProps extends Omit<RecordPropertiesProps, "schema" | "visibleFields
 }
 
 function PropertyRow(props: RowProps) {
-  const { field, label, record, statuses, host, mark, editing, onCellChange, editingDisabled = false, relationExecutor, people } = props;
+  const {
+    field,
+    label,
+    record,
+    statuses,
+    host,
+    mark,
+    editing,
+    onCellChange,
+    editingDisabled = false,
+    relationExecutor,
+    people,
+  } = props;
   const labelId = useId();
   const problemId = useId();
   const tooltip = useTooltip();
-  const status = useSyncExternalStore(statuses.subscribe, () => statuses.get(record.id, field.name));
+  const status = useSyncExternalStore(statuses.subscribe, () =>
+    statuses.get(record.id, field.name),
+  );
   const stored = record.values.find((entry) => entry.field === field.name);
   const indexed = shownValue(field.name, stored, status);
-  const edits = onCellChange !== undefined && !editingDisabled && (props.canEditCell?.(record, field) ?? true);
+  const edits =
+    onCellChange !== undefined && !editingDisabled && (props.canEditCell?.(record, field) ?? true);
   const editable = edits && opensEditor(field, relationExecutor, host);
   const cell = { recordId: record.id, recordPath: record.path, field: field.name };
   // A picker or a host's editor is a popover on the value. Other editors fill it.
@@ -171,7 +229,9 @@ function PropertyRow(props: RowProps) {
     // The host draws the value, so the row says when there is none.
     content = (
       <>
-        {isEmpty(indexed?.value) ? <span className="shrink-0 text-[13px] text-subtle">{EMPTY}</span> : null}
+        {isEmpty(indexed?.value) ? (
+          <span className="shrink-0 text-[13px] text-subtle">{EMPTY}</span>
+        ) : null}
         {host.cell(record, true)}
       </>
     );
@@ -202,9 +262,14 @@ function PropertyRow(props: RowProps) {
       className="grid items-start gap-x-2"
       style={{ gridTemplateColumns: `${LABEL_WIDTH}px minmax(0, 1fr)` }}
     >
-      <div className="relative flex h-7 min-w-0 items-center gap-2 text-[12px] text-muted" {...(mark ? tooltip.hoverProps : {})}>
+      <div
+        className="relative flex h-7 min-w-0 items-center gap-2 text-[12px] text-muted"
+        {...(mark ? tooltip.hoverProps : {})}
+      >
         <FieldTypeIcon type={field.type} className="shrink-0 text-subtle" />
-        <span id={labelId} className="truncate">{label}</span>
+        <span id={labelId} className="truncate">
+          {label}
+        </span>
         {mark && field.type !== "button" ? (
           <span
             role="img"
@@ -217,7 +282,9 @@ function PropertyRow(props: RowProps) {
             {mark.icon}
           </span>
         ) : null}
-        {mark && field.type !== "button" ? <Tooltip {...tooltip.tooltipProps}>{mark.label}</Tooltip> : null}
+        {mark && field.type !== "button" ? (
+          <Tooltip {...tooltip.tooltipProps}>{mark.label}</Tooltip>
+        ) : null}
       </div>
       <div className="relative min-w-0">
         <div
@@ -231,8 +298,21 @@ function PropertyRow(props: RowProps) {
           }}
           onKeyDown={(event) => {
             // A typed character starts the edit, as on a selected cell. A host's value is changed in the host's editor.
-            if (!editable || host || !(event.target instanceof HTMLButtonElement) || composing(event)) return;
-            if (event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1 || event.key === " ") return;
+            if (
+              !editable ||
+              host ||
+              !(event.target instanceof HTMLButtonElement) ||
+              composing(event)
+            )
+              return;
+            if (
+              event.ctrlKey ||
+              event.metaKey ||
+              event.altKey ||
+              event.key.length !== 1 ||
+              event.key === " "
+            )
+              return;
             if (!TYPED_INTO.has(field.type)) return;
             event.preventDefault();
             props.onStartEdit(event.key);
@@ -261,9 +341,15 @@ function PropertyRow(props: RowProps) {
                 ? "dohc-popover absolute right-0 top-0 z-10 m-0 w-full min-w-0 rounded-md border border-line bg-bg p-1 font-normal"
                 : "dohc-popover dohc-pop-in absolute right-0 top-0 z-10 m-0 min-w-full rounded-lg border border-line bg-bg p-0 font-normal"
             }
-            style={popover === null ? { minHeight: 28 } : { width: popover, maxWidth: `calc(100% + ${LABEL_WIDTH}px)`, minHeight: 28 }}
+            style={
+              popover === null
+                ? { minHeight: 28 }
+                : { width: popover, maxWidth: `calc(100% + ${LABEL_WIDTH}px)`, minHeight: 28 }
+            }
           >
-            {host ? host.editor?.(record, () => props.onCloseEdit()) : (
+            {host ? (
+              host.editor?.(record, () => props.onCloseEdit())
+            ) : (
               <CellEditor
                 field={field}
                 label={label}
@@ -273,17 +359,40 @@ function PropertyRow(props: RowProps) {
                 carried={props.carried}
                 // The edit starts from what the value shows, so a refused value is not typed twice.
                 indexed={indexed}
-                emit={(value, previousValues) => onCellChange({ ...cell, value, ...(previousValues === undefined ? {} : { previousValues }) })}
+                emit={(value, previousValues) =>
+                  onCellChange({
+                    ...cell,
+                    value,
+                    ...(previousValues === undefined ? {} : { previousValues }),
+                  })
+                }
                 close={props.onCloseEdit}
-                abandon={props.onDraftAbandoned ? (text, value) => props.onDraftAbandoned?.({ recordId: record.id, field: field.name, text, ...(value === undefined ? {} : { value }) }) : undefined}
+                abandon={
+                  props.onDraftAbandoned
+                    ? (text, value) =>
+                        props.onDraftAbandoned?.({
+                          recordId: record.id,
+                          field: field.name,
+                          text,
+                          ...(value === undefined ? {} : { value }),
+                        })
+                    : undefined
+                }
                 onCreateOption={
                   props.onCreateOption
                     ? (option, value, previousValues) =>
-                        props.onCreateOption?.({ ...cell, option, value, ...(previousValues === undefined ? {} : { previousValues }) })
+                        props.onCreateOption?.({
+                          ...cell,
+                          option,
+                          value,
+                          ...(previousValues === undefined ? {} : { previousValues }),
+                        })
                     : undefined
                 }
                 onOptionColorChange={
-                  props.onOptionColorChange ? (option, color) => props.onOptionColorChange?.(field.name, option, color) : undefined
+                  props.onOptionColorChange
+                    ? (option, color) => props.onOptionColorChange?.(field.name, option, color)
+                    : undefined
                 }
                 people={people}
                 relationExecutor={relationExecutor}
@@ -291,9 +400,15 @@ function PropertyRow(props: RowProps) {
             )}
           </fieldset>
         ) : null}
-        {status && status.state !== "pending" ? <StatusNote status={status} onAct={props.onFocusValue} /> : null}
+        {status && status.state !== "pending" ? (
+          <StatusNote status={status} onAct={props.onFocusValue} />
+        ) : null}
         {props.problem === undefined ? null : (
-          <p id={problemId} role="alert" className="m-0 flex items-start gap-1 px-2 pb-1 text-[12px] text-danger">
+          <p
+            id={problemId}
+            role="alert"
+            className="m-0 flex items-start gap-1 px-2 pb-1 text-[12px] text-danger"
+          >
             <span aria-hidden className="flex h-lh shrink-0 items-center">
               <CircleAlert size={12} strokeWidth={1.9} />
             </span>
@@ -306,12 +421,25 @@ function PropertyRow(props: RowProps) {
 }
 
 export function RecordProperties(props: RecordPropertiesProps) {
-  const { schema, visibleFields, omitFields, hostCells, fieldMarks, cellStatuses, problems, ...shared } = props;
+  const {
+    schema,
+    visibleFields,
+    omitFields,
+    hostCells,
+    fieldMarks,
+    cellStatuses,
+    problems,
+    ...shared
+  } = props;
   const { record, fieldLabel, subscribeToDiscardedWrites } = props;
-  const fields = deriveColumns(schema, visibleFields).filter((field) => !omitFields?.includes(field.name));
+  const fields = deriveColumns(schema, visibleFields).filter(
+    (field) => !omitFields?.includes(field.name),
+  );
   // One editor at a time: the row it is on, and the character that opened it, if one did. It belongs to
   // one record, so another record in the same place starts with no editor.
-  const [opened, setEditing] = useState<{ recordId: string; field: string; typed?: string } | null>(null);
+  const [opened, setEditing] = useState<{ recordId: string; field: string; typed?: string } | null>(
+    null,
+  );
   const editing = opened?.recordId === record.id ? opened : null;
   const values = useRef(new Map<string, HTMLDivElement>());
   const editor = useRef<HTMLFieldSetElement | null>(null);
@@ -319,7 +447,9 @@ export function RecordProperties(props: RecordPropertiesProps) {
 
   /** Focuses a row's own control, outside its editor. False when the row has none. */
   const focusValue = (field: string): boolean => {
-    const target = values.current.get(field)?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), [tabindex='0']");
+    const target = values.current
+      .get(field)
+      ?.querySelector<HTMLElement>("button:not(:disabled), input:not(:disabled), [tabindex='0']");
     target?.focus();
     return target !== undefined && target !== null;
   };
@@ -328,10 +458,15 @@ export function RecordProperties(props: RecordPropertiesProps) {
     const field = editing?.field;
     setEditing(null);
     // A press away closes the editor too, and focus belongs to what was pressed.
-    if (to === "away" || field === undefined || !editor.current?.contains(document.activeElement)) return;
+    if (to === "away" || field === undefined || !editor.current?.contains(document.activeElement))
+      return;
     // Tab goes on to the next row's value, or back to the one before. Enter and Escape stay on this one.
     const step = to === "next" ? 1 : to === "previous" ? -1 : 0;
-    for (let at = fields.findIndex((entry) => entry.name === field) + step; step !== 0 && at >= 0 && at < fields.length; at += step) {
+    for (
+      let at = fields.findIndex((entry) => entry.name === field) + step;
+      step !== 0 && at >= 0 && at < fields.length;
+      at += step
+    ) {
       if (focusValue(fields[at]!.name)) return;
     }
     focusValue(field);
@@ -365,7 +500,11 @@ export function RecordProperties(props: RecordPropertiesProps) {
           problem={problems?.get(field.name)}
           editing={editing?.field === field.name ? editing : null}
           // By record and field, as the table keeps them, so another record in the same place starts from its own picks.
-          carried={field.type === "multi-select" ? carried(JSON.stringify([record.id, field.name])) : undefined}
+          carried={
+            field.type === "multi-select"
+              ? carried(JSON.stringify([record.id, field.name]))
+              : undefined
+          }
           onStartEdit={(typed) => startEdit(field.name, typed)}
           onCloseEdit={closeEdit}
           onFocusValue={() => focusValue(field.name)}

@@ -8,9 +8,9 @@
 //! secret = { byteLength } only; absence carries `everTracked` (any
 //! moments/secret_moments rows) so retired and NEVER-TRACKED stay distinct.
 //!
-//! Fixtures are DISK-DRIVEN only — the ratified delta: TS `writeIfChanged`
-//! ignores `metadata_origin` (safe there because the desktop materializes API
-//! writes to disk), while this daemon enforces capture ownership. RPC-vs-disk
+//! Fixtures are disk-driven only: TS `writeIfChanged` ignores
+//! `metadata_origin` (safe there because the desktop materializes API writes
+//! to disk), while this daemon enforces capture ownership. RPC-vs-disk
 //! interleavings are covered by Rust-only acceptance tests instead.
 
 use crate::common;
@@ -208,8 +208,6 @@ fn is_secret_path(path: &str) -> bool {
 /// (everTracked, secret byte length, head (content_kind, binary sha)).
 type RawProjection = (bool, Option<u64>, Option<(String, Option<String>)>);
 
-/// Project one path from the persisted engine.db — the same source a fresh
-/// process would read, mirroring the TS emitter's projection exactly.
 fn project_path(db: &Path, path: &str) -> Projection {
     use rusqlite::OptionalExtension;
     let mut store = EngineStore::open(db, u32::MAX.into()).expect("open engine db");
@@ -296,9 +294,6 @@ fn project_path(db: &Path, path: &str) -> Projection {
     }
 }
 
-/// Drive one step to visibility: flush until the persisted projection shows
-/// the step's effect. The only nondeterminism is the watcher noticing the
-/// disk write; once it has, one settled flush suffices — no blind sleeps.
 async fn drive_step_to_visibility(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -331,23 +326,6 @@ fn capture_oracles_are_frozen_and_each_scenario_is_scheduled() {
     let fixtures: Fixtures = serde_json::from_str(FIXTURES).expect("fixtures parse");
     let goldens: Goldens = serde_json::from_str(GOLDENS).expect("goldens parse");
 
-    // === The freeze, enforced here rather than described in a document. ===
-    //
-    // R16 deletes the TypeScript oracle that produced these goldens. After that
-    // the only implementation able to regenerate them is the daemon this test
-    // grades, so an unenforced freeze means the daemon can certify itself by
-    // editing one file. These hashes are the anchor, and they live in Rust source
-    // precisely so that changing either JSON file cannot be a one-file diff.
-    //
-    // Both files are covered on purpose. Freezing only the goldens leaves the
-    // INPUTS mutable, and input coverage can vanish without changing any output:
-    // drop the first step of `update-coalesce` and the final projection is
-    // identical, so every value assertion passes while the update-transition case
-    // is gone.
-    //
-    // If you are here because one of these failed: do not update the hash to make
-    // it pass. Work out which behaviour changed, and why the new answer is right.
-    // See tools/rust-engine-program/capture-goldens.provenance.md.
     const FIXTURES_SHA256: &str =
         "ecf8710b19870fab090abfc2c6b78e80a050d245d60c42c21cc6eb62962122d7";
     const GOLDENS_SHA256: &str = "246655d8e2f697d069d121c50faec04222f7f45eecc970f1af4e0b4ee64e5292";
@@ -451,7 +429,6 @@ async fn run_capture_scenario(name: &str) {
         close_workspace(&transport, handle.clone(), id).await;
     }
 
-    // The DIFFERENTIAL: normalized persisted state vs the TS golden.
     for path in &scenario.watch {
         let produced = project_path(&db, path);
         let expected = golden

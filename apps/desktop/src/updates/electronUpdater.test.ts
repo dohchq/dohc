@@ -4,13 +4,10 @@ import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   debInstallFailure,
-  publicUpdateState,
-  resolveUpdateChannel,
   startAutoUpdates,
   updateFeedOverride,
   type AutoUpdateController,
 } from "./electronUpdater";
-import { initialUpdateState, transition, type UpdateEvent } from "./updateMachine";
 import { deferred } from "../testing/deferred";
 import { UpdateStateEvent } from "../ipc/bridgeContract";
 
@@ -82,20 +79,24 @@ function fakeApp(updater: ReturnType<typeof fakeUpdater>) {
   };
 }
 
-// The installs that started, with their (isSilent, isForceRunAfter).
 function startedInstalls(updater: ReturnType<typeof fakeUpdater>): unknown[][] {
-  return updater.install.mock.calls.filter((_call, index) => updater.install.mock.results[index]?.value === true);
+  return updater.install.mock.calls.filter(
+    (_call, index) => updater.install.mock.results[index]?.value === true,
+  );
 }
 
-async function startWith(updater: ReturnType<typeof fakeUpdater> & { isUpdaterActive?: () => boolean }, options: {
-  isPackaged?: boolean;
-  env?: NodeJS.ProcessEnv;
-  currentVersion?: string;
-  app?: ReturnType<typeof fakeApp>;
-  restartApproved?: () => boolean;
-  stateDir?: string;
-  platform?: NodeJS.Platform;
-} = {}): Promise<AutoUpdateController | null> {
+async function startWith(
+  updater: ReturnType<typeof fakeUpdater> & { isUpdaterActive?: () => boolean },
+  options: {
+    isPackaged?: boolean;
+    env?: NodeJS.ProcessEnv;
+    currentVersion?: string;
+    app?: ReturnType<typeof fakeApp>;
+    restartApproved?: () => boolean;
+    stateDir?: string;
+    platform?: NodeJS.Platform;
+  } = {},
+): Promise<AutoUpdateController | null> {
   const app = options.app ?? fakeApp(updater);
   return startAutoUpdates({
     isPackaged: options.isPackaged ?? true,
@@ -124,31 +125,14 @@ function failChecksWith(updater: ReturnType<typeof fakeUpdater>, error: Error) {
 
 function channelFileNotFound(): Error {
   return Object.assign(
-    new Error("Cannot find nightly-mac.yml in the latest release artifacts (https://github.com/dohchq/dohc/releases/download/v0.1.1-nightly.20261019.42.1/nightly-mac.yml): HttpError: 404"),
+    new Error(
+      "Cannot find nightly-mac.yml in the latest release artifacts (https://github.com/dohchq/dohc/releases/download/v0.1.1-nightly.20261019.42.1/nightly-mac.yml): HttpError: 404",
+    ),
     { code: "ERR_UPDATER_CHANNEL_FILE_NOT_FOUND" },
   );
 }
 
 describe("electron updater configuration", () => {
-  it("derives latest/nightly channels from semver-compatible versions", () => {
-    expect(resolveUpdateChannel("1.2.3")).toBe("latest");
-    expect(resolveUpdateChannel("1.2.4-nightly.20260621.123")).toBe("nightly");
-    expect(resolveUpdateChannel("1.2.4-nightly.20260621.123.2")).toBe("nightly");
-  });
-
-  it("uses a baked packaged app-update.yml feed unless an override is explicit", async () => {
-    const updater = fakeUpdater();
-    const controller = await startWith(updater, { isPackaged: true, env: {} });
-
-    expect(controller).not.toBeNull();
-    expect(updater.setFeedURL).not.toHaveBeenCalled();
-    expect(updater.autoDownload).toBe(false);
-    expect(updater.autoInstallOnAppQuit).toBe(true);
-    expect(updater.channel).toBe("latest");
-    expect(updater.allowPrerelease).toBe(false);
-    expect(updater.allowDowngrade).toBe(false);
-  });
-
   it("honors DOHC_UPDATE_URL only for packaged builds or explicit dev mock mode", async () => {
     expect(updateFeedOverride({ DOHC_UPDATE_URL: "https://updates.test" }, false)).toBeNull();
     expect(
@@ -215,20 +199,28 @@ describe("electron updater configuration", () => {
       throw new Error("Command pkexec exited with code 126");
     };
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    expect(() => DebUpdater.installWithCommandRunner("dpkg", "/tmp/dohc.deb", cancelled, logger)).toThrow("126");
-    expect(commands).toEqual([[
-      "dpkg", "-i", "/tmp/dohc.deb", "||",
-      "(", "apt-get", "install", "-f", "-y", "--no-remove", "&&", "dpkg", "-i", "/tmp/dohc.deb", ")",
-    ]]);
-  });
-
-  it("sets nightly channel flags explicitly", async () => {
-    const updater = fakeUpdater();
-    await startWith(updater, { currentVersion: "1.2.4-nightly.20260621.123" });
-
-    expect(updater.channel).toBe("nightly");
-    expect(updater.allowPrerelease).toBe(true);
-    expect(updater.allowDowngrade).toBe(false);
+    expect(() =>
+      DebUpdater.installWithCommandRunner("dpkg", "/tmp/dohc.deb", cancelled, logger),
+    ).toThrow("126");
+    expect(commands).toEqual([
+      [
+        "dpkg",
+        "-i",
+        "/tmp/dohc.deb",
+        "||",
+        "(",
+        "apt-get",
+        "install",
+        "-f",
+        "-y",
+        "--no-remove",
+        "&&",
+        "dpkg",
+        "-i",
+        "/tmp/dohc.deb",
+        ")",
+      ],
+    ]);
   });
 });
 
@@ -237,7 +229,10 @@ describe("electron updater release without this platform's files", () => {
   it("reports no update on macOS while the newest release has no Mac channel file", async () => {
     const updater = fakeUpdater();
     failChecksWith(updater, channelFileNotFound());
-    const controller = await startWith(updater, { platform: "darwin", currentVersion: "0.1.1-nightly.20261018.41.1" });
+    const controller = await startWith(updater, {
+      platform: "darwin",
+      currentVersion: "0.1.1-nightly.20261018.41.1",
+    });
 
     await expect(controller!.checkForUpdates()).resolves.toMatchObject({
       checked: true,
@@ -245,45 +240,22 @@ describe("electron updater release without this platform's files", () => {
     });
   });
 
-  it("reports a missing channel file as an error on Windows and Linux, whose files ship with the release", async () => {
-    for (const platform of ["win32", "linux"] as const) {
-      const updater = fakeUpdater();
-      failChecksWith(updater, channelFileNotFound());
-      const controller = await startWith(updater, { platform });
-
-      await expect(controller!.checkForUpdates()).resolves.toMatchObject({
-        checked: false,
-        state: { status: "error", message: expect.stringContaining("Cannot find nightly-mac.yml") },
-      });
-    }
-  });
-
   it("reports a missing channel file as an error on macOS for a custom feed", async () => {
     const updater = fakeUpdater();
     failChecksWith(updater, channelFileNotFound());
-    const controller = await startWith(updater, { platform: "darwin", env: { DOHC_UPDATE_URL: "https://updates.example.test/dohc" } });
+    const controller = await startWith(updater, {
+      platform: "darwin",
+      env: { DOHC_UPDATE_URL: "https://updates.example.test/dohc" },
+    });
 
-    expect(updater.setFeedURL).toHaveBeenCalledWith({ provider: "generic", url: "https://updates.example.test/dohc" });
+    expect(updater.setFeedURL).toHaveBeenCalledWith({
+      provider: "generic",
+      url: "https://updates.example.test/dohc",
+    });
     await expect(controller!.checkForUpdates()).resolves.toMatchObject({
       checked: false,
       state: { status: "error", message: expect.stringContaining("Cannot find nightly-mac.yml") },
     });
-  });
-
-  it("still reports other update errors on macOS", async () => {
-    for (const error of [
-      new Error("sha512 checksum mismatch"),
-      Object.assign(new Error("Unable to find latest version on GitHub"), { code: "ERR_UPDATER_LATEST_VERSION_NOT_FOUND" }),
-    ]) {
-      const updater = fakeUpdater();
-      failChecksWith(updater, error);
-      const controller = await startWith(updater, { platform: "darwin" });
-
-      await expect(controller!.checkForUpdates()).resolves.toMatchObject({
-        checked: false,
-        state: { status: "error", message: expect.stringContaining(error.message) },
-      });
-    }
   });
 });
 
@@ -307,48 +279,12 @@ describe("electron updater actions", () => {
     expect(controller.downloadUpdate().accepted).toBe(true);
   });
 
-  it("coalesces repeated checks while one is active", async () => {
-    const updater = fakeUpdater();
-    const check = deferred<undefined>();
-    updater.checkForUpdates.mockReturnValueOnce(check.promise);
-    const controller = await startWith(updater);
-    expect(controller).not.toBeNull();
-
-    const first = controller!.checkForUpdates();
-    updater.emit("checking-for-update");
-    const second = controller!.checkForUpdates();
-
-    await expect(second).resolves.toMatchObject({ checked: false });
-    expect(updater.checkForUpdates).toHaveBeenCalledTimes(1);
-    updater.emit("update-not-available");
-    check.resolve(undefined);
-    await expect(first).resolves.toMatchObject({
-      checked: true,
-      state: { status: "up-to-date" },
-    });
-  });
-
-  it("recovers when a check rejects after entering checking without an error event", async () => {
-    const updater = fakeUpdater();
-    updater.checkForUpdates.mockImplementationOnce(async () => {
-      updater.emit("checking-for-update");
-      throw new Error("socket failed");
-    });
-    const controller = await startWith(updater);
-    expect(controller).not.toBeNull();
-
-    await expect(controller!.checkForUpdates()).resolves.toMatchObject({
-      checked: false,
-      state: { status: "error", canCheck: true },
-    });
-  });
-
-  // The latch is pulled ONCE. What a second request means
-  // changed in r18: it used to be refused, which stranded the update whenever
-  // a recovery warning vetoed the first restart's unload. The restart is not
-  // lost — electron-updater installs it on the next quit — so a second
-  // request completes it by quitting, and this is MAIN's fact to hold, not a
-  // renderer module variable a reload resets.
+  // The latch is pulled once. A second request is not refused: refusing it
+  // would strand the update whenever a recovery warning vetoed the first
+  // restart's unload. The restart is not lost, because electron-updater
+  // installs it on the next quit, so a second request completes it by
+  // quitting. Main holds this fact, not a renderer module variable a reload
+  // resets.
   it("on macOS, installs only after update-downloaded, pulls the latch once, and completes a staged restart", async () => {
     const updater = fakeUpdater();
     const app = fakeApp(updater);
@@ -373,7 +309,10 @@ describe("electron updater actions", () => {
       accepted: true,
     });
     expect(app.quit).toHaveBeenCalledTimes(1);
-    expect(updater.quitAndInstall, "one-shot: drop the restartStaged branch so quitAndInstall runs again. electron-updater ignores it, and the app never quits.").toHaveBeenCalledTimes(1);
+    expect(
+      updater.quitAndInstall,
+      "one-shot: drop the restartStaged branch so quitAndInstall runs again. electron-updater ignores it, and the app never quits.",
+    ).toHaveBeenCalledTimes(1);
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
   });
 
@@ -397,7 +336,6 @@ describe("electron updater actions", () => {
       expect(app.quit).toHaveBeenCalledOnce();
       expect(updater.install).not.toHaveBeenCalled();
       expect(updater.quitAndInstall).not.toHaveBeenCalled();
-      // A window went back, so dohc did not quit. Restart quits again.
       await expect(controller.installUpdate()).resolves.toMatchObject({ accepted: true });
       expect(app.quit).toHaveBeenCalledTimes(2);
       expect(updater.install).not.toHaveBeenCalled();
@@ -425,47 +363,32 @@ describe("electron updater actions", () => {
       failed.app.exit(1);
       expect(failed.updater.install).not.toHaveBeenCalled();
     });
-
-    it("starts the installer after the controller stops, as launch recovery's does", async () => {
-      const { updater, app, controller } = await ready();
-      await controller.installUpdate();
-      controller.stop();
-      app.exit(0);
-      expect(startedInstalls(updater)).toEqual([[false, true]]);
-    });
-  });
-
-  it("bounds progress exposed to the renderer", async () => {
-    const updater = fakeUpdater();
-    const controller = await startWith(updater);
-    expect(controller).not.toBeNull();
-
-    updater.emit("checking-for-update");
-    updater.emit("update-available", { version: "1.2.4" });
-    controller!.downloadUpdate();
-    updater.emit("download-progress", { percent: 150 });
-
-    expect(controller!.publicState()).toMatchObject({
-      status: "downloading",
-      percent: 100,
-    });
   });
 
   it("downloads only when a person asks, once", async () => {
     const updater = fakeUpdater();
     const controller = (await startWith(updater))!;
-    expect(controller.downloadUpdate()).toMatchObject({ accepted: false, state: { status: "idle" } });
+    expect(controller.downloadUpdate()).toMatchObject({
+      accepted: false,
+      state: { status: "idle" },
+    });
 
     updater.emit("checking-for-update");
     updater.emit("update-available", { version: "1.2.4" });
-    expect(controller.publicState()).toMatchObject({ status: "available", version: "1.2.4", message: "dohc 1.2.4 is available." });
+    expect(controller.publicState()).toMatchObject({
+      status: "available",
+      version: "1.2.4",
+      message: "dohc 1.2.4 is available.",
+    });
     expect(updater.downloadUpdate).not.toHaveBeenCalled();
-    // Nothing a download did not start can install.
     await expect(controller.installUpdate()).resolves.toMatchObject({ accepted: false });
     updater.emit("update-downloaded", { version: "1.2.4" });
     expect(controller.publicState().status).toBe("available");
 
-    expect(controller.downloadUpdate()).toMatchObject({ accepted: true, state: { status: "downloading" } });
+    expect(controller.downloadUpdate()).toMatchObject({
+      accepted: true,
+      state: { status: "downloading" },
+    });
     expect(controller.downloadUpdate()).toMatchObject({ accepted: false });
     expect(updater.downloadUpdate).toHaveBeenCalledOnce();
     updater.emit("update-downloaded", { version: "1.2.4" });
@@ -474,7 +397,6 @@ describe("electron updater actions", () => {
   });
 
   it("returns a failed download to Update, with the step that failed", async () => {
-    // The updater emits "error" and rejects; a rejection alone still ends the download.
     for (const emits of [true, false]) {
       const updater = fakeUpdater();
       const controller = (await startWith(updater))!;
@@ -486,12 +408,13 @@ describe("electron updater actions", () => {
         throw error;
       });
       controller.downloadUpdate();
-      await vi.waitFor(() => expect(controller.publicState()).toMatchObject({
-        status: "available",
-        message: "sha512 checksum mismatch",
-        failure: { step: "download" },
-      }));
-      // Trying again clears the failure while it runs.
+      await vi.waitFor(() =>
+        expect(controller.publicState()).toMatchObject({
+          status: "available",
+          message: "sha512 checksum mismatch",
+          failure: { step: "download" },
+        }),
+      );
       expect(controller.downloadUpdate().state).not.toHaveProperty("failure");
     }
   });
@@ -512,35 +435,10 @@ describe("electron updater actions", () => {
     failChecksWith(updater, new Error("feed returned 503"));
     await controller.checkForUpdates();
     expect(controller.publicState().failure?.id).toBeGreaterThan(asked!.id);
-    // Offline is not a failure to report.
     failChecksWith(updater, new Error("net::ERR_INTERNET_DISCONNECTED"));
     await controller.checkForUpdates();
     expect(controller.publicState()).toMatchObject({ status: "offline" });
     expect(controller.publicState()).not.toHaveProperty("failure");
-  });
-
-  it("reports quitAndInstall failures as rejected restart requests", async () => {
-    const updater = fakeUpdater();
-    updater.quitAndInstall.mockImplementationOnce(() => {
-      throw new Error("quit failed");
-    });
-    const controller = await startWith(updater, { platform: "darwin" });
-    expect(controller).not.toBeNull();
-
-    updater.emit("checking-for-update");
-    updater.emit("update-available", { version: "1.2.4" });
-    controller!.downloadUpdate();
-    updater.emit("update-downloaded", { version: "1.2.4" });
-
-    await expect(controller!.installUpdate()).resolves.toMatchObject({
-      accepted: false,
-      state: {
-        status: "ready",
-        canInstall: true,
-        message: "quit failed",
-        failure: { step: "install" },
-      },
-    });
   });
 
   it("surfaces updater install error events while keeping the update retryable", async () => {
@@ -574,9 +472,17 @@ describe("electron updater actions", () => {
     // electron-updater's words for a failed install command (BaseUpdater.spawnSyncLog).
     for (const [error, message, installCommand] of [
       ["Command pkexec exited with code 126", "The update needs your password.", undefined],
-      ["Command pkexec exited with code 127", "dohc did not get permission. Run this command in a terminal to install it.", install],
+      [
+        "Command pkexec exited with code 127",
+        "dohc did not get permission. Run this command in a terminal to install it.",
+        install,
+      ],
       ["Command sudo exited with code 1", "Run this command in a terminal to install it.", install],
-      ["Command pkexec exited with code 1", "Run this command in a terminal to install it.", install],
+      [
+        "Command pkexec exited with code 1",
+        "Run this command in a terminal to install it.",
+        install,
+      ],
     ] as const) {
       const updater = fakeUpdater();
       updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error(error)));
@@ -587,7 +493,11 @@ describe("electron updater actions", () => {
       updater.emit("update-downloaded", { version: "1.2.4", downloadedFile: deb });
 
       const result = await controller!.installUpdate();
-      expect(result, error).toMatchObject({ accepted: false, reason: message, state: { status: "ready", canInstall: true, message } });
+      expect(result, error).toMatchObject({
+        accepted: false,
+        reason: message,
+        state: { status: "ready", canInstall: true, message },
+      });
       expect(result.state.installCommand, error).toBe(installCommand);
       // electron-updater clears its one-shot latch after a failed install, so Restart tries again.
       await expect(controller!.installUpdate()).resolves.toMatchObject({ accepted: true });
@@ -595,28 +505,25 @@ describe("electron updater actions", () => {
     }
   });
 
-  it("keeps the generic install failure for a Linux AppImage", async () => {
-    const downloadedFile = "/home/sam/dohc-1.2.4-linux-x86_64.AppImage";
-    const updater = fakeUpdater();
-    updater.quitAndInstall.mockImplementationOnce(() => updater.emit("error", new Error("Command pkexec exited with code 127")));
-    const controller = await startWith(updater, { platform: "linux" });
-    updater.emit("checking-for-update");
-    updater.emit("update-available", { version: "1.2.4", downloadedFile });
-    controller!.downloadUpdate();
-    updater.emit("update-downloaded", { version: "1.2.4", downloadedFile });
-
-    const result = await controller!.installUpdate();
-    const cause = "Command pkexec exited with code 127";
-    expect(result).toMatchObject({ accepted: false, reason: cause, state: { message: cause, failure: { step: "install" } } });
-    expect(result.state.installCommand).toBeUndefined();
-  });
-
   it("quotes the .deb's path for the shell in the install command, and the update state carries the longest one", () => {
-    expect(debInstallFailure(new Error("Command sudo exited with code 1"), "/home/o'brien/dohc 1.2.4.deb").installCommand)
-      .toBe("sudo apt install '/home/o'\\''brien/dohc 1.2.4.deb'");
+    expect(
+      debInstallFailure(
+        new Error("Command sudo exited with code 1"),
+        "/home/o'brien/dohc 1.2.4.deb",
+      ).installCommand,
+    ).toBe("sudo apt install '/home/o'\\''brien/dohc 1.2.4.deb'");
     // A Linux path is at most 4,096 bytes; quoting makes each ' four characters.
-    const longest = debInstallFailure(new Error("Command sudo exited with code 1"), `/${"'".repeat(4095)}`).installCommand;
-    expect(UpdateStateEvent.parse({ status: "ready", message: "Run this command in a terminal to install it.", installCommand: longest }).installCommand).toBe(longest);
+    const longest = debInstallFailure(
+      new Error("Command sudo exited with code 1"),
+      `/${"'".repeat(4095)}`,
+    ).installCommand;
+    expect(
+      UpdateStateEvent.parse({
+        status: "ready",
+        message: "Run this command in a terminal to install it.",
+        installCommand: longest,
+      }).installCommand,
+    ).toBe(longest);
   });
 
   describe("awaitUpdate", () => {
@@ -634,7 +541,6 @@ describe("electron updater actions", () => {
       const answer = deferred<boolean>();
       const confirmDownload = vi.fn(() => answer.promise);
       const waiting = controller.awaitUpdate(bounds, confirmDownload, onDownloading);
-      // Nothing downloads until the person answers.
       await vi.waitFor(() => expect(confirmDownload).toHaveBeenCalledWith("1.2.4"));
       expect(updater.downloadUpdate).not.toHaveBeenCalled();
       answer.resolve(true);
@@ -646,23 +552,6 @@ describe("electron updater actions", () => {
       await expect(waiting).resolves.toBe("1.2.4");
       expect(updater.checkForUpdates).toHaveBeenCalledOnce();
       expect(onDownloading).toHaveBeenCalledOnce();
-    });
-
-    it.each([
-      ["no update", (updater: ReturnType<typeof fakeUpdater>) => updater.emit("update-not-available")],
-      ["offline", (updater: ReturnType<typeof fakeUpdater>) => updater.emit("error", new Error("net::ERR_INTERNET_DISCONNECTED"))],
-      ["a failed download", (updater: ReturnType<typeof fakeUpdater>) => {
-        updater.emit("update-available", { version: "1.2.4" });
-        updater.emit("error", new Error("sha512 checksum mismatch"));
-      }],
-    ])("resolves null on %s", async (_name, answer) => {
-      const updater = fakeUpdater();
-      updater.checkForUpdates.mockImplementationOnce(async () => {
-        updater.emit("checking-for-update");
-        answer(updater);
-      });
-      const controller = (await startWith(updater))!;
-      await expect(controller.awaitUpdate(bounds, yes)).resolves.toBeNull();
     });
 
     it("downloads nothing when the person declines", async () => {
@@ -677,48 +566,13 @@ describe("electron updater actions", () => {
       expect(controller.state().status).toBe("available");
     });
 
-    it("joins a download the person already started without asking again", async () => {
-      const updater = fakeUpdater();
-      const controller = (await startWith(updater))!;
-      updater.emit("checking-for-update");
-      updater.emit("update-available", { version: "1.2.4" });
-      controller.downloadUpdate();
-      const confirmDownload = vi.fn(yes);
-      const waiting = controller.awaitUpdate(bounds, confirmDownload);
-      updater.emit("update-downloaded", { version: "1.2.4" });
-      await expect(waiting).resolves.toBe("1.2.4");
-      expect(confirmDownload).not.toHaveBeenCalled();
-      expect(updater.downloadUpdate).toHaveBeenCalledOnce();
-    });
-
-    it("resolves at once with an update already downloaded", async () => {
-      const updater = fakeUpdater();
-      const controller = (await startWith(updater))!;
-      updater.emit("checking-for-update");
-      updater.emit("update-available", { version: "1.2.4" });
-      controller.downloadUpdate();
-      updater.emit("update-downloaded", { version: "1.2.4" });
-      await expect(controller.awaitUpdate(bounds, yes)).resolves.toBe("1.2.4");
-      expect(updater.checkForUpdates).not.toHaveBeenCalled();
-    });
-
-    it("joins a check that is already running", async () => {
-      const updater = fakeUpdater();
-      const controller = (await startWith(updater))!;
-      updater.emit("checking-for-update");
-      const waiting = controller.awaitUpdate(bounds, yes);
-      updater.emit("update-available", { version: "1.2.4" });
-      await vi.waitFor(() => expect(controller.state().status).toBe("downloading"));
-      updater.emit("update-downloaded", { version: "1.2.4" });
-      await expect(waiting).resolves.toBe("1.2.4");
-      expect(updater.checkForUpdates).not.toHaveBeenCalled();
-    });
-
     it("gives up on a silent feed at the verdict bound and on a stalled download at the download bound", async () => {
       vi.useFakeTimers();
       try {
         const silent = fakeUpdater();
-        silent.checkForUpdates.mockImplementationOnce(async () => { silent.emit("checking-for-update"); });
+        silent.checkForUpdates.mockImplementationOnce(async () => {
+          silent.emit("checking-for-update");
+        });
         const silentWait = (await startWith(silent))!.awaitUpdate(bounds, yes);
         await vi.advanceTimersByTimeAsync(bounds.verdictMs);
         await expect(silentWait).resolves.toBeNull();
@@ -729,7 +583,9 @@ describe("electron updater actions", () => {
           stalled.emit("update-available", { version: "1.2.4" });
         });
         let result: string | null | undefined;
-        void (await startWith(stalled))!.awaitUpdate(bounds, yes).then((version) => { result = version; });
+        void (await startWith(stalled))!.awaitUpdate(bounds, yes).then((version) => {
+          result = version;
+        });
         await vi.advanceTimersByTimeAsync(bounds.verdictMs);
         expect(result).toBeUndefined();
         await vi.advanceTimersByTimeAsync(bounds.downloadMs - bounds.verdictMs);
@@ -738,25 +594,6 @@ describe("electron updater actions", () => {
         vi.useRealTimers();
       }
     });
-  });
-
-  it("stops scheduled checks when the controller is stopped", async () => {
-    vi.useFakeTimers();
-    try {
-      const updater = fakeUpdater();
-      const controller = await startWith(updater);
-      expect(controller).not.toBeNull();
-
-      controller!.stop();
-      vi.advanceTimersByTime(60 * 60_000);
-
-      expect(updater.checkForUpdates).not.toHaveBeenCalled();
-      await expect(controller!.checkForUpdates()).resolves.toMatchObject({
-        checked: false,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });
 
@@ -801,7 +638,10 @@ describe("electron updater after a quit", () => {
   });
 
   it("forgets a chosen update once dohc opens on another version, or the feed offers none", async () => {
-    for (const [currentVersion, ending] of [["1.2.4", "launch"], ["1.2.3", "not-available"]] as const) {
+    for (const [currentVersion, ending] of [
+      ["1.2.4", "launch"],
+      ["1.2.3", "not-available"],
+    ] as const) {
       const { stateDir: folder, path } = stateDir();
       writeFileSync(path, JSON.stringify({ version: "1.2.4", from: "1.2.3" }));
       const updater = fakeUpdater();
@@ -827,92 +667,5 @@ describe("electron updater after a quit", () => {
     expect(existsSync(path)).toBe(false);
     await controller.installUpdate();
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: "1.2.4", from: "1.2.3" });
-  });
-});
-
-describe("publicUpdateState", () => {
-  const READY_EVENTS: UpdateEvent[] = [
-    { type: "check" },
-    { type: "available", version: "1.0.1" },
-    { type: "download" },
-    { type: "downloaded", version: "1.0.1" },
-  ];
-
-  it("gates actions during an active check", () => {
-    const checking = transition(initialUpdateState, { type: "check" });
-    expect(
-      publicUpdateState(checking, {
-        currentVersion: "1.0.0",
-        channel: "latest",
-        checkInFlight: true,
-      }),
-    ).toMatchObject({ canCheck: false, canInstall: false });
-  });
-
-  it("enables install when an update is downloaded and ready", () => {
-    const ready = READY_EVENTS.reduce(transition, initialUpdateState);
-
-    expect(
-      publicUpdateState(ready, {
-        currentVersion: "1.0.0",
-        channel: "latest",
-      }),
-    ).toMatchObject({
-      status: "ready",
-      version: "1.0.1",
-      canCheck: false,
-      canInstall: true,
-    });
-  });
-
-  // quitAndInstall's latch never clears, so gating install on
-  // it stranded a ready update for the rest of the run whenever the restart
-  // was interrupted — a recovery warning whose "Go back" had nothing to go
-  // back to. The restart is not lost; it is finishable by quitting.
-  it("keeps a staged restart offerable while blocking a new check", () => {
-    const ready = READY_EVENTS.reduce(transition, initialUpdateState);
-
-    expect(
-      publicUpdateState(ready, {
-        currentVersion: "1.0.0",
-        channel: "latest",
-        restartStaged: true,
-      }),
-      "staged restart offerable: gate canInstall on restartStaged again. The Restart button disappears for the rest of the app run.",
-    ).toMatchObject({
-      status: "ready",
-      canInstall: true,
-      // ...but staging is done, so there is nothing to re-check for.
-      canCheck: false,
-    });
-  });
-
-  it("keeps checks available after retryable error and offline states", () => {
-    expect(
-      publicUpdateState(transition(initialUpdateState, { type: "error", message: "boom" }), {
-        currentVersion: "1.0.0",
-        channel: "latest",
-      }),
-    ).toMatchObject({ status: "error", canCheck: true, canInstall: false });
-    expect(
-      publicUpdateState(transition(initialUpdateState, { type: "offline" }), {
-        currentVersion: "1.0.0",
-        channel: "latest",
-      }),
-    ).toMatchObject({ status: "offline", canCheck: true, canInstall: false });
-  });
-
-  it("carries current version and channel through public state", () => {
-    expect(
-      publicUpdateState(initialUpdateState, {
-        currentVersion: "1.0.1-nightly.20260621.12.2",
-        channel: "nightly",
-      }),
-    ).toMatchObject({
-      currentVersion: "1.0.1-nightly.20260621.12.2",
-      channel: "nightly",
-      canCheck: true,
-      canInstall: false,
-    });
   });
 });

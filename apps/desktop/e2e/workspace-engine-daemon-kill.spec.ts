@@ -94,13 +94,9 @@ async function killDaemonMidTyping(
   // so a later missing sentinel cannot be blamed on a doc that never worked.
   await page.keyboard.type(" WARMUP_KILLREC");
   await expect
-    .poll(
-      async () =>
-        await readFile(join(temp.rootPath, input.docPath), "utf8").catch(
-          () => "",
-        ),
-      { timeout: 20_000 },
-    )
+    .poll(async () => await readFile(join(temp.rootPath, input.docPath), "utf8").catch(() => ""), {
+      timeout: 20_000,
+    })
     .toContain("WARMUP_KILLREC");
 
   const victims = await engineDaemonPids(appPid);
@@ -112,7 +108,6 @@ async function killDaemonMidTyping(
   await page.keyboard.type(` ${input.preKill}`);
   for (const pid of victims) await hardKillPid(pid);
 
-  // Keep typing through the outage, exactly like the journey's user did.
   await page.keyboard.type(` ${input.postKill}`);
 
   const replacement = await waitForFreshEngineDaemon(
@@ -124,11 +119,20 @@ async function killDaemonMidTyping(
 
   // PID creation precedes the handshake and blocking restart smoke. A real
   // workspace request proves the replacement can serve the quit-time recovery.
-  await expect.poll(async () => page.evaluate(async workspaceId => {
-    try {
-      return (await window.dohcDesktop!.listWorkspaceVersions({ workspaceId })).activeVersionId;
-    } catch { return null; }
-  }, workspace.workspaceId), { timeout: 30_000 }).toBe("main");
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(async (workspaceId) => {
+          try {
+            return (await window.dohcDesktop!.listWorkspaceVersions({ workspaceId }))
+              .activeVersionId;
+          } catch {
+            return null;
+          }
+        }, workspace.workspaceId),
+      { timeout: 30_000 },
+    )
+    .toBe("main");
 
   // A daemon death must never become a user-facing main-process crash. This
   // cannot observe the journey's EPIPE class — Playwright keeps a reader on the
@@ -141,9 +145,6 @@ async function killDaemonMidTyping(
   return { desktop, editor };
 }
 
-// The journey's scenario. Its user stopped typing before the app went away, so
-// recovery that only runs on the next keystroke never runs at all: nothing is
-// typed here between the daemon's return and the quit.
 test("a hard daemon kill keeps the outage text when the user never types again", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -152,9 +153,7 @@ test("a hard daemon kill keeps the outage text when the user never types again",
   const docPath = "abuse/kill.md";
 
   try {
-    await writeWorkspaceFiles(temp, [
-      { path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" }]);
 
     const killed = await killDaemonMidTyping(temp, {
       docPath,
@@ -171,7 +170,6 @@ test("a hard daemon kill keeps the outage text when the user never types again",
     const onDisk = await readFile(join(temp.rootPath, docPath), "utf8");
     expect(onDisk).toContain(preKill);
     expect(onDisk).toContain(postKill);
-    // The document must be recovered, not duplicated.
     expect(onDisk.match(/Anchor paragraph\./g)).toHaveLength(1);
     expect(onDisk.match(new RegExp(preKill, "g"))).toHaveLength(1);
 
@@ -180,9 +178,7 @@ test("a hard daemon kill keeps the outage text when the user never types again",
     const reopened = await openWorkspaceFromFirstRun(relaunched, temp);
     await waitForWorkspaceFile(relaunched, reopened.workspaceId, docPath);
     await openEngineDoc(relaunched, docPath);
-    await expect(relaunched.getByTestId("markdown-editor")).toContainText(
-      preKill,
-    );
+    await expect(relaunched.getByTestId("markdown-editor")).toContainText(preKill);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
@@ -196,9 +192,7 @@ test("a hard daemon kill leaves the editor writable and lands the outage text", 
   const docPath = "abuse/kill.md";
 
   try {
-    await writeWorkspaceFiles(temp, [
-      { path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" }]);
 
     const killed = await killDaemonMidTyping(temp, {
       docPath,
@@ -207,17 +201,13 @@ test("a hard daemon kill leaves the editor writable and lands the outage text", 
     });
     desktop = killed.desktop;
 
-    // (a) The editor must still accept input after the restart, not sit dead.
     await desktop.page.keyboard.type(" KILLREC_AFTER_RESTART");
     await expect(killed.editor).toContainText("KILLREC_AFTER_RESTART");
 
-    // (b) And the keystroke path persists everything through the replacement.
     await expect
-      .poll(
-        async () =>
-          await readFile(join(temp.rootPath, docPath), "utf8").catch(() => ""),
-        { timeout: 30_000 },
-      )
+      .poll(async () => await readFile(join(temp.rootPath, docPath), "utf8").catch(() => ""), {
+        timeout: 30_000,
+      })
       .toContain("KILLREC_AFTER_RESTART");
     const onDisk = await readFile(join(temp.rootPath, docPath), "utf8");
     expect(onDisk).toContain(preKill);
@@ -246,9 +236,7 @@ test("an outage longer than the retry window still persists the text at quit", a
   const restartBackoffMs = 4_000;
 
   try {
-    await writeWorkspaceFiles(temp, [
-      { path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" },
-    ]);
+    await writeWorkspaceFiles(temp, [{ path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" }]);
 
     const killed = await killDaemonMidTyping(temp, {
       docPath,
@@ -265,12 +253,14 @@ test("an outage longer than the retry window still persists the text at quit", a
     // to go beyond. The exhausted transport can report either an unavailable
     // daemon or a failed workspace rebind, depending on where delivery stopped.
     const refusedEdits = desktop.logs.filter(
-      (entry) =>
-        entry.source === "main" &&
-        /Y\.Doc local update of .* failed/.test(entry.text),
+      (entry) => entry.source === "main" && /Y\.Doc local update of .* failed/.test(entry.text),
     );
     expect(refusedEdits.length).toBeGreaterThan(0);
-    expect(refusedEdits.some(entry => /Engine(?:WorkspaceRebind|DaemonUnavailable)Error/.test(entry.text))).toBe(true);
+    expect(
+      refusedEdits.some((entry) =>
+        /Engine(?:WorkspaceRebind|DaemonUnavailable)Error/.test(entry.text),
+      ),
+    ).toBe(true);
 
     // Quit with no further typing. Only the settling close can save this text.
     await desktop.close();
@@ -285,11 +275,6 @@ test("an outage longer than the retry window still persists the text at quit", a
   }
 });
 
-// edges-04. The whole app dies after the engine journaled an edit but before
-// the debounced settle wrote the file. On relaunch the editor shows the edit
-// from the engine's copy, and nothing else reads it: an agent or another app
-// sees the old file. The document must not claim Saved until the file has the
-// text, and dohc must write it without waiting for another keystroke.
 test("a document reopened after an app crash reads Saved only once its file has the text", async () => {
   test.setTimeout(150_000);
   const temp = await createTempWorkspace();
@@ -317,7 +302,6 @@ test("a document reopened after an app crash reads Saved only once its file has 
     await desktop.page.getByTestId("markdown-editor").click();
     await desktop.page.keyboard.press(DOCUMENT_END);
 
-    // Crash once the engine has journaled the edit.
     const journaled = ydocUpdateCount(temp.rootPath);
     await desktop.page.keyboard.insertText(` ${crashed}`);
     await expect.poll(() => ydocUpdateCount(temp.rootPath)).toBeGreaterThan(journaled);
@@ -366,19 +350,13 @@ test("a document reopened after an app crash reads Saved only once its file has 
 
     // Held: the document reads Saving… and never Saved, and the file lacks
     // the text. The gate cannot open by itself, so this is not a race.
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
-      "data-state",
-      "saving",
-    );
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saving");
     expect(await saveMarks()).toEqual(["saving"]);
     expect(await diskText()).not.toContain(crashed);
 
     // Released: the recovery settle writes the file, and only then Saved.
     await rm(gate);
-    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute(
-      "data-state",
-      "saved",
-    );
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "saved");
     expect(await diskText()).toContain(crashed);
     const marks = await saveMarks();
     expect(marks, "the document read Saved before its file had the text").toEqual([

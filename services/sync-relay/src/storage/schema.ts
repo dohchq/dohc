@@ -1,10 +1,18 @@
-import {initializeReplicaCurrentViewSchema} from "./replicaCurrentViewSchema";
-import {initializeWorkReferenceSchema} from "./workReferenceSchema";
-import {initializeReplicaHistorySchema, HISTORY_JOURNAL_POSITION_INDEX} from "./replicaHistorySchema";
-import {initializeReplicaHistoryWorkSchema} from "./replicaHistoryWorkSchema";
-import {initializeReplicaCurrentViewIncrementalSchema} from "./replicaCurrentViewIncrementalSchema";
-import {initializeHostedSettlementSchema, SETTLEMENT_CUTS} from "./hostedSettlementSchema";
-import { initializeLiveAuthorshipSchema, originalLiveJournalSql, liveAuthorSchemaMarked, assertLiveAuthorColumns } from "./liveAuthorshipSchema";
+import { initializeReplicaCurrentViewSchema } from "./replicaCurrentViewSchema";
+import { initializeWorkReferenceSchema } from "./workReferenceSchema";
+import {
+  initializeReplicaHistorySchema,
+  HISTORY_JOURNAL_POSITION_INDEX,
+} from "./replicaHistorySchema";
+import { initializeReplicaHistoryWorkSchema } from "./replicaHistoryWorkSchema";
+import { initializeReplicaCurrentViewIncrementalSchema } from "./replicaCurrentViewIncrementalSchema";
+import { initializeHostedSettlementSchema, SETTLEMENT_CUTS } from "./hostedSettlementSchema";
+import {
+  initializeLiveAuthorshipSchema,
+  originalLiveJournalSql,
+  liveAuthorSchemaMarked,
+  assertLiveAuthorColumns,
+} from "./liveAuthorshipSchema";
 import { initializeAppPublicationSchema } from "./publicationSchema";
 import { initializeAppCollectionSchema } from "./appCollectionSchema";
 import { initializeLiveCommittedDeliverySchema } from "./liveCommittedDeliverySchema";
@@ -28,9 +36,13 @@ import {
 } from "./automationHosts";
 import { initializeCollectionWriteSchema } from "./collectionWrites";
 import { initializeAutomationPressSchema } from "./automationPresses";
-import { initializeAutomationWorkspaceSchema, initializeLiveClaimIndex } from "./automationWorkspaces";
+import {
+  initializeAutomationWorkspaceSchema,
+  initializeLiveClaimIndex,
+} from "./automationWorkspaces";
 import { initializeAccountWorkspaceSchema } from "./accountWorkspaces";
 import { initializeOperationRecordSchema } from "./operationRecords";
+import { initializeChatWakeSchema } from "./chatWakes";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
 import { initializePushSchema } from "./pushSchema";
 import { initializePushDeliveries } from "./pushDeliveries";
@@ -42,7 +54,11 @@ import {
 } from "./limits";
 import { initializeLinkCreationSchema } from "./linkCreationSchema";
 import { initializeAgentConnectionSchema } from "./agentConnections";
-import { initializePersonalAgentActivity, initializePersonalAgentSchema, initializeWorkspaceDisplayName } from "./personalAgents";
+import {
+  initializePersonalAgentActivity,
+  initializePersonalAgentSchema,
+  initializeWorkspaceDisplayName,
+} from "./personalAgents";
 import type { SqliteDb } from "./types";
 
 const NORMALIZED_SHARE_SCHEMA_SQL = `
@@ -499,9 +515,10 @@ function initializeSessionHostControlSchema(db: SqliteDb): void {
 
   db.exec(SESSION_HOST_CONTROL_SCHEMA_SQL);
   assertSessionHostControlSchema(db);
-  db.prepare(
-    "INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)",
-  ).run(SESSION_HOST_CONTROL_MIGRATION_ID, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    SESSION_HOST_CONTROL_MIGRATION_ID,
+    Date.now(),
+  );
 }
 
 const LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID = "live-document-authority-v1";
@@ -602,79 +619,168 @@ CREATE INDEX idx_sync_relay_live_document_baseline_coverage
 
 const LIVE_DOCUMENT_AUTHORITY_COLUMNS = {
   sync_relay_live_documents: [
-    ["workspace_id", "TEXT", 1, 1], ["main_version_id", "TEXT", 1, 2],
-    ["object_id", "TEXT", 1, 3], ["lineage_claim_id", "TEXT", 1, 4],
-    ["replaces_lineage_claim_id", "TEXT", 0, 0], ["current_path", "TEXT", 1, 0],
-    ["baseline_moment_relay_seq", "INTEGER", 1, 0], ["baseline_projected_sha256", "TEXT", 1, 0],
-    ["baseline_projected_byte_length", "INTEGER", 1, 0], ["baseline_digest", "TEXT", 1, 0],
-    ["baseline_bytes", "BLOB", 1, 0], ["lineage_state", "TEXT", 1, 0],
-    ["admission_state", "TEXT", 1, 0], ["restore_fence_generation", "INTEGER", 1, 0],
-    ["registered_at_ms", "INTEGER", 1, 0], ["retired_at_ms", "INTEGER", 0, 0],
+    ["workspace_id", "TEXT", 1, 1],
+    ["main_version_id", "TEXT", 1, 2],
+    ["object_id", "TEXT", 1, 3],
+    ["lineage_claim_id", "TEXT", 1, 4],
+    ["replaces_lineage_claim_id", "TEXT", 0, 0],
+    ["current_path", "TEXT", 1, 0],
+    ["baseline_moment_relay_seq", "INTEGER", 1, 0],
+    ["baseline_projected_sha256", "TEXT", 1, 0],
+    ["baseline_projected_byte_length", "INTEGER", 1, 0],
+    ["baseline_digest", "TEXT", 1, 0],
+    ["baseline_bytes", "BLOB", 1, 0],
+    ["lineage_state", "TEXT", 1, 0],
+    ["admission_state", "TEXT", 1, 0],
+    ["restore_fence_generation", "INTEGER", 1, 0],
+    ["registered_at_ms", "INTEGER", 1, 0],
+    ["retired_at_ms", "INTEGER", 0, 0],
   ],
   sync_relay_live_document_baseline_ranges: [
-    ["workspace_id", "TEXT", 1, 1], ["main_version_id", "TEXT", 1, 2],
-    ["object_id", "TEXT", 1, 3], ["lineage_claim_id", "TEXT", 1, 4],
-    ["client_id", "INTEGER", 1, 5], ["start_clock", "INTEGER", 1, 6],
+    ["workspace_id", "TEXT", 1, 1],
+    ["main_version_id", "TEXT", 1, 2],
+    ["object_id", "TEXT", 1, 3],
+    ["lineage_claim_id", "TEXT", 1, 4],
+    ["client_id", "INTEGER", 1, 5],
+    ["start_clock", "INTEGER", 1, 6],
     ["end_clock", "INTEGER", 1, 0],
   ],
 } as const;
 
 function assertLiveDocumentAuthoritySchema(db: SqliteDb): void {
-  const fail = (): never => { throw new Error("live document authority schema is missing or damaged"); };
+  const fail = (): never => {
+    throw new Error("live document authority schema is missing or damaged");
+  };
   const same = (actual: unknown, expected: unknown): void => {
     if (JSON.stringify(actual) !== JSON.stringify(expected)) fail();
   };
   for (const [name, sql] of Object.entries(LIVE_DOCUMENT_AUTHORITY_SCHEMA)) {
-    const rows = db.prepare("SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?").all(name);
+    const rows = db
+      .prepare("SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?")
+      .all(name);
     const row = rows[0];
-    const table = name === "sync_relay_live_documents" || name === "idx_sync_relay_live_documents_current"
-      ? "sync_relay_live_documents" : "sync_relay_live_document_baseline_ranges";
-    if (rows.length !== 1 || !row || row.type !== (name.startsWith("idx_") ? "index" : "table")
-      || row.tbl_name !== table || typeof row.sql !== "string" || normalizedSchemaSql(row.sql) !== normalizedSchemaSql(sql)) fail();
+    const table =
+      name === "sync_relay_live_documents" || name === "idx_sync_relay_live_documents_current"
+        ? "sync_relay_live_documents"
+        : "sync_relay_live_document_baseline_ranges";
+    if (
+      rows.length !== 1 ||
+      !row ||
+      row.type !== (name.startsWith("idx_") ? "index" : "table") ||
+      row.tbl_name !== table ||
+      typeof row.sql !== "string" ||
+      normalizedSchemaSql(row.sql) !== normalizedSchemaSql(sql)
+    )
+      fail();
   }
   const documentKey = ["workspace_id", "main_version_id", "object_id", "lineage_claim_id"];
   for (const [table, columns] of Object.entries(LIVE_DOCUMENT_AUTHORITY_COLUMNS)) {
-    same(db.prepare(`PRAGMA table_info(${table})`).all().map(row =>
-      [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
-    columns.map(([name, type, notnull, pk], cid) => [cid, name, type, notnull, null, pk]));
-    const parent = table === "sync_relay_live_documents" ? "sync_relay_workspaces" : "sync_relay_live_documents";
+    same(
+      db
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .map((row) => [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
+      columns.map(([name, type, notnull, pk], cid) => [cid, name, type, notnull, null, pk]),
+    );
+    const parent =
+      table === "sync_relay_live_documents" ? "sync_relay_workspaces" : "sync_relay_live_documents";
     const foreignColumns = table === "sync_relay_live_documents" ? ["workspace_id"] : documentKey;
-    same(db.prepare(`PRAGMA foreign_key_list(${table})`).all().map(row =>
-      [row.id, row.seq, row.table, row.from, row.to, row.on_update, row.on_delete, row.match]),
-    foreignColumns.map((name, seq) => [0, seq, parent, name, name, "NO ACTION", "CASCADE", "NONE"]));
-    const namedIndex = table === "sync_relay_live_documents"
-      ? "idx_sync_relay_live_documents_current" : "idx_sync_relay_live_document_baseline_coverage";
-    const primaryColumns = table === "sync_relay_live_documents" ? documentKey : [...documentKey, "client_id", "start_clock"];
-    const indexedColumns = table === "sync_relay_live_documents"
-      ? documentKey.slice(0, 3) : [...documentKey, "client_id", "start_clock", "end_clock"];
+    same(
+      db
+        .prepare(`PRAGMA foreign_key_list(${table})`)
+        .all()
+        .map((row) => [
+          row.id,
+          row.seq,
+          row.table,
+          row.from,
+          row.to,
+          row.on_update,
+          row.on_delete,
+          row.match,
+        ]),
+      foreignColumns.map((name, seq) => [
+        0,
+        seq,
+        parent,
+        name,
+        name,
+        "NO ACTION",
+        "CASCADE",
+        "NONE",
+      ]),
+    );
+    const namedIndex =
+      table === "sync_relay_live_documents"
+        ? "idx_sync_relay_live_documents_current"
+        : "idx_sync_relay_live_document_baseline_coverage";
+    const primaryColumns =
+      table === "sync_relay_live_documents"
+        ? documentKey
+        : [...documentKey, "client_id", "start_clock"];
+    const indexedColumns =
+      table === "sync_relay_live_documents"
+        ? documentKey.slice(0, 3)
+        : [...documentKey, "client_id", "start_clock", "end_clock"];
     const expectedIndexes = [
-      [namedIndex, table === "sync_relay_live_documents" ? 1 : 0, "c", table === "sync_relay_live_documents" ? 1 : 0],
+      [
+        namedIndex,
+        table === "sync_relay_live_documents" ? 1 : 0,
+        "c",
+        table === "sync_relay_live_documents" ? 1 : 0,
+      ],
       [`sqlite_autoindex_${table}_1`, 1, "pk", 0],
     ];
-    const orderIndexes = (rows: unknown[][]): unknown[][] => rows.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-    same(orderIndexes(db.prepare(`PRAGMA index_list(${table})`).all().map(row =>
-      [row.name, row.unique, row.origin, row.partial])), orderIndexes(expectedIndexes));
-    for (const [name, indexColumns] of [[namedIndex, indexedColumns], [`sqlite_autoindex_${table}_1`, primaryColumns]] as const) {
-      same(db.prepare(`PRAGMA index_info(${name})`).all().map(row => [row.seqno, row.cid, row.name]),
-        indexColumns.map((column, seq) => [seq, columns.findIndex(entry => entry[0] === column), column]));
+    const orderIndexes = (rows: unknown[][]): unknown[][] =>
+      rows.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    same(
+      orderIndexes(
+        db
+          .prepare(`PRAGMA index_list(${table})`)
+          .all()
+          .map((row) => [row.name, row.unique, row.origin, row.partial]),
+      ),
+      orderIndexes(expectedIndexes),
+    );
+    for (const [name, indexColumns] of [
+      [namedIndex, indexedColumns],
+      [`sqlite_autoindex_${table}_1`, primaryColumns],
+    ] as const) {
+      same(
+        db
+          .prepare(`PRAGMA index_info(${name})`)
+          .all()
+          .map((row) => [row.seqno, row.cid, row.name]),
+        indexColumns.map((column, seq) => [
+          seq,
+          columns.findIndex((entry) => entry[0] === column),
+          column,
+        ]),
+      );
     }
   }
 }
 
 function initializeLiveDocumentAuthoritySchema(db: SqliteDb): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
-    .get(LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID) !== undefined;
-  const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)")
+  const marked =
+    db
+      .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+      .get(LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID) !== undefined;
+  const existing = db
+    .prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)")
     .all(...Object.keys(LIVE_DOCUMENT_AUTHORITY_SCHEMA));
   if (marked) {
     assertLiveDocumentAuthoritySchema(db);
     return;
   }
-  if (existing.length > 0) throw new Error("unmarked live document authority schema already exists");
+  if (existing.length > 0)
+    throw new Error("unmarked live document authority schema already exists");
   for (const sql of Object.values(LIVE_DOCUMENT_AUTHORITY_SCHEMA)) db.exec(sql);
   assertLiveDocumentAuthoritySchema(db);
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
-    .run(LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID,
+    Date.now(),
+  );
 }
 
 const LIVE_JOURNAL_MARKER = "live-update-journal-v1";
@@ -831,127 +937,310 @@ CREATE INDEX idx_sync_relay_live_update_struct_provenance_journal
 const LIVE_JOURNAL_SHAPE = {
   sync_relay_live_update_journal: {
     columns: [
-      [0,"journal_cursor","INTEGER",0,null,1],
-      [1,"delivery_id","TEXT",1,null,0],
-      [2,"update_digest","TEXT",1,null,0],
-      [3,"workspace_id","TEXT",1,null,0],
-      [4,"main_version_id","TEXT",1,null,0],
-      [5,"object_id","TEXT",1,null,0],
-      [6,"lineage_claim_id","TEXT",1,null,0],
-      [7,"current_path","TEXT",1,null,0],
-      [8,"selector_paths_json","TEXT",1,null,0],
-      [9,"restore_fence_generation","INTEGER",1,null,0],
-      [10,"principal_kind","TEXT",1,null,0],
-      [11,"principal_id","TEXT",1,null,0],
-      [12,"grant_id","TEXT",0,null,0],
-      [13,"grant_generation","INTEGER",0,null,0],
-      [14,"accepting_host_epoch","INTEGER",1,null,0],
-      [15,"received_at_ms","INTEGER",1,null,0],
-      [16,"update_bytes","BLOB",1,null,0],
-      [17,"validation_checkpoint_sha256","TEXT",0,null,0],
-      [18,"validation_checkpoint_bytes","BLOB",0,null,0],
-      [19,"relay_database_namespace","TEXT",1,null,0],
-      [20,"accepted_event_count","INTEGER",1,null,0],
-      [21,"accepted_evidence_digest","TEXT",1,null,0],
-      [22,"accepted_metadata_bytes","INTEGER",1,null,0],
-      [23,"restore_operation_id","TEXT",0,null,0],
+      [0, "journal_cursor", "INTEGER", 0, null, 1],
+      [1, "delivery_id", "TEXT", 1, null, 0],
+      [2, "update_digest", "TEXT", 1, null, 0],
+      [3, "workspace_id", "TEXT", 1, null, 0],
+      [4, "main_version_id", "TEXT", 1, null, 0],
+      [5, "object_id", "TEXT", 1, null, 0],
+      [6, "lineage_claim_id", "TEXT", 1, null, 0],
+      [7, "current_path", "TEXT", 1, null, 0],
+      [8, "selector_paths_json", "TEXT", 1, null, 0],
+      [9, "restore_fence_generation", "INTEGER", 1, null, 0],
+      [10, "principal_kind", "TEXT", 1, null, 0],
+      [11, "principal_id", "TEXT", 1, null, 0],
+      [12, "grant_id", "TEXT", 0, null, 0],
+      [13, "grant_generation", "INTEGER", 0, null, 0],
+      [14, "accepting_host_epoch", "INTEGER", 1, null, 0],
+      [15, "received_at_ms", "INTEGER", 1, null, 0],
+      [16, "update_bytes", "BLOB", 1, null, 0],
+      [17, "validation_checkpoint_sha256", "TEXT", 0, null, 0],
+      [18, "validation_checkpoint_bytes", "BLOB", 0, null, 0],
+      [19, "relay_database_namespace", "TEXT", 1, null, 0],
+      [20, "accepted_event_count", "INTEGER", 1, null, 0],
+      [21, "accepted_evidence_digest", "TEXT", 1, null, 0],
+      [22, "accepted_metadata_bytes", "INTEGER", 1, null, 0],
+      [23, "restore_operation_id", "TEXT", 0, null, 0],
     ],
     foreignKeys: [
-      [0,0,"sync_relay_live_restore_operations","relay_database_namespace","relay_database_namespace","NO ACTION","NO ACTION","NONE"],
-      [0,1,"sync_relay_live_restore_operations","restore_operation_id","operation_id","NO ACTION","NO ACTION","NONE"],
-      [1,0,"sync_relay_workspaces","workspace_id","workspace_id","NO ACTION","CASCADE","NONE"],
+      [
+        0,
+        0,
+        "sync_relay_live_restore_operations",
+        "relay_database_namespace",
+        "relay_database_namespace",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE",
+      ],
+      [
+        0,
+        1,
+        "sync_relay_live_restore_operations",
+        "restore_operation_id",
+        "operation_id",
+        "NO ACTION",
+        "NO ACTION",
+        "NONE",
+      ],
+      [
+        1,
+        0,
+        "sync_relay_workspaces",
+        "workspace_id",
+        "workspace_id",
+        "NO ACTION",
+        "CASCADE",
+        "NONE",
+      ],
     ],
     indexes: [
-      ["idx_sync_relay_live_update_journal_checkpoint",0,"c",1],
-      ["idx_sync_relay_live_update_journal_document",0,"c",0],
-      ["idx_sync_relay_live_update_journal_restore",1,"c",1],
-      ["sqlite_autoindex_sync_relay_live_update_journal_1",1,"u",0],
-      ["sqlite_autoindex_sync_relay_live_update_journal_2",1,"u",0],
+      ["idx_sync_relay_live_update_journal_checkpoint", 0, "c", 1],
+      ["idx_sync_relay_live_update_journal_document", 0, "c", 0],
+      ["idx_sync_relay_live_update_journal_restore", 1, "c", 1],
+      ["sqlite_autoindex_sync_relay_live_update_journal_1", 1, "u", 0],
+      ["sqlite_autoindex_sync_relay_live_update_journal_2", 1, "u", 0],
     ],
     indexColumns: {
-      idx_sync_relay_live_update_journal_checkpoint: [[0,3,"workspace_id"],[1,4,"main_version_id"],[2,5,"object_id"],[3,6,"lineage_claim_id"],[4,0,"journal_cursor"]],
-      idx_sync_relay_live_update_journal_document: [[0,3,"workspace_id"],[1,4,"main_version_id"],[2,5,"object_id"],[3,6,"lineage_claim_id"],[4,0,"journal_cursor"]],
-      idx_sync_relay_live_update_journal_restore: [[0,19,"relay_database_namespace"],[1,23,"restore_operation_id"]],
-      sqlite_autoindex_sync_relay_live_update_journal_1: [[0,1,"delivery_id"]],
-      sqlite_autoindex_sync_relay_live_update_journal_2: [[0,0,"journal_cursor"],[1,3,"workspace_id"],[2,4,"main_version_id"],[3,5,"object_id"],[4,6,"lineage_claim_id"]],
+      idx_sync_relay_live_update_journal_checkpoint: [
+        [0, 3, "workspace_id"],
+        [1, 4, "main_version_id"],
+        [2, 5, "object_id"],
+        [3, 6, "lineage_claim_id"],
+        [4, 0, "journal_cursor"],
+      ],
+      idx_sync_relay_live_update_journal_document: [
+        [0, 3, "workspace_id"],
+        [1, 4, "main_version_id"],
+        [2, 5, "object_id"],
+        [3, 6, "lineage_claim_id"],
+        [4, 0, "journal_cursor"],
+      ],
+      idx_sync_relay_live_update_journal_restore: [
+        [0, 19, "relay_database_namespace"],
+        [1, 23, "restore_operation_id"],
+      ],
+      sqlite_autoindex_sync_relay_live_update_journal_1: [[0, 1, "delivery_id"]],
+      sqlite_autoindex_sync_relay_live_update_journal_2: [
+        [0, 0, "journal_cursor"],
+        [1, 3, "workspace_id"],
+        [2, 4, "main_version_id"],
+        [3, 5, "object_id"],
+        [4, 6, "lineage_claim_id"],
+      ],
     },
   },
   sync_relay_live_update_struct_provenance: {
     columns: [
-      [0,"workspace_id","TEXT",1,null,1],
-      [1,"main_version_id","TEXT",1,null,2],
-      [2,"object_id","TEXT",1,null,3],
-      [3,"lineage_claim_id","TEXT",1,null,4],
-      [4,"client_id","INTEGER",1,null,5],
-      [5,"start_clock","INTEGER",1,null,6],
-      [6,"end_clock","INTEGER",1,null,0],
-      [7,"journal_cursor","INTEGER",1,null,0],
+      [0, "workspace_id", "TEXT", 1, null, 1],
+      [1, "main_version_id", "TEXT", 1, null, 2],
+      [2, "object_id", "TEXT", 1, null, 3],
+      [3, "lineage_claim_id", "TEXT", 1, null, 4],
+      [4, "client_id", "INTEGER", 1, null, 5],
+      [5, "start_clock", "INTEGER", 1, null, 6],
+      [6, "end_clock", "INTEGER", 1, null, 0],
+      [7, "journal_cursor", "INTEGER", 1, null, 0],
     ],
     foreignKeys: [
-      [0,0,"sync_relay_live_update_journal","journal_cursor","journal_cursor","NO ACTION","CASCADE","NONE"],
-      [0,1,"sync_relay_live_update_journal","workspace_id","workspace_id","NO ACTION","CASCADE","NONE"],
-      [0,2,"sync_relay_live_update_journal","main_version_id","main_version_id","NO ACTION","CASCADE","NONE"],
-      [0,3,"sync_relay_live_update_journal","object_id","object_id","NO ACTION","CASCADE","NONE"],
-      [0,4,"sync_relay_live_update_journal","lineage_claim_id","lineage_claim_id","NO ACTION","CASCADE","NONE"],
+      [
+        0,
+        0,
+        "sync_relay_live_update_journal",
+        "journal_cursor",
+        "journal_cursor",
+        "NO ACTION",
+        "CASCADE",
+        "NONE",
+      ],
+      [
+        0,
+        1,
+        "sync_relay_live_update_journal",
+        "workspace_id",
+        "workspace_id",
+        "NO ACTION",
+        "CASCADE",
+        "NONE",
+      ],
+      [
+        0,
+        2,
+        "sync_relay_live_update_journal",
+        "main_version_id",
+        "main_version_id",
+        "NO ACTION",
+        "CASCADE",
+        "NONE",
+      ],
+      [
+        0,
+        3,
+        "sync_relay_live_update_journal",
+        "object_id",
+        "object_id",
+        "NO ACTION",
+        "CASCADE",
+        "NONE",
+      ],
+      [
+        0,
+        4,
+        "sync_relay_live_update_journal",
+        "lineage_claim_id",
+        "lineage_claim_id",
+        "NO ACTION",
+        "CASCADE",
+        "NONE",
+      ],
     ],
     indexes: [
-      ["idx_sync_relay_live_update_struct_provenance_coverage",0,"c",0],
-      ["idx_sync_relay_live_update_struct_provenance_journal",0,"c",0],
-      ["sqlite_autoindex_sync_relay_live_update_struct_provenance_1",1,"pk",0],
+      ["idx_sync_relay_live_update_struct_provenance_coverage", 0, "c", 0],
+      ["idx_sync_relay_live_update_struct_provenance_journal", 0, "c", 0],
+      ["sqlite_autoindex_sync_relay_live_update_struct_provenance_1", 1, "pk", 0],
     ],
     indexColumns: {
-      idx_sync_relay_live_update_struct_provenance_coverage: [[0,0,"workspace_id"],[1,1,"main_version_id"],[2,2,"object_id"],[3,3,"lineage_claim_id"],[4,4,"client_id"],[5,5,"start_clock"],[6,6,"end_clock"],[7,7,"journal_cursor"]],
-      idx_sync_relay_live_update_struct_provenance_journal: [[0,7,"journal_cursor"],[1,4,"client_id"],[2,5,"start_clock"]],
-      sqlite_autoindex_sync_relay_live_update_struct_provenance_1: [[0,0,"workspace_id"],[1,1,"main_version_id"],[2,2,"object_id"],[3,3,"lineage_claim_id"],[4,4,"client_id"],[5,5,"start_clock"]],
+      idx_sync_relay_live_update_struct_provenance_coverage: [
+        [0, 0, "workspace_id"],
+        [1, 1, "main_version_id"],
+        [2, 2, "object_id"],
+        [3, 3, "lineage_claim_id"],
+        [4, 4, "client_id"],
+        [5, 5, "start_clock"],
+        [6, 6, "end_clock"],
+        [7, 7, "journal_cursor"],
+      ],
+      idx_sync_relay_live_update_struct_provenance_journal: [
+        [0, 7, "journal_cursor"],
+        [1, 4, "client_id"],
+        [2, 5, "start_clock"],
+      ],
+      sqlite_autoindex_sync_relay_live_update_struct_provenance_1: [
+        [0, 0, "workspace_id"],
+        [1, 1, "main_version_id"],
+        [2, 2, "object_id"],
+        [3, 3, "lineage_claim_id"],
+        [4, 4, "client_id"],
+        [5, 5, "start_clock"],
+      ],
     },
   },
 };
 function assertLiveJournalSchema(db: SqliteDb): void {
-  const same = (actual: unknown, expected: unknown) => { if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("live update journal schema is missing or damaged"); };
+  const same = (actual: unknown, expected: unknown) => {
+    if (JSON.stringify(actual) !== JSON.stringify(expected))
+      throw new Error("live update journal schema is missing or damaged");
+  };
   for (const [name, sql] of Object.entries(LIVE_JOURNAL_SCHEMA)) {
     const rows = db.prepare("SELECT type,tbl_name,sql FROM sqlite_schema WHERE name=?").all(name);
     const row = rows[0];
     same(rows.length, 1);
     same(row?.type, name.startsWith("idx_") ? "index" : "table");
-    same(row?.tbl_name, name.includes("struct_provenance") ? LIVE_JOURNAL_PROVENANCE : LIVE_JOURNAL_TABLE);
-    same(typeof row?.sql === "string" ? (name === LIVE_JOURNAL_TABLE && liveAuthorSchemaMarked(db) ? originalLiveJournalSql(row.sql) : normalizedSchemaSql(row.sql)) : null,
-      name === LIVE_JOURNAL_TABLE && liveJournalPersonalMarked(db) ? personalJournalSql(sql) : normalizedSchemaSql(sql));
+    same(
+      row?.tbl_name,
+      name.includes("struct_provenance") ? LIVE_JOURNAL_PROVENANCE : LIVE_JOURNAL_TABLE,
+    );
+    same(
+      typeof row?.sql === "string"
+        ? name === LIVE_JOURNAL_TABLE && liveAuthorSchemaMarked(db)
+          ? originalLiveJournalSql(row.sql)
+          : normalizedSchemaSql(row.sql)
+        : null,
+      name === LIVE_JOURNAL_TABLE && liveJournalPersonalMarked(db)
+        ? personalJournalSql(sql)
+        : normalizedSchemaSql(sql),
+    );
   }
   for (const [table, expected] of Object.entries(LIVE_JOURNAL_SHAPE)) {
     if (table === LIVE_JOURNAL_TABLE && liveAuthorSchemaMarked(db)) assertLiveAuthorColumns(db);
-    same(db.prepare(`PRAGMA table_info(${table})`).all().filter(r => table !== LIVE_JOURNAL_TABLE || !liveAuthorSchemaMarked(db) || Number(r.cid) < 24).map(r => [r.cid,r.name,r.type,r.notnull,r.dflt_value,r.pk]), expected.columns);
-    same(db.prepare(`PRAGMA foreign_key_list(${table})`).all().map(r => [r.id,r.seq,r.table,r.from,r.to,r.on_update,r.on_delete,r.match]), expected.foreignKeys);
-    same(db.prepare(`PRAGMA index_list(${table})`).all().filter(r => r.name !== LIVE_APPLICATION_AUTHORSHIP_INDEX && r.name !== LIVE_JOURNAL_WORKSPACE_INDEX && r.name !== HISTORY_JOURNAL_POSITION_INDEX).map(r => [r.name,r.unique,r.origin,r.partial]).sort((a,b) => String(a[0]).localeCompare(String(b[0]))), expected.indexes);
-    for (const [name, columns] of Object.entries(expected.indexColumns)) same(db.prepare(`PRAGMA index_info(${name})`).all().map(r => [r.seqno,r.cid,r.name]), columns);
+    same(
+      db
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .filter(
+          (r) => table !== LIVE_JOURNAL_TABLE || !liveAuthorSchemaMarked(db) || Number(r.cid) < 24,
+        )
+        .map((r) => [r.cid, r.name, r.type, r.notnull, r.dflt_value, r.pk]),
+      expected.columns,
+    );
+    same(
+      db
+        .prepare(`PRAGMA foreign_key_list(${table})`)
+        .all()
+        .map((r) => [r.id, r.seq, r.table, r.from, r.to, r.on_update, r.on_delete, r.match]),
+      expected.foreignKeys,
+    );
+    same(
+      db
+        .prepare(`PRAGMA index_list(${table})`)
+        .all()
+        .filter(
+          (r) =>
+            r.name !== LIVE_APPLICATION_AUTHORSHIP_INDEX &&
+            r.name !== LIVE_JOURNAL_WORKSPACE_INDEX &&
+            r.name !== HISTORY_JOURNAL_POSITION_INDEX,
+        )
+        .map((r) => [r.name, r.unique, r.origin, r.partial])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      expected.indexes,
+    );
+    for (const [name, columns] of Object.entries(expected.indexColumns))
+      same(
+        db
+          .prepare(`PRAGMA index_info(${name})`)
+          .all()
+          .map((r) => [r.seqno, r.cid, r.name]),
+        columns,
+      );
   }
 }
 function initializeLiveJournalSchema(db: SqliteDb): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_JOURNAL_MARKER);
-  if (marked) { assertLiveJournalSchema(db); return; }
-  const existing = db.prepare(`SELECT name FROM sqlite_schema WHERE name IN (${Object.keys(LIVE_JOURNAL_SCHEMA).map(()=>"?").join(",")})`).all(...Object.keys(LIVE_JOURNAL_SCHEMA));
+  const marked = db
+    .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?")
+    .get(LIVE_JOURNAL_MARKER);
+  if (marked) {
+    assertLiveJournalSchema(db);
+    return;
+  }
+  const existing = db
+    .prepare(
+      `SELECT name FROM sqlite_schema WHERE name IN (${Object.keys(LIVE_JOURNAL_SCHEMA)
+        .map(() => "?")
+        .join(",")})`,
+    )
+    .all(...Object.keys(LIVE_JOURNAL_SCHEMA));
   if (existing.length) throw new Error("unmarked live update journal schema already exists");
   for (const sql of Object.values(LIVE_JOURNAL_SCHEMA)) db.exec(sql);
   assertLiveJournalSchema(db);
-  db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(LIVE_JOURNAL_MARKER,Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(
+    LIVE_JOURNAL_MARKER,
+    Date.now(),
+  );
 }
 
 const LIVE_JOURNAL_PERSONAL_MIGRATION = "live-update-journal-personal-v1";
 // A personal agent's update names the agent and holds no grant.
 const LIVE_JOURNAL_PERSONAL_CHANGES = [
-  ["CHECK (principal_kind IN ('owner', 'named', 'link'))", "CHECK (principal_kind IN ('owner', 'personal', 'named', 'link'))"],
-  ["(principal_kind = 'owner' AND grant_id IS NULL AND grant_generation IS NULL)",
+  [
+    "CHECK (principal_kind IN ('owner', 'named', 'link'))",
+    "CHECK (principal_kind IN ('owner', 'personal', 'named', 'link'))",
+  ],
+  [
+    "(principal_kind = 'owner' AND grant_id IS NULL AND grant_generation IS NULL)",
     "(principal_kind = 'owner' AND grant_id IS NULL AND grant_generation IS NULL) OR " +
-    "(principal_kind = 'personal' AND substr(principal_id, 1, 2) = 'p-' AND grant_id IS NULL AND grant_generation IS NULL)"],
+      "(principal_kind = 'personal' AND substr(principal_id, 1, 2) = 'p-' AND grant_id IS NULL AND grant_generation IS NULL)",
+  ],
 ] as const;
 function liveJournalPersonalMarked(db: SqliteDb): boolean {
-  return !!db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_JOURNAL_PERSONAL_MIGRATION);
+  return !!db
+    .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?")
+    .get(LIVE_JOURNAL_PERSONAL_MIGRATION);
 }
-/** The journal SQL `sql` with personal authority allowed, normalized. */
 function personalJournalSql(sql: string): string {
   let result = normalizedSchemaSql(sql);
   for (const [from, to] of LIVE_JOURNAL_PERSONAL_CHANGES) {
     const at = result.indexOf(from);
-    if (at < 0 || result.includes(from, at + 1)) throw new Error("live update journal schema is missing or damaged");
+    if (at < 0 || result.includes(from, at + 1))
+      throw new Error("live update journal schema is missing or damaged");
     result = result.slice(0, at) + to + result.slice(at + from.length);
   }
   return result;
@@ -961,9 +1250,15 @@ function personalJournalSql(sql: string): string {
 // reference each row, the restore foreign key, and the journal's next cursor.
 function initializeLiveJournalPersonalAuthority(db: SqliteDb): void {
   if (!liveJournalPersonalMarked(db)) {
-    rebuildTables(db, [LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE, SETTLEMENT_CUTS],
-      (table, sql) => table === LIVE_JOURNAL_TABLE ? personalJournalSql(sql) : sql);
-    db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(LIVE_JOURNAL_PERSONAL_MIGRATION, Date.now());
+    rebuildTables(
+      db,
+      [LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE, SETTLEMENT_CUTS],
+      (table, sql) => (table === LIVE_JOURNAL_TABLE ? personalJournalSql(sql) : sql),
+    );
+    db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(
+      LIVE_JOURNAL_PERSONAL_MIGRATION,
+      Date.now(),
+    );
   }
   assertLiveJournalSchema(db);
 }
@@ -973,14 +1268,25 @@ const LIVE_JOURNAL_WORKSPACE_MIGRATION = "live-update-journal-workspace-index-v1
 const LIVE_JOURNAL_WORKSPACE_SQL = `CREATE INDEX ${LIVE_JOURNAL_WORKSPACE_INDEX}
   ON sync_relay_live_update_journal(workspace_id,journal_cursor)`;
 function initializeLiveJournalWorkspaceIndex(db: SqliteDb): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_JOURNAL_WORKSPACE_MIGRATION);
-  const row = db.prepare("SELECT type,tbl_name,sql FROM sqlite_schema WHERE name=?").get(LIVE_JOURNAL_WORKSPACE_INDEX);
+  const marked = db
+    .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?")
+    .get(LIVE_JOURNAL_WORKSPACE_MIGRATION);
+  const row = db
+    .prepare("SELECT type,tbl_name,sql FROM sqlite_schema WHERE name=?")
+    .get(LIVE_JOURNAL_WORKSPACE_INDEX);
   if (!marked) {
     if (row) throw new Error("unmarked live journal workspace index exists");
     db.exec(LIVE_JOURNAL_WORKSPACE_SQL);
-    db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(LIVE_JOURNAL_WORKSPACE_MIGRATION, Date.now());
-  } else if (row?.type !== "index" || row.tbl_name !== LIVE_JOURNAL_TABLE ||
-    typeof row.sql !== "string" || normalizedSchemaSql(row.sql) !== normalizedSchemaSql(LIVE_JOURNAL_WORKSPACE_SQL)) {
+    db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(
+      LIVE_JOURNAL_WORKSPACE_MIGRATION,
+      Date.now(),
+    );
+  } else if (
+    row?.type !== "index" ||
+    row.tbl_name !== LIVE_JOURNAL_TABLE ||
+    typeof row.sql !== "string" ||
+    normalizedSchemaSql(row.sql) !== normalizedSchemaSql(LIVE_JOURNAL_WORKSPACE_SQL)
+  ) {
     throw new Error("live journal workspace index is missing or damaged");
   }
 }
@@ -992,28 +1298,43 @@ const LIVE_APPLICATION_AUTHORSHIP_SQL = `CREATE INDEX ${LIVE_APPLICATION_AUTHORS
     relay_database_namespace,accepted_event_count,update_digest,journal_cursor,
     delivery_id,accepted_evidence_digest,accepted_metadata_bytes,length(update_bytes))`;
 function initializeLiveApplicationAuthorshipIndex(db: SqliteDb): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_APPLICATION_AUTHORSHIP_MIGRATION);
-  const row = db.prepare("SELECT type,tbl_name,sql FROM sqlite_schema WHERE name=?").get(LIVE_APPLICATION_AUTHORSHIP_INDEX);
+  const marked = db
+    .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?")
+    .get(LIVE_APPLICATION_AUTHORSHIP_MIGRATION);
+  const row = db
+    .prepare("SELECT type,tbl_name,sql FROM sqlite_schema WHERE name=?")
+    .get(LIVE_APPLICATION_AUTHORSHIP_INDEX);
   if (!marked) {
     if (row) throw new Error("unmarked live application authorship index exists");
     db.exec(LIVE_APPLICATION_AUTHORSHIP_SQL);
-    db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(LIVE_APPLICATION_AUTHORSHIP_MIGRATION, Date.now());
-  } else if (row?.type !== "index" || row.tbl_name !== LIVE_JOURNAL_TABLE ||
-    typeof row.sql !== "string" || normalizedSchemaSql(row.sql) !== normalizedSchemaSql(LIVE_APPLICATION_AUTHORSHIP_SQL)) {
+    db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(
+      LIVE_APPLICATION_AUTHORSHIP_MIGRATION,
+      Date.now(),
+    );
+  } else if (
+    row?.type !== "index" ||
+    row.tbl_name !== LIVE_JOURNAL_TABLE ||
+    typeof row.sql !== "string" ||
+    normalizedSchemaSql(row.sql) !== normalizedSchemaSql(LIVE_APPLICATION_AUTHORSHIP_SQL)
+  ) {
     throw new Error("live application authorship index is missing or damaged");
   }
 }
 
 export function initializeSyncRelaySchema(db: SqliteDb): void {
-    const legacy = "sync_relay_live_update_agent_declarations";
-    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?").get(legacy)) {
-      if (db.prepare(`SELECT 1 FROM ${legacy} LIMIT 1`).get()) {
-        throw new Error("Cannot open a relay store with declared v1 accepted evidence. Its data is unchanged. Reset the development relay store to use v2 authors.");
-      }
-      db.exec(`DROP TABLE ${legacy}`);
-      db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id=?").run("live-update-agent-declarations-v1");
+  const legacy = "sync_relay_live_update_agent_declarations";
+  if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?").get(legacy)) {
+    if (db.prepare(`SELECT 1 FROM ${legacy} LIMIT 1`).get()) {
+      throw new Error(
+        "Cannot open a relay store with declared v1 accepted evidence. Its data is unchanged. Reset the development relay store to use v2 authors.",
+      );
     }
-    db.exec(`
+    db.exec(`DROP TABLE ${legacy}`);
+    db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id=?").run(
+      "live-update-agent-declarations-v1",
+    );
+  }
+  db.exec(`
       CREATE TABLE IF NOT EXISTS sync_relay_workspaces (
         workspace_id TEXT PRIMARY KEY,
         owner_user_id TEXT NOT NULL,
@@ -1115,7 +1436,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
 
       ${NORMALIZED_SHARE_SCHEMA_SQL}
 
-      -- #646 PR2: where every object the relay has ever seen sits RIGHT NOW,
+      -- Where every object the relay has ever seen sits RIGHT NOW,
       -- maintained at insert time by appendLogBatch. The file-chat share
       -- filter resolves a thread's object to its current path and tests that
       -- path against the selector, so this lookup is on the share read path
@@ -1141,7 +1462,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       CREATE INDEX IF NOT EXISTS idx_sync_relay_object_paths_path
         ON sync_relay_object_paths(workspace_id, path);
 
-      -- #646 PR3a: one row per moment the relay has seen for an object, which
+      -- One row per moment the relay has seen for an object, which
       -- is what the base rewrite resolves against. sync_relay_object_paths
       -- above answers "where is this object NOW?"; accept needs the harder
       -- question, "which of your own moments produced the content the
@@ -1237,7 +1558,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
           workspace_id, version_id, blob_sha256, path, state_relay_seq
         );
 
-      -- #646 PR3a: a recipient's submitted changes, held until the granter
+      -- A recipient's submitted changes, held until the granter
       -- accepts or declines them. Nothing here is in the granter's log: accept
       -- is what releases it, through the same appendLogBatch the chat path
       -- already uses.
@@ -1299,66 +1620,67 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
           REFERENCES sync_relay_share_proposals(proposal_id) ON DELETE CASCADE
       ) STRICT;
     `);
-    db.exec(`
+  db.exec(`
       CREATE TABLE IF NOT EXISTS sync_relay_migrations (
         migration_id TEXT PRIMARY KEY,
         completed_at_ms INTEGER NOT NULL
       ) STRICT;
     `);
-    initializeLinkCredentialSealSchema(db);
-    initializeSessionHostControlSchema(db);
-    initializeDeviceHostCredentialSchema(db);
-    initializeLiveDocumentAuthoritySchema(db);
-    initializeServiceActivationSchema(db);
-    initializeServiceHostEnrollmentSchema(db);
-    initializeServiceHostUploadSchema(db);
-    initializeServiceKeptEditsSchema(db);
-    initializeLiveRestoreOperationSchema(db);
-    initializeLiveRestoreCancellationSchema(db);
-    initializeLiveJournalSchema(db);
-    initializeLiveJournalWorkspaceIndex(db);
-    initializeLiveCommittedDeliverySchema(db);
-    initializeLiveTicketSchema(db);
-    initializeAppPublicationSchema(db);
-    initializeLinkCreationSchema(db);
-    initializeAppCollectionSchema(db);
-    initializeLiveAuthorshipSchema(db);
-    initializeLiveApplicationAuthorshipIndex(db);
-    initializeHostedSettlementSchema(db);
-    initializeRelayAdmissionColumn(db);
-    initializeReplicaCurrentViewSchema(db);
-    initializeReplicaHistorySchema(db);
-    initializeReplicaHistoryWorkSchema(db);
-    initializeReplicaCurrentViewIncrementalSchema(db);
-    initializeNoticeSchema(db);
-    initializeShareNoticeDeliverySchema(db);
-    initializeAutomationHostSchema(db);
-    initializeAutomationGroupHandoverSchema(db);
-    initializeAutomationHostPlacementSchema(db);
-    initializeAutomationReachHandoverSchema(db);
-    initializeAutomationServerScheduleSchema(db);
-    initializeAutomationServerUnsentRunSchema(db);
-    initializeCurrentFileKeySchema(db);
-    initializeWorkReferenceSchema(db);
-    initializeCollectionWriteSchema(db);
-    initializeAutomationPressSchema(db);
-    initializeAutomationWorkspaceSchema(db);
-    initializeAccountWorkspaceSchema(db);
-    initializeOperationRecordSchema(db);
-    initializePushSchema(db);
-    initializePushDeliveries(db);
-    initializeLiveClaimIndex(db);
-    initializeServiceHostFeedIndex(db);
-    initializeAgentConnectionSchema(db);
-    initializePersonalAgentSchema(db);
-    initializeWorkspaceDisplayName(db);
-    initializePersonalAgentActivity(db);
-    db.exec(`
+  initializeLinkCredentialSealSchema(db);
+  initializeSessionHostControlSchema(db);
+  initializeDeviceHostCredentialSchema(db);
+  initializeLiveDocumentAuthoritySchema(db);
+  initializeServiceActivationSchema(db);
+  initializeServiceHostEnrollmentSchema(db);
+  initializeServiceHostUploadSchema(db);
+  initializeServiceKeptEditsSchema(db);
+  initializeLiveRestoreOperationSchema(db);
+  initializeLiveRestoreCancellationSchema(db);
+  initializeLiveJournalSchema(db);
+  initializeLiveJournalWorkspaceIndex(db);
+  initializeLiveCommittedDeliverySchema(db);
+  initializeLiveTicketSchema(db);
+  initializeAppPublicationSchema(db);
+  initializeLinkCreationSchema(db);
+  initializeAppCollectionSchema(db);
+  initializeLiveAuthorshipSchema(db);
+  initializeLiveApplicationAuthorshipIndex(db);
+  initializeHostedSettlementSchema(db);
+  initializeRelayAdmissionColumn(db);
+  initializeReplicaCurrentViewSchema(db);
+  initializeReplicaHistorySchema(db);
+  initializeReplicaHistoryWorkSchema(db);
+  initializeReplicaCurrentViewIncrementalSchema(db);
+  initializeNoticeSchema(db);
+  initializeShareNoticeDeliverySchema(db);
+  initializeAutomationHostSchema(db);
+  initializeAutomationGroupHandoverSchema(db);
+  initializeAutomationHostPlacementSchema(db);
+  initializeAutomationReachHandoverSchema(db);
+  initializeAutomationServerScheduleSchema(db);
+  initializeAutomationServerUnsentRunSchema(db);
+  initializeCurrentFileKeySchema(db);
+  initializeWorkReferenceSchema(db);
+  initializeCollectionWriteSchema(db);
+  initializeAutomationPressSchema(db);
+  initializeAutomationWorkspaceSchema(db);
+  initializeAccountWorkspaceSchema(db);
+  initializeOperationRecordSchema(db);
+  initializeChatWakeSchema(db);
+  initializePushSchema(db);
+  initializePushDeliveries(db);
+  initializeLiveClaimIndex(db);
+  initializeServiceHostFeedIndex(db);
+  initializeAgentConnectionSchema(db);
+  initializePersonalAgentSchema(db);
+  initializeWorkspaceDisplayName(db);
+  initializePersonalAgentActivity(db);
+  db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)
         WHERE result_grant_id IS NOT NULL
     `);
-    db.exec(`
+  db.exec(`
       CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_insert
       AFTER INSERT ON sync_relay_workspaces
       BEGIN
@@ -1532,7 +1854,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         );
       END;
     `);
-    initializeLiveJournalPersonalAuthority(db);
+  initializeLiveJournalPersonalAuthority(db);
 }
 
 export const DEVICE_HOST_CREDENTIAL_TABLE = "sync_relay_device_host_credential";
@@ -1551,18 +1873,27 @@ CREATE TABLE sync_relay_device_host_credential (
 ) STRICT;`;
 
 function initializeDeviceHostCredentialSchema(db: SqliteDb): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(DEVICE_HOST_CREDENTIAL_MIGRATION);
-  const existing = db.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get(DEVICE_HOST_CREDENTIAL_TABLE);
+  const marked = db
+    .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+    .get(DEVICE_HOST_CREDENTIAL_MIGRATION);
+  const existing = db
+    .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
+    .get(DEVICE_HOST_CREDENTIAL_TABLE);
   if (marked) {
-    if (typeof existing?.sql !== "string" || normalizedSchemaSql(existing.sql) !== normalizedSchemaSql(DEVICE_HOST_CREDENTIAL_SCHEMA)) {
+    if (
+      typeof existing?.sql !== "string" ||
+      normalizedSchemaSql(existing.sql) !== normalizedSchemaSql(DEVICE_HOST_CREDENTIAL_SCHEMA)
+    ) {
       throw new Error("Device host credential schema is missing or damaged.");
     }
     return;
   }
   if (existing) throw new Error("Unmarked device host credential table exists.");
   db.exec(DEVICE_HOST_CREDENTIAL_SCHEMA);
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
-    .run(DEVICE_HOST_CREDENTIAL_MIGRATION, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    DEVICE_HOST_CREDENTIAL_MIGRATION,
+    Date.now(),
+  );
 }
 
 export const LIVE_TICKET_TABLE = "sync_relay_live_session_tickets";
@@ -1661,58 +1992,162 @@ CREATE INDEX idx_sync_relay_live_session_tickets_expiry
 } as const;
 
 export const LIVE_TICKET_COLUMNS = [
-  "ticket_id", "token_hash", "audience", "workspace_id", "main_version_id", "object_id",
-  "lineage_claim_id", "current_path", "selector_paths_json", "restore_fence_generation",
-  "principal_kind", "principal_id", "grant_id", "grant_generation", "host_epoch",
-  "minted_at_ms", "expires_at_ms", "redeemed_at_ms", "link_session_id", "agent_connection_id",
+  "ticket_id",
+  "token_hash",
+  "audience",
+  "workspace_id",
+  "main_version_id",
+  "object_id",
+  "lineage_claim_id",
+  "current_path",
+  "selector_paths_json",
+  "restore_fence_generation",
+  "principal_kind",
+  "principal_id",
+  "grant_id",
+  "grant_generation",
+  "host_epoch",
+  "minted_at_ms",
+  "expires_at_ms",
+  "redeemed_at_ms",
+  "link_session_id",
+  "agent_connection_id",
   "personal_connection_id",
 ] as const;
 export const LIVE_TICKET_NULLABLE_COLUMNS = new Set<string>([
-  "grant_id", "grant_generation", "redeemed_at_ms", "link_session_id", "agent_connection_id", "personal_connection_id",
+  "grant_id",
+  "grant_generation",
+  "redeemed_at_ms",
+  "link_session_id",
+  "agent_connection_id",
+  "personal_connection_id",
 ]);
 
 export const LIVE_TICKET_INTEGER_COLUMNS = new Set<string>([
-  "restore_fence_generation", "grant_generation", "host_epoch", "minted_at_ms", "expires_at_ms", "redeemed_at_ms",
+  "restore_fence_generation",
+  "grant_generation",
+  "host_epoch",
+  "minted_at_ms",
+  "expires_at_ms",
+  "redeemed_at_ms",
 ]);
 
 function assertLiveTicketSchema(db: SqliteDb): void {
-  const fail = (): never => { throw new Error("live-ticket schema is missing or damaged"); };
+  const fail = (): never => {
+    throw new Error("live-ticket schema is missing or damaged");
+  };
   const same = (actual: unknown, expected: unknown): void => {
     if (JSON.stringify(actual) !== JSON.stringify(expected)) fail();
   };
   for (const [name, sql] of Object.entries(LIVE_TICKET_SCHEMA)) {
-    const rows = db.prepare("SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?").all(name);
+    const rows = db
+      .prepare("SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?")
+      .all(name);
     const row = rows[0];
-    if (rows.length !== 1 || !row || row.type !== (name === LIVE_TICKET_TABLE ? "table" : "index") ||
-      row.tbl_name !== LIVE_TICKET_TABLE || typeof row.sql !== "string" || normalizedSchemaSql(row.sql) !== normalizedSchemaSql(sql)) fail();
+    if (
+      rows.length !== 1 ||
+      !row ||
+      row.type !== (name === LIVE_TICKET_TABLE ? "table" : "index") ||
+      row.tbl_name !== LIVE_TICKET_TABLE ||
+      typeof row.sql !== "string" ||
+      normalizedSchemaSql(row.sql) !== normalizedSchemaSql(sql)
+    )
+      fail();
   }
-  same(db.prepare(`PRAGMA table_info(${LIVE_TICKET_TABLE})`).all().map(row =>
-    [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
-  LIVE_TICKET_COLUMNS.map((name, cid) => [cid, name, LIVE_TICKET_INTEGER_COLUMNS.has(name) ? "INTEGER" : "TEXT",
-    LIVE_TICKET_NULLABLE_COLUMNS.has(name) ? 0 : 1, null, name === "ticket_id" ? 1 : 0]));
-  same(db.prepare(`PRAGMA foreign_key_list(${LIVE_TICKET_TABLE})`).all().map(row =>
-    [row.id, row.seq, row.table, row.from, row.to, row.on_update, row.on_delete, row.match]),
-  [[0, 0, "sync_relay_workspaces", "workspace_id", "workspace_id", "NO ACTION", "CASCADE", "NONE"]]);
+  same(
+    db
+      .prepare(`PRAGMA table_info(${LIVE_TICKET_TABLE})`)
+      .all()
+      .map((row) => [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
+    LIVE_TICKET_COLUMNS.map((name, cid) => [
+      cid,
+      name,
+      LIVE_TICKET_INTEGER_COLUMNS.has(name) ? "INTEGER" : "TEXT",
+      LIVE_TICKET_NULLABLE_COLUMNS.has(name) ? 0 : 1,
+      null,
+      name === "ticket_id" ? 1 : 0,
+    ]),
+  );
+  same(
+    db
+      .prepare(`PRAGMA foreign_key_list(${LIVE_TICKET_TABLE})`)
+      .all()
+      .map((row) => [
+        row.id,
+        row.seq,
+        row.table,
+        row.from,
+        row.to,
+        row.on_update,
+        row.on_delete,
+        row.match,
+      ]),
+    [
+      [
+        0,
+        0,
+        "sync_relay_workspaces",
+        "workspace_id",
+        "workspace_id",
+        "NO ACTION",
+        "CASCADE",
+        "NONE",
+      ],
+    ],
+  );
   const indexes = [
     ["idx_sync_relay_live_session_tickets_hash", 1, "c", ["token_hash"]],
-    ["idx_sync_relay_live_session_tickets_scope_expiry", 0, "c", ["workspace_id", "principal_kind", "principal_id", "grant_id", "expires_at_ms", "ticket_id"]],
+    [
+      "idx_sync_relay_live_session_tickets_scope_expiry",
+      0,
+      "c",
+      ["workspace_id", "principal_kind", "principal_id", "grant_id", "expires_at_ms", "ticket_id"],
+    ],
     ["idx_sync_relay_live_session_tickets_expiry", 0, "c", ["expires_at_ms", "ticket_id"]],
     [`sqlite_autoindex_${LIVE_TICKET_TABLE}_1`, 1, "pk", ["ticket_id"]],
   ] as const;
-  const sorted = (rows: unknown[][]): unknown[][] => rows.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-  same(sorted(db.prepare(`PRAGMA index_list(${LIVE_TICKET_TABLE})`).all().map(row => [row.name, row.unique, row.origin, row.partial])),
-    sorted(indexes.map(([name, unique, origin]) => [name, unique, origin, 0])));
+  const sorted = (rows: unknown[][]): unknown[][] =>
+    rows.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  same(
+    sorted(
+      db
+        .prepare(`PRAGMA index_list(${LIVE_TICKET_TABLE})`)
+        .all()
+        .map((row) => [row.name, row.unique, row.origin, row.partial]),
+    ),
+    sorted(indexes.map(([name, unique, origin]) => [name, unique, origin, 0])),
+  );
   for (const [name, , , columns] of indexes) {
-    same(db.prepare(`PRAGMA index_info(${name})`).all().map(row => [row.seqno, row.cid, row.name]),
-      columns.map((column, seq) => [seq, LIVE_TICKET_COLUMNS.findIndex(value => value === column), column]));
+    same(
+      db
+        .prepare(`PRAGMA index_info(${name})`)
+        .all()
+        .map((row) => [row.seqno, row.cid, row.name]),
+      columns.map((column, seq) => [
+        seq,
+        LIVE_TICKET_COLUMNS.findIndex((value) => value === column),
+        column,
+      ]),
+    );
   }
-  same(db.prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = ?").all(LIVE_TICKET_TABLE), []);
+  same(
+    db
+      .prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = ?")
+      .all(LIVE_TICKET_TABLE),
+    [],
+  );
 }
 
 function initializeLiveTicketSchema(db: SqliteDb): void {
-  const isMarked = (migration: string) => db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(migration) !== undefined;
-  const unmark = (migration: string) => db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id = ?").run(migration);
-  if (isMarked(LIVE_TICKET_MIGRATION)) { assertLiveTicketSchema(db); return; }
+  const isMarked = (migration: string) =>
+    db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(migration) !==
+    undefined;
+  const unmark = (migration: string) =>
+    db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id = ?").run(migration);
+  if (isMarked(LIVE_TICKET_MIGRATION)) {
+    assertLiveTicketSchema(db);
+    return;
+  }
   // A v1 table cannot name an agent's connection. Its tickets expire within 30 seconds, so it is replaced, not copied.
   if (isMarked(LIVE_TICKET_V1_MIGRATION)) {
     db.exec(`DROP TABLE IF EXISTS ${LIVE_TICKET_TABLE}`);
@@ -1720,24 +2155,40 @@ function initializeLiveTicketSchema(db: SqliteDb): void {
   }
   if (isMarked(LIVE_TICKET_V2_MIGRATION)) {
     // A v2 table cannot hold a personal agent's ticket. Its rows return with no personal connection.
-    const columns = db.prepare("SELECT name FROM pragma_table_info(?) ORDER BY cid").all(LIVE_TICKET_TABLE).map(row => String(row.name));
-    if (columns.join(",") !== LIVE_TICKET_COLUMNS.slice(0, -1).join(",")) throw new Error("live-ticket schema is missing or damaged");
+    const columns = db
+      .prepare("SELECT name FROM pragma_table_info(?) ORDER BY cid")
+      .all(LIVE_TICKET_TABLE)
+      .map((row) => String(row.name));
+    if (columns.join(",") !== LIVE_TICKET_COLUMNS.slice(0, -1).join(","))
+      throw new Error("live-ticket schema is missing or damaged");
     rebuildTables(db, [LIVE_TICKET_TABLE], () => LIVE_TICKET_SCHEMA[LIVE_TICKET_TABLE]);
     unmark(LIVE_TICKET_V2_MIGRATION);
   } else {
-    const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)").all(...Object.keys(LIVE_TICKET_SCHEMA));
+    const existing = db
+      .prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)")
+      .all(...Object.keys(LIVE_TICKET_SCHEMA));
     if (existing.length) throw new Error("unmarked live-ticket schema already exists");
     for (const sql of Object.values(LIVE_TICKET_SCHEMA)) db.exec(sql);
   }
   assertLiveTicketSchema(db);
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(LIVE_TICKET_MIGRATION, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    LIVE_TICKET_MIGRATION,
+    Date.now(),
+  );
 }
 
 const LINK_CREDENTIAL_SEAL_MIGRATION = "link-credential-seal-v1";
 
 function initializeLinkCredentialSealSchema(db: SqliteDb): void {
-  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(LINK_CREDENTIAL_SEAL_MIGRATION)) return;
+  if (
+    db
+      .prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+      .get(LINK_CREDENTIAL_SEAL_MIGRATION)
+  )
+    return;
   db.exec("ALTER TABLE sync_relay_link_credentials ADD COLUMN secret_sealed TEXT");
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
-    .run(LINK_CREDENTIAL_SEAL_MIGRATION, Date.now());
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(
+    LINK_CREDENTIAL_SEAL_MIGRATION,
+    Date.now(),
+  );
 }

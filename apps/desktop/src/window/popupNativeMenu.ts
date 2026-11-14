@@ -2,9 +2,7 @@ import type { BrowserWindow, Menu, MenuItemConstructorOptions } from "electron";
 
 export function popupNativeMenu<Command>(input: {
   window: BrowserWindow | undefined;
-  buildFromTemplate(
-    template: MenuItemConstructorOptions[],
-  ): Pick<Menu, "popup">;
+  buildFromTemplate(template: MenuItemConstructorOptions[]): Pick<Menu, "popup">;
   template(
     item: (
       label: string,

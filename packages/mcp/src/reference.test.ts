@@ -1,5 +1,8 @@
 import { once } from "node:events";
-import { MessageChannel as NodeMessageChannel, type MessagePort as NodeMessagePort } from "node:worker_threads";
+import {
+  MessageChannel as NodeMessageChannel,
+  type MessagePort as NodeMessagePort,
+} from "node:worker_threads";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { attachAppCollectionBroker } from "@dohc/app-browser/broker";
 import { executeCli } from "@dohc/cli";
@@ -25,7 +28,6 @@ afterEach(() => {
 });
 
 describe("CLI, MCP, and app channel reference", () => {
-  // On a mismatch, regenerate the page with the command at its top.
   it(`matches ${REFERENCE_PATH}`, async () => {
     await expect(await renderReference()).toMatchFileSnapshot(`../../../${REFERENCE_PATH}`);
   });
@@ -47,9 +49,12 @@ describe("CLI, MCP, and app channel reference", () => {
   });
 
   it("gives every dataset and app verb in CLI_COMMANDS a result, and no other verb", () => {
-    expect(Object.keys(DATASET_RESULTS).sort()).toEqual(Object.keys(CLI_COMMANDS.dataset!.verbs).sort());
-    expect([...Object.keys(APP_RESULTS), ...Object.keys(APP_RESPONSE_RESULTS)].sort())
-      .toEqual(Object.keys(CLI_COMMANDS.app!.verbs).sort());
+    expect(Object.keys(DATASET_RESULTS).sort()).toEqual(
+      Object.keys(CLI_COMMANDS.dataset!.verbs).sort(),
+    );
+    expect([...Object.keys(APP_RESULTS), ...Object.keys(APP_RESPONSE_RESULTS)].sort()).toEqual(
+      Object.keys(CLI_COMMANDS.app!.verbs).sort(),
+    );
   });
 
   it("documents every CLI socket verb, as a command or through an MCP tool", () => {
@@ -58,7 +63,12 @@ describe("CLI, MCP, and app channel reference", () => {
       ...Object.values(CHAT_SOCKET_VERBS),
       ...Object.values(ACCESS_RESULTS),
       ...Object.values(ACCOUNT_RESULTS),
-      "dataset", "appPublication", "ownerAppResponses", "fileWrite", "fileMove", "fileDelete",
+      "dataset",
+      "appPublication",
+      "ownerAppResponses",
+      "fileWrite",
+      "fileMove",
+      "fileDelete",
       // dohc_workspace_status reports it as its `collectionsWaiting` field.
       "collectionsWaiting",
       // dohc document kept-edits prints it; dohc_workspace_status reports it as `keptEdits`.
@@ -69,13 +79,17 @@ describe("CLI, MCP, and app channel reference", () => {
       "syncFailure",
       // dohc_reply_to_chat sends it for `nothingToReport`.
       "nothingToReport",
-      ...Object.values(MCP_RETURNS).flatMap((returns) => typeof returns === "string" ? [] : [returns.cli]),
+      ...Object.values(MCP_RETURNS).flatMap((returns) =>
+        typeof returns === "string" ? [] : [returns.cli],
+      ),
     ]);
     expect(Object.keys(cliResultSchemas).filter((verb) => !documented.has(verb))).toEqual([]);
   });
 
   it("documents Access commands with their socket results and observation limits", async () => {
-    expect(Object.keys(ACCESS_RESULTS).sort()).toEqual(Object.keys(CLI_COMMANDS.access!.verbs).sort());
+    expect(Object.keys(ACCESS_RESULTS).sort()).toEqual(
+      Object.keys(CLI_COMMANDS.access!.verbs).sort(),
+    );
     const page = await renderReference();
     const section = page.split("### `dohc access`")[1]!.split("\n### ")[0]!;
     for (const [name, socketVerb] of Object.entries(ACCESS_RESULTS)) {
@@ -83,16 +97,28 @@ describe("CLI, MCP, and app channel reference", () => {
       expect(section).toContain(`Uses socket verb \`${socketVerb}\`.`);
     }
     expect(section).toContain("only the allowlisted AccessAnswer fields");
-    expect(section).toContain("never return credentials, bearer URLs, invitation URLs, share codes, or link URLs");
+    expect(section).toContain(
+      "never return credentials, bearer URLs, invitation URLs, share codes, or link URLs",
+    );
     expect(section).toContain("Use `dohc access refresh` to request fresh Sharing inventories");
-    expect(section).toContain("Requested and joined wait for started or existing attempts to settle");
+    expect(section).toContain(
+      "Requested and joined wait for started or existing attempts to settle",
+    );
     expect(section).toContain("`joined`, `paced`, or `unavailable`");
     expect(section).toContain("`freshness` is `fresh`, `stale`, or `unknown`");
     expect(section).toContain("`checkedAtMs`");
     expect(section).toContain("`coverage`");
     expect(section).toContain("`unknownReason`");
     expect(section).toContain("When visibility is `hidden` or `missing`, it is null");
-    for (const reason of ["signed-out", "not-synced", "other-account", "other-server", "not-listed-yet", "changed", "unreadable"]) {
+    for (const reason of [
+      "signed-out",
+      "not-synced",
+      "other-account",
+      "other-server",
+      "not-listed-yet",
+      "changed",
+      "unreadable",
+    ]) {
       expect(section).toContain(reason);
     }
   });
@@ -112,7 +138,9 @@ describe("CLI, MCP, and app channel reference", () => {
             throw new Error("parsed");
           },
         });
-        expect(sent, `${argv.join(" ")}: ${result.stderr}`).toMatchObject({ verb: CHAT_SOCKET_VERBS[verb] ?? verb });
+        expect(sent, `${argv.join(" ")}: ${result.stderr}`).toMatchObject({
+          verb: CHAT_SOCKET_VERBS[verb] ?? verb,
+        });
       }
       for (const flag of spec.flags ?? []) {
         expect(examples.flat(), `${verb} examples`).toContain(flag.name);
@@ -124,9 +152,13 @@ describe("CLI, MCP, and app channel reference", () => {
     const page = await renderReference();
     for (const [commandName, command] of Object.entries(CLI_COMMANDS)) {
       for (const [verbName, verb] of Object.entries(command.verbs)) {
-        const section = page.split(`#### \`dohc ${commandName} ${verbName}\``)[1]!.split("\n#### ")[0]!;
+        const section = page
+          .split(`#### \`dohc ${commandName} ${verbName}\``)[1]!
+          .split("\n#### ")[0]!;
         for (const source of verb.take ?? []) {
-          expect(section).toContain(`Set \`${source.field}\` to \`${source.path}\` from \`${source.from}\`.`);
+          expect(section).toContain(
+            `Set \`${source.field}\` to \`${source.path}\` from \`${source.from}\`.`,
+          );
         }
         for (const note of verb.notes ?? []) expect(section).toContain(note);
       }
@@ -146,10 +178,14 @@ describe("CLI, MCP, and app channel reference", () => {
       },
     });
     const lifetime = new AbortController();
-    attachAppCollectionBroker(frame as unknown as HTMLIFrameElement, async (body) => {
-      forwarded.push(body);
-      return Response.json({});
-    }, lifetime.signal);
+    attachAppCollectionBroker(
+      frame as unknown as HTMLIFrameElement,
+      async (body) => {
+        forwarded.push(body);
+        return Response.json({});
+      },
+      lifetime.signal,
+    );
     frame.dispatchEvent(new Event("load"));
     try {
       for (const [index, { example }] of APP_CHANNEL_REQUESTS.entries()) {

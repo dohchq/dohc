@@ -12,11 +12,15 @@ export default function Home() {
   return sampleBuild ? <SampleHome /> : <ServerHome />;
 }
 
-// The sample has no Home yet.
 function SampleHome() {
   const theme = useTheme();
   return (
-    <ScrollView contentInsetAdjustmentBehavior="automatic" alwaysBounceVertical={false} style={{ backgroundColor: theme.bg }} contentContainerStyle={{ flexGrow: 1 }}>
+    <ScrollView
+      contentInsetAdjustmentBehavior="automatic"
+      alwaysBounceVertical={false}
+      style={{ backgroundColor: theme.bg }}
+      contentContainerStyle={{ flexGrow: 1 }}
+    >
       <Stack.Screen options={{ title: "Home", headerLeft: () => <WorkspaceButton /> }} />
       {syncProblem ? <SyncBand problem={syncProblem} /> : null}
       <NotYet symbol="house" title="Home" />

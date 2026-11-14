@@ -7,14 +7,22 @@ import { USER_SETTINGS_FILE } from "../src/settings/userSettingsStore";
 import { desktopRoot, launchDesktopApp } from "./helpers/desktopApp";
 import { installFakeAgentTools } from "./helpers/agentTools";
 import { waitForVisibleAnimations } from "./helpers/animations";
-import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, trustOpenWorkspace } from "./helpers/workspace";
+import {
+  cleanupDesktopWorkspace,
+  createTempWorkspace,
+  openWorkspaceFromFirstRun,
+  trustOpenWorkspace,
+} from "./helpers/workspace";
 
 test("a named agent replies to a group mention with its owner on hover and focus", async ({}, testInfo) => {
   test.setTimeout(180_000);
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    await writeFile(join(temp.homeDir, USER_SETTINGS_FILE), JSON.stringify({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }));
+    await writeFile(
+      join(temp.homeDir, USER_SETTINGS_FILE),
+      JSON.stringify({ ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Ada" } }),
+    );
     desktop = await launchDesktopApp({ workspace: temp, env: await installFakeAgentTools(temp) });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     await trustOpenWorkspace(desktop);
@@ -28,7 +36,11 @@ test("a named agent replies to a group mention with its owner on hover and focus
     await page.getByTestId("chats-add-agent-command").fill(command);
     await page.getByTestId("chats-add-agent-submit").click();
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
-    await expect(page.locator('[data-testid="chats-my-agent"][data-agent-id="default"]').getByTestId("chats-my-agent-name")).toHaveText("Nova");
+    await expect(
+      page
+        .locator('[data-testid="chats-my-agent"][data-agent-id="default"]')
+        .getByTestId("chats-my-agent-name"),
+    ).toHaveText("Nova");
     await page.getByTestId("chats-new-channel").click();
     await page.getByTestId("chats-new-channel-name").fill("Agent name check");
     await page.getByTestId("chats-new-channel-type-posts").click();
@@ -36,17 +48,21 @@ test("a named agent replies to a group mention with its owner on hover and focus
     const view = page.locator("main");
     await view.getByTestId("chats-new-thread-composer").fill("@Nova check the exports");
     await view.getByTestId("chats-new-thread-composer").press("Enter");
-    const reply = view.getByTestId("chats-comment-bubble").filter({ hasText: "done: checked the exports" });
+    const reply = view
+      .getByTestId("chats-comment-bubble")
+      .filter({ hasText: "done: checked the exports" });
     await expect(reply).toBeVisible();
     await expect(reply.getByTestId("chats-message-author")).toHaveText("Nova");
     const badge = reply.getByTestId("chats-comment-agent-badge");
     for (const theme of ["light", "dark"] as const) {
-      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       await page.emulateMedia({ reducedMotion: "reduce" });
       await badge.hover();
       const hover = reply.getByRole("tooltip");
       await expect(hover).toContainText("Owned by Ada");
-      // Your agent's card says it runs your command, and names it in full on hover.
       const runsWith = hover.getByTestId("chats-comment-agent-runs-with");
       await expect(runsWith).toHaveText("Your runner command");
       await expect(runsWith).toHaveAttribute("title", command);
@@ -59,5 +75,7 @@ test("a named agent replies to a group mention with its owner on hover and focus
       await expect(hover).toHaveCount(0);
       await badge.press("Tab");
     }
-  } finally { await cleanupDesktopWorkspace(desktop, temp); }
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
 });

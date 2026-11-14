@@ -28,18 +28,12 @@ describe("parseWindowState", () => {
     expect(parseWindowState("not json")).toBeNull();
     expect(parseWindowState("{}")).toBeNull();
     expect(parseWindowState('{"bounds":{"x":0,"y":0}}')).toBeNull();
-    expect(
-      parseWindowState('{"bounds":{"x":"0","y":0,"width":1280,"height":800}}'),
-    ).toBeNull();
-    expect(
-      parseWindowState('{"bounds":{"x":0,"y":0,"width":1e999,"height":800}}'),
-    ).toBeNull();
+    expect(parseWindowState('{"bounds":{"x":"0","y":0,"width":1280,"height":800}}')).toBeNull();
+    expect(parseWindowState('{"bounds":{"x":0,"y":0,"width":1e999,"height":800}}')).toBeNull();
   });
 
   it("rejects bounds below the window minimum", () => {
-    expect(
-      parseWindowState('{"bounds":{"x":0,"y":0,"width":200,"height":100}}'),
-    ).toBeNull();
+    expect(parseWindowState('{"bounds":{"x":0,"y":0,"width":200,"height":100}}')).toBeNull();
   });
 
   it("round-trips the manager default against the manager minimum", () => {
@@ -86,9 +80,7 @@ describe("planWindowPlacement", () => {
 
   it("keeps bounds on a secondary display", () => {
     const onSecond = { ...saved, bounds: { ...saved.bounds, x: 2000 } };
-    expect(planWindowPlacement(onSecond, [PRIMARY, SECOND]).bounds).toEqual(
-      onSecond.bounds,
-    );
+    expect(planWindowPlacement(onSecond, [PRIMARY, SECOND]).bounds).toEqual(onSecond.bounds);
   });
 
   it("keeps a window larger than the display (still grabbable)", () => {
@@ -99,7 +91,6 @@ describe("planWindowPlacement", () => {
   it("resets to centered default when off every display", () => {
     const offscreen = { ...saved, bounds: { ...saved.bounds, x: 4000, y: 3000 } };
     expect(planWindowPlacement(offscreen, [PRIMARY]).bounds).toBeNull();
-    // The unplugged-monitor case: bounds were valid for a display that's gone.
     expect(planWindowPlacement(saved, [SECOND]).bounds).not.toEqual(saved.bounds);
   });
 
@@ -109,8 +100,8 @@ describe("planWindowPlacement", () => {
   });
 
   it("resets when the titlebar is above every display, even if the body is visible", () => {
-    // codex e0-e1 review: bottom 64px visible used to pass, but the titlebar
-    // at y=-736 is unreachable — the user can never drag the window back.
+    // The bottom 64px is visible, but the titlebar at y=-736 is unreachable:
+    // the user can never drag the window back.
     const titlebarOffTop = {
       ...saved,
       bounds: { x: 100, y: -736, width: 1280, height: 800 },
@@ -136,9 +127,7 @@ describe("planWindowPlacement", () => {
       ...saved,
       bounds: { x: 100, y: 1100, width: 1280, height: 800 },
     };
-    expect(planWindowPlacement(belowBoth, [above, PRIMARY]).bounds).toEqual(
-      belowBoth.bounds,
-    );
+    expect(planWindowPlacement(belowBoth, [above, PRIMARY]).bounds).toEqual(belowBoth.bounds);
     expect(planWindowPlacement(fullyBelow, [above, PRIMARY]).bounds).toBeNull();
   });
 
@@ -176,7 +165,6 @@ describe("createDebouncedSaver", () => {
     saver.schedule();
     saver.flush();
     expect(save).toHaveBeenCalledTimes(2);
-    // flush with nothing pending is a no-op
     saver.flush();
     expect(save).toHaveBeenCalledTimes(2);
     vi.useRealTimers();

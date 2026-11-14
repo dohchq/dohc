@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NOTICE_MARK_BATCH_MAX, MarkNoticesPayload, type NoticeRow } from "../../ipc/bridgeContract";
+import {
+  NOTICE_MARK_BATCH_MAX,
+  MarkNoticesPayload,
+  type NoticeRow,
+} from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { SENT_NOTICE_TOAST_MS, sentNoticeRef, useSentNotices } from "./useSentNotices";
 
@@ -63,15 +67,22 @@ async function arrive(next: NoticeRow[], nextAccount: string | null = account) {
 
 describe("sent notices in a window", () => {
   it("carries the shown refusal coordinates and releases dismissal for a newer refusal", async () => {
-    const shown = notice("refusal", { store: "local", kind: "sync-refusal",
-      refusalCoordinates: [{ originId: "peer", originSeq: 1 }] });
+    const shown = notice("refusal", {
+      store: "local",
+      kind: "sync-refusal",
+      refusalCoordinates: [{ originId: "peer", originSeq: 1 }],
+    });
     listed = [shown];
     const { result } = renderHook(() => useSentNotices(true));
     await waitFor(() => expect(result.current.notices).toHaveLength(1));
-    bridge.markNotices.mockImplementation(async payload => {
-      expect(MarkNoticesPayload.parse(payload).notices).toEqual([{
-        store: "local", noticeId: "refusal", refusalCoordinates: shown.refusalCoordinates,
-      }]);
+    bridge.markNotices.mockImplementation(async (payload) => {
+      expect(MarkNoticesPayload.parse(payload).notices).toEqual([
+        {
+          store: "local",
+          noticeId: "refusal",
+          refusalCoordinates: shown.refusalCoordinates,
+        },
+      ]);
       listed = [{ ...shown, refusalCoordinates: [{ originId: "peer", originSeq: 2 }] }];
     });
     await act(async () => result.current.dismiss(sentNoticeRef(shown)));
@@ -96,11 +107,9 @@ describe("sent notices in a window", () => {
     expect(result.current.notices).toHaveLength(2);
     expect(result.current.toast).toBeNull();
 
-    // Main lists newest first.
     await arrive([notice("newest"), notice("newer"), ...listed]);
     expect(result.current.toast?.noticeId).toBe("newest");
 
-    // One at a time: the next arrival takes the toast.
     await arrive([notice("next"), ...listed]);
     expect(result.current.toast?.noticeId).toBe("next");
     act(() => result.current.hideToast());
@@ -131,11 +140,14 @@ describe("sent notices in a window", () => {
       read = result.current.read([{ store: "account", noticeId: "a" }]);
       dismissed = result.current.dismiss({ store: "account", noticeId: "b" });
     });
-    expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs !== null])).toEqual([["a", true]]);
+    expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs !== null])).toEqual([
+      ["a", true],
+    ]);
 
-    // A list that left before main had the marks does not undo them.
     await act(async () => emitChanged?.());
-    expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs !== null])).toEqual([["a", true]]);
+    expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs !== null])).toEqual([
+      ["a", true],
+    ]);
 
     listed = [notice("a", { readAtMs: Date.now() })];
     await act(async () => {
@@ -143,12 +155,18 @@ describe("sent notices in a window", () => {
       dismissing.resolve(undefined);
       await Promise.all([read, dismissed]);
     });
-    expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs !== null])).toEqual([["a", true]]);
+    expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs !== null])).toEqual([
+      ["a", true],
+    ]);
     expect(bridge.markNotices).toHaveBeenCalledWith({
-      account: ANA, mark: "read", notices: [{ store: "account", noticeId: "a" }],
+      account: ANA,
+      mark: "read",
+      notices: [{ store: "account", noticeId: "a" }],
     });
     expect(bridge.markNotices).toHaveBeenCalledWith({
-      account: ANA, mark: "dismissed", notices: [{ store: "account", noticeId: "b" }],
+      account: ANA,
+      mark: "dismissed",
+      notices: [{ store: "account", noticeId: "b" }],
     });
   });
 
@@ -158,7 +176,9 @@ describe("sent notices in a window", () => {
     await waitFor(() => expect(result.current.notices).toHaveLength(1));
     bridge.markNotices.mockRejectedValueOnce(new Error("disk full"));
     await act(async () => {
-      await expect(result.current.dismiss({ store: "account", noticeId: "a" })).rejects.toThrow("disk full");
+      await expect(result.current.dismiss({ store: "account", noticeId: "a" })).rejects.toThrow(
+        "disk full",
+      );
     });
     expect(result.current.notices.map((row) => row.noticeId)).toEqual(["a"]);
   });
@@ -171,8 +191,13 @@ describe("sent notices in a window", () => {
       noticeId: `n${index}`,
     }));
     await act(async () => result.current.read(refs));
-    expect(bridge.markNotices.mock.calls.map(([payload]) => [payload.account, payload.notices.length]))
-      .toEqual([[ANA, NOTICE_MARK_BATCH_MAX], [ANA, NOTICE_MARK_BATCH_MAX], [ANA, 1]]);
+    expect(
+      bridge.markNotices.mock.calls.map(([payload]) => [payload.account, payload.notices.length]),
+    ).toEqual([
+      [ANA, NOTICE_MARK_BATCH_MAX],
+      [ANA, NOTICE_MARK_BATCH_MAX],
+      [ANA, 1],
+    ]);
   });
 
   it("keeps marks, the toast, and what it has seen to the account whose list showed them", async () => {
@@ -187,24 +212,27 @@ describe("sent notices in a window", () => {
       read = result.current.read([{ store: "account", noticeId: "b" }]);
     });
 
-    // Ben signs in. His notice "b" is his own and unread; his notices were
-    // there before this window saw his list, so none of them toasts.
     await arrive([notice("c"), notice("b")], BEN);
-    expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs])).toEqual([["c", null], ["b", null]]);
+    expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs])).toEqual([
+      ["c", null],
+      ["b", null],
+    ]);
     expect(result.current.toast).toBeNull();
 
-    // The mark made on Ana's list still names Ana.
     await act(async () => {
       reading.resolve(undefined);
       await read;
     });
     expect(bridge.markNotices).toHaveBeenCalledWith({
-      account: ANA, mark: "read", notices: [{ store: "account", noticeId: "b" }],
+      account: ANA,
+      mark: "read",
+      notices: [{ store: "account", noticeId: "b" }],
     });
-    // Marks made now go out for Ben.
     await act(async () => result.current.dismiss({ store: "account", noticeId: "c" }));
     expect(bridge.markNotices).toHaveBeenLastCalledWith({
-      account: BEN, mark: "dismissed", notices: [{ store: "account", noticeId: "c" }],
+      account: BEN,
+      mark: "dismissed",
+      notices: [{ store: "account", noticeId: "c" }],
     });
   });
 
@@ -218,7 +246,9 @@ describe("sent notices in a window", () => {
     await arrive([notice("c")], BEN);
     expect(result.current.toast).toBeNull();
     await arrive([notice("a")], ANA);
-    expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs])).toEqual([["a", null]]);
+    expect(result.current.notices.map((row) => [row.noticeId, row.readAtMs])).toEqual([
+      ["a", null],
+    ]);
     expect(result.current.toast).toBeNull();
   });
 

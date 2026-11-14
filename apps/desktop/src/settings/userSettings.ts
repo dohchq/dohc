@@ -5,10 +5,21 @@ import {
   MAX_PREFERRED_NAME_LENGTH,
   hasPreferredNameControlCharacters,
 } from "@dohc/workspace-contracts/chat-identity-values";
-import { AGENT_HUE_ASSIGNMENT_ORDER, AGENT_HUES, IDENTITY_HUES, type AgentHue, type IdentityHue } from "@dohc/workspace-contracts/agent-hues";
+import {
+  AGENT_HUE_ASSIGNMENT_ORDER,
+  AGENT_HUES,
+  IDENTITY_HUES,
+  type AgentHue,
+  type IdentityHue,
+} from "@dohc/workspace-contracts/agent-hues";
 import { VIEW_IDS } from "../renderer/workbench/workbenchState";
 import { IgnoredSettings } from "./settingsFile";
-import { chatMentionTokens, handleForName, normalizeHandle, type MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import {
+  chatMentionTokens,
+  handleForName,
+  normalizeHandle,
+  type MentionCandidate,
+} from "@dohc/workspace-contracts/chat-mentions";
 
 const PreferredNameForIpc = z
   .string()
@@ -33,7 +44,9 @@ const HexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 // font installed on this computer. The name becomes a quoted CSS family, so
 // it holds only letters, digits, spaces, dots, dashes, and underscores.
 export const EDITOR_FONTS = ["sans", "serif", "mono"] as const;
-const InstalledFontName = z.string().max(100)
+const InstalledFontName = z
+  .string()
+  .max(100)
   .regex(/^[\p{L}\p{N}](?:[\p{L}\p{N} ._-]*[\p{L}\p{N}])?$/u);
 
 // Window zoom, stored as a Chromium zoom level like VS Code's
@@ -64,26 +77,77 @@ export const DEFAULT_AGENT_ID = "default";
 // Agents are kept by id, so a mistake in one entry turns off only that agent.
 // An id starts with a letter, so the agents keep the order the file lists them in.
 // Its dashes are single and inside it, so its chat's slug keeps the id as it is.
-export const AgentId = z.string().regex(/^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/, "An agent's id is up to 64 lowercase letters, digits and single dashes, starting with a letter and not ending with a dash.")
-  .refine((id) => id !== "dohc-mcp", "dohc-mcp stands for agents that give no name. Give this agent another id.")
-  .refine((id) => !id.startsWith("p-"), "Ids that start with p- are kept for personal agents. Give this agent another id.");
+export const AgentId = z
+  .string()
+  .regex(
+    /^(?=.{1,64}$)[a-z](?:-?[a-z0-9])*$/,
+    "An agent's id is up to 64 lowercase letters, digits and single dashes, starting with a letter and not ending with a dash.",
+  )
+  .refine(
+    (id) => id !== "dohc-mcp",
+    "dohc-mcp stands for agents that give no name. Give this agent another id.",
+  )
+  .refine(
+    (id) => !id.startsWith("p-"),
+    "Ids that start with p- are kept for personal agents. Give this agent another id.",
+  );
 
-export const AgentSettings = z.object({
-  name: PreferredNameForIpc,
-  hue: z.enum(AGENT_HUES),
-  // How dohc starts the agent. Without one, dohc never starts it.
-  launch: AgentLaunch.optional(),
-  changesFiles: z.boolean().default(true),
-  // Pause and Resume. dohc starts only an enabled agent.
-  enabled: z.boolean(),
-  timeoutMinutes: z.number().int().min(1).max(1440).default(30),
-  // The name this agent's messages carried before agents had ids. Only the
-  // migration writes it, and no other agent can take it.
-  nameBeforeMigration: PreferredNameForIpc.optional(),
-}).strict().refine((agent) => agent.launch !== undefined || !agent.enabled, {
-  message: "Choose how dohc starts this agent before turning it on.",
-  path: ["enabled"],
-});
+// A workspace's id as this file names it.
+const SettingsWorkspaceId = z
+  .string()
+  .max(200)
+  .regex(/^[a-z0-9][a-z0-9-]*$/);
+
+// The agent's own conversation in its tool (CONTEXT.md, Agent thread). dohc
+// forwards the agent's messages there and never starts the agent.
+export const AgentThread = z
+  .object({
+    tool: z.literal("t3-code"),
+    // The thread's id in the tool, in visible ASCII.
+    id: z.string().regex(/^[\x21-\x7e]{1,512}$/),
+  })
+  .strict();
+export type AgentThread = z.infer<typeof AgentThread>;
+export const MAX_AGENT_NOTE_LENGTH = 4000;
+const MAX_AGENT_WORKSPACES = 200;
+
+export const AgentSettings = z
+  .object({
+    name: PreferredNameForIpc,
+    hue: z.enum(AGENT_HUES),
+    // How dohc starts the agent. Without one, dohc never starts it.
+    launch: AgentLaunch.optional(),
+    thread: AgentThread.optional(),
+    // What dohc does with a message while the thread works: put it in line,
+    // or hand it over at once. In line when absent.
+    whileBusy: z.enum(["line", "steer"]).optional(),
+    // What the person wrote for the agent. dohc sends it with every message.
+    note: z.string().min(1).max(MAX_AGENT_NOTE_LENGTH).optional(),
+    // The workspaces whose messages dohc forwards to the thread.
+    workspaces: z.array(SettingsWorkspaceId).max(MAX_AGENT_WORKSPACES).optional(),
+    changesFiles: z.boolean().default(true),
+    // Pause and Resume. dohc starts, and forwards to, only an enabled agent.
+    enabled: z.boolean(),
+    timeoutMinutes: z.number().int().min(1).max(1440).default(30),
+    // The name this agent's messages carried before agents had ids. Only the
+    // migration writes it, and no other agent can take it.
+    nameBeforeMigration: PreferredNameForIpc.optional(),
+  })
+  .strict()
+  .refine((agent) => agent.launch !== undefined || agent.thread !== undefined || !agent.enabled, {
+    message: "Choose how dohc starts this agent before turning it on.",
+    path: ["enabled"],
+  })
+  .refine((agent) => agent.launch === undefined || agent.thread === undefined, {
+    message: "An agent with a `thread` has no `launch`. Its tool runs it.",
+    path: ["thread"],
+  })
+  .refine(
+    (agent) =>
+      agent.thread !== undefined ||
+      (agent.whileBusy === undefined && agent.note === undefined && agent.workspaces === undefined),
+    { message: "`whileBusy`, `note` and `workspaces` need a `thread`.", path: ["thread"] },
+  );
 export type AgentSettings = z.infer<typeof AgentSettings>;
 export type Agent = AgentSettings & { id: string };
 
@@ -94,16 +158,35 @@ export const agentNameKey = (name: string) => normalizeHandle(agentHandle(name) 
 // Each agent's name, and the name the default agent's messages had before
 // agents had ids, so an old message names one agent.
 function agentNameKeys(agents: Record<string, AgentSettings>): string[] {
-  return Object.values(agents).flatMap(({ name, nameBeforeMigration }) =>
-    [...new Set([name, nameBeforeMigration ?? name].map(agentNameKey))]);
+  return Object.values(agents).flatMap(({ name, nameBeforeMigration }) => [
+    ...new Set([name, nameBeforeMigration ?? name].map(agentNameKey)),
+  ]);
 }
-export const AgentsSettings = z.record(AgentId, AgentSettings)
+export const AgentsSettings = z
+  .record(AgentId, AgentSettings)
   .refine((agents) => new Set(agentNameKeys(agents)).size === agentNameKeys(agents).length, {
     message: "Give each agent its own name.",
   })
-  .refine((agents) => Object.entries(agents).every(([id, agent]) => id === DEFAULT_AGENT_ID || agent.nameBeforeMigration === undefined), {
-    message: "Only the default agent keeps a name from before agents had ids.",
-  });
+  .refine(
+    (agents) =>
+      Object.entries(agents).every(
+        ([id, agent]) => id === DEFAULT_AGENT_ID || agent.nameBeforeMigration === undefined,
+      ),
+    {
+      message: "Only the default agent keeps a name from before agents had ids.",
+    },
+  )
+  // One thread is one agent. Two agents on it would put two workspaces'
+  // messages in one conversation with no warning (ADR 0016).
+  .refine(
+    (agents) => {
+      const threads = Object.values(agents).flatMap(({ thread }) =>
+        thread ? [`${thread.tool}\n${thread.id}`] : [],
+      );
+      return new Set(threads).size === threads.length;
+    },
+    { message: "Give each agent its own thread." },
+  );
 export type AgentsSettings = z.infer<typeof AgentsSettings>;
 
 export function listAgents(settings: Pick<DesktopUserSettings, "agents">): Agent[] {
@@ -119,7 +202,8 @@ export type AgentWithLaunch = Agent & { launch: AgentLaunch };
 /** The agents dohc starts: each one that is on and has a way to start. */
 export function runnableAgents(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch[] {
   return listAgents(settings).flatMap((agent) =>
-    agent.enabled && agent.launch ? [{ ...agent, launch: agent.launch }] : []);
+    agent.enabled && agent.launch ? [{ ...agent, launch: agent.launch }] : [],
+  );
 }
 
 /**
@@ -127,13 +211,31 @@ export function runnableAgents(settings: Pick<DesktopUserSettings, "agents">): A
  * One that is off is not passed over: dispatch says it is off, so no other
  * agent takes the work without the person knowing.
  */
-export function automationAgent(settings: Pick<DesktopUserSettings, "agents">): AgentWithLaunch | null {
+export function automationAgent(
+  settings: Pick<DesktopUserSettings, "agents">,
+): AgentWithLaunch | null {
   const agent = listAgents(settings).find((entry) => entry.launch !== undefined);
   return agent?.launch ? { ...agent, launch: agent.launch } : null;
 }
 
+export type AgentWithThread = Agent & { thread: AgentThread };
+/** The agents dohc forwards a workspace's messages to: each one that is on, has a thread, and serves the workspace. */
+export function forwardingAgents(
+  settings: Pick<DesktopUserSettings, "agents">,
+  workspaceId: string,
+): AgentWithThread[] {
+  return listAgents(settings).flatMap((agent) =>
+    agent.enabled && agent.thread && agent.workspaces?.includes(workspaceId)
+      ? [{ ...agent, thread: agent.thread }]
+      : [],
+  );
+}
+
 /** The agent you run with this id: an entry dohc never starts. */
-export function agentYouRun(settings: Pick<DesktopUserSettings, "agents">, agentId: string): Agent | null {
+export function agentYouRun(
+  settings: Pick<DesktopUserSettings, "agents">,
+  agentId: string,
+): Agent | null {
   return listAgents(settings).find((agent) => agent.id === agentId && !agent.launch) ?? null;
 }
 
@@ -150,11 +252,21 @@ export function agentMentionId(agentId: string): string {
 
 // The @ roster's entries for your agents with a handle: each one dohc starts
 // that is on, and each one you run.
-export function agentMentionCandidates(agents: readonly Pick<Agent, "id" | "name" | "enabled" | "launch">[]): MentionCandidate[] {
+export function agentMentionCandidates(
+  agents: readonly Pick<Agent, "id" | "name" | "enabled" | "launch">[],
+): MentionCandidate[] {
   return agents.flatMap((agent) => {
     const handle = agentHandle(agent.name);
     return (agent.enabled || !agent.launch) && handle
-      ? [{ id: agentMentionId(agent.id), kind: "agent" as const, handle, label: agent.name, description: "your agent" }]
+      ? [
+          {
+            id: agentMentionId(agent.id),
+            kind: "agent" as const,
+            handle,
+            label: agent.name,
+            description: "your agent",
+          },
+        ]
       : [];
   });
 }
@@ -162,13 +274,28 @@ export function agentMentionCandidates(agents: readonly Pick<Agent, "id" | "name
 // The @ roster's entries for your personal agents that are signed in and can
 // reach this workspace. Each one reads its own mentions through the server.
 export function personalAgentMentionCandidates(
-  agents: readonly { agentId: string; name: string; status: "active" | "signed_out"; reach: readonly { workspaceId: string }[] }[],
+  agents: readonly {
+    agentId: string;
+    name: string;
+    status: "active" | "signed_out";
+    reach: readonly { workspaceId: string }[];
+  }[],
   workspaceId: string,
 ): MentionCandidate[] {
   return agents.flatMap((agent) => {
     const handle = agentHandle(agent.name);
-    return agent.status === "active" && handle && agent.reach.some((entry) => entry.workspaceId === workspaceId)
-      ? [{ id: agentMentionId(agent.agentId), kind: "agent" as const, handle, label: agent.name, description: "your agent" }]
+    return agent.status === "active" &&
+      handle &&
+      agent.reach.some((entry) => entry.workspaceId === workspaceId)
+      ? [
+          {
+            id: agentMentionId(agent.agentId),
+            kind: "agent" as const,
+            handle,
+            label: agent.name,
+            description: "your agent",
+          },
+        ]
       : [];
   });
 }
@@ -189,16 +316,24 @@ export function agentIdsToWake(
 ): string[] {
   const agents = listAgents(settings);
   const named = new Set(chatMentionTokens(body).map(({ handle }) => normalizeHandle(handle)));
-  const dmAgent = dmAgentId !== null && !dmAgentId.startsWith("p-") &&
-    !agents.some((agent) => agent.id === dmAgentId && !agent.launch) ? [dmAgentId] : [];
+  const dmAgent =
+    dmAgentId !== null &&
+    !dmAgentId.startsWith("p-") &&
+    !agents.some((agent) => agent.id === dmAgentId && !agent.launch)
+      ? [dmAgentId]
+      : [];
   const namedAgents = agents
     .filter((agent) => {
       const handle = agentHandle(agent.name);
       return agent.launch && handle && named.has(normalizeHandle(handle));
     })
     .map(({ id }) => id);
-  const answered = answeredAgentId !== undefined && answeredAgentId !== null &&
-    agents.some((agent) => agent.id === answeredAgentId && agent.launch) ? [answeredAgentId] : [];
+  const answered =
+    answeredAgentId !== undefined &&
+    answeredAgentId !== null &&
+    agents.some((agent) => agent.id === answeredAgentId && agent.launch)
+      ? [answeredAgentId]
+      : [];
   return [...new Set([...dmAgent, ...namedAgents, ...answered])];
 }
 
@@ -218,7 +353,10 @@ export function withAgent(
  * was given keeps working.
  */
 export function agentIdDohcStarts(settings: Pick<DesktopUserSettings, "agents">): string {
-  return listAgents(settings).find((agent) => agent.launch !== undefined)?.id ?? newAgentId(Object.keys(settings.agents), "agent");
+  return (
+    listAgents(settings).find((agent) => agent.launch !== undefined)?.id ??
+    newAgentId(Object.keys(settings.agents), "agent")
+  );
 }
 
 /** The settings with the agent Chats sets up changed, or added when there is none. */
@@ -230,17 +368,22 @@ export function withAgentDohcStarts(
   return { ...settings, agents: { ...settings.agents, [id]: change(settings.agents[id] ?? null) } };
 }
 
-/** What a new agent starts with: the first free hue, and off until the person turns it on. */
 export function newAgentDefaults(
   settings: Pick<DesktopUserSettings, "agents">,
   yourHue: IdentityHue | null,
 ): Omit<AgentSettings, "name" | "launch"> {
-  return { hue: newAgentHue(settings.agents, yourHue), changesFiles: true, enabled: false, timeoutMinutes: 30 };
+  return {
+    hue: newAgentHue(settings.agents, yourHue),
+    changesFiles: true,
+    enabled: false,
+    timeoutMinutes: 30,
+  };
 }
 
 /** The hue your agents and you use least, first in the assignment order, so a new agent takes the first free one. */
 export function newAgentHue(agents: AgentsSettings, yourHue: IdentityHue | null): AgentHue {
-  const uses = (hue: AgentHue) => Object.values(agents).filter((agent) => agent.hue === hue).length + (hue === yourHue ? 1 : 0);
+  const uses = (hue: AgentHue) =>
+    Object.values(agents).filter((agent) => agent.hue === hue).length + (hue === yourHue ? 1 : 0);
   return AGENT_HUE_ASSIGNMENT_ORDER.reduce((least, hue) => (uses(hue) < uses(least) ? hue : least));
 }
 
@@ -255,7 +398,11 @@ export function newAgentId(taken: readonly string[], base: string): string {
 
 /** A new agent's name that no agent has: `base`, `base 2`, `base 3` and on. */
 // `takenElsewhere` names the agents outside the file, such as your personal agents.
-export function newAgentName(agents: AgentsSettings, base: string, takenElsewhere: (name: string) => boolean = () => false): string {
+export function newAgentName(
+  agents: AgentsSettings,
+  base: string,
+  takenElsewhere: (name: string) => boolean = () => false,
+): string {
   for (let count = 1; ; count += 1) {
     const name = count === 1 ? base : `${base} ${count}`;
     if (!agentNameTaken(agents, "", name) && !takenElsewhere(name)) return name;
@@ -282,7 +429,11 @@ export function agentProblem(id: string, entry: unknown): string {
   }
   const fields = entry as Record<string, unknown>;
   const alone = AgentsSettings.safeParse({ [id]: entry });
-  if (alone.success) return "Another agent has this name.";
+  // The entry is sound alone, so it clashes with an agent the file lists first.
+  if (alone.success)
+    return hasKey(fields, "thread")
+      ? "Another agent has this name or this thread."
+      : "Another agent has this name.";
   const issue = alone.error.issues[0]!;
   if (issue.code === "unrecognized_keys") return `dohc doesn't use \`${issue.keys[0]}\`.`;
   const key = issue.path[1];
@@ -295,7 +446,8 @@ export function agentProblem(id: string, entry: unknown): string {
       if (name === undefined) return "`name` is missing.";
       if (typeof name !== "string") return "`name` must be text.";
       if (!name.trim()) return "`name` is empty.";
-      if (hasPreferredNameControlCharacters(name)) return "`name` can't contain control characters.";
+      if (hasPreferredNameControlCharacters(name))
+        return "`name` can't contain control characters.";
       return `\`name\` must be ${MAX_PREFERRED_NAME_LENGTH} characters or fewer.`;
     }
     case "hue":
@@ -308,20 +460,31 @@ export function agentProblem(id: string, entry: unknown): string {
       return "`timeoutMinutes` must be a whole number from 1 to 1440.";
     case "launch":
       return "dohc can't read `launch`.";
+    case "thread":
+      // The rules across keys: a thread takes the place of `launch`, and its settings need it.
+      return issue.code === "custom" ? issue.message : "dohc can't read `thread`.";
+    case "whileBusy":
+      return "`whileBusy` must be line or steer.";
+    case "note":
+      return `\`note\` must be text of 1 to ${MAX_AGENT_NOTE_LENGTH} characters.`;
+    case "workspaces":
+      return "`workspaces` must be a list of workspace ids.";
     default:
       return "dohc can't read this entry.";
   }
 }
 
 // An agent entry dohc could not use, so Settings can still show it in its place.
-export const AgentProblem = z.object({
-  id: z.string().max(200),
-  name: z.string().max(200).optional(),
-  hue: z.enum(AGENT_HUES).optional(),
-  // Where the entry sits among the file's agents.
-  position: z.number().int().nonnegative(),
-  problem: z.string().min(1).max(500),
-}).strict();
+export const AgentProblem = z
+  .object({
+    id: z.string().max(200),
+    name: z.string().max(200).optional(),
+    hue: z.enum(AGENT_HUES).optional(),
+    // Where the entry sits among the file's agents.
+    position: z.number().int().nonnegative(),
+    problem: z.string().min(1).max(500),
+  })
+  .strict();
 export type AgentProblem = z.infer<typeof AgentProblem>;
 
 // Pins are kept per workspace, by workspace id, because an app is a folder in
@@ -329,38 +492,39 @@ export type AgentProblem = z.infer<typeof AgentProblem>;
 // one person's choice on one computer: a collaborator never sees it.
 export const MAX_PINNED_APPS = 20;
 const MAX_PINNED_WORKSPACES = 200;
-const PinnedAppsWorkspaceId = z.string().max(200).regex(/^[a-z0-9][a-z0-9-]*$/);
 // Archived chats follow the same rule: hiding a chat from your sidebar is
 // your choice on this computer, and the chat's members still see it.
 export const MAX_ARCHIVED_CHATS = 500;
 
-export const SidebarSettings = z.object({
-  // dohc's own views in the order the sidebar shows them. A view the list
-  // leaves out follows in dohc's order, so a new view still appears.
-  order: z.array(z.enum(VIEW_IDS)).max(VIEW_IDS.length),
-  hidden: z.array(z.enum(VIEW_IDS)).max(VIEW_IDS.length),
-  // Each workspace's pinned apps, by the app's folder in that workspace.
-  pinnedApps: z
-    .record(PinnedAppsWorkspaceId, z.array(z.string().min(1).max(4096)).max(MAX_PINNED_APPS))
-    .refine((pins) => Object.keys(pins).length <= MAX_PINNED_WORKSPACES, {
-      message: `Pin apps in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
-    }),
-  // Each workspace's archived chats, by the chat's id in that workspace.
-  archivedChats: z
-    .record(PinnedAppsWorkspaceId, z.array(z.string().min(1).max(200)).max(MAX_ARCHIVED_CHATS))
-    .refine((archived) => Object.keys(archived).length <= MAX_PINNED_WORKSPACES, {
-      message: `Archive chats in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
-    })
-    .default({}),
-  // Each workspace's chats of removed agents taken off Archived, by the
-  // chat's id. One shows again when an agent with its id is added again.
-  hiddenChats: z
-    .record(PinnedAppsWorkspaceId, z.array(z.string().min(1).max(200)).max(MAX_ARCHIVED_CHATS))
-    .refine((hidden) => Object.keys(hidden).length <= MAX_PINNED_WORKSPACES, {
-      message: `Remove chats from the list in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
-    })
-    .default({}),
-}).strict();
+export const SidebarSettings = z
+  .object({
+    // dohc's own views in the order the sidebar shows them. A view the list
+    // leaves out follows in dohc's order, so a new view still appears.
+    order: z.array(z.enum(VIEW_IDS)).max(VIEW_IDS.length),
+    hidden: z.array(z.enum(VIEW_IDS)).max(VIEW_IDS.length),
+    // Each workspace's pinned apps, by the app's folder in that workspace.
+    pinnedApps: z
+      .record(SettingsWorkspaceId, z.array(z.string().min(1).max(4096)).max(MAX_PINNED_APPS))
+      .refine((pins) => Object.keys(pins).length <= MAX_PINNED_WORKSPACES, {
+        message: `Pin apps in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
+      }),
+    // Each workspace's archived chats, by the chat's id in that workspace.
+    archivedChats: z
+      .record(SettingsWorkspaceId, z.array(z.string().min(1).max(200)).max(MAX_ARCHIVED_CHATS))
+      .refine((archived) => Object.keys(archived).length <= MAX_PINNED_WORKSPACES, {
+        message: `Archive chats in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
+      })
+      .default({}),
+    // Each workspace's chats of removed agents taken off Archived, by the
+    // chat's id. One shows again when an agent with its id is added again.
+    hiddenChats: z
+      .record(SettingsWorkspaceId, z.array(z.string().min(1).max(200)).max(MAX_ARCHIVED_CHATS))
+      .refine((hidden) => Object.keys(hidden).length <= MAX_PINNED_WORKSPACES, {
+        message: `Remove chats from the list in ${MAX_PINNED_WORKSPACES} workspaces or fewer.`,
+      })
+      .default({}),
+  })
+  .strict();
 export type SidebarSettings = z.infer<typeof SidebarSettings>;
 
 export const DEFAULT_SIDEBAR_SETTINGS: SidebarSettings = {
@@ -374,10 +538,12 @@ export const DEFAULT_SIDEBAR_SETTINGS: SidebarSettings = {
 // Reports this computer sends to dohc's developers. A release build that
 // names a report service sends them until the person turns them off; other
 // builds send nothing. See telemetry/reportingConfig.ts.
-export const PrivacySettings = z.object({
-  usageReports: z.boolean(),
-  errorReports: z.boolean(),
-}).strict();
+export const PrivacySettings = z
+  .object({
+    usageReports: z.boolean(),
+    errorReports: z.boolean(),
+  })
+  .strict();
 export type PrivacySettings = z.infer<typeof PrivacySettings>;
 
 export const DEFAULT_PRIVACY_SETTINGS: PrivacySettings = {
@@ -388,46 +554,66 @@ export const DEFAULT_PRIVACY_SETTINGS: PrivacySettings = {
 // How long dohc keeps a finished agent run's log (agents/runLogRetention.ts):
 // 30 days unless the settings file asks for longer, or for "forever".
 export const DEFAULT_RUN_LOG_KEEP_DAYS = 30;
-export const AgentRunLogsSettings = z.object({
-  keepDays: z.union([z.number().int().min(DEFAULT_RUN_LOG_KEEP_DAYS).max(36_500), z.literal("forever")]),
-}).strict();
+export const AgentRunLogsSettings = z
+  .object({
+    keepDays: z.union([
+      z.number().int().min(DEFAULT_RUN_LOG_KEEP_DAYS).max(36_500),
+      z.literal("forever"),
+    ]),
+  })
+  .strict();
 export type AgentRunLogsSettings = z.infer<typeof AgentRunLogsSettings>;
 
-export const DEFAULT_AGENT_RUN_LOGS_SETTINGS: AgentRunLogsSettings = { keepDays: DEFAULT_RUN_LOG_KEEP_DAYS };
+export const DEFAULT_AGENT_RUN_LOGS_SETTINGS: AgentRunLogsSettings = {
+  keepDays: DEFAULT_RUN_LOG_KEEP_DAYS,
+};
 
-export const DesktopUserSettings = z.object({
-  version: z.literal(2),
-  // Added after the original v1 settings shipped. The default makes old v1
-  // files migrate in place instead of failing the strict top-level parse and
-  // resetting unrelated preferences.
-  profile: z.object({
-    preferredName: PreferredNameForIpc.optional(),
-  }).strict().default({}),
-  appearance: z.object({
-    themeMode: z.enum(THEME_MODES),
-    // Added after appearance shipped. The default migrates stored files in
-    // place instead of failing the strict parse and resetting preferences.
-    zoomLevel: z.number().int().min(MIN_ZOOM_LEVEL).max(MAX_ZOOM_LEVEL)
-      .default(DEFAULT_ZOOM_LEVEL),
-    // null is dohc's own accent.
-    accentColor: HexColor.nullable().default(null),
-    // How this computer shows you in chat. It is not part of your identity:
-    // every viewer picks each person's color itself, so a collaborator still
-    // sees the color their computer picks for you. null is the hue dohc picks
-    // from your name.
-    yourColor: z.enum(IDENTITY_HUES).nullable().default(null),
-  }).strict(),
-  editor: z.object({
-    fontFamily: z.union([z.enum(EDITOR_FONTS), InstalledFontName]).default("sans"),
-    fontSize: z.number().int().min(MIN_EDITOR_FONT_SIZE).max(MAX_EDITOR_FONT_SIZE),
-    lineWrap: z.boolean(),
-    spellcheck: z.boolean(),
-  }).strict(),
-  agents: AgentsSettings.default({}),
-  sidebar: SidebarSettings.default(DEFAULT_SIDEBAR_SETTINGS),
-  privacy: PrivacySettings.default(DEFAULT_PRIVACY_SETTINGS),
-  agentRunLogs: AgentRunLogsSettings.default(DEFAULT_AGENT_RUN_LOGS_SETTINGS),
-}).strict();
+export const DesktopUserSettings = z
+  .object({
+    version: z.literal(2),
+    // Added after the original v1 settings shipped. The default makes old v1
+    // files migrate in place instead of failing the strict top-level parse and
+    // resetting unrelated preferences.
+    profile: z
+      .object({
+        preferredName: PreferredNameForIpc.optional(),
+      })
+      .strict()
+      .default({}),
+    appearance: z
+      .object({
+        themeMode: z.enum(THEME_MODES),
+        // Added after appearance shipped. The default migrates stored files in
+        // place instead of failing the strict parse and resetting preferences.
+        zoomLevel: z
+          .number()
+          .int()
+          .min(MIN_ZOOM_LEVEL)
+          .max(MAX_ZOOM_LEVEL)
+          .default(DEFAULT_ZOOM_LEVEL),
+        // null is dohc's own accent.
+        accentColor: HexColor.nullable().default(null),
+        // How this computer shows you in chat. It is not part of your identity:
+        // every viewer picks each person's color itself, so a collaborator still
+        // sees the color their computer picks for you. null is the hue dohc picks
+        // from your name.
+        yourColor: z.enum(IDENTITY_HUES).nullable().default(null),
+      })
+      .strict(),
+    editor: z
+      .object({
+        fontFamily: z.union([z.enum(EDITOR_FONTS), InstalledFontName]).default("sans"),
+        fontSize: z.number().int().min(MIN_EDITOR_FONT_SIZE).max(MAX_EDITOR_FONT_SIZE),
+        lineWrap: z.boolean(),
+        spellcheck: z.boolean(),
+      })
+      .strict(),
+    agents: AgentsSettings.default({}),
+    sidebar: SidebarSettings.default(DEFAULT_SIDEBAR_SETTINGS),
+    privacy: PrivacySettings.default(DEFAULT_PRIVACY_SETTINGS),
+    agentRunLogs: AgentRunLogsSettings.default(DEFAULT_AGENT_RUN_LOGS_SETTINGS),
+  })
+  .strict();
 export type DesktopUserSettings = z.infer<typeof DesktopUserSettings>;
 
 export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
@@ -452,8 +638,12 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
 };
 
 // Main-only settings. Actor keys never cross the renderer boundary.
-export const AgentColors = z.record(z.string().refine(key => new TextEncoder().encode(key).byteLength <= 2048), z.enum(IDENTITY_HUES))
-  .refine(colors => Object.keys(colors).length <= 256);
+export const AgentColors = z
+  .record(
+    z.string().refine((key) => new TextEncoder().encode(key).byteLength <= 2048),
+    z.enum(IDENTITY_HUES),
+  )
+  .refine((colors) => Object.keys(colors).length <= 256);
 export type AgentColors = z.infer<typeof AgentColors>;
 export const StoredUserSettings = DesktopUserSettings.safeExtend({
   appearance: DesktopUserSettings.shape.appearance.extend({ agentColors: AgentColors.optional() }),
@@ -462,23 +652,30 @@ export type StoredUserSettings = z.infer<typeof StoredUserSettings>;
 
 export const SETTINGS_READ_SOURCES = ["stored", "default", "recovered"] as const;
 
-export const DesktopUserSettingsResult = z.object({
-  settings: DesktopUserSettings,
-  source: z.enum(SETTINGS_READ_SOURCES),
-  // Names the file, so it is bounded above a full path.
-  warning: z.string().min(1).max(4600).optional(),
-  ignored: IgnoredSettings.optional(),
-  agentProblems: z.array(AgentProblem).min(1).max(50).optional(),
-}).strict();
+export const DesktopUserSettingsResult = z
+  .object({
+    settings: DesktopUserSettings,
+    source: z.enum(SETTINGS_READ_SOURCES),
+    // Names the file, so it is bounded above a full path.
+    warning: z.string().min(1).max(4600).optional(),
+    ignored: IgnoredSettings.optional(),
+    agentProblems: z.array(AgentProblem).min(1).max(50).optional(),
+  })
+  .strict();
 export type DesktopUserSettingsResult = z.infer<typeof DesktopUserSettingsResult>;
 
-export const StoredUserSettingsResult = DesktopUserSettingsResult.extend({ settings: StoredUserSettings });
+export const StoredUserSettingsResult = DesktopUserSettingsResult.extend({
+  settings: StoredUserSettings,
+});
 export type StoredUserSettingsResult = z.infer<typeof StoredUserSettingsResult>;
 
-export function rendererUserSettingsResult(result: StoredUserSettingsResult): DesktopUserSettingsResult {
+export function rendererUserSettingsResult(
+  result: StoredUserSettingsResult,
+): DesktopUserSettingsResult {
   const { agentColors: _private, ...appearance } = result.settings.appearance;
   return DesktopUserSettingsResult.parse({
-    ...result, settings: { ...result.settings, appearance },
+    ...result,
+    settings: { ...result.settings, appearance },
     ignored: result.ignored?.length ? result.ignored : undefined,
     agentProblems: result.agentProblems?.length ? result.agentProblems : undefined,
   });
@@ -501,16 +698,13 @@ export function settingsDeepEqual(left: unknown, right: unknown): boolean {
     const leftKeys = Object.keys(left);
     const rightKeys = Object.keys(right);
     if (leftKeys.length !== rightKeys.length) return false;
-    return leftKeys.every((key, index) =>
-      key === rightKeys[index] && settingsDeepEqual(left[key], right[key]),
+    return leftKeys.every(
+      (key, index) => key === rightKeys[index] && settingsDeepEqual(left[key], right[key]),
     );
   }
   return false;
 }
 
-export function effectiveThemeMode(
-  mode: ThemeMode,
-  prefersDark: boolean,
-): "light" | "dark" {
+export function effectiveThemeMode(mode: ThemeMode, prefersDark: boolean): "light" | "dark" {
   return mode === "system" ? (prefersDark ? "dark" : "light") : mode;
 }

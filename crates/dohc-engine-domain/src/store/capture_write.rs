@@ -24,8 +24,6 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::borrow::Cow;
 
 impl<'a> VersionedTextStore<'a> {
-    // --------------------------------------------------------------------- writes
-
     /// Write text and its history in one storage transaction.
     ///
     /// Creates an object for a new path or updates the existing path's object.
@@ -102,10 +100,6 @@ impl<'a> VersionedTextStore<'a> {
         committed(outcome)
     }
 }
-
-// ============================================================================
-// Free helpers (SQL over a borrowed connection/transaction).
-// ============================================================================
 
 /// Input for text persistence with borrowed identifiers and metadata.
 ///
@@ -305,9 +299,6 @@ impl<'a> From<&'a WriteText> for ProjectedWriteText<'a> {
     }
 }
 
-/// Validate a write and normalize only its path through the R07
-/// plaintext-storable path floor. The document body stays borrowed or owned as
-/// supplied, so validation never copies it.
 fn normalized_write_input<'a>(
     mut input: ProjectedWriteText<'a>,
 ) -> Result<ProjectedWriteText<'a>, DomainError> {
@@ -451,10 +442,6 @@ where
         Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
         None => (b"none".as_slice(), b"".as_slice()),
     };
-    // Frame extended with the summary/correlation provenance fields: the
-    // capture sink passes request_id: None, so no store holds recorded
-    // capture-ingest requests and no legacy-hash compatibility shim is owed
-    // (same reasoning as the capture-retire frame below).
     let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
     let (correlation_kind, correlation) =
         hash_optional_text_fields(input.metadata_correlation_id.as_deref());
@@ -749,10 +736,6 @@ pub fn capture_retire_in_tx(
     if !version_exists(tx, &input.workspace_id, &input.version_id)? {
         return Err(DomainError::VersionNotFound);
     }
-    // Frame extended (head-scope discriminator, then the summary/correlation
-    // provenance fields): no store outside tests has recorded capture-retire
-    // requests (the sink passes request_id: None), so no legacy-hash
-    // compatibility shim is owed.
     let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
     let (correlation_kind, correlation) =
         hash_optional_text_fields(input.metadata_correlation_id.as_deref());
@@ -1000,7 +983,6 @@ where
         Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
         None => (b"none".as_slice(), b"".as_slice()),
     };
-    // Frame extended with summary/correlation; see `capture_ingest_in_tx`.
     let (summary_kind, summary) = hash_optional_text_fields(input.metadata_summary.as_deref());
     let (correlation_kind, correlation) =
         hash_optional_text_fields(input.metadata_correlation_id.as_deref());
@@ -1453,7 +1435,7 @@ pub fn switch_projection_job_id(
 
 /// The `(path, sha256)` pairs that `version`'s plaintext switch has yet to
 /// write where no file was. Another version's pending write at the same path
-/// does not count (dohc#3622).
+/// does not count.
 fn unwritten_switch_writes(
     conn: &Connection,
     workspace: &str,
@@ -2223,7 +2205,7 @@ fn head_sha256(head: &SnapshotRecord) -> Option<&str> {
 }
 
 /// Text capture's result for a head that already holds `text`. A file recorded
-/// as binary before code files were stored as text (#2666) keeps its binary
+/// as binary before code files were stored as text keeps its binary
 /// head, so its result pairs the captured text with that head's moment.
 fn capture_result_for_moment(
     conn: &Connection,
@@ -2257,12 +2239,6 @@ fn reconstruct_capture_delete(
 
 fn validate_text(text: &str) -> Result<(), DomainError> {
     if text.len() > MAX_TEXT_BYTES {
-        // Name the cap, not just the fact of it. "text exceeds the
-        // size cap" told a caller nothing it could act on: which cap, how
-        // large, in what unit, and by how much it overshot were all missing.
-        // The sync side already reports this same limit as
-        // ("MAX_TEXT_BYTES", MAX_TEXT_BYTES) with observed bytes at its
-        // ingest boundary; the store's own write path was the outlier.
         return Err(DomainError::PayloadTooLarge {
             constraint: "MAX_TEXT_BYTES",
             limit_bytes: MAX_TEXT_BYTES,

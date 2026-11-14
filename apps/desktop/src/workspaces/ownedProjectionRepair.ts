@@ -40,7 +40,7 @@ export function createOwnedProjectionRepairer(files: ProjectionOwner) {
         try {
           const outcome = await files.reconcile(lease, input.target, "repair");
           assertOwnedProjectionRepair(outcome);
-          const held = new Map(outcome.unjournalablePaths.map(entry => [entry.path, entry]));
+          const held = new Map(outcome.unjournalablePaths.map((entry) => [entry.path, entry]));
           const repairedStatus = await files.projectionStatus(input.target);
           changedNothing = repairChangedNothing(outcome, repairedStatus, held);
           return { status: repairedStatus, held };
@@ -72,15 +72,21 @@ function heldRequest(
   path: { resolved: string; requested: string },
 ): UnjournalablePath | undefined {
   // A standalone view's resolved path is the path as asked, so compare both by their parts.
-  const parts = (value: string) => posix.normalize(value.replaceAll("\\", "/")).split("/").filter(part => part && part !== ".");
+  const parts = (value: string) =>
+    posix
+      .normalize(value.replaceAll("\\", "/"))
+      .split("/")
+      .filter((part) => part && part !== ".");
   const resolved = parts(path.resolved);
   // The view's own root is never a held file.
   if (resolved.length === 0) return undefined;
   const asked = parts(path.requested).slice(-resolved.length).join("/");
   const key = workspacePathKey(resolved.join("/"));
-  return [...held.values()].find(entry => entry.reason === "local-collision"
-    ? workspacePathKey(entry.path) === key
-    : entry.path === asked);
+  return [...held.values()].find((entry) =>
+    entry.reason === "local-collision"
+      ? workspacePathKey(entry.path) === key
+      : entry.path === asked,
+  );
 }
 
 // The projection is current apart from its held files: no path waits for
@@ -95,7 +101,7 @@ function onlyHeld(
     status.pendingPathCount === 0 &&
     !status.pullInFlight &&
     status.collisionPathCount === held.size &&
-    status.collisionPaths.every(path => held.has(path))
+    status.collisionPaths.every((path) => held.has(path))
   );
 }
 
@@ -109,14 +115,7 @@ function repairChangedNothing(
   held: ReadonlyMap<string, UnjournalablePath>,
 ): boolean {
   if (!onlyHeld(status, held)) return false;
-  const {
-    kind,
-    repairedPaths,
-    unjournalablePaths,
-    failedPaths,
-    ...unnamed
-  } = outcome;
-  // A field added to the repair outcome fails to compile here until it is named above.
+  const { kind, repairedPaths, unjournalablePaths, failedPaths, ...unnamed } = outcome;
   const unnamedFields: Record<string, never> = unnamed;
   return (
     Object.keys(unnamedFields).length === 0 &&
@@ -135,7 +134,7 @@ function assertOwnedProjectionRepair(
   if (outcome.kind !== "repair") {
     throw new Error("Shared file repair returned an invalid result.");
   }
-  const unrepairable = outcome.unjournalablePaths.filter(entry => !isHold(entry));
+  const unrepairable = outcome.unjournalablePaths.filter((entry) => !isHold(entry));
   if (unrepairable.length > 0) {
     throw new Error(unjournalablePathMessages(unrepairable).join(" "));
   }

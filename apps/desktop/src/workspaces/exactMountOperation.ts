@@ -17,27 +17,22 @@ export function createExactMountOperationRunner<
   ): Promise<Result> {
     const attachmentId = Reflect.get(input.workspace, "attachmentId");
     if (typeof attachmentId !== "symbol") {
-      throw new Error(
-        "Open this workspace again before using this share.",
-      );
+      throw new Error("Open this workspace again before using this share.");
     }
-    return dependencies.withOperation(
-      input.workspace.workspaceId,
-      async (operation) => {
-        if (operation.workspace.attachmentId !== attachmentId) {
-          throw new Error("This workspace was closed. Open it again.");
-        }
-        await dependencies.engineReady();
-        const assertCurrent = (): void => {
-          operation.assertCurrent();
-          input.assertCurrent();
-        };
-        assertCurrent();
-        return run(operation, {
-          workspace: operation.workspace,
-          assertCurrent,
-        });
-      },
-    );
+    return dependencies.withOperation(input.workspace.workspaceId, async (operation) => {
+      if (operation.workspace.attachmentId !== attachmentId) {
+        throw new Error("This workspace was closed. Open it again.");
+      }
+      await dependencies.engineReady();
+      const assertCurrent = (): void => {
+        operation.assertCurrent();
+        input.assertCurrent();
+      };
+      assertCurrent();
+      return run(operation, {
+        workspace: operation.workspace,
+        assertCurrent,
+      });
+    });
   };
 }

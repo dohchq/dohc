@@ -49,19 +49,13 @@ export const VERSIONED_METHOD = {
   searchEnsureIndex: "search.ensureIndex",
 } as const;
 
-export type VersionedMethod =
-  (typeof VERSIONED_METHOD)[keyof typeof VERSIONED_METHOD];
+export type VersionedMethod = (typeof VERSIONED_METHOD)[keyof typeof VERSIONED_METHOD];
 type JsonObject = { [key: string]: JsonValue | undefined };
 export type VersionedContentKind = "text" | "binary";
 
 export type VersionChangeStatus = "added" | "modified" | "deleted";
 
-export type VersionedOrigin =
-  | "api"
-  | "local-file"
-  | "restore"
-  | "sync"
-  | "unknown";
+export type VersionedOrigin = "api" | "local-file" | "restore" | "sync" | "unknown";
 
 export type AgentAuthor = JsonObject & {
   kind: "agent";
@@ -106,7 +100,10 @@ type VersionedTextWriteParams = MutationMetadata & {
   momentId?: string;
 };
 
-type VersionedTextWriteBlobParams = Omit<VersionedTextWriteParams, "text"> & { sha256: string; bytesBase64: string };
+type VersionedTextWriteBlobParams = Omit<VersionedTextWriteParams, "text"> & {
+  sha256: string;
+  bytesBase64: string;
+};
 
 type VersionedTextReadParams = JsonObject & {
   versionId: string;
@@ -330,21 +327,6 @@ type SearchEnsureIndexParams = JsonObject & {
 
 type FileObject = typeof FileObjectSchema.Type;
 
-type SnapshotMetadata = JsonObject & {
-  workspaceId: string;
-  versionId: string;
-  objectId: string;
-  path: string;
-  contentKind: VersionedContentKind;
-  sha256: string;
-  byteLength: number;
-  updatedAtMs: number;
-  latestMomentId: string;
-  metadataOrigin: string;
-  metadataSummary?: string | null;
-  metadataCorrelationId?: string | null;
-};
-
 type BinaryWriteSnapshot = JsonObject & {
   objectId: string;
   path: string;
@@ -360,10 +342,6 @@ export type MomentRecord = typeof MomentRecordSchema.Type;
 
 type VersionedTextWriteResult = typeof TextWriteResultSchema.Type;
 
-type VersionedTextReadMetadata = SnapshotMetadata & {
-  blobSha256: string;
-};
-
 export type VersionedTextReadValue = typeof VersionedTextReadValueSchema.Type;
 
 type VersionedTextReadResult = VersionedTextReadValue | null;
@@ -378,13 +356,7 @@ type VersionedBinaryWriteResult = JsonObject & {
   materializeOutcome: MaterializeOutcome;
 };
 
-type MaterializeOutcome =
-  | "applied"
-  | "skipped"
-  | "conflict"
-  | "superseded"
-  | "parked"
-  | "error";
+type MaterializeOutcome = "applied" | "skipped" | "conflict" | "superseded" | "parked" | "error";
 
 type VersionedTextRenameResult = typeof TextRenameResultSchema.Type;
 
@@ -440,16 +412,9 @@ type VersionsSetActiveResult = VersionRecord;
 type VersionsEnsureMainResult = VersionRecord;
 type VersionsActiveResult = VersionRecord | null;
 
-type MergeMaterializationResult = {
-  materializeEnqueued: boolean;
-  materialized: boolean;
-  materializeOutcome: MaterializeOutcome;
-};
-
 type VersionsMergeResult = typeof VersionsMergeResultSchema.Type;
 
-export type VersionedComparisonRecord =
-  typeof VersionedComparisonRecordSchema.Type;
+export type VersionedComparisonRecord = typeof VersionedComparisonRecordSchema.Type;
 
 type VersionsCompareResult = typeof VersionedComparisonRecordSchema.Type;
 
@@ -490,7 +455,12 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.textReadBlob]: VersionedTextReadBlobParams;
   [VERSIONED_METHOD.textRename]: VersionedTextRenameParams;
   // Preflight the author of the following rename or delete.
-  [VERSIONED_METHOD.textCheckMove]: JsonObject & { versionId: string; path: string; author?: WriteAuthor; change?: "movePage" | "moveFolder" | "delete" };
+  [VERSIONED_METHOD.textCheckMove]: JsonObject & {
+    versionId: string;
+    path: string;
+    author?: WriteAuthor;
+    change?: "movePage" | "moveFolder" | "delete";
+  };
   [VERSIONED_METHOD.textDelete]: VersionedTextDeleteParams;
   [VERSIONED_METHOD.textRollback]: VersionedTextRollbackParams;
   [VERSIONED_METHOD.textList]: VersionedTextListParams;
@@ -522,9 +492,12 @@ export type VersionedMethodParamsMap = {
   [VERSIONED_METHOD.momentsGet]: MomentsGetParams;
   [VERSIONED_METHOD.publicationApplied]: PublicationAppliedParams;
   [VERSIONED_METHOD.historyPage]: HistoryPageParams;
-  [VERSIONED_METHOD.historyOperations]: JsonObject & {operationId: string};
-  [VERSIONED_METHOD.historyUndo]: JsonObject & {operationId: string; author?: WriteAuthor};
-  [VERSIONED_METHOD.historyRewriteLinks]: JsonObject & {operationId: string; author?: WriteAuthor};
+  [VERSIONED_METHOD.historyOperations]: JsonObject & { operationId: string };
+  [VERSIONED_METHOD.historyUndo]: JsonObject & { operationId: string; author?: WriteAuthor };
+  [VERSIONED_METHOD.historyRewriteLinks]: JsonObject & {
+    operationId: string;
+    author?: WriteAuthor;
+  };
   [VERSIONED_METHOD.searchEnsureIndex]: SearchEnsureIndexParams;
 };
 
@@ -582,18 +555,12 @@ function decodeVersionedSchema<S extends Schema.ConstraintDecoder<unknown>>(
     onExcessProperty: "error",
   })(value);
   if (Result.isFailure(decoded)) {
-    const issue = SchemaIssue.makeFormatterStandardSchemaV1()(
-      decoded.failure.issue,
-    ).issues[0];
+    const issue = SchemaIssue.makeFormatterStandardSchemaV1()(decoded.failure.issue).issues[0];
     const path =
       issue?.path
-        ?.map((part) =>
-          typeof part === "number" ? `[${part}]` : `.${String(part)}`,
-        )
+        ?.map((part) => (typeof part === "number" ? `[${part}]` : `.${String(part)}`))
         .join("") ?? "";
-    throw new ProtocolShapeError(
-      `${label}${path}: ${issue?.message ?? decoded.failure.message}`,
-    );
+    throw new ProtocolShapeError(`${label}${path}: ${issue?.message ?? decoded.failure.message}`);
   }
   return decoded.success;
 }
@@ -709,20 +676,22 @@ const SnapshotHumanAuthorSchema = mutableStruct({
 });
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
 const MomentAuthorsSchema = Schema.NullOr(
-  Schema.mutable(Schema.Array(
-    Schema.Union([
-      AgentAuthorSchema,
-      HumanAuthorSchema,
-      PublicAuthorSchema,
-      NamedAuthorSchema,
-      LinkAuthorSchema,
-      LiveLinkAuthorSchema,
-      AutomationAuthorSchema,
-      SnapshotHumanAuthorSchema,
-      CorruptAuthorSchema,
-      mutableStruct({ kind: Schema.Literal("unattributed") }),
-    ]),
-  )),
+  Schema.mutable(
+    Schema.Array(
+      Schema.Union([
+        AgentAuthorSchema,
+        HumanAuthorSchema,
+        PublicAuthorSchema,
+        NamedAuthorSchema,
+        LinkAuthorSchema,
+        LiveLinkAuthorSchema,
+        AutomationAuthorSchema,
+        SnapshotHumanAuthorSchema,
+        CorruptAuthorSchema,
+        mutableStruct({ kind: Schema.Literal("unattributed") }),
+      ]),
+    ),
+  ),
 );
 
 const MomentRecordSchema = mutableStruct({
@@ -788,10 +757,15 @@ const TextWriteResultSchema = mutableStruct({
 });
 const TextBlobWriteResultSchema = mutableStruct({
   object: FileObjectSchema,
-  snapshot: Schema.Union([TextWriteSnapshotSchema, mutableStruct({
-    ...TextReadMetadataFields,
-    contentKind: Schema.Literal("text"), text: Schema.Null, inbandLimitBytes: Schema.Int,
-  })]),
+  snapshot: Schema.Union([
+    TextWriteSnapshotSchema,
+    mutableStruct({
+      ...TextReadMetadataFields,
+      contentKind: Schema.Literal("text"),
+      text: Schema.Null,
+      inbandLimitBytes: Schema.Int,
+    }),
+  ]),
   moment: MomentRecordSchema,
   deduped: Schema.Boolean,
   materialized: Schema.Boolean,
@@ -861,12 +835,7 @@ const VersionedComparisonRecordSchema = mutableStruct({
   base: Schema.NullOr(VersionedTextReadValueSchema),
   current: Schema.NullOr(VersionedTextReadValueSchema),
   incoming: Schema.NullOr(VersionedTextReadValueSchema),
-  status: Schema.Literals([
-    "same",
-    "incoming-changed",
-    "current-changed",
-    "diverged",
-  ]),
+  status: Schema.Literals(["same", "incoming-changed", "current-changed", "diverged"]),
 });
 const MergeMaterializationFields = {
   materializeEnqueued: Schema.Boolean,
@@ -1021,27 +990,63 @@ const MomentsListResultSchema = mutableStruct({
   nextBeforeMomentOrder: NullableInt,
   latestMomentOrder: Schema.Int,
 });
-const HistoryMomentPositionSchema = mutableStruct({ recordedAtMs: Schema.Int, momentOrder: Schema.Int });
-const HistoryMarkerPositionSchema = mutableStruct({ createdAtMs: Schema.Int, versionId: Schema.String });
+const HistoryMomentPositionSchema = mutableStruct({
+  recordedAtMs: Schema.Int,
+  momentOrder: Schema.Int,
+});
+const HistoryMarkerPositionSchema = mutableStruct({
+  createdAtMs: Schema.Int,
+  versionId: Schema.String,
+});
 const HistoryCursorSchema = mutableStruct({
-  format: Schema.Literal(1), engineUuid: Schema.String, workspaceId: Schema.String,
-  versionId: Schema.String, objectId: NullableString, operationId: NullableString,
-  textFence: Schema.Int, protectedFence: Schema.Int, markerFence: Schema.Int,
-  text: Schema.NullOr(HistoryMomentPositionSchema), protected: Schema.NullOr(HistoryMomentPositionSchema),
+  format: Schema.Literal(1),
+  engineUuid: Schema.String,
+  workspaceId: Schema.String,
+  versionId: Schema.String,
+  objectId: NullableString,
+  operationId: NullableString,
+  textFence: Schema.Int,
+  protectedFence: Schema.Int,
+  markerFence: Schema.Int,
+  text: Schema.NullOr(HistoryMomentPositionSchema),
+  protected: Schema.NullOr(HistoryMomentPositionSchema),
   marker: Schema.NullOr(HistoryMarkerPositionSchema),
 });
 export type HistoryCursor = typeof HistoryCursorSchema.Type;
 const HistoryMomentMetadataSchema = mutableStruct({
-  momentOrder: Schema.Int, momentId: Schema.String, versionId: Schema.String, objectId: Schema.String,
-  path: Schema.String, beforePath: NullableString, recordedAtMs: Schema.Int, operation: Schema.Literals(["write", "delete", "rename"]),
-  afterContentKind: ContentKindSchema, afterByteLength: NullableInt, metadataOrigin: Schema.String,
-  metadataSummary: Schema.optionalKey(NullableString), metadataCorrelationId: Schema.optionalKey(NullableString),
-  authors: MomentAuthorsSchema, syncRecordOnly: Schema.Boolean,
+  momentOrder: Schema.Int,
+  momentId: Schema.String,
+  versionId: Schema.String,
+  objectId: Schema.String,
+  path: Schema.String,
+  beforePath: NullableString,
+  recordedAtMs: Schema.Int,
+  operation: Schema.Literals(["write", "delete", "rename"]),
+  afterContentKind: ContentKindSchema,
+  afterByteLength: NullableInt,
+  metadataOrigin: Schema.String,
+  metadataSummary: Schema.optionalKey(NullableString),
+  metadataCorrelationId: Schema.optionalKey(NullableString),
+  authors: MomentAuthorsSchema,
+  syncRecordOnly: Schema.Boolean,
 });
 export type HistoryMomentMetadata = typeof HistoryMomentMetadataSchema.Type;
-const HistoryOperationFields = {operationId: Schema.String, versionId: Schema.String, momentCount: Schema.Int};
-const HistoryOperationSchema = mutableStruct({...HistoryOperationFields, kind: Schema.NullOr(Schema.Literal("file-duplicate"))});
-const HistoryUndoSchema = mutableStruct({...HistoryOperationFields, compensationOperationId: Schema.String, deduped: Schema.Boolean, materialized: Schema.Boolean, notRestored: Schema.Array(Schema.String)});
+const HistoryOperationFields = {
+  operationId: Schema.String,
+  versionId: Schema.String,
+  momentCount: Schema.Int,
+};
+const HistoryOperationSchema = mutableStruct({
+  ...HistoryOperationFields,
+  kind: Schema.NullOr(Schema.Literal("file-duplicate")),
+});
+const HistoryUndoSchema = mutableStruct({
+  ...HistoryOperationFields,
+  compensationOperationId: Schema.String,
+  deduped: Schema.Boolean,
+  materialized: Schema.Boolean,
+  notRestored: Schema.Array(Schema.String),
+});
 const HistoryLinkRewriteSchema = mutableStruct({
   documents: Schema.Int,
   links: Schema.Int,
@@ -1054,7 +1059,9 @@ const HistoryPageResultSchema = mutableStruct({
   moments: Schema.mutable(Schema.Array(HistoryMomentMetadataSchema)),
   protectedMoments: Schema.mutable(Schema.Array(SecretMomentRecordSchema)),
   versionMarkers: Schema.mutable(Schema.Array(VersionRecordSchema)),
-  startCursor: HistoryCursorSchema, nextCursor: Schema.NullOr(HistoryCursorSchema), latestMomentOrder: Schema.Int,
+  startCursor: HistoryCursorSchema,
+  nextCursor: Schema.NullOr(HistoryCursorSchema),
+  latestMomentOrder: Schema.Int,
 });
 const TextListResultSchema = mutableStruct({
   files: Schema.mutable(
@@ -1083,14 +1090,18 @@ const SourceCaptureSchema = mutableStruct({
   versionId: Schema.String,
   sourceDigest: Schema.String,
   totalBytes: Schema.Int,
-  files: Schema.mutable(Schema.Array(mutableStruct({
-    path: Schema.String,
-    objectId: Schema.String,
-    contentKind: ContentKindSchema,
-    sha256: Schema.String,
-    byteLength: Schema.Int,
-    latestMomentId: Schema.String,
-  }))),
+  files: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        path: Schema.String,
+        objectId: Schema.String,
+        contentKind: ContentKindSchema,
+        sha256: Schema.String,
+        byteLength: Schema.Int,
+        latestMomentId: Schema.String,
+      }),
+    ),
+  ),
 });
 export type SourceCapture = typeof SourceCaptureSchema.Type;
 
@@ -1139,9 +1150,7 @@ const VersionedResultSchemas = {
   [VERSIONED_METHOD.searchEnsureIndex]: EmptyObjectSchema,
 } as const;
 
-function decodeVersionedBinaryWriteResult(
-  value: JsonValue,
-): VersionedBinaryWriteResult {
+function decodeVersionedBinaryWriteResult(value: JsonValue): VersionedBinaryWriteResult {
   const decoded = decodeVersionedSchema(
     BinaryWriteResultWireSchema,
     value,
@@ -1162,43 +1171,22 @@ function decodeVersionedBinaryWriteResult(
   } as VersionedBinaryWriteResult;
 }
 
-function decodeBlobReadResult(
-  value: JsonValue,
-  label: string,
-): VersionedBinaryReadBlobResult {
+function decodeBlobReadResult(value: JsonValue, label: string): VersionedBinaryReadBlobResult {
   const decoded = decodeVersionedSchema(BlobReadResultSchema, value, label);
-  return typeof decoded.bytesBase64 === "string"
-    ? { bytesBase64: decoded.bytesBase64 }
-    : decoded;
+  return typeof decoded.bytesBase64 === "string" ? { bytesBase64: decoded.bytesBase64 } : decoded;
 }
 
 export function decodeVersionedResult<M extends VersionedMethod>(
   method: M,
   value: JsonValue,
 ): VersionedMethodResultMap[M] {
-  if (
-    method === VERSIONED_METHOD.binaryWrite ||
-    method === VERSIONED_METHOD.binaryWriteBlob
-  ) {
-    return decodeVersionedBinaryWriteResult(
-      value,
-    ) as VersionedMethodResultMap[M];
+  if (method === VERSIONED_METHOD.binaryWrite || method === VERSIONED_METHOD.binaryWriteBlob) {
+    return decodeVersionedBinaryWriteResult(value) as VersionedMethodResultMap[M];
   }
-  if (
-    method === VERSIONED_METHOD.binaryReadBlob ||
-    method === VERSIONED_METHOD.textReadBlob
-  ) {
-    return decodeBlobReadResult(
-      value,
-      `${method} result`,
-    ) as VersionedMethodResultMap[M];
+  if (method === VERSIONED_METHOD.binaryReadBlob || method === VERSIONED_METHOD.textReadBlob) {
+    return decodeBlobReadResult(value, `${method} result`) as VersionedMethodResultMap[M];
   }
   const schema = VersionedResultSchemas[method];
-  if (schema === undefined)
-    throw new ProtocolShapeError(`Unsupported versioned method: ${method}`);
-  return decodeVersionedSchema(
-    schema,
-    value,
-    `${method} result`,
-  ) as VersionedMethodResultMap[M];
+  if (schema === undefined) throw new ProtocolShapeError(`Unsupported versioned method: ${method}`);
+  return decodeVersionedSchema(schema, value, `${method} result`) as VersionedMethodResultMap[M];
 }

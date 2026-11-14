@@ -17,7 +17,6 @@ export interface RecordPanelHost {
   initialOpenRecord?: string | null;
   /** The page opened a record in its panel, by the record's key, or closed the panel, for null. */
   onOpenRecordChange?(record: string | null): void;
-  /** The record panel's width when the page starts. */
   initialRecordPanelWidth?: number;
   /** A resize of the record panel ended. */
   onRecordPanelWidthChange?(width: number): void;
@@ -43,24 +42,32 @@ export function useRecordPanel(options: RecordPanelOptions) {
   const [openKey, setOpenKey] = useState<string | null>(options.initialOpenRecord ?? null);
   const openKeyRef = useRef(openKey);
   openKeyRef.current = openKey;
-  const [width, setWidthState] = useState(options.initialRecordPanelWidth ?? RECORD_PANEL_DEFAULT_WIDTH);
+  const [width, setWidthState] = useState(
+    options.initialRecordPanelWidth ?? RECORD_PANEL_DEFAULT_WIDTH,
+  );
   const element = useRef<HTMLElement | null>(null);
   // What opened the panel, which takes focus back when it closes, and whether the panel takes focus at the next commit.
-  const opener = useRef<HTMLElement | null>(null), focusPanel = useRef(false);
+  const opener = useRef<HTMLElement | null>(null),
+    focusPanel = useRef(false);
   const latest = useRef(options);
   latest.current = options;
   const alive = useRef(true);
   useLayoutEffect(() => {
     alive.current = true;
-    return () => { alive.current = false; };
+    return () => {
+      alive.current = false;
+    };
   }, []);
-  const settle = (then: () => void) => (latest.current.settle ? latest.current.settle(then) : then());
+  const settle = (then: () => void) =>
+    latest.current.settle ? latest.current.settle(then) : then();
   /**
    * Runs `then` once what the open record holds unsaved is saved, as before something else takes the record's
    * place. With no record open it runs at once. It never runs once the page has closed.
    */
   function afterSettled(then: () => void): void {
-    const run = () => { if (alive.current) then(); };
+    const run = () => {
+      if (alive.current) then();
+    };
     if (openKeyRef.current !== null) settle(run);
     else run();
   }
@@ -79,13 +86,19 @@ export function useRecordPanel(options: RecordPanelOptions) {
       opener.current = from;
       const changed = openKeyRef.current !== key;
       shown?.(changed);
-      if (!changed) { element.current?.focus({ preventScroll: true }); return; }
+      if (!changed) {
+        element.current?.focus({ preventScroll: true });
+        return;
+      }
       focusPanel.current = true;
       setOpenKey(key);
       latest.current.onOpenRecordChange?.(key);
     };
     // One side panel shows at a time. Automations closes first, and keeps its place if the person keeps a draft there.
-    const take = () => { if (latest.current.automations?.open) latest.current.automations.close(show); else show(); };
+    const take = () => {
+      if (latest.current.automations?.open) latest.current.automations.close(show);
+      else show();
+    };
     // The record this one replaces keeps the panel until what it holds is saved.
     if (openKeyRef.current !== null && openKeyRef.current !== key) settle(take);
     else take();
@@ -103,11 +116,18 @@ export function useRecordPanel(options: RecordPanelOptions) {
   function closeNow(focus: "opener" | "table" | "none", fromPage = false): void {
     if (!alive.current || openKeyRef.current === null) return;
     latest.current.onClose?.();
-    const active = document.activeElement, from = opener.current;
+    const active = document.activeElement,
+      from = opener.current;
     opener.current = null;
     // Otherwise, focus the person has moved to the page stays where they put it.
-    if (focus !== "none" && (fromPage || active === null || active === document.body || element.current?.contains(active))) {
-      const target = focus === "opener" && from?.isConnected ? from : element.current?.parentElement?.querySelector<HTMLElement>('[role="grid"]');
+    if (
+      focus !== "none" &&
+      (fromPage || active === null || active === document.body || element.current?.contains(active))
+    ) {
+      const target =
+        focus === "opener" && from?.isConnected
+          ? from
+          : element.current?.parentElement?.querySelector<HTMLElement>('[role="grid"]');
       target?.focus({ preventScroll: true });
     }
     setOpenKey(null);
@@ -118,18 +138,22 @@ export function useRecordPanel(options: RecordPanelOptions) {
     if (!focusPanel.current) return;
     focusPanel.current = false;
     // The name of a record made a moment ago opens for typing as the panel shows it, and has focus already.
-    if (!element.current?.contains(document.activeElement)) element.current?.focus({ preventScroll: true });
+    if (!element.current?.contains(document.activeElement))
+      element.current?.focus({ preventScroll: true });
   }, [openKey]);
   // Two editor groups can show this tab, and its one saved entry holds the record a person last opened or closed
   // in either. When a close in the other copy empties the entry while this copy still shows a record, this copy
   // saves its record again, so the entry is never empty beside a panel that shows one. Neither copy follows the other's record.
   const keptRecord = options.initialOpenRecord ?? null;
   useEffect(() => {
-    if (keptRecord === null && openKeyRef.current !== null) latest.current.onOpenRecordChange?.(openKeyRef.current);
+    if (keptRecord === null && openKeyRef.current !== null)
+      latest.current.onOpenRecordChange?.(openKeyRef.current);
   }, [keptRecord]);
   // The ⚡ panel takes the side panel's place when it opens. The record has left the page by then, so nothing of it waits to be saved.
   const automationsOpen = options.automations?.open ?? false;
-  useLayoutEffect(() => { if (automationsOpen) closeNow("none"); }, [automationsOpen]);
+  useLayoutEffect(() => {
+    if (automationsOpen) closeNow("none");
+  }, [automationsOpen]);
 
   /**
    * The page's own Escape. An editor, a picker, a menu and a popover each take
@@ -137,7 +161,13 @@ export function useRecordPanel(options: RecordPanelOptions) {
    * anywhere on the page, before the table clears its selection.
    */
   function onPageKeyDown(event: KeyboardEvent<HTMLElement>): void {
-    if (event.key !== "Escape" || event.defaultPrevented || isComposingKey(event) || element.current === null) return;
+    if (
+      event.key !== "Escape" ||
+      event.defaultPrevented ||
+      isComposingKey(event) ||
+      element.current === null
+    )
+      return;
     // A dialog a control of the page opens is the page's child in React, not on the page.
     if (!event.currentTarget.contains(event.target as Node)) return;
     if (isRecordBodyTextKey(event)) return;

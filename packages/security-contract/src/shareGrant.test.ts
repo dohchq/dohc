@@ -14,21 +14,15 @@ const contracts = [
   ["grant statuses", vectors.grantStatuses, isGrantStatusValue],
   ["chat share accesses", vectors.chatShareAccesses, isChatShareAccessValue],
   ["share grant records", vectors.shareGrantRecords, isShareGrantRecord],
-  [
-    "link credential records",
-    vectors.linkCredentialRecords,
-    isLinkCredentialRecord,
-  ],
+  ["link credential records", vectors.linkCredentialRecords, isLinkCredentialRecord],
   ["grant bindings", vectors.grantBindings, isGrantBinding],
 ] as const;
 
 describe("share grant contract vectors", () => {
   for (const [name, { accepted, refused }, guard] of contracts) {
     it(`accepts and refuses ${name}`, () => {
-      for (const value of accepted)
-        expect(guard(value), JSON.stringify(value)).toBe(true);
-      for (const value of refused)
-        expect(guard(value), JSON.stringify(value)).toBe(false);
+      for (const value of accepted) expect(guard(value), JSON.stringify(value)).toBe(true);
+      for (const value of refused) expect(guard(value), JSON.stringify(value)).toBe(false);
     });
   }
 });

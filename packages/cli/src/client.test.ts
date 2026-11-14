@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sendCliRequest } from "./client";
 import { DohcCliError } from "./errors";
@@ -60,14 +60,34 @@ describe("sendCliRequest", () => {
     );
   });
 
-  it.each(["cli", "mcp"] as const)("preserves the %s label on the wire without changing the result", async door => {
-    const stateDir = await tempStateDir();
-    const result = { groups: [] };
-    const transport = vi.fn(async (_socketPath: string, _line: string) => ({ protocolVersion: CLI_PROTOCOL_VERSION, ok: true, result }));
-    expect(await sendCliRequest({ protocolVersion: CLI_PROTOCOL_VERSION, door, verb: "groups", args: { cwd: "/workspace", actor: "agent" } },
-      { stateDir, transport, platform: "linux" })).toEqual(result);
-    expect(JSON.parse(transport.mock.calls[0]![1])).toMatchObject({ door, token: TOKEN, args: { actor: "agent" } });
-  });
+  it.each(["cli", "mcp"] as const)(
+    "preserves the %s label on the wire without changing the result",
+    async (door) => {
+      const stateDir = await tempStateDir();
+      const result = { groups: [] };
+      const transport = vi.fn(async (_socketPath: string, _line: string) => ({
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        ok: true,
+        result,
+      }));
+      expect(
+        await sendCliRequest(
+          {
+            protocolVersion: CLI_PROTOCOL_VERSION,
+            door,
+            verb: "groups",
+            args: { cwd: "/workspace", actor: "agent" },
+          },
+          { stateDir, transport, platform: "linux" },
+        ),
+      ).toEqual(result);
+      expect(JSON.parse(transport.mock.calls[0]![1])).toMatchObject({
+        door,
+        token: TOKEN,
+        args: { actor: "agent" },
+      });
+    },
+  );
 
   it("sends the run's secret from DOHC_RUN_SECRET, and leaves out a malformed one", async () => {
     const stateDir = await tempStateDir();
@@ -76,11 +96,25 @@ describe("sendCliRequest", () => {
       lines.push(line);
       return { protocolVersion: CLI_PROTOCOL_VERSION, ok: true, result: { groups: [] } };
     });
-    const cases = [["b".repeat(64), "b".repeat(64)], ["B".repeat(64), undefined], ["b".repeat(63), undefined], [undefined, undefined]] as const;
+    const cases = [
+      ["b".repeat(64), "b".repeat(64)],
+      ["B".repeat(64), undefined],
+      ["b".repeat(63), undefined],
+      [undefined, undefined],
+    ] as const;
     for (const [secret, sent] of cases) {
       await sendCliRequest(
-        { protocolVersion: CLI_PROTOCOL_VERSION, verb: "groups", args: { cwd: "/workspace", actor: "agent" } },
-        { stateDir, transport, platform: "linux", env: secret === undefined ? {} : { DOHC_RUN_SECRET: secret } },
+        {
+          protocolVersion: CLI_PROTOCOL_VERSION,
+          verb: "groups",
+          args: { cwd: "/workspace", actor: "agent" },
+        },
+        {
+          stateDir,
+          transport,
+          platform: "linux",
+          env: secret === undefined ? {} : { DOHC_RUN_SECRET: secret },
+        },
       );
       expect((JSON.parse(lines.at(-1) ?? "{}") as { runSecret?: string }).runSecret).toBe(sent);
     }
@@ -202,10 +236,7 @@ describe("sendCliRequest", () => {
       },
     );
     expect(result).toEqual({ groups: [] });
-    expect(attempted).toEqual([
-      join(stale, "dohc-cli.sock"),
-      join(active, "dohc-cli.sock"),
-    ]);
+    expect(attempted).toEqual([join(stale, "dohc-cli.sock"), join(active, "dohc-cli.sock")]);
   });
 
   it("dials the Windows pipe named by the endpoint descriptor", async () => {
@@ -236,14 +267,12 @@ describe("sendCliRequest", () => {
       ok: true,
       result: { groups: [] },
     }));
-    for (
-      const described of [
-        "\\\\.\\pipe\\attacker-listener",
-        "\\\\evil-host\\pipe\\dohc-cli-00112233445566778899aabbccddeeff",
-        "C:\\Users\\someone\\dohc-cli.sock",
-        "",
-      ]
-    ) {
+    for (const described of [
+      "\\\\.\\pipe\\attacker-listener",
+      "\\\\evil-host\\pipe\\dohc-cli-00112233445566778899aabbccddeeff",
+      "C:\\Users\\someone\\dohc-cli.sock",
+      "",
+    ]) {
       const stateDir = await tempStateDir();
       await describeEndpoint(stateDir, described);
       await expect(
@@ -266,10 +295,7 @@ describe("sendCliRequest", () => {
     const appData = join(home, "AppData", "Roaming");
     const stale = join(appData, "dohc");
     const active = join(appData, "@dohc", "desktop");
-    await Promise.all([
-      mkdir(stale, { recursive: true }),
-      mkdir(active, { recursive: true }),
-    ]);
+    await Promise.all([mkdir(stale, { recursive: true }), mkdir(active, { recursive: true })]);
     for (const dir of [stale, active]) {
       await writeFile(join(dir, "dohc-cli-token"), `${TOKEN}\n`);
     }

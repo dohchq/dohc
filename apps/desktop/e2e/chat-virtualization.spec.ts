@@ -21,7 +21,10 @@ test.describe("chat list virtualization", () => {
   test.beforeAll(async () => {
     output = await createTestScratch("chat-list-browser-");
     const root = fileURLToPath(new URL("./fixtures/chat-list", import.meta.url));
-    environment = { NODE_ENV: process.env.NODE_ENV, VITE_USER_NODE_ENV: process.env.VITE_USER_NODE_ENV };
+    environment = {
+      NODE_ENV: process.env.NODE_ENV,
+      VITE_USER_NODE_ENV: process.env.VITE_USER_NODE_ENV,
+    };
     try {
       await build({
         configFile: false,
@@ -32,7 +35,12 @@ test.describe("chat list virtualization", () => {
         build: { outDir: output, emptyOutDir: true },
         logLevel: "error",
       });
-      server = await preview({ configFile: false, root, build: { outDir: output }, preview: { host: "127.0.0.1", port: 0 } });
+      server = await preview({
+        configFile: false,
+        root,
+        build: { outDir: output },
+        preview: { host: "127.0.0.1", port: 0 },
+      });
     } finally {
       // Keep Vite's build environment out of later Electron preflight checks.
       for (const key of environmentKeys) {
@@ -43,17 +51,23 @@ test.describe("chat list virtualization", () => {
   });
 
   test.afterAll(async () => {
-    if (server) await new Promise<void>((resolve, reject) => {
-      server.httpServer.close((error) => error ? reject(error) : resolve());
-    });
+    if (server)
+      await new Promise<void>((resolve, reject) => {
+        server.httpServer.close((error) => (error ? reject(error) : resolve()));
+      });
     if (output) await removeTestScratch(output);
   });
 
   for (const theme of ["light", "dark"]) {
-    test(`dismisses the reaction picker when its message scrolls away in ${theme}`, async ({ page }) => {
+    test(`dismisses the reaction picker when its message scrolls away in ${theme}`, async ({
+      page,
+    }) => {
       await page.setViewportSize({ width: 420, height: 400 });
       await page.goto(server.resolvedUrls!.local[0]);
-      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       await page.evaluate(() => window.chatListFixture.jump("m-200"));
       const row = page.locator('[data-message-id="m-200"]');
       const trigger = row.getByRole("button", { name: "Add reaction" });
@@ -80,7 +94,10 @@ test.describe("chat list virtualization", () => {
       await page.setViewportSize({ width: 650, height: 800 });
       await page.emulateMedia({ reducedMotion: "reduce" });
       await page.goto(server.resolvedUrls!.local[0]);
-      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       const list = page.getByRole("list");
       const row = (id: string) => page.locator(`[data-message-id="${id}"]`);
       await expect(row("m-499")).toBeInViewport();
@@ -89,9 +106,13 @@ test.describe("chat list virtualization", () => {
 
       await page.setViewportSize({ width: 320, height: 360 });
       await expect.poll(() => gap(list)).toBeLessThan(2);
-      const originalHeight = await row("m-499").evaluate((node) => node.getBoundingClientRect().height);
+      const originalHeight = await row("m-499").evaluate(
+        (node) => node.getBoundingClientRect().height,
+      );
       await page.evaluate(() => window.chatListFixture.grow("m-499"));
-      await expect.poll(() => row("m-499").evaluate((node) => node.getBoundingClientRect().height)).toBeGreaterThan(originalHeight);
+      await expect
+        .poll(() => row("m-499").evaluate((node) => node.getBoundingClientRect().height))
+        .toBeGreaterThan(originalHeight);
       await expect.poll(() => gap(list)).toBeLessThan(2);
 
       await row("m-499").getByRole("button", { name: "Add reaction" }).focus();
@@ -100,14 +121,25 @@ test.describe("chat list virtualization", () => {
       const firstRowTop = await row("m-0").evaluate((node) => node.getBoundingClientRect().top);
       await page.evaluate(() => window.chatListFixture.append());
       await expect(row("m-0")).toHaveAttribute("aria-setsize", "501");
-      await expect.poll(() => row("m-0").evaluate((node, top) =>
-        Math.abs(node.getBoundingClientRect().top - top), firstRowTop)).toBeLessThan(2);
+      await expect
+        .poll(() =>
+          row("m-0").evaluate(
+            (node, top) => Math.abs(node.getBoundingClientRect().top - top),
+            firstRowTop,
+          ),
+        )
+        .toBeLessThan(2);
       await page.setViewportSize({ width: 500, height: 600 });
       await expect(row("m-0")).toBeInViewport({ ratio: 1 });
-      await expect.poll(() => row("m-0").evaluate((node, top) =>
-        Math.abs(node.getBoundingClientRect().top - top), firstRowTop)).toBeLessThan(2);
+      await expect
+        .poll(() =>
+          row("m-0").evaluate(
+            (node, top) => Math.abs(node.getBoundingClientRect().top - top),
+            firstRowTop,
+          ),
+        )
+        .toBeLessThan(2);
 
-      // A jump to the last item resumes following even after reading history.
       await page.evaluate(() => window.chatListFixture.jump("m-500"));
       await expect(row("m-500")).toBeInViewport();
       await expect.poll(() => gap(list)).toBeLessThan(2);
@@ -120,7 +152,10 @@ test.describe("chat list virtualization", () => {
       await page.setViewportSize({ width: 650, height: 800 });
       await page.emulateMedia({ reducedMotion: "reduce" });
       await page.goto(server.resolvedUrls!.local[0]);
-      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.evaluate(
+        (value) => document.documentElement.setAttribute("data-theme", value),
+        theme,
+      );
       const list = page.getByRole("list");
       const row = (id: string) => page.locator(`[data-message-id="${id}"]`);
       await expect(row("m-499")).toBeInViewport();
@@ -133,7 +168,6 @@ test.describe("chat list virtualization", () => {
       await expect(row("m-0")).toBeInViewport();
       await expect(trigger).toBeFocused();
       await page.keyboard.press("Tab");
-      // The next row's toolbar starts with its quick reactions.
       await expect(row("m-201").getByRole("button", { name: "React with 👍" })).toBeFocused();
       await page.keyboard.press("Shift+Tab");
       await expect(trigger).toBeFocused();
@@ -145,9 +179,13 @@ test.describe("chat list virtualization", () => {
       if (!bounds) throw new Error("Message body is missing its layout box");
       await page.mouse.move(bounds.x + 5, bounds.y + 10);
       await page.mouse.down();
-      await page.mouse.move(bounds.x + Math.min(220, bounds.width - 5), bounds.y + 10, { steps: 5 });
+      await page.mouse.move(bounds.x + Math.min(220, bounds.width - 5), bounds.y + 10, {
+        steps: 5,
+      });
       await page.mouse.up();
-      await expect.poll(() => page.evaluate(() => document.getSelection()?.toString().length ?? 0)).toBeGreaterThan(5);
+      await expect
+        .poll(() => page.evaluate(() => document.getSelection()?.toString().length ?? 0))
+        .toBeGreaterThan(5);
       const selected = await page.evaluate(() => document.getSelection()?.toString());
       await list.hover();
       await page.mouse.wheel(0, -100_000);
@@ -162,7 +200,10 @@ test.describe("chat list virtualization", () => {
     await page.setViewportSize({ width: 650, height: 800 });
     await page.goto(`${server.resolvedUrls!.local[0]}?sparse`);
     const list = page.getByRole("list");
-    const link = (index: number) => page.locator(`[data-message-id="m-${index}"]`).getByTestId("fixture-chat-message-body-file-mention");
+    const link = (index: number) =>
+      page
+        .locator(`[data-message-id="m-${index}"]`)
+        .getByTestId("fixture-chat-message-body-file-mention");
     await expect(page.locator('[data-message-id="m-499"]')).toBeInViewport();
     await page.evaluate(() => window.chatListFixture.jump("m-200"));
     await expect(link(200)).toBeInViewport();
@@ -191,20 +232,28 @@ test.describe("chat list virtualization", () => {
     await page.evaluate(() => window.chatListFixture.prepend());
     await expect(anchor).toHaveAttribute("aria-setsize", "520");
     await expect(anchor).toHaveAttribute("aria-posinset", "221");
-    await expect.poll(() => anchor.evaluate((node, previousTop) =>
-      Math.abs(node.getBoundingClientRect().top - previousTop), top)).toBeLessThan(2);
+    await expect
+      .poll(() =>
+        anchor.evaluate(
+          (node, previousTop) => Math.abs(node.getBoundingClientRect().top - previousTop),
+          top,
+        ),
+      )
+      .toBeLessThan(2);
 
-    // Moving an existing row from below the viewport into older history must
-    // preserve the reading position too, without dropping data preservation.
     await page.evaluate(() => window.chatListFixture.reorder());
     await expect(anchor).toHaveAttribute("aria-posinset", "222");
-    await expect.poll(() => anchor.evaluate((node, previousTop) =>
-      Math.abs(node.getBoundingClientRect().top - previousTop), top)).toBeLessThan(2);
+    await expect
+      .poll(() =>
+        anchor.evaluate(
+          (node, previousTop) => Math.abs(node.getBoundingClientRect().top - previousTop),
+          top,
+        ),
+      )
+      .toBeLessThan(2);
     await expect(anchor).toBeInViewport({ ratio: 1 });
   });
 
-  // A long Markdown reply shows as plain text until the parse worker answers,
-  // then reflows into its formatted, usually taller, layout.
   test("stays at the newest message while a long reply is formatted", async ({ page }) => {
     await page.setViewportSize({ width: 650, height: 800 });
     await page.emulateMedia({ reducedMotion: "reduce" });
@@ -218,9 +267,15 @@ test.describe("chat list virtualization", () => {
     await expect(reply.getByRole("heading", { name: "Reply 500" })).toBeAttached();
     // The reply's last line stays in view. The reply has its own bullet list,
     // and the chat list comes first in the page.
-    await expect.poll(() => Promise.all([reply, list.first()].map((node) =>
-      node.evaluate((element) => element.getBoundingClientRect().bottom)))
-      .then(([replyBottom, listBottom]) => replyBottom - listBottom)).toBeLessThanOrEqual(1);
+    await expect
+      .poll(() =>
+        Promise.all(
+          [reply, list.first()].map((node) =>
+            node.evaluate((element) => element.getBoundingClientRect().bottom),
+          ),
+        ).then(([replyBottom, listBottom]) => replyBottom - listBottom),
+      )
+      .toBeLessThanOrEqual(1);
   });
 
   test("keeps the text being read still while a reply above it is formatted", async ({ page }) => {
@@ -232,7 +287,6 @@ test.describe("chat list virtualization", () => {
     const anchor = page.locator('[data-message-id="m-200"]');
     await expect(anchor).toBeInViewport({ ratio: 1 });
     const top = await anchor.evaluate((node) => node.getBoundingClientRect().top);
-    // The nearest row still mounted wholly above the viewport.
     const aboveId = await page.evaluate(() => {
       const viewportTop = document.querySelector('[role="list"]')!.getBoundingClientRect().top;
       return [...document.querySelectorAll("[data-message-id]")]
@@ -243,8 +297,14 @@ test.describe("chat list virtualization", () => {
     if (!aboveId) throw new Error("No row is mounted above the viewport");
     await page.evaluate((id) => window.chatListFixture.markdown(id), aboveId);
     await expect(page.locator(`[data-message-id="${aboveId}"] pre`)).toBeAttached();
-    await expect.poll(() => anchor.evaluate((node, previousTop) =>
-      Math.abs(node.getBoundingClientRect().top - previousTop), top)).toBeLessThan(2);
+    await expect
+      .poll(() =>
+        anchor.evaluate(
+          (node, previousTop) => Math.abs(node.getBoundingClientRect().top - previousTop),
+          top,
+        ),
+      )
+      .toBeLessThan(2);
     await expect(anchor).toBeInViewport({ ratio: 1 });
   });
 });

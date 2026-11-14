@@ -50,14 +50,17 @@ function ownBubble(message: Locator): Locator {
 // A message's actions show, and take the pointer, while its own row is
 // hovered. A comment's item also holds its replies, so hover its bubble;
 // the opening post is its own row.
-async function addReaction(message: Locator, emoji: string, row: Locator = ownBubble(message)): Promise<void> {
+async function addReaction(
+  message: Locator,
+  emoji: string,
+  row: Locator = ownBubble(message),
+): Promise<void> {
   await row.hover();
   const actions = ownActions(message);
   await actions.getByTestId("chats-add-reaction").click();
-  await message.page()
-    .locator(
-      `[data-testid="chats-reaction-choice"][data-emoji=${JSON.stringify(emoji)}]`,
-    )
+  await message
+    .page()
+    .locator(`[data-testid="chats-reaction-choice"][data-emoji=${JSON.stringify(emoji)}]`)
     .click();
 }
 
@@ -142,37 +145,22 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
 
     await ownBubble(firstComment).hover();
     await ownActions(firstComment).getByTestId("chats-comment-reply").click();
-    await expect(view.getByTestId("chats-replying-mode")).toContainText(
-      "Replying to You",
-    );
+    await expect(view.getByTestId("chats-replying-mode")).toContainText("Replying to You");
     await composer.fill(nestedCommentBody);
     await composer.press("Enter");
     const nestedComment = commentWithBody(view, nestedCommentBody);
     await expect(nestedComment).toBeVisible();
     await expect(nestedComment).toHaveAttribute("data-thread-depth", "1");
-    await expect(nestedComment).toHaveAttribute(
-      "data-parent-message-id",
-      firstCommentId,
-    );
-    await expect(nestedComment.getByTestId("chats-reply-context")).toHaveText(
-      "↳ replying to You",
-    );
+    await expect(nestedComment).toHaveAttribute("data-parent-message-id", firstCommentId);
+    await expect(nestedComment.getByTestId("chats-reply-context")).toHaveText("↳ replying to You");
 
-    // A post reaction is a reaction on the opening message. The same quiet
-    // pills work on comments.
     const openingMessage = view.locator('article[data-testid="chats-message"]');
     await addReaction(openingMessage, "👍", openingMessage);
-    await expect(reactionPill(openingMessage, "👍")).toHaveAttribute(
-      "data-mine",
-      "true",
-    );
+    await expect(reactionPill(openingMessage, "👍")).toHaveAttribute("data-mine", "true");
     await expect(reactionPill(openingMessage, "👍")).toContainText("1");
 
     await addReaction(firstComment, "🎉");
-    await expect(reactionPill(firstComment, "🎉")).toHaveAttribute(
-      "data-mine",
-      "true",
-    );
+    await expect(reactionPill(firstComment, "🎉")).toHaveAttribute("data-mine", "true");
     await expect(reactionPill(firstComment, "🎉")).toContainText("1");
 
     // The real CLI discovers the socket/token in the running app's state dir
@@ -188,7 +176,6 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     ]);
     expect(reply.stderr).toBe("");
     expect(reply.stdout).toContain("replied");
-    // `replied <threadId> <messageId>` carries the CLI message handle.
     const cliMessageId = reply.stdout.match(/^replied\s+\S+\s+(\S+)/mu)?.[1];
     expect(cliMessageId).toBeTruthy();
     if (!cliMessageId) throw new Error("CLI reply did not return a message id");
@@ -197,9 +184,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     // report and typed decision appear without a navigation or polling wait.
     const agentComment = commentWithBody(view, decisionBody);
     await expect(agentComment).toHaveAttribute("data-author-kind", "agent");
-    await expect(ownBubble(agentComment).getByTestId("chats-message-author")).toHaveText(
-      "Agent",
-    );
+    await expect(ownBubble(agentComment).getByTestId("chats-message-author")).toHaveText("Agent");
     await expect(ownBubble(agentComment).getByTestId("chats-comment-agent-badge")).toHaveText(
       "agent",
     );
@@ -207,8 +192,6 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
       "Unanswered",
     );
 
-    // The feed summary reflects the same open decision, and reopening keeps
-    // the full agent treatment and resolve gesture intact.
     await view.getByTestId("chats-thread-back").click();
     const decisionCard = postCard(view, postTitle);
     await expect(decisionCard.getByTestId("chats-post-decision-open")).toHaveAccessibleName(
@@ -224,9 +207,9 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await expect(view.getByTestId("chats-replying-mode")).toHaveCount(0);
     await composer.fill(resolutionBody);
     await composer.press("Enter");
-    await expect(
-      ownBubble(agentComment).getByTestId("chats-comment-decision-resolved"),
-    ).toHaveText("Answered");
+    await expect(ownBubble(agentComment).getByTestId("chats-comment-decision-resolved")).toHaveText(
+      "Answered",
+    );
     await expect(commentWithBody(view, resolutionBody)).toBeVisible();
 
     const show = await runDohcCli(temp, ["chat", "show", threadId, "--peek"]);
@@ -237,9 +220,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
 
     const grep = await runDohcCli(temp, ["chat", "grep", "region"]);
     expect(grep.stderr).toBe("");
-    const matchingLine = grep.stdout
-      .split("\n")
-      .find((line) => line.includes(decisionBody));
+    const matchingLine = grep.stdout.split("\n").find((line) => line.includes(decisionBody));
     expect(matchingLine).toBeTruthy();
     expect(matchingLine).toContain(cliMessageId);
 
@@ -266,32 +247,26 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await expect(commentCount).toHaveText("5");
     await expect(commentCount).toHaveAccessibleName("5 comments");
     await expect(
-      persistedCard.locator(
-        '[data-testid="chats-post-reaction-pill"][data-emoji="👍"]',
-      ),
+      persistedCard.locator('[data-testid="chats-post-reaction-pill"][data-emoji="👍"]'),
     ).toContainText("1");
     await expect(persistedCard.getByTestId("chats-post-decision-open")).toHaveCount(0);
 
     await persistedCard.click();
     await expect(view.getByTestId("chats-thread-post-title")).toHaveText(postTitle);
     await expect(view.getByTestId("chats-message-body")).toHaveCount(6);
-    await expect(commentWithBody(view, nestedCommentBody).getByTestId("chats-reply-context"))
-      .toHaveText("↳ replying to You");
+    await expect(
+      commentWithBody(view, nestedCommentBody).getByTestId("chats-reply-context"),
+    ).toHaveText("↳ replying to You");
 
     const persistedOpening = view.locator('article[data-testid="chats-message"]');
-    await expect(reactionPill(persistedOpening, "👍")).toHaveAttribute(
-      "data-mine",
-      "true",
-    );
+    await expect(reactionPill(persistedOpening, "👍")).toHaveAttribute("data-mine", "true");
     const persistedFirstComment = commentWithBody(view, firstCommentBody);
-    await expect(reactionPill(persistedFirstComment, "🎉")).toHaveAttribute(
-      "data-mine",
-      "true",
-    );
+    await expect(reactionPill(persistedFirstComment, "🎉")).toHaveAttribute("data-mine", "true");
 
     const persistedAgentComment = commentWithBody(view, decisionBody);
-    await expect(ownBubble(persistedAgentComment).getByTestId("chats-comment-agent-badge"))
-      .toHaveText("agent");
+    await expect(
+      ownBubble(persistedAgentComment).getByTestId("chats-comment-agent-badge"),
+    ).toHaveText("agent");
     await expect(
       ownBubble(persistedAgentComment).getByTestId("chats-comment-decision-resolved"),
     ).toHaveText("Answered");
@@ -317,13 +292,30 @@ test("a comment's hidden toolbar takes no click meant for the comment above", as
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
-    await page.evaluate(async ({ workspaceId, bodies }) => {
-      const bridge = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;
-      const { channel } = await bridge.createChatChannel({ workspaceId, name: "Run check", type: "posts" });
-      const { message } = await bridge.startChannelThread({ workspaceId, channelId: channel.id, body: "Launch checklist" });
-      for (const body of bodies) await bridge.sendChatMessage({ workspaceId, threadId: message.threadId, body });
-    }, { workspaceId, bodies: [aboveBody, belowBody] });
-    await (await openChatsView(page)).getByTestId("chats-channel").filter({ hasText: "Run check" }).click();
+    await page.evaluate(
+      async ({ workspaceId, bodies }) => {
+        const bridge = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;
+        const { channel } = await bridge.createChatChannel({
+          workspaceId,
+          name: "Run check",
+          type: "posts",
+        });
+        const { message } = await bridge.startChannelThread({
+          workspaceId,
+          channelId: channel.id,
+          body: "Launch checklist",
+        });
+        for (const body of bodies)
+          await bridge.sendChatMessage({ workspaceId, threadId: message.threadId, body });
+      },
+      { workspaceId, bodies: [aboveBody, belowBody] },
+    );
+    await (
+      await openChatsView(page)
+    )
+      .getByTestId("chats-channel")
+      .filter({ hasText: "Run check" })
+      .click();
     await page.getByTestId(activityPin("chats")).click();
     const view = editorArea(page);
     await view.getByTestId("chats-post-card").first().click();
@@ -338,7 +330,6 @@ test("a comment's hidden toolbar takes no click meant for the comment above", as
     const point = { x: replyBox.x + replyBox.width / 2, y: replyBox.y + 0.5 };
     expect(point.y).toBeGreaterThan(aboveBox.y);
     expect(point.y).toBeLessThan(aboveBox.y + aboveBox.height);
-    // Rest the pointer on the comment above, clear of the lower row.
     await page.mouse.move(aboveBox.x + aboveBox.width / 2, aboveBox.y + aboveBox.height / 2);
     const toolbar = ownBubble(below).getByTestId("chats-message-toolbar");
     const toolbarTakesPoint = () =>
@@ -346,7 +337,6 @@ test("a comment's hidden toolbar takes no click meant for the comment above", as
     await expect.poll(toolbarTakesPoint).toBe(false);
     await expect(toolbar).toHaveCSS("pointer-events", "none");
 
-    // The same Reply, shown on hover, still starts a reply.
     await ownBubble(below).hover();
     await ownBubble(below).getByTestId("chats-comment-reply").click();
     await expect(view.getByTestId("chats-replying-mode")).toContainText("Replying to You");
@@ -358,7 +348,7 @@ test("a comment's hidden toolbar takes no click meant for the comment above", as
 // The live external-write invariant. A separate OS process writes an
 // agent chat into the running app's daemon over the authenticated CLI
 // endpoint, and the unread badge appears with NO relaunch and NO navigation.
-// This is the only cross-process write path after the daemon cutover — a
+// This is the only cross-process write path — a
 // second daemon cannot attach to the app's store — so it is what proves the
 // app invalidates its chat state on an outside write.
 //
@@ -380,12 +370,8 @@ test("an agent chat written by the CLI while the app runs arrives unread live", 
     // Open #general in the editor and stay there. The panel stays a navigator,
     // so both surfaces render chats markup from here on; scope every locator
     // to the one being asserted.
-    const channelView = page.locator(
-      '[data-testid="chats-channel-view"][data-variant="page"]',
-    );
-    const threadView = page.locator(
-      '[data-testid="chats-thread-view"][data-variant="page"]',
-    );
+    const channelView = page.locator('[data-testid="chats-channel-view"][data-variant="page"]');
+    const threadView = page.locator('[data-testid="chats-thread-view"][data-variant="page"]');
     const panel = await openChatsView(page);
     await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
     await panel.getByTestId("chats-channel").click();
@@ -393,13 +379,7 @@ test("an agent chat written by the CLI while the app runs arrives unread live", 
     await expect(channelView.getByTestId("chats-thread")).toHaveCount(0);
 
     await waitForCliEndpoint(temp.homeDir);
-    const post = await runDohcCli(temp, [
-      "chat",
-      "post",
-      "general",
-      "--as-agent",
-      agentBody,
-    ]);
+    const post = await runDohcCli(temp, ["chat", "post", "general", "--as-agent", agentBody]);
     expect(post.stderr).toBe("");
     expect(post.stdout).toContain("in #general");
 
@@ -411,15 +391,9 @@ test("an agent chat written by the CLI while the app runs arrives unread live", 
     await expect(agentThreadRow).toBeVisible();
     await expect(agentThreadRow.getByTestId("chats-thread-unread")).toHaveText("1");
 
-    // Reading it clears the badge, so it tracked read state rather than
-    // merely rendering an arrival.
     await agentThreadRow.click();
-    await expect(threadView.getByTestId("chats-message-author")).toHaveText(
-      "Agent",
-    );
-    await expect(threadView.getByTestId("chats-message-body")).toContainText(
-      agentBody,
-    );
+    await expect(threadView.getByTestId("chats-message-author")).toHaveText("Agent");
+    await expect(threadView.getByTestId("chats-message-body")).toContainText(agentBody);
     await threadView.getByTestId("chats-thread-back").click();
     await expect(channelView.getByTestId("chats-thread-unread")).toHaveCount(0);
   } finally {

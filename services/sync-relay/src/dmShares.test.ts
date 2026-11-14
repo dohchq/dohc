@@ -14,7 +14,6 @@ import type { SyncRelayStorage } from "./storage";
 import {
   appendLog,
   chatChannelCreate,
-  chatMessageAppend,
   chatThreadCreate,
   claimWorkspace,
   closeTestStorages,
@@ -38,14 +37,13 @@ const NO_FILE_CHAT: ShareFileChatResolver = {
   objectIdAtPath: () => undefined,
 };
 
-// WS-MU-C3 — DM / chat grants over the relay, riding MU-C4's
-// bidirectional shared-channel lane. A DM is a `kind:"dm"` channel + one
-// email-addressed chat grant per participant, so a DM op is a strict
-// subset of the already-merged shared-channel route: it serves byte-identically
-// to a regular channel op, binds by thread (never a self-claimed
-// channelWireId on the message payload), and every unauthorized probe is
-// indistinguishable from a share that never existed. These tests are the
-// blocking adversarial isolation gate for that claim.
+// DM / chat grants over the relay, on the bidirectional shared-channel lane.
+// A DM is a `kind:"dm"` channel + one email-addressed chat grant per
+// participant, so a DM op is a strict subset of the shared-channel route: it
+// serves byte-identically to a regular channel op, binds by thread (never a
+// self-claimed channelWireId on the message payload), and every unauthorized
+// probe is indistinguishable from a share that never existed. These tests are
+// the adversarial isolation gate for that claim.
 
 afterEach(closeTestStorages);
 
@@ -68,7 +66,7 @@ async function createWorkspace(h: SyncRelayHandler): Promise<void> {
 const chatOp = logOp;
 
 // A DM channel.create carries `kind:"dm"` — the only thing distinguishing it
-// from a regular MU-C4 channel op. Everything downstream is identical.
+// from a regular channel op. Everything downstream is identical.
 function dmChannelCreate(wireId = DM_WIRE): ReturnType<typeof chatOp> {
   return chatOp(
     "chat.channel.create",
@@ -84,7 +82,7 @@ function dmThreadCreate(wireId = DM_WIRE, threadId = "thread-dm-1"): ReturnType<
 }
 
 // A message binds only by threadId — it never carries a channelWireId, exactly
-// like a solo/MU-C4 message. The relay derives scope from the thread's create.
+// like a solo or shared-channel message. The relay derives scope from the thread's create.
 function dmMessage(
   body: string,
   overrides: Record<string, unknown> = {},
@@ -120,7 +118,7 @@ async function createDmGrant(
 }
 
 // A member-append op: the client supplies its own originSeq (client-sequenced,
-// unlike MU-C3's server-owned space). The relay namespaces the origin id.
+// not a server-owned space). The relay namespaces the origin id.
 function memberMessage(
   originSeq: number,
   overrides: Record<string, unknown> = {},
@@ -181,42 +179,136 @@ describe("chat share selector (DM grants)", () => {
       channelWireId: DM_WIRE,
       access: "read-write",
     };
-    // The thread→channel resolver the chat branch scopes by. "t" belongs to the
-    // granted DM; "t2" belongs to another channel; "t3" is unbound.
+    const threadBoundToOtherChannel = "t2";
     const chat: ChatShareThreadResolver = {
       channelKind: (wireId) =>
         wireId === DM_WIRE ? "dm" : wireId === OTHER_WIRE ? "channel" : undefined,
       ...NO_FILE_CHAT,
       threadChannelWireId: (threadId) =>
-        threadId === "t" ? DM_WIRE : threadId === "t2" ? OTHER_WIRE : undefined,
+        threadId === "t"
+          ? DM_WIRE
+          : threadId === threadBoundToOtherChannel
+            ? OTHER_WIRE
+            : undefined,
     };
     const allow = (opKind: string, payload: Record<string, unknown>) =>
       filterOpForShare(selector, opKind, JSON.stringify(payload), chat).allowed;
 
-    // Honest DM stream: channel + thread + message + reaction for this wire id.
-    expect(allow("chat.channel.create", { wireId: DM_WIRE, kind: "dm", name: "x", slug: "x", channelId: "c", createdAtMs: 1 })).toBe(true);
-    expect(allow("chat.thread.create", { threadId: "t", title: "", createdAtMs: 1, channelWireId: DM_WIRE })).toBe(true);
-    expect(allow("chat.message.append", { messageId: "m", threadId: "t", body: "hi", authorKind: "human", authorDisplayName: "A", createdAtMs: 1 })).toBe(true);
-    expect(allow("chat.reaction.set", { reactionId: "r", messageId: "m", threadId: "t", emoji: "👍", authorId: "u", authorKind: "human", authorDisplayName: "A", state: "added", atMs: 1 })).toBe(true);
+    expect(
+      allow("chat.channel.create", {
+        wireId: DM_WIRE,
+        kind: "dm",
+        name: "x",
+        slug: "x",
+        channelId: "c",
+        createdAtMs: 1,
+      }),
+    ).toBe(true);
+    expect(
+      allow("chat.thread.create", {
+        threadId: "t",
+        title: "",
+        createdAtMs: 1,
+        channelWireId: DM_WIRE,
+      }),
+    ).toBe(true);
+    expect(
+      allow("chat.message.append", {
+        messageId: "m",
+        threadId: "t",
+        body: "hi",
+        authorKind: "human",
+        authorDisplayName: "A",
+        createdAtMs: 1,
+      }),
+    ).toBe(true);
+    expect(
+      allow("chat.reaction.set", {
+        reactionId: "r",
+        messageId: "m",
+        threadId: "t",
+        emoji: "👍",
+        authorId: "u",
+        authorKind: "human",
+        authorDisplayName: "A",
+        state: "added",
+        atMs: 1,
+      }),
+    ).toBe(true);
 
     // Another channel's ops never cross — resolved by thread, so a hostile
     // channelWireId stapled onto the payload is irrelevant.
-    expect(allow("chat.channel.create", { wireId: OTHER_WIRE, kind: "channel", name: "y", slug: "y", channelId: "c2", createdAtMs: 1 })).toBe(false);
-    expect(allow("chat.thread.create", { threadId: "t2", title: "", createdAtMs: 1, channelWireId: OTHER_WIRE })).toBe(false);
-    // A thread.create that forges the granted wire id for a thread already bound
-    // elsewhere is excluded (earliest-binding wins).
-    expect(allow("chat.thread.create", { threadId: "t2", title: "", createdAtMs: 1, channelWireId: DM_WIRE })).toBe(false);
-    // A message into another channel's thread, even with a forged channelWireId.
-    expect(allow("chat.message.append", { messageId: "m2", threadId: "t2", channelWireId: DM_WIRE, body: "leak", authorKind: "human", authorDisplayName: "A", createdAtMs: 1 })).toBe(false);
-    // A message into an UNBOUND thread (no channel address at all).
-    expect(allow("chat.message.append", { messageId: "m3", threadId: "t3", body: "leak", authorKind: "human", authorDisplayName: "A", createdAtMs: 1 })).toBe(false);
-    expect(allow("chat.reaction.set", { reactionId: "r2", messageId: "m", threadId: "t2", emoji: "👍", authorId: "u", authorKind: "human", authorDisplayName: "A", state: "added", atMs: 1 })).toBe(false);
+    expect(
+      allow("chat.channel.create", {
+        wireId: OTHER_WIRE,
+        kind: "channel",
+        name: "y",
+        slug: "y",
+        channelId: "c2",
+        createdAtMs: 1,
+      }),
+    ).toBe(false);
+    expect(
+      allow("chat.thread.create", {
+        threadId: threadBoundToOtherChannel,
+        title: "",
+        createdAtMs: 1,
+        channelWireId: OTHER_WIRE,
+      }),
+    ).toBe(false);
+    expect(
+      allow("chat.thread.create", {
+        threadId: threadBoundToOtherChannel,
+        title: "",
+        createdAtMs: 1,
+        channelWireId: DM_WIRE,
+      }),
+    ).toBe(false);
+    expect(
+      allow("chat.message.append", {
+        messageId: "m2",
+        threadId: threadBoundToOtherChannel,
+        channelWireId: DM_WIRE,
+        body: "leak",
+        authorKind: "human",
+        authorDisplayName: "A",
+        createdAtMs: 1,
+      }),
+    ).toBe(false);
+    expect(
+      allow("chat.message.append", {
+        messageId: "m3",
+        threadId: "t3",
+        body: "leak",
+        authorKind: "human",
+        authorDisplayName: "A",
+        createdAtMs: 1,
+      }),
+    ).toBe(false);
+    expect(
+      allow("chat.reaction.set", {
+        reactionId: "r2",
+        messageId: "m",
+        threadId: threadBoundToOtherChannel,
+        emoji: "👍",
+        authorId: "u",
+        authorKind: "human",
+        authorDisplayName: "A",
+        state: "added",
+        atMs: 1,
+      }),
+    ).toBe(false);
 
-    // A file-linked thread never crosses a chat grant even if a hostile payload
-    // staples the granted wire id next to a linked file.
-    expect(allow("chat.thread.create", { threadId: "t4", title: "x", createdAtMs: 1, channelWireId: DM_WIRE, linkedObjectId: "object-1" })).toBe(false);
+    expect(
+      allow("chat.thread.create", {
+        threadId: "t4",
+        title: "x",
+        createdAtMs: 1,
+        channelWireId: DM_WIRE,
+        linkedObjectId: "object-1",
+      }),
+    ).toBe(false);
 
-    // Nothing non-chat crosses a chat grant.
     for (const opKind of [
       "workspace.init",
       "moment.append",
@@ -245,7 +337,12 @@ describe("chat share selector (DM grants)", () => {
         filterOpForShare(
           pathSelector,
           opKind,
-          JSON.stringify({ channelWireId: DM_WIRE, wireId: DM_WIRE, threadId: "t", path: "docs/a.md" }),
+          JSON.stringify({
+            channelWireId: DM_WIRE,
+            wireId: DM_WIRE,
+            threadId: "t",
+            path: "docs/a.md",
+          }),
         ).allowed,
         opKind,
       ).toBe(false);
@@ -263,14 +360,26 @@ describe("DM grants over the relay", () => {
     await createWorkspace(h);
     const shareId = await createDmGrant(h);
 
-    // Invalid selectors fail closed with the MU-C4 codes.
+    // Invalid selectors fail closed with the shared-channel codes.
     const invalid = await h(
-      request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, channelWireId: "" })),
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, channelWireId: "" }),
+      ),
     );
     expect(invalid.status).toBe(400);
     expect((await json(invalid)).code).toBe("invalid_chat");
     const badAccess = await h(
-      request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, channelWireId: DM_WIRE, access: "admin" })),
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({
+          recipientEmail: `${MEMBER}@dohc.test`,
+          channelWireId: DM_WIRE,
+          access: "admin",
+        }),
+      ),
     );
     expect(badAccess.status).toBe(400);
     expect((await json(badAccess)).code).toBe("invalid_access");
@@ -279,14 +388,22 @@ describe("DM grants over the relay", () => {
     // group: it has no folder, so the body is refused rather than minting a
     // grant on a folder the DM never had.
     const seeded = await h(
-      request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: "origin-owner", ops: [dmChannelCreate()] })),
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/log`,
+        jsonBody({ originId: "origin-owner", ops: [dmChannelCreate()] }),
+      ),
     );
     expect(seeded.status).toBe(200);
     const mixed = await h(
       request(
         OWNER,
         `/sync/${WORKSPACE}/shares`,
-        jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, paths: ["docs"], channelWireId: DM_WIRE }),
+        jsonBody({
+          recipientEmail: `${MEMBER}@dohc.test`,
+          paths: ["docs"],
+          channelWireId: DM_WIRE,
+        }),
       ),
     );
     expect(mixed.status).toBe(400);
@@ -319,7 +436,6 @@ describe("DM grants over the relay", () => {
       grantId: expect.any(String),
       generation: 1,
     });
-    // The received summary must not expose the granter's workspace id.
     expect(receivedRow?.workspaceId).toBeUndefined();
   });
 
@@ -329,7 +445,10 @@ describe("DM grants over the relay", () => {
     const ciphertext = "secret-ciphertext-bytes";
     const ciphertextSha = sha256(ciphertext);
     const blobPut = await h(
-      request(OWNER, `/sync/${WORKSPACE}/blobs/${ciphertextSha}`, { method: "PUT", body: ciphertext }),
+      request(OWNER, `/sync/${WORKSPACE}/blobs/${ciphertextSha}`, {
+        method: "PUT",
+        body: ciphertext,
+      }),
     );
     expect(blobPut.status).toBe(200);
     await appendOwnerOps(h, [
@@ -339,11 +458,32 @@ describe("DM grants over the relay", () => {
       dmMessage("hello bob"),
       // A PRIVATE channel + thread + message in the same bucket must never
       // cross the DM grant.
-      chatOp("chat.channel.create", { channelId: "channel-private", name: "private", slug: "private", kind: "channel", createdAtMs: 1, wireId: OTHER_WIRE }),
-      chatOp("chat.thread.create", { threadId: "thread-private", title: "", createdAtMs: 2, channelSlug: "private", channelWireId: OTHER_WIRE }),
+      chatOp("chat.channel.create", {
+        channelId: "channel-private",
+        name: "private",
+        slug: "private",
+        kind: "channel",
+        createdAtMs: 1,
+        wireId: OTHER_WIRE,
+      }),
+      chatOp("chat.thread.create", {
+        threadId: "thread-private",
+        title: "",
+        createdAtMs: 2,
+        channelSlug: "private",
+        channelWireId: OTHER_WIRE,
+      }),
       dmMessage("private secret", { threadId: "thread-private", messageId: "private-msg" }),
       chatOp("moment.append", { path: "docs/a.md", versionId: "main" }),
-      chatOp("secret.file.put", { path: ".env", versionId: "main", ciphertextSha256: ciphertextSha, ivBase64: "aa", authTagBase64: "bb", byteLength: 2, metadata: {} }),
+      chatOp("secret.file.put", {
+        path: ".env",
+        versionId: "main",
+        ciphertextSha256: ciphertextSha,
+        ivBase64: "aa",
+        authTagBase64: "bb",
+        byteLength: 2,
+        metadata: {},
+      }),
     ]);
     const shareId = await createDmGrant(h);
 
@@ -354,7 +494,7 @@ describe("DM grants over the relay", () => {
       "chat.message.append",
     ]);
     // The served message payload carries NO channelWireId — the exact same
-    // allowlisted shape a solo/MU-C4 message serves. Scope came from the thread.
+    // allowlisted shape a solo or shared-channel message serves. Scope came from the thread.
     const served = ops.find((op) => op.opKind === "chat.message.append")!;
     expect(served.payload).toEqual({
       messageId: (served.payload as Record<string, unknown>).messageId,
@@ -386,12 +526,9 @@ describe("DM grants over the relay", () => {
     const memberAuthored = memberOps.find(
       (op) => (op.payload as Record<string, unknown>).body === "hi alice",
     )!;
-    // Client-sequenced, scoped to the authenticated member and replica.
     expect(memberAuthored.originId).toBe(namedShareOrigin(shareId, MEMBER, "origin-member"));
     expect(memberAuthored.originSeq).toBe(0);
 
-    // The OWNER's own bucket pull sees the member's op too (one log, many
-    // authenticated readers/writers).
     const ownerLog = await json(await h(request(OWNER, `/sync/${WORKSPACE}/log?since=0`)));
     const ownerBodies = (ownerLog.ops as Array<Record<string, unknown>>)
       .filter((op) => op.opKind === "chat.message.append")
@@ -411,7 +548,6 @@ describe("DM grants over the relay", () => {
     expect(forged.status).toBe(403);
     expect((await json(forged)).code).toBe("authorship_mismatch");
 
-    // Nothing from a rejected batch is admitted.
     const ops = await fetchSharedOps(h, MEMBER, shareId);
     expect(JSON.stringify(ops)).not.toContain("forged as alice");
   });
@@ -426,29 +562,79 @@ describe("DM grants over the relay", () => {
     await appendOwnerOps(h, [
       dmChannelCreate(),
       dmThreadCreate(),
-      chatOp("chat.channel.create", { channelId: "channel-other", name: "other", slug: "other", kind: "channel", createdAtMs: 1, wireId: OTHER_WIRE }),
-      chatOp("chat.thread.create", { threadId: "thread-other", title: "", createdAtMs: 2, channelSlug: "other", channelWireId: OTHER_WIRE }),
+      chatOp("chat.channel.create", {
+        channelId: "channel-other",
+        name: "other",
+        slug: "other",
+        kind: "channel",
+        createdAtMs: 1,
+        wireId: OTHER_WIRE,
+      }),
+      chatOp("chat.thread.create", {
+        threadId: "thread-other",
+        title: "",
+        createdAtMs: 2,
+        channelSlug: "other",
+        channelWireId: OTHER_WIRE,
+      }),
     ]);
     const shareId = await createDmGrant(h);
 
     const cases: Array<Record<string, unknown>> = [
-      // A message into a thread bound to a different channel.
-      { originSeq: 1, opKind: "chat.message.append", payload: { messageId: "x1", threadId: "thread-other", authorKind: "human", authorDisplayName: "Bob", authorUserId: MEMBER, body: "cross-channel write", createdAtMs: 5000 }, recordedAtMs: 5000 },
-      // A message into an UNBOUND thread (no channel address anywhere).
-      { originSeq: 1, opKind: "chat.message.append", payload: { messageId: "x2", threadId: "thread-nowhere", authorKind: "human", authorDisplayName: "Bob", authorUserId: MEMBER, body: "unaddressed write", createdAtMs: 5000 }, recordedAtMs: 5000 },
+      {
+        originSeq: 1,
+        opKind: "chat.message.append",
+        payload: {
+          messageId: "x1",
+          threadId: "thread-other",
+          authorKind: "human",
+          authorDisplayName: "Bob",
+          authorUserId: MEMBER,
+          body: "cross-channel write",
+          createdAtMs: 5000,
+        },
+        recordedAtMs: 5000,
+      },
+      {
+        originSeq: 1,
+        opKind: "chat.message.append",
+        payload: {
+          messageId: "x2",
+          threadId: "thread-nowhere",
+          authorKind: "human",
+          authorDisplayName: "Bob",
+          authorUserId: MEMBER,
+          body: "unaddressed write",
+          createdAtMs: 5000,
+        },
+        recordedAtMs: 5000,
+      },
       // A forged re-bind: thread.create claiming the granted channel for the
       // owner's existing OTHER-channel thread (earliest-binding must win).
-      { originSeq: 1, opKind: "chat.thread.create", payload: { threadId: "thread-other", title: "", createdAtMs: 1, channelWireId: DM_WIRE }, recordedAtMs: 5000 },
-      // A member thread must be channel-owned, never file-linked.
-      { originSeq: 1, opKind: "chat.thread.create", payload: { threadId: "evil-thread", title: "", createdAtMs: 1, channelWireId: DM_WIRE, linkedObjectId: "object-1" }, recordedAtMs: 5000 },
+      {
+        originSeq: 1,
+        opKind: "chat.thread.create",
+        payload: { threadId: "thread-other", title: "", createdAtMs: 1, channelWireId: DM_WIRE },
+        recordedAtMs: 5000,
+      },
+      {
+        originSeq: 1,
+        opKind: "chat.thread.create",
+        payload: {
+          threadId: "evil-thread",
+          title: "",
+          createdAtMs: 1,
+          channelWireId: DM_WIRE,
+          linkedObjectId: "object-1",
+        },
+        recordedAtMs: 5000,
+      },
     ];
     for (const op of cases) {
-      // Mix the hostile op with an honest one: the whole batch must fail.
       const response = await memberAppend(h, shareId, [memberMessage(0), op]);
       expect(response.status, JSON.stringify(op)).toBe(403);
       expect((await json(response)).code).toBe("share_op_rejected");
     }
-    // Nothing was admitted by any rejected batch.
     const ops = await fetchSharedOps(h, MEMBER, shareId);
     expect(ops.filter((op) => op.opKind === "chat.message.append")).toEqual([]);
   });
@@ -459,33 +645,36 @@ describe("DM grants over the relay", () => {
     await appendOwnerOps(h, [dmChannelCreate(), dmThreadCreate(), dmMessage("secret dm body")]);
     const shareId = await createDmGrant(h);
 
-    // The baseline: a share id that has never existed.
     const absent = await denialBytes(await h(request(STRANGER, "/sync/shares/never-existed")));
     const absentLog = await denialBytes(
       await h(request(STRANGER, "/sync/shares/never-existed/log?since=0")),
     );
     const absentAppend = await denialBytes(
-      await h(request(STRANGER, "/sync/shares/never-existed/log", jsonBody({ originId: "o", ops: [] }))),
+      await h(
+        request(STRANGER, "/sync/shares/never-existed/log", jsonBody({ originId: "o", ops: [] })),
+      ),
     );
 
-    // A REAL DM share probed by a non-participant: byte-identical denials on
-    // metadata, read, and append — existence is unconfirmable.
     expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}`)))).toBe(absent);
     expect(
       await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}/log?since=0`))),
     ).toBe(absentLog);
     expect(
       await denialBytes(
-        await h(request(STRANGER, `/sync/shares/${shareId}/log`, jsonBody({ originId: "o", ops: [memberMessage(0)] }))),
+        await h(
+          request(
+            STRANGER,
+            `/sync/shares/${shareId}/log`,
+            jsonBody({ originId: "o", ops: [memberMessage(0)] }),
+          ),
+        ),
       ),
     ).toBe(absentAppend);
 
-    // The DM is invisible in the stranger's share listings.
     const listing = await json(await h(request(STRANGER, "/sync/shares")));
     expect(listing.granted).toEqual([]);
     expect(listing.received).toEqual([]);
 
-    // And the OWNER's bucket itself stays owner-only.
     const bucketProbe = await h(request(STRANGER, `/sync/${WORKSPACE}/log?since=0`));
     expect(bucketProbe.status).toBe(404);
   });
@@ -496,29 +685,27 @@ describe("DM grants over the relay", () => {
     await appendOwnerOps(h, [dmChannelCreate(), dmThreadCreate(), dmMessage("hello bob")]);
     const shareId = await createDmGrant(h);
 
-    // The honest path works before revocation.
     expect((await fetchSharedOps(h, MEMBER, shareId)).length).toBe(3);
     expect((await memberAppend(h, shareId, [memberMessage(0)])).status).toBe(200);
 
-    const revoke = await h(
-      request(OWNER, `/sync/shares/${shareId}/revoke`, { method: "POST" }),
-    );
+    const revoke = await h(request(OWNER, `/sync/shares/${shareId}/revoke`, { method: "POST" }));
     expect(revoke.status).toBe(200);
 
     const absent = await denialBytes(await h(request(MEMBER, "/sync/shares/never-existed")));
     const absentLog = await denialBytes(
       await h(request(MEMBER, "/sync/shares/never-existed/log?since=0")),
     );
-    const removed = `404:${JSON.stringify({ok: false, error: "The owner removed your access.", code: "share_access_removed"})}`;
+    const removed = `404:${JSON.stringify({ ok: false, error: "The owner removed your access.", code: "share_access_removed" })}`;
     expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}`)))).toBe(removed);
     expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}`)))).toBe(absent);
     expect(await denialBytes(await h(request(MEMBER, `/sync/shares/${shareId}/log?since=0`)))).toBe(
       removed,
     );
-    expect(await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}/log?since=0`)))).toBe(absentLog);
+    expect(
+      await denialBytes(await h(request(STRANGER, `/sync/shares/${shareId}/log?since=0`))),
+    ).toBe(absentLog);
     expect(await denialBytes(await memberAppend(h, shareId, [memberMessage(1)]))).toBe(removed);
 
-    // The revoked DM disappears from the member's received listing.
     const listing = await json(await h(request(MEMBER, "/sync/shares")));
     expect(
       (listing.received as Array<Record<string, unknown>>).find((row) => row.shareId === shareId),
@@ -537,16 +724,19 @@ describe("DM grants over the relay", () => {
     const post = await memberAppend(h, readOnlyShareId, [memberMessage(0)]);
     expect(post.status).toBe(403);
     expect((await json(post)).code).toBe("share_read_only");
-    // Reading still works for a read-only member.
     expect((await fetchSharedOps(h, MEMBER, readOnlyShareId)).length).toBe(2);
 
-    // A PATH-share recipient cannot append through the chat route at all — and
-    // learns nothing distinguishing (share_read_only, like any non-appendable).
-    const pathShareId = (await json(
-      await h(
-        request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, paths: ["docs"], access: "view" })),
-      ),
-    )).shareId as string;
+    const pathShareId = (
+      await json(
+        await h(
+          request(
+            OWNER,
+            `/sync/${WORKSPACE}/shares`,
+            jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, paths: ["docs"], access: "view" }),
+          ),
+        ),
+      )
+    ).shareId as string;
     const pathPost = await memberAppend(h, pathShareId, [memberMessage(0)]);
     expect(pathPost.status).toBe(403);
     expect((await json(pathPost)).code).toBe("share_read_only");
@@ -556,16 +746,23 @@ describe("DM grants over the relay", () => {
     const h = handler(await testStorage());
     await createWorkspace(h);
     const known = await h(
-      request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, channelWireId: DM_WIRE })),
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientEmail: `${MEMBER}@dohc.test`, channelWireId: DM_WIRE }),
+      ),
     );
     const unknown = await h(
-      request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ recipientEmail: "nobody@example.com", channelWireId: DM_WIRE })),
+      request(
+        OWNER,
+        `/sync/${WORKSPACE}/shares`,
+        jsonBody({ recipientEmail: "nobody@example.com", channelWireId: DM_WIRE }),
+      ),
     );
     expect(known.status).toBe(200);
     expect(unknown.status).toBe(200);
     const knownBody = await json(known);
     const unknownBody = await json(unknown);
-    // Identical shape either way: no recipientUserId echo, no account oracle.
     expect(Object.keys(knownBody).sort()).toEqual(Object.keys(unknownBody).sort());
     expect(knownBody.recipientUserId).toBeUndefined();
     expect(unknownBody.recipientUserId).toBeUndefined();

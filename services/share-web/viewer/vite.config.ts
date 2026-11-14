@@ -29,7 +29,16 @@ export default defineConfig({
   build: {
     outDir: resolve(viewerRoot, "dist"),
     emptyOutDir: true,
-    rolldownOptions: { input: VIEWER_PAGES.map(page => resolve(viewerRoot, page)) },
+    rolldownOptions: {
+      input: VIEWER_PAGES.map((page) => resolve(viewerRoot, page)),
+      // share-web lets browsers keep every file directly in assets/ forever,
+      // so each name must change with its content.
+      output: {
+        entryFileNames: "assets/[name]-[hash].js",
+        chunkFileNames: "assets/[name]-[hash].js",
+        assetFileNames: "assets/[name]-[hash][extname]",
+      },
+    },
   },
   server: {
     host: "127.0.0.1",
