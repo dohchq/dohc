@@ -3736,9 +3736,11 @@ export function DesktopWorkspaceShell(props: {
                   : "";
             const copy = saved.copyPath;
             if (copy === null) {
-              // The package is in .dohc/local, which dohc does not open as a file.
-              showSuccessNotice(
-                `Saved your kept edits for ${path} on this computer in ${saved.packagePath}. dohc could not make a readable copy.${kept}`,
+              // The package is in .dohc/local, which dohc does not open as a
+              // file, so the row stays to say where it is and copy its path.
+              showWarningNotice(
+                `dohc could not make a readable copy of your kept edits for ${path}. They are saved on this computer, in the file below.${kept}`,
+                [saved.packagePath],
               );
               return;
             }
@@ -3774,7 +3776,7 @@ export function DesktopWorkspaceShell(props: {
       recoverySaves.current.set(key, saving);
       return saving;
     };
-  }, [openFile, showSuccessNotice, reportShellError]);
+  }, [openFile, showSuccessNotice, showWarningNotice, reportShellError]);
   // A held file can't go live again, so Live documents offers a copy beside
   // it. Opening the copy starts its live editing.
   const liveCopies = useRef(new Map<string, Promise<void>>());
