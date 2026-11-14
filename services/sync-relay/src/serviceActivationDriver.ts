@@ -387,9 +387,10 @@ export class ServiceActivationDriver {
   /**
    * Whether a target's last activation left work for a later pass: it failed, or ended pending without blocking.
    * A finished one found no owner edit waiting in the engine. A blocked one waits for its owner or the relay instead.
+   * One that waits out its back-off after a failure does not count until its wait lapses.
    */
   get unfinished() {
-    return this.#unfinished.size > 0;
+    return [...this.#unfinished].some((key) => !this.#waitingOut(key));
   }
   /**
    * Clears readiness of documents a hosted pass left held. The engine has
@@ -732,8 +733,8 @@ export class ServiceActivationDriver {
       .every((target) => this.#completedTargets.has(targetKey(target)));
   }
   // Whether an unready workspace may still push. A document with no owner that waits out a backoff after a failed
-  // activation does not hold the push back, so its siblings' settled edits still publish while it waits. It still
-  // holds readiness, so the workspace keeps pulling as an unready one does.
+  // activation does not hold the push back, so its siblings' settled edits still publish while it waits. A workspace
+  // that may push also passes `workspaceWaiting`.
   workspacePushes(workspaceId: string) {
     return this.#targets
       .filter(
@@ -746,8 +747,30 @@ export class ServiceActivationDriver {
       )
       .every((target) => this.#completedTargets.has(targetKey(target)));
   }
+  // Whether each document that holds a workspace's readiness has completed or waits out a back-off. Until a wait lapses,
+  // such a workspace has nothing more to do than a ready one.
+  workspaceWaiting(workspaceId: string) {
+    return this.#targets
+      .filter(
+        (target) =>
+          target.workspaceId === workspaceId &&
+          !this.dormant(target) &&
+          !this.#held.has(targetKey(target)) &&
+          !this.#blocked.has(targetKey(target)),
+      )
+      .every(
+        (target) =>
+          this.#completedTargets.has(targetKey(target)) || this.#waitingOut(targetKey(target)),
+      );
+  }
   #backingOff(key: string) {
     return this.#waiting(key) && ![...this.#owners.values()].some((owner) => owner.target === key);
+  }
+  // Whether a target that has not completed waits out a failed activation's back-off, as `#activate` checks before it
+  // tries again.
+  #waitingOut(key: string) {
+    const owner = [...this.#owners.values()].find((owner) => owner.target === key);
+    return !owner?.completed && this.#waiting(key, owner !== undefined);
   }
   // Whether a failed activation's wait before its next capture or drain has not yet lapsed. A target whose owner the host
   // holds waits at most 30 s: its document, its Stop and its workspace's push wait for that owner to complete.

@@ -5098,7 +5098,8 @@ for (const c of [
         ]),
       );
       for (let pass = 0; pass < 3; pass++) {
-        await o.nextPull();
+        // A document that backs off does not keep its workspace pulling, so this waits on passes.
+        await o.nextPass();
         expect(
           o.host.isDocumentReady(o.document),
           "The returned document must stay inactive after its text changed.",
@@ -5653,7 +5654,8 @@ for (const c of [
         ).toContainEqual(["Service activation pass failed.", `ServerLogError: ${refusal}`]),
       );
       for (let pass = 0; pass < 3; pass++) {
-        await o.nextPull();
+        // A document that backs off does not keep its workspace pulling, so this waits on passes.
+        await o.nextPass();
         expect(
           o.host.isDocumentReady(o.document),
           "The document must stay inactive while its saved text needs attention.",
@@ -6944,8 +6946,8 @@ it("pushes a live document's settled edit on the next pass while another documen
   expect(after).not.toContain("liveApplication.unloadDocument");
   expect(o.host.retains(o.other)).toBe(true);
   expect(o.host.settled(o.other)).toBe(false);
-  // The other document still holds readiness, so the workspace keeps its pull every pass. A pass that tries
-  // the other document again catches up instead, at most once across these three passes since each wait is longer.
+  // A document that backs off does not keep its workspace pulling every pass. Its workspace pulls as a ready one
+  // does: on a pull duty, a nudge or the recovery probe.
   const unreadyPulls = () => o.host.hostedPulls(o.workspace.workspaceId).reasons.unready ?? 0,
     pulled = unreadyPulls();
   await o.nextPass();
@@ -6953,17 +6955,27 @@ it("pushes a live document's settled edit on the next pass while another documen
   await o.nextPass();
   expect(
     unreadyPulls(),
-    "The workspace must keep pulling every pass while the other document backs off.",
-  ).toBeGreaterThanOrEqual(pulled + 2);
+    "The workspace must not pull every pass while the other document backs off.",
+  ).toBe(pulled);
 });
 
 // An activation whose drain runs past every pass deadline fails each time it runs, as one does on an engine whose owner
 // reads stop answering. The activation tries again once
-// its back-off has passed, within one poll of it, and sends none of those reads while it waits. While the host holds
-// its owner, no wait is longer than 30 s.
+// its back-off has passed, within the idle interval of it, and sends none of those reads while it waits. While the host
+// holds its owner, no wait is longer than 30 s. While it waits, the host's pause grows as an idle host's does.
 it("retries an activation that keeps running past its pass deadline only after each back-off", async () => {
   const paced = pacedPasses(),
     o = await emptyServiceHost({ paced, limits: { passDeadlineMs: 50 } as DrainLimits });
+  // Enrolled, the note gives its workspace a hosted scope, so a quiet workspace does not pull every pass.
+  o.f.storage.ensureOwnedLiveDocument({
+    intent: "share",
+    workspaceId: "workspace",
+    ownerUserId: "owner",
+    shareId: "share",
+    path: o.sibling.path,
+    nowMs: 10,
+    guard() {},
+  });
   // The back-off reads the wall clock, which moves with the host's clock here.
   const startedAt = Date.now();
   vi.spyOn(Date, "now").mockImplementation(() => startedAt + paced.clock.nowMs());
@@ -7001,8 +7013,13 @@ it("retries an activation that keeps running past its pass deadline only after e
   gaps.slice(1).forEach((gap, index) => {
     const wait = Math.min(30_000, 1000 * 2 ** index);
     expect(gap).toBeGreaterThanOrEqual(wait);
-    expect(gap).toBeLessThanOrEqual(wait + paced.poll);
+    expect(gap).toBeLessThanOrEqual(wait + paced.ceiling);
   });
+  // An idle host runs a pass per idle interval. Each failed retry puts the pause back to the poll interval, from
+  // which it doubles again: at most four passes before it reaches the idle interval.
+  expect(passes, "The host must not pass every poll while the note waits.").toBeLessThanOrEqual(
+    120_000 / paced.ceiling + 4 * (gaps.length + 1),
+  );
   expect(o.host.isDocumentReady(o.document)).toBe(false);
 });
 

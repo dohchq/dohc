@@ -2168,9 +2168,11 @@ export async function startServiceLiveHost(options: {
                 try {
                   // While a sibling is mid-activation the open skips catch-up, as awake documents
                   // do, and converges once that sibling resolves. Waiting here would let one stuck
-                  // sibling keep every dormant document in the workspace from opening.
+                  // sibling keep every dormant document in the workspace from opening. A sibling
+                  // waiting out a backoff is not mid-activation, so the open catches up.
                   if (
-                    activation!.workspaceReady(workspaceId) &&
+                    (activation!.workspaceReady(workspaceId) ||
+                      activation!.workspaceWaiting(workspaceId)) &&
                     (await pull(attachments.get(workspaceId)!, joined, "open")).hasMore
                   ) {
                     throw new Error("Hosted replication has more pages.");
@@ -3193,11 +3195,11 @@ export async function startServiceLiveHost(options: {
                 }
               });
               // Every ready workspace pushes, then pulls unless its replica is quiet and its relay state unchanged, until the
-              // recovery probe. One with no documents still pulls while its replica has departures to finish.
-              // One that is not ready pulls once a pass unless an activation above caught it up, so its held lists page
-              // on and an ended hold is freed, however long another document holds readiness back. It pushes first while
-              // only documents with no owner waiting out a backoff hold it back. One whose replica has not checked its
-              // origin does neither.
+              // recovery probe. One with no documents still pulls while its replica has departures to finish. One held back
+              // only by documents waiting out a backoff pulls the same way, and pushes unless one of them has its owner here.
+              // Any other unready workspace pulls once a pass unless an activation above caught it up, so its held lists page
+              // on and an ended hold is freed, however long another document holds readiness back. It does not push. One
+              // whose replica has not checked its origin does neither.
               for (const [workspaceId, attached] of [...attachments]) {
                 if (!attached.hosted.checked) continue;
                 const push = async () => {
@@ -3209,9 +3211,10 @@ export async function startServiceLiveHost(options: {
                     if (timed) timed.pushMs = Math.round(now() - startedAt);
                   }
                 };
-                if (activation!.workspaceReady(workspaceId)) {
+                const ready = activation!.workspaceReady(workspaceId);
+                if (ready || activation!.workspaceWaiting(workspaceId)) {
                   // A refused push does not cost the pull, so departures are still confirmed while the push keeps failing.
-                  await step(push);
+                  if (ready || activation!.workspacePushes(workspaceId)) await step(push);
                   await step(async () => {
                     // The pull uses the attachment standing after the push, not one the pass saw before it.
                     const current = checked(workspaceId),
@@ -3219,8 +3222,6 @@ export async function startServiceLiveHost(options: {
                     if (current && reason) await pull(current, passSignal, reason);
                   });
                 } else {
-                  // A refused push does not cost the pull, so held lists still page while the push keeps failing.
-                  if (activation!.workspacePushes(workspaceId)) await step(push);
                   if (!catchUp.has(workspaceId))
                     await step(() => pull(attached, passSignal, "unready"));
                 }
@@ -3298,8 +3299,10 @@ export async function startServiceLiveHost(options: {
             if (visited === 0) idleSweepsBeforeDue++;
           };
           // Whether nothing is left for a pass to do until a wake, a nudge or a deadline: no document leaves, parks,
-          // recovers, unloads or is kept, none that moved away is still listed, every activation finished or blocked, and
-          // every workspace is checked, ready, pushed and quiet with its relay state read and its recovery probe not due.
+          // recovers, unloads or is kept, none that moved away is still listed, every activation finished, blocked or waits
+          // out a backoff, and every workspace is checked and quiet with its relay state read and its recovery probe not
+          // due, ready apart from documents waiting out a backoff, and pushed unless its push waits for one of those.
+          // A pause ends within idlePollIntervalMs, so a document tries again within that of its wait lapsing.
           const settled = () => {
             if (
               leaving.size ||
@@ -3316,8 +3319,12 @@ export async function startServiceLiveHost(options: {
               if (
                 !attached.hosted.checked ||
                 attached.hosted.diverged ||
-                !attached.hosted.pushedAll ||
-                !activation!.workspaceReady(workspaceId)
+                !(
+                  activation!.workspaceReady(workspaceId) ||
+                  activation!.workspaceWaiting(workspaceId)
+                ) ||
+                // A push that waits for a document's backoff does not run, so it cannot have pushed everything.
+                (!attached.hosted.pushedAll && activation!.workspacePushes(workspaceId))
               )
                 return false;
               if (
