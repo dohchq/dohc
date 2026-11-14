@@ -220,7 +220,7 @@ it("writes the package before the copy is projected, and keeps it when the proje
     expect(saved).toEqual({
       copyPath: null,
       packagePath: `${KEPT}/notes/plan (recovered).dohc-recovery.json`,
-    notInNote: 0,
+      notInNote: 0,
       storedOn: "this-computer",
     });
     expect(projection.run).toHaveBeenCalledOnce();
@@ -228,6 +228,23 @@ it("writes the package before the copy is projected, and keeps it when the proje
   } finally {
     vi.restoreAllMocks();
   }
+});
+
+it("fails, keeping the package, when the readable copy can't be written", async () => {
+  const { root, writes } = await workspace(),
+    { recovery } = queue(3);
+  const failing = {
+    ...writes,
+    create: vi.fn(async () => {
+      throw new Error("The disk is full.");
+    }),
+  };
+  await expect(
+    saveLiveRecoveryCopy(liveRecoveryPackage(recovery, source), failing, directDocumentProjection),
+  ).rejects.toThrow("The disk is full.");
+  expect(failing.create).toHaveBeenCalledOnce();
+  const packaged = join(root, KEPT, "notes/plan (recovered).dohc-recovery.json");
+  expect(reopen(JSON.parse(await readFile(packaged, "utf8")))).toBeTruthy();
 });
 
 it("never replaces a file, and gives the copy and its package the same free number", async () => {
@@ -247,9 +264,9 @@ it("never replaces a file, and gives the copy and its package the same free numb
     storedOn: "this-computer",
   });
   expect(await readFile(join(root, "notes/plan (recovered).md"), "utf8")).toBe("older copy");
-  expect(await readFile(join(root, KEPT, "notes/plan (recovered 2).dohc-recovery.json"), "utf8")).toBe(
-    "older package",
-  );
+  expect(
+    await readFile(join(root, KEPT, "notes/plan (recovered 2).dohc-recovery.json"), "utf8"),
+  ).toBe("older package");
   await writeFile(join(root, "untouched.md"), "x");
   await expect(writes.create("untouched.md", "y")).rejects.toMatchObject({ code: "EEXIST" });
 });
@@ -516,6 +533,36 @@ it("lists nothing when a kept edit's own later edit removed it", async () => {
   expect(saved.notInNote).toBe(0);
   expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(
     "---\nowner: Sam\nstatus: second\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+  );
+});
+
+it("quotes text once when a later kept update repeats an earlier one", async () => {
+  const { root, writes } = await workspace();
+  const recovery = conflict(
+    [
+      (doc) => paragraph(doc).insert("Start here.".length, " Kept"),
+      (doc) => paragraph(doc).insert("Start here. Kept".length, " words."),
+    ],
+    (doc) => body(doc).delete(1, 1),
+  );
+  const [first, second] = recovery.entries;
+  const both = Y.mergeUpdates([first!.update, second!.update]);
+  const repeated = {
+    ...recovery,
+    pendingBytes: first!.byteLength + both.byteLength,
+    entries: [
+      first!,
+      { ...second!, update: both, updateDigest: sha256(both), byteLength: both.byteLength },
+    ],
+  };
+  const saved = await saveLiveRecoveryCopy(
+    liveRecoveryPackage(repeated, source),
+    writes,
+    directDocumentProjection,
+  );
+  expect(saved.notInNote).toBe(1);
+  expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(
+    `# Plan\n\nKeep this.\n\n- [ ] tick me\n\n${LISTED}Text added to a part that was deleted:\n\n> Kept words.\n`,
   );
 });
 

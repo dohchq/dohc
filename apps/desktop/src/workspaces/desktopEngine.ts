@@ -1964,9 +1964,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         writes,
         dependencies.documentProjection,
       );
-      // With no readable copy, the package on this computer is the only other
-      // place the edits are, so the record and its notice stay for Try again.
-      if (files.copyPath === null) return { ...files, keptEdits: "kept" };
+      // A package without a readable copy means these edits can't become one,
+      // so Try again would fail the same way. A copy that couldn't be written
+      // throws instead, and the record stays.
       await end();
       return { ...files, keptEdits: "ended" };
     },

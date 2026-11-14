@@ -1569,23 +1569,10 @@ describe("server owner peer lifecycle", () => {
         );
         if (materialized) return;
         const queueReads = quarantineMock.queue.mock.calls.length;
-        // Without a readable copy the record and its notice stay, for Try again.
-        vi.spyOn(directDocumentProjection, "run").mockRejectedValueOnce(new Error("worker failed"));
-        expect(
-          await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md"),
-        ).toEqual({
-          copyPath: null,
-          packagePath: ".dohc/local/live-recovery/notes/plan (recovered).dohc-recovery.json",
-          notInNote: 0,
-          storedOn: "this-computer",
-          keptEdits: "kept",
-        });
-        expect(f.unwritten).toHaveLength(1);
         const saved = await f.engine.saveOwnerLiveRecoveryCopy(await workspace(), "notes/plan.md");
-        // The first package keeps its name, so Try again takes the next one.
         expect(saved).toEqual({
-          copyPath: "notes/plan (recovered 2).md",
-          packagePath: ".dohc/local/live-recovery/notes/plan (recovered 2).dohc-recovery.json",
+          copyPath: "notes/plan (recovered).md",
+          packagePath: ".dohc/local/live-recovery/notes/plan (recovered).dohc-recovery.json",
           notInNote: 0,
           storedOn: "this-computer",
           keptEdits: "ended",

@@ -9,6 +9,7 @@ import {
   type OwnerYDocOutboxRecovery,
 } from "@dohc/workspace-engine-client";
 import type { DocumentProjection } from "./documentProjection";
+import type { RecoveredDocument } from "./recoveredDocument";
 
 export const LIVE_RECOVERY_FORMAT = "dohc.live-recovery";
 const OPEN =
@@ -205,7 +206,8 @@ function recoveredName(path: string, attempt: number, extension?: string): strin
  * queue as it is. The package, which only a program reads, is written first
  * and always, on this computer, under the first number whose copy name is
  * free too. The readable copy is projected off main afterwards; when it
- * cannot be made, the saved package is the result.
+ * cannot be made, the saved package is the result. A copy that can't be
+ * written throws.
  */
 export async function saveLiveRecoveryCopy(
   recovery: LiveRecoveryPackage,
@@ -229,19 +231,21 @@ export async function saveLiveRecoveryCopy(
     );
     if (packagePath === null) continue;
     const packageOnly = { copyPath: null, packagePath, notInNote: 0, storedOn: recovery.storedOn };
+    let copy: RecoveredDocument | null;
     try {
-      const copy = await projection.run({ kind: "recover", accepted, kept });
-      if (copy === null) return packageOnly;
-      return {
-        copyPath: await writes.create(copyName, copy.markdown),
-        packagePath,
-        notInNote: copy.notInNote,
-        storedOn: recovery.storedOn,
-      };
+      copy = await projection.run({ kind: "recover", accepted, kept });
     } catch (error) {
       console.error("[desktop] live recovery copy kept only its package:", error);
       return packageOnly;
     }
+    if (copy === null) return packageOnly;
+    // A copy that can't be written is an error, so the caller keeps what it holds for Try again.
+    return {
+      copyPath: await writes.create(copyName, copy.markdown),
+      packagePath,
+      notInNote: copy.notInNote,
+      storedOn: recovery.storedOn,
+    };
   }
   throw new Error(
     "dohc could not find a free name for the recovery copy. Rename older recovery copies, then try again.",

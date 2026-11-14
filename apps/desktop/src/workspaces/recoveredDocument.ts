@@ -95,25 +95,34 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
   // deletes part of it, and an item can hold accepted content beside kept.
   const lost = new Map<Y.Item, Span[]>();
   const found: NotInNote[] = [];
+  // Kept updates can repeat each other's content, so each clock is read once.
+  const keptClocks = new Map<number, Span[]>();
   for (const { structs } of decoded)
-    for (const struct of structs) {
-      if (!(struct instanceof Y.Item)) continue;
-      const end = struct.id.clock + struct.length;
-      for (let clock = struct.id.clock; clock < end; ) {
-        const part = Y.getItem(doc.store, Y.createID(struct.id.client, clock));
+    for (const struct of structs)
+      if (struct instanceof Y.Item) {
+        const spans = keptClocks.get(struct.id.client) ?? [];
+        spans.push([struct.id.clock, struct.id.clock + struct.length]);
+        keptClocks.set(struct.id.client, spans);
+      }
+  for (const [client, spans] of keptClocks) {
+    spans.sort(([left], [right]) => left - right);
+    let clock = 0;
+    for (const [from, end] of spans) {
+      for (clock = Math.max(clock, from); clock < end;) {
+        const part = Y.getItem(doc.store, Y.createID(client, clock));
         const partEnd = Math.min(end, part.id.clock + part.length);
         // Collected with a block it was made in: its content is not in the document to show.
         if (!(part instanceof Y.Item)) found.push({ kind: "other" });
         else if (part.deleted) {
-          const spans = notDeleted(keptDeletes, part.id.client, clock, partEnd).map(
-            ([from, to]): Span => [from - part.id.clock, to - part.id.clock],
+          const dropped = notDeleted(keptDeletes, client, clock, partEnd).map(
+            ([start, stop]): Span => [start - part.id.clock, stop - part.id.clock],
           );
-          if (spans.length > 0) lost.set(part, [...(lost.get(part) ?? []), ...spans]);
+          if (dropped.length > 0) lost.set(part, [...(lost.get(part) ?? []), ...dropped]);
         }
         clock = partEnd;
       }
     }
-  for (const spans of lost.values()) spans.sort(([left], [right]) => left - right);
+  }
 
   const parentsWithText = new Set<Y.AbstractType<unknown>>();
   const elementsWithText = new Set<Y.Item>();
@@ -180,7 +189,8 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
   // an embed. Its settings were deleted with it, so they are read from the
   // entries Yjs keeps. An empty paragraph is not listed.
   for (const item of lost.keys()) {
-    if (item.parentSub !== null || rootOf(item.parent as Y.AbstractType<unknown>) !== body) continue;
+    if (item.parentSub !== null || rootOf(item.parent as Y.AbstractType<unknown>) !== body)
+      continue;
     const { content } = item;
     if (
       content instanceof Y.ContentString ||
@@ -220,7 +230,10 @@ function entry(edit: Exclude<NotInNote, { kind: "other" }>): JSONContent[] {
         paragraph("Text added to a part that was deleted:"),
         {
           type: "blockquote",
-          content: edit.text.split("\n").filter((line) => line !== "").map(paragraph),
+          content: edit.text
+            .split("\n")
+            .filter((line) => line !== "")
+            .map(paragraph),
         },
       ];
     case "field": {
@@ -263,7 +276,11 @@ function notInNoteSection(edits: readonly NotInNote[]): string {
   const others = edits.filter((edit) => edit.kind === "other").length;
   const content: JSONContent[] = [
     { type: "horizontalRule" },
-    { type: "heading", attrs: { level: 2 }, content: [{ type: "text", text: "Kept edits that aren’t in this copy" }] },
+    {
+      type: "heading",
+      attrs: { level: 2 },
+      content: [{ type: "text", text: "Kept edits that aren’t in this copy" }],
+    },
     paragraph(
       "These edits were kept on the computer that made them. A change saved at the same moment removed or replaced the place they were made, so the note above doesn’t have them.",
     ),
@@ -300,7 +317,8 @@ export function recoveredDocument(
     if (edits.length === 0) return { markdown, notInNote: 0 };
     const lineBreak = markdown.includes("\r\n") ? "\r\n" : "\n";
     const section = notInNoteSection(edits).trimEnd().replaceAll("\n", lineBreak);
-    const separator = markdown === "" ? "" : markdown.endsWith(lineBreak) ? lineBreak : `${lineBreak}${lineBreak}`;
+    const separator =
+      markdown === "" ? "" : markdown.endsWith(lineBreak) ? lineBreak : `${lineBreak}${lineBreak}`;
     return { markdown: `${markdown}${separator}${section}${lineBreak}`, notInNote: edits.length };
   } finally {
     doc.destroy();
