@@ -1259,6 +1259,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
         depth: agent.depth,
       },
     ]);
+    // As for the save above, the read always reports a replay.
     expect(
       await capture.client.readLiveApplicationAck(
         {
@@ -1269,7 +1270,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
         },
         { deliveryId: agentAck.deliveryId, updateDigest: agentAck.updateDigest },
       ),
-    ).toEqual(agentAck);
+    ).toEqual({ ...agentAck, applicationReplayed: true });
     const agentMarkdown = yDocToMarkdown(agentProvider.doc);
     agentProvider.close();
     agentProvider.doc.destroy();
