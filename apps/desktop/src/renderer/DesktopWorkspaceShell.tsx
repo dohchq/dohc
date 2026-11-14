@@ -421,6 +421,9 @@ import { usePinnedApps } from "./workbench/pinnedApps";
 import { pinnedAppsFor } from "../settings/pinnedApps";
 import { ipcErrorMessage } from "./ipcError";
 
+// A lower level is a change of state, not a success.
+const LEVEL_RANK = { view: 0, comment: 1, edit: 2 } as const;
+
 // Mounted-share paths (shared-with-me/…) are read-only projections of
 // someone else's files. This check is a renderer UX affordance only — main
 // refuses every write to the reserved prefix regardless — but it uses the
@@ -3202,7 +3205,8 @@ export function DesktopWorkspaceShell(props: {
       else if (result.access && result.access !== shareAccess)
         setAccessFor({ view: shareView, access: result.access });
       if (shareView.membership && result.levelChanged && result.access) {
-        showSuccessNotice(levelChangedWords(result.access, result.levelChangedBy));
+        const words = levelChangedWords(result.access, result.levelChangedBy);
+        if (shareAccess && LEVEL_RANK[result.access] < LEVEL_RANK[shareAccess]) showWarningNotice(words); else showSuccessNotice(words);
       }
       if (result.status === "ended" || (result.access && result.access !== shareAccess)) {
         void props.refreshWorkspaceRegistry().catch(() => undefined);

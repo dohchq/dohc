@@ -5692,6 +5692,16 @@ export function ChatsView(props: {
                       agentOffer={agentOffer.offer}
                     />
                   </div>
+                ) : channelLocked ? (
+                  // Where the composer would be, so the reason is the first thing above the posts.
+                  <div className="py-4">
+                    <p
+                      data-testid="chats-readonly-note"
+                      className="m-0 rounded-xl border border-line px-4 py-3 text-xs text-subtle"
+                    >
+                      {channelJoined?.ended ? endedGroupNotice(channelJoined) : lockedLine}
+                    </p>
+                  </div>
                 ) : null}
               </>
             }
@@ -5749,11 +5759,6 @@ export function ChatsView(props: {
             }}
           />
         )}
-        {channelLocked && !showLane ? (
-          <ComposerNotice testId="chats-readonly-note">
-            {channelJoined?.ended ? endedGroupNotice(channelJoined) : lockedLine}
-          </ComposerNotice>
-        ) : null}
       </div>
     );
   }

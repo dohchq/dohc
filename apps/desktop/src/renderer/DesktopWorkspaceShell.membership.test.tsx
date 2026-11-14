@@ -100,8 +100,11 @@ describe("a joined workspace", () => {
     withGroup("view", { status: "current", access: "view", role: "member" });
     fireEvent.click(await screen.findByTestId("activity-chats"));
     fireEvent.click(await screen.findByTestId("chats-channel"));
-    expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe("Only people who can comment post here.");
+    const note = await screen.findByTestId("chats-readonly-note");
+    expect(note.textContent).toBe("Only people who can comment post here.");
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    // The line sits above the posts, where the composer would be.
+    expect(note.closest('[data-testid="chats-feed-column"]')).not.toBeNull();
   });
 
   it("offers New group to an admin once the relay names the role", async () => {
@@ -169,6 +172,9 @@ describe("a joined workspace", () => {
     withGroup("comment", { status: "current", access: "view", role: "member", levelChanged: true, levelChangedBy: "Ana" });
     const toast = await screen.findByTestId("workspace-shell-notice");
     expect(toast.textContent).toContain("Ana now lets members view only.");
+    // Less access is a change of state, not a success.
+    expect(toast.querySelector(".text-warning")).not.toBeNull();
+    expect(toast.querySelector(".text-success")).toBeNull();
     fireEvent.click(screen.getByTestId("notice-center-toggle"));
     expect(await within(screen.getByTestId("notice-center")).findByText("Ana now lets members view only.")).toBeTruthy();
   });
