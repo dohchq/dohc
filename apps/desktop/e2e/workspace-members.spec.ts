@@ -1053,7 +1053,8 @@ test("@two-client a member creates a page that reaches the owner, and an admin c
     await expect(mine.getByTestId("new-page")).toHaveCount(0);
     relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"), port: relayPort });
     await setLevel("comment");
-    const unsent = "You can no longer edit in this workspace. Your unsent pages stay on this computer and send when members can edit again.";
+    // The level drop is found by a push the view never sent or by one the relay refused, so the count may be unknown.
+    const unsent = /You can no longer edit .+(Your unsent pages stay|\d+ unsent pages? stays?) on this computer\. They send when members can edit again\./;
     const notices = mine.getByTestId("notice-center");
     const unsentRow = notices.locator("li").filter({ hasText: unsent }).first();
     // The failed send offers Try again. At Comment, trying again finds the level changed.

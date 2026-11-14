@@ -80,6 +80,7 @@ async function setup(
       workspaceId,
       sharedView: true,
       membership: options.membership ?? false,
+      workspaceName: "Lisbon trip",
       enabled: options.enabled ?? true,
       ready: options.ready ?? true,
       ownerName: "ana@example.com",
@@ -130,6 +131,7 @@ it("subscribes only for ready shared views", async () => {
   const input = {
     workspaceId: "share-view",
     sharedView: false,
+    workspaceName: "Lisbon trip",
     enabled: false,
     ready: true,
     ownerName: "Owner",
@@ -188,6 +190,7 @@ it("waits for readiness before reporting unavailable, then shows only the access
       useShareDirectWrites({
         sharedView: true,
         workspaceId: "share-view",
+        workspaceName: "Lisbon trip",
         enabled: true,
         ready,
         ownerName: "ana@example.com",
@@ -346,12 +349,32 @@ it("keeps a member's unsent pages when their level drops, with no proposal to se
   await vi.waitFor(() => expect(notices).toHaveLength(1));
   expect(notices[0]).toEqual({
     kind: "direct-write-unavailable",
-    message:
-      "You can no longer edit in this workspace. Your unsent pages stay on this computer and send when members can edit again.",
+    tone: "warning",
+    title: "You can no longer edit Lisbon trip",
+    message: "Your unsent pages stay on this computer. They send when members can edit again.",
     retry: null,
     send: null,
   });
   expect(sendShareChanges).not.toHaveBeenCalled();
+});
+
+it("counts a member's unsent pages when the push that found the lower level counted them", async () => {
+  const { notices } = await setup({
+    membership: true,
+    changed: true,
+    opened: {
+      status: "failed",
+      writes: [],
+      errorMessage: "not edit",
+      lasting: true,
+      pagesWaiting: 2,
+    },
+  });
+  await vi.waitFor(() => expect(notices).toHaveLength(1));
+  expect(notices[0]).toMatchObject({
+    title: "You can no longer edit Lisbon trip",
+    message: "2 unsent pages stay on this computer. They send when members can edit again.",
+  });
 });
 
 it("sends a member's unsent pages without a click once they can edit again", async () => {
@@ -364,6 +387,7 @@ it("sends a member's unsent pages without a click once they can edit again", asy
         workspaceId: "share-view",
         sharedView: true,
         membership: true,
+        workspaceName: "Lisbon trip",
         enabled,
         ready: true,
         ownerName: "ana@example.com",
@@ -586,6 +610,7 @@ it("keeps an unavailable push's pending refresh when writing stops in the same w
       useShareDirectWrites({
         sharedView: true,
         workspaceId: "share-view",
+        workspaceName: "Lisbon trip",
         enabled,
         ready: true,
         ownerName: "ana@example.com",
@@ -616,6 +641,7 @@ it("discards an unavailable push's pending refresh after A to B to A", async () 
       useShareDirectWrites({
         sharedView: true,
         workspaceId,
+        workspaceName: "Lisbon trip",
         enabled: true,
         ready: true,
         ownerName: "ana@example.com",
@@ -662,6 +688,7 @@ it.each(["ended", "changed"] as const)(
       useShareDirectWrites({
         sharedView: true,
         workspaceId: "share-view",
+        workspaceName: "Lisbon trip",
         enabled: false,
         ready: true,
         ownerName: "Ana",

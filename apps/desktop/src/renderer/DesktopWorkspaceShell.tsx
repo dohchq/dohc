@@ -6930,6 +6930,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceId,
     sharedView: !!shareView,
     membership: membershipView,
+    workspaceName: workspaceName(props.workspace),
     enabled: shareViewWritable,
     ready: workspaceIsReady,
     ownerName: shareGranterName,

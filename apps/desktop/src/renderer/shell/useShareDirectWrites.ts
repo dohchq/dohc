@@ -19,6 +19,9 @@ export type ShareViewRefresh = "current" | "ended" | "changed" | "stale" | "held
 
 export interface DirectWriteNotice {
   kind: DirectWriteNoticeKind;
+  // A state that needs the person, though nothing failed, shows as a warning with a title.
+  tone?: "warning";
+  title?: string;
   message: string;
   retry: (() => void) | null;
   send: { label: string; run: () => void } | null;
@@ -37,6 +40,7 @@ export function useShareDirectWrites(input: {
   sharedView: boolean;
   // A joined workspace, where a member's new pages take this path too.
   membership?: boolean;
+  workspaceName: string;
   // An Edit share view that has not ended and whose grant is readable.
   enabled: boolean;
   ready: boolean;
@@ -82,7 +86,8 @@ export function useShareDirectWrites(input: {
       delivery?: ShareDirectWriteAnswerDelivery,
     ): Promise<void> => {
       if (!isCurrent() || !latest.current.ready) return;
-      const { ownerName, refreshShareView, sendShareChanges, membership } = latest.current;
+      const { ownerName, refreshShareView, sendShareChanges, membership, workspaceName } =
+        latest.current;
       const notices: DirectWriteNotice[] = [];
       const showNotice = (notice: DirectWriteNotice) => {
         notices.push(notice);
@@ -103,10 +108,13 @@ export function useShareDirectWrites(input: {
           // them only at Edit, so they go when Edit returns and the view
           // pushes again.
           if (membership && access === "changed") {
+            // A push the relay refused counts what waits. One the view never sent, at a level below Edit, cannot.
+            const pages = result.status === "failed" ? result.pagesWaiting : null;
             showNotice({
               kind: "direct-write-unavailable",
-              message:
-                "You can no longer edit in this workspace. Your unsent pages stay on this computer and send when members can edit again.",
+              tone: "warning",
+              title: `You can no longer edit ${workspaceName}`,
+              message: `${pages === null ? "Your unsent pages stay" : pages === 1 ? "1 unsent page stays" : `${pages} unsent pages stay`} on this computer. They send when members can edit again.`,
               retry: null,
               send: null,
             });

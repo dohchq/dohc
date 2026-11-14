@@ -1101,6 +1101,8 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     (notice: DirectWriteNotice) => {
       const { send } = notice;
       push({
+        ...(notice.tone ? { tone: notice.tone } : {}),
+        ...(notice.title ? { title: notice.title } : {}),
         message: notice.message,
         retry: notice.retry,
         ...(send
