@@ -3,6 +3,8 @@ import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { chatTabPath } from "./workbench/workbenchState";
+import { editorTabTestId } from "../testPins";
 import { DesktopWorkspaceShell, SHARE_VIEW, makeShareBridge, shellBootstrapProps, storedStateWithTabs } from "./DesktopWorkspaceShell.testHarness";
 
 const JOINED: Workspace = {
@@ -59,8 +61,9 @@ describe("a joined workspace", () => {
     expect(toggle.hasAttribute("disabled") || toggle.getAttribute("aria-disabled") === "true").toBe(false);
   });
 
-  function withGroup(access: "view" | "comment" | "edit", checked: Awaited<ReturnType<ReturnType<typeof makeShareBridge>["checkSharedViewAccess"]>>) {
-    const bridge = makeShareBridge();
+  function withGroup(access: "view" | "comment" | "edit", checked: Awaited<ReturnType<ReturnType<typeof makeShareBridge>["checkSharedViewAccess"]>>,
+    uiState: Parameters<typeof makeShareBridge>[0] = undefined) {
+    const bridge = makeShareBridge(uiState);
     bridge.listChatChannels.mockResolvedValue({ channels: [{
       id: "launch", name: "Launch team", slug: "launch-team", kind: "channel",
       createdAtMs: 1, updatedAtMs: 1, threadCount: 1, unreadCount: 0, wireId: "launch",
@@ -85,6 +88,12 @@ describe("a joined workspace", () => {
     expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
     expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
     expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+  });
+
+  it("names a Group's restored tab before the tab is shown", async () => {
+    const launch = chatTabPath({ kind: "channel", id: "launch" });
+    withGroup("comment", { status: "current", access: "comment", role: "member" }, Promise.resolve(storedStateWithTabs(["a.md", launch], "a.md")));
+    await waitFor(() => expect(screen.getByTestId(editorTabTestId(launch)).textContent).toContain("Launch team"));
   });
 
   it("shows no composer at View, only the line that says who posts", async () => {

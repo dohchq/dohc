@@ -4534,7 +4534,7 @@ export function DesktopWorkspaceShell(props: {
     onNavigate: cancelDmNavigation,
     paths: chatPaths,
     activePaths: wb.editorGroups.flatMap((group) => (group.activeTab ? [group.activeTab] : [])),
-    enabled: captureAvailable,
+    enabled: chatsAvailable,
     agents: settingsAgents,
     readRevision: chatsReadRevision + chatsDmReadRevision,
   });
