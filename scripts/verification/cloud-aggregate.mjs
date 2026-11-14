@@ -116,20 +116,17 @@ export function aggregateRust(records) {
 export const CLOUD_JOB_GRAPH = {
   changes: { names: ["what changed"], needs: [] },
   "javascript-prepare": { names: ["shared preparation"], needs: ["changes"] },
-  "confinement-compiler": { names: ["compiler confinement"], needs: ["changes"] },
-  "confinement-relay": { names: ["relay confinement"], needs: ["changes"] },
   "javascript-workers": {
     names: Array.from({ length: JS_SHARDS - 1 }, (_, index) => `JS worker ${index + 1}`),
     needs: ["changes"],
   },
   javascript: { names: ["typecheck + tests"], needs: ["changes"] },
-  "rust-archive": { names: ["Rust build once"], needs: ["changes"] },
   "rust-policy": { names: ["Rust policy checks"], needs: ["changes"] },
   "rust-tests": {
     names: Array.from({ length: RUST_SHARDS - 1 }, (_, index) => `Rust tests ${index + 1}`),
-    needs: ["changes", "rust-archive"],
+    needs: ["changes"],
   },
-  rust: { names: ["engine gate"], needs: ["changes", "rust-archive"] },
+  rust: { names: ["engine gate"], needs: ["changes"] },
 };
 
 function gateJobNames(scope) {
@@ -139,7 +136,6 @@ function gateJobNames(scope) {
       ([id]) =>
         id === "changes" ||
         id === "javascript-prepare" ||
-        id.startsWith("confinement-") ||
         (scope === "rust" ? id.startsWith("rust") : id.startsWith("javascript")),
     )
     .flatMap(([, node]) => node.names);
@@ -176,6 +172,32 @@ function jobReadyAt(job, metadata) {
   return readyAt <= Date.parse(job.started_at) ? readyAt : createdAt;
 }
 
+export const RUST_ARCHIVE_BUILD_STEP = "Compile and inventory every workspace test";
+export const RUST_ARCHIVE_WAIT_STEP = "Wait for the shared Rust archive";
+
+// Rust test jobs start early and set up while engine gate builds their archive. A runner wait
+// delays such a job only by how late it reached its archive wait after the archive was
+// published. Returns null without the steps that show this, keeping the whole wait.
+function archiveLateSeconds(job, metadata) {
+  if (!CLOUD_JOB_GRAPH["rust-tests"].names.includes(job.name)) return null;
+  const gates = metadata.filter(
+    (gate) => gate.name === "engine gate" && gate.head_sha === job.head_sha,
+  );
+  const steps = gates.length === 1 && Array.isArray(gates[0].steps) ? gates[0].steps : [];
+  const built = steps.findIndex((step) => step.name === RUST_ARCHIVE_BUILD_STEP);
+  const upload = steps[built + 1];
+  const waits = (job.steps ?? []).filter((step) => step.name === RUST_ARCHIVE_WAIT_STEP);
+  if (
+    built < 0 ||
+    steps.filter((step) => step.name === RUST_ARCHIVE_BUILD_STEP).length !== 1 ||
+    !upload?.name.startsWith("Run actions/upload-artifact@") ||
+    waits.length !== 1
+  )
+    return null;
+  const late = (Date.parse(waits[0].started_at) - Date.parse(upload.completed_at)) / 1000;
+  return Number.isFinite(late) ? Math.max(0, late) : null;
+}
+
 function gateTiming(scope, required, metadata = required, transferSeconds = null) {
   if (
     required.some(
@@ -189,8 +211,12 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
   const start = Date.parse(required.find((job) => job.name === "what changed").started_at);
   const spanSeconds =
     (Math.max(...required.map((job) => Date.parse(job.completed_at))) - start) / 1000;
-  const wait = (job) =>
-    Math.max(0, (Date.parse(job.started_at) - jobReadyAt(job, metadata)) / 1000) || 0;
+  const wait = (job) => {
+    const seconds =
+      Math.max(0, (Date.parse(job.started_at) - jobReadyAt(job, metadata)) / 1000) || 0;
+    const late = archiveLateSeconds(job, metadata);
+    return late === null ? seconds : Math.min(seconds, late);
+  };
   const jobs = required.map((job) => ({
     name: job.name,
     createdAt: job.created_at,
@@ -199,19 +225,8 @@ function gateTiming(scope, required, metadata = required, transferSeconds = null
     conclusion: job.conclusion,
     runnerWaitSeconds: wait(job),
   }));
-  const preparedAt = Date.parse(
-    required.find((job) => job.name === "shared preparation").completed_at,
-  );
-  const confinementNames = [
-    ...CLOUD_JOB_GRAPH["confinement-compiler"].names,
-    ...CLOUD_JOB_GRAPH["confinement-relay"].names,
-  ];
   const longest = jobs
-    .filter(
-      (job) =>
-        job.name !== "what changed" &&
-        (!confinementNames.includes(job.name) || Date.parse(job.startedAt) > preparedAt),
-    )
+    .filter((job) => job.name !== "what changed")
     .reduce((a, b) => (a.runnerWaitSeconds > b.runnerWaitSeconds ? a : b));
   const contended = longest.runnerWaitSeconds > 30 || transferSeconds > 30,
     seconds = spanSeconds;

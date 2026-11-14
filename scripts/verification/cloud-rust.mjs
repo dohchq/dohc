@@ -14,9 +14,18 @@ import {
   testScratchParent,
 } from "../../tools/rust-engine-program/scratch-leak-report.mjs";
 import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test-node.mjs";
+import rustTestTimes from "./rust-test-times.json" with { type: "json" };
 
-export const RUST_SHARDS = 8;
+export const RUST_SHARDS = 7;
+// Default ubuntu-24.04 runners have 4 vCPUs, and nextest runs one test per CPU. An 8-vCPU
+// Blacksmith dispatch reserves too little. Every partition must compute the same plan, so this
+// stays a constant rather than a reading of the runner.
+export const RUST_TEST_THREADS = 4;
+// In run 43610854388, tests began 29 s wall after compile on partition 0, versus about 12 s elsewhere.
+export const RUST_PARTITION_ZERO_DELAY_SECONDS = 17;
 export const RUST_READER_SHARD = 1;
+// The reader tests run after the partition; across six CI runs they took 34 to 68 s wall, median 47 s.
+export const RUST_READER_SECONDS = 47;
 export const RUST_POLICY_STEPS = [
   "tree provenance",
   "native target",
@@ -52,6 +61,71 @@ export function passedRustTests(log) {
       .replace(/\x1b\[[0-9;]*m/gu, "")
       .matchAll(/^\s*PASS\s+\[\s*[\d.]+s\]\s+(?:\([^)]*\)\s+)?(.+?)\s*$/gmu),
   ].map((match) => match[1]);
+}
+
+export function partitionRustTests(
+  inventory,
+  count = RUST_SHARDS,
+  times = rustTestTimes,
+  readerSeconds = RUST_READER_SECONDS,
+  partitionZeroDelaySeconds = RUST_PARTITION_ZERO_DELAY_SECONDS,
+  threads = RUST_TEST_THREADS,
+) {
+  if (!Number.isSafeInteger(count) || count < 1)
+    throw new Error("A Rust partition count must be a positive integer.");
+  if (new Set(inventory).size !== inventory.length) throw new Error("Duplicate Rust test IDs.");
+  const tasks = inventory.map((id) => ({
+    id,
+    seconds:
+      times.tests[id] ??
+      (Object.hasOwn(times.binaries, id.split(" ")[0])
+        ? times.binaries[id.split(" ")[0]]
+        : times.defaultSeconds),
+  }));
+  if (tasks.some((task) => !Number.isFinite(task.seconds) || task.seconds <= 0))
+    throw new Error("Rust test estimates must be positive seconds.");
+  const partitions = Array.from({ length: count }, (_, index) => ({
+    seconds:
+      (index === 0 ? partitionZeroDelaySeconds : index === RUST_READER_SHARD ? readerSeconds : 0) *
+      threads,
+    tests: [],
+  }));
+  for (const task of tasks.sort(
+    (a, b) => b.seconds - a.seconds || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  )) {
+    const least = partitions.reduce((a, b) => (b.seconds < a.seconds ? b : a));
+    least.tests.push(task.id);
+    least.seconds += task.seconds;
+  }
+  return partitions.map((partition) => partition.tests);
+}
+
+export function rustPartitionFilters(assigned) {
+  // https://nexte.st/docs/filtersets/reference/#name-matchers
+  const escape = (name) =>
+    name.replace(/[^a-zA-Z0-9_:.-]/gu, (char) => `\\u{${char.codePointAt(0).toString(16)}}`);
+  const expressions = [];
+  let expression = "";
+  for (const id of assigned) {
+    const split = id.indexOf(" ");
+    if (split < 1 || split === id.length - 1) throw new Error(`Invalid Rust test ID: ${id}`);
+    const clause = `(binary_id(=${escape(id.slice(0, split))}) & test(=${escape(id.slice(split + 1))}))`;
+    // Linux limits one argument to 128 KiB, including its NUL; 32 KiB chunks leave margin.
+    if (Buffer.byteLength(clause) >= 32 * 1024)
+      throw new Error(`Rust test filter is too long: ${id}`);
+    if (expression && Buffer.byteLength(expression) + 3 + Buffer.byteLength(clause) >= 32 * 1024) {
+      expressions.push(expression);
+      expression = "";
+    }
+    expression += (expression ? " | " : "") + clause;
+  }
+  if (expression) expressions.push(expression);
+  return (expressions.length ? expressions : ["none()"]).flatMap((filter) => ["-E", filter]);
+}
+
+export function assertRustPartitionInventory(assigned, listed) {
+  if (JSON.stringify([...assigned].sort()) !== JSON.stringify([...listed].sort()))
+    throw new Error("The listed Rust partition inventory differs from its assignment.");
 }
 
 export async function cloudRust(part, index = 0) {
@@ -181,6 +255,8 @@ export async function cloudRust(part, index = 0) {
         repoRoot,
         "--extract-to",
         repoRoot,
+        // Partition zero extracts over the target directory it just built.
+        ...(index === 0 ? ["--extract-overwrite"] : []),
         "--message-format=json",
       ]);
       const extracted = rustTestInventory(JSON.parse(listed.stdout)).map((task) => task.id);
@@ -199,17 +275,20 @@ export async function cloudRust(part, index = 0) {
       scratch = join(testScratchParent(), `cloud-${randomUUID()}`);
       mkdirSync(scratch);
       writeFileSync(join(scratch, SCRATCH_SENTINEL), "cloud");
-      const partition = `hash:${index + 1}/${RUST_SHARDS}`;
+      report.assigned = partitionRustTests(all)[index];
+      save();
+      const filters = rustPartitionFilters(report.assigned);
       const selected = await step("partition inventory", "cargo", [
         "nextest",
         "list",
         ...reused,
-        "--partition",
-        partition,
+        ...filters,
         "--message-format=json",
       ]);
-      report.assigned = rustTestInventory(JSON.parse(selected.stdout)).map((task) => task.id);
-      save();
+      assertRustPartitionInventory(
+        report.assigned,
+        rustTestInventory(JSON.parse(selected.stdout)).map((task) => task.id),
+      );
       const result = await step(
         "test-workspace",
         "cargo",
@@ -217,8 +296,7 @@ export async function cloudRust(part, index = 0) {
           "nextest",
           "run",
           ...reused,
-          "--partition",
-          partition,
+          ...filters,
           "--no-fail-fast",
           "--no-tests=fail",
           "--retries=0",

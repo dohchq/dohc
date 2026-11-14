@@ -11,7 +11,7 @@
       "completed_at": "2026-11-11T13:04:14Z"
     },
     {
-      "name": "shared preparation + confinement",
+      "name": "shared preparation",
       "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
       "status": "completed",
       "conclusion": "success",
@@ -27,15 +27,6 @@
       "created_at": "2026-11-11T13:04:14Z",
       "started_at": "2026-11-11T13:04:19Z",
       "completed_at": "2026-11-11T13:08:09Z"
-    },
-    {
-      "name": "Rust build once",
-      "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
-      "status": "completed",
-      "conclusion": "success",
-      "created_at": "2026-11-11T13:04:14Z",
-      "started_at": "2026-11-11T13:04:19Z",
-      "completed_at": "2026-11-11T13:06:57Z"
     },
     {
       "name": "Rust policy checks",
@@ -150,8 +141,8 @@
       "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
       "status": "completed",
       "conclusion": "success",
-      "created_at": "2026-11-11T13:08:09Z",
-      "started_at": "2026-11-11T13:08:14Z",
+      "created_at": "2026-11-11T13:04:14Z",
+      "started_at": "2026-11-11T13:04:19Z",
       "completed_at": "2026-11-11T13:11:07Z"
     },
     {
@@ -182,15 +173,6 @@
       "completed_at": "2026-11-11T13:10:41Z"
     },
     {
-      "name": "Rust tests 10",
-      "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
-      "status": "completed",
-      "conclusion": "success",
-      "created_at": "2026-11-11T13:08:09Z",
-      "started_at": "2026-11-11T13:08:16Z",
-      "completed_at": "2026-11-11T13:10:05Z"
-    },
-    {
       "name": "Rust tests 5",
       "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
       "status": "completed",
@@ -200,15 +182,6 @@
       "completed_at": "2026-11-11T13:09:58Z"
     },
     {
-      "name": "Rust tests 8",
-      "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
-      "status": "completed",
-      "conclusion": "success",
-      "created_at": "2026-11-11T13:08:09Z",
-      "started_at": "2026-11-11T13:08:14Z",
-      "completed_at": "2026-11-11T13:10:08Z"
-    },
-    {
       "name": "Rust tests 3",
       "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
       "status": "completed",
@@ -216,33 +189,6 @@
       "created_at": "2026-11-11T13:08:09Z",
       "started_at": "2026-11-11T13:08:15Z",
       "completed_at": "2026-11-11T13:10:38Z"
-    },
-    {
-      "name": "Rust tests 7",
-      "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
-      "status": "completed",
-      "conclusion": "success",
-      "created_at": "2026-11-11T13:08:09Z",
-      "started_at": "2026-11-11T13:08:15Z",
-      "completed_at": "2026-11-11T13:09:59Z"
-    },
-    {
-      "name": "Rust tests 11",
-      "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
-      "status": "completed",
-      "conclusion": "success",
-      "created_at": "2026-11-11T13:08:09Z",
-      "started_at": "2026-11-11T13:08:16Z",
-      "completed_at": "2026-11-11T13:10:51Z"
-    },
-    {
-      "name": "Rust tests 9",
-      "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
-      "status": "completed",
-      "conclusion": "success",
-      "created_at": "2026-11-11T13:08:09Z",
-      "started_at": "2026-11-11T13:08:15Z",
-      "completed_at": "2026-11-11T13:10:05Z"
     },
     {
       "name": "Rust tests 4",
@@ -262,5 +208,6 @@
       "started_at": "2026-11-11T13:11:15Z",
       "completed_at": "2026-11-11T13:11:29Z"
     }
-  ]
+  ],
+  "adaptation": "Build and confinement jobs folded into the current graph; completion times retained. Rust worker starts retained to model delayed scheduling. Removed Rust test jobs above 6; retained all remaining timestamps."
 }
