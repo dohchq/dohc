@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 pub(super) mod restore;
 
@@ -46,7 +46,7 @@ pub struct LiveSettlementAudit {
     /// native tail keeps the native head ahead of acceptance.
     accepted: Option<crate::Ydoc>,
     terminal_source: bool,
-    receipts: Vec<ReceiptIdentity>,
+    application_count: usize,
     interval_digest: String,
     bootstrap_moment: String,
     bootstrap_digest: String,
@@ -263,15 +263,17 @@ impl LiveSettlementAudit {
             if latest.as_ref().map_or(0, |receipt| receipt.journal_cursor) != self.terminal_cursor {
                 return Err(corrupt());
             }
-            let receipts = read_interval(
+            let mut interval = IntervalDigest::default();
+            visit_interval(
                 tx,
                 &registration,
                 self.previous_cursor,
                 self.terminal_cursor,
-                self.receipts.len(),
+                Some(self.application_count),
+                |receipt| interval.push(&receipt),
             )
             .map_err(audit_error)?;
-            if receipts != self.receipts {
+            if interval.finish() != (self.application_count, self.interval_digest.clone()) {
                 return Err(corrupt());
             }
             let observed: i64 = tx.query_row("SELECT head_update_seq FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",
@@ -334,7 +336,7 @@ impl LiveSettlementAudit {
                 || saved_moment != moment
                 || saved_markdown != markdown
                 || saved_interval != self.interval_digest
-                || count != self.receipts.len() as i64
+                || count != self.application_count as i64
                 || sequence != self.sequence
             {
                 return Err(corrupt());
@@ -346,7 +348,7 @@ impl LiveSettlementAudit {
             return Err(invalid("a new settlement must cover an accepted edit"));
         }
         tx.execute("INSERT INTO live_device_settlements VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
-            params![id,self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.previous_cursor,self.terminal_cursor,self.previous_sequence,self.sequence,self.receipts.len() as i64,self.interval_digest,moment,markdown,vector,
+            params![id,self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.previous_cursor,self.terminal_cursor,self.previous_sequence,self.sequence,self.application_count as i64,self.interval_digest,moment,markdown,vector,
                 serde_json::to_string(b).map_err(StorageError::persist_public)?,serde_json::to_string(&self.coordinate).map_err(StorageError::persist_public)?,now_ms,if operation.is_some() {"restore"} else {"ordinary"},operation]).map_err(StorageError::persist_public)?;
         if self.terminal_source {
             tx.execute("INSERT INTO live_settlement_attribution_unavailable(workspace_id,moment_id,settlement_id,reason) VALUES (?1,?2,?3,'terminal-owner-source') ON CONFLICT(workspace_id,moment_id) DO NOTHING",params![b.workspace_id,moment,id]).map_err(StorageError::persist_public)?;
@@ -488,7 +490,7 @@ impl LiveSettlementAudit {
             application_count: self
                 .replay_anchor
                 .as_ref()
-                .map_or(self.receipts.len(), |anchor| anchor.application_count),
+                .map_or(self.application_count, |anchor| anchor.application_count),
             local_ydoc_sequence: self.sequence,
             moment_id,
             markdown_digest,
@@ -631,7 +633,7 @@ where
             Some((_,end,_,end_sequence,_)) if end == terminal_cursor && restored_origin.as_ref().is_some_and(|anchor|anchor.cursor == end) => (end,end_sequence,None),
             Some((start,end,start_sequence,end_sequence,_)) if end == terminal_cursor => (start,start_sequence,Some(end_sequence)),
             Some((_,end,_,end_sequence,refused_start)) if end < terminal_cursor => {
-                let cursor = if let Some(start) = refused_start { verified_previous_cursor(conn,held,start,origin_cursor,max_applications)? } else {end};
+                let cursor = if let Some(start) = refused_start { verified_previous_cursor(conn,held,start,origin_cursor)? } else {end};
                 // A successor's adoption verified its captured head, which
                 // holds the rows ordinary sync added after its predecessor's
                 // last settlement. Its first settlement covers from there.
@@ -645,13 +647,18 @@ where
             None => (origin_cursor,origin_sequence,None),
         };
         if replayed.is_some_and(|sequence| sequence < previous_sequence || sequence > head) { return Err(ApplicationError::Corrupt); }
-        let receipts = read_interval(conn,held,previous_cursor,terminal_cursor,max_applications)?;
-        let mut sequences=HashSet::new();
-        for (delivery,hash,cursor,epoch,sequence,_) in &receipts {
+        // A catch-up after refused settlements covers every application since
+        // the first refusal, however many. Reading them one at a time keeps
+        // its memory to one bit per native sequence.
+        let mut sequences = Sequences::new(previous_sequence, head);
+        let mut interval = IntervalDigest::default();
+        visit_interval(conn,held,previous_cursor,terminal_cursor,None,|receipt| {
+            let (delivery,hash,cursor,epoch,sequence,_) = &receipt;
             LiveUpdateReceipt { delivery_id:delivery.clone(),update_digest:hash.clone(),journal_cursor:*cursor,accepting_host_epoch:*epoch }.validate()?;
             integer(*sequence,1,head)?;
-            if *sequence>previous_sequence { sequences.insert(*sequence); }
-        }
+            sequences.insert(*sequence);
+            interval.push(&receipt)
+        })?;
         if head < previous_sequence { return Err(invalid("settlement application coverage is incomplete")); }
         // Every native sequence since the last settlement is an accepted
         // application or an update this owner answers for and has not
@@ -686,11 +693,11 @@ where
         } else {
             None
         };
-        let interval_digest=hex_sha256(&serde_json::to_vec(&receipts).map_err(|_| ApplicationError::Corrupt)?);
+        let (application_count,interval_digest) = interval.finish();
         let last_settled: Option<String> = conn.query_row("SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id],|row|row.get(0)).map_err(read_sql)?;
         // With nothing stored, the next settlement again starts at the origin.
         let empty = previous.is_none() && restored_origin.is_none() && previous_cursor == terminal_cursor;
-        Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:replayed.unwrap_or(covered_sequence),observed_head:head,accepted,terminal_source:replayed.is_none() && tail.terminal,receipts,interval_digest,
+        Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:replayed.unwrap_or(covered_sequence),observed_head:head,accepted,terminal_source:replayed.is_none() && tail.terminal,application_count,interval_digest,
             bootstrap_moment:origin_moment,bootstrap_digest:origin_digest,first:owner_origin.is_none() && previous.is_none() && last_settled.is_none(),restore:None,
             replay_anchor:restored_origin.filter(|anchor|anchor.cursor == terminal_cursor),empty })
     }).map_err(E::from)?;
@@ -704,15 +711,12 @@ fn verified_previous_cursor(
     held: &Registration,
     start: i64,
     origin: i64,
-    limit: usize,
 ) -> Result<i64, ApplicationError> {
     let b = &held.binding;
     let mut cursor = start.max(origin);
-    let mut visited = 0;
+    // Each step moves strictly back toward the origin, so the walk ends
+    // however many refused settlements queued up before their refusals.
     while cursor > origin {
-        if visited >= limit {
-            return Err(invalid("settlement application limit exceeded"));
-        }
         let prior: Option<(i64,String)> = conn.query_row(
             "SELECT p.previous_cursor,p.binding_json FROM live_device_settlements s
              JOIN live_settlement_attribution_unavailable u ON u.workspace_id=s.workspace_id AND u.moment_id=s.moment_id
@@ -738,7 +742,6 @@ fn verified_previous_cursor(
             return Err(ApplicationError::Corrupt);
         }
         cursor = previous.max(origin);
-        visited += 1;
     }
     Ok(cursor)
 }
@@ -1019,6 +1022,31 @@ fn read_interval(
     terminal: i64,
     max: usize,
 ) -> Result<Vec<ReceiptIdentity>, ApplicationError> {
+    let mut receipts = Vec::new();
+    visit_interval(
+        conn,
+        registration,
+        previous,
+        terminal,
+        Some(max),
+        |receipt| {
+            receipts.push(receipt);
+            Ok(())
+        },
+    )?;
+    Ok(receipts)
+}
+
+/// Passes each application in `(previous, terminal]` to `visit` in journal
+/// order. More than `max` applications is an error.
+fn visit_interval(
+    conn: &Connection,
+    registration: &Registration,
+    previous: i64,
+    terminal: i64,
+    max: Option<usize>,
+    mut visit: impl FnMut(ReceiptIdentity) -> Result<(), ApplicationError>,
+) -> Result<(), ApplicationError> {
     let b = &registration.binding;
     let mut query=conn.prepare("SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch,local_ydoc_sequence,current_path,selector_paths_json,restore_fence_generation FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND journal_cursor>?6 AND journal_cursor<=?7 ORDER BY journal_cursor LIMIT ?8").map_err(read_sql)?;
     let mut rows = query
@@ -1030,18 +1058,19 @@ fn read_interval(
             b.lineage_claim_id,
             previous,
             terminal,
-            max as i64 + 1
+            max.map_or(-1, |max| max as i64 + 1)
         ])
         .map_err(read_sql)?;
-    let mut receipts = Vec::new();
+    let mut count = 0;
     // An interval can hold applications from before restores cancelled after
     // their fences. Each step between applications, and from the last to the
     // binding, crosses only cancellations; fence admission bounds each step.
     let mut previous_generation: Option<i64> = None;
     while let Some(row) = rows.next().map_err(read_sql)? {
-        if receipts.len() == max {
+        if Some(count) == max {
             return Err(invalid("settlement application limit exceeded"));
         }
+        count += 1;
         let path: String = row.get(5).map_err(read_sql)?;
         let selectors: String = row.get(6).map_err(read_sql)?;
         let selectors: Vec<String> =
@@ -1073,19 +1102,113 @@ fn read_interval(
         previous_generation = Some(generation);
         let binding_digest =
             hex_sha256(&serde_json::to_vec(&historical).map_err(|_| ApplicationError::Corrupt)?);
-        receipts.push((
+        visit((
             row.get(0).map_err(read_sql)?,
             row.get(1).map_err(read_sql)?,
             row.get(2).map_err(read_sql)?,
             row.get(3).map_err(read_sql)?,
             row.get(4).map_err(read_sql)?,
             binding_digest,
-        ));
+        ))?;
     }
     if let Some(last) = previous_generation.filter(|last| *last != b.restore_fence_generation) {
         restore_fence::require_crossed(conn, &registration.namespace, b, last)?;
     }
-    Ok(receipts)
+    Ok(())
+}
+
+/// The digest of an interval's applications as one JSON list, hashed one
+/// application at a time.
+#[derive(Default)]
+struct IntervalDigest {
+    hash: sha2::Sha256,
+    count: usize,
+}
+
+impl IntervalDigest {
+    fn push(&mut self, receipt: &ReceiptIdentity) -> Result<(), ApplicationError> {
+        use sha2::Digest;
+        self.hash.update(if self.count == 0 { b"[" } else { b"," });
+        self.hash
+            .update(serde_json::to_vec(receipt).map_err(|_| ApplicationError::Corrupt)?);
+        self.count += 1;
+        Ok(())
+    }
+
+    fn finish(mut self) -> (usize, String) {
+        use sha2::Digest;
+        self.hash.update(if self.count == 0 {
+            &b"[]"[..]
+        } else {
+            &b"]"[..]
+        });
+        (self.count, dohc_engine_storage::hex(&self.hash.finalize()))
+    }
+}
+
+/// Distinct native sequences, one bit each for those in `(floor, head]`. The
+/// bits grow only as far as the sequences seen, never past a word per
+/// sequence plus a margin, so a corrupt head or sequence cannot force a huge
+/// allocation; the rest go to `outside`.
+struct Sequences {
+    floor: i64,
+    words: usize,
+    bits: Vec<u64>,
+    outside: BTreeSet<i64>,
+    len: usize,
+}
+
+impl Sequences {
+    fn new(floor: i64, head: i64) -> Self {
+        let span = head
+            .checked_sub(floor)
+            .and_then(|span| usize::try_from(span).ok())
+            .unwrap_or(0);
+        Self {
+            floor,
+            words: span.div_ceil(64),
+            bits: Vec::new(),
+            outside: BTreeSet::new(),
+            len: 0,
+        }
+    }
+
+    /// Ignores sequences at or below the floor.
+    fn insert(&mut self, sequence: i64) {
+        if sequence <= self.floor {
+            return;
+        }
+        let fresh = match usize::try_from(sequence.abs_diff(self.floor) - 1) {
+            Ok(index) if index / 64 < self.words && index / 64 <= self.len + 1024 => {
+                if self.bits.len() <= index / 64 {
+                    self.bits.resize(index / 64 + 1, 0);
+                }
+                let word = &mut self.bits[index / 64];
+                let bit = 1 << (index % 64);
+                // A sequence first seen before the bits reached it is in
+                // `outside`.
+                let fresh = *word & bit == 0 && !self.outside.contains(&sequence);
+                *word |= bit;
+                fresh
+            }
+            _ => self.outside.insert(sequence),
+        };
+        if fresh {
+            self.len += 1;
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl Extend<i64> for Sequences {
+    fn extend<I: IntoIterator<Item = i64>>(&mut self, sequences: I) {
+        for sequence in sequences {
+            self.insert(sequence);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1136,7 +1259,7 @@ mod publication_state_tests {
             observed_head: 1,
             accepted: None,
             terminal_source: false,
-            receipts: Vec::new(),
+            application_count: 0,
             interval_digest: digest.clone(),
             bootstrap_moment: "moment".into(),
             bootstrap_digest: digest,
@@ -1214,5 +1337,50 @@ mod publication_state_tests {
                 Ok::<_, StorageError>(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn sequences_count_each_distinct_sequence_once() {
+        let mut sequences = Sequences::new(10, i64::MAX);
+        sequences.extend([5, 10, 11, 11, 75, 1_000_000, 1_000_000, i64::MAX]);
+        assert_eq!(sequences.len(), 4);
+        assert!(sequences.bits.len() <= 1026);
+        let mut sequences = Sequences::new(0, 200_000);
+        sequences.extend([150_000, 1, 150_000]);
+        sequences.extend(2..=200_000);
+        assert_eq!(sequences.len(), 200_000);
+        let mut sequences = Sequences::new(i64::MIN, i64::MAX);
+        sequences.extend([i64::MIN, i64::MIN + 1, 0, i64::MAX, 0]);
+        assert_eq!(sequences.len(), 3);
+    }
+
+    // Stored settlements keep the digest of the whole list. A replay
+    // compares against it, so the streamed digest must be the same bytes.
+    #[test]
+    fn the_streamed_interval_digest_is_the_list_digest() {
+        let receipt = |n: i64| -> ReceiptIdentity {
+            (
+                format!("delivery-{n}"),
+                format!("{n:064x}"),
+                n,
+                1,
+                n,
+                "binding".into(),
+            )
+        };
+        for count in [0, 1, 3] {
+            let receipts: Vec<_> = (1..=count).map(receipt).collect();
+            let mut interval = IntervalDigest::default();
+            for receipt in &receipts {
+                interval.push(receipt).unwrap();
+            }
+            assert_eq!(
+                interval.finish(),
+                (
+                    receipts.len(),
+                    hex_sha256(&serde_json::to_vec(&receipts).unwrap())
+                )
+            );
+        }
     }
 }
