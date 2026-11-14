@@ -1,11 +1,13 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { format } from "node:util";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi, type MockInstance } from "vitest";
 import {
   asRelayWrite,
   loopHeldBetween,
+  recordEngineRequest,
   recordLiveSubmit,
   startRelayMainThreadTiming,
   stopRelayMainThreadTiming,
@@ -45,6 +47,18 @@ function store(autocheckpointPages: number) {
 
 type Summary = { writes: Record<string, { count: number; checkpoints: number }> };
 
+const MINUTE_LINE = "Relay main thread, last minute.";
+/** Each summary as the console prints it to the log, not the value it was handed. */
+function printedMinutes(log: MockInstance<typeof console.error>): unknown[] {
+  return log.mock.calls
+    .filter(([line]) => line === MINUTE_LINE)
+    .map((call) => {
+      const printed = format(...call);
+      expect(printed).not.toContain("[Object]");
+      return JSON.parse(printed.slice(MINUTE_LINE.length + 1));
+    });
+}
+
 function lastMinute(write: (checkpointing: ReturnType<typeof store>) => void): Summary {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -56,9 +70,9 @@ function lastMinute(write: (checkpointing: ReturnType<typeof store>) => void): S
     checkpointing.owner.close();
   }
   vi.advanceTimersByTime(60_025);
-  const summaries = log.mock.calls.filter(([line]) => line === "Relay main thread, last minute.");
+  const summaries = printedMinutes(log);
   expect(summaries).toHaveLength(1);
-  return summaries[0]![1] as Summary;
+  return summaries[0] as Summary;
 }
 
 it("counts each write under its kind once a minute, with the checkpoints that wrote the file", () => {
@@ -71,7 +85,7 @@ it("counts each write under its kind once a minute, with the checkpoints that wr
   // The read changed nothing, so it is not a write. Every commit checkpoints at one page, but the first
   // write of the store only learns the file's time.
   expect(summary.writes).toMatchObject({
-    save: { count: 4, checkpoints: 3 },
+    save: { count: 4, checkpoints: 3, writeMs: { p50: expect.any(Number) } },
     pass: { count: 1, checkpoints: 1 },
     other: { count: 1, checkpoints: 1 },
   });
@@ -89,7 +103,7 @@ it("counts no checkpoint while commits only append to the log", () => {
     appending.owner.close();
   }
   vi.advanceTimersByTime(60_025);
-  expect(log.mock.calls[0]?.[1]).toMatchObject({ writes: { save: { count: 4, checkpoints: 0 } } });
+  expect(printedMinutes(log)[0]).toMatchObject({ writes: { save: { count: 4, checkpoints: 0 } } });
 });
 
 it("records nothing and logs nothing until started", () => {
@@ -130,8 +144,18 @@ it("keeps each save result's figures apart, so fast refusals do not move success
   recordLiveSubmit("success", { checkMs: 40, rows: 3, loopMaxMs: null });
   recordLiveSubmit("success", { checkMs: 60, rows: 3, loopMaxMs: null });
   for (let i = 0; i < 5; i++) recordLiveSubmit("capacity-refused", { checkMs: 1, rows: null });
+  recordEngineRequest("sync.push", 2, 5);
   vi.advanceTimersByTime(60_025);
-  const summary = log.mock.calls[0]?.[1] as { saves: Record<string, unknown> };
+  const summary = printedMinutes(log)[0] as Record<string, unknown>;
+  // Each part's figures survive the printing as numbers, at every depth.
+  expect(summary.loop).toMatchObject({ samples: 2400, lateMs: { p50: 0, p90: 0, max: 0 } });
+  expect(summary.engine).toEqual({
+    "sync.push": {
+      count: 1,
+      waitMs: { p50: 2, p90: 2, max: 2 },
+      serveMs: { p50: 5, p90: 5, max: 5 },
+    },
+  });
   expect(summary.saves).toEqual({
     success: { count: 2, checkMs: { p50: 60, p90: 60, max: 60 }, rows: { p50: 3, p90: 3, max: 3 } },
     "capacity-refused": { count: 5, checkMs: { p50: 1, p90: 1, max: 1 } },

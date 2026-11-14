@@ -208,7 +208,8 @@ function reportMinute(minute: Minute) {
   if (minute.writes.size === 0 && minute.saves.size === 0 && minute.engine.size === 0) return;
   try {
     const loop = minute.loopLateMs;
-    console.error("Relay main thread, last minute.", {
+    // One JSON string: the console prints an object only two levels deep, and these figures sit deeper.
+    const summary = {
       loop: loop.length
         ? {
             samples: loop.length,
@@ -252,7 +253,8 @@ function reportMinute(minute: Minute) {
         ]),
       ),
       ...(minute.dropped ? { dropped: minute.dropped } : {}),
-    });
+    };
+    console.error("Relay main thread, last minute.", JSON.stringify(summary));
   } catch {
     /* Reporting must not stop the relay. */
   }

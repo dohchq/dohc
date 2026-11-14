@@ -86,7 +86,8 @@ it("sums each engine method's wait in the line and the engine's time once a minu
   await first;
   await second;
   vi.advanceTimersByTime(60_000);
-  expect(log.mock.calls[0]?.[1]).toMatchObject({
+  // The summary is printed as one JSON string.
+  expect(JSON.parse(log.mock.calls[0]?.[1] as string)).toMatchObject({
     engine: {
       "liveApplication.settle": {
         count: 1,
