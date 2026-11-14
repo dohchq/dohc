@@ -18,7 +18,7 @@ import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   markdownToYDoc,
-  needsContent,
+  isShellType,
   yDocToMarkdown,
 } from "./import-export.js";
 import {
@@ -859,7 +859,7 @@ function bodyFingerprint(
     if (
       fingerprint.kind === "element" &&
       fingerprint.children.length === 0 &&
-      needsContent(fingerprint.nodeName)
+      isShellType(fingerprint.nodeName)
     )
       continue;
     children.push(fingerprint);

@@ -890,10 +890,14 @@ export function getDohcProseMirrorSchema() {
   return schema;
 }
 
-/** Whether the schema refuses this node empty, as it refuses a list with no item. */
-export function needsContent(nodeName: string): boolean {
-  const type = schema.nodes[nodeName];
-  return type !== undefined && !type.contentMatch.validEnd;
+// Once empty, a list or item shows none of its attributes (a tick, a start number), so leaving
+// it out hides nothing. Other blocks the schema refuses empty stay refused: a callout's title
+// is text the Markdown file would keep.
+const SHELL_TYPES = new Set(["bulletList", "orderedList", "taskList", "listItem", "taskItem"]);
+
+/** Whether this element may be left out when empty, as a list or list item. */
+export function isShellType(nodeName: string): boolean {
+  return SHELL_TYPES.has(nodeName);
 }
 
 /**
@@ -901,16 +905,10 @@ export function needsContent(nodeName: string): boolean {
  * reader shows it, and a reading leaves it out instead of refusing the document.
  */
 export function isEmptyShell(element: Y.XmlElement): boolean {
-  if (!needsContent(element.nodeName)) return false;
-  const type = schema.nodes[element.nodeName]!;
-  const permitsText = type.contentMatch.matchType(schema.nodes.text!) != null;
-  return element
-    .toArray()
-    .every((child) =>
-      child instanceof Y.XmlElement
-        ? isEmptyShell(child)
-        : permitsText && child instanceof Y.XmlText && child.length === 0,
-    );
+  return (
+    isShellType(element.nodeName) &&
+    element.toArray().every((child) => child instanceof Y.XmlElement && isEmptyShell(child))
+  );
 }
 
 /** Deletes the empty shells a reading leaves out, for code that pairs blocks with elements. */

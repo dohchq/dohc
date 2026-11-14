@@ -430,6 +430,15 @@ describe("public Markdown schema", () => {
         doc.getXmlFragment("body").insert(1, [list]);
       }),
     );
+    // An empty callout still has a title the Markdown file would keep.
+    refused(
+      encode("- [ ] alpha\n\nbravo", (doc) => {
+        const callout = new Y.XmlElement("callout");
+        callout.setAttribute("calloutType", "note");
+        callout.setAttribute("title", "hidden");
+        doc.getXmlFragment("body").insert(1, [callout]);
+      }),
+    );
   });
   it("accepts a full 2 MiB file as one text run, and refuses one UTF-8 byte over", () => {
     // The limit counts the projected file, final newline included.
