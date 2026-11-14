@@ -485,15 +485,21 @@ pub struct OwnerPauseInput {
 ///
 /// The owner's text is in the store at every moment: as outbox entries
 /// before, as the copy's blob after. The caller writes the file from the blob.
+/// `unbind` runs the pause inside the sync layer's end of the binding, as a
+/// release does.
 pub fn pause_cached(
     store: &mut EngineStore,
     cache: &mut crate::WriterDocCache,
     input: &OwnerPauseInput,
     faults: &dyn dohc_engine_storage::FaultInjector,
+    unbind: impl FnOnce(
+        &rusqlite::Transaction<'_>,
+        &dyn Fn(&rusqlite::Transaction<'_>) -> Result<OwnerLiveStop, OwnerOutboxError>,
+    ) -> Result<OwnerLiveStop, OwnerOutboxError>,
 ) -> Result<OwnerLiveStop, OwnerOutboxError> {
     let key = key(&input.binding)?;
     let layer = cache.owner_layer(&key);
-    match store.write_with(faults, |tx| pause_in_tx(tx, input, layer))? {
+    match store.write_with(faults, |tx| unbind(tx, &|tx| pause_in_tx(tx, input, layer)))? {
         dohc_engine_storage::TxnOutcome::Committed(stop) => {
             cache.clear_owner_layer(&key);
             Ok(stop)

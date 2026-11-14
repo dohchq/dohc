@@ -652,6 +652,95 @@ impl ActorHandle {
         .await
     }
 
+    /// The relay's safety stop held the note: keep what the owner's screen
+    /// showed as a copy's blob and unbind the note at its applied cursor.
+    pub async fn owner_ydoc_pause(
+        &self,
+        input: dohc_engine_collab::owner_outbox::release::OwnerPauseInput,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::release::OwnerLiveStop, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let key = DocKey::new(
+                &input.binding.workspace_id,
+                &input.binding.main_version_id,
+                &input.binding.object_id,
+            )?;
+            Ok(dohc_engine_collab::owner_outbox::release::pause_cached(
+                store,
+                cache,
+                &input,
+                faults.as_ref(),
+                |tx, pause| dohc_engine_sync::unbind_owner_in_tx(tx, &key, owner_hold_error, pause),
+            ))
+        })
+        .await
+    }
+
+    /// A paused note's Stop and the copy's bytes, while Resume has not
+    /// cleared it.
+    pub async fn owner_ydoc_paused_copy(
+        &self,
+        key: DocKey,
+        token: CancellationToken,
+    ) -> Result<
+        Result<
+            Option<(
+                dohc_engine_collab::owner_outbox::release::OwnerLiveStop,
+                Vec<u8>,
+            )>,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::release::paused_copy_in(conn, &key)
+            }))
+        })
+        .await
+    }
+
+    /// The copy is on disk at `copy_path`.
+    pub async fn owner_ydoc_copy_written(
+        &self,
+        key: DocKey,
+        copy_path: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::release::OwnerLiveStop, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(
+                match store.write_with(faults.as_ref(), |tx| {
+                    dohc_engine_collab::owner_outbox::release::copy_written_in_tx(
+                        tx, &key, &copy_path, now_ms,
+                    )
+                }) {
+                    Ok(TxnOutcome::Committed(stop)) => Ok(stop),
+                    Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
+                    Err(error) => Err(error),
+                },
+            )
+        })
+        .await
+    }
+
     /// Main-owned accepted position used to resume the ordered native feed.
     pub async fn owner_ydoc_accepted_state(
         &self,

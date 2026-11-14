@@ -3547,20 +3547,37 @@ mod tests {
         let mut early = pause_input(&observed);
         early.applied_cursor = 3;
         assert!(matches!(
-            release::pause_cached(&mut store, &mut cache, &early, &NoFaults),
+            release::pause_cached(
+                &mut store,
+                &mut cache,
+                &early,
+                &NoFaults,
+                |tx, pause| pause(tx)
+            ),
             Err(OwnerOutboxError::AcceptedStateIncomplete)
         ));
         // So does one whose last row the layer does not hold.
         let mut missing_row = pause_input(&observed);
         missing_row.row_cursor = 6;
         assert!(matches!(
-            release::pause_cached(&mut store, &mut cache, &missing_row, &NoFaults),
+            release::pause_cached(
+                &mut store,
+                &mut cache,
+                &missing_row,
+                &NoFaults,
+                |tx, pause| pause(tx)
+            ),
             Err(OwnerOutboxError::AcceptedStateIncomplete)
         ));
 
-        let stop =
-            release::pause_cached(&mut store, &mut cache, &pause_input(&observed), &NoFaults)
-                .unwrap();
+        let stop = release::pause_cached(
+            &mut store,
+            &mut cache,
+            &pause_input(&observed),
+            &NoFaults,
+            |tx, pause| pause(tx),
+        )
+        .unwrap();
         let paused = stop.paused.clone().unwrap();
         assert_eq!((paused.applied_cursor, paused.row_cursor), (0, 5));
         assert!(!paused.copy_written);
@@ -3582,9 +3599,15 @@ mod tests {
 
         // The pause, Stop and an ordinary release leave a paused row as it is.
         assert_eq!(
-            release::pause_cached(&mut store, &mut cache, &pause_input(&observed), &NoFaults)
-                .unwrap()
-                .paused,
+            release::pause_cached(
+                &mut store,
+                &mut cache,
+                &pause_input(&observed),
+                &NoFaults,
+                |tx, pause| pause(tx)
+            )
+            .unwrap()
+            .paused,
             Some(paused.clone())
         );
         let stopped = committed(
@@ -3675,7 +3698,8 @@ mod tests {
                 &mut store,
                 &mut cache,
                 &pause_input(&observed),
-                &Crash(point)
+                &Crash(point),
+                |tx, pause| pause(tx)
             )
             .is_err());
             if point == FaultPoint::StorageBeforePersist {
@@ -3694,9 +3718,14 @@ mod tests {
             }
             // Running the road again ends paused with one copy holding the
             // owner's text, never a note holding a row above A.
-            let stop =
-                release::pause_cached(&mut store, &mut cache, &pause_input(&observed), &NoFaults)
-                    .unwrap();
+            let stop = release::pause_cached(
+                &mut store,
+                &mut cache,
+                &pause_input(&observed),
+                &NoFaults,
+                |tx, pause| pause(tx),
+            )
+            .unwrap();
             assert!(stop.paused.is_some());
             let copy = copy_text(&store).unwrap();
             assert!(copy.contains("Owner says: Committed by a collaborator"));
