@@ -5744,7 +5744,8 @@ export const ListChatChannelSharesResult = z.object({
   // surface shows those too and decides for each one whether this workspace
   // has already joined it.
   //
-  // NO row cap, and it must not gain one. These are dohc's own registry rows
+  // sharedChannelsIpc.test.ts checks requested local answers beyond the relay cap.
+  // These are dohc's own registry rows
   // and they are the authority for channelIsLocked: a read that refuses them
   // rejects the whole IPC call, the renderer reads an unknown listing, and
   // every channel goes read-only. Nothing needs a cap here now — the

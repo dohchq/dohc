@@ -208,8 +208,7 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
         return;
       }
     }
-    // Held from the accept until the press returns, so a handover waits for
-    // the admission and nothing is accepted once one begins.
+    // relayedPresses.test.ts checks the hold through acceptance and press settlement.
     const release = host.hold();
     if (release === null) return;
     try {

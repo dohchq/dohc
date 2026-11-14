@@ -3409,10 +3409,8 @@ async function readBoundedMetadataFile(absolutePath: string): Promise<string | n
   return readFile(absolutePath, "utf8");
 }
 
-// Matches the bridge contract's SitePackageScripts bound
-// (z.record(z.string().min(1).max(200), z.string().max(10_000))) — a script
-// name or body over these limits must never reach listSitePackages' output,
-// or the whole response fails Zod parsing over one script in one site. Drop
+// sitePackage.test.ts checks these bounds against SitePackageScripts.
+// A script over these limits fails Zod parsing for the whole response. Drop
 // (not truncate) the offending script: a truncated shell command is a
 // different, possibly dangerous, command, not a shorter version of the same
 // one — mirroring the title-too-long fix without inheriting its truncation.

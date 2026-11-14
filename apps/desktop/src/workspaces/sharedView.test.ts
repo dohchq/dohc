@@ -44,6 +44,8 @@ import { createTestScratch } from "./testTemp";
 import type { ImportCopyOutcome } from "./workspaceFiles";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { LocalStateUnavailableError, readLocalStateFrom } from "./workspaceLocalState";
+import { shareViewTakesLocalWrites, shareViewWriteScopeOf } from "./shareWriteGate";
+import { requireShareViewProposalScope } from "./shareProposals";
 
 // This suite isolates shared-view primitives. Owner admission itself is kept
 // real in shareViewFiles.test.ts and every file-operation/mount e2e suite.
@@ -578,6 +580,58 @@ class FakeShareRelay {
 }
 
 describe("shared view refresh", () => {
+  it.each(
+    ["view", "comment", "edit", "damaged"].flatMap((access) =>
+      [false, true].map((ended) => ({ access, ended })),
+    ),
+  )(
+    "agrees on local writes, journaling, and proposals for $access ended=$ended",
+    async ({ access, ended }) => {
+      const rootDir = await createTestScratch("dohc-shared-view-write-gates-");
+      const relay = new FakeShareRelay();
+      const harness = daemonHarness(relay);
+      const path = "docs/a.md";
+      relay.addWrite(path, "granter body");
+      await refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+      await writeFile(join(rootDir, path), "recipient edit", "utf8");
+      const pinnedSelector = { ...PINNED_SELECTOR, access: access === "damaged" ? null : access };
+      const marker = {
+        shareId: SHARE_ID,
+        recipientUserId: "recipient",
+        grantedSelector: pinnedSelector,
+        ended,
+      };
+      const writable = access === "edit" && !ended;
+      expect(shareViewTakesLocalWrites(shareViewWriteScopeOf(marker)!)).toBe(writable);
+      if (writable) expect(requireShareViewProposalScope(marker).grant).toEqual(pinnedSelector);
+      else expect(() => requireShareViewProposalScope(marker)).toThrow();
+
+      const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+      try {
+        const before = await momentIds(store);
+        const capture = captureStandaloneShareViewDivergence({
+          rootDir,
+          workspaceId: WORKSPACE,
+          store,
+          pinnedSelector,
+          shareId: SHARE_ID,
+          ended,
+        });
+        if (access === "damaged")
+          await expect(capture).rejects.toBeInstanceOf(SharePinInvalidError);
+        else await expect(capture).resolves.toMatchObject({ capturedPaths: writable ? 1 : 0 });
+        const after = await momentIds(store);
+        if (writable) expect(after).toHaveLength(before.length + 1);
+        else expect(after).toEqual(before);
+        const main = await store.ensureMainVersion({ workspaceId: WORKSPACE });
+        const head = await store.readTextFile({ workspaceId: WORKSPACE, versionId: main.id, path });
+        expect(head?.text).toBe(writable ? "recipient edit" : "granter body");
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
   describe("materialization through an in-view alias", () => {
     const store = {
       ensureMainVersion: async () => ({ id: "main" }),
