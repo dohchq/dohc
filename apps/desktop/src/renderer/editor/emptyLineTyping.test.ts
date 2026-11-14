@@ -534,6 +534,34 @@ it.each(pairs)(
   },
 );
 
+// The editor leaves this line when someone removes the first of two breaks before text.
+// Removing the remaining break brings the empty piece beside the text, where it can't stay,
+// so what was typed into it goes with it.
+it.each(pairs)(
+  "accepts both changes but loses what one person types at the start of a line while the other removes the line break after it (%s removes, %s types)",
+  async (remover, typist) => {
+    const baseline = seeded(["", null, "c"]);
+    const a = await pages[remover](baseline),
+      b = await pages[typist](baseline);
+    caretAt(a, 1, 1);
+    backspace(a);
+    caretAt(b, 1, 0);
+    type(b, "QZ");
+    const fromA = await a.take(),
+      fromB = await b.take();
+    expect([
+      verdict(baseline, [], fromA),
+      verdict(baseline, [fromA], fromB),
+      verdict(baseline, [], fromB),
+      verdict(baseline, [fromB], fromA),
+    ]).toEqual(ALL_ACCEPTED);
+    await exchange(a, b, fromA, fromB);
+    expect(yDocToMarkdown(b.doc)).toBe(yDocToMarkdown(a.doc));
+    expect(yDocToMarkdown(a.doc)).toContain("c\n");
+    expect(yDocToMarkdown(a.doc)).not.toContain("QZ");
+  },
+);
+
 // Text on both sides: removing either break brings the empty piece beside text, where it
 // can't stay, so what was typed into it goes with it. Both people still see the same note.
 it.each(pairs)(
