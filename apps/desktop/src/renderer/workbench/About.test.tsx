@@ -45,6 +45,7 @@ const bridgeMock = {
     >(),
   linksIn: vi.fn<DohcDesktopBridge["linksIn"]>(),
   chatFileMentionsPage: vi.fn<DohcDesktopBridge["chatFileMentionsPage"]>(),
+  workspaceMembers: vi.fn<DohcDesktopBridge["workspaceMembers"]>(),
 };
 
 const notices = { report: vi.fn(), clear: vi.fn() };
@@ -135,6 +136,7 @@ function Access(props: {
   facts?: AccessFacts;
   sharing?: boolean;
   membershipLevel?: "view" | "comment" | "edit";
+  membershipEnded?: boolean;
 }) {
   const [open, setOpen] = useState(props.open ?? true);
   return (
@@ -148,6 +150,7 @@ function Access(props: {
         ...contextFor(props.facts ?? SYNCED),
         sharing: props.sharing ?? false,
         ...(props.membershipLevel ? { membershipLevel: props.membershipLevel } : {}),
+        ...(props.membershipEnded ? { membershipEnded: true } : {}),
       }}
     />
   );
@@ -898,16 +901,68 @@ it("shows a member who joined inside the pacing window once the paced retry list
   }
 });
 
-  it("shows a membership's new level at once, before main lists it", async () => {
+it("shows a membership's new level at once, before main lists it", async () => {
+  bridgeMock.workspaceMembers.mockResolvedValue({status: "refused"});
+  bridgeMock.getObjectAccess.mockResolvedValue(
+    answer({
+      unknownReason: null,
+      coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
+      rows: [
+        share({
+          via: "received",
+          sharerName: "Sam",
+          subjectName: "Community",
+          access: "comment",
+          selector: { kind: "workspace", role: "member" },
+        }),
+      ],
+    }),
+  );
+  const { rerender } = render(<Access membershipLevel="comment" />);
+  const row = await screen.findByTestId("about-access-row");
+  expect(within(row).getByText("Can comment")).toBeTruthy();
+  rerender(<Access membershipLevel="view" />);
+  expect(within(screen.getByTestId("about-access-row")).getByText("Can view")).toBeTruthy();
+});
+
+  it("lists everyone in a joined workspace by name and role, from the Members page's source", async () => {
     bridgeMock.getObjectAccess.mockResolvedValue(
       answer({
         unknownReason: null, coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
-        rows: [share({ via: "received", sharerName: "Sam", subjectName: "Community", access: "comment", selector: { kind: "workspace", role: "member" } })],
+        rows: [share({ via: "received", sharerName: "Ana", subjectName: "Lisbon trip", access: "comment", selector: { kind: "workspace", role: "member" } })],
       }),
     );
-    const { rerender } = render(<Access membershipLevel="comment" />);
-    const row = await screen.findByTestId("about-access-row");
-    expect(within(row).getByText("Can comment")).toBeTruthy();
-    rerender(<Access membershipLevel="view" />);
-    expect(within(screen.getByTestId("about-access-row")).getByText("Can view")).toBeTruthy();
+    const person = (memberId: string, role: "owner" | "admin" | "member", name: string | null) =>
+      ({ memberId, role, state: "active" as const, name, email: null, invitedAtMs: null, joinedAtMs: 1, removedAtMs: null });
+    bridgeMock.workspaceMembers.mockResolvedValue({
+      status: "ready",
+      view: {
+        workspaceId: "workspace-a", workspaceName: "Lisbon trip", viewer: { memberId: "m-sam", role: "member" }, memberLevel: "comment", inviteLink: null,
+        people: [person("owner", "owner", "Ana Ruiz"), person("m-lee", "admin", "Lee Park"), person("m-sam", "member", "Sam Rivera"), person("m-kit", "member", null)],
+      },
+    });
+    render(<Access membershipLevel="comment" />);
+    await waitFor(() => expect(screen.getAllByTestId("about-access-person")).toHaveLength(4));
+    expect(bridgeMock.workspaceMembers).toHaveBeenCalledWith({ workspaceId: "workspace-a", request: { action: "list" } });
+    const rows = screen.getAllByTestId("about-access-person");
+    expect(rows.map((row) => row.textContent)).toEqual(["AAna RuizOwner", "LLee ParkAdmin", "SSam RiveraYouMember", "NNo nameMember"]);
+    expect(screen.getByTestId("about-access-count").textContent).toBe("4");
+    expect(screen.queryByTestId("about-access-row")).toBeNull();
+    expect(document.body.textContent).not.toContain("@");
   });
+
+  it("says on the member's own row that the membership ended", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({
+        unknownReason: null, coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
+        rows: [share({ via: "received", sharerName: "Ana", subjectName: "Lisbon trip", access: "edit", selector: { kind: "workspace", role: "member" } })],
+      }),
+    );
+    render(<Access membershipLevel="edit" membershipEnded />);
+    const row = await screen.findByTestId("about-access-row");
+    expect(row.dataset.status).toBe("revoked");
+    // The avatar shows the initial.
+    expect(row.textContent).toBe("YYouended");
+    expect(bridgeMock.workspaceMembers).not.toHaveBeenCalled();
+  });
+

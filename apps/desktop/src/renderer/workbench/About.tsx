@@ -29,6 +29,8 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
+import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
 import type {
   ChatFileMentionRecord,
   ChatThreadRecord,
@@ -1443,24 +1445,145 @@ function AccessRowView(props: { row: AccessRow }) {
 }
 
 // A level change applies at once, as it does to the composer, so the
-// membership's own row shows the level the relay last named.
+// membership's own row shows the level the relay last named. Once the
+// membership ends, that row says so.
 function withMembershipLevel(
   view: AccessView,
   level: AccessContext["membershipLevel"],
+  ended: boolean,
 ): AccessView {
   if (!level || view.status !== "ready") return view;
   const rows = view.answer.rows.map((row) =>
-    row.kind === "share" &&
-    row.via === "received" &&
-    row.status === "active" &&
-    row.selector?.kind === "workspace" &&
-    row.access !== level
-      ? { ...row, access: level }
-      : row,
+    row.kind !== "share" ||
+    row.via !== "received" ||
+    row.status !== "active" ||
+    row.selector?.kind !== "workspace"
+      ? row
+      : ended
+        ? { ...row, status: "revoked" as const }
+        : row.access !== level
+          ? { ...row, access: level }
+          : row,
   );
   return rows.some((row, index) => row !== view.answer.rows[index])
     ? { ...view, answer: { ...view.answer, rows } }
     : view;
+}
+
+const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const;
+// A member's workspace reaches everyone in it, so Access lists the people on
+// the Members page, as the relay names them to this account.
+type MemberPeople =
+  | { status: "loading" }
+  | { status: "failed" }
+  | { status: "refused" }
+  | { status: "ready"; view: WorkspaceMembersView };
+
+// It reads while the section is open, and keeps what it read while closed.
+function useMemberPeople(
+  workspaceId: string,
+  member: boolean,
+  expanded: boolean,
+  notices: AboutNotices,
+) {
+  const [read, setRead] = useState<{ key: string; people: MemberPeople } | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const identity = `about-access-members:${workspaceId}`;
+  useEffect(() => {
+    if (!member || !expanded) return;
+    let current = true;
+    // A list already shown stays while it reads again.
+    setRead((shown) =>
+      shown?.key === workspaceId && shown.people.status === "ready"
+        ? shown
+        : { key: workspaceId, people: { status: "loading" } },
+    );
+    void (async () =>
+      bridge().workspaceMembers({ workspaceId, request: { action: "list" } }))().then(
+      (result) => {
+        if (!current) return;
+        notices.clear(identity);
+        setRead({
+          key: workspaceId,
+          people:
+            result.status === "ready"
+              ? { status: "ready", view: result.view }
+              : { status: "refused" },
+        });
+      },
+      (cause: unknown) => {
+        if (!current) return;
+        setRead({ key: workspaceId, people: { status: "failed" } });
+        notices.report({
+          identity,
+          message: ipcErrorMessage(cause, "dohc could not load Members."),
+          cause,
+          retry: () => setAttempt((count) => count + 1),
+        });
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [attempt, expanded, identity, member, notices, workspaceId]);
+  return {
+    people: !member
+      ? null
+      : read?.key === workspaceId
+        ? read.people
+        : { status: "loading" as const },
+    retry: () => setAttempt((count) => count + 1),
+  };
+}
+
+function AboutMemberAccess(props: {
+  people: Exclude<MemberPeople, { status: "refused" }>;
+  expanded: boolean;
+  onToggle: () => void;
+  onRetry: () => void;
+}) {
+  const { people } = props;
+  return (
+    <AboutSection
+      id="access"
+      label="Access"
+      count={people.status === "ready" ? String(people.view.people.length) : undefined}
+      expanded={props.expanded}
+      onToggle={props.onToggle}
+    >
+      {people.status === "loading" ? (
+        <SkeletonLines rows={2} className="px-2 py-1" />
+      ) : people.status === "failed" ? (
+        <RetryRow testId="about-access-failed" onRetry={props.onRetry}>
+          dohc could not load Members.
+        </RetryRow>
+      ) : (
+        <ul className="m-0 list-none p-0" data-testid="about-access-people">
+          {people.view.people.map((person) => {
+            const self = person.memberId === people.view.viewer.memberId;
+            const name = person.name?.trim() || "No name";
+            return (
+              <li key={person.memberId}>
+                <div data-testid="about-access-person" className={`${ABOUT_ROW} h-7`}>
+                  <ChatAvatar
+                    presentation={relayPresentation(actorHueSlot(person.memberId), self)}
+                    name={name}
+                    kind="human"
+                    size="strip"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-ink" title={name}>
+                    {name}
+                  </span>
+                  {self ? <span className="shrink-0 text-[11px] text-subtle">You</span> : null}
+                  <span className="shrink-0 text-[11px] text-muted">{ROLE_WORDS[person.role]}</span>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </AboutSection>
+  );
 }
 
 // What Access asks about: a file by its path, or a chat by its wire identity.
@@ -1602,11 +1725,29 @@ export function AboutAccess(props: {
     () => ({ reason, server, openSyncSettings, connect }),
     [connect, openSyncSettings, reason, server],
   );
-  const { membershipLevel } = props.context;
+  const { membershipLevel } = props.context,
+    membershipEnded = props.context.membershipEnded === true;
   const view = useMemo(
-    () => withMembershipLevel(read.view, membershipLevel),
-    [membershipLevel, read.view],
+    () => withMembershipLevel(read.view, membershipLevel, membershipEnded),
+    [membershipEnded, membershipLevel, read.view],
   );
+  const members = useMemberPeople(
+    workspaceId,
+    membershipLevel !== undefined && !membershipEnded,
+    props.expanded,
+    props.notices,
+  );
+  // A relay that lists no Members page for this account leaves main's answer.
+  if (members.people && members.people.status !== "refused") {
+    return (
+      <AboutMemberAccess
+        people={members.people}
+        expanded={props.expanded}
+        onToggle={props.onToggle}
+        onRetry={members.retry}
+      />
+    );
+  }
   return (
     <AboutAccessView
       view={view}

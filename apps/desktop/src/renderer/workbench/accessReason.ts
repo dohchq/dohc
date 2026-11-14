@@ -29,6 +29,8 @@ export type AccessContext = {
   // A joined workspace's level as the relay last named it. The membership's
   // row shows it before main lists the change.
   membershipLevel?: "view" | "comment" | "edit";
+  // The joined workspace's membership ended.
+  membershipEnded?: boolean;
 };
 
 export function serverName(server: string): string {

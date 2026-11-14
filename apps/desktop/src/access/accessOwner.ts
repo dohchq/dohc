@@ -173,7 +173,15 @@ export function createAccessOwner<Workspace>(dependencies: {
         shareId: resolved.shareId,
         cursor: input.cursor,
       });
-      if (resolved.ended && answer.freshness === "fresh") answer.freshness = "stale";
+      if (resolved.ended) {
+        if (answer.freshness === "fresh") answer.freshness = "stale";
+        // The recipient's own grant no longer reaches the work, so its row says it ended rather than naming a level.
+        answer.rows = answer.rows.map((row) =>
+          row.kind === "share" && row.via === "received" && row.status === "active"
+            ? { ...row, status: "revoked" }
+            : row,
+        );
+      }
       return AccessAnswer.parse(answer);
     },
     sharing(workspace: Workspace, input: z.infer<typeof SharingAccessInput>): AccessAnswer {

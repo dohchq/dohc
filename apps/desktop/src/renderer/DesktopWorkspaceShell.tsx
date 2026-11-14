@@ -2472,13 +2472,13 @@ export function DesktopWorkspaceShell(props: {
     access: "view" | "comment" | "edit";
   } | null>(null);
   const shareAccess = accessFor?.view === shareView ? accessFor.access : shareView?.access;
-  // About's Access follows a level change at once, as the composer does.
+  // About's Access follows a level change at once, as the composer does, and says when the membership ended.
   const aboutAccessContext = useMemo<AccessContext>(
     () =>
       membershipView && shareAccess
-        ? { ...accessContext, membershipLevel: shareAccess }
+        ? { ...accessContext, membershipLevel: shareAccess, membershipEnded: shareViewEnded }
         : accessContext,
-    [accessContext, membershipView, shareAccess],
+    [accessContext, membershipView, shareAccess, shareViewEnded],
   );
   // A membership's role, as the relay last named it. It is keyed by share, so
   // a registry refresh after a level change keeps it.
@@ -2602,7 +2602,13 @@ export function DesktopWorkspaceShell(props: {
       });
     };
     refresh();
-  }, [workspaceIsReady, workspaceAdmission, shareViewEnded, refreshDatasets, reportCollectionsRead]);
+  }, [
+    workspaceIsReady,
+    workspaceAdmission,
+    shareViewEnded,
+    refreshDatasets,
+    reportCollectionsRead,
+  ]);
   // This computer's saved Collections list came up to date from the server.
   useEffect(() => {
     if (!workspaceIsReady || shareViewEnded) return;
@@ -2615,8 +2621,7 @@ export function DesktopWorkspaceShell(props: {
   // Reads the Collections list again, as Try again beside a list that could not be read.
   const retryCollectionsList = useCallback(() => {
     void refreshDatasets().catch((error) => {
-      if (!workspaceAdmission.superseded)
-        reportCollectionsRead(error);
+      if (!workspaceAdmission.superseded) reportCollectionsRead(error);
     });
   }, [refreshDatasets, reportCollectionsRead, workspaceAdmission]);
   // Keeps Collections no computer keeps yet on this one, then reads the list, and runs `then`, such as a tab's own read.
@@ -4496,9 +4501,7 @@ export function DesktopWorkspaceShell(props: {
   );
   const clearCollectionHistory = useCallback(() => setCollectionHistoryTab(null), []);
   const onMoreDataCollections = useCallback(() => {
-    void loadMoreDatasets().catch((error) =>
-      reportCollectionsRead(error),
-    );
+    void loadMoreDatasets().catch((error) => reportCollectionsRead(error));
   }, [loadMoreDatasets, reportCollectionsRead]);
   const onRestoreCollection = useCallback(() => {
     setRecoveryWorkspaceId(workspaceId);
@@ -6208,8 +6211,7 @@ export function DesktopWorkspaceShell(props: {
       if (!shareView || shareViewReadsCollections) void refreshCollections();
       if (!shareView) {
         void refreshDatasets().catch((error) => {
-          if (!workspaceAdmission.superseded)
-            reportCollectionsRead(error);
+          if (!workspaceAdmission.superseded) reportCollectionsRead(error);
         });
         void refreshKeptCopies();
         // Capture records kept typing in the batch that took the outside text.

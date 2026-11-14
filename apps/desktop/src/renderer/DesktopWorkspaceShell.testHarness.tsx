@@ -8,6 +8,7 @@ import type { ComponentProps } from "react";
 import { afterEach, expect, vi } from "vitest";
 import * as Y from "yjs";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
+import type { MembersResult } from "@dohc/cli/members";
 import type { OwnerRestoreRequest } from "../ipc/ownerRestoreContract";
 import type {
   AgentRunStateEvent,
@@ -1097,6 +1098,8 @@ export function makeBridge(
       nextCursor: null,
     })),
     requestAccessRefresh: vi.fn(async () => undefined),
+    // A member's Access lists the Members page. By default the relay lists none, which leaves main's answer.
+    workspaceMembers: vi.fn(async (): Promise<MembersResult> => ({ status: "refused" })),
     // About's per-file History still reads moments directly.
     listEngineMoments: vi.fn(async (): Promise<ListEngineMomentsResponse> => ({
       moments: [],
