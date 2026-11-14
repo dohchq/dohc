@@ -481,8 +481,7 @@ describe("share-level tool profiles", () => {
   });
 
   it("returns the relay's refusal of a member's invite as an error", async () => {
-    const reason =
-      "dohc could not send the invite because your role in this workspace does not allow it. Reload Members to see what you can do.";
+    const reason = "dohc could not send the invite. Only the owner and admins can invite.";
     const { client } = await connectedToolNames({
       ...base,
       root: await workspaceRoot(),

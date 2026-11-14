@@ -89,7 +89,9 @@ function failure(action: MembersRequest["action"], status: number): Error {
       );
     case 403:
       return new Error(
-        `dohc could not ${phrase} because your role in this workspace does not allow it. Reload Members to see what you can do.`,
+        action === "invite"
+          ? "dohc could not send the invite. Only the owner and admins can invite."
+          : `dohc could not ${phrase} because your role in this workspace does not allow it. Reload Members to see what you can do.`,
       );
     case 404:
       return new Error(

@@ -210,7 +210,7 @@ describe("workspace members actions", () => {
       ]);
     });
 
-    it("passes on the relay's refusal of a member's invite, naming the role", async () => {
+    it("passes on the relay's refusal of a member's invite, saying who can invite", async () => {
       const h = joined();
       h.relay.mockResolvedValueOnce(json({ error: "members_forbidden" }, 403));
       await expect(
@@ -218,9 +218,7 @@ describe("workspace members actions", () => {
           workspaceId: "ws-1",
           request: { action: "invite", email: "new@test" },
         }),
-      ).rejects.toThrow(
-        "dohc could not send the invite because your role in this workspace does not allow it. Reload Members to see what you can do.",
-      );
+      ).rejects.toThrow("dohc could not send the invite. Only the owner and admins can invite.");
       expect(calls(h.relay)).toEqual([
         `POST /sync/owner-ws/members/invites ${JSON.stringify({ email: "new@test", workspaceName: "Community" })}`,
       ]);

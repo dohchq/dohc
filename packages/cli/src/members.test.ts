@@ -120,11 +120,9 @@ describe("dohc members", () => {
     );
   });
 
-  it("starts a refusal as the other refusals do, and names the command that lists Members where the desktop says Reload Members", async () => {
+  it("starts a refusal as the other refusals do, and says who can invite", async () => {
     const request = async () => {
-      throw new Error(
-        "dohc could not send the invite because your role in this workspace does not allow it. Reload Members to see what you can do.",
-      );
+      throw new Error("dohc could not send the invite. Only the owner and admins can invite.");
     };
     const result = await executeCli({
       argv: ["members", "invite", "lee@test"],
@@ -135,8 +133,27 @@ describe("dohc members", () => {
     expect(result).toEqual({
       exitCode: 1,
       stdout: "",
+      stderr: "dohc: Could not send the invite. Only the owner and admins can invite.\n",
+    });
+  });
+
+  it("names the command that lists Members where the desktop says Reload Members", async () => {
+    const request = async () => {
+      throw new Error(
+        "dohc could not remove this person because Members changed first. Reload Members, then try again.",
+      );
+    };
+    const result = await executeCli({
+      argv: ["members", "remove", "m-bo"],
+      cwd: "/workspace",
+      env: {},
+      request,
+    });
+    expect(result).toEqual({
+      exitCode: 1,
+      stdout: "",
       stderr:
-        "dohc: Could not send the invite because your role in this workspace does not allow it. Run dohc members list to see what you can do.\n",
+        "dohc: Could not remove this person because Members changed first. Run dohc members list, then try again.\n",
     });
   });
 
