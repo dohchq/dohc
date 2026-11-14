@@ -237,8 +237,8 @@ pub fn list_requested_in(
         .collect()
 }
 
-/// The relay has retired exactly this binding's generation. The hook journals
-/// each original entry in the same transaction, as recovery replay does.
+/// The relay has retired exactly this binding's generation. The recorder
+/// journals each run of credited edits in the same transaction.
 ///
 /// `kept_snapshot` names the refused edits the desktop recorded before this
 /// release; a released Stop answers again only for the same one. Without
@@ -431,20 +431,33 @@ pub fn release_in_tx(
 /// One update and History row for each run of consecutive edits with the same
 /// credit, so a release replays and stores each run once rather than each edit.
 /// An edit already in the note's log stays alone, so the recorder still skips it
-/// instead of recording it again inside a run.
+/// instead of recording it again inside a run. A Collection record's edits all
+/// stay alone: its field history and record events need every value it held.
 fn credited_runs(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     credited: Vec<(EntryCredit, String, Vec<u8>)>,
 ) -> Result<Vec<crate::durable::CreditedUpdate>, OwnerOutboxError> {
+    let record = dohc_engine_domain::is_collection_record_bound_in_tx(
+        tx,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+    )
+    .map_err(|error| {
+        collab(CollabError::Corrupt {
+            reason: error.to_string(),
+        })
+    })?;
     let mut runs: Vec<(EntryCredit, Vec<Vec<u8>>, usize, bool)> = Vec::new();
     for (credit, digest, bytes) in credited {
-        let logged = crate::durable::blob_seq_in_log(tx, key, &digest, &bytes)
-            .map_err(collab)?
-            .is_some();
+        let alone = record
+            || crate::durable::blob_seq_in_log(tx, key, &digest, &bytes)
+                .map_err(collab)?
+                .is_some();
         match runs.last_mut() {
             Some((last, run, size, false))
-                if !logged
+                if !alone
                     && *last == credit
                     && *size + bytes.len() <= crate::limits::MAX_YDOC_UPDATE_BYTES =>
             {
@@ -453,7 +466,7 @@ fn credited_runs(
             }
             _ => {
                 let size = bytes.len();
-                runs.push((credit, vec![bytes], size, logged));
+                runs.push((credit, vec![bytes], size, alone));
             }
         }
     }
