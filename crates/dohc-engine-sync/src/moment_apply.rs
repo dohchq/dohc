@@ -832,6 +832,43 @@ fn apply_moment_append(
     validate_payload_sides(tx, payload)?;
     let remote_before = moment_before_from_payload(tx, payload)?;
 
+    // An owner device's edit of a note this host holds live joined the note's
+    // owner queue. The file change it came from waits for the relay's answer.
+    // Once the relay accepts the edit, the change is history and the note's
+    // settlement writes the file. A refused edit takes the ordinary path.
+    // On the computer bound to the note's live session, a file change whose
+    // text the live note already holds is history too, whichever edit
+    // brought the note there.
+    if mode.ordinary() {
+        let history_only = match take_device_update_answer(tx, envelope, payload, after_kind)? {
+            Some(DeviceUpdateAnswer::Pending) => {
+                return Err(SyncError::RetryableState {
+                    reason: "ydoc-session-live",
+                });
+            }
+            Some(DeviceUpdateAnswer::Accepted) => true,
+            Some(DeviceUpdateAnswer::Refused) | None => {
+                payload.operation == "write"
+                    && payload.path == payload.payload_after_path
+                    && conflicting_occupant.is_none()
+                    && !is_ydoc_settlement_moment_id(&payload.moment_id)
+                    && match after_text.as_deref() {
+                        Some(text) => live_text_is(tx, envelope, payload, text)?,
+                        None => false,
+                    }
+            }
+        };
+        if history_only {
+            ensure_file_object(tx, &envelope.workspace_id, payload)?;
+            insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
+            return Ok(MomentApplyResult {
+                conflicts_opened: 0,
+                materialization_changes: Vec::new(),
+                record_facts: None,
+            });
+        }
+    }
+
     if mode.ordinary()
         && payload.operation == "write"
         && conflicting_occupant.is_none()
@@ -1691,6 +1728,90 @@ fn origin_update_is_on_live_claim(
         |row| row.get(0),
     ).optional().map_err(SyncError::corrupt)?.flatten();
     Ok(claim.is_some())
+}
+
+/// Whether `envelope` comes from one of the owner's devices, and `payload`'s
+/// note is bound to a live session here whose accepted text is `text`. Only
+/// a storage failure is an error: the checks after this one decide every
+/// other answer the binding gives.
+fn live_text_is(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+    text: &str,
+) -> Result<bool, SyncError> {
+    if !crate::owner_private::owner_device_origin(&envelope.origin_id) {
+        return Ok(false);
+    }
+    let key = DocKey::new(
+        &envelope.workspace_id,
+        &payload.version_id,
+        &payload.object_id,
+    )
+    .map_err(|_| SyncError::CoordinateDiverged)?;
+    match crate::ydoc_apply::observed_owner_projection_in_tx(tx, &key, &payload.payload_after_path)
+    {
+        Ok(Some((_, accepted))) => Ok(accepted == text),
+        Ok(None) => Ok(false),
+        Err(SyncError::Storage(error)) => Err(SyncError::Storage(error)),
+        Err(_) => Ok(false),
+    }
+}
+
+/// The relay's answer to the owner queue entry a device's edit joined.
+enum DeviceUpdateAnswer {
+    Pending,
+    Accepted,
+    Refused,
+}
+
+/// The relay's answer to the owner queue entry that `payload`'s edit joined,
+/// or `None` when it joined none. Reading an answer removes its row, unless
+/// the change that reads it rolls back.
+fn take_device_update_answer(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+    after_kind: ContentKind,
+) -> Result<Option<DeviceUpdateAnswer>, SyncError> {
+    if payload.operation != "write"
+        || after_kind != ContentKind::Text
+        || payload.path != payload.payload_after_path
+    {
+        return Ok(None);
+    }
+    let found: Option<(bool, bool)> = tx
+        .query_row(
+            "SELECT COALESCE(e.accepted_receipt_json IS NOT NULL,0),COALESCE(e.pending=1,0) \
+             FROM live_device_update_covers c LEFT JOIN owner_ydoc_outbox_entries e \
+               ON e.delivery_id=c.delivery_id \
+             WHERE c.workspace_id=?1 AND c.update_origin_id=?2 AND c.moment_id=?3 \
+               AND c.version_id=?4 AND c.object_id=?5",
+            params![
+                envelope.workspace_id,
+                envelope.origin_id,
+                payload.moment_id,
+                payload.version_id,
+                payload.object_id
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let answer = match found {
+        None => return Ok(None),
+        Some((true, _)) => DeviceUpdateAnswer::Accepted,
+        Some((false, true)) => return Ok(Some(DeviceUpdateAnswer::Pending)),
+        // Refused, or gone without a receipt.
+        Some((false, false)) => DeviceUpdateAnswer::Refused,
+    };
+    tx.execute(
+        "DELETE FROM live_device_update_covers \
+         WHERE workspace_id=?1 AND update_origin_id=?2 AND moment_id=?3",
+        params![envelope.workspace_id, envelope.origin_id, payload.moment_id],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(Some(answer))
 }
 
 fn holds_earlier_lineage_artifact(

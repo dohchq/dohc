@@ -3431,8 +3431,10 @@ fn moment_append_equal_text_for_bound_owner_keeps_live_binding_checks() {
     } = restore_owner();
     let key = DocKey::new("ws", "main", "object").unwrap();
     let before = snapshot(&store, "object");
+    // From a share. An owner device's change whose text the relay accepted
+    // is history instead: see `tests::bound_device_change`.
     let op = envelope(
-        "unaudited-peer",
+        "share:unaudited-peer",
         0,
         "ws",
         present_text_payload(
@@ -3455,7 +3457,7 @@ fn moment_append_equal_text_for_bound_owner_keeps_live_binding_checks() {
         })
     ));
     assert_eq!(
-        read_replication_acked_seq(&store, "ws", "unaudited-peer").unwrap(),
+        read_replication_acked_seq(&store, "ws", "share:unaudited-peer").unwrap(),
         -1
     );
     assert_eq!(store.table_row_count("moments").unwrap(), 1);

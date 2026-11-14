@@ -76,6 +76,7 @@ const COMPARED_TABLES: &[&str] = &[
     "live_owner_adoptions",
     "live_owner_activations",
     "live_owner_retirements",
+    "live_device_update_covers",
     "released_tail_generations",
     "released_hold_revisions",
     "live_device_bootstraps",
