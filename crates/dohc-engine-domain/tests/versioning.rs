@@ -1,5 +1,3 @@
-//! Version identity, write boundaries, history, replay, and rollback traces.
-
 use dohc_engine_domain::store::SourceCaptureBounds;
 use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, ListMomentsQuery, MergeTextFileFromVersion,

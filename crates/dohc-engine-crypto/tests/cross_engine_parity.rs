@@ -89,7 +89,6 @@ fn aad_binds_workspace_and_path_fails_closed_across_paths() {
     )
     .unwrap();
 
-    // Decrypting entryA's ciphertext under path B fails closed (AAD mismatch).
     let path_b = str_field(b, "path");
     let err = open(&key, workspace, path_b, &sealed_a).unwrap_err();
     assert_eq!(

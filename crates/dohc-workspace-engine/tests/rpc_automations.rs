@@ -536,10 +536,6 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     .await;
     assert_eq!(drained, Value::Null, "nothing pending remains");
 
-    // The owner's re-run: the failed claim goes back to pending as run 2
-    // with the same facts, and announces itself so the executor wakes and
-    // the failure surface re-reads. Retrying it while it is pending changes
-    // nothing and announces nothing.
     let failures = call(
         &transport,
         &handle,
@@ -601,10 +597,6 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     );
     assert_eq!(rerun["change"], second["change"]);
 
-    // An executor that cannot run the claim yet hands it back: pending with
-    // the attempts it had before this serve and the same run. It announces
-    // nothing, so a held claim is not served straight back. Only a running
-    // claim can be released.
     while notices.try_recv().is_ok() {}
     let released = call(
         &transport,
@@ -870,13 +862,6 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     );
 }
 
-/// A record added on this computer and then written through
-/// `versionedText.write` claims once for each change: the added claim keys
-/// on the moment that created the file and lists its values, the field
-/// write keys on its history row and carries previous and next values, and
-/// a repeated or body-only write claims nothing. A write an automation
-/// authors claims as that automation, never for itself, and a rollback
-/// claims like any write. Each claim announces itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn records_added_and_written_on_this_computer_claim_once_through_rpc() {
     const RECORD: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1323,9 +1308,6 @@ fn claimed_events(
     claimed
 }
 
-/// A Group subscription made through RPC claims each matching message a
-/// local write stores, announces each claim, and serves the message with
-/// it. `chats.messages.get` reads the whole message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn group_messages_written_here_claim_through_rpc() {
     const TASK: &str = "collection:object-tasks#task";
@@ -1604,10 +1586,6 @@ async fn group_messages_written_here_claim_through_rpc() {
     );
 }
 
-/// A button press and a schedule step claim through RPC: a new press
-/// announces its claim and the same press sent again answers it without a
-/// second, a schedule starts its mark before it claims, and the marks read
-/// back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn presses_and_schedule_steps_claim_through_rpc() {
     const PAY: &str = "collection:Invoices#mark-paid";

@@ -258,12 +258,6 @@ fn write_file(f: &mut Fixture, text: &str, moment: &str) {
         .unwrap();
 }
 
-/// Each condition of the settled-B proof, failing alone, refuses the capture
-/// with no writes: a moment name without its settlement, a settlement at
-/// another terminal or another boundary, a state vector or file that is not
-/// accepted state at B, a local edit or catch-up row the Carried updates do
-/// not explain, a Carried update whose dependency is missing, and a Carried
-/// update from outside the chain.
 #[test]
 fn the_settled_source_proof_refuses_any_unexplained_difference() {
     let damages: [SourceDamage; 9] = [
@@ -395,11 +389,6 @@ fn only_the_current_adoptions_refusal_makes_attribution_unavailable() {
     assert!(!attribution_unavailable(&f), "a predecessor's refusal its chain already covered");
 }
 
-/// The relay refused the owner's edit X, the owner saved
-/// the copy, and retirement kept X with its bytes. Settled at B and released
-/// with nothing Carried, the Y.Doc returns to accepted state at B, so Resume
-/// captures from that state with no seed and nothing delivers X again. The
-/// kept entry keeps X's bytes, and the reopened outbox keeps no refusal.
 #[test]
 fn resume_starts_from_the_accepted_state_after_a_kept_refusal() {
     let mut f = Fixture::new();

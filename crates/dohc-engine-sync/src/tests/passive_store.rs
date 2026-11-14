@@ -401,8 +401,6 @@ fn passive_store_restarts_mid_history_across_a_secret_page() {
     assert!(!scratch.path().join(".env").exists());
 }
 
-/// A passive store is never hosted, and each relay row it applies or
-/// recognizes as redelivered moves its log frontier.
 #[test]
 fn passive_apply_advances_the_log_frontier_and_never_hosts() {
     let (_scratch, _path, mut store) = open_passive_store();

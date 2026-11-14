@@ -32,7 +32,6 @@ struct FakeLayer {
     base_disruptions: u64,
 }
 
-/// Records what the loop did and when, in virtual time.
 #[derive(Default)]
 struct Journal {
     starts: Vec<std::time::Duration>,
@@ -642,9 +641,6 @@ async fn a_flush_on_a_quiescent_layer_settles() {
 
 #[tokio::test(start_paused = true)]
 async fn a_flush_during_a_backoff_answers_promptly_and_honestly() {
-    // The caller must not sit out the escalating backoff (up to the 30s
-    // terminal probe) — that is indistinguishable from a hang. It gets an
-    // immediate honest "not settled, not running".
     let (outcome, waited) = flush_after(
         vec![Script::StartFails],
         std::time::Duration::from_millis(5300),
@@ -724,8 +720,6 @@ async fn flush_polling_does_not_defeat_the_restart_backoff() {
 
 #[tokio::test(start_paused = true)]
 async fn a_flush_that_never_converges_is_bounded() {
-    // A workspace under continuous mutation never reaches quiescence;
-    // flush must return an honest not-settled rather than spin forever.
     let (outcome, waited) = flush_after(
         vec![Script::HealthyButDirtyApply],
         std::time::Duration::from_secs(2),

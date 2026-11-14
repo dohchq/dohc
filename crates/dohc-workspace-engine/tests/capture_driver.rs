@@ -1,8 +1,3 @@
-//! Files-into-daemon composition acceptance: once a root-bound workspace is
-//! open, the watcher + reconcile driver notice EXTERNAL disk changes and
-//! record them autonomously — no RPC involved — across text, binary, and
-//! secret content; policy flips re-offer; teardown is clean and ordered.
-
 use crate::common;
 
 use common::*;

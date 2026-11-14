@@ -224,7 +224,6 @@ fn owner_adoption_evidence_matches_the_shared_vectors() {
     }
 }
 
-/// A prefix cut has no events after the prefix and ends at its terminal.
 #[test]
 fn a_prefix_cut_is_its_prefix_alone() {
     let mut f = Fixture::new();
@@ -246,12 +245,6 @@ fn a_prefix_cut_is_its_prefix_alone() {
     assert!(validate_cut(&f.cut, &f.binding, 1_000_000, 10).is_err(), "no predecessor");
 }
 
-/// The successor of the exact released tail adopts
-/// its prefix. It inserts its own activation under the lineage's origin,
-/// names the binding, and leaves the root adoption and the accepted history
-/// as they were. Unchanged state queues no seed; an offline edit queues one
-/// seed of the full local state, which writes no Y.Doc row. Replay answers by
-/// the exact activation ID, and only for the prefix it adopted.
 #[test]
 fn a_successor_adopts_its_released_prefix_without_touching_the_origin() {
     for edited in [false, true] {
@@ -327,10 +320,6 @@ fn a_successor_adopts_its_released_prefix_without_touching_the_origin() {
 }
 type SuccessionDamage = (&'static str, fn(&mut Fixture));
 
-/// Each successor requirement, failing alone, refuses with no writes: the
-/// exact predecessor, a capture that follows it, no sibling successor, no
-/// current activation in any namespace, the tail's boundary, the
-/// accepted-history endpoint, and a lineage already adopted.
 #[test]
 fn each_succession_requirement_refuses_without_writes() {
     let cases: [SuccessionDamage; 7] = [
@@ -375,7 +364,6 @@ fn each_succession_requirement_refuses_without_writes() {
             .unwrap();
         }),
         ("boundary", |f| {
-            // The cut names the history's real endpoint; the tail kept another.
             let root = f.cut.retained_prefix.clone().unwrap().predecessor_activation_id;
             write(f, &format!(
                 "UPDATE live_owner_activations SET released_boundary_json=json_set(released_boundary_json,
@@ -413,9 +401,6 @@ fn each_succession_requirement_refuses_without_writes() {
     }
 }
 
-/// Once a lineage adopted in
-/// one namespace, a capture in another neither adopts it first nor succeeds
-/// the released tail; each refuses with no writes.
 #[test]
 fn another_namespace_never_adopts_or_succeeds_an_adopted_lineage() {
     for (case, succeeds) in [("a first adoption", false), ("a succession", true)] {
@@ -458,11 +443,6 @@ fn another_namespace_never_adopts_or_succeeds_an_adopted_lineage() {
     }
 }
 
-/// A successor of a chain whose tail carried deliveries: its coverage holds
-/// the Covered entry and the Carried one, each with its receipt, and its seed
-/// follows them. A covered receipt that differs from accepted history, a
-/// carried entry its chain never listed, a listed delivery it lacks, and
-/// local state lacking the accepted state each refuse with no writes.
 #[test]
 fn a_successor_covers_its_chains_retained_entries() {
     for damage in ["none", "covered receipt", "unlisted carried", "missing carried", "local lacks accepted"] {
@@ -580,15 +560,6 @@ fn a_successor_covers_an_abandoned_seed_and_holds_only_its_own() {
     }
 }
 
-/// Two never-adopted
-/// captures. While the first one's retirement settles the document, the
-/// second can't adopt. Once the first releases, the second is stale: it
-/// follows nothing while the first is the tail, so neither its registration
-/// nor its adoption proceeds. A recapture follows the first and adopts first,
-/// with no prefix. Its descriptor and row name the same predecessor, so an
-/// unchanged recapture keeps its ID and resumes. A lineage never adopted
-/// keeps its first adoption after released captures, and its seed lands
-/// although released rows exist.
 #[test]
 fn adoption_waits_while_the_document_retires() {
     let mut f = imported_fixture();
@@ -653,7 +624,6 @@ const RECOVERY_TERMINAL: &str =
        terminal_reason='stale-binding' WHERE pending=1;
      UPDATE owner_ydoc_outboxes SET pending_bytes=0,oldest_entry_at_ms=NULL";
 
-/// Write a state the schema's checks refuse, as a damaged store could hold it.
 fn write_unchecked(f: &mut Fixture, sql: &str) {
     let raw = rusqlite::Connection::open(f._scratch.join("engine.db")).unwrap();
     raw.pragma_update(None, "ignore_check_constraints", true).unwrap();
@@ -794,12 +764,6 @@ fn release_and_return(f: &mut Fixture) {
     file_matches_local(f, "returned");
 }
 
-/// A refusal belongs to its delivery, never to the
-/// document's lineage. A native update and the owner write that built on it,
-/// refused through the host's refusal path; an adoption seed refused the same
-/// way; and an update enrollment recovery ended: each releases, and a
-/// successor then adopts. Coverage records each as Refused, and the entry
-/// keeps its terminal bytes, provenance and reason.
 #[test]
 fn a_refusal_ends_its_delivery_and_never_its_lineage() {
     for case in ["native update", "adoption seed", "enrollment recovery"] {
@@ -860,8 +824,6 @@ fn write_source(f: &mut Fixture, sequence: i64, source: &owner_outbox::OwnerOutb
     ));
 }
 
-/// Rewrite the native source of the entry at sequence 1, keyed as its append
-/// key would be.
 fn rewrite_source(f: &mut Fixture, change: impl FnOnce(&mut owner_outbox::OwnerOutboxNativeSource)) {
     let (key, json): (String, String) = f
         .store
@@ -1026,7 +988,6 @@ fn a_refused_seed_is_proven_by_its_capture() {
                json_extract(descriptor_json,'$.nativeHeadSequence')+1) WHERE activation_id=(SELECT activation_id {SEED_CAPTURE})"
         ))),
         ("unadopted activation", false, |f| {
-            // The same capture under an activation that never adopted.
             write(f, &format!(
                 "INSERT INTO ydoc_owner_activation_sources SELECT 'stray',relay_database_namespace,workspace_id,version_id,
                    object_id,lineage_claim_id,source_moment_id,source_digest,full_state_digest,descriptor_json {SEED_CAPTURE}"
@@ -1073,11 +1034,6 @@ fn quarantined_seed_released() -> (Fixture, String) {
     (f, root)
 }
 
-/// The successor reopens the outbox its predecessor's refused seed
-/// quarantined, in its adoption: active again, with its entries and sequence
-/// kept and the successor's seed next. A failure before commit rolls the
-/// reopening back with the adoption, and a replay after a lost reply writes
-/// nothing.
 #[test]
 fn a_successor_reopens_the_outbox_a_refused_seed_quarantined() {
     let (mut f, root) = quarantined_seed_released();
@@ -1286,11 +1242,6 @@ fn unadopted_source(f: &mut Fixture, seed: bool) {
     write_source(f, 2, &source);
 }
 
-/// Each first-adoption coverage requirement, failing alone over an enrolled
-/// owner's accepted, refused and accepted drafts, refuses with no writes:
-/// the strict refusal, no refused native update or seed, no terminal
-/// evidence beside an accepted receipt, receipt order across the refusal,
-/// and capacity that counts the refusal.
 #[test]
 fn a_first_adoption_refuses_what_its_coverage_cannot_account_for() {
     let cases: [SuccessionDamage; 8] = [
@@ -1306,7 +1257,6 @@ fn a_first_adoption_refuses_what_its_coverage_cannot_account_for() {
             "UPDATE owner_ydoc_outbox_entries SET terminal_reason='authority-refused' WHERE sequence=1",
         )),
         ("receipt order", |f| {
-            // The journal accepted the third draft before the first.
             let (mut first, mut third) = (f.cut.events[0].clone(), f.cut.events[1].clone());
             let cursors = (first.metadata.accepted.receipt.journal_cursor, third.metadata.accepted.receipt.journal_cursor);
             first.metadata.accepted.receipt.journal_cursor = cursors.1;
@@ -1340,9 +1290,6 @@ fn a_first_adoption_refuses_what_its_coverage_cannot_account_for() {
     }
 }
 
-/// The successor of a lineage whose baseline
-/// the reader built adopts its released prefix, its accepted state at B
-/// replayed from that baseline by the reader's rule.
 #[test]
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn a_reader_built_lineage_adopts_its_successor() {
@@ -1363,9 +1310,6 @@ fn a_reader_built_lineage_adopts_its_successor() {
     assert!(current);
 }
 
-/// A lineage whose baseline the reader built
-/// writes its checkpoint at the native cadence, and its accepted state
-/// replays from that checkpoint.
 #[test]
 #[ignore = "the Rust gate's reader phase runs it with DOHC_ENGINE_READER_CONFIG"]
 fn a_reader_built_lineage_checkpoints_at_the_native_cadence() {

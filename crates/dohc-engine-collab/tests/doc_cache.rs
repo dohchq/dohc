@@ -1,8 +1,3 @@
-//! WriterDocCache invariants: the in-tx
-//! tuple probe under hostile raw-SQL injection, the ABA and poison cases the
-//! differential check must catch, rollback/crash semantics, compaction
-//! re-base byte-equality, eviction, and the forced-close containment pin.
-
 use crate::common;
 
 use common::*;
@@ -53,9 +48,6 @@ fn independent_insert(text: &str) -> Vec<u8> {
     Ydoc::wire().plaintext_insert(0, text)
 }
 
-/// Redefine an update's plaintext payload in place (same client, same clocks,
-/// different content) — the hostile-redefinition shape the parity gate must
-/// reject.
 fn flip_payload_byte(update: &[u8], from: u8, to: u8) -> Vec<u8> {
     let marker = b"plainText";
     let marker_at = update
@@ -80,8 +72,6 @@ fn flip_payload_byte(update: &[u8], from: u8, to: u8) -> Vec<u8> {
     hostile
 }
 
-/// Append a row behind the cache's (and the durable API's) back: blob + log
-/// row + head bump, exactly what a hostile writer or missed hook would leave.
 fn inject_row(store: &mut EngineStore, key: &DocKey, bytes: &[u8], seq: i64) {
     let outcome = store
         .write_with(&NoFaults, |tx| -> Result<(), CollabError> {

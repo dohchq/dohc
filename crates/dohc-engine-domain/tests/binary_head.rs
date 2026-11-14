@@ -176,10 +176,6 @@ fn m2_same_path_binary_gen_is_strictly_below_next_text_and_is_superseded() {
     let _ = binary_sha;
 }
 
-/// Round-trip: a text write over a binary head, then rolling that text moment
-/// back, must restore the binary head exactly (content_kind='binary', the
-/// original binary sha, empty text), reconstructing the binary preimage from the
-/// moment's before_binary_sha256.
 #[test]
 fn rollback_text_over_binary_restores_the_binary_head() {
     let (_scratch, mut store) = open();
@@ -263,13 +259,6 @@ fn rollback_text_over_binary_restores_the_binary_head() {
     assert_eq!(err.code(), "binary-head-not-text");
 }
 
-/// Rolling back a first binary write (no preimage) removes the file and GCs the
-/// object — the binary head is not left as a phantom absent-text snapshot.
-///
-/// M1: the write also enqueued a durable materialization job. Rollback must
-/// cancel it, so draining the materializer afterward leaves NO file on disk. The
-/// pre-M1 code left the pending job, and the drain resurrected the rolled-back
-/// bytes onto disk while the DB said the path was absent.
 #[test]
 fn rollback_first_binary_write_removes_file_and_object() {
     let (scratch, mut store) = open();
@@ -379,11 +368,6 @@ fn rollback_first_binary_write_removes_file_and_object() {
     );
 }
 
-/// M1 COMPLETED-job half: rolling back a first binary write whose materialization
-/// job already drained to disk must reconcile disk with the absent DB head. The
-/// pending-cancel fix alone left disk holding the rolled-back bytes while the DB
-/// said absent; the rollback must enqueue a compensating DELETE so a later drain
-/// removes the file. Proven against disk, not just DB.
 #[test]
 fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
     let (scratch, mut store) = open();
@@ -430,8 +414,6 @@ fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
         )
         .expect("rollback completed binary write");
 
-    // A compensating job must be pending (the original completed job is not
-    // replayed; a new delete job restores disk).
     let pending: i64 = store
         .read_with(|conn| {
             conn.query_row(
@@ -446,8 +428,6 @@ fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
         "rollback of a completed write must enqueue a compensating job"
     );
 
-    // DISK-STATE proof: draining removes the resurrected file so disk matches the
-    // absent DB head.
     run_pending_jobs(
         &store,
         scratch.path(),
@@ -472,10 +452,6 @@ fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
     assert!(view.is_none(), "the DB head must be absent after rollback");
 }
 
-/// M1 COMPLETED-job half, overwrite branch: rolling back a binary write that
-/// overwrote a previous binary head, after both reached disk, must restore disk
-/// to the previous content (not leave the rolled-back bytes). Exercises the
-/// compensating write (restore-previous) branch, not just the delete branch.
 #[test]
 fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
     let (scratch, mut store) = open();
@@ -650,12 +626,6 @@ fn text_rollback_does_not_touch_a_materialization_job_with_the_same_id() {
     );
 }
 
-/// Finding A (crash-consistency): a pending materialization job does not prove
-/// the bytes never reached disk — the materializer can crash after the atomic
-/// rename lands but before marking the job complete
-/// (`MaterializeAfterRenameBeforeComplete`), leaving the written bytes on disk
-/// with a still-pending job. Rolling that write back must reconcile disk anyway:
-/// the compensating delete runs even though the original job was only pending.
 #[test]
 fn rollback_of_pending_binary_write_with_bytes_on_disk_cleans_disk() {
     let (scratch, mut store) = open();
@@ -668,8 +638,6 @@ fn rollback_of_pending_binary_write_with_bytes_on_disk_cleans_disk() {
         10,
     );
 
-    // Crash after the rename lands but before marking complete: bytes ON DISK,
-    // job stays PENDING.
     let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete);
     let results = run_pending_jobs(
         &store,
@@ -709,7 +677,6 @@ fn rollback_of_pending_binary_write_with_bytes_on_disk_cleans_disk() {
         .expect("pending count");
     assert_eq!(pending, 1, "the crashed job must remain pending");
 
-    // Roll back — must reconcile disk even though the job was only pending.
     VersionedTextStore::new(&mut store)
         .rollback_text_file_mutation(
             &RollbackTextFileMutation {

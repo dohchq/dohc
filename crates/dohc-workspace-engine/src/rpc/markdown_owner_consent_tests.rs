@@ -70,7 +70,6 @@ fn markdown_owner_consent_uses_only_the_forwarded_session_and_keeps_its_grant_un
     assert!(
         forwarded_owner_consent(&sessions, Some(&workspace), &binding(), Some("missing")).is_none()
     );
-    // A dropped failed attempt leaves the same grant in that session.
     drop(grant);
     let grant =
         forwarded_owner_consent(&sessions, Some(&workspace), &binding(), Some("owner")).unwrap();

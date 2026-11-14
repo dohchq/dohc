@@ -1156,9 +1156,6 @@ fn automation_claim_rows(store: &EngineStore, automation_id: &str) -> i64 {
         .expect("count claims")
 }
 
-/// Failed claims past 30 days leave run history, except the automation's
-/// newest failure, which its notice offers. An expired failure cannot run
-/// again, and every failure stays counted.
 #[test]
 fn failed_claims_expire_after_30_days_except_the_newest() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -1346,11 +1343,6 @@ fn the_claim_history_pages_newest_first_and_keeps_done_claims_30_days() {
     );
 }
 
-/// An executor that cannot run a claim yet hands it back: pending again,
-/// with the attempts it had before the serve and the same run, and served
-/// again by the next `claimNext`. Only a running claim can be released, and
-/// a claim whose holder dies after being served again still goes to the
-/// reaper.
 #[test]
 fn a_released_claim_is_pending_again_without_an_attempt() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -1661,10 +1653,6 @@ fn group_subscriptions_belong_to_collection_automations_and_validate() {
     assert_eq!(group_rows(&store, WS), Vec::new());
 }
 
-/// A Group message claims once for each subscription whose starting text it
-/// begins with, in the write that stores it, and the executor gets the
-/// message with the claim. A removed subscription and a second store of the
-/// same message claim nothing.
 #[test]
 fn a_group_message_claims_each_matching_subscription_once() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -1701,7 +1689,6 @@ fn a_group_message_claims_each_matching_subscription_once() {
     assert_eq!(claim.state, AutomationClaimState::Pending);
     assert_eq!(claim.created_at_ms, 20);
 
-    // The starting text is case-sensitive, and a reply claims like a post.
     let mut chats = LinkedChatStore::new(&mut store);
     chats
         .send_message(
@@ -1798,10 +1785,6 @@ fn a_group_message_claims_each_matching_subscription_once() {
     assert_eq!(claimed_ids(&claims), vec![ALL]);
 }
 
-/// Releasing freezes every Group subscription in the workspace at once: a
-/// message stored after it claims nothing here, a repeated release answers
-/// the same, and record subscriptions and another workspace's Group
-/// subscriptions stay.
 #[test]
 fn releasing_group_subscriptions_stops_message_claims_here() {
     const OTHER: &str = "ws-other";
@@ -1882,8 +1865,6 @@ fn releasing_group_subscriptions_stops_message_claims_here() {
     );
 }
 
-/// An automation's post never claims for that automation, carries its
-/// depth, and at the cap records the stop instead of a run.
 #[test]
 fn an_automations_message_skips_its_writer_and_stops_at_the_cap() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -2020,8 +2001,6 @@ fn changed_by(
     applied
 }
 
-/// A message in My agent that the dispatch runs the agent for: a person's
-/// request, or an automation's wake at its chain depth.
 fn ask_agent(
     store: &mut EngineStore,
     message_id: &str,
@@ -2071,10 +2050,6 @@ fn ask_agent(
         .expect("a run")
 }
 
-/// An automation that wakes the agent, and one that answers the agent's
-/// change, share one depth counter with the agent's run. Each hop goes one
-/// deeper, and the chain stops at the cap with a failed claim the owner sees
-/// in Notices, instead of the three waking each other forever.
 #[test]
 fn an_automation_and_the_agent_it_wakes_stop_each_other_at_the_cap() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -2157,7 +2132,6 @@ fn an_automation_and_the_agent_it_wakes_stop_each_other_at_the_cap() {
     assert_eq!(failures[0].error, AUTOMATION_CHAIN_STOPPED);
 }
 
-/// A run that covers several wakes writes one deeper than the deepest.
 #[test]
 fn a_run_covering_several_wakes_takes_the_deepest() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -2234,10 +2208,6 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
         vec![4]
     );
 
-    // A restart interrupts the run, and every trigger it covered goes back to
-    // the queue. The next run starts from the oldest request again, covers the
-    // person's later one, and still counts the wakes the interrupted run
-    // covered.
     chats
         .reclaim_running_dispatches(WS, 2, 16, &NO_FAULTS)
         .expect("reclaim");
@@ -2279,9 +2249,6 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
     assert_eq!(again.run.trigger_message_id, "m-first");
     assert_eq!(again.chain_depth, 4);
 
-    // A second restart gives back only what has attempts left. The person's
-    // request the run covered comes back even though the run's first request
-    // has used its attempts.
     chats
         .reclaim_running_dispatches(WS, 2, 19, &NO_FAULTS)
         .expect("reclaim again");
@@ -2294,9 +2261,6 @@ fn a_run_covering_several_wakes_takes_the_deepest() {
     assert_eq!(pending, vec!["m-early".to_owned()]);
 }
 
-/// An agent's post in a Group during a run claims at the run's depth, so the
-/// agent cannot start a chain over by posting. After the run, an agent's post
-/// claims at 0, as a person's does.
 #[test]
 fn an_agents_post_during_a_run_claims_at_the_runs_depth() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -2461,19 +2425,6 @@ fn sorted(mut claimed: Vec<(String, String)>) -> Vec<(String, String)> {
     claimed
 }
 
-/// Across a handover each Group message claims exactly once, whichever
-/// computer a message reaches first and whether it reaches the new host
-/// before or after it starts. The laptop hands over to the desk:
-///
-/// - m1 reaches both before the handover: the laptop claims it.
-/// - m2 is the laptop's own post it had not pushed; it reaches the desk after
-///   the desk starts: the laptop claimed it.
-/// - m3 reaches the laptop after it stopped and the desk before it starts:
-///   the desk claims it as it starts.
-/// - m4 reaches both after the handover: the desk claims it.
-/// - m5 is the laptop's automation's own post: it never claims for that
-///   automation, on either computer.
-/// - m0 was posted before the automations started: nothing claims it.
 #[test]
 fn each_group_message_claims_exactly_once_across_a_handover() {
     let mut laptop = Computer::new();
@@ -2514,8 +2465,6 @@ fn each_group_message_claims_exactly_once_across_a_handover() {
     laptop.store_message(&m3);
     laptop.store_message(&m4);
 
-    // The desk runs at the released generation: before it has the handover,
-    // nothing changes and nothing it stores claims.
     assert!(desk.watch(3, None, 40).needs_handover);
     assert_eq!(group_rows(&desk.store, WS), Vec::new());
     desk.watch(3, fetched(3, handover), 40);
@@ -2547,7 +2496,6 @@ fn each_group_message_claims_exactly_once_across_a_handover() {
         }
     );
 
-    // Back to the laptop: what both decided travels on, so nothing claims twice.
     let back = release_automation_groups(&mut desk.store, WS, 50, &NO_FAULTS)
         .expect("release")
         .handover;
@@ -2573,9 +2521,6 @@ fn each_group_message_claims_exactly_once_across_a_handover() {
     );
 }
 
-/// The coverage window: a host keeps what it decided for a window, starts
-/// every subscription no earlier than the window, and a handover carries the
-/// window at most. A message older than the window claims on neither side.
 #[test]
 fn a_handover_carries_one_window_and_the_new_host_starts_there() {
     let window = AUTOMATION_GROUP_COVERAGE_MS;
@@ -2603,8 +2548,6 @@ fn a_handover_carries_one_window_and_the_new_host_starts_there() {
     assert!(desk.claimed.is_empty(), "both were decided or are too old");
 }
 
-/// A handover carries at most its bound of decided messages, and starts
-/// after the newest one it leaves out.
 #[test]
 fn a_handover_past_its_bound_starts_after_what_it_leaves_out() {
     let mut laptop = Computer::new();
@@ -2652,9 +2595,6 @@ fn a_handover_past_its_bound_starts_after_what_it_leaves_out() {
     );
 }
 
-/// An automation the handover names that the new host cannot watch yet, as
-/// when its Group has not synced there, keeps its start. Once the new host
-/// watches it, it claims each stored message nobody decided, from that start.
 #[test]
 fn an_automation_the_new_host_cannot_watch_yet_keeps_its_start() {
     let mut laptop = Computer::new();
@@ -2679,7 +2619,6 @@ fn an_automation_the_new_host_cannot_watch_yet_keeps_its_start() {
         vec![(ALL.to_owned(), 10, false), (TASK.to_owned(), 10, true)],
         "the task automation waits, frozen, with its start"
     );
-    // Its Group arrives: it starts where the laptop started it.
     desk.watch(3, None, 50);
     assert_eq!(
         sorted(desk.claimed.clone()),
@@ -2715,8 +2654,6 @@ fn a_computer_that_never_ran_its_generation_says_so_and_the_first_takes_its_own_
     );
 }
 
-/// Each new decision keeps the host's coverage within its bound, with no
-/// settle, and starts each subscription after what it leaves out.
 #[test]
 fn each_decision_keeps_the_coverage_bounded() {
     let mut laptop = Computer::new();
@@ -2783,9 +2720,6 @@ fn each_decision_keeps_the_coverage_bounded() {
     assert_eq!(skips.ahead_at_ms, None);
 }
 
-/// A message another host decided for one automation stays decided while
-/// the same message is decided for the next: the bound applies once every
-/// subscription has decided it.
 #[test]
 fn a_message_at_the_bound_claims_nothing_its_last_host_decided() {
     let mut laptop = Computer::new();
@@ -2821,9 +2755,6 @@ fn a_message_at_the_bound_claims_nothing_its_last_host_decided() {
     );
 }
 
-/// A watch that replays several subscriptions keeps every decision until
-/// all of them are in place: one automation's replay never pushes out what
-/// the next one decided on the last host.
 #[test]
 fn a_replay_never_pushes_out_what_the_next_subscription_decided() {
     let mut laptop = Computer::new();
@@ -2850,9 +2781,6 @@ fn a_replay_never_pushes_out_what_the_next_subscription_decided() {
     );
 }
 
-/// A handover carries every decision the host keeps, however it is dated:
-/// one dated past the host's clock, as another computer's decision can be,
-/// counts toward the bound like any other and is never left out.
 #[test]
 fn a_handover_carries_every_decision_it_keeps_however_it_is_dated() {
     let mut laptop = Computer::new();
@@ -2894,9 +2822,6 @@ fn a_handover_carries_every_decision_it_keeps_however_it_is_dated() {
     assert!(task.decided.contains(&("m-later".to_owned(), later)));
 }
 
-/// A message dated more than the allowance past this computer's clock
-/// decides nothing as it arrives, so a forged date cannot hold the coverage,
-/// and the owner can hear why.
 #[test]
 fn a_message_dated_past_the_clock_decides_nothing() {
     let mut laptop = Computer::new();
@@ -2924,9 +2849,6 @@ fn a_message_dated_past_the_clock_decides_nothing() {
     assert_eq!(skips.late_at_ms, None);
 }
 
-/// A handover called off before any other computer ran: taking up again,
-/// this computer starts what it froze where it was, and claims what reached
-/// it while it had stopped. A handover it took already is not taken again.
 #[test]
 fn a_called_off_handover_starts_what_was_frozen_where_it_was() {
     let mut laptop = Computer::new();
@@ -2953,9 +2875,6 @@ fn a_called_off_handover_starts_what_was_frozen_where_it_was() {
     );
 }
 
-/// After a take over, which has no handover, what this computer froze in an
-/// earlier turn starts from now: it replays nothing the last host may have
-/// decided. So it does after the relay lost what it recorded.
 #[test]
 fn after_a_take_over_what_was_frozen_starts_from_now() {
     let mut desk = Computer::new();
@@ -2983,10 +2902,6 @@ fn after_a_take_over_what_was_frozen_starts_from_now() {
     );
 }
 
-/// A computer that took over and never watched after it ran nothing since;
-/// the host it took over from did. A called-off handover later still finds
-/// the take over newer than its last watch, so it starts from now and
-/// replays nothing that host decided.
 #[test]
 fn a_take_over_this_computer_never_watched_after_still_starts_from_now() {
     let mut laptop = Computer::new();

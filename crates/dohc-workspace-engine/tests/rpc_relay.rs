@@ -781,9 +781,6 @@ async fn bounded_push_publishes_an_idle_open_document_and_its_next_edit_succeeds
         "the continuation must send the open document without another edit: {continued}"
     );
 
-    // The push claimed the lineage under the session. An edit that still
-    // expects the unclaimed lineage is refused; the engine does not infer
-    // that the claim continues the editor's document.
     let next =
         base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(24, " and after"));
     id += 1;
@@ -801,8 +798,6 @@ async fn bounded_push_publishes_an_idle_open_document_and_its_next_edit_succeeds
         .expect_err("an unclaimed expectation must not write into the claimed lineage");
     assert_eq!(stale.message, "ydoc-lineage-stale");
 
-    // The resync shows the editor the claim this device made from its own
-    // history, so the editor keeps its document and writes under that claim.
     id += 1;
     let resynced = ProtocolEngineService::call(
         service.as_ref(),

@@ -34,9 +34,6 @@ fn carried_twice_at(cursor: i64) -> (Fixture, LiveUpdateReceipt, CarriedDelivery
     (f, covered, c1, c2)
 }
 
-/// [`carried_twice_at`] before its successor captures: the predecessor
-/// released with C1 and C2 Carried, its document back in scope with the file
-/// holding the local Y.Doc's text.
 fn released_carrying_twice(cursor: i64) -> (Fixture, LiveUpdateReceipt, CarriedDelivery, CarriedDelivery) {
     let (mut f, covered, c1, _) = covered_and_carried();
     let second = native_tail_edit(&mut f, "# Carried again\n", 13);
@@ -54,8 +51,6 @@ fn released_carrying_twice(cursor: i64) -> (Fixture, LiveUpdateReceipt, CarriedD
     (f, covered, c1, c2)
 }
 
-/// The journal proves the current activation's seed absent, so
-/// reconciliation abandons it.
 fn abandon_seed(f: &mut Fixture) {
     let absent = JournalEvidence { receipts: vec![], absent: vec![pending_seed_delivery(f)] };
     reconcile(f, 10, None, Some(&absent)).unwrap();
@@ -92,7 +87,6 @@ fn applies(f: &mut Fixture, event: AdmittedLiveUpdate) -> LiveUpdateHostApplicat
     ack
 }
 
-/// Everything an application could write.
 const APPLICATION_WRITES: [&str; 14] = [
     "live_device_update_applications",
     "live_device_application_first_seen",
@@ -216,10 +210,6 @@ fn a_repeated_stop_keeps_the_chains_carried_deliveries() {
     }
 }
 
-/// A seed the relay accepted and its activation never applied is Carried
-/// too, and its activation's capture proves it: S1's seed, once S1 released,
-/// resolves for S2 only while that capture holds its full state. Damaged, it
-/// refuses the resolution and S2's adoption with no writes.
 #[test]
 fn an_inherited_seed_is_proven_by_its_capture() {
     for intact in [true, false] {
@@ -259,12 +249,6 @@ fn move_entry(f: &mut Fixture, c2: &CarriedDelivery, change: &str) {
     ));
 }
 
-/// Each requirement of an inherited Carried entry, failing alone for C2,
-/// refuses the shared resolution, S1's release, and S2's adoption after it,
-/// with no writes: no terminal evidence beside its receipt, the listed
-/// receipt saved in full, its own digest, its native sequence and that
-/// sequence's provenance, its document and lineage, a source in the released
-/// chain, and one listing.
 #[test]
 fn inherited_carried_evidence_refuses_without_writes() {
     let damages: [InheritedDamage; 9] = [
@@ -349,10 +333,6 @@ fn inherited_carried_evidence_refuses_without_writes() {
     }
 }
 
-/// The retained suffix drains while the
-/// successor's seed waits for its receipt. C2 cannot overtake C1, each
-/// applies once under its original delivery with its accepted history, and a
-/// row past F still waits for the seed.
 #[test]
 fn the_retained_suffix_drains_in_journal_order_while_the_seed_waits() {
     let (mut f, covered, c1, c2) = carried_twice();
@@ -367,8 +347,6 @@ fn the_retained_suffix_drains_in_journal_order_while_the_seed_waits() {
     held(&mut f, past);
 }
 
-/// Journal rows between Carried deliveries keep their order: a row before
-/// the earliest unapplied one applies, and a row after it waits for it.
 #[test]
 fn rows_between_carried_deliveries_apply_in_journal_order() {
     let (mut f, covered, c1, c2) = carried_twice_at(8);
@@ -390,8 +368,6 @@ fn rows_between_carried_deliveries_apply_in_journal_order() {
     ]);
 }
 
-/// The successor's seed applies only after the retained suffix drains,
-/// whether its receipt is still pending or was saved first.
 #[test]
 fn the_seed_cannot_overtake_the_retained_suffix() {
     for receipt_first in [false, true] {
@@ -410,10 +386,6 @@ fn the_seed_cannot_overtake_the_retained_suffix() {
     }
 }
 
-/// Once every Carried delivery has an application, the
-/// suffix still resolves each one and checks its application exactly. One
-/// applied at another accepting epoch conflicts, so a later delivery refuses
-/// with nothing written.
 #[test]
 fn a_conflicting_carried_application_refuses_after_every_carried_delivery_applied() {
     let (mut f, _, c1, c2) = carried_twice();
@@ -430,10 +402,6 @@ fn a_conflicting_carried_application_refuses_after_every_carried_delivery_applie
     assert_eq!(rows(&f, &APPLICATION_WRITES), before, "a refusal writes nothing");
 }
 
-/// An applied Carried delivery, delivered again exactly, returns its saved
-/// ACK and writes nothing, before and after the suffix drains and after a
-/// restart. A replay that changes its bytes, digest, receipt or cursor, or
-/// names another delivery at its cursor, conflicts and writes nothing.
 #[test]
 fn an_applied_carried_delivery_replays_exactly_or_conflicts() {
     let (mut f, _, c1, c2) = carried_twice();
@@ -466,9 +434,6 @@ fn an_applied_carried_delivery_replays_exactly_or_conflicts() {
     }
 }
 
-/// A successor of a successor drains what both predecessors carried, in
-/// journal order: C2 from the first, and the seed S1 had accepted at 7 but
-/// never applied. Its own seed waits for both.
 #[test]
 fn a_second_successor_drains_both_predecessors_carried_deliveries() {
     let (mut f, covered, c1, c2) = carried_twice();
@@ -502,8 +467,6 @@ fn a_second_successor_drains_both_predecessors_carried_deliveries() {
     ]);
 }
 
-/// A collaborator's paragraph `index`, as ordinary sync brings it while live
-/// editing is stopped: a native row no live delivery applied.
 fn catch_up_row(f: &mut Fixture, index: i64) {
     let bytes = f.doc.richdoc_append_paragraph(&format!("Caught up {index}"));
     let remote = crate::RemoteUpdate { origin_id: "peer".into(), origin_seq: index, bytes };
@@ -512,11 +475,6 @@ fn catch_up_row(f: &mut Fixture, index: i64) {
     assert!(matches!(applied.outcome, TxnOutcome::Committed(crate::ReplicationApplyOutcome::Applied { .. })));
 }
 
-/// A root whose native update the host applied at 3 and, with `carried`,
-/// whose updates C1 and C2 the relay accepted at 5 and 6 without the host
-/// applying them, released after its settlement through F. Ordinary sync then
-/// adds `catch_up` rows before S1 captures and adopts, its seed pending.
-/// Returns the covered receipt and the Carried deliveries.
 fn resumed_after_catch_up(carried: bool, catch_up: i64) -> (Fixture, LiveUpdateReceipt, Vec<CarriedDelivery>) {
     let mut f = Fixture::new();
     f.adopt().unwrap();
@@ -585,7 +543,6 @@ fn coverage_floor(f: &Fixture, settlement: &str) -> i64 {
         .unwrap()
 }
 
-/// Everything a settlement records.
 const SETTLEMENT_WRITES: [&str; 4] = [
     "live_device_settlements",
     "live_settlement_attribution_unavailable",
@@ -605,13 +562,6 @@ fn replays(f: &mut Fixture, stored: &LiveSettlementResult, settle: impl Fn(&mut 
     }
 }
 
-/// A successor's settlement projects accepted
-/// state at its terminal, never a delivery it has not applied, whatever
-/// receipt it saved. With C1 applied and C2 not, only C1's content settles;
-/// once C2 applies, the next settlement holds it; once S1's own seed applies,
-/// the next holds what ordinary sync brought before its capture. The seed's
-/// receipt is saved before C1 applies or after it, before the suffix drains
-/// either way, and ordinary sync adds rows before the capture or none.
 #[test]
 fn a_successor_settles_only_what_it_applied() {
     for (receipt_first, catch_up) in [(true, 0), (false, 0), (true, 2)] {
@@ -636,9 +586,6 @@ fn a_successor_settles_only_what_it_applied() {
     }
 }
 
-/// The current activation's own native update stays out of its settlement
-/// while the relay's receipt is all it has: acknowledgement alone exposes
-/// nothing. Applied, it settles.
 #[test]
 fn an_acknowledged_own_update_settles_once_applied() {
     let mut f = Fixture::new();
@@ -657,10 +604,6 @@ fn an_acknowledged_own_update_settles_once_applied() {
     assert!(moment_text(&f, "applied").contains("Own edit"));
 }
 
-/// An unapplied inherited delivery keeps the tail private below the coverage
-/// floor too. S1, its seed abandoned so nothing of its own is private, and
-/// nothing applied: C1 and C2 alone make its tail private, and its settlement
-/// at B projects only the accepted state its predecessor settled.
 #[test]
 fn an_inherited_delivery_below_the_floor_stays_private() {
     let (mut f, covered, carried) = resumed_after_catch_up(true, 0);
@@ -717,12 +660,6 @@ fn a_successor_replays_its_predecessors_settlement_as_stored() {
     replays(&mut f, &settled, |f| settle_as(f, Some(terminal.clone()), "retired"));
 }
 
-/// Ordinary sync's rows between a release and the successor's adoption are
-/// covered by the successor's verified capture, with Carried deliveries and
-/// without. Its first settlement starts coverage at its adopted head and its
-/// journal interval at its predecessor's settlement, and no application is
-/// recorded for those rows. Replayed after a restart, it answers what it
-/// stored and writes nothing.
 #[test]
 fn catch_up_rows_before_adoption_need_no_application() {
     for carried in [false, true] {
@@ -745,9 +682,6 @@ fn catch_up_rows_before_adoption_need_no_application() {
     }
 }
 
-/// What a settlement audit at `terminal` projects, through the fixture's
-/// handle or, with `retiring`, in the retirement form, recording nothing:
-/// accepted state while its tail keeps anything private, otherwise none.
 fn audited(f: &mut Fixture, retiring: bool, terminal: Option<LiveUpdateReceipt>) -> Result<Option<String>, ApplicationError> {
     fn project(_: &mut EngineStore, audit: &LiveSettlementAudit) -> Result<Option<String>, ApplicationError> {
         Ok(match audit.accepted_prefix() {
@@ -797,11 +731,6 @@ fn native_sequence_of(f: &Fixture, delivery: &str) -> i64 {
         .unwrap()
 }
 
-/// A root applies a remote prefix at 3. The relay accepts its `count` native
-/// updates at 5 and on, and it settles the prefix at B with coverage starting
-/// at its adopted head. It releases the later updates as Carried.
-/// S1 then captures straight away, with no catch-up rows, and adopts: its
-/// seed waits at the last Carried update's native sequence.
 fn carried_since_the_floor(count: i64) -> (Fixture, LiveUpdateReceipt, Vec<CarriedDelivery>) {
     let mut f = Fixture::new();
     f.adopt().unwrap();
@@ -866,11 +795,6 @@ fn a_seed_at_a_carried_sequence_settles_at_b() {
     }
 }
 
-/// A chain seed shares a native sequence with its predecessor's last update.
-/// S1's seed, accepted and never applied, is Carried beside C2 at C2's
-/// sequence; S2 inherits both and its own seed names that sequence too.
-/// Acknowledged, S2's settlement at B replays the stored range, before and
-/// after a restart, with no writes.
 #[test]
 fn a_chain_seed_shares_its_predecessors_last_sequence() {
     let (mut f, covered, carried) = carried_since_the_floor(2);
@@ -903,13 +827,6 @@ fn refused_then_resumed() -> (Fixture, LiveUpdateReceipt) {
     (f, covered)
 }
 
-/// A refusal the released chain left stays private on
-/// replay. P's refused update lies above the stored floor and names P, not
-/// S. Settled at B, it keeps the tail private, and the projection holds only
-/// accepted state, never the refused content S's local Y.Doc still holds:
-/// with S's seed acknowledged, and with it abandoned so that the refusal
-/// alone keeps the tail private, below the floor too. Before and after a
-/// restart, with no writes.
 #[test]
 fn a_predecessors_refusal_stays_private_on_replay() {
     for abandoned in [false, true] {
@@ -933,11 +850,6 @@ fn a_predecessors_refusal_stays_private_on_replay() {
 
 type ChainRefusalDamage = (&'static str, fn(&mut Fixture));
 
-/// Only a strict refusal by an activation of the released chain stays
-/// private. One whose source names an activation outside the chain, or one
-/// released only in another namespace, one failing the strict
-/// representation, and another activation's pending entry leave the
-/// settlement Corrupt, with no writes.
 #[test]
 fn another_activations_entry_outside_a_chain_refusal_is_corrupt() {
     let damages: [ChainRefusalDamage; 4] = [

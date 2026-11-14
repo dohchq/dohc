@@ -62,8 +62,6 @@ fn committed(unproven: Vec<RetainedContribution>) -> RetainedCoverage {
     RetainedCoverage::Unproven(UnprovenCommitment::of(unproven).expect("unproven work"))
 }
 
-/// The work `tail` retains without proof, as its validation reads it, which
-/// its binding names by commitment.
 fn unproven_of(f: &Fixture, tail: &ProtectedTail) -> Vec<RetainedContribution> {
     let work = tail_work(f, tail);
     assert!(work.contradictions.is_empty(), "{}: {:?}", tail.namespace, work.contradictions);
@@ -103,7 +101,6 @@ fn carried(delivery: &CarriedDelivery) -> RetainedContribution {
     carried_by(delivery, native_agent())
 }
 
-/// An acknowledged seed, Carried: it credits nobody.
 fn carried_seed(delivery: &CarriedDelivery) -> RetainedContribution {
     carried_by(delivery, RetainedAuthors::credited(None, None).unwrap())
 }
@@ -132,11 +129,6 @@ fn native_agent() -> RetainedAuthors {
     .unwrap()
 }
 
-/// A released tail protects its lineage while
-/// retained work lacks proof of application. Its binding names the scope,
-/// the incoming coordinate, the head and the tail's coverage. An acknowledged
-/// seed the host never applied is Carried work too. Nothing retained, a
-/// current activation, or no chain protects nothing.
 #[test]
 fn a_released_tail_protects_its_lineage_while_its_retained_work_lacks_proof() {
     let (f, _, c1, c2) = released_at_b();
@@ -163,7 +155,6 @@ fn a_released_tail_protects_its_lineage_while_its_retained_work_lacks_proof() {
         }
     );
     assert_eq!(ReleasedLineageBinding::from_canonical_json(&binding.canonical_json()), Some(binding.clone()));
-    // The feed's namespace is the binding's own: another names another hold.
     let elsewhere = IncomingCoordinate { relay_namespace: Some("elsewhere".into()), ..incoming() };
     let moved_feed = protected_from(&f, &elsewhere).expect("protected");
     assert_eq!(moved_feed.incoming, elsewhere);
@@ -319,8 +310,6 @@ fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
     let [kept]: [RetainedContribution; 1] = only_unproven(&f).try_into().unwrap();
     assert_eq!((kept.locator(), kept.authors()), (locator, &in_run_a), "the draft's run");
 
-    // One Carried delivery's journal row contradicts it; the other still
-    // reads, and the tail commits to neither.
     let (mut f, _, c1, _) = released_at_b();
     write_unchecked(&mut f, &format!("PRAGMA foreign_keys=OFF;
         UPDATE ydoc_updates SET actor_origin_id='impostor' WHERE seq={}", c1.native_sequence));
@@ -335,7 +324,6 @@ fn contradictory_provenance_invalidates_the_whole_tail_and_names_its_work() {
         }]
     );
 
-    // A tail record that does not read names no work: its tail is the finding.
     let mut f = released_without_carried();
     write_unchecked(&mut f, "UPDATE live_owner_activations SET released_boundary_json='{}' WHERE activation_id='adoption'");
     let binding = protected(&f).expect("protected");
@@ -374,11 +362,6 @@ fn tail_generation_of(f: &Fixture) -> Option<i64> {
         .unwrap()
 }
 
-/// The actor keeps a lineage's validated tails while the document's
-/// generation stands. Later decisions share the same tails, with no copy of
-/// their lists, and each reads its own path. A changed tail input, here both
-/// Carried deliveries applied, validates again. The worker commits to the
-/// unproven work as it validates, and no decision commits to it again.
 #[test]
 fn validated_tails_stand_until_their_generation_moves() {
     let (mut f, _, c1, c2) = released_at_b();
@@ -417,12 +400,6 @@ fn apply_both_in(tx: &rusqlite::Transaction<'_>, receipts: [&LiveUpdateReceipt; 
     Ok(())
 }
 
-/// A write transaction that changed the tails never
-/// decides on them. Its decision waits, and the worker, which reads only
-/// committed state, refuses the generation that transaction read rather
-/// than validate anything else for it. Back at committed state after its
-/// savepoint rolls back, it reuses what was kept. A later change that
-/// reaches the generation a rolled-back transaction read validates again.
 #[test]
 fn a_rolled_back_change_keeps_no_tails() {
     let (mut f, _, c1, c2) = released_at_b();
@@ -478,11 +455,6 @@ fn same_generation(first: &mut Fixture, second: &mut Fixture) {
     }
 }
 
-/// Kept tails belong to one open store. Tails bound to another store forget
-/// them, even where the document and its generation coincide, and so does a
-/// reopen of the same file, whose generations stand. A document never
-/// activated has no generation and is unprotected without a scan, and an
-/// activated one without its generation is corrupt, never unprotected.
 #[test]
 fn kept_tails_belong_to_one_open_store_and_one_recorded_generation() {
     let (mut first, _, _, _) = released_at_b();
@@ -517,10 +489,6 @@ fn kept_tails_belong_to_one_open_store_and_one_recorded_generation() {
     assert_eq!((tails.validation_requests(), tails.validations()), (0, 0));
 }
 
-/// A kept verdict answers only the store it was
-/// validated on. Tails bound to one store, asked through another store's
-/// connection at the same document and generation, miss, and the bound
-/// store's worker refuses to validate another store's decision.
 #[test]
 fn kept_tails_answer_only_the_store_they_were_validated_on() {
     let (mut first, _, _, _) = released_at_b();
@@ -541,9 +509,6 @@ fn kept_tails_answer_only_the_store_they_were_validated_on() {
     assert_eq!(tails.validations(), 1);
 }
 
-/// Identical requests share one validation, and one
-/// whose result is already kept completes without asking the worker. A
-/// waiter that first looks after the validation completed still sees it.
 #[test]
 fn identical_requests_share_one_validation_and_no_completion_is_lost() {
     let (f, _, _, _) = released_at_b();
@@ -564,9 +529,6 @@ fn identical_requests_share_one_validation_and_no_completion_is_lost() {
     assert!(protected(&f).is_some());
 }
 
-/// A generation that moves while the worker validates
-/// an older snapshot leaves that result answering nothing current. The next
-/// decision asks again, and the current state is what it decides on.
 #[test]
 fn a_generation_moved_during_validation_validates_current_state() {
     let (mut f, _, c1, c2) = released_at_b();
@@ -585,9 +547,6 @@ fn a_generation_moved_during_validation_validates_current_state() {
     assert_eq!(tails.validations(), 2);
 }
 
-/// Closing the tails cancels the validation running,
-/// wakes its waiters, and returns only once the worker ended. Nothing
-/// validates after.
 #[test]
 fn closing_cancels_validation_and_waits_for_the_worker() {
     let (f, _, _, _) = released_at_b();
@@ -611,9 +570,6 @@ fn bump_generation(f: &mut Fixture) {
         UPDATE live_owner_activations SET source_byte_length=source_byte_length");
 }
 
-/// A queued validation nobody waits for leaves the
-/// queue, however many requests a cancelled caller abandons while the worker
-/// is busy, and one a live waiter still shares stays and completes for it.
 #[test]
 fn abandoned_validations_leave_the_queue() {
     let (mut f, _, _, _) = released_at_b();
@@ -638,16 +594,12 @@ fn abandoned_validations_leave_the_queue() {
     assert_eq!((tails.validation_requests(), tails.validations()), (34, 2));
 }
 
-/// `validation`'s result, or a failure once it has not completed for long
-/// enough that it never will.
 fn completed(validation: Validation) -> Result<(), ValidationError> {
     let (sent, received) = std::sync::mpsc::channel();
     std::thread::spawn(move || sent.send(validation.wait()));
     received.recv_timeout(std::time::Duration::from_secs(60)).expect("the validation completed")
 }
 
-/// A validation that panics fails its waiters, and
-/// the worker goes on to the next.
 #[test]
 fn a_panicking_validation_fails_its_waiters_and_the_worker_goes_on() {
     let (f, _, _, _) = released_at_b();
@@ -661,8 +613,6 @@ fn a_panicking_validation_fails_its_waiters_and_the_worker_goes_on() {
     assert_eq!((tails.validation_requests(), tails.validations()), (2, 1));
 }
 
-/// The binding lists every protected namespace's
-/// tail, in namespace order, never only the first.
 #[test]
 fn a_binding_lists_every_protected_namespace() {
     let (mut f, _, c1, c2) = released_at_b();
@@ -737,10 +687,6 @@ fn measure_protected_inspection_over_half_a_mebibyte() {
     );
 }
 
-/// An update lands off a protected tail's binding at another path, or after
-/// a restore its release did not bind. Invalid coverage keeps the release
-/// binding; a release or window that does not read cannot show an update
-/// stays on it.
 #[test]
 fn an_update_moves_off_a_tail_at_another_path_or_restore() {
     let (f, _, _, _) = released_at_b();
@@ -903,12 +849,6 @@ fn a_held_proof_reserves_the_window_and_each_activation_before_it_reads_them() {
     assert!(within.activations > 1, "its validation read its chain's activations: {}", within.activations);
 }
 
-/// The fixture released with nothing Carried, then `count` entries of its
-/// lineage's outbox queued and never sent, each one paragraph appended to
-/// its head, written in one transaction with their bytes: retained work no
-/// proof covers. They are pending entries, not drafts: none names a draft
-/// binding. With the binding that protects it and the work its tail commits
-/// to, in canonical order.
 fn released_with_pending_entries(count: usize) -> (Fixture, ReleasedLineageBinding, Vec<RetainedContribution>) {
     let mut f = released_without_carried();
     let writer = Ydoc::wire();

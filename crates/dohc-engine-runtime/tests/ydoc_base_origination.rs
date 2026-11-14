@@ -29,7 +29,6 @@ use std::sync::{Arc, OnceLock};
 use yrs::types::Attrs;
 use yrs::{Any, Doc, OffsetKind, Options, ReadTxn, Text, Transact};
 
-/// A locally-originated relay-visible op, shaped as a peer receives it.
 #[derive(Debug, Clone)]
 struct LoggedOp {
     origin_id: String,
@@ -461,13 +460,6 @@ fn seed_unclaimed_oversized_lineage(db: &Path, key: &DocKey, path: &str) {
         .expect("seed unclaimed oversized lineage");
 }
 
-/// The fresh-creation path: a first edit on a synced workspace mints exactly
-/// one base, later edits journal deltas, and a clean peer rebuilds the document
-/// from that pair alone.
-///
-/// Mutation check: sever the claim (make `ydoc_originate_base_in_tx` return
-/// `Ok(None)` unconditionally) and this test fails at the first assertion —
-/// nothing is journaled at all, because `emit_outbound` stays false forever.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
     const WS: &str = "ws-originate-fresh";
@@ -605,13 +597,6 @@ async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &s
     );
 }
 
-/// A workspace that never contacted a relay is private: it originates nothing,
-/// and its lineage stays prunable local-only however many times it is edited.
-///
-/// Mutation check: drop the relay-replication gate in
-/// `ydoc_originate_base_in_tx` and the claim still succeeds while
-/// `journal_local_op_in_tx` refuses, which rolls back the user's edit — this
-/// test fails on the op count and the marker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unsynced_workspace_never_originates() {
     two_edits_originate_nothing("ws-originate-private", "notes/private.md", |_, _| {}).await;
@@ -1928,9 +1913,6 @@ async fn saved_unclaimed_new_page(db: &Path, root: &Path, ws: &str, path: &str) 
     state.key
 }
 
-/// The schema version is written in the claim's own transaction. A claim that
-/// rolls back leaves no version, no claim and no row behind, and its retry
-/// proposes the same first version.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rolled_back_claim_leaves_no_schema_version_and_its_retry_proposes_the_same_base() {
     const WS: &str = "ws-new-page-rollback";

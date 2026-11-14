@@ -164,9 +164,6 @@ fn head_content_kind(store: &EngineStore, version_id: &str, path: &str) -> Strin
         .expect("head content kind")
 }
 
-/// Differing bytes open a conflict carrying both sides, and each side resolves
-/// to its own bytes.
-///
 #[test]
 fn differing_bytes_open_a_conflict_resolvable_by_side() {
     let (_scratch, mut store) = open();
@@ -309,10 +306,6 @@ fn differing_bytes_open_a_conflict_resolvable_by_side() {
     assert_eq!(binary_head_sha(&store, "main", "logo.png"), feat_sha);
 }
 
-/// A new binary file, present only in the source: base and current are both
-/// absent, so nothing on the target can be lost and the merge fast-forwards
-/// instead of asking the user to adjudicate a disagreement that does not exist.
-///
 #[test]
 fn a_new_source_only_binary_file_fast_forwards() {
     let (_scratch, mut store) = open();

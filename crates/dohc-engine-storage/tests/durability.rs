@@ -238,8 +238,6 @@ const NEWER_BUILD_MIGRATION: &str = "
     FROM engine_migrations;
     COMMIT;";
 
-/// A store a newer build migrated stops this build before any write, so a
-/// newer build still opens it.
 #[test]
 fn a_store_a_newer_build_migrated_is_refused_and_left_byte_identical() {
     let scratch = Scratch::new("newer-build-fence");
@@ -274,9 +272,6 @@ fn a_store_a_newer_build_migrated_is_refused_and_left_byte_identical() {
     );
 }
 
-/// A newer build that crashed leaves its last commit in the WAL. Refusing
-/// its store must not checkpoint that commit into engine.db: both files stay
-/// byte-identical, so no frame is lost or moved.
 #[test]
 fn refusing_a_newer_store_leaves_its_wal_frames_in_place() {
     let scratch = Scratch::new("newer-build-wal");

@@ -62,7 +62,6 @@ struct Step {
 struct Goldens {
     scenarios: BTreeMap<String, BTreeMap<String, Projection>>,
 }
-/// One path's normalized state. `PartialEq` drives the differential compare.
 #[derive(Debug, PartialEq, Deserialize)]
 struct Projection {
     kind: String,

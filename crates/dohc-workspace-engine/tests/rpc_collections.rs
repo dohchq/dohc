@@ -1719,10 +1719,6 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
     assert_eq!(counts, (1, 1));
 }
 
-/// A watched workspace with an ordinary pull left unfinished. Capture still
-/// records a new record's file, but its Collections update finds the pull and
-/// changes nothing. Abandoning the pull on the open binding wakes capture, and
-/// the record binds without a relay.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_leaves_collections_to_an_unfinished_pull_until_it_is_abandoned() {
     let scratch = ScratchDir::new().expect("scratch");

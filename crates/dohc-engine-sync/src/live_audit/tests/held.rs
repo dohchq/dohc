@@ -1,6 +1,3 @@
-//! A refused live audit holds its lineage's later audits, never its origin's
-//! other work.
-
 use super::*;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdateMetadata, LiveUpdateReceipt, NativeRestoreFence, NativeRestoreSelection,
@@ -168,7 +165,6 @@ fn record_of(store: &EngineStore, op: &ReplicationEnvelope) -> serde_json::Value
         .unwrap()
 }
 
-/// Builds a restore source for this fixture.
 fn restore_source(
     source: &Fixture,
     origin: serde_json::Value,
@@ -417,8 +413,6 @@ fn assert_contained(replica: &EngineStore, outcomes: &[(ReplicationEnvelope, Str
     assert_eq!(held(replica), unverified);
 }
 
-/// The audits the third replica refuses hold, and the adopter's edit of
-/// another document still arrives.
 #[test]
 fn later_work_reaches_a_third_replica() {
     let (replica, _scratch, outcomes) = third_replica();
@@ -466,8 +460,6 @@ fn apply_all(
         .collect()
 }
 
-/// A held audit keeps every blob it names, and its hold survives a restart:
-/// the store opens offline as before, and a redelivery changes nothing.
 #[test]
 fn held_audits_keep_their_blobs_across_a_restart() {
     let (mut f, ops) = new_owner_holds();
@@ -516,8 +508,6 @@ fn held_audits_keep_their_blobs_across_a_restart() {
         .unwrap();
 }
 
-/// A crash after the hold and before the commit leaves the coordinate
-/// unacknowledged and nothing held; the redelivery holds it.
 #[test]
 fn a_crash_before_the_ack_leaves_the_audit_to_redeliver() {
     use dohc_engine_storage::FaultPoint;
@@ -753,7 +743,6 @@ fn only_work_that_depends_on_a_waiting_document_waits() {
     assert!(!waits(&missing, wait()));
 }
 
-/// Queues export streams this store cannot export.
 fn refused_streams(f: &mut Fixture, n: usize) {
     f.store
         .write_with(&NoFaults, |tx| {
@@ -783,9 +772,6 @@ fn prepare(f: &mut Fixture, now_ms: i64) {
     .unwrap();
 }
 
-/// A refused export stream keeps its place and lets the next stream and the
-/// workspace's other history, a saved edit and a resolved conflict, export
-/// in the same pass.
 #[test]
 fn a_refused_export_stream_lets_later_streams_and_enrollment_export() {
     let mut f = fixture(false);
@@ -821,7 +807,6 @@ fn a_refused_export_stream_lets_later_streams_and_enrollment_export() {
     );
 }
 
-/// A held stream that exports on its retry is no longer held.
 #[test]
 fn a_held_stream_that_exports_on_its_retry_is_no_longer_held() {
     let mut f = fixture(false);

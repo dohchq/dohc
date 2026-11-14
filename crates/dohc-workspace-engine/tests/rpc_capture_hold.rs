@@ -1,6 +1,3 @@
-//! `capture.hold` lets a caller change the disk and record the change under
-//! its own author before capture sees it, so History keeps one row per change.
-
 use crate::common;
 
 use common::*;
@@ -134,7 +131,6 @@ async fn a_hold_keeps_capture_out_until_release_and_a_write_under_an_ended_hold_
 
     let hold = call(&transport, &handle, 11, "capture.hold", json!({})).await["holdId"].clone();
     write_file(scratch.path(), "outside.txt", b"a person's edit");
-    // Capture cannot pass while the hold lasts, however long the change runs.
     let flush = call(&transport, &handle, 12, "capture.flush", json!({}));
     assert!(
         tokio::time::timeout(Duration::from_secs(3), flush)
@@ -190,9 +186,6 @@ async fn check_move_refuses_an_author_history_would_refuse_before_anything_chang
     );
 }
 
-/// An overwrite that fails puts the staged destination back, then rolls its
-/// delete back. The rollback's restore finds the same bytes already there,
-/// so the file keeps them and capture finds nothing to record.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_binary_delete_rolled_back_after_its_file_returns_keeps_its_bytes_without_a_row() {
     let scratch = ScratchDir::new().expect("scratch");
