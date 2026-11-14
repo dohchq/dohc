@@ -247,6 +247,9 @@ Run `pnpm fmt` before you commit JavaScript or TypeScript. The JavaScript gate f
 Test observable behavior that can break. Mock-call assertions and callback wiring alone do not prove it.
 Leave facts already guaranteed by types to the typechecker.
 Extend an existing case or table when it covers the behavior.
+Let a test's name and assertions say what it proves.
+Comment a reason, a constraint, or a warning that the test cannot show.
+Explain a value, a wait, or an order that looks arbitrary.
 For logic, data, state, or protocol defects, record a focused check failing before the fix and passing afterward.
 Keep that result in the PR evidence.
 Use the lowest layer that exposes the defect. Add checks at other layers only for distinct risks.
