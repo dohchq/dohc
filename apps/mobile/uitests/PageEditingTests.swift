@@ -116,12 +116,10 @@ final class PageEditingTests: XCTestCase {
     keep(app, "04-editing-pasted-emoji")
   }
 
-  // The page scrolls inside its own container, so the status bar's scroll-to-top has nothing to move. Known limit:
-  // react-native-webview keeps its own scroll view as a status-bar target, and with a second target on screen iOS
-  // ignores the tap, so a stand-in can't take it without native code. This fails until that changes.
+  // The page's host (modules/page-scroll-top) takes the status-bar tap in place of its web view and scrolls the page's
+  // own container to the top.
   @MainActor
   func testStatusBarTapScrollsThePageToTheTop() {
-    XCTExpectFailure("Known limit: a status bar tap doesn't reach a page's own scroll container")
     let app = XCUIApplication()
     app.launchArguments += ["-dohcTestRoute", "page"]
     app.launch()

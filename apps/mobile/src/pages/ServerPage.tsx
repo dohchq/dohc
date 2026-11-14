@@ -1,9 +1,10 @@
 import { documentWords } from "@dohc/interface-words/documents";
-import { Stack, useLocalSearchParams } from "expo-router";
+import { Stack, useIsFocused, useLocalSearchParams } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PixelRatio, Pressable, StyleSheet, Text, View } from "react-native";
 import { useReducedMotion } from "react-native-reanimated";
 import { WebView } from "react-native-webview";
+import { PageScrollTop } from "../../modules/page-scroll-top";
 import { useAccount } from "../account/AccountProvider";
 import { copyText } from "../copy";
 import { pageTitle } from "../home/homeModel";
@@ -49,6 +50,7 @@ function PageScreen({ path }: { path: string }) {
   const problemText = useProblemText();
   const kept = useKeptContentProblem(state.problem, retry);
   const reduceMotion = useReducedMotion();
+  const focused = useIsFocused();
 
   // A page deleted while open keeps the last text its workspace's store read of it.
   const deleted = state.value?.kind === "missing" && state.value.last !== undefined;
@@ -202,21 +204,27 @@ function PageScreen({ path }: { path: string }) {
             />
           ) : null}
           {uri && injected ? (
-            <WebView
+            <PageScrollTop
               key={`${attempt}:${revision}`}
-              originWhitelist={["file://*"]}
-              source={{ uri }}
-              // Read access to the editor's folder only: the page never reads the rest of the app's files.
-              allowingReadAccessToURL={editorFolderUri}
-              allowFileAccess
-              injectedJavaScriptBeforeContentLoaded={injected}
-              onMessage={(event) => handleMessage(event.nativeEvent.data)}
-              onError={() => setLostPage("failed")}
-              onContentProcessDidTerminate={() => setLostPage("failed")}
-              hideKeyboardAccessoryView
-              scrollEnabled={false}
-              style={[styles.web, { backgroundColor: theme.bg }]}
-            />
+              active={focused}
+              ready={painted}
+              style={styles.web}
+            >
+              <WebView
+                originWhitelist={["file://*"]}
+                source={{ uri }}
+                // Read access to the editor's folder only: the page never reads the rest of the app's files.
+                allowingReadAccessToURL={editorFolderUri}
+                allowFileAccess
+                injectedJavaScriptBeforeContentLoaded={injected}
+                onMessage={(event) => handleMessage(event.nativeEvent.data)}
+                onError={() => setLostPage("failed")}
+                onContentProcessDidTerminate={() => setLostPage("failed")}
+                hideKeyboardAccessoryView
+                scrollEnabled={false}
+                style={[styles.web, { backgroundColor: theme.bg }]}
+              />
+            </PageScrollTop>
           ) : null}
           {painted ? null : <LoadingLines theme={theme} reduceMotion={reduceMotion} />}
         </>
