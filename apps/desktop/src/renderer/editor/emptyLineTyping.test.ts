@@ -437,6 +437,103 @@ it.each(pairs)(
   },
 );
 
+// Two empty pieces between the breaks: removing the second would bring both beside the text.
+it.each(pairs)(
+  "keeps what one person types between two line breaks holding two empty pieces while the other removes the first break (%s removes, %s types)",
+  async (remover, typist) => {
+    const baseline = seeded([null, "", "", null, "w"]);
+    const a = await pages[remover](baseline),
+      b = await pages[typist](baseline);
+    caretAt(a, 1, 1);
+    backspace(a);
+    caretAt(b, 1, 1);
+    type(b, "from b");
+    const fromA = await a.take(),
+      fromB = await b.take();
+    expect([
+      verdict(baseline, [], fromA),
+      verdict(baseline, [fromA], fromB),
+      verdict(baseline, [], fromB),
+      verdict(baseline, [fromB], fromA),
+    ]).toEqual(ALL_ACCEPTED);
+    await exchange(a, b, fromA, fromB);
+    await expectKept(a, b, "from b");
+  },
+);
+
+it.each(pairs)(
+  "saves an image that replaces two line breaks around an empty piece (%s replaces, %s reads)",
+  async (writer, reader) => {
+    const baseline = seeded([null, "", null, "w"]);
+    const a = await pages[writer](baseline),
+      b = await pages[reader](baseline);
+    caretAt(a, 1, 0);
+    const from = a.view.state.selection.from;
+    const image = a.view.state.schema.nodes.image!.create({ src: "x.png" });
+    a.view.dispatch(a.view.state.tr.replaceWith(from, from + 2, image));
+    const fromA = await a.take();
+    expect(verdict(baseline, [], fromA)).toBe("accepted");
+    b.receive(fromA);
+    expect(b.view.state.doc.toJSON()).toEqual(a.view.state.doc.toJSON());
+    expect(yDocToMarkdown(a.doc)).toContain("x.png");
+  },
+);
+
+// The editor may remove a later one of several identical breaks to keep the empty piece away
+// from text.
+it.each(pairs)(
+  "keeps what one person types between line breaks while the other joins the text around them (%s joins, %s types)",
+  async (joiner, typist) => {
+    const baseline = seeded(["a", null, "", null, "b", null]);
+    const a = await pages[joiner](baseline),
+      b = await pages[typist](baseline);
+    caretAt(a, 1, 1);
+    const from = a.view.state.selection.from;
+    a.view.dispatch(a.view.state.tr.delete(from, from + 2));
+    caretAt(b, 1, 2);
+    type(b, "X");
+    const fromA = await a.take(),
+      fromB = await b.take();
+    expect([
+      verdict(baseline, [], fromA),
+      verdict(baseline, [fromA], fromB),
+      verdict(baseline, [], fromB),
+      verdict(baseline, [fromB], fromA),
+    ]).toEqual(ALL_ACCEPTED);
+    await exchange(a, b, fromA, fromB);
+    await expectKept(a, b, "X");
+  },
+);
+
+// The editor removes the first of two identical breaks to keep typing (above), so when the
+// other person deletes the second at the same time, both go.
+it.each(pairs)(
+  "accepts both changes but loses a second line break when one person removes a break while the other deletes the next one (%s removes, %s deletes)",
+  async (remover, deleter) => {
+    const baseline = seeded([null, "", null, "w"]);
+    const a = await pages[remover](baseline),
+      b = await pages[deleter](baseline);
+    caretAt(a, 1, 2);
+    backspace(a);
+    caretAt(b, 1, 1);
+    const from = b.view.state.selection.from;
+    b.view.dispatch(b.view.state.tr.delete(from, from + 2));
+    const fromA = await a.take(),
+      fromB = await b.take();
+    expect([
+      verdict(baseline, [], fromA),
+      verdict(baseline, [fromA], fromB),
+      verdict(baseline, [], fromB),
+      verdict(baseline, [fromB], fromA),
+    ]).toEqual(ALL_ACCEPTED);
+    await exchange(a, b, fromA, fromB);
+    expect(yDocToMarkdown(b.doc)).toBe(yDocToMarkdown(a.doc));
+    const line = getDohcYDocBodyFragment(a.doc).get(1) as Y.XmlElement;
+    expect(line.toArray().filter((item) => item instanceof Y.XmlElement)).toHaveLength(0);
+    expect(yDocToMarkdown(a.doc)).not.toContain("w");
+  },
+);
+
 // Text on both sides: removing either break brings the empty piece beside text, where it
 // can't stay, so what was typed into it goes with it. Both people still see the same note.
 it.each(pairs)(

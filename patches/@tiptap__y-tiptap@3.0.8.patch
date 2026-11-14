@@ -1,17 +1,37 @@
 diff --git a/dist/y-tiptap.cjs b/dist/y-tiptap.cjs
-index 653ffe79d5edb4a040555bb222f472af1e45edc8..cadcff414e2cfdd885bd3f3ce62d380299825885 100644
+index 653ffe79d5edb4a040555bb222f472af1e45edc8..e8a1afce8701cdb09ee8e09223a6bdf5a53505c5 100644
 --- a/dist/y-tiptap.cjs
 +++ b/dist/y-tiptap.cjs
-@@ -1571,6 +1571,8 @@ const marksToAttributes = (marks, meta) => {
+@@ -1571,6 +1571,28 @@ const marksToAttributes = (marks, meta) => {
   * @param {any} pNode
   * @param {BindingMetadata} meta
   */
 +const isEmptyYText = (type) => type instanceof Y__namespace.XmlText && type.length === 0;
 +
++// dohc: the empty text pieces to delete from a line, as [from, to) ranges from the line's end
++// backwards. Typing into an empty piece beside a text piece, or beside another empty piece,
++// would put two text pieces side by side, which the server refuses. So a run of empty pieces
++// beside a text piece goes, and any other run keeps only its first piece.
++const emptyRunsToDrop = (types) => {
++  const drop = [];
++  for (let end = types.length; end > 0;) {
++    let from = end;
++    while (from > 0 && isEmptyYText(types[from - 1])) from--;
++    if (from === end) {
++      end--;
++      continue
++    }
++    const keep = types[from - 1] instanceof Y__namespace.XmlText || types[end] instanceof Y__namespace.XmlText ? from : from + 1;
++    if (keep < end) drop.push([keep, end]);
++    end = from;
++  }
++  return drop;
++};
++
  const updateYFragment = (y, yDomFragment, pNode, meta) => {
    if (
      yDomFragment instanceof Y__namespace.XmlElement &&
-@@ -1602,10 +1604,29 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1602,10 +1624,29 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
    // update children
    const pChildren = normalizePNodeContent(pNode);
    const pChildCnt = pChildren.length;
@@ -43,7 +63,7 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..cadcff414e2cfdd885bd3f3ce62d3802
      return
    }
    let left = 0;
-@@ -1624,7 +1645,9 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1624,7 +1665,9 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
      }
    }
    // find number of matching elements from right
@@ -54,7 +74,7 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..cadcff414e2cfdd885bd3f3ce62d3802
      const rightY = yChildren[yChildCnt - right - 1];
      const rightP = pChildren[pChildCnt - right - 1];
      if (!mappedIdentity(meta.mapping.get(rightY), rightP)) {
-@@ -1698,33 +1721,105 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1698,33 +1741,94 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
            );
            right += 1;
          } else {
@@ -66,6 +86,8 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..cadcff414e2cfdd885bd3f3ce62d3802
 +          yDomFragment.insert(yAt[left], [
              createTypeFromTextOrElementNode(leftP, meta)
            ]);
++          // dohc: the removal below reads the line's children, so they name the new item.
++          yAll[yAt[left]] = yChildren[left] = yDomFragment.get(yAt[left]);
            left += 1;
          }
        }
@@ -100,9 +122,8 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..cadcff414e2cfdd885bd3f3ce62d3802
 +        JSON.stringify(a.getAttributes()) === JSON.stringify(b.getAttributes());
 +      const doomed = (from, to) => {
 +        const gone = new Set(yAt.slice(from, to));
-+        const rest = yAll.filter((_, i) => !gone.has(i));
-+        return rest.filter((type, i) => isEmptyYText(type) &&
-+          (rest[i - 1] instanceof Y__namespace.XmlText || (rest[i + 1] instanceof Y__namespace.XmlText && !isEmptyYText(rest[i + 1])))).length;
++        return emptyRunsToDrop(yAll.filter((_, i) => !gone.has(i)))
++          .reduce((count, [a, b]) => count + b - a, 0);
 +      }
 +      let best = doomed(lo, hi);
 +      for (let step = -1; step <= 1 && best > 0; step += 2) {
@@ -151,46 +172,54 @@ index 653ffe79d5edb4a040555bb222f472af1e45edc8..cadcff414e2cfdd885bd3f3ce62d3802
 +        } else {
 +          ins.push(createTypeFromTextOrElementNode(pChildren[i], meta));
 +        }
-+      }
-+      if (ins.length > 0) yDomFragment.insert(at, ins);
-+    }
-+    // dohc: typing into an empty piece beside a text piece, or beside another empty piece,
-+    // would put two text pieces side by side, which the server refuses. So such a piece
-+    // goes; the editor does not show it.
-+    if (yEmpty.length > 0 || kept) {
-+      const now = yDomFragment.toArray();
-+      for (let end = now.length; end > 0;) {
-+        let from = end;
-+        while (from > 0 && isEmptyYText(now[from - 1])) from--;
-+        if (from === end) {
-+          end--;
-+          continue
-+        }
-+        const keep = now[from - 1] instanceof Y__namespace.XmlText || now[end] instanceof Y__namespace.XmlText ? from : from + 1;
-+        if (keep < end) {
-+          now.slice(keep, end).forEach(type => meta.mapping.delete(type));
-+          yDomFragment.delete(keep, end - keep);
-+        }
-+        end = from;
        }
 -      yDomFragment.insert(left, ins);
++      if (ins.length > 0) yDomFragment.insert(at, ins);
++    }
++    // dohc: an empty piece the server would refuse typing into goes; the editor does not show it.
++    if (yEmpty.length > 0 || kept) {
++      const now = yDomFragment.toArray();
++      emptyRunsToDrop(now).forEach(([from, to]) => {
++        now.slice(from, to).forEach(type => meta.mapping.delete(type));
++        yDomFragment.delete(from, to - from);
++      });
      }
    }, ySyncPluginKey);
  };
 diff --git a/dist/y-tiptap.js b/dist/y-tiptap.js
-index 28c55820dff13cf3d5c303970f530c17eb38f757..44805b344ee86c84cb0a37efd028054464859cf2 100644
+index 28c55820dff13cf3d5c303970f530c17eb38f757..ff0e96761acf03cd09ec85a151ab945b1e9e57e8 100644
 --- a/dist/y-tiptap.js
 +++ b/dist/y-tiptap.js
-@@ -1537,6 +1537,8 @@ const marksToAttributes = (marks, meta) => {
+@@ -1537,6 +1537,28 @@ const marksToAttributes = (marks, meta) => {
   * @param {any} pNode
   * @param {BindingMetadata} meta
   */
 +const isEmptyYText = (type) => type instanceof Y.XmlText && type.length === 0;
 +
++// dohc: the empty text pieces to delete from a line, as [from, to) ranges from the line's end
++// backwards. Typing into an empty piece beside a text piece, or beside another empty piece,
++// would put two text pieces side by side, which the server refuses. So a run of empty pieces
++// beside a text piece goes, and any other run keeps only its first piece.
++const emptyRunsToDrop = (types) => {
++  const drop = [];
++  for (let end = types.length; end > 0;) {
++    let from = end;
++    while (from > 0 && isEmptyYText(types[from - 1])) from--;
++    if (from === end) {
++      end--;
++      continue
++    }
++    const keep = types[from - 1] instanceof Y.XmlText || types[end] instanceof Y.XmlText ? from : from + 1;
++    if (keep < end) drop.push([keep, end]);
++    end = from;
++  }
++  return drop;
++};
++
  const updateYFragment = (y, yDomFragment, pNode, meta) => {
    if (
      yDomFragment instanceof Y.XmlElement &&
-@@ -1568,10 +1570,29 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1568,10 +1590,29 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
    // update children
    const pChildren = normalizePNodeContent(pNode);
    const pChildCnt = pChildren.length;
@@ -222,7 +251,7 @@ index 28c55820dff13cf3d5c303970f530c17eb38f757..44805b344ee86c84cb0a37efd0280544
      return
    }
    let left = 0;
-@@ -1590,7 +1611,9 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1590,7 +1631,9 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
      }
    }
    // find number of matching elements from right
@@ -233,7 +262,7 @@ index 28c55820dff13cf3d5c303970f530c17eb38f757..44805b344ee86c84cb0a37efd0280544
      const rightY = yChildren[yChildCnt - right - 1];
      const rightP = pChildren[pChildCnt - right - 1];
      if (!mappedIdentity(meta.mapping.get(rightY), rightP)) {
-@@ -1664,33 +1687,105 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1664,33 +1707,94 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
            );
            right += 1;
          } else {
@@ -245,6 +274,8 @@ index 28c55820dff13cf3d5c303970f530c17eb38f757..44805b344ee86c84cb0a37efd0280544
 +          yDomFragment.insert(yAt[left], [
              createTypeFromTextOrElementNode(leftP, meta)
            ]);
++          // dohc: the removal below reads the line's children, so they name the new item.
++          yAll[yAt[left]] = yChildren[left] = yDomFragment.get(yAt[left]);
            left += 1;
          }
        }
@@ -279,9 +310,8 @@ index 28c55820dff13cf3d5c303970f530c17eb38f757..44805b344ee86c84cb0a37efd0280544
 +        JSON.stringify(a.getAttributes()) === JSON.stringify(b.getAttributes());
 +      const doomed = (from, to) => {
 +        const gone = new Set(yAt.slice(from, to));
-+        const rest = yAll.filter((_, i) => !gone.has(i));
-+        return rest.filter((type, i) => isEmptyYText(type) &&
-+          (rest[i - 1] instanceof Y.XmlText || (rest[i + 1] instanceof Y.XmlText && !isEmptyYText(rest[i + 1])))).length;
++        return emptyRunsToDrop(yAll.filter((_, i) => !gone.has(i)))
++          .reduce((count, [a, b]) => count + b - a, 0);
 +      }
 +      let best = doomed(lo, hi);
 +      for (let step = -1; step <= 1 && best > 0; step += 2) {
@@ -330,29 +360,17 @@ index 28c55820dff13cf3d5c303970f530c17eb38f757..44805b344ee86c84cb0a37efd0280544
 +        } else {
 +          ins.push(createTypeFromTextOrElementNode(pChildren[i], meta));
 +        }
-+      }
-+      if (ins.length > 0) yDomFragment.insert(at, ins);
-+    }
-+    // dohc: typing into an empty piece beside a text piece, or beside another empty piece,
-+    // would put two text pieces side by side, which the server refuses. So such a piece
-+    // goes; the editor does not show it.
-+    if (yEmpty.length > 0 || kept) {
-+      const now = yDomFragment.toArray();
-+      for (let end = now.length; end > 0;) {
-+        let from = end;
-+        while (from > 0 && isEmptyYText(now[from - 1])) from--;
-+        if (from === end) {
-+          end--;
-+          continue
-+        }
-+        const keep = now[from - 1] instanceof Y.XmlText || now[end] instanceof Y.XmlText ? from : from + 1;
-+        if (keep < end) {
-+          now.slice(keep, end).forEach(type => meta.mapping.delete(type));
-+          yDomFragment.delete(keep, end - keep);
-+        }
-+        end = from;
        }
 -      yDomFragment.insert(left, ins);
++      if (ins.length > 0) yDomFragment.insert(at, ins);
++    }
++    // dohc: an empty piece the server would refuse typing into goes; the editor does not show it.
++    if (yEmpty.length > 0 || kept) {
++      const now = yDomFragment.toArray();
++      emptyRunsToDrop(now).forEach(([from, to]) => {
++        now.slice(from, to).forEach(type => meta.mapping.delete(type));
++        yDomFragment.delete(from, to - from);
++      });
      }
    }, ySyncPluginKey);
  };

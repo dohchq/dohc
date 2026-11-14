@@ -1,17 +1,37 @@
 diff --git a/dist/y-prosemirror.cjs b/dist/y-prosemirror.cjs
-index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..8e128bf2da4a8e2d618af4673c370822581f3da6 100644
+index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..eb7f11b0f4e5c018d3ac284f79f4085f2f8b7531 100644
 --- a/dist/y-prosemirror.cjs
 +++ b/dist/y-prosemirror.cjs
-@@ -1216,6 +1216,8 @@ const marksToAttributes = (marks, meta) => {
+@@ -1216,6 +1216,28 @@ const marksToAttributes = (marks, meta) => {
   * @param {any} pNode
   * @param {BindingMetadata} meta
   */
 +const isEmptyYText = (type) => type instanceof Y__namespace.XmlText && type.length === 0;
 +
++// dohc: the empty text pieces to delete from a line, as [from, to) ranges from the line's end
++// backwards. Typing into an empty piece beside a text piece, or beside another empty piece,
++// would put two text pieces side by side, which the server refuses. So a run of empty pieces
++// beside a text piece goes, and any other run keeps only its first piece.
++const emptyRunsToDrop = (types) => {
++  const drop = [];
++  for (let end = types.length; end > 0;) {
++    let from = end;
++    while (from > 0 && isEmptyYText(types[from - 1])) from--;
++    if (from === end) {
++      end--;
++      continue
++    }
++    const keep = types[from - 1] instanceof Y__namespace.XmlText || types[end] instanceof Y__namespace.XmlText ? from : from + 1;
++    if (keep < end) drop.push([keep, end]);
++    end = from;
++  }
++  return drop;
++};
++
  const updateYFragment = (y, yDomFragment, pNode, meta) => {
    if (
      yDomFragment instanceof Y__namespace.XmlElement &&
-@@ -1247,7 +1249,21 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1247,7 +1269,21 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
    // update children
    const pChildren = normalizePNodeContent(pNode);
    const pChildCnt = pChildren.length;
@@ -34,7 +54,7 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..8e128bf2da4a8e2d618af4673c370822
    const yChildCnt = yChildren.length;
    const minCnt = math__namespace.min(pChildCnt, yChildCnt);
    let left = 0;
-@@ -1340,33 +1356,105 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1340,33 +1376,94 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
            );
            right += 1;
          } else {
@@ -46,6 +66,8 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..8e128bf2da4a8e2d618af4673c370822
 +          yDomFragment.insert(yAt[left], [
              createTypeFromTextOrElementNode(leftP, meta)
            ]);
++          // dohc: the removal below reads the line's children, so they name the new item.
++          yAll[yAt[left]] = yChildren[left] = yDomFragment.get(yAt[left]);
            left += 1;
          }
        }
@@ -80,9 +102,8 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..8e128bf2da4a8e2d618af4673c370822
 +        JSON.stringify(a.getAttributes()) === JSON.stringify(b.getAttributes());
 +      const doomed = (from, to) => {
 +        const gone = new Set(yAt.slice(from, to));
-+        const rest = yAll.filter((_, i) => !gone.has(i));
-+        return rest.filter((type, i) => isEmptyYText(type) &&
-+          (rest[i - 1] instanceof Y__namespace.XmlText || (rest[i + 1] instanceof Y__namespace.XmlText && !isEmptyYText(rest[i + 1])))).length;
++        return emptyRunsToDrop(yAll.filter((_, i) => !gone.has(i)))
++          .reduce((count, [a, b]) => count + b - a, 0);
 +      }
 +      let best = doomed(lo, hi);
 +      for (let step = -1; step <= 1 && best > 0; step += 2) {
@@ -131,46 +152,54 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..8e128bf2da4a8e2d618af4673c370822
 +        } else {
 +          ins.push(createTypeFromTextOrElementNode(pChildren[i], meta));
 +        }
-+      }
-+      if (ins.length > 0) yDomFragment.insert(at, ins);
-+    }
-+    // dohc: typing into an empty piece beside a text piece, or beside another empty piece,
-+    // would put two text pieces side by side, which the server refuses. So such a piece
-+    // goes; the editor does not show it.
-+    if (yEmpty.length > 0 || kept) {
-+      const now = yDomFragment.toArray();
-+      for (let end = now.length; end > 0;) {
-+        let from = end;
-+        while (from > 0 && isEmptyYText(now[from - 1])) from--;
-+        if (from === end) {
-+          end--;
-+          continue
-+        }
-+        const keep = now[from - 1] instanceof Y__namespace.XmlText || now[end] instanceof Y__namespace.XmlText ? from : from + 1;
-+        if (keep < end) {
-+          now.slice(keep, end).forEach(type => meta.mapping.delete(type));
-+          yDomFragment.delete(keep, end - keep);
-+        }
-+        end = from;
        }
 -      yDomFragment.insert(left, ins);
++      if (ins.length > 0) yDomFragment.insert(at, ins);
++    }
++    // dohc: an empty piece the server would refuse typing into goes; the editor does not show it.
++    if (yEmpty.length > 0 || kept) {
++      const now = yDomFragment.toArray();
++      emptyRunsToDrop(now).forEach(([from, to]) => {
++        now.slice(from, to).forEach(type => meta.mapping.delete(type));
++        yDomFragment.delete(from, to - from);
++      });
      }
    }, ySyncPluginKey);
  };
 diff --git a/src/plugins/sync-plugin.js b/src/plugins/sync-plugin.js
-index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..c3935d2086e590b0bf9f94be84253532f6e30bed 100644
+index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..4d47e30f15a3e190d917f82b324b7efea2627fec 100644
 --- a/src/plugins/sync-plugin.js
 +++ b/src/plugins/sync-plugin.js
-@@ -1142,6 +1142,8 @@ const marksToAttributes = (marks, meta) => {
+@@ -1142,6 +1142,28 @@ const marksToAttributes = (marks, meta) => {
   * @param {any} pNode
   * @param {BindingMetadata} meta
   */
 +const isEmptyYText = (type) => type instanceof Y.XmlText && type.length === 0
 +
++// dohc: the empty text pieces to delete from a line, as [from, to) ranges from the line's end
++// backwards. Typing into an empty piece beside a text piece, or beside another empty piece,
++// would put two text pieces side by side, which the server refuses. So a run of empty pieces
++// beside a text piece goes, and any other run keeps only its first piece.
++const emptyRunsToDrop = (types) => {
++  const drop = []
++  for (let end = types.length; end > 0;) {
++    let from = end
++    while (from > 0 && isEmptyYText(types[from - 1])) from--
++    if (from === end) {
++      end--
++      continue
++    }
++    const keep = types[from - 1] instanceof Y.XmlText || types[end] instanceof Y.XmlText ? from : from + 1
++    if (keep < end) drop.push([keep, end])
++    end = from
++  }
++  return drop
++}
++
  export const updateYFragment = (y, yDomFragment, pNode, meta) => {
    if (
      yDomFragment instanceof Y.XmlElement &&
-@@ -1173,7 +1175,21 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1173,7 +1195,21 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
    // update children
    const pChildren = normalizePNodeContent(pNode)
    const pChildCnt = pChildren.length
@@ -193,7 +222,7 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..c3935d2086e590b0bf9f94be84253532
    const yChildCnt = yChildren.length
    const minCnt = math.min(pChildCnt, yChildCnt)
    let left = 0
-@@ -1266,33 +1282,105 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1266,33 +1302,94 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
            )
            right += 1
          } else {
@@ -205,6 +234,8 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..c3935d2086e590b0bf9f94be84253532
 +          yDomFragment.insert(yAt[left], [
              createTypeFromTextOrElementNode(leftP, meta)
            ])
++          // dohc: the removal below reads the line's children, so they name the new item.
++          yAll[yAt[left]] = yChildren[left] = yDomFragment.get(yAt[left])
            left += 1
          }
        }
@@ -239,9 +270,8 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..c3935d2086e590b0bf9f94be84253532
 +        JSON.stringify(a.getAttributes()) === JSON.stringify(b.getAttributes())
 +      const doomed = (from, to) => {
 +        const gone = new Set(yAt.slice(from, to))
-+        const rest = yAll.filter((_, i) => !gone.has(i))
-+        return rest.filter((type, i) => isEmptyYText(type) &&
-+          (rest[i - 1] instanceof Y.XmlText || (rest[i + 1] instanceof Y.XmlText && !isEmptyYText(rest[i + 1])))).length
++        return emptyRunsToDrop(yAll.filter((_, i) => !gone.has(i)))
++          .reduce((count, [a, b]) => count + b - a, 0)
 +      }
 +      let best = doomed(lo, hi)
 +      for (let step = -1; step <= 1 && best > 0; step += 2) {
@@ -290,29 +320,17 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..c3935d2086e590b0bf9f94be84253532
 +        } else {
 +          ins.push(createTypeFromTextOrElementNode(pChildren[i], meta))
 +        }
-+      }
-+      if (ins.length > 0) yDomFragment.insert(at, ins)
-+    }
-+    // dohc: typing into an empty piece beside a text piece, or beside another empty piece,
-+    // would put two text pieces side by side, which the server refuses. So such a piece
-+    // goes; the editor does not show it.
-+    if (yEmpty.length > 0 || kept) {
-+      const now = yDomFragment.toArray()
-+      for (let end = now.length; end > 0;) {
-+        let from = end
-+        while (from > 0 && isEmptyYText(now[from - 1])) from--
-+        if (from === end) {
-+          end--
-+          continue
-+        }
-+        const keep = now[from - 1] instanceof Y.XmlText || now[end] instanceof Y.XmlText ? from : from + 1
-+        if (keep < end) {
-+          now.slice(keep, end).forEach(type => meta.mapping.delete(type))
-+          yDomFragment.delete(keep, end - keep)
-+        }
-+        end = from
        }
 -      yDomFragment.insert(left, ins)
++      if (ins.length > 0) yDomFragment.insert(at, ins)
++    }
++    // dohc: an empty piece the server would refuse typing into goes; the editor does not show it.
++    if (yEmpty.length > 0 || kept) {
++      const now = yDomFragment.toArray()
++      emptyRunsToDrop(now).forEach(([from, to]) => {
++        now.slice(from, to).forEach(type => meta.mapping.delete(type))
++        yDomFragment.delete(from, to - from)
++      })
      }
    }, ySyncPluginKey)
  }
