@@ -8,7 +8,10 @@ import { expect } from "vitest";
 import * as Y from "yjs";
 import { yDocToMarkdown } from "@dohc/ydoc-projection";
 import type { LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
-import { OwnerRestoreActionResponse } from "../../../apps/desktop/src/ipc/ownerRestoreContract.js";
+import {
+  OwnerRestoreActionResponse,
+  OwnerRestoreRelayReview,
+} from "../../../apps/desktop/src/ipc/ownerRestoreContract.js";
 import type { startServiceLiveHost } from "../../sync-relay/src/serviceLiveHost.js";
 import type { SyncRelayStorage } from "../../sync-relay/src/storage.js";
 import type { createPublicLinkWireProof } from "./publicLinkWireProof.integration-helper.js";
@@ -247,9 +250,7 @@ export async function runPublicTransitions(
           await h.ownerRequest(prefix + "/prepare", {}),
         );
         expect(prepared.result.kind).toBe("prepared");
-        const review = OwnerRestoreActionResponse.review.parse(
-          await h.ownerRequest(prefix + "/review", {}),
-        );
+        const review = OwnerRestoreRelayReview.parse(await h.ownerRequest(prefix + "/review", {}));
         if (!review.result || "kind" in review.result)
           throw new Error("Transition restore review missing.");
         expect(hash(Buffer.from(review.result.content.frozenMarkdown))).toBe(hash(before.markdown));
