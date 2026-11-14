@@ -5,8 +5,6 @@ import { atomicCreateFile } from "../atomicReplaceFile";
 import { SECRET_KEY_RELATIVE_PATH, installWorkspaceDataKey } from "./workspaceDataKey";
 import { createTestScratch } from "./testTemp";
 
-// A drive's hard links, and the rename that replaces them where it has none.
-// `events` records each read and each flush of a file or folder, in order.
 const drive = vi.hoisted(() => ({
   link: null as null | {
     code: string;

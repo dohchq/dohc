@@ -318,7 +318,6 @@ const openAgent = async (name: string) =>
   fireEvent.click(await screen.findByRole("button", { name }));
 const copyMcpConfig = () =>
   screen.getByRole<HTMLButtonElement>("button", { name: "Copy MCP config" });
-// The config has loaded once its copy is on.
 const mcpConfigLoaded = () => waitFor(() => expect(copyMcpConfig().disabled).toBe(false));
 
 function stubClipboard() {
@@ -729,9 +728,6 @@ describe("SettingsDialog", () => {
   });
 
   it("a broadcast during the initial load is not painted over by it", async () => {
-    // The initial Promise.all retains a user-settings snapshot; a change pushed
-    // while it is in flight is newer and must survive the load resolving,
-    // in the controls and in the window's look.
     const onWorkspaceSettingsRead = vi.fn();
     let pushUserSettings: ((result: DesktopUserSettingsResult) => void) | undefined;
     bridge.onUserSettingsChanged.mockImplementationOnce((listener) => {

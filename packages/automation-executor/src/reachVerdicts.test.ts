@@ -91,7 +91,6 @@ describe("reach verdicts", () => {
     expect(
       nextReachVerdict({ verdict: "stopped", stoppedFor: "bob@dohc.test" }, stoppedByBob, true),
     ).toEqual({ verdict: "stopped", stoppedFor: "bob@dohc.test" });
-    // Reach comes back: the step waits for a current editor, as any widening does.
     expect(nextReachVerdict(narrowed, allowed, true)).toEqual({
       verdict: "held",
       stoppedFor: "bob@dohc.test",

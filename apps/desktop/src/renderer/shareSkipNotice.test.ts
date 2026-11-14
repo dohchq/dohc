@@ -58,8 +58,6 @@ describe("what a share's skipped ops say", () => {
     ).toBe("dohc couldn't apply 1 update this share sent.");
     expect(line?.text).not.toContain("granter@dohc.test");
     expect(line?.text).not.toContain("this share covers");
-    // The detail rides along in the notice title, so it must not claim the
-    // scope the line just refused to claim.
     expect(
       line?.detail,
       "the persisted detail claims the op was outside the share, contradicting the notice it is attached to",
@@ -79,8 +77,6 @@ describe("what a share's skipped ops say", () => {
     expect(line?.text).toBe("dohc couldn't apply 1 update this share sent.");
     expect(line?.text).not.toContain("granter@dohc.test");
     expect(line?.text).not.toContain("this share covers");
-    // The detail is persisted with the refusal and shown as this notice's
-    // title. It must not claim the scope the line just refused to claim.
     expect(
       line?.detail,
       "the persisted detail says the moment was outside the share boundary, contradicting the notice it is attached to and the code that classifies it",

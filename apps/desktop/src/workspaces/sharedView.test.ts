@@ -114,7 +114,6 @@ async function readCollisionRecordPaths(rootDir: string, shareId: string): Promi
   return (await readSharedViewProjectionDebt(rootDir, shareId)).collisionPaths;
 }
 
-// Record reads while allowing the real filesystem operations.
 let readdirCalls: string[] = [];
 let realpathOverride: ((path: string, resolved: string) => string | null) | null = null;
 let failRenameToPathOnce: { path: string; error: Error } | null = null;
@@ -2020,8 +2019,6 @@ describe("shared view refresh", () => {
     await writeFile(join(outsideDir, markerName), "external marker", "utf8");
     await symlink(outsideDir, localDir, process.platform === "win32" ? "junction" : "dir");
 
-    // dohc trusts nothing under a linked `.dohc/local`, so the view reads as
-    // not current, and nothing there is removed.
     await expect(readSharedViewProjectionDebt(rootDir, SHARE_ID)).rejects.toThrow(
       /\.dohc\/local is a link/,
     );
@@ -2340,7 +2337,6 @@ describe("shared view refresh", () => {
     });
     expect(await readFile(join(rootDir, "docs/a.md"), "utf8")).toBe("updated body");
 
-    // The pull really went through the daemon share RPC.
     expect(harness.transport.requests.map((request) => request.method)).toContain(
       "share.view.pull",
     );
@@ -2570,8 +2566,6 @@ describe("share-refresh records in .dohc/local", () => {
           return pulled;
         }),
       ).resolves.toMatchObject({ ok: true });
-      // The pull ran with its marker and its pending paths beside the
-      // collision record, each this user's alone.
       expect(seen).toEqual([RECORDS.slice().sort()]);
       if (process.platform !== "win32") {
         expect(modes).toEqual([0o600, 0o600, 0o600]);
@@ -2655,7 +2649,6 @@ describe("share-refresh records in .dohc/local", () => {
         pull,
       });
 
-    // No `.dohc/local` yet: the engine has not opened this view's store.
     await expect(testProjection.markPending(rootDir, ["docs/a.md"])).rejects.toMatchObject(
       notOpened,
     );
@@ -2665,7 +2658,6 @@ describe("share-refresh records in .dohc/local", () => {
     await expect(refresh()).rejects.toMatchObject(notOpened);
     expect(await readdir(join(rootDir, ".dohc"))).toEqual([]);
 
-    // `.dohc/local` is there, but this open is closing.
     await openedView(rootDir);
     closedViews.add(rootDir);
     await expect(refresh()).rejects.toMatchObject(notOpened);
@@ -2673,7 +2665,6 @@ describe("share-refresh records in .dohc/local", () => {
       notOpened,
     );
 
-    // The open could not keep `.dohc/local` out of iCloud Drive.
     closedViews.delete(rootDir);
     unexcludedViews.add(rootDir);
     await expect(refresh()).rejects.toMatchObject({

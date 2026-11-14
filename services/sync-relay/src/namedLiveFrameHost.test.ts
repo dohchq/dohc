@@ -284,7 +284,6 @@ it("shows each named recipient its own share's selector on one binding and one n
   });
   const minted = await tickets.mint({ objectId: binding.objectId }, secondScope);
   const ticket = (await tickets.redeem(minted!.token, secondScope))!;
-  // Both recipients' accepted events carry the lineage's one recorded binding.
   expect(ticket.binding).toEqual(f.capture.ticket.binding);
   expect(ticket.binding).toEqual(binding);
   const second = captureNamedLiveFrameHost({

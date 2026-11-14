@@ -306,7 +306,6 @@ describe("a dataset table's saved views", () => {
     contentHash: "c".repeat(64),
     truncated: false,
   });
-  // Later tests start with no views file again, and with no view kept open on this computer.
   afterEach(() => {
     backend.readWorkspaceText.mockImplementation(async () => {
       throw Error("missing");

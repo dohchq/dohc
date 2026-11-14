@@ -54,7 +54,6 @@ test("workspace discovery follows declared globs, exclusions, and nested package
 test("the real tree's undeclared test imports select their importers", () => {
   const packages = readWorkspacePackages(root);
   const references = packageReferences(root, packages);
-  // sync-relay's tests import desktop source, and ydoc-projection's tests import sync-relay's.
   assert.ok(
     affectedPackages(["apps/desktop/src/ipc/stopAndRestoreIpc.ts"], packages, references).includes(
       "@dohc/sync-relay",

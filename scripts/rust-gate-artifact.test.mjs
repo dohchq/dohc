@@ -584,14 +584,10 @@ test("a tree changed under the gate is refused, and never stamped", () => {
     const run = runGate(stub);
     assert.equal(existsSync(probe), true, "the stub must have changed the tree");
 
-    // The row fails, and names the step whose interval the change fell in —
-    // that is what a reader has to re-run.
     assert.match(run.summary, /FAIL tree provenance/);
     assert.match(run.summary, /changed during `native target`/);
     assert.match(run.summary, /dohc-gate-wiring-probe/);
 
-    // And the stamp is the judgement's. `tree <sha> clean` printed above a
-    // FAIL row is a log disagreeing with its own summary.
     assert.match(run.summary, /^== summary ==\r?\n {2}tree UNATTRIBUTABLE\r?\n/);
     assert.doesNotMatch(run.summary.split("\n")[1], /clean|dirty/);
     assert.match(run.evidence, / head UNATTRIBUTABLE\)/);

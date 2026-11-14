@@ -160,7 +160,6 @@ describe("links the OS hands dohc", () => {
     messageId: `message-${workspaceId}`,
   });
 
-  // The window shows the workspace it was switched to.
   function activations(deps: {
     resolve: (link: WorkLink) => Promise<WorkLinkPlace | null>;
     activate?: (place: WorkLinkPlace) => Promise<string | null>;

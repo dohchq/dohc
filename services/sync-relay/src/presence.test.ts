@@ -137,9 +137,6 @@ describe("PresenceHub", () => {
   });
 
   it("keeps the server-derived userId; a client cannot pass one in", () => {
-    // The hub only records the userId the caller (the relay, from the actor)
-    // supplies. State is opaque — even if a client stuffed a fake userId into
-    // state, attribution is the hub's userId argument, not anything in state.
     const hub = new PresenceHub();
     const snap = hub.publish(
       "ws:w:general",

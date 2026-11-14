@@ -59,8 +59,6 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
   await waitForVisibleAnimations(page);
 }
 
-// The dialog stays above the toasts and inside the window, so the backdrop
-// never scrolls; a long dialog scrolls its own body.
 async function expectFitsWindow(page: Page, dialog: Locator): Promise<void> {
   const box = await dialog.boundingBox();
   const fit = await page.evaluate(() => {

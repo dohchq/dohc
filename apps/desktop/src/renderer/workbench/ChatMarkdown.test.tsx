@@ -18,8 +18,6 @@ vi.mock("./chatMarkdownParse", async (original) => {
   return { ...actual, parseChatMarkdown: vi.fn(actual.parseChatMarkdown) };
 });
 
-// The chat's parse worker, run in this thread. `workerMode` decides whether it
-// answers, never answers, crashes, or holds its answer until a test sends it.
 let workerMode: "answer" | "hang" | "crash" | "hold" = "answer";
 const workers: FakeWorker[] = [];
 const held: Array<() => void> = [];

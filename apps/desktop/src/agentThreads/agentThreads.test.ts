@@ -51,11 +51,9 @@ function setup(
       left = left.filter((messageId) => messageId > input.upTo.messageId);
     },
     getThread: async () => ({ thread: { id: "thread-a", title: "Hello" }, messageCount: 4 }),
-    // What was posted in the chat thread after the forwarded message.
     listMessagesPage: async () => ({ messages: replies, nextAfterMessageOrder: null }),
   } as unknown as Chats;
   const replies: Array<{ authorAgentId?: string }> = [];
-  // What the tool says the thread is doing.
   const tool: { state: T3CodeThreadState } = {
     state: {
       title: "Chief",
@@ -247,7 +245,6 @@ describe("agent threads", () => {
     agentThreads.settingsChanged();
     await vi.waitFor(() => expect(forget).toHaveBeenCalledTimes(1));
 
-    // Nothing more to drop while no agent has a thread.
     agentThreads.settingsChanged();
     await settled();
     expect(forget).toHaveBeenCalledTimes(1);
@@ -357,7 +354,6 @@ describe("agent threads", () => {
     ]);
     expect(lineChanges).toContain(WORKSPACE);
 
-    // The agent posts in the chat thread: the write takes the line away.
     replies.push({ authorAgentId: "chief" });
     signalChatWrite(WORKSPACE);
     await vi.waitFor(() => expect(agentThreads.lines(WORKSPACE)).toEqual([]));
@@ -525,7 +521,6 @@ describe("forwardProblemWords", () => {
     ).toBe(
       "Messages for Chief are waiting. dohc is not allowed in T3 Code. Open the agent in Settings to allow dohc.",
     );
-    // An error dohc did not word for a person stays out of the notice.
     expect(forwardProblemWords(null, new Error("EACCES: /secret/path"))).toBe(
       "Messages for your agents are waiting. dohc could not give them to the agent's thread. dohc tries again by itself.",
     );

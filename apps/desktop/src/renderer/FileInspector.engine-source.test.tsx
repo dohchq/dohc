@@ -391,9 +391,6 @@ describe("engine markdown source view", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
-  // The ended share's lifecycle: the live session reports read-only as a
-  // status whether or not an edit is waiting, then the shell re-renders the
-  // file through the read-only view.
   async function endAccessAfterTyping() {
     const user = userEvent.setup();
     const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
@@ -600,11 +597,6 @@ describe("engine markdown source view", () => {
     expect(bridgeMock.openEngineYDocSession).not.toHaveBeenCalled();
   });
 
-  // Engine mode renders no editable source surface, which held the only
-  // consumer of the pending line. Every engine-backed search result therefore
-  // opened at the top of the document, whatever line it named. The engine
-  // editor now takes the seam over: the line resolves to the top-level block
-  // holding it, and the editor reveals that block.
   const SEARCH_DOC =
     "---\ntitle: Plan\n---\n\n# Plan\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph.\n";
 
@@ -1217,7 +1209,6 @@ describe("engine markdown source view", () => {
     const editor = await screen.findByTestId("markdown-editor");
     await waitFor(() => expect(editor.textContent).toContain("Base paragraph."));
     expect(screen.getByTestId("markdown-source-toggle")).toBeTruthy();
-    // The panel draws the record's name, buttons and fields, so the body draws none and asks main for no record.
     expect(screen.queryByTestId("page-identity")).toBeNull();
     expect(screen.queryByTestId("properties-panel")).toBeNull();
     expect(screen.queryByTestId("record-buttons")).toBeNull();

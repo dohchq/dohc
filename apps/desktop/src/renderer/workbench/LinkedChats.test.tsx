@@ -322,7 +322,6 @@ it("shows what an agent's thread is doing over the composer of a file's chat", a
       Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
 
-  // The agent replied in this chat: its line goes, and another chat's stays out.
   act(() =>
     pushLines({
       workspaceId: "workspace-1",

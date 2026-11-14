@@ -33,10 +33,6 @@ import { createAutomationTargets } from "./automationTargets";
 import { chatDirectoryOf } from "./automationChat";
 import { undoAutomationRuns } from "./automationUndo";
 
-// A document Collection's run against an in-memory engine: each step reads
-// what the steps before it wrote, and a run that stops at any durable point
-// finishes with the same writes, under the same keys, exactly once.
-
 const shared = createAutomationFormulaEvaluator();
 afterAll(async () => {
   await shared.close();
@@ -289,7 +285,6 @@ function workspace(
 ) {
   const records = new Map(docs.map((doc) => [doc.id, structuredClone(doc)]));
   const metadataReads: string[] = [];
-  // Each idempotency key the engine took, with what it wrote.
   const keys = new Map<string, JsonValue>();
   let events = 0;
   let dead = false;
@@ -474,7 +469,6 @@ function workspace(
       isButtonField: async () => true,
       withReads: async (work) => await work(reads),
       withRecordWrites: async (_signal, work) => await work(writes),
-      // Each Collection's id is its name here; none moves unless a test moves it.
       collectionIdOf: (path) => (path === "Tasks" || path === "Log" ? path : null),
       collectionPathOf: (collectionId) =>
         collectionId === "Tasks" || collectionId === "Log" ? collectionId : null,
@@ -1045,7 +1039,6 @@ describe("a stepwise run", () => {
     );
     const space = workspace([task("rec_t", { Project: "A", Count: 1 })]);
     const store = await scratchStore();
-    // Someone sets Count just after the second step read the record.
     space.hooks.afterFindRead(() => {
       space.records.get("rec_t")!.values.Count = 10;
     });

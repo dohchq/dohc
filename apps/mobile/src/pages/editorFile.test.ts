@@ -101,8 +101,6 @@ describe("the editor files", () => {
   });
 });
 
-// The page body's typeface is the desktop's Inter: the same package's variable wght files, with its faces as the
-// desktop declares them, for the Latin-script subsets only, so other scripts fall back to the system font.
 describe("the page's typeface", () => {
   it("declares the desktop's Inter faces for the Latin-script subsets, and no others", async () => {
     const { pageFonts, pageHtml } = await import("../editorHtml.generated");

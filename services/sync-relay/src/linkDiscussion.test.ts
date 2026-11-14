@@ -1690,7 +1690,6 @@ describe("share discussion HTTP boundary", () => {
     for (const response of await Promise.all(refusals)) {
       expect(await genericRefusal(response)).toBe(baseline);
     }
-    // A caller who is not the owner is refused before the relay reads the body.
     for (const userId of [null, COMMENTER]) {
       let read = false;
       const body = new ReadableStream<Uint8Array>(

@@ -169,7 +169,6 @@ describe("dataset automation claims in both ledgers", () => {
     await f.edit(invoice, { [PAID]: true });
     await f.until(() => f.claims()[0]?.state === "done");
     const ledgerClaim = f.claims()[0]!;
-    // The automation then ran 21 times on a schedule, after its record change.
     for (let index = 0; index < 21; index += 1)
       f.engineClaims.push(
         engineClaim(`atc_later_${index}`, "done", ledgerClaim.createdAtMs + 1 + index),

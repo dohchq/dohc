@@ -83,7 +83,6 @@ for (const theme of ["light", "dark"] as const) {
         BrowserWindow.getAllWindows()[0]!.setSize(1280, 900),
       );
       const collection = page.getByRole("region", { name: "Tournament", exact: true });
-      // Create form is a command in the actions menu. Enter on the menu's button opens it from the keyboard, so Enter then runs the command that has focus.
       const manage = collection.getByRole("button", { name: "Manage Collection", exact: true });
       const createForm = collection.getByRole("menuitem", { name: "Create form", exact: true });
       await manage.focus();

@@ -442,7 +442,6 @@ function expectPersonal(f: Fixture, signed: Pick<Signed, "accessToken" | "resour
   return expect(f.h.linkAuthority.personal(agentRequest(signed.accessToken, signed.resource)));
 }
 
-/** Running work under a connection, registered as a wait or stream registers it. */
 function running(
   f: Fixture,
   signed: Signed,
@@ -624,7 +623,6 @@ describe("families never mix", () => {
     const link = await linkAgent(f, clientId);
     const personal = await approve(f, { clientId });
 
-    // A code at the other family's address finds nothing, and stays unspent.
     await expectRefused(
       await redeem(f, { clientId, code: link.code, resource: personal.resource }),
     );
@@ -1019,7 +1017,6 @@ type ChatPage = { messages: Array<Record<string, unknown>>; olderCursor: number 
 
 const computerSeqs = new WeakMap<SyncRelayStorage, Map<string, number>>();
 
-/** The owner's computer pushes these ops, and held waits wake. */
 function fromComputer(f: Fixture, workspaceId: string, ops: ChatOp[]): void {
   const seqs = computerSeqs.get(f.storage) ?? new Map<string, number>();
   computerSeqs.set(f.storage, seqs);

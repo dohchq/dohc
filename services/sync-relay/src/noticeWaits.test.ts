@@ -37,8 +37,6 @@ import {
   testStorage,
 } from "./testing";
 
-// The account's own Notice reads, `scope=phone` and `wait`, over real storage.
-
 afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -56,7 +54,6 @@ async function relay(options: { seedFull?: boolean } = {}) {
   storage.claimWorkspace({ workspaceId: "trip", ownerUserId: "ana", createdAtMs: 1 });
   storage.claimWorkspace({ workspaceId: "diary", ownerUserId: "ana", createdAtMs: 1 });
   storage.claimWorkspace({ workspaceId: "bens", ownerUserId: "ben", createdAtMs: 1 });
-  // Ana keeps her diary off her phone.
   storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "diary", showOnPhone: false });
   if (options.seedFull)
     seedFullNoticeList(storage, {
@@ -65,8 +62,6 @@ async function relay(options: { seedFull?: boolean } = {}) {
       idPrefix: "full-",
       nowMs: NOW - 2_000,
     });
-  // `Bearer session:<user>:<session>` is a valid sign-in, under `rename` while it is set, until its session is revoked.
-  // `holdSession(n)` holds the nth sign-in check from now until its release.
   let rename: string | null = null;
   const revoked = new Set<string>();
   let checks = 0;
@@ -136,7 +131,6 @@ async function relay(options: { seedFull?: boolean } = {}) {
         ...(input.signal ? { signal: input.signal } : {}),
       }),
     );
-  // The whole list, as a computer reads it.
   const full = async (userId = "ana") =>
     await page(await h(request(userId, "/sync/notices?limit=200")));
   const post = (noticeId: string, overrides: Partial<PostNoticeInput> = {}) =>
@@ -194,7 +188,6 @@ function parking(storage: SyncRelayStorage) {
   return { heads, parks };
 }
 
-// Log rows as a computer's sync would write them: moments place objects, and thread creates name their file.
 function logWriter(storage: SyncRelayStorage, workspaceId = "trip") {
   const context = storage as StorageContext;
   let originSeq = 0;
@@ -284,7 +277,6 @@ it("reads with scope or wait only under the account's Bearer session", async () 
       )
     ).status,
   ).toBe(401);
-  // A relay without the account resolver serves no account read.
   const without = testHandler(storage, { nowMs: () => NOW });
   expect(
     await denialBytes(
@@ -295,7 +287,6 @@ it("reads with scope or wait only under the account's Bearer session", async () 
       ),
     ),
   ).toBe(missing);
-  // Without scope or wait, the read is the computer's, as before.
   expect(ids(await page(await h(request("ana", "/sync/notices"))))).toEqual(["n-1"]);
 
   createAccountDeletionRoute({
@@ -351,14 +342,12 @@ it("leaves hidden workspaces, secret targets, and wake payloads out of the phone
     linkedPathHint: "docs/gone.md",
   });
   write("chat.thread.create", { threadId: "thread-chat" });
-  // A linked file the relay never placed, with no hint and with an ordinary one.
   write("chat.thread.create", { threadId: "thread-unplaced", linkedObjectId: "object-never" });
   write("chat.thread.create", {
     threadId: "thread-unplaced-hint",
     linkedObjectId: "object-never-2",
     linkedPathHint: "docs/new.md",
   });
-  // Ana keeps notices of her own in Ben's shared notes.
   shareNotesWithAna(storage);
 
   post("plain", { target: { path: "docs/plan.md" } });
@@ -553,7 +542,6 @@ it("shows each kind on the phone only as its rule allows, and leaves out a kind 
     "future",
   ];
   for (const noticeId of left) expect(text, noticeId).not.toContain(`"noticeId":"${noticeId}"`);
-  // The whole list keeps every row.
   expect(ids(await full())).toEqual(expect.arrayContaining([...shown, ...left]));
 });
 
@@ -578,7 +566,6 @@ it("decides a row in another account's workspace by a fixed rule that reads noth
 it("never looks up a thread named through a share, even beside a path the share admits", async () => {
   const { storage, read, full, post } = await relay();
   shareNotesWithAna(storage);
-  // An admitted path paired with Ben's thread outside the share.
   post("share-path-thread", {
     reach: { shareId: "share-ben" },
     target: { path: "notes/list.md", thread: "thread-private" },
@@ -689,7 +676,6 @@ it("answers a held read at once when a named share arrives during its last sign-
   ]);
 });
 
-// A mention Ana's computer posted about a file in Ben's shared notes.
 const SHARED_MENTION = {
   reach: { shareId: "share-ben" },
   title: "Mentioned in Ben's notes",
@@ -765,7 +751,6 @@ it("never names a share's secret or ignored row on the phone, before or after th
   };
   const before = await phone("");
   expect(ids(before)).toContain("share-mention");
-  // Rows settled before a whole read never start the list over again.
   const caughtUp = await phone(`cursor=${before.nextCursor}`);
   expect(caughtUp).toMatchObject({ replace: false, notices: [] });
   expect(storage.revokeShare("share-ben", NOW)).toBe(true);
@@ -811,7 +796,6 @@ it("finishes a restarted phone pull, then reads on without starting over again",
   expect(first).toMatchObject({ hasMore: true, replace: true });
   expect(storage.revokeShare("share-ben", NOW)).toBe(true);
 
-  // The restart takes "later", then the two settled rows one page each, and leaves both out.
   const restarted = await next(first.nextCursor);
   const settled = await next(restarted.nextCursor);
   const last = await next(settled.nextCursor);
@@ -869,7 +853,6 @@ it("serves a removed row to the phone without its title", async () => {
     ["full-0", true, ""],
     ["overflow", false, "Title overflow"],
   ]);
-  // A computer's read still carries what the row said.
   const computer = await page(await h(request("ana", `/sync/notices?cursor=${head}`)));
   expect(computer.notices.find((notice) => notice.noticeId === "full-0")).toMatchObject({
     removed: true,

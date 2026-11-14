@@ -250,7 +250,6 @@ test("@live-owner-open an owner edit queued while the server hosts the note nowh
           { timeout: 120_000, intervals: [1_000] },
         )
         .toBe(true);
-      // The server accepted the queued edit, so this computer holds none for it.
       await expect.poll(unaccepted, { timeout: 120_000, intervals: [1_000] }).toBe(0);
       await expect(page.getByTestId("markdown-save-state")).not.toHaveAttribute(
         "data-state",

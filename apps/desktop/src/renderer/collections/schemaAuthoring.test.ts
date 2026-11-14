@@ -11,10 +11,6 @@ import {
   setOptionColor,
 } from "./schemaAuthoring";
 
-// The serializer's one contract: what it writes, parseCollectionSchema reads
-// back as a valid schema equal to the model. The mutation helpers are pure
-// and covered against that same round trip.
-
 const FULL: CollectionSchema = {
   name: "Tasks",
   description: "Team tasks",

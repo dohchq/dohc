@@ -279,7 +279,6 @@ test("local app works without an account, survives restart, and stops at shared 
     await app.getByRole("button", { name: "List orders" }).click();
     await expect(status).toContainText('"ok":false');
     await expect(launcher.launch(publication.publicationId, lifetime.signal)).rejects.toThrow();
-    // The stopped session closes its loopback server, so the app can't load there again.
     const stoppedOrigin = new URL(page.url()).origin;
     await expect
       .poll(async () => {

@@ -367,8 +367,6 @@ describe("versions compare page", () => {
     await screen.findByTestId("version-compare-file");
     expect(computeTextDiffSpy).toHaveBeenCalledTimes(1);
 
-    // A render that does not change the compared bodies must not diff them
-    // again.
     view.rerender(<VersionComparePage workspaceId="ws-1" versionId="v-1" />);
     await screen.findByTestId("version-compare-file");
     expect(computeTextDiffSpy).toHaveBeenCalledTimes(1);

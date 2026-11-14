@@ -62,14 +62,6 @@ import {
 import type { StorageContext } from "./storage/context";
 import { closeTestStorages, tempRoot, testStorage } from "./testing";
 
-// The owner's computer writes a page and chats and syncs. The phone then
-// reads them through the relay's route from the server's copy of the
-// workspace, the real engine in both, and gets what the owner's computer
-// reads, and the change feed names them. A page read leaves the copy nothing
-// to send. The phone's writes through the same route reach the relay as the
-// copy's engine journaled them, and the owner's computer then reads them as
-// the phone does.
-
 const engine = requireEngineBinaryOrSkip();
 const WORKSPACE = "workspace-trip";
 const DEADLINE_MS = 30_000;
@@ -82,8 +74,6 @@ afterEach(async () => {
   await closeTestStorages();
 });
 
-// The relay's test seam: "Bearer test:<user>" is that user's computer, and
-// "Bearer session:<user>" that user's phone.
 const testActor: ResolveActor = (request, workspaceId) => {
   const match = /^Bearer test:([A-Za-z0-9_.:-]+)$/u.exec(
     request.headers.get("authorization") ?? "",
@@ -97,7 +87,6 @@ const resolveAccountSession: ResolveAccountSession = async (request) => {
   return { userId: match[1]!, sessionId: "phone", expiresAtMs: Number.MAX_SAFE_INTEGER };
 };
 
-/** One engine with the workspace open on the relay route and ordinary replication. */
 async function computer(input: {
   root: string;
   relayUrl: string;
@@ -190,7 +179,6 @@ async function computer(input: {
   };
 }
 
-/** The operations' host over one engine, as the server's copy reads it. */
 function engineChats(client: AutomationReplica["client"], workspace: string): ChatsHost {
   const files = new VersionedLiveAdapter(client, workspace, { workspaceId: WORKSPACE });
   const resolved = async (target: { path: string } | { objectId: string }) =>
@@ -228,14 +216,6 @@ const shared = (value: unknown): unknown =>
     ),
   );
 
-/**
- * The relay as main.ts mounts it, with this server's public origin and the
- * accounts' names, its replication route on a loopback port, and the owner's
- * computer with the workspace open. Once the owner has synced, `openCopy`
- * joins the server for the account and opens its copy, which syncs before
- * each read and write. `route` asks the account operations route as the
- * owner's phone.
- */
 async function relayAndOwner(lookupUserDisplayName?: (userId: string) => string | null) {
   const root = await tempRoot("account-operations-e2e");
   const storage = await testStorage();
@@ -442,7 +422,6 @@ it.skipIf(engine.missing)(
     });
     await owner.sync();
 
-    // The server joins for the account and opens its copy, which syncs before each read.
     const copy = await openCopy();
 
     await same("groups", {}, await listGroups(ownerChats));
@@ -581,7 +560,6 @@ it.skipIf(engine.missing)(
       ...said,
       body: "Hi Ben",
     });
-    // A thread on a file the copy never held, and one on a secret file.
     const gone = await chats.createThread({
       workspaceId: WORKSPACE,
       title: "Gone",
@@ -784,7 +762,6 @@ it.skipIf(engine.missing)(
       await sameThread(postThread);
     }
 
-    // A thread on a file the copy never held reads with its file unavailable, and takes a reply and a reaction.
     const onFile = (await route("chat", { threadId: gone.id })) as {
       ok: boolean;
       projection: { text: string };

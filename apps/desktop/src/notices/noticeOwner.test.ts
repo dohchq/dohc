@@ -2,15 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { withErrorWords, type FailureWords } from "../ipc/errorWords";
 import { NoticeOwner } from "./noticeOwner";
 
-// What the shell's Notices shows for each report: the toast's words as the
-// shell writes them, and whether a new toast shows.
 type Shown = { words: string; toast: boolean } | { cleared: true };
 
 const CAUSE = new Error("engine went away");
 const LAST_CHANGES = "dohc could not read when each version last changed. engine went away";
 const SEVERAL = "dohc could not finish loading Versions. engine went away";
 
-// One cause's notice, and the buttons on the row it last filed.
 function opened() {
   const shown: Shown[] = [];
   const row = { dismiss: () => {}, tryAgain: () => {} };
@@ -27,7 +24,6 @@ function opened() {
 }
 
 describe("NoticeOwner", () => {
-  // A failure after a dismissal must not change a row that is gone.
   it("files a new toast when the cause fails again after the person dismissed its row", () => {
     const { shown, row, notice } = opened();
     notice.failed();

@@ -4,10 +4,6 @@ import type { PersonalAgentAction, PersonalAgentClient } from "./personalAgentCl
 import { PERSONAL_SIGN_IN_UNAVAILABLE, servePersonalMcp } from "./personalMcp";
 import { MAX_WAIT_TIMEOUT_MS, POST_UNKNOWN } from "./remoteMcp";
 
-// The tools a personal agent calls at /mcp/agent/w/<workspace>, against a
-// fake relay. The relay decides reach and level; these tests check what each
-// tool asks it and how each answer and refusal reads to the agent.
-
 const origin = "https://share.example.test";
 const clients: Client[] = [];
 afterEach(async () => {
@@ -77,7 +73,6 @@ function relay({ action, body }: Call): Response {
     return Response.json({ ok: false, code: "not_found", error: "not found" }, { status: 404 });
   }
   if (action === "chat") return Response.json({ ok: true, messages: [message(3)], olderCursor: 2 });
-  // A thread answers with the path its file has or last had.
   if (action === "discussion") {
     return Response.json(
       typeof body.threadId === "string"

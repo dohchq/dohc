@@ -532,7 +532,6 @@ describe("reach check", () => {
 });
 
 describe("share links as editors", () => {
-  // A share link's own grant: it names nobody.
   function linkGrant(
     grantId: string,
     paths: string[],
@@ -580,7 +579,6 @@ describe("share links as editors", () => {
     expect(check(opened, change(budget))).toEqual(
       stopped("Anyone with your share link to Trip cannot edit Budget."),
     );
-    // A link the owner made gives the owner's reach to nobody.
     expect(
       check(
         owner(
@@ -743,7 +741,6 @@ describe("a link that wrote automations directly and stopped editing", () => {
 });
 
 describe("reach on a dataset Collection", () => {
-  // Budget keeps its records in a dataset. Its automations use its operations.
   const edit = {
     operationId: "op-edit",
     name: "invoices.edit",

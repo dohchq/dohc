@@ -219,7 +219,6 @@ describe("bindDocPresence", () => {
     await flush();
     const localYc = binding.awareness.clientID;
 
-    // Alice joins honestly; her slot is now owned by (alice, pa).
     await push([alicePeer]);
     expect(onPeers.mock.calls.at(-1)?.[0]).toContain("Alice");
 

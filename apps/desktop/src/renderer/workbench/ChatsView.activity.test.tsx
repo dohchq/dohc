@@ -169,8 +169,6 @@ describe("ChatsView live activity refresh", () => {
     expect(await screen.findByText(agentReport.body)).toBeTruthy();
     expect(await screen.findByTestId("chats-comment-decision-open")).toBeTruthy();
     expect((await screen.findByTestId("chats-run-chip")).textContent).toBe("Details");
-    // The same view stayed mounted; activity caused fresh reads rather than a
-    // back/forward navigation or optimistic local append.
     expect(screen.getByTestId("chats-thread-view")).toBeTruthy();
     expect(bridgeMock.listChatMessages.mock.calls.length).toBeGreaterThan(messageReadsBefore);
     expect(bridgeMock.listChatThreadDecisions.mock.calls.length).toBeGreaterThan(

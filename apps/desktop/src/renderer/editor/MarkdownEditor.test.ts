@@ -1203,7 +1203,6 @@ it("hands Edit > Find to the editor that has focus, including its find bar", asy
   expect(find(rightSurface!)?.open).toBe(true);
   expect(find(leftSurface!)?.open).toBe(false);
 
-  // From the find bar, as with ⌘G there.
   fireEvent.change(input, { target: { value: "the" } });
   act(() => sendToFocusedEditor("find-again-next"));
   expect(find(rightSurface!)?.activeIndex).toBe(1);

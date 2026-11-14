@@ -80,9 +80,6 @@ function errnoError(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`${code}: forced by test`), { code });
 }
 
-// A tool result is a union and only its refusal arm carries `reason`. Throws
-// on a success rather than narrowing silently, so a tool that should have
-// refused is reported as that instead of an assertion against `undefined`.
 function refusalReason(result: { ok: true } | { ok: false; reason: string }): string {
   if (result.ok) throw new Error("expected a refusal, got a successful result");
   return result.reason;
@@ -188,9 +185,6 @@ async function withProcessPlatform<T>(platform: NodeJS.Platform, fn: () => Promi
 // history" covers that.
 const itDurableHistory = process.platform === "linux" ? it : it.skip;
 
-// The traversal vectors every path-taking tool must refuse: parent escape,
-// percent-encoded escape (single and double), an absolute path, and the
-// reserved .dohc control dir.
 const TRAVERSALS = [
   "../secret.txt",
   "%2e%2e/secret.txt",
@@ -342,9 +336,6 @@ describe("mcp tool path containment", () => {
         expect(JSON.stringify(secretSearch)).not.toContain("API_KEY=x");
       }
 
-      // The floor also covers the import/query LAUNDERING paths: a secret
-      // source must not become a visible database, and a secret-named
-      // database must not answer SELECTs (mounted or local).
       await writeFile(join(ctx.root, "shared-with-me", "alex", ".env.csv"), "k,v\nX,1");
       await expect(
         importData(ctx, {
@@ -748,8 +739,6 @@ describe("mcp tools operate on allowed paths", () => {
         ]);
       }
 
-      // The write carried no legacy change set (the engine
-      // is the recorder).
       expect(written).not.toHaveProperty("recordedBy");
     });
   });
@@ -757,7 +746,6 @@ describe("mcp tools operate on allowed paths", () => {
   it("mutating tools work on platforms without durable legacy history", async () => {
     await withWorkspace(async (ctx) => {
       await withProcessPlatform("darwin", async () => {
-        // The engine capture path has no platform gate, so mutations proceed.
         await expect(
           writeWorkspaceFile(ctx, { path: "notes/nested/plan.txt", content: "draft\n" }),
         ).resolves.toMatchObject({ ok: true });
@@ -930,15 +918,12 @@ describe("mcp tools operate on allowed paths", () => {
 
   it("reads history from engine moments only — legacy .dohc/history relics are ignored", async () => {
     await withWorkspace(async (ctx) => {
-      // A pre-flip legacy change-set relic left on disk is never read: the
-      // engine (moments) is the sole history source now.
       await mkdir(join(ctx.root, ".dohc", "history"), { recursive: true });
       await writeFile(
         join(ctx.root, ".dohc", "history", "relic.json"),
         JSON.stringify({ id: "relic-1", summary: "Pre-flip edit" }),
       );
 
-      // A new MCP write records nothing legacy.
       await expect(
         writeWorkspaceFile(ctx, { path: "notes/plan.txt", content: "draft\n" }),
       ).resolves.toMatchObject({ ok: true });
@@ -1050,7 +1035,6 @@ describe("mcp tools operate on allowed paths", () => {
         code: "ENOENT",
       });
 
-      // None of the mutations wrote a legacy change set.
       expect(moved).not.toHaveProperty("recordedBy");
       expect(deleted).not.toHaveProperty("recordedBy");
     });
@@ -1151,7 +1135,6 @@ describe("mcp tools operate on allowed paths", () => {
         title: "Ledger",
         build: { output: "dist" },
       });
-      // The scaffold reports the engine as recorder; no change set.
       await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
         count: 0,
       });
@@ -1558,9 +1541,6 @@ describe("mcp tools operate on allowed paths", () => {
       const result = await detectApps(ctx);
       expect(result).toMatchObject({ ok: true, count: 1 });
       if (!result.ok) return;
-      // A silently-accepted array pkg would look like an empty, valid
-      // package.json (no scripts, no dependencies, no diagnostic at all) and
-      // would never explain why no package signal was picked up.
       expect(result.apps[0]).toMatchObject({
         root: "pkg-not-an-object",
         kind: "static",
@@ -1605,10 +1585,6 @@ describe("mcp tools operate on allowed paths", () => {
         join(ctx.root, "workflow-claims-build/dohc.json"),
         JSON.stringify({ type: "workflow", build: { output: "dist" } }),
       );
-      // A sibling with the same non-site type but a real build artifact on
-      // disk (an actual dist/index.html, not just an empty dist/) still
-      // counts, proving the detected-vs-configured distinction (not a
-      // blanket refusal of every build.output claim).
       await mkdir(join(ctx.root, "workflow-real-build/dist"), { recursive: true });
       await writeFile(join(ctx.root, "workflow-real-build/dist/index.html"), "<h1>Built</h1>");
       await writeFile(
@@ -1960,7 +1936,6 @@ describe("mcp tools operate on allowed paths", () => {
   it("import_data refuses a hidden-internal (.dohc) database target", async () => {
     await withWorkspace(async (ctx) => {
       await writeFile(join(ctx.root, "people.csv"), "id\n1\n");
-      // .dohc is reserved, so the path validator rejects it outright.
       await expect(
         importData(ctx, {
           sourcePath: "people.csv",

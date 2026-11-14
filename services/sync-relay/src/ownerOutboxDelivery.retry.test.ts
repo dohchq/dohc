@@ -129,7 +129,6 @@ function fixture(
         const fault = faults.acknowledge.shift(),
           receipt = (request.params as unknown as { receipts: LiveUpdateReceipt[] }).receipts[0]!;
         if (fault === "failed") throw new Error("Engine unavailable.");
-        // Only the head its owner asked to try again leaves quarantine, and its acceptance resumes the queue.
         if (native.state === "quarantined" && native.retryDeliveryId !== receipt.deliveryId)
           throw new Error("A quarantined owner outbox refuses acknowledgement.");
         Object.assign(native, { state: "active", quarantineReason: null, retryDeliveryId: null });
@@ -526,7 +525,6 @@ it("admits an outstanding Try again once, under its original delivery, after a c
     quarantineReason: "invalid-update",
     retryDeliveryId: f.entry.deliveryId,
   });
-  // The relay crashes with the refusal it received; the owner's request is still open.
   f.crash();
   const storage = f.restart(),
     commit = vi.spyOn(storage, "commitLiveUpdateJournal");

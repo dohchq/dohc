@@ -271,7 +271,6 @@ describe("a workspace's history stays inside it", () => {
       "dohc could not record this workspace's sync history. A link is at .dohc/sync-history, which must be a real folder. Remove or rename that link. Then retry.";
     await expect(recordSynced(root)).rejects.toThrow(refusal);
     await expect(recordReceivedShare(root)).rejects.toThrow(refusal);
-    // A link proves nothing, so no computer runs the schedules and none can take them.
     expect(await readSyncHistory(root)).toBe("unknown");
     expect(await scheduleComputer(root, laptop)).toBeNull();
     expect(await runSchedulesOn(root, desk)).toBe(false);

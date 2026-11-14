@@ -65,10 +65,6 @@ let momentQueryId = 1;
 // there at all, so keying on `afterText` by itself would report a removed body
 // as though a write had landed it.
 async function readDaemonMoments(loopback: VersionedLoopbackEngine): Promise<EngineMomentRow[]> {
-  // Drained rather than capped. An earlier draft asked for one large page and
-  // threw on a cursor, which would have rejected a valid history the day a test
-  // recorded one page more — a limit with no measurement behind it. Paging costs
-  // nothing here and removes the question.
   const moments: MomentRecord[] = [];
   let beforeMomentOrder: number | null = null;
   for (;;) {
@@ -640,8 +636,6 @@ describe("switchVersion", () => {
     expect(toMain.activeVersionId).toBe("main");
     expect(await readText(root, "plan.md")).toBe("v1 text\n");
     expect(existsSync(join(root, "draft-only.md"))).toBe(false);
-    // In-cap binary files follow the active version byte-for-byte when
-    // switching.
     expect(existsSync(join(root, "logo.png"))).toBe(true);
     expect(new Uint8Array(await readFile(join(root, "logo.png")))).toEqual(logoBytes);
 

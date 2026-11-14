@@ -19,11 +19,6 @@ import {
   SHARED_BUTTON_UNCHECKED,
 } from "@dohc/automation-executor/button-presser";
 
-// The host's side of shared-view presses against a fake relay and a fake
-// host module: it runs only while the host module says so, accepts and presses
-// under a hold at its host generation, and after a restart resumes only a
-// press whose engine claim exists.
-
 const WORKSPACE = "ws-1";
 const HASH = "0123456789abcdef";
 it.each(["pending", "accepted", "settled"])(
@@ -226,8 +221,6 @@ function fakeRelay(options: {
   };
 }
 
-// The host module as this loop sees it: whether this computer runs the
-// workspace's automations, at which generation, and the holds a handover waits on.
 function fakeHost(options: { runs?: boolean; generation?: number } = {}) {
   let runs = options.runs ?? true;
   let notify = () => undefined as void;

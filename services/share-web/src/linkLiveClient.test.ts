@@ -308,7 +308,6 @@ it("bounds admission even when an injected relay ignores cancellation", async ()
   });
 });
 
-// The servers' own trouble while a viewer's page is open. Each answered 404 before, which stops the page.
 const serverTrouble: [string, () => Promise<Response>][] = [
   [
     "relay unreachable",

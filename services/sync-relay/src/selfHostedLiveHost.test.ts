@@ -35,7 +35,6 @@ const markerFailure = vi.hoisted(() => ({
   synced: 0,
   hold: undefined as { entered(): void; release: Promise<void> } | undefined,
 }));
-// While `error` is set, creating a folder fails, so a pass cannot prepare its hosted stores.
 const folderFailure = vi.hoisted(() => ({ error: undefined as Error | undefined }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -280,7 +279,6 @@ async function fixture(
         held = held.filter((row) => row.workspaceId !== workspaceId);
       }
     });
-    // A failed detach leaves the diverged workspace attached.
     running = {
       holds,
       attached,
@@ -328,7 +326,6 @@ async function fixture(
     } as never;
   });
   const onError = vi.fn();
-  // Records what the store and attachment looked like at each release.
   const release = f.storage.releaseServiceHostEnrollment.bind(f.storage);
   vi.spyOn(f.storage, "releaseServiceHostEnrollment").mockImplementation((input) => {
     events.push(
@@ -368,7 +365,6 @@ async function fixture(
       },
       { timeout: 10_000 },
     );
-  // Waits for a few more reconciliations, which find nothing new to do.
   const waitPasses = async () => {
     const passes = vi.spyOn(f.storage, "listUndrainedServiceHostEnrollments");
     await vi.waitFor(
@@ -861,8 +857,6 @@ it("keeps a diverged store in place and its workspace detached across passes and
   expect(await readFile(join(store, "replica.sqlite"), "utf8")).toBe("unpublished work");
 });
 
-// Proves: a document whose history is past what the server reads or checks
-// tells the operator, once, that it tries again later or on its owner's Resume.
 it("tells the operator a document whose history is past its budget tries again later", async () => {
   const f = await fixture();
   await f.waitStarted(1);
@@ -883,7 +877,6 @@ it("tells the operator a document whose history is past its budget tries again l
     ],
   ]);
   expect(f.host.blocked(binding)).toBe("history-over-budget");
-  // The server log prints the whole line, and it names neither the document's path nor the store's folder.
   const line = serverLogLine(f.onError.mock.calls[0]![0]);
   expect(line).toMatch(/^ServerLogError: Live editing of object /);
   expect(line).not.toContain("docs/a.md");
@@ -892,7 +885,6 @@ it("tells the operator a document whose history is past its budget tries again l
   expect(f.onError).toHaveBeenCalledTimes(1);
 });
 
-// Proves: a daemon that replaces a failed one is logged once it starts. The first daemon's start is not.
 it("logs a replacement daemon once it starts", async () => {
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   try {

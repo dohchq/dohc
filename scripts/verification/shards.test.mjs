@@ -476,7 +476,6 @@ function passingCloudJobs() {
   });
   jobs.push({ ...jobs.at(-1), name: "relay confinement", completed_at: "2026-11-11T13:07:00Z" });
   prepared.completed_at = "2026-11-11T13:06:40Z";
-  // Extend the historical topology with copies of an existing worker's timing.
   for (const [prefix, count] of [
     ["JS worker", JS_SHARDS],
     ["Rust tests", RUST_SHARDS],
@@ -1904,7 +1903,6 @@ test("job readiness falls back for later prerequisites and partial re-runs", () 
       const final = jobs.find((job) => job.name === "typecheck + tests");
       final.run_attempt = 2;
       if (carried) {
-        // A previous successful job keeps its own wait when selection is re-run later.
         selection.run_attempt = 2;
         for (const field of ["created_at", "started_at", "completed_at"])
           selection[field] = new Date(Date.parse(selection[field]) + 3_600_000).toISOString();

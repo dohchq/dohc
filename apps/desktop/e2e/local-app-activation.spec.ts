@@ -76,7 +76,6 @@ test("@local-app-activation credits a click inside the sandboxed app frame, and 
     await expect.poll(activated, { timeout: 15_000 }).toBe(false);
     await page.mouse.click(box.x, box.y);
     expect(await write("pressed-1")).toBe(true);
-    // The press inside the sandboxed frame activated the bootstrap window.
     expect(await activated()).toBe(true);
 
     await expect.poll(activated, { timeout: 15_000 }).toBe(false);

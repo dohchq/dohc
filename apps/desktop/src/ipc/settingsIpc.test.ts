@@ -247,7 +247,6 @@ async function harness() {
     },
     root: entries.get("workspace-a")!.rootPath,
     otherRoot: entries.get("workspace-b")!.rootPath,
-    // What workspace-a's engine open does: prepare .dohc/local, then answer.
     prepareLocalState: async (ready = true, workspaceId = "workspace-a") => {
       const workspace = entries.get(workspaceId)!;
       await localState.open(workspace, ready);
@@ -617,7 +616,6 @@ describe("registered settings IPC", () => {
     expect(h.publishRunners.mock.invocationCallOrder[0]).toBeLessThan(
       h.refreshDispatchTray.mock.invocationCallOrder[0]!,
     );
-    // Its last agent switched off leaves nothing dohc starts, and still publishes.
     const off = settingsWithAgent({ name: "Nova", enabled: false });
     await h.invoke(settingsOperations.setUserSettings.channel, { settings: off, base: on });
     expect(h.publishRunners).toHaveBeenCalledTimes(2);

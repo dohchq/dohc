@@ -459,7 +459,6 @@ describe("History timeline changes", () => {
     expect(folder.className.split(" ")).toEqual(
       expect.arrayContaining(["grow", "basis-6", "max-w-max", "truncate"]),
     );
-    // The actor and the name share a part that never wraps; the folder is outside it.
     expect(folder.parentElement).toBe(line);
     expect(actor.parentElement!.parentElement).toBe(line);
 

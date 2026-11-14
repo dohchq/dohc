@@ -151,7 +151,6 @@ describe("sync relay startup guards", () => {
     },
   );
 
-  // Proves: a device control configuration that cannot be read stops the relay without its file's path in the log.
   it("refuses an unreadable device delivery configuration without naming its path", async () => {
     const root = await tempRoot("device-delivery-startup");
     const configPath = join(root, "deployment.json");

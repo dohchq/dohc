@@ -1212,8 +1212,6 @@ it("recovers a missing received pin once without fetching detail on every refres
   expect(h.files.reconcile).toHaveBeenCalledTimes(2);
 });
 
-// One mount refreshed through the real files path, so the refresh reads its
-// records on disk.
 async function mountOnDisk(
   h: ReturnType<typeof harness>,
   overrides: (

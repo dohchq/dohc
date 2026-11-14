@@ -466,9 +466,6 @@ test("protected join preserves a failed folder, then restores exact secret and b
     });
     const relayConfig = { baseUrl: relay.baseUrl, token: TOKEN };
 
-    // Seed through the same daemon capture, relay journal, and key-envelope
-    // protocol that the product uses. Only the source machine is test-driven;
-    // the joining machine below goes through the public renderer and IPC.
     sourceWorkspace = await openLiveDaemonWorkspace(
       { workspaceId, rootPath: sourceRoot },
       { maxRestarts: 0 },
@@ -612,8 +609,6 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // Drive the real enable-sync IPC. The relay claim is authoritative, so it
-    // resolves with a live sync status and not "Enabling sync failed (404)".
     const enableResult = await page.evaluate(async (id) => {
       const api = (
         window as unknown as {

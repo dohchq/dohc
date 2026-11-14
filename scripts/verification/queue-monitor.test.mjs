@@ -460,7 +460,6 @@ test("the waiting count is rebuilt from the requests: until each first attempt, 
   assert.equal(buckets.at(-1).running, 1);
 });
 
-// A request to the monitor. A chunked body is sent in two writes, without a length.
 function get(
   port,
   path,
@@ -1207,7 +1206,6 @@ test("a write whose body is too large or too slow is refused, and its connection
     [413, "close"],
     "the client cannot keep streaming a body the server refused",
   );
-  // A body that never arrives gets its answer when the wait runs out, then the server closes the connection.
   const socket = connect(port, "127.0.0.1");
   let answer = "";
   socket.setEncoding("utf8").on("data", (chunk) => {

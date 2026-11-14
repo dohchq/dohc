@@ -43,7 +43,6 @@ const config = {
     ),
   },
 };
-// The external-database overlay leaves out the bundled database and its volume.
 const externalConfig = {
   ...config,
   services: {},
@@ -413,7 +412,6 @@ test("with an external database, move needs dohc accounts there and keeps every 
     assert.equal(started(mock.calls), false, String(refusal));
     assert.equal(changed(mock.calls), false, String(refusal));
   }
-  // A running writer refuses before the accounts check connects to the database.
   const written = host({
     external: "present",
     containers: [

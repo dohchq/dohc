@@ -180,7 +180,6 @@ it.skipIf(process.platform === "win32").each(["writable by others", "hard-linked
   },
 );
 
-// A sign-out whose removal of the copy's folder fails, as a busy folder's would.
 async function failedSignOut() {
   const f = await fixture();
   await f.registry.get(f.input);

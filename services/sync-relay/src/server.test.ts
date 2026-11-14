@@ -1290,7 +1290,6 @@ describe("sync relay handler", () => {
     const caller = (headers: Record<string, string>) =>
       requestBodyCaller(new Headers({ "x-dohc-relay-client-ip": "10.0.0.1", ...headers }));
     const cookie = "better-auth.session_token";
-    // Each spelling of one sign-in shares one key.
     expect(
       new Set([
         caller({ authorization: "Bearer token1" }),
@@ -1317,7 +1316,6 @@ describe("sync relay handler", () => {
         caller({ authorization: "LinkCapability link2", cookie: `${cookie}=token1.signature` }),
       ]),
     ).toEqual(new Set(["link"]));
-    // Each service host's credential keeps its own share.
     expect(caller({ authorization: "Bearer dohc-service-v1.host1" })).not.toBe(
       caller({ authorization: "Bearer dohc-service-v1.host2" }),
     );
@@ -3262,10 +3260,6 @@ describe("sync relay epoch and stream identity enforcement", () => {
   });
 });
 
-// The relay verifies that a chat op's claimed author equals the authenticated
-// pusher (actor.userId) before admitting it to the log. A forged author is
-// rejected atomically and leaves the log unchanged. The honest path is
-// admitted. An unattributed local message cannot enter either relay log.
 describe("MU-C0 verified chat authorship", () => {
   function messageOp(originSeq: number, author: string | undefined, messageId = `m-${originSeq}`) {
     return {

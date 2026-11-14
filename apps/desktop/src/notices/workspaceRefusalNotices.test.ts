@@ -97,8 +97,6 @@ async function fixture(shareView?: RegistryEntry["shareView"]) {
       throw new Error("No relay needed.");
     },
   });
-  // Each workspace authority the refusal adapter acquires, and whether
-  // authority close had begun by then.
   const acquisitions: ("open" | "closing")[] = [];
   let closing = false;
   const deps: Parameters<typeof createWorkspaceRefusalNotices>[0] = {

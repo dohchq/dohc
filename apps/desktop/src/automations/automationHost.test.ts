@@ -633,7 +633,6 @@ describe("the automation host", () => {
     const root = await createTestScratch("dohc-automation-host-copied-");
     await mkdir(join(root, ".dohc"), { recursive: true });
     await recordNeverSynced(root, laptop);
-    // iCloud Drive or a copy carries the same folder to the desk.
     expect(await automationHostGeneration({ rootPath: root }, laptop, () => null)).toBe(0);
     expect(
       await automationHostGeneration({ rootPath: root }, desk, () => null),

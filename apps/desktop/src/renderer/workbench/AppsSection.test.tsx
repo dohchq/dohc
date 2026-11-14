@@ -323,7 +323,6 @@ describe("Home's Apps section", () => {
     expect(screen.getByTestId("explorer-apps-empty").textContent).toBe("No apps yet.");
     expect(onHasApps).toHaveBeenLastCalledWith(false);
 
-    // An agent wrote an app folder; the listing settled.
     view.rerender(<Harness filesSettledRevision={1} onHasApps={onHasApps} />);
     expect(await screen.findByText("Client Portal")).toBeTruthy();
     expect(screen.queryByTestId("explorer-apps-empty")).toBeNull();

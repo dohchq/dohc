@@ -541,7 +541,6 @@ describe("serveFetchHandler", () => {
     const statuses: number[] = [];
     const { port, server } = await serve({
       maxBodyBytes: () => size,
-      // A sign-in check that has not answered yet, then refuses without reading the body.
       handler: async () => {
         await admission;
         return new Response(null, { status: 401 });

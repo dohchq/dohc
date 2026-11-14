@@ -4,12 +4,6 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspace";
 
-// The states page's notice-details part, drawn by a real browser: a toast and a
-// Notices row with Details closed, open, and open with a report long enough to
-// scroll. Opening one from the keyboard keeps focus on Details, and the next
-// Tab reaches Copy details. With UI_AUDIT_SHOT_DIR set, it saves both themes at
-// rest, scrolled, with focus on Details, and with focus on Copy details.
-
 const SHOT_DIR = process.env.UI_AUDIT_SHOT_DIR;
 const BLEED = 16;
 

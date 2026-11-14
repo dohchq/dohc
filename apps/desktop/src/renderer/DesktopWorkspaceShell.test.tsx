@@ -292,7 +292,6 @@ describe("collection folders", () => {
       };
     });
     await typeRow("Milk", "Enter");
-    // The record exists, so its title is written, or kept with its Try again, and nothing says it could not be created.
     await waitFor(() =>
       expect(retainedCollectionFieldWritePaths(WORKSPACE.workspaceId)).toEqual(["tasks/Milk.md"]),
     );
@@ -369,10 +368,8 @@ describe("collection folders", () => {
         "dohc created the record file but could not finish the record.",
       ),
     );
-    // No row holds the record. The notice has what was typed, and its Try again is the resume of that record.
     expect(notice().textContent).toContain("You typed: title: Milk");
     expect(document.querySelector("[data-new-record-status]")).toBeNull();
-    // The resume itself fails. The record still exists in part, so the failure is still that record's.
     fireEvent.click(screen.getByTestId("workspace-shell-error-retry"));
     await waitFor(() => expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(notice().textContent).toContain("already exists"));
@@ -530,7 +527,6 @@ describe("collection folders", () => {
         within(kept).getByLabelText<HTMLTextAreaElement>("Unsaved collection value").value,
       ).toContain('"title": "Milk"');
       expect(bridge.createCollectionRecord).toHaveBeenCalledTimes(sending ? 1 : 0);
-      // Nothing of it is painted in the workspace the window shows now.
       expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
       resetCollectionFieldWritesForTests();
     },

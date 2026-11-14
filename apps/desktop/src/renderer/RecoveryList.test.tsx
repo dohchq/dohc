@@ -192,8 +192,6 @@ it("copies the readable half when the recovery snapshot cannot be decoded", asyn
   await waitFor(async () =>
     expect(await navigator.clipboard.readText()).toBe("Crude fallback text"),
   );
-  // Unrecoverable bytes are the one case where the readable half is the whole
-  // answer, so this copy succeeded and the row can be dismissed.
   await waitFor(() => expect(screen.getByTestId("recovery-list-copy").textContent).toBe("Copied"));
 });
 

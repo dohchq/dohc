@@ -695,8 +695,6 @@ describe("registered cloud handlers", () => {
     await expect(
       h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" }),
     ).resolves.toMatchObject({ workspaceSyncConnected: false });
-    // An unconfirmed account records nothing, so once it matches again sync
-    // reads on and connected, with no pause saved.
     h.cache.set(credentials);
     await expect(
       h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" }),

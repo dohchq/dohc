@@ -133,7 +133,6 @@ async function harness(prefix: string, access?: "comment" | "edit"): Promise<Har
   return { workspaceId, rootPath, engineWorkspace, store, sessions };
 }
 
-/** The granter's file, as the share's pull leaves it: a moment and a projection. */
 async function seedSharedFile(
   harnessed: Harness,
   path: string,

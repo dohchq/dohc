@@ -341,7 +341,6 @@ describe("a dataset automation run", () => {
     expect(await resumedRun).toEqual({ kind: "done" });
     expect(second.sent).toEqual([{ ...edit, signal: expect.any(AbortSignal) }]);
 
-    // A new claim run under the same plan finds rules that no longer resolve.
     const third = host({
       resolves: () => false,
       edit: async () => {

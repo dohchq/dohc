@@ -170,7 +170,6 @@ function fixture(options: { ownerLiveReleases?: UnwrittenReleases } = {}) {
   const daemons: ReturnType<typeof createRustEngineDaemon>[] = [];
   const spawns: EngineClientSpawnOptions[] = [];
   let quitting = false;
-  // Stands in for the durable file of releases whose file write is not confirmed.
   const unwritten: UnwrittenRelease[] = [];
   const recoveries = new Map<string, string>();
   const dependencies: Dependencies = {
@@ -319,10 +318,6 @@ const unexpectedKeptEdits = async (): Promise<unknown> => {
 const unexpectedOpen = async (): Promise<"hosted" | "refused"> => {
   throw new Error("Unexpected owner open.");
 };
-/**
- * A server-owned workspace whose delivery offers these documents, for quarantine tests. The server keeps `kept`.
- * `listed` sees each list read's `fresh` flag after the list is read, and can hold back its answer.
- */
 async function quarantinedOwner(
   documents: { path: string; objectId: string; head?: () => number }[],
   server: {
@@ -1294,7 +1289,6 @@ describe("server owner peer lifecycle", () => {
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
       expect(f.engine.ownerLiveDeliveryReason("owner")).toBeUndefined();
       expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "owner" });
-      // The workspace as a renderer operation names it.
       const workspace = await f.authorities.withAuthority("owner", (lease) => ({
         workspaceId: "owner",
         rootPath: lease.binding.canonicalRootPath,
@@ -1394,7 +1388,6 @@ describe("server owner peer lifecycle", () => {
     ownerDeliveryMock.pass.mockImplementation(async (options) =>
       options.document.binding.currentPath === "notes/plan.md" ? planResult : "empty",
     );
-    // What the next pass of plan.md is given as the server's head.
     const nextPlanHead = async () => {
       for (;;) {
         const before = ownerDeliveryMock.pass.mock.calls.length;

@@ -250,7 +250,6 @@ describe("ConfirmDialog guards against an Enter nobody meant", () => {
     rerender(shown(true));
     const panel = screen.getByTestId("confirm").parentElement!;
     expect(document.activeElement).toBe(panel);
-    // The panel it focuses is the dialog, so a screen reader reads its title.
     expect(
       screen.getByRole("dialog", {
         name: "Delete 3 kept copies?",

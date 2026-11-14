@@ -198,8 +198,6 @@ it("keeps only the file links a Group's files cover in its label, which its memb
     { kind: "group", channelWireId: "wire-nested", paths: ["clients/acme/team"], versionId: null },
     "Plan @[clients/acme/team/plan.md] @[clients/acme/budget.md]",
   );
-  // The owner's words are stored as written, and a label stored that way
-  // before this reads withheld all the same.
   const db = inspectDatabase(storagePath(storage));
   expect(
     db.prepare("SELECT subject_name FROM sync_relay_share_labels WHERE share_id = 'group'").get(),
@@ -220,7 +218,6 @@ it("keeps only the file links a Group's files cover in its label, which its memb
     Record<string, unknown>
   >;
   expect(granted.find((row) => row.shareId === "group")?.subjectName).toBe(name);
-  // A rename reads the same way, cut short or not.
   expect(
     (
       await handler(

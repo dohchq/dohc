@@ -557,8 +557,6 @@ describe("table controls grips", () => {
     const columnGrips = second.view.dom.querySelectorAll(".dohc-table-grip--col");
     drag(columnGrips[0] as HTMLElement, columnGrips[2] as HTMLElement);
 
-    // One region per editor, each holding its own editor's announcement. A
-    // single shared region would let one editor announce into the other's.
     expect(dragStatusText()).toEqual([
       "Row 1 moved to position 3.",
       "Column 1 moved to position 3.",

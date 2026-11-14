@@ -87,7 +87,6 @@ const definition: DatasetDefinition = {
   ],
 };
 
-// The Collection's automations, which the server runs once it moved there.
 const AUTOMATIONS = `version: 1
 automations:
   - id: confirm
@@ -332,9 +331,6 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     await page.screenshot({ path: test.info().outputPath("collections-server-history.png") });
     await rail.getByRole("button", { name: "Explorer", exact: true }).click();
 
-    // The ⚡ panel lists the Collection's automations as the server's. This
-    // server runs no automations, so each says so and its button is off.
-    // Nothing here runs them.
     const off = "This server does not run automations.";
     await page.getByTestId("collection-automations-button").click();
     const panel = page.getByTestId("collection-automations-panel");
@@ -348,7 +344,6 @@ test("@collections-server-list a computer that doesn't keep the Collections uses
     await page.getByTestId("collection-automations-button").click();
     await expect(panel).toHaveCount(0);
 
-    // Approving a Collection stays with the computer that keeps them, and nothing above opened a store here.
     const refused = await page.evaluate(async (workspaceId) => {
       try {
         await window.dohcDesktop!.dataset({

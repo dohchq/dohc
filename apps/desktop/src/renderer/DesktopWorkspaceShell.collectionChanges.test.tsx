@@ -29,9 +29,6 @@ import {
 } from "./DesktopWorkspaceShell.testHarness";
 import type { Workspace } from "./DesktopWorkspaceShell";
 
-// The shell, the Collection's page around the table, and the table's queue
-// are real. Only the table stands aside: buttons that change, keep, and
-// delete records through the queue, as its cells and its record panel do.
 vi.mock("./TransactionalCollectionPage", async () => {
   const { useLayoutEffect, useState } = await import("react");
   const { writeQueueFor } = await import("./transactionalWriteQueue");
@@ -175,7 +172,6 @@ const invoked = (result: AppBackendJson): DatasetResult => ({
   revision: 5,
   replayed: false,
 });
-/** The table's queue, which outlives its page. */
 const queue = () => writeQueueFor(JSON.stringify([WORKSPACE.workspaceId, budget.datasetId, id(2)]));
 // What main answers a Collection change from a window whose session it has not admitted (main.ts, rendererWorkspaceOperation.ts).
 const NOT_ADMITTED =
@@ -208,7 +204,6 @@ function collectionWindow(strict = false) {
       return status;
     }),
   });
-  // The Collection's tab is open the first time the workspace opens, and closed after.
   const layout = { open: true };
   bridge.getWorkspaceUiState = vi.fn(async () =>
     layout.open

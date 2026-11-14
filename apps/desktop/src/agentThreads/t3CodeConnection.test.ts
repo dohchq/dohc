@@ -19,7 +19,6 @@ const cipher = (available: boolean) => ({
     Buffer.from(sealed, "base64").toString("utf8").slice("sealed:".length),
 });
 
-/** A T3 Code folder whose file names the stand-in, and a connection that keeps its sign-in beside it. */
 async function setup(options: { canKeep?: boolean } = {}) {
   const t3 = await startFakeT3Code();
   cleanups.push(t3.close);
@@ -147,7 +146,6 @@ describe("dohc's connection to T3 Code", () => {
   it("keeps a new sign-in when a call made with the old one is refused late", async () => {
     const { t3, home, store } = await setup();
     await store.save({ origin: t3.origin, token: "revoked", expiresAtMs: Date.now() + 60_000 });
-    // T3 Code's refusal of the old sign-in is held until the new one is kept.
     let arrived!: () => void;
     const refusalOnItsWay = new Promise<void>((resolve) => (arrived = resolve));
     let deliver!: () => void;
@@ -180,7 +178,6 @@ describe("dohc's connection to T3 Code", () => {
   it("gives a call made while a new sign-in is being saved the new sign-in", async () => {
     const { t3, home, store } = await setup();
     await store.save({ origin: t3.origin, token: "revoked", expiresAtMs: Date.now() + 60_000 });
-    // A store whose save waits, as a slow disk does.
     let saving!: () => void;
     const savingStarted = new Promise<void>((resolve) => (saving = resolve));
     let finishSave!: () => void;
@@ -208,7 +205,6 @@ describe("dohc's connection to T3 Code", () => {
     finishSave();
     await allowed;
 
-    // The call waited for the save: it was not refused, and it dropped nothing.
     await sent;
     expect((await store.load())?.token).toBe("token-1");
   });

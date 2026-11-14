@@ -34,7 +34,6 @@ const bridgeMock = {
 };
 vi.mock("../bridge", () => ({ bridge: () => bridgeMock }));
 
-// Which shells have run their first effect.
 const started = new Set<string>();
 
 // Orders its effects as the workspace shell does: its notices start empty,

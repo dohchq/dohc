@@ -499,7 +499,6 @@ describe("the actions Settings offers on a share", () => {
     const row = await screen.findByTestId("sharing-granted-row");
     expect(within(row).getByTestId("sharing-row-status").textContent).toBe("Damaged");
     const end = within(await openMenu(row)).getByRole("menuitem", { name: "End share…" });
-    // Ending removes access, so it reads in the danger color.
     expect(end.className).toContain("text-danger");
     await userEvent.click(end);
     await userEvent.click(screen.getByTestId("sharing-end"));

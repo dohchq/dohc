@@ -14,10 +14,6 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// Linked Chats rail E2E: create a chat about a file, send a message,
-// survive a relaunch and a rename (stable engine object id), and render
-// agent-authored messages as "their stored name".
-
 test("create a chat about a file, send a message, survive relaunch and rename", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -64,8 +60,6 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
       "Should we rename this topic?",
     );
 
-    // Rename through the product move IPC: the chat follows the file's
-    // stable engine object id to its new path.
     await page.evaluate(
       async ({ id }) => {
         const api = (

@@ -44,11 +44,6 @@ import {
 } from "./mcpPersonalSignIn.test-helper";
 import { createShareWebApplication } from "./server";
 
-// A personal agent's sign-in through the real share-web and the real relay:
-// the browser signs in to its account if it has to, then the person chooses
-// the agent and the workspaces it reaches, and allows it.
-// The share link's sign-in is in mcpSignIn.test.ts.
-
 const HOST = "share.example.test",
   ORIGIN = `https://${HOST}`;
 const NOW = 10_000;
@@ -146,7 +141,6 @@ async function stack(options: { account?: boolean; live?: boolean } = {}) {
   const relayCalls: string[] = [];
   const liveCalls: Array<{ path: string; authorization: string | null }> = [];
   let noWorkspaces = false;
-  // The next origin sequence of the owner's computer in each workspace.
   const ownerSeqs = new Map<string, number>();
   const ownerSeq = (workspaceId: string, count: number) => {
     const next = ownerSeqs.get(workspaceId) ?? 0;

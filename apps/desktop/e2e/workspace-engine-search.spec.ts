@@ -18,13 +18,6 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// Indexed engine search in the desktop:
-// a workspace's search panel routes through the engine's FTS index
-// and returns files and chat messages in one result list; a chat hit renders
-// a distinguishable row and opens the Chats panel on its thread. The `.env`
-// family (including `.env.local`) is never findable and never present in the
-// raw FTS tables.
-
 const SECRET_VALUE = "E2E_INDEX_SECRET_z9y8x7w6";
 
 const requireModule = createRequire(import.meta.url);

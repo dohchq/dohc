@@ -33,7 +33,6 @@ function renderShell(bridge: ReturnType<typeof makeBridge>, oldWindow: OldWindow
 
 const workbenchInert = () => screen.getByTestId("workspace-workbench").hasAttribute("inert");
 
-// What the window receives when main marks a call on the workspace it has stopped.
 const stoppedCall = (channel: string, stopped: "read" | "call") =>
   new Error(
     `Error invoking remote method '${channel}': Error [stopped=${stopped}]: This workspace is no longer open in this window.`,

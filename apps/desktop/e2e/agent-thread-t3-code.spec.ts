@@ -89,7 +89,6 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     nextCursor: null,
   });
   const sends = () => t3.calls.filter((call) => call.tool === "t3_thread_send");
-  // Each message starts a run, named for its place among the sends.
   t3.tools.t3_thread_send = (args) => ({ threadId: args.threadId, runId: `run-${sends().length}` });
   // How many requests wait on the person in the thread, and the question among them.
   let waiting = 0;
@@ -118,7 +117,6 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
       startedAt: new Date().toISOString(),
     })),
   });
-  // Asked for one run: its status, or waiting in line when the thread does not list it yet.
   t3.tools.t3_thread_wait = (args) => {
     const run = runs.find((entry) => entry.runId === args.runId);
     return {
@@ -149,7 +147,6 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
       const opened: string[] = [];
       (globalThis as unknown as { openedInT3Code: string[] }).openedInT3Code = opened;
       shell.openExternal = async (url: string) => {
-        // A link into T3 Code's own window is recorded, not opened.
         if (url.startsWith("t3code://")) {
           opened.push(url);
           return;
@@ -195,7 +192,6 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     await expect(row).toContainText("T3 Code");
     await shoot(page, section, "t3-code-d-list");
 
-    // Connecting gave the thread dohc's introduction, and nothing else.
     expect(sends().map((call) => call.args.threadId)).toEqual(["t-chief"]);
     expect(String(sends()[0]!.args.message)).toContain('as their agent "Chief"');
 
@@ -217,7 +213,6 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
       return Object.keys((await api.getUserSettings()).settings.agents)[0]!;
     });
     await openAgentChat(page, agentId, "Chief");
-    // The message's work is going in T3 Code when dohc first asks.
     runs = [{ runId: "run-2", status: "running", completedAt: null }];
     await page.getByTestId("chats-lane-composer").fill("Can you check the Mac build?");
     await page.getByTestId("chats-lane-composer").press("Enter");
@@ -230,7 +225,6 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     expect(forwarded).toContain('Note from "Sam": Post decisions and a daily status here.');
     expect(forwarded).toContain(`--workspace ${WORKSPACE_ID} --agent-id ${agentId} -`);
 
-    // The foot of the chat says what the thread is doing with that message.
     const line = page.getByTestId("agent-thread-line");
     await expect(line).toHaveAttribute("data-state", "working", { timeout: 30_000 });
     await expect(line).toContainText("Chief");
@@ -297,11 +291,9 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     await expect(line).toHaveAttribute("data-state", "working", { timeout: 30_000 });
     await expect(line.getByTestId("agent-thread-answer")).toHaveCount(0);
 
-    // Its work ends with nothing posted here: dohc reminds the thread once.
     runs = [{ runId: "run-2", status: "completed", completedAt: new Date().toISOString() }];
     await expect.poll(() => sends().length, { timeout: 30_000 }).toBe(3);
     expect(String(sends()[2]!.args.message)).toContain("you finished without replying");
-    // The reminder's work ends the same way: the chat says so, and nothing more goes.
     runs = [
       { runId: "run-3", status: "completed", completedAt: new Date().toISOString() },
       ...runs,

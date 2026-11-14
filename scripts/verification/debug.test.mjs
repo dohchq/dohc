@@ -247,7 +247,6 @@ if (process.argv[2] === "fixture") {
         }),
       );
       if (signalEnds) {
-        // A signal that ends the launcher before its cleanup runs leaves no link to the session's home.
         assert.equal(result.code, signal === "SIGTERM" ? 143 : 130, output);
         assert.equal(protectedCleanup, true, "the launcher listens for the signal during startup");
         assert.ok(link, "the launcher made a link to the session's home");

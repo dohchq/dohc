@@ -39,7 +39,6 @@ function seed(enabled = true): Snapshot {
 function memoryStore(initial: unknown = seed(), buildMapping = mapping) {
   const path = join("isolated-state", USAGE_SNAPSHOT_NAME);
   const disk = new Map<string, string>(initial ? [[path, JSON.stringify(initial)]] : []);
-  // The process stops at the first file operation `crash` matches, and does nothing after it.
   let crash: ((operation: string, path: string) => boolean) | undefined;
   let dead = false;
   const alive = (operation: string, path: string) => {
@@ -137,7 +136,6 @@ function memoryStore(initial: unknown = seed(), buildMapping = mapping) {
   const crashOn = (match: (operation: string, path: string) => boolean) => {
     crash = match;
   };
-  // The power fails: the process stops, and what it never synced comes back empty.
   const powerCut = () => {
     dead = true;
     for (const file of unsynced) disk.set(file, "");

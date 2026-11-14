@@ -414,8 +414,6 @@ describe("Rust engine daemon lifecycle", () => {
   });
 
   it("restarts a daemon that is alive but stopped answering engine.ping", async () => {
-    // The wedge from the issue: the process never exits, so the restart path —
-    // which starts at process exit — is never reached on its own.
     const clients: SelfExitingClient[] = [];
     const failures: Array<{ error: Error; terminal: boolean }> = [];
     const lifecycle = new EngineDaemonLifecycle({
@@ -576,9 +574,6 @@ describe("Rust engine daemon lifecycle", () => {
   }, 30_000);
 
   it("clears the wedge streak when a generation answers a probe", async () => {
-    // A daemon that wedges, is restarted, answers, then wedges again is being
-    // recovered — not looping. Only consecutive wedges with nothing answered
-    // in between are evidence, so this daemon must keep getting restarted.
     const clients: SelfExitingClient[] = [];
     const failures: Array<{ error: Error; terminal: boolean }> = [];
     const lifecycle = new EngineDaemonLifecycle({

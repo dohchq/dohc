@@ -3,8 +3,6 @@ import { createSitePreviewLifecycle } from "./sitePreviewLifecycle";
 import { AppCommandStillRunningError, type SiteProcessHandle } from "./siteRunner";
 import { deferred } from "../testing/deferred";
 
-// A handle whose processes outlive each stop until `alive` turns false, as a
-// tree kill that fails leaves them.
 function handle(state: { alive: boolean }) {
   const stop = vi.fn(async () => undefined);
   const value: SiteProcessHandle = {

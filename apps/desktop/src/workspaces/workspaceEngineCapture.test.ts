@@ -2603,7 +2603,6 @@ describe("workspaceEngineCapture relay sync materialization", () => {
       return;
     }
     const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
-    // The first read of linked/.env itself finds the folder already swapped.
     let swap = true;
     vi.mocked(lstat).mockImplementation((async (path: PathLike) => {
       if (swap && String(path) === join(link, ".env")) {
@@ -3855,7 +3854,6 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     try {
       const pass = sync.start();
       await entered.promise;
-      // Neither waits for the push on the relay.
       const session = await engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
       await engine.writeAuthoredFile(join(root, "agent.txt"), "authored content", {
         kind: "agent",

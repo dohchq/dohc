@@ -48,8 +48,6 @@ function harness(
   handlers: OperationHandlers<typeof table, Event, { workspace: { workspaceId: string } }>,
 ) {
   const listeners = new Map<string, (event: Event, payload: unknown) => Promise<unknown>>();
-  // Main's own guard over a fake physical workspace: the sender's session is
-  // current while the window still shows the workspace it names.
   const withRendererWorkspaceOperation = createRendererWorkspaceOperationRunner<
     Sender,
     { workspaceId: string; attachmentId: symbol },

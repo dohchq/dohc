@@ -17,11 +17,6 @@ import {
   storedStateWithTabs,
 } from "./DesktopWorkspaceShell.testHarness";
 
-// What a person sees of the Versions page's read failures, through the real
-// shell and Notices: each toast and each row, its words, its buttons, and
-// whether it is unread. Every order of events here passed before the page
-// moved onto the notice owner, and passes unchanged after it.
-
 type Read = "lastChanges" | "counts" | "conflicts";
 type Step = "ok" | "fail" | "hold";
 
@@ -57,7 +52,6 @@ function versionsShell() {
     conflicts: [],
   };
   const calls: Record<Read, number> = { lastChanges: 0, counts: 0, conflicts: 0 };
-  // Each answer that settles at once. A held answer is not here.
   const answered: Array<Promise<unknown>> = [];
   let moment = 0;
   const answer = <T,>(read: Read, ok: T): Promise<T> => {
@@ -125,7 +119,6 @@ function versionsShell() {
 const READ_WORDS =
   /dohc could not (read when each version|count the files|read which merges|finish loading Versions)/;
 
-// Each toast for a Versions read: its whole text and its buttons.
 function toasts() {
   return screen
     .queryAllByTestId("workspace-shell-error")
@@ -138,7 +131,6 @@ function toasts() {
     }));
 }
 
-// Each Notices row for a Versions read: its text, its buttons, and its unread mark.
 async function rows(user: ReturnType<typeof userEvent.setup>) {
   if (screen.queryByTestId("notice-center") === null)
     await user.click(screen.getByTestId("notice-center-toggle"));
@@ -166,8 +158,6 @@ async function opened() {
   await screen.findByTestId("versions-page");
 }
 
-// Waits for the page to ask for these reads, then for every answer given to
-// reach it and for what it did with them.
 async function settled(
   shell: ReturnType<typeof versionsShell>,
   counts: Partial<Record<Read, number>>,
@@ -314,7 +304,6 @@ describe("the Versions page's read notices, as a person sees them", () => {
         "toasts": [],
       }
     `);
-    // The same read failing again, with nothing new failed, files a new row.
     await historyGrows(shell);
     expect(await look(user)).toMatchInlineSnapshot(`
       {
@@ -411,7 +400,6 @@ describe("the Versions page's read notices, as a person sees them", () => {
         "toasts": [],
       }
     `);
-    // A failure after the dismissal files a new row.
     await historyGrows(shell);
     expect(await look(user)).toMatchInlineSnapshot(`
       {
@@ -538,7 +526,6 @@ describe("the Versions page's read notices, as a person sees them", () => {
         ],
       }
     `);
-    // One read works again; the row keeps saying more than one failed.
     await historyGrows(shell);
     expect(await look(user)).toMatchInlineSnapshot(`
       {
@@ -607,7 +594,6 @@ describe("the Versions page's read notices, as a person sees them", () => {
         ],
       }
     `);
-    // A second read fails, and the row changes where it stands.
     await historyGrows(shell);
     await settled(shell, { counts: 2 });
     expect(await look(user)).toMatchInlineSnapshot(`
@@ -750,7 +736,6 @@ describe("the Versions page's read notices, as a person sees them", () => {
       }
     `);
     expect(markNotices).not.toHaveBeenCalled();
-    // The same failure again keeps the row read; new words make it unread.
     await historyGrows(shell);
     expect(await look(user)).toMatchInlineSnapshot(`
       {

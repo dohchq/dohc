@@ -115,7 +115,6 @@ const page = (text = "Alice", next = false): AppBackendJson => ({
   ],
   nextCursor: next ? { id: 1, value: "Alice" } : null,
 });
-/** Two records, so one record's change can wait while the other's goes. */
 const twoRecords = (): AppBackendJson => ({
   rows: [
     { id: 1, version: 2, values: { [name]: "Alice", [amount]: 5, [status]: "New" } },
@@ -318,7 +317,6 @@ const mark = (field: string, row = 0) =>
 const why = (field: string, row = 0) =>
   cell(field, row).querySelector("[data-cell-status]")?.getAttribute("title") ?? null;
 const press = (key: string) => fireEvent.keyDown(grid(), { key });
-/** The page's own controls work once a full read of records ends. */
 const loaded = () =>
   waitFor(() =>
     expect(screen.getByRole("region", { name: "People" }).getAttribute("aria-busy")).toBe("false"),
@@ -861,7 +859,6 @@ describe("a Data Collection's table", () => {
     expect(onError).toHaveBeenCalledWith("The Collection refused this change.", refusal, null);
     // A refusal is an answer, so nothing offers to send it again.
     expect(within(cell("Name")).queryByRole("button", { name: "Try again" })).toBeNull();
-    // The record is read again, so the person sees what it holds now.
     await waitFor(() => expect(sent(invoke, read)).toHaveLength(2));
     fireEvent.click(cell("Name"));
     expect(editorInput().value).toBe("Alicia");
@@ -1603,7 +1600,6 @@ describe("a Data Collection's files and relations", () => {
     });
     expect(editor()).toBeNull();
 
-    // A file opens its upload. The file is staged on the server, and attached only by Save.
     await waitFor(() => expect(mark("Team")).toBeNull());
     fireEvent.click(within(cell("Receipt")).getByRole("button", { name: "Change Receipt" }));
     expect(within(editor()!).queryByRole("textbox")).toBeNull();
@@ -1690,7 +1686,6 @@ describe("a Data Collection's record panel and forms", () => {
     expect(within(record).queryByText("Private note")).toBeNull();
     expect(within(record).queryByText("Do not show")).toBeNull();
     expect(record.textContent).not.toMatch(/version|record 1/i);
-    // A Data record has no page to open.
     expect(within(record).queryByRole("button", { name: "Open as page" })).toBeNull();
     expect(
       grid().querySelector('[role="row"][aria-current="true"]')?.getAttribute("data-index"),
@@ -1958,7 +1953,6 @@ describe("a Data Collection's record panel and forms", () => {
     );
     const { props } = setup({ invoke });
     cleanup();
-    // Two editor groups show the Collection's tab. The tab has one saved entry, which both copies read and write.
     function TwoCopies() {
       const [kept, setKept] = useState<string | null>(null);
       return (
@@ -2260,7 +2254,6 @@ describe("a Data Collection's record panel and forms", () => {
     const { props, rerender } = setup({ invoke });
     await screen.findByText("Alice");
     const record = openPanel();
-    // The record leaves this page of records, so its row and its Open control go.
     rows = {
       rows: [{ id: 2, version: 4, values: { [name]: "Bea", [amount]: 7, [status]: "New" } }],
       nextCursor: null,
@@ -2720,7 +2713,6 @@ describe("a Data Collection's record panel and forms", () => {
     expect(sent(invoke, create)[0]!.input).toEqual({
       values: { [name]: "Bob", [amount]: null, [status]: "New" },
     });
-    // The records are read again once the Collection confirms the new one, and Enter starts the next row.
     await waitFor(() => expect(sent(invoke, read)).toHaveLength(2));
     await waitFor(() => expect(newRow()?.textContent).toBe("New"));
     expect(document.activeElement).toBe(cellEditor());
@@ -2849,7 +2841,6 @@ describe("a Data Collection's record panel and forms", () => {
     await screen.findByText("Alice");
     typeRows(["Bob", "Cy", "Di"]);
     expectFreshRow();
-    // The queue sends one change at a time, in the order made.
     await waitFor(() => expect(sent(invoke, create)).toHaveLength(1));
     for (const [index, record] of [7, 8, 9].entries())
       await answer(index, (held) => held.resolve({ result: { id: record, version: 1 } }));
@@ -3634,7 +3625,6 @@ describe("when the Collection's fields change", () => {
         dataset={revised(2, retype(name, "number"))}
       />,
     );
-    // The request in flight can't be confirmed under the new rules: a toast says to check the records, with nothing to retry.
     expect(result.onError.mock.calls.at(-1)![0]).toContain("Check the records");
     expect(result.onError.mock.calls.at(-1)![2]).toBeNull();
     expect(mark("Name", 1)).toBe("refused");

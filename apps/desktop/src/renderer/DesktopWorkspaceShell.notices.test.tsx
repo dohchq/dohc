@@ -73,13 +73,11 @@ it("says History paused with Try again, restarts capture from the row, and keeps
   expect(bridge.retryHistoryCapture).toHaveBeenCalledExactlyOnceWith({
     workspaceId: WORKSPACE.workspaceId,
   });
-  // The row waits for the restart's answer.
   expect(within(notices).getByTestId("notice-history-capture-failed")).toBeTruthy();
 
   status = SYNC_STATUS;
   act(() => bridge.emitWorkspaceActivity());
   await waitFor(() => expect(screen.queryByTestId("notice-history-capture-failed")).toBeNull());
-  // A restart that answers late with a failure must not bring the row back.
   await act(async () => {
     restart.reject(new Error("History is still paused."));
     await restart.promise.catch(() => undefined);
@@ -115,13 +113,11 @@ describe("edits the server refused", () => {
       incident: "outbox:delivery:0",
     });
     await waitFor(() => expect(screen.queryByText(TITLE)).toBeNull());
-    // Delivery has the owner's attempt: no notice while it waits.
     status = quarantined({ ...quarantine, incident: "outbox:delivery:1", recovery: "retrying" });
     const reads = bridge.getSyncStatus.mock.calls.length;
     act(() => bridge.emitWorkspaceActivity());
     await waitFor(() => expect(bridge.getSyncStatus.mock.calls.length).toBeGreaterThan(reads));
     expect(screen.queryByText(TITLE)).toBeNull();
-    // The server refused it again: a new incident, so a new toast.
     status = quarantined({ ...quarantine, incident: "outbox:delivery:1" });
     act(() => bridge.emitWorkspaceActivity());
     const again = await screen.findByTestId("workspace-shell-error");
@@ -132,7 +128,6 @@ describe("edits the server refused", () => {
       objectId: "object-1",
       incident: "outbox:delivery:1",
     });
-    // Accepted: the queue drained, and nothing is left to show.
     status = SYNC_STATUS;
     act(() => bridge.emitWorkspaceActivity());
     await waitFor(() => expect(screen.queryByText(TITLE)).toBeNull());
@@ -154,7 +149,6 @@ describe("edits the server refused", () => {
         name: "Save recovery copy",
       }),
     );
-    // The row names the kept edits it shows, so Save writes those.
     expect(bridge.saveOwnerLiveRecoveryCopy).toHaveBeenCalledExactlyOnceWith({
       workspaceId: WORKSPACE.workspaceId,
       path: "notes/plan.md",
@@ -176,7 +170,6 @@ describe("edits the server refused", () => {
       ),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Open" })).toBeTruthy();
-    // The edits stay queued, so the notice that holds them stays too.
     await user.click(screen.getByTestId("notice-center-toggle"));
     expect(
       within(await screen.findByTestId("notice-center")).getByText(
@@ -347,8 +340,6 @@ describe("engine store recovery", () => {
       }),
     ).toBe(dialog);
 
-    // The user learns what moves, where it goes, and what does not come
-    // back, before anything moves.
     expect(dialog.textContent).toContain(".dohc/engine/pre-v2-backup");
     expect(dialog.textContent).toContain(
       "The old data store stays in the backup location. History and chats stored only there will not appear in the rebuilt workspace. Your workspace files stay in place.",
@@ -611,7 +602,6 @@ describe("crash report notice", () => {
 
     await user.click(await screen.findByTestId("crash-report-toast-send"));
     await waitFor(() => expect(bridge.sendCrashReport).toHaveBeenCalledWith({}));
-    // No dialog of the renderer's own: main asks.
     expect(screen.queryByRole("dialog")).toBeNull();
     await waitFor(() => expect(screen.getByTestId("crash-report-toast-send")).toBeTruthy());
     expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
@@ -699,7 +689,6 @@ describe("notices sent to you", () => {
       ],
       unclaimedDatasetFolders: [],
     }));
-    // Main finds each automation's Collection by its id.
     bridge.findAutomationCollection.mockResolvedValue({ status: "found", collectionPath: "tasks" });
     bridge.listCollectionAutomationRuns.mockImplementation(async ({ automationId }) => ({
       status: "listed",
@@ -730,7 +719,6 @@ describe("notices sent to you", () => {
     return bridge;
   }
 
-  // Chats' answer for a Group invitation, share-1, that waits with Join.
   const INVITATION_LISTING = {
     joined: [] as JoinedChannelAnswer[],
     sessionKey: null,
@@ -1074,7 +1062,6 @@ describe("owner live documents", () => {
     await screen.findByTestId("settings-dialog");
     await user.click(screen.getByTestId("settings-nav-cloud"));
     await user.click(await screen.findByRole("button", { name: "Open live documents" }));
-    // Settings stays open underneath, so closing the dialog returns there.
     const dialog = await screen.findByTestId("live-documents-dialog");
     expect(screen.getByTestId("settings-dialog")).toBeTruthy();
     return dialog;
@@ -1137,13 +1124,11 @@ describe("owner live documents", () => {
     });
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(`dohc could not make a copy of ${held.path}.`);
-    // A failed copy leaves the list open to try another row.
     expect(screen.getByTestId("live-documents-dialog")).toBeTruthy();
 
     // History has the copy, but its file isn't written yet: nothing opens.
     await user.click(within(toast).getByRole("button", { name: "Try again" }));
     expect(bridge.duplicateWorkspaceFile).toHaveBeenCalledTimes(2);
-    // The row joins the copy its notice started, so no second file is made.
     await user.click(within(dialog).getByRole("button", { name: `Make a copy of ${held.path}` }));
     expect(bridge.duplicateWorkspaceFile).toHaveBeenCalledTimes(2);
     await act(async () =>
@@ -1200,8 +1185,6 @@ describe("Connect server", () => {
     await user.click(await screen.findByTestId("settings-nav-cloud"));
     await user.click(await screen.findByTestId("settings-cloud-connect"));
     expect(await screen.findByTestId("cloud-server-url")).toBeTruthy();
-    // Opened from Settings, the dialog closes back to Settings, by a click
-    // outside it or by Escape.
     expect(screen.getByTestId("settings-dialog")).toBeTruthy();
     const backdrop = screen
       .getByTestId("cloud-sync-panel")
@@ -1234,8 +1217,6 @@ describe("Connect server", () => {
     expect(document.activeElement).toBe(field);
   });
 
-  // The app menu's Settings replaces the dialog rather than opening under it,
-  // so Escape closes what is on top.
   it("closes the Cloud dialog when the app menu opens Settings", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     bridge.cloudStatus = vi.fn(async () => SIGNED_OUT);
@@ -1521,7 +1502,6 @@ it("signs in again from Notices, and sync resumes with no enable or pause", asyn
       await vi.advanceTimersByTimeAsync(3000);
     });
 
-    // Main announces the rebuilt engine's status.
     await waitFor(() => expect(screen.queryByTestId("cloud-sync-panel")).toBeNull());
     act(() => bridge.emitWorkspaceActivity({ workspaceId: WORKSPACE.workspaceId }));
     await waitFor(() =>
@@ -1537,15 +1517,12 @@ it("signs in again from Notices, and sync resumes with no enable or pause", asyn
   }
 });
 
-// Settings shows the same expired row: no switch reading on while nothing
-// syncs, and Sign in again in Try again's place.
 it.each([
   [
     "the title bar says so",
     { ...SYNC_STATUS, state: "sign-in-expired", signInExpired: true },
     "Sign in again to sync",
   ],
-  // A conflict shows first, and the switch still mustn't read on.
   [
     "a conflict shows first",
     { ...SYNC_STATUS, state: "conflict", conflictCount: 1, signInExpired: true },
@@ -1590,7 +1567,6 @@ it.each([
     ]);
     await user.click(row.getByRole("button", { name: "Sign in again" }));
     await screen.findByTestId("cloud-user-code");
-    // Settings stays open underneath, so closing the dialog returns there.
     expect(screen.getByTestId("settings-dialog")).toBeTruthy();
     expect(bridge.cloudLoginStart).toHaveBeenCalledWith({ serverUrl: "https://cloud.dohc.test" });
     expect(bridge.cloudEnableSync).not.toHaveBeenCalled();

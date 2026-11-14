@@ -273,8 +273,6 @@ it("keeps raw HTML as the text the file holds", () => {
     expect(yDocBodyJSON(doc)).toEqual(
       getDohcProseMirrorSchema().nodeFromJSON(rawHtml.document).toJSON(),
     );
-    // A save keeps every comment and tag as text, with the Markdown inside a
-    // paired-tag run still text and the marks outside it still marks.
     const saved = yDocToMarkdown(doc);
     expect(parseRichdocMarkdown(saved)).toEqual(rawHtml.document);
     const reopened = markdownToYDoc(saved);
@@ -4079,11 +4077,6 @@ describe("Y.Doc markdown import/export", () => {
   });
 
   it("round-trips per-column GFM alignment (left/center/right) losslessly", () => {
-    // Per-column alignment is expressible. The `align` cell attr (set by
-    // tableControls' column grip menu) serializes to the delimiter row and
-    // parses back, so a mixed-alignment table with left (`:---`), center
-    // (`:---:`), right (`---:`), and default (`---`) columns is byte-stable
-    // across the round-trip.
     const once = expectStableMarkdownRoundTrip(
       ["| L | C | R | D |", "| :--- | :---: | ---: | --- |", "| a | b | c | d |"].join("\n"),
       ["| :--- | :---: | ---: | --- |"],
@@ -4733,7 +4726,6 @@ describe("Y.Doc markdown import/export", () => {
       const once = yDocToMarkdown(highlighted(text));
       const twice = yDocToMarkdown(markdownToYDoc(once));
       expect(twice, `text=${JSON.stringify(text)}`).toBe(once);
-      // The highlight is preserved as a single `==...==` span, never split.
       expect(once.startsWith("=="), `text=${JSON.stringify(text)}`).toBe(true);
       expect(once.endsWith("==\n"), `text=${JSON.stringify(text)}`).toBe(true);
     }
@@ -4784,8 +4776,6 @@ describe("Y.Doc markdown import/export", () => {
     // target/label separator aren't matched early.
     const once = yDocToMarkdown(doc);
     expect(once).toBe("[[notes/plan|Plan \\]\\] Draft \\| v2]]\n");
-    // Re-parsing unescapes the label and re-serializing reproduces it verbatim
-    // (a truncated re-parse would drop the tail and diverge here).
     const twice = yDocToMarkdown(markdownToYDoc(once));
     expect(twice).toBe(once);
   });

@@ -21,13 +21,6 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// A workspace gets a Chats
-// view with channels. The default #general channel exists on first use, the
-// composer starts a chat with one Enter and no title prompt (untitled chats
-// display their first-message snippet), messages persist across relaunch,
-// agent messages create unread badges that mark-read clears, and engine
-// search finds channel messages.
-
 test("general channel, composer-first chats, relaunch persistence, unread, search", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -145,8 +138,6 @@ test("general channel, composer-first chats, relaunch persistence, unread, searc
     await expect(view.getByTestId("chats-thread-unread")).toHaveCount(0);
     await expect(panel.getByTestId("chats-channel-unread")).toHaveCount(0);
 
-    // Engine search finds the channel message and renders
-    // it as a Chat result with the snippet title.
     await page.getByTestId(activityPin("search")).click();
     await page.getByTestId("search-input").fill("zeppelin-cadence");
     const chatGroup = page

@@ -130,7 +130,6 @@ describe("buildStandaloneDocumentHtml", () => {
     const withMath = buildStandaloneDocumentHtml("Euler: $x^2$ done.", "fallback");
     expect(withMath).toContain('class="katex"');
     expect(withMath).not.toContain("$x^2$");
-    // The KaTeX layout CSS is inlined (self-contained, no <link>/font url()).
     expect(withMath).toContain(".katex");
     expect(withMath).not.toMatch(/@font-face/);
     expect(withMath).not.toContain("url(");

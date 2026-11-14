@@ -84,8 +84,6 @@ async function folderContents(root: string): Promise<Record<string, string | nul
   return contents;
 }
 
-// Open folder and Forget as main wires them: the real registry, workspace
-// authority, trust and profile record, each file in its own place.
 async function harness(home: string) {
   const profile = join(home, "profile");
   const profileFile = join(profile, "forgotten-share-views.json");

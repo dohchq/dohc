@@ -8,10 +8,6 @@ import { parseDatasetDefinition, type DatasetDefinition } from "@dohc/security-c
 import { NewCollectionDialog } from "./NewCollectionDialog";
 import { deferred } from "../../testing/deferred";
 
-// The flow's whole contract is the IPC payload: one createWorkspaceFile call
-// whose text parses back as the schema the user described in collection
-// vocabulary. The dialog never shows the file or the format.
-
 const bridgeMock = vi.hoisted(() => ({
   createWorkspaceFile: vi.fn(),
   listCollections: vi.fn(async () => ({ collections: [] })),

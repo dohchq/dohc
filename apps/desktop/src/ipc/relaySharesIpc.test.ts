@@ -154,7 +154,6 @@ function harness() {
           ...(action === "release" ? { materialized: true } : {}),
         },
   );
-  // Each path holds the document "object", which the object ids name at "live.md".
   const liveDocument = vi.fn<Dependencies["liveDocument"]>(async (_workspace, target) => ({
     mainVersionId: "main",
     objectId: "objectId" in target ? target.objectId : "object",

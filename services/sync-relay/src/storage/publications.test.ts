@@ -1006,7 +1006,6 @@ function addShare(
 }
 const edited = () => ({ ...request().candidate, sourceRevision: digest("edited revision") });
 
-// A takedown holds app publishing for the owner's whole account.
 it("holds the owner's app publishing after a takedown until the operator lifts the hold", async () => {
   const f = httpFixture();
   await f.upload();

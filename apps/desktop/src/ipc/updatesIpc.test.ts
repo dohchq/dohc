@@ -498,7 +498,6 @@ describe("registered updater IPC", () => {
       expect(quit).toHaveBeenCalledOnce();
       expect(updater.quitAndInstall).not.toHaveBeenCalled();
       expect(h.canQuit()).toBe(true);
-      // A draft set aside while the window unloaded, and the person chose Go back.
       if (goesBack) h.exitRounds.answer(1, h.requests[0]!, "cancel");
       exit(0);
       if (goesBack) expect(updater.install).not.toHaveBeenCalled();

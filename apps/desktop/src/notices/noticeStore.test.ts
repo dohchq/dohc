@@ -148,7 +148,6 @@ interface Relay {
   failPosts: boolean;
   // Posts of notices are refused, as the relay refuses a settled skipped notice.
   refusePosts?: boolean;
-  // Posts of notices reach the relay, and their answer is lost.
   losePostReplies?: boolean;
   failPulls: boolean;
   // Runs, and is awaited, as each request leaves.
@@ -212,14 +211,10 @@ interface Computer {
   directory: string;
   changes: number;
   signedIn: NoticeAccount | null;
-  // Rises with every sign-in, sign-out, or account switch.
   generation: number;
   reach: Map<string, NoticeReach>;
-  // Runs when the store asks how a workspace reaches the relay.
   onReach?: () => void;
-  // Runs when the store reads which account a session belongs to.
   onAccountRead?: () => void;
-  // Runs after each change the store publishes, as main's listeners do.
   onChanged?: () => void;
 }
 
@@ -491,7 +486,6 @@ describe("notices on one person's computers", () => {
     const desktop = await computer(account(server, "ana"));
     const key = desktop.signedIn?.key ?? null;
     const ref = { store: "account" as const, noticeId: "agent-run:1" };
-    // The phone marks through the relay; nothing on this computer asks for it.
     const phone = (mark: "unread" | "restore" | "read") =>
       server.storage.markNotices({
         recipientUserId: "ana",
@@ -606,7 +600,6 @@ describe("notices on one person's computers", () => {
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
-    // The relay takes the dismissal, and its answer waits.
     server.onAnswer = async (request) => {
       if (request.method !== "POST" || new URL(request.url).pathname !== "/sync/notices/marks")
         return;
@@ -648,7 +641,6 @@ describe("notices on one person's computers", () => {
       { noticeId: "schedule-skipped:x", mark: "dismissed", withdraw: true, atMs: 9_000 },
       { noticeId: "agent-run:1", mark: "read", atMs: 9_500 },
     ];
-    // A version 1 file: its rows carry no relay expiry, and its unsent post goes.
     await writeFile(
       join(laptop.directory, name),
       JSON.stringify({
@@ -736,7 +728,6 @@ describe("notices on one person's computers", () => {
       laptop.signedIn?.key ?? null,
     );
 
-    // The share ends before the notice leaves, so the relay refuses it.
     expect(server.storage.revokeShare(shareId, clock)).toBe(true);
     server.online = true;
     clock += 1;

@@ -87,7 +87,6 @@ const NEXT_AGENT = "trip-agent-after-restore";
 // Outside a run dohc dispatched, an agent's edit is the unnamed agent's,
 // whatever name it gives.
 const UNNAMED_AGENT = "dohc-mcp";
-// The document is shared, so the pending warning goes on to say someone may change the same blocks.
 const PENDING_EDIT_WARNING =
   "Saved locally. The shared file update is pending. Do not repeat this edit. " +
   "The edit is saved. Someone may be changing this document at the same moment, and a change they make to the " +
@@ -100,7 +99,6 @@ async function attachScreen(testInfo: TestInfo, page: Page, name: string): Promi
   await testInfo.attach(name, { contentType: "image/png", body: await page.screenshot() });
 }
 
-/** A document workflow sends no Collection changes, so no notice in this window speaks of them. */
 async function expectNoCollectionNotice(page: Page): Promise<void> {
   await expect(page.getByText(/Collection changes/)).toHaveCount(0);
 }
@@ -183,8 +181,6 @@ async function ownerSettled(
     cli: describeView(cli, sentences),
     disk: describeView(disk, sentences),
     equal: cli.status === "fulfilled" && disk.status === "fulfilled" && cli.value === disk.value,
-    // Whether the host's settlement never arrived, waits for the accepted
-    // cursor, or waits for a retry. Counts only.
     ...(settled ? {} : { ownerSettlements: settlementState(temp) }),
   };
   if (cli.status === "rejected") throw cli.reason;
@@ -487,7 +483,6 @@ interface IntroducingMoment {
   authors: Authors;
 }
 
-/** The earliest moment of the document whose change wrote `text`, with the authors its list row and its detail report. Null until history records it. */
 async function momentIntroducing(
   page: Page,
   workspaceId: string,
@@ -599,13 +594,6 @@ async function expectDeclaredMoment(
   return moment!;
 }
 
-/**
- * The earliest moment of the document whose change wrote `text`, with the
- * authors its list row and its detail report, and the History label of the
- * person `humanId` among them. A moment with one author labels it in
- * `liveAuthorName`; a moment with several labels each author at its own
- * position in `authorLabels`. Null until history records the moment.
- */
 async function recipientCredit(page: Page, workspaceId: string, text: string, humanId: string) {
   const rows = await readHistoryMoments(page, workspaceId, PATH);
   if (rows === null) return null;
@@ -750,7 +738,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         .hostedAgentEvidence(workspaceId, PATH, UNNAMED_AGENT)
         .relay.map((change) => change.deliveryId),
     );
-  /** The one accepted change since `before` that declared the unnamed agent, as the relay journaled it, the service host accepted and audited it, and the owner imported that audit. */
   const acceptedDeclaration = async (
     workspaceId: string,
     before: ReadonlySet<string>,
@@ -771,7 +758,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         () => {
           const { relay, host, journal } = read();
           const imported = relay.length === 1 && ownerAudit(relay[0]!.deliveryId) !== null;
-          // Where the change stopped: the owner's queue, the relay journal, the host audit or the owner's import.
           lastAcceptance = {
             agentId,
             checkedAt: new Date().toISOString(),
@@ -988,8 +974,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await tab.hover();
       await tab.getByRole("button", { name: /^Close / }).click();
       await expect(tab).toHaveCount(0);
-      // Closing the last session of a replicated document compacts it: a
-      // snapshot row covers the head it had, and the updates it folded are gone.
       await expect
         .poll(
           () => {
@@ -1080,7 +1064,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         ).toEqual({ moment: null });
       }
       await typeAfter(page, H1, ` ${R1}`);
-      // The recipient session reports host acceptance without a local artifact.
       await expect(saveState(page)).toHaveAttribute("data-state", "saved-to-host", {
         timeout: 60_000,
       });
@@ -1176,8 +1159,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await access.selectOption({ label: recipientLabel });
       const point = stack!.acceptedCursorBefore(workspace.workspaceId, PATH, recipientUserId);
       const pointSelect = dialog.getByLabel("Shared restore point");
-      // A choice says when and who made the change, never an internal change
-      // number. Its value stays the exact accepted cursor.
       await expect(pointSelect.locator(`option[value="${point}"]`)).toHaveText(
         / · Owner( \(\d+ of \d+\))?$/,
       );
@@ -1466,7 +1447,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
           )
           .toBe(false);
         const document = await expectEndedShare(page, [H1, A1, HA]);
-        // Access ended while main still held the typing.
         expect(await heldEditorUpdates(desktop)).toMatchObject({ settled: 0, released: false });
         await document.getByText(H1).click();
         await page.keyboard.type(" Typed after the share ended.");
@@ -1581,7 +1561,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
             .catch(() => undefined);
         });
       }
-      // Main takes the held typing only now, after access ended, and refuses it.
       await expect
         .poll(
           async () => {
@@ -1758,8 +1737,6 @@ type LiveEditingRead = {
   reason: string | null;
 };
 
-// Each stretch in which the owner's live editing was not active, from the
-// read that saw it leave to the read that saw it back, in ms from `from`.
 function departureWindows(reads: LiveEditingRead[], from: number) {
   const windows: {
     from: number;

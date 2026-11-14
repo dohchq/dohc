@@ -1,12 +1,5 @@
 // @vitest-environment jsdom
 
-// The queue's continuity contract, driven through the REAL host and writer
-// with a mocked engine-doc session (CollectionPage.test.tsx idiom): a failed
-// write keeps the user's accepted value until a retry lands it or the user
-// discards it, the failure stays visible and reported with no CollectionPage
-// mounted, and an operation guard pauses new acceptance without dropping a
-// racing edit.
-
 import { createHash } from "node:crypto";
 import {
   act,
@@ -742,7 +735,6 @@ describe("retained failures", () => {
     expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
 
-    // Actionable with only the host mounted — no CollectionPage anywhere.
     screen.getByTestId("collection-write-failures");
     // The host's region comes first; the copy control has its own.
     expect(screen.getAllByRole("status")[0]!.textContent).toContain(

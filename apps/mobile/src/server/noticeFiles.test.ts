@@ -15,7 +15,6 @@ const disk = vi.hoisted(() => ({
   files: new Map<string, string>(),
   folders: new Set<string>(),
   heldWrites: null as Promise<void> | null,
-  /** Called when a write stops at the hold. */
   onHeld: null as (() => void) | null,
   failMoveAfterDelete: false,
   /** Writes to files under this folder fail after their first half lands. */
@@ -92,7 +91,6 @@ const slotPath = (slot: 0 | 1) => `${MARKS}/${fileName(SCOPE)}.${slot}.json`;
 const listPath = `cache/${NOTICE_LIST_FOLDER}/${fileName(SCOPE)}.json`;
 const slotText = (generation: number, marks: unknown[], scope = SCOPE) =>
   JSON.stringify({ format: NOTICE_MARKS_FORMAT, scope, generation, marks });
-/** Holds the next writes part way. `reached` resolves once one stops there. */
 const hold = () => {
   let release!: () => void;
   disk.heldWrites = new Promise<void>((done) => {
@@ -142,7 +140,6 @@ describe("the Notice files", () => {
     expect(disk.files.get(slotPath(1))).toBe(slotText(2, [mark(2)]));
     expect(await createNoticeFiles().readMarks(SCOPE)).toEqual([mark(3)]);
 
-    // A newer slot that doesn't parse, or is another account's or format's, doesn't count.
     disk.files.set(slotPath(1), slotText(4, [mark(4)]).slice(0, 20));
     expect(await createNoticeFiles().readMarks(SCOPE)).toEqual([mark(3)]);
     disk.files.set(slotPath(1), slotText(4, [mark(4)], OTHER));
@@ -161,7 +158,6 @@ describe("the Notice files", () => {
     const held = hold();
     void files.writeMarks(SCOPE, [mark(3)]);
     await held.reached;
-    // The app closes with half of the third save in the older slot.
     const third = slotText(3, [mark(3)]);
     expect(disk.files.get(slotPath(0))).toBe(third.slice(0, Math.floor(third.length / 2)));
     expect(await createNoticeFiles().readMarks(SCOPE)).toEqual([mark(2)]);
@@ -197,7 +193,6 @@ describe("the Notice files", () => {
     expect(await createNoticeFiles().readMarks(SCOPE)).toEqual([{ ...mark(1), taken: 1 }]);
 
     disk.failMoveAfterDelete = false;
-    // The list lands, and the marks save after it fails: the taken mark is still on disk.
     disk.failWritesIn = MARKS;
     expect(await files.writeListThenMarks(SCOPE, [{ noticeId: "a" }], marks)).toBe("marks-failed");
     expect(marks).toHaveBeenCalledTimes(1);

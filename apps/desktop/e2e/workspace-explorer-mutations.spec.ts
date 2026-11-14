@@ -204,7 +204,6 @@ test("dropping a folder from the OS imports it whole", async ({}, testInfo) => {
       await cdp.detach();
     };
 
-    // The Explorer shows what landed, so the drop selects it instead of a toast.
     await dropFromOs(trip);
     await expect(explorerRow(page, "Trip")).toHaveAttribute("aria-selected", "true");
     await expect(explorerRow(page, "Trip")).toBeFocused();

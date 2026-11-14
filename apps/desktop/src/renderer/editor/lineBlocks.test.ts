@@ -318,7 +318,6 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("Intro\n| --- |\n    matched\n\nAfter", 3).index).toBe(1);
     expect(blockForLine("A | B\n--- | --- | ---\n1 | 2\n\nAfter", 3).index).toBe(0);
     expect(blockForLine("A | B | C\n--- | ---\n1 | 2\n\nAfter", 3).index).toBe(0);
-    // When they do agree it is a table, and a table row is not prose.
     expect(blockForLine("A | B | C\n--- | --- | ---\n1 | 2\n\nAfter", 5).index).toBe(1);
     expect(blockForLine("| A |\n| --- |\n| r |\n    matched\n\nAfter", 4).index).toBe(1);
   });
@@ -614,7 +613,6 @@ describe("blockForLine — the index", () => {
     expect(blockForLine("Intro\n\n   | A |\n   | --- |\n   | r |\n\nAfter", 7).index).toBe(2);
     expect(blockForLine("Intro\n\n   [a]: https://e.com\n    code\n\nAfter", 4).index).toBe(2);
     expect(blockForLine("Intro\n\n\t[a]: https://e.com\n    code\n\nAfter", 4).index).toBe(1);
-    // The kinds guarded earlier stay guarded: a tab makes each of these code.
     for (const marker of ["# H", "- item", "1. item", "> q", "---"]) {
       expect(blockForLine(`Intro\n\n\t${marker}\n\nAfter`, 5).index).toBe(2);
     }

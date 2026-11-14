@@ -443,8 +443,6 @@ describe("registered shared-channel handlers", () => {
       }),
     ).rejects.toThrow("Left the group, but its folder could not be removed. disk busy");
     expect(h.workspace.sharedChannels?.find((row) => row.shareId === "shown")?.ended).toBe(true);
-    // The unmount can resolve with the folder still on disk; that is reported
-    // the same way, and the leave still stands.
     h.unmount.mockResolvedValueOnce({ folderLeft: true });
     await expect(
       h.invoke(sharedChannelOperations.leaveSharedChannel.channel, {
@@ -498,7 +496,6 @@ describe("registered shared-channel handlers", () => {
     };
     h.relayListing.mockResolvedValue(listing);
     h.reconcileReceivedShares.mockImplementation(async () => {
-      // What main's reconcile does when the listing says the share is back.
       h.workspace.sharedChannels = h.workspace.sharedChannels!.map((row) =>
         row.shareId === "gone" ? { ...row, ended: false } : row,
       );
@@ -719,7 +716,6 @@ describe("registered shared-channel handlers", () => {
       labelHint: "Launch team",
       assertCurrent: expect.any(Function),
     });
-    // A plain channel has no folder to mount.
     vi.mocked(fetchSharedChannelInfo).mockResolvedValueOnce({
       ...info,
       shareId: "share-c",

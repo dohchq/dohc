@@ -541,7 +541,6 @@ test("@dataset-collection Apply on a chat's change card gives the Collection the
     const threadId = posted.stdout.match(/^posted (\S+) /mu)?.[1];
     if (!threadId) throw Error(`chat post named no thread: ${posted.stdout}`);
 
-    // Until Apply, only the files have the field.
     expect(await fileFields()).toContain("Due date");
     expect((await volunteers()).fields).not.toContain("Due date");
 

@@ -407,10 +407,6 @@ const rustOnly = (row) => ({
   ...row,
   request: { ...row.request, scope: "rust", gates: { rust: true, js: false } },
 });
-/**
- * The ids the service starts, one a minute: by one lane, each run ending before the next starts, or,
- * with `ending` false, by as many lanes as it takes, every run still going.
- */
 function startInTurn(requests, health, { ending = true } = {}) {
   const order = [];
   for (
@@ -692,7 +688,6 @@ test("the nightly submission verifies main's head in full, against the last nigh
       protocol: undefined,
     },
   );
-  // Once a nightly passed, the next one covers everything merged since.
   await writeJson(join(queuePaths(root).request("000000001-aaaaaa"), "request.json"), {
     id: "000000001-aaaaaa",
     sequence: 1,
@@ -1128,7 +1123,6 @@ function harness(
       ...overrides,
     });
   let service = serve();
-  // Stop the service and start another on the same root, as the supervisor does. Resolves once the new one beats.
   const restart = async (overrides) => {
     const before = readJson(queuePaths(root).service)?.startedAt;
     stop.abort();
@@ -2002,7 +1996,6 @@ test(
     };
     const first = await generation(0);
     assert.ok(first.every(alive));
-    // Kill only the service, as a crash would: the supervisor closes its job, and the relay stops the command.
     spawnSync("taskkill.exe", ["/PID", String(first[0]), "/F"], { windowsHide: true });
     await waitFor(
       () => first.every((pid) => !alive(pid)),
@@ -2011,7 +2004,6 @@ test(
     );
     const second = await generation(1);
     assert.ok(second.every(alive));
-    // Stop only the supervisor, as a crash or Task Scheduler would; its job takes the rest.
     spawnSync("taskkill.exe", ["/PID", String(supervisor.pid), "/F"], { windowsHide: true });
     await waitFor(
       () => second.every((pid) => !alive(pid)),
@@ -2108,7 +2100,6 @@ test("the Mac's LaunchAgents run the supervisor in the login session and submit 
     const lint = spawnSync("plutil", ["-lint", join(dir, name)], { encoding: "utf8" });
     assert.equal(lint.status, 0, lint.stdout + lint.stderr);
   }
-  // The nightly script runs the installed service's queue.mjs, whatever the root's name; a pass ends it at once.
   const script = nightlyAgentDefinition(dir, process.env.PATH)
     .match(/<string>\/bin\/sh<\/string><string>-c<\/string><string>(.*?)<\/string>/su)[1]
     .replaceAll("&gt;", ">")
@@ -2234,7 +2225,6 @@ test(
       [root],
       "a restart stops what a supervisor launchd killed left behind before another starts",
     );
-    // A service that is not running is started through launchd, never by hand.
     assert.deepEqual(startCommand("darwin"), [
       "launchctl",
       ["kickstart", `${domain}/${launchAgentLabel}`],
@@ -2344,7 +2334,6 @@ test("the supervisor takes a service instance's processes by its marker, its rec
   );
 });
 
-/** A fake process table of `[pid, ppid, second]` rows, as ps prints it. */
 const fakeTable = (rows) =>
   processTable(
     rows
@@ -2910,7 +2899,6 @@ test(
     process.kill(-first.pid, "SIGKILL");
     await once(first, "exit");
     assert.ok(one.every(running), "killing the supervisor alone stops nothing below it");
-    // The next supervisor stops them from the record before it starts a service.
     const second = startSupervisor();
     await waitFor(
       () => one.every((pid) => !running(pid)),
@@ -3369,7 +3357,6 @@ test("a move of a running, finished, or unknown request is refused with a reason
   );
   const waiting = await request("pass", { branch: "refs/heads/waiting" });
   const behind = await request("pass", { branch: "refs/heads/behind" });
-  // The command refuses at once.
   for (const [args, message] of [
     [[hung.id, "--first"], /^Cannot move \S+: it is running\. Only a queued request can move\.$/u],
     [[done.id, "--first"], /it has already finished: passed/u],
@@ -3490,7 +3477,6 @@ test("a malformed move is answered and removed, and the rest of the tick still r
     reason: `fixes main\n000000001-aaaaaa  #1  all\u001b[31m ${"x".repeat(400)}`,
     by: { name: "Ice\nX", user: "ice", cwd: `C:\\w\\${"y".repeat(300)}` },
   });
-  // A cancel written with them still stops the run in the same pass.
   await cancel(root, hung.id);
   assert.equal((await settled(hung.id)).status.state, "cancelled");
   for (const [index, [, message]] of bad.entries())

@@ -30,8 +30,6 @@ const OWNER_ROSTER: Exclude<ReachRoster, { kind: "unknown" }> = {
   grants: [],
 };
 
-/** A replica's chat store with one Group, recording each write. */
-/** A message already in the replica, by id. */
 type Sent = {
   id: string;
   threadId: string;

@@ -182,8 +182,6 @@ describe("JoinSyncedWorkspace", () => {
     await waitFor(() => expect(bridgeMock.cloudJoinWorkspace).toHaveBeenCalled());
     expect(back.disabled).toBe(true);
 
-    // The parent swaps the view away mid-request (e.g. first-run state
-    // change): the stale resolution must not navigate into the workspace.
     unmount();
     resolveJoin({ workspace: JOINED });
     await Promise.resolve();

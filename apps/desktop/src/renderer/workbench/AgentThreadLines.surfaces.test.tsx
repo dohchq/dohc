@@ -19,7 +19,6 @@ import {
 } from "./ChatsView.testHarness";
 import { ReactionStoreProvider } from "./reactionStore";
 
-// Nova's thread is in T3 Code, and dohc forwards this workspace's messages to it.
 const settings: DesktopUserSettings = {
   ...DEFAULT_USER_SETTINGS,
   agents: {

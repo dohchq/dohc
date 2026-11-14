@@ -1291,8 +1291,6 @@ describe("workspace authority owner on a Linux folder that ignores capitals", ()
   );
 
   function linuxOwner(knowsInodes = true) {
-    // What the disk answers for a folder's identity. A test can change it to
-    // a stat that starts or stops working, or to a folder replaced in place.
     const probe = { knows: knowsInodes, replacedBy: null as FolderIdentity | null };
     const registry = new Map<string, Workspace>();
     const owner = createWorkspaceAuthorityOwner({

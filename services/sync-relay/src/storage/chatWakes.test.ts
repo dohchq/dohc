@@ -560,7 +560,6 @@ it("names a computer as a wake target only while its declaration's lease holds, 
       .map((runner) => runner.installId);
   declare("mac", NOW);
   declare("laptop", NOW);
-  // The boundary: a lease holds up to, not at, CHAT_RUNNER_LEASE_MS after its declaration.
   expect(targets(NOW + CHAT_RUNNER_LEASE_MS - 1)).toEqual(["laptop", "mac"]);
   expect(targets(NOW + CHAT_RUNNER_LEASE_MS)).toEqual([]);
   // The same declaration again starts the lease again: the refresh a signed-in computer sends about daily.
@@ -572,7 +571,6 @@ it("names a computer as a wake target only while its declaration's lease holds, 
     .get();
   expect(updated).toEqual({ install_id: "mac", updated_at_ms: NOW + CHAT_RUNNER_LEASE_MS - 1 });
   expect(targets(NOW + CHAT_RUNNER_LEASE_MS)).toEqual(["mac"]);
-  // An expired computer's rows stay, read as absent, until it declares again.
   expect(count(storage, "sync_relay_chat_runners")).toBe(2);
   declare("laptop", NOW + 2 * CHAT_RUNNER_LEASE_MS, "Nova");
   expect(targets(NOW + 2 * CHAT_RUNNER_LEASE_MS).sort()).toEqual(["laptop"]);
@@ -616,7 +614,6 @@ it("tries a wake again only on computers whose declaration of its agent is enabl
   expect(wakes(storage).find((row) => row.wake_id === next)?.candidates_json).toEqual(
     target("claude", "laptop").candidates,
   );
-  // None left: answered as a wake with no other computer to try, and no empty generation.
   const before = count(storage, "sync_relay_chat_wakes");
   expect(retry("retry-none", "message-none")).toEqual({ kind: "refused" });
   expect(count(storage, "sync_relay_chat_wakes")).toBe(before);

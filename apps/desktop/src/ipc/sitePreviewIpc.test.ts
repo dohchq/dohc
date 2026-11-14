@@ -50,7 +50,6 @@ function harness(
     catalogSite?: SitePackageInfo | null;
     sharedView?: boolean;
     activeWorkspaceId?: string;
-    // Whether this computer trusts the workspace. Trusted unless a test says.
     trusted?: boolean;
   } = {},
 ) {

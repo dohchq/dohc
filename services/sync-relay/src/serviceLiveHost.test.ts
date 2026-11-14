@@ -298,7 +298,6 @@ it("closes the daemon immediately when storage loses continuity standing", async
   expect(existsSync(captured.nativePath)).toBe(false);
 });
 
-// Proves: an engine that ends by itself is logged with its exit code and signal, and the host stops with it.
 it("logs an engine that exits by itself with its code and signal", async () => {
   const f = await fixture();
   let exit!: (code: number | null, signal: NodeJS.Signals | null) => void;
@@ -320,8 +319,6 @@ it("logs an engine that exits by itself with its code and signal", async () => {
   }
 });
 
-// Proves: an engine the relay stops after a missed request deadline is logged as stopped by the relay, and its exit
-// that follows as one the relay caused.
 it("logs an engine the relay stops for a missed deadline, then its exit", async () => {
   const f = await fixture();
   let captured!: ReturnType<typeof clientFrom>,
@@ -494,7 +491,6 @@ it("logs a pass over a second at most once a minute, with cut ids, timings and f
   try {
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(100);
-    // The third pass's settlement reaches the engine and then fails.
     clock += 60_000;
     failSettle = true;
     await vi.advanceTimersByTimeAsync(100);
@@ -2208,7 +2204,6 @@ it("stops the engine for a held read it answers neither at the deadline nor on c
     if (request.method !== "sync.heldDocument") return through(...args);
     deadlines.push(request.deadlineMs);
     const cancel = args[3] as AbortSignal;
-    // The engine holds the read past its caller's deadline.
     await new Promise((resolve) => cancel.addEventListener("abort", resolve, { once: true }));
     // A healthy engine answers the cancel. A stuck one does not, and the client's own deadline ends the read later.
     if (answersCancel)
@@ -3892,7 +3887,6 @@ const pushRestoredUpdate = (o: Enrolled) => {
     );
   return fullState;
 };
-// The note's first text, depth first.
 const firstText = (node: Y.XmlFragment | Y.XmlElement): Y.XmlText | null => {
   for (const child of node.toArray()) {
     const found =
@@ -3901,7 +3895,6 @@ const firstText = (node: Y.XmlFragment | Y.XmlElement): Y.XmlText | null => {
   }
   return null;
 };
-// The successor's native capture: the restored state, sourced from the restore's settlement moment.
 
 const restoredCapture = (o: Enrolled, fullState: Buffer): NativeOwnerActivation => {
   const moment = o.raw
@@ -4460,7 +4453,6 @@ const replacementActivation = async (
   return { ...o.sibling, path, objectId: document.objectId };
 };
 
-// Appends real path changes from another device, with unchanged text unless supplied.
 const documentMoves = (o: Enrolled) => {
   let sequence = 0;
   return (row: typeof o.sibling, path: string, text?: string) => {

@@ -162,7 +162,6 @@ describe("folder app offers", () => {
     await act(async () => reads[1]!.reject(new Error("listing failed")));
     expect(quiet()).toEqual([false, true]);
 
-    // Try again is the person's own request, so its failure toasts.
     act(() => onError.mock.calls[0]![2]());
     await act(async () => reads[2]!.reject(new Error("listing failed")));
     expect(quiet()).toEqual([false, true, false]);

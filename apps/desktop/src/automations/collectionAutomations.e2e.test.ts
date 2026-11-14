@@ -118,7 +118,6 @@ async function harness(
   const errors: string[] = [];
   const executor = new CollectionAutomations({
     withEngine,
-    // These automations never post.
     chat: {
       hasMessage: async () => false,
       directory: async () => null,
@@ -252,7 +251,6 @@ it.skipIf(engine.missing)(
   120_000,
 );
 
-// A run store of its own, in a folder no engine opens.
 async function scratchRunStore(prefix: string) {
   const folder = await createTestScratch(prefix);
   return createAutomationRunStore({ forWrite: async () => folder, read: (work) => work(folder) });

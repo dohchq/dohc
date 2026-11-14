@@ -908,8 +908,6 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
     closeSpy.mockRestore();
   });
 
-  // A round-aware write bridge: the round messages arrive through the
-  // listener, and the write engine is the controllable one above.
   function stubRoundWriteBridge(overrides: Record<string, unknown> = {}) {
     let listener: ((message: ExitRoundMessage) => void) | null = null;
     const answerExitRound = vi.fn(

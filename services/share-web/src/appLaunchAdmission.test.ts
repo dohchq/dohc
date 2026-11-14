@@ -20,7 +20,6 @@ function fixture() {
     nowMs: () => 1_000_000,
     resolveMaterial: async (_discriminator, cookie) => {
       probes++;
-      // Each accepted cookie resolves to a private, server-owned browser profile.
       if (!cookie?.startsWith("viewer=profile-")) return { ok: false, status: 404 };
       return {
         ok: true,

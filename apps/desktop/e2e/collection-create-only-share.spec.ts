@@ -259,7 +259,6 @@ test("a shared collection reaches a link holder, converges a cross-device edit, 
     expect(await readViewLink(relay.baseUrl, capability, "/sync/link/share")).toEqual(
       neverValidRead,
     );
-    // The relay explains removal to a former recipient; a share they never had stays opaque.
     const namedAfterEnd = await relayJson(
       relay.baseUrl,
       RECIPIENT_TOKEN,

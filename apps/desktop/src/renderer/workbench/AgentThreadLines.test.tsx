@@ -175,13 +175,11 @@ it("shows nothing for another workspace's lines", async () => {
   push([line()], "ws-b");
   expect(screen.queryByTestId("agent-thread-line")).toBeNull();
 
-  // A chat of another workspace never borrows this workspace's lines.
   push([line()]);
   expect(screen.getByTestId("agent-thread-line")).toBeTruthy();
   view.rerender(chat({ shown: "ws-b" }));
   expect(screen.queryByTestId("agent-thread-line")).toBeNull();
 
-  // The window moved on: the first workspace's slow read paints nothing.
   const moved = settingsWith({ nova: agent("Nova", { workspaces: ["ws-a", "ws-b"] }) });
   view.rerender(chat({ workspaceId: "ws-b", settings: moved }));
   expect(reads.map((read) => read.workspaceId)).toEqual(["ws-a", "ws-b"]);
@@ -216,7 +214,6 @@ it("counts the time a state has lasted, outside the status, and stops with the l
   await act(() => vi.advanceTimersByTimeAsync(74_000));
   expect(elapsed.textContent).toBe("1m 21s");
 
-  // A new state counts from its own start.
   push([line({ state: "silent", sinceMs: Date.now() - 2_000 })]);
   expect(screen.getByTestId("agent-thread-line-elapsed").textContent).toBe("2s");
 
@@ -293,7 +290,6 @@ it("opens the agent's thread, and reports a refusal with Try again", async () =>
   expect(reported.cause).toBe(failure);
   expect(clear).not.toHaveBeenCalled();
 
-  // Try again opens it, which takes the failure's notice back.
   await act(async () => reported.retry?.());
   expect(desktop.openAgentThread).toHaveBeenCalledTimes(2);
   expect(clear).toHaveBeenCalledExactlyOnceWith(reported.identity);

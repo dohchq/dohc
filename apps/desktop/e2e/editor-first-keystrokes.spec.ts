@@ -31,7 +31,6 @@ async function withDesktop(
   }
 }
 
-// The palette's New file… makes the file before its editor opens.
 async function createDocument(page: Page, name: string): Promise<void> {
   await page.keyboard.press("ControlOrMeta+k");
   await page

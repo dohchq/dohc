@@ -252,8 +252,6 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     await confirm.getByTestId("sharing-end").click();
     await expect(row.getByTestId("sharing-row-status")).toHaveText("Ended");
 
-    // Revocation is live: the recipient's next fetch returns 404 with the
-    // owner-removed explanation.
     const revokedFetch = await relayJson(
       relay.baseUrl,
       RECIPIENT_TOKEN,
@@ -647,7 +645,6 @@ confidentialTest.describe("View link lifecycle", () => {
         confirmation = dialog.getByTestId("share-link-confirmation");
         await confirmation.getByRole("button", { name: "End link" }).click();
         await expect(confirmation).not.toBeVisible();
-        // An ended link waits under "more links".
         await expect(linkRows).toHaveCount(0);
         await dialog.getByTestId("share-links-more").click();
         await expect(linkRow).toContainText("Ended");
@@ -849,10 +846,6 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         }),
       );
       const mcp = await api.getMcpConfig({ workspaceId });
-      // A live engine Y.Doc session is writable, so opening
-      // one in a read-only shared view must be refused at the IPC boundary (same
-      // class as the write bypass above). applyEngineYDocUpdate on the refused
-      // session must be an inert no-op — it must never throw and never write.
       const engineYDoc = await api.openEngineYDocSession({
         workspaceId,
         sessionId: "shared-view-bypass",
@@ -1371,8 +1364,6 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
     await page.getByTestId("open-share-start").click();
     await expect(page.getByTestId("workspace-shell")).toBeVisible();
 
-    // The banner preserves the distinction from dependent Comment without
-    // promising a desktop write.
     const banner = page.getByTestId("shared-view-banner");
     await expect(banner).toBeVisible();
     await expect(banner).toContainText(
@@ -1793,8 +1784,6 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
     );
     expect(accepted.status, accepted.body).toBe(200);
 
-    // The proof: four moments in the GRANTER's log, each carrying the intent
-    // the accept door derived from the granter's own current path.
     const afterAccept = await relayJson(
       relay.baseUrl,
       GRANTER_TOKEN,

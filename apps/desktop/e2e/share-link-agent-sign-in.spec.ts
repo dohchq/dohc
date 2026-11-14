@@ -80,8 +80,6 @@ async function expectInvalidToken(response: Response, address: string): Promise<
   });
 }
 
-// The token endpoint's refusal of a refresh the relay will not grant, with
-// share-web's own no-store on every answer.
 async function expectInvalidGrant(response: Response): Promise<void> {
   expect({
     status: response.status,
@@ -168,7 +166,6 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
       )
       .toBe(true);
 
-    // Another link, whose address this agent's token must not open.
     let dialog = await openLinkPane(page, OTHER_PATH);
     await dialog.getByRole("button", { name: "Create link", exact: true }).click();
     const otherUrl = new URL((await dialog.getByTestId("share-link-url").textContent()) ?? "");
@@ -241,8 +238,6 @@ test("@share-link-agent-sign-in an agent signs in to a share link, keeps working
     await expectInvalidGrant(await claude.refresh(claude.refreshToken!, otherAddress));
     expect((await claude.tool("dohc_share_status")).status).toBe(200);
 
-    // 6. Agent authorship: the post is the agent's, under the name its client
-    // reported, as a link author the owner can block.
     expect(
       await claude.tool("dohc_post_discussion", {
         body: COMMENT,
