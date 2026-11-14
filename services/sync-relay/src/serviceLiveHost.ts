@@ -3193,8 +3193,9 @@ export async function startServiceLiveHost(options: {
                 }
               });
               // Every ready workspace pushes, then pulls unless its replica is quiet and its relay state unchanged, until the
-              // recovery probe. One with no documents still pulls while its replica has departures to finish.
-              // One that is not ready pulls once a pass unless an activation above caught it up, so its held lists page
+              // recovery probe. One with no documents still pulls while its replica has departures to finish. One held back
+              // only by documents waiting out a backoff pulls the same way, and pushes unless one of them has its owner here.
+              // Any other unready workspace pulls once a pass unless an activation above caught it up, so its held lists page
               // on and an ended hold is freed, however long another document holds readiness back. It pushes first while
               // only documents with no owner waiting out a backoff hold it back. One whose replica has not checked its
               // origin does neither.
@@ -3209,9 +3210,9 @@ export async function startServiceLiveHost(options: {
                     if (timed) timed.pushMs = Math.round(now() - startedAt);
                   }
                 };
-                if (activation!.workspaceReady(workspaceId)) {
+                if (activation!.workspaceWaiting(workspaceId)) {
                   // A refused push does not cost the pull, so departures are still confirmed while the push keeps failing.
-                  await step(push);
+                  if (activation!.workspacePushes(workspaceId)) await step(push);
                   await step(async () => {
                     // The pull uses the attachment standing after the push, not one the pass saw before it.
                     const current = checked(workspaceId),
@@ -3298,8 +3299,10 @@ export async function startServiceLiveHost(options: {
             if (visited === 0) idleSweepsBeforeDue++;
           };
           // Whether nothing is left for a pass to do until a wake, a nudge or a deadline: no document leaves, parks,
-          // recovers, unloads or is kept, none that moved away is still listed, every activation finished or blocked, and
-          // every workspace is checked, ready, pushed and quiet with its relay state read and its recovery probe not due.
+          // recovers, unloads or is kept, none that moved away is still listed, every activation finished, blocked or waits
+          // out a backoff, and every workspace is checked, pushed and quiet with its relay state read and its recovery
+          // probe not due, and ready apart from documents waiting out a backoff. A pause ends within idlePollIntervalMs,
+          // so a document tries again within that of its wait lapsing.
           const settled = () => {
             if (
               leaving.size ||
@@ -3317,7 +3320,7 @@ export async function startServiceLiveHost(options: {
                 !attached.hosted.checked ||
                 attached.hosted.diverged ||
                 !attached.hosted.pushedAll ||
-                !activation!.workspaceReady(workspaceId)
+                !activation!.workspaceWaiting(workspaceId)
               )
                 return false;
               if (
