@@ -85,7 +85,8 @@ export function MemberChats({found, onRetry, shown, onEnded, onUnread}: {
   return <section className="comments-panel link-channel member-chats" aria-label="Chats" aria-busy={found === "loading"}>
     {group && opened && hub ? <>
       <div className="chats-head">
-        {opened.groups.length > 1 && <button ref={back} className="icon-button" type="button" aria-label="All Groups" title="All Groups" onClick={() => go(null)}>
+        {opened.groups.length > 1 && <button ref={back} className="icon-button" type="button" aria-label={others > 0 ? `All Groups, ${others} unread` : "All Groups"}
+          title="All Groups" onClick={() => go(null)}>
           <Icon name="chevron-left"/>{others > 0 && <span className="unread-count">{others}</span>}
         </button>}
         <span className="chats-hash"><Icon name="hash" size={14}/></span>

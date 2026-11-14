@@ -49,7 +49,7 @@ afterEach(async () => {
 });
 
 function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wire: string; name: string; type?: "posts" | "chat" | "both"}>; files?: typeof FILES; member?: boolean;
-  groupsFail?: number; history?: Record<string, unknown[]>; postFails?: {status: number; code: string}} = {}) {
+  groupsFail?: number; history?: Record<string, unknown[]>; postFails?: {status: number; code: string}; openHeld?: boolean} = {}) {
   let signedIn = options.signedIn ?? true, groupsFail = options.groupsFail ?? 0;
   const files = options.files ?? FILES;
   // A test can change the level while the page is open; the next read of the workspace's meta carries it.
@@ -73,6 +73,7 @@ function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wir
     if (options.member === false && (url.pathname.startsWith("/api/view/") || url.pathname.startsWith("/api/named-chat/"))) return jsonResponse({ok: false, error: "not found"}, 404);
     if (url.pathname.startsWith("/api/view/")) {
       expect(headers.get("x-dohc-link-session") ?? url.searchParams.get("session")).toBe(SESSION);
+      if (url.pathname === "/api/view/current" && options.openHeld) return hold("current", url, signal);
       if (url.pathname === "/api/view/current") return jsonResponse({...meta(), files, nextCursor: 7, epochLogFloor: 0});
       if (url.pathname === "/api/view/meta") return jsonResponse(meta());
       if (url.pathname === "/api/view/log") return url.searchParams.has("hold") ? hold("log", url, signal)
@@ -208,8 +209,9 @@ it("posts in a Group at Comment, counts another Group's new messages, and opens 
   expect(posts[0]).toMatchObject({shareId: "share", channelWireId: "wire-plans", lane: "posts", body: "Count me in", authorKind: "human"});
   await act(async () => following("chat")[0]!.answer({shareId: "share", nextCursor: 22, hasMore: false,
     messages: [{...chat(21, "Bring snacks too"), channelWireId: "wire-food"}]}));
-  await settle(() => button("All Groups")?.textContent?.includes("1") === true);
-  await click("All Groups");
+  // The count is part of the back button's name, so a screen reader hears it too.
+  await settle(() => button("All Groups, 1 unread")?.textContent === "1");
+  await click("All Groups, 1 unread");
   const food = buttons().find(node => node.textContent?.startsWith("food"))!;
   expect(food.textContent).toBe("food1 unread");
   await act(async () => food.click());
@@ -435,6 +437,8 @@ it("stops editing when the person loses Edit, and keeps the unsent text to copy,
   await act(async () => following("log")[0]!.answer({ops: [], nextCursor: 7, hasMore: false, epochLogFloor: 0}));
   await settle(() => container.querySelector('[role="textbox"]') === null && recovery() !== null);
   expect(recovery()!.textContent).toContain('dohc kept your unsent edits to "plan.md"');
+  // Toasts stack in the same bottom-right corner, so neither covers the other.
+  expect(recovery()!.closest(".workspace-corner")?.querySelector(".toast-slot")).toBeInstanceOf(HTMLElement);
   expect(recovery()!.querySelector("textarea")?.value).toContain("Leave at ten.");
   const writeText = vi.fn(async () => undefined);
   Object.defineProperty(navigator, "clipboard", {configurable: true, value: {writeText}});
@@ -475,6 +479,15 @@ it("refuses an account that is not a member, names it, and offers Switch account
   expect(container.querySelector(".state-message p")?.textContent).toBe("You're signed in as Sam Rivera. Sign in with the account the owner invited.");
   await click("Switch account");
   await settle(() => text().includes("Sign in to open this workspace"));
+});
+
+it("loads in the shape of the workspace it opens: the files, the page and the side panel", async () => {
+  server({openHeld: true}); await render();
+  await settle(() => held.some(item => item.path === "current"));
+  const opening = container.querySelector<HTMLElement>(".workspace-opening")!;
+  expect(opening.getAttribute("aria-busy")).toBe("true");
+  expect(opening.textContent).toBe("Opening the workspace");
+  expect([...opening.children].map(node => node.className)).toEqual(["workspace-opening-files", "workspace-opening-page", "workspace-opening-side", "sr-only"]);
 });
 
 it("lays the files, the page and Chats or Comments side by side on a wide screen, and as four tabs on a phone", async () => {

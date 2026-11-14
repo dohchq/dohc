@@ -1,5 +1,6 @@
 import {lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent} from "react";
 import type {Ended} from "./ChatChannel";
+import {createPortal} from "react-dom";
 import {DohcMark, Icon} from "./icons";
 import {MemberChats, MemberComments, useMemberListing} from "./MemberChats";
 import {Toast} from "./Toast";
@@ -9,7 +10,7 @@ import {accountUser, namedRequest} from "./namedRecipient";
 import {SignInForm, signInErrorMessage} from "./NamedSignIn";
 import {RETRY_INITIAL_MS, RETRY_MAX_MS} from "./retry";
 import {
-  EpochFloorChangedError, FileTree, FileView, fileTitle, fileTree, loadCurrentState, loadLog, loadMeta, MAX_LOG_PAGES, Opening, StatePage,
+  EpochFloorChangedError, FileTree, FileView, fileTitle, fileTree, loadCurrentState, loadLog, loadMeta, MAX_LOG_PAGES, StatePage,
   useNarrow, VersionMismatchError, VIEW_LOG_HOLD_MS, ViewResponseError, waitForRetry,
 } from "./viewFiles";
 import "./join.css";
@@ -41,8 +42,7 @@ type Unsent = {id: number; path: string; text: string};
 
 // Shown over whatever the page shows next, so it outlasts a lower level, an ended membership or an ended session.
 function UnsentEdits({unsent, onDismiss}: {unsent: readonly Unsent[]; onDismiss(id: number): void}) {
-  if (!unsent.length) return null;
-  return <div className="unsent-slot">{unsent.map(item => {
+  return <>{unsent.map(item => {
     const name = item.path.slice(item.path.lastIndexOf("/") + 1), dot = name.lastIndexOf(".");
     const file = dot > 0 ? `${name.slice(0, dot)} (unsent edits)${name.slice(dot)}` : `${name} (unsent edits)`;
     return <aside key={item.id} className="unsent-edits" aria-label="Unsent edits">
@@ -56,21 +56,26 @@ function UnsentEdits({unsent, onDismiss}: {unsent: readonly Unsent[]; onDismiss(
         <button type="button" className="handoff-button secondary" onClick={() => onDismiss(item.id)}>Dismiss</button>
       </div>
     </aside>;
-  })}</div>;
+  })}</>;
 }
 
 /** A workspace member's page: its files, a page, and its Groups, at the member's level. */
 export default function WorkspaceApp({grantId}: {grantId: string | null}) {
   const [unsent, setUnsent] = useState<Unsent[]>([]), unsentId = useRef(0);
+  const [toastSlot, setToastSlot] = useState<HTMLElement | null>(null);
   const keep = useCallback((path: string, text: string) => setUnsent(list => [...list, {id: ++unsentId.current, path, text}]), []);
   return <>
-    <MemberEntry grantId={grantId} onUnsent={keep}/>
-    <UnsentEdits unsent={unsent} onDismiss={id => setUnsent(list => list.filter(item => item.id !== id))}/>
+    <MemberEntry grantId={grantId} onUnsent={keep} toastSlot={toastSlot}/>
+    {/* Toasts and kept edits share the window's bottom-right corner, and the edits outlive the workspace page. */}
+    <div className="workspace-corner">
+      <div className="toast-slot" ref={setToastSlot}/>
+      <UnsentEdits unsent={unsent} onDismiss={id => setUnsent(list => list.filter(item => item.id !== id))}/>
+    </div>
   </>;
 }
 
 /** Signs the member in, then opens the workspace. */
-function MemberEntry({grantId, onUnsent}: {grantId: string | null; onUnsent(path: string, text: string): void}) {
+function MemberEntry({grantId, onUnsent, toastSlot}: {grantId: string | null; onUnsent(path: string, text: string): void; toastSlot: HTMLElement | null}) {
   const [account, setAccount] = useState<Account | null | undefined>(undefined);
   const [pending, setPending] = useState<"account" | "sign-in" | "sign-out" | null>(grantId ? "account" : null);
   const [error, setError] = useState<string | null>(null);
@@ -104,7 +109,7 @@ function MemberEntry({grantId, onUnsent}: {grantId: string | null; onUnsent(path
   if (!grantId) return <StatePage icon="unlink" title="This workspace link isn't valid.">
     <p>Open the workspace again from your invitation.</p>
   </StatePage>;
-  if (account === undefined) return <Opening/>;
+  if (account === undefined) return <WorkspaceOpening/>;
   if (!account) return <div className="state-page join-page">
     <span className="bar-mark"><DohcMark/></span>
     <main className="state">
@@ -119,7 +124,7 @@ function MemberEntry({grantId, onUnsent}: {grantId: string | null; onUnsent(path
     </main>
   </div>;
   return <MemberWorkspace key={`${account.id}\n${grantId}`} grantId={grantId} account={account} signingOut={pending === "sign-out"}
-    signOutError={error === SIGN_OUT_FAILED ? error : null} onSignOut={signOut} onSessionEnded={sessionEnded} onUnsent={onUnsent}/>;
+    signOutError={error === SIGN_OUT_FAILED ? error : null} onSignOut={signOut} onSessionEnded={sessionEnded} onUnsent={onUnsent} toastSlot={toastSlot}/>;
 }
 
 /** The workspace's files from the view routes, kept current by one held log read at a time. */
@@ -169,9 +174,19 @@ function useMemberFiles(session: string, attempt: number) {
   return view;
 }
 
-function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut, onSessionEnded, onUnsent}: {
+// The workspace's shape while it loads: its files, the page and the side panel, or the page alone on a phone.
+function WorkspaceOpening() {
+  return <div className="viewer link-page workspace-page workspace-opening" aria-busy="true">
+    <div className="workspace-opening-files" aria-hidden="true"><span className="bar-mark"><DohcMark/></span><i/><i/><i/><i/><i/></div>
+    <div className="workspace-opening-page" aria-hidden="true"><div className="skeleton"><i/><i/><i/><i/><i/><i/><i/></div></div>
+    <div className="workspace-opening-side" aria-hidden="true"><i/><i/><i/><i/></div>
+    <p className="sr-only">Opening the workspace</p>
+  </div>;
+}
+
+function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut, onSessionEnded, onUnsent, toastSlot}: {
   grantId: string; account: Account; signingOut: boolean; signOutError: string | null; onSignOut(): void; onSessionEnded(): void;
-  onUnsent(path: string, text: string): void;
+  onUnsent(path: string, text: string): void; toastSlot: HTMLElement | null;
 }) {
   const session = memberSession(grantId);
   const [attempt, setAttempt] = useState(0);
@@ -179,7 +194,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
   const [ended, setEnded] = useState(false);
   const [selectedPath, setSelectedPath] = useState("");
   const [tab, setTab] = useState<Tab>("page"), [side, setSide] = useState<Side>("chats"), [unread, setUnread] = useState(0);
-  const [statusSlot, setStatusSlot] = useState<HTMLElement | null>(null), [toastSlot, setToastSlot] = useState<HTMLElement | null>(null);
+  const [statusSlot, setStatusSlot] = useState<HTMLElement | null>(null);
   const [bandSlot, setBandSlot] = useState<HTMLElement | null>(null);
   const leave = useRef<((action: () => void) => void) | null>(null), tabs = useRef(new Map<Tab, HTMLButtonElement>());
   const narrow = useNarrow();
@@ -223,7 +238,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
     <p>Reload it to get the version the server expects.</p>
     <button className="handoff-button secondary" type="button" onClick={() => location.reload()}>Reload</button>
   </StatePage>;
-  if (!files) return <Opening/>;
+  if (!files) return <WorkspaceOpening/>;
 
   const access = files.meta.access;
   const selected = files.files.find(file => file.path === selectedPath) ?? files.files[0];
@@ -315,10 +330,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
       {TABS.map(item => <button key={item.id} ref={node => {if (node) tabs.current.set(item.id, node);}} id={`workspace-tab-${item.id}`} role="tab" type="button"
         aria-selected={tab === item.id} aria-controls={item.panel} tabIndex={tab === item.id ? 0 : -1} onClick={() => setTab(item.id)}>{tabLabel(item)}</button>)}
     </div>}
-    {/* Outside the tab panels, so a phone shows a toast whichever tab is open. */}
-    <div className="toast-slot" ref={setToastSlot}>
-      {listing.found === "failed" && !listingDismissed && <Toast title={LISTING_FAILED} body={CHECK_CONNECTION} onRetry={listing.retry}
-        onDismiss={() => setListingDismissed(true)}/>}
-    </div>
+    {listing.found === "failed" && !listingDismissed && toastSlot && createPortal(<Toast title={LISTING_FAILED} body={CHECK_CONNECTION}
+      onRetry={listing.retry} onDismiss={() => setListingDismissed(true)}/>, toastSlot)}
   </div>;
 }
