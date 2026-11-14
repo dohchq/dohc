@@ -15,6 +15,7 @@ import { untilAborted } from "./namedLiveFrameHost.js";
 import { observeRelayWrites, type LiveHostChanges } from "./relayWriteChanges.js";
 import { parseNativeLiveSyncConfig } from "./liveSyncConfig.js";
 import { LiveDocumentWork } from "./liveDocumentWork.js";
+import { createAppliedAcks } from "./appliedAcks.js";
 import { liveEditors } from "./liveEditors.js";
 import {
   HeldReadBusyError,
@@ -759,6 +760,7 @@ export async function startServiceLiveHost(options: {
     sentRequests = 0,
     idleRequests = 0,
     probeCredits = 0;
+  const appliedAcks = createAppliedAcks();
   const nextRequestId = () => {
     if (requestId === Number.MAX_SAFE_INTEGER)
       throw new Error("Service host request IDs exhausted.");
@@ -1068,9 +1070,16 @@ export async function startServiceLiveHost(options: {
           if (IDLE_PASS_REQUESTS.has(request.method)) idleRequests++;
           return queued.sendRequest(request, ...rest);
         };
+        // Every drain applies through here, so a submission takes the engine's answer for its row.
+        const sendLiveApplication: EngineClient["sendLiveApplication"] = async (...args) => {
+          const response = await queued.sendLiveApplication(...args);
+          appliedAcks.record(response.result);
+          return response;
+        };
         const client = new Proxy(queued, {
           get(target, property) {
             if (property === "sendRequest") return sendRequest;
+            if (property === "sendLiveApplication") return sendLiveApplication;
             const value: unknown = Reflect.get(target, property, target);
             if (typeof value !== "function") return value;
             if (!CONNECTION_READS.has(property)) return value.bind(target);
@@ -3938,6 +3947,7 @@ export async function startServiceLiveHost(options: {
               nextRequestId,
               deadlineMs: config.client.requestDeadlineMs,
               drain,
+              takeAppliedAck: appliedAcks.take,
             });
           },
           /**

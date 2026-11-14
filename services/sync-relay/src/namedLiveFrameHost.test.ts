@@ -219,6 +219,7 @@ async function setup(maxListeners = 4, reserveBytes?: (size: number) => () => vo
     deadlineMs: 5000,
     nextRequestId: () => ++requestId,
     drain,
+    takeAppliedAck: vi.fn((): typeof ack | undefined => undefined),
   };
   const bounds = {
     maxClientVectorBytes: 32,
@@ -557,6 +558,27 @@ it.each(["applied", "missing", "receipt-only"])(
     );
   },
 );
+
+it.each([
+  ["takes the ACK of the drain that applied the row without asking the engine again", 11, 0],
+  ["asks the engine when the drain's ACK names another journal row", 12, 1],
+])("%s", async (_name, journalCursor, ackReads) => {
+  const f = await setup();
+  journal(f);
+  const applied = { ...ack, journalCursor, applicationReplayed: false };
+  f.native.takeAppliedAck.mockReturnValueOnce(applied);
+  expect(
+    await f.capture.submit(
+      { deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes },
+      new AbortController().signal,
+    ),
+  ).toEqual({ result: "success", ack: ackReads ? ack : applied });
+  expect(f.native.takeAppliedAck).toHaveBeenCalledExactlyOnceWith({
+    deliveryId: ack.deliveryId,
+    updateDigest: hash(bytes),
+  });
+  expect(f.peer.requests.filter((r) => r.method === "liveApplication.ack")).toHaveLength(ackReads);
+});
 
 it("rechecks revocation after asynchronous validation and never commits its stale result", async () => {
   const f = await setup(),

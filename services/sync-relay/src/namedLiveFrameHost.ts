@@ -24,6 +24,7 @@ import {
   parseServerDerivedLiveUpdateAuthority,
   type ServerDerivedLiveUpdateAuthority,
   type LiveDocumentKey,
+  type LiveUpdateHostApplicationAck,
   type LiveUpdateReceipt,
 } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
@@ -70,6 +71,11 @@ export interface NamedFrameNativeHost {
   nextRequestId(): number;
   /** Uses the existing service/device delivery consumer and signals shared changes on completion. */
   drain(document: LiveDocumentKey, signal: AbortSignal): Promise<unknown>;
+  /** Takes the engine's own applied ACK for a delivery, from the drain that applied it, when this host keeps one. */
+  takeAppliedAck?(identity: {
+    readonly deliveryId: string;
+    readonly updateDigest: string;
+  }): LiveUpdateHostApplicationAck | undefined;
 }
 export interface NamedFrameHostBounds {
   readonly maxClientVectorBytes: number;
@@ -582,11 +588,18 @@ function captureLiveFrameHost(options: {
         check(signal);
       }
       check(signal);
-      const ack = await native.client.readLiveApplicationAck(
-        request(),
-        { deliveryId, updateDigest },
-        signal,
-      );
+      // The engine's answer to the drain that applied this row, or else the ACK the engine kept for it.
+      const applied = native.takeAppliedAck?.({ deliveryId, updateDigest });
+      const ack =
+        applied &&
+        applied.journalCursor === receipt.journalCursor &&
+        applied.acceptingHostEpoch === receipt.acceptingHostEpoch
+          ? applied
+          : await native.client.readLiveApplicationAck(
+              request(),
+              { deliveryId, updateDigest },
+              signal,
+            );
       check(signal);
       if (!ack) return { result: "retry", reason: "application-pending" };
       if (
