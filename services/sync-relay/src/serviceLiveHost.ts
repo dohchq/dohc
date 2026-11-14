@@ -3271,7 +3271,7 @@ export async function startServiceLiveHost(options: {
               });
               // Every ready workspace pushes, then pulls unless its replica is quiet and its relay state unchanged, until the
               // recovery probe. One with no documents still pulls while its replica has departures to finish. One held back
-              // only by documents waiting out a backoff pulls the same way, and pushes unless one of them has its owner here.
+              // only by documents waiting out a backoff pushes and pulls the same way.
               // Any other unready workspace pulls once a pass unless an activation above caught it up, so its held lists page
               // on and an ended hold is freed, however long another document holds readiness back. It does not push. One
               // whose replica has not checked its origin does neither.
@@ -3289,7 +3289,7 @@ export async function startServiceLiveHost(options: {
                 const ready = activation!.workspaceReady(workspaceId);
                 if (ready || activation!.workspaceWaiting(workspaceId)) {
                   // A refused push does not cost the pull, so departures are still confirmed while the push keeps failing.
-                  if (ready || activation!.workspacePushes(workspaceId)) await step(push);
+                  await step(push);
                   await step(async () => {
                     // The pull uses the attachment standing after the push, not one the pass saw before it.
                     const current = checked(workspaceId),
@@ -3376,7 +3376,7 @@ export async function startServiceLiveHost(options: {
           // Whether nothing is left for a pass to do until a wake, a nudge or a deadline: no document leaves, parks,
           // recovers, unloads or is kept, none that moved away is still listed, every activation finished, blocked or waits
           // out a backoff, and every workspace is checked and quiet with its relay state read and its recovery probe not
-          // due, ready apart from documents waiting out a backoff, and pushed unless its push waits for one of those.
+          // due, ready apart from documents waiting out a backoff, and fully pushed.
           // A pause ends within idlePollIntervalMs, so a document tries again within that of its wait lapsing.
           const settled = () => {
             if (
@@ -3398,8 +3398,7 @@ export async function startServiceLiveHost(options: {
                   activation!.workspaceReady(workspaceId) ||
                   activation!.workspaceWaiting(workspaceId)
                 ) ||
-                // A push that waits for a document's backoff does not run, so it cannot have pushed everything.
-                (!attached.hosted.pushedAll && activation!.workspacePushes(workspaceId))
+                !attached.hosted.pushedAll
               )
                 return false;
               if (
