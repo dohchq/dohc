@@ -38,12 +38,17 @@ const reply = (body: string, threadId: string | null): ChatWrite => ({
   operation: "reply",
   args: { threadId, body },
 });
-const state = (records: OutboxRecord[], unreadable: string[] = []): OutboxState => ({
+const state = (
+  records: OutboxRecord[],
+  unreadable: string[] = [],
+  unconfirmed: string[] = [],
+): OutboxState => ({
   status: "ready",
   records,
   aside: unreadable,
   unreadable,
   deletion: "none",
+  unconfirmed,
 });
 
 describe("a stream's outbox rows", () => {
@@ -196,6 +201,48 @@ describe("Messages on this phone", () => {
       [null, "thread-1"],
       [null, null],
       [null, "thread-2"],
+    ]);
+  });
+
+  it("list a saved reaction a read since shows otherwise, with what it asks for, and no other saved reaction", () => {
+    const saved = (
+      emoji: string,
+      reaction: "added" | "removed",
+      fields: Partial<OutboxRecord> = {},
+    ) =>
+      record(
+        { operation: "react", args: { messageId: "m", emoji, state: reaction } },
+        {
+          messageId: null,
+          target: { kind: "thread", id: "thread-2" },
+          stage: "saved",
+          attempted: true,
+          result: { kind: "saved", threadId: "thread-2", messageId: null },
+          ...fields,
+        },
+      );
+    const doubted = saved(" 👍", "added");
+    const waiting = saved("🎉", "removed");
+    const another = saved("👀", "added", { accountId: "u-2" });
+    const { rows } = recoveryRows(
+      state([doubted, waiting, another], [], [doubted.operationId, another.operationId]),
+      ME,
+    );
+    expect(rows).toEqual([
+      {
+        workspaceId: "ws-1",
+        streamId: null,
+        threadId: "thread-2",
+        mark: expect.objectContaining({
+          operationId: doubted.operationId,
+          state: { kind: "saved" },
+        }),
+        reaction: {
+          emoji: "👍",
+          state: "added",
+          mark: expect.objectContaining({ operationId: doubted.operationId }),
+        },
+      },
     ]);
   });
 });

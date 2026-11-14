@@ -201,20 +201,26 @@ function useScreenWrites(target: string) {
     () => (state && rowScope ? reactionRecords(state, rowScope) : null),
     [state, rowScope],
   );
+  const unconfirmed = state?.unconfirmed;
   // A message this phone has no reaction for keeps its object while the outbox changes, so its row doesn't draw again.
   const [plain] = useState(() => new WeakMap<Message, Message>());
   const message = useCallback(
     (entry: ChatMessage, base: Message) => {
       const records = reactionsByMessage?.get(entry.id);
       if (records)
-        return withReactions(base, confirmedReactions(entry.reactions, signIn.userId), records);
+        return withReactions(
+          base,
+          confirmedReactions(entry.reactions, signIn.userId),
+          records,
+          unconfirmed,
+        );
       const kept = plain.get(base);
       if (kept) return kept;
       const made = withReactions(base, confirmedReactions(entry.reactions, signIn.userId));
       plain.set(base, made);
       return made;
     },
-    [signIn, reactionsByMessage, plain],
+    [signIn, reactionsByMessage, unconfirmed, plain],
   );
   const problem = useMemo(
     () => outboxProblem(state, blocked, () => outbox.wake()),

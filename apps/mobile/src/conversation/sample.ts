@@ -413,6 +413,7 @@ export function createSampleOutbox(seed: string | null): WriteOutbox {
         aside: [],
         unreadable: [],
         deletion: "none",
+        unconfirmed: [],
       }),
     subscribe(listener) {
       listeners.add(listener);

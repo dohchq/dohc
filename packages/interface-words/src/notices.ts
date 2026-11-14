@@ -136,6 +136,11 @@ export const chatWords = {
   reactionStillSending: (emoji: string) => `Your ${emoji} reaction is still sending.`,
   /** The server refused a reaction, or can't find its message. */
   reactionRefused: (emoji: string) => `dohc could not change your ${emoji} reaction.`,
+  /** The server saved a reaction, but a read since shows otherwise, as when another device changed it. */
+  reactionUnconfirmed: (emoji: string, state: "added" | "removed") =>
+    state === "added"
+      ? `Your ${emoji} reaction was saved, but your server no longer shows it.`
+      : `Your ${emoji} reaction was removed, but your server shows it again.`,
   /** Enqueue failed and nothing was kept. */
   reactionNotKept: "dohc could not keep this reaction on your phone.",
   discardReactionTitle: "Discard this reaction?",

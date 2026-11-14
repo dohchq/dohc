@@ -56,11 +56,13 @@ export interface Reaction {
 }
 
 /**
- * A reaction of this phone's that needs the person: withheld, still sending, refused, or for a message the server can't
- * find.
+ * A reaction of this phone's that needs the person: withheld, still sending, refused, for a message the server can't
+ * find, or saved but shown otherwise by a read since.
  */
 export interface ReactionMark {
   readonly emoji: string;
+  /** The state the reaction asks for. */
+  readonly state: "added" | "removed";
   readonly mark: LocalMark;
 }
 

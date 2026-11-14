@@ -1,6 +1,6 @@
-import type { OutboxState } from "../server/outbox";
+import { emojiKey, type OutboxState } from "../server/outbox";
 import type { OutboxRecord } from "./conversationWrites";
-import type { LocalMark, LocalState } from "./types";
+import type { LocalMark, LocalState, ReactionMark } from "./types";
 
 // The outbox's records as the phone shows them: in the conversation they were written to, until a read shows the
 // message, and in Messages on this phone, for every record of the signed-in account. Only the account's own records
@@ -150,19 +150,27 @@ export interface RecoveryRow {
   readonly streamId: string | null;
   readonly threadId: string | null;
   readonly mark: LocalMark;
+  /** A saved reaction that a read since shows otherwise, shown with what it asks for and Discard. */
+  readonly reaction?: ReactionMark;
 }
 
 /**
- * Every record of the account that isn't saved, in any workspace, and the handles of records that can't be read, whose
- * account, workspace and text can't be known. A saved record waits only for a read to show it, so it isn't listed.
+ * Every record of the account that isn't saved, and every saved reaction a read since shows otherwise, in any
+ * workspace, with the handles of records that can't be read, whose account, workspace and text can't be known. Any
+ * other saved record waits only for a read to show it, so it isn't listed.
  */
 export function recoveryRows(
   state: OutboxState,
   scope: OutboxScope,
 ): { readonly rows: readonly RecoveryRow[]; readonly unreadable: readonly string[] } {
   const rows = state.records.flatMap((record): RecoveryRow[] => {
-    if (!owned(record, scope) || record.stage === "saved") return [];
+    if (!owned(record, scope)) return [];
     const { write } = record;
+    const doubted =
+      write.operation === "react" &&
+      record.stage === "saved" &&
+      state.unconfirmed.includes(record.operationId);
+    if (record.stage === "saved" && !doubted) return [];
     const streamId =
       write.operation === "send"
         ? write.args.streamId
@@ -171,7 +179,18 @@ export function recoveryRows(
           : null;
     const threadId =
       streamId === null && record.target?.kind === "thread" ? record.target.id : null;
-    return [{ workspaceId: record.workspaceId, streamId, threadId, mark: localMark(record) }];
+    const mark = localMark(record);
+    return [
+      {
+        workspaceId: record.workspaceId,
+        streamId,
+        threadId,
+        mark,
+        ...(doubted && write.operation === "react"
+          ? { reaction: { emoji: emojiKey(write.args.emoji), state: write.args.state, mark } }
+          : {}),
+      },
+    ];
   });
   return { rows, unreadable: state.unreadable };
 }

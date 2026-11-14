@@ -52,7 +52,7 @@ export function reactionRecords(
 
 export interface MessageReactions {
   readonly reactions: readonly Reaction[];
-  /** Reactions that need the person: withheld, still sending, refused, or missing. */
+  /** Reactions that need the person: withheld, still sending, refused, missing, or saved but unconfirmed. */
   readonly marks: readonly ReactionMark[];
   /** A reaction isn't settled, so the message takes no other yet. */
   readonly busy: boolean;
@@ -61,12 +61,14 @@ export interface MessageReactions {
 /**
  * The server's reactions with `records`, this phone's reactions to the same message, over them. A reaction the server
  * saved still counts until a read shows it, when the outbox hands it off, so the count never jumps back meanwhile.
- * Other people's reactions always count: only the account's own one changes.
+ * One in `unconfirmed`, which a read since it was saved shows otherwise, stays pending and needs the person. Other
+ * people's reactions always count: only the account's own one changes.
  */
 export function withLocalReactions(
   confirmed: readonly Reaction[],
   records: readonly OutboxRecord[],
   messageId: string,
+  unconfirmed: readonly string[] = [],
 ): MessageReactions {
   const latest = new Map<string, { readonly mine: boolean; readonly pending: boolean }>();
   const marks: ReactionMark[] = [];
@@ -74,17 +76,19 @@ export function withLocalReactions(
     if (record.write.operation !== "react" || record.write.args.messageId !== messageId) continue;
     const emoji = emojiKey(record.write.args.emoji);
     const state = localState(record);
+    const doubted = state.kind === "saved" && unconfirmed.includes(record.operationId);
     if (
       state.kind === "refused" ||
       state.kind === "missing" ||
       state.kind === "withheld" ||
-      state.kind === "stalled"
+      state.kind === "stalled" ||
+      doubted
     )
-      marks.push({ emoji, mark: localMark(record) });
+      marks.push({ emoji, state: record.write.args.state, mark: localMark(record) });
     if (state.kind === "refused" || state.kind === "missing") continue;
     latest.set(emoji, {
       mine: record.write.args.state === "added",
-      pending: state.kind !== "saved",
+      pending: state.kind !== "saved" || doubted,
     });
   }
   const reactions: Reaction[] = [];
@@ -120,8 +124,9 @@ export function withReactions(
   message: Message,
   confirmed: readonly Reaction[],
   records: readonly OutboxRecord[] = [],
+  unconfirmed: readonly string[] = [],
 ): Message {
-  const shown = withLocalReactions(confirmed, records, message.id);
+  const shown = withLocalReactions(confirmed, records, message.id, unconfirmed);
   return {
     ...message,
     reactions: shown.reactions,

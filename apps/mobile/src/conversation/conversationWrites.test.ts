@@ -48,6 +48,7 @@ const READY: OutboxState = {
   aside: [],
   unreadable: [],
   deletion: "none",
+  unconfirmed: [],
 };
 
 /** An outbox that records what it was asked, and answers as each test says. */

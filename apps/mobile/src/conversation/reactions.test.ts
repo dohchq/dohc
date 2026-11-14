@@ -128,7 +128,11 @@ describe("this phone's reactions over the server's", () => {
     const shown = withLocalReactions(confirmed, [failed], "m-1");
     expect(shown.reactions).toEqual(confirmed);
     expect(shown.marks).toEqual([
-      { emoji: "🎉", mark: expect.objectContaining({ operationId: failed.operationId }) },
+      {
+        emoji: "🎉",
+        state: "added",
+        mark: expect.objectContaining({ operationId: failed.operationId }),
+      },
     ]);
     expect(shown.busy).toBe(false);
   });
@@ -174,12 +178,53 @@ describe("this phone's reactions over the server's", () => {
     expect(shown.marks).toEqual([
       {
         emoji: "👍",
+        state: "removed",
         mark: expect.objectContaining({
           operationId: stalled.operationId,
           state: { kind: "stalled" },
         }),
       },
     ]);
+  });
+
+  it("keep a saved one a read since shows otherwise pending, and list it to discard", () => {
+    // The read shows 👍 without the account's, and 🎉 with it: another device changed both.
+    const read = [
+      { emoji: "👍", count: 1 },
+      { emoji: "🎉", count: 2, mine: true },
+    ];
+    const added = reacted("👍", "added", saved);
+    const removed = reacted("🎉", "removed", saved);
+    const shown = withLocalReactions(read, [added, removed], "m-1", [
+      added.operationId,
+      removed.operationId,
+    ]);
+    expect(shown.reactions).toEqual([
+      { emoji: "👍", count: 2, mine: true, pending: true },
+      { emoji: "🎉", count: 1, pending: true },
+    ]);
+    expect(shown.marks).toEqual([
+      {
+        emoji: "👍",
+        state: "added",
+        mark: expect.objectContaining({
+          operationId: added.operationId,
+          state: { kind: "saved" },
+        }),
+      },
+      {
+        emoji: "🎉",
+        state: "removed",
+        mark: expect.objectContaining({
+          operationId: removed.operationId,
+          state: { kind: "saved" },
+        }),
+      },
+    ]);
+    // Saved, before a read since shows otherwise, it shows as settled, with nothing to do.
+    const settled = withLocalReactions(read, [added], "m-1");
+    expect(settled.reactions[0]).toEqual({ emoji: "👍", count: 2, mine: true });
+    expect(settled.marks).toEqual([]);
   });
 
   it("match an emoji typed in another Unicode form", () => {
@@ -213,6 +258,7 @@ describe("the outbox's reactions", () => {
       aside: [],
       unreadable: [],
       deletion: "none",
+      unconfirmed: [],
     };
     const byMessage = reactionRecords(state, HERE);
     expect(byMessage.get("m-1")).toEqual([mine]);

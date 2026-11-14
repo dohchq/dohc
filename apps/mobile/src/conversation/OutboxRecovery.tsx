@@ -17,9 +17,10 @@ import type { Author } from "./types";
 import { useConversationWrites, useLocalActions, useOutboxState } from "./useOutbox";
 
 // Messages on this phone, from Settings: every message of the signed-in account that its outbox keeps and the server
-// hasn't saved, in any workspace, with records that can't be read. A withheld message stays reachable here when its
-// chat is closed or no longer shows. A message in the open workspace opens its chat. One that can't be read says only
-// that, with no workspace or chat, since neither can be known. Errors stay in place.
+// hasn't saved, and every saved reaction a read since shows otherwise, in any workspace, with records that can't be
+// read. A withheld message stays reachable here when its chat is closed or no longer shows. A message in the open
+// workspace opens its chat. One that can't be read says only that, with no workspace or chat, since neither can be
+// known. Errors stay in place.
 export function OutboxRecovery() {
   const theme = useTheme();
   const router = useRouter();
@@ -114,7 +115,7 @@ export function OutboxRecovery() {
                 at: "",
                 minute: 0,
                 body: [{ text: row.mark.body }],
-                local: row.mark,
+                ...(row.reaction ? { reactionMarks: [row.reaction] } : { local: row.mark }),
               }}
               continued={false}
               afterExtras={false}
