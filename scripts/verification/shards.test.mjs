@@ -30,9 +30,11 @@ import {
   RUST_ARCHIVE_PROOFS,
   RUST_PARTITION_ZERO_DELAY_SECONDS,
   RUST_POLICY_STEPS,
+  RUST_READER_SECONDS,
   RUST_READER_SHARD,
   RUST_SHARDS,
   RUST_TEST_PROOFS,
+  RUST_TEST_THREADS,
   passedRustTests,
   rustTestInventory,
   partitionRustTests,
@@ -527,26 +529,35 @@ test("Rust partitions use binary defaults for new tests and the global default f
   assert.deepEqual(partitionRustTests([], 2, times), [[], []]);
 });
 
-test("The reader shard takes less test time to leave room for the reader tests", () => {
+test("The reader reserve holds back wall seconds times the test thread count", () => {
   const times = { defaultSeconds: 10, binaries: {}, tests: {} };
-  const inventory = Array.from({ length: 8 }, (_, i) => `crate t${i}`);
-  const partitions = partitionRustTests(inventory, 2, times, 20, 0);
+  const inventory = Array.from({ length: 24 }, (_, i) => `crate t${i}`);
   assert.equal(RUST_READER_SHARD, 1);
-  assert.deepEqual(
-    partitions.map((tests) => tests.length),
-    [5, 3],
-  );
+  assert.equal(RUST_READER_SECONDS, 47);
+  assert.equal(RUST_TEST_THREADS, 4);
+  // A 20 s wall reserve holds back 20, 40, or 80 test-seconds at 1, 2, or 4 threads.
+  for (const [threads, sizes] of [
+    [1, [13, 11]],
+    [2, [14, 10]],
+    [undefined, [16, 8]],
+  ]) {
+    const partitions = partitionRustTests(inventory, 2, times, 20, 0, threads);
+    assert.deepEqual(
+      partitions.map((tests) => tests.length),
+      sizes,
+    );
+  }
 });
 
-test("Rust partition zero takes less test time to allow for its later start", () => {
+test("Rust partition zero converts its wall delay to test-seconds at four threads", () => {
   const times = { defaultSeconds: 1, binaries: {}, tests: {} };
-  // With 51 one-second tests, the 17 s reserve makes both partitions finish at 34 s.
-  const inventory = Array.from({ length: 51 }, (_, i) => `crate t${i}`);
+  // With 204 one-second tests and 4 threads, the 17 s wall reserve balances both at 34 s wall.
+  const inventory = Array.from({ length: 204 }, (_, i) => `crate t${i}`);
   const partitions = partitionRustTests(inventory, 2, times, 0);
   assert.equal(RUST_PARTITION_ZERO_DELAY_SECONDS, 17);
   assert.deepEqual(
     partitions.map((tests) => tests.length),
-    [17, 34],
+    [68, 136],
   );
 });
 

@@ -17,11 +17,13 @@ import { stageReaderTestNode } from "../../tools/rust-engine-program/reader-test
 import rustTestTimes from "./rust-test-times.json" with { type: "json" };
 
 export const RUST_SHARDS = 7;
-// In run 43610854388, tests began 29 s after compile on partition 0, versus about 12 s elsewhere.
+// ubuntu-24.04 runners have 4 vCPUs, and nextest runs one test per CPU.
+export const RUST_TEST_THREADS = 4;
+// In run 43610854388, tests began 29 s wall after compile on partition 0, versus about 12 s elsewhere.
 export const RUST_PARTITION_ZERO_DELAY_SECONDS = 17;
 export const RUST_READER_SHARD = 1;
-// The reader shard runs the reader tests after its partition; they took 27 to 49 s in CI.
-export const RUST_READER_SECONDS = 43;
+// The reader tests run after the partition; they took 34 to 68 s wall in CI, with a median about 47 s.
+export const RUST_READER_SECONDS = 47;
 export const RUST_POLICY_STEPS = [
   "tree provenance",
   "native target",
@@ -65,6 +67,7 @@ export function partitionRustTests(
   times = rustTestTimes,
   readerSeconds = RUST_READER_SECONDS,
   partitionZeroDelaySeconds = RUST_PARTITION_ZERO_DELAY_SECONDS,
+  threads = RUST_TEST_THREADS,
 ) {
   if (!Number.isSafeInteger(count) || count < 1)
     throw new Error("A Rust partition count must be a positive integer.");
@@ -81,7 +84,8 @@ export function partitionRustTests(
     throw new Error("Rust test estimates must be positive seconds.");
   const partitions = Array.from({ length: count }, (_, index) => ({
     seconds:
-      index === 0 ? partitionZeroDelaySeconds : index === RUST_READER_SHARD ? readerSeconds : 0,
+      (index === 0 ? partitionZeroDelaySeconds : index === RUST_READER_SHARD ? readerSeconds : 0) *
+      threads,
     tests: [],
   }));
   for (const task of tasks.sort(
