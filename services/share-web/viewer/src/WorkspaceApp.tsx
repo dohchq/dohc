@@ -2,6 +2,7 @@ import {lazy, Suspense, useCallback, useEffect, useRef, useState, type KeyboardE
 import type {Ended} from "./ChatChannel";
 import {DohcMark} from "./icons";
 import {MemberChats, MemberComments, useMemberListing} from "./MemberChats";
+import {Toast} from "./Toast";
 import {memberSession} from "./memberWorkspace";
 import {filesFromAccumulator, isMarkdown, type FileAccumulator, type SharedFile, type ViewMeta} from "./model";
 import {accountUser, namedRequest} from "./namedRecipient";
@@ -31,6 +32,7 @@ const BADGE = {view: "View only", comment: "Can comment", edit: "Can edit"} as c
 const SESSION_ENDED = "Your session ended. Sign in again to keep reading.";
 const CHECK_FAILED = "dohc could not open this workspace. Check your connection, then try again.";
 const SIGN_OUT_FAILED = "dohc could not sign you out. Retry sign-out.";
+const LISTING_FAILED = "dohc could not load Groups and comments", CHECK_CONNECTION = "Check your connection.";
 const refusedStatus = (error: unknown) => error instanceof ViewResponseError && [401, 403, 404].includes(error.status);
 
 /** A workspace member's page: its files, a page, and its Groups, at the member's level. */
@@ -147,6 +149,9 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
   }, [files]);
   const groupsEnded = useCallback((reason: Ended) => {if (reason === "signed-out") onSessionEnded(); else setEnded(true);}, [onSessionEnded]);
   const listing = useMemberListing(view.status === "ready" ? grantId : null, account.id, groupsEnded);
+  // Groups and Comments share one read, so one toast reports it. Each failure raises it again.
+  const [listingDismissed, setListingDismissed] = useState(false);
+  useEffect(() => {if (listing.found === "failed") setListingDismissed(false);}, [listing.found]);
   const signOut = () => (leave.current ?? (action => action()))(onSignOut);
   // A file whose text is gone has changed. The follow brings its new text; this says whether to wait for it.
   const refreshStale = useCallback(async (path: string, blobSha256: string) => {
@@ -239,7 +244,10 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
           </div>
         </div>
       </div>
-      <div className="toast-slot" ref={setToastSlot}/>
+      <div className="toast-slot" ref={setToastSlot}>
+        {listing.found === "failed" && !listingDismissed && <Toast title={LISTING_FAILED} body={CHECK_CONNECTION} onRetry={listing.retry}
+          onDismiss={() => setListingDismissed(true)}/>}
+      </div>
     </div>
     <div className="side-panel workspace-side" {...(narrow ? {inert: showing === null, "data-shown": showing !== null} : {})}>
       {!narrow && <div className="side-tabs" role="tablist" aria-label="Beside the page" onKeyDown={moveTab(SIDES, side, setSide)}>

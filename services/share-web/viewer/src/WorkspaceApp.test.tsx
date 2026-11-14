@@ -44,8 +44,9 @@ afterEach(async () => {
   Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal"); Reflect.deleteProperty(HTMLDialogElement.prototype, "close");
 });
 
-function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wire: string; name: string}>; files?: typeof FILES; member?: boolean} = {}) {
-  let signedIn = options.signedIn ?? true;
+function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wire: string; name: string}>; files?: typeof FILES; member?: boolean;
+  groupsFail?: number} = {}) {
+  let signedIn = options.signedIn ?? true, groupsFail = options.groupsFail ?? 0;
   const level = options.level ?? "comment", files = options.files ?? FILES;
   const access = level === "view" ? "read-only" : "read-write";
   const groups = options.groups ?? [{wire: "wire-plans", name: "plans"}, {wire: "wire-food", name: "food"}];
@@ -73,6 +74,7 @@ function server(options: {level?: Level; signedIn?: boolean; groups?: Array<{wir
       const sha = url.pathname.slice("/api/view/blob/".length);
       return new Response(TEXT[sha] ?? "", {headers: {"content-type": "text/plain"}});
     }
+    if (url.pathname === "/api/named-chat/channels" && groupsFail > 0) {groupsFail -= 1; return jsonResponse({ok: false, error: "unavailable"}, 503);}
     if (url.pathname === "/api/named-chat/channels") return jsonResponse({shareId: "share", userId: "sam", maxPostBytes: 9000, maxBodyBytes: 8000,
       channels: groups.map(group => ({channelWireId: group.wire, name: group.name, kind: "channel", access}))});
     if (url.pathname === "/api/named-chat/messages" && init?.method === "POST") {
@@ -163,6 +165,21 @@ it("moves through the file tree with the arrow keys, folds a folder, and opens a
   await settle(() => text().includes("Welcome."));
   expect(named("readme.md").getAttribute("aria-selected")).toBe("true");
   expect(items().filter(node => node.tabIndex === 0)).toEqual([named("readme.md")]);
+});
+
+it("raises a toast with Try again and copy when the Groups don't load, and keeps one line in their place", async () => {
+  server({groupsFail: 1}); await render();
+  await settle(() => text().includes("Leave at nine.") && groupPanel().textContent!.includes("Groups didn't load."));
+  const toast = () => container.querySelector<HTMLElement>(".toast-slot [role=alert]");
+  expect(toast()?.querySelector(".edit-notice-title")?.textContent).toBe("dohc could not load Groups and comments");
+  expect(toast()?.textContent).toContain("Check your connection.");
+  const copy = vi.fn(async () => {});
+  vi.stubGlobal("navigator", {...navigator, clipboard: {writeText: copy}});
+  await act(async () => toast()!.querySelector<HTMLButtonElement>('[aria-label="Copy message"]')!.click());
+  expect(copy).toHaveBeenCalledWith("dohc could not load Groups and comments\nCheck your connection.");
+  await act(async () => [...toast()!.querySelectorAll("button")].find(node => node.textContent === "Try again")!.click());
+  await settle(() => text().includes("Plans start here"));
+  expect(toast()).toBeNull();
 });
 
 it("posts in a Group at Comment, counts another Group's new messages, and opens it from the list", async () => {

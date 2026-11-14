@@ -20,7 +20,7 @@
 @keyframes workspace-ring { to { transform: rotate(360deg); } }
 
 /* Errors land at the bottom right of the page, over its text. */
-.toast-slot { position: absolute; right: 16px; bottom: 16px; z-index: 25; width: 360px; max-width: calc(100% - 32px); pointer-events: none; }
+.toast-slot { position: absolute; right: 16px; bottom: 16px; z-index: 25; width: 360px; max-width: calc(100% - 32px); display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
 .link-page .toast-slot .edit-notice { position: static; width: auto; max-width: none; pointer-events: auto; animation: workspace-toast 160ms ease-out both; }
 .toast-slot .edit-notice > div { min-width: 0; flex: 1; }
 /* Copy sits beside the text it copies. */

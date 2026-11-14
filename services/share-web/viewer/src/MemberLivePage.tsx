@@ -3,7 +3,7 @@ import {createPortal} from "react-dom";
 import type {NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {NamedDocumentEditor} from "./NamedDocumentEditor";
 import {DiscardDraft} from "./DiscardDraft";
-import {Icon} from "./icons";
+import {Toast} from "./Toast";
 import {memberDocument, memberPageReady, openMemberPage, type MemberDocument} from "./memberLive";
 
 /** How long a page waits for its owner's dohc, ring alone, before its toast. The desktop waits as long. */
@@ -122,33 +122,7 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
       <p>Your unsynced changes exist only in this tab. Closing or reloading loses them.</p>
       <p>Copy the changes you want to keep. Open the current file, then paste and review them.</p>
       <button className="handoff-button secondary" onClick={() => leave.current?.(open)}>Open current file</button></aside>}
-    {toast && toastSlot && createPortal(<div className="edit-notice workspace-toast" role="alert">
-      <span className="tile bad"><Icon name="alert"/></span>
-      <div>
-        <div className="toast-text">
-          <div><p className="edit-notice-title">{toastTitle}</p><p>{toastBody}</p></div>
-          <CopyMessage text={`${toastTitle}\n${toastBody}`}/>
-        </div>
-        <div className="edit-notice-actions"><button className="handoff-button secondary" onClick={open}>Try again</button></div>
-      </div>
-      <button className="icon-button toast-close" type="button" aria-label="Dismiss" title="Dismiss" onClick={() => setDismissed(true)}><Icon name="x"/></button>
-    </div>, toastSlot)}
+    {toast && toastSlot && createPortal(<Toast title={toastTitle} body={toastBody} onRetry={open} onDismiss={() => setDismissed(true)}/>, toastSlot)}
     {leaving && <DiscardDraft cancel={() => setLeaving(null)} confirm={() => {const action = leaving; setLeaving(null); action();}}/>}
   </>;
-}
-
-/** Copies exactly what the toast says, and shows that it did for 2 s. */
-function CopyMessage({text}: {text: string}) {
-  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  useEffect(() => () => clearTimeout(timer.current), []);
-  const copy = async () => {
-    let next: "copied" | "failed" = "copied";
-    try {await navigator.clipboard.writeText(text);} catch {next = "failed";}
-    setState(next); clearTimeout(timer.current); timer.current = setTimeout(() => setState("idle"), 2000);
-  };
-  const label = state === "copied" ? "Copied" : state === "failed" ? "Could not copy" : "Copy message";
-  return <button className="icon-button toast-copy" type="button" aria-label={label} title={label} onClick={() => void copy()}>
-    <Icon name={state === "copied" ? "check" : "copy"}/>
-  </button>;
 }
