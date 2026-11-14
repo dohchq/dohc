@@ -200,6 +200,37 @@ describe("what an agent thread is doing with a forwarded message", () => {
     states.stop();
   });
 
+  it("does not send the reminder until the ledger has recorded it", async () => {
+    const store = memoryLedger();
+    let finish!: () => void;
+    const recording = new Promise<void>((resolve) => (finish = resolve));
+    let asked!: () => void;
+    const askedToRecord = new Promise<void>((resolve) => (asked = resolve));
+    const { states, tool, forward } = setup({
+      ledger: {
+        ...store.ledger,
+        put: async (row) => {
+          if (row.reminder.state === "recorded") {
+            asked();
+            await recording;
+          }
+          await store.ledger.put(row);
+        },
+      },
+    });
+    states.forwarded(forwarded());
+    tool(thread([run("run-1", "ended")]));
+
+    const looking = states.check();
+    await askedToRecord;
+    expect(forward).not.toHaveBeenCalled();
+    finish();
+    await looking;
+
+    expect(forward).toHaveBeenCalledTimes(1);
+    states.stop();
+  });
+
   it("never sends a second reminder after a restart between recording it and sending it", async () => {
     const stopped: ForwardRow = { ...forwarded(), reminder: { state: "recorded", atMs: 3_000 } };
     const { states, tool, forward } = setup({}, [stopped]);

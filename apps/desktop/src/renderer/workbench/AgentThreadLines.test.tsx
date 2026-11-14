@@ -238,8 +238,14 @@ it("shows one line for each agent, with its newest state", () => {
   render(chat({ settings: two, chatThreadIds: ["thread-1", "post-1", null] }));
   push([
     line({ agentId: "scout", state: "waiting-in-tool" }),
-    line({ state: "silent", sinceMs: NOW - 60_000 }),
-    line({ chatThreadId: "post-1", state: "working", sinceMs: NOW - 5_000 }),
+    // The older message's state began later. The newer message's line still shows.
+    line({ state: "silent", sinceMs: NOW - 1_000, forwardedAtMs: NOW - 60_000 }),
+    line({
+      chatThreadId: "post-1",
+      state: "working",
+      sinceMs: NOW - 5_000,
+      forwardedAtMs: NOW - 6_000,
+    }),
     // An agent that Settings no longer lists has no line.
     line({ agentId: "gone" }),
   ]);
