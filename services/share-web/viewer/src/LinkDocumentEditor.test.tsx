@@ -158,6 +158,7 @@ const stopped: Pick<NamedLiveBrowserState, "status" | "reason" | "pendingUpdates
   { status: "quarantined", reason: "provenance-refused", pendingUpdates: 1 },
   { status: "disconnected", reason: "authority-unavailable", pendingUpdates: 1 },
   { status: "disconnected", reason: "paused", pendingUpdates: 1 },
+  { status: "disconnected", reason: "live-stopped", pendingUpdates: 1 },
   { status: "closed", reason: null, pendingUpdates: 1 },
 ];
 it.each(stopped)(

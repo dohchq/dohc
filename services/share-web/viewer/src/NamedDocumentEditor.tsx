@@ -15,7 +15,13 @@ export type NamedDocumentSession = ReturnType<
 >;
 const OPENING = ["authorizing", "connecting", "syncing"];
 // A disconnected page reconnects by itself and sends a pending change again, except for these reasons.
-const NO_AUTOMATIC_RETRY = ["authority-unavailable", "access-removed", "link-full", "paused"];
+const NO_AUTOMATIC_RETRY = [
+  "authority-unavailable",
+  "access-removed",
+  "link-full",
+  "paused",
+  "live-stopped",
+];
 // Trying again can't change these, so the page offers no Try again.
 const FINAL = ["access-removed", "link-full"];
 /** Editing stopped with a change the page will not send again by itself. */
