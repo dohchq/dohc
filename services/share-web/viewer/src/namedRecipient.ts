@@ -10,7 +10,12 @@ import {
   type NamedLiveBrowserLimits,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { RETRY_BUDGET_MS } from "./retry";
-import { LINK_REFUSALS, parseLinkRefusal } from "@dohc/security-contract/link-refusal";
+import {
+  LINK_REFUSALS,
+  NAMED_LIVE_STOPPED,
+  isNamedLiveStopped,
+  parseLinkRefusal,
+} from "@dohc/security-contract/link-refusal";
 
 // The existing share-web authenticated metadata ceiling also bounds invitation and account responses.
 const RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -103,6 +108,8 @@ export async function namedRequest(
       if (removedResponse) {
         if (record(value) && value.code === "share_access_removed")
           throw new ShareAccessRemovedError();
+        if (isNamedLiveStopped(value, response.status))
+          throw new LiveStoppedError(NAMED_LIVE_STOPPED.error);
         throw new LiveAuthorityUnavailableError("Unavailable");
       }
       if (linkRefused) {

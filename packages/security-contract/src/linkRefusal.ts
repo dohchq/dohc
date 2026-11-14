@@ -53,3 +53,25 @@ export function parseLinkRefusal(value: unknown, status: number): LinkRefusalCod
     ? code
     : null;
 }
+
+/**
+ * What an invited editor is told when live editing of a file stopped on the server. A 404, so a share
+ * server or page from before this code reads it as the refusal it gave before.
+ */
+export const NAMED_LIVE_STOPPED = {
+  ok: false,
+  code: "live-edit-unadmitted",
+  error: LINK_REFUSALS.link_live_stopped.error,
+} as const;
+export const NAMED_LIVE_STOPPED_STATUS = 404;
+
+export function isNamedLiveStopped(value: unknown, status: number): boolean {
+  if (status !== NAMED_LIVE_STOPPED_STATUS || !value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    Object.keys(record).sort().join() === "code,error,ok" &&
+    record.ok === false &&
+    record.code === NAMED_LIVE_STOPPED.code &&
+    record.error === NAMED_LIVE_STOPPED.error
+  );
+}

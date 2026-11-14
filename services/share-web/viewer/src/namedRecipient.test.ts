@@ -6,6 +6,7 @@ import {
 } from "@dohc/ydoc-projection/named-live-browser-transport";
 import {
   LINK_REFUSALS,
+  NAMED_LIVE_STOPPED,
   linkRefusalBody,
   type LinkRefusalCode,
 } from "@dohc/security-contract/link-refusal";
@@ -86,6 +87,18 @@ it("tells a page that live editing stopped until the owner starts it again", asy
   expect(error).toBeInstanceOf(LiveStoppedError);
   expect(error).toHaveProperty("message", LINK_REFUSALS.link_live_stopped.error);
   expect(error).not.toBeInstanceOf(LiveHostUnavailableError);
+});
+
+it("tells an invited editor that live editing stopped until the owner starts it again", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => Response.json(NAMED_LIVE_STOPPED, { status: 404 })),
+  );
+  const error = await namedRequest("/api/live/named-ticket", new AbortController().signal).catch(
+    (cause: unknown) => cause,
+  );
+  expect(error).toBeInstanceOf(LiveStoppedError);
+  expect(error).toHaveProperty("message", NAMED_LIVE_STOPPED.error);
 });
 
 it("shows removal for the verified named recipient", async () => {

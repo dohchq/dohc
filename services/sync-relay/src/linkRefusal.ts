@@ -2,6 +2,8 @@ import { relayPathSegments } from "./requestInputs";
 import { isLinkEndpointPath } from "./linkEndpointPath";
 import {
   LINK_REFUSALS,
+  NAMED_LIVE_STOPPED,
+  NAMED_LIVE_STOPPED_STATUS,
   linkRefusalBody,
   parseLinkRefusal,
   type LinkRefusalCode,
@@ -30,6 +32,14 @@ export type SessionHostBlock = "held" | "stopped";
 /** What a link holder is told about a blocked document. */
 export function sessionHostRefusal(block: SessionHostBlock): Response {
   return linkRefusal(block === "held" ? "link_live_stopped" : "link_live_unavailable");
+}
+
+/** What an invited editor is told about a held document. */
+export function namedLiveStoppedRefusal(): Response {
+  return Response.json(NAMED_LIVE_STOPPED, {
+    status: NAMED_LIVE_STOPPED_STATUS,
+    headers: { "cache-control": "private, no-store" },
+  });
 }
 
 export async function normalizeLinkRefusal(
