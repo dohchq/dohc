@@ -1964,6 +1964,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         writes,
         dependencies.documentProjection,
       );
+      // With no readable copy, the package on this computer is the only other
+      // place the edits are, so the record and its notice stay for Try again.
+      if (files.copyPath === null) return { ...files, keptEdits: "kept" };
       await end();
       return { ...files, keptEdits: "ended" };
     },

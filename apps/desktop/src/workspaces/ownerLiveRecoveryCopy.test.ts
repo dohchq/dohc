@@ -365,9 +365,10 @@ it("keeps who wrote each edit: a declaration, a person, and the author a native 
  * A kept edit that conflicts with a change the server already accepted from
  * someone else. The person (client 1) and the other editor (client 2) both
  * start from the same note; the other editor's change is in the checkpoint.
+ * Each of `mine` is one kept update.
  */
 function conflict(
-  mine: (doc: Y.Doc) => void,
+  mine: ((doc: Y.Doc) => void) | readonly ((doc: Y.Doc) => void)[],
   theirs: (doc: Y.Doc) => void,
 ): OwnerYDocOutboxRecovery {
   const start = markdownToYDoc("# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me");
@@ -381,9 +382,11 @@ function conflict(
   };
   const person = editor(1),
     other = editor(2);
-  const before = Y.encodeStateVector(person);
-  mine(person);
-  const update = Y.encodeStateAsUpdate(person, before);
+  const updates = (typeof mine === "function" ? [mine] : mine).map((edit) => {
+    const before = Y.encodeStateVector(person);
+    edit(person);
+    return Y.encodeStateAsUpdate(person, before);
+  });
   theirs(other);
   const checkpoint = Y.encodeStateAsUpdate(other);
   person.destroy();
@@ -396,19 +399,17 @@ function conflict(
     checkpoint,
     checkpointDigest: sha256(checkpoint),
     state: "quarantined",
-    pendingBytes: update.byteLength,
+    pendingBytes: updates.reduce((total, update) => total + update.byteLength, 0),
     oldestEntryAtMs: 1_001,
-    entries: [
-      {
-        sequence: 1,
-        appendKey: "append-1",
-        deliveryId: "delivery-1",
-        updateDigest: sha256(update),
-        update,
-        byteLength: update.byteLength,
-        createdAtMs: 1_001,
-      },
-    ],
+    entries: updates.map((update, index) => ({
+      sequence: index + 1,
+      appendKey: `append-${index + 1}`,
+      deliveryId: `delivery-${index + 1}`,
+      updateDigest: sha256(update),
+      update,
+      byteLength: update.byteLength,
+      createdAtMs: 1_001 + index,
+    })),
     quarantineReason: "invalid-update",
     observedBinding: null,
     retryDeliveryId: null,
@@ -443,7 +444,45 @@ it.each([
     "# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
     "Ticked “tick me”. The note has it unticked.\n",
   ],
-])("lists %s at the end of the readable copy", async (_case, mine, theirs, note, listed) => {
+  [
+    "the words a later kept edit left, of text typed into a paragraph someone else deleted",
+    [
+      (doc: Y.Doc) => paragraph(doc).insert("Start here.".length, " Kept words."),
+      (doc: Y.Doc) => paragraph(doc).delete("Start here.".length, " Kept".length),
+    ],
+    (doc: Y.Doc) => body(doc).delete(1, 1),
+    "# Plan\n\nKeep this.\n\n- [ ] tick me\n",
+    "Text added to a part that was deleted:\n\n> words.\n",
+  ],
+  [
+    "the words a later kept edit left at the start, of text typed into a paragraph someone else deleted",
+    [
+      (doc: Y.Doc) => paragraph(doc).insert("Start here.".length, " Kept words."),
+      (doc: Y.Doc) => paragraph(doc).delete("Start here. Kept".length, " words.".length),
+    ],
+    (doc: Y.Doc) => body(doc).delete(1, 1),
+    "# Plan\n\nKeep this.\n\n- [ ] tick me\n",
+    "Text added to a part that was deleted:\n\n> Kept\n",
+  ],
+  [
+    "a tick on a to-do someone else deleted",
+    (doc: Y.Doc) => task(doc).setAttribute("checked", true as never),
+    (doc: Y.Doc) => body(doc).delete(3, 1),
+    "# Plan\n\nStart here.\n\nKeep this.\n",
+    "Ticked a to-do that was deleted.\n",
+  ],
+  [
+    "an image added to a to-do someone else deleted",
+    (doc: Y.Doc) => {
+      const image = new Y.XmlElement("image");
+      image.setAttribute("src", "photo.png");
+      task(doc).insert(task(doc).length, [image]);
+    },
+    (doc: Y.Doc) => body(doc).delete(3, 1),
+    "# Plan\n\nStart here.\n\nKeep this.\n",
+    "1 more kept edit, such as an image, can’t be shown as text.\n",
+  ],
+] as const)("lists %s at the end of the readable copy", async (_case, mine, theirs, note, listed) => {
   const { root, writes } = await workspace();
   const saved = await saveLiveRecoveryCopy(
     liveRecoveryPackage(conflict(mine, theirs), source),
@@ -475,5 +514,22 @@ it("lists nothing when a kept edit's own later edit removed it", async () => {
   expect(saved.notInNote).toBe(0);
   expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(
     "---\nowner: Sam\nstatus: second\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [ ] tick me\n",
+  );
+});
+
+it("lists nothing when someone else set the same value at the same moment", async () => {
+  const { root, writes } = await workspace();
+  const same = (doc: Y.Doc) => {
+    task(doc).setAttribute("checked", true as never);
+    doc.getMap("frontmatter").set("status", "done");
+  };
+  const saved = await saveLiveRecoveryCopy(
+    liveRecoveryPackage(conflict(same, same), source),
+    writes,
+    directDocumentProjection,
+  );
+  expect(saved.notInNote).toBe(0);
+  expect(await readFile(join(root, saved.copyPath!), "utf8")).toBe(
+    "---\nstatus: done\n---\n\n# Plan\n\nStart here.\n\nKeep this.\n\n- [x] tick me\n",
   );
 });

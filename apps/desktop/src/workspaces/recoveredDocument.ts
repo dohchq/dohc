@@ -13,8 +13,19 @@ export type RecoveredDocument = { markdown: string; notInNote: number };
 type NotInNote =
   | { kind: "text"; text: string }
   | { kind: "field"; field: string; value: unknown; now: unknown }
-  | { kind: "attribute"; block: string; nodeName: string; name: string; value: unknown; now: unknown }
+  | {
+      kind: "attribute";
+      /** The block's text, or null when the block was deleted. */
+      block: string | null;
+      nodeName: string;
+      name: string;
+      value: unknown;
+      now: unknown;
+    }
   | { kind: "other" };
+
+/** Offsets within one item, from inclusive, to exclusive. */
+type Span = readonly [from: number, to: number];
 
 const QUOTE_LIMIT = 80;
 
@@ -43,60 +54,89 @@ function plainText(type: Y.AbstractType<unknown>): string {
   return "";
 }
 
+/** The parts of `from`..`to` on `client` that `deletes` does not name. */
+function notDeleted(deletes: Y.DeleteSet, client: number, from: number, to: number): Span[] {
+  const spans: Span[] = [];
+  let cursor = from;
+  for (const { clock, len } of deletes.clients.get(client) ?? []) {
+    if (clock + len <= cursor) continue;
+    if (clock >= to) break;
+    if (clock > cursor) spans.push([cursor, clock]);
+    cursor = clock + len;
+    if (cursor >= to) break;
+  }
+  if (cursor < to) spans.push([cursor, to]);
+  return spans;
+}
+
+const same = (left: unknown, right: unknown) =>
+  JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+
 /**
  * The kept edits a rebuilt document dropped. Yjs merges a kept edit with
  * changes already accepted, and drops it from what a person sees when it was
  * typed into a block someone else deleted, or when it set a field or a
  * block's setting that someone else set at the same moment and theirs was
- * kept. Each such item is in the document but deleted, and no kept update
+ * kept. Such content is in the document but deleted, and no kept update
  * deleted it. Formatting a kept edit added is not listed.
  */
 function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
   const decoded = kept.map((update) => Y.decodeUpdate(update));
-  const deletedByKept = (id: Y.ID) => decoded.some(({ ds }) => Y.isDeleted(ds, id));
+  const keptDeletes = Y.mergeDeleteSets(decoded.map(({ ds }) => ds));
   const body = getDohcYDocBodyFragment(doc);
   const frontmatter = doc.getMap("frontmatter");
-  const lost = new Set<Y.Item>();
+  // Each item holding dropped kept content, with the offsets dropped. Yjs does
+  // not split an item that was already deleted when a later kept update
+  // deletes part of it, and an item can hold accepted content beside kept.
+  const lost = new Map<Y.Item, Span[]>();
   const found: NotInNote[] = [];
   for (const { structs } of decoded)
     for (const struct of structs) {
       if (!(struct instanceof Y.Item)) continue;
-      // The document can hold an update's struct as several items.
-      for (let clock = struct.id.clock; clock < struct.id.clock + struct.length; ) {
+      const end = struct.id.clock + struct.length;
+      for (let clock = struct.id.clock; clock < end; ) {
         const part = Y.getItem(doc.store, Y.createID(struct.id.client, clock));
+        const partEnd = Math.min(end, part.id.clock + part.length);
         // Collected with a block it was made in: its content is not in the document to show.
         if (!(part instanceof Y.Item)) found.push({ kind: "other" });
-        else if (part.deleted && !deletedByKept(part.id)) lost.add(part);
-        clock = part.id.clock + part.length;
+        else if (part.deleted) {
+          const spans = notDeleted(keptDeletes, part.id.client, clock, partEnd).map(
+            ([from, to]): Span => [from - part.id.clock, to - part.id.clock],
+          );
+          if (spans.length > 0) lost.set(part, [...(lost.get(part) ?? []), ...spans]);
+        }
+        clock = partEnd;
       }
     }
+  for (const spans of lost.values()) spans.sort(([left], [right]) => left - right);
 
   const parentsWithText = new Set<Y.AbstractType<unknown>>();
   const elementsWithText = new Set<Y.Item>();
-  for (const item of lost) {
+  for (const item of lost.keys()) {
     const parent = item.parent as Y.AbstractType<unknown>;
     if (item.parentSub !== null) {
-      // A field or a block's setting whose holder still shows: a value set at the same moment was kept instead.
+      const value = contentValue(item);
       if (parent === frontmatter) {
-        found.push({
-          kind: "field",
-          field: item.parentSub,
-          value: contentValue(item),
-          now: getDohcYDocFrontmatter(doc)[item.parentSub],
-        });
+        // A value set at the same moment was kept instead.
+        const now = getDohcYDocFrontmatter(doc)[item.parentSub];
+        if (!same(value, now)) found.push({ kind: "field", field: item.parentSub, value, now });
       } else if (
         parent instanceof Y.XmlElement &&
-        !parent._item?.deleted &&
-        rootOf(item.parent as Y.AbstractType<unknown>) === body
+        rootOf(parent as Y.AbstractType<unknown>) === body &&
+        // A setting of a block the kept edits added goes with that block.
+        !(parent._item !== null && lost.has(parent._item))
       ) {
-        found.push({
-          kind: "attribute",
-          block: plainText(item.parent as Y.AbstractType<unknown>),
-          nodeName: parent.nodeName,
-          name: item.parentSub,
-          value: contentValue(item),
-          now: parent.getAttribute(item.parentSub),
-        });
+        const deleted = parent._item?.deleted === true;
+        const now = deleted ? undefined : parent.getAttribute(item.parentSub);
+        if (deleted || !same(value, now))
+          found.push({
+            kind: "attribute",
+            block: deleted ? null : plainText(parent as Y.AbstractType<unknown>),
+            nodeName: parent.nodeName,
+            name: item.parentSub,
+            value,
+            now,
+          });
       }
       continue;
     }
@@ -116,13 +156,25 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
     };
     for (let item = parent._start; item; item = item.right) {
       if (item.content instanceof Y.ContentFormat) continue;
-      if (lost.has(item) && item.content instanceof Y.ContentString) run += item.content.str;
-      else flush();
+      const spans = item.content instanceof Y.ContentString ? lost.get(item) : undefined;
+      if (spans === undefined || !(item.content instanceof Y.ContentString)) {
+        flush();
+        continue;
+      }
+      let at = 0;
+      for (const [from, to] of spans) {
+        if (from > at) flush();
+        run += item.content.str.slice(from, to);
+        at = to;
+      }
+      if (at < item.length) flush();
     }
     flush();
   }
-  // Something added with settings but no text, such as an image, a formula or an embed. An empty paragraph is not listed.
-  for (const item of lost) {
+  // Something added with settings but no text, such as an image, a formula or
+  // an embed. Its settings were deleted with it, so they are read from the
+  // entries Yjs keeps. An empty paragraph is not listed.
+  for (const item of lost.keys()) {
     if (item.parentSub !== null || rootOf(item.parent as Y.AbstractType<unknown>) !== body) continue;
     const { content } = item;
     if (
@@ -134,7 +186,7 @@ function editsNotInNote(doc: Y.Doc, kept: readonly Uint8Array[]): NotInNote[] {
       continue;
     if (
       content instanceof Y.ContentType &&
-      !(content.type instanceof Y.XmlElement && Object.keys(content.type.getAttributes()).length > 0)
+      !(content.type instanceof Y.XmlElement && content.type._map.size > 0)
     )
       continue;
     found.push({ kind: "other" });
@@ -175,13 +227,20 @@ function entry(edit: Exclude<NotInNote, { kind: "other" }>): JSONContent[] {
       ];
     }
     case "attribute": {
-      const block = edit.block === "" ? `a ${edit.nodeName}` : `“${quoteOf(edit.block)}”`;
-      if (edit.nodeName === "taskItem" && edit.name === "checked")
+      const task = edit.nodeName === "taskItem" && edit.name === "checked";
+      if (edit.block === null)
         return [
           paragraph(
-            edit.value === true
-              ? `Ticked ${block}. The note has it unticked.`
-              : `Unticked ${block}. The note has it ticked.`,
+            task
+              ? `${edit.value === true ? "Ticked" : "Unticked"} a to-do that was deleted.`
+              : `Set ${edit.name} to ${shown(edit.value) ?? "nothing"} on a ${edit.nodeName} that was deleted.`,
+          ),
+        ];
+      const block = edit.block === "" ? `a ${edit.nodeName}` : `“${quoteOf(edit.block)}”`;
+      if (task)
+        return [
+          paragraph(
+            `${edit.value === true ? "Ticked" : "Unticked"} ${block}. The note has it ${edit.now === true ? "ticked" : "unticked"}.`,
           ),
         ];
       const now = shown(edit.now);
