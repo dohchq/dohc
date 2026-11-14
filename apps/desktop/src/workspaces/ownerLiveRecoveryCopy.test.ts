@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { access, open as openFile, readFile, writeFile } from "node:fs/promises";
+import { access, lstat, open as openFile, readFile, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import type { OwnerYDocOutboxEntry, OwnerYDocOutboxRecovery } from "@dohc/workspace-engine-client";
 import {
+  existsInWorkspace,
   keepOnThisComputer,
   liveRecoveryPackage,
   parseLiveRecoveryPackage,
@@ -87,16 +88,19 @@ async function workspace() {
   const root = await createTestScratch("dohc-live-recovery-");
   const local = { workspaceId: "live-recovery", rootPath: root };
   await openedLocalState(local);
+  // Every path Save recovery copy looks at in the workspace.
+  const looked: string[] = [];
   const writes = {
     create: (relative: string, text: string) => createDurableFile(root, relative, text),
     keep: keepOnThisComputer(local),
-    exists: (relative: string) =>
-      access(join(root, relative)).then(
-        () => true,
-        () => false,
-      ),
+    exists: existsInWorkspace(local, {
+      lstat: (async (path: string) => {
+        looked.push(relative(root, path).replaceAll("\\", "/"));
+        return lstat(path);
+      }) as typeof lstat,
+    }),
   };
-  return { root, writes };
+  return { root, writes, looked };
 }
 
 /** Follows the package's own `open` field with nothing but its bytes. */
@@ -642,8 +646,8 @@ it.each([
   },
 );
 
-it("validates the note's path before keeping its package", async () => {
-  const { root, writes } = await workspace(),
+it("checks the note's path before looking on disk or saving its package", async () => {
+  const { root, writes, looked } = await workspace(),
     { recovery } = queue(5, 2);
   await expect(
     saveLiveRecoveryCopy(
@@ -652,5 +656,6 @@ it("validates the note's path before keeping its package", async () => {
       directDocumentProjection,
     ),
   ).rejects.toThrow("Invalid file path");
+  expect(looked).toEqual([]);
   await expect(access(join(root, "notes"))).rejects.toThrow();
 });
