@@ -4,6 +4,7 @@
   "desktop:undo-database-import": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation + withExclusiveWorkspaceOperation" } },
   "desktop:dataset": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "datasetHandler.withRendererWorkspaceOperation" } },
   "desktop:keep-collections-here": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:keep-outside-change": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },
   "desktop:get-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:reload-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
   "desktop:set-user-settings": { "guard": "trusted-sender", "scope": "device", "handlerCheck": null },
@@ -230,5 +231,6 @@
   "desktop:links-in": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:links-resolve": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:links-edges": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
-  "desktop:read-held-change": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
+  "desktop:read-held-change": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
+  "desktop:outside-changes": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null }
 }

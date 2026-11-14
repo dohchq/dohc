@@ -108,6 +108,7 @@ function fixture(
   const dispatchStore = {} as ReturnType<Dependencies["agentDispatchStoreHandleFor"]>["store"];
   const capture = {
     fileObjectIdForPath: vi.fn(async () => "object"),
+    keepOutsideChange: vi.fn(async (_path: string) => true),
     filePathForObjectId: vi.fn(async () => "notes.md"),
     listMoments:
       vi.fn<NonNullable<ReturnType<Dependencies["activity"]["engineCaptureFor"]>>["listMoments"]>(),
@@ -251,6 +252,7 @@ function fixture(
     heldChanges: { change: vi.fn(async () => null) },
     reads: {
       chatFileMentions: vi.fn(async () => null),
+      outsideChanges: vi.fn(async () => ({ outsideChanges: [] })),
       chatLinks: vi.fn(async () => null),
       linksEdges: vi.fn(async () => ({
         versionId: "main",
@@ -2367,7 +2369,10 @@ async function liveDocumentsFixture(
       authors.push(input.author),
       stopNamedOwnerLiveDocument(
         h.actions,
-        { liveDocument: async () => h.document, sendRendererActivity: activity },
+        {
+          liveDocument: async () => h.document,
+          sendRendererActivity: activity,
+        },
         { workspaceId: operation.workspace.workspaceId, ...input },
         operationOf(operation),
       )
@@ -2683,4 +2688,49 @@ it("refuses a held change read in a shared view instead of answering that nothin
     ),
   ).toMatchObject({ ok: false, reason: expect.stringContaining("original workspace") });
   expect(read).not.toHaveBeenCalled();
+});
+
+it("lists and keeps a live note's outside change for the CLI and the MCP, only in the original workspace", async () => {
+  const f = fixture(await createTestScratch("outside-change-cli-"));
+  const listed = { outsideChanges: [{ path: "notes.md", firstObservedAtMs: 1 }] };
+  f.dependencies.reads.outsideChanges = vi.fn(async () => listed);
+  await f.create().startDesktopCliServer();
+  const token = "a".repeat(64);
+  const send = async (request: CliRequestWithoutToken) => {
+    const response = cliTransportResponseSchema.parse(
+      JSON.parse(
+        await handleCliRequestLine(JSON.stringify({ ...request, token }), token, f.options()),
+      ),
+    );
+    if (!response.ok) throw new Error(response.error);
+    return response.result;
+  };
+  const cli = (...argv: string[]) =>
+    executeCli({ argv, cwd: f.workspace.rootPath, env: {}, request: send });
+  const ctx = { root: f.workspace.rootPath, home: "state", request: send };
+  const tools = await import("@dohc/mcp/tools");
+
+  const list = await cli("document", "outside-changes", "--json");
+  expect(list.exitCode).toBe(0);
+  expect(JSON.parse(list.stdout)).toMatchObject(listed);
+  expect(await tools.requestDeclaredTool(ctx, "dohc_list_outside_changes", {})).toEqual(listed);
+
+  const kept = await cli("document", "keep-outside-change", "notes.md", "--json");
+  expect(kept.exitCode).toBe(0);
+  expect(JSON.parse(kept.stdout)).toMatchObject({ ok: true, path: "notes.md", kept: true });
+  f.capture.keepOutsideChange.mockResolvedValueOnce(false);
+  expect(await tools.keepOutsideChange(ctx, { path: "notes.md" })).toEqual({
+    ok: true,
+    path: "notes.md",
+    kept: false,
+  });
+  expect(f.capture.keepOutsideChange.mock.calls).toEqual([["notes.md"], ["notes.md"]]);
+  expect(await tools.keepOutsideChange(ctx, { path: "../outside.md" })).toMatchObject({
+    ok: false,
+  });
+
+  vi.mocked(f.dependencies.sharedViewOf).mockReturnValue({});
+  const refused = await cli("document", "keep-outside-change", "notes.md");
+  expect(refused.exitCode).not.toBe(0);
+  expect(f.capture.keepOutsideChange).toHaveBeenCalledTimes(2);
 });

@@ -1,8 +1,10 @@
 import { RESTORE_FENCED_RECOVERY_LIMIT } from "../workspaces/ownerLiveRecoveryLimits";
 import { ChatFileMentionEntry } from "@dohc/workspace-contracts/chat-file-mentions";
+import type { captureOperations } from "./captureOperations";
 import type { linksOperations } from "./linksOperations";
 import { heldChangeOperations } from "./heldChangeOperations";
 import { WorkspaceSyncPauseStatus } from "@dohc/workspace-contracts/workspace-sync";
+import { OutsideChange } from "@dohc/workspace-contracts/outside-changes";
 import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { shareCopyOperations } from "./shareCopyOperations";
 export type { ShareCopyInput, ShareCopyResult } from "@dohc/workspace-contracts/share-copy";
@@ -1648,6 +1650,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     })
     .optional(),
   heldFiles: z.array(CaptureFileHold).optional(),
+  outsideChanges: z.array(OutsideChange).optional(),
   // Collection updates wait for a pull that has not finished, as the engine
   // answers. "sync" while ordinary sync is on, signed in or not, so a pass
   // that finishes the pull ends it. "reopen" after sync paused but the
@@ -1848,6 +1851,19 @@ export const captureRecoveryOperations = {
     handlerCheck: {
       check: "withRendererWorkspaceOperation",
       reason: "The handler clears recovery only in the sending window's active workspace.",
+    },
+  },
+  // Keep a copy, from a live note's outside change Notices row.
+  keepOutsideChange: {
+    capabilityId: "capture.outside.keep",
+    channel: "desktop:keep-outside-change",
+    payload: WorkspaceIdPayload.extend({ path: PATH_STRING }),
+    result: z.object({ kept: z.boolean() }),
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: {
+      check: "withRendererWorkspaceOperation",
+      reason: "Only the sending window's active workspace keeps its outside change.",
     },
   },
   // Restarts History recording that stopped. Rejects while it is still paused.
@@ -9105,6 +9121,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof relayShareOperations>,
     OperationBridge<typeof shareCopyOperations>,
     OperationBridge<typeof linksOperations>,
+    OperationBridge<typeof captureOperations>,
     OperationBridge<typeof heldChangeOperations>,
     OperationBridge<typeof workspaceFolderNameOperations>,
     OperationBridge<typeof systemMotionOperations>,

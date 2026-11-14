@@ -181,6 +181,9 @@ export interface OwnerLiveDocumentActionDependencies<Workspace> {
     path: string,
     change: () => Promise<Result>,
   ): Promise<Result>;
+  // Keeps a held outside change to the file at a path as a copy, and puts the
+  // note's text back in the file. False when the path holds none.
+  keepOutsideChange(workspace: Workspace, path: string): Promise<boolean>;
   // Documents whose edits the server refused for good, as this computer last read them.
   ownerLiveQuarantines(workspace: Workspace): readonly OwnerLiveQuarantine[];
   // Stops that took refused edits but could not write the file, from their own records.
@@ -558,6 +561,11 @@ export function createOwnerLiveDocumentActions<
         document.currentPath,
         async (): Promise<StopOwnerLiveDocumentResult> => {
           await unchanged();
+          // A file changed outside dohc while the note was live keeps that
+          // change as a copy first, so Stop leaves the note as it is. A keep
+          // that fails starts no Stop.
+          await dependencies.keepOutsideChange(operation.workspace, document.currentPath);
+          operation.assertCurrent();
           // Stop again writes the file a finished release could not, from that release alone. The records
           // decide, never a list not yet read, so no ordinary Stop starts over a release the file still needs.
           // A release the engine no longer holds keeps its edits for Save recovery copy.

@@ -1,10 +1,15 @@
+import { CAPTURE_DECLARATIONS } from "./captureDeclarations";
 import { CHAT_DECLARATIONS } from "./chatDeclarations";
 import { LINKS_DECLARATIONS } from "./linksDeclarations";
 import { ENVELOPE_FIELDS, type OperationFamily } from "./operationDeclaration";
 
 // Every declared family, listed once. The capability table, the CLI, and the
 // IPC tables take their families from here, so each door loads the checks below.
-export const DECLARATION_FAMILIES = { chat: CHAT_DECLARATIONS, links: LINKS_DECLARATIONS } as const;
+export const DECLARATION_FAMILIES = {
+  capture: CAPTURE_DECLARATIONS,
+  chat: CHAT_DECLARATIONS,
+  links: LINKS_DECLARATIONS,
+} as const;
 
 // The type refuses these, but a cast can hide one from it.
 for (const family of Object.values<OperationFamily>(DECLARATION_FAMILIES)) {

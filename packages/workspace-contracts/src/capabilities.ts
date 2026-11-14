@@ -391,6 +391,21 @@ const LISTED_CAPABILITIES = {
   "capture.recovery.clear": capability("Clear a capture recovery notice persistently.", {
     ipc: ["clearCaptureRecovery"],
   }),
+  "capture.outside.read": capability("List live notes whose file changed outside dohc.", {
+    ipc: [],
+    mcp: {},
+    mcpReason:
+      "Only the original workspace holds its live notes' outside changes. Shared profiles omit this read; main admits the workspace.",
+  }),
+  "capture.outside.keep": capability(
+    "Keep a live note's outside change as a copy and put the note's text back in its file.",
+    {
+      ipc: ["keepOutsideChange"],
+      mcp: { owner: ["dohc_keep_outside_change"] },
+      mcpReason:
+        "Only the original workspace holds its live notes' outside changes. Shared profiles omit this owner action; main admits the workspace.",
+    },
+  ),
   "capture.history.retry": capability("Restart History recording that stopped.", {
     ipc: ["retryHistoryCapture"],
   }),

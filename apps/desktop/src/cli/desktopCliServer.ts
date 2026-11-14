@@ -245,6 +245,7 @@ interface DesktopCliServerDependencies<State> {
       | "heldNoteChange"
       | "listKeptCopies"
       | "saveKeptCopy"
+      | "keepOutsideChange"
       | "restoreProtectedCopy"
       | "discardProtectedCopy"
       | "listRetainedCopies"
@@ -1003,6 +1004,11 @@ export function createDesktopCliServer<State>(dependencies: DesktopCliServerDepe
                 return restored;
               },
               discardProtected: (id) => capture.discardProtectedCopy(id),
+              keepOutsideChange: async (path) => {
+                const kept = await capture.keepOutsideChange(path);
+                if (kept) notifyRenderer({ workspaceId: workspace.workspaceId });
+                return kept;
+              },
             },
             heldNoteChange: (input) => capture.heldNoteChange(input),
             retainedCopies: {

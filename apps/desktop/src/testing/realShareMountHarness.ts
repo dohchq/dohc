@@ -162,6 +162,7 @@ export function createRealShareMountHarness(input: {
     ownerLiveStop: unexpected,
     pushRecorded: unexpected,
     liveDocument: unexpected,
+    keepOutsideChange: unexpected,
     withoutEditors: unexpected,
     listOwnerLiveStops: unexpected,
     ownerLiveQuarantines: unexpected,

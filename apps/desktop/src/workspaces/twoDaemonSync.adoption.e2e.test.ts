@@ -837,6 +837,7 @@ it.skipIf(engine.missing).each(["existing id", stopQuarantineCase])(
                     { acceptedCursor: acceptedCursor! },
                   );
             }),
+          keepOutsideChange: async () => false,
           liveDocument: async (_workspace, target) => {
             const resolved = await source.sessions.run(
               source.workspace,

@@ -570,6 +570,12 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
         ...(saved.copyPath === null ? ["dohc could not make a readable copy."] : []),
       ].join("\n");
     }
+    case "keepOutsideChange": {
+      const kept = result as Extract<CliResultByVerb["keepOutsideChange"], { ok: true }>;
+      return kept.kept
+        ? `Kept the outside change to ${lineSafe(kept.path)} as a copy`
+        : `${lineSafe(kept.path)} holds no outside change`;
+    }
     case "retryKeptEdits":
       return `Trying again for ${lineSafe((result as Extract<CliResultByVerb["retryKeptEdits"], { ok: true }>).path)}`;
     case "liveDocuments":

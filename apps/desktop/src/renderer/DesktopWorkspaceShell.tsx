@@ -1,6 +1,7 @@
 import type { GraphNode } from "./workbench/graphData";
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
 import { useProtectedCopyNotices } from "./shell/useProtectedCopyNotices";
+import { useOutsideChangeNotices } from "./shell/useOutsideChangeNotices";
 import { isRefusalNoticeKind } from "../notices/refusalNoticeKind";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { withClosedEngineDocSession } from "./collab/engineDocLease";
@@ -7770,6 +7771,12 @@ export function DesktopWorkspaceShell(props: {
     retryRead: retryProtectedCopyRead,
     reportShellFailure,
     showSuccessNotice,
+    clearIdentity,
+  });
+  useOutsideChangeNotices({
+    workspaceId,
+    changes: syncStatus?.outsideChanges,
+    reportShellFailure,
     clearIdentity,
   });
   const keptFilesNotice = useKeptFilesNotice({

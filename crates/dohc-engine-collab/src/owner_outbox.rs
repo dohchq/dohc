@@ -41,6 +41,21 @@ pub fn has_adopted_owner_in(
         .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
 }
 
+/// Whether the note is live for its owner: a relay host's current
+/// activation, or, on the owner's own computer, the owner's binding, which
+/// stays while a draft waits or is quarantined. Either one already refuses
+/// every ordinary write to the note, so capture holds an outside change to
+/// its file instead of folding it. Both lookups are a prefix of an index:
+/// `live_owner_activations_current` and the bindings' primary key.
+pub fn owner_holds_live_in(
+    conn: &Connection,
+    key: &crate::DocKey,
+) -> Result<bool, crate::CollabError> {
+    conn.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {CURRENT_ACTIVATIONS} WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3) OR EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)"),
+        params![key.workspace_id,key.version_id,key.object_id], |r| r.get(0))
+        .map_err(|error| crate::CollabError::Storage(StorageError::corrupt_public(error)))
+}
+
 const OWNER_DRAFT_REFUSAL_ACTOR: &str = "owner-draft-refusal";
 const OWNER_DRAFT_QUARANTINE_ACTOR: &str = "owner-draft-quarantine";
 

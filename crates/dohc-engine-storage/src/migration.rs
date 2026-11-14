@@ -3722,6 +3722,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_OWNER_OUTBOX_DELIVERY_GROUP_DDL,
         sets_user_version: None,
     },
+    // A file that changed outside dohc while its note was live.
+    Migration {
+        ordinal: 101,
+        id: "v2-held-outside-change",
+        sql: include_str!("held_outside_changes.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5681,6 +5688,10 @@ mod tests {
             (
                 "v2-owner-outbox-delivery-group",
                 "9dfc69b2f8a0a97cad3070f8281445eb2e8208f4a82e6a7bdd861119779227ce",
+            ),
+            (
+                "v2-held-outside-change",
+                "0f40b74d415c8d28fba7d4626976d32b8995bdc4213d662abd3c95dce323060c",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

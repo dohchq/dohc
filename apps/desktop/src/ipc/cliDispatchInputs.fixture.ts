@@ -113,6 +113,8 @@ export const CLI_DISPATCH_ARGUMENTS: Readonly<Record<string, readonly string[]>>
   "document set-fields": ["board/launch.md", "--field", "Status=Blocked"],
   "document retry-kept-edits": ["Notes/a.md", "outbox:delivery:0"],
   "document stop-again": ["Notes/a.md", "release:a:0"],
+  "document keep-outside-change": ["Notes/a.md"],
+  "document outside-changes": [],
   "document live": [],
   "document stop": ["Notes/a.md"],
   "document resume": ["Notes/a.md"],

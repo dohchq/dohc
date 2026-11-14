@@ -303,6 +303,7 @@ async function harness(
       keptFiles: [],
       captureRecoveries: [],
       heldFiles: [],
+      outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
     })),
     clearCaptureRecovery: vi.fn<VersionedLiveAdapter["clearCaptureRecovery"]>(
@@ -326,6 +327,7 @@ async function harness(
   };
   const capture = {
     filePathForObjectId: vi.fn<WorkspaceEngineCapture["filePathForObjectId"]>(async () => null),
+    keepOutsideChange: vi.fn<WorkspaceEngineCapture["keepOutsideChange"]>(async () => true),
     listMoments: vi.fn<WorkspaceEngineCapture["listMoments"]>(async () => ({
       moments: [],
       nextCursor: null,
@@ -603,6 +605,7 @@ const channels = [
   captureRecoveryOperations.retryHeldCapture.channel,
   captureRecoveryOperations.getCaptureRecoveryStatus.channel,
   captureRecoveryOperations.clearCaptureRecovery.channel,
+  captureRecoveryOperations.keepOutsideChange.channel,
   captureRecoveryOperations.retryHistoryCapture.channel,
   captureRecoveryOperations.retrySecretKey.channel,
   fileObservationOperations.retryFileObservation.channel,
@@ -803,6 +806,7 @@ describe("workspace engine IPC registrations", () => {
       keptFiles: [],
       captureRecoveries: [recovery],
       heldFiles: [],
+      outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
     });
     expect(await bridge.getCaptureRecoveryStatus({ workspaceId: "workspace" })).toEqual({
@@ -928,6 +932,7 @@ describe("workspace engine IPC registrations", () => {
       keptFiles: [],
       captureRecoveries: [],
       heldFiles: [],
+      outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
     });
     await expect(h.invoke(CHANNELS.retryFileRecovery)).rejects.toThrow("still cannot read");
@@ -954,6 +959,7 @@ describe("workspace engine IPC registrations", () => {
       keptFiles: [],
       captureRecoveries: [],
       heldFiles: [],
+      outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
     });
     await expect(h.invoke(captureRecoveryOperations.retrySecretKey.channel)).rejects.toThrow(

@@ -45,6 +45,16 @@ fn held_files_json(holds: &[dohc_engine_storage::capture_file_holds::CaptureFile
     })).collect::<Vec<_>>())
 }
 
+pub(super) fn outside_changes_json(
+    changes: &[dohc_engine_storage::held_outside_changes::HeldOutsideChange],
+) -> Value {
+    json!(changes.iter().map(|change| json!({
+        "path": change.path, "observedSha256": change.observed_sha256,
+        "observedSize": change.observed_size, "firstObservedAtMs": change.first_observed_at_ms,
+        "observedAtMs": change.observed_at_ms,
+    })).collect::<Vec<_>>())
+}
+
 /// How long a hold lasts without a renewal. The holder renews well inside
 /// this while its change runs, so a hold whose reply was lost, or whose
 /// holder died with the connection up, ends on its own.
@@ -492,6 +502,19 @@ impl EngineService {
         response["retried"] = json!(retried);
         Ok(response)
     }
+    /// Files that changed outside dohc while their note was live.
+    pub(super) async fn capture_outside_changes(
+        &self,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let changes = open
+            .actor
+            .held_outside_changes(open.workspace_id.clone())
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({ "outsideChanges": outside_changes_json(&changes) }))
+    }
     pub(super) async fn capture_clear_recovery(
         &self,
         handle: Option<WorkspaceHandle>,
@@ -518,12 +541,13 @@ impl EngineService {
             .kept_materialization_files(open.workspace_id.clone(), open.root.clone())
             .await
             .unwrap_or_default();
-        let (capture_recoveries, holds) = open
+        let (capture_recoveries, holds, outside_changes) = open
             .actor
             .capture_notices(open.workspace_id.clone())
             .await
             .map_err(map_runtime)?;
         let held_files = held_files_json(&holds);
+        let outside_changes = outside_changes_json(&outside_changes);
         let retained_copies = crate::rpc::retained_copies::summary_json(
             crate::rpc::retained_copies::retained_summary(&open)
                 .await
@@ -544,6 +568,7 @@ impl EngineService {
                     "keptFiles": kept_files,
                     "captureRecoveries": capture_recoveries,
                     "heldFiles": held_files,
+                    "outsideChanges": outside_changes,
                     "deferredWrites": driver.status().deferred_writes(),
                     "recoveryUnavailable": recovery_unavailable,
                     "retainedCopies": retained_copies,
@@ -565,6 +590,7 @@ impl EngineService {
                 "keptFiles": kept_files,
                 "captureRecoveries": capture_recoveries,
                 "heldFiles": held_files,
+                "outsideChanges": outside_changes,
                 "deferredWrites": [],
                 "recoveryUnavailable": recovery_unavailable,
                 "retainedCopies": retained_copies,

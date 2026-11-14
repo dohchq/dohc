@@ -3172,8 +3172,22 @@ mod tests {
         service.workspace_close(Some(handle)).await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn captured_owner_seed_retains_exact_original_source_moment() {
+    struct AdoptedOwner {
+        scratch: ScratchDir,
+        service: EngineService,
+        handle: WorkspaceHandle,
+        session: Value,
+        db_path: std::path::PathBuf,
+        markdown: String,
+        object_id: String,
+        source_moment: String,
+        cut: dohc_engine_collab::live_update_application::OwnerAdoptionCut,
+        _connection: dohc_engine_protocol::transport::ConnectionOwner,
+    }
+
+    /// `notes/owner.md`, captured from disk, then adopted by a live owner
+    /// whose session stays open.
+    async fn adopted_owner() -> AdoptedOwner {
         let vector: Value = serde_json::from_str(include_str!(
             "../../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
         ))
@@ -3232,9 +3246,9 @@ mod tests {
         let reopened_workspace = service.workspace_open(&RequestContext::unbounded(), json!({
             "rootDir":scratch.path().to_string_lossy(),"workspaceId":"owner-source","captureMode":"none"
         })).await.unwrap();
-        let mut handle: WorkspaceHandle =
+        let handle: WorkspaceHandle =
             serde_json::from_value(reopened_workspace["workspace"].clone()).unwrap();
-        let (mut session, egress) = service
+        let (session, egress) = service
             .ydoc_open(
                 &RequestContext::unbounded(),
                 Some(handle.clone()),
@@ -3361,6 +3375,34 @@ mod tests {
                 "the adoption's answer belongs to the activation it made: {guard:?}"
             );
         }
+        AdoptedOwner {
+            scratch,
+            service,
+            handle,
+            session,
+            db_path,
+            markdown,
+            object_id,
+            source_moment,
+            cut,
+            _connection: connection,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn captured_owner_seed_retains_exact_original_source_moment() {
+        let AdoptedOwner {
+            scratch,
+            service,
+            mut handle,
+            mut session,
+            db_path,
+            markdown,
+            object_id,
+            source_moment,
+            cut,
+            _connection,
+        } = adopted_owner().await;
         session = assert_adopted_owner_move_refused(
             &service,
             &mut handle,
@@ -3514,6 +3556,160 @@ mod tests {
                 .unwrap();
             assert_eq!(limits, (10, 100_000));
         }
+    }
+
+    /// A live note's file that changed outside dohc is held, not refused:
+    /// capture records no moment, reads the same bytes only once, and the hold
+    /// ends when the file stops holding the change (#4003, #2756).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_outside_change_to_a_live_note_is_held_until_the_file_drops_it() {
+        let AdoptedOwner {
+            scratch,
+            service,
+            mut handle,
+            session,
+            db_path,
+            markdown,
+            cut,
+            _connection,
+            ..
+        } = adopted_owner().await;
+        // The session opened before adoption names the old lineage claim.
+        let session = assert_adopted_owner_move_refused(
+            &service,
+            &mut handle,
+            session,
+            scratch.path(),
+            &db_path,
+        )
+        .await;
+        let actor = service.open(Some(&handle)).unwrap().actor.clone();
+        let file = scratch.path().join("notes/owner.md");
+        let capture_at = |path: &str, text: &str, now_ms: i64| {
+            let actor = actor.clone();
+            let (path, text) = (path.to_owned(), text.to_owned());
+            async move {
+                actor
+                    .capture_ingest(
+                        dohc_engine_runtime::CaptureIngest {
+                            workspace_id: "owner-source".into(),
+                            version_id: "main".into(),
+                            path,
+                            text,
+                            metadata_origin: "capture".into(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms,
+                            request_id: None,
+                            claim_foreign_head: true,
+                        },
+                        LeaseRegistry::new(),
+                        Arc::new(NoFaults),
+                        CancellationToken::new(),
+                    )
+                    .await
+            }
+        };
+        let capture = |text: &str, now_ms: i64| capture_at("notes/owner.md", text, now_ms);
+        let db = || {
+            rusqlite::Connection::open_with_flags(
+                &db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap()
+        };
+        let moment_count = || -> i64 {
+            db().query_row("SELECT COUNT(*) FROM moments", [], |r| r.get(0))
+                .unwrap()
+        };
+        let observe = || {
+            let held: Vec<(String, String, i64, i64)> = db()
+                .prepare("SELECT path,observed_sha256,first_observed_at_ms,observed_at_ms FROM held_outside_changes ORDER BY path")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            (moment_count(), held)
+        };
+        let path = || "notes/owner.md".to_owned();
+        let sha = |text: &str| dohc_engine_storage::hex_sha256(text.as_bytes());
+
+        // The owner types; the file still holds the bytes dohc recorded.
+        let typed = dohc_engine_collab::Ydoc::wire();
+        typed.apply(&cut.baseline_bytes).unwrap();
+        typed
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "Typed in the live note")
+            .unwrap();
+        service.ydoc_record_update(&RequestContext::unbounded(),Some(handle.clone()),Some("typed-live".into()),json!({
+            "sessionId":session["sessionId"],"updateBase64":base64::engine::general_purpose::STANDARD.encode(typed.encode_full_state()),
+            "expectedLineageClaimId":session["lineageClaimId"]
+        })).await.unwrap();
+        let moments = moment_count();
+        capture(&markdown, 20)
+            .await
+            .expect("a file only behind its live note is not an outside change");
+        assert_eq!(observe(), (moments, vec![]));
+
+        let outside = "Changed outside dohc.\n";
+        std::fs::write(&file, outside).unwrap();
+        for now_ms in [21, 22] {
+            let error = capture(outside, now_ms).await.unwrap_err();
+            assert!(
+                matches!(error, RuntimeError::CaptureFileHeld { .. }),
+                "{error:?}"
+            );
+        }
+        assert_eq!(
+            observe(),
+            (moments, vec![(path(), sha(outside), 21, 21)]),
+            "the held change records no moment and the same bytes are read once"
+        );
+
+        let again = "Changed outside dohc twice.\n";
+        std::fs::write(&file, again).unwrap();
+        let error = capture(again, 23).await.unwrap_err();
+        assert!(
+            matches!(error, RuntimeError::CaptureFileHeld { .. }),
+            "{error:?}"
+        );
+        assert_eq!(observe(), (moments, vec![(path(), sha(again), 21, 23)]));
+
+        std::fs::write(&file, &markdown).unwrap();
+        capture(&markdown, 24)
+            .await
+            .expect("the file holds the recorded bytes again");
+        assert_eq!(observe(), (moments, vec![]), "the hold ends with no moment");
+
+        // A hold left on a file whose note is not live keeps none of its
+        // bytes out of History.
+        let plain = "notes/plain.md";
+        let first = "Plain.\n";
+        std::fs::write(scratch.path().join(plain), first).unwrap();
+        capture_at(plain, first, 25)
+            .await
+            .expect("a file with no live note is captured");
+        let changed = "Plain, changed outside dohc.\n";
+        std::fs::write(scratch.path().join(plain), changed).unwrap();
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO held_outside_changes SELECT workspace_id,version_id,object_id,path,?1,?2,26,26 \
+                 FROM snapshots WHERE workspace_id='owner-source' AND path=?3 LIMIT 1",
+                rusqlite::params![sha(changed), changed.len() as i64, plain],
+            )
+            .unwrap();
+        let moments = moment_count();
+        capture_at(plain, changed, 27)
+            .await
+            .expect("capture reads held bytes once their note is not live");
+        assert_eq!(
+            observe(),
+            (moments + 1, vec![]),
+            "the change reaches History"
+        );
+        service.workspace_close(Some(handle)).await.unwrap();
     }
 
     async fn assert_adopted_owner_move_refused(

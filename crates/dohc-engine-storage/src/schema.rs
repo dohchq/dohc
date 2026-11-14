@@ -135,6 +135,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "versions",
     "active_versions",
     "capture_file_holds",
+    "held_outside_changes",
     "capture_first_imports",
     "work_references",
     "work_reference_outbox",
