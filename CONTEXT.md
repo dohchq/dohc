@@ -146,11 +146,11 @@ An agent dohc does not start, which reaches dohc through the CLI or MCP.
 _Avoid_: outside agent, external agent
 
 **Agent thread**:
-An agent's own continuing conversation in its tool, where it keeps what it has done. An agent has one in each workspace it serves, whether dohc starts the agent or not. One agent thread can serve several workspaces when its owner turns that on. Write "agent thread" and "chat thread" in full where both appear. Planned, not built yet.
+An agent's own continuing conversation in its tool, where it keeps what it has done. An agent has one in each workspace it serves, whether dohc starts the agent or not. One agent thread can serve several workspaces when its owner turns that on. Write "agent thread" and "chat thread" in full where both appear. Built for a T3 Code thread that serves one workspace; the rest is planned.
 _Avoid_: session (the tools' own word; see Agent run), native session
 
 **Forwarding**:
-dohc giving a person's message to an agent thread, when that message wakes the agent. The agent alone decides what it posts back. Planned, not built yet.
+dohc giving a person's message to an agent thread, when that message wakes the agent. The agent alone decides what it posts back. Built for the owner's messages to a T3 Code thread; the rest is planned.
 _Avoid_: mirror, delivery (a forwarded message can still wait in line), dispatch (that starts a run with no agent thread)
 
 **Personal agent link**:

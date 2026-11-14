@@ -88,8 +88,25 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     ),
     nextCursor: null,
   });
-  t3.tools.t3_thread_send = (args) => ({ threadId: args.threadId, runId: "run-1" });
   const sends = () => t3.calls.filter((call) => call.tool === "t3_thread_send");
+  // Each message starts a run, named for its place among the sends.
+  t3.tools.t3_thread_send = (args) => ({ threadId: args.threadId, runId: `run-${sends().length}` });
+  // What the thread's runs are doing, newest first, as the test sets them.
+  let runs: Array<{ runId: string; status: string; completedAt: string | null }> = [];
+  t3.tools.t3_thread_read = () => ({
+    thread: {
+      title: "Chief of Staff: dohc",
+      activeRunId: runs.find((run) => run.status === "running")?.runId ?? null,
+      pendingRequestCount: 0,
+      archived: false,
+      settled: false,
+    },
+    recentRuns: runs.map((run) => ({
+      ...run,
+      requestedAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+    })),
+  });
 
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -109,7 +126,14 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     // The person's browser: it follows T3 Code's page to where T3 Code sends
     // it, and goes nowhere but the stand-in.
     await desktop.app.evaluate(({ shell }, origin) => {
+      const opened: string[] = [];
+      (globalThis as unknown as { openedInT3Code: string[] }).openedInT3Code = opened;
       shell.openExternal = async (url: string) => {
+        // A link into T3 Code's own window is recorded, not opened.
+        if (url.startsWith("t3code://")) {
+          opened.push(url);
+          return;
+        }
         if (!url.startsWith(`${origin}/`)) throw new Error(`The test opened ${url}.`);
         await fetch(url);
       };
@@ -173,6 +197,8 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
       return Object.keys((await api.getUserSettings()).settings.agents)[0]!;
     });
     await openAgentChat(page, agentId, "Chief");
+    // The message's work is going in T3 Code when dohc first asks.
+    runs = [{ runId: "run-2", status: "running", completedAt: null }];
     await page.getByTestId("chats-lane-composer").fill("Can you check the Mac build?");
     await page.getByTestId("chats-lane-composer").press("Enter");
 
@@ -183,7 +209,36 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     expect(forwarded).toContain("Can you check the Mac build?");
     expect(forwarded).toContain('Note from "Sam": Post decisions and a daily status here.');
     expect(forwarded).toContain(`--workspace ${WORKSPACE_ID} --agent-id ${agentId} -`);
+
+    // The foot of the chat says what the thread is doing with that message.
+    const line = page.getByTestId("agent-thread-line");
+    await expect(line).toHaveAttribute("data-state", "working", { timeout: 30_000 });
+    await expect(line).toContainText("Chief");
+    await expect(line).toContainText("Working");
     await shoot(page, page, "t3-code-f-chat");
+
+    await line.getByTestId("agent-thread-open").click();
+    await expect
+      .poll(() =>
+        desktop!.app.evaluate(
+          () => (globalThis as unknown as { openedInT3Code: string[] }).openedInT3Code,
+        ),
+      )
+      .toEqual(["t3code://threads/env-fake/t-chief"]);
+
+    // Its work ends with nothing posted here: dohc reminds the thread once.
+    runs = [{ runId: "run-2", status: "completed", completedAt: new Date().toISOString() }];
+    await expect.poll(() => sends().length, { timeout: 30_000 }).toBe(3);
+    expect(String(sends()[2]!.args.message)).toContain("you finished without replying");
+    // The reminder's work ends the same way: the chat says so, and nothing more goes.
+    runs = [
+      { runId: "run-3", status: "completed", completedAt: new Date().toISOString() },
+      ...runs,
+    ];
+    await expect(line).toHaveAttribute("data-state", "silent", { timeout: 30_000 });
+    await expect(line).toContainText("Finished without replying here");
+    await shoot(page, page, "t3-code-g-silent");
+    expect(sends()).toHaveLength(3);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
     await t3.close();
