@@ -2513,7 +2513,7 @@ async fn measure_stop_release_of_100000_small_edits() {
 }
 
 async fn measure_small_edits_release(count: usize, run: usize) {
-    let mut f = observed_release_fixture();
+    let f = observed_release_fixture();
     let started = std::time::Instant::now();
     let updates: Vec<_> = (0..count)
         .map(|index| {
@@ -2538,7 +2538,7 @@ async fn measure_stop_release_at_the_document_limit() {
     let total = 19 * 1024 * 1024;
     for (shape, count) in [("one-edit", 1), ("many-edits", 1_000)] {
         for run in 0..3 {
-            let mut f = observed_release_fixture();
+            let f = observed_release_fixture();
             let mut updates = vec![f.doc.richdoc_append_paragraph("Opening edit")];
             updates.extend(
                 (0..count).map(|_| f.doc.richdoc_append_paragraph(&"x".repeat(total / count))),
@@ -3471,6 +3471,7 @@ const RELEASED_RECORD: &str = "rec_00000000000000000000000000";
 
 fn observed_record_release_fixture() -> Fixture {
     let mut f = observed_release_fixture();
+    seed_head(&mut f.store, "schema", "notes/.collection.json", "{}");
     f.store.write_with(&NoFaults, |tx| {
         tx.execute("INSERT INTO collections VALUES ('workspace','main','notes','notes/.collection.json','valid','[]')",[]).unwrap();
         tx.execute("INSERT INTO collection_records (workspace_id,version_id,record_id,collection_path,file_path,object_id,adoption_state) VALUES ('workspace','main',?1,'notes','notes/owner.md','object','adopted')",[RELEASED_RECORD]).unwrap();
@@ -3496,20 +3497,20 @@ async fn measure_stop_release_of_a_collection_record() {
     }
 }
 
-// A Collection record's edits keep one History row each, so its field history
-// records every value the record held, not only the first and the last.
+// A Collection record's edits keep one History row each, so the release records
+// and reports every value the record held, not only the first and the last.
 #[tokio::test]
 async fn stop_records_each_edit_of_a_collection_record_apart() {
-    let record = RELEASED_RECORD;
     let f = observed_record_release_fixture();
-    let before = record_history(&f.store, record);
     let updates = ["To do", "Doing", "Done"]
         .map(|status| f.doc.frontmatter_set("status", status).unwrap())
         .to_vec();
     let (f, supervisor, actor) = pending_release_fixture_updates(f, updates).await;
-    stop_action(&actor, &f, "release").await.unwrap();
+    let queued = record_history(&f.store, RELEASED_RECORD);
+    let rows = stop_action(&actor, &f, "release").await.unwrap();
     assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 3);
-    assert_eq!(record_history(&f.store, record) - before, 3);
+    assert_eq!(record_history(&f.store, RELEASED_RECORD) - queued, 3);
+    assert_eq!(rows[0].record_facts.len(), 3);
     supervisor.close_all().unwrap();
 }
 
