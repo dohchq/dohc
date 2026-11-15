@@ -219,20 +219,6 @@ test("gate input guard rejects a bare direct read outside the reader's gate", ()
   ]);
 });
 
-test("gate input guard does not let the CI-only phone filters cover a reader's input", () => {
-  const reader = "scripts/phone.mjs";
-  const input = "apps/mobile/uitests/PageEditingTests.swift";
-  const workflow = `${gateWorkflow}            android:\n              - 'apps/mobile/**'\n            ios:\n              - 'apps/mobile/**'\n`;
-  assert.deepEqual(
-    uncoveredGateInputs(
-      [{ path: reader, source: `readFileSync("${input}", "utf8")` }],
-      [reader, input],
-      workflow,
-    ),
-    [gateFinding(reader, input, "js")],
-  );
-});
-
 test("gate input guard admits read_to_string without another read or path word", () => {
   const reader = "scripts/read.mjs";
   assert.deepEqual(gateFixture(reader, 'read_to_string("LICENSE");', "LICENSE"), [

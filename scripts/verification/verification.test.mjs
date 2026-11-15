@@ -34,11 +34,9 @@ import {
 } from "./ios-ui.mjs";
 import {
   changedFiles,
-  ciAdvisory,
   ciEvidence,
   desktopProofCommand,
   desktopProofTags,
-  noLocalGateReason,
   postgres,
   readSelfHostNativeProof,
 } from "./verify.mjs";
@@ -1433,7 +1431,7 @@ test("gate selection covers root self-host deployment inputs", () => {
   ]) {
     assert.deepEqual(
       selectedGates([file], workflow),
-      { rust: false, js: true, android: false, ios: false },
+      { rust: false, js: true, android: false },
       file,
     );
   }
@@ -1471,7 +1469,6 @@ test("the Android filter in the workflow selects native module, Expo config, and
     rust: false,
     js: true,
     android: true,
-    ios: true,
   });
   // The selection reads the filter from the workflow, so a filter change moves it.
   const narrowed = workflow.replace("- 'apps/mobile/app.json'", "- 'apps/mobile/other.json'");
@@ -1486,62 +1483,6 @@ test("a selected Android gate needs CI evidence, because no local run compiles i
     ["Android Kotlin compile"],
   );
   assert.deepEqual(ciEvidence(selectedGates(["apps/desktop/src/main.ts"], workflow)), []);
-});
-
-test("the iOS filter in the workflow selects the phone app, the packages it imports, and install inputs", () => {
-  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
-  for (const file of [
-    "apps/mobile/src/app/index.tsx",
-    "apps/mobile/editor/index.ts",
-    "apps/mobile/uitests/PageEditingTests.swift",
-    "apps/mobile/modules/chat-composer/ios/ChatComposerView.swift",
-    "apps/mobile/app.json",
-    "packages/interface-words/src/index.ts",
-    "packages/ydoc-projection/src/browser-editor.ts",
-    "packages/security-contract/src/engine-path-floor.ts",
-    "packages/workspace-core/src/paths.ts",
-    "package.json",
-    "pnpm-lock.yaml",
-    "patches/prosemirror-view@1.42.2.patch",
-    "tsconfig.base.json",
-    "scripts/verification/ios-ui.mjs",
-    ".github/workflows/pr-checks.yml",
-  ]) {
-    assert.equal(selectedGates([file], workflow).ios, true, file);
-  }
-  for (const file of [
-    "apps/desktop/src/main.ts",
-    "services/sync-relay/package.json",
-    "packages/workspace-engine-client/src/index.ts",
-    "scripts/verification/verify.mjs",
-    "services/sync-relay/src/liveTickets.ts",
-    "crates/example/src/lib.rs",
-    "scripts/check-brand.mjs",
-    "docs/guide.md",
-  ]) {
-    assert.equal(selectedGates([file], workflow).ios, false, file);
-  }
-});
-
-test("a selected iOS gate is advisory CI work, never required evidence", () => {
-  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
-  const gates = selectedGates(["apps/mobile/uitests/PageEditingTests.swift"], workflow);
-  assert.deepEqual(ciAdvisory(gates), ["iOS sample UI tests"]);
-  assert.deepEqual(ciEvidence(gates), []);
-  assert.deepEqual(ciAdvisory(selectedGates(["apps/desktop/src/main.ts"], workflow)), []);
-  assert.deepEqual(ciEvidence({ android: true, ios: true }), ["Android Kotlin compile"]);
-  assert.equal(
-    noLocalGateReason({ rust: false, js: false, android: false, ios: true }),
-    "No local code gate applies to the changed files. The iOS UI tests run only in CI.",
-  );
-  assert.equal(
-    noLocalGateReason({ rust: false, js: false, android: true, ios: false }),
-    "No local code gate applies to the changed files. Android compiles only in CI.",
-  );
-  assert.equal(
-    noLocalGateReason({ rust: false, js: false, android: false, ios: false }),
-    "No code gate applies to the changed files.",
-  );
 });
 
 test("the iOS job's selection skips only the Mac's tests and names each that it skips", () => {
@@ -1649,7 +1590,6 @@ test("gate selection follows workflow inputs, including shared and gate implemen
     rust: false,
     js: false,
     android: false,
-    ios: false,
   });
   assert.deepEqual(localGates(["apps/desktop/src/main.ts"], workflow), {
     rust: false,
@@ -1916,8 +1856,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     assert.equal(report.commit, head);
     assert.equal(report.provenance.status, "PASS");
     assert.equal(report.dirty, false);
-    assert.deepEqual(report.gates, { rust: false, js: false, android: false, ios: false });
-    assert.deepEqual(report.ciAdvisory, []);
+    assert.deepEqual(report.gates, { rust: false, js: false, android: false });
     assert.deepEqual(report.ciEvidence, []);
     assert.deepEqual(report.steps, []);
     assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);

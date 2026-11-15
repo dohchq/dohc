@@ -1,4 +1,4 @@
-// The PR checks' iOS job: which sample UI tests it runs, and how it reads their results and the built bundle.
+// The iOS sample UI tests workflow: which sample UI tests it runs, and how it reads their results and the built bundle.
 // Usage, from the repository root:
 //   node scripts/verification/ios-ui.mjs classes
 //   node scripts/verification/ios-ui.mjs exclusions

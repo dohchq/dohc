@@ -495,7 +495,7 @@ test(
       ["pr", "js", "desktop-cancelled"],
       // The gallery is required only where it runs, so its missing-proof case exists only there.
       ...(process.platform === "win32" ? [["pr", "js", "gallery-missing"]] : []),
-      // A change to one package selects only the JavaScript gate locally, which runs that package and its dependents, and only the repository tests that read the source tree.
+      // A change to one package selects only the JavaScript gate, which runs that package and its dependents, and only the repository tests that read the source tree.
       ["pr", null, null, "packages/fixture/src/index.ts"],
       ["pr", "js", null, "packages/fixture/src/index.ts", false, true],
       ["pr", null, null, null, true],
@@ -532,8 +532,6 @@ test(
             const js = mode === "pr" && job !== "rust";
             // The lockfile is an Android input too. A --job run keeps only its own gate, and Android never runs locally.
             const android = mode === "pr" && !job && (full || changed === "pnpm-lock.yaml");
-            // The iOS UI tests read the lockfile but not this fixture package, and run in CI only.
-            const ios = mode === "pr" && !job && (full || changed === "pnpm-lock.yaml");
             // The lockfile is a tooling input; a package's source is not. An empty diff narrows nothing.
             const repositoryTests =
               changed === "packages/fixture/src/index.ts" && !full && !keepGoing
@@ -938,15 +936,8 @@ test(
                 assert.equal(report.provenance.status, "PASS");
                 assert.equal(Boolean(report.build), desktop);
                 assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), js);
-                assert.deepEqual(report.gates, { rust, js, android, ios });
+                assert.deepEqual(report.gates, { rust, js, android });
                 assert.deepEqual(report.ciEvidence, android ? ["Android Kotlin compile"] : []);
-                assert.deepEqual(report.ciAdvisory, ios ? ["iOS sample UI tests"] : []);
-                assert.equal(
-                  result.stdout.includes(
-                    "[verification] iOS sample UI tests runs only in CI and is advisory",
-                  ),
-                  ios,
-                );
                 assert.equal(report.full, full);
                 assert.equal(report.repositoryTests, js ? repositoryTests : undefined);
                 assert.equal(

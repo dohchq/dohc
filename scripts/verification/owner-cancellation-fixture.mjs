@@ -39,7 +39,7 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   put(".github/workflows/pr-checks.yml", "fixture workflow");
   put(
     "node_modules/js-yaml/index.js",
-    "exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],android:[],ios:[],repository:[]};",
+    "exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],android:[],repository:[]};",
   );
   put(
     "tools/rust-engine-program/build-slot-real.mjs",

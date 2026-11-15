@@ -12,7 +12,7 @@ on:
       gate:
         description: Full gate to run
         type: choice
-        options: [all, js, rust, android, ios]
+        options: [all, js, rust, android]
         default: all
       cache:
         description: Build-cache condition for measurement
@@ -57,7 +57,6 @@ jobs:
       js: ${{ steps.filter.outputs.js }}
       rust: ${{ steps.filter.outputs.rust }}
       android: ${{ steps.filter.outputs.android }}
-      ios: ${{ steps.filter.outputs.ios }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         if: github.event_name == 'pull_request'
@@ -195,33 +194,6 @@ jobs:
               - '.nvmrc'
               - 'patches/**'
               - 'scripts/verification/**'
-              - '.github/workflows/pr-checks.yml'
-            # The UI tests drive the whole sample app: its JavaScript, the
-            # editor and its workspace packages, fonts, and words, as well as
-            # the native modules and the Expo config the prebuild reads.
-            # The phone app, the packages its bundles import (directly, or
-            # through the page editor and live-session-contract), and the
-            # install inputs. Other packages and manifests don't reach the
-            # iOS build.
-            ios:
-              - 'apps/mobile/**'
-              - 'packages/interface-words/**'
-              - 'packages/workspace-contracts/**'
-              - 'packages/live-session-contract/**'
-              - 'packages/brand/**'
-              - 'packages/ydoc-projection/**'
-              - 'packages/security-contract/**'
-              - 'packages/workspace-core/**'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - 'pnpm-workspace.yaml'
-              - '.npmrc'
-              - '.pnpmfile.cjs'
-              - '.pnpmfile.mjs'
-              - '.node-version'
-              - 'patches/**'
-              - 'tsconfig.base.json'
-              - 'scripts/verification/ios-ui.mjs'
               - '.github/workflows/pr-checks.yml'
             # Only the local verifier reads this filter; no job uses it. When
             # the JavaScript gate runs, a change here runs every repository
@@ -760,204 +732,6 @@ jobs:
         working-directory: apps/mobile/android
         run: ./gradlew :chat-composer:compileDebugKotlin :durable-file:compileDebugKotlin --no-daemon --console=plain --stacktrace
 
-  # An advisory pilot: the final verification doesn't need this job, so a merge doesn't wait on it. The local
-  # verifier never builds iOS. xcode-27 is GitHub's free standard runner for public repositories; never use a larger,
-  # xlarge, Blacksmith, or custom runner, which bill. VoiceOver, Dynamic Type, Reduce Motion, the emoji keyboard, a
-  # development server, and devices stay with the Mac rounds.
-  ios:
-    name: iOS sample UI tests
-    needs: changes
-    if: github.event.repository.private == false && ((github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'ios')) || needs.changes.outputs.ios == 'true')
-    runs-on: xcode-27
-    timeout-minutes: 90
-    defaults:
-      run:
-        shell: bash
-    env:
-      CI: '1'
-      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
-      EXPO_NO_TELEMETRY: '1'
-      COCOAPODS_DISABLE_STATS: '1'
-      IOS_RUNTIME: com.apple.CoreSimulator.SimRuntime.iOS-27-2
-      IOS_DEVICE_TYPE: com.apple.CoreSimulator.SimDeviceType.iPhone-17
-      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 2
-          persist-credentials: false
-      # The image already has Xcode 27.2, the iOS 27.2 runtime, and the iPhone 17; nothing downloads them.
-      - name: Check the toolchain and name the caches
-        id: native
-        timeout-minutes: 5
-        run: |
-          [[ -z ${EXPO_PUBLIC_DOHC_PHONE_WRITES+x} ]] || { echo '::error::EXPO_PUBLIC_DOHC_PHONE_WRITES is set. This job builds with phone writes off.'; exit 1; }
-          echo "Tested merge $GITHUB_SHA, PR head $PR_HEAD_SHA, image ${ImageOS:-unknown} ${ImageVersion:-unknown}"
-          xcodebuild -version
-          xcodebuild -version | grep -qx 'Xcode 27.2' || { echo '::error::Xcode 27.2 is not at DEVELOPER_DIR.'; exit 1; }
-          xcrun simctl list runtimes
-          xcrun simctl list runtimes | grep -F "$IOS_RUNTIME" | grep -vq unavailable || { echo "::error::$IOS_RUNTIME is not available."; exit 1; }
-          xcrun simctl list devicetypes | grep -qF "($IOS_DEVICE_TYPE)" || { echo "::error::$IOS_DEVICE_TYPE is not available."; exit 1; }
-          df -h "$RUNNER_TEMP"
-          mkdir -p "$RUNNER_TEMP/dohc-ios/logs" "$RUNNER_TEMP/dohc-ios/results" "$RUNNER_TEMP/dohc-results"
-          {
-            echo "CP_CACHE_DIR=$RUNNER_TEMP/dohc-pod-cache"
-            echo "DD=$RUNNER_TEMP/dohc-dd"
-            echo "OUT=$RUNNER_TEMP/dohc-ios"
-          } >> "$GITHUB_ENV"
-          xcode=$(xcodebuild -version | sed -n 's/^Build version //p')
-          {
-            echo "native=${ImageOS:-unknown}-${ImageVersion:-unknown}-$xcode-arm64-release-sample-writes-off-${{ hashFiles('pnpm-lock.yaml', 'patches/**', 'apps/mobile/app.json', 'apps/mobile/plugins/**', 'apps/mobile/modules/*/expo-module.config.json', 'apps/mobile/modules/*/ios/**', 'apps/mobile/scripts/**') }}"
-            echo "source=${{ hashFiles('apps/mobile/**', 'packages/**') }}"
-          } >> "$GITHUB_OUTPUT"
-      # Caches only speed up downloads and compilation: the job always installs the pods and builds again.
-      # Saves wait for IOS_CACHE_SAVES_ENABLED, set once the repository's cache ceiling reads 10 GB or less.
-      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        id: pods-cache
-        if: inputs.cache != 'cold'
-        with:
-          path: ${{ runner.temp }}/dohc-pod-cache
-          key: ios-pods-${{ steps.native.outputs.native }}
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: .node-version
-      # A fresh prebuild each run, so the generated ios/ folder is never cached and holds no stale references.
-      - name: Generate the iOS project and its UI test target
-        timeout-minutes: 15
-        run: |
-          pnpm --filter @dohc/mobile... install --frozen-lockfile
-          cd apps/mobile
-          pnpm exec expo prebuild --platform ios --no-install --template ./node_modules/expo/template.tgz
-          ruby -e 'require "xcodeproj"' || { echo '::error::Ruby cannot load xcodeproj from the image CocoaPods.'; exit 1; }
-          (cd ios && pod install --no-repo-update)
-          shasum -a 256 ios/Podfile.lock
-          cp ios/Podfile.lock "$OUT/"
-          for pod in BarBand ChatComposer DurableFile ExpoCamera ExpoWebBrowser PageScrollTop; do
-            grep -qE "^  - $pod \(" ios/Podfile.lock || { echo "::error::Podfile.lock has no $pod."; exit 1; }
-            grep -qF "$pod" ios/Pods/Pods.xcodeproj/project.pbxproj || { echo "::error::The Pods project has no $pod."; exit 1; }
-          done
-          node scripts/build-editor.mjs
-          ruby scripts/add-ui-tests.rb
-          refs=$(grep -oE '[^ ";]*/uitests/[A-Za-z0-9_]+\.swift' ios/dohc.xcodeproj/project.pbxproj | sort -u)
-          for file in $refs; do [[ -f $file ]] || { echo "::error::The UI test target names a missing $file."; exit 1; }; done
-          for class in $(node ../../scripts/verification/ios-ui.mjs classes); do
-            grep -qF "/uitests/$class.swift" <<< "$refs" || { echo "::error::The UI test target has no $class."; exit 1; }
-          done
-          shopt -s nullglob
-          for file in .env* ios/.xcode.env*; do
-            if grep -qF EXPO_PUBLIC_DOHC_PHONE_WRITES "$file"; then echo "::error::$file sets EXPO_PUBLIC_DOHC_PHONE_WRITES. This job builds with phone writes off."; exit 1; fi
-          done
-          df -h "$RUNNER_TEMP"
-      - uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        id: derived-cache
-        if: inputs.cache != 'cold'
-        with:
-          path: |
-            ${{ runner.temp }}/dohc-dd/Build
-            ${{ runner.temp }}/dohc-dd/ModuleCache.noindex
-          key: ios-derived-${{ steps.native.outputs.native }}-${{ steps.native.outputs.source }}
-          restore-keys: ios-derived-${{ steps.native.outputs.native }}-
-      - name: Build the sample app and its UI tests
-        timeout-minutes: 30
-        working-directory: apps/mobile/ios
-        run: |
-          [[ -z ${EXPO_PUBLIC_DOHC_PHONE_WRITES+x} ]] || { echo '::error::EXPO_PUBLIC_DOHC_PHONE_WRITES is set. This job builds with phone writes off.'; exit 1; }
-          status=0
-          EXPO_PUBLIC_DOHC_SAMPLE=1 xcodebuild build-for-testing \
-            -workspace dohc.xcworkspace -scheme dohc -configuration Release \
-            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "$DD" -jobs 2 ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
-            CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO \
-            DEBUG_INFORMATION_FORMAT=dwarf GCC_GENERATE_DEBUGGING_SYMBOLS=NO > "$OUT/logs/build.log" 2>&1 || status=$?
-          grep -E 'error:|\*\* (TEST )?BUILD' "$OUT/logs/build.log" | sort -u | head -100 || true
-          (( status == 0 )) || { echo "::error::build-for-testing exited $status. The job's artifact holds the log."; exit 1; }
-          products="$DD/Build/Products/Release-iphonesimulator"
-          [[ $(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$products/dohc.app/Info.plist") == app.dohc.mobile ]] || { echo '::error::The built app is not app.dohc.mobile.'; exit 1; }
-          shopt -s nullglob
-          runs=("$DD"/Build/Products/*.xctestrun)
-          (( ${#runs[@]} == 1 )) && [[ -d $products/dohcUITests-Runner.app ]] || { echo '::error::The build has no single .xctestrun and dohcUITests-Runner.app.'; exit 1; }
-          echo "XCTESTRUN=${runs[0]}" >> "$GITHUB_ENV"
-          LC_ALL=C grep -aqF 'Lisbon trip' "$products/dohc.app/main.jsbundle" || { echo '::error::The bundle holds no sample data.'; exit 1; }
-          node ../../../scripts/verification/ios-ui.mjs flag "$products/main.jsbundle" sampleBuild on
-          node ../../../scripts/verification/ios-ui.mjs flag "$products/main.jsbundle" phoneWrites off
-          df -h "$RUNNER_TEMP"
-      # One simulator, light then dark, each class once per appearance. A failed class doesn't stop the others.
-      - name: Run the UI tests in light, then dark
-        timeout-minutes: 40
-        run: |
-          udid=$(xcrun simctl create "dohc-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$IOS_DEVICE_TYPE" "$IOS_RUNTIME")
-          [[ $udid =~ ^[0-9A-F-]{36}$ ]] || { echo "::error::simctl create returned $udid."; exit 1; }
-          echo "IOS_UDID=$udid" >> "$GITHUB_ENV"
-          xcrun simctl bootstatus "$udid" -b
-          runs=0 failed=0
-          for appearance in light dark; do
-            xcrun simctl ui "$udid" appearance "$appearance"
-            [[ $(xcrun simctl ui "$udid" appearance) == "$appearance" ]] || { echo "::error::The simulator did not switch to $appearance."; exit 1; }
-            for class in $(node scripts/verification/ios-ui.mjs classes); do
-              bundle="$RUNNER_TEMP/dohc-results/$class-$appearance.xcresult"
-              json="$OUT/results/$class-$appearance.json"
-              started=$SECONDS status=0 runs=$((runs + 1))
-              xcodebuild test-without-building -xctestrun "$XCTESTRUN" -destination "id=$udid" -derivedDataPath "$DD" \
-                "-only-testing:dohcUITests/$class" $(node scripts/verification/ios-ui.mjs skips "$class") \
-                -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 300 \
-                -resultBundlePath "$bundle" > "$OUT/logs/$class-$appearance.log" 2>&1 || status=$?
-              xcrun xcresulttool get test-results tests --path "$bundle" --compact > "$json" || true
-              rm -rf "$bundle"
-              node scripts/verification/ios-ui.mjs check "$class" "$appearance" "$json" "$status" | tee -a "$OUT/summary.txt" || failed=$((failed + 1))
-              echo "  $((SECONDS - started)) s" | tee -a "$OUT/summary.txt"
-            done
-          done
-          (( failed == 0 )) || { echo "::error::$failed of $runs class runs failed. The job summary names each test."; exit 1; }
-      - name: Measure the caches to save
-        id: cache-size
-        if: github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch && inputs.cache != 'cold' && vars.IOS_CACHE_SAVES_ENABLED == 'true'
-        run: |
-          pods=$(du -sk "$CP_CACHE_DIR" | cut -f1)
-          derived=$(du -sk "$DD/Build" "$DD/ModuleCache.noindex" | awk '{ total += $1 } END { print total }')
-          echo "Pod downloads $pods KiB of 1 GiB, DerivedData $derived KiB of 3 GiB"
-          echo "pods=$(( pods <= 1048576 ))" >> "$GITHUB_OUTPUT"
-          echo "derived=$(( derived <= 3145728 ))" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        if: steps.cache-size.outputs.pods == '1' && steps.pods-cache.outputs.cache-hit != 'true'
-        with:
-          path: ${{ runner.temp }}/dohc-pod-cache
-          key: ios-pods-${{ steps.native.outputs.native }}
-      - uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        if: steps.cache-size.outputs.derived == '1' && steps.derived-cache.outputs.cache-hit != 'true'
-        with:
-          path: |
-            ${{ runner.temp }}/dohc-dd/Build
-            ${{ runner.temp }}/dohc-dd/ModuleCache.noindex
-          key: ios-derived-${{ steps.native.outputs.native }}-${{ steps.native.outputs.source }}
-      - name: Summarize the run
-        if: always()
-        run: |
-          {
-            echo '### iOS sample UI tests'
-            echo "Tested merge \`$GITHUB_SHA\`, PR head \`$PR_HEAD_SHA\`, $(xcodebuild -version | tr '\n' ' '), image ${ImageVersion:-unknown}, cache ${{ inputs.cache || 'warm' }}."
-            echo
-            echo "Skipped: $(node scripts/verification/ios-ui.mjs exclusions | paste -sd ';' -)"
-            echo
-            echo '```'
-            cat "$OUT/summary.txt" 2>/dev/null || echo 'No UI test ran.'
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-      # Logs and the result summaries only: no result bundle, screenshot, app, or DerivedData.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: ios-ui-tests-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/dohc-ios
-          if-no-files-found: warn
-          retention-days: 7
-      - name: Delete the simulator
-        if: always() && env.IOS_UDID != ''
-        run: |
-          xcrun simctl shutdown "$IOS_UDID" || true
-          xcrun simctl delete "$IOS_UDID" || echo "::warning::Could not delete simulator $IOS_UDID."
-
   verification:
     name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}
     needs: [changes, javascript, rust, javascript-prepare, android]
@@ -1005,8 +779,7 @@ jobs:
             // Android is one job, so its success is its whole proof.
             if (selected && gate !== 'android') await verifyCompletedCloud(gate);
           }));
-          // The iOS job is advisory and outside this verdict; a manual ios gate needs no shared preparation.
-          const confined = (process.env.EVENT_NAME === 'workflow_dispatch' && ['all', 'js', 'rust'].includes(process.env.REQUESTED_GATE)) || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
+          const confined = (process.env.EVENT_NAME === 'workflow_dispatch' && process.env.REQUESTED_GATE !== 'android') || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
           assert.equal(jobs['javascript-prepare'].result, confined ? 'success' : 'skipped', 'shared preparation did not complete as selected');
           const failures = verdicts.filter(verdict => verdict.status === 'rejected').map(verdict => verdict.reason);
           if (failures.length) throw new AggregateError(failures, 'Selected verification gates failed');

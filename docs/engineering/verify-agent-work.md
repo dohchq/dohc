@@ -120,11 +120,7 @@ Android compiles only in CI. The **Android Kotlin compile** job runs when a chan
 It generates the Expo Android project and compiles the Kotlin of both native modules for debug. A Kotlin error fails the job with its file and line.
 Nothing Android runs locally. When `pnpm verify:plan` or `pnpm verify:pr` selects `android`, the report lists the job under `ciEvidence`, and a merge needs a passing run of it for the head.
 
-The **iOS sample UI tests** job is an advisory pilot. It runs when a change reaches the workflow's `ios` filter, and a merge doesn't need it.
-It runs on the free `xcode-27` runner, generates the iOS project, builds the sample app once, and runs each selected class in light, then dark.
-It fails if a selected test is missing, skipped, or passes only as an expected failure. Tests that need VoiceOver or the emoji keyboard stay on the Mac. The job summary names them.
-Nothing iOS runs locally. When the local runner selects `ios`, the report lists the job under `ciAdvisory`, not `ciEvidence`.
-The job saves its pod and DerivedData caches only from a manual warm run on the default branch, and only when the `IOS_CACHE_SAVES_ENABLED` variable is `true`. Set it only after you confirm that the repository's cache limit is 10 GB or less.
+The iOS sample UI tests run in their own advisory workflow on GitHub's free `xcode-27` runner. They don't gate merges, and a newer push cancels the running job.
 
 The timing targets are 300 s for JavaScript and 600 s for Rust. The failure ceilings are 400 s and 700 s.
 A gate's `seconds` runs from the start of `what changed` to the finish of the gate's last job.
@@ -138,7 +134,7 @@ Receipts record the target as `targetSeconds` and the ceiling as `budgetSeconds`
 
 `"unmeasured"` excuses time only. Failed tests, incomplete inventory or coverage, wrong commits, and missing, duplicated, cancelled, or failed jobs still fail.
 The organisation's Team plan permits 60 concurrent standard-runner jobs.
-A combined run peaks at 23 jobs, so two combined runs fit and a third can queue.
+A combined run peaks at 22 jobs, so two combined runs fit and a third can queue.
 The workflow holds the job graph, wait caps, and job timeouts.
 [`cloud.mjs`](../../scripts/verification/cloud.mjs) and [`cloud-rust.mjs`](../../scripts/verification/cloud-rust.mjs) run each job's tests. [`cloud-aggregate.mjs`](../../scripts/verification/cloud-aggregate.mjs) checks the receipts and computes the timing verdict.
 
