@@ -8869,6 +8869,117 @@ fn render_inline(
         part_index += 1;
     }
 
+    // Markdown reads no delimiter beside only whitespace as a mark, so a mark
+    // that opens or closes inside whitespace reads back as literal asterisks.
+    // A run of only whitespace keeps a mark that continues through it to text
+    // on both sides, or that opens right before a character, where the
+    // whitespace is written before the delimiter. It keeps one that closes
+    // right after a character, where the whitespace is written after it,
+    // unless the run also opens a mark: closing and opening in one run writes
+    // them inside the whitespace. It drops the others. Each kept mark is
+    // written where the old writer wrote it, whose nesting the reader depends
+    // on. The TypeScript writer does the same.
+    let mut blank = Vec::with_capacity(parts.len());
+    for part in &parts {
+        blank.push(match part {
+            InlinePart::Text {
+                run,
+                literal_markdown,
+            } => {
+                run.text.chars().all(is_js_whitespace)
+                    && written_run_text(run, *literal_markdown, code_context, escape_block_syntax)?
+                        .chars()
+                        .all(is_js_whitespace)
+            }
+            InlinePart::Node(_) => false,
+        });
+    }
+    if blank.contains(&true) {
+        let from_before = marks_reaching_text(&parts, &blank, 0..parts.len());
+        let from_after = marks_reaching_text(&parts, &blank, (0..parts.len()).rev());
+        // Whether a run beside a blank one starts and ends with text.
+        let mut starts_solid = vec![false; parts.len()];
+        let mut ends_solid = vec![false; parts.len()];
+        for (index, part) in parts.iter().enumerate() {
+            let beside_blank =
+                (index > 0 && blank[index - 1]) || blank.get(index + 1).copied().unwrap_or(false);
+            if let (
+                false,
+                true,
+                InlinePart::Text {
+                    run,
+                    literal_markdown,
+                },
+            ) = (blank[index], beside_blank, part)
+            {
+                let written =
+                    written_run_text(run, *literal_markdown, code_context, escape_block_syntax)?;
+                starts_solid[index] = written.chars().next().is_some_and(|c| !is_js_whitespace(c));
+                ends_solid[index] = written
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| !is_js_whitespace(c));
+            }
+        }
+        for (index, part) in parts.iter_mut().enumerate() {
+            let InlinePart::Text { run, .. } = part else {
+                continue;
+            };
+            if !blank[index] {
+                continue;
+            }
+            let after_text = index > 0 && ends_solid[index - 1];
+            let before_text = starts_solid.get(index + 1).copied().unwrap_or(false);
+            let back = |mark: &MarkdownMark| contains_same_mark(&from_before[index], mark);
+            let ahead = |mark: &MarkdownMark| contains_same_mark(&from_after[index], mark);
+            // Code marks are written before this, as code spans.
+            let delimits = |mark: &MarkdownMark| mark.kind != MarkKind::Link;
+            let opens = run
+                .marks
+                .iter()
+                .any(|mark| delimits(mark) && before_text && ahead(mark) && !back(mark));
+            run.marks.retain(|mark| {
+                !delimits(mark)
+                    || (back(mark) && ahead(mark))
+                    || (ahead(mark) && before_text)
+                    || (back(mark) && after_text && !opens)
+            });
+        }
+    }
+
+    // For each blank run, the marks it shares with the text the order visits
+    // before it, through blank runs that carry them too.
+    fn marks_reaching_text(
+        parts: &[InlinePart<'_>],
+        blank: &[bool],
+        order: impl Iterator<Item = usize>,
+    ) -> Vec<Vec<MarkdownMark>> {
+        let mut reached = vec![Vec::new(); parts.len()];
+        let mut before: Option<usize> = None;
+        for index in order {
+            let InlinePart::Text { run, .. } = &parts[index] else {
+                before = None;
+                continue;
+            };
+            if let (true, Some(at)) = (blank[index], before) {
+                let carried: &[MarkdownMark] = match &parts[at] {
+                    _ if blank[at] => &reached[at],
+                    InlinePart::Text { run, .. } => &run.marks,
+                    InlinePart::Node(_) => unreachable!("a node ends the reach"),
+                };
+                let shared = run
+                    .marks
+                    .iter()
+                    .filter(|mark| contains_same_mark(carried, mark))
+                    .cloned()
+                    .collect();
+                reached[index] = shared;
+            }
+            before = Some(index);
+        }
+        reached
+    }
+
     let mut output = ProjectionBuffer::new();
     let mut active: Vec<MarkdownMark> = Vec::new();
     let mut modes: BTreeMap<MarkKind, OpeningMode> = BTreeMap::new();
@@ -8918,16 +9029,8 @@ fn render_inline(
                 if run.text.len() > MAX_PROJECTION_BYTES {
                     return Err(projection_too_large(run.text.len()));
                 }
-                let mut text = run.text.clone();
-                if !literal_markdown && has_mark(&run.marks, MarkKind::Highlight) {
-                    text = escape_highlight_equals(&text)?;
-                }
-                if !literal_markdown && !code_context && !has_mark(&run.marks, MarkKind::Code) {
-                    text = encode_html_entities(&text)?;
-                    if escape_block_syntax {
-                        text = encode_paragraph_whitespace(&text);
-                    }
-                }
+                let mut text =
+                    written_run_text(run, *literal_markdown, code_context, escape_block_syntax)?;
                 // Nothing held is whitespace at the text's edge, which marks
                 // read: a held character is inside an empty link.
                 if !held.is_empty() && text.contains(HELD) {
@@ -9171,6 +9274,26 @@ fn mark_closing(mark: &MarkdownMark, mode: OpeningMode) -> String {
         MarkKind::Strike => "~~".to_string(),
         MarkKind::Underline => "++".to_string(),
     }
+}
+
+/// A run's text as it is written, before held characters are written back.
+fn written_run_text(
+    run: &TextRun,
+    literal_markdown: bool,
+    code_context: bool,
+    escape_block_syntax: bool,
+) -> ProjectionResult<String> {
+    let mut text = run.text.clone();
+    if !literal_markdown && has_mark(&run.marks, MarkKind::Highlight) {
+        text = escape_highlight_equals(&text)?;
+    }
+    if !literal_markdown && !code_context && !has_mark(&run.marks, MarkKind::Code) {
+        text = encode_html_entities(&text)?;
+        if escape_block_syntax {
+            text = encode_paragraph_whitespace(&text);
+        }
+    }
+    Ok(text)
 }
 
 fn escape_highlight_equals(value: &str) -> ProjectionResult<String> {
@@ -10052,6 +10175,125 @@ mod projection_tests {
                 .content,
             SETTLED
         );
+    }
+
+    // Markdown reads no delimiter beside only whitespace as a mark, so it
+    // would read back as literal asterisks. The TypeScript writer's tests have
+    // the same cases.
+    #[test]
+    fn a_marked_run_of_only_whitespace_is_written_as_its_text() {
+        fn marks(names: &[&str]) -> Attrs {
+            names
+                .iter()
+                .map(|name| ((*name).into(), json_to_any(&json!({}))))
+                .collect()
+        }
+        let bold = || marks(&["bold"]);
+        let bold_italic = || marks(&["bold", "italic"]);
+        let strike = || marks(&["strike"]);
+        let cases: Vec<(Vec<(&str, Attrs)>, &str)> = vec![
+            (
+                vec![("a", Attrs::new()), (" ", bold()), ("b", Attrs::new())],
+                "a b\n",
+            ),
+            // Unlike the TypeScript writer, this one drops a paragraph's
+            // trailing space, marked or not, which Markdown reads as nothing.
+            (vec![("a", Attrs::new()), (" ", bold())], "a\n"),
+            (
+                vec![("x", bold()), (" ", bold_italic()), ("y", bold())],
+                "**x y**\n",
+            ),
+            (
+                vec![("x", bold()), (" ", bold_italic()), ("y", Attrs::new())],
+                "**x** y\n",
+            ),
+            (
+                vec![("x", Attrs::new()), (" ", bold_italic()), ("y", bold())],
+                "x **y**\n",
+            ),
+            (
+                vec![("a", Attrs::new()), (" ", strike()), ("b", Attrs::new())],
+                "a b\n",
+            ),
+            (
+                vec![("a", Attrs::new()), ("\t", bold()), ("b", Attrs::new())],
+                "a\tb\n",
+            ),
+            (vec![(" ", bold()), ("b", Attrs::new())], "&#32;b\n"),
+            // Written as a reference, it is no longer whitespace, so it keeps
+            // its mark.
+            (
+                vec![("a", Attrs::new()), ("\u{a0}", bold()), ("b", Attrs::new())],
+                "a**&#160;**b\n",
+            ),
+            // The underline opens on the space, outside the italic. Opened
+            // with the italic at the text, it would read back as asterisks.
+            (
+                vec![
+                    ("x", bold_italic()),
+                    (" ", marks(&["bold", "underline"])),
+                    ("y", marks(&["bold", "italic", "underline"])),
+                ],
+                "***x* ++*y*++**\n",
+            ),
+            (
+                vec![
+                    ("x", bold()),
+                    (" ", bold()),
+                    (" ", bold_italic()),
+                    ("y", Attrs::new()),
+                ],
+                "**x**  y\n",
+            ),
+            (
+                vec![
+                    ("x", Attrs::new()),
+                    (" ", bold_italic()),
+                    (" ", bold()),
+                    ("y", bold()),
+                ],
+                "x  **y**\n",
+            ),
+            (
+                vec![("x ", bold()), (" ", bold_italic()), ("y", Attrs::new())],
+                "**x**  y\n",
+            ),
+            (
+                vec![
+                    ("a", marks(&["italic"])),
+                    (" ", bold_italic()),
+                    ("b", bold()),
+                ],
+                "*a* **b**\n",
+            ),
+            (
+                vec![("x", Attrs::new()), (" ", bold_italic()), (" y", bold())],
+                "x  **y**\n",
+            ),
+        ];
+        for (runs, expected) in cases {
+            let source = Ydoc::wire();
+            let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+            {
+                let mut txn = source.doc.transact_mut();
+                let paragraph = body.push_back(
+                    &mut txn,
+                    XmlElementPrelim::new("paragraph", std::iter::empty::<XmlIn>()),
+                );
+                let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
+                for (value, attrs) in runs {
+                    let at = text.len(&txn);
+                    text.insert_with_attributes(&mut txn, at, value, attrs);
+                }
+            }
+            assert_eq!(
+                source
+                    .project(ContentKind::Richdoc)
+                    .expect("projection")
+                    .content,
+                expected
+            );
+        }
     }
 
     #[test]

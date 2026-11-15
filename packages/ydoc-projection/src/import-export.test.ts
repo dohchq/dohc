@@ -29,6 +29,15 @@ import { setFrontmatterValue } from "./frontmatter-map.js";
 
 type ExpectedMarkdownFragment = string | RegExp;
 
+const plain = (text: string): JSONContent => ({ type: "text", text });
+const bold = (text: string): JSONContent => ({ type: "text", text, marks: [{ type: "bold" }] });
+const italic = (text: string): JSONContent => ({ type: "text", text, marks: [{ type: "italic" }] });
+const boldItalic = (text: string): JSONContent => ({
+  type: "text",
+  text,
+  marks: [{ type: "bold" }, { type: "italic" }],
+});
+
 function textWork(run: () => void): { split: number; replace: number } {
   const { split, replace } = String.prototype;
   const work = { split: 0, replace: 0 };
@@ -544,6 +553,62 @@ it.each([
     ).not.toContain("\\");
   },
 );
+
+// Markdown reads no delimiter beside only whitespace as a mark, so it would
+// read back as literal asterisks. Whitespace keeps a mark that continues
+// through it, or opens or closes beside text, and is written without the
+// others. The engine writer's test has the same cases.
+it.each([
+  ["between plain text", [plain("a"), bold(" "), plain("b")], "a b"],
+  ["at the end", [plain("a"), bold(" ")], "a "],
+  ["inside bold", [bold("x"), boldItalic(" "), bold("y")], "**x y**"],
+  ["after bold", [bold("x"), boldItalic(" "), plain("y")], "**x** y"],
+  ["before bold", [plain("x"), boldItalic(" "), bold("y")], "x **y**"],
+  [
+    "struck through",
+    [plain("a"), { type: "text", text: " ", marks: [{ type: "strike" }] }, plain("b")],
+    "a b",
+  ],
+  ["of a tab", [plain("a"), bold("\t"), plain("b")], "a\tb"],
+  ["starting a paragraph", [bold(" "), plain("b")], "&#32;b"],
+  // Written as a reference, it is no longer whitespace, so it keeps its mark.
+  ["of a non-breaking space", [plain("a"), bold(" "), plain("b")], "a**&#160;**b"],
+  ["closing bold after another", [bold("x"), bold(" "), boldItalic(" "), plain("y")], "**x**  y"],
+  ["opening bold before another", [plain("x"), boldItalic(" "), bold(" "), bold("y")], "x  **y**"],
+  ["closing bold after a space", [bold("x "), boldItalic(" "), plain("y")], "**x**  y"],
+  ["closing italic and opening bold", [italic("a"), boldItalic(" "), bold("b")], "*a* **b**"],
+  ["opening bold before a space", [plain("x"), boldItalic(" "), bold(" y")], "x  **y**"],
+] satisfies Array<[string, JSONContent[], string]>)(
+  "writes a marked run of only whitespace %s as its text",
+  (_name, content, saved) => {
+    const document = { type: "doc", content: [{ type: "paragraph", content }] };
+    expect(serializeRichdocBody(document)).toBe(saved);
+    const reopened = parseRichdocMarkdown(saved);
+    expect(serializeRichdocBody(reopened)).toBe(saved);
+    expect(textContentOf(reopened)).toBe(content.map((node) => node.text).join(""));
+  },
+);
+
+// The underline opens on the space and is written outside the italic. Opened
+// with the italic at the text instead, it would read back as literal asterisks.
+it("keeps a mark that opens on whitespace and continues into text", () => {
+  const content: JSONContent[] = [
+    boldItalic("x"),
+    { type: "text", text: " ", marks: [{ type: "bold" }, { type: "underline" }] },
+    {
+      type: "text",
+      text: "y",
+      marks: [{ type: "bold" }, { type: "italic" }, { type: "underline" }],
+    },
+  ];
+  const saved = serializeRichdocBody({ type: "doc", content: [{ type: "paragraph", content }] });
+  expect(saved).toBe("***x* ++*y*++**");
+  expect(textContentOf(parseRichdocMarkdown(saved))).toBe("x y");
+});
+
+function textContentOf(node: JSONContent): string {
+  return (node.text ?? "") + (node.content ?? []).map(textContentOf).join("");
+}
 
 it.each([
   ["a backslash escape", "<b>\\*</b>"],
