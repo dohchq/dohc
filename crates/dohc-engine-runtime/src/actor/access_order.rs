@@ -45,6 +45,7 @@ use dohc_engine_files::access_rules::{
     ACCESS_RULE_FILE, AccessRule, ReachBefore, access_rule_folder, is_access_rule_path, is_rule_of,
     parse_access_rule, rule_change_narrows,
 };
+use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_files::materialize::{PublicationTarget, read_publication_target};
 use dohc_engine_storage::access_rule_holds::{self, AccessRuleHold};
 use dohc_engine_storage::{EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome};
@@ -1570,6 +1571,54 @@ fn observed_sha256(disk: &OnDisk) -> Option<String> {
             .map(|bytes| dohc_engine_storage::hex_sha256(bytes)),
         _ => None,
     }
+}
+
+/// Whether a merged write of the rule at `path` waits to reach disk: the
+/// Version still holds another spelling of the same rule, whose file holds
+/// the name on a disk that ignores case. That spelling's merged delete places
+/// it, through [`respelled_rule_writes`], so no conflict copy stands in for
+/// the rule and the journal keeps a rule at every step.
+pub(super) fn respelled_rule_waits(
+    store: &EngineStore,
+    workspace: &str,
+    version: &str,
+    path: &str,
+) -> Result<bool, RuntimeError> {
+    if !is_access_rule_path(path) {
+        return Ok(false);
+    }
+    let key = path_collision_key(path);
+    let spellings = store.read_with(|conn| {
+        committed_rule_paths(conn, workspace, version, access_rule_folder(path))
+    })?;
+    Ok(spellings
+        .iter()
+        .any(|other| other != path && path_collision_key(other) == key))
+}
+
+/// The merged writes of other spellings of the rule at `path` that wait for
+/// its delete.
+pub(super) fn respelled_rule_writes(
+    store: &EngineStore,
+    workspace: &str,
+    path: &str,
+) -> Result<Vec<dohc_engine_storage::MaterializationJob>, RuntimeError> {
+    if !is_access_rule_path(path) {
+        return Ok(Vec::new());
+    }
+    let key = path_collision_key(path);
+    Ok(store
+        .list_pending_materialization_jobs()?
+        .into_iter()
+        .filter(|job| {
+            job.workspace_id == workspace
+                && job.target_path != path
+                && job.job_id.starts_with("merge-mat_")
+                && job.operation == dohc_engine_storage::MaterializationOperation::Write
+                && job.preimage == dohc_engine_storage::Preimage::Absent
+                && path_collision_key(&job.target_path) == key
+        })
+        .collect())
 }
 
 /// What a decision did beyond settling the folder.

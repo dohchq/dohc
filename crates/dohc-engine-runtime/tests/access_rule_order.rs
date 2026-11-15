@@ -431,6 +431,122 @@ fn a_decision_on_a_rule_changed_since_is_refused() {
     assert_eq!(f.holds(), vec![("team".to_owned(), "removed".to_owned())]);
 }
 
+fn ignores_case(root: &Path) -> bool {
+    std::fs::write(root.join("probe.md"), "probe").unwrap();
+    let ignores_case = std::fs::metadata(root.join("PROBE.md")).is_ok();
+    std::fs::remove_file(root.join("probe.md")).unwrap();
+    if !ignores_case {
+        eprintln!("skipping: this disk keeps case apart");
+    }
+    ignores_case
+}
+
+/// A Version respells the rule with new contents. Merged on a disk that
+/// ignores case, Main journals the new spelling before the old one's delete,
+/// so the folder always has a rule, and the merged rule ends on disk under
+/// its new spelling with no conflict copy beside it.
+#[test]
+fn a_rule_respelled_with_new_contents_merges_onto_a_disk_that_ignores_case() {
+    let f = Fixture::new();
+    if !ignores_case(f.root()) {
+        return;
+    }
+    f.put("team/access.yaml", VIEW);
+    f.put("team/a.md", "alpha");
+    f.settle();
+    f.capture_ok(&["team/access.yaml", "team/a.md"]);
+    f.runtime
+        .block_on(f.actor.create_named_version(
+            CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "feature".to_owned(),
+                name: "feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 41,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        ))
+        .expect("version");
+    f.runtime
+        .block_on(f.actor.versioned_text_rename(
+            RenameTextFile {
+                workspace_id: WS.to_owned(),
+                version_id: "feature".to_owned(),
+                from_path: "team/access.yaml".to_owned(),
+                to_path: "team/ACCESS.yaml".to_owned(),
+                moment_id: "m-respell".to_owned(),
+                request_id: None,
+                metadata_origin: "cli".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 42,
+            },
+            f.root().to_path_buf(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        ))
+        .expect("respell");
+    f.versioned_write(WriteText {
+        version_id: "feature".to_owned(),
+        ..write("team/ACCESS.yaml", EDIT, "m-edit")
+    })
+    .expect("edit");
+    let before = f.journal();
+    // The desktop merges a rule's writes before its deletes.
+    for (path, now_ms) in [("team/ACCESS.yaml", 43), ("team/access.yaml", 44)] {
+        f.runtime
+            .block_on(f.actor.versioned_text_merge(
+                MergeTextFileFromVersion {
+                    workspace_id: WS.to_owned(),
+                    target_version_id: "main".to_owned(),
+                    source_version_id: "feature".to_owned(),
+                    path: path.to_owned(),
+                    object_id: "ignored".to_owned(),
+                    moment_id: format!("merge-{now_ms}"),
+                    request_id: None,
+                    conflict_id: format!("conflict-{now_ms}"),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms,
+                },
+                f.root().to_path_buf(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            ))
+            .unwrap_or_else(|error| panic!("merge {path}: {error}"));
+    }
+    assert_eq!(
+        f.journal()[before.len()..],
+        lines(&["write team/ACCESS.yaml", "delete team/access.yaml"])
+    );
+    let mut names: Vec<String> = std::fs::read_dir(f.root().join("team"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["ACCESS.yaml", "a.md"]);
+    assert_eq!(
+        std::fs::read_to_string(f.root().join("team/ACCESS.yaml")).unwrap(),
+        EDIT
+    );
+    let unfinished: i64 = rusqlite::Connection::open(&f.db)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM materialization_jobs WHERE status IN ('pending','conflict')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unfinished, 0, "no merge job is left pending or in conflict");
+}
+
 /// A rule gone and a rule spelled twice both record no bytes, so the owner's
 /// decision on a removal names its reason too. A second spelling saved since
 /// is refused, and stays on disk.

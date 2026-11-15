@@ -3261,7 +3261,23 @@ fn versioned_text_merge_on_store(
             materialize_outcome: PostCommitMaterializeOutcome::Skipped,
         });
     }
-    let (materialized, materialize_outcome) = materialize_pending_job(
+    if let MergeTextFileResult::Write { write, .. } = &result
+        && job.preimage == Preimage::Absent
+        && access_order::respelled_rule_waits(
+            store,
+            &input.workspace_id,
+            &input.target_version_id,
+            &write.snapshot.path,
+        )?
+    {
+        return Ok(MergeExecutionResult {
+            merge: result,
+            materialize_enqueued: !deduped,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Parked,
+        });
+    }
+    let (mut materialized, mut materialize_outcome) = materialize_pending_job(
         store,
         root_dir,
         &input.workspace_id,
@@ -3271,6 +3287,26 @@ fn versioned_text_merge_on_store(
         faults,
         None,
     );
+    if let MergeTextFileResult::Delete { delete, .. } = &result
+        && materialized
+    {
+        for waiting in
+            access_order::respelled_rule_writes(store, &input.workspace_id, &delete.before.path)?
+        {
+            let (placed, outcome) = materialize_pending_job(
+                store,
+                root_dir,
+                &input.workspace_id,
+                &waiting,
+                self_writes,
+                input.now_ms,
+                faults,
+                None,
+            );
+            materialized &= placed;
+            materialize_outcome = worse_materialize_outcome(materialize_outcome, outcome);
+        }
+    }
     Ok(MergeExecutionResult {
         merge: result,
         materialize_enqueued: !deduped,
