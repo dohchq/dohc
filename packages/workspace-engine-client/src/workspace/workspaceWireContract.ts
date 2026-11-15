@@ -1448,6 +1448,20 @@ const WorkspaceResultSchemas = {
         }),
       ),
     ),
+    // Text a merged change from elsewhere removed unseen, kept on this
+    // computer until its notice is dismissed.
+    mergeRemovals: Schema.mutable(
+      Schema.Array(
+        mutableStruct({
+          momentId: Schema.NonEmptyString,
+          versionId: Schema.NonEmptyString,
+          objectId: Schema.NonEmptyString,
+          path: Schema.NonEmptyString,
+          text: Schema.NonEmptyString,
+          authorKnown: Schema.Boolean,
+        }),
+      ),
+    ),
   }),
   [WORKSPACE_METHOD.captureClearRecovery]: mutableStruct({ cleared: Schema.Boolean }),
   [WORKSPACE_METHOD.captureImportRecovery]: mutableStruct({

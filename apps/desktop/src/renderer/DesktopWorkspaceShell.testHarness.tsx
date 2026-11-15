@@ -856,6 +856,7 @@ function makeBaseBridge(
     getCaptureRecoveryStatus: vi.fn(
       async (_payload: { workspaceId: string }): Promise<CaptureRecoveryStatusResult> => ({
         captureRecoveries: [],
+        mergeRemovals: [],
       }),
     ),
     clearCaptureRecovery: vi.fn(
