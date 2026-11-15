@@ -729,12 +729,22 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     let reading = false;
     let read: LiveFrameLease<NamedFrameAppliedUpdate> | undefined;
     let failed: { error: unknown } | undefined;
+    // A lease holds reserved output bytes until it is released, so none outlives the feed.
+    lifetime.addEventListener(
+      "abort",
+      () => {
+        read?.release();
+        read = undefined;
+      },
+      { once: true },
+    );
     function startRead() {
       if (reading || read || failed) return;
       reading = true;
       sync.nextApplied(lifetime).then(
         (lease) => {
           reading = false;
+          if (lifetime.aborted) return lease.release();
           try {
             // The room takes the owner's next edits against all the owner has been shown.
             applyFeed(room, lease.value.updateBytes);

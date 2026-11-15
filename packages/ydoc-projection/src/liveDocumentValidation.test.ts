@@ -1131,6 +1131,13 @@ describe("live edit format guard", () => {
     expect(liveEditFitsNote(note, new Uint8Array([1, 2, 3]))).toBe(false);
   });
 
+  // Proves: a long mark name is refused in time linear in its length, so it can't hold up admission.
+  it("refuses a long unknown mark name without stalling", () => {
+    const note = markdownToYDoc(markdown);
+    const edit = sent(note, (page) => words(page).format(0, 2, { ["x".repeat(1 << 18)]: true }));
+    expect(liveEditFitsNote(note, edit)).toBe(false);
+  });
+
   it("follows a run of typing back to where it starts", () => {
     const note = markdownToYDoc(markdown);
     // The bold letter builds on the typed ones, and only they name a neighbour the note holds.

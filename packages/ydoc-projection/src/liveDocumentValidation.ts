@@ -839,7 +839,7 @@ function validBodyAttribute(nodeName: string, key: string, value: unknown): bool
 }
 
 // y-prosemirror appends an eight-character hash to nonexclusive mark names.
-const markNameOf = (name: string) => /(.*)(--[a-zA-Z0-9+/=]{8})$/.exec(name)?.[1] ?? name;
+const markNameOf = (name: string) => /^(.*)(--[a-zA-Z0-9+/=]{8})$/.exec(name)?.[1] ?? name;
 
 function validateMarkAttributes(name: string, value: unknown): void {
   const markName = markNameOf(name);

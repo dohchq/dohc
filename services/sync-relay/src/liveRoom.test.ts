@@ -247,8 +247,15 @@ function editor(f: Fixture, room: ReturnType<typeof rooms>, sender: LiveAuthorSn
 
 const rowBytes = (row: Record<string, unknown>) => new Uint8Array(row.update_bytes as Uint8Array);
 
-/** The owner's computer. Its own capture's feed brings every journal row as it is committed. */
-function ownerDesktop(f: Fixture, room: ReturnType<typeof rooms>) {
+/**
+ * The owner's computer. Its own capture's feed brings every journal row as it is committed, and
+ * counts the leases it hands out and those released.
+ */
+function ownerDesktop(
+  f: Fixture,
+  room: ReturnType<typeof rooms>,
+  leases = { out: 0, released: 0 },
+) {
   const lifetime = new AbortController();
   const binding = f.storage.resolveCurrentLiveDocumentBinding({
     document: f.input.evidence.document,
@@ -279,7 +286,11 @@ function ownerDesktop(f: Fixture, room: ReturnType<typeof rooms>) {
             const row = f.journalRows().journal.find((r) => Number(r.journal_cursor) > fed);
             if (row) {
               fed = Number(row.journal_cursor);
-              return { value: { journalCursor: fed, updateBytes: rowBytes(row) }, release() {} };
+              leases.out += 1;
+              return {
+                value: { journalCursor: fed, updateBytes: rowBytes(row) },
+                release: () => void (leases.released += 1),
+              };
             }
             await new Promise((resolve) => setTimeout(resolve, 5));
           }
@@ -463,6 +474,26 @@ it("gives the owner others' edits as rows, and each save the last row it holds, 
   expect(savedAuthors(f)).toEqual([ana, olu]);
   expect(unsaved(f)).toEqual([]);
   expect(owner.doc.getMap("frontmatter").toJSON()).toEqual({ title: "Lisbon", place: "Porto" });
+});
+
+// Proves: a lease the owner's feed read and holds for the owner's next read is released when the
+// owner closes, as each holds reserved output bytes.
+it("releases the owner's held feed lease when the owner closes", async () => {
+  const f = note();
+  const room = rooms(f, { saveEveryMs: 20 });
+  const leases = { out: 0, released: 0 };
+  const owner = ownerDesktop(f, room, leases),
+    a = editor(f, room, ana);
+  const sync = await owner.open();
+  await a.open();
+  // The owner waits on its feed, and Ana's edit reaches it first as a room row.
+  const next = owner.next();
+  const first = position(await a.submit(a.change("title", "Lisbon")));
+  expect(await next).toEqual({ journalCursor: first, roomRow: true });
+  // The save's row then comes on the feed, and waits for a read the owner never makes.
+  await vi.waitFor(() => expect(leases.out).toBe(1));
+  sync.close();
+  expect(leases.released).toBe(1);
 });
 
 it("sends an owner who reconnects the rows no save holds, oldest first", async () => {
@@ -792,6 +823,37 @@ it("keeps a pause's copy until the owner's desktop records it written, and resum
   await expect(
     call("POST", pauseId, "copy-written", { sha256: "0".repeat(64) }),
   ).rejects.toMatchObject({ code: "conflict" });
+  // Ownership that ends while the body is read, as when the owner's account is being deleted,
+  // records nothing.
+  let owned = true;
+  const ending = createLiveRoomPauseRoutes(
+    Object.assign(Object.create(f.storage), {
+      workspaceIsOwnedBy: (workspaceId: string, userId: string) =>
+        owned && f.storage.workspaceIsOwnedBy(workspaceId, userId),
+    }),
+  );
+  const body = new ReadableStream(
+    {
+      pull(controller) {
+        owned = false;
+        controller.enqueue(new TextEncoder().encode(JSON.stringify({ sha256 })));
+        controller.close();
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  await expect(
+    ending(
+      new Request("https://relay.invalid/", {
+        method: "POST",
+        body,
+        duplex: "half",
+      } as RequestInit),
+      { route: "live-pauses", workspaceId: "workspace", pauseId, action: "copy-written" },
+      "owner",
+    ),
+  ).rejects.toMatchObject({ code: "not_found" });
+  expect(new Uint8Array(await (await call("GET", pauseId, "copy")).arrayBuffer())).toEqual(copy);
   expect((await call("POST", pauseId, "copy-written", { sha256 })).status).toBe(200);
   await expect(call("GET", pauseId, "copy")).rejects.toMatchObject({ code: "not_found" });
   expect(liveRoomPaused(storage, f.input.evidence.document)).toBe(true);
