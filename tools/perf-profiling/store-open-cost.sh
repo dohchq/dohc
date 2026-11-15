@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Time an engine store open on Linux for stores of several sizes: one quick_check, an ordinary open,
-# and the first open after an update that added migrations. Each is timed with the file cache
-# emptied first and again with it warm. Usage: store-open-cost.sh [megabytes...]
+# Time an engine store open on Linux for stores of several sizes: an ordinary open, and the first open
+# after an update that added migrations. Each open is timed with the file cache emptied first and again
+# with it warm. One quick_check is timed with the cache emptied. Usage: store-open-cost.sh [megabytes...]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 sizes=("$@")
