@@ -251,7 +251,10 @@ function findSlashTrigger(state: EditorState): { from: number; query: string } |
   if (!selection.empty) return null;
   const $from = selection.$from;
   if (!$from.parent.isTextblock) return null;
-  const match = findSlashCommandMatch($from.parent.textBetween(0, $from.parentOffset));
+  // Each inline atom counts as one character, its size, so offsets are positions.
+  const match = findSlashCommandMatch(
+    $from.parent.textBetween(0, $from.parentOffset, undefined, "￼"),
+  );
   return match ? { from: $from.start() + match.slashOffset, query: match.query } : null;
 }
 
