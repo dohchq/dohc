@@ -49,6 +49,19 @@ struct AccessRuleDecisionParams {
     expected_reason: String,
 }
 
+/// A decision's `undo`, with the Version and folder it was made in.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccessRuleUndoParams {
+    version_id: String,
+    folder: String,
+    path: String,
+    /// The rule to put back; null deletes the file.
+    text: Option<String>,
+    /// The bytes the decision left at `path`; null when it left none.
+    expected_sha256: Option<String>,
+}
+
 fn access_rule_holds_json(views: &[dohc_engine_runtime::AccessRuleHoldView]) -> Value {
     json!(
         views
@@ -578,27 +591,9 @@ impl EngineService {
                 "access rule decisions need the workspace's owning handle",
             ));
         }
-        let active = open
-            .actor
-            .active_version_id(open.workspace_id.clone())
-            .await
-            .map_err(map_runtime)?;
-        let holds = open
-            .actor
-            .access_rule_holds(open.workspace_id.clone())
-            .await
-            .map_err(map_runtime)?;
-        let Some(hold) = holds.into_iter().find(|hold| {
-            hold.version_id == input.version_id
-                && hold.folder == input.folder
-                && hold.version_id == active
-        }) else {
-            return Err(WireError::new(
-                ErrorCode::InvalidParams,
-                "access-rule-not-held",
-            ));
-        };
         let cancellation = OperationCancellation::new(ctx);
+        // The engine checks the hold is the active Version's under the gate,
+        // which a Version switch takes too.
         let gate = tokio::select! {
             () = cancellation.token.cancelled() => return Err(cancellation.interruption("access rule decision (queued)")),
             guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
@@ -607,8 +602,8 @@ impl EngineService {
             .actor
             .decide_access_rule(
                 open.workspace_id.clone(),
-                hold.version_id,
-                hold.folder,
+                input.version_id,
+                input.folder.clone(),
                 decision,
                 expected_sha256,
                 input.expected_reason,
@@ -628,6 +623,51 @@ impl EngineService {
             json!({ "path": undo.path, "text": undo.text, "expectedSha256": undo.expected_sha256 })
         });
         Ok(json!({ "folder": input.folder, "decided": true, "kept": decided.kept, "undo": undo }))
+    }
+
+    /// Reverse a decision with the change it returned, if the folder's rule
+    /// is still the one the decision left.
+    pub(super) async fn capture_undo_access_rule(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let input: AccessRuleUndoParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "access rule decisions need the workspace's owning handle",
+            ));
+        }
+        let cancellation = OperationCancellation::new(ctx);
+        let gate = tokio::select! {
+            () = cancellation.token.cancelled() => return Err(cancellation.interruption("access rule undo (queued)")),
+            guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+        };
+        open.actor
+            .undo_access_rule(
+                open.workspace_id.clone(),
+                input.version_id,
+                input.folder.clone(),
+                dohc_engine_runtime::AccessRuleUndo {
+                    path: input.path,
+                    text: input.text,
+                    expected_sha256: input.expected_sha256,
+                },
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
+                now_ms()?,
+                Arc::new(dohc_engine_storage::NoFaults),
+            )
+            .await
+            .map_err(map_runtime)?;
+        if let Some(driver) = lock(&open.capture).as_ref() {
+            driver.request_manifest_refresh();
+        }
+        drop(gate);
+        Ok(json!({ "folder": input.folder, "undone": true }))
     }
 
     pub(super) async fn capture_clear_recovery(

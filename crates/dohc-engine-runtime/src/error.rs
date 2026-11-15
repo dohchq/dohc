@@ -32,6 +32,10 @@ pub enum RuntimeError {
     /// The owner decided on a rule that has changed on disk since.
     #[error("access-rule-changed: {folder}")]
     AccessRuleChanged { folder: String },
+    /// The owner decided on a hold the engine no longer lists for the
+    /// active Version: decided already, or its Version is no longer active.
+    #[error("access-rule-not-held")]
+    AccessRuleNotHeld,
     #[error("capture-file-held: {path}")]
     CaptureFileHeld { path: String },
     #[error("capture-not-owned: {path}")]
@@ -190,6 +194,7 @@ impl RuntimeError {
             RuntimeError::LinksEdgesSourceChanged => "links-edges-source-changed",
             RuntimeError::AccessRuleHeld { .. } => "access-rule-held",
             RuntimeError::AccessRuleChanged { .. } => "access-rule-changed",
+            RuntimeError::AccessRuleNotHeld => "access-rule-not-held",
             RuntimeError::CaptureFileHeld { .. } => "capture-file-held",
             RuntimeError::CaptureNotOwnedAfterHold { .. } => "capture-not-owned",
             RuntimeError::Identity { .. } => "identity-unresolved",

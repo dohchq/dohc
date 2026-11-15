@@ -244,6 +244,9 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     if let RuntimeError::AccessRuleHeld { .. } | RuntimeError::AccessRuleChanged { .. } = error {
         return WireError::new(ErrorCode::Conflict, error.to_string());
     }
+    if let RuntimeError::AccessRuleNotHeld = error {
+        return WireError::new(ErrorCode::InvalidParams, "access-rule-not-held");
+    }
     if let RuntimeError::CaptureFileHeld { path } = error {
         return WireError::new(ErrorCode::Conflict, format!("capture-file-held: {path}"));
     }

@@ -1905,22 +1905,18 @@ fn decide_on_store(
     seen: &SeenHold<'_>,
     self_writes: &dyn super::materialization::SelfWriteRecorder,
 ) -> Result<AccessRuleDecided, RuntimeError> {
-    // The folders above settle first: their own holds answer for them.
-    for above in folders_of(&rule_path(folder)) {
-        if above == folder {
-            continue;
-        }
-        match judge_one(store, order, above, &[], false, &[])? {
-            Verdict::Clear(_) => {}
-            Verdict::Waits => return Err(waits()),
-            Verdict::Held { reason } | Verdict::Refused { reason } => {
-                return Err(RuntimeError::AccessRuleHeld {
-                    folder: above.to_owned(),
-                    reason,
-                });
-            }
-        }
+    // Read under the capture gate, so no Version switch or other decision
+    // lands between this check and the change.
+    if !version_is_active(store, order)?
+        || store
+            .read_with(|conn| {
+                access_rule_holds::hold_in(conn, order.workspace_id, order.version_id, folder)
+            })?
+            .is_none()
+    {
+        return Err(RuntimeError::AccessRuleNotHeld);
     }
+    outer_rules_settle(store, order, folder)?;
     let disk = read_disk_rule(order.root, folder).map_err(|()| waits())?;
     // A rule gone and a rule spelled twice both record no bytes.
     let reason = if disk.is_empty() {
@@ -1976,6 +1972,111 @@ fn decide_on_store(
     }
     release_hold(store, order, folder)?;
     Ok(decided)
+}
+
+fn version_is_active(store: &mut EngineStore, order: &Order<'_>) -> Result<bool, RuntimeError> {
+    Ok(dohc_engine_domain::VersionedTextStore::new(store)
+        .get_active_version(order.workspace_id)?
+        .version_id
+        == order.version_id)
+}
+
+/// The folders above `folder` settle first: their own holds answer for them.
+fn outer_rules_settle(
+    store: &mut EngineStore,
+    order: &Order<'_>,
+    folder: &str,
+) -> Result<(), RuntimeError> {
+    for above in folders_of(&rule_path(folder)) {
+        if above == folder {
+            continue;
+        }
+        match judge_one(store, order, above, &[], false, &[])? {
+            Verdict::Clear(_) => {}
+            Verdict::Waits => return Err(waits()),
+            Verdict::Held { reason } | Verdict::Refused { reason } => {
+                return Err(RuntimeError::AccessRuleHeld {
+                    folder: above.to_owned(),
+                    reason,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Put back the rule a decision replaced, if the folder's rule is still the
+/// one the decision left, on disk and in the store. As a change the owner
+/// makes through dohc, it commits as written.
+fn undo_on_store(
+    store: &mut EngineStore,
+    order: &Order<'_>,
+    folder: &str,
+    undo: &AccessRuleUndo,
+    self_writes: &dyn super::materialization::SelfWriteRecorder,
+) -> Result<(), RuntimeError> {
+    if !is_access_rule_path(&undo.path) || access_rule_folder(&undo.path) != folder {
+        return Err(RuntimeError::Domain(DomainError::InvalidInput {
+            reason: "an access rule undo names a file that is not the folder's rule",
+        }));
+    }
+    let changed = || RuntimeError::AccessRuleChanged {
+        folder: folder.to_owned(),
+    };
+    // A Version switched since holds other rules on disk.
+    if !version_is_active(store, order)? {
+        return Err(changed());
+    }
+    outer_rules_settle(store, order, folder)?;
+    // A hold here is a rule changed outside dohc since: its notice answers.
+    if store
+        .read_with(|conn| {
+            access_rule_holds::hold_in(conn, order.workspace_id, order.version_id, folder)
+        })?
+        .is_some()
+    {
+        return Err(changed());
+    }
+    let disk = read_disk_rule(order.root, folder).map_err(|()| waits())?;
+    let committed = store
+        .read_with(|conn| committed_rule(conn, order.workspace_id, order.version_id, folder))?;
+    let left = match &undo.expected_sha256 {
+        None => disk.is_empty(),
+        Some(sha256) => {
+            disk.len() == 1
+                && disk
+                    .get(&undo.path)
+                    .is_some_and(|bytes| dohc_engine_storage::hex_sha256(bytes) == *sha256)
+        }
+    };
+    if !left || !rule_changes(committed.as_ref(), &disk).is_empty() {
+        return Err(changed());
+    }
+    let present = disk.get(&undo.path).map(Vec::as_slice);
+    match (&undo.text, &undo.expected_sha256) {
+        (Some(text), _) => {
+            let bytes = text.as_bytes();
+            place(
+                store,
+                order,
+                "access-rule-undo",
+                &undo.path,
+                &dohc_engine_storage::hex_sha256(bytes),
+                Some(bytes),
+                present,
+                self_writes,
+            )?;
+        }
+        (None, Some(sha256)) => remove_checked(order, &undo.path, sha256)?,
+        (None, None) => return Ok(()),
+    }
+    let disk = read_disk_rule(order.root, folder).map_err(|()| waits())?;
+    commit_rule_changes(
+        store,
+        order,
+        folder,
+        rule_changes(committed.as_ref(), &disk),
+    )
 }
 
 /// Keep the rule from outside dohc at `path` as a kept copy before Restore
@@ -2069,8 +2170,38 @@ fn place_rule(
     disk: Option<&[u8]>,
     self_writes: &dyn super::materialization::SelfWriteRecorder,
 ) -> Result<(), RuntimeError> {
+    // The materializer replaces only bytes the store holds. The rule it
+    // displaces stays as a kept copy the owner can save.
+    if let Some(bytes) = disk {
+        keep_outside_rule(store, order, path, bytes)?;
+    }
+    place(
+        store,
+        order,
+        "access-rule-restore",
+        path,
+        content_sha256,
+        None,
+        disk,
+        self_writes,
+    )
+}
+
+/// Place `content_sha256` at `path` over the judged bytes `disk`, adding
+/// `content` to the store first when it may not hold those bytes yet.
+#[allow(clippy::too_many_arguments)]
+fn place(
+    store: &mut EngineStore,
+    order: &Order<'_>,
+    job: &str,
+    path: &str,
+    content_sha256: &str,
+    content: Option<&[u8]>,
+    disk: Option<&[u8]>,
+    self_writes: &dyn super::materialization::SelfWriteRecorder,
+) -> Result<(), RuntimeError> {
     let job_id = format!(
-        "access-rule-restore_{}_{}",
+        "{job}_{}_{}",
         dohc_engine_storage::hex_sha256(path.as_bytes()),
         order.now_ms
     );
@@ -2088,13 +2219,8 @@ fn place_rule(
         target_generation: order.now_ms,
         now_ms: order.now_ms,
     };
-    // The materializer replaces only bytes the store holds. The rule it
-    // displaces stays as a kept copy the owner can save.
-    if let Some(bytes) = disk {
-        keep_outside_rule(store, order, path, bytes)?;
-    }
     committed(store.write_with(order.faults, |tx| {
-        if let Some(bytes) = disk {
+        for bytes in disk.into_iter().chain(content) {
             dohc_engine_storage::put_binary_blob(tx, bytes)?;
         }
         dohc_engine_storage::enqueue_job(tx, &spec)
@@ -2120,16 +2246,35 @@ fn remove_rule(
     path: &str,
     judged_sha256: &str,
 ) -> Result<(), RuntimeError> {
-    let bytes = match read_publication_target(order.root, path) {
+    let Some(bytes) = read_judged(order, path, judged_sha256)? else {
+        return Ok(());
+    };
+    keep_outside_rule(store, order, path, &bytes)?;
+    remove_checked(order, path, judged_sha256)
+}
+
+/// The bytes at `path`, if they are the judged ones; `None` once it is gone.
+fn read_judged(
+    order: &Order<'_>,
+    path: &str,
+    judged_sha256: &str,
+) -> Result<Option<Vec<u8>>, RuntimeError> {
+    match read_publication_target(order.root, path) {
         Ok(PublicationTarget::Bytes(bytes))
             if dohc_engine_storage::hex_sha256(&bytes) == judged_sha256 =>
         {
-            bytes
+            Ok(Some(bytes))
         }
-        Ok(PublicationTarget::Absent) => return Ok(()),
-        _ => return Err(waits()),
-    };
-    keep_outside_rule(store, order, path, &bytes)?;
+        Ok(PublicationTarget::Absent) => Ok(None),
+        _ => Err(waits()),
+    }
+}
+
+/// Remove `path` if it still holds the judged bytes.
+fn remove_checked(order: &Order<'_>, path: &str, judged_sha256: &str) -> Result<(), RuntimeError> {
+    if read_judged(order, path, judged_sha256)?.is_none() {
+        return Ok(());
+    }
     match std::fs::remove_file(order.root.join(path)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
             Err(RuntimeError::Storage(StorageError::persist_public(error)))
@@ -2217,6 +2362,38 @@ impl ActorHandle {
                 },
                 self_writes.as_ref(),
             )
+        })
+        .await
+    }
+
+    /// Reverse a decision with the change it returned, if the folder's rule
+    /// is still the one the decision left. Otherwise it refuses with
+    /// [`RuntimeError::AccessRuleChanged`] and the rule stays.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn undo_access_rule(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        folder: String,
+        undo: AccessRuleUndo,
+        root: std::path::PathBuf,
+        self_writes: std::sync::Arc<dyn super::materialization::SelfWriteRecorder>,
+        now_ms: i64,
+        faults: std::sync::Arc<dyn FaultInjector>,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |store, _| {
+            begin_command();
+            let leases = LeaseRegistry::new();
+            let order = Order {
+                root: &root,
+                workspace_id: &workspace_id,
+                version_id: &version_id,
+                now_ms,
+                writer: Writer::Deliberate,
+                leases: &leases,
+                faults: faults.as_ref(),
+            };
+            undo_on_store(store, &order, &folder, &undo, self_writes.as_ref())
         })
         .await
     }
