@@ -32,7 +32,8 @@ export function WakeState({
 }) {
   const theme = useTheme();
   const lines = wakeLines(wakes);
-  if (lines.length === 0) return null;
+  // A failed read still says so, with Try again, when it has no line to keep.
+  if (lines.length === 0 && !failed) return null;
   return (
     <View style={styles.wakes}>
       {lines.map((line) => {

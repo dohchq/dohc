@@ -303,7 +303,8 @@ export const wakeLines = (wakes: readonly PhoneChatWake[]): readonly WakeLine[] 
 /** What a surface shows of its wakes, in order: each line and its note, then a failed read. Empty without a line. */
 export function wakeWords(wakes: readonly PhoneChatWake[], failed: boolean): readonly string[] {
   const lines = wakeLines(wakes);
-  if (lines.length === 0) return [];
+  // A failed read says so even with no line to keep, as when the first read failed.
+  if (lines.length === 0) return failed ? [chatWords.wakeReadFailed] : [];
   return [
     ...lines.flatMap((line) => (line.note ? [line.text, line.note] : [line.text])),
     ...(failed ? [chatWords.wakeReadFailed] : []),

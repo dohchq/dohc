@@ -908,10 +908,11 @@ function Conversation({
         )),
     [onShown],
   );
-  // Only a message the content read shows takes wakes, by its ID; one only this phone has never does.
+  // Only a message the content read shows takes wakes, by its ID; one only this phone has never does. Its lines stay
+  // while a read fails: the failure shows once for the conversation, below, not under every message.
   const wakesOf = (entry: Message) => {
     const own = entry.local === undefined ? wakes?.byMessage.get(entry.id) : undefined;
-    return own ? { wakes: own, wakesFailed: wakes?.failed ?? false, onRetryWakes: retryWakes } : {};
+    return own ? { wakes: own } : {};
   };
   const renderItem = (item: ConversationItem) =>
     item.type === "day" ? (
@@ -990,6 +991,11 @@ function Conversation({
       {kept ? (
         <View style={[styles.problem, { borderBottomColor: theme.line }]}>
           <ProblemLine text={kept.text} onRetry={kept.retry} />
+        </View>
+      ) : wakes?.failed ? (
+        // The agents' states couldn't be read: once for the conversation, with a Try again that only reads.
+        <View style={[styles.problem, { borderBottomColor: theme.line }]}>
+          <ProblemLine text={chatWords.wakeReadFailed} onRetry={retryWakes} />
         </View>
       ) : null}
       {items.length === 0 ? (

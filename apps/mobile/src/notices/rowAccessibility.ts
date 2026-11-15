@@ -58,7 +58,7 @@ const answerWakes = (notice: PhoneNotice) => {
 /** Try again on a failed read of the answer's wakes, while the row shows their last lines. */
 const wakeRetry = (notice: PhoneNotice) => {
   const wakes = notice.answer?.wakes;
-  return wakes?.failed && answerWakes(notice).length > 0 ? wakes.retry : undefined;
+  return wakes?.failed ? wakes.retry : undefined;
 };
 
 /** The press handler behind each action a row offers: its pill or icon, and its rotor action, share it. */

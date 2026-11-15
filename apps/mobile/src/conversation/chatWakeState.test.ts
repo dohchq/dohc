@@ -199,6 +199,28 @@ describe("createChatWakes", () => {
     expect(wakes.view("w1", THREAD)?.byMessage.get("m-1")).toEqual([wake(1)]);
   });
 
+  it("marks a first read that failed, and a failed wait after only a queued wake, with nothing to keep", async () => {
+    const first = setup();
+    first.server.on("POST", CONTEXT, "offline");
+    first.wakes.want("w1", THREAD, SHOWN);
+    await vi.waitFor(() => expect(first.wakes.view("w1", THREAD)?.failed).toBe(true));
+    expect(first.wakes.view("w1", THREAD)?.byMessage.size).toBe(0);
+    first.wakes.stop();
+
+    const queued = setup();
+    queued.server.on(
+      "POST",
+      CONTEXT,
+      context(thread("thread-1"), [wake(1, { state: "queued" })], "7"),
+    );
+    queued.server.on("GET", waitPath("7"), "offline");
+    queued.wakes.want("w1", THREAD, SHOWN);
+    await vi.waitFor(() => expect(queued.wakes.view("w1", THREAD)?.failed).toBe(true));
+    expect(wakeWords(queued.wakes.view("w1", THREAD)?.byMessage.get("m-1") ?? [], true)).toEqual([
+      "dohc could not read this agent's state.",
+    ]);
+  });
+
   it("aborts in the background, drops the late answer, and reads again on return", async () => {
     const { server, wakes, callsTo } = setup();
     const first = deferred<Answer>();
@@ -333,12 +355,17 @@ describe("wakeLine", () => {
     expect(JSON.stringify(lines)).not.toContain("Mention");
   });
 
-  it("adds a failed read only beside lines it shows", () => {
+  it("says a read failed, beside the lines it shows or alone when it has none", () => {
     expect(wakeWords([wake(1)], true)).toEqual([
       "Nova is waiting for a computer",
       "dohc could not read this agent's state.",
     ]);
-    expect(wakeWords([wake(1, { state: "queued" })], true)).toEqual([]);
+    // A first read that failed, or a wait that failed after only a queued wake: nothing to keep, the failure still says so.
+    expect(wakeWords([], true)).toEqual(["dohc could not read this agent's state."]);
+    expect(wakeWords([wake(1, { state: "queued" })], true)).toEqual([
+      "dohc could not read this agent's state.",
+    ]);
+    expect(wakeWords([wake(1, { state: "queued" })], false)).toEqual([]);
   });
 });
 

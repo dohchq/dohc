@@ -461,12 +461,13 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
             })
           : null;
         const chosenWakes = chosen === null ? undefined : wakeView?.byMessage.get(chosen);
+        // A failed read shows on the chosen answer even when no wake of it is known yet, with Try again.
         const withWakes =
-          view && asked && wakes && wakeView && chosenWakes
+          view && asked && wakes && wakeView && chosen !== null && (chosenWakes || wakeView.failed)
             ? {
                 ...view,
                 wakes: {
-                  wakes: chosenWakes,
+                  wakes: chosenWakes ?? [],
                   failed: wakeView.failed,
                   retry: () => wakes.refresh(asked.workspaceId),
                 },
