@@ -407,7 +407,7 @@ it.each(pairs)(
     ]).toEqual(ALL_ACCEPTED);
     await exchange(a, b, fromA, fromB);
     await expectKept(a, b, "from b");
-    expect(yDocToMarkdown(a.doc)).toContain("  \nfrom b  \nz\n");
+    expect(yDocToMarkdown(a.doc)).toContain("\\\nfrom b  \nz\n");
   },
 );
 

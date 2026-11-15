@@ -438,6 +438,113 @@ function expectSavedAsTheSameDocument(document: JSONContent): void {
   expect(serializeRichdocBody(parseRichdocMarkdown(saved))).toBe(saved);
 }
 
+// #4110: a hard break's two spaces on a line with nothing else read back as a
+// blank line, so a hard break that starts a line is written as a backslash.
+it("keeps a hard break that starts a line", () => {
+  const breakThen = (text: string): JSONContent => ({
+    type: "paragraph",
+    content: [{ type: "hardBreak" }, { type: "text", text }],
+  });
+  const document: JSONContent = {
+    type: "doc",
+    content: [
+      breakThen("after a leading break"),
+      {
+        type: "paragraph",
+        content: [
+          { type: "hardBreak" },
+          { type: "hardBreak" },
+          { type: "text", text: "after two" },
+        ],
+      },
+      {
+        type: "paragraph",
+        content: [
+          { type: "text", text: "a" },
+          { type: "hardBreak" },
+          { type: "hardBreak" },
+          { type: "text", text: "b" },
+        ],
+      },
+      {
+        type: "taskList",
+        content: [
+          {
+            type: "taskItem",
+            attrs: { checked: false },
+            content: [
+              { type: "paragraph", content: [{ type: "text", text: "first" }] },
+              breakThen(" in a task item"),
+            ],
+          },
+        ],
+      },
+      {
+        type: "paragraph",
+        content: [{ type: "hardBreak" }, { type: "text", text: " ", marks: [{ type: "code" }] }],
+      },
+    ],
+  };
+  expect(serializeRichdocBody(document)).toBe(
+    "\\\nafter a leading break\n\n\\\n\\\nafter two\n\na  \n\\\nb\n\n- [ ] first\n\n  \\\n   in a task item\n\n\\\n` `",
+  );
+  expectSavedAsTheSameDocument(document);
+});
+
+// A backslash before a blank line ends the paragraph and reads back as a
+// literal backslash.
+it.each([
+  ["another break", [{ type: "hardBreak" }, { type: "hardBreak" }]],
+  [
+    "more breaks",
+    [
+      { type: "text", text: "a" },
+      { type: "hardBreak" },
+      { type: "hardBreak" },
+      { type: "hardBreak" },
+    ],
+  ],
+  ["a space", [{ type: "hardBreak" }, { type: "text", text: " " }]],
+  [
+    "a line of a space and a break",
+    [
+      { type: "hardBreak" },
+      { type: "text", text: " " },
+      { type: "hardBreak" },
+      { type: "text", text: "x" },
+    ],
+  ],
+  [
+    "a break and a line of a space",
+    [
+      { type: "text", text: "a" },
+      { type: "hardBreak" },
+      { type: "hardBreak" },
+      { type: "text", text: " " },
+      { type: "hardBreak" },
+      { type: "text", text: "x" },
+    ],
+  ],
+  ["a line of a space in the text", [{ type: "hardBreak" }, { type: "text", text: " \nx" }]],
+  ["an ideographic space", [{ type: "hardBreak" }, { type: "text", text: "　" }]],
+  [
+    "a break and an em space",
+    [
+      { type: "text", text: "a" },
+      { type: "hardBreak" },
+      { type: "hardBreak" },
+      { type: "text", text: " " },
+    ],
+  ],
+] satisfies Array<[string, JSONContent[]]>)(
+  "writes no backslash for a hard break followed by %s",
+  (_name, content) => {
+    expect(
+      serializeRichdocBody({ type: "doc", content: [{ type: "paragraph", content }] }),
+    ).not.toContain("\\");
+  },
+);
+
 it.each([
   ["a backslash escape", "<b>\\*</b>"],
   ["a backslash line break", "<b>a\\\nb</b>"],

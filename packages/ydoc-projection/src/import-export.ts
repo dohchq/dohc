@@ -965,6 +965,8 @@ export function serializeRichdocBody(root: JSONContent): string {
     leadingWhitespaceSentinels.set(value, token);
     return token;
   };
+  const encodeBackslash = (): string =>
+    replaceCharacters("\\", characterSentinels, () => reserveToken("CHARACTER"), /\\/g);
   const encodeBlockEscape = (value: string): string => {
     const existing = blockEscapeSentinels.get(value);
     if (existing) return existing;
@@ -1041,6 +1043,8 @@ export function serializeRichdocBody(root: JSONContent): string {
           content,
           encodeLeadingWhitespace,
           encodeBlockEscape,
+          // A table cell writes a hard break as <br>, which needs no backslash.
+          insideTableCell ? undefined : encodeBackslash,
           definition,
         );
         if (
@@ -1283,6 +1287,7 @@ function escapeLeadingMarkdownBlockSyntax(
   content: JSONContent[],
   encodeLeadingWhitespace: (value: " " | "\t") => string,
   encodeBlockEscape: (value: string) => string,
+  encodeBackslash: (() => string) | undefined,
   definition: boolean,
 ): JSONContent[] {
   const output: JSONContent[] = [];
@@ -1292,9 +1297,13 @@ function escapeLeadingMarkdownBlockSyntax(
     encodeBlockEscape,
   );
   const preparedContent = escapeLeadingIndentedCode(escapedContent, encodeLeadingWhitespace);
+  // Every break in a run looks ahead to the same line, so keep the answer
+  // for the run rather than rescanning it at each break.
+  let lineAfterBreaks: boolean | undefined;
 
   for (let index = 0; index < preparedContent.length;) {
     const node = preparedContent[index];
+    if (node.type !== "hardBreak") lineAfterBreaks = undefined;
     if (typeof node.text === "string" && !node.marks?.length) {
       const run: JSONContent[] = [];
       while (
@@ -1318,11 +1327,46 @@ function escapeLeadingMarkdownBlockSyntax(
       continue;
     }
 
+    // A hard break's two spaces on a line with nothing else read back as a
+    // blank line, which ends the paragraph. A backslash keeps the break, but
+    // a backslash before a blank line ends the paragraph and is literal.
+    if (
+      encodeBackslash &&
+      node.type === "hardBreak" &&
+      lineStart &&
+      (lineAfterBreaks ??= showsLineAfter(preparedContent, index))
+    ) {
+      output.push({ type: "text", text: `${encodeBackslash()}\n` });
+      index += 1;
+      continue;
+    }
     output.push(node);
     lineStart = node.type === "hardBreak";
     index += 1;
   }
   return output;
+}
+
+// Whether the line after the hard break at `index` shows anything. Breaks that
+// follow it directly start lines of their own, which this answers for in turn.
+function showsLineAfter(content: JSONContent[], index: number): boolean {
+  let next = index + 1;
+  while (content[next]?.type === "hardBreak") next += 1;
+  let line = "";
+  for (; next < content.length && content[next].type !== "hardBreak"; next += 1) {
+    const node = content[next];
+    // A code span of blank space is written in backticks, so it shows.
+    if (typeof node.text !== "string" || node.marks?.some((mark) => mark.type === "code")) {
+      return true;
+    }
+    const lineEnd = node.text.indexOf("\n");
+    if (lineEnd !== -1) return /[^ \t]/u.test(line + node.text.slice(0, lineEnd));
+    line += node.text;
+  }
+  // Before another line, only spaces and tabs make it blank. On the paragraph's
+  // last line any whitespace does, as a backslash followed only by whitespace
+  // to the end is literal.
+  return next < content.length ? /[^ \t]/u.test(line) : /\S/u.test(line);
 }
 
 // Whether a paragraph is plain text that marked reads back as the one link

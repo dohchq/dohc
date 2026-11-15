@@ -7139,8 +7139,14 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                     }
                 } else {
                     let rendered = render_inline(children, false, true, table_cell)?;
+                    // The TypeScript writer escapes a leading space of text,
+                    // not a hard break's two spaces.
                     if matches!(context.parent_tag, "doc" | "listItem" | "taskItem")
                         && rendered.starts_with(' ')
+                        && !matches!(
+                            children.first(),
+                            Some(MarkdownNode::Element { tag, .. }) if tag == "hardBreak"
+                        )
                     {
                         let mut output = ProjectionBuffer::new();
                         output.push_str("&#32;")?;
@@ -7780,7 +7786,9 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
                 let rendered = render_table_cell_block(child, tag, attrs, children, index)?;
                 raw.push_str(&rendered)?;
             }
-            let text = prepare_rendered_table_cell(&collapse_js_whitespace(&raw.into_string())?)?;
+            let text = collapse_js_whitespace(&table_cell_line_breaks(
+                &prepare_rendered_table_cell(&raw.into_string())?,
+            ))?;
             cell_text_bytes = checked_projection_len(cell_text_bytes, text.len())?;
             rendered_cells.push(TableCell {
                 text,
@@ -7918,6 +7926,28 @@ fn prepare_rendered_table_cell(markdown: &str) -> ProjectionResult<String> {
         };
     }
     Ok(output.into_string())
+}
+
+/// Tiptap's table renderer writes each line break in a cell, a hard break or a
+/// block separator, as `<br>` without the spaces or tabs around it.
+fn table_cell_line_breaks(markdown: &str) -> String {
+    let lines = markdown.replace(GFM_TABLE_CELL_BLOCK_SEPARATOR, "\n");
+    let mut output = String::with_capacity(markdown.len());
+    let mut lines = lines.split('\n').peekable();
+    let mut first = true;
+    while let Some(mut line) = lines.next() {
+        if !first {
+            output.push_str(GFM_TABLE_CELL_BLOCK_SEPARATOR);
+            line = line.trim_start_matches([' ', '\t']);
+        }
+        if lines.peek().is_some() {
+            line = line.strip_suffix('\r').unwrap_or(line);
+            line = line.trim_end_matches([' ', '\t']);
+        }
+        output.push_str(line);
+        first = false;
+    }
+    output
 }
 
 fn utf16_len(value: &str) -> usize {
@@ -8619,10 +8649,49 @@ fn render_inline(
         }
     }
 
+    // Whether the line after the hard break at `index` shows anything. Breaks
+    // that follow it directly start lines of their own, which this answers for
+    // in turn. A code span is already written in backticks here, so it shows.
+    fn shows_line_after(parts: &[InlinePart<'_>], index: usize) -> bool {
+        let is_break = |part: &InlinePart<'_>| matches!(part, InlinePart::Node(MarkdownNode::Element { tag, .. }) if tag == "hardBreak");
+        let rest = &parts[index + 1..];
+        let first_line = rest
+            .iter()
+            .position(|part| !is_break(part))
+            .unwrap_or(rest.len());
+        // Before another line, only spaces and tabs make it blank. On the
+        // paragraph's last line any whitespace does, as a backslash followed
+        // only by whitespace to the end is literal.
+        let mut shows_before_line = false;
+        let mut shows_before_end = false;
+        for part in &rest[first_line..] {
+            let InlinePart::Text { run, .. } = part else {
+                return !is_break(part) || shows_before_line;
+            };
+            let (line, ends) = match run.text.split_once('\n') {
+                Some((line, _)) => (line, true),
+                None => (run.text.as_str(), false),
+            };
+            shows_before_line |= line.chars().any(|c| c != ' ' && c != '\t');
+            shows_before_end |= line.chars().any(|c| !is_js_whitespace(c));
+            if ends {
+                return shows_before_line;
+            }
+        }
+        shows_before_end
+    }
+
     let mut rendered_nodes = BTreeMap::new();
     let mut starts_line = true;
+    // Every break in a run looks ahead to the same line, so keep the answer
+    // for the run rather than rescanning it at each break.
+    let mut line_after_breaks = None;
     let mut part_index = 0usize;
     while escape_block_syntax && part_index < parts.len() {
+        if !matches!(&parts[part_index], InlinePart::Node(MarkdownNode::Element { tag, .. }) if tag == "hardBreak")
+        {
+            line_after_breaks = None;
+        }
         let is_plain_text = matches!(
             &parts[part_index],
             InlinePart::Text {
@@ -8672,6 +8741,20 @@ fn render_inline(
         }
 
         starts_line = match &parts[part_index] {
+            // A hard break's two spaces on a line with nothing else read back
+            // as a blank line, which ends the paragraph. A backslash keeps the
+            // break, but a backslash before a blank line ends the paragraph
+            // and is literal. A table cell writes it as <br>.
+            InlinePart::Node(MarkdownNode::Element { tag, .. })
+                if tag == "hardBreak"
+                    && starts_line
+                    && !table_cell
+                    && *line_after_breaks
+                        .get_or_insert_with(|| shows_line_after(&parts, part_index)) =>
+            {
+                rendered_nodes.insert(part_index, "\\\n".to_string());
+                true
+            }
             InlinePart::Node(node) => {
                 let rendered = render_node(
                     node,
@@ -10678,7 +10761,7 @@ mod projection_tests {
             "a &copy; b\n",
             "1. one\n7. two\n",
             "1. a\n3. b\n",
-            "| a |\n|---|\n| x &lt;br&gt; y |\n",
+            "| a |\n|---|\n| x&lt;br&gt;y |\n",
             // A tag without attributes and another name stays text.
             "a <x> b </x-y>\n",
             // Its content is raw HTML to the importer, which the projector
