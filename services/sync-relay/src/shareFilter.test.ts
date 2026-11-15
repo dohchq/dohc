@@ -2048,6 +2048,41 @@ describe("a new page under Edit", () => {
     ).toEqual(REFUSED);
   });
 
+  it("refuses a member's change to a rule file or a copy of one, and serves the rule only to an admin", () => {
+    const change = (afterPath: string) => ({
+      basedOnPath: null,
+      basedOnBlobSha256: null,
+      operation: "write",
+      afterPath,
+      afterBlobSha256: sha(5),
+      afterContentKind: "text",
+      afterByteLength: 14,
+      recordedAtMs: 5,
+    });
+    for (const path of ["docs/access.yaml", "docs/ACCESS.YAML", "docs/access.yaml~"]) {
+      expect(filterProposedChangeForShare(member, change(path)).allowed, path).toBe(false);
+    }
+    expect(decide(member, [page("docs/access.yaml.md")])).toEqual(REFUSED);
+    const ruleWrite = JSON.stringify({
+      momentId: "m-rule",
+      versionId: "main",
+      objectId: "o-rule",
+      path: "docs/access.yaml",
+      recordedAtMs: 1,
+      operation: "write",
+      payloadBeforeBlobSha256: null,
+      payloadBeforePath: null,
+      payloadAfterBlobSha256: sha(6),
+      payloadAfterPath: "docs/access.yaml",
+      metadata: { origin: "user" },
+      beforePresent: "null",
+    });
+    expect(filterOpForShare(member, "moment.append", ruleWrite).allowed).toBe(false);
+    expect(filterOpForShare({ ...member, role: "admin" }, "moment.append", ruleWrite).allowed).toBe(
+      true,
+    );
+  });
+
   it("refuses a member's new Collection, which would create a folder, and takes an admin's", () => {
     const schema = page("docs/Packing/collection.yaml", { afterBlobSha256: sha(2) });
     expect(decide(member, [schema])).toEqual(REFUSED);
