@@ -471,6 +471,7 @@ it.each([true])(
 it.each([
   ["scope", "record-namespace"],
   ["authors", "client-authors"],
+  ["length", "markdown-length"],
 ])("consumes forged %s proof without changing current content", async (field, check) => {
   const f = registered({ deployment: true });
   try {
@@ -482,6 +483,8 @@ it.each([
       };
     if (field === "scope") reference.record.relayDatabaseNamespace = "other";
     if (field === "authors") payload.authors = [{ kind: "agent", agentId: "forged" }];
+    if (field === "length")
+      payload.payloadAfterByteLength = Number(payload.payloadAfterByteLength) + 1;
     // Each forgery names its own settlement, so only the proof it changes refuses it.
     reference.record.settlementId = nativeSettlementId(reference.record);
     reference.recordDigest = settlementRecordDigest(reference.record);
@@ -776,7 +779,10 @@ it("accepts an owner engine's own spelling of the proven state and continues fro
       false,
       engine,
     );
-    expect(first.markdownSha).not.toBe(f.input.evidence.projectedMarkdownSha256);
+    const cut = f.raw
+      .prepare("SELECT markdown_sha256 FROM sync_relay_live_settlement_cuts WHERE journal_cursor=?")
+      .get(first.receipt.journalCursor);
+    expect(cut!.markdown_sha256).not.toBe(first.markdownSha);
     await prepare(f, [first.op]);
     expect(first.op).toMatchObject({ settlementAdmission: { status: "accepted" } });
     expect(append(f, [first.op]).inserted).toBe(1);

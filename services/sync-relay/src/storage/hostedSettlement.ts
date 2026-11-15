@@ -935,6 +935,13 @@ export async function prepareHostedSettlements(
             payload.payloadBeforeContentKind === "text" &&
             payload.payloadAfterBlobSha256 === record.markdownDigest, "moment-payload"),
       );
+      // The declared length must be the owner's own blob's, which activation later reads.
+      const after = storage.db
+        .prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?")
+        .get(input.workspaceId, proved.markdown);
+      if (!after) throw relayError("blob_missing");
+      require(payload.payloadAfterByteLength ===
+        integer(after.byte_length, "markdown-length"), "markdown-length");
       const p: Prepared = { ...proved, before: String(payload.payloadBeforeBlobSha256) };
       const document = p.binding;
       const key = JSON.stringify(documentParams(document)),
