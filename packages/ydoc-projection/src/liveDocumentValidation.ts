@@ -940,7 +940,8 @@ export function liveEditFitsNote(doc: Y.Doc, update: Uint8Array): boolean {
           near?.content instanceof Y.ContentType
             ? { parent: near.content.type, sub: item.parentSub }
             : null;
-      else if (near instanceof Y.Item && !noted(near.id)) {
+      // By the id it names: an edit's struct can start in what the note holds and run past it.
+      else if (near instanceof Y.Item && neighbour && !noted(neighbour)) {
         item = near;
         continue;
       } else {

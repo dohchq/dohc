@@ -1229,4 +1229,23 @@ describe("live edit format guard", () => {
     expect((Y.getItem(placed.store, Y.createID(9, 0)) as Y.Item).parent).toBeInstanceOf(Y.XmlText);
     expect(liveEditFitsNote(note, dropped)).toBe(false);
   });
+
+  it("takes an edit that runs on from text the note already holds", () => {
+    const note = markdownToYDoc(markdown);
+    const page = new Y.Doc();
+    page.clientID = 9;
+    Y.applyUpdate(page, Y.encodeStateAsUpdate(note));
+    const before = Y.encodeStateVector(page);
+    words(page).insert(0, "abc");
+    Y.applyUpdate(note, Y.encodeStateAsUpdate(page, before));
+    // Sent again from before, the edit holds "abcdef" in one struct the note holds the start of,
+    // and bold that ends after its last letter.
+    words(page).insert(3, "def");
+    words(page).format(0, 6, { bold: {} });
+    const edit = Y.encodeStateAsUpdate(page, before);
+    expect(
+      Y.decodeUpdate(edit).structs.some((struct) => struct.id.client === 9 && struct.length === 6),
+    ).toBe(true);
+    expect(liveEditFitsNote(note, edit)).toBe(true);
+  });
 });
