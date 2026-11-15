@@ -40,7 +40,14 @@ import {
 } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { Composer, ComposerProblem, outboxProblem } from "./Composer";
-import { answerPlace, answerRecords, answerWrite, decisionOf, type Shown } from "./decisionAnswers";
+import {
+  answerPlace,
+  answerRecords,
+  answerTarget,
+  answerWrite,
+  decisionOf,
+  type Shown,
+} from "./decisionAnswers";
 import {
   blockedBy,
   chatWrite,
@@ -54,7 +61,7 @@ import { MessageRow } from "./MessageRow";
 import { streamRows, threadRows } from "./outboxMessages";
 import { confirmedReactions, reactionRecords, withReactions } from "./reactions";
 import { markShown, markShownPosts, shownMessages } from "./readMarks";
-import type { ReplyTo } from "./ReplyContext";
+import { UNSHOWN_QUESTION, type ReplyTo } from "./ReplyContext";
 import {
   conversationItems,
   localMessage,
@@ -85,7 +92,6 @@ export function ServerConversation() {
     message,
     reply,
     answer,
-    post,
   } = useLocalSearchParams<{
     id: string;
     name?: string;
@@ -96,8 +102,6 @@ export function ServerConversation() {
     reply?: string;
     /** A thread opened to answer one of its messages' questions. */
     answer?: string;
-    /** "1": a post's thread, opened from its stream, whose answers go at its top. */
-    post?: string;
   }>();
   const { data } = useAccount();
   if (workspace !== undefined && data?.workspaceId !== workspace) return <ElsewhereChat />;
@@ -113,7 +117,6 @@ export function ServerConversation() {
         messageId={message ?? null}
         replyId={reply ?? null}
         answerId={answer ?? null}
-        post={post === "1"}
       />
     ) : (
       <Thread threadId={id} messageId={message ?? null} />
@@ -125,10 +128,7 @@ export function ServerConversation() {
   );
 }
 
-/**
- * Opens a thread in the open workspace, at a message, to reply to it or answer its question when one is named. `post`
- * says it's a post's thread.
- */
+/** Opens a thread in the open workspace, at a message, to reply to it or answer its question when one is named. */
 function openThread(
   router: ReturnType<typeof useRouter>,
   workspaceId: string | null,
@@ -137,7 +137,6 @@ function openThread(
     readonly message?: string;
     readonly reply?: string;
     readonly answer?: string;
-    readonly post?: "1";
   } = {},
 ) {
   router.push({
@@ -354,7 +353,7 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
           workspaceId,
           question.threadId,
           posts.has(question.id)
-            ? { post: "1", answer: question.id }
+            ? { answer: question.id }
             : { message: question.id, answer: question.id },
         );
       },
@@ -386,7 +385,7 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
         router,
         workspaceId,
         entry.threadId,
-        post ? { post: "1" } : { message: entry.id, reply: entry.id },
+        post ? {} : { message: entry.id, reply: entry.id },
       );
     },
     [router, workspaceId],
@@ -467,14 +466,11 @@ function WritableThread({
   messageId,
   replyId,
   answerId,
-  post,
 }: {
   threadId: string;
   messageId: string | null;
   replyId: string | null;
   answerId: string | null;
-  /** A post's thread, whose answers go at its top. */
-  post: boolean;
 }) {
   const {
     state,
@@ -486,13 +482,22 @@ function WritableThread({
     you,
     rowScope,
     message,
-    problem,
+    problem: outboxProblemNow,
     answersByQuestion,
     chooser,
   } = useScreenWrites(threadId);
+  const problemText = useProblemText();
   const view = useMemo(() => views.thread(threadId), [threadId]);
   const value = useView(view).state.value;
   const thread = value?.kind === "thread" ? value : null;
+  // A post's thread takes its answers at its top. Which it is comes from the lane the chat list names for it, however
+  // the thread was opened. One no chat lists, as a file's, is no post. Null until the list is read.
+  const { state: chatsState, retry: retryChats } = useView(views.chats);
+  const chats = chatsState.value;
+  const post = useMemo(
+    () => (chats ? chats.some((group) => group.postThreadIds?.includes(threadId) === true) : null),
+    [chats, threadId],
+  );
   // The message a reply goes under, or the question it answers, never both.
   const [chosen, setChosen] = useState<string | null>(answerId === null ? replyId : null);
   const [answering, setAnswering] = useState<string | null>(answerId);
@@ -503,20 +508,39 @@ function WritableThread({
       ? { id: entry.id, to: { name: entry.authorName, excerpt: entry.body } satisfies ReplyTo }
       : null;
   }, [chosen, thread]);
-  // A question is answered only while the read shows it taking an answer. Once it doesn't, the composer names nothing.
+  // While Answer names a question, the text only ever answers it. Once a read shows the question answered, or no longer
+  // shows it, the context and text stay with Send off, until the person cancels Answer or chooses another message.
   const question = useMemo(() => {
-    const entry =
-      answering === null ? undefined : thread?.messages.find((each) => each.id === answering);
-    if (!entry) return null;
-    const decision = decisionOf(entry, answersByQuestion?.get(entry.id));
-    if (decision?.state.kind !== "open" || decision.options.length > 0) return null;
-    const byId = byIdOf(thread?.messages ?? []);
+    if (answering === null) return null;
+    const messages = thread?.messages ?? [];
+    const entry = messages.find((each) => each.id === answering);
+    const to: ReplyTo = entry
+      ? { name: entry.authorName, excerpt: entry.body, answers: true }
+      : UNSHOWN_QUESTION;
     return {
-      id: entry.id,
-      place: answerPlace(entry, parentsIn(byId), { post, poll: false }),
-      to: { name: entry.authorName, excerpt: entry.body, answers: true } satisfies ReplyTo,
+      id: answering,
+      target: answerTarget(
+        entry,
+        answersByQuestion?.get(answering),
+        parentsIn(byIdOf(messages)),
+        post,
+      ),
+      to,
     };
   }, [answering, thread, answersByQuestion, post]);
+  // A failed read of the chat list shows in the composer while an answer waits on it, with its cause and Try again.
+  // The outbox's own problem comes first.
+  const problem = useMemo(
+    () =>
+      outboxProblemNow ??
+      (question?.target.kind === "waiting" && chatsState.problem
+        ? {
+            text: `${chatWords.lanesFailed} ${problemText(chatsState.problem)}`,
+            retry: retryChats,
+          }
+        : null),
+    [outboxProblemNow, question, chatsState.problem, problemText, retryChats],
+  );
   const local = useCallback(
     (shown: ReadonlySet<string>) =>
       state && rowScope
@@ -529,13 +553,14 @@ function WritableThread({
     setChosen(entry.id);
     setAnswering(null);
   }, []);
+  // A poll's choice waits, as an answer does, until the chat list says whether this is a post's thread.
   const answers = useCallback(
     (byId: ReadonlyMap<string, ChatMessage>): AnswerActions => ({
-      blocked: actions.blocked,
+      blocked: actions.blocked || post === null,
       problems: chooser.problems,
       choose: (entry, option) => {
         const asked = byId.get(entry.id);
-        if (!asked) return;
+        if (!asked || post === null) return;
         const how = { post, poll: true };
         chooser.choose(answerPlace(asked, parentsIn(byId), how), asked.id, option);
       },
@@ -549,8 +574,11 @@ function WritableThread({
   const submit = useCallback(
     async (_kind: "send" | "post" | "reply", body: string) => {
       if (workspaceId === null) return { kind: "blocked" as const };
+      // Answering never falls back to an ordinary reply: a closed or waiting answer sends nothing.
       if (question) {
-        const write = answerWrite(question.place, question.id, body);
+        const { target } = question;
+        const write =
+          target.kind === "answer" ? answerWrite(target.place, question.id, body) : null;
         if (!write) return { kind: "blocked" as const };
         const outcome = await writes.submit(workspaceId, write);
         if (outcome.kind === "kept" || outcome.kind === "withheld")
@@ -579,10 +607,11 @@ function WritableThread({
       <Composer
         placeholder={chatWords.reply}
         lanes={REPLY_LANES}
-        blocked={blocked}
+        blocked={blocked ?? (question?.target.kind === "waiting" ? "loading" : null)}
         problem={problem}
         replies
         replyTo={question?.to ?? parent?.to ?? null}
+        closed={question?.target.kind === "closed" ? chatWords.answerClosed : null}
         onCancelReply={cancelReply}
         onSubmit={submit}
         onLayoutHeight={onLayoutHeight}
@@ -811,7 +840,7 @@ function Conversation({
   // Only a post shows its replies' link.
   const openReplies = useCallback(
     (entry: Message) => {
-      if (entry.threadId) openThread(router, workspaceId, entry.threadId, { post: "1" });
+      if (entry.threadId) openThread(router, workspaceId, entry.threadId);
     },
     [router, workspaceId],
   );

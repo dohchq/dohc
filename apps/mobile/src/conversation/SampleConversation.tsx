@@ -15,11 +15,17 @@ import {
   type ReplyTarget,
   type SubmitOutcome,
 } from "./conversationWrites";
-import { answerPlace, answerRecords, answerWrite, decisionOf } from "./decisionAnswers";
+import {
+  answerPlace,
+  answerRecords,
+  answerTarget,
+  answerWrite,
+  decisionOf,
+} from "./decisionAnswers";
 import { MessageRow } from "./MessageRow";
 import { streamRows, threadRows } from "./outboxMessages";
 import { reactionRecords, withReactions } from "./reactions";
-import type { ReplyTo } from "./ReplyContext";
+import { UNSHOWN_QUESTION, type ReplyTo } from "./ReplyContext";
 import {
   createSampleOutbox,
   sampleAsks,
@@ -132,18 +138,21 @@ export function SampleConversation() {
     },
     [answersByQuestion, messages],
   );
+  // While Answer names a question, the text only ever answers it, as in a live thread: once the question no longer takes
+  // an answer, Send stays off until the person cancels Answer or chooses another message.
   const question = useMemo(() => {
-    const message = answering === null ? undefined : messages.find((each) => each.id === answering);
+    if (answering === null) return null;
+    const message = messages.find((each) => each.id === answering);
     const ask = message && sampleAsks.get(message.id);
-    const decision = message && decisionFor(message);
-    if (!message || !ask || decision?.state.kind !== "open" || decision.options.length > 0)
-      return null;
+    const to: ReplyTo = message
+      ? { name: message.author.name, excerpt: excerptOf(message), answers: true }
+      : UNSHOWN_QUESTION;
     return {
-      id: ask.id,
-      place: answerPlace(ask, parentOf, { post: false, poll: false }),
-      to: { name: message.author.name, excerpt: excerptOf(message), answers: true },
+      id: answering,
+      target: answerTarget(ask, answersByQuestion?.get(answering), parentOf, false),
+      to,
     };
-  }, [answering, messages, decisionFor, parentOf]);
+  }, [answering, messages, answersByQuestion, parentOf]);
 
   const items = useMemo<Item[]>(() => {
     const byMessage = state ? reactionRecords(state, sampleScope) : null;
@@ -261,7 +270,8 @@ export function SampleConversation() {
     postTitle: string,
   ): Promise<SubmitOutcome> => {
     if (kind === "reply" && question) {
-      const write = answerWrite(question.place, question.id, body);
+      const { target } = question;
+      const write = target.kind === "answer" ? answerWrite(target.place, question.id, body) : null;
       if (!write) return { kind: "blocked" };
       const outcome = await writes.submit(sampleScope.workspaceId, write);
       if (outcome.kind === "kept" || outcome.kind === "withheld")
@@ -371,6 +381,7 @@ export function SampleConversation() {
         problem={null}
         replies={inThread || chosen !== null}
         replyTo={question?.to ?? chosen?.to ?? null}
+        closed={question?.target.kind === "closed" ? chatWords.answerClosed : null}
         onCancelReply={() => {
           setChosen(null);
           setAnswering(null);

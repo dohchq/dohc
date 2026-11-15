@@ -16,6 +16,7 @@ import {
 import {
   answerPlace,
   answerRecords,
+  answerTarget,
   answerWrite,
   decisionOf,
   type Asked,
@@ -273,13 +274,35 @@ describe("a decision's card", () => {
     expect(decisionOf(poll(), [saved])?.state).toEqual({ kind: "answered", chosen: "Porto" });
   });
 
-  it("lets the server's state win once a read shows the question answered", () => {
+  it("keeps this phone's unfinished answer pending when a read shows the question answered", () => {
     const resolved = poll({
       decisionState: "resolved",
       chosenOption: "Lisbon",
       resolvedByMessageId: "m-9",
     });
-    expect(decisionOf(resolved, [answer({ stage: "sending" }, "Porto")])?.state).toEqual({
+    for (const stage of ["queued", "sending", "stalled"] as const)
+      expect(decisionOf(resolved, [answer({ stage }, "Porto")])?.state).toEqual({
+        kind: "answering",
+        chosen: "Porto",
+      });
+  });
+
+  it("lets the server's state win once this phone's answer settles", () => {
+    const resolved = poll({
+      decisionState: "resolved",
+      chosenOption: "Lisbon",
+      resolvedByMessageId: "m-9",
+    });
+    const saved = answer(
+      {
+        stage: "saved",
+        result: { kind: "saved", threadId: "thread-lane", messageId: "message-mine" },
+      },
+      "Porto",
+    );
+    expect(decisionOf(resolved, [saved])?.state).toEqual({ kind: "answered", chosen: "Lisbon" });
+    // A withheld answer isn't on its way, so the server's state wins over it too.
+    expect(decisionOf(resolved, [answer({ withheld: true }, "Porto")])?.state).toEqual({
       kind: "answered",
       chosen: "Lisbon",
     });
@@ -358,7 +381,7 @@ describe("a decision's card", () => {
 });
 
 describe("an answer in a stream", () => {
-  it("shows under the stream until the outbox saves it", () => {
+  it("shows under the stream, saved or not, until a read shows its reply", () => {
     const waiting = answer({ operationId: "op-wait", messageId: "message-wait" });
     const saved = answer({
       operationId: "op-saved",
@@ -368,8 +391,49 @@ describe("an answer in a stream", () => {
     });
     const state: OutboxState = { ...READY, records: [waiting, saved] };
     const rows = streamRows(state, SCOPE, "group-1", new Set(), new Set(["q-1"]));
-    expect(rows.map((row) => row.messageId)).toEqual(["message-wait"]);
+    expect(rows.map((row) => row.messageId)).toEqual(["message-wait", "message-saved"]);
+    expect(rows[1]?.mark.state).toEqual({ kind: "saved" });
+    // A read that shows the reply takes its row, before the outbox hands the record off.
+    expect(
+      streamRows(state, SCOPE, "group-1", new Set(["message-saved"]), new Set(["q-1"])).map(
+        (row) => row.messageId,
+      ),
+    ).toEqual(["message-wait"]);
     expect(streamRows(state, SCOPE, "group-1", new Set())).toEqual([]);
+  });
+});
+
+describe("a composer answering a question", () => {
+  const top = () => undefined;
+
+  it("answers an open question at its place", () => {
+    expect(answerTarget(question(), [], top, false)).toEqual({
+      kind: "answer",
+      place: { threadId: "thread-lane", parentMessageId: "q-1" },
+    });
+    expect(answerTarget(question(), [], top, true)).toEqual({
+      kind: "answer",
+      place: { threadId: "thread-lane", parentMessageId: null },
+    });
+  });
+
+  it("closes, never falling back to a reply, once a read shows the question answered or gone", () => {
+    const resolved = question({ decisionState: "resolved", resolvedByMessageId: "m-9" });
+    for (const post of [false, true, null]) {
+      expect(answerTarget(resolved, [], top, post)).toEqual({ kind: "closed" });
+      expect(answerTarget(undefined, [], top, post)).toEqual({ kind: "closed" });
+    }
+    // This phone's own answer is on its way, or withheld: the question takes no other.
+    expect(answerTarget(question(), [answer()], top, false)).toEqual({ kind: "closed" });
+    expect(answerTarget(question(), [answer({ withheld: true })], top, false)).toEqual({
+      kind: "closed",
+    });
+    // A poll takes a choice, never a free answer.
+    expect(answerTarget(poll(), [], top, false)).toEqual({ kind: "closed" });
+  });
+
+  it("waits while it isn't known whether the thread is a post's", () => {
+    expect(answerTarget(question(), [], top, null)).toEqual({ kind: "waiting" });
   });
 });
 

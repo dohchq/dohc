@@ -159,6 +159,11 @@ export const chatWords = {
   alreadyAnswered: "Already answered",
   /** The phone's: a read shows this phone's reply, and the server took another answer. */
   answerLost: "Sent your reply. Another answer was chosen.",
+  /**
+   * The phone's: a read since Answer shows the question answered or no longer shows it. The text stays, and Cancel reply
+   * keeps it as an ordinary reply.
+   */
+  answerClosed: "dohc can't send this answer, because the question was answered or removed.",
 } as const;
 
 // A notice's time, as the desktop's Notices show it (apps/desktop/src/renderer/relativeTime.ts, which can move here).

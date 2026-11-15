@@ -87,6 +87,8 @@ export interface ChatGroup {
   readonly kind: ChatGroupKind;
   /** The threads in it, so a change to one can find the chat it's in. */
   readonly threadIds: readonly string[];
+  /** The threads in its posts lane, each a post's own, whose answers go at its top. Absent when it has none. */
+  readonly postThreadIds?: readonly string[];
   /** The account's unread messages across its threads. */
   readonly unreadCount: number;
   readonly unreadThreadIds: readonly string[];
@@ -112,19 +114,25 @@ export function readChats(
           !isGroupKind(group.kind)
         )
           return null;
+        // A thread names its lane, or none, as an older server's does.
         const threads = each(group.threads, (thread) =>
-          isFields(thread) && text(thread.id, 256) && count(thread.unreadCount)
-            ? { id: thread.id, unreadCount: thread.unreadCount }
+          isFields(thread) &&
+          text(thread.id, 256) &&
+          count(thread.unreadCount) &&
+          (thread.lane === undefined || isLane(thread.lane))
+            ? { id: thread.id, unreadCount: thread.unreadCount, post: thread.lane === "posts" }
             : null,
         );
         if (threads === null) return null;
         const unreadCount = threads.reduce((sum, thread) => sum + thread.unreadCount, 0);
+        const postThreadIds = threads.filter((thread) => thread.post).map((thread) => thread.id);
         return Number.isSafeInteger(unreadCount)
           ? {
               id: group.id,
               name: group.name,
               kind: group.kind,
               threadIds: threads.map((thread) => thread.id),
+              ...(postThreadIds.length > 0 ? { postThreadIds } : {}),
               unreadCount,
               unreadThreadIds: threads
                 .filter((thread) => thread.unreadCount > 0)

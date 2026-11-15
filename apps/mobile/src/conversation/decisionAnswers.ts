@@ -6,9 +6,9 @@ import type { OutboxScope } from "./outboxMessages";
 import type { Decision } from "./types";
 
 // A message's question or poll as the phone shows it, and the reply that answers it. An answer is an ordinary reply
-// through the outbox, with `resolves` naming the question. Until the outbox saves this phone's answer, it shows as on
-// its way; once saved, the server's state wins as soon as a read shows it. An answer the server refused as already
-// answered keeps the winning answer it names.
+// through the outbox, with `resolves` naming the question. Until the outbox settles this phone's answer, it shows as on
+// its way, even when a read shows the question answered; once settled, the server's state wins as soon as a read shows
+// it. An answer the server refused as already answered keeps the winning answer it names.
 
 /** What a decision's card needs of the message that asks it, as the server's reads give it. */
 export type Asked = Pick<
@@ -89,11 +89,11 @@ export function decisionOf(
       },
     };
   }
+  const sending = latest(answers, (record) => unfinished(record) && !record.withheld);
+  if (sending) return { options, state: { kind: "answering", chosen: chosenOf(sending) } };
   if (resolved) return { options, state: { kind: "answered", chosen: serverChosen } };
   const saved = latest(answers, (record) => record.stage === "saved");
   if (saved) return { options, state: { kind: "answered", chosen: chosenOf(saved) } };
-  const sending = latest(answers, (record) => unfinished(record) && !record.withheld);
-  if (sending) return { options, state: { kind: "answering", chosen: chosenOf(sending) } };
   if (answers.some((record) => unfinished(record) && record.withheld))
     return { options, state: { kind: "held" } };
   return { options, state: { kind: "open" } };
@@ -130,6 +130,34 @@ export function answerPlace(
     parent = next;
   }
   return { threadId, parentMessageId: root };
+}
+
+/**
+ * What a composer answering a question does with its text. `answer`: the question takes it, at `place`. `closed`: the
+ * question no longer takes an answer, so Send stays off and the text stays until the person cancels Answer or chooses
+ * another message; it never goes as an ordinary reply. `waiting`: where the answer goes isn't known yet.
+ */
+export type AnswerTarget =
+  | { readonly kind: "answer"; readonly place: AnswerPlace }
+  | { readonly kind: "closed" }
+  | { readonly kind: "waiting" };
+
+/**
+ * Where a free answer to `asked` goes, given the question as the screen's read shows it, or undefined when the read no
+ * longer shows it. `answers` are this phone's answers to it. `post` says whether its thread is a post's, null while
+ * that isn't known.
+ */
+export function answerTarget(
+  asked: Asked | undefined,
+  answers: readonly OutboxRecord[] | undefined,
+  parentOf: (id: string) => string | null | undefined,
+  post: boolean | null,
+): AnswerTarget {
+  const decision = asked && decisionOf(asked, answers);
+  if (!asked || decision?.state.kind !== "open" || decision.options.length > 0)
+    return { kind: "closed" };
+  if (post === null) return { kind: "waiting" };
+  return { kind: "answer", place: answerPlace(asked, parentOf, { post, poll: false }) };
 }
 
 /**

@@ -90,8 +90,8 @@ const here = (record: OutboxRecord, scope: OutboxScope & { readonly workspaceId:
  * whose message is among them is the server's row now, even before the outbox hands it off, so the message never
  * shows twice. A reply moves to its thread once the outbox gives it one.
  *
- * An answer to one of the stream's `questions` shows too, until the outbox saves it. The question's card then shows
- * it answered, and the reply itself comes with a read of its thread, which a stream may never show.
+ * An answer to one of the stream's `questions` shows too, saved or not, until a read shows its reply and the outbox
+ * hands it off. A stream's read holds no replies, so its saved receipt alone never takes the row away.
  */
 export function streamRows(
   state: OutboxState,
@@ -125,8 +125,7 @@ export function streamRows(
     if (
       write.operation === "reply" &&
       write.args.resolves !== undefined &&
-      questions.has(write.args.resolves.messageId) &&
-      record.stage !== "saved"
+      questions.has(write.args.resolves.messageId)
     ) {
       const local = row(record, "reply", shown);
       return local ? [local] : [];
