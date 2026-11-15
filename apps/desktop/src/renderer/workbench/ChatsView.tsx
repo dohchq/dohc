@@ -3881,7 +3881,6 @@ export function ChatsView(props: {
         mentionCandidates={mentionCandidates}
         onError={props.onError}
         onClearError={props.onClearError}
-        onNotice={props.onNotice}
         onOpenSettings={props.onOpenSettings}
         onOpenConversation={(conversationId, title) => {
           openConversation({ level: "direct", conversationId, title });
@@ -3905,7 +3904,6 @@ export function ChatsView(props: {
         onOpenSettings={props.onOpenSettings}
         onError={props.onError}
         onClearError={props.onClearError}
-        onNotice={props.onNotice}
       />
     );
   }
@@ -4877,7 +4875,6 @@ export function ChatsView(props: {
             onNew={() => openConversation({ level: "direct-new" })}
             onError={props.onError}
             onClearError={props.onClearError}
-            onNotice={props.onNotice}
           />
           {/* Agents cannot run in a joined workspace yet, so it lists none. */}
           {!inJoinedWorkspace &&

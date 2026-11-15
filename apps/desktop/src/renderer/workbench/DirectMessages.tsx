@@ -38,7 +38,6 @@ type ReportError = (message: string, cause?: unknown, retry?: () => void, refuse
 interface Reporting {
   onError: ReportError;
   onClearError?: (identity: string) => void;
-  onNotice?: (message: string, undo?: () => void) => void;
 }
 
 const NO_CANDIDATES: readonly MentionCandidate[] = [];
@@ -227,8 +226,6 @@ async function blockPerson(input: {
   person: DirectPerson;
   blocked: boolean;
   reporting: Reporting;
-  // In a group, the notice holds Undo, since the block doesn't take the composer's place.
-  withUndo?: boolean;
   /** Runs once the change is made, by the first try or by the notice's Try again. */
   onDone?: () => void;
 }): Promise<void> {
@@ -238,13 +235,8 @@ async function blockPerson(input: {
   try {
     await store.setBlocked(conversationId, person.personId, blocked);
     reporting.onClearError?.(identity);
+    // No notice: the blocked line, with its Unblock, shows the change where it happened.
     input.onDone?.();
-    if (input.withUndo) {
-      reporting.onNotice?.(
-        blocked ? `Blocked ${name}. You won't see their new messages.` : `Unblocked ${name}`,
-        () => void blockPerson({ ...input, blocked: !blocked, withUndo: false, onDone: undefined }),
-      );
-    }
   } catch (cause) {
     reportDirect(reporting,
       ipcErrorMessage(cause, blocked ? `dohc could not block ${name}.` : `dohc could not unblock ${name}.`),
@@ -471,11 +463,7 @@ function ConversationForAccount(props: ConversationProps) {
       : { label: `Block ${directPersonName(single)}`, danger: true, onSelect: () => void blockPerson({ store, conversationId, person: single, blocked: true, reporting: props }) }]
     : conversation.people.map((person) => person.blocked
       ? { label: `Unblock ${directPersonName(person)}`, onSelect: () => void blockPerson({ store, conversationId, person, blocked: false, reporting: props }) }
-      : {
-        label: `Block ${directPersonName(person)}`,
-        danger: true,
-        onSelect: () => void blockPerson({ store, conversationId, person, blocked: true, reporting: props, withUndo: true }),
-      });
+      : { label: `Block ${directPersonName(person)}`, danger: true, onSelect: () => void blockPerson({ store, conversationId, person, blocked: true, reporting: props }) });
 
   const header = (
     <ChatHeader

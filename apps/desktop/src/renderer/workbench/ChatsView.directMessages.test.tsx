@@ -465,7 +465,8 @@ describe("ChatsView direct messages", () => {
     signedIn([group]);
     history([sent(5, "sam", "Booked the table")]);
     bridgeMock.directBlock.mockResolvedValue(undefined);
-    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    const onNotice = vi.fn();
+    renderView(vi.fn(), vi.fn(), { variant: "panel", onNotice });
     await openSam();
     fireEvent.click(await screen.findByTestId("chats-dm-options"));
     expect(await screen.findByRole("menuitem", { name: "Block Sam Rivera" })).toBeTruthy();
@@ -479,7 +480,11 @@ describe("ChatsView direct messages", () => {
       }),
     );
     fireEvent.click(await screen.findByTestId("chats-dm-options"));
-    expect(await screen.findByRole("menuitem", { name: "Block Ana Diaz" })).toBeTruthy();
+    signedIn([group]);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Block Ana Diaz" }));
+    // The line shows the block where it happened, so no notice repeats it.
+    expect(await screen.findByTestId("chats-dm-group-blocked")).toBeTruthy();
+    expect(onNotice).not.toHaveBeenCalled();
   });
 
   it("says in a group conversation who the viewer blocked, keeps the composer, and unblocks from the line", async () => {
