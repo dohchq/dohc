@@ -27,6 +27,13 @@ export type OwnerJournalRead = (
   signal: AbortSignal,
 ) => Promise<OwnerJournalPage | "not-retired">;
 
+/** The server has not finished retiring the note, so its saves can't all be read yet. */
+export class OwnerJournalPending extends Error {
+  constructor() {
+    super("The server is still ending live editing for this note.");
+  }
+}
+
 /**
  * Applies a retired note's saves that this computer has not applied, so a
  * release at the relay's last save writes all of them into the file. Returns

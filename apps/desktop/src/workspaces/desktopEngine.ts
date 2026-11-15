@@ -1,5 +1,5 @@
 import { installedReaderConfig } from "./installedReaderConfig";
-import { catchUpFromJournal, type OwnerJournalRead } from "./ownerJournal";
+import { catchUpFromJournal, OwnerJournalPending, type OwnerJournalRead } from "./ownerJournal";
 import {
   reconcileOwnerLiveStops,
   releaseRetiredOwnerNotes,
@@ -450,14 +450,18 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       const stop = (await client.ownerYDocStopList(request, signal)).find((row) =>
         sameBinding(row.binding ?? null, binding),
       );
-      if (stop)
-        await catchUpFromJournal({
+      // Released before the server's last save, the note would wait for Resume.
+      if (
+        stop &&
+        (await catchUpFromJournal({
           client,
           workspaceHandle,
           target: { binding, relayDatabaseNamespace: stop.relayDatabaseNamespace },
           read: journal,
           signal: signal ?? AbortSignal.any([]),
-        });
+        })) === null
+      )
+        throw new OwnerJournalPending();
     }
     // Only the queue of the generation this release takes. If the engine refuses
     // to read this document's queue head, the release fails: nothing would keep its edits.

@@ -65,7 +65,7 @@ vi.mock("./ownerLiveQuarantine", async (importOriginal) => ({
   readOwnerLiveQueue: quarantineMock.queue,
 }));
 // Stands in for the server's saves of a retired note; ownerLiveStop.test.ts covers the catch-up.
-const journalMock = vi.hoisted(() => ({ catchUp: vi.fn(async () => null) }));
+const journalMock = vi.hoisted(() => ({ catchUp: vi.fn(async (): Promise<number | null> => 0) }));
 vi.mock("./ownerJournal", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./ownerJournal")>()),
   catchUpFromJournal: journalMock.catchUp,

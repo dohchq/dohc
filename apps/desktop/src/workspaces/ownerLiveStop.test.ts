@@ -2,6 +2,7 @@ import { expect, it, vi } from "vitest";
 import { EngineRequestError, type EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { reconcileOwnerLiveStops, releaseRetiredOwnerNotes } from "./ownerLiveStop";
 import { liveStopError } from "../ipc/liveEditingStop";
+import { OwnerJournalPending } from "./ownerJournal";
 import { pendingStopHarness } from "../testing/ownerLiveStop.test-helper";
 const withDocument = <
   T extends { binding: { mainVersionId: string; objectId: string; currentPath: string } },
@@ -521,4 +522,43 @@ it("brings a note whose hosting ended up to the server's last save, then release
   ]);
   expect(release).toHaveBeenCalledTimes(1);
   expect(release).toHaveBeenCalledWith(ended!.binding, 14, expect.any(AbortSignal));
+});
+
+it("waits for the next pass while the server is still retiring a stopped note", async () => {
+  const row = {
+    ...withDocument({
+      binding: {
+        workspaceId: "workspace",
+        mainVersionId: "main",
+        objectId: "object",
+        lineageClaimId: "a".repeat(64),
+        currentPath: "a.md",
+        selectorPaths: ["a.md"],
+        restoreFenceGeneration: 0,
+      },
+    }),
+    relayDatabaseNamespace: "relay",
+    state: "requested",
+  };
+  const client = {
+    ownerYDocStopList: vi.fn(async () => [row]),
+    ownerYDocStopRequest: vi.fn(async () => row),
+  } as unknown as EngineClient;
+  const onError = vi.fn(),
+    onComplete = vi.fn();
+  await reconcileOwnerLiveStops({
+    client,
+    workspaceHandle: "handle",
+    workspaceId: "workspace",
+    signal: new AbortController().signal,
+    assertCurrent() {},
+    retire: async () => 14,
+    release: async () => {
+      throw new OwnerJournalPending();
+    },
+    onError,
+    onComplete,
+  });
+  expect(onError).not.toHaveBeenCalled();
+  expect(onComplete).not.toHaveBeenCalled();
 });

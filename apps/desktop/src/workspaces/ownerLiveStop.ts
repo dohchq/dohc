@@ -1,6 +1,6 @@
 import type { LiveObjectBinding } from "@dohc/workspace-engine-client";
 import { EngineRequestError, type EngineClient } from "@dohc/workspace-engine-client/daemon";
-import { catchUpFromJournal, type OwnerJournalRead } from "./ownerJournal";
+import { catchUpFromJournal, OwnerJournalPending, type OwnerJournalRead } from "./ownerJournal";
 import { sameBinding } from "./ownerLiveReleases";
 export type OwnerStopRetirementTarget = {
   objectId: string;
@@ -79,11 +79,12 @@ export async function reconcileOwnerLiveStops(options: {
                 ));
           else await options.client.ownerYDocStopRetired(request(), stop.document, options.signal);
         } catch (error) {
-          // Still waiting: a held save applies, or discovery installs a restore
-          // successor, before the next pass retries. The Stop has not finished.
+          // Still waiting: a held save applies, discovery installs a restore
+          // successor, or the server finishes retiring the note, before the next pass retries. The Stop has not finished.
           if (
-            error instanceof EngineRequestError &&
-            ["owner-stop-conflict", "owner-stop-restore-pending"].includes(error.message)
+            error instanceof OwnerJournalPending ||
+            (error instanceof EngineRequestError &&
+              ["owner-stop-conflict", "owner-stop-restore-pending"].includes(error.message))
           )
             return;
           // A release that committed ended the Stop even when it then could not write
