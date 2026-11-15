@@ -21,6 +21,7 @@ import type {
   LiveUpdateRetry,
 } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveMembershipSession } from "./liveMembership";
+import type { LiveRoomSave } from "./storage/types";
 
 export interface NamedFrameAppliedUpdate {
   readonly journalCursor: number;
@@ -55,6 +56,8 @@ export interface NamedFrameHostSession {
         readonly grantId: string;
         readonly grantGeneration: number;
       };
+      /** Only a live room sets this, for its own save on the owner's capture. */
+      readonly room?: LiveRoomSave;
     },
     signal: AbortSignal,
   ): Promise<NamedFrameSubmissionResult>;

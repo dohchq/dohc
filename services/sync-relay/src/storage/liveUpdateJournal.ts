@@ -265,6 +265,13 @@ function liveJournalSeedClient(
   }
   return Math.max(1, hash.digest().readUInt32BE(0));
 }
+/** The editor id a note's original content is written under. Nobody may write under it. */
+export function liveJournalSeedClientId(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+): number | null {
+  return liveJournalSeedClient(document, liveJournalSeedSource(storage, document));
+}
 interface DecodedJournalRow {
   admitted: AdmittedLiveUpdate;
   checkpoint: { digest: string; bytes: Uint8Array } | null;
@@ -1764,7 +1771,13 @@ export function commitLiveUpdateJournal(
       "updateBytes",
       "receivedAtMs",
     ],
-    ["trustedAccount", "trustedAutomation", "trustedAutomationPress", "trustedAutomationGrant"],
+    [
+      "trustedAccount",
+      "trustedAutomation",
+      "trustedAutomationPress",
+      "trustedAutomationGrant",
+      "room",
+    ],
   );
   const trustedAccount =
     outer.trustedAccount === undefined
@@ -1847,6 +1860,20 @@ export function commitLiveUpdateJournal(
     trustedAutomationGrant &&
     (!trustedAutomation || actorKind !== "owner" || trustedAutomationPress)
   )
+    return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
+  const room =
+    outer.room === undefined
+      ? undefined
+      : (() => {
+          const save = baselineRecord(outer.room, ["authors", "committed"]);
+          if (typeof save.committed !== "function") throw new TypeError("Invalid live room save.");
+          return {
+            authors: parseLiveAuthorSnapshot(save.authors),
+            committed: save.committed as () => void,
+          };
+        })();
+  // A room's save is the room's own write under the owner's authority, never an editor's.
+  if (room && (actorKind !== "owner" || trustedAutomation || rawMetadata.authorContext))
     return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
   const { token, issued } = captureJournalCut(storage, outer.cutToken);
   const updateBytes = journalBytes(outer.updateBytes),
@@ -2048,7 +2075,26 @@ export function commitLiveUpdateJournal(
       const firstSeenDeletes = validation.evidence.candidate.firstSeenDeletes;
       const clients = [...new Set(firstSeen.map((range) => range.clientId))];
       const bindings: { clientId: number; snapshot: string }[] = [];
-      if (authorSnapshot.length && clients.length) {
+      if (room) {
+        // The room tied each new id to its sender when it took the edit. A save whose ids and
+        // senders don't match is refused, never committed with names dropped.
+        authorSnapshot = room.authors;
+        const named = new Set(authorSnapshot.map(liveAuthorIdentity));
+        for (const clientId of clients) {
+          const prior = storage.db
+            .prepare(
+              `SELECT author_snapshot_json FROM ${LIVE_AUTHOR_CLIENTS} WHERE ${JOURNAL_DOCUMENT_WHERE} AND client_id=?`,
+            )
+            .get(...documentParams(document), clientId);
+          if (
+            !prior ||
+            !parseLiveAuthorSnapshot(JSON.parse(String(prior.author_snapshot_json))).every(
+              (author) => named.has(liveAuthorIdentity(author)),
+            )
+          )
+            return refused({ kind: "refused", reason: "provenance-refused" });
+        }
+      } else if (authorSnapshot.length && clients.length) {
         const encoded = JSON.stringify(authorSnapshot);
         const identities = authorSnapshot.map(liveAuthorIdentity);
         let unbound = 0,
@@ -2079,11 +2125,14 @@ export function commitLiveUpdateJournal(
           bindings.length = 0;
         }
       }
-      authorSnapshot = limitLiveDeclaredAgents(
+      const limited = limitLiveDeclaredAgents(
         read.cut.suffix.map((row) => row.metadata),
         current.authority,
         authorSnapshot,
       );
+      if (room && !isDeepStrictEqual(limited, authorSnapshot))
+        return refused({ kind: "refused", reason: "provenance-refused" });
+      authorSnapshot = limited;
       if (
         !admitsWorkspaceLiveAuthorship(
           storage,
@@ -2159,6 +2208,7 @@ export function commitLiveUpdateJournal(
           .prepare(`UPDATE sync_relay_personal_agents SET last_action_at_ms = MAX(COALESCE(last_action_at_ms, 0), ?)
           WHERE agent_id = ?`)
           .run(receivedAtMs, request.actor.agentId);
+      room?.committed();
       return {
         reply: {
           result: {

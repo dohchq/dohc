@@ -710,6 +710,14 @@ export interface LiveUpdateJournalCommitInput {
   readonly validation: LiveJournalValidation;
   readonly updateBytes: Uint8Array;
   readonly receivedAtMs: number;
+  readonly room?: LiveRoomSave;
+}
+/** A live room's save: several people's edits, committed under the owner's authority. */
+export interface LiveRoomSave {
+  /** Everyone whose taken edits the save holds. */
+  readonly authors: import("@dohc/live-session-contract/live-authorship").LiveAuthorSnapshot;
+  /** Runs inside the transaction that commits the save. */
+  readonly committed: () => void;
 }
 export type RelayLiveUpdateJournalResult =
   | {

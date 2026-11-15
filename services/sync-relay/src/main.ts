@@ -103,7 +103,9 @@ import { createLiveMembershipRegistry } from "./liveMembership";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { createNamedDesktopLive } from "./namedDesktopLive";
 import { parseNamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
-import type { NamedFrameNativeHost } from "./namedLiveFrameHost";
+import { captureOwnerLiveFrameHost, type NamedFrameNativeHost } from "./namedLiveFrameHost";
+import { createLiveRooms } from "./liveRoom";
+import { workspaceOwner } from "./storage/workspaces";
 import { createAutomationRecordHost } from "./automationRecordHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
@@ -1214,7 +1216,37 @@ if (namedLiveConfig) {
     },
     storage.readLiveAuthority.bind(storage),
   );
+  const bounds = namedLiveConfig.host;
+  // Off unless DOHC_RELAY_LIVE_ROOMS=1 while the room is built and tested in stages.
+  const rooms =
+    process.env.DOHC_RELAY_LIVE_ROOMS === "1"
+      ? createLiveRooms({
+          storage,
+          maxUpdateBytes: bounds.maxSubmissionBytes,
+          maxNoteBytes: bounds.maxAdmissionBytes,
+          maxAppliedBytes: bounds.maxAppliedUpdateBytes,
+          // A room saves as the workspace's owner, whoever is connected.
+          async openSaver(document, signal) {
+            const ownerUserId = workspaceOwner(storage as StorageContext, document.workspaceId);
+            if (!ownerUserId) throw new Error("The workspace has no owner.");
+            const current = storage.resolveCurrentLiveDocumentBinding({
+              document,
+              actor: { kind: "owner", userId: ownerUserId },
+            });
+            if (current.kind !== "current") throw new Error("The owner's binding is not current.");
+            return captureOwnerLiveFrameHost({
+              authenticatedUserId: ownerUserId,
+              storage,
+              native: await captureNative(current.binding, signal),
+              bounds,
+              validate: namedLiveConfig.validate,
+            });
+          },
+        })
+      : undefined;
+  if (rooms) server.once("close", () => rooms.close());
   namedLive = createNamedLiveRoutes({
+    rooms,
     kind: "named",
     storage,
     lookupUserDisplayName,
@@ -1253,6 +1285,7 @@ if (namedLiveConfig) {
       tickets,
       captureNative,
       membership,
+      rooms,
       admission,
       sessionHostBlocked,
     });
