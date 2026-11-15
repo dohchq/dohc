@@ -1,4 +1,3 @@
-import { mapWidgetOwners } from "./widgetOwnership";
 import { isCodeBlockNode, isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
@@ -11,7 +10,7 @@ import {
   type Transaction,
 } from "@tiptap/pm/state";
 import { ReplaceStep } from "@tiptap/pm/transform";
-import { Fragment, type Node as ProseMirrorNode, type ResolvedPos } from "@tiptap/pm/model";
+import { type Node as ProseMirrorNode, type ResolvedPos } from "@tiptap/pm/model";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 import {
   ChevronDown,
@@ -135,116 +134,150 @@ function gutterHang(node: ProseMirrorNode): string | null {
   }
 }
 
-function buildBlockControlDecorations(
+/** The block whose controls show and the block that holds the caret. A note
+ * keeps controls for these two blocks only, so their cost does not grow with
+ * its length. */
+type BlockControlsState = {
+  /** The top-level block under the pointer, by its position. */
+  hover: number | null;
+  /** The top-level block that holds the selection. Its controls stay hidden
+   * until they take focus, so Shift+Tab from a block reaches its handle. */
+  caret: number | null;
+  decorations: DecorationSet;
+};
+
+type BlockControlRefs = {
+  onInsertRef: RefObject<(pos: number) => void>;
+  onOpenMenuRef: RefObject<(pos: number, handle: HTMLElement) => void>;
+  ghostSlot: DragGhostSlot;
+  /** The controls now in the document, each with its block's position. */
+  live: Map<HTMLElement, () => number | undefined>;
+};
+
+/** `pos` when a top-level block starts there. */
+function topLevelBlockAt(doc: ProseMirrorNode, pos: number | null): number | null {
+  if (pos === null || pos < 0 || pos > doc.content.size) return null;
+  const $pos = doc.resolve(pos);
+  return $pos.depth === 0 && $pos.nodeAfter ? pos : null;
+}
+
+/** The top-level block that holds `pos`, by its position. */
+function topLevelBlockAround(doc: ProseMirrorNode, pos: number): number | null {
+  const $pos = doc.resolve(pos);
+  return $pos.depth === 0 ? topLevelBlockAt(doc, pos) : $pos.before(1);
+}
+
+function blockControl(doc: ProseMirrorNode, pos: number, refs: BlockControlRefs): Decoration {
+  const { onInsertRef, onOpenMenuRef, ghostSlot, live } = refs;
+  const node = doc.nodeAt(pos)!;
+  const hang = gutterHang(node);
+  const digits = hang === "number" ? String(node.attrs.start ?? 1).length : 0;
+  return Decoration.widget(
+    pos,
+    (view, getPos) => {
+      const wrap = document.createElement("span");
+      wrap.className = "dohc-block-affordance";
+      wrap.setAttribute("contenteditable", "false");
+      if (hang) wrap.dataset.hang = hang;
+      if (digits) wrap.style.setProperty("--dohc-block-digits", String(digits));
+
+      const plus = document.createElement("button");
+      plus.type = "button";
+      plus.className = "dohc-block-gutter-btn dohc-block-plus";
+      plus.title = "insert block";
+      plus.setAttribute("aria-label", "insert block");
+      plus.addEventListener("mousedown", stopEditorMouseEvent);
+      plus.addEventListener("click", (event) => {
+        stopEditorMouseEvent(event);
+        const currentPos = getPos();
+        if (currentPos === undefined) return;
+        onInsertRef.current(currentPos);
+      });
+
+      const handle = document.createElement("button");
+      handle.type = "button";
+      handle.className = "dohc-block-gutter-btn dohc-block-handle";
+      handle.title = "drag to move · click for actions";
+      handle.setAttribute("aria-label", "block actions");
+      handle.setAttribute("aria-haspopup", "menu");
+      handle.setAttribute("aria-expanded", "false");
+      handle.setAttribute("draggable", "true");
+      // Only stop propagation (not preventDefault) so the native HTML5 drag
+      // can still start — preventing the mousedown default cancels dragging.
+      handle.addEventListener("mousedown", (event) => event.stopPropagation());
+
+      handle.addEventListener("dragstart", (event) => {
+        const dragEvent = event as DragEvent;
+        dragEvent.stopPropagation();
+        if (view.editable === false || !dragEvent.dataTransfer) {
+          dragEvent.preventDefault();
+          return;
+        }
+        const currentPos = getPos();
+        if (currentPos === undefined) {
+          dragEvent.preventDefault();
+          return;
+        }
+        const node = view.state.doc.nodeAt(currentPos);
+        if (!node) {
+          dragEvent.preventDefault();
+          return;
+        }
+        // Whatever the slot still holds can no longer be reached: parking
+        // a new ghost over it would strand the old one on `document.body`.
+        removeBlockDragGhost(ghostSlot);
+        ghostSlot.current = startBlockDrag(view, currentPos, handle, dragEvent.dataTransfer);
+      });
+      handle.addEventListener("dragend", () => removeBlockDragGhost(ghostSlot));
+
+      handle.addEventListener("click", (event) => {
+        stopEditorMouseEvent(event);
+        const currentPos = getPos();
+        if (currentPos === undefined) return;
+        if (view.state.doc.nodeAt(currentPos)) {
+          view.dispatch(
+            view.state.tr.setSelection(NodeSelection.create(view.state.doc, currentPos)),
+          );
+        }
+        onOpenMenuRef.current(currentPos, handle);
+      });
+
+      wrap.append(plus, handle);
+      live.set(wrap, getPos);
+      return wrap;
+    },
+    {
+      side: -1,
+      // A block that changes kind or digits gets new controls, with its hang.
+      key: `dohc-block-controls-${hang}-${digits}`,
+      destroy: (dom) => live.delete(dom as HTMLElement),
+    },
+  );
+}
+
+function blockControlsState(
   doc: ProseMirrorNode,
-  onInsertRef: RefObject<(pos: number) => void>,
-  onOpenMenuRef: RefObject<(pos: number, handle: HTMLElement) => void>,
-  ghostSlot: DragGhostSlot,
-  owners: Map<number, string>,
-  nextOwnerKey: () => string,
-): DecorationSet {
-  const decorations: Decoration[] = [];
-
-  // Only widgets: ProseMirror checks each node decoration against the
-  // document with a scan from its first block, so one per block makes every
-  // keystroke quadratic in the document's length.
-  doc.forEach((node, pos) => {
-    const ownerKey = owners.get(pos) ?? nextOwnerKey();
-    const hang = gutterHang(node);
-    const digits = hang === "number" ? String(node.attrs.start ?? 1).length : 0;
-    decorations.push(
-      Decoration.widget(
-        pos,
-        (view, getPos) => {
-          const wrap = document.createElement("span");
-          wrap.className = "dohc-block-affordance";
-          wrap.setAttribute("contenteditable", "false");
-          if (hang) wrap.dataset.hang = hang;
-          if (digits) wrap.style.setProperty("--dohc-block-digits", String(digits));
-
-          const plus = document.createElement("button");
-          plus.type = "button";
-          plus.className = "dohc-block-gutter-btn dohc-block-plus";
-          plus.title = "insert block";
-          plus.setAttribute("aria-label", "insert block");
-          plus.addEventListener("mousedown", stopEditorMouseEvent);
-          plus.addEventListener("click", (event) => {
-            stopEditorMouseEvent(event);
-            const currentPos = getPos();
-            if (currentPos === undefined) return;
-            onInsertRef.current(currentPos);
-          });
-
-          const handle = document.createElement("button");
-          handle.type = "button";
-          handle.className = "dohc-block-gutter-btn dohc-block-handle";
-          handle.title = "drag to move · click for actions";
-          handle.setAttribute("aria-label", "block actions");
-          handle.setAttribute("aria-haspopup", "menu");
-          handle.setAttribute("aria-expanded", "false");
-          handle.setAttribute("draggable", "true");
-          // Only stop propagation (not preventDefault) so the native HTML5 drag
-          // can still start — preventing the mousedown default cancels dragging.
-          handle.addEventListener("mousedown", (event) => event.stopPropagation());
-
-          handle.addEventListener("dragstart", (event) => {
-            const dragEvent = event as DragEvent;
-            dragEvent.stopPropagation();
-            if (view.editable === false || !dragEvent.dataTransfer) {
-              dragEvent.preventDefault();
-              return;
-            }
-            const currentPos = getPos();
-            if (currentPos === undefined) {
-              dragEvent.preventDefault();
-              return;
-            }
-            const node = view.state.doc.nodeAt(currentPos);
-            if (!node) {
-              dragEvent.preventDefault();
-              return;
-            }
-            // Whatever the slot still holds can no longer be reached: parking
-            // a new ghost over it would strand the old one on `document.body`.
-            removeBlockDragGhost(ghostSlot);
-            ghostSlot.current = startBlockDrag(view, currentPos, handle, dragEvent.dataTransfer);
-          });
-          handle.addEventListener("dragend", () => removeBlockDragGhost(ghostSlot));
-
-          handle.addEventListener("click", (event) => {
-            stopEditorMouseEvent(event);
-            const currentPos = getPos();
-            if (currentPos === undefined) return;
-            if (view.state.doc.nodeAt(currentPos)) {
-              view.dispatch(
-                view.state.tr.setSelection(NodeSelection.create(view.state.doc, currentPos)),
-              );
-            }
-            onOpenMenuRef.current(currentPos, handle);
-          });
-
-          wrap.append(plus, handle);
-          return wrap;
-        },
-        // A block that changes kind or digits gets new controls, with its hang.
-        { side: -1, key: `dohc-block-controls-${ownerKey}-${hang}-${digits}`, ownerKey },
-      ),
-    );
-  });
-
-  // Each widget sits on the boundary before its block, inside no block.
-  // Built against the full document, ProseMirror checks every widget against
-  // every block, so each Enter cost time quadratic in the document's length.
-  // The document without its blocks gives the same set.
-  return DecorationSet.create(doc.copy(Fragment.empty), decorations);
+  hover: number | null,
+  caret: number | null,
+  refs: BlockControlRefs,
+): BlockControlsState {
+  const positions = [...new Set([caret, hover])]
+    .filter((pos): pos is number => pos !== null)
+    .sort((a, b) => a - b);
+  return {
+    hover,
+    caret,
+    decorations: DecorationSet.create(
+      doc,
+      positions.map((pos) => blockControl(doc, pos, refs)),
+    ),
+  };
 }
 
 /**
  * A text-only replacement cannot change the set or kind of top-level blocks.
- * Keeping the persistent decoration tree and mapping its positions avoids
- * rebuilding a widget for every block while typing. Structural edits,
- * node replacements, and multi-step transactions still take the
- * full rebuild path below.
+ * Mapping the controls through it keeps them, where a structural edit, a node
+ * replacement or a multi-step transaction builds them again.
  */
 function isSingleTextblockReplacement(tr: Transaction): boolean {
   if (tr.steps.length !== 1) return false;
@@ -259,11 +292,14 @@ function isSingleTextblockReplacement(tr: Transaction): boolean {
   return from.depth === 1 && from.sameParent(to) && from.parent.isTextblock;
 }
 
-/** The gutter of the top-level block that holds `target`. A block's gutter is
- * the nearest gutter widget before the block's element, with nothing but
- * other widgets between them. Another widget, such as a Mermaid preview,
- * belongs to no block. */
-function blockControlAt(view: EditorView, target: EventTarget | null): HTMLElement | null {
+/** The top-level block the pointer is over, by its position: the block
+ * itself or its controls. `null` over anything else, such as another
+ * plugin's widget. */
+function hoveredBlock(
+  view: EditorView,
+  target: EventTarget | null,
+  live: BlockControlRefs["live"],
+): number | null {
   let element =
     target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
   while (element && element.parentElement !== view.dom) {
@@ -271,16 +307,14 @@ function blockControlAt(view: EditorView, target: EventTarget | null): HTMLEleme
   }
   if (!(element instanceof HTMLElement)) return null;
   if (element.classList.contains("ProseMirror-widget")) {
-    return element.classList.contains("dohc-block-affordance") ? element : null;
+    return live.get(element)?.() ?? null;
   }
-  for (
-    let sibling = element.previousElementSibling;
-    sibling instanceof HTMLElement && sibling.classList.contains("ProseMirror-widget");
-    sibling = sibling.previousElementSibling
-  ) {
-    if (sibling.classList.contains("dohc-block-affordance")) return sibling;
+  try {
+    return topLevelBlockAround(view.state.doc, view.posAtDOM(element, 0));
+  } catch {
+    // An element in DOM that is mid-change resolves to no position.
+    return null;
   }
-  return null;
 }
 
 /** Delete a whole top-level block after it has been selected from its gutter.
@@ -305,62 +339,79 @@ export function makeBlockControlsPlugin({
   onInsertRef: RefObject<(pos: number) => void>;
   onOpenMenuRef: RefObject<(pos: number, handle: HTMLElement) => void>;
 }) {
-  let visibleControl: HTMLElement | null = null;
-  const showBlockControl = (control: HTMLElement | null) => {
-    if (control === visibleControl) return;
-    visibleControl?.classList.remove("is-visible");
-    control?.classList.add("is-visible");
-    visibleControl = control;
+  const refs: BlockControlRefs = {
+    onInsertRef,
+    onOpenMenuRef,
+    ghostSlot: { current: null },
+    live: new Map(),
   };
-  const ghostSlot: DragGhostSlot = { current: null };
-  let nextId = 0;
-  const nextOwnerKey = () => String(nextId++);
-  return new Plugin({
+  const stateOf = (view: EditorView) => blockControlsKey.getState(view.state) as BlockControlsState;
+  const showHovered = (view: EditorView) => {
+    const { hover } = stateOf(view);
+    for (const [control, getPos] of refs.live) {
+      control.classList.toggle("is-visible", hover !== null && getPos() === hover);
+    }
+  };
+  // The handle whose menu is open stays, so the menu can give it focus back.
+  const menuIsOpen = () =>
+    [...refs.live.keys()].some(
+      (control) => control.querySelector('[aria-expanded="true"]') !== null,
+    );
+  const hoverBlock = (view: EditorView, hover: number | null) => {
+    if (hover === stateOf(view).hover || menuIsOpen()) return;
+    view.dispatch(
+      view.state.tr.setMeta(blockControlsKey, { hover }).setMeta("addToHistory", false),
+    );
+  };
+  return new Plugin<BlockControlsState>({
     key: blockControlsKey,
     state: {
       init(_, instance) {
-        return buildBlockControlDecorations(
+        return blockControlsState(
           instance.doc,
-          onInsertRef,
-          onOpenMenuRef,
-          ghostSlot,
-          new Map(),
-          nextOwnerKey,
+          null,
+          topLevelBlockAround(instance.doc, instance.selection.from),
+          refs,
         );
       },
       apply(tr, old) {
-        if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
-        if (isSingleTextblockReplacement(tr)) {
-          return tr.doc.content.size === tr.before.content.size ? old : old.map(tr.mapping, tr.doc);
+        const moved = tr.getMeta(blockControlsKey) as { hover: number | null } | undefined;
+        const mapped = (pos: number | null) => {
+          if (pos === null || !tr.docChanged) return pos;
+          // Content inserted at a block's start stays above the block.
+          const result = tr.mapping.mapResult(pos, 1);
+          return result.deleted ? null : result.pos;
+        };
+        const hover = topLevelBlockAt(tr.doc, moved ? moved.hover : mapped(old.hover));
+        const caret = topLevelBlockAround(tr.doc, tr.selection.from);
+        const kept = !moved && hover === mapped(old.hover) && caret === mapped(old.caret);
+        if (kept && !tr.docChanged) return old;
+        if (kept && isSingleTextblockReplacement(tr)) {
+          return { hover, caret, decorations: old.decorations.map(tr.mapping, tr.doc) };
         }
-        return buildBlockControlDecorations(
-          tr.doc,
-          onInsertRef,
-          onOpenMenuRef,
-          ghostSlot,
-          mapWidgetOwners(old.find(), tr.mapping),
-          nextOwnerKey,
-        );
+        return blockControlsState(tr.doc, hover, caret, refs);
       },
     },
-    view() {
+    view(view) {
+      showHovered(view);
       return {
+        update: showHovered,
         destroy() {
-          removeBlockDragGhost(ghostSlot);
+          removeBlockDragGhost(refs.ghostSlot);
         },
       };
     },
     props: {
       decorations(state) {
-        return blockControlsKey.getState(state) as DecorationSet | undefined;
+        return (blockControlsKey.getState(state) as BlockControlsState | undefined)?.decorations;
       },
       handleDOMEvents: {
         mousemove(view, event) {
-          showBlockControl(blockControlAt(view, event.target));
+          hoverBlock(view, hoveredBlock(view, event.target, refs.live));
           return false;
         },
-        mouseleave() {
-          showBlockControl(null);
+        mouseleave(view) {
+          hoverBlock(view, null);
           return false;
         },
       },

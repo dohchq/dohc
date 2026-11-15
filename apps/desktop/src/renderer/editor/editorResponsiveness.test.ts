@@ -218,18 +218,21 @@ describe("editor chrome reuse", () => {
         [history(), plugin],
       );
       view.setProps({ handleScrollToSelection: () => true });
-      const controls = [...view.dom.querySelectorAll(".dohc-block-affordance")];
+      // The controls of the block at `position`, shown by the pointer.
+      const controlsAt = (position: number) => {
+        view.nodeDOM(position)!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+        const shown = view.dom.querySelectorAll(".dohc-block-affordance.is-visible");
+        expect(shown).toHaveLength(1);
+        return shown[0]!;
+      };
+      const first = controlsAt(0);
       const build = vi.spyOn(DecorationSet, "create");
       view.dispatch(view.state.tr.insertText(text, from, to).setMeta("remote-origin", true));
       expect(build).not.toHaveBeenCalled();
       const assertControls = () => {
-        expectSameElements(view.dom.querySelectorAll(".dohc-block-affordance"), controls);
-        view.state.doc.forEach((node, position, index) => {
-          view.nodeDOM(position)!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
-          expectSameElements(view.dom.querySelectorAll(".dohc-block-affordance.is-visible"), [
-            controls[index],
-          ]);
-          (controls[index].querySelector(".dohc-block-plus") as HTMLButtonElement).click();
+        expect(controlsAt(0)).toBe(first);
+        view.state.doc.forEach((_node, position) => {
+          (controlsAt(position).querySelector(".dohc-block-plus") as HTMLButtonElement).click();
           expect(insert).toHaveBeenLastCalledWith(position);
         });
       };
@@ -264,9 +267,11 @@ describe("editor chrome reuse", () => {
     const codePosition = view.state.doc.content.size - view.state.doc.lastChild!.nodeSize;
     view.dispatch(view.state.tr.setNodeMarkup(codePosition, undefined, { language: "python" }));
     expect(build).toHaveBeenCalled();
-    expect(view.dom.querySelectorAll(".dohc-block-affordance")).toHaveLength(
-      view.state.doc.childCount,
-    );
+    // The code block's controls follow its new markup.
+    view.nodeDOM(codePosition)!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    const shown = view.dom.querySelectorAll<HTMLElement>(".dohc-block-affordance.is-visible");
+    expect(shown).toHaveLength(1);
+    expect(shown[0]!.dataset.hang).toBe("frame");
   });
 
   it("types into a 100-block document with work linear in its blocks", () => {
@@ -277,16 +282,16 @@ describe("editor chrome reuse", () => {
       [history(), plugin],
     );
     view.setProps({ handleScrollToSelection: () => true });
-    // One widget per block and no node decorations: ProseMirror checks each
-    // node decoration it maps with a scan from the document's first block.
-    expect((plugin.getState(view.state) as DecorationSet).find()).toHaveLength(blocks);
+    // Only the caret's block has controls, whatever the note's length.
+    const controls = () => plugin.getState(view.state)!.decorations.find();
+    expect(controls()).toHaveLength(1);
     const middle = view.state.doc.child(0).nodeSize * (blocks / 2) + 3;
     view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, middle)));
     // A quadratic scan exceeds this bound even with 100 blocks.
     expect(
       countCalls(Fragment.prototype, "child", () => view.dispatch(view.state.tr.insertText("x"))),
     ).toBeLessThan(blocks * 4);
-    expect((plugin.getState(view.state) as DecorationSet).find()).toHaveLength(blocks);
+    expect(controls()).toHaveLength(1);
   });
 
   it("presses Enter in a 100-block document with work linear in its blocks", () => {
@@ -315,11 +320,13 @@ describe("editor chrome reuse", () => {
     // ProseMirror itself reads each block about six times to split one.
     expect(reads).toBeLessThan(blocks * 8);
     expect(view.state.doc.childCount).toBe(blocks + 1);
-    const starts: number[] = [];
-    view.state.doc.forEach((_node, position) => starts.push(position));
+    // The controls follow the caret into the new block.
     expect(
-      (plugin.getState(view.state) as DecorationSet).find().map((widget) => widget.from),
-    ).toEqual(starts);
+      plugin
+        .getState(view.state)!
+        .decorations.find()
+        .map((widget) => widget.from),
+    ).toEqual([view.state.selection.$from.before(1)]);
   });
 
   it("preserves 3 toolbars through preceding text edits, code edits, undo, and redo", () => {
@@ -358,7 +365,13 @@ describe("editor chrome reuse", () => {
     );
     view.setProps({ handleScrollToSelection: () => true });
     const select = view.dom.querySelectorAll<HTMLSelectElement>(".dohc-code-language-select")[1];
-    const plus = view.dom.querySelectorAll<HTMLButtonElement>(".dohc-block-plus")[2];
+    // The pointer is over the second code block, so its controls show.
+    view.dom
+      .querySelectorAll("pre")[1]!
+      .dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    const plus = view.dom.querySelector<HTMLButtonElement>(
+      ".dohc-block-affordance.is-visible .dohc-block-plus",
+    )!;
     const focused = control === "language" ? select : plus;
     focused.focus();
     const start = view.state.doc.child(0).nodeSize;

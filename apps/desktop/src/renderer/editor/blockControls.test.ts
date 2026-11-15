@@ -82,10 +82,24 @@ function topLevelBlocks(editor: Editor): { type: string; pos: number }[] {
   return blocks;
 }
 
+/** The controls of the top-level block at `index`, shown by the pointer. */
+function blockControls(editor: Editor, index: number): HTMLElement {
+  const block = topLevelBlocks(editor)[index];
+  if (!block) throw new Error(`block ${index} missing`);
+  const [controls] = hover(editor, editor.view.nodeDOM(block.pos) as Element);
+  if (!controls) throw new Error(`block ${index} shows no controls`);
+  return controls;
+}
+
 function blockHandle(editor: Editor, index: number): HTMLElement {
-  const handle = editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-handle")[index];
-  if (!handle) throw new Error(`block handle ${index} missing`);
-  return handle;
+  return blockControls(editor, index).querySelector<HTMLElement>(".dohc-block-handle")!;
+}
+
+/** The top-level block that controls belong to: the next element that is no widget. */
+function blockAfter(controls: Element): Element | null {
+  let next = controls.nextElementSibling;
+  while (next?.classList.contains("ProseMirror-widget")) next = next.nextElementSibling;
+  return next;
 }
 
 function hover(editor: Editor, target: Element): HTMLElement[] {
@@ -503,7 +517,7 @@ describe("blockControls delete", () => {
 });
 
 describe("blockControls gutter coverage", () => {
-  it("renders one top-level gutter for every structural block", () => {
+  it("shows the controls of any structural block under the pointer, and keeps no others", () => {
     const editor = track(
       makeEditorWithControls({
         type: "doc",
@@ -540,19 +554,24 @@ describe("blockControls gutter coverage", () => {
       }),
     );
 
-    const controls = Array.from(
-      editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-affordance"),
-    );
-    expect(controls).toHaveLength(editor.state.doc.childCount);
-    expect(controls.every((control) => control.parentElement === editor.view.dom)).toBe(true);
-
-    editor.state.doc.forEach((_node, pos, index) => {
-      expect(hover(editor, deepestElement(editor, pos))).toEqual([controls[index]]);
+    const all = () => editor.view.dom.querySelectorAll(".dohc-block-affordance");
+    editor.state.doc.forEach((_node, pos) => {
+      const shown = hover(editor, deepestElement(editor, pos));
+      expect(shown).toHaveLength(1);
+      expect(shown[0]!.parentElement).toBe(editor.view.dom);
+      expect(blockAfter(shown[0]!)).toBe(editor.view.nodeDOM(pos));
+      // The pointer's block and the caret's block have controls, and no other.
+      expect(all().length).toBeLessThanOrEqual(2);
     });
-    expect(hover(editor, controls[2]!)).toEqual([controls[2]]);
+    // The pointer on the controls themselves keeps them.
+    const shown = blockControls(editor, 2);
+    expect(hover(editor, shown)).toEqual([shown]);
 
     editor.view.dom.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
     expect(visibleControls(editor)).toEqual([]);
+    // The caret's block keeps its controls, hidden, so the keyboard reaches them.
+    expect(all()).toHaveLength(1);
+    expect(blockAfter(all()[0]!)).toBe(editor.view.nodeDOM(0));
   });
 
   it("marks each gutter with what its block hangs left of its text, and replaces it when the block changes kind or digits", () => {
@@ -590,10 +609,9 @@ describe("blockControls gutter coverage", () => {
         ],
       }),
     );
-    const gutters = () =>
-      Array.from(editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-affordance"));
+    const gutter = (index: number) => blockControls(editor, index);
     // A task list's checkbox starts on the text edge, so it hangs nothing.
-    expect(gutters().map((gutter) => gutter.dataset.hang)).toEqual([
+    expect(topLevelBlocks(editor).map((_block, index) => gutter(index).dataset.hang)).toEqual([
       undefined,
       "bullet",
       "number",
@@ -607,27 +625,28 @@ describe("blockControls gutter coverage", () => {
       undefined,
     ]);
     const digits = () =>
-      gutters()
-        .slice(2, 5)
-        .map((gutter) => gutter.style.getPropertyValue("--dohc-block-digits"));
+      [2, 3, 4].map((index) => gutter(index).style.getPropertyValue("--dohc-block-digits"));
     expect(digits()).toEqual(["1", "1", "2"]);
 
-    const [paragraph, list, , nine] = gutters();
+    // An edit elsewhere keeps the shown controls.
+    const list = gutter(1);
     editor.commands.insertContentAt(editor.state.doc.content.size, {
       type: "paragraph",
       content: text("Last"),
     });
-    expect(gutters()[1]).toBe(list);
+    expect(gutter(1)).toBe(list);
+    const nine = gutter(3);
     let ninePos = 0;
     editor.state.doc.forEach((node, offset) => {
       if (node.attrs.start === 9) ninePos = offset;
     });
     editor.view.dispatch(editor.state.tr.setNodeAttribute(ninePos, "start", 10));
-    expect(gutters()[3]).not.toBe(nine);
+    expect(gutter(3)).not.toBe(nine);
     expect(digits()).toEqual(["1", "2", "2"]);
+    const paragraph = gutter(0);
     turnBlockInto(editor, 0, "bulleted-list");
-    expect(gutters()[0]).not.toBe(paragraph);
-    expect(gutters()[0]!.dataset.hang).toBe("bullet");
+    expect(gutter(0)).not.toBe(paragraph);
+    expect(gutter(0).dataset.hang).toBe("bullet");
   });
 
   it("shows the gutter of the block under the pointer, first to last, nested, and across edits", () => {
@@ -661,34 +680,37 @@ describe("blockControls gutter coverage", () => {
         ],
       }),
     );
-    const gutter = (index: number) =>
-      editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-affordance")[index]!;
+    // The block whose controls show with the pointer over `target`.
+    const shownFor = (target: Element) => hover(editor, target).map(blockAfter);
+    const block = (index: number) => editor.view.nodeDOM(topLevelBlocks(editor)[index]!.pos);
     const inner = () => editor.view.dom.querySelector("ul ul p")!;
     const first = () => editor.view.dom.querySelector("p")!;
+    const cell = () => editor.view.dom.querySelector("td p")!;
 
-    expect(hover(editor, first())).toEqual([gutter(0)]);
-    expect(hover(editor, inner())).toEqual([gutter(1)]);
-    expect(hover(editor, editor.view.dom.querySelector("td p")!)).toEqual([gutter(2)]);
-    expect(hover(editor, editor.view.dom.querySelector("pre code")!)).toEqual([gutter(3)]);
-    expect(hover(editor, editor.view.dom.lastElementChild!)).toEqual([gutter(4)]);
+    expect(shownFor(first())).toEqual([block(0)]);
+    expect(shownFor(inner())).toEqual([block(1)]);
+    expect(shownFor(cell())).toEqual([block(2)]);
+    expect(shownFor(editor.view.dom.querySelector("pre code")!)).toEqual([block(3)]);
+    expect(shownFor(editor.view.dom.lastElementChild!)).toEqual([block(4)]);
     expect(hover(editor, editor.view.dom)).toEqual([]);
 
     const tablePos = topLevelBlocks(editor)[2]!.pos;
     editor.view.dispatch(
       editor.state.tr.setSelection(new GapCursor(editor.state.doc.resolve(tablePos))),
     );
-    expect(gutter(2).nextElementSibling?.className).toContain("ProseMirror-gapcursor");
-    expect(hover(editor, editor.view.dom.querySelector("td p")!)).toEqual([gutter(2)]);
+    const [table] = hover(editor, cell());
+    expect(table!.nextElementSibling?.className).toContain("ProseMirror-gapcursor");
+    expect(blockAfter(table!)).toBe(block(2));
 
     editor.commands.insertContentAt(0, { type: "paragraph", content: text("Above") });
-    expect(hover(editor, inner())).toEqual([gutter(2)]);
-    expect(hover(editor, editor.view.dom.lastElementChild!)).toEqual([gutter(5)]);
+    expect(shownFor(inner())).toEqual([block(2)]);
+    expect(shownFor(editor.view.dom.lastElementChild!)).toEqual([block(5)]);
     editor.commands.undo();
-    expect(hover(editor, inner())).toEqual([gutter(1)]);
-    expect(hover(editor, first())).toEqual([gutter(0)]);
+    expect(shownFor(inner())).toEqual([block(1)]);
+    expect(shownFor(first())).toEqual([block(0)]);
     editor.commands.redo();
-    expect(hover(editor, first())).toEqual([gutter(0)]);
-    expect(hover(editor, inner())).toEqual([gutter(2)]);
+    expect(shownFor(first())).toEqual([block(0)]);
+    expect(shownFor(inner())).toEqual([block(2)]);
   });
 
   it("shows no gutter over a Mermaid preview, which sits between the next block's gutter and that block", () => {
@@ -708,15 +730,15 @@ describe("blockControls gutter coverage", () => {
         [makeMermaidPreviewPlugin(async () => ({ svg: "<svg></svg>" }))],
       ),
     );
-    const [fenceGutter, paragraphGutter] = Array.from(
-      editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-affordance"),
-    );
     const preview = editor.view.dom.querySelector<HTMLElement>(".dohc-mermaid-preview")!;
-    expect(paragraphGutter!.nextElementSibling).toBe(preview);
+    const fence = editor.view.dom.querySelector("pre")!;
+    const paragraph = editor.view.dom.lastElementChild!;
 
-    expect(hover(editor, editor.view.dom.querySelector("pre")!)).toEqual([fenceGutter]);
+    expect(hover(editor, fence).map(blockAfter)).toEqual([fence]);
     expect(hover(editor, preview)).toEqual([]);
-    expect(hover(editor, editor.view.dom.lastElementChild!)).toEqual([paragraphGutter]);
+    const [paragraphGutter] = hover(editor, paragraph);
+    expect(paragraphGutter!.nextElementSibling).toBe(preview);
+    expect(blockAfter(paragraphGutter!)).toBe(paragraph);
     expect(hover(editor, preview)).toEqual([]);
   });
 
@@ -756,14 +778,13 @@ describe("blockControls gutter coverage", () => {
         [other],
       ),
     );
-    const gutters = Array.from(
-      editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-affordance"),
-    );
     const widgets = Array.from(editor.view.dom.querySelectorAll<HTMLElement>(".test-widget"));
-    expect(gutters.map((gutter) => gutter.nextElementSibling)).toEqual(widgets);
 
     editor.state.doc.forEach((_node, pos, index) => {
-      expect(hover(editor, editor.view.nodeDOM(pos) as Element)).toEqual([gutters[index]]);
+      const block = editor.view.nodeDOM(pos) as Element;
+      const shown = hover(editor, block);
+      expect(shown.map(blockAfter)).toEqual([block]);
+      expect(shown[0]!.nextElementSibling).toBe(widgets[index]);
       expect(hover(editor, widgets[index]!)).toEqual([]);
     });
   });
@@ -1102,7 +1123,10 @@ describe("blockControls drag ghost", () => {
     });
   }
 
+  /** Both blocks' handles: the caret is in the first block, and the pointer
+   * shows the second block's controls. */
   function blockHandles(editor: Editor): HTMLElement[] {
+    blockControls(editor, 1);
     const handles = Array.from(editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-handle"));
     if (handles.length < 2) throw new Error("block handles missing");
     return handles;
