@@ -10,6 +10,7 @@ import {
 } from "react";
 import { AppState, View } from "react-native";
 import { nativeDurableFile } from "../../modules/durable-file";
+import { createChatWakes, type ChatWakes } from "../conversation/chatWakeState";
 import { createAccount, type Account, type AccountState, type SignIn } from "../server/account";
 import { createCacheFiles } from "../server/cacheFiles";
 import { createDurableFiles } from "../server/durableFiles";
@@ -45,6 +46,8 @@ interface AccountValue {
   readonly data: WorkspaceData | null;
   /** The account's Notices, whichever workspace is open. */
   readonly notices: NoticeStore | null;
+  /** The wakes of the conversations on screen, one sign-in's and open workspace's, in memory only. */
+  readonly wakes: ChatWakes | null;
   chooseWorkspace(workspaceId: string): void;
   reloadWorkspaces(): void;
   setShowOnPhone(workspaceId: string, showOnPhone: boolean): void;
@@ -159,6 +162,26 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     };
   }, [open, list, notices, cache, noticeFiles]);
 
+  // Wakes, one sign-in's and open workspace's store's: a sign-in change or a workspace switch stops every read and wait
+  // the last one started, before any screen or Notice row wants its conversations again. A Notice row reads its own
+  // workspace's wakes through it. Nothing reads in the background.
+  const instance = data?.instance ?? null;
+  const wakes = useMemo(
+    () => (signIn && instance !== null ? createChatWakes({ signIn }) : null),
+    [signIn, instance],
+  );
+  useEffect(() => {
+    if (!wakes) return;
+    if (AppState.currentState === "background") wakes.pause();
+    const subscription = AppState.addEventListener("change", (next) =>
+      next === "background" ? wakes.pause() : wakes.resume(),
+    );
+    return () => {
+      subscription.remove();
+      wakes.stop();
+    };
+  }, [wakes]);
+
   const value = useMemo<AccountValue>(
     () => ({
       account,
@@ -169,11 +192,24 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       currentWorkspaceId,
       data,
       notices,
+      wakes,
       chooseWorkspace: (workspaceId) => open?.choose(workspaceId),
       reloadWorkspaces: () => list?.reload(),
       setShowOnPhone: (workspaceId, showOnPhone) => open?.setShowOnPhone(workspaceId, showOnPhone),
     }),
-    [account, state, outbox, deletion, workspaces, currentWorkspaceId, data, notices, list, open],
+    [
+      account,
+      state,
+      outbox,
+      deletion,
+      workspaces,
+      currentWorkspaceId,
+      data,
+      notices,
+      wakes,
+      list,
+      open,
+    ],
   );
   return <Context value={value}>{children}</Context>;
 }

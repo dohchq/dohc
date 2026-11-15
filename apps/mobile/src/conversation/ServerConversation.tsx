@@ -21,6 +21,7 @@ import { useAccount, useSignIn } from "../account/AccountProvider";
 import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
 import type { ChatKind } from "../chats/sample";
+import type { WakeTarget } from "../server/chatWakes";
 import { phoneWrites } from "../server/phoneWrites";
 import { views, type ViewState } from "../server/workspaceData";
 import type {
@@ -31,6 +32,7 @@ import type {
   MissingChat,
 } from "../server/workspaceReads";
 import { useTheme, workspaceMarkFills } from "../theme";
+import type { WakeView } from "./chatWakeState";
 import {
   EmptyLine,
   HoldRow,
@@ -71,6 +73,7 @@ import {
   serverMessage,
 } from "./serverMessages";
 import type { Author, Message } from "./types";
+import { useChatWakes } from "./useChatWakes";
 import {
   useChoose,
   useConversationWrites,
@@ -730,12 +733,21 @@ function Stream({
     [reply, posts],
   );
   const answers = useMemo(() => writes?.answers(byId, posts), [writes, byId, posts]);
+  // The wakes of the items the stream shows, read again when its read changes or a thread among them changes.
+  const wakeTarget = useMemo<WakeTarget>(() => ({ kind: "stream", groupId }), [groupId]);
+  const wakeThreads = useMemo(
+    () => (stream ? new Set(stream.items.map((item) => item.message.threadId)) : null),
+    [stream],
+  );
+  const wakes = useChatWakes(wakeTarget, wakeThreads, visible, stream);
   return (
     <Conversation
       title={chatTitle(kindOf(stream?.groupKind ?? "group"), stream?.name ?? name)}
       state={state}
       messages={messages}
       retry={retry}
+      wakes={wakes.view}
+      retryWakes={wakes.retry}
       {...(writes && onReply && answers
         ? {
             local: local ?? [],
@@ -801,12 +813,17 @@ function Thread({
   const reply = writes?.reply;
   const onReply = useMemo(() => reply && ((message: Message) => reply(message, false)), [reply]);
   const answers = useMemo(() => writes?.answers(byId, new Set()), [writes, byId]);
+  const wakeTarget = useMemo<WakeTarget>(() => ({ kind: "thread", threadId }), [threadId]);
+  const wakeThreads = useMemo(() => (thread ? new Set([threadId]) : null), [thread, threadId]);
+  const wakes = useChatWakes(wakeTarget, wakeThreads, visible, thread);
   return (
     <Conversation
       title={thread?.title || workspaceWords.thread}
       state={state}
       messages={messages}
       retry={retry}
+      wakes={wakes.view}
+      retryWakes={wakes.retry}
       anchor={messageId}
       {...(messageId === null ? {} : { onShown: addOnScreen })}
       {...(writes && onReply && answers
@@ -828,6 +845,8 @@ function Conversation({
   state,
   messages,
   retry,
+  wakes,
+  retryWakes,
   anchor = null,
   onShown,
   local,
@@ -841,6 +860,9 @@ function Conversation({
   state: ViewState<GroupStream | ChatThread | MissingChat>;
   messages: readonly Message[] | null;
   retry(): void;
+  /** The wakes of the messages its read shows, as last read, or null before a read. */
+  wakes: WakeView | null;
+  retryWakes(): void;
   /** The message to open at, rather than the end. */
   anchor?: string | null;
   /** Takes the IDs of the messages on screen each time they change. */
@@ -886,6 +908,12 @@ function Conversation({
         )),
     [onShown],
   );
+  // Only a message the content read shows takes wakes, by its ID; one only this phone has never does. Its lines stay
+  // while a read fails: the failure shows once for the conversation, below, not under every message.
+  const wakesOf = (entry: Message) => {
+    const own = entry.local === undefined ? wakes?.byMessage.get(entry.id) : undefined;
+    return own ? { wakes: own } : {};
+  };
   const renderItem = (item: ConversationItem) =>
     item.type === "day" ? (
       <View style={styles.dayRow}>
@@ -903,6 +931,7 @@ function Conversation({
         {...(react ? { react } : {})}
         {...(onReply ? { onReply } : {})}
         {...(answers ? { answers } : {})}
+        {...wakesOf(item.message)}
       />
     );
   const gap = useWorkspaceGap();
@@ -963,12 +992,19 @@ function Conversation({
         <View style={[styles.problem, { borderBottomColor: theme.line }]}>
           <ProblemLine text={kept.text} onRetry={kept.retry} />
         </View>
+      ) : wakes?.failed ? (
+        // The agents' states couldn't be read: once for the conversation, with a Try again that only reads.
+        <View style={[styles.problem, { borderBottomColor: theme.line }]}>
+          <ProblemLine text={chatWords.wakeReadFailed} onRetry={retryWakes} />
+        </View>
       ) : null}
       {items.length === 0 ? (
         <EmptyLine text={workspaceWords.noMessages} />
       ) : composer === undefined ? (
         <LegendList
           data={items}
+          // Wakes change apart from the messages: their rows draw again.
+          extraData={wakes}
           keyExtractor={(item) => item.key}
           getItemType={(item) => item.type}
           estimatedItemSize={64}
@@ -986,6 +1022,7 @@ function Conversation({
         // Where writes are on, the list rides the keyboard with the composer, and its end clears the composer.
         <KeyboardAwareLegendList
           data={items}
+          extraData={wakes}
           keyExtractor={(item) => item.key}
           getItemType={(item) => item.type}
           estimatedItemSize={64}

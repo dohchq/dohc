@@ -1,3 +1,4 @@
+import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { workspaceName } from "../chats/workspaceName";
 import type { SubmitOutcome } from "../conversation/conversationWrites";
@@ -93,6 +94,17 @@ export interface NoticeAnswerView {
   keepDraft(text: string): void;
   /** Send, Copy and Discard on this phone's answers. */
   readonly actions: LocalActions;
+  /**
+   * Where each agent the chosen answer woke stands, when a read shows the question answered by a reply the phone shows
+   * and that reply has wakes. Never a losing reply's.
+   */
+  readonly wakes?: {
+    readonly wakes: readonly PhoneChatWake[];
+    /** The latest read of its thread's wakes failed: these are from the read before. */
+    readonly failed: boolean;
+    /** Try again: reads the wakes again. */
+    retry(): void;
+  };
 }
 
 /** Where a Notice's Open goes on the phone. */

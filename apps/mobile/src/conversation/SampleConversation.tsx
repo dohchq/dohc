@@ -34,6 +34,7 @@ import {
   sampleMessagesFor,
   sampleScope,
   sampleThreadFor,
+  sampleWakesFor,
   sampleYou,
 } from "./sample";
 import { localMessage } from "./serverMessages";
@@ -57,6 +58,12 @@ type Item =
   | { type: "message"; key: string; message: Message; continued: boolean; afterExtras: boolean };
 
 const always = () => true;
+/** `talk-wakes`'s wakes, shown as a server read's would be. They never change, so they never fail or need Try again. */
+const sampleWakes = sampleWakesFor(demoMode);
+const wakesFor = (message: Message) => {
+  const wakes = message.local === undefined ? sampleWakes?.get(message.id) : undefined;
+  return wakes ? { wakes } : {};
+};
 /** A thread takes replies, and never a post. */
 const REPLY_LANES: Lanes = { post: false, send: true };
 
@@ -370,6 +377,7 @@ export function SampleConversation() {
               onReply={onReply}
               onOpenReplies={onOpenReplies}
               answers={answers}
+              {...wakesFor(item.message)}
             />
           )
         }

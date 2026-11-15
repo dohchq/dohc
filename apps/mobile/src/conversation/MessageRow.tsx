@@ -20,6 +20,7 @@ import Animated, {
 import { confirmWords } from "@dohc/interface-words/confirmations";
 import { chatWords } from "@dohc/interface-words/notices";
 import { workspaceWords } from "@dohc/interface-words/workspace";
+import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
 import { AgentMark } from "../AgentMark";
 import { ActionPill } from "../notices/ActionPill";
 import { sampleBuild } from "../sampleBuild";
@@ -28,11 +29,12 @@ import { DecisionCard } from "./DecisionCard";
 import { localOffers } from "./outboxMessages";
 import type { Author, LocalMark, Message, Reaction, ReactionMark, Segment } from "./types";
 import type { AnswerActions, LocalActions, ReactActions } from "./useOutbox";
+import { WakeState } from "./WakeState";
 
 // One message, as in Slack: an author line starts a group; follow-ups from the same author within a few minutes don't repeat it.
 // Where writes are on, a message the server has offers its reactions, Add reaction and Reply; one only this phone has
 // offers Reply when a reply can wait for it. A message that asks a question or a poll shows its card, which takes
-// answers where writes are on.
+// answers where writes are on. A message the server has shows where each agent it woke stands, read-only.
 export const MessageRow = memo(function MessageRow({
   message,
   continued,
@@ -42,6 +44,9 @@ export const MessageRow = memo(function MessageRow({
   react,
   onReply,
   answers,
+  wakes,
+  wakesFailed = false,
+  onRetryWakes,
 }: {
   message: Message;
   continued: boolean;
@@ -54,6 +59,11 @@ export const MessageRow = memo(function MessageRow({
   onReply?(message: Message): void;
   /** A question's or poll's answers, where writes are on. */
   answers?: AnswerActions;
+  /** The wakes of a message the server has, from the latest read of its conversation's wakes. */
+  wakes?: readonly PhoneChatWake[];
+  /** That read failed, so the wakes are from the read before. */
+  wakesFailed?: boolean;
+  onRetryWakes?(): void;
 }) {
   const theme = useTheme();
   const paddingTop = continued ? (afterExtras ? 12 : 8) : 14;
@@ -99,6 +109,13 @@ export const MessageRow = memo(function MessageRow({
             message={message}
             decision={message.decision}
             {...(answers ? { answers } : {})}
+          />
+        ) : null}
+        {wakes && message.local === undefined ? (
+          <WakeState
+            wakes={wakes}
+            failed={wakesFailed}
+            {...(onRetryWakes ? { onRetry: onRetryWakes } : {})}
           />
         ) : null}
         {message.local === undefined && message.threadId && react ? (

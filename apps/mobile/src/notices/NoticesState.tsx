@@ -23,8 +23,10 @@ import { serverName } from "../server/origin";
 import { phoneWrites } from "../server/phoneWrites";
 import { readChats, readThread } from "../server/workspaceReads";
 import { failureStep, type Reported } from "../workspace/failureReports";
+import type { WakeView } from "../conversation/chatWakeState";
 import {
   answerLookup,
+  answerReply,
   answerView,
   createNoticeEditor,
   namedQuestion,
@@ -209,6 +211,9 @@ const noState = () => NO_NOTICES;
 const NO_READS: ReadonlyMap<string, TargetRead> = new Map();
 const noReads = () => NO_READS;
 const NO_ANSWERS: readonly OutboxRecord[] = [];
+const noVersion = () => 0;
+const sameIds = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((id, index) => id === b[index]);
 
 // The account's Notices from the server, with failures held on this phone on top.
 function ServerNoticesState({ children }: { children: ReactNode }) {
@@ -219,6 +224,7 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
     chooseWorkspace,
     reloadWorkspaces,
     outbox,
+    wakes,
   } = useAccount();
   const relay = useSyncExternalStore(store?.subscribe ?? noSubscribe, store?.state ?? noState);
   const local = useLocalNotices([]);
@@ -364,8 +370,16 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
     [targets],
   );
 
-  // A row the store didn't change, whose read, answers and visit didn't change, keeps its object, so its NoticeRow
-  // doesn't draw again.
+  // The wakes of each answered question's chosen reply, read in the Notice's own workspace, only for rows on screen and
+  // the row whose answer is open.
+  const wakeVersion = useSyncExternalStore(
+    wakes?.subscribe ?? noSubscribe,
+    wakes?.version ?? noVersion,
+  );
+  const [seen, setSeen] = useState<readonly string[]>([]);
+
+  // A row the store didn't change, whose read, answers, visit and wakes didn't change, keeps its object, so its
+  // NoticeRow doesn't draw again.
   const presented = useMemo(
     () =>
       new WeakMap<
@@ -374,10 +388,21 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
           readonly read: TargetRead | undefined;
           readonly answers: readonly OutboxRecord[];
           readonly visit: AnswerVisit | null;
+          readonly wakes: WakeView | null;
           readonly notice: PhoneNotice;
         }
       >(),
-    [workspaces, currentWorkspaceId, open, reply, answer, retryTarget, editor, answerActions],
+    [
+      workspaces,
+      currentWorkspaceId,
+      open,
+      reply,
+      answer,
+      retryTarget,
+      editor,
+      answerActions,
+      wakes,
+    ],
   );
   const relayNotices = useMemo(
     () =>
@@ -388,8 +413,21 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
         const named = phoneWrites ? namedQuestion(record) : null;
         const answers = named ? answersOf(named.workspaceId, named.messageId) : NO_ANSWERS;
         const editing = visit?.noticeId === `relay:${record.noticeId}` ? visit : null;
+        const asked = candidate?.answer === true && signIn.isCurrent() ? candidate : null;
+        const shown = asked ? shownQuestion(asked, read) : null;
+        const chosen = answerReply(shown);
+        const wakeView =
+          asked && chosen !== null && wakes
+            ? wakes.view(asked.workspaceId, { kind: "thread", threadId: asked.threadId })
+            : null;
         const known = presented.get(record);
-        if (known && known.read === read && known.answers === answers && known.visit === editing)
+        if (
+          known &&
+          known.read === read &&
+          known.answers === answers &&
+          known.visit === editing &&
+          known.wakes === wakeView
+        )
           return known.notice;
         const action = noticeAction(record, {
           list: workspaces,
@@ -408,11 +446,10 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
           retryTarget,
         });
         const target = phoneTarget(record, workspaces);
-        const asked = candidate?.answer === true && signIn.isCurrent() ? candidate : null;
         const view = named
           ? answerView({
               noticeId: notice.id,
-              shown: asked ? shownQuestion(asked, read) : null,
+              shown,
               verified: asked ? verifiedQuestion(asked, read) : null,
               showing: asked !== null,
               named,
@@ -423,8 +460,21 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
               ...(target ? { open: () => open(record, target) } : {}),
             })
           : null;
-        const row = view ? { ...notice, answer: view } : notice;
-        presented.set(record, { read, answers, visit: editing, notice: row });
+        const chosenWakes = chosen === null ? undefined : wakeView?.byMessage.get(chosen);
+        // A failed read shows on the chosen answer even when no wake of it is known yet, with Try again.
+        const withWakes =
+          view && asked && wakes && wakeView && chosen !== null && (chosenWakes || wakeView.failed)
+            ? {
+                ...view,
+                wakes: {
+                  wakes: chosenWakes ?? [],
+                  failed: wakeView.failed,
+                  retry: () => wakes.refresh(asked.workspaceId),
+                },
+              }
+            : view;
+        const row = withWakes ? { ...notice, answer: withWakes } : notice;
+        presented.set(record, { read, answers, visit: editing, wakes: wakeView, notice: row });
         return row;
       }),
     [
@@ -443,8 +493,54 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
       visit,
       editor,
       answerActions,
+      wakes,
+      // The wakes' views change apart from the rows' records.
+      wakeVersion,
     ],
   );
+
+  // Each chosen reply's thread wakes are wanted while its row is on screen or its answer is open, one per workspace
+  // and thread. A new read of that thread wants them again, which reads them again.
+  const wakeThreads = useMemo(() => {
+    const ids = new Set(seen);
+    if (visit) ids.add(visit.noticeId);
+    const byKey = new Map<string, { readonly target: MessageTarget; readonly read: TargetRead }>();
+    for (const record of relay.notices) {
+      if (!ids.has(`relay:${record.noticeId}`)) continue;
+      const candidate = answerCandidate(record, workspaces, phoneWrites);
+      if (!candidate || !signIn.isCurrent()) continue;
+      const read = reads.get(targetKey(candidate));
+      if (read && answerReply(shownQuestion(candidate, read)) !== null)
+        byKey.set(targetKey(candidate), { target: candidate, read });
+    }
+    return byKey;
+  }, [seen, visit, relay.notices, workspaces, reads, signIn]);
+  const wanting = useRef(new Map<string, { readonly read: TargetRead; release(): void }>());
+  useEffect(() => {
+    const held = wanting.current;
+    for (const [key, entry] of held)
+      if (!wakeThreads.has(key)) {
+        entry.release();
+        held.delete(key);
+      }
+    if (!wakes) return;
+    for (const [key, { target, read }] of wakeThreads) {
+      const was = held.get(key);
+      if (was?.read === read) continue;
+      const { workspaceId, threadId } = target;
+      // Wanted again before the last want goes, so the read already running is replaced, not dropped.
+      const release = wakes.want(workspaceId, { kind: "thread", threadId }, new Set([threadId]));
+      was?.release();
+      held.set(key, { read, release });
+    }
+  }, [wakes, wakeThreads]);
+  useEffect(() => {
+    const held = wanting.current;
+    return () => {
+      for (const entry of held.values()) entry.release();
+      held.clear();
+    };
+  }, [wakes]);
 
   // Only the rows on screen read their messages, one read per workspace and thread, and the row whose answer is open
   // keeps its read while it scrolls away. A row's answer closes when its Notice leaves the list or its workspace stops
@@ -472,6 +568,8 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
     (ids: readonly string[] | null) => {
       if (ids === null) editor.close();
       visible.current = ids ?? [];
+      const next = visible.current;
+      setSeen((previous) => (sameIds(previous, next) ? previous : next));
       wantVisible();
     },
     [wantVisible, editor],
