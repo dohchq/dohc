@@ -1155,6 +1155,49 @@ fn an_outside_save_during_an_undo_is_judged_after_it() {
     assert_eq!(f.holds(), vec![("team".to_owned(), "widened".to_owned())]);
 }
 
+/// An Undo whose placement fails leaves nothing to replay, so the bytes it
+/// meant to place are judged as a change from outside dohc.
+#[test]
+fn a_failed_undo_leaves_no_placement_to_replay() {
+    struct CrashPlacement;
+    impl dohc_engine_storage::FaultInjector for CrashPlacement {
+        fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+            if point == dohc_engine_storage::FaultPoint::MaterializeAfterTempWrite {
+                dohc_engine_storage::FaultAction::Crash
+            } else {
+                dohc_engine_storage::FaultAction::Continue
+            }
+        }
+    }
+    let mut f = ruled_team();
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    let decided = f
+        .decided_on(
+            "team",
+            AccessRuleDecision::Restore,
+            Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes())),
+            "widened",
+        )
+        .expect("restore");
+    let failed = f.undo_rule_with(
+        "team",
+        decided.undo.expect("an undo"),
+        Arc::new(CrashPlacement),
+    );
+    assert!(waits(&failed), "{failed:?}");
+    f.restart();
+    assert_eq!(
+        std::fs::read_to_string(f.root().join("team/access.yaml")).unwrap(),
+        VIEW
+    );
+    // The owner puts the outside rule back by hand.
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/access.yaml"])[0], "team"));
+}
+
 /// Restoring a folder whose new rule nothing committed removes that rule
 /// from disk and keeps it as a kept copy, so the restore can be undone.
 #[test]

@@ -2220,7 +2220,19 @@ fn place(
         order.faults,
         None,
     );
-    if placed { Ok(()) } else { Err(waits()) }
+    if placed {
+        return Ok(());
+    }
+    // Bytes nothing committed must not wait to replay: capture would take
+    // them for dohc's own. Restore's bytes are the committed rule, so they may.
+    if content.is_some()
+        && store
+            .load_materialization_job(&job_id)?
+            .is_some_and(|job| job.status == dohc_engine_storage::JobStatus::Pending)
+    {
+        store.mark_materialization_cancelled(&job_id, order.now_ms)?;
+    }
+    Err(waits())
 }
 
 /// Remove a rule nothing committed, if it still holds the judged bytes. It
