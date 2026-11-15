@@ -491,13 +491,17 @@ function WritableThread({
   const value = useView(view).state.value;
   const thread = value?.kind === "thread" ? value : null;
   // A post's thread takes its answers at its top. Which it is comes from the lane the chat list names for it, however
-  // the thread was opened. One no chat lists, as a file's, is no post. Null until the list is read.
+  // the thread was opened. One no chat lists, as a file's, is no post, but only once a current read of the list says
+  // so: a cached list from before a new post doesn't name it. Null while that isn't known.
   const { state: chatsState, retry: retryChats } = useView(views.chats);
   const chats = chatsState.value;
-  const post = useMemo(
-    () => (chats ? chats.some((group) => group.postThreadIds?.includes(threadId) === true) : null),
-    [chats, threadId],
-  );
+  const listCurrent = !chatsState.loading && chatsState.problem === null;
+  const post = useMemo(() => {
+    if (!chats) return null;
+    const group = chats.find((each) => each.threadIds.includes(threadId));
+    if (group) return group.postThreadIds?.includes(threadId) === true;
+    return listCurrent ? false : null;
+  }, [chats, threadId, listCurrent]);
   // The message a reply goes under, or the question it answers, never both.
   const [chosen, setChosen] = useState<string | null>(answerId === null ? replyId : null);
   const [answering, setAnswering] = useState<string | null>(answerId);
@@ -528,18 +532,22 @@ function WritableThread({
       to,
     };
   }, [answering, thread, answersByQuestion, post]);
-  // A failed read of the chat list shows in the composer while an answer waits on it, with its cause and Try again.
-  // The outbox's own problem comes first.
+  // A failed read of the chat list shows in the composer while it keeps an answer off, chosen or offered by an open
+  // question in the thread, with its cause and Try again. The outbox's own problem comes first.
+  const answersWait =
+    post === null &&
+    (question !== null ||
+      (thread?.messages.some((each) => each.decisionState === "open") ?? false));
   const problem = useMemo(
     () =>
       outboxProblemNow ??
-      (question?.target.kind === "waiting" && chatsState.problem
+      (answersWait && chatsState.problem
         ? {
             text: `${chatWords.lanesFailed} ${problemText(chatsState.problem)}`,
             retry: retryChats,
           }
         : null),
-    [outboxProblemNow, question, chatsState.problem, problemText, retryChats],
+    [outboxProblemNow, answersWait, chatsState.problem, problemText, retryChats],
   );
   const local = useCallback(
     (shown: ReadonlySet<string>) =>
