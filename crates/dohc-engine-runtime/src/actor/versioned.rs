@@ -472,15 +472,17 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<RollbackExecutionResult, RuntimeError> {
         self.run(move |store, cache| {
-            with_local_file_mutation_cache_reset(cache, || {
-                versioned_text_rollback_on_store(
-                    store,
-                    &input,
-                    &root_dir,
-                    self_writes.as_ref(),
-                    faults.as_ref(),
-                    &token,
-                )
+            access_order::ordered(store, |store| {
+                with_local_file_mutation_cache_reset(cache, || {
+                    versioned_text_rollback_on_store(
+                        store,
+                        &input,
+                        &root_dir,
+                        self_writes.as_ref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                })
             })
         })
         .await
@@ -507,15 +509,17 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<MergeExecutionResult, RuntimeError> {
         self.run(move |store, cache| {
-            with_local_file_mutation_cache_reset(cache, || {
-                versioned_text_merge_on_store(
-                    store,
-                    &input,
-                    &root_dir,
-                    self_writes.as_ref(),
-                    faults.as_ref(),
-                    &token,
-                )
+            access_order::ordered(store, |store| {
+                with_local_file_mutation_cache_reset(cache, || {
+                    versioned_text_merge_on_store(
+                        store,
+                        &input,
+                        &root_dir,
+                        self_writes.as_ref(),
+                        faults.as_ref(),
+                        &token,
+                    )
+                })
             })
         })
         .await

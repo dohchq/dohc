@@ -23,8 +23,11 @@
 //! needs one refuses the moment and is judged again, with its commit or hold,
 //! when the command ends ([`finish_command`]). So that writers rarely meet
 //! that refusal, capture ([`order_capture`]) and the versioned text and
-//! binary writes, renames and deletes ([`order_writer`]) run [`order_paths`]
-//! before their transaction: it commits a changed rule first. Capture judges
+//! binary writes, renames and deletes ([`order_writer`]) and Undo
+//! ([`order_undo`]) run [`order_paths`] before their transaction: it commits a
+//! changed rule first. Rollback and merge run through [`ordered`], which
+//! judges a folder the check refused and runs the writer once more, so their
+//! callers never see that refusal either. Capture judges
 //! the rule bytes it read itself, so a widening it found is held rather than
 //! committed. A rule moment no step judged is a change made through dohc and
 //! commits as written.
@@ -236,8 +239,31 @@ pub(super) fn order_writer(
     version_id: &str,
     touches: &[Touch<'_>],
 ) -> Result<(), RuntimeError> {
+    order_as(store, Writer::Deliberate, workspace_id, version_id, touches)?
+        .into_iter()
+        .collect()
+}
+
+/// [`order_writer`] for the members of one Undo turn, with each touch's
+/// answer, so a member refused here is skipped and the others go on.
+pub(super) fn order_undo(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    touches: &[Touch<'_>],
+) -> Result<Vec<Result<(), RuntimeError>>, RuntimeError> {
+    order_as(store, Writer::Undo, workspace_id, version_id, touches)
+}
+
+fn order_as(
+    store: &mut EngineStore,
+    writer: Writer,
+    workspace_id: &str,
+    version_id: &str,
+    touches: &[Touch<'_>],
+) -> Result<Vec<Result<(), RuntimeError>>, RuntimeError> {
     let Some(root) = root() else {
-        return Ok(());
+        return Ok(touches.iter().map(|_| Ok(())).collect());
     };
     let leases = LeaseRegistry::new();
     let order = Order {
@@ -245,28 +271,75 @@ pub(super) fn order_writer(
         workspace_id,
         version_id,
         now_ms: wall_clock_ms(),
-        writer: Writer::Deliberate,
+        writer,
         leases: &leases,
         faults: &NoFaults,
     };
-    order_paths(store, &order, touches)?.into_iter().collect()
+    order_paths(store, &order, touches)
 }
 
-/// Judge `folder` and the folders above it, from the root down.
+/// Run a writer that has no step of its own. When the commit-point check
+/// refused one of its moments, judge the refused folders now, which commits
+/// a rule that goes first, and run the writer once more, so its caller never
+/// sees the refusal. A folder that waits or is held answers for the writer.
+pub(super) fn ordered<R>(
+    store: &mut EngineStore,
+    mut work: impl FnMut(&mut EngineStore) -> Result<R, RuntimeError>,
+) -> Result<R, RuntimeError> {
+    let outcome = work(store);
+    let deferred = CLEARED.with(|cleared| std::mem::take(&mut cleared.borrow_mut().deferred));
+    let root = root();
+    let (Err(_), Some(root)) = (&outcome, root.filter(|_| !deferred.is_empty())) else {
+        CLEARED.with(|cleared| cleared.borrow_mut().deferred.extend(deferred));
+        return outcome;
+    };
+    let leases = LeaseRegistry::new();
+    for ((workspace, version, folder), writes_under) in deferred {
+        begin_command();
+        let order = Order {
+            root: &root,
+            workspace_id: &workspace,
+            version_id: &version,
+            now_ms: wall_clock_ms(),
+            writer: Writer::Deliberate,
+            leases: &leases,
+            faults: &NoFaults,
+        };
+        match order_folder(store, &order, &folder, writes_under)? {
+            (_, Verdict::Clear(_)) => {}
+            (_, Verdict::Waits) => return Err(waits()),
+            (folder, Verdict::Held { reason } | Verdict::Refused { reason }) => {
+                return Err(RuntimeError::AccessRuleHeld { folder, reason });
+            }
+        }
+    }
+    begin_command();
+    work(store)
+}
+
+/// Judge `folder` and the folders above it, from the root down, and say
+/// where judging stopped.
 fn order_folder(
     store: &mut EngineStore,
     order: &Order<'_>,
     folder: &str,
     writes_under: bool,
-) -> Result<Verdict, RuntimeError> {
+) -> Result<(String, Verdict), RuntimeError> {
     let mut verdict = Verdict::Clear(Clearance::Open);
     for above in folders_of(&rule_path(folder)) {
-        verdict = judge_one(store, order, above, &[], writes_under || above != folder)?;
+        verdict = judge_one(
+            store,
+            order,
+            above,
+            &[],
+            writes_under || above != folder,
+            &[],
+        )?;
         if !matches!(verdict, Verdict::Clear(_)) {
-            break;
+            return Ok((above.to_owned(), verdict));
         }
     }
-    Ok(verdict)
+    Ok((folder.to_owned(), verdict))
 }
 
 fn key(workspace: &str, version: &str, folder: &str) -> FolderKey {
@@ -438,10 +511,10 @@ fn judge_in_tx(
         version_id: version,
         writer: Writer::Capture,
     };
-    let plan = judge_folder(tx, &scope, folder, &[], !deletes).map_err(sync_error)?;
+    let plan = judge_folder(tx, &scope, folder, &[], !deletes, &[]).map_err(sync_error)?;
     let reason = match plan {
         Plan::Verdict(Verdict::Clear(clearance)) => return Ok(clearance),
-        Plan::Verdict(Verdict::Held { .. }) => ACCESS_RULE_HELD,
+        Plan::Verdict(Verdict::Held { .. } | Verdict::Refused { .. }) => ACCESS_RULE_HELD,
         Plan::Verdict(Verdict::Waits) | Plan::CommitRule(_) => ACCESS_RULE_WAITS,
     };
     CLEARED.with(|cleared| {
@@ -512,10 +585,14 @@ pub(super) enum Writer {
     /// Capture, recording what it found on disk. A rule it records is judged
     /// like any rule found on disk.
     Capture,
-    /// A change made through dohc: a write, restore, undo, merge or other
+    /// A change made through dohc: a write, restore, merge or other
     /// operation the owner or their agent asked for. Its own rule changes
     /// commit as written, in order.
     Deliberate,
+    /// Undo, replaying an operation backwards. It writes rules as written,
+    /// but removes one the way a rule missing from disk goes: after the files
+    /// under it, and only once none is left.
+    Undo,
 }
 
 pub(super) struct Order<'a> {
@@ -552,7 +629,14 @@ struct Scope<'a> {
 enum Verdict {
     Clear(Clearance),
     Waits,
-    Held { reason: &'static str },
+    Held {
+        reason: &'static str,
+    },
+    /// The writer's own change cannot go now, and nothing waits for the
+    /// owner: Undo would remove a rule over files it leaves behind.
+    Refused {
+        reason: &'static str,
+    },
 }
 
 /// A folder's rule files on disk, by path.
@@ -808,15 +892,13 @@ fn nearest_committed_above(
     Ok(None)
 }
 
-/// Whether a file the store records under `folder`, other than its rule,
-/// is still on disk.
-fn folder_holds_files(
+/// The files the store records under `folder`, other than its rule.
+fn recorded_files(
     conn: &Connection,
-    root: &Path,
     workspace: &str,
     version: &str,
     folder: &str,
-) -> Result<(bool, bool), RuntimeError> {
+) -> Result<Vec<String>, RuntimeError> {
     let (low, high) = folder_range(folder);
     let mut query = conn
         .prepare_cached(
@@ -829,18 +911,30 @@ fn folder_holds_files(
             row.get::<_, String>(0)
         })
         .map_err(StorageError::corrupt_public)?;
-    let mut recorded = false;
+    let mut files = Vec::new();
     for path in paths {
         let path = path.map_err(StorageError::corrupt_public)?;
-        if is_rule_of(&path, folder) {
-            continue;
-        }
-        recorded = true;
-        if std::fs::symlink_metadata(root.join(&path)).is_ok() {
-            return Ok((true, true));
+        if !is_rule_of(&path, folder) {
+            files.push(path);
         }
     }
-    Ok((recorded, false))
+    Ok(files)
+}
+
+/// Whether the store records a file under `folder`, other than its rule,
+/// and whether one is still on disk.
+fn folder_holds_files(
+    conn: &Connection,
+    root: &Path,
+    workspace: &str,
+    version: &str,
+    folder: &str,
+) -> Result<(bool, bool), RuntimeError> {
+    let files = recorded_files(conn, workspace, version, folder)?;
+    let on_disk = files
+        .iter()
+        .any(|path| std::fs::symlink_metadata(root.join(path)).is_ok());
+    Ok((!files.is_empty(), on_disk))
 }
 
 fn materialization_pending(
@@ -912,10 +1006,11 @@ fn judge_folder(
     folder: &str,
     rule_touches: &[Touch<'_>],
     writes_under: bool,
+    deletes_under: &[&str],
 ) -> Result<Plan, RuntimeError> {
     let (workspace, version) = (order.workspace_id, order.version_id);
     let committed = committed_rule(conn, workspace, version, folder)?;
-    if order.writer == Writer::Deliberate && !rule_touches.is_empty() {
+    if order.writer != Writer::Capture && !rule_touches.is_empty() {
         // A change made through dohc goes as written. Only deleting every
         // file of the rule closes the folder behind it.
         let removes = rule_touches.iter().all(|touch| touch.deletes)
@@ -925,12 +1020,22 @@ fn judge_folder(
                     .keys()
                     .all(|path| rule_touches.iter().any(|touch| touch.path == path))
             });
-        let clearance = if removes {
-            Clearance::RuleLast
-        } else {
-            Clearance::RuleFirst
-        };
-        return Ok(Plan::Verdict(Verdict::Clear(clearance)));
+        if !removes {
+            return Ok(Plan::Verdict(Verdict::Clear(Clearance::RuleFirst)));
+        }
+        // Undo widens nothing it was not asked to: the folder must be left
+        // with no file the rule covered.
+        if order.writer == Writer::Undo
+            && (writes_under
+                || recorded_files(conn, workspace, version, folder)?
+                    .iter()
+                    .any(|path| !deletes_under.contains(&path.as_str())))
+        {
+            return Ok(Plan::Verdict(Verdict::Refused {
+                reason: access_rule_holds::REMOVED,
+            }));
+        }
+        return Ok(Plan::Verdict(Verdict::Clear(Clearance::RuleLast)));
     }
     if materialization_pending(conn, workspace, folder)? {
         // dohc wrote this rule and its file is on the way to disk.
@@ -991,6 +1096,17 @@ fn judge_folder(
     })
 }
 
+/// What a writer's touches do under one folder.
+#[derive(Default)]
+struct Under<'a> {
+    /// Its changes to the folder's own rule.
+    rule: Vec<Touch<'a>>,
+    /// Whether it writes a file under the folder.
+    writes: bool,
+    /// The files under the folder it deletes.
+    deletes: Vec<&'a str>,
+}
+
 /// Put the access rules over `touches` in order before a writer changes
 /// them, and say for each touch whether the writer may go on. An `Err` in
 /// the outer result is a store failure; an `Err` for one touch is that
@@ -1001,7 +1117,7 @@ pub(super) fn order_paths(
     order: &Order<'_>,
     touches: &[Touch<'_>],
 ) -> Result<Vec<Result<(), RuntimeError>>, RuntimeError> {
-    let mut folders: BTreeMap<(usize, &str), (Vec<Touch<'_>>, bool)> = BTreeMap::new();
+    let mut folders: BTreeMap<(usize, &str), Under<'_>> = BTreeMap::new();
     for touch in touches {
         let own = is_access_rule_path(touch.path).then(|| access_rule_folder(touch.path));
         for folder in folders_of(touch.path) {
@@ -1012,14 +1128,16 @@ pub(super) fn order_paths(
                 ))
                 .or_default();
             if own == Some(folder) {
-                entry.0.push(*touch);
-            } else if !touch.deletes {
-                entry.1 = true;
+                entry.rule.push(*touch);
+            } else if touch.deletes {
+                entry.deletes.push(touch.path);
+            } else {
+                entry.writes = true;
             }
         }
     }
     let mut verdicts: HashMap<&str, Verdict> = HashMap::new();
-    for ((_, folder), (rule_touches, writes_under)) in &folders {
+    for ((_, folder), under) in &folders {
         // A folder under one that waits or is held waits with it.
         let above = folders_of(folder)
             .into_iter()
@@ -1029,14 +1147,22 @@ pub(super) fn order_paths(
                     .get(above)
                     .filter(|v| !matches!(v, Verdict::Clear(_)))
             });
-        let cleared = rule_touches
+        let cleared = under
+            .rule
             .is_empty()
             .then(|| clearance(order.workspace_id, order.version_id, folder))
             .flatten();
         let verdict = match (above, cleared) {
             (Some(_), _) => Verdict::Waits,
             (None, Some(cleared)) => Verdict::Clear(cleared),
-            (None, None) => judge_one(store, order, folder, rule_touches, *writes_under)?,
+            (None, None) => judge_one(
+                store,
+                order,
+                folder,
+                &under.rule,
+                under.writes,
+                &under.deletes,
+            )?,
         };
         verdicts.insert(folder, verdict);
     }
@@ -1053,7 +1179,7 @@ pub(super) fn order_paths(
                     }
                     Some(Verdict::Clear(_)) => {}
                     Some(Verdict::Waits) | None => return Err(waits()),
-                    Some(Verdict::Held { reason }) => {
+                    Some(Verdict::Held { reason } | Verdict::Refused { reason }) => {
                         return Err(RuntimeError::AccessRuleHeld {
                             folder: folder.to_owned(),
                             reason,
@@ -1320,10 +1446,10 @@ fn decide_on_store(
         if above == folder {
             continue;
         }
-        match judge_one(store, order, above, &[], false)? {
+        match judge_one(store, order, above, &[], false, &[])? {
             Verdict::Clear(_) => {}
             Verdict::Waits => return Err(waits()),
-            Verdict::Held { reason } => {
+            Verdict::Held { reason } | Verdict::Refused { reason } => {
                 return Err(RuntimeError::AccessRuleHeld {
                     folder: above.to_owned(),
                     reason,
@@ -1372,9 +1498,18 @@ fn judge_one(
     folder: &str,
     rule_touches: &[Touch<'_>],
     writes_under: bool,
+    deletes_under: &[&str],
 ) -> Result<Verdict, RuntimeError> {
-    let plan = store
-        .read_with(|conn| judge_folder(conn, &order.scope(), folder, rule_touches, writes_under))?;
+    let plan = store.read_with(|conn| {
+        judge_folder(
+            conn,
+            &order.scope(),
+            folder,
+            rule_touches,
+            writes_under,
+            deletes_under,
+        )
+    })?;
     let verdict = match plan {
         Plan::Verdict(verdict) => verdict,
         Plan::CommitRule(changes) => {
@@ -1397,7 +1532,7 @@ fn judge_one(
             };
             record_hold(store, order, folder, reason, observed)?;
         }
-        Verdict::Waits => {}
+        Verdict::Waits | Verdict::Refused { .. } => {}
     }
     Ok(verdict)
 }

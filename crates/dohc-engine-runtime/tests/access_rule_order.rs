@@ -1,10 +1,11 @@
 //! A folder's access.yaml reaches the journal before the files it covers, and
 //! a rule changed outside dohc in a way that widens reach waits for its owner.
-use dohc_engine_domain::VersionedTextStore;
+use dohc_engine_domain::{CreateNamedVersion, DuplicateFile, VersionedTextStore};
 use dohc_engine_runtime::{
     ACCESS_RULE_WAITS, AccessRuleDecision, ActorHandle, CancellationToken, CaptureIngest,
-    CaptureIngestBinary, CaptureRetire, DeleteTextFile, NoFaults, RenameTextFile, RuntimeError,
-    WorkspaceSupervisor, WriteBinary, WriteText,
+    CaptureIngestBinary, CaptureRetire, DeleteTextFile, MergeTextFileFromVersion, NoFaults,
+    RenameTextFile, RollbackTextFileMutation, RuntimeError, WorkspaceSupervisor, WriteBinary,
+    WriteText,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_sync::SyncError;
@@ -503,60 +504,204 @@ fn an_unpublished_rule_is_not_read_as_removed() {
     assert!(f.holds().is_empty());
 }
 
-/// A writer with no step of its own, such as Undo, meets the commit-point
-/// check: it is refused once, the rule commits, and its retry follows it.
-#[test]
-fn a_writer_without_its_own_step_waits_for_the_rule() {
-    let f = Fixture::new();
-    f.runtime
-        .block_on(f.actor.versioned_text_write_indexed(
-            write("team/a.md", "alpha", "m-alpha"),
-            f.root().to_path_buf(),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        ))
-        .expect("write");
-    f.runtime
-        .block_on(f.actor.versioned_text_delete(
-            delete("team/a.md", "d-alpha"),
-            f.root().to_path_buf(),
-            Arc::new(()),
-            Arc::new(NoFaults),
-            CancellationToken::new(),
-        ))
-        .expect("delete");
-    f.put("team/access.yaml", VIEW);
-    f.settle();
-    let undo = || {
-        f.runtime.block_on(f.actor.history_undo_in_turns(
-            WS.to_owned(),
-            OP.to_owned(),
-            "undo-delete".to_owned(),
-            None,
-            f.root().to_path_buf(),
-            Arc::new(NoFaults),
-            60,
-            [Arc::default(), Arc::default()],
-            Arc::new(()),
-            None,
-            CancellationToken::new(),
-        ))
-    };
-    if undo().is_err() {
-        undo().expect("undo after the rule committed");
+impl Fixture {
+    fn versioned_write(&self, input: WriteText) -> Result<(), RuntimeError> {
+        self.runtime
+            .block_on(self.actor.versioned_text_write_indexed(
+                input,
+                self.root().to_path_buf(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            ))
+            .map(drop)
     }
-    assert_eq!(
-        f.journal(),
-        lines(&[
-            "write team/a.md",
-            "delete team/a.md",
-            "write team/access.yaml",
-            "write team/a.md",
-        ])
-    );
+
+    fn versioned_delete(&self, input: DeleteTextFile) -> Result<(), RuntimeError> {
+        self.runtime
+            .block_on(self.actor.versioned_text_delete(
+                input,
+                self.root().to_path_buf(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            ))
+            .map(drop)
+    }
+
+    fn undo(&self, operation: &str, request: &str) -> Result<(), RuntimeError> {
+        self.runtime
+            .block_on(self.actor.history_undo_in_turns(
+                WS.to_owned(),
+                operation.to_owned(),
+                request.to_owned(),
+                None,
+                self.root().to_path_buf(),
+                Arc::new(NoFaults),
+                60,
+                [Arc::default(), Arc::default()],
+                Arc::new(()),
+                None,
+                CancellationToken::new(),
+            ))
+            .map(drop)
+    }
+}
+
+/// Undo, rollback and merge meet a rule on disk that nothing committed yet.
+/// Each puts the rule first and goes on, on its first attempt: a refusal by
+/// the commit-point check never reaches its caller.
+#[test]
+fn writers_without_a_step_of_their_own_put_a_pending_rule_first() {
+    type Step = fn(&Fixture) -> Result<(), RuntimeError>;
+    let writers: [(&str, Step, Step); 3] = [
+        (
+            "undo",
+            |f| {
+                f.versioned_write(write("team/a.md", "alpha", "m-alpha"))?;
+                f.versioned_delete(delete("team/a.md", "d-alpha"))
+            },
+            |f| f.undo(OP, "undo-delete"),
+        ),
+        (
+            "rollback",
+            |f| {
+                f.versioned_write(write("team/a.md", "alpha", "m-alpha"))?;
+                f.versioned_write(write("team/a.md", "alpha 2", "m-alpha-2"))
+            },
+            |f| {
+                f.runtime
+                    .block_on(f.actor.versioned_text_rollback(
+                        RollbackTextFileMutation {
+                            workspace_id: WS.to_owned(),
+                            version_id: "main".to_owned(),
+                            path: "team/a.md".to_owned(),
+                            mutation_moment_id: "m-alpha-2".to_owned(),
+                            request_id: None,
+                            metadata_origin: "api".to_owned(),
+                            author_json: None,
+                        },
+                        f.root().to_path_buf(),
+                        Arc::new(()),
+                        Arc::new(NoFaults),
+                        CancellationToken::new(),
+                    ))
+                    .map(drop)
+            },
+        ),
+        (
+            "merge",
+            |f| {
+                f.versioned_write(write("team/a.md", "alpha", "m-alpha"))?;
+                f.runtime.block_on(f.actor.create_named_version(
+                    CreateNamedVersion {
+                        workspace_id: WS.to_owned(),
+                        new_version_id: "feature".to_owned(),
+                        name: "feature".to_owned(),
+                        from_version_id: "main".to_owned(),
+                        now_ms: 41,
+                        request_id: None,
+                    },
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                ))?;
+                f.versioned_write(WriteText {
+                    version_id: "feature".to_owned(),
+                    ..write("team/a.md", "alpha 2", "m-feature")
+                })
+            },
+            |f| {
+                f.runtime
+                    .block_on(f.actor.versioned_text_merge(
+                        MergeTextFileFromVersion {
+                            workspace_id: WS.to_owned(),
+                            target_version_id: "main".to_owned(),
+                            source_version_id: "feature".to_owned(),
+                            path: "team/a.md".to_owned(),
+                            object_id: "ignored".to_owned(),
+                            moment_id: "m-merge".to_owned(),
+                            request_id: None,
+                            conflict_id: "conflict-merge".to_owned(),
+                            metadata_origin: "api".to_owned(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 42,
+                        },
+                        f.root().to_path_buf(),
+                        Arc::new(()),
+                        Arc::new(NoFaults),
+                        CancellationToken::new(),
+                    ))
+                    .map(drop)
+            },
+        ),
+    ];
+    for (name, prepare, writer) in writers {
+        let f = Fixture::new();
+        prepare(&f).unwrap_or_else(|error| panic!("{name} setup: {error}"));
+        let before = f.journal();
+        f.put("team/access.yaml", VIEW);
+        f.settle();
+        writer(&f).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let journal = f.journal();
+        assert_eq!(journal[..before.len()], before[..], "{name}");
+        assert_eq!(
+            journal[before.len()..],
+            lines(&["write team/access.yaml", "write team/a.md"]),
+            "{name}"
+        );
+    }
 }
 
 const OP: &str = "dohc-operation:remove-team";
+const COPY: &str = "dohc-operation:copy-rule";
+
+/// Undoing a Duplicate that made a folder's rule removes the rule the way a
+/// rule missing from disk goes: only from a folder left with no file it
+/// covered. Otherwise Undo skips it and journals nothing; no one changed the
+/// rule outside dohc, so nothing waits for the owner.
+#[test]
+fn undoing_a_copied_rule_removes_it_only_from_a_folder_it_leaves_empty() {
+    for other_file in [false, true] {
+        let f = ruled_team();
+        f.runtime
+            .block_on(f.actor.duplicate_file(
+                DuplicateFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    from_path: "team/access.yaml".to_owned(),
+                    to_path: "crew/access.yaml".to_owned(),
+                    operation_id: COPY.to_owned(),
+                    author_json: None,
+                    now_ms: 30,
+                },
+                f.root().to_path_buf(),
+                Arc::new(NoFaults),
+            ))
+            .expect("duplicate the rule");
+        if other_file {
+            f.versioned_write(write("crew/b.md", "beta", "m-beta"))
+                .expect("write under the copied rule");
+        }
+        f.settle();
+        let mut expected = f.journal();
+        f.undo(COPY, "undo-copy").expect("undo");
+        if !other_file {
+            expected.push("delete crew/access.yaml".to_owned());
+        }
+        assert_eq!(f.journal(), expected, "other file: {other_file}");
+        let kept: bool = rusqlite::Connection::open(&f.db)
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1                  AND path='crew/access.yaml')",
+                [WS],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, other_file, "other file: {other_file}");
+        assert!(f.holds().is_empty());
+    }
+}
 
 fn delete(path: &str, moment: &str) -> DeleteTextFile {
     DeleteTextFile {
