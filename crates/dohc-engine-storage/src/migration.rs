@@ -5755,7 +5755,7 @@ mod tests {
             ),
             (
                 "v2-access-rule-holds",
-                "7d6ca51f44d9243f4b9c0385a6d4e8e61d02037ef050eb5bfe6b652d8a1be69b",
+                "6f2ba17f8a826ebe0c14b9d7bd6d89a3f708f789bf99489512f5379349f621a6",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -7390,6 +7390,42 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM engine_ownership", [], |r| r.get(0))
             .expect("own");
         assert_eq!(owns, 1);
+    }
+
+    #[test]
+    fn deleting_a_version_cascades_its_access_rule_holds() {
+        let dir = tempdir();
+        let path = dir.join("access-rule-hold-version-cascade.db");
+        let ctx = MigrationContext::current(1_100);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("apply baseline");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'Main', 'main', 1),
+                        ('ws', 'feature', 'Feature', 'named', 2);
+             INSERT INTO access_rule_holds
+                 (workspace_id, version_id, folder, reason, observed_sha256, recorded_at_ms)
+                 VALUES ('ws', 'main', 'team', 'removed', NULL, 3),
+                        ('ws', 'feature', 'team', 'removed', NULL, 3);",
+        )
+        .expect("seed holds");
+        conn.execute(
+            "DELETE FROM versions WHERE workspace_id='ws' AND version_id='feature'",
+            [],
+        )
+        .expect("delete feature version");
+        let left: Vec<String> = conn
+            .prepare("SELECT version_id FROM access_rule_holds")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(left, ["main"]);
     }
 
     #[test]

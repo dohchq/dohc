@@ -14,5 +14,5 @@ CREATE TABLE access_rule_holds (
     ),
     recorded_at_ms INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, version_id, folder),
-    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id)
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
 ) STRICT;
