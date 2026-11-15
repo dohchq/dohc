@@ -427,6 +427,8 @@ export function ChatsView(props: {
   onOpenInTab?: (nav: ChatsNav) => void;
   // Closes this page's own tab, such as New message once its conversation opens in a tab of its own.
   onCloseTab?: () => void;
+  // Opens a Settings section, for a state whose next step lives there.
+  onOpenSettings?: (section: "cloud" | "members") => void;
   // Active editor destination, used by a persistent panel navigator to mark
   // the selected channel or DM without navigating the panel itself.
   selectedNav?: ChatsNav;
@@ -3880,6 +3882,7 @@ export function ChatsView(props: {
         onError={props.onError}
         onClearError={props.onClearError}
         onNotice={props.onNotice}
+        onOpenSettings={props.onOpenSettings}
         onOpenConversation={(conversationId, title) => {
           openConversation({ level: "direct", conversationId, title });
           // The conversation took a tab of its own, so New message's has done its job.
@@ -3899,6 +3902,7 @@ export function ChatsView(props: {
         mentionCandidates={mentionCandidates}
         onOpenPath={props.onOpenPath}
         onTitle={setDirectTitle}
+        onOpenSettings={props.onOpenSettings}
         onError={props.onError}
         onClearError={props.onClearError}
         onNotice={props.onNotice}

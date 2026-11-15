@@ -288,8 +288,12 @@ type History =
   | { conversationId: string; status: "failed"; message: string }
   | { conversationId: string; status: "ready"; messages: readonly DirectMessage[]; more: boolean; saved: boolean; olderLoading: boolean };
 
+/** Where a state's next step lives, when it lives in Settings. */
+type OpenSettings = (section: "cloud" | "members") => void;
+
 type ConversationProps = Reporting & {
   conversationId: string;
+  onOpenSettings?: OpenSettings;
   variant: "panel" | "page";
   onBack?: () => void;
   mentionCandidates?: readonly MentionCandidate[];
@@ -487,7 +491,11 @@ function ConversationForAccount(props: ConversationProps) {
 
   let body: ReactNode;
   if (state.status === "signed-out") {
-    body = <EmptyState data-testid="chats-dm-signed-out" icon={CloudOff} title="Sign in to your server to read your direct messages." />;
+    body = (
+      <EmptyState data-testid="chats-dm-signed-out" icon={CloudOff} title="Sign in to your server to read your direct messages.">
+        <SettingsStep onOpenSettings={props.onOpenSettings} section="cloud" label="Sync and sharing" testId="chats-dm-signed-out-action" />
+      </EmptyState>
+    );
   } else if (ready && !conversation && shown.status !== "ready") {
     body = <EmptyState data-testid="chats-dm-missing" icon={Users} title="dohc could not find this conversation." />;
   } else if (shown.status === "loading") {
@@ -574,6 +582,12 @@ function ConversationForAccount(props: ConversationProps) {
   );
 }
 
+function SettingsStep(props: { onOpenSettings: OpenSettings | undefined; section: "cloud" | "members"; label: string; testId: string }) {
+  const { onOpenSettings, section } = props;
+  if (!onOpenSettings) return null;
+  return <SecondaryButton data-testid={props.testId} onClick={() => onOpenSettings(section)}>{props.label}</SecondaryButton>;
+}
+
 /** Where the composer would be, when it can't be: why, and what to do. */
 function DirectComposerLine(props: { testId: string; icon: ReactNode; children: string; action: { label: string; run: () => void } }) {
   return (
@@ -609,6 +623,7 @@ const MAX_PICKS = MAX_DIRECT_PEOPLE - 1;
 
 type NewMessageProps = Reporting & {
   workspaceId: string;
+  onOpenSettings?: OpenSettings;
   memberIds?: readonly string[];
   variant: "panel" | "page";
   onBack?: () => void;
@@ -803,7 +818,11 @@ function NewMessageForAccount(props: NewMessageProps) {
 
   let content: ReactNode;
   if (state.status === "signed-out") {
-    content = <EmptyState data-testid="chats-dm-new-signed-out" icon={CloudOff} title="Sign in to your server to send direct messages." />;
+    content = (
+      <EmptyState data-testid="chats-dm-new-signed-out" icon={CloudOff} title="Sign in to your server to send direct messages.">
+        <SettingsStep onOpenSettings={props.onOpenSettings} section="cloud" label="Sync and sharing" testId="chats-dm-new-signed-out-action" />
+      </EmptyState>
+    );
   } else if (members.status === "loading") {
     content = <SkeletonRows label="Loading members…" className="pt-3" testId="chats-dm-new-loading" />;
   } else if (members.status === "failed") {
@@ -815,9 +834,17 @@ function NewMessageForAccount(props: NewMessageProps) {
       </div>
     );
   } else if (members.status === "unsynced") {
-    content = <EmptyState data-testid="chats-dm-new-unsynced" icon={CloudOff} title="Sync this workspace to message its members." />;
+    content = (
+      <EmptyState data-testid="chats-dm-new-unsynced" icon={CloudOff} title="Sync this workspace to message its members.">
+        <SettingsStep onOpenSettings={props.onOpenSettings} section="cloud" label="Set up sync" testId="chats-dm-new-unsynced-action" />
+      </EmptyState>
+    );
   } else if (members.members.length === 0) {
-    content = <EmptyState data-testid="chats-dm-new-empty" icon={Users} title="No one else is a member of this workspace yet." />;
+    content = (
+      <EmptyState data-testid="chats-dm-new-empty" icon={Users} title="No one else is a member of this workspace yet.">
+        <SettingsStep onOpenSettings={props.onOpenSettings} section="members" label="Members" testId="chats-dm-new-empty-action" />
+      </EmptyState>
+    );
   } else {
     content = (
       <ul id={listId} role="listbox" aria-label="Members" aria-multiselectable="true" data-testid="chats-dm-new-members" className="m-0 min-h-0 flex-1 list-none overflow-y-auto p-1">

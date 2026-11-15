@@ -762,12 +762,15 @@ describe("ChatsView direct messages", () => {
       ),
     );
     const onError = vi.fn();
-    renderView(vi.fn(), onError, { variant: "panel" });
+    const onOpenSettings = vi.fn();
+    renderView(vi.fn(), onError, { variant: "panel", onOpenSettings });
     fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
     expect((await screen.findByTestId("chats-dm-new-unsynced")).textContent).toContain(
       "Sync this workspace to message its members.",
     );
     expect(onError).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("chats-dm-new-unsynced-action"));
+    expect(onOpenSettings).toHaveBeenCalledWith("cloud");
   });
 
   it("offers the conversation the picked people already have", async () => {
