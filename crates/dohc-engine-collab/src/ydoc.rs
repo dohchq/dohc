@@ -6186,7 +6186,7 @@ fn escape_markdown_block_syntax(
     mut definition: bool,
 ) -> ProjectionResult<String> {
     let mut output = ProjectionBuffer::new();
-    let markdown = markdown.replace('\r', "&#13;");
+    let markdown = encode_paragraph_whitespace(markdown);
     for line in markdown.split_inclusive('\n') {
         let body = line.strip_suffix('\n').unwrap_or(line);
         if starts_line {
@@ -6222,6 +6222,13 @@ fn escape_markdown_block_syntax(
         }
     }
     Ok(output.into_string())
+}
+
+/// Paragraph text writes a `\r`, and an NBSP that task-list parsing would read
+/// as indentation, as references. They are written in place, so the text
+/// around them stays one run for block openers and marks.
+fn encode_paragraph_whitespace(text: &str) -> String {
+    text.replace('\r', "&#13;").replace('\u{a0}', "&#160;")
 }
 
 /// Whether marked reads this line as indented code: four spaces, or a tab
@@ -8195,15 +8202,20 @@ fn render_inline(
         };
         let in_span =
             |from: usize, to: usize| span.is_some_and(|(start, end)| from < end && start < to);
+        // The TypeScript writer keeps these as they are inside an empty link,
+        // where the reader keeps them, but writes them differently outside it.
+        let written_differently = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .any(|byte| matches!(byte, b'\n' | b'&' | b'<' | b'>'))
+                || bytes.windows(2).any(|pair| pair == "\u{a0}".as_bytes())
+        };
         let mut stretches = Vec::new();
         let mut offset = 0usize;
         for (part_index, (text, ranges)) in texts.iter().zip(&empty_links).enumerate() {
             let link = text.as_bytes();
             let mut write = |(from, to): (usize, usize)| {
-                if link[from..to]
-                    .iter()
-                    .any(|byte| matches!(byte, b'\n' | b'&' | b'<' | b'>'))
-                {
+                if written_differently(&link[from..to]) {
                     stretches.push((part_index, from, to));
                 }
             };
@@ -8216,9 +8228,7 @@ fn render_inline(
                 stretch = match stretch {
                     Some((start, end))
                         if !in_span(offset + end, offset + from)
-                            && !link[end..from]
-                                .iter()
-                                .any(|byte| matches!(byte, b'\n' | b'&' | b'<' | b'>')) =>
+                            && !written_differently(&link[end..from]) =>
                     {
                         Some((start, to))
                     }
@@ -8531,33 +8541,6 @@ fn render_inline(
                 continue;
             };
             for (offset, byte) in run.text.bytes().enumerate() {
-                // Task-list parsing reads a literal NBSP as indentation, so it
-                // is written as a reference, as a `\r` is.
-                if run.text.as_bytes()[offset..].starts_with("\u{a0}".as_bytes()) {
-                    replacements.entry(part_index).or_default().insert(
-                        offset,
-                        InlineReplacement {
-                            text: "&#160;".into(),
-                            preserve_marks: true,
-                            width: "\u{a0}".len(),
-                        },
-                    );
-                }
-                if byte == b'\r' {
-                    replacements.entry(part_index).or_default().insert(
-                        offset,
-                        InlineReplacement {
-                            text: "&#13;".into(),
-                            preserve_marks: true,
-                            width: 1,
-                        },
-                    );
-                    if captures_line {
-                        line.push(byte);
-                        positions.push((part_index, offset));
-                    }
-                    continue;
-                }
                 if byte == b'\n' {
                     if captures_line {
                         record_post_newline_block_escapes(
@@ -8685,7 +8668,10 @@ fn render_inline(
                 None => (run.text.as_str(), false),
             };
             shows_before_line |= line.chars().any(|c| c != ' ' && c != '\t');
-            shows_before_end |= line.chars().any(|c| !is_js_whitespace(c));
+            // A `\r` or NBSP is written as a reference, which shows.
+            shows_before_end |= line
+                .chars()
+                .any(|c| !is_js_whitespace(c) || matches!(c, '\r' | '\u{a0}'));
             if ends {
                 return shows_before_line;
             }
@@ -8841,6 +8827,9 @@ fn render_inline(
                 }
                 if !literal_markdown && !code_context && !has_mark(&run.marks, MarkKind::Code) {
                     text = encode_html_entities(&text)?;
+                    if escape_block_syntax {
+                        text = encode_paragraph_whitespace(&text);
+                    }
                 }
                 let current = &run.marks;
                 let mut to_open: Vec<MarkdownMark> = current
