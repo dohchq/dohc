@@ -753,6 +753,59 @@ fn a_removed_hold_lists_what_the_folder_falls_back_to() {
     }
 }
 
+/// A notice's levels are the relay's: every rule from the root down applies,
+/// a person an outer rule names counts, and a rule that hides someone above
+/// the folder hides them before and after.
+#[test]
+fn a_held_rules_levels_follow_every_rule_above_it() {
+    // The root rule hides members, so team giving them edit reaches nobody
+    // and neither change does; ana and bo, whom only the root rule names, go
+    // from the folder's view to team's edit.
+    let expected = lines(&[
+        "ana@example.com: view → edit",
+        "bo@example.com: view → edit",
+    ]);
+    for removes in [false, true] {
+        let f = Fixture::new();
+        // Outer rules wider than view hold until the owner allows them.
+        for (path, folder, text) in [
+            (
+                "access.yaml",
+                "",
+                "people:\n  ana@example.com: edit\n  bo@example.com: view\n",
+            ),
+            ("team/access.yaml", "team", EDIT),
+        ] {
+            f.put(path, text);
+            f.settle();
+            if f.capture(&[path])[0].is_err() {
+                f.decide(folder, AccessRuleDecision::Accept).unwrap();
+            }
+        }
+        f.put("team/sub/access.yaml", VIEW);
+        f.put("team/sub/b.md", "beta");
+        f.settle();
+        f.capture_ok(&["team/sub/access.yaml", "team/sub/b.md"]);
+        assert!(f.holds().is_empty());
+        if removes {
+            std::fs::remove_file(f.root().join("team/sub/access.yaml")).unwrap();
+        } else {
+            f.put("team/sub/access.yaml", EDIT);
+        }
+        f.put("team/sub/b.md", "beta 2");
+        f.settle();
+        assert!(held(&f.capture(&["team/sub/b.md"])[0], "team/sub"));
+        let views = f.hold_views();
+        let [view] = views.as_slice() else {
+            panic!("{views:?}")
+        };
+        assert_eq!(rows(view), expected, "removes: {removes}");
+        // Without its rule the folder follows team's, under the root's.
+        let falls_back_to = removes.then_some("team");
+        assert_eq!(view.falls_back_to.as_deref(), falls_back_to);
+    }
+}
+
 /// Each decision on a one-file rule says the ordinary change that reverses
 /// it: the rule it replaced, over the bytes it left.
 #[test]

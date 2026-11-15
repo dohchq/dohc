@@ -42,8 +42,8 @@ use crate::error::RuntimeError;
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::{CaptureIngest, CaptureIngestBinary, CaptureRetire, DomainError};
 use dohc_engine_files::access_rules::{
-    ACCESS_RULE_FILE, AccessRule, Level, ReachBefore, access_rule_folder, is_access_rule_path,
-    is_rule_of, level_for_email, parse_access_rule, rule_change_narrows,
+    ACCESS_RULE_FILE, AccessRule, ReachBefore, access_rule_folder, is_access_rule_path, is_rule_of,
+    level_for_email, parse_access_rule, rule_change_narrows,
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_files::materialize::{PublicationTarget, read_publication_target};
@@ -1668,7 +1668,7 @@ pub struct AccessRuleLevelChange {
     /// `members`, or a person's email.
     pub who: String,
     /// `view`, `comment`, `edit`, `none`, or `workspace` for the member's
-    /// workspace level, which no rule above sets.
+    /// workspace level, which no rule from the root down sets.
     pub before: &'static str,
     pub after: &'static str,
 }
@@ -1682,9 +1682,9 @@ pub struct AccessRuleHoldView {
     pub recorded: Option<String>,
     /// The rule file on disk, when there is exactly one.
     pub rule_path: Option<String>,
-    /// The entries whose reach changes: for a widening, each one that
-    /// reaches the folder differently; for a removal, each recorded entry,
-    /// with what the folder falls back to.
+    /// Members and each person a rule from the root down names, whose
+    /// level at the folder changes, as the relay works it out from every
+    /// rule above the folder as well as its own.
     pub changes: Vec<AccessRuleLevelChange>,
     /// `on-disk` or `recorded`, when that rule cannot be read.
     pub unreadable: Option<&'static str>,
@@ -1693,67 +1693,48 @@ pub struct AccessRuleHoldView {
     pub falls_back_to: Option<String>,
 }
 
-/// What reaches a folder through a rule.
-enum Reach<'a> {
-    Rule(&'a AccessRule),
-    /// An unreadable rule hides the folder.
-    Hidden,
-    /// No rule: members hold their workspace level.
-    Workspace,
-}
+/// The rules dohc recorded from the workspace root down to a folder, the
+/// folder's own included; `None` is a rule that cannot be read.
+type Chain<'a> = Vec<Option<&'a AccessRule>>;
 
-impl Reach<'_> {
-    fn of(&self, who: Option<&str>) -> &'static str {
-        match self {
-            Reach::Rule(rule) => match who {
-                None => rule.members,
-                Some(email) => level_for_email(rule, email),
-            }
-            .map_or("none", Level::as_str),
-            Reach::Hidden => "none",
-            Reach::Workspace => "workspace",
+/// A member's reach at the end of `chain`, as the relay's `folderLevel`
+/// works it out: each rule replaces the level above it, and one that leaves
+/// the member out hides everything below it. `who` is a person's email, or
+/// `None` for a member no rule names. `workspace` is the member's workspace
+/// level, which the engine does not know.
+fn chain_reach(chain: &[Option<&AccessRule>], who: Option<&str>) -> &'static str {
+    let mut reach = "workspace";
+    for rule in chain {
+        let level = rule.and_then(|rule| match who {
+            None => rule.members,
+            Some(email) => level_for_email(rule, email),
+        });
+        match level {
+            None => return "none",
+            Some(level) => reach = level.as_str(),
         }
     }
-
-    fn people(&self) -> impl Iterator<Item = &str> {
-        match self {
-            Reach::Rule(rule) => Some(rule.people.keys().map(String::as_str)),
-            Reach::Hidden | Reach::Workspace => None,
-        }
-        .into_iter()
-        .flatten()
-    }
+    reach
 }
 
-fn reach_of(committed: Option<&Committed>) -> Reach<'_> {
-    match committed {
-        None => Reach::Workspace,
-        Some(committed) => committed.rule().map_or(Reach::Hidden, Reach::Rule),
-    }
-}
-
-/// Members first, then each person `before` names, and `after` too unless
-/// `recorded_only`, with their reach before and after, where it differs.
+/// Members first, then each person any rule on either chain names, with
+/// their reach at the end of each chain, where it differs.
 fn level_changes(
-    before: &Reach<'_>,
-    after: &Reach<'_>,
-    recorded_only: bool,
+    before: &[Option<&AccessRule>],
+    after: &[Option<&AccessRule>],
 ) -> Vec<AccessRuleLevelChange> {
     let people: std::collections::BTreeSet<&str> = before
-        .people()
-        .chain(
-            (!recorded_only)
-                .then(|| after.people())
-                .into_iter()
-                .flatten(),
-        )
+        .iter()
+        .chain(after)
+        .flatten()
+        .flat_map(|rule| rule.people.keys().map(String::as_str))
         .collect();
     std::iter::once(None)
         .chain(people.into_iter().map(Some))
         .map(|who| AccessRuleLevelChange {
             who: who.unwrap_or("members").to_owned(),
-            before: before.of(who),
-            after: after.of(who),
+            before: chain_reach(before, who),
+            after: chain_reach(after, who),
         })
         .filter(|change| change.before != change.after)
         .collect()
@@ -1766,13 +1747,13 @@ fn hold_view(
 ) -> Result<AccessRuleHoldView, RuntimeError> {
     let (workspace, version, folder) = (&hold.workspace_id, &hold.version_id, &hold.folder);
     let here = committed_rule(conn, workspace, version, folder)?;
-    let mut above = None;
+    // The rules above the folder, nearest first.
+    let mut above = Vec::new();
     let mut at = folder.as_str();
     while !at.is_empty() {
         at = access_rule_folder(at);
         if let Some(committed) = committed_rule(conn, workspace, version, at)? {
-            above = Some((at.to_owned(), committed));
-            break;
+            above.push((at.to_owned(), committed));
         }
     }
     let recorded = here
@@ -1805,13 +1786,16 @@ fn hold_view(
         view.unreadable = Some("recorded");
         return Ok(view);
     }
+    let outer: Chain<'_> = above
+        .iter()
+        .rev()
+        .map(|(_, committed)| committed.rule())
+        .collect();
+    let mut before = outer.clone();
+    before.extend(here.as_ref().map(Committed::rule));
     if view.hold.reason == access_rule_holds::REMOVED {
-        view.falls_back_to = above.as_ref().map(|(at, _)| at.clone());
-        view.changes = level_changes(
-            &reach_of(here.as_ref()),
-            &reach_of(above.as_ref().map(|(_, committed)| committed)),
-            true,
-        );
+        view.falls_back_to = above.first().map(|(at, _)| at.clone());
+        view.changes = level_changes(&before, &outer);
         return Ok(view);
     }
     let now = disk.as_ref().and_then(|disk| match disk.len() {
@@ -1826,11 +1810,9 @@ fn hold_view(
         view.unreadable = Some("on-disk");
         return Ok(view);
     };
-    let before = reach_of(
-        here.as_ref()
-            .or(above.as_ref().map(|(_, committed)| committed)),
-    );
-    view.changes = level_changes(&before, &Reach::Rule(&now), false);
+    let mut after = outer;
+    after.push(Some(&now));
+    view.changes = level_changes(&before, &after);
     Ok(view)
 }
 
