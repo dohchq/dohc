@@ -3,6 +3,7 @@ import { createReadStream, type Stats } from "node:fs";
 import { lstat, open, readFile, readdir, unlink, type FileHandle } from "node:fs/promises";
 import { dirname, join, posix, relative, sep } from "node:path";
 import { z } from "zod";
+import { isAccessRuleRelatedPath } from "@dohc/security-contract/access-rule-files";
 import { atomicWriteFile } from "../atomicReplaceFile";
 import {
   localStateFolder,
@@ -230,7 +231,10 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
         return false;
     }
     const extension = posix.extname(path);
-    const stem = posix.basename(path, extension);
+    // A copy of an access rule keeps the rule's whole name, so the relay
+    // hides it from members as it hides the rule.
+    const ruleRelated = isAccessRuleRelatedPath(path);
+    const stem = ruleRelated ? posix.basename(path) : posix.basename(path, extension);
     let copy: string;
     let destination: string;
     let file: FileHandle;
@@ -245,6 +249,8 @@ export function outsideWriteCopies(workspace: LocalStateWorkspace) {
         shortStem = candidate;
       }
       copy = posix.join(posix.dirname(path), `${shortStem}${suffix}`);
+      if (ruleRelated && !isAccessRuleRelatedPath(copy))
+        throw new Error(`The name of ${path} is too long to keep a copy.`);
       admitCopy(copy);
       destination = await checked(copy);
       try {

@@ -12,6 +12,7 @@ import {
 import { deferred } from "../testing/deferred";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { createTestScratch } from "./testTemp";
+import { isAccessRuleRelatedPath } from "@dohc/security-contract/access-rule-files";
 import { outsideWriteCopies, OutsideWriteCopyError } from "./outsideWriteCopies";
 import { readLocalStateFrom } from "./workspaceLocalState";
 import * as durableFiles from "../atomicReplaceFile";
@@ -113,6 +114,21 @@ describe("materialization keeps outside bytes before replacement", () => {
       expect(await copies.list()).toEqual(rows);
     },
   );
+
+  it("keeps a copy of an access rule under a name that still names the rule", async () => {
+    const { rootPath, copies, isRecorded } = await setup();
+    await mkdir(join(rootPath, "team"));
+    await writeFile(join(rootPath, "team/access.yaml"), "members: edit\n");
+    await copies.beforeWrite(
+      "team/access.yaml",
+      Buffer.from("members: view\n"),
+      () => undefined,
+      isRecorded,
+    );
+    const [row] = await copies.list();
+    expect(row?.[1]).toBe("team/access.yaml (kept copy).yaml");
+    expect(isAccessRuleRelatedPath(row![1])).toBe(true);
+  });
 
   it.each(["baseline", "incoming"])("does not copy bytes equal to the %s", async (same) => {
     const { rootPath, copies, recorded, isRecorded } = await setup();

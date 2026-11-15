@@ -115,6 +115,7 @@
 //! completes. Its single rename keeps the check-to-replace race; the
 //! ancestor-redirection race is closed.
 
+use crate::access_rules::is_access_rule_related_path;
 use crate::bounds::{MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES};
 use crate::floor::{is_excluded_file, path_collision_key};
 use crate::media::{is_text_media_type, media_type_for_path};
@@ -4056,6 +4057,10 @@ fn has_multiple_links(path: &Path) -> std::io::Result<bool> {
 /// bytes. A name with no extension, or only a leading dot, takes the suffix
 /// at its end. The stem gives up bytes, never splitting a character; the
 /// suffix and the extension stay whole. `None` when not one stem byte fits.
+///
+/// A copy of an access rule keeps the rule's whole name as its stem,
+/// `access.yaml (kept copy).yaml`, so the relay hides it from members as it
+/// hides the rule. `None` when the budget would cut that name.
 fn kept_copy_name(file_name: &str, n: u32, budget: usize) -> Option<String> {
     let suffix = match n {
         1 => " (kept copy)".to_owned(),
@@ -4067,13 +4072,16 @@ fn kept_copy_name(file_name: &str, n: u32, budget: usize) -> Option<String> {
         }
         _ => (file_name, ""),
     };
+    let rule_related = is_access_rule_related_path(file_name);
+    let stem = if rule_related { file_name } else { stem };
     let mut keep = budget
         .checked_sub(suffix.len() + extension.len())?
         .min(stem.len());
     while !stem.is_char_boundary(keep) {
         keep -= 1;
     }
-    (keep > 0).then(|| format!("{}{suffix}{extension}", &stem[..keep]))
+    let name = format!("{}{suffix}{extension}", &stem[..keep]);
+    (keep > 0 && (!rule_related || is_access_rule_related_path(&name))).then_some(name)
 }
 
 /// The longest file name, in UTF-8 bytes, a kept copy takes. Most file
@@ -6435,6 +6443,31 @@ mod tests {
         let (attempts, result) = attempt(|| std::io::Error::from_raw_os_error(13));
         assert_eq!(attempts, MAX_REPLACE_ATTEMPTS as usize);
         assert_eq!(result.expect_err("EACCES").code(), "materialize-io");
+    }
+
+    /// A kept copy of an access rule carries the rule's emails, so its name
+    /// still names the rule and members never receive it.
+    #[test]
+    fn kept_copies_of_an_access_rule_stay_rule_related() {
+        let name = |file: &str, n| kept_copy_name(file, n, MAX_KEPT_COPY_NAME_BYTES).expect("fits");
+        assert_eq!(name("access.yaml", 1), "access.yaml (kept copy).yaml");
+        assert_eq!(name("ACCESS.yaml", 2), "ACCESS.yaml (kept copy 2).yaml");
+        assert_eq!(name("#access.yaml#", 1), "#access.yaml# (kept copy).yaml#");
+        for file in [
+            "access.yaml",
+            "Access.YAML",
+            "access.yaml~",
+            "#access.yaml#",
+        ] {
+            let copy = name(file, 1);
+            assert!(is_access_rule_related_path(&copy), "{copy}");
+            assert!(
+                is_access_rule_related_path(&format!("team/{copy}")),
+                "{copy}"
+            );
+        }
+        // A budget that would cut the rule's name leaves no name at all.
+        assert_eq!(kept_copy_name("access.yaml", 1, 25), None);
     }
 
     #[cfg(windows)]
