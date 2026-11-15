@@ -197,7 +197,8 @@ impl ApplicationOwner {
                 (origin.binding.clone(), origin.source_moment.clone(), origin.source_digest.clone(), origin.terminal.as_ref().map_or(0, |r| r.journal_cursor), origin.sequence)
             } else {
                 let (bootstrap, binding, _, _) = bootstrap::read_bootstrap(tx, &held)?.ok_or(ApplicationError::Corrupt)?;
-                (binding, bootstrap.bootstrap_moment_id, bootstrap.projected_markdown_digest, 0, 0)
+                let written = bootstrap::written_markdown_digest(tx, &held)?;
+                (binding, bootstrap.bootstrap_moment_id, written, 0, 0)
             };
             restore_resume::validate_origin_binding(tx, &held, &origin_binding)?;
             let (previous_cursor, previous_sequence, expected_moment, expected_digest) = prior.as_ref().map_or(

@@ -600,7 +600,8 @@ where
             (origin.binding.clone(),origin.source_moment.clone(),origin.source_digest.clone(),origin.terminal.as_ref().map_or(0,|r|r.journal_cursor),origin.sequence)
         } else {
             let (bootstrap,original_binding,_,_) = bootstrap::read_bootstrap(conn,held)?.ok_or(ApplicationError::Corrupt)?;
-            (original_binding,bootstrap.bootstrap_moment_id,bootstrap.projected_markdown_digest,0,0)
+            let written = bootstrap::written_markdown_digest(conn,held)?;
+            (original_binding,bootstrap.bootstrap_moment_id,written,0,0)
         };
         validate_crossed_binding(conn,&held.namespace,&original_binding,b)?;
         let latest = latest_receipt(conn,held)?;

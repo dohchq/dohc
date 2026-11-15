@@ -154,7 +154,6 @@ pub struct PendingProof {
     source_sha: String,
     source_length: usize,
     projection_sha: String,
-    canonical_sha: String,
     checkpoint_sha: String,
 }
 impl std::fmt::Debug for PendingProof {
@@ -201,13 +200,15 @@ impl PendingProof {
                     {
                         Ok(true)
                     }
+                    // The reader writes Markdown its own way, so an expired
+                    // proof hands the engine its own projection whatever the
+                    // reader projected.
                     Outcome::Expired {
                         proof,
                         checkpoint_sha256,
                     } if checkpoint_sha256 == self.checkpoint_sha
                         && proof.source_sha256 == self.source_sha
-                        && proof.source_byte_length == self.source_length
-                        && proof.projection_sha256 == self.canonical_sha =>
+                        && proof.source_byte_length == self.source_length =>
                     {
                         Ok(false)
                     }
@@ -423,7 +424,6 @@ impl ReaderResolver {
                 content_digest,
             },
             request,
-            crate::hex_sha256(canonical.as_bytes()),
         )?;
         Ok(fresh)
     }
@@ -444,12 +444,7 @@ impl ReaderResolver {
             .map(|(_, retries, backed_off, crashes)| (retries, backed_off, crashes))
     }
 
-    fn lookup(
-        &self,
-        key: Key,
-        request: Request,
-        canonical_sha: String,
-    ) -> Result<bool, CollabError> {
+    fn lookup(&self, key: Key, request: Request) -> Result<bool, CollabError> {
         let mut entries = self.entries.lock().unwrap();
         let mut retries = 0;
         let mut crashes = 0;
@@ -531,7 +526,6 @@ impl ReaderResolver {
             source_sha: key.source_sha.clone(),
             source_length: request.source.len(),
             projection_sha: key.projection_sha.clone(),
-            canonical_sha,
             checkpoint_sha: crate::hex_sha256(&request.checkpoint),
             request: Mutex::new(Some(request)),
             result: OnceCell::new(),
@@ -635,7 +629,6 @@ pub fn resolve(
             content_digest,
         },
         request,
-        crate::hex_sha256(canonical.as_bytes()),
     )?;
     Ok(fresh.then_some(source))
 }

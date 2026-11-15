@@ -141,7 +141,12 @@ pub(super) fn origin_head(
             id,
         ),
         RestoreDeliveryOrigin::Bootstrap { id } => (
-            ["projected_markdown_digest", "0", "0"],
+            // The file this engine wrote at bootstrap, not the relay's spelling.
+            [
+                "(SELECT m.after_blob_sha256 FROM moments m WHERE m.workspace_id=?2 AND m.version_id=?3 AND m.object_id=?4 AND m.moment_id=bootstrap_moment_id AND m.after_content_kind='text')",
+                "0",
+                "0",
+            ],
             format!("FROM live_device_bootstraps {row} AND bootstrap_id=?6"),
             id,
         ),
