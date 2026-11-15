@@ -5,6 +5,7 @@ import { afterEach, expect, it } from "vitest";
 import { serveFetchHandler } from "@dohc/service-http";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { APP_BACKEND_CATCH_UP_HEADER } from "@dohc/security-contract/app-backend";
 import { fixture, limits } from "../../../../services/sync-relay/src/datasetTestFixture";
 import { createSyncRelayHandler } from "../../../../services/sync-relay/src/server";
 import { readDatasetResponse } from "../ipc/readDatasetResponse";
@@ -95,6 +96,8 @@ const operationSource =
 const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
 const pinned = { datasetId: id(1), revision: 1, revisionSha256: revision.revisionSha256 };
 
+type Intercept = (headers: Headers, go: () => Promise<Response>) => Promise<Response>;
+
 async function ownerOverSocket(latencyMs = 0) {
   const f = fixture(),
     directory = await mkdtemp(join(tmpdir(), "desktop-owner-trips-"));
@@ -126,12 +129,17 @@ async function ownerOverSocket(latencyMs = 0) {
   if (!address || typeof address === "string") throw Error("Missing server address");
   const origin = `http://127.0.0.1:${address.port}`;
   const trips: string[] = [];
+  // Changes the next change's request or answer on its way.
+  let intercept: Intercept | undefined;
   const send = async (path: string, init: RequestInit) => {
     trips.push(`${init.method ?? "GET"} ${path.replace(/^\/sync\/w\/datasets\/[^/]+/, "")}`);
     const headers = new Headers(init.headers);
     headers.set("authorization", "Bearer owner");
     if (latencyMs) await new Promise((resolve) => setTimeout(resolve, latencyMs));
-    return fetch(`${origin}${path}`, { ...init, headers });
+    const go = () => fetch(`${origin}${path}`, { ...init, headers });
+    const hook = path.endsWith("/invoke") ? intercept : undefined;
+    if (hook) intercept = undefined;
+    return hook ? hook(headers, go) : go();
   };
   const credentials = {
     serverUrl: origin,
@@ -192,6 +200,9 @@ async function ownerOverSocket(latencyMs = 0) {
   let key = 0;
   return {
     trips,
+    intercept(hook: Intercept) {
+      intercept = hook;
+    },
     write: (operationId: string, input: Record<string, unknown>) =>
       data.invoke({ ...pinned, operationId, input, idempotencyKey: `change-${++key}` } as never),
     read: () =>
@@ -239,6 +250,53 @@ it("sends one request for a change on a syncing owner's computer, and the table 
   expect(edit.requests).toEqual([["POST /invoke"]]);
   expect(operation.requests).toEqual([["POST /invoke"]]);
 }, 120_000);
+
+it("shows a change whose journal the copy did not apply, in the read just after it", async () => {
+  const owner = await ownerOverSocket();
+  const rename = (name: string) => owner.write(id(7), { id: 1, name });
+  const shows = async (name: string) =>
+    expect(await owner.read()).toMatchObject({ result: [{ id: 1, name }] });
+  await owner.write(id(5), { name: "First" });
+  await rename("a");
+  await shows("a");
+
+  // A server that leaves the journal out, as it does for one too large to carry.
+  owner.intercept((headers, go) => {
+    headers.delete(APP_BACKEND_CATCH_UP_HEADER);
+    return go();
+  });
+  await rename("b");
+  await shows("b");
+
+  // The server commits the change, and its answer is lost.
+  owner.intercept(async (_headers, go) => {
+    await go();
+    throw new TypeError("fetch failed");
+  });
+  await expect(rename("c")).rejects.toThrow("can't reach");
+  await shows("c");
+
+  // An earlier change's journal arrives after a later change went out.
+  let answered!: () => void, release!: () => void;
+  const committed = new Promise<void>((resolve) => (answered = resolve)),
+    held = new Promise<void>((resolve) => (release = resolve));
+  owner.intercept(async (_headers, go) => {
+    const response = await go();
+    answered();
+    await held;
+    return response;
+  });
+  const earlier = rename("d");
+  await committed;
+  owner.intercept((headers, go) => {
+    headers.delete(APP_BACKEND_CATCH_UP_HEADER);
+    return go();
+  });
+  await rename("e");
+  release();
+  await earlier;
+  await shows("e");
+}, 60_000);
 
 it.runIf(roundTripMs > 0)(
   "prints how long a change takes",

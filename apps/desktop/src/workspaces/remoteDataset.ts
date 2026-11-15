@@ -599,9 +599,11 @@ export function createRemoteDatasetData(input: {
               : { [APP_BACKEND_CATCH_UP_HEADER]: JSON.stringify(after) },
           ),
         );
+      // The change is committed whatever the journal holds; the copy catches up later without it.
+      const journal = DatasetCatchUp.safeParse(catchUp);
       return {
         ...DatasetInvocationResult.parse(result),
-        ...(catchUp === undefined ? {} : { catchUp: DatasetCatchUp.parse(catchUp) }),
+        ...(journal.success ? { catchUp: journal.data } : {}),
       };
     },
     async upload(upload) {

@@ -47,7 +47,8 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
   const replica = await createDatasetReplica(options);
   let denied = false,
     closing = false,
-    confirmed: { cursor: DatasetCursor; atMs: number } | null = null;
+    confirmed: { cursor: DatasetCursor; atMs: number } | null = null,
+    changes = 0;
   const confirmations = new Set<Promise<unknown>>();
   const trackConfirmation = <T>(work: () => Promise<T>): Promise<T> => {
     const result = work();
@@ -249,12 +250,16 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
           },
         };
         const state = await replica.catchUp(inline, signal);
-        if (equalRecoveryCursor(state.cursor, head)) confirmed = { cursor: head, atMs: Date.now() };
+        return equalRecoveryCursor(state.cursor, head) ? head : null;
       };
       const change = async (
         input: Parameters<OwnerDatasetData["invoke"]>[0],
         after: DatasetCursor,
       ) => {
+        // Until this change's own journal reaches the head, a read asks the server.
+        // A change sent later takes over, so an earlier one's journal cannot vouch for it.
+        const mine = ++changes;
+        confirmed = null;
         let result: Awaited<ReturnType<OwnerDatasetData["invoke"]>>;
         try {
           result = await remote.invoke({ ...input, after });
@@ -270,10 +275,13 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
         }
         authorize();
         const { catchUp, ...committed } = result;
-        if (catchUp)
-          await applyCatchUp(catchUp).catch(() => {
-            // The change is saved on the server; the next read catches the copy up.
-          });
+        const head = catchUp
+          ? await applyCatchUp(catchUp).catch(() => {
+              // The change is saved on the server; the next read catches the copy up.
+              return null;
+            })
+          : null;
+        if (head && mine === changes) confirmed = { cursor: head, atMs: Date.now() };
         authorize();
         return committed;
       };
