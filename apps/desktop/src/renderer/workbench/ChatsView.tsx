@@ -425,6 +425,8 @@ export function ChatsView(props: {
   // destination to the shell so it opens in the editor instead of replacing
   // the panel's list. Pages hand other conversations to their own tabs.
   onOpenInTab?: (nav: ChatsNav) => void;
+  // Closes this page's own tab, such as New message once its conversation opens in a tab of its own.
+  onCloseTab?: () => void;
   // Active editor destination, used by a persistent panel navigator to mark
   // the selected channel or DM without navigating the panel itself.
   selectedNav?: ChatsNav;
@@ -3878,9 +3880,11 @@ export function ChatsView(props: {
         onError={props.onError}
         onClearError={props.onClearError}
         onNotice={props.onNotice}
-        onOpenConversation={(conversationId, title) =>
-          openConversation({ level: "direct", conversationId, title })
-        }
+        onOpenConversation={(conversationId, title) => {
+          openConversation({ level: "direct", conversationId, title });
+          // The conversation took a tab of its own, so New message's has done its job.
+          if (variant === "page" && props.editorTabPath && props.onOpenInTab) props.onCloseTab?.();
+        }}
       />
     );
   }
@@ -3894,7 +3898,6 @@ export function ChatsView(props: {
         onBack={variant === "panel" ? goBack : undefined}
         mentionCandidates={mentionCandidates}
         onOpenPath={props.onOpenPath}
-        knownTitle={nav.title}
         onTitle={setDirectTitle}
         onError={props.onError}
         onClearError={props.onClearError}

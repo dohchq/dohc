@@ -8927,6 +8927,7 @@ export function DesktopWorkspaceShell(props: {
                                                               }
                                                               editorTabPath={groupTab.path}
                                                               onOpenInTab={openChatsNavInTab}
+ onCloseTab={() => { if (tabPath) closeFileTab(editorGroup.id, tabPath); }}
                                                               variant="page"
                                                             />
                                                           </Suspense>
@@ -9930,7 +9931,10 @@ export function DesktopWorkspaceShell(props: {
                             }}
                           >
                             <LazyDesktopSettings
-                              onMessageMember={(memberId) => { closeSettings(); openChatsNavInTab({ level: "direct-new", memberIds: [memberId] }); }}
+                              onMessageMember={(memberId) => {
+                                closeSettings();
+                                openChatsNavInTab({ level: "direct-new", memberIds: [memberId] });
+                              }}
                               workspaceIsReady={workspaceIsReady}
                               workspaceOpenFailed={!!workspaceOpenFailure}
                               onError={reportSettingsFailure}

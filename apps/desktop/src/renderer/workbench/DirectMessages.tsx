@@ -5,7 +5,7 @@ import type { MembersResult } from "@dohc/cli/members";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
-import { refusalCode, WORKSPACE_NOT_SYNCED } from "../../ipc/errorWords";
+import { DIRECT_SIGNED_OUT, readError, refusalCode, WORKSPACE_NOT_SYNCED } from "../../ipc/errorWords";
 import { EmptyState, FieldError, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
 import { Menu } from "../ui/Menu";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
@@ -217,6 +217,11 @@ export function DirectPeopleSection(props: Reporting & {
   );
 }
 
+/** Reports a failure, with Try again only where trying again can help: a block or a refusal stays as it is. */
+function reportDirect(reporting: Reporting, message: string, cause: unknown, retry: () => void, refusedPage?: string, notice?: ChatErrorNotice): void {
+  reporting.onError(message, cause, readError(cause).canRetry === false ? undefined : retry, refusedPage, notice);
+}
+
 async function blockPerson(input: {
   store: DirectStore;
   conversationId: string;
@@ -239,7 +244,7 @@ async function blockPerson(input: {
       );
     }
   } catch (cause) {
-    reporting.onError(
+    reportDirect(reporting,
       ipcErrorMessage(cause, blocked ? `dohc could not block ${name}.` : `dohc could not unblock ${name}.`),
       cause,
       () => void blockPerson(input),
@@ -289,8 +294,6 @@ type ConversationProps = Reporting & {
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   /** The people's names, once the list knows them, for the tab. */
   onTitle?: (title: string) => void;
-  /** The names the tab last showed, for while the list can't say, such as after signing out. */
-  knownTitle?: string;
 };
 
 /** One direct conversation, read from the server, or this computer's copy while the server is away. */
@@ -342,7 +345,9 @@ function ConversationForAccount(props: ConversationProps) {
     } catch (cause) {
       if (mine !== request.current || session !== store.session()) return;
       const message = ipcErrorMessage(cause, "dohc could not read this conversation.");
-      reporting.current.onError(message, cause, () => void load(before), undefined, { identity: historyIdentity });
+      // Signed out, the view says to sign in once the list learns it, so a notice would only repeat that.
+      if (refusalCode(cause) === DIRECT_SIGNED_OUT) void store.refresh();
+      else reportDirect(reporting.current, message, cause, () => void load(before), undefined, { identity: historyIdentity });
       setHistory((current) => current.conversationId === conversationId && current.status === "ready"
         ? { ...current, olderLoading: false }
         : { conversationId, status: "failed", message });
@@ -419,7 +424,7 @@ function ConversationForAccount(props: ConversationProps) {
       requestAnimationFrame(() => listRef.current?.scrollToEnd());
     } catch (cause) {
       if (session !== store.session()) return;
-      reporting.current.onError(
+      reportDirect(reporting.current,
         ipcErrorMessage(cause, "dohc could not send your message."),
         cause,
         () => void send(body, messageId, session),
@@ -437,7 +442,8 @@ function ConversationForAccount(props: ConversationProps) {
     void send(body, store.messageIdFor(conversationId, body));
   };
 
-  const title = conversation ? directTitle(conversation.people) : props.knownTitle ?? "Direct message";
+  // Signed out, or as another account, the names stay hidden with the rest of the conversation.
+  const title = conversation ? directTitle(conversation.people) : "Direct message";
   const known = conversation !== null;
   useEffect(() => {
     if (known) onTitle?.(title);
@@ -638,7 +644,7 @@ function NewMessageForAccount(props: NewMessageProps) {
           return;
         }
         const message = ipcErrorMessage(cause, "dohc could not read this workspace's members.");
-        reporting.current.onError(message, cause, () => setAttempt((count) => count + 1), undefined, { identity: membersIdentity });
+        reportDirect(reporting.current, message, cause, () => setAttempt((count) => count + 1), undefined, { identity: membersIdentity });
         setList({ workspaceId, status: "failed", message });
       },
     );
@@ -695,7 +701,9 @@ function NewMessageForAccount(props: NewMessageProps) {
   // Whether these people already have a conversation, so the first message lands there.
   const pickKey = [...shownPicks].sort().join(",");
   // Member ids are not account ids, so who the viewer blocks is known only once the picks resolve.
-  const [existing, setExisting] = useState<{ key: string; conversationId: string | null; title: string; blocked: string } | null>(null);
+  const [existing, setExisting] = useState<{ key: string; conversationId: string | null; title: string; blocked: readonly DirectPerson[] } | null>(null);
+  // Moves after an Unblock here, so the picks resolve again.
+  const [resolveAgain, setResolveAgain] = useState(0);
   useEffect(() => {
     if (!pickKey || members.status !== "ready" || state.status !== "ready") return;
     let current = true;
@@ -708,8 +716,7 @@ function NewMessageForAccount(props: NewMessageProps) {
           openConversation.current(resolution.conversationId, title);
           return;
         }
-        const blocked = resolution.people.filter((person) => person.blocked);
-        setExisting({ key: pickKey, conversationId: resolution.conversationId, title, blocked: blocked.length > 0 ? directTitle(blocked) : "" });
+        setExisting({ key: pickKey, conversationId: resolution.conversationId, title, blocked: resolution.people.filter((person) => person.blocked) });
       },
       // Sending says why, if this person can't be messaged.
       () => undefined,
@@ -717,7 +724,7 @@ function NewMessageForAccount(props: NewMessageProps) {
     return () => {
       current = false;
     };
-  }, [pickKey, members.status, state.status, workspaceId]);
+  }, [pickKey, members.status, state.status, workspaceId, resolveAgain]);
   const resolved = existing?.key === pickKey ? existing : null;
 
   const [draft, setDraftState] = useState(() => store.draft("new"));
@@ -751,7 +758,7 @@ function NewMessageForAccount(props: NewMessageProps) {
       props.onOpenConversation(result.conversationId, title);
     } catch (cause) {
       if (session !== store.session()) return;
-      reporting.current.onError(
+      reportDirect(reporting.current,
         ipcErrorMessage(cause, "dohc could not send your message."),
         cause,
         () => void start(memberIds, body, messageId, title, session),
@@ -884,10 +891,21 @@ function NewMessageForAccount(props: NewMessageProps) {
               />
             </div>
             {pickError ? <FieldError id={errorId} className="mt-1">Choose who to message.</FieldError> : null}
-            {resolved?.blocked ? (
+            {resolved && resolved.blocked.length > 0 ? (
               <p data-testid="chats-dm-new-blocked" className="m-0 mt-1.5 flex items-center gap-2 text-[12px] text-muted">
                 <Ban size={12} aria-hidden className="shrink-0 text-subtle" />
-                <span className="min-w-0 flex-1 truncate">{`You blocked ${resolved.blocked}. They can't message you.`}</span>
+                <span className="min-w-0 flex-1 truncate">{`You blocked ${directTitle(resolved.blocked)}. They can't message you.`}</span>
+                {/* A block is set from a conversation, so it is undone from one. */}
+                {resolved.conversationId && resolved.blocked.length === 1 ? (
+                  <SecondaryButton
+                    size="compact"
+                    data-testid="chats-dm-new-unblock"
+                    onClick={() => void blockPerson({ store, conversationId: resolved.conversationId!, person: resolved.blocked[0]!, blocked: false, reporting: props })
+                      .then(() => setResolveAgain((count) => count + 1))}
+                  >
+                    Unblock
+                  </SecondaryButton>
+                ) : null}
               </p>
             ) : null}
             {resolved?.conversationId ? (

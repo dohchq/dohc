@@ -454,6 +454,8 @@ export const WORKSPACE_NOT_SYNCED = "workspace-not-synced";
 export const DIRECT_FINAL = "direct-final";
 /** A direct message's failure that may pass on another try, such as an unreachable server. */
 export const DIRECT_RETRY = "direct-retry";
+/** A direct message's failure because nobody is signed in. A view that already says so needs no notice. */
+export const DIRECT_SIGNED_OUT = "direct-signed-out";
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
@@ -479,7 +481,7 @@ export function readError(error: unknown): ReadError {
   }
   if (code === WORKSPACE_NOT_SYNCED) return { words: message, mapped: false, cause: null };
   if (name === "DirectMessageError") {
-    return { words: message || null, mapped: false, cause: text, ...(code === DIRECT_FINAL ? { canRetry: false as const } : {}) };
+    return { words: message || null, mapped: false, cause: text, ...(code === DIRECT_FINAL || code === DIRECT_SIGNED_OUT ? { canRetry: false as const } : {}) };
   }
   if (code === PRIVACY_DENIED || (name === "DaemonRefusalError" && message === PRIVACY_DENIED)) {
     return { words: PRIVACY_DENIED_WORDS, mapped: true, cause: text };

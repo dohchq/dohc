@@ -16,7 +16,7 @@ import {
   type DirectSendResult,
 } from "@dohc/security-contract/direct-messages";
 import { atomicWriteFile } from "../atomicReplaceFile";
-import { DIRECT_FINAL, DIRECT_RETRY } from "../ipc/errorWords";
+import { DIRECT_FINAL, DIRECT_RETRY, DIRECT_SIGNED_OUT } from "../ipc/errorWords";
 
 // Direct messages for the signed-in account. The relay holds each
 // conversation; this computer keeps a copy of what it has read under
@@ -36,7 +36,7 @@ export type DirectFailure = "signed-out" | "unreachable" | "refused";
 
 export class DirectMessageError extends Error {
   /** Whether trying again can help. It crosses IPC as the error's code, so a notice offers Try again only then. */
-  readonly wireCode: typeof DIRECT_FINAL | typeof DIRECT_RETRY;
+  readonly wireCode: typeof DIRECT_FINAL | typeof DIRECT_RETRY | typeof DIRECT_SIGNED_OUT;
   constructor(
     readonly failure: DirectFailure,
     message: string,
@@ -46,7 +46,7 @@ export class DirectMessageError extends Error {
   ) {
     super(message);
     this.name = "DirectMessageError";
-    this.wireCode = retry ? DIRECT_RETRY : DIRECT_FINAL;
+    this.wireCode = failure === "signed-out" ? DIRECT_SIGNED_OUT : retry ? DIRECT_RETRY : DIRECT_FINAL;
   }
 }
 
@@ -184,6 +184,8 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
         if (unchanged) await pause(dependencies.retryMs ?? 1_000);
       } catch {
         if (stop.aborted) return;
+        // The answer after a failure counts as a change too: a window may have fallen back to the saved copy meanwhile.
+        since = -1;
         await pause(dependencies.retryMs ?? 15_000);
       }
     }

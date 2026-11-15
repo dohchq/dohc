@@ -277,6 +277,19 @@ ${cat.userId}`).digest("hex").slice(0, 32);
     stop();
   });
 
+  it("tells listeners when the server answers again after an outage, with nothing new", async () => {
+    const h = harness();
+    h.routes.set("/sync/direct/activity", () => Response.json({ revision: 7 }));
+    const stop = h.service.listen();
+    await expect.poll(() => h.changes()).toBe(1);
+    h.goOffline();
+    const failedFrom = h.requests.length;
+    await expect.poll(() => h.requests.length).toBeGreaterThan(failedFrom + 1);
+    h.goOnline();
+    await expect.poll(() => h.changes()).toBe(2);
+    stop();
+  });
+
   it("follows with the newest token when the same account signs in again", async () => {
     const h = harness({ account: { relayUrl: "https://relay.test", userId: "ann", token: "old" } });
     h.routes.set("/sync/direct/activity", () => Response.json({ revision: 1 }));
