@@ -141,6 +141,9 @@ export interface ShellError {
   lastLine?: string;
   // Paths the message lists, one per line under it.
   paths?: readonly string[];
+  // Short facts the message lists, one per line under it, such as who
+  // reaches a folder at which level. Copy details names each a row.
+  rows?: readonly string[];
   // A terminal command the message asks the person to run, shown with its copy.
   command?: string;
   // Facts for a report, one "label: value" line each, such as the error as
@@ -157,6 +160,8 @@ export interface ShellError {
   // `ends` the notice removes its row when it runs; one that `reads` it
   // closes its toast and keeps the row.
   // afterRetry puts the action after Try again, so F6 lands on Try again.
+  // `busy` names the step that is running, 0 for the action and 1 on for
+  // each additional one: it reads as working and every step waits.
   action?: {
     label: string;
     run: () => void;
@@ -164,6 +169,7 @@ export interface ShellError {
     reads?: boolean;
     afterRetry?: true;
     additional?: { label: string; run: () => void }[];
+    busy?: number;
   };
   // Where a press on the row goes: what it is about. Opening never runs
   // the row's action, so it never retries or ends the row.
@@ -662,6 +668,7 @@ export function useShellError(
       command?: string;
       details?: ReadonlyArray<ErrorDetailField>;
       paths?: readonly string[];
+      rows?: readonly string[];
       retry?: ShellError["retry"];
       onDismiss?: () => void;
       action?: ShellError["action"];
@@ -711,6 +718,7 @@ export function useShellError(
               : (failure.retry ?? null),
           ...(failure.command ? { command: failure.command } : {}),
           ...(failure.paths?.length ? { paths: failure.paths } : {}),
+          ...(failure.rows?.length ? { rows: failure.rows } : {}),
           ...(details.length ? { details } : {}),
           ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
           ...(action ? { action } : {}),
@@ -1175,6 +1183,7 @@ export function useShellError(
   // saves it. An Undo's row goes, so it runs once.
   const runShellErrorAction = useCallback((id: string, index = 0) => {
     const target = shellErrorsRef.current.find((error) => error.id === id);
+    if (target?.action?.busy !== undefined) return;
     if (index > 0) {
       target?.action?.additional?.[index - 1]?.run();
       return;

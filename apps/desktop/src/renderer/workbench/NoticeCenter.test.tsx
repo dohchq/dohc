@@ -19,6 +19,71 @@ function liveDeliveryIcon(surface: HTMLElement): string | undefined {
     ?.slice("lucide-".length);
 }
 
+it("shows the running step as working, with every step waiting, on the toast and the row", async () => {
+  const held: WorkspaceErrorNotice = {
+    id: "held",
+    tone: "warning",
+    title: "Access to team was widened outside dohc",
+    message: "Until you choose…",
+    atMs: 0,
+    canRetry: false,
+    seen: false,
+    actionLabel: "Restore rule",
+    additionalActionLabels: ["Allowing…"],
+    actionBusy: 1,
+    noDismiss: true,
+  };
+  const action = vi.fn();
+  render(<WorkspaceErrorToast error={held} onAction={action} onHide={vi.fn()} />);
+  const restore = screen.getByRole("button", { name: "Restore rule" });
+  const allowing = screen.getByRole("button", { name: "Allowing…" });
+  expect([restore.hasAttribute("disabled"), allowing.hasAttribute("disabled")]).toEqual([
+    true,
+    true,
+  ]);
+  expect([restore.getAttribute("aria-busy"), allowing.getAttribute("aria-busy")]).toEqual([
+    null,
+    "true",
+  ]);
+  cleanup();
+
+  renderNotices({ workspaceErrors: [{ ...held, seen: true }], onWorkspaceErrorAction: action });
+  await userEvent.click(screen.getByTestId("notice-center-toggle"));
+  const row = screen.getByTestId("notice-held");
+  expect(within(row).getByRole("button", { name: "Restore rule" }).hasAttribute("disabled")).toBe(
+    true,
+  );
+  expect(within(row).getByRole("button", { name: "Allowing…" }).getAttribute("aria-busy")).toBe(
+    "true",
+  );
+  expect(action).not.toHaveBeenCalled();
+});
+
+it("opens Notices at the row a request names and moves focus into it", async () => {
+  const errors: WorkspaceErrorNotice[] = ["outer", "inner"].map((id) => ({
+    id,
+    tone: "warning",
+    title: `${id} rule changed`,
+    message: "Until you choose…",
+    atMs: 0,
+    canRetry: false,
+    seen: true,
+    target: { to: "folder", path: id },
+  }));
+  const view = renderNotices({ workspaceErrors: errors, onOpenTarget: async () => null });
+  expect(screen.queryByTestId("notice-outer")).toBeNull();
+  view.rerender(
+    noticeElement({
+      workspaceErrors: errors,
+      onOpenTarget: async () => null,
+      showRequest: { id: "outer", seq: 1 },
+    }),
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("notice-outer").contains(document.activeElement)).toBe(true),
+  );
+});
+
 beforeEach(() => {
   vi.stubGlobal("dohcDesktop", {});
 });
@@ -102,6 +167,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
       {...(props.keptTyping ? { keptTyping: props.keptTyping } : {})}
       {...(props.onDismissKeptTyping ? { onDismissKeptTyping: props.onDismissKeptTyping } : {})}
+      {...(props.showRequest ? { showRequest: props.showRequest } : {})}
     />
   );
 }

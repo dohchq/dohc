@@ -1018,6 +1018,25 @@ export function isCaptureFileHeldRefusal(error: unknown): boolean {
   );
 }
 
+/**
+ * The folder whose access rule also changed outside dohc, above the one the
+ * owner decided on, which they decide first; empty for the workspace's own
+ * rule. Null for any other error.
+ */
+export function heldOuterAccessRuleFolder(error: unknown): string | null {
+  const { name, code, message } = parse(error);
+  if (
+    name !== "DaemonRefusalError" ||
+    code !== "CONFLICT" ||
+    !message.startsWith("access-rule-held:")
+  )
+    return null;
+  // `access-rule-held: <reason> <folder>`; the workspace's own folder is empty.
+  const rest = message.slice("access-rule-held:".length).trim();
+  const space = rest.indexOf(" ");
+  return space < 0 ? "" : rest.slice(space + 1);
+}
+
 /** The access rule changed again since the owner saw its Notice. The Notice already shows it as it is now. */
 export function isAccessRuleChangedRefusal(error: unknown): boolean {
   const { name, code, message } = parse(error);

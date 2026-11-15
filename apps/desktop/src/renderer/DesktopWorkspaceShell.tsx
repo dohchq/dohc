@@ -7594,7 +7594,7 @@ export function DesktopWorkspaceShell(props: {
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
-        ...(error.paths ? { paths: error.paths } : {}),
+        ...((error.paths ?? error.rows) ? { paths: error.paths ?? error.rows } : {}),
         ...(error.command ? { command: error.command } : {}),
         ...(error.change
           ? {}
@@ -7606,6 +7606,7 @@ export function DesktopWorkspaceShell(props: {
                     [error.tone ? "Notice" : "Error", error.message],
                     ...(error.title ? [["Title", error.title] as const] : []),
                     ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
+                    ...(error.rows ?? []).map((row) => ["Row", row] as const),
                     ...(error.details ?? []),
                     ...reportFacts(error.atMs),
                   ]),
@@ -7622,6 +7623,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.action?.additional
           ? { additionalActionLabels: error.action.additional.map((action) => action.label) }
           : {}),
+        ...(error.action?.busy !== undefined ? { actionBusy: error.action.busy } : {}),
         seen: error.seen,
         ...(error.read ? { read: true } : {}),
         ...(error.noDismiss ? { noDismiss: true } : {}),
@@ -7979,12 +7981,21 @@ export function DesktopWorkspaceShell(props: {
     reportShellFailure,
     clearIdentity,
   });
+  // Opens Notices at the row of one identity, such as a held folder that an
+  // inner folder's decision waits for.
+  const [noticeShown, setNoticeShown] = useState<{ id: string; seq: number } | null>(null);
+  const showNoticeRow = useCallback((identity: string) => {
+    const id = shellErrorsRef.current.find((error) => error.identity === identity)?.id;
+    if (id !== undefined) setNoticeShown((current) => ({ id, seq: (current?.seq ?? 0) + 1 }));
+  }, []);
   useAccessRuleHoldNotices({
     workspaceId,
-    workspaceName: workspaceName(props.workspace),
     holds: shareView ? undefined : syncStatus?.heldAccessRules,
     reportShellFailure,
     clearIdentity,
+    showSuccessNotice,
+    showNotice: showNoticeRow,
+    openHistory: openHistoryView,
   });
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,
@@ -8444,6 +8455,7 @@ export function DesktopWorkspaceShell(props: {
                                 onRetryLiveDelivery={retryLiveDelivery}
                                 onOpenSharingDeclined={openSharingDeclined}
                                 onOpenTarget={openNoticeRowTarget}
+                                showRequest={noticeShown}
                                 {...(shareView
                                   ? {}
                                   : {
