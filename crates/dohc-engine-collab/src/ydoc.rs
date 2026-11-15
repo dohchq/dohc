@@ -8303,6 +8303,14 @@ fn render_inline(
                     stretches.push((part_index, from, to));
                 }
             };
+            // The links written as references are sorted, so a join finds the
+            // first one after its end.
+            let links = &text_links[part_index];
+            let references_between = |end: usize, from: usize| {
+                links
+                    .get(links.partition_point(|&(at, _)| at < end))
+                    .is_some_and(|&(at, _)| at < from)
+            };
             let mut stretch: Option<(usize, usize)> = None;
             for &(from, to) in ranges {
                 // A link inside the span reads back as the span does.
@@ -8314,9 +8322,7 @@ fn render_inline(
                     Some((start, end))
                         if !in_span(offset + end, offset + from)
                             && !written_differently(&link[end..from])
-                            && !text_links[part_index]
-                                .iter()
-                                .any(|&(at, _)| end <= at && at < from) =>
+                            && !references_between(end, from) =>
                     {
                         Some((start, to))
                     }
