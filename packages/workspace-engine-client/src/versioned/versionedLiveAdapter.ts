@@ -1,4 +1,8 @@
-import type { HeldNoteChangeInput, HeldNoteChangeResult } from "../workspace/workspaceWireContract";
+import type {
+  AccessRuleDecisionParams,
+  HeldNoteChangeInput,
+  HeldNoteChangeResult,
+} from "../workspace/workspaceWireContract";
 import {
   LinksEdgesInput,
   LinksEdgesResult,
@@ -1841,19 +1845,13 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
   }
 
   /** Keeps a held access rule as it is on disk, or puts back the recorded one. */
-  async decideAccessRule(input: {
-    folder: string;
-    decision: "accept" | "restore";
-    expectedSha256: string | null;
-  }) {
+  async decideAccessRule(input: AccessRuleDecisionParams & { decision: "accept" | "restore" }) {
     const method =
       input.decision === "accept"
         ? WORKSPACE_METHOD.captureAcceptAccessRule
         : WORKSPACE_METHOD.captureRestoreAccessRule;
-    return this.workspaceRequest(method, {
-      folder: input.folder,
-      expectedSha256: input.expectedSha256,
-    });
+    const { versionId, folder, expectedSha256, expectedReason } = input;
+    return this.workspaceRequest(method, { versionId, folder, expectedSha256, expectedReason });
   }
 
   async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {

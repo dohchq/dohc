@@ -489,13 +489,15 @@ type CaptureSetAuthorParams = WorkspaceJsonObject & {
 };
 
 /**
- * The owner's decision on a held folder. `expectedSha256` is the hold's
- * `observedSha256`; the engine refuses with a conflict when the rule on disk
- * changed since.
+ * The owner's decision on a held folder of the active Version. `expectedSha256`
+ * and `expectedReason` are the hold's `observedSha256` and `reason`; the engine
+ * refuses with a conflict when the rule on disk changed since.
  */
 export type AccessRuleDecisionParams = WorkspaceJsonObject & {
+  versionId: string;
   folder: string;
   expectedSha256: string | null;
+  expectedReason: "widened" | "removed";
 };
 
 export type WorkspaceMethodParamsMap = {

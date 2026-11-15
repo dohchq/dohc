@@ -870,16 +870,20 @@ describe("workspace engine IPC registrations", () => {
     expect(
       await bridge.decideAccessRule({
         workspaceId: "workspace",
+        versionId: "main",
         folder: "team",
         decision: "restore",
         expectedSha256: "a".repeat(64),
+        expectedReason: "widened",
       }),
     ).toEqual({ heldAccessRules: [] });
     expect(h.adapter.decideAccessRule).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
+        versionId: "main",
         folder: "team",
         decision: "restore",
         expectedSha256: "a".repeat(64),
+        expectedReason: "widened",
       }),
     );
     expect(h.recordHeldAccessRules).toHaveBeenLastCalledWith(h.physical, []);
@@ -901,18 +905,22 @@ describe("workspace engine IPC registrations", () => {
     await expect(
       bridge.decideAccessRule({
         workspaceId: "workspace",
+        versionId: "main",
         folder: "team",
         decision: "accept",
         expectedSha256: "a".repeat(64),
+        expectedReason: "widened",
       }),
     ).rejects.toThrow("access-rule-changed: team");
     expect(h.recordHeldAccessRules).toHaveBeenLastCalledWith(h.physical, [judgedAgain]);
     await expect(
       bridge.decideAccessRule({
         workspaceId: "other",
+        versionId: "main",
         folder: "team",
         decision: "accept",
         expectedSha256: null,
+        expectedReason: "removed",
       }),
     ).rejects.toThrow("This workspace is no longer active.");
     expect(h.adapter.decideAccessRule).toHaveBeenCalledTimes(2);

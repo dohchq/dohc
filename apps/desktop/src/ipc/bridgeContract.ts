@@ -1912,14 +1912,17 @@ export const captureRecoveryOperations = {
     },
   },
   // Keeps a held access rule as it is on disk, or puts back the rule dohc
-  // last recorded. Refused when the rule changed since `expectedSha256`.
+  // last recorded. Refused when the hold is not the active Version's, or when
+  // the rule changed since the hold the owner saw.
   decideAccessRule: {
     capabilityId: "capture.access.decide",
     channel: "desktop:decide-access-rule",
     payload: WorkspaceIdPayload.extend({
+      versionId: z.string().min(1),
       folder: z.string(),
       decision: z.enum(["accept", "restore"]),
       expectedSha256: z.string().min(1).nullable(),
+      expectedReason: z.enum(["widened", "removed"]),
     }),
     result: z.object({ heldAccessRules: z.array(AccessRuleHold) }),
     guard: "trusted-sender",

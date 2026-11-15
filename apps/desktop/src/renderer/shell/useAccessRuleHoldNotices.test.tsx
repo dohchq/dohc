@@ -72,15 +72,19 @@ describe("useAccessRuleHoldNotices", () => {
     await waitFor(() => expect(h.bridge.decideAccessRule).toHaveBeenCalledTimes(2));
     expect(h.bridge.decideAccessRule).toHaveBeenNthCalledWith(1, {
       workspaceId: "ws-a",
+      versionId: "main",
       folder: "team",
       decision: "accept",
       expectedSha256: "a".repeat(64),
+      expectedReason: "widened",
     });
     expect(h.bridge.decideAccessRule).toHaveBeenNthCalledWith(2, {
       workspaceId: "ws-a",
+      versionId: "main",
       folder: "",
       decision: "restore",
       expectedSha256: null,
+      expectedReason: "removed",
     });
     // The rows stay until the engine stops listing the holds.
     expect(h.errors().shellErrors).toHaveLength(2);

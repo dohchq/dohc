@@ -1572,14 +1572,22 @@ fn observed_sha256(disk: &OnDisk) -> Option<String> {
     }
 }
 
+/// What the owner saw in a folder's hold when they decided.
+struct SeenHold<'a> {
+    /// The hold's `observed_sha256`.
+    sha256: Option<&'a str>,
+    /// The hold's reason.
+    reason: &'a str,
+}
+
 /// Settle `folder` as its owner chose, if its rule on disk is still the one
-/// they saw: `expected_sha256` as its hold recorded it.
+/// they saw: the bytes and the reason its hold showed.
 fn decide_on_store(
     store: &mut EngineStore,
     order: &Order<'_>,
     folder: &str,
     decision: AccessRuleDecision,
-    expected_sha256: Option<&str>,
+    seen: &SeenHold<'_>,
     self_writes: &dyn super::materialization::SelfWriteRecorder,
 ) -> Result<(), RuntimeError> {
     // The folders above settle first: their own holds answer for them.
@@ -1599,7 +1607,13 @@ fn decide_on_store(
         }
     }
     let disk = read_disk_rule(order.root, folder).map_err(|()| waits())?;
-    if observed_sha256(&disk).as_deref() != expected_sha256 {
+    // A rule gone and a rule spelled twice both record no bytes.
+    let reason = if disk.is_empty() {
+        access_rule_holds::REMOVED
+    } else {
+        access_rule_holds::WIDENED
+    };
+    if observed_sha256(&disk).as_deref() != seen.sha256 || reason != seen.reason {
         // Judge what is there now, so the hold the owner sees next is current.
         judge_one(store, order, folder, &[], false, &[])?;
         return Err(RuntimeError::AccessRuleChanged {
@@ -1780,8 +1794,9 @@ impl ActorHandle {
 
     /// Settle a held folder: accept what is on disk, or restore the rule
     /// last committed. Either takes effect at once; the files under the
-    /// folder follow on the next capture pass. A rule on disk other than
-    /// `expected_sha256` refuses with [`RuntimeError::AccessRuleChanged`].
+    /// folder follow on the next capture pass. A rule on disk other than the
+    /// one the owner saw, by bytes or by reason, refuses with
+    /// [`RuntimeError::AccessRuleChanged`].
     #[allow(clippy::too_many_arguments)]
     pub async fn decide_access_rule(
         &self,
@@ -1790,6 +1805,7 @@ impl ActorHandle {
         folder: String,
         decision: AccessRuleDecision,
         expected_sha256: Option<String>,
+        expected_reason: String,
         root: std::path::PathBuf,
         self_writes: std::sync::Arc<dyn super::materialization::SelfWriteRecorder>,
         now_ms: i64,
@@ -1812,7 +1828,10 @@ impl ActorHandle {
                 &order,
                 &folder,
                 decision,
-                expected_sha256.as_deref(),
+                &SeenHold {
+                    sha256: expected_sha256.as_deref(),
+                    reason: &expected_reason,
+                },
                 self_writes.as_ref(),
             )
         })

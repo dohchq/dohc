@@ -159,14 +159,14 @@ impl Fixture {
 
     /// Decide on the rule the folder's hold shows.
     fn decide(&self, folder: &str, decision: AccessRuleDecision) -> Result<(), RuntimeError> {
-        let seen = self
+        let hold = self
             .runtime
             .block_on(self.actor.access_rule_holds(WS.to_owned()))
             .expect("holds")
             .into_iter()
             .find(|hold| hold.folder == folder)
-            .and_then(|hold| hold.observed_sha256);
-        self.decide_on(folder, decision, seen)
+            .expect("a hold to decide");
+        self.decide_on(folder, decision, hold.observed_sha256, &hold.reason)
     }
 
     fn decide_on(
@@ -174,6 +174,7 @@ impl Fixture {
         folder: &str,
         decision: AccessRuleDecision,
         seen: Option<String>,
+        reason: &str,
     ) -> Result<(), RuntimeError> {
         self.runtime.block_on(self.actor.decide_access_rule(
             WS.to_owned(),
@@ -181,6 +182,7 @@ impl Fixture {
             folder.to_owned(),
             decision,
             seen,
+            reason.to_owned(),
             self.root().to_path_buf(),
             Arc::new(()),
             30,
@@ -408,7 +410,7 @@ fn a_decision_on_a_rule_changed_since_is_refused() {
     std::fs::remove_file(f.root().join("team/access.yaml")).unwrap();
     f.settle();
     for decision in [AccessRuleDecision::Accept, AccessRuleDecision::Restore] {
-        let decided = f.decide_on("team", decision, seen.clone());
+        let decided = f.decide_on("team", decision, seen.clone(), "widened");
         assert!(
             matches!(&decided, Err(RuntimeError::AccessRuleChanged { folder }) if folder == "team"),
             "{decided:?}"
@@ -417,6 +419,32 @@ fn a_decision_on_a_rule_changed_since_is_refused() {
     assert!(!f.root().join("team/access.yaml").exists());
     assert_eq!(f.journal(), before);
     assert_eq!(f.holds(), vec![("team".to_owned(), "removed".to_owned())]);
+}
+
+/// A rule gone and a rule spelled twice both record no bytes, so the owner's
+/// decision on a removal names its reason too. A second spelling saved since
+/// is refused, and stays on disk.
+#[test]
+fn a_decision_on_a_removal_that_became_two_spellings_is_refused() {
+    let f = ruled_team();
+    std::fs::remove_file(f.root().join("team/access.yaml")).unwrap();
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    assert_eq!(f.holds(), vec![("team".to_owned(), "removed".to_owned())]);
+    // A fullwidth letter folds to the same rule but is its own name on disk.
+    let other = "team/\u{FF41}ccess.yaml";
+    f.put("team/access.yaml", EDIT);
+    f.put(other, EDIT);
+    f.settle();
+    for decision in [AccessRuleDecision::Accept, AccessRuleDecision::Restore] {
+        let decided = f.decide_on("team", decision, None, "removed");
+        assert!(
+            matches!(&decided, Err(RuntimeError::AccessRuleChanged { folder }) if folder == "team"),
+            "{decided:?}"
+        );
+        assert!(f.root().join("team/access.yaml").exists());
+        assert!(f.root().join(other).exists());
+    }
 }
 
 #[test]

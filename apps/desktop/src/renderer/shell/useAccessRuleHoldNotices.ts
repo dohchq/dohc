@@ -56,9 +56,11 @@ export function useAccessRuleHoldNotices(
     void bridge()
       .decideAccessRule({
         workspaceId: asked,
+        versionId: hold.versionId,
         folder: hold.folder,
         decision,
         expectedSha256: hold.observedSha256,
+        expectedReason: hold.reason,
       })
       .finally(() => running.current.delete(identity))
       .catch((error: unknown) => {
