@@ -1118,11 +1118,25 @@ export function serializeRichdocBody(root: JSONContent): string {
     ),
   ];
   const writeTokens = (text: string) => written.reduce(restoreCharacterSentinels, text);
-  let markdown = writingTableCellTokens(writeTokens, () => markdownManager.serialize(prepared));
+  // The library writes a note of only `&nbsp;` as empty, for its blank lines.
+  // A sealed piece holding that text is the file's own, so it is written.
+  let markdown = writingTableCellTokens(writeTokens, () =>
+    holdsSealedPiece(prepared)
+      ? markdownManager.renderNodes(prepared, prepared)
+      : markdownManager.serialize(prepared),
+  );
   if (prepared.content?.[0]?.type === "horizontalRule") {
     markdown = "***" + markdown.slice(3);
   }
   return rewriteCodeBlockFences(writeTokens(markdown), codeBlocks);
+}
+
+function holdsSealedPiece(node: JSONContent): boolean {
+  return (
+    node.type === "rawBlock" ||
+    node.type === "rawInline" ||
+    (node.content?.some(holdsSealedPiece) ?? false)
+  );
 }
 
 function escapeLeadingIndentedCode(
@@ -1345,7 +1359,10 @@ function escapeLeadingMarkdownBlockSyntax(
       continue;
     }
     output.push(node);
-    lineStart = node.type === "hardBreak";
+    // A sealed piece can end a line, as the Rust writer sees from its output.
+    lineStart =
+      node.type === "hardBreak" ||
+      (node.type === "rawInline" && String(node.attrs?.source ?? "").endsWith("\n"));
     index += 1;
   }
   return output;

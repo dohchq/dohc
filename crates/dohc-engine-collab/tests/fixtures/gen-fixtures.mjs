@@ -738,6 +738,21 @@ const RICHDOC_PROJECTION_CASES = [
           xmlElement("listItem", {}, [paragraph("tight")]),
           xmlElement("listItem", {}, [paragraph("list")]),
         ]),
+        // A piece ending a line starts the next one, so the text after it is
+        // escaped as at any line start.
+        paragraph([
+          xmlText("a"),
+          xmlElement("rawInline", { source: "<br>\n" }),
+          xmlText("# b"),
+        ]),
+        // A piece is written exactly, even its leading space or blank lines.
+        paragraph([xmlElement("rawInline", { source: " <kbd>" }), xmlText("x")]),
+        xmlElement("bulletList", {}, [
+          xmlElement("listItem", {}, [
+            paragraph([]),
+            xmlElement("rawBlock", { source: "\n\n<div>" }),
+          ]),
+        ]),
         // In a cell, a piece is written in the cell's form, which has no
         // unescaped pipe and no line break.
         table([
@@ -754,6 +769,11 @@ const RICHDOC_PROJECTION_CASES = [
           ]),
         ]),
       ]),
+  },
+  {
+    // A note holding only a sealed entity is not an empty note.
+    name: "sealed-entity-alone",
+    makeDoc: () => directRichdoc([paragraph([xmlElement("rawInline", { source: "&nbsp;" })])]),
   },
   {
     name: "callout-title-delimiter",

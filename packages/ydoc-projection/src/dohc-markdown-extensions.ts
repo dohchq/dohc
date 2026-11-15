@@ -902,7 +902,18 @@ export const DohcMathBlock = Node.create({
 // does, because the editor binding deletes a node its schema cannot make.
 // Their HTML holds the source as text so a paste brings it back; their parse
 // rules rank above the code block's and code mark's, which match the same tags.
+// Their text is the source too, for a plain-text copy.
+const sealedSource = (node: { attrs: Record<string, unknown> }) => String(node.attrs.source ?? "");
+const sealedText = {
+  renderText: ({ node }: { node: { attrs: Record<string, unknown> } }) => sealedSource(node),
+  // A plain ProseMirror view, as on the share page and phone, reads leafText.
+  extendNodeSchema: (extension: { name: string }) =>
+    extension.name === "rawBlock" || extension.name === "rawInline"
+      ? { leafText: sealedSource }
+      : {},
+};
 export const DohcRawBlock = Node.create({
+  ...sealedText,
   name: "rawBlock",
   priority: CUSTOM_BLOCK_PRIORITY,
   group: "block",
@@ -924,6 +935,7 @@ export const DohcRawBlock = Node.create({
 });
 
 export const DohcRawInline = Node.create({
+  ...sealedText,
   name: "rawInline",
   priority: 1000,
   inline: true,
@@ -1228,7 +1240,16 @@ const tableTokenizer = Table.config.markdownTokenizer!;
 // between an item's blocks. Any other list leaves the attribute unset: the
 // editor binding writes no null attribute, so a list an editor makes carries
 // none, which a reader or check that predates it would refuse.
-const looseListAttributes = { loose: { default: null, rendered: false } };
+// Its HTML mark is data-loose, so a cut and paste keeps the spacing and HTML
+// from elsewhere cannot give the attribute another value.
+const looseListAttributes = {
+  loose: {
+    default: null,
+    parseHTML: (element: HTMLElement) => (element.hasAttribute("data-loose") ? true : null),
+    renderHTML: (attributes: Record<string, unknown>) =>
+      attributes.loose === true ? { "data-loose": "" } : {},
+  },
+};
 const renderLooseList = (node: JSONContent, helpers: MarkdownRendererHelpers): string =>
   node.content
     ? helpers.renderChildren(node.content, node.attrs?.loose === true ? "\n\n" : "\n")

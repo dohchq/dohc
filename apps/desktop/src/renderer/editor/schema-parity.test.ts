@@ -340,11 +340,32 @@ describe("desktop editor schema parity", () => {
             { type: "rawInline", attrs: { source: "<kbd>" } },
           ],
         },
+        {
+          type: "bulletList",
+          attrs: { loose: true },
+          content: ["a", "b"].map((text) => ({
+            type: "listItem",
+            content: [{ type: "paragraph", content: [{ type: "text", text }] }],
+          })),
+        },
       ],
     });
     const host = document.createElement("div");
     host.append(DOMSerializer.fromSchema(canonical).serializeFragment(doc.content));
     expect(ProseMirrorDOMParser.fromSchema(canonical).parse(host).toJSON()).toEqual(doc.toJSON());
+  });
+
+  // The check accepts only true or no value, so HTML from elsewhere must not
+  // set a list's `loose` to anything else.
+  it("reads a pasted list as loose only from its own mark", () => {
+    const host = document.createElement("div");
+    host.innerHTML = [
+      '<ul loose="yes"><li><p>a</p></li></ul>',
+      '<ol loose=""><li><p>b</p></li></ol>',
+      '<ul data-loose="false"><li><p>c</p></li></ul>',
+    ].join("");
+    const lists = ProseMirrorDOMParser.fromSchema(canonical).parse(host).toJSON().content;
+    expect(lists.map((list: JSONContent) => list.attrs?.loose)).toEqual([null, null, true]);
   });
 
   it("carries edge content and shared frontmatter exactly through the wire and both schemas", async () => {

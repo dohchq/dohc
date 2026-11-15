@@ -1,0 +1,22 @@
+{
+ "seed": -124,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-sealed-entity-alone",
+ "updates": [
+  "AQO0obuvAwAHAQRib2R5AwlwYXJhZ3JhcGgHALShu68DAAMJcmF3SW5saW5lKAC0obuvAwEGc291cmNlAXcGJm5ic3A7AA==",
+  "AQG0obuvAwMoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcTc2VhbGVkLWVudGl0eS1hbG9uZQA="
+ ],
+ "mergedUpdateB64": "AQS0obuvAwAHAQRib2R5AwlwYXJhZ3JhcGgHALShu68DAAMJcmF3SW5saW5lKAC0obuvAwEGc291cmNlAXcGJm5ic3A7KAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3E3NlYWxlZC1lbnRpdHktYWxvbmUA",
+ "stateVectorB64": "AbShu68DBA==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "paragraph",
+   "rawInline"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "&nbsp;\n"
+ }
+}

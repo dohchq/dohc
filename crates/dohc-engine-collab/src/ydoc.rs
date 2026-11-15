@@ -6164,10 +6164,23 @@ fn push_mark(
 fn markdown_document(children: &[MarkdownNode]) -> ProjectionResult<String> {
     let attrs = BTreeMap::new();
     let rendered = render_nodes(children, "doc", &attrs, "\n\n", false)?;
-    if markdown_output_is_empty(&rendered) {
+    // Blank lines are written `&nbsp;`, so output of only that is an empty
+    // note, unless a sealed piece holds it as the file's own text.
+    if markdown_output_is_empty(&rendered) && !children.iter().any(holds_sealed_piece) {
         Ok(String::new())
     } else {
         Ok(trim_js_end(&rendered).to_string())
+    }
+}
+
+fn holds_sealed_piece(node: &MarkdownNode) -> bool {
+    match node {
+        MarkdownNode::Text(_) => false,
+        MarkdownNode::Element { tag, children, .. } => {
+            matches!(tag.as_str(), "rawBlock" | "rawInline")
+                || children.iter().any(holds_sealed_piece)
+        }
+        MarkdownNode::Fragment(children) => children.iter().any(holds_sealed_piece),
     }
 }
 
@@ -7148,11 +7161,12 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                     let rendered = render_inline(children, false, true, table_cell)?;
                     // The TypeScript writer escapes a leading space of text,
                     // not a hard break's two spaces.
+                    // A sealed piece is written exactly, as the TypeScript writer does.
                     if matches!(context.parent_tag, "doc" | "listItem" | "taskItem")
                         && rendered.starts_with(' ')
                         && !matches!(
                             children.first(),
-                            Some(MarkdownNode::Element { tag, .. }) if tag == "hardBreak"
+                            Some(MarkdownNode::Element { tag, .. }) if tag == "hardBreak" || tag == "rawInline"
                         )
                     {
                         let mut output = ProjectionBuffer::new();
@@ -7365,8 +7379,10 @@ fn render_list_item(
                 table_cell: context.table_cell,
             },
         )?;
+        // One line break, as the TypeScript writer strips; a sealed block
+        // keeps blank lines of its own.
         let child_rendered = if index == 0 && empty_marker {
-            child_rendered.trim_start_matches('\n')
+            child_rendered.strip_prefix('\n').unwrap_or(&child_rendered)
         } else {
             &child_rendered
         };
