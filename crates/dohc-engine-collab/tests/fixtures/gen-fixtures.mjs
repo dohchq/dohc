@@ -707,6 +707,18 @@ const RICHDOC_PROJECTION_CASES = [
             tableCell("tableCell", [xmlText("a"), xmlElement("hardBreak"), xmlText("b")]),
           ]),
           tableRow([tableCell("tableCell", [xmlText("ends"), xmlElement("hardBreak")])]),
+          tableRow([
+            tableCell("tableCell", [xmlElement("hardBreak"), xmlText(" spaced in a cell")]),
+          ]),
+          tableRow([
+            tableCell("tableCell", [xmlText("a  "), xmlElement("hardBreak"), xmlText("  b")]),
+          ]),
+          tableRow([
+            xmlElement("tableCell", { colspan: 1, rowspan: 1 }, [
+              paragraph("first block "),
+              paragraph(" second block"),
+            ]),
+          ]),
         ]),
       ]),
   },

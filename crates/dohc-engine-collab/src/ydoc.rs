@@ -7186,12 +7186,7 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                 "---"
             }
             .to_string()),
-            "hardBreak" => Ok(if context.table_cell {
-                GFM_TABLE_CELL_BLOCK_SEPARATOR
-            } else {
-                "  \n"
-            }
-            .to_string()),
+            "hardBreak" => Ok("  \n".to_string()),
             "image" => render_image(attrs),
             "escapedPunctuation" => ensure_projection_string(format!(
                 "\\{}",
@@ -7785,7 +7780,9 @@ fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
                 let rendered = render_table_cell_block(child, tag, attrs, children, index)?;
                 raw.push_str(&rendered)?;
             }
-            let text = prepare_rendered_table_cell(&collapse_js_whitespace(&raw.into_string())?)?;
+            let text = collapse_js_whitespace(&table_cell_line_breaks(
+                &prepare_rendered_table_cell(&raw.into_string())?,
+            ))?;
             cell_text_bytes = checked_projection_len(cell_text_bytes, text.len())?;
             rendered_cells.push(TableCell {
                 text,
@@ -7923,6 +7920,28 @@ fn prepare_rendered_table_cell(markdown: &str) -> ProjectionResult<String> {
         };
     }
     Ok(output.into_string())
+}
+
+/// Tiptap's table renderer writes each line break in a cell, a hard break or a
+/// block separator, as `<br>` without the spaces or tabs around it.
+fn table_cell_line_breaks(markdown: &str) -> String {
+    let lines = markdown.replace(GFM_TABLE_CELL_BLOCK_SEPARATOR, "\n");
+    let mut output = String::with_capacity(markdown.len());
+    let mut lines = lines.split('\n').peekable();
+    let mut first = true;
+    while let Some(mut line) = lines.next() {
+        if !first {
+            output.push_str(GFM_TABLE_CELL_BLOCK_SEPARATOR);
+            line = line.trim_start_matches([' ', '\t']);
+        }
+        if lines.peek().is_some() {
+            line = line.strip_suffix('\r').unwrap_or(line);
+            line = line.trim_end_matches([' ', '\t']);
+        }
+        output.push_str(line);
+        first = false;
+    }
+    output
 }
 
 fn utf16_len(value: &str) -> usize {
@@ -10695,7 +10714,7 @@ mod projection_tests {
             "a &copy; b\n",
             "1. one\n7. two\n",
             "1. a\n3. b\n",
-            "| a |\n|---|\n| x &lt;br&gt; y |\n",
+            "| a |\n|---|\n| x&lt;br&gt;y |\n",
             // A tag without attributes and another name stays text.
             "a <x> b </x-y>\n",
             // Its content is raw HTML to the importer, which the projector
