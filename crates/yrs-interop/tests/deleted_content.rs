@@ -1,7 +1,9 @@
 use yrs::deleted_content::{deleted_runs, Places};
 use yrs::types::xml::{XmlElementPrelim, XmlFragment, XmlTextPrelim};
 use yrs::updates::decoder::Decode;
-use yrs::{Any, BranchID, Doc, OffsetKind, Options, ReadTxn, StateVector, Text, Transact, Update, Xml};
+use yrs::{
+    Any, BranchID, Doc, OffsetKind, Options, ReadTxn, StateVector, Text, Transact, Update, Xml,
+};
 
 fn keeping() -> Doc {
     Doc::with_options(Options {
@@ -25,7 +27,9 @@ fn paragraph(text: &str) -> (Doc, Doc) {
         line.insert(&mut txn, 0, XmlTextPrelim::new(text));
     }
     let b = keeping();
-    let update = a.transact().encode_state_as_update_v1(&StateVector::default());
+    let update = a
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
     b.transact_mut()
         .apply_update(Update::decode_v1(&update).unwrap())
         .unwrap();
@@ -68,25 +72,35 @@ fn reads_text_typed_into_a_line_someone_else_deleted() {
     };
     // The deleter's page receives the typing after its delete.
     let mut txn = b.transact_mut();
-    txn.apply_update(Update::decode_v1(&typed).unwrap()).unwrap();
+    txn.apply_update(Update::decode_v1(&typed).unwrap())
+        .unwrap();
     txn.commit();
     let set = txn.delete_set().clone();
     let mut places = Places::default();
     let mut runs: Vec<_> = deleted_runs(&txn, &set)
         .into_iter()
         .filter(|run| run.in_xml_text() && !run.keyed())
-        .map(|run| (run.place(&mut places), run.text().unwrap().to_owned(), run.line()))
+        .map(|run| {
+            (
+                run.place(&mut places),
+                run.text().unwrap().to_owned(),
+                run.line(),
+            )
+        })
         .collect();
     runs.sort();
     assert_eq!(
-        runs.iter().map(|(_, text, line)| (text.as_str(), *line)).collect::<Vec<_>>(),
+        runs.iter()
+            .map(|(_, text, line)| (text.as_str(), *line))
+            .collect::<Vec<_>>(),
         vec![(" world", Some(line_id))]
     );
     drop(txn);
 
     // The typist's page receives the delete: all of the line's text goes, in order.
     let mut txn = a.transact_mut();
-    txn.apply_update(Update::decode_v1(&removed).unwrap()).unwrap();
+    txn.apply_update(Update::decode_v1(&removed).unwrap())
+        .unwrap();
     txn.commit();
     let set = txn.delete_set().clone();
     let mut places = Places::default();
@@ -145,4 +159,3 @@ fn reads_a_deleted_inline_element_and_its_attributes() {
     assert_eq!(element.attribute("title"), None);
     assert!(runs.iter().all(|run| run.text().is_none() || run.keyed()));
 }
-
