@@ -1173,4 +1173,60 @@ describe("live edit format guard", () => {
     const both = Y.mergeUpdates([Y.encodeStateAsUpdate(page, start), typed]);
     expect(liveEditFitsNote(note, both)).toBe(true);
   });
+
+  it("places what an edit builds on by the note's own items, as Yjs does, not the edit's copies", () => {
+    // The note: a paragraph at (7, 0) holding a text run at (7, 1).
+    const note = new Y.Doc();
+    note.clientID = 7;
+    const kept = new Y.XmlElement("paragraph");
+    note.getXmlFragment("body").insert(0, [kept]);
+    kept.insert(0, [new Y.XmlText()]);
+    const clone = () => {
+      // Kept uncollected, so where Yjs put an item can be read after its removals.
+      const copy = new Y.Doc({ gc: false });
+      Y.applyUpdate(copy, Y.encodeStateAsUpdate(note));
+      return copy;
+    };
+
+    // A map claimed at the paragraph's id, with a key set in it by another editor. Yjs keeps the
+    // note's paragraph, so the key lands on it as an attribute it doesn't have.
+    const fake = new Y.Doc();
+    fake.clientID = 7;
+    fake.getMap("frontmatter").set("x", new Y.Map());
+    const other = new Y.Doc();
+    other.clientID = 9;
+    Y.applyUpdate(other, Y.encodeStateAsUpdate(fake));
+    (other.getMap("frontmatter").get("x") as Y.Map<unknown>).set("onclick", "alert(1)");
+    const attribute = Y.encodeStateAsUpdate(other);
+    const landed = clone();
+    Y.applyUpdate(landed, attribute);
+    expect(paragraph(landed).getAttribute("onclick")).toBe("alert(1)");
+    expect(liveEditFitsNote(note, attribute)).toBe(false);
+
+    // A collected item claimed at the text run's id, so the edit's own copy says its child is
+    // dropped. Yjs puts the child on the note's text run. (This edit's removals then take the
+    // paragraph out too; one written by hand needn't.)
+    const gone = new Y.Doc();
+    gone.clientID = 7;
+    const outer = new Y.Map<unknown>();
+    gone.getMap("frontmatter").set("outer", outer);
+    outer.set("inner", new Y.Map());
+    const writer = new Y.Doc();
+    writer.clientID = 9;
+    Y.applyUpdate(writer, Y.encodeStateAsUpdate(gone));
+    const start = Y.encodeStateVector(writer);
+    (
+      (writer.getMap("frontmatter").get("outer") as Y.Map<unknown>).get("inner") as Y.Map<unknown>
+    ).set("k", new Y.XmlElement("script"));
+    gone.getMap("frontmatter").delete("outer");
+    const dropped = Y.mergeUpdates([
+      Y.encodeStateAsUpdate(gone),
+      Y.encodeStateAsUpdate(writer, start),
+    ]);
+    expect(Y.decodeUpdate(dropped).structs.some((struct) => struct instanceof Y.GC)).toBe(true);
+    const placed = clone();
+    Y.applyUpdate(placed, dropped);
+    expect((Y.getItem(placed.store, Y.createID(9, 0)) as Y.Item).parent).toBeInstanceOf(Y.XmlText);
+    expect(liveEditFitsNote(note, dropped)).toBe(false);
+  });
 });

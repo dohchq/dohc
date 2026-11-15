@@ -860,8 +860,8 @@ const GONE = Symbol("gone");
  * Whether an edit adds only kinds of content a note can hold: the three roots, the elements and
  * marks the shared schema has, each element's own attributes, and frontmatter and metadata
  * values. It reads the edit and the items it builds on, not the whole note, and checks no values
- * or nesting; the full check at save does that. False when the edit builds on something neither
- * it nor `doc` has.
+ * or nesting; the full check at save does that. As Yjs does, it reads an id from `doc` when `doc`
+ * has it. False when the edit builds on something neither it nor `doc` has.
  */
 export function liveEditFitsNote(doc: Y.Doc, update: Uint8Array): boolean {
   let structs: ReturnType<typeof Y.decodeUpdate>["structs"];
@@ -899,6 +899,9 @@ export function liveEditFitsNote(doc: Y.Doc, update: Uint8Array): boolean {
       return undefined;
     }
   };
+  // Yjs keeps what the note already has under an id and takes from an edit only what is past it.
+  const noted = (id: Y.ID) => id.clock < Y.getState(doc.store, id.client);
+  const find = (id: Y.ID) => (noted(id) ? inDoc(id) : inEdit(id));
   const roots = new Map<Shared, string>();
   for (const [name, type] of doc.share) roots.set(type, name);
   const places = new Map<Y.Item, Place | typeof GONE | null>();
@@ -914,14 +917,14 @@ export function liveEditFitsNote(doc: Y.Doc, update: Uint8Array): boolean {
       places.set(item, null);
       chain.push(item);
       const parent = item.parent as string | Y.ID | null;
+      const neighbour = item.origin ?? item.rightOrigin;
       const near =
         typeof parent === "string"
           ? undefined
           : parent
-            ? (inEdit(parent) ?? inDoc(parent))
-            : item.origin || item.rightOrigin
-              ? (inEdit((item.origin ?? item.rightOrigin)!) ??
-                inDoc((item.origin ?? item.rightOrigin)!))
+            ? find(parent)
+            : neighbour
+              ? find(neighbour)
               : undefined;
       // Yjs drops an item whose parent or neighbour the note has already collected.
       if (
@@ -937,7 +940,7 @@ export function liveEditFitsNote(doc: Y.Doc, update: Uint8Array): boolean {
           near?.content instanceof Y.ContentType
             ? { parent: near.content.type, sub: item.parentSub }
             : null;
-      else if (near instanceof Y.Item && near === inEdit(near.id)) {
+      else if (near instanceof Y.Item && !noted(near.id)) {
         item = near;
         continue;
       } else {
