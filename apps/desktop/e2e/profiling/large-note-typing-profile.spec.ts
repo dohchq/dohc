@@ -25,9 +25,13 @@ const KEY_INTERVAL_MS = Number(process.env.DOHC_LARGE_NOTE_KEY_INTERVAL_MS ?? 10
 const TRACE = process.env.DOHC_LARGE_NOTE_TRACE === "1";
 // "timeline" records a Chromium trace of the measured keys instead: layout, style and paint times.
 const TIMELINE = process.env.DOHC_LARGE_NOTE_TRACE === "timeline";
+// "open" traces every process from the click that opens a note until its caret is placed.
+const OPEN_TRACE = process.env.DOHC_LARGE_NOTE_TRACE === "open";
 // "0" turns the spellchecker off for the run, to measure what it costs.
 const SPELLCHECK = process.env.DOHC_LARGE_NOTE_SPELLCHECK !== "0";
 // Extra Chromium switches for a controlled comparison, separated by spaces.
+// CSS added to the page for a controlled comparison, such as hiding one kind of widget.
+const EXTRA_CSS = process.env.DOHC_LARGE_NOTE_CSS ?? "";
 const SWITCHES = (process.env.DOHC_LARGE_NOTE_SWITCHES ?? "").split(" ").filter(Boolean);
 // Alternate order to expose host drift instead of favoring one note.
 const ORDER = (process.env.DOHC_LARGE_NOTE_ORDER ?? "small,plain,rich,rich,plain,small").split(
@@ -275,6 +279,7 @@ test("@large-note-typing times keystrokes in small, plain and block-heavy notes"
       );
     const opened = await openWorkspaceFromFirstRun(page, workspace);
     await page.emulateMedia({ reducedMotion: "reduce" });
+    if (EXTRA_CSS) await page.addStyleTag({ content: EXTRA_CSS });
     const rounds: Array<Record<string, unknown> & { kind: Kind; samples: InputTiming[] }> = [];
     const testStartedAt = performance.now();
     // A passing test's attachments are not kept on disk, so results also go to the output folder.
@@ -314,6 +319,12 @@ test("@large-note-typing times keystrokes in small, plain and block-heavy notes"
       const headings = kind === "small" ? 12 : SECTIONS;
       // From before the open: main keeps working long after the note is editable.
       const stopMainProfile = TRACE ? await startMainProfile(desktop.app) : null;
+      if (OPEN_TRACE)
+        await desktop.app.evaluate(({ contentTracing }) =>
+          contentTracing.startRecording({
+            included_categories: ["toplevel", "accessibility", "ipc", "mojom", "devtools.timeline"],
+          }),
+        );
       const openStartedAt = performance.now();
       // A frozen window holds the click; the wait is part of what this run measures.
       await explorerRow(page, `${kind}.md`).click({ timeout: 600_000 });
@@ -347,6 +358,12 @@ test("@large-note-typing times keystrokes in small, plain and block-heavy notes"
       step(
         `caret placed after ${Math.round(clickToCaretMs)} ms, accessibility [${await accessibilityFeatures()}]`,
       );
+      if (OPEN_TRACE && output) {
+        const recorded = await desktop.app.evaluate(({ contentTracing }) =>
+          contentTracing.stopRecording(),
+        );
+        await copyFile(recorded, join(output, `${kind}-${rounds.length + 1}-open-trace.json`));
+      }
       // The profile covers the warm-ups too: the first keys after an open are the slowest.
       const capture = TRACE ? await startCdpCapture(desktop.app, page) : null;
       const warmups = await typeKeys(keyboard, page, WARMUPS);
@@ -420,6 +437,7 @@ test("@large-note-typing times keystrokes in small, plain and block-heavy notes"
       profiling: TRACE,
       spellcheck: SPELLCHECK,
       switches: SWITCHES,
+      extraCss: EXTRA_CSS,
       host: {
         platform: process.platform,
         cpu: cpus()[0]?.model,
