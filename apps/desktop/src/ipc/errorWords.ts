@@ -447,6 +447,14 @@ export interface ReadError {
 
 const NOT_A_WORKSPACE = { canRetry: false, refusal: "not-a-workspace" } as const;
 
+/** The code of a request that needs the workspace to sync first. Its words stay the error's own. */
+export const WORKSPACE_NOT_SYNCED = "workspace-not-synced";
+
+/** A direct message's failure that trying again cannot change, such as a block or being signed out. */
+export const DIRECT_FINAL = "direct-final";
+/** A direct message's failure that may pass on another try, such as an unreachable server. */
+export const DIRECT_RETRY = "direct-retry";
+
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
   if (
@@ -468,6 +476,10 @@ export function readError(error: unknown): ReadError {
       canRetry: false,
       ...(name !== "SyncedDeletionStaleError" ? { refusal: "synced-deletion" as const } : {}),
     };
+  }
+  if (code === WORKSPACE_NOT_SYNCED) return { words: message, mapped: false, cause: null };
+  if (name === "DirectMessageError") {
+    return { words: message || null, mapped: false, cause: text, ...(code === DIRECT_FINAL ? { canRetry: false as const } : {}) };
   }
   if (code === PRIVACY_DENIED || (name === "DaemonRefusalError" && message === PRIVACY_DENIED)) {
     return { words: PRIVACY_DENIED_WORDS, mapped: true, cause: text };

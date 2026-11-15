@@ -98,6 +98,7 @@ import {
   readError,
   USE_THIS_COMPUTER,
   withErrorWords,
+  WORKSPACE_NOT_SYNCED,
 } from "./ipc/errorWords";
 import { liveStopHostCopy, liveStopRelayError } from "./ipc/liveEditingStop";
 import { assertRootNotPrivacyDenied, withPrivacyDenial } from "./workspaces/privacyDenial";
@@ -1967,7 +1968,10 @@ async function remoteForWorkspace(workspace: RegistryEntry, options?: { allowPau
   await warmCredentialCache();
   const credentialGeneration = credentialCacheGeneration;
   const remote = workspace.remote ?? (options?.allowPaused ? workspace.pausedRemote : undefined);
-  if (!remote) throw new Error("Sync this workspace before sharing.");
+  if (!remote)
+    throw Object.assign(new Error("Sync this workspace before sharing."), {
+      code: WORKSPACE_NOT_SYNCED,
+    });
   const credentials = requireCredentials(cachedCredentials);
   if (!workspaceRemoteMatchesCredentials(remote, credentials)) {
     if (normalizeServerUrl(credentials.serverUrl) !== normalizeServerUrl(remote.serverUrl)) {

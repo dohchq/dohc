@@ -230,6 +230,18 @@ describe("ChatsView direct messages", () => {
     expect(bridgeMock.directSend).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the people's names on a conversation after signing out", async () => {
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    const view = await openSam();
+    await waitFor(() => expect(within(view).getByTestId("chats-dm-title").textContent).toBe("Sam Rivera"));
+    bridgeMock.directConversations.mockResolvedValue({ available: false });
+    act(() => emitCloudSessionChanged("session-signed-out", "ready"));
+    await screen.findByTestId("chats-dm-signed-out");
+    expect(screen.getByTestId("chats-dm-title").textContent).toBe("Sam Rivera");
+  });
+
   it("clears an open conversation when the account changes", async () => {
     signedIn([conversation()]);
     history([sent(1, VIEWER, "Dinner Friday?"), sent(2, "sam", "See you at nine")]);
@@ -460,6 +472,18 @@ describe("ChatsView direct messages", () => {
     expect(within(screen.getByTestId("chats-dm-new-pick")).getByTestId("chats-dm-new-pick-blocked")).toBeTruthy();
   });
 
+  it("asks to sync a workspace that is only on this computer, without a failure notice", async () => {
+    signedIn([]);
+    bridgeMock.workspaceMembers.mockRejectedValue(
+      new Error("Error invoking remote method 'desktop:workspace-members': Error [workspace-not-synced]: Sync this workspace before sharing."),
+    );
+    const onError = vi.fn();
+    renderView(vi.fn(), onError, { variant: "panel" });
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
+    expect((await screen.findByTestId("chats-dm-new-unsynced")).textContent).toContain("Sync this workspace to message its members.");
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it("offers the conversation the picked people already have", async () => {
     const user = userEvent.setup();
     signedIn([conversation()]);
@@ -479,6 +503,16 @@ describe("ChatsView direct messages", () => {
       "conversation-sam",
     );
     expect(bridgeMock.directStart).not.toHaveBeenCalled();
+  });
+
+  it("opens the existing conversation when Members' Message names someone already in one", async () => {
+    signedIn([conversation()]);
+    members([{ memberId: "sam", name: "Sam Rivera" }]);
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: "conversation-sam", people: [sam] });
+    history([sent(2, "sam", "See you at nine")]);
+    renderView(vi.fn(), vi.fn(), { variant: "page", initialNav: { level: "direct-new", memberIds: ["sam"] } });
+    expect((await screen.findByTestId("chats-dm-view")).dataset.conversationId).toBe("conversation-sam");
+    expect(screen.queryByTestId("chats-dm-new")).toBeNull();
   });
 
   it("opens New message with a member already picked, as Members' Message does", async () => {

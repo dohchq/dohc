@@ -3894,6 +3894,7 @@ export function ChatsView(props: {
         onBack={variant === "panel" ? goBack : undefined}
         mentionCandidates={mentionCandidates}
         onOpenPath={props.onOpenPath}
+        knownTitle={nav.title}
         onTitle={setDirectTitle}
         onError={props.onError}
         onClearError={props.onClearError}

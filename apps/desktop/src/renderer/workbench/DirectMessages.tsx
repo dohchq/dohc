@@ -5,6 +5,7 @@ import type { MembersResult } from "@dohc/cli/members";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { bridge } from "../bridge";
 import { ipcErrorMessage } from "../ipcError";
+import { refusalCode, WORKSPACE_NOT_SYNCED } from "../../ipc/errorWords";
 import { EmptyState, FieldError, RetryRow, SecondaryButton, SectionLabel } from "../ui/controls";
 import { Menu } from "../ui/Menu";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
@@ -126,7 +127,7 @@ export function DirectPeopleSection(props: Reporting & {
         </SectionActionButton>
       </div>
       {state.status === "loading" ? (
-        <div data-testid="chats-dms-loading" aria-busy="true" className="h-8" />
+        <SkeletonRows rows={2} label="Loading people…" testId="chats-dms-loading" className="px-3 py-2" />
       ) : state.status === "failed" ? (
         <RetryRow testId="chats-dms-retry" onRetry={() => void store.refresh()}>
           {state.message}
@@ -288,6 +289,8 @@ type ConversationProps = Reporting & {
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   /** The people's names, once the list knows them, for the tab. */
   onTitle?: (title: string) => void;
+  /** The names the tab last showed, for while the list can't say, such as after signing out. */
+  knownTitle?: string;
 };
 
 /** One direct conversation, read from the server, or this computer's copy while the server is away. */
@@ -438,7 +441,7 @@ function ConversationForAccount(props: ConversationProps) {
     void send(body, store.messageIdFor(conversationId, body));
   };
 
-  const title = conversation ? directTitle(conversation.people) : "Direct message";
+  const title = conversation ? directTitle(conversation.people) : props.knownTitle ?? "Direct message";
   const known = conversation !== null;
   useEffect(() => {
     if (known) onTitle?.(title);
@@ -491,15 +494,16 @@ function ConversationForAccount(props: ConversationProps) {
   } else {
     body = (
       <>
-        {shown.more ? (
-          <div className="flex shrink-0 justify-center border-b border-line/60 py-1">
-            <SecondaryButton size="compact" data-testid="chats-dm-older" disabled={shown.olderLoading} onClick={() => void load(shown.messages[0]?.seq)}>
-              {shown.olderLoading ? "Loading…" : "Show earlier messages"}
-            </SecondaryButton>
-          </div>
-        ) : null}
         <ChatMessageList
           testIdPrefix="chats-dm"
+          // At the top of the history, so it scrolls away with the messages and covers none of them.
+          header={shown.more ? (
+            <div className="flex justify-center pb-2 pt-1">
+              <SecondaryButton size="compact" data-testid="chats-dm-older" disabled={shown.olderLoading} onClick={() => void load(shown.messages[0]?.seq)}>
+                {shown.olderLoading ? "Loading…" : "Show earlier messages"}
+              </SecondaryButton>
+            </div>
+          ) : null}
           messages={records}
           loading={false}
           emptyLabel={single ? `This is the start of your conversation with ${directPersonName(single)}.` : "This is the start of your conversation."}
@@ -578,6 +582,8 @@ type Member = { memberId: string; name: string };
 type MemberList =
   | { workspaceId: string; status: "loading" }
   | { workspaceId: string; status: "failed"; message: string }
+  // A workspace only on this computer has no members to message yet. Nothing failed.
+  | { workspaceId: string; status: "unsynced" }
   | { workspaceId: string; status: "ready"; members: readonly Member[] };
 
 /** The workspace's other active members, by name. Emails stay out of Chats. */
@@ -630,6 +636,11 @@ function NewMessageForAccount(props: NewMessageProps) {
       },
       (cause: unknown) => {
         if (!current) return;
+        if (refusalCode(cause) === WORKSPACE_NOT_SYNCED) {
+          reporting.current.onClearError?.(membersIdentity);
+          setList({ workspaceId, status: "unsynced" });
+          return;
+        }
         const message = ipcErrorMessage(cause, "dohc could not read this workspace's members.");
         reporting.current.onError(message, cause, () => setAttempt((count) => count + 1), undefined, { identity: membersIdentity });
         setList({ workspaceId, status: "failed", message });
@@ -641,6 +652,9 @@ function NewMessageForAccount(props: NewMessageProps) {
   }, [workspaceId, attempt, membersIdentity]);
 
   const [picked, setPicked] = useState<readonly string[]>(() => (props.memberIds ?? []).slice(0, MAX_PICKS));
+  // Opened for someone, such as from Members' Message: their existing conversation opens directly,
+  // until the person changes the picks or writes.
+  const goStraight = useRef((props.memberIds?.length ?? 0) > 0);
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
   const [pickError, setPickError] = useState(false);
@@ -664,6 +678,7 @@ function NewMessageForAccount(props: NewMessageProps) {
   );
 
   const toggle = (memberId: string) => {
+    goStraight.current = false;
     setPickError(false);
     setPicked((current) => current.includes(memberId)
       ? current.filter((id) => id !== memberId)
@@ -682,6 +697,7 @@ function NewMessageForAccount(props: NewMessageProps) {
       event.preventDefault();
       if (!full || shownPicks.includes(active.memberId)) toggle(active.memberId);
     } else if (event.key === "Backspace" && query === "" && shownPicks.length > 0) {
+      goStraight.current = false;
       setPicked(shownPicks.slice(0, -1));
     }
   };
@@ -694,7 +710,14 @@ function NewMessageForAccount(props: NewMessageProps) {
     let current = true;
     bridge().directResolve({ workspaceId, memberIds: pickKey.split(",") }).then(
       (resolution) => {
-        if (current) setExisting({ key: pickKey, conversationId: resolution.conversationId, title: directTitle(resolution.people) });
+        if (!current) return;
+        const title = directTitle(resolution.people);
+        if (goStraight.current && resolution.conversationId && !draftRef.current.trim()) {
+          goStraight.current = false;
+          openConversation.current(resolution.conversationId, title);
+          return;
+        }
+        setExisting({ key: pickKey, conversationId: resolution.conversationId, title });
       },
       // Sending says why, if this person can't be messaged.
       () => undefined,
@@ -706,7 +729,12 @@ function NewMessageForAccount(props: NewMessageProps) {
   const resolved = existing?.key === pickKey ? existing : null;
 
   const [draft, setDraftState] = useState(() => store.draft("new"));
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const openConversation = useRef(props.onOpenConversation);
+  openConversation.current = props.onOpenConversation;
   const setDraft = (value: string) => {
+    goStraight.current = false;
     setDraftState(value);
     store.setDraft("new", value);
   };
@@ -769,6 +797,8 @@ function NewMessageForAccount(props: NewMessageProps) {
         </RetryRow>
       </div>
     );
+  } else if (members.status === "unsynced") {
+    content = <EmptyState data-testid="chats-dm-new-unsynced" icon={CloudOff} title="Sync this workspace to message its members." />;
   } else if (members.members.length === 0) {
     content = <EmptyState data-testid="chats-dm-new-empty" icon={Users} title="No one else is a member of this workspace yet." />;
   } else {

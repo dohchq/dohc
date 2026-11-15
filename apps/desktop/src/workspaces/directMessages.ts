@@ -16,6 +16,7 @@ import {
   type DirectSendResult,
 } from "@dohc/security-contract/direct-messages";
 import { atomicWriteFile } from "../atomicReplaceFile";
+import { DIRECT_FINAL, DIRECT_RETRY } from "../ipc/errorWords";
 
 // Direct messages for the signed-in account. The relay holds each
 // conversation; this computer keeps a copy of what it has read under
@@ -34,9 +35,18 @@ export interface DirectAccount {
 export type DirectFailure = "signed-out" | "unreachable" | "refused";
 
 export class DirectMessageError extends Error {
-  constructor(readonly failure: DirectFailure, message: string, readonly status: number | null = null, readonly code: string | null = null) {
+  /** Whether trying again can help. It crosses IPC as the error's code, so a notice offers Try again only then. */
+  readonly wireCode: typeof DIRECT_FINAL | typeof DIRECT_RETRY;
+  constructor(
+    readonly failure: DirectFailure,
+    message: string,
+    readonly status: number | null = null,
+    readonly code: string | null = null,
+    retry = failure === "unreachable",
+  ) {
     super(message);
     this.name = "DirectMessageError";
+    this.wireCode = retry ? DIRECT_RETRY : DIRECT_FINAL;
   }
 }
 
@@ -64,7 +74,7 @@ interface Dependencies<Credentials extends DirectAccount> {
   retryMs?: number;
 }
 
-const UNREACHABLE = "dohc could not reach your server. Check your connection, then try again.";
+const UNREACHABLE = "dohc could not reach your server. Check your connection.";
 const SIGNED_OUT = "Sign in to your server to send direct messages.";
 
 const accountKey = (account: DirectAccount) => createHash("sha256").update(`${account.relayUrl}\n${account.userId}`).digest("hex").slice(0, 32);
@@ -75,8 +85,8 @@ function refusal(status: number, code: string | null, message: string | null): D
   if (code === "direct_alone") return new DirectMessageError("refused", "Nobody else is in this conversation any more.", status, code);
   if (code === "direct_limit_reached") return new DirectMessageError("refused", "Your account has stored as many direct messages as your server keeps. Ask whoever runs it for more room.", status, code);
   if (status === 404) return new DirectMessageError("refused", "dohc could not find this conversation or person. They may have left the workspace.", status, code);
-  if (status === 429) return new DirectMessageError("refused", "You have sent a lot of messages. Wait a minute, then try again.", status, code);
-  return new DirectMessageError("refused", message ?? `Your server refused the request (${status}). Try again.`, status, code);
+  if (status === 429) return new DirectMessageError("refused", "You have sent a lot of messages. Wait a minute, then try again.", status, code, true);
+  return new DirectMessageError("refused", message ?? `Your server refused the request (${status}).`, status, code, true);
 }
 
 export function createDirectMessages<Credentials extends DirectAccount>(dependencies: Dependencies<Credentials>) {
@@ -165,7 +175,7 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
       try {
         const answer = await call(credentials, `${DIRECT_ROUTES.activity}?since=${Math.max(since, 0)}&waitMs=${since < 0 ? 0 : DIRECT_ACTIVITY_MAX_WAIT_MS}`, { signal: stop });
         const revision = (answer as { revision?: unknown } | null)?.revision;
-        if (!Number.isSafeInteger(revision)) throw new DirectMessageError("refused", "unreadable activity");
+        if (!Number.isSafeInteger(revision)) throw new DirectMessageError("refused", "unreadable activity", null, null, true);
         const unchanged = since >= 0 && revision === since;
         // The first answer counts as a change: a window may be showing the copy saved while the server was away.
         if (!unchanged) dependencies.changed();
@@ -234,7 +244,7 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
       void ensureFollowing();
       try {
         const listed = parseDirectConversationList(await call(credentials, DIRECT_ROUTES.conversations));
-        if (!listed) throw new DirectMessageError("refused", "Your server sent conversations dohc could not read. Try again.");
+        if (!listed) throw new DirectMessageError("refused", "Your server sent conversations dohc could not read.", null, null, true);
         await save(credentials, "conversations.json", listed);
         return { conversations: listed.conversations, saved: false };
       } catch (error) {
@@ -251,7 +261,7 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
       const query = before === undefined ? "" : `?before=${before}`;
       try {
         const page = parseDirectMessagePage(await call(credentials, `${DIRECT_ROUTES.messages.replace(":conversationId", encodeURIComponent(conversationId))}${query}`));
-        if (!page || page.conversationId !== conversationId) throw new DirectMessageError("refused", "Your server sent messages dohc could not read. Try again.");
+        if (!page || page.conversationId !== conversationId) throw new DirectMessageError("refused", "Your server sent messages dohc could not read.", null, null, true);
         await keep(credentials, conversationId, page.messages);
         return { messages: page.messages, more: page.more, saved: false };
       } catch (error) {
@@ -265,7 +275,7 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
 
     async resolve(people: DirectMemberPick[]): Promise<DirectResolution> {
       const resolved = parseDirectResolution(await post(await account(), DIRECT_ROUTES.resolve, { people }));
-      if (!resolved) throw new DirectMessageError("refused", "Your server sent a person dohc could not read. Try again.");
+      if (!resolved) throw new DirectMessageError("refused", "Your server sent a person dohc could not read.", null, null, true);
       return resolved;
     },
 

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DirectConversation, DirectMessage } from "@dohc/security-contract/direct-messages";
+import { ipcWireError, readError } from "../ipc/errorWords";
 import { createDirectMessages, DirectMessageError } from "./directMessages";
 
 // Lets a test hold a save at its first filesystem step, or hold or fail a deletion.
@@ -129,6 +130,26 @@ describe("direct messages on this computer", () => {
     h.routes.set("/sync/direct/send", () => Response.json({ code: "direct_blocked", error: "blocked" }, { status: 403 }));
     await expect(h.service.send({ conversationId: "c1", messageId: "m1", body: "hi" }))
       .rejects.toMatchObject({ failure: "refused", code: "direct_blocked", message: "You can't message this person." });
+  });
+
+  it("offers Try again only where trying again can help", async () => {
+    // What the renderer reads: main's wire error, as Electron passes it on.
+    const afterIpc = async (call: Promise<unknown>) => {
+      const error = await call.then(() => null, (cause: unknown) => cause);
+      return readError(new Error(`Error invoking remote method 'desktop:direct-send': ${String(ipcWireError(error))}`));
+    };
+    const send = (h: ReturnType<typeof harness>) => h.service.send({ conversationId: "c1", messageId: "m1", body: "hi" });
+    const h = harness();
+    h.routes.set("/sync/direct/send", () => Response.json({ code: "direct_blocked", error: "blocked" }, { status: 403 }));
+    expect(await afterIpc(send(h))).toMatchObject({ words: "You can't message this person.", canRetry: false });
+    h.routes.set("/sync/direct/send", () => Response.json({ code: "direct_alone" }, { status: 409 }));
+    expect(await afterIpc(send(h))).toMatchObject({ canRetry: false });
+    h.routes.set("/sync/direct/send", () => Response.json({ error: "busy" }, { status: 429 }));
+    expect((await afterIpc(send(h))).canRetry).toBeUndefined();
+    h.goOffline();
+    expect(await afterIpc(send(h))).toMatchObject({ words: "dohc could not reach your server. Check your connection." });
+    expect((await afterIpc(send(h))).canRetry).toBeUndefined();
+    expect(await afterIpc(harness({ account: { userId: "ann" } }).service.list())).toMatchObject({ canRetry: false });
   });
 
   it("does not fall back to the saved copy when the server refuses", async () => {
