@@ -1230,6 +1230,71 @@ describe("live edit format guard", () => {
     expect(liveEditFitsNote(note, dropped)).toBe(false);
   });
 
+  it("refuses an edit whose run past the note's text would sit somewhere else", () => {
+    // The note: two paragraphs and a list of days in its frontmatter.
+    const start = new Y.Doc();
+    start.clientID = 7;
+    for (const index of [0, 1]) {
+      const block = new Y.XmlElement("paragraph");
+      block.insert(0, [new Y.XmlText()]);
+      start.getXmlFragment("body").insert(index, [block]);
+    }
+    start.getMap("frontmatter").set("days", new Y.Array());
+    const text = (doc: Y.Doc, index: number) =>
+      (doc.getXmlFragment("body").get(index) as Y.XmlElement).get(0) as Y.XmlText;
+    // One run from client 9, made from the note's start.
+    const run = (write: (doc: Y.Doc) => void) => {
+      const doc = new Y.Doc();
+      doc.clientID = 9;
+      Y.applyUpdate(doc, Y.encodeStateAsUpdate(start));
+      const before = Y.encodeStateVector(doc);
+      write(doc);
+      return Y.encodeStateAsUpdate(doc, before);
+    };
+    const holding = (taken: Uint8Array) => {
+      const note = new Y.Doc();
+      Y.applyUpdate(note, Y.encodeStateAsUpdate(start));
+      Y.applyUpdate(note, taken);
+      return note;
+    };
+    const abc = run((doc) => text(doc, 0).insert(0, "abc"));
+
+    // The note took "abc" into the first paragraph, which is then removed and collected. The run
+    // goes on in the second paragraph, beside an item that is gone.
+    const collected = holding(abc);
+    collected.getXmlFragment("body").delete(0, 1);
+    expect(Y.getItem(collected.store, Y.createID(9, 2))).toBeInstanceOf(Y.GC);
+    expect(
+      liveEditFitsNote(
+        collected,
+        run((doc) => text(doc, 1).insert(0, "abcdef")),
+      ),
+    ).toBe(false);
+
+    // The note took three paragraphs. Text claimed under their ids would be linked after the
+    // third paragraph, in the body itself.
+    const blocks = holding(
+      run((doc) =>
+        doc.getXmlFragment("body").insert(
+          2,
+          [0, 1, 2].map(() => new Y.XmlElement("paragraph")),
+        ),
+      ),
+    );
+    expect(
+      liveEditFitsNote(
+        blocks,
+        run((doc) => text(doc, 0).insert(0, "XXXXXXXXX")),
+      ),
+    ).toBe(false);
+
+    // Values claimed under "abc"'s ids would be linked into the text, not the list of days.
+    const days = run((doc) =>
+      (doc.getMap("frontmatter").get("days") as Y.Array<number>).push([1, 2, 3, 4, 5, 6]),
+    );
+    expect(liveEditFitsNote(holding(abc), days)).toBe(false);
+  });
+
   it("takes an edit that runs on from text the note already holds", () => {
     const note = markdownToYDoc(markdown);
     const page = new Y.Doc();

@@ -972,6 +972,15 @@ export function liveEditFitsNote(doc: Y.Doc, update: Uint8Array): boolean {
     if (!place) return false;
     const { parent, sub } = place,
       content = struct.content;
+    // Yjs links the part past what the note holds beside the note's last item of the run, and
+    // keeps the parent it read from the start. Both must be the same place.
+    const held = Y.getState(doc.store, struct.id.client) - struct.id.clock;
+    if (held > 0 && held < struct.length) {
+      const left = inDoc(Y.createID(struct.id.client, struct.id.clock + held - 1));
+      if (!(left instanceof Y.Item)) return false;
+      const type = left.parent as Shared | null;
+      if (!type || (roots.get(type) ?? type) !== parent || left.parentSub !== sub) return false;
+    }
     const fits =
       parent === "body"
         ? sub === null && xmlChild(content)
