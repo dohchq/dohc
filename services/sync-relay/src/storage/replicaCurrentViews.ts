@@ -810,6 +810,8 @@ export function readReplicaCurrentViewRowText(
     ? (chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks)).toString("utf8")
     : null;
 }
+// Retention-visible: it can return a rule file's text. A recipient's read
+// filters with that recipient's own selector first.
 export function readReplicaCurrentViewText(
   storage: StorageContext,
   workspace: string,

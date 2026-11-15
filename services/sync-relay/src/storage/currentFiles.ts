@@ -518,7 +518,10 @@ export function currentFileBlobByteLengthQuery(selectorPaths: readonly string[])
        WHERE sync_relay_current_files.workspace_id = ?
          AND sync_relay_current_files.version_id = ?
          AND sync_relay_current_files.blob_sha256 = ?
-         AND sync_relay_current_files.state_relay_seq > ?${selector.sql}`,
+         AND sync_relay_current_files.state_relay_seq > ?${selector.sql}
+       -- The caller may skip hidden rule files with these bytes; a few rows keep
+       -- the cost, and its timing, the same however many folders share a rule.
+       LIMIT 16`,
     selectorParams: selector.params,
   };
 }
