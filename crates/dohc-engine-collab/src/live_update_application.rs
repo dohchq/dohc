@@ -783,11 +783,17 @@ impl AdmittedLiveUpdateMetadata {
                 }
                 if !one_author(authors) {
                     // Only a room's save, made under the owner's authority,
-                    // names everyone whose edits it holds.
+                    // names everyone whose edits it holds. Automations commit
+                    // outside the room, so it never names one.
                     if !matches!(
                         self.accepted.authority,
                         ServerDerivedLiveUpdateAuthority::Owner { .. }
-                    ) {
+                    ) || authors.iter().any(|author| {
+                        matches!(
+                            author,
+                            LiveAuthorEntry::Automation { .. } | LiveAuthorEntry::Unattributed {}
+                        )
+                    }) {
                         return Err(invalid("noncanonical author snapshot"));
                     }
                     let mut identities = std::collections::BTreeSet::new();
