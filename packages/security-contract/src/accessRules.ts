@@ -1,4 +1,4 @@
-import { stripWindowsAliasSuffix } from "@dohc/workspace-contracts/workspace-paths";
+import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { SHARE_ACCESS_VALUES, shareAccessRank, type ShareAccess } from "./shareSelector";
 
 /**
@@ -18,23 +18,8 @@ export const ACCESS_RULE_MAX_BYTES = 64 * 1024;
 export const ACCESS_RULE_MAX_PEOPLE = 1_000;
 const MAX_EMAIL_CHARS = 320;
 
-/**
- * One spelling for every way a filesystem may name the same path: Unicode
- * composed form, no Windows name endings, and case folded until it stops
- * changing, so "ſ" is "s" and "ẞ", "ß", and "ss" are one spelling.
- */
-export function pathFoldKey(path: string): string {
-  return path
-    .normalize("NFC")
-    .split("/")
-    .map((segment) =>
-      stripWindowsAliasSuffix(segment).toLowerCase().toUpperCase().toLowerCase().normalize("NFC"),
-    )
-    .join("/");
-}
-
 function lastSegmentKey(path: string): string {
-  return pathFoldKey(path.slice(path.lastIndexOf("/") + 1));
+  return pathCollisionKey(path.slice(path.lastIndexOf("/") + 1));
 }
 
 /** Whether this file is a folder's rule, however the filesystem spells it. */
@@ -232,8 +217,30 @@ export type ReachViewer =
       readonly unverifiedEmail: string | null;
     };
 
-/** Rules by `pathFoldKey` of their folder ("" for the root); null is a rule that couldn't be read. */
-export type AccessRuleSet = ReadonlyMap<string, AccessRule | null>;
+/**
+ * The rules in one workspace Version. Each folder takes its level only from a
+ * rule in exactly that folder. A rule in a folder spelled differently but one
+ * place on some disk (case, Unicode form, trailing dots) can only hide it,
+ * never widen it, so no spelling reaches a folder its twin hides.
+ */
+export interface AccessRuleSet {
+  readonly exact: ReadonlyMap<string, AccessRule | null>;
+  readonly folded: ReadonlyMap<string, readonly (AccessRule | null)[]>;
+}
+
+/** Builds a rule set from each ruled folder ("" for the root) and its rule; null is a rule that couldn't be read. */
+export function accessRuleSet(
+  entries: Iterable<readonly [string, AccessRule | null]>,
+): AccessRuleSet {
+  const exact = new Map<string, AccessRule | null>();
+  const folded = new Map<string, (AccessRule | null)[]>();
+  for (const [folder, rule] of entries) {
+    exact.set(folder, rule);
+    const key = pathCollisionKey(folder);
+    folded.set(key, [...(folded.get(key) ?? []), rule]);
+  }
+  return { exact, folded };
+}
 
 /** The level one rule gives a member, or null when it leaves them out. */
 export function ruleLevel(
@@ -274,10 +281,11 @@ export function folderLevel(
   if (viewer.role !== "member") return "edit";
   let level: ShareAccess | null = viewer.level;
   for (const ancestor of folderChain(folder)) {
-    const key = pathFoldKey(ancestor);
-    if (!rules.has(key)) continue;
-    level = ruleLevel(rules.get(key)!, viewer);
-    if (level === null) return null;
+    const twins = rules.folded.get(pathCollisionKey(ancestor));
+    if (!twins) continue;
+    if (twins.some((rule) => ruleLevel(rule, viewer) === null)) return null;
+    const own = rules.exact.get(ancestor);
+    if (own !== undefined) level = ruleLevel(own, viewer);
   }
   return level;
 }

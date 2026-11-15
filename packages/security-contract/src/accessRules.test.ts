@@ -3,6 +3,7 @@ import {
   type AccessRule,
   type AccessRuleSet,
   type ReachViewer,
+  accessRuleSet,
   fileLevel,
   folderLevel,
   formatAccessRule,
@@ -10,7 +11,6 @@ import {
   isAccessRuleRelatedPath,
   lowerRule,
   parseAccessRule,
-  pathFoldKey,
   ruleOnlyNarrows,
 } from "./accessRules";
 
@@ -20,11 +20,10 @@ const rule = (text: string): AccessRule => {
   return parsed;
 };
 const rules = (entries: Record<string, string | null>): AccessRuleSet =>
-  new Map(
-    Object.entries(entries).map(([folder, text]) => [
-      pathFoldKey(folder),
-      text === null ? null : rule(text),
-    ]),
+  accessRuleSet(
+    Object.entries(entries).map(
+      ([folder, text]) => [folder, text === null ? null : rule(text)] as const,
+    ),
   );
 const member = (
   level: "view" | "comment" | "edit",
@@ -110,9 +109,15 @@ describe("folderLevel and fileLevel", () => {
     expect(fileLevel(set, member("comment", "sam@example.com"), "Drafts/a/b.md")).toBe("edit");
   });
 
-  it("matches folders however the filesystem spells them", () => {
+  it("hides a folder whose twin spelling is hidden, but never widens one through it", () => {
+    // On a disk that ignores case, "TEAM" is the hidden "Team".
     expect(folderLevel(set, member("edit"), "TEAM")).toBeNull();
     expect(fileLevel(set, member("edit"), "team/plan.md")).toBeNull();
+    // An unruled "drafts" beside "Drafts" keeps the level above it.
+    expect(folderLevel(set, member("comment", "sam@example.com"), "drafts")).toBe("comment");
+    const twins = rules({ "": "members: view\n", Open: "members: edit\n" });
+    expect(folderLevel(twins, member("edit"), "open")).toBe("view");
+    expect(folderLevel(twins, member("edit"), "Open")).toBe("edit");
   });
 
   it("hides a folder whose rule couldn't be read", () => {
@@ -158,7 +163,7 @@ describe("lowerRule and ruleOnlyNarrows", () => {
   it("gives everyone the lower of the two", () => {
     const merged = lowerRule(admin, owner);
     const viewer = (email: string) => member("comment", email);
-    const set = (r: AccessRule) => new Map([["", r]]);
+    const set = (r: AccessRule) => accessRuleSet([["", r]]);
     for (const email of ["sam@example.com", "ana@example.com", "bea@example.com"]) {
       const a = folderLevel(set(admin), viewer(email), "");
       const b = folderLevel(set(owner), viewer(email), "");

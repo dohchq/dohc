@@ -3,7 +3,6 @@ import {
   stripWindowsAliasSuffix,
   validateUserMaterializePath,
 } from "@dohc/workspace-core";
-import { pathFoldKey } from "@dohc/security-contract/access-rules";
 import { isWorkspaceGroup } from "@dohc/security-contract/chat-wire-ids";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
@@ -258,13 +257,26 @@ function within(path: string, folder: string): boolean {
   return path === folder || path.startsWith(`${folder}/`);
 }
 
+// One spelling for every way a filesystem may name the same path: Unicode
+// composed form, no Windows name endings, and case folded until it stops
+// changing, so "ſ" is "s" and "ẞ", "ß", and "ss" are one spelling.
+function looseKey(path: string): string {
+  return path
+    .normalize("NFC")
+    .split("/")
+    .map((segment) =>
+      stripWindowsAliasSuffix(segment).toLowerCase().toUpperCase().toLowerCase().normalize("NFC"),
+    )
+    .join("/");
+}
+
 function canEdit(person: Person, path: string): boolean {
-  const key = pathFoldKey(path);
+  const key = looseKey(path);
   return person.grants.some(
     (grant) =>
       grant.files?.access === "edit" &&
       (grant.files.wholeWorkspace === true ||
-        grant.files.paths.some((granted) => within(key, pathFoldKey(granted)))),
+        grant.files.paths.some((granted) => within(key, looseKey(granted)))),
   );
 }
 
