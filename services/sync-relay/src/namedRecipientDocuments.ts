@@ -1,5 +1,6 @@
 import { RelayError, relayError } from "./errors";
 import { readBoundedJson } from "@dohc/service-http";
+import { isAccessRuleRelatedPath } from "@dohc/security-contract/access-rules";
 import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { createNamedLiveBrowserResolver } from "./namedLiveBrowserAuth";
@@ -108,7 +109,12 @@ export function createNamedRecipientDocuments(options: {
         if (snapshot.tooMany) return refuse();
         const files: { objectId: string; path: string }[] = [];
         for (const file of snapshot.files) {
-          if (file.contentKind !== "text" || !/\.md$/i.test(file.path)) continue;
+          if (
+            file.contentKind !== "text" ||
+            !/\.md$/i.test(file.path) ||
+            isAccessRuleRelatedPath(file.path)
+          )
+            continue;
           const objectId = storage.objectIdAtPathInVersion({
             workspaceId: context.workspaceId,
             versionId: "main",
