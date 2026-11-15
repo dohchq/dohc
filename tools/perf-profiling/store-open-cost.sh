@@ -4,6 +4,8 @@
 # with it warm. One quick_check is timed with the cache emptied. Usage: store-open-cost.sh [megabytes...]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+# Cargo outside the Rust gate takes one build lane's share of the cores, a quarter, so it can run beside a gate.
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-$(( ($(nproc) + 3) / 4 ))}
 sizes=("$@")
 [ $# -gt 0 ] || sizes=(64 256 1024)
 # Beside the build output, so the stores sit on the checkout's disk and not on a memory-backed /tmp.

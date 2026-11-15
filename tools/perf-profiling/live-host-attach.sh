@@ -4,6 +4,8 @@
 # Usage: live-host-attach.sh [megabytes] [deadline ms]
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+# Cargo outside the Rust gate takes one build lane's share of the cores, a quarter, so it can run beside a gate.
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-$(( ($(nproc) + 3) / 4 ))}
 megabytes=${1:-1024} deadline=${2:-30000}
 cargo build --release -p dohc-workspace-engine 2>&1 | tail -n 2
 cargo test --release -p dohc-engine-storage --lib --no-run 2>&1 | tail -n 2
