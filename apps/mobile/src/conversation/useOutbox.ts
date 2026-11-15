@@ -9,7 +9,9 @@ import {
   type ConversationWrites,
   type WriteOutbox,
 } from "./conversationWrites";
-import type { LocalMark } from "./types";
+import type { OutboxScope } from "./outboxMessages";
+import { nextReaction } from "./reactions";
+import type { LocalMark, Message } from "./types";
 
 const never = () => () => undefined;
 const nothing = () => null;
@@ -45,6 +47,8 @@ export interface LocalActions {
   readonly problems: ReadonlyMap<string, string>;
   send(mark: LocalMark): void;
   discard(mark: LocalMark): void;
+  /** Discards a reaction this phone keeps, asking first as for a message. */
+  discardReaction(mark: LocalMark): void;
   /** Discards a record that can't be read, by its handle from the outbox's state. */
   discardUnreadable(handle: string): void;
   copy(mark: LocalMark): void;
@@ -57,17 +61,23 @@ const maySend = (mark: LocalMark) =>
     mark.state.kind === "stalled" ||
     mark.state.kind === "withheld");
 
-export function useLocalActions(writes: ConversationWrites, blocked: boolean): LocalActions {
+/** Failures shown in place, by key, with a setter that clears one with null. */
+function useProblems() {
   const [problems, setProblems] = useState<ReadonlyMap<string, string>>(new Map());
-  const setProblem = useCallback((operationId: string, text: string | null) => {
+  const setProblem = useCallback((key: string, text: string | null) => {
     setProblems((previous) => {
-      if (text === null && !previous.has(operationId)) return previous;
+      if (text === null && !previous.has(key)) return previous;
       const next = new Map(previous);
-      if (text === null) next.delete(operationId);
-      else next.set(operationId, text);
+      if (text === null) next.delete(key);
+      else next.set(key, text);
       return next;
     });
   }, []);
+  return [problems, setProblem] as const;
+}
+
+export function useLocalActions(writes: ConversationWrites, blocked: boolean): LocalActions {
+  const [problems, setProblem] = useProblems();
 
   const send = useCallback(
     (mark: LocalMark) => {
@@ -84,10 +94,10 @@ export function useLocalActions(writes: ConversationWrites, blocked: boolean): L
   // Discard asks first. It warns that a message may still send when a request may have reached the server unsettled,
   // and for a record that can't be read, whose state can't be known.
   const confirmDiscard = useCallback(
-    (key: string, target: DiscardTarget, warn: boolean) => {
+    (key: string, target: DiscardTarget, warn: boolean, title: string = chatWords.discardTitle) => {
       void (async () => {
         const chosen = await confirm({
-          title: chatWords.discardTitle,
+          title,
           ...(warn ? { message: chatWords.maySend } : {}),
           confirm: chatWords.discard,
           destructive: true,
@@ -120,10 +130,57 @@ export function useLocalActions(writes: ConversationWrites, blocked: boolean): L
           { kind: "record", operationId: mark.operationId },
           maySend(mark),
         ),
+      discardReaction: (mark: LocalMark) =>
+        confirmDiscard(
+          mark.operationId,
+          { kind: "record", operationId: mark.operationId },
+          maySend(mark),
+          chatWords.discardReactionTitle,
+        ),
       discardUnreadable: (handle: string) =>
         confirmDiscard(handle, { kind: "unreadable", handle }, true),
       copy: (mark: LocalMark) => copyText(mark.body),
     }),
     [blocked, problems, send, confirmDiscard],
   );
+}
+
+/** Reactions to a conversation's messages, and a failure to keep one, shown under its message. */
+export interface ReactActions {
+  /**
+   * Taps `emoji` on a message the server has: it asks for the state the tap should end in, from what shows. A message
+   * whose reaction isn't settled takes none.
+   */
+  react(message: Message, emoji: string): void;
+  /** By message. */
+  readonly problems: ReadonlyMap<string, string>;
+}
+
+/** `scope`: the account and workspace the reactions are in, or null while no workspace is open. */
+export function useReact(
+  writes: ConversationWrites,
+  scope: (OutboxScope & { readonly workspaceId: string }) | null,
+): ReactActions {
+  const [problems, setProblem] = useProblems();
+  const react = useCallback(
+    (message: Message, emoji: string) => {
+      const { threadId } = message;
+      if (scope === null || !threadId || message.local || message.reactionsBusy) return;
+      setProblem(message.id, null);
+      void writes
+        .react(
+          scope,
+          { messageId: message.id, threadId },
+          emoji,
+          nextReaction(message.reactions, emoji),
+        )
+        .then((outcome) => {
+          if (outcome.kind !== "not-kept") return;
+          setProblem(message.id, chatWords.reactionNotKept);
+          AccessibilityInfo.announceForAccessibility(chatWords.reactionNotKept);
+        });
+    },
+    [writes, scope, setProblem],
+  );
+  return useMemo(() => ({ react, problems }), [react, problems]);
 }

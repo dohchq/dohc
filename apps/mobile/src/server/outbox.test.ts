@@ -84,6 +84,25 @@ function placeRecord(disk: Disk, sequence: number, fields: Record<string, unknow
   );
 }
 
+/** A 👍 reaction to message-x the server saved, as an earlier run left it, with operation `op-<sequence>`. */
+function savedReaction(disk: Disk, sequence: number, state: "added" | "removed") {
+  placeRecord(disk, sequence, {
+    operationId: `op-${sequence}`,
+    write: { operation: "react", args: { messageId: "message-x", emoji: "👍", state } },
+    target: { kind: "thread", id: "thread-x" },
+    stage: "saved",
+    attempted: true,
+    result: { kind: "saved", threadId: "thread-x", messageId: null },
+  });
+}
+const MY_THUMB = {
+  emoji: "👍",
+  authorId: "u-1",
+  authorKind: "human",
+  authorName: "Ice",
+  atMs: 1,
+} as const;
+
 /** The phone's sign-in, as the account gives it: a generation that ends at sign-out, a 401 and another sign-in. */
 function fakeAccount(onSignOut: (leave: () => Promise<void>) => Promise<void>) {
   let state: AccountState = { status: "loading" };
@@ -230,6 +249,7 @@ const ready = (outbox: Outbox) => vi.waitFor(() => expect(outbox.state().status)
 const record = (outbox: Outbox, sequence: number) =>
   outbox.state().records.find((entry) => entry.sequence === sequence);
 const stages = (outbox: Outbox) => outbox.state().records.map((entry) => entry.stage);
+const sequences = (outbox: Outbox) => outbox.state().records.map((entry) => entry.sequence);
 
 /** Answers each request to `operation` when the test says. */
 function answerLater(server: Server, operation: string) {
@@ -1021,6 +1041,173 @@ describe("the handoff to reads", () => {
     expect(records(disk)).toEqual([]);
     stop();
   });
+
+  it("hands off a reaction's earlier saved records once a read shows the latest, so a removed one never shows again", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", path("react"), SAVED("thread-x"));
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+    await outbox.enqueue({ workspaceId: "ws-1", write: react(), thread: "thread-x" });
+    await vi.waitFor(() => expect(stages(outbox)).toEqual(["saved"]));
+    await outbox.enqueue({
+      workspaceId: "ws-1",
+      write: {
+        operation: "react",
+        args: { messageId: "message-x", emoji: " 👍", state: "removed" },
+      },
+      thread: "thread-x",
+    });
+    // Another emoji's saved reaction to the same message stays until a read shows it.
+    await outbox.enqueue({ workspaceId: "ws-1", write: react("🎉"), thread: "thread-x" });
+    await vi.waitFor(() => expect(stages(outbox)).toEqual(["saved", "saved", "saved"]));
+
+    outbox.handoff(ME, "ws-1", [message("message-x")]);
+    await vi.waitFor(() => expect(outbox.state().records).toHaveLength(1));
+    expect(outbox.state().records[0]?.write.args).toMatchObject({ emoji: "🎉", state: "added" });
+    expect(records(disk)).toHaveLength(1);
+    stop();
+  });
+
+  it("deletes a reaction's earlier saved record before the one a read shows, so the earlier one never shows alone", async () => {
+    const disk = durableDisk();
+    savedReaction(disk, 1, "added");
+    savedReaction(disk, 2, "removed");
+    const { outbox, stop } = launch(disk, testServer());
+    await ready(outbox);
+    const seen: number[][] = [];
+    const unsubscribe = outbox.subscribe(() => seen.push(sequences(outbox)));
+    outbox.handoff(ME, "ws-1", [message("message-x")]);
+    await vi.waitFor(() => expect(outbox.state().records).toEqual([]));
+    unsubscribe();
+    expect(seen).toContainEqual([2]);
+    expect(seen).not.toContainEqual([1]);
+    expect(disk.log.indexOf("remove m-000000000001")).toBeLessThan(
+      disk.log.indexOf("remove m-000000000002"),
+    );
+    expect(records(disk)).toEqual([]);
+    stop();
+  });
+
+  it("keeps both records when the earlier one can't be deleted, and deletes them in order once it can", async () => {
+    const disk = durableDisk();
+    savedReaction(disk, 1, "added");
+    savedReaction(disk, 2, "removed");
+    const { outbox, stop } = launch(disk, testServer());
+    await ready(outbox);
+    disk.failRemoves = "unlink";
+    outbox.handoff(ME, "ws-1", [message("message-x")]);
+    await vi.waitFor(() => expect(disk.log).toContain("remove m-000000000001"));
+    await settled();
+    expect(sequences(outbox)).toEqual([1, 2]);
+    expect(records(disk)).toEqual(["m-000000000001", "m-000000000002"]);
+    expect(disk.log).not.toContain("remove m-000000000002");
+
+    disk.failRemoves = null;
+    outbox.handoff(ME, "ws-1", [message("message-x")]);
+    await vi.waitFor(() => expect(records(disk)).toEqual([]));
+    expect(outbox.state().records).toEqual([]);
+    stop();
+  });
+
+  it("leaves the later record when the app closes between the two deletes", async () => {
+    const disk = durableDisk();
+    savedReaction(disk, 1, "added");
+    savedReaction(disk, 2, "removed");
+    const base = createDurableFiles(disk.launch());
+    const files: DurableFiles = {
+      ...base,
+      remove(name) {
+        // The app closes once the earlier record's delete is durable, before the later one's starts.
+        if (name === "m-000000000002") disk.crash();
+        return base.remove(name);
+      },
+    };
+    const { outbox, stop } = launch(disk, testServer(), { files });
+    await ready(outbox);
+    outbox.handoff(ME, "ws-1", [message("message-x")]);
+    await vi.waitFor(() => expect(records(disk)).toEqual(["m-000000000002"]));
+    stop();
+
+    const relaunch = launch(disk);
+    await ready(relaunch.outbox);
+    expect(relaunch.outbox.state().records.map((entry) => entry.write.args)).toEqual([
+      { messageId: "message-x", emoji: "👍", state: "removed" },
+    ]);
+    relaunch.stop();
+  });
+
+  it("marks a saved reaction a read since shows otherwise, and Discard deletes it without sending anything", async () => {
+    const disk = durableDisk();
+    savedReaction(disk, 1, "added");
+    const server = testServer();
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+    // A read of another message says nothing of it.
+    outbox.handoff(ME, "ws-1", [message("message-y")]);
+    expect(outbox.state().unconfirmed).toEqual([]);
+
+    // Another device removed it: the read shows its message without the account's reaction.
+    outbox.handoff(ME, "ws-1", [message("message-x")]);
+    expect(outbox.state().unconfirmed).toEqual(["op-1"]);
+    await settled();
+    expect(sequences(outbox)).toEqual([1]);
+
+    await outbox.discard({ kind: "record", operationId: "op-1" });
+    expect(outbox.state()).toMatchObject({ records: [], unconfirmed: [] });
+    expect(records(disk)).toEqual([]);
+    await settled();
+    expect(requests(server, "react")).toEqual([]);
+    stop();
+  });
+
+  it("hands off a marked reaction once a read shows it, and marks it again after a relaunch", async () => {
+    const disk = durableDisk();
+    savedReaction(disk, 1, "added");
+    const first = launch(disk, testServer());
+    await ready(first.outbox);
+    first.outbox.handoff(ME, "ws-1", [message("message-x")]);
+    expect(first.outbox.state().unconfirmed).toEqual(["op-1"]);
+    first.stop();
+
+    const relaunch = launch(disk, testServer());
+    await ready(relaunch.outbox);
+    expect(relaunch.outbox.state().unconfirmed).toEqual([]);
+    relaunch.outbox.handoff(ME, "ws-1", [message("message-x")]);
+    expect(relaunch.outbox.state().unconfirmed).toEqual(["op-1"]);
+    relaunch.outbox.handoff(ME, "ws-1", [message("message-x", { reactions: [MY_THUMB] })]);
+    await vi.waitFor(() => expect(records(disk)).toEqual([]));
+    expect(relaunch.outbox.state()).toMatchObject({ records: [], unconfirmed: [] });
+    relaunch.stop();
+  });
+
+  it.each([
+    { state: "added" as const, contradicting: [], confirming: [MY_THUMB] },
+    { state: "removed" as const, contradicting: [MY_THUMB], confirming: [] },
+  ])(
+    "unmarks a saved $state reaction once a read shows it, even when its record can't be deleted",
+    async ({ state, contradicting, confirming }) => {
+      const disk = durableDisk();
+      savedReaction(disk, 1, state);
+      const { outbox, stop } = launch(disk, testServer());
+      await ready(outbox);
+      outbox.handoff(ME, "ws-1", [message("message-x", { reactions: contradicting })]);
+      expect(outbox.state().unconfirmed).toEqual(["op-1"]);
+
+      disk.failRemoves = "unlink";
+      const seen: string[][] = [];
+      const unsubscribe = outbox.subscribe(() => seen.push([...outbox.state().unconfirmed]));
+      outbox.handoff(ME, "ws-1", [message("message-x", { reactions: confirming })]);
+      expect(seen).toContainEqual([]);
+      await vi.waitFor(() => expect(disk.log).toContain("remove m-000000000001"));
+      await settled();
+      unsubscribe();
+      expect(sequences(outbox)).toEqual([1]);
+      expect(records(disk)).toEqual(["m-000000000001"]);
+      expect(outbox.state().unconfirmed).toEqual([]);
+      stop();
+    },
+  );
 
   it("matches a reaction by its emoji as the relay stores it, trimmed and in NFC, and sends the arguments as given", async () => {
     const disk = durableDisk();

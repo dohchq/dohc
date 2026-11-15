@@ -17,9 +17,10 @@ import type { Author } from "./types";
 import { useConversationWrites, useLocalActions, useOutboxState } from "./useOutbox";
 
 // Messages on this phone, from Settings: every message of the signed-in account that its outbox keeps and the server
-// hasn't saved, in any workspace, with records that can't be read. A withheld message stays reachable here when its
-// chat is closed or no longer shows. A message in the open workspace opens its chat. One that can't be read says only
-// that, with no workspace or chat, since neither can be known. Errors stay in place.
+// hasn't saved, and every saved reaction a read since shows otherwise, in any workspace, with records that can't be
+// read. A withheld message stays reachable here when its chat is closed or no longer shows. A message in the open
+// workspace opens its chat. One that can't be read says only that, with no workspace or chat, since neither can be
+// known. Errors stay in place.
 export function OutboxRecovery() {
   const theme = useTheme();
   const router = useRouter();
@@ -52,15 +53,25 @@ export function OutboxRecovery() {
         : undefined;
     return found ? workspaceName(found) : null;
   };
-  // In the open workspace only, so opening never switches the workspace under another screen.
-  const open = (row: RecoveryRow) =>
-    row.streamId !== null && row.workspaceId === currentWorkspaceId
-      ? () =>
-          router.push({
-            pathname: "/chat/[id]",
-            params: { id: row.streamId ?? "", workspace: row.workspaceId },
-          })
-      : null;
+  // In the open workspace only, so opening never switches the workspace under another screen. A reply or reaction
+  // opens its thread, once the outbox knows it.
+  const open = (row: RecoveryRow) => {
+    if (row.workspaceId !== currentWorkspaceId) return null;
+    const { streamId, threadId } = row;
+    if (streamId !== null)
+      return () =>
+        router.push({
+          pathname: "/chat/[id]",
+          params: { id: streamId, workspace: row.workspaceId },
+        });
+    if (threadId !== null)
+      return () =>
+        router.push({
+          pathname: "/chat/[id]",
+          params: { id: threadId, thread: "1", workspace: row.workspaceId },
+        });
+    return null;
+  };
   const empty = state?.status === "ready" && rows.length === 0 && unreadable.length === 0;
 
   return (
@@ -104,7 +115,7 @@ export function OutboxRecovery() {
                 at: "",
                 minute: 0,
                 body: [{ text: row.mark.body }],
-                local: row.mark,
+                ...(row.reaction ? { reactionMarks: [row.reaction] } : { local: row.mark }),
               }}
               continued={false}
               afterExtras={false}

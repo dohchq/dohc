@@ -1,6 +1,7 @@
 import type { ClearRequest, FieldChange } from "../../modules/chat-composer";
 import type { ChatWrite } from "../server/chatWrites";
 import { OutboxError, type DiscardTarget, type Outbox, type OutboxState } from "../server/outbox";
+import type { OutboxScope } from "./outboxMessages";
 
 // What a conversation's write controls do, apart from how they look. The outbox is the only thing that keeps or sends a
 // write: this checks the gate, makes the write the route takes, keeps one attempt of each kind from running twice, and
@@ -60,6 +61,46 @@ export function chatWrite(destination: Destination, body: string, title = ""): C
 }
 
 /**
+ * The message a reply answers. `thread`: a message the server has, in its thread; without a parent the reply goes at
+ * the top of the thread. `outbox`: a post or send still in this phone's outbox, whose thread isn't known yet.
+ */
+export type ReplyTarget =
+  | { readonly kind: "thread"; readonly threadId: string; readonly parentMessageId: string | null }
+  | { readonly kind: "outbox"; readonly operationId: string; readonly messageId: string };
+
+/** A reply's write and, for one to an outbox post or send, the record it waits for. */
+export interface Reply {
+  readonly write: ChatWrite;
+  readonly dependsOn?: string;
+}
+
+/**
+ * The reply to `target`, or null when the body has only spaces. One to an outbox post or send names no thread: the
+ * outbox gives it the thread that write's result names.
+ */
+export function replyWrite(target: ReplyTarget, body: string): Reply | null {
+  if (body.trim() === "") return null;
+  if (target.kind === "outbox")
+    return {
+      write: {
+        operation: "reply",
+        args: { threadId: null, body, parentMessageId: target.messageId },
+      },
+      dependsOn: target.operationId,
+    };
+  return {
+    write: {
+      operation: "reply",
+      args: {
+        threadId: target.threadId,
+        body,
+        ...(target.parentMessageId === null ? {} : { parentMessageId: target.parentMessageId }),
+      },
+    },
+  };
+}
+
+/**
  * What the composer holds: the body, a post's title, and whether New post is chosen. Each has a revision that every
  * edit raises, so an edit away and back still counts as an edit. The body's is the native field's.
  */
@@ -115,15 +156,20 @@ export function clearStatus(
   return refused === request.token ? "refused" : "waiting";
 }
 
-/** The draft once the field reports `change`. Only its clear for `request` closes New post, by `closePost`. */
+/**
+ * The draft once the field reports `change`. Only its clear for `request` closes New post, by `closePost`, and only
+ * when `sent` is a post or message: a reply's clear, null here, leaves New post as it was.
+ */
 export function fieldChanged(
   current: Draft,
   change: FieldChange,
   request: ClearRequest,
-  sent: Draft,
+  sent: Draft | null,
 ): Draft {
   const typed = { ...current, text: change.text, textRevision: change.revision };
-  return change.cleared !== 0 && change.cleared === request.token ? closePost(typed, sent) : typed;
+  return sent !== null && change.cleared !== 0 && change.cleared === request.token
+    ? closePost(typed, sent)
+    : typed;
 }
 
 /** One showing of a workspace store and chat. Showing the same ones again is another activation. */
@@ -155,13 +201,47 @@ export function createWriteScope() {
  * may keep it, withheld under `operationId`, and its row offers Send, so the composer clears that text too and never
  * sends it again as another message. `not-kept`: nothing was kept, so the text stays, and Try again submits it.
  * `blocked`: nothing was asked, or the outbox wasn't open. `stale`: the account or workspace changed meanwhile.
+ * `parent-gone`: a reply's outbox post or send was refused or is gone, so it can't wait for it; the text stays.
  */
 export type SubmitOutcome =
   | { readonly kind: "kept" }
   | { readonly kind: "withheld"; readonly operationId: string }
   | { readonly kind: "not-kept" }
+  | { readonly kind: "parent-gone" }
   | { readonly kind: "blocked" }
   | { readonly kind: "stale" };
+
+/** Why the composer's last submit kept nothing. `parent-gone` holds the reply it was for, as the composer named it. */
+export type SubmitFailure =
+  | { readonly kind: "not-kept" }
+  | { readonly kind: "parent-gone"; readonly replyTo: object | null };
+
+/**
+ * Whether Send stays off because `replyTo`, the reply the composer names now, is the one whose post or send can't take
+ * it. Its text never goes anywhere else until the person cancels Reply or chooses another message.
+ */
+export const replyParentGone = (failure: SubmitFailure | null, replyTo: object | null) =>
+  replyTo !== null && failure?.kind === "parent-gone" && failure.replyTo === replyTo;
+
+/**
+ * A reaction to `messageId` the outbox hasn't settled: waiting, withheld, sending or still sending. While one is, the
+ * message takes no other, so a stalled reaction is never sent again as another, and taps never pile up.
+ */
+export const reactionWaits = (record: OutboxRecord, messageId: string) =>
+  record.write.operation === "react" &&
+  record.write.args.messageId === messageId &&
+  (record.stage === "queued" || record.stage === "sending" || record.stage === "stalled");
+
+/** What became of a reaction, as a submit, without text to keep. */
+export type ReactOutcome = {
+  readonly kind: "kept" | "withheld" | "not-kept" | "blocked" | "stale";
+};
+
+/** The message a reaction is on: one the server has, in its thread. */
+export interface ReactionTarget {
+  readonly messageId: string;
+  readonly threadId: string;
+}
 
 /** `not-kept`: the record stays withheld, and Send stays to try again. */
 export type RetryOutcome = { readonly kind: "kept" | "not-kept" | "blocked" | "stale" };
@@ -172,7 +252,18 @@ export type DiscardOutcome = {
 };
 
 export interface ConversationWrites {
-  submit(workspaceId: string, write: ChatWrite): Promise<SubmitOutcome>;
+  /** Keeps a write. A reply to an outbox post or send names that record in `dependsOn`. */
+  submit(workspaceId: string, write: ChatWrite, dependsOn?: string): Promise<SubmitOutcome>;
+  /**
+   * Adds or removes the account's reaction in `scope`'s workspace, as the state it should end in, never a toggle. One at
+   * a time per message: a second while the first is being kept, or while the account's last isn't settled, does nothing.
+   */
+  react(
+    scope: OutboxScope & { readonly workspaceId: string },
+    target: ReactionTarget,
+    emoji: string,
+    state: "added" | "removed",
+  ): Promise<ReactOutcome>;
   /** Sends a withheld record as its own operation, with the body it keeps. */
   retry(operationId: string): Promise<RetryOutcome>;
   /** Deletes a record, or a record that can't be read, from this phone. */
@@ -208,15 +299,51 @@ export function createConversationWrites(options: {
   }
 
   return {
-    submit: (workspaceId, write) =>
+    submit: (workspaceId, write, dependsOn) =>
       once<SubmitOutcome>("submit", async (box) => {
         try {
-          await box.enqueue({ workspaceId, write });
+          await box.enqueue({
+            workspaceId,
+            write,
+            ...(dependsOn === undefined ? {} : { dependsOn }),
+          });
           return isCurrent() ? { kind: "kept" } : { kind: "stale" };
         } catch (error) {
           if (!isCurrent()) return { kind: "stale" };
           if (error instanceof OutboxError && error.kind === "indeterminate" && error.operationId)
             return { kind: "withheld", operationId: error.operationId };
+          if (error instanceof OutboxError && error.kind === "closed") return { kind: "blocked" };
+          // The outbox checks a waiting reply's post or send as it keeps it: refused or gone, it refuses the reply.
+          if (error instanceof OutboxError && error.kind === "invalid" && dependsOn !== undefined)
+            return { kind: "parent-gone" };
+          return { kind: "not-kept" };
+        }
+      }),
+
+    react: (scope, target, emoji, state) =>
+      once<ReactOutcome>(`react:${target.messageId}`, async (box) => {
+        // Only the account's own reactions in this workspace hold it: another account's may name the same message ID.
+        const waits = box
+          .state()
+          .records.some(
+            (record) =>
+              record.origin === scope.origin &&
+              record.accountId === scope.accountId &&
+              record.workspaceId === scope.workspaceId &&
+              reactionWaits(record, target.messageId),
+          );
+        if (waits) return { kind: "blocked" };
+        try {
+          await box.enqueue({
+            workspaceId: scope.workspaceId,
+            write: { operation: "react", args: { messageId: target.messageId, emoji, state } },
+            thread: target.threadId,
+          });
+          return { kind: isCurrent() ? "kept" : "stale" };
+        } catch (error) {
+          if (!isCurrent()) return { kind: "stale" };
+          if (error instanceof OutboxError && error.kind === "indeterminate" && error.operationId)
+            return { kind: "withheld" };
           if (error instanceof OutboxError && error.kind === "closed") return { kind: "blocked" };
           return { kind: "not-kept" };
         }

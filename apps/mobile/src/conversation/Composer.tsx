@@ -12,14 +12,17 @@ import { ChatComposerField, type ClearRequest } from "../../modules/chat-compose
 import { ProblemLine } from "../account/ProblemLine";
 import type { OutboxState } from "../server/outbox";
 import { useTheme } from "../theme";
+import { ReplyContext, type ReplyTo } from "./ReplyContext";
 import {
   clearSent,
   clearStatus,
   EMPTY_DRAFT,
   fieldChanged,
+  replyParentGone,
   type Blocked,
   type Draft,
   type Lanes,
+  type SubmitFailure,
   type SubmitOutcome,
 } from "./conversationWrites";
 
@@ -60,11 +63,17 @@ export function outboxProblem(
 // `closePost`). Text the outbox couldn't keep stays in the field, with the failure and Try again above it. Return is a
 // new line; sending is the button. The screen gives each workspace store and chat its own composer, so a draft never
 // reaches another destination.
+//
+// `replies`: every message is a reply, as in a thread, or in a stream once a message is chosen to reply to. Then there
+// is no New post, and the reply's clear leaves New post as it was. `replyTo` names the chosen message above the field.
 export function Composer({
   placeholder,
   lanes,
   blocked,
   problem,
+  replies = false,
+  replyTo = null,
+  onCancelReply,
   onSubmit,
   onLayoutHeight,
 }: {
@@ -72,7 +81,10 @@ export function Composer({
   lanes: Lanes;
   blocked: Blocked;
   problem: OutboxProblem | null;
-  onSubmit(kind: "send" | "post", body: string, title: string): Promise<SubmitOutcome>;
+  replies?: boolean;
+  replyTo?: ReplyTo | null;
+  onCancelReply?(): void;
+  onSubmit(kind: "send" | "post" | "reply", body: string, title: string): Promise<SubmitOutcome>;
   onLayoutHeight(height: number): void;
 }) {
   const theme = useTheme();
@@ -83,42 +95,62 @@ export function Composer({
     setDraft((current) => ({ ...current, chosen, chosenRevision: current.chosenRevision + 1 }));
   const { text, title } = draft;
   // A stream that takes only posts is always writing one.
-  const mode = lanes.send ? draft.chosen : "post";
+  const mode = replies ? "reply" : lanes.send ? draft.chosen : "post";
   const [height, setHeight] = useState(FIELD_MIN);
-  // The last clear asked of the field, and the draft it was for. Token 0 asks nothing. Send waits for its answer.
-  const [clear, setClear] = useState<{ readonly request: ClearRequest; readonly sent: Draft }>({
+  // The last clear asked of the field, and the draft it was for: null for a reply, whose clear closes nothing. Token 0
+  // asks nothing. Send waits for its answer.
+  const [clear, setClear] = useState<{
+    readonly request: ClearRequest;
+    readonly sent: Draft | null;
+  }>({
     request: { revision: 0, token: 0 },
-    sent: EMPTY_DRAFT,
+    sent: null,
   });
   // The token of the last clear the field refused, keeping the body sent.
   const [refused, setRefused] = useState(0);
   const [submitting, setSubmitting] = useState(false);
-  const [notKept, setNotKept] = useState(false);
+  // Why the outbox kept nothing: Try again submits the same text, and a reply whose message wasn't sent can't wait, so
+  // Send stays off while that reply is chosen (`replyParentGone`).
+  const [failure, setFailure] = useState<SubmitFailure | null>(null);
   const status = clearStatus(clear.request, draft.textRevision, refused);
   const busy = submitting || status === "waiting";
-  const ready = text.trim().length > 0 && blocked === null && !submitting && status === "settled";
+  const ready =
+    text.trim().length > 0 &&
+    blocked === null &&
+    !submitting &&
+    status === "settled" &&
+    !replyParentGone(failure, replyTo);
 
   async function submit() {
     if (!ready) return;
     const sent = draft;
+    const kind = mode;
+    const chosen = replyTo;
     setSubmitting(true);
-    const outcome = await onSubmit(mode, sent.text, sent.title);
+    const outcome = await onSubmit(kind, sent.text, sent.title);
     setSubmitting(false);
     if (outcome.kind === "kept" || outcome.kind === "withheld") {
-      setNotKept(false);
+      setFailure(null);
       setClear((previous) => ({
         request: { revision: sent.textRevision, token: previous.request.token + 1 },
-        sent,
+        sent: kind === "reply" ? null : sent,
       }));
-      setDraft((current) => clearSent(current, sent));
+      if (kind !== "reply") setDraft((current) => clearSent(current, sent));
       if (outcome.kind === "kept") void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    } else if (outcome.kind === "not-kept") {
-      setNotKept(true);
-      AccessibilityInfo.announceForAccessibility(chatWords.notKept);
+    } else if (outcome.kind === "not-kept" || outcome.kind === "parent-gone") {
+      setFailure(
+        outcome.kind === "parent-gone"
+          ? { kind: outcome.kind, replyTo: chosen }
+          : { kind: outcome.kind },
+      );
+      AccessibilityInfo.announceForAccessibility(
+        outcome.kind === "not-kept" ? chatWords.notKept : chatWords.replyParentGone,
+      );
     }
   }
 
   const label = mode === "post" ? chatWords.post : chatWords.sendMessage;
+  const fieldLabel = replyTo ? chatWords.replyTo(replyTo.name) : placeholder;
   return (
     <Dock onLayoutHeight={onLayoutHeight}>
       {problem ? (
@@ -128,7 +160,14 @@ export function Composer({
           <Text style={[styles.problem, { color: theme.muted }]}>{problem.text}</Text>
         )
       ) : null}
-      {notKept ? <ProblemLine text={chatWords.notKept} onRetry={() => void submit()} /> : null}
+      {failure?.kind === "not-kept" ? (
+        <ProblemLine text={chatWords.notKept} onRetry={() => void submit()} />
+      ) : failure?.kind === "parent-gone" ? (
+        <Text style={[styles.problem, { color: theme.danger }]} accessibilityRole="alert">
+          {chatWords.replyParentGone}
+        </Text>
+      ) : null}
+      {replyTo && onCancelReply ? <ReplyContext to={replyTo} onCancel={onCancelReply} /> : null}
       {mode === "post" ? (
         <View style={styles.postHead}>
           <TextInput
@@ -181,7 +220,7 @@ export function Composer({
         >
           <ChatComposerField
             placeholder={placeholder}
-            fieldLabel={placeholder}
+            fieldLabel={fieldLabel}
             editable
             textColor={theme.ink}
             placeholderColor={theme.subtle}

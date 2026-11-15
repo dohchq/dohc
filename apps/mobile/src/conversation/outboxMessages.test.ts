@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ChatWrite } from "../server/chatWrites";
 import type { OutboxState } from "../server/outbox";
 import type { OutboxRecord } from "./conversationWrites";
-import { recoveryRows, streamRows } from "./outboxMessages";
+import { recoveryRows, streamRows, threadRows } from "./outboxMessages";
 
 const ME = { origin: "https://dohc.example.com", accountId: "u-1" };
 const HERE = { ...ME, workspaceId: "ws-1" };
@@ -34,12 +34,21 @@ const post = (body: string, title?: string): ChatWrite => ({
   operation: "post",
   args: { groupId: "group-1", body, ...(title ? { title } : {}) },
 });
-const state = (records: OutboxRecord[], unreadable: string[] = []): OutboxState => ({
+const reply = (body: string, threadId: string | null): ChatWrite => ({
+  operation: "reply",
+  args: { threadId, body },
+});
+const state = (
+  records: OutboxRecord[],
+  unreadable: string[] = [],
+  unconfirmed: string[] = [],
+): OutboxState => ({
   status: "ready",
   records,
   aside: unreadable,
   unreadable,
   deletion: "none",
+  unconfirmed,
 });
 
 describe("a stream's outbox rows", () => {
@@ -160,13 +169,162 @@ describe("Messages on this phone", () => {
       ME,
     );
     expect(rows).toEqual([
-      { workspaceId: "ws-1", streamId: "group-1", mark: expect.objectContaining({ body: "Here" }) },
+      {
+        workspaceId: "ws-1",
+        streamId: "group-1",
+        threadId: null,
+        mark: expect.objectContaining({ body: "Here" }),
+      },
       {
         workspaceId: "ws-2",
         streamId: "group-1",
+        threadId: null,
         mark: expect.objectContaining({ body: "There" }),
       },
     ]);
     expect(unreadable).toEqual(["handle-1"]);
+  });
+
+  it("name a reply's or reaction's thread once it's known, so it opens there", () => {
+    const { rows } = recoveryRows(
+      state([
+        record(reply("In a thread", "thread-1"), { target: { kind: "thread", id: "thread-1" } }),
+        record(reply("Waiting", null), { target: null, dependsOn: "op-x" }),
+        record(
+          { operation: "react", args: { messageId: "m", emoji: "👍", state: "added" } },
+          { messageId: null, target: { kind: "thread", id: "thread-2" } },
+        ),
+      ]),
+      ME,
+    );
+    expect(rows.map((row) => [row.streamId, row.threadId])).toEqual([
+      [null, "thread-1"],
+      [null, null],
+      [null, "thread-2"],
+    ]);
+  });
+
+  it("list a saved reaction a read since shows otherwise, with what it asks for, and no other saved reaction", () => {
+    const saved = (
+      emoji: string,
+      reaction: "added" | "removed",
+      fields: Partial<OutboxRecord> = {},
+    ) =>
+      record(
+        { operation: "react", args: { messageId: "m", emoji, state: reaction } },
+        {
+          messageId: null,
+          target: { kind: "thread", id: "thread-2" },
+          stage: "saved",
+          attempted: true,
+          result: { kind: "saved", threadId: "thread-2", messageId: null },
+          ...fields,
+        },
+      );
+    const doubted = saved(" 👍", "added");
+    const waiting = saved("🎉", "removed");
+    const another = saved("👀", "added", { accountId: "u-2" });
+    const { rows } = recoveryRows(
+      state([doubted, waiting, another], [], [doubted.operationId, another.operationId]),
+      ME,
+    );
+    expect(rows).toEqual([
+      {
+        workspaceId: "ws-1",
+        streamId: null,
+        threadId: "thread-2",
+        mark: expect.objectContaining({
+          operationId: doubted.operationId,
+          state: { kind: "saved" },
+        }),
+        reaction: {
+          emoji: "👍",
+          state: "added",
+          mark: expect.objectContaining({ operationId: doubted.operationId }),
+        },
+      },
+    ]);
+  });
+});
+
+describe("replies on this phone", () => {
+  it("wait in the stream under the outbox post or send they reply to, until they have a thread", () => {
+    const parent = record(post("Plans"));
+    const waiting = record(reply("Count me in", null), {
+      target: null,
+      dependsOn: parent.operationId,
+    });
+    const elsewhere = record(reply("Other chat", null), { target: null, dependsOn: "op-other" });
+    const rows = streamRows(state([parent, waiting, elsewhere]), HERE, "group-1", new Set());
+    expect(rows.map((row) => [row.lane, row.mark.body])).toEqual([
+      ["posts", "Plans"],
+      ["reply", "Count me in"],
+    ]);
+  });
+
+  it("move to their thread once the outbox gives them one", () => {
+    const parent = record(send("Lunch?"), {
+      stage: "saved",
+      attempted: true,
+      result: { kind: "saved", threadId: "thread-1", messageId: "message-lunch" },
+    });
+    const bound = record(reply("Yes", "thread-1"), {
+      target: { kind: "thread", id: "thread-1" },
+      dependsOn: parent.operationId,
+    });
+    const all = state([parent, bound]);
+    expect(streamRows(all, HERE, "group-1", new Set()).map((row) => row.mark.body)).toEqual([
+      "Lunch?",
+    ]);
+    expect(threadRows(all, HERE, "thread-1", new Set()).map((row) => row.mark.body)).toEqual([
+      "Yes",
+    ]);
+  });
+
+  it("show in a thread only this account's, in this workspace, until a read shows them", () => {
+    const mine = record(reply("Mine", "thread-1"));
+    const shown = record(reply("Shown", "thread-1"));
+    const rows = threadRows(
+      state([
+        mine,
+        shown,
+        record(reply("Other thread", "thread-2")),
+        record(reply("Other account", "thread-1"), { accountId: "u-2" }),
+        record(reply("Other workspace", "thread-1"), { workspaceId: "ws-2" }),
+        record(send("A message", "thread-1")),
+      ]),
+      HERE,
+      "thread-1",
+      new Set([shown.messageId ?? ""]),
+    );
+    expect(rows.map((row) => row.mark.body)).toEqual(["Mine"]);
+  });
+
+  it("can wait for a post or send that isn't refused or missing, and for no reply", () => {
+    const rows = streamRows(
+      state([
+        record(send("Waiting")),
+        record(send("Withheld"), { withheld: true }),
+        record(send("Saved"), {
+          stage: "saved",
+          result: { kind: "saved", threadId: "thread-9", messageId: null },
+        }),
+        record(send("Refused"), {
+          stage: "refused",
+          result: { kind: "refused", reason: "too old", threadId: null, winnerMessageId: null },
+        }),
+        record(send("Missing"), { stage: "refused", result: { kind: "missing", reason: "gone" } }),
+      ]),
+      HERE,
+      "group-1",
+      new Set(),
+    );
+    expect(rows.map((row) => [row.mark.body, row.replyable, row.threadId])).toEqual([
+      ["Waiting", true, null],
+      ["Withheld", true, null],
+      ["Saved", true, "thread-9"],
+      ["Refused", false, null],
+      ["Missing", false, null],
+    ]);
   });
 });

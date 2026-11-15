@@ -130,6 +130,12 @@ export interface OutboxState {
    * would read the records instead of deleting them.
    */
   readonly deletion: "none" | "owed" | "failed" | "failed-unmarked";
+  /**
+   * The operation IDs of saved reactions that a read since they were saved shows otherwise, as when another device
+   * changed them. The server's state may differ from what the record shows, so it needs the person, who can discard
+   * it. In memory only: after a relaunch, the next read of the message finds it again.
+   */
+  readonly unconfirmed: readonly string[];
 }
 
 /**
@@ -357,6 +363,8 @@ export function createOutbox(options: {
   /** The latest messages reads showed, for one account and workspace. */
   let observed: { readonly scope: string; readonly messages: Map<string, ChatMessage> } | null =
     null;
+  /** Saved reactions, by sequence, that a read since they were saved shows otherwise. Kept in memory only. */
+  const unconfirmed = new Set<number>();
   let changeFailures = 0;
   let retrying = false;
   /** Aborts to cut every retry wait short. */
@@ -641,25 +649,50 @@ export function createOutbox(options: {
     return track(epoch, erase(epoch));
   }
 
-  /** Deletes saved records whose result the latest reads show. */
+  /**
+   * Deletes saved records whose result the latest reads show. For a reaction, it deletes the account's newest one to
+   * the message and emoji that a read shows, with the earlier saved ones it replaced, oldest first, so an earlier one
+   * never shows again over the server's state.
+   */
   function reconcile() {
     if (status !== "ready" || !observed) return;
     const { scope, messages } = observed;
-    for (const record of records.values())
-      if (record.stage === "saved" && scopeOf(record) === scope && shows(record, messages))
-        forget(record.sequence);
+    const saved = [...records.values()]
+      .filter((record) => record.stage === "saved" && scopeOf(record) === scope)
+      .sort((a, b) => a.sequence - b.sequence);
+    const newest = new Map<string, number>();
+    for (const record of saved) {
+      if (!shows(record, messages)) continue;
+      const key = reactionKey(record);
+      if (key === null) retire([record.sequence]);
+      else newest.set(key, record.sequence);
+    }
+    for (const [key, last] of newest)
+      retire(
+        saved
+          .filter((record) => record.sequence <= last && reactionKey(record) === key)
+          .map((record) => record.sequence),
+      );
   }
 
-  function forget(sequence: number) {
+  /**
+   * Deletes saved records in order, in one queued change that stops at the first it can't delete, so a record is never
+   * deleted before the ones listed ahead of it.
+   */
+  function retire(sequences: readonly number[]) {
     const at = epoch;
     void serial(async () => {
-      const record = records.get(sequence);
-      // Checked here, after every change queued before it, such as a reply accepted meanwhile that needs its thread.
-      if (epoch !== at || record?.stage !== "saved" || needed(record)) return;
-      await files.remove(nameOf(sequence));
-      if (epoch !== at) return;
-      records.delete(sequence);
-      changed();
+      for (const sequence of sequences) {
+        if (epoch !== at) return;
+        const record = records.get(sequence);
+        if (record === undefined) continue;
+        // Checked here, after every change queued before it, such as a reply accepted meanwhile that needs its thread.
+        if (record.stage !== "saved" || needed(record)) return;
+        await files.remove(nameOf(sequence));
+        if (epoch !== at) return;
+        records.delete(sequence);
+        changed();
+      }
     }).catch(() => undefined);
   }
 
@@ -916,6 +949,9 @@ export function createOutbox(options: {
         aside,
         unreadable: [...unreadable.keys()],
         deletion: !owed ? "none" : !deleteFailed ? "owed" : marked ? "failed" : "failed-unmarked",
+        unconfirmed: [...records.values()]
+          .filter((record) => unconfirmed.has(record.sequence))
+          .map((record) => record.operationId),
       };
       return snapshot;
     },
@@ -1111,6 +1147,25 @@ export function createOutbox(options: {
         if (observed.messages.size <= OBSERVED_MAX) break;
         observed.messages.delete(id);
       }
+      // A saved reaction this read shows otherwise may have changed on another device since. It needs the person.
+      // The latest read of its message decides, whether or not its record can be deleted yet.
+      const read = new Set(messages.map((message) => message.id));
+      let flagged = false;
+      for (const record of records.values()) {
+        if (
+          record.stage !== "saved" ||
+          record.write.operation !== "react" ||
+          scopeOf(record) !== scope ||
+          !read.has(record.write.args.messageId)
+        )
+          continue;
+        const contradicts = !shows(record, observed.messages);
+        if (contradicts === unconfirmed.has(record.sequence)) continue;
+        if (contradicts) unconfirmed.add(record.sequence);
+        else unconfirmed.delete(record.sequence);
+        flagged = true;
+      }
+      if (flagged) changed();
       reconcile();
       pump();
     },
@@ -1124,6 +1179,7 @@ export function createOutbox(options: {
       unreadable = new Map();
       observed = null;
       unreachable.clear();
+      unconfirmed.clear();
       owed = true;
       status = "loading";
       changed();
@@ -1183,7 +1239,13 @@ export function createOutbox(options: {
 }
 
 /** The relay stores a reaction's emoji trimmed and in NFC. */
-const emojiKey = (emoji: string) => emoji.trim().normalize("NFC");
+export const emojiKey = (emoji: string) => emoji.trim().normalize("NFC");
+
+/** The message and emoji a reaction is on, or null for another write. */
+const reactionKey = ({ write }: OutboxRecord) =>
+  write.operation === "react"
+    ? JSON.stringify([write.args.messageId, emojiKey(write.args.emoji)])
+    : null;
 
 /** Whether a read shows a saved record's result: its message by ID, its answer resolved, or its reaction as sent. */
 function shows(record: OutboxRecord, shown: ReadonlyMap<string, ChatMessage>): boolean {

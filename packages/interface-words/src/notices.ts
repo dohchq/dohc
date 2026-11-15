@@ -117,6 +117,33 @@ export const chatWords = {
   },
   /** The chat a message was for is gone, or this account can't reach it. */
   missing: "This message wasn't sent, because dohc could not find its chat.",
+
+  // Replies and reactions.
+  /** A message's reply control, and a thread composer's placeholder. */
+  reply: "Reply",
+  /** The message a reply answers, above the composer, and the field's name while it's chosen. */
+  replyTo: (name: string) => `Reply to ${name}`,
+  cancelReply: "Cancel reply",
+  /** Enqueue refused a reply because the outbox message it answers was refused or is gone. */
+  replyParentGone: "dohc could not send this reply, because the message it replies to wasn't sent.",
+  addReaction: "Add reaction",
+  /** A reaction's button: a tap on one that's yours removes it. */
+  reaction: (emoji: string, count: number, mine: boolean) =>
+    `${mine ? `Remove ${emoji} reaction` : emoji}, ${count} ${count === 1 ? "reaction" : "reactions"}`,
+  /** A reaction kept on the phone, withheld: nothing sends it until Send. */
+  reactionNotSent: (emoji: string) => `Your ${emoji} reaction has not been sent.`,
+  /** The server has answered "pending" for a reaction for a long time. It may still be saved. */
+  reactionStillSending: (emoji: string) => `Your ${emoji} reaction is still sending.`,
+  /** The server refused a reaction, or can't find its message. */
+  reactionRefused: (emoji: string) => `dohc could not change your ${emoji} reaction.`,
+  /** The server saved a reaction, but a read since shows otherwise, as when another device changed it. */
+  reactionUnconfirmed: (emoji: string, state: "added" | "removed") =>
+    state === "added"
+      ? `Your ${emoji} reaction was saved, but your server no longer shows it.`
+      : `Your ${emoji} reaction was removed, but your server shows it again.`,
+  /** Enqueue failed and nothing was kept. */
+  reactionNotKept: "dohc could not keep this reaction on your phone.",
+  discardReactionTitle: "Discard this reaction?",
 } as const;
 
 // A notice's time, as the desktop's Notices show it (apps/desktop/src/renderer/relativeTime.ts, which can move here).

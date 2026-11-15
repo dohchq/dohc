@@ -45,6 +45,27 @@ export interface LocalMark {
   readonly body: string;
 }
 
+/** One emoji's reactions to a message. */
+export interface Reaction {
+  readonly emoji: string;
+  readonly count: number;
+  /** The account's own is among them, as the server has it or as this phone's latest reaction says. */
+  readonly mine?: boolean;
+  /** This phone's reaction with this emoji isn't settled yet. */
+  readonly pending?: boolean;
+}
+
+/**
+ * A reaction of this phone's that needs the person: withheld, still sending, refused, for a message the server can't
+ * find, or saved but shown otherwise by a read since.
+ */
+export interface ReactionMark {
+  readonly emoji: string;
+  /** The state the reaction asks for. */
+  readonly state: "added" | "removed";
+  readonly mark: LocalMark;
+}
+
 export interface Message {
   readonly id: string;
   readonly threadId?: string;
@@ -55,11 +76,10 @@ export interface Message {
   /** A post's title, drawn above its body. */
   readonly title?: string;
   readonly body: readonly Segment[];
-  readonly reactions?: readonly {
-    readonly emoji: string;
-    readonly count: number;
-    readonly mine?: boolean;
-  }[];
+  readonly reactions?: readonly Reaction[];
+  readonly reactionMarks?: readonly ReactionMark[];
+  /** A reaction of this phone's to the message isn't settled, so its reaction controls wait. */
+  readonly reactionsBusy?: boolean;
   readonly replies?: {
     readonly count: number;
     readonly last: string;
@@ -69,4 +89,13 @@ export interface Message {
   readonly working?: string;
   /** Only this phone has it, in its outbox: its state shows where the time would. */
   readonly local?: LocalMark;
+  /**
+   * Only this phone has it, and it's a post or send a reply can wait for: the outbox's record, the message the write
+   * makes, and the thread the server named once it saved it.
+   */
+  readonly replyable?: {
+    readonly operationId: string;
+    readonly messageId: string;
+    readonly threadId: string | null;
+  };
 }

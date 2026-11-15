@@ -1,5 +1,5 @@
 import type { ChatWrite } from "../server/chatWrites";
-import type { OutboxState } from "../server/outbox";
+import { OutboxError, type OutboxState } from "../server/outbox";
 import type { Lanes, WriteOutbox } from "./conversationWrites";
 import type { Author, Message } from "./types";
 
@@ -32,9 +32,28 @@ const scout: Author = {
 
 export const sampleConversation = { name: "planning", members: 6 };
 
+/** #planning's chat, as one thread, as a Group's chat lane is. */
+const PLANNING_THREAD = "t-planning";
+/** The thread that hangs from the Porto day trip message. */
+export const PORTO_THREAD = "thread-porto";
+
+/** The message the Porto thread hangs from. */
+const portoAsk: Message = {
+  id: "m4",
+  threadId: PORTO_THREAD,
+  author: me,
+  at: "9:24",
+  minute: 22,
+  body: [
+    { mention: "Nova", agent: true },
+    { text: " can you add the Porto day trip to the itinerary app and check train times?" },
+  ],
+};
+
 export const sampleMessages: readonly Message[] = [
   {
     id: "m1",
+    threadId: PLANNING_THREAD,
     author: maya,
     at: "9:02",
     minute: 0,
@@ -46,6 +65,7 @@ export const sampleMessages: readonly Message[] = [
   },
   {
     id: "m2",
+    threadId: PLANNING_THREAD,
     author: maya,
     at: "9:03",
     minute: 1,
@@ -53,24 +73,16 @@ export const sampleMessages: readonly Message[] = [
   },
   {
     id: "m3",
+    threadId: PLANNING_THREAD,
     author: sam,
     at: "9:20",
     minute: 18,
     body: [{ text: "Nice. Can someone look at trains from Porto on the 15th?" }],
   },
-  {
-    id: "m4",
-    author: me,
-    at: "9:24",
-    minute: 22,
-    body: [
-      { mention: "Nova", agent: true },
-      { text: " can you add the Porto day trip to the itinerary app and check train times?" },
-    ],
-    replies: { count: 3, last: "9:31", people: [nova, sam] },
-  },
+  { ...portoAsk, replies: { count: 3, last: "9:31", people: [nova, sam] } },
   {
     id: "m5",
+    threadId: PLANNING_THREAD,
     author: nova,
     at: "9:31",
     minute: 29,
@@ -83,6 +95,7 @@ export const sampleMessages: readonly Message[] = [
   },
   {
     id: "m6",
+    threadId: PLANNING_THREAD,
     author: sam,
     at: "9:40",
     minute: 38,
@@ -91,6 +104,7 @@ export const sampleMessages: readonly Message[] = [
   },
   {
     id: "m7",
+    threadId: PLANNING_THREAD,
     author: nova,
     at: "9:41",
     minute: 39,
@@ -154,6 +168,47 @@ export function sampleMessagesFor(chatId: string): readonly Message[] {
   return sampleMessages;
 }
 
+/** The Porto thread: the message it hangs from, then its replies. */
+const portoMessages: readonly Message[] = [
+  portoAsk,
+  {
+    id: "r1",
+    threadId: PORTO_THREAD,
+    author: nova,
+    at: "9:27",
+    minute: 25,
+    body: [
+      { text: "Added a Porto day on the 15th to the itinerary app, with the 8:09 train out." },
+    ],
+    reactions: [
+      { emoji: "👍", count: 2 },
+      { emoji: "🎉", count: 1, mine: true },
+    ],
+  },
+  {
+    id: "r2",
+    threadId: PORTO_THREAD,
+    author: sam,
+    at: "9:29",
+    minute: 27,
+    body: [{ text: "Can we leave a bit later? 8:09 is early after a late dinner." }],
+  },
+  {
+    id: "r3",
+    threadId: PORTO_THREAD,
+    author: nova,
+    at: "9:31",
+    minute: 29,
+    body: [{ text: "The 9:09 gets in at 11:58. I kept 8:09 for now and noted the later one." }],
+    reactions: [{ emoji: "👀", count: 1 }],
+  },
+];
+
+/** A thread's messages: the Porto thread's, and #planning's for its chat, which is one thread. */
+export function sampleThreadFor(threadId: string): readonly Message[] {
+  return threadId === PORTO_THREAD ? portoMessages : sampleMessages;
+}
+
 /** An agent in this sample, by its author id, for its card. */
 export function sampleAgent(id: string): Author | undefined {
   return [nova, scout].find((agent) => agent.id === id);
@@ -210,12 +265,50 @@ const talkOutbox = (): SampleRecord[] => [
   seeded(4, "On my way.", {}),
 ];
 
+/** A reaction in the Porto thread as the outbox would keep it. */
+const reacted = (
+  sequence: number,
+  messageId: string,
+  emoji: string,
+  fields: Partial<SampleRecord>,
+): SampleRecord =>
+  seeded(sequence, "", {
+    messageId: null,
+    target: { kind: "thread", id: PORTO_THREAD },
+    write: { operation: "react", args: { messageId, emoji, state: "added" } },
+    ...fields,
+  });
+
+/**
+ * Design review only: `-dohcDemo talk-thread` opens with a reply on its way in the Porto thread, a reaction kept
+ * withheld, and one the server refused.
+ */
+const talkThread = (): SampleRecord[] => [
+  seeded(1, "Later works for me too.", {
+    target: { kind: "thread", id: PORTO_THREAD },
+    write: {
+      operation: "reply",
+      args: { threadId: PORTO_THREAD, body: "Later works for me too.", parentMessageId: "r2" },
+    },
+    stage: "sending",
+    attempted: true,
+  }),
+  reacted(2, "r2", "🙌", { withheld: true }),
+  reacted(3, "r3", "✅", {
+    stage: "refused",
+    attempted: true,
+    result: { kind: "refused", reason: "Couldn't send", threadId: null, winnerMessageId: null },
+  }),
+];
+
 /**
  * The sample build's outbox, in memory: it never reaches a server. A write it takes shows Waiting to send, then
- * Sending, then stays as a message. Send on a withheld message does the same. Discard deletes it.
+ * Sending, then stays as a message, or a reaction. Send on a withheld message does the same. Discard deletes it. A
+ * reply to a post or send still here waits until that one is saved, then takes the thread it names.
  */
 export function createSampleOutbox(seed: string | null): WriteOutbox {
-  let records: SampleRecord[] = seed === "talk-outbox" ? talkOutbox() : [];
+  let records: SampleRecord[] =
+    seed === "talk-outbox" ? talkOutbox() : seed === "talk-thread" ? talkThread() : [];
   let next = records.length + 1;
   let snapshot: OutboxState | null = null;
   const listeners = new Set<() => void>();
@@ -229,29 +322,86 @@ export function createSampleOutbox(seed: string | null): WriteOutbox {
     );
     changed();
   };
+  const find = (operationId: string | null) =>
+    records.find((record) => record.operationId === operationId);
+  const savedThread = (record: SampleRecord | undefined) =>
+    record?.result?.kind === "saved" ? record.result.threadId : null;
   const run = (record: SampleRecord) => {
+    const { write } = record;
+    // A reply waiting for its post or send asks again until that one is saved, then takes its thread.
+    if (write.operation === "reply" && write.args.threadId === null) {
+      const parent = find(record.dependsOn);
+      if (!parent || parent.stage === "refused") {
+        update(record.operationId, {
+          stage: "refused",
+          result: {
+            kind: "refused",
+            reason: "The message it replies to wasn't sent",
+            threadId: null,
+            winnerMessageId: null,
+          },
+        });
+        return;
+      }
+      const threadId = savedThread(parent);
+      if (threadId === null) {
+        setTimeout(() => {
+          const current = find(record.operationId);
+          if (current && !current.withheld) run(current);
+        }, 1000);
+        return;
+      }
+      const bound: SampleRecord = {
+        ...record,
+        target: { kind: "thread", id: threadId },
+        write: { operation: "reply", args: { ...write.args, threadId } },
+      };
+      update(record.operationId, { target: bound.target, write: bound.write });
+      run(bound);
+      return;
+    }
     setTimeout(() => update(record.operationId, { stage: "sending", attempted: true }), 700);
     setTimeout(
       () =>
         update(record.operationId, {
           stage: "saved",
-          result: { kind: "saved", threadId: null, messageId: record.messageId },
+          result: {
+            kind: "saved",
+            // A post or send starts a thread here; a reply stays in its own.
+            threadId:
+              write.operation === "reply"
+                ? write.args.threadId
+                : write.operation === "react"
+                  ? null
+                  : `sample-thread-${record.sequence}`,
+            messageId: record.messageId,
+          },
         }),
       1600,
     );
   };
-  const make = (write: ChatWrite): SampleRecord => {
+  const make = (
+    write: ChatWrite,
+    dependsOn: string | undefined,
+    thread: string | undefined,
+  ): SampleRecord => {
     const sequence = next;
     next += 1;
-    const streamId =
+    const target =
       write.operation === "send"
-        ? write.args.streamId
+        ? { kind: "stream" as const, id: write.args.streamId }
         : write.operation === "post"
-          ? write.args.groupId
-          : "";
+          ? { kind: "stream" as const, id: write.args.groupId }
+          : write.operation === "reply"
+            ? write.args.threadId === null
+              ? null
+              : { kind: "thread" as const, id: write.args.threadId }
+            : { kind: "thread" as const, id: thread ?? "" };
     return {
       ...seeded(sequence, "", {}),
-      target: { kind: "stream", id: streamId },
+      messageId: write.operation === "react" ? null : `sample-message-${sequence}`,
+      dependsOn: dependsOn ?? null,
+      target,
       write,
     };
   };
@@ -263,13 +413,21 @@ export function createSampleOutbox(seed: string | null): WriteOutbox {
         aside: [],
         unreadable: [],
         deletion: "none",
+        unconfirmed: [],
       }),
     subscribe(listener) {
       listeners.add(listener);
       return () => void listeners.delete(listener);
     },
-    async enqueue({ write }) {
-      const record = make(write);
+    async enqueue({ write, dependsOn, thread }) {
+      const parent = dependsOn === undefined ? undefined : find(dependsOn);
+      // As the outbox does: a reply waits only for a post or send it still has, that wasn't refused.
+      if (
+        dependsOn !== undefined &&
+        (!parent || parent.stage === "refused" || parent.result?.kind === "missing")
+      )
+        throw new OutboxError("invalid");
+      const record = make(write, dependsOn, thread);
       records = [...records, record];
       changed();
       run(record);
