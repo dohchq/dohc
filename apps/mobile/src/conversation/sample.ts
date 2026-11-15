@@ -1,6 +1,7 @@
 import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
 import type { ChatWrite } from "../server/chatWrites";
 import { OutboxError, type OutboxState } from "../server/outbox";
+import { retryable, type RetryGate, type WakeRetry } from "./chatWakeState";
 import type { Lanes, WriteOutbox } from "./conversationWrites";
 import type { Asked } from "./decisionAnswers";
 import type { Author, Message } from "./types";
@@ -207,6 +208,8 @@ const wakeMessages: readonly Message[] = [
       { text: ", that's all for today." },
     ],
   },
+  asking("k6", 50, "Scout", " book the airport transfer."),
+  asking("k7", 55, "Iris", " draft the dinner menu."),
 ];
 
 /** A wake as the server's context would give it for `talk-wakes`. */
@@ -224,7 +227,8 @@ const sampleWake = (
 
 /**
  * `talk-wakes`'s wakes, by message: each state that shows a line, an agent with no current name, two wakes with the
- * same name, ended wakes with and without another computer, and a message whose wakes show none.
+ * same name, ended wakes with and without another computer, a message whose wakes show none, and last, one wake that
+ * didn't start and one not confirmed on a named computer, each with another computer to try.
  */
 const wakesByMessage: ReadonlyMap<string, readonly PhoneChatWake[]> = new Map([
   [
@@ -306,6 +310,28 @@ const wakesByMessage: ReadonlyMap<string, readonly PhoneChatWake[]> = new Map([
       }),
     ],
   ],
+  [
+    "k6",
+    [
+      sampleWake(10, "k6", {
+        state: "unclaimed",
+        agentName: "Scout",
+        winnerLabel: null,
+        canRetry: true,
+      }),
+    ],
+  ],
+  [
+    "k7",
+    [
+      sampleWake(11, "k7", {
+        state: "unconfirmed",
+        agentName: "Iris",
+        winnerLabel: "Ice's Mac",
+        canRetry: true,
+      }),
+    ],
+  ],
 ]);
 
 /** The wakes a sample chat shows by message: only `talk-wakes` has any. */
@@ -313,6 +339,98 @@ export const sampleWakesFor = (
   demo: string | null,
 ): ReadonlyMap<string, readonly PhoneChatWake[]> | null =>
   demo === "talk-wakes" ? wakesByMessage : null;
+
+/** How long the sample's Try again takes to answer, so its busy pill shows. */
+const SAMPLE_RETRY_MS = 1200;
+
+/** A sample chat's wakes and their Try again, in memory: the same states and gate as a server conversation's. */
+export interface SampleWakes {
+  /** The wakes by message, or null for a chat with none. The same object until one changes. */
+  byMessage(): ReadonlyMap<string, readonly PhoneChatWake[]> | null;
+  retries(): ReadonlyMap<string, WakeRetry>;
+  subscribe(listener: () => void): () => void;
+  retry(wake: PhoneChatWake, gate: RetryGate): void;
+  /** Leaving the chat: a Try again on its way never answers. */
+  stop(): void;
+}
+
+/**
+ * Design review only: Try again on a sample wake asks as a server conversation does, shows the line busy, then shows
+ * the agent waiting at the next generation. It never reaches a server.
+ */
+export function createSampleWakes(demo: string | null): SampleWakes {
+  let wakes = sampleWakesFor(demo);
+  let retries: ReadonlyMap<string, WakeRetry> = new Map();
+  let next = 100;
+  const confirming = new Set<string>();
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  const listeners = new Set<() => void>();
+  const changed = () => {
+    for (const listener of listeners) listener();
+  };
+  const shows = (wake: PhoneChatWake) =>
+    wakes
+      ?.get(wake.messageId)
+      ?.some(
+        (each) =>
+          each.wakeId === wake.wakeId &&
+          each.generation === wake.generation &&
+          each.state === wake.state &&
+          retryable(each),
+      ) ?? false;
+  const send = (wake: PhoneChatWake) => {
+    retries = new Map<string, WakeRetry>([
+      ...retries,
+      [wake.wakeId, { generation: wake.generation, phase: "sending" }],
+    ]);
+    changed();
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      const successor: PhoneChatWake = {
+        ...wake,
+        wakeId: `wake-${String(next).padStart(32, "0")}`,
+        generation: wake.generation + 1,
+        state: "waiting",
+        winnerLabel: null,
+        canRetry: false,
+      };
+      next += 1;
+      const map = new Map(wakes);
+      map.set(
+        wake.messageId,
+        (map.get(wake.messageId) ?? []).map((each) =>
+          each.wakeId === wake.wakeId ? successor : each,
+        ),
+      );
+      wakes = map;
+      retries = new Map([...retries].filter(([wakeId]) => wakeId !== wake.wakeId));
+      changed();
+    }, SAMPLE_RETRY_MS);
+    timers.add(timer);
+  };
+  return {
+    byMessage: () => wakes,
+    retries: () => retries,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => void listeners.delete(listener);
+    },
+    retry(wake, gate) {
+      if (retries.has(wake.wakeId) || confirming.has(wake.wakeId)) return;
+      if (!shows(wake) || !gate.allowed()) return;
+      if (wake.state === "unclaimed") return send(wake);
+      confirming.add(wake.wakeId);
+      void gate.confirm(wake).then((yes) => {
+        confirming.delete(wake.wakeId);
+        if (yes && shows(wake) && gate.allowed()) send(wake);
+      });
+    },
+    stop() {
+      for (const timer of timers) clearTimeout(timer);
+      timers.clear();
+    },
+  };
+}
 
 /** #planning's messages, with `talk-decisions`'s open poll and question before Nova's work. */
 const planningFor = (demo: string | null): readonly Message[] =>

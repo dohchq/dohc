@@ -7,17 +7,21 @@ import { useTheme } from "../theme";
 export function ActionPill({
   label,
   onPress,
-  disabled = false,
+  disabled: off = false,
+  busy = false,
 }: {
   label: string;
   onPress?(): void;
   disabled?: boolean;
+  /** Its action is under way: the pill takes no tap until it ends. */
+  busy?: boolean;
 }) {
   const theme = useTheme();
+  const disabled = off || busy;
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityState={{ disabled }}
+      accessibilityState={{ disabled, busy }}
       disabled={disabled}
       onPress={onPress}
       style={styles.target}

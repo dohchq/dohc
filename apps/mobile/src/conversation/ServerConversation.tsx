@@ -1,5 +1,6 @@
 import { chatWords } from "@dohc/interface-words/notices";
 import { workspaceWords } from "@dohc/interface-words/workspace";
+import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import {
   LegendList,
@@ -32,7 +33,7 @@ import type {
   MissingChat,
 } from "../server/workspaceReads";
 import { useTheme, workspaceMarkFills } from "../theme";
-import type { WakeView } from "./chatWakeState";
+import type { WakeRetry, WakeView } from "./chatWakeState";
 import {
   EmptyLine,
   HoldRow,
@@ -739,7 +740,9 @@ function Stream({
     () => (stream ? new Set(stream.items.map((item) => item.message.threadId)) : null),
     [stream],
   );
-  const wakes = useChatWakes(wakeTarget, wakeThreads, visible, stream);
+  // A line's Try again is a write: only where writes are on and not blocked.
+  const writable = writes !== undefined && !writes.actions.blocked;
+  const wakes = useChatWakes(wakeTarget, wakeThreads, visible, stream, writable);
   return (
     <Conversation
       title={chatTitle(kindOf(stream?.groupKind ?? "group"), stream?.name ?? name)}
@@ -748,6 +751,8 @@ function Stream({
       retry={retry}
       wakes={wakes.view}
       retryWakes={wakes.retry}
+      wakeRetries={wakes.retries}
+      {...(writable ? { onRetryWake: wakes.retryWake } : {})}
       {...(writes && onReply && answers
         ? {
             local: local ?? [],
@@ -815,7 +820,8 @@ function Thread({
   const answers = useMemo(() => writes?.answers(byId, new Set()), [writes, byId]);
   const wakeTarget = useMemo<WakeTarget>(() => ({ kind: "thread", threadId }), [threadId]);
   const wakeThreads = useMemo(() => (thread ? new Set([threadId]) : null), [thread, threadId]);
-  const wakes = useChatWakes(wakeTarget, wakeThreads, visible, thread);
+  const writable = writes !== undefined && !writes.actions.blocked;
+  const wakes = useChatWakes(wakeTarget, wakeThreads, visible, thread, writable);
   return (
     <Conversation
       title={thread?.title || workspaceWords.thread}
@@ -824,6 +830,8 @@ function Thread({
       retry={retry}
       wakes={wakes.view}
       retryWakes={wakes.retry}
+      wakeRetries={wakes.retries}
+      {...(writable ? { onRetryWake: wakes.retryWake } : {})}
       anchor={messageId}
       {...(messageId === null ? {} : { onShown: addOnScreen })}
       {...(writes && onReply && answers
@@ -847,6 +855,8 @@ function Conversation({
   retry,
   wakes,
   retryWakes,
+  wakeRetries,
+  onRetryWake,
   anchor = null,
   onShown,
   local,
@@ -863,6 +873,10 @@ function Conversation({
   /** The wakes of the messages its read shows, as last read, or null before a read. */
   wakes: WakeView | null;
   retryWakes(): void;
+  /** Its lines' Try again states, by wake ID. */
+  wakeRetries: ReadonlyMap<string, WakeRetry>;
+  /** Try again on a line, where writes are on and not blocked. */
+  onRetryWake?: (wake: PhoneChatWake) => void;
   /** The message to open at, rather than the end. */
   anchor?: string | null;
   /** Takes the IDs of the messages on screen each time they change. */
@@ -909,11 +923,15 @@ function Conversation({
     [onShown],
   );
   // Only a message the content read shows takes wakes, by its ID; one only this phone has never does. Its lines stay
-  // while a read fails: the failure shows once for the conversation, below, not under every message.
+  // while a read fails: the failure shows once for the conversation, below, not under every message, and no line
+  // offers Try again until a read works.
+  const retryOn = wakes?.failed === false ? onRetryWake : undefined;
   const wakesOf = (entry: Message) => {
     const own = entry.local === undefined ? wakes?.byMessage.get(entry.id) : undefined;
-    return own ? { wakes: own } : {};
+    return own ? { wakes: own, wakeRetries, ...(retryOn ? { onRetryWake: retryOn } : {}) } : {};
   };
+  // Wakes and their Try again states change apart from the messages: their rows draw again.
+  const wakeData = useMemo(() => ({ wakes, wakeRetries, retryOn }), [wakes, wakeRetries, retryOn]);
   const renderItem = (item: ConversationItem) =>
     item.type === "day" ? (
       <View style={styles.dayRow}>
@@ -1003,8 +1021,7 @@ function Conversation({
       ) : composer === undefined ? (
         <LegendList
           data={items}
-          // Wakes change apart from the messages: their rows draw again.
-          extraData={wakes}
+          extraData={wakeData}
           keyExtractor={(item) => item.key}
           getItemType={(item) => item.type}
           estimatedItemSize={64}
@@ -1022,7 +1039,7 @@ function Conversation({
         // Where writes are on, the list rides the keyboard with the composer, and its end clears the composer.
         <KeyboardAwareLegendList
           data={items}
-          extraData={wakes}
+          extraData={wakeData}
           keyExtractor={(item) => item.key}
           getItemType={(item) => item.type}
           estimatedItemSize={64}

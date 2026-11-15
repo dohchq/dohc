@@ -5,6 +5,7 @@ import {
   earlierWakeCursor,
   readConversationWakes,
   readWakeChanges,
+  retryWake,
   WAKE_HOLD_MS,
   type WakeChanges,
   type WakeTarget,
@@ -17,6 +18,14 @@ import { shownProblem, type ServerClient } from "../server/client";
 // reads that context again; `replace` reads every one again. Background, a target nobody wants, and stop abort what
 // they started, and an answer lands only for the read or wait that is still current. A failed read or wait keeps the
 // last wakes, marked failed, until Try again reads them again.
+//
+// Try again on a line that didn't start, or wasn't confirmed, sends one request the person asked for, while they watch.
+// Its operation ID is minted once, on the press, after the alert for one that wasn't confirmed. A second press, or Try
+// again after a lost answer, sends that ID for that exact wake again. Each step first checks that the screen still
+// wants the conversation, that its latest read still shows the wake at that generation, in that state, with a computer
+// to try, and that writes aren't blocked. The answer shows nothing of its own: the line stays busy until the read it
+// starts lands. Background, leaving the conversation, a sign-in change and stop abort it and forget it, so another
+// press needs a fresh read first. Nothing of it is stored, and nothing sends it later.
 
 /** A conversation's wakes as its latest read gave them, by message, with each message's wakes kept apart. */
 export interface WakeView {
@@ -26,6 +35,30 @@ export interface WakeView {
 }
 
 const NO_WAKES: WakeView = { byMessage: new Map(), failed: false };
+
+/**
+ * Where a line's Try again stands, for the wake generation it was pressed on. `sending` until its answer and the read
+ * after it land; `failed` when the request failed or was refused, offering Try again of the same request; `missing`
+ * when the server has no such wake, offering nothing.
+ */
+export interface WakeRetry {
+  readonly generation: number;
+  readonly phase: "sending" | "failed" | "missing";
+}
+
+/** What a Try again asks of the screen it was pressed on. */
+export interface RetryGate {
+  /** The screen still shows the conversation, and writes aren't blocked. Checked before each step. */
+  allowed(): boolean;
+  /** Asks the person before a wake that wasn't confirmed tries another computer. Resolves true only on confirm. */
+  confirm(wake: PhoneChatWake): Promise<boolean>;
+}
+
+const NO_RETRIES: ReadonlyMap<string, WakeRetry> = new Map();
+
+/** A line offers Try again: it didn't start, or wasn't confirmed, and another computer could run its agent. */
+export const retryable = (wake: PhoneChatWake) =>
+  wake.canRetry && (wake.state === "unclaimed" || wake.state === "unconfirmed");
 
 export interface ChatWakes {
   /**
@@ -40,6 +73,10 @@ export interface ChatWakes {
   subscribe(listener: () => void): () => void;
   /** Try again: reads every wanted context in the workspace again, and waits for changes from there. */
   refresh(workspaceId: string): void;
+  /** The conversation's lines' Try again states, by wake ID. The same object until one changes. */
+  retries(workspaceId: string, target: WakeTarget): ReadonlyMap<string, WakeRetry>;
+  /** Try again on a line of a wanted conversation, from the person's press. */
+  retry(workspaceId: string, target: WakeTarget, wake: PhoneChatWake, gate: RetryGate): void;
   /** In the background: aborts every read and wait. */
   pause(): void;
   /** Back from the background: reads every wanted context again. */
@@ -59,7 +96,33 @@ interface Entry {
   /** The wake cursor through which `view` is current, or null while no read answered since it was wanted. */
   cursor: string | null;
   read: AbortController | null;
+  /** Its lines' Try again requests, by source wake ID. */
+  readonly intents: Map<string, Intent>;
+  retries: ReadonlyMap<string, WakeRetry>;
 }
+
+/** One Try again, on one wake generation, in memory only. */
+interface Intent {
+  readonly source: PhoneChatWake;
+  /** Minted on the press, or after the alert's confirm; null while the alert shows. */
+  operationId: string | null;
+  /** `rereading`: answered `retried`, until the read after it lands. */
+  phase: "confirming" | "sending" | "rereading" | "failed" | "missing";
+  send: AbortController | null;
+}
+
+/** The latest read still shows the wake as it was pressed on, at that generation, in that state, with a computer to try. */
+const stillShows = (entry: Entry, source: PhoneChatWake) => {
+  const { view } = entry;
+  if (!view || view.failed || entry.cursor === null) return false;
+  const now = view.byMessage.get(source.messageId)?.find((each) => each.wakeId === source.wakeId);
+  return (
+    now !== undefined &&
+    now.generation === source.generation &&
+    now.state === source.state &&
+    retryable(now)
+  );
+};
 
 interface Workspace {
   readonly entries: Map<string, Entry>;
@@ -110,6 +173,47 @@ export function createChatWakes(options: {
     if (entry.view && !entry.view.failed) setView(entry, { ...entry.view, failed: true });
   };
 
+  /** Shows the entry's Try again states as they stand now. */
+  const publish = (entry: Entry) => {
+    const next = new Map<string, WakeRetry>();
+    for (const [wakeId, intent] of entry.intents) {
+      if (intent.phase === "confirming") continue;
+      const phase = intent.phase === "rereading" ? "sending" : intent.phase;
+      next.set(wakeId, { generation: intent.source.generation, phase });
+    }
+    if (next.size === 0 && entry.retries.size === 0) return;
+    entry.retries = next.size === 0 ? NO_RETRIES : next;
+    notify();
+  };
+
+  /** Aborts and forgets the entry's Try again requests. */
+  const drop = (entry: Entry) => {
+    for (const intent of entry.intents.values()) intent.send?.abort();
+    entry.intents.clear();
+    publish(entry);
+  };
+
+  /**
+   * A read landed: a request answered `retried` is done, and one whose wake the read no longer shows goes with its line.
+   * A failed or missing one stays while its line does.
+   */
+  const settle = (entry: Entry) => {
+    let changedAny = false;
+    for (const [wakeId, intent] of entry.intents) {
+      const shown = entry.view?.byMessage
+        .get(intent.source.messageId)
+        ?.some((each) => each.wakeId === wakeId);
+      if (
+        intent.phase === "rereading" ||
+        ((intent.phase === "failed" || intent.phase === "missing") && !shown)
+      ) {
+        entry.intents.delete(wakeId);
+        changedAny = true;
+      }
+    }
+    if (changedAny) publish(entry);
+  };
+
   function read(workspaceId: string, entry: Entry) {
     entry.read?.abort();
     entry.read = null;
@@ -124,10 +228,12 @@ export function createChatWakes(options: {
         if ("kind" in answer) {
           entry.cursor = null;
           setView(entry, NO_WAKES);
+          settle(entry);
           return;
         }
         entry.cursor = answer.wakeCursor;
         setView(entry, { byMessage: byMessage(answer.wakes), failed: false });
+        settle(entry);
         hold(workspaceId);
       },
       (error: unknown) => {
@@ -136,6 +242,8 @@ export function createChatWakes(options: {
         if (shownProblem(error) === null) return;
         if (entry.view) markFailed(entry);
         else setView(entry, { ...NO_WAKES, failed: true });
+        // The lines offer nothing until a read works; a request that answered `retried` is done.
+        settle(entry);
       },
     );
   }
@@ -191,6 +299,43 @@ export function createChatWakes(options: {
       if (entry.wanted > 0) read(workspaceId, entry);
   };
 
+  /**
+   * Sends a Try again with its own operation ID and wake, through this sign-in's client, and reads the conversation
+   * again once it answers. The answer lands only while the request is still the one current.
+   */
+  function send(workspaceId: string, entry: Entry, intent: Intent, operationId: string) {
+    const { client } = signIn;
+    const controller = new AbortController();
+    intent.send = controller;
+    intent.phase = "sending";
+    publish(entry);
+    const current = () =>
+      live() && entry.intents.get(intent.source.wakeId) === intent && intent.send === controller;
+    const answered = (phase: Intent["phase"]) => {
+      intent.send = null;
+      intent.phase = phase;
+      publish(entry);
+      read(workspaceId, entry);
+    };
+    retryWake(client, workspaceId, operationId, intent.source.wakeId, controller.signal).then(
+      (answer) => {
+        if (!current()) return;
+        if (answer.kind === "missing") return answered("missing");
+        if (answer.kind === "refused") return answered("failed");
+        // A generation of another message or thread isn't this wake's.
+        const { messageId, threadId } = answer.wake;
+        answered(
+          messageId === intent.source.messageId && threadId === intent.source.threadId
+            ? "rereading"
+            : "failed",
+        );
+      },
+      () => {
+        if (current()) answered("failed");
+      },
+    );
+  }
+
   return {
     want(workspaceId, target, threads) {
       if (stopped) return () => undefined;
@@ -198,7 +343,16 @@ export function createChatWakes(options: {
       const key = wakeKey(target);
       let entry = place.entries.get(key);
       if (!entry) {
-        entry = { target, threads, wanted: 0, view: null, cursor: null, read: null };
+        entry = {
+          target,
+          threads,
+          wanted: 0,
+          view: null,
+          cursor: null,
+          read: null,
+          intents: new Map(),
+          retries: NO_RETRIES,
+        };
         place.entries.set(key, entry);
       }
       const wanted = entry;
@@ -216,6 +370,7 @@ export function createChatWakes(options: {
         wanted.read?.abort();
         wanted.read = null;
         wanted.cursor = null;
+        drop(wanted);
         if (![...place.entries.values()].some((each) => each.wanted > 0)) {
           place.hold?.abort();
           place.hold = null;
@@ -235,6 +390,45 @@ export function createChatWakes(options: {
       place.hold = null;
       restart(workspaceId);
     },
+    retries: (workspaceId, target) =>
+      workspaces.get(workspaceId)?.entries.get(wakeKey(target))?.retries ?? NO_RETRIES,
+    retry(workspaceId, target, wake, gate) {
+      const entry = workspaces.get(workspaceId)?.entries.get(wakeKey(target));
+      if (!entry) return;
+      const allowed = (source: PhoneChatWake) =>
+        live() && entry.wanted > 0 && gate.allowed() && stillShows(entry, source);
+      const known = entry.intents.get(wake.wakeId);
+      if (known) {
+        // A second press while it sends or asks does nothing. After a failure it sends the same request again.
+        if (known.phase === "failed" && known.operationId !== null && allowed(known.source))
+          send(workspaceId, entry, known, known.operationId);
+        return;
+      }
+      if (!allowed(wake)) return;
+      const intent: Intent = { source: wake, operationId: null, phase: "confirming", send: null };
+      entry.intents.set(wake.wakeId, intent);
+      if (wake.state === "unclaimed") {
+        intent.operationId = crypto.randomUUID();
+        send(workspaceId, entry, intent, intent.operationId);
+        return;
+      }
+      // It may have started: the person says to try another computer first. Cancel sends nothing.
+      const asked = () => entry.intents.get(wake.wakeId) === intent;
+      gate.confirm(wake).then(
+        (yes) => {
+          if (!asked()) return;
+          if (!yes || !allowed(wake)) {
+            entry.intents.delete(wake.wakeId);
+            return;
+          }
+          intent.operationId = crypto.randomUUID();
+          send(workspaceId, entry, intent, intent.operationId);
+        },
+        () => {
+          if (asked()) entry.intents.delete(wake.wakeId);
+        },
+      );
+    },
     pause() {
       paused = true;
       for (const place of workspaces.values()) {
@@ -244,6 +438,7 @@ export function createChatWakes(options: {
           entry.read?.abort();
           entry.read = null;
           entry.cursor = null;
+          drop(entry);
         }
       }
     },
@@ -257,7 +452,12 @@ export function createChatWakes(options: {
       for (const place of workspaces.values()) {
         place.hold?.abort();
         place.hold = null;
-        for (const entry of place.entries.values()) entry.read?.abort();
+        for (const entry of place.entries.values()) {
+          entry.read?.abort();
+          for (const intent of entry.intents.values()) intent.send?.abort();
+          entry.intents.clear();
+          entry.retries = NO_RETRIES;
+        }
       }
       listeners.clear();
     },
