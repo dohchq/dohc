@@ -7184,7 +7184,13 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
             }
             "blockquote" => render_prefixed_blocks(children, tag, attrs, ">", None, table_cell),
             "bulletList" | "orderedList" | "taskList" => {
-                render_nodes(children, tag, attrs, "\n", table_cell)
+                // A loose list keeps a blank line between its items.
+                let separator = if attr_bool(attrs, "loose") == Some(true) {
+                    "\n\n"
+                } else {
+                    "\n"
+                };
+                render_nodes(children, tag, attrs, separator, table_cell)
             }
             "listItem" => render_list_item(children, &context, None),
             "taskItem" => {
@@ -7212,6 +7218,8 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
             "mathBlock" => {
                 ensure_projection_string(format!("$${}$$", attr_js_string(attrs, "tex")))
             }
+            // Sealed pieces: the source the file holds, written back exactly.
+            "rawBlock" | "rawInline" => ensure_projection_string(attr_js_string(attrs, "source")),
             "table" => render_table(children),
             "tableRow" | "tableCell" | "tableHeader" => {
                 render_nodes(children, tag, attrs, "", table_cell)
@@ -7388,13 +7396,15 @@ fn render_list_item(
         };
         if index == 0 && empty_marker {
             output.push('\n')?;
-        } else if matches!(
-            element_tag(child),
-            Some("paragraph" | "horizontalRule" | "mathBlock" | "table")
-        ) || (matches!(
-            element_tag(previous),
-            Some("paragraph" | "mathBlock" | "table" | "blockquote" | "callout")
-        ) && !list_interrupts)
+        } else if attr_bool(context.parent_attrs, "loose") == Some(true)
+            || matches!(
+                element_tag(child),
+                Some("paragraph" | "horizontalRule" | "mathBlock" | "rawBlock" | "table")
+            )
+            || (matches!(
+                element_tag(previous),
+                Some("paragraph" | "mathBlock" | "rawBlock" | "table" | "blockquote" | "callout")
+            ) && !list_interrupts)
             || (matches!(element_tag(previous), Some("blockquote" | "callout"))
                 && matches!(element_tag(child), Some("blockquote" | "callout")))
             || (element_tag(previous) == element_tag(child)

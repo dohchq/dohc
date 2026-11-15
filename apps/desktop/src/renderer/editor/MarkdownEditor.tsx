@@ -18,6 +18,7 @@ import {
   DohcMarkdownTable,
   DohcTaskItem,
   escapeHighlightMarkdown,
+  MarkdownBulletList,
   MarkdownListItem,
   MarkdownOrderedList,
   MarkdownTaskList,
@@ -225,13 +226,15 @@ const DROP_CURSOR_OPTIONS = { color: "var(--dohc-accent)", width: 2 };
 // Inline code is a literal, such as a booking code or a command, so the
 // spellchecker leaves it alone.
 const CODE_MARK_OPTIONS = { HTMLAttributes: { spellcheck: "false" } };
-// orderedList: false on both starter kits hands the node to the projection's
-// MarkdownOrderedList in STATIC_EDITOR_EXTENSIONS, as the projection's own
+// bulletList and orderedList: false on both starter kits hand the nodes to the
+// projection's MarkdownBulletList and MarkdownOrderedList in
+// STATIC_EDITOR_EXTENSIONS, as the projection's own
 // schema does. The editor lists the projection's Markdown extensions before
 // the starter kit, as the projection does, so the two schemas rank marks the
 // same: highlight above bold, italic, strike, underline, and code.
 const LOCAL_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
+  bulletList: false,
   orderedList: false,
   listItem: false,
   dropcursor: DROP_CURSOR_OPTIONS,
@@ -241,6 +244,7 @@ const LOCAL_STARTER_KIT = StarterKit.configure({
 const COLLAB_STARTER_KIT = StarterKit.configure({
   trailingNode: false,
   undoRedo: false,
+  bulletList: false,
   orderedList: false,
   listItem: false,
   dropcursor: DROP_CURSOR_OPTIONS,
@@ -276,6 +280,7 @@ const TABLE_EXTENSION = DohcMarkdownTable.configure({
 });
 const STATIC_EDITOR_EXTENSIONS = [
   ListConversions,
+  MarkdownBulletList,
   MarkdownListItem,
   MarkdownOrderedList,
   MarkdownTaskList,

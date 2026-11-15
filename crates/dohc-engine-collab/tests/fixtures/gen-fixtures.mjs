@@ -704,6 +704,58 @@ const RICHDOC_PROJECTION_CASES = [
       ]),
   },
   {
+    // Sealed pieces are written as their source, and a loose list keeps a
+    // blank line between its items and between an item's blocks.
+    name: "sealed-pieces-and-loose-lists",
+    makeDoc: () =>
+      directRichdoc([
+        xmlElement("rawBlock", { source: '<p align="center">\n  <img src="/logo.png">\n</p>' }),
+        paragraph([
+          xmlText("Press "),
+          xmlElement("rawInline", { source: "<kbd>" }),
+          xmlText("K"),
+          xmlElement("rawInline", { source: "</kbd>" }),
+          xmlElement("rawInline", { source: "&nbsp;" }),
+          xmlText(" now"),
+        ]),
+        xmlElement("rawBlock", { source: '[docs]: https://example.com "Docs"' }),
+        xmlElement("bulletList", { loose: true }, [
+          xmlElement("listItem", {}, [paragraph("one")]),
+          xmlElement("listItem", {}, [
+            paragraph("two"),
+            xmlElement("rawBlock", { source: "<!-- note -->" }),
+          ]),
+        ]),
+        xmlElement("orderedList", { start: 3, loose: true }, [
+          xmlElement("listItem", {}, [paragraph("three")]),
+          xmlElement("listItem", {}, [paragraph("four"), paragraph("more")]),
+        ]),
+        xmlElement("taskList", { loose: true }, [
+          xmlElement("taskItem", { checked: true }, [paragraph("done")]),
+          xmlElement("taskItem", { checked: false }, [paragraph("open")]),
+        ]),
+        xmlElement("bulletList", {}, [
+          xmlElement("listItem", {}, [paragraph("tight")]),
+          xmlElement("listItem", {}, [paragraph("list")]),
+        ]),
+        // In a cell, a piece is written in the cell's form, which has no
+        // unescaped pipe and no line break.
+        table([
+          tableRow([tableCell("tableHeader", "Value")]),
+          tableRow([
+            xmlElement("tableCell", { colspan: 1, rowspan: 1 }, [
+              paragraph([
+                xmlText("x "),
+                xmlElement("rawInline", { source: "<kbd>a|b</kbd>" }),
+                xmlElement("rawInline", { source: "c\\|d" }),
+              ]),
+              xmlElement("rawBlock", { source: "<div>\na|b\n</div>" }),
+            ]),
+          ]),
+        ]),
+      ]),
+  },
+  {
     name: "callout-title-delimiter",
     makeDoc: () =>
       directRichdoc([

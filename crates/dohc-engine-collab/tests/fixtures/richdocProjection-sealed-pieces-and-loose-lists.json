@@ -1,0 +1,33 @@
+{
+ "seed": -123,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-sealed-pieces-and-loose-lists",
+ "updates": [
+  "AVWby/+3BgAHAQRib2R5AwhyYXdCbG9jaygAm8v/twYABnNvdXJjZQF3LzxwIGFsaWduPSJjZW50ZXIiPgogIDxpbWcgc3JjPSIvbG9nby5wbmciPgo8L3A+h5vL/7cGAAMJcGFyYWdyYXBoBwCby/+3BgIGBACby/+3BgMGUHJlc3Mgh5vL/7cGAwMJcmF3SW5saW5lKACby/+3BgoGc291cmNlAXcFPGtiZD6Hm8v/twYKBgQAm8v/twYMAUuHm8v/twYMAwlyYXdJbmxpbmUoAJvL/7cGDgZzb3VyY2UBdwY8L2tiZD6Hm8v/twYOAwlyYXdJbmxpbmUoAJvL/7cGEAZzb3VyY2UBdwYmbmJzcDuHm8v/twYQBgQAm8v/twYSBCBub3eHm8v/twYCAwhyYXdCbG9jaygAm8v/twYXBnNvdXJjZQF3Iltkb2NzXTogaHR0cHM6Ly9leGFtcGxlLmNvbSAiRG9jcyKHm8v/twYXAwpidWxsZXRMaXN0BwCby/+3BhkDCGxpc3RJdGVtBwCby/+3BhoDCXBhcmFncmFwaAcAm8v/twYbBgQAm8v/twYcA29uZYeby/+3BhoDCGxpc3RJdGVtBwCby/+3BiADCXBhcmFncmFwaAcAm8v/twYhBgQAm8v/twYiA3R3b4eby/+3BiEDCHJhd0Jsb2NrKACby/+3BiYGc291cmNlAXcNPCEtLSBub3RlIC0tPigAm8v/twYZBWxvb3NlAXiHm8v/twYZAwtvcmRlcmVkTGlzdAcAm8v/twYpAwhsaXN0SXRlbQcAm8v/twYqAwlwYXJhZ3JhcGgHAJvL/7cGKwYEAJvL/7cGLAV0aHJlZYeby/+3BioDCGxpc3RJdGVtBwCby/+3BjIDCXBhcmFncmFwaAcAm8v/twYzBgQAm8v/twY0BGZvdXKHm8v/twYzAwlwYXJhZ3JhcGgHAJvL/7cGOQYEAJvL/7cGOgRtb3JlKACby/+3BikFc3RhcnQBfQMoAJvL/7cGKQVsb29zZQF4h5vL/7cGKQMIdGFza0xpc3QHAJvL/7cGQQMIdGFza0l0ZW0HAJvL/7cGQgMJcGFyYWdyYXBoBwCby/+3BkMGBACby/+3BkQEZG9uZSgAm8v/twZCB2NoZWNrZWQBeIeby/+3BkIDCHRhc2tJdGVtBwCby/+3BkoDCXBhcmFncmFwaAcAm8v/twZLBgQAm8v/twZMBG9wZW4oAJvL/7cGSgdjaGVja2VkAXkoAJvL/7cGQQVsb29zZQF4h5vL/7cGQQMKYnVsbGV0TGlzdAcAm8v/twZTAwhsaXN0SXRlbQcAm8v/twZUAwlwYXJhZ3JhcGgHAJvL/7cGVQYEAJvL/7cGVgV0aWdodIeby/+3BlQDCGxpc3RJdGVtBwCby/+3BlwDCXBhcmFncmFwaAcAm8v/twZdBgQAm8v/twZeBGxpc3SHm8v/twZTAwV0YWJsZQcAm8v/twZjAwh0YWJsZVJvdwcAm8v/twZkAwt0YWJsZUhlYWRlcgcAm8v/twZlAwlwYXJhZ3JhcGgHAJvL/7cGZgYEAJvL/7cGZwVWYWx1ZSgAm8v/twZlB2NvbHNwYW4BfQEoAJvL/7cGZQdyb3dzcGFuAX0Bh5vL/7cGZAMIdGFibGVSb3cHAJvL/7cGbwMJdGFibGVDZWxsBwCby/+3BnADCXBhcmFncmFwaAcAm8v/twZxBgQAm8v/twZyAnggh5vL/7cGcgMJcmF3SW5saW5lKACby/+3BnUGc291cmNlAXcOPGtiZD5hfGI8L2tiZD6Hm8v/twZ1AwlyYXdJbmxpbmUoAJvL/7cGdwZzb3VyY2UBdwRjXHxkh5vL/7cGcQMIcmF3QmxvY2soAJvL/7cGeQZzb3VyY2UBdxA8ZGl2PgphfGIKPC9kaXY+KACby/+3BnAHY29sc3BhbgF9ASgAm8v/twZwB3Jvd3NwYW4BfQEA",
+  "AQGby/+3Bn0oAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcdc2VhbGVkLXBpZWNlcy1hbmQtbG9vc2UtbGlzdHMA"
+ ],
+ "mergedUpdateB64": "AVaby/+3BgAHAQRib2R5AwhyYXdCbG9jaygAm8v/twYABnNvdXJjZQF3LzxwIGFsaWduPSJjZW50ZXIiPgogIDxpbWcgc3JjPSIvbG9nby5wbmciPgo8L3A+h5vL/7cGAAMJcGFyYWdyYXBoBwCby/+3BgIGBACby/+3BgMGUHJlc3Mgh5vL/7cGAwMJcmF3SW5saW5lKACby/+3BgoGc291cmNlAXcFPGtiZD6Hm8v/twYKBgQAm8v/twYMAUuHm8v/twYMAwlyYXdJbmxpbmUoAJvL/7cGDgZzb3VyY2UBdwY8L2tiZD6Hm8v/twYOAwlyYXdJbmxpbmUoAJvL/7cGEAZzb3VyY2UBdwYmbmJzcDuHm8v/twYQBgQAm8v/twYSBCBub3eHm8v/twYCAwhyYXdCbG9jaygAm8v/twYXBnNvdXJjZQF3Iltkb2NzXTogaHR0cHM6Ly9leGFtcGxlLmNvbSAiRG9jcyKHm8v/twYXAwpidWxsZXRMaXN0BwCby/+3BhkDCGxpc3RJdGVtBwCby/+3BhoDCXBhcmFncmFwaAcAm8v/twYbBgQAm8v/twYcA29uZYeby/+3BhoDCGxpc3RJdGVtBwCby/+3BiADCXBhcmFncmFwaAcAm8v/twYhBgQAm8v/twYiA3R3b4eby/+3BiEDCHJhd0Jsb2NrKACby/+3BiYGc291cmNlAXcNPCEtLSBub3RlIC0tPigAm8v/twYZBWxvb3NlAXiHm8v/twYZAwtvcmRlcmVkTGlzdAcAm8v/twYpAwhsaXN0SXRlbQcAm8v/twYqAwlwYXJhZ3JhcGgHAJvL/7cGKwYEAJvL/7cGLAV0aHJlZYeby/+3BioDCGxpc3RJdGVtBwCby/+3BjIDCXBhcmFncmFwaAcAm8v/twYzBgQAm8v/twY0BGZvdXKHm8v/twYzAwlwYXJhZ3JhcGgHAJvL/7cGOQYEAJvL/7cGOgRtb3JlKACby/+3BikFc3RhcnQBfQMoAJvL/7cGKQVsb29zZQF4h5vL/7cGKQMIdGFza0xpc3QHAJvL/7cGQQMIdGFza0l0ZW0HAJvL/7cGQgMJcGFyYWdyYXBoBwCby/+3BkMGBACby/+3BkQEZG9uZSgAm8v/twZCB2NoZWNrZWQBeIeby/+3BkIDCHRhc2tJdGVtBwCby/+3BkoDCXBhcmFncmFwaAcAm8v/twZLBgQAm8v/twZMBG9wZW4oAJvL/7cGSgdjaGVja2VkAXkoAJvL/7cGQQVsb29zZQF4h5vL/7cGQQMKYnVsbGV0TGlzdAcAm8v/twZTAwhsaXN0SXRlbQcAm8v/twZUAwlwYXJhZ3JhcGgHAJvL/7cGVQYEAJvL/7cGVgV0aWdodIeby/+3BlQDCGxpc3RJdGVtBwCby/+3BlwDCXBhcmFncmFwaAcAm8v/twZdBgQAm8v/twZeBGxpc3SHm8v/twZTAwV0YWJsZQcAm8v/twZjAwh0YWJsZVJvdwcAm8v/twZkAwt0YWJsZUhlYWRlcgcAm8v/twZlAwlwYXJhZ3JhcGgHAJvL/7cGZgYEAJvL/7cGZwVWYWx1ZSgAm8v/twZlB2NvbHNwYW4BfQEoAJvL/7cGZQdyb3dzcGFuAX0Bh5vL/7cGZAMIdGFibGVSb3cHAJvL/7cGbwMJdGFibGVDZWxsBwCby/+3BnADCXBhcmFncmFwaAcAm8v/twZxBgQAm8v/twZyAnggh5vL/7cGcgMJcmF3SW5saW5lKACby/+3BnUGc291cmNlAXcOPGtiZD5hfGI8L2tiZD6Hm8v/twZ1AwlyYXdJbmxpbmUoAJvL/7cGdwZzb3VyY2UBdwRjXHxkh5vL/7cGcQMIcmF3QmxvY2soAJvL/7cGeQZzb3VyY2UBdxA8ZGl2PgphfGIKPC9kaXY+KACby/+3BnAHY29sc3BhbgF9ASgAm8v/twZwB3Jvd3NwYW4BfQEoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcdc2VhbGVkLXBpZWNlcy1hbmQtbG9vc2UtbGlzdHMA",
+ "stateVectorB64": "AZvL/7cGfg==",
+ "coverage": {
+  "nodes": [
+   "bulletList",
+   "doc",
+   "listItem",
+   "orderedList",
+   "paragraph",
+   "rawBlock",
+   "rawInline",
+   "table",
+   "tableCell",
+   "tableHeader",
+   "tableRow",
+   "taskItem",
+   "taskList",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "<p align=\"center\">\n  <img src=\"/logo.png\">\n</p>\n\nPress <kbd>K</kbd>&nbsp; now\n\n[docs]: https://example.com \"Docs\"\n\n- one\n\n- two\n\n  <!-- note -->\n\n3. three\n\n4. four\n\n   more\n\n- [x] done\n\n- [ ] open\n\n- tight\n- list\n\n| Value                                            |\n| ------------------------------------------------ |\n| x <kbd>a\\|b</kbd>c\\|d<br><div><br>a\\|b<br></div> |\n"
+ }
+}

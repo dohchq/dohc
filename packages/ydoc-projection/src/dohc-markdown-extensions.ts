@@ -5,7 +5,7 @@ import { Extension, Mark, Node, markInputRule } from "@tiptap/core";
 import type { JSONContent, MarkdownRendererHelpers } from "@tiptap/core";
 import { getDefaults, Lexer, Tokenizer, type Tokens } from "marked";
 import { preprocessTablePipes, renderTableToMarkdown, Table } from "@tiptap/extension-table";
-import { ListItem, OrderedList, TaskItem, TaskList } from "@tiptap/extension-list";
+import { BulletList, ListItem, OrderedList, TaskItem, TaskList } from "@tiptap/extension-list";
 import { Paragraph } from "@tiptap/extension-paragraph";
 import { sanitizeImageSrc } from "./image-src.js";
 import { TABLE_ROW_HEIGHTS_RE, tableRowHeight, tableRowHeights } from "./table-row-heights.js";
@@ -895,6 +895,56 @@ export const DohcMathBlock = Node.create({
   renderMarkdown: (node) => `$$${String(node.attrs?.tex ?? "")}$$`,
 });
 
+// Sealed pieces: Markdown the editor cannot represent, kept as the file spells
+// it. Both writers write `source` back exactly. A block is a raw HTML block, an
+// HTML comment or a link reference definition; an inline piece is a tag or an
+// entity. No reader makes them yet, but every editor must know them before one
+// does, because the editor binding deletes a node its schema cannot make.
+// Their HTML holds the source as text so a paste brings it back; their parse
+// rules rank above the code block's and code mark's, which match the same tags.
+export const DohcRawBlock = Node.create({
+  name: "rawBlock",
+  priority: CUSTOM_BLOCK_PRIORITY,
+  group: "block",
+  atom: true,
+  addAttributes() {
+    return { source: { default: "", parseHTML: (element) => element.textContent ?? "" } };
+  },
+  parseHTML() {
+    return [{ tag: "pre[data-dohc-raw-block]", priority: 100 }];
+  },
+  renderHTML({ node }) {
+    return [
+      "pre",
+      { class: "dohc-raw dohc-raw-block", "data-dohc-raw-block": "" },
+      String(node.attrs.source ?? ""),
+    ];
+  },
+  renderMarkdown: (node) => String(node.attrs?.source ?? ""),
+});
+
+export const DohcRawInline = Node.create({
+  name: "rawInline",
+  priority: 1000,
+  inline: true,
+  group: "inline",
+  atom: true,
+  addAttributes() {
+    return { source: { default: "", parseHTML: (element) => element.textContent ?? "" } };
+  },
+  parseHTML() {
+    return [{ tag: "code[data-dohc-raw-inline]", priority: 100 }];
+  },
+  renderHTML({ node }) {
+    return [
+      "code",
+      { class: "dohc-raw dohc-raw-inline", "data-dohc-raw-inline": "" },
+      String(node.attrs.source ?? ""),
+    ];
+  },
+  renderMarkdown: (node) => String(node.attrs?.source ?? ""),
+});
+
 // Row height is editor layout metadata. It lives on the canonical Y.Doc so a
 // resized table remains stable across collaborative edits and reloads. GFM
 // has no row-height syntax, so the Markdown projectors write it in an HTML
@@ -936,8 +986,14 @@ export const DohcTableRowHeight = Extension.create({
 // list. `nested: true` widens it to `paragraph block*`. Every dohc
 // schema registers this extension so the editor and the conversions agree.
 export const DohcTaskItem = TaskItem.extend({
-  renderMarkdown: (node, helpers) =>
-    renderItemBlocks(node, helpers, `- [${node.attrs?.checked ? "x" : " "}] `, 2),
+  renderMarkdown: (node, helpers, context) =>
+    renderItemBlocks(
+      node,
+      helpers,
+      `- [${node.attrs?.checked ? "x" : " "}] `,
+      2,
+      context.meta?.parentAttrs?.loose === true,
+    ),
 }).configure({ nested: true });
 
 // dohc owns the `code` token instead of StarterKit's CodeBlock, whose
@@ -1113,6 +1169,8 @@ export const dohcMarkdownExtensions = [
   DohcHighlight,
   DohcMathInline,
   DohcMathBlock,
+  DohcRawBlock,
+  DohcRawInline,
   DohcTableRowHeight,
   DohcCodeBlock,
   DohcMarkdownLists,
@@ -1165,9 +1223,30 @@ function prepareRenderedTableCell(markdown: string): string {
 
 const tableTokenizer = Table.config.markdownTokenizer!;
 
+// A list the file spaces with blank lines (CommonMark's loose list) is
+// `loose: true`, and both writers put a blank line between its items and
+// between an item's blocks. Any other list leaves the attribute unset: the
+// editor binding writes no null attribute, so a list an editor makes carries
+// none, which a reader or check that predates it would refuse.
+const looseListAttributes = { loose: { default: null, rendered: false } };
+const renderLooseList = (node: JSONContent, helpers: MarkdownRendererHelpers): string =>
+  node.content
+    ? helpers.renderChildren(node.content, node.attrs?.loose === true ? "\n\n" : "\n")
+    : "";
+export const MarkdownBulletList = BulletList.extend({
+  addAttributes() {
+    return { ...this.parent?.(), ...looseListAttributes };
+  },
+  renderMarkdown: renderLooseList,
+});
+
 // Use marked's CommonMark item-body lexer; Tiptap's ordered-list tokenizer
 // accepts letter markers and strips only two columns from child blocks.
 export const MarkdownOrderedList = OrderedList.extend({
+  addAttributes() {
+    return { ...this.parent?.(), ...looseListAttributes };
+  },
+  renderMarkdown: renderLooseList,
   markdownTokenizer: {
     name: "orderedList",
     level: "block",
@@ -1182,7 +1261,13 @@ export const MarkdownListItem = ListItem.extend({
       context.parentType === "orderedList"
         ? `${Math.min(999_999_999, start + (context.index || 0))}. `
         : "- ";
-    return renderItemBlocks(node, helpers, prefix, prefix.length);
+    return renderItemBlocks(
+      node,
+      helpers,
+      prefix,
+      prefix.length,
+      context.meta?.parentAttrs?.loose === true,
+    );
   },
 });
 
@@ -1191,6 +1276,7 @@ function renderItemBlocks(
   helpers: MarkdownRendererHelpers,
   prefix: string,
   indent: number,
+  loose = false,
 ): string {
   const [first, ...children] = node.content ?? [];
   const firstText = helpers.renderChildren(first ? [first] : []).replace(/^[ \t]*$/u, "");
@@ -1210,12 +1296,15 @@ function renderItemBlocks(
         ? /^1\. [ \t]*[^ \t]/u.test(firstLine)
         : child.type !== "bulletList" || firstLine.replace(/[ \t]+$/u, "") !== "-";
     const separate =
-      ["paragraph", "horizontalRule", "mathBlock", "table"].includes(child.type ?? "") ||
-      (["paragraph", "mathBlock", "table", "blockquote", "callout"].includes(
+      ["paragraph", "horizontalRule", "mathBlock", "rawBlock", "table"].includes(
+        child.type ?? "",
+      ) ||
+      (["paragraph", "mathBlock", "rawBlock", "table", "blockquote", "callout"].includes(
         previous?.type ?? "",
       ) &&
         !interrupts);
     const boundary =
+      loose ||
       separate ||
       (["blockquote", "callout"].includes(previous?.type ?? "") &&
         ["blockquote", "callout"].includes(child.type ?? "")) ||
@@ -1226,6 +1315,10 @@ function renderItemBlocks(
   return output;
 }
 export const MarkdownTaskList = TaskList.extend({
+  addAttributes() {
+    return { ...this.parent?.(), ...looseListAttributes };
+  },
+  renderMarkdown: renderLooseList,
   // DohcMarkdownLists groups items before Tiptap's task-only list splitter.
   markdownTokenName: "list",
   markdownTokenizer: {

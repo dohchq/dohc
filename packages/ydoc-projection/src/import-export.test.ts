@@ -3960,6 +3960,7 @@ describe("Y.Doc markdown import/export", () => {
       "mathBlock",
       "orderedList",
       "paragraph",
+      "rawBlock",
       "table",
       "taskList",
     ]);
@@ -3969,6 +3970,7 @@ describe("Y.Doc markdown import/export", () => {
       "image",
       "inlineAtom",
       "mathInline",
+      "rawInline",
       "text",
       "wikilink",
     ]);
@@ -4052,6 +4054,10 @@ describe("Y.Doc markdown import/export", () => {
     {
       type: "mathBlock",
       block: { type: "mathBlock", attrs: { tex: "a|`b`" } },
+    },
+    {
+      type: "rawBlock",
+      block: { type: "rawBlock", attrs: { source: "<div>\na|`b`\n</div>" } },
     },
     {
       type: "orderedList",

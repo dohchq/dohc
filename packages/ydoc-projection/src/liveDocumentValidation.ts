@@ -793,7 +793,13 @@ function validBodyAttribute(nodeName: string, key: string, value: unknown): bool
     case "image.src":
     case "image.alt":
     case "escapedPunctuation.value":
+    case "rawBlock.source":
+    case "rawInline.source":
       return typeof value === "string";
+    case "bulletList.loose":
+    case "orderedList.loose":
+    case "taskList.loose":
+      return typeof value === "boolean";
     case "wikilink.label":
     case "image.title":
     case "codeBlock.language":
