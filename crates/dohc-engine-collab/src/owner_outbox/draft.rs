@@ -120,7 +120,11 @@ fn draft_proof(
 pub struct OwnerDraftAppendInput {
     pub person_edit: bool,
     pub binding: LiveObjectBinding,
-    pub expected_revision: i64,
+    /// The binding revision the caller read, or `None` for the one current
+    /// when the append commits. A Yjs update needs nothing a later accepted
+    /// frame takes away, so an editor names none: its session's copy can
+    /// trail a frame. The binding itself must still match.
+    pub expected_revision: Option<i64>,
     pub append_key: String,
     pub update: Vec<u8>,
     pub now_ms: i64,
@@ -388,10 +392,14 @@ pub fn append_draft_cached(
     let layer = cache.owner_layer(&key);
     let mut retained = None;
     let result = store.write_with(faults, |tx| {
-        let proof = draft_proof(tx, &input.binding, input.expected_revision)?;
+        let revision = match input.expected_revision {
+            Some(revision) => revision,
+            None => super::accepted::current(tx, &input.binding)?.revision,
+        };
+        let proof = draft_proof(tx, &input.binding, revision)?;
         let draft = match cached {
             Some(entry) if entry.proof == proof => entry.draft,
-            _ => open_layered_draft_in(tx, &input.binding, input.expected_revision, layer)?,
+            _ => open_layered_draft_in(tx, &input.binding, revision, layer)?,
         };
         let (result, encoded_len) = append_prepared_draft_in_tx(
             tx,
@@ -407,7 +415,7 @@ pub fn append_draft_cached(
                 automation_declaration: input.automation_declaration.as_ref(),
             },
         )?;
-        let proof = draft_proof(tx, &input.binding, input.expected_revision)?;
+        let proof = draft_proof(tx, &input.binding, revision)?;
         let approx_bytes = encoded_len
             .saturating_add(proof.binding_json.len().saturating_mul(2))
             .saturating_add(proof.namespace.len());
@@ -1234,7 +1242,7 @@ mod tests {
                 OwnerDraftAppendInput {
                     person_edit: false,
                     binding: observed.binding.clone(),
-                    expected_revision: 1,
+                    expected_revision: Some(1),
                     append_key: "owner-edit".into(),
                     update: revoked_delta,
                     now_ms: 5,
@@ -1370,7 +1378,7 @@ mod tests {
             let input = |append_key: &str, update: Vec<u8>| OwnerDraftAppendInput {
                 person_edit: false,
                 binding: observed.binding.clone(),
-                expected_revision: 1,
+                expected_revision: Some(1),
                 append_key: append_key.into(),
                 update,
                 now_ms: 3,
@@ -1465,7 +1473,7 @@ mod tests {
             let input = OwnerDraftAppendInput {
                 person_edit: false,
                 binding: self.binding.clone(),
-                expected_revision: observed.revision,
+                expected_revision: Some(observed.revision),
                 append_key: append_key.into(),
                 update: update.to_vec(),
                 now_ms: 3,
@@ -1548,7 +1556,7 @@ mod tests {
         let input = OwnerDraftAppendInput {
             person_edit: true,
             binding: observed.binding.clone(),
-            expected_revision: 1,
+            expected_revision: Some(1),
             append_key: "person".into(),
             update: owner.richdoc_append_paragraph("Person typing"),
             now_ms: 3,
@@ -1622,7 +1630,7 @@ mod tests {
         let input = OwnerDraftAppendInput {
             person_edit: false,
             binding: observed.binding,
-            expected_revision: 1,
+            expected_revision: Some(1),
             append_key: "press/Status".into(),
             update: owner.richdoc_append_paragraph("Done"),
             now_ms: 3,
@@ -3196,7 +3204,7 @@ mod tests {
         OwnerDraftAppendInput {
             person_edit: true,
             binding: observed.binding.clone(),
-            expected_revision: 1,
+            expected_revision: Some(1),
             append_key: append_key.into(),
             update,
             now_ms: 3,

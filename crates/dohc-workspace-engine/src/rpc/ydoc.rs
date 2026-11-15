@@ -1869,7 +1869,7 @@ impl EngineService {
                     .as_ref()
                     .is_some_and(|a| a.actor_kind == dohc_engine_domain::ChangeActorKind::Human),
                 binding: draft.binding.clone(),
-                expected_revision: draft.revision,
+                expected_revision: None,
                 append_key,
                 update,
                 now_ms: now_ms()?,

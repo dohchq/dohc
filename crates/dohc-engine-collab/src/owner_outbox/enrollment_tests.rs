@@ -354,7 +354,7 @@ fn first_enrollment_accept_echo_preserves_later_draft_fields_until_refusal() {
     let input = OwnerDraftAppendInput {
         person_edit: false,
         binding: observed.binding.clone(),
-        expected_revision: enrolled.revision,
+        expected_revision: Some(enrolled.revision),
         append_key: "agent-status".into(),
         update: local.frontmatter_set("status", "blocked").unwrap(),
         now_ms: 11,

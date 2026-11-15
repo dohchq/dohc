@@ -1102,7 +1102,7 @@ fn owner_draft(
         owner_outbox::draft::OwnerDraftAppendInput {
             person_edit: false,
             binding: binding.clone(),
-            expected_revision: state.revision,
+            expected_revision: Some(state.revision),
             append_key: format!("draft-{index}"),
             update: update.clone(),
             now_ms: 20,
