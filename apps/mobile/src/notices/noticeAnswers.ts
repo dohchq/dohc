@@ -114,6 +114,16 @@ export function answerSurface(
 }
 
 /**
+ * The reply a read shows as the question's chosen answer, by its message ID, or null. Its wakes are the row's. A reply
+ * of this phone's that lost is never the chosen one, and a reply the read doesn't show has no wakes to show.
+ */
+export function answerReply(shown: ShownQuestion | null): string | null {
+  const question = shown?.question;
+  const id = question?.decisionState === "resolved" ? question.resolvedByMessageId : null;
+  return id !== null && id !== undefined && shown?.byId.has(id) === true ? id : null;
+}
+
+/**
  * What a Notice's row shows of its question and this phone's answers, with what its controls do, or null when it shows
  * neither. `shown` and `verified` come from the latest list, sign-in and read; `answers` from the outbox, whatever the
  * list says now. A new answer goes only while `verified` holds and the question takes one; Send on a withheld answer

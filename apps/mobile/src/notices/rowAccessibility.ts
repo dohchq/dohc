@@ -4,6 +4,7 @@ import {
   relativeTime,
   spokenRelativeTime,
 } from "@dohc/interface-words/notices";
+import { wakeWords } from "../conversation/chatWakeState";
 import { decisionWord } from "../conversation/decisionAnswers";
 import { needsPerson } from "./noticeAnswers";
 import type { PhoneNotice } from "./phoneNotice";
@@ -48,6 +49,18 @@ export const swipesUnread = (notice: PhoneNotice) => marksRead(notice) && notice
 export const dismissLabel = (notice: PhoneNotice) =>
   notice.relayId === undefined ? noticesWords.dismissNotice : noticesWords.done;
 
+/** What the row says of its answer's wakes, in order: each line and its note, then a failed read. */
+const answerWakes = (notice: PhoneNotice) => {
+  const wakes = notice.answer?.wakes;
+  return wakes ? wakeWords(wakes.wakes, wakes.failed) : [];
+};
+
+/** Try again on a failed read of the answer's wakes, while the row shows their last lines. */
+const wakeRetry = (notice: PhoneNotice) => {
+  const wakes = notice.answer?.wakes;
+  return wakes?.failed && answerWakes(notice).length > 0 ? wakes.retry : undefined;
+};
+
 /** The press handler behind each action a row offers: its pill or icon, and its rotor action, share it. */
 export function noticeRowHandlers(
   notice: PhoneNotice,
@@ -57,6 +70,7 @@ export function noticeRowHandlers(
   return {
     worded: notice.retry ? handlers.retry : notice.open ? handlers.open : undefined,
     retryTarget: notice.retryTarget ? handlers.retryTarget : undefined,
+    retryWakes: wakeRetry(notice),
     read: marksRead(notice) && setRead ? () => setRead(!notice.read) : undefined,
     copy: handlers.copy,
     dismiss: notice.dismissible ? handlers.dismiss : undefined,
@@ -102,7 +116,8 @@ export const answerStatus = (notice: PhoneNotice) =>
 
 /**
  * What VoiceOver hears for a row, and its actions in rotor order: the worded action, Try again when the read that
- * would offer Reply failed, Mark read or Mark unread, Copy, then Done, or Dismiss for a failure held on this phone.
+ * would offer Reply failed, Try again when the read of its answer's wakes failed, Mark read or Mark unread, Copy, then
+ * Done, or Dismiss for a failure held on this phone.
  */
 export function noticeRowAccessibility(notice: PhoneNotice): {
   label: string;
@@ -112,6 +127,7 @@ export function noticeRowAccessibility(notice: PhoneNotice): {
   const actions = [
     ...(worded ? [{ name: "worded", label: worded }] : []),
     ...(notice.retryTarget ? [{ name: "retryTarget", label: noticesWords.tryAgain }] : []),
+    ...(wakeRetry(notice) ? [{ name: "retryWakes", label: noticesWords.tryAgain }] : []),
     ...(marksRead(notice)
       ? [{ name: "read", label: notice.read ? noticesWords.markUnread : noticesWords.markRead }]
       : []),
@@ -128,6 +144,7 @@ export function noticeRowAccessibility(notice: PhoneNotice): {
     notice.title,
     notice.body,
     answerStatus(notice),
+    ...answerWakes(notice),
     notice.retryTarget ? noticesWords.targetReadFailed : null,
     noticeMeta(notice, time),
   ]

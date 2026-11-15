@@ -1,3 +1,4 @@
+import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
 import type { ChatWrite } from "../server/chatWrites";
 import { OutboxError, type OutboxState } from "../server/outbox";
 import type { Lanes, WriteOutbox } from "./conversationWrites";
@@ -181,11 +182,145 @@ const openDecisions: readonly Message[] = [
   },
 ];
 
+/** Your message in #planning that mentions an agent. */
+const asking = (id: string, minute: number, agent: string, text: string): Message => ({
+  id,
+  threadId: PLANNING_THREAD,
+  author: me,
+  at: `10:${String(minute).padStart(2, "0")}`,
+  minute,
+  body: [{ mention: agent, agent: true }, { text }],
+});
+
+/** Design review only: `talk-wakes` shows #planning as these messages, each waking agents. */
+const wakeMessages: readonly Message[] = [
+  asking("k1", 0, "Nova", " can you book a table for Friday?"),
+  asking("k2", 10, "Scout", " check the flat's wifi, and ask the other agent too."),
+  asking("k3", 20, "Nova", " add the museum hours to the itinerary."),
+  asking("k4", 30, "Scout", " update the budget with the train fares."),
+  {
+    ...asking("k5", 40, "Atlas", " and "),
+    body: [
+      { mention: "Atlas", agent: true },
+      { text: " and " },
+      { mention: "Echo", agent: true },
+      { text: ", that's all for today." },
+    ],
+  },
+];
+
+/** A wake as the server's context would give it for `talk-wakes`. */
+const sampleWake = (
+  sequence: number,
+  messageId: string,
+  fields: Pick<PhoneChatWake, "state" | "agentName" | "winnerLabel" | "canRetry">,
+): PhoneChatWake => ({
+  wakeId: `wake-${String(sequence).padStart(32, "0")}`,
+  messageId,
+  threadId: PLANNING_THREAD,
+  generation: 1,
+  ...fields,
+});
+
+/**
+ * `talk-wakes`'s wakes, by message: each state that shows a line, an agent with no current name, two wakes with the
+ * same name, ended wakes with and without another computer, and a message whose wakes show none.
+ */
+const wakesByMessage: ReadonlyMap<string, readonly PhoneChatWake[]> = new Map([
+  [
+    "k1",
+    [
+      sampleWake(1, "k1", {
+        state: "waiting",
+        agentName: "Nova",
+        winnerLabel: null,
+        canRetry: false,
+      }),
+    ],
+  ],
+  [
+    "k2",
+    [
+      sampleWake(2, "k2", {
+        state: "claimed",
+        agentName: "Scout",
+        winnerLabel: "Ice's Mac",
+        canRetry: false,
+      }),
+      sampleWake(3, "k2", {
+        state: "claimed",
+        agentName: null,
+        winnerLabel: null,
+        canRetry: false,
+      }),
+    ],
+  ],
+  [
+    "k3",
+    [
+      sampleWake(4, "k3", {
+        state: "unclaimed",
+        agentName: "Nova",
+        winnerLabel: null,
+        canRetry: true,
+      }),
+      sampleWake(5, "k3", {
+        state: "unclaimed",
+        agentName: "Nova",
+        winnerLabel: null,
+        canRetry: false,
+      }),
+    ],
+  ],
+  [
+    "k4",
+    [
+      sampleWake(6, "k4", {
+        state: "unconfirmed",
+        agentName: "Scout",
+        winnerLabel: "Studio Mac",
+        canRetry: false,
+      }),
+      sampleWake(7, "k4", {
+        state: "unconfirmed",
+        agentName: null,
+        winnerLabel: null,
+        canRetry: true,
+      }),
+    ],
+  ],
+  [
+    "k5",
+    [
+      sampleWake(8, "k5", {
+        state: "held",
+        agentName: "Atlas",
+        winnerLabel: null,
+        canRetry: false,
+      }),
+      sampleWake(9, "k5", {
+        state: "queued",
+        agentName: "Echo",
+        winnerLabel: "Ice's Mac",
+        canRetry: false,
+      }),
+    ],
+  ],
+]);
+
+/** The wakes a sample chat shows by message: only `talk-wakes` has any. */
+export const sampleWakesFor = (
+  demo: string | null,
+): ReadonlyMap<string, readonly PhoneChatWake[]> | null =>
+  demo === "talk-wakes" ? wakesByMessage : null;
+
 /** #planning's messages, with `talk-decisions`'s open poll and question before Nova's work. */
 const planningFor = (demo: string | null): readonly Message[] =>
-  demo === "talk-decisions"
-    ? [...sampleMessages.slice(0, -1), ...openDecisions, ...sampleMessages.slice(-1)]
-    : sampleMessages;
+  demo === "talk-wakes"
+    ? wakeMessages
+    : demo === "talk-decisions"
+      ? [...sampleMessages.slice(0, -1), ...openDecisions, ...sampleMessages.slice(-1)]
+      : sampleMessages;
 
 /** The question or poll a sample message asks, as the server would give it. */
 const asked = (id: string, fields: Partial<Asked>): Asked => ({

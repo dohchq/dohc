@@ -20,6 +20,7 @@ import { useTheme } from "../theme";
 import type { PhoneNotice } from "./phoneNotice";
 import { copyText } from "../copy";
 import { ActionPill } from "./ActionPill";
+import { WakeState } from "../conversation/WakeState";
 import { AnswerStatus, NoticeAnswer } from "./NoticeAnswer";
 import {
   ageMinutes,
@@ -111,7 +112,9 @@ export const NoticeRow = memo(function NoticeRow({
   const readToggle = marksRead(notice) && onSetRead !== undefined;
   const worded = editing ? (answer.open ? noticesWords.open : null) : wordedLabel(notice);
   const onWorded = editing ? answer.open : handlers.worded;
-  const pills = worded !== null || readToggle;
+  // Expanded, the answer's own wake lines carry their Try again.
+  const retryWakes = expanded ? undefined : handlers.retryWakes;
+  const pills = worded !== null || readToggle || retryWakes !== undefined;
   const done = notice.relayId !== undefined;
   const onAction = (event: AccessibilityActionEvent) => handlers[event.nativeEvent.actionName]?.();
   const controls = (
@@ -171,7 +174,13 @@ export const NoticeRow = memo(function NoticeRow({
           expanded ? (
             <NoticeAnswer answer={answer} />
           ) : (
-            <AnswerStatus answer={answer} />
+            <>
+              <AnswerStatus answer={answer} />
+              {/* One element collapsed: its Try again is the row's pill and rotor action. */}
+              {answer.wakes ? (
+                <WakeState wakes={answer.wakes.wakes} failed={answer.wakes.failed} />
+              ) : null}
+            </>
           )
         ) : null}
         {notice.retryTarget ? (
@@ -185,6 +194,7 @@ export const NoticeRow = memo(function NoticeRow({
             {notice.retryTarget ? (
               <ActionPill label={noticesWords.tryAgain} onPress={handlers.retryTarget} />
             ) : null}
+            {retryWakes ? <ActionPill label={noticesWords.tryAgain} onPress={retryWakes} /> : null}
             {/* Mark unread is also the swipe right. */}
             {readToggle ? (
               <ActionPill

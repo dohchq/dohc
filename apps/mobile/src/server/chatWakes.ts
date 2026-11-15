@@ -1,0 +1,243 @@
+import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
+import { each, isFields, okAnswer, segment } from "./api";
+import { REQUEST_TIMEOUT_MS, ServerError, type ServerClient } from "./client";
+import { isCursor, type MissingChat } from "./workspaceReads";
+
+// The wakes of the messages a chat or thread shows, from the server's context for the phone, and the account's wake
+// changes. Both answers are checked by hand against the relay's contract (packages/workspace-contracts/src/chatWakes.ts)
+// before the phone keeps them, as the phone's other reads are: the contract's schemas would bring zod into the app.
+// chatWakes.test.ts holds these checks to the contract's. The wake cursor is decimal text, apart from the workspace
+// feed's dotted cursor.
+
+const WAKE_ID = /^wake-[0-9a-f]{32}$/u;
+const WAKE_CURSOR = /^(?:0|[1-9]\d{0,15})$/u;
+const CONTROL = /[\u0000-\u001f\u007f]/u;
+const WAKE_STATES: ReadonlySet<string> = new Set([
+  "held",
+  "waiting",
+  "claimed",
+  "queued",
+  "unclaimed",
+  "unconfirmed",
+]);
+const line = (value: unknown, maxChars: number): value is string =>
+  typeof value === "string" &&
+  value.length > 0 &&
+  value.length <= maxChars &&
+  value === value.trim() &&
+  !CONTROL.test(value);
+const id = (value: unknown): value is string => line(value, 1_024);
+const order = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+const isWakeCursor = (value: unknown): value is string =>
+  typeof value === "string" && WAKE_CURSOR.test(value);
+
+/** One wake as the contract's `PhoneChatWake` has it, or null. */
+export function phoneChatWake(item: unknown): PhoneChatWake | null {
+  if (!isFields(item)) return null;
+  const { wakeId, messageId, threadId, generation, state, winnerLabel, agentName, canRetry } = item;
+  if (
+    Object.keys(item).length !== 8 ||
+    typeof wakeId !== "string" ||
+    !WAKE_ID.test(wakeId) ||
+    !id(messageId) ||
+    !id(threadId) ||
+    !order(generation) ||
+    typeof state !== "string" ||
+    !WAKE_STATES.has(state) ||
+    (winnerLabel !== null && !line(winnerLabel, 64)) ||
+    (agentName !== null &&
+      (typeof agentName !== "string" || agentName.length < 1 || agentName.length > 256)) ||
+    typeof canRetry !== "boolean"
+  )
+    return null;
+  return {
+    wakeId,
+    messageId,
+    threadId,
+    generation,
+    state: state as PhoneChatWake["state"],
+    winnerLabel,
+    agentName,
+    canRetry,
+  };
+}
+
+type Conversation =
+  | { readonly kind: "stream"; readonly groupId: string }
+  | { readonly kind: "thread"; readonly threadId: string; readonly nextBefore: number | null };
+
+/** The parts of a `PhoneChatContext` the phone keeps, or null when the answer isn't one. */
+export function phoneChatContext(result: unknown): {
+  readonly conversation: Conversation;
+  readonly wakes: readonly PhoneChatWake[];
+  readonly wakeCursor: string;
+} | null {
+  if (!isFields(result) || result.ok !== true || !isWakeCursor(result.wakeCursor)) return null;
+  const { conversation } = result;
+  if (!isFields(conversation) || !Array.isArray(result.mentions) || result.mentions.length > 256)
+    return null;
+  const wakes =
+    Array.isArray(result.wakes) && result.wakes.length <= 6_400
+      ? each(result.wakes, phoneChatWake)
+      : null;
+  if (!wakes) return null;
+  if (conversation.kind === "stream" && id(conversation.groupId))
+    return {
+      conversation: { kind: "stream", groupId: conversation.groupId },
+      wakes,
+      wakeCursor: result.wakeCursor,
+    };
+  if (
+    conversation.kind === "thread" &&
+    id(conversation.threadId) &&
+    (conversation.nextBefore === null || order(conversation.nextBefore))
+  )
+    return {
+      conversation: {
+        kind: "thread",
+        threadId: conversation.threadId,
+        nextBefore: conversation.nextBefore,
+      },
+      wakes,
+      wakeCursor: result.wakeCursor,
+    };
+  return null;
+}
+
+/** A `PhoneWakeChanges` answer, or null. */
+export function phoneWakeChanges(
+  body: unknown,
+):
+  | { readonly cursor: string; readonly replace: true }
+  | { readonly cursor: string; readonly threads: readonly string[] }
+  | null {
+  if (!isFields(body) || body.ok !== true || !isWakeCursor(body.cursor)) return null;
+  if (body.replace === true)
+    return Object.keys(body).length === 3 ? { cursor: body.cursor, replace: true } : null;
+  if (!Array.isArray(body.threads) || body.threads.length > 1_000 || Object.keys(body).length !== 3)
+    return null;
+  const threads = each(body.threads, (thread) => (id(thread) ? thread : null));
+  return threads ? { cursor: body.cursor, threads } : null;
+}
+
+/** A conversation whose wakes the phone reads: a chat's stream, or a thread. */
+export type WakeTarget =
+  | { readonly kind: "stream"; readonly groupId: string }
+  | { readonly kind: "thread"; readonly threadId: string };
+
+/** One page of a conversation's context: its wakes, the wake cursor it was read at, and a thread's older boundary. */
+export interface ChatContextPage {
+  readonly kind: "context";
+  readonly wakes: readonly PhoneChatWake[];
+  readonly wakeCursor: string;
+  /** The message order before which a thread's older page starts, or null once its first message is covered. */
+  readonly nextBefore: number | null;
+}
+
+/** The longest the server holds a wake-changes request open: the contract's `CHAT_WAKE_WAIT_MAX_MS`. */
+export const WAKE_HOLD_MS = 25_000;
+
+/** One context page: a stream's newest items, or a thread's newest messages before `before`. */
+export function readChatContext(
+  client: ServerClient,
+  workspaceId: string,
+  target: WakeTarget,
+  signal: AbortSignal,
+  before?: number,
+): Promise<ChatContextPage | MissingChat> {
+  const args =
+    target.kind === "stream"
+      ? { group: target.groupId }
+      : { threadId: target.threadId, ...(before === undefined ? {} : { before }) };
+  return client.send(
+    "POST",
+    `/sync/${segment(workspaceId)}/ops/chatContext`,
+    (body): ChatContextPage | MissingChat | null => {
+      const answer = okAnswer(body);
+      if (!answer || !isCursor(answer.cursor)) return null;
+      const { result } = answer;
+      if (isFields(result) && result.ok === false) {
+        if (result.refusal === "missing") return { kind: "missing" };
+        // The server's copy couldn't do the read: the answer is fine, the read isn't.
+        throw new ServerError("refused", 200);
+      }
+      const parsed = phoneChatContext(result);
+      if (!parsed) return null;
+      const { conversation, wakes, wakeCursor } = parsed;
+      if (target.kind === "stream")
+        return conversation.kind === "stream" && conversation.groupId === target.groupId
+          ? { kind: "context", wakes, wakeCursor, nextBefore: null }
+          : null;
+      if (conversation.kind !== "thread" || conversation.threadId !== target.threadId) return null;
+      if (wakes.some((wake) => wake.threadId !== target.threadId)) return null;
+      // An older page starts before the page it follows, so paging always ends.
+      const { nextBefore } = conversation;
+      if (nextBefore !== null && before !== undefined && nextBefore >= before) return null;
+      return { kind: "context", wakes, wakeCursor, nextBefore };
+    },
+    args,
+    { signal },
+  );
+}
+
+/**
+ * Every wake of a conversation the phone shows. A stream's context covers the items its read shows. The phone's thread
+ * read has no message order, so a thread's pages are followed to its first message. The cursor is the earliest page's,
+ * so a change during the paging is still answered by `readWakeChanges`.
+ */
+export async function readConversationWakes(
+  client: ServerClient,
+  workspaceId: string,
+  target: WakeTarget,
+  signal: AbortSignal,
+): Promise<
+  { readonly wakes: readonly PhoneChatWake[]; readonly wakeCursor: string } | MissingChat
+> {
+  const wakes: PhoneChatWake[] = [];
+  let wakeCursor: string | null = null;
+  let before: number | undefined;
+  for (;;) {
+    const page = await readChatContext(client, workspaceId, target, signal, before);
+    if (page.kind === "missing") return page;
+    wakes.push(...page.wakes);
+    wakeCursor =
+      wakeCursor === null ? page.wakeCursor : earlierWakeCursor(wakeCursor, page.wakeCursor);
+    if (page.nextBefore === null) return { wakes, wakeCursor };
+    before = page.nextBefore;
+  }
+}
+
+/** `replace` when every context must be read again. Otherwise the threads whose wakes changed, which may be none. */
+export type WakeChanges =
+  | { readonly cursor: string; readonly replace: true }
+  | { readonly cursor: string; readonly replace: false; readonly threads: readonly string[] };
+
+/** Waits up to `holdMs` for a wake change after `since` in the workspace, and answers what changed and the next cursor. */
+export function readWakeChanges(
+  client: ServerClient,
+  workspaceId: string,
+  since: string,
+  options: { readonly holdMs: number; readonly signal: AbortSignal },
+): Promise<WakeChanges> {
+  const query = `since=${encodeURIComponent(since)}&hold=${options.holdMs}`;
+  return client.send(
+    "GET",
+    `/sync/${segment(workspaceId)}/ops/wakeChanges?${query}`,
+    (body): WakeChanges | null => {
+      const answer = phoneWakeChanges(body);
+      if (!answer) return null;
+      return "replace" in answer
+        ? { cursor: answer.cursor, replace: true }
+        : { cursor: answer.cursor, replace: false, threads: answer.threads };
+    },
+    undefined,
+    { signal: options.signal, timeoutMs: options.holdMs + REQUEST_TIMEOUT_MS },
+  );
+}
+
+/** The lower of two wake cursors. Each is decimal text without leading zeros, so a shorter one is lower. */
+export function earlierWakeCursor(a: string, b: string): string {
+  if (a.length !== b.length) return a.length < b.length ? a : b;
+  return a <= b ? a : b;
+}

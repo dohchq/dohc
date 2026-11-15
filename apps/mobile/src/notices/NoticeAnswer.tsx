@@ -9,6 +9,7 @@ import { LocalFooter } from "../conversation/MessageRow";
 import { ReplyContext, replyLabel, type ReplyTo } from "../conversation/ReplyContext";
 import type { Message } from "../conversation/types";
 import type { AnswerActions } from "../conversation/useOutbox";
+import { WakeState } from "../conversation/WakeState";
 import { useTheme } from "../theme";
 import type { NoticeAnswerView } from "./phoneNotice";
 
@@ -91,6 +92,13 @@ export function NoticeAnswer({ answer }: { answer: NoticeAnswerView }) {
         decision={decision}
         {...(open && polls ? { answers: choices } : {})}
       />
+      {answer.wakes ? (
+        <WakeState
+          wakes={answer.wakes.wakes}
+          failed={answer.wakes.failed}
+          onRetry={answer.wakes.retry}
+        />
+      ) : null}
       {answer.marks.map((mark) => (
         <LocalFooter
           key={mark.operationId}

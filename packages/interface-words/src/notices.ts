@@ -61,6 +61,9 @@ export const phoneSyncBody: Record<keyof typeof syncProblemSentence, string> = {
   serverNeedsUpdate: `${syncProblemSentence.serverNeedsUpdate} Messages wait on this phone until then.`,
 };
 
+/** A wake's agent: its current name, or "An agent" when no computer declares it now. Never an older name. */
+const wakeAgent = (name: string | null) => name ?? "An agent";
+
 export const chatWords = {
   /** A message written while the server can't be reached, queued on this device. */
   waitingToSend: "Waiting to send",
@@ -166,6 +169,20 @@ export const chatWords = {
    * keeps it as an ordinary reply.
    */
   answerClosed: "dohc can't send this answer, because the question was answered or removed.",
+
+  // The phone's: where each agent a message wakes stands, one line per wake (packages/workspace-contracts/src/chatWakes.ts).
+  // `name` is the agent's, or null; `computer` is the computer that took the wake, or null.
+  wakeWaiting: (name: string | null) => `${wakeAgent(name)} is waiting for a computer`,
+  wakeStarting: (name: string | null, computer: string | null) =>
+    `${wakeAgent(name)} is starting on ${computer ?? "a computer"}`,
+  wakeNotStarted: (name: string | null) => `${wakeAgent(name)} didn't start`,
+  /** The computer took the wake but never said the agent started. */
+  wakeUnconfirmed: (name: string | null, computer: string | null) =>
+    `${wakeAgent(name)} isn't confirmed on ${computer ?? "a computer"}. It may have started.`,
+  /** Under a wake that didn't start or wasn't confirmed, when no other computer's lease of the agent holds. */
+  wakeNoOtherComputer: "No other computer can run this agent.",
+  /** A read of a conversation's wakes failed: the last lines stay, with Try again. */
+  wakeReadFailed: "dohc could not read this agent's state.",
 } as const;
 
 // A notice's time, as the desktop's Notices show it (apps/desktop/src/renderer/relativeTime.ts, which can move here).
