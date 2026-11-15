@@ -44,10 +44,9 @@ pub use source_capture::{
 pub use binary_write::{write_binary_in_tx, write_published_binary_in_tx};
 pub use capture_recovery::{
     CAPTURE_RECOVERY_ORIGIN, CLEARED_CAPTURE_RECOVERY_ORIGIN, CLEARED_MERGE_REMOVAL_ORIGIN,
-    CaptureRecovery, MERGE_REMOVAL_ORIGIN, MERGE_REMOVAL_QUOTE_UNITS, MERGE_REMOVALS_LISTED, MergeRemoval,
-    capture_recoveries_in,
-    clear_capture_recovery_in, is_capture_recovery_origin, merge_removals_in,
-    record_capture_recovery_in_tx, record_deleted_capture_recovery_in_tx,
+    CaptureRecovery, MERGE_REMOVAL_ORIGIN, MERGE_REMOVAL_QUOTE_UNITS, MERGE_REMOVALS_LISTED,
+    MergeRemoval, capture_recoveries_in, clear_capture_recovery_in, is_capture_recovery_origin,
+    merge_removals_in, record_capture_recovery_in_tx, record_deleted_capture_recovery_in_tx,
     record_keyed_capture_recovery_in_tx, record_merge_removal_in,
 };
 pub use capture_write::{

@@ -1377,7 +1377,11 @@ fn a_status_read_quotes_each_removal_and_lists_the_newest_hundred() {
                 .unwrap()
                 .unwrap();
             for index in 0..=MERGE_REMOVALS_LISTED {
-                let removed = if index == MERGE_REMOVALS_LISTED { long.as_str() } else { "x" };
+                let removed = if index == MERGE_REMOVALS_LISTED {
+                    long.as_str()
+                } else {
+                    "x"
+                };
                 dohc_engine_domain::record_merge_removal_in(
                     tx,
                     "ws",

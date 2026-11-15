@@ -204,16 +204,19 @@ pub fn merge_removals_in(
         )
         .map_err(DomainError::sql_corrupt)?;
     let rows = query
-        .query_map(params![workspace_id, MERGE_REMOVAL_ORIGIN, MERGE_REMOVALS_LISTED], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, bool>(5)?,
-            ))
-        })
+        .query_map(
+            params![workspace_id, MERGE_REMOVAL_ORIGIN, MERGE_REMOVALS_LISTED],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, bool>(5)?,
+                ))
+            },
+        )
         .map_err(DomainError::sql_corrupt)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(DomainError::sql_corrupt)?;
