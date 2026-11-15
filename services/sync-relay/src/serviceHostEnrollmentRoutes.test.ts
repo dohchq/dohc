@@ -1132,13 +1132,17 @@ it("serves a finished retirement's F and journal to the workspace owner alone", 
     rows: [],
     nextAfter: null,
   });
-  for (const values of [
+  for (const values of <Record<string, string>[]>[
     { restoreFenceGeneration: String(binding.restoreFenceGeneration + 1) },
     { lineageClaimId: "c".repeat(64) },
     { objectId: "object-2" },
   ])
     expect((await journal(values)).status).toBe(409);
-  for (const values of [{ after: "-1" }, { after: "01" }, { lineageClaimId: "C".repeat(64) }])
+  for (const values of <Record<string, string>[]>[
+    { after: "-1" },
+    { after: "01" },
+    { lineageClaimId: "C".repeat(64) },
+  ])
     expect((await journal(values)).status).toBe(400);
   expect((await f.handle(f.request("GET", undefined, {}, `${query({})}&after=0`))).status).toBe(
     404,
