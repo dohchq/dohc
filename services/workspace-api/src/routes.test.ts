@@ -432,7 +432,8 @@ describe("device verification page", () => {
     const body = await response.text();
     expect(response.status).toBe(403);
     expect(body).toContain("Approve this on a computer");
-    expect(body).toContain("/account/sign-in?next=");
+    expect(body).toContain('id="sign-out-sign-in"');
+    expect(body).toContain('data-next="/account/sign-in?next=');
     expect(body).not.toContain('id="approve"');
   });
 

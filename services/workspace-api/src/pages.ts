@@ -228,12 +228,15 @@ ${field("user_code", "Device code", `type="text" name="user_code" autocomplete="
   }
   if (state.kind === "phone") {
     const next = `/device?user_code=${encodeURIComponent(state.userCode)}`;
+    // A phone's session may only read and end itself, so signing in with a password here starts by ending it.
     return shell({
       title: "Connect your device",
       page: "device-phone",
+      data: { next: `/account/sign-in?next=${encodeURIComponent(next)}` },
       main: `<h1>Approve this on a computer</h1>
-<p>A phone's sign-in can't connect another device. Open this page on a computer, or sign in here with your email and password.</p>
-<p class="links"><a href="${escapeHtml(`/account/sign-in?next=${encodeURIComponent(next)}`)}">Sign in with your password</a></p>`,
+<p>A phone's sign-in can't connect another device. Open this page on a computer, or sign out of the phone's sign-in here and sign in with your email and password.</p>
+<div class="actions"><button type="button" id="sign-out-sign-in" class="secondary">Sign out and sign in</button></div>
+${STATUS}`,
     });
   }
   const connected = state.status === "approved";

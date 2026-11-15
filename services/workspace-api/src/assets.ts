@@ -376,6 +376,19 @@ if (page === "device") {
   );
 }
 
+if (page === "device-phone") {
+  byId("sign-out-sign-in").addEventListener("click", async (event) => {
+    event.target.disabled = true;
+    try {
+      await call("/api/auth/sign-out", {});
+      location.assign(document.body.dataset.next);
+    } catch (error) {
+      setStatus("error", error.message);
+      event.target.disabled = false;
+    }
+  });
+}
+
 if (page === "account") {
   byId("sign-out").addEventListener("click", async (event) => {
     event.target.disabled = true;
