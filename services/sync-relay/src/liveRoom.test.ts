@@ -476,6 +476,33 @@ it("gives the owner others' edits as rows, and each save the last row it holds, 
   expect(owner.doc.getMap("frontmatter").toJSON()).toEqual({ title: "Lisbon", place: "Porto" });
 });
 
+// Proves: a save whose transaction rolls back after the room was told of it leaves the room's edits
+// unsaved, so the room saves them again.
+it("saves an edit again when its save's transaction rolls back", async () => {
+  const f = note();
+  const room = rooms(f, { saveEveryMs: 20 });
+  const a = editor(f, room, ana);
+  await a.open();
+  // The first journal commit fails after its last write, as a failed continuity marker update
+  // does: the transaction rolls back and storage stays open.
+  const storage = f.storage as StorageContext;
+  const tx = storage.tx.bind(storage);
+  let failures = 1;
+  storage.tx = <T>(run: () => T) =>
+    tx(() => {
+      const result = run();
+      if (failures && typeof result === "object" && result !== null && "reply" in result) {
+        failures -= 1;
+        throw new Error("The write failed.");
+      }
+      return result;
+    });
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await vi.waitFor(() => expect(savedAuthors(f)).toEqual([ana]));
+  expect(failures).toBe(0);
+  expect(unsaved(f)).toEqual([]);
+});
+
 // Proves: a lease the owner's feed read and holds for the owner's next read is released when the
 // owner closes, as each holds reserved output bytes.
 it("releases the owner's held feed lease when the owner closes", async () => {

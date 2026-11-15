@@ -441,14 +441,17 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
             authors,
             committed(journalCursor) {
               deleteSavedLiveRoomEdits(storage, room.document, through);
-              room.savedThrough = through;
-              // The save's journal row is in the room already, and a page that joins may have
-              // read the note through it. Its echo changes nothing, so it moves no position.
-              room.position = Math.max(room.position, journalCursor);
-              room.saves.set(journalCursor, through);
-              if (room.saves.size > REMEMBERED_SAVES)
-                room.saves.delete(room.saves.keys().next().value!);
-              committed = true;
+              // The room moves on only once the save's transaction has committed.
+              return () => {
+                room.savedThrough = through;
+                // The save's journal row is in the room already, and a page that joins may have
+                // read the note through it. Its echo changes nothing, so it moves no position.
+                room.position = Math.max(room.position, journalCursor);
+                room.saves.set(journalCursor, through);
+                if (room.saves.size > REMEMBERED_SAVES)
+                  room.saves.delete(room.saves.keys().next().value!);
+                committed = true;
+              };
             },
           },
         },

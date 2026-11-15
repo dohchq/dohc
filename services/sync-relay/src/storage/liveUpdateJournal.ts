@@ -1882,7 +1882,7 @@ export function commitLiveUpdateJournal(
           if (typeof save.committed !== "function") throw new TypeError("Invalid live room save.");
           return {
             authors: parseAdmittedLiveAuthorSnapshot(save.authors, expectedAuthority),
-            committed: save.committed as (journalCursor: number) => void,
+            committed: save.committed as (journalCursor: number) => () => void,
           };
         })();
   // A room's save is the room's own write under the owner's authority, never an editor's.
@@ -1918,6 +1918,7 @@ export function commitLiveUpdateJournal(
   const refused = (
     result: Exclude<RelayLiveUpdateJournalResult["result"], { kind: "accepted" }>,
   ) => ({ reply: { result, admitted: null } as RelayLiveUpdateJournalResult });
+  let roomCommitted: (() => void) | undefined;
   let committed: {
     reply: RelayLiveUpdateJournalResult;
     row?: DecodedJournalRow;
@@ -2221,7 +2222,7 @@ export function commitLiveUpdateJournal(
           .prepare(`UPDATE sync_relay_personal_agents SET last_action_at_ms = MAX(COALESCE(last_action_at_ms, 0), ?)
           WHERE agent_id = ?`)
           .run(receivedAtMs, request.actor.agentId);
-      room?.committed(admitted.metadata.accepted.receipt.journalCursor);
+      roomCommitted = room?.committed(admitted.metadata.accepted.receipt.journalCursor);
       return {
         reply: {
           result: {
@@ -2247,6 +2248,7 @@ export function commitLiveUpdateJournal(
       return { result: { kind: "retry", reason: "admission-unavailable" }, admitted: null };
     throw error;
   }
+  roomCommitted?.();
   if (committed.row) verifyJournalRow(committed.row);
   if (committed.advancedCut) verifyJournalCut(committed.advancedCut);
   if (committed.history)
