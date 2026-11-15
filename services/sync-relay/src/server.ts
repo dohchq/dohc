@@ -586,9 +586,15 @@ export function createSyncRelayHandler({
   // One lookup per account at a time, so a slower lookup can't store an older
   // email over a newer one. `refreshedAt` lets the member feed skip a repeat
   // lookup within `maxAgeMs`.
-  const accountRefreshes = new Map<string, Promise<void>>();
+  const accountRefreshes = new Map<
+    string,
+    { done: Promise<void>; callers: (AbortSignal | undefined)[] }
+  >();
   const refreshedAt = new Map<string, number>();
-  const refreshAccount = async (userId: string): Promise<void> => {
+  const refreshAccount = async (
+    userId: string,
+    callers: (AbortSignal | undefined)[],
+  ): Promise<void> => {
     const startedAt = nowMs();
     if (!lookupAccountEmail && !lookupVerifiedUserEmail) {
       storage.refreshAccountEmail(userId, null, startedAt);
@@ -602,6 +608,8 @@ export function createSyncRelayHandler({
       const email = verified ?? (await lookupUserEmail?.(userId));
       account = email ? { email, verified: verified !== null } : null;
     }
+    // Once every caller has cancelled, the result is dropped: nothing is stored or claimed.
+    if (callers.every((signal) => signal?.aborted)) return;
     storage.refreshAccountEmail(userId, account, startedAt);
     // Kept in refresh order and capped: forgetting the oldest only costs a lookup.
     refreshedAt.delete(userId);
@@ -622,15 +630,17 @@ export function createSyncRelayHandler({
       return Promise.resolve();
     let running = accountRefreshes.get(userId);
     if (!running) {
-      const started = refreshAccount(userId);
+      const callers: (AbortSignal | undefined)[] = [];
+      const started = { done: refreshAccount(userId, callers), callers };
       running = started;
       accountRefreshes.set(userId, started);
       const clear = () => {
         if (accountRefreshes.get(userId) === started) accountRefreshes.delete(userId);
       };
-      started.then(clear, clear);
+      started.done.then(clear, clear);
     }
-    return signal ? running.then(() => signal.throwIfAborted()) : running;
+    running.callers.push(signal);
+    return signal ? running.done.then(() => signal.throwIfAborted()) : running.done;
   };
 
   function requireShareAction(
