@@ -148,6 +148,40 @@ fn rename_looks_like_remove_plus_add() {
     assert_eq!(retire_paths(&p), ["old-name.md"]);
 }
 
+/// A folder moved with its access rule creates the rule at the destination
+/// before the files arrive, and deletes it at the source after they leave.
+#[test]
+fn a_moved_folder_plans_its_rule_create_first_and_its_delete_last() {
+    let ws = Scratch::new();
+    ws.write("team/access.yaml", b"members: view\n");
+    ws.write("team/a.md", b"alpha\n");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+
+    ws.rename("team", "crew");
+
+    let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    let ops: Vec<_> = p
+        .ops
+        .iter()
+        .map(|op| match op {
+            CaptureOp::Ingest { path, .. } => format!("write {path}"),
+            CaptureOp::Retire { path } => format!("delete {path}"),
+        })
+        .collect();
+    assert_eq!(
+        ops,
+        [
+            "write crew/access.yaml",
+            "write crew/a.md",
+            "delete team/a.md",
+            "delete team/access.yaml",
+        ]
+    );
+}
+
 /// APFS keeps finding a file through its old spelling after a rename that
 /// changes only case or Unicode normalization. The old spelling must still
 /// retire, or it stays tracked beside the new one and every pass is degraded.

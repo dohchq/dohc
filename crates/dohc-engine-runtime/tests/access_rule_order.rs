@@ -703,6 +703,28 @@ fn undoing_a_copied_rule_removes_it_only_from_a_folder_it_leaves_empty() {
     }
 }
 
+/// A folder moved on disk with its rule reaches the engine as capture's
+/// plan orders it: the rule's create at the destination, the files' writes
+/// there, their deletes at the source, and the source rule's delete last.
+#[test]
+fn a_moved_ruled_folder_journals_its_rule_create_first_and_delete_last() {
+    let f = ruled_team();
+    let mut expected = f.journal();
+    std::fs::rename(f.root().join("team"), f.root().join("crew")).unwrap();
+    f.settle();
+    f.capture_ok(&["crew/access.yaml", "crew/a.md"]);
+    f.retire("team/a.md").expect("retire the moved file");
+    f.retire("team/access.yaml").expect("retire the moved rule");
+    expected.extend(lines(&[
+        "write crew/access.yaml",
+        "write crew/a.md",
+        "delete team/a.md",
+        "delete team/access.yaml",
+    ]));
+    assert_eq!(f.journal(), expected);
+    assert!(f.holds().is_empty());
+}
+
 fn delete(path: &str, moment: &str) -> DeleteTextFile {
     DeleteTextFile {
         workspace_id: WS.to_owned(),
