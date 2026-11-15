@@ -1097,7 +1097,13 @@ export class YdocAdapterSession {
   ): Promise<YdocRecordUpdateResult> {
     for (const earlier of [...this.pendingRecords]) {
       if (earlier === record) break;
-      await this.requestRecordUpdate(earlier);
+      if (!this.pendingRecords.has(earlier)) continue;
+      try {
+        await this.requestRecordUpdate(earlier);
+      } catch (error) {
+        // A refusal for good retires only the edits that build on that one.
+        if (!isYdocUpdateAdmissionRefusal(error)) throw error;
+      }
     }
     if (record.refusal !== undefined) throw record.refusal;
     return this.requestRecordUpdate(record);

@@ -7885,6 +7885,60 @@ describe("immutable original-record recovery", () => {
     adapter.dispose();
   });
 
+  it("still saves an independent edit when an edit left unsent ahead of it is refused for good", async () => {
+    const engine = seedPlaintextEngine("abc");
+    let aliceKey: Request["idempotencyKey"];
+    let busy = false;
+    const adapter = new YdocLiveAdapter({
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          if (busy) {
+            aliceKey ??= request.idempotencyKey;
+            throw new DaemonRefusalError(
+              { code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" },
+              undefined,
+            );
+          }
+          if (request.idempotencyKey === aliceKey) {
+            throw new DaemonRefusalError(
+              { code: "FORBIDDEN", message: "author-refused", retry: "no" },
+              undefined,
+            );
+          }
+        }
+        return engine.sendRequest(request);
+      },
+    });
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+    });
+    const refused: string[] = [];
+    session.onLocalUpdateRefused((id) => refused.push(id));
+    busy = true;
+    await expect(
+      session.applyLocalTextEdit(
+        { root: "plainText", index: 0, deleteLength: 1 },
+        { actorOriginId: "alice-agent" },
+      ),
+    ).rejects.toBeInstanceOf(DaemonRefusalError);
+    busy = false;
+    await expect(
+      session.applyLocalTextEdit(
+        { root: "plainText", index: 2, insert: "d" },
+        { actorOriginId: "bob-agent" },
+      ),
+    ).resolves.toBeDefined();
+    expect(refused).toEqual([aliceKey]);
+    expect(session.missingLocalState).toBe(false);
+    await expect(session.settle()).resolves.toMatchObject({ content: "abcd" });
+    await session.close();
+    adapter.dispose();
+  });
+
   it("replays mixed pending authors separately, including an original deletion-only record", async () => {
     const engine = seedPlaintextEngine("abc");
     let busy = false;
