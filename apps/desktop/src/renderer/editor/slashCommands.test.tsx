@@ -243,6 +243,17 @@ describe("the slash trigger after an inline atom", () => {
     expect(stateRef.current).toMatchObject({ open: true, from: 10, query: "he" });
     editor.destroy();
   });
+
+  it("finds the / that starts a line after a hard break", () => {
+    const { editor, stateRef } = makeSlashEditor();
+    editor.commands.insertContent([
+      { type: "text", text: "a" },
+      { type: "hardBreak" },
+      { type: "text", text: "/he" },
+    ]);
+    expect(stateRef.current).toMatchObject({ open: true, from: 3, query: "he" });
+    editor.destroy();
+  });
 });
 
 // A collaborator's edits arrive through Y.js, which replaces the whole

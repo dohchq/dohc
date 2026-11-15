@@ -251,9 +251,12 @@ function findSlashTrigger(state: EditorState): { from: number; query: string } |
   if (!selection.empty) return null;
   const $from = selection.$from;
   if (!$from.parent.isTextblock) return null;
-  // Each inline atom counts as one character, its size, so offsets are positions.
+  // Each leaf counts as one character, its size, so offsets are positions.
+  // A hard break starts a line, where a "/" opens the menu.
   const match = findSlashCommandMatch(
-    $from.parent.textBetween(0, $from.parentOffset, undefined, "￼"),
+    $from.parent.textBetween(0, $from.parentOffset, undefined, (leaf) =>
+      leaf.type.name === "hardBreak" ? "\n" : "￼",
+    ),
   );
   return match ? { from: $from.start() + match.slashOffset, query: match.query } : null;
 }
