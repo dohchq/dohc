@@ -180,10 +180,23 @@ describe("workspaceActivity capture hooks", () => {
     expect(activity.getStatus("activity-test").outsideWriteCopyReadError).toBe("broken receipt");
     hooks.onOutsideWriteCopies?.([["n.md", "n (kept copy).md", "copy-n-1"]], null);
     expect(activity.getStatus("activity-test").outsideWriteCopyReadError).toBeNull();
+    const rule = {
+      versionId: "main",
+      folder: "team",
+      reason: "widened" as const,
+      observedSha256: "digest",
+      recordedAtMs: 1,
+    };
+    expect(activity.getStatus("activity-test").heldAccessRules).toEqual([]);
+    hooks.onHeldAccessRules([rule]);
+    hooks.onHeldAccessRules([rule]);
+    expect(activity.getStatus("activity-test").heldAccessRules).toEqual([rule]);
+    expect(notify).toHaveBeenCalledTimes(6);
     await activity.stopAll();
     hooks.onRetainedCopies({ count: 4, bytes: 400 });
     hooks.onOutsideWriteCopies?.([], "retired capture");
-    expect(notify).toHaveBeenCalledTimes(5);
+    hooks.onHeldAccessRules([]);
+    expect(notify).toHaveBeenCalledTimes(6);
   });
   it("attaches observation after capture fails and queues sync only for capture announcements", async () => {
     let observation!: WorkspaceObservationCallbacks;

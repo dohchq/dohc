@@ -1018,6 +1018,16 @@ export function isCaptureFileHeldRefusal(error: unknown): boolean {
   );
 }
 
+/** The access rule changed again since the owner saw its Notice. The Notice already shows it as it is now. */
+export function isAccessRuleChangedRefusal(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  return (
+    name === "DaemonRefusalError" &&
+    code === "CONFLICT" &&
+    message.startsWith("access-rule-changed: ")
+  );
+}
+
 // A note changed outside dohc closed, but capture has not recorded the new
 // version, so the note did not open again. Try again sits beside it.
 export function outsideVersionWaitingMessage(path: string): string {

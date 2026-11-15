@@ -2,6 +2,7 @@ import type { GraphNode } from "./workbench/graphData";
 import { useTypingRecoveryNotices } from "./shell/useTypingRecoveryNotices";
 import { useProtectedCopyNotices } from "./shell/useProtectedCopyNotices";
 import { useOutsideChangeNotices } from "./shell/useOutsideChangeNotices";
+import { useAccessRuleHoldNotices } from "./shell/useAccessRuleHoldNotices";
 import { isRefusalNoticeKind } from "../notices/refusalNoticeKind";
 import { useFolderAppOffers } from "./offers/useFolderAppOffers";
 import { withClosedEngineDocSession } from "./collab/engineDocLease";
@@ -7975,6 +7976,13 @@ export function DesktopWorkspaceShell(props: {
   useOutsideChangeNotices({
     workspaceId,
     changes: syncStatus?.outsideChanges,
+    reportShellFailure,
+    clearIdentity,
+  });
+  useAccessRuleHoldNotices({
+    workspaceId,
+    workspaceName: workspaceName(props.workspace),
+    holds: shareView ? undefined : syncStatus?.heldAccessRules,
     reportShellFailure,
     clearIdentity,
   });

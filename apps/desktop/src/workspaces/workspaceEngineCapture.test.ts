@@ -242,6 +242,7 @@ interface CaptureOptions {
   onRetainedCopies?: WorkspaceEngineCaptureOptions["onRetainedCopies"];
   onHeldFiles?: WorkspaceEngineCaptureOptions["onHeldFiles"];
   onOutsideChanges?: WorkspaceEngineCaptureOptions["onOutsideChanges"];
+  onHeldAccessRules?: WorkspaceEngineCaptureOptions["onHeldAccessRules"];
   rustEngineSessions?: EngineWorkspaceSessions;
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
@@ -1965,6 +1966,15 @@ describe("workspaceEngineCapture batch capture", () => {
               recoveryUnavailable: true,
               secretKeyUnavailable: "key-missing",
               heldFiles: [],
+              heldAccessRules: [
+                {
+                  versionId: "main",
+                  folder: "team",
+                  reason: "removed",
+                  observedSha256: null,
+                  recordedAtMs: 1,
+                },
+              ],
             });
           if (property === "listKeptCopies") return async () => native;
           if (property === "listPendingCollectionAdoptions") return adoptions;
@@ -1978,7 +1988,8 @@ describe("workspaceEngineCapture batch capture", () => {
         recovery = vi.fn(),
         secretKey = vi.fn(),
         held = vi.fn(),
-        outside = vi.fn();
+        outside = vi.fn(),
+        heldRules = vi.fn();
       const outcomes = vi.fn(),
         errors = vi.fn();
       const engine = capture(root, {
@@ -1989,6 +2000,7 @@ describe("workspaceEngineCapture batch capture", () => {
         onRecoveryUnavailable: recovery,
         onSecretKeyUnavailable: secretKey,
         onHeldFiles: held,
+        onHeldAccessRules: heldRules,
         onOutsideWriteCopies: outside,
         onCaptureOutcome: outcomes,
         onError: errors,
@@ -2001,6 +2013,15 @@ describe("workspaceEngineCapture batch capture", () => {
         expect(recovery).toHaveBeenCalledWith(true);
         expect(secretKey).toHaveBeenCalledWith("key-missing");
         expect(held).toHaveBeenCalledWith([]);
+        expect(heldRules).toHaveBeenCalledWith([
+          {
+            versionId: "main",
+            folder: "team",
+            reason: "removed",
+            observedSha256: null,
+            recordedAtMs: 1,
+          },
+        ]);
         expect(adoptions).toHaveBeenCalled();
         expect(outcomes).toHaveBeenLastCalledWith(null, null);
         expect(errors).not.toHaveBeenCalled();

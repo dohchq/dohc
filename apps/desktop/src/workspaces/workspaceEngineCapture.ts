@@ -1,5 +1,5 @@
 import type { OutsideChange } from "@dohc/workspace-contracts/outside-changes";
-import type { CaptureFileHold } from "../ipc/bridgeContract";
+import type { AccessRuleHold, CaptureFileHold } from "../ipc/bridgeContract";
 import type { HeldNoteChangeInput, HeldNoteChangeResult } from "@dohc/workspace-engine-client";
 import { duplicateWithRecovery } from "./workspaceDuplicateOutcome";
 import { resolveEngineFileTargets } from "./resolveEngineFiles";
@@ -1025,6 +1025,7 @@ export interface WorkspaceEngineCaptureOptions {
   onRetainedCopies?: (summary: RetainedCopiesSummary) => void;
   onHeldFiles?: (files: CaptureFileHold[]) => void;
   onOutsideChanges?: (changes: OutsideChange[]) => void;
+  onHeldAccessRules?: (holds: AccessRuleHold[]) => void;
   // Injectable disk mutation seam so tests can exercise mid-switch failures
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
@@ -5066,6 +5067,7 @@ export function createWorkspaceEngineCapture(
           options.onSecretKeyUnavailable?.(status.secretKeyUnavailable ?? null);
           options.onHeldFiles?.(status.heldFiles);
           options.onOutsideChanges?.(outsideChangesOf(status));
+          options.onHeldAccessRules?.(status.heldAccessRules);
           for (const path of status.deferredWrites) liveYDocSessions.get(path)?.changedOutside();
         }
         const healthy = captureWorks(status);

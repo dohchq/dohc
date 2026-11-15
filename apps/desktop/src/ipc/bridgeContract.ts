@@ -1633,6 +1633,17 @@ export type CaptureFileHold = z.infer<typeof CaptureFileHold>;
 export const CaptureHoldsEvent = z
   .object({ workspaceId: WORKSPACE_ID, heldFiles: z.array(CaptureFileHold) })
   .strict();
+// A folder whose access rule changed outside dohc. The rule dohc last
+// recorded still applies until the owner decides. `folder` is empty for the
+// workspace's own rule, and `observedSha256` is null when the rule is gone.
+export const AccessRuleHold = z.object({
+  versionId: z.string().min(1),
+  folder: z.string(),
+  reason: z.enum(["widened", "removed"]),
+  observedSha256: z.string().min(1).nullable(),
+  recordedAtMs: z.number().int(),
+});
+export type AccessRuleHold = z.infer<typeof AccessRuleHold>;
 export type CaptureHoldsEvent = z.infer<typeof CaptureHoldsEvent>;
 
 const SYNC_STATUS_BASE_FIELDS = {
@@ -1706,6 +1717,7 @@ const SYNC_STATUS_BASE_FIELDS = {
     .optional(),
   heldFiles: z.array(CaptureFileHold).optional(),
   outsideChanges: z.array(OutsideChange).optional(),
+  heldAccessRules: z.array(AccessRuleHold).optional(),
   // Collection updates wait for a pull that has not finished, as the engine
   // answers. "sync" while ordinary sync is on, signed in or not, so a pass
   // that finishes the pull ends it. "reopen" after sync paused but the
@@ -1897,6 +1909,24 @@ export const captureRecoveryOperations = {
     handlerCheck: {
       check: "withRendererWorkspaceOperation",
       reason: "Only the sending window's active workspace can retry a held file.",
+    },
+  },
+  // Keeps a held access rule as it is on disk, or puts back the rule dohc
+  // last recorded. Refused when the rule changed since `expectedSha256`.
+  decideAccessRule: {
+    capabilityId: "capture.access.decide",
+    channel: "desktop:decide-access-rule",
+    payload: WorkspaceIdPayload.extend({
+      folder: z.string(),
+      decision: z.enum(["accept", "restore"]),
+      expectedSha256: z.string().min(1).nullable(),
+    }),
+    result: z.object({ heldAccessRules: z.array(AccessRuleHold) }),
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: {
+      check: "withRendererWorkspaceOperation",
+      reason: "Only the sending window's active workspace can decide a held access rule.",
     },
   },
   getCaptureRecoveryStatus: {

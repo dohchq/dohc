@@ -1840,6 +1840,22 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
     return this.workspaceRequest(WORKSPACE_METHOD.captureRetryHeld, { path });
   }
 
+  /** Keeps a held access rule as it is on disk, or puts back the recorded one. */
+  async decideAccessRule(input: {
+    folder: string;
+    decision: "accept" | "restore";
+    expectedSha256: string | null;
+  }) {
+    const method =
+      input.decision === "accept"
+        ? WORKSPACE_METHOD.captureAcceptAccessRule
+        : WORKSPACE_METHOD.captureRestoreAccessRule;
+    return this.workspaceRequest(method, {
+      folder: input.folder,
+      expectedSha256: input.expectedSha256,
+    });
+  }
+
   async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {
     await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author });
   }

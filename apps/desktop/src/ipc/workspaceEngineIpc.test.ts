@@ -311,6 +311,10 @@ async function harness(
     clearCaptureRecovery: vi.fn<VersionedLiveAdapter["clearCaptureRecovery"]>(
       async () => undefined,
     ),
+    decideAccessRule: vi.fn<VersionedLiveAdapter["decideAccessRule"]>(async (input) => ({
+      folder: input.folder,
+      decided: true as const,
+    })),
     listCollections: vi.fn<VersionedLiveAdapter["listCollections"]>(async () => ({
       collections: [],
     })),
@@ -437,6 +441,7 @@ async function harness(
       userId === "person-local" ? null : userId,
   );
   const recordHeldFiles = vi.fn();
+  const recordHeldAccessRules = vi.fn();
   const prepareRecordHistoryPeople =
     vi.fn<(_workspaceId: string, userIds: readonly string[], _sender: Sender) => void>();
   const prepareNamed = vi.fn<NonNullable<EngineMomentAuthorNames["prepare"]>>();
@@ -485,6 +490,7 @@ async function harness(
     signedInAccount: () => session.account,
     notifyRenderer: notify,
     recordHeldFiles,
+    recordHeldAccessRules,
     namedAuthorLabels: () => ({ prepare: prepareNamed, named: () => "Someone you shared with" }),
     recordHistoryPersonName,
     prepareRecordHistoryPeople,
@@ -574,6 +580,7 @@ async function harness(
     recordHistoryPersonName,
     prepareRecordHistoryPeople,
     recordHeldFiles,
+    recordHeldAccessRules,
     signIn: (account: string | null) => {
       session.account = account;
       session.generation += 1;
@@ -605,6 +612,7 @@ const channels = [
   CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus,
   captureRecoveryOperations.retryHeldCapture.channel,
+  captureRecoveryOperations.decideAccessRule.channel,
   captureRecoveryOperations.getCaptureRecoveryStatus.channel,
   captureRecoveryOperations.clearCaptureRecovery.channel,
   captureRecoveryOperations.keepOutsideChange.channel,
@@ -846,6 +854,68 @@ describe("workspace engine IPC registrations", () => {
     ).rejects.toThrow("This workspace is no longer active.");
     expect(h.adapter.retryHeldCapture).toHaveBeenCalledOnce();
     expect(h.recordHeldFiles).toHaveBeenCalledOnce();
+  });
+  it("records the holds the engine lists after an access rule decision, also when the engine refuses it", async () => {
+    const h = await harness();
+    const bridge = operationBridge(captureRecoveryOperations, async (channel, payload) =>
+      h.invoke(channel, payload),
+    );
+    const judgedAgain = {
+      versionId: "main",
+      folder: "team",
+      reason: "widened" as const,
+      observedSha256: "b".repeat(64),
+      recordedAtMs: 2,
+    };
+    expect(
+      await bridge.decideAccessRule({
+        workspaceId: "workspace",
+        folder: "team",
+        decision: "restore",
+        expectedSha256: "a".repeat(64),
+      }),
+    ).toEqual({ heldAccessRules: [] });
+    expect(h.adapter.decideAccessRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        folder: "team",
+        decision: "restore",
+        expectedSha256: "a".repeat(64),
+      }),
+    );
+    expect(h.recordHeldAccessRules).toHaveBeenLastCalledWith(h.physical, []);
+    h.adapter.decideAccessRule.mockRejectedValueOnce(new Error("access-rule-changed: team"));
+    h.adapter.watcherStatus.mockResolvedValueOnce({
+      running: true,
+      degraded: false,
+      terminal: false,
+      phase: "ready",
+      noAtomicPlacement: false,
+      recoveryUnavailable: false,
+      deferredWrites: [],
+      keptFiles: [],
+      captureRecoveries: [],
+      heldFiles: [],
+      heldAccessRules: [judgedAgain],
+      retainedCopies: { count: 0, bytes: 0 },
+    });
+    await expect(
+      bridge.decideAccessRule({
+        workspaceId: "workspace",
+        folder: "team",
+        decision: "accept",
+        expectedSha256: "a".repeat(64),
+      }),
+    ).rejects.toThrow("access-rule-changed: team");
+    expect(h.recordHeldAccessRules).toHaveBeenLastCalledWith(h.physical, [judgedAgain]);
+    await expect(
+      bridge.decideAccessRule({
+        workspaceId: "other",
+        folder: "team",
+        decision: "accept",
+        expectedSha256: null,
+      }),
+    ).rejects.toThrow("This workspace is no longer active.");
+    expect(h.adapter.decideAccessRule).toHaveBeenCalledTimes(2);
   });
   it("retries recovery only for the writable workspace this renderer shows", async () => {
     const h = await harness();
