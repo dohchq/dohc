@@ -49,9 +49,11 @@ export function applyUpdateFindingRemovedText(
   let removed: RemovedText | null = null;
   const look = (transaction: Y.Transaction) => {
     if (transaction.origin !== origin || transaction.deleteSet.clients.size === 0) return;
+    // Merging also sorts each client's ranges, which `unnamed` relies on; an
+    // update's own list can arrive in any order.
     removed = findRemovedText(
       transaction,
-      () => (waiting ? Y.mergeDeleteSets([named(), Y.decodeUpdateV2(waiting).ds]) : named()),
+      () => Y.mergeDeleteSets(waiting ? [named(), Y.decodeUpdateV2(waiting).ds] : [named()]),
       keep,
     );
   };
@@ -115,8 +117,8 @@ function unnamed(item: Y.Item, named: DeleteSet): [number, number][] {
   const to = from + item.length;
   const ranges: [number, number][] = [];
   const listed = named.clients.get(item.id.client) ?? [];
-  // A delete set lists each client's ranges in clock order. Start at the
-  // first that reaches this item, so many ranges cost no rescan per item.
+  // `named` lists each client's ranges in clock order. Start at the first
+  // that reaches this item, so many ranges cost no rescan per item.
   let low = 0;
   for (let high = listed.length; low < high;) {
     const middle = (low + high) >>> 1;

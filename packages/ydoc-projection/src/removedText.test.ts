@@ -105,6 +105,18 @@ describe("text a merged change removes without having seen it", () => {
     expect(receive(ana, deleted, anyone)).toBeNull();
   });
 
+  it("reads a delete list whose ranges arrive out of order", () => {
+    const [ana, ben] = pair("Hello", "Keep", "World");
+    const deleted = change(ben, (body) => {
+      body.delete(2, 1);
+      body.delete(0, 1);
+    });
+    const named = Y.decodeUpdate(deleted).ds;
+    for (const ranges of named.clients.values()) ranges.reverse();
+
+    expect(applyUpdateFindingRemovedText(ana, deleted, REMOTE, () => named, anyone)).toBeNull();
+  });
+
   it("reports nothing when two people type into one piece and one deletes words", () => {
     const [ana, ben] = pair("Hello world");
     change(ana, (body) => piece(body, 0).insert(11, "!"));
