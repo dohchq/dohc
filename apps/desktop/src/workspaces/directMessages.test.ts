@@ -221,12 +221,17 @@ ${cat.userId}`).digest("hex").slice(0, 32);
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
     let holding = true;
+    let catDeleting = false;
     fsGate.removing = (path) => {
-      if (path.endsWith(catFolder)) return holding ? held : undefined;
+      if (path.endsWith(catFolder)) {
+        catDeleting = true;
+        return holding ? held : undefined;
+      }
       return Promise.reject(Object.assign(new Error("busy"), { code: "EBUSY" }));
     };
 
     const signedOut = h.service.credentialsChanged(null).catch(() => "failed");
+    await expect.poll(() => catDeleting).toBe(true);
     const signedIn = h.service.credentialsChanged(cat).catch(() => "failed");
     const listing = h.service.list();
     // Let a save that does not wait for the deletion finish first.
