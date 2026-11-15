@@ -1047,6 +1047,14 @@ export function isAccessRuleChangedRefusal(error: unknown): boolean {
   );
 }
 
+/** The hold was decided already, or its Version is no longer active. The list that follows drops its Notice. */
+export function isAccessRuleNotHeldRefusal(error: unknown): boolean {
+  const { name, code, message } = parse(error);
+  return (
+    name === "DaemonRefusalError" && code === "INVALID_PARAMS" && message === "access-rule-not-held"
+  );
+}
+
 // A note changed outside dohc closed, but capture has not recorded the new
 // version, so the note did not open again. Try again sits beside it.
 export function outsideVersionWaitingMessage(path: string): string {
