@@ -1291,21 +1291,12 @@ function escapeLeadingMarkdownBlockSyntax(
 
     // A hard break's two spaces on a line with nothing else read back as a
     // blank line, which ends the paragraph. A backslash keeps the break, but
-    // only before visible text: a backslash that ends a paragraph is literal.
+    // a backslash before a blank line ends the paragraph and is literal.
     if (
       encodeBackslash &&
       node.type === "hardBreak" &&
       lineStart &&
-      preparedContent.slice(index + 1).some(
-        (later) =>
-          later.type !== "hardBreak" &&
-          // A code span of blank space is written in backticks, so it shows.
-          !(
-            typeof later.text === "string" &&
-            !later.marks?.some((mark) => mark.type === "code") &&
-            /^[ \t\n]*$/u.test(later.text)
-          ),
-      )
+      showsLineAfter(preparedContent, index)
     ) {
       output.push({ type: "text", text: `${encodeBackslash()}\n` });
       index += 1;
@@ -1316,6 +1307,24 @@ function escapeLeadingMarkdownBlockSyntax(
     index += 1;
   }
   return output;
+}
+
+// Whether the line after the hard break at `index` shows anything. Breaks that
+// follow it directly start lines of their own, which this answers for in turn.
+function showsLineAfter(content: JSONContent[], index: number): boolean {
+  let next = index + 1;
+  while (content[next]?.type === "hardBreak") next += 1;
+  for (; next < content.length && content[next].type !== "hardBreak"; next += 1) {
+    const node = content[next];
+    // A code span of blank space is written in backticks, so it shows.
+    if (typeof node.text !== "string" || node.marks?.some((mark) => mark.type === "code")) {
+      return true;
+    }
+    const lineEnd = node.text.indexOf("\n");
+    if (/[^ \t]/u.test(lineEnd === -1 ? node.text : node.text.slice(0, lineEnd))) return true;
+    if (lineEnd !== -1) return false;
+  }
+  return false;
 }
 
 // Whether a paragraph is plain text that marked reads back as the one link

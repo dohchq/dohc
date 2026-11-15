@@ -8649,6 +8649,34 @@ fn render_inline(
         }
     }
 
+    // Whether the line after the hard break at `index` shows anything. Breaks
+    // that follow it directly start lines of their own, which this answers for
+    // in turn. A code span is already written in backticks here, so it shows.
+    fn shows_line_after(parts: &[InlinePart<'_>], index: usize) -> bool {
+        let is_break = |part: &InlinePart<'_>| matches!(part, InlinePart::Node(MarkdownNode::Element { tag, .. }) if tag == "hardBreak");
+        let rest = &parts[index + 1..];
+        let first_line = rest
+            .iter()
+            .position(|part| !is_break(part))
+            .unwrap_or(rest.len());
+        for part in &rest[first_line..] {
+            let InlinePart::Text { run, .. } = part else {
+                return !is_break(part);
+            };
+            let (line, ends) = match run.text.split_once('\n') {
+                Some((line, _)) => (line, true),
+                None => (run.text.as_str(), false),
+            };
+            if line.chars().any(|c| c != ' ' && c != '\t') {
+                return true;
+            }
+            if ends {
+                return false;
+            }
+        }
+        false
+    }
+
     let mut rendered_nodes = BTreeMap::new();
     let mut starts_line = true;
     let mut part_index = 0usize;
@@ -8704,19 +8732,13 @@ fn render_inline(
         starts_line = match &parts[part_index] {
             // A hard break's two spaces on a line with nothing else read back
             // as a blank line, which ends the paragraph. A backslash keeps the
-            // break, but only before visible text: a backslash that ends a
-            // paragraph is literal. A table cell writes it as <br>.
+            // break, but a backslash before a blank line ends the paragraph
+            // and is literal. A table cell writes it as <br>.
             InlinePart::Node(MarkdownNode::Element { tag, .. })
                 if tag == "hardBreak"
                     && starts_line
                     && !table_cell
-                    && parts[part_index + 1..].iter().any(|later| match later {
-                        InlinePart::Node(MarkdownNode::Element { tag, .. }) => tag != "hardBreak",
-                        InlinePart::Node(_) => true,
-                        InlinePart::Text { run, .. } => {
-                            !run.text.chars().all(|c| matches!(c, ' ' | '\t' | '\n'))
-                        }
-                    }) =>
+                    && shows_line_after(&parts, part_index) =>
             {
                 rendered_nodes.insert(part_index, "\\\n".to_string());
                 true
