@@ -15,18 +15,23 @@ export interface ReplyTo {
 }
 
 /**
- * "Reply to <name>", or "Answer <name>" for a reply that answers a question, or "Answer" when the read doesn't show it:
- * the context's words and the field's name.
+ * "Reply to <name>", or "Answer <name>" for a reply that answers a question, or "Reply" or "Answer" when the read
+ * doesn't show the message: the context's words and the field's name.
  */
 export const replyLabel = (to: ReplyTo) =>
   to.answers
     ? to.name === ""
       ? chatWords.answer
       : chatWords.answerTo(to.name)
-    : chatWords.replyTo(to.name);
+    : to.name === ""
+      ? chatWords.reply
+      : chatWords.replyTo(to.name);
 
 /** An answer to a question the read doesn't show, as when a read since Answer no longer shows it. */
 export const UNSHOWN_QUESTION: ReplyTo = { name: "", excerpt: "", answers: true };
+
+/** A reply to a message the read doesn't show, as when it went before the thread opened. */
+export const UNSHOWN_MESSAGE: ReplyTo = { name: "", excerpt: "" };
 
 // Above the composer while a reply answers a chosen message: whose, and its start, then Cancel reply. It comes before
 // the field, so VoiceOver reads it first.

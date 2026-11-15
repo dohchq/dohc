@@ -23,6 +23,7 @@ import {
   noticeRowHandlers,
   shortAgo,
   swipesUnread,
+  wordedLabel,
 } from "./rowAccessibility";
 import { useRouter } from "expo-router";
 import { SenderMark } from "./SenderMark";
@@ -66,8 +67,9 @@ export const NoticeRow = memo(function NoticeRow({
   };
   const router = useRouter();
   const { label, actions } = noticeRowAccessibility(notice);
-  // Open goes where the phone can go, and Try again does what the notice says failed. In the dev-only sample, Try again
-  // and an Open with nowhere to go need the server, so they do nothing.
+  // Open goes where the phone can go, Reply opens a mention's thread with its message chosen, and Try again does what
+  // the notice says failed. In the dev-only sample, Try again and an Open with nowhere to go need the server, so they do
+  // nothing.
   const handlers = noticeRowHandlers(notice, {
     open:
       notice.onOpen ??
@@ -75,11 +77,14 @@ export const NoticeRow = memo(function NoticeRow({
         ? () => router.push({ pathname: "/chat/[id]", params: notice.openChat ?? {} })
         : undefined),
     retry: notice.onRetry,
+    retryTarget: notice.retryTarget,
     setRead: onSetRead ? setRead : undefined,
     copy: () => copyText(noticeDetails(notice)),
     dismiss,
   });
   const readToggle = marksRead(notice) && onSetRead !== undefined;
+  const worded = wordedLabel(notice);
+  const pills = worded !== null || readToggle;
   const done = notice.relayId !== undefined;
   const onAction = (event: AccessibilityActionEvent) => handlers[event.nativeEvent.actionName]?.();
   const controls = (
@@ -91,9 +96,7 @@ export const NoticeRow = memo(function NoticeRow({
       done={done}
       demoCopied={demoMode === "notice-copied" && notice.id === "n1"}
       // On the action line their 44pt targets reach 11pt past each icon, so they keep clear of the pill's.
-      style={
-        roomy && (notice.retry || notice.open || readToggle) ? styles.actionControls : undefined
-      }
+      style={roomy && pills ? styles.actionControls : undefined}
     />
   );
   const row = (
@@ -134,16 +137,16 @@ export const NoticeRow = memo(function NoticeRow({
             {notice.body}
           </Text>
         ) : null}
-        {notice.retry || notice.open || readToggle || roomy ? (
+        {notice.retryTarget ? (
+          <Text style={[styles.body, { color: theme.danger }]}>
+            {noticesWords.targetReadFailed}
+          </Text>
+        ) : null}
+        {pills || roomy ? (
           <View style={styles.actions}>
-            {notice.retry ? (
-              <ActionPill label={noticesWords.tryAgain} onPress={handlers.worded} />
-            ) : null}
-            {notice.open ? (
-              <ActionPill
-                label={notice.open === "openNote" ? noticesWords.openNote : noticesWords.open}
-                onPress={handlers.worded}
-              />
+            {worded !== null ? <ActionPill label={worded} onPress={handlers.worded} /> : null}
+            {notice.retryTarget ? (
+              <ActionPill label={noticesWords.tryAgain} onPress={handlers.retryTarget} />
             ) : null}
             {/* Mark unread is also the swipe right. */}
             {readToggle ? (

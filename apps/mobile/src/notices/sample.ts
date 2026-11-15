@@ -109,6 +109,23 @@ export const sampleNotices: readonly PhoneNotice[] = [
   },
 ];
 
+/**
+ * Design review only, in notices-reply, last in the list: a mention whose message the sample's Porto thread shows, so
+ * it offers Reply, which opens that thread with the message chosen.
+ */
+export const replySample: PhoneNotice = {
+  id: "n10",
+  senderKind: "person",
+  senderLabel: "Sam Ortiz",
+  title: "Sam Ortiz mentioned you in #planning",
+  body: "Can we leave a bit later? 8:09 is early after a late dinner.",
+  minutesAgo: 5760,
+  read: true,
+  open: "reply",
+  openChat: { id: "thread-porto", thread: "1", reply: "r2" },
+  dismissible: true,
+};
+
 /** Design review only: the row a failed End share leaves, held on this phone. */
 export const endFailedSample: PhoneNotice = {
   id: "n-end-failed",

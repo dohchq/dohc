@@ -31,6 +31,8 @@ export const noticesWords = {
   openOnComputer: "Open on your computer",
   readFailed: "dohc could not read your notices.",
   marksFailed: "dohc could not save your changes to notices.",
+  /** In a mention's row when the read that would offer Reply failed. The row keeps Open, with Try again. */
+  targetReadFailed: "dohc could not read this message.",
   /** Under marksFailed when this phone's storage would not take the changes: a close before they send loses them. */
   marksNotStored: "They are not stored on this phone yet. Keep dohc open until they send.",
 } as const;

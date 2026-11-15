@@ -101,6 +101,37 @@ export function replyWrite(target: ReplyTarget, body: string): Reply | null {
 }
 
 /**
+ * The message a thread opens chosen to reply to or answer: the route's `reply` or `answer`, only when the route's
+ * `workspace` is the one open. A route that names no workspace, or another, chooses nothing, so the phone never builds
+ * a write meant for another.
+ */
+export function routeReply(
+  reply: string | undefined,
+  workspace: string | undefined,
+  openWorkspaceId: string | null,
+): string | null {
+  return reply !== undefined && workspace !== undefined && workspace === openWorkspaceId
+    ? reply
+    : null;
+}
+
+/**
+ * Where a thread's composer replies, given the message chosen to reply to and the messages a read shows: under that
+ * message, at the thread's top when none is chosen, or null when a message is chosen and the read doesn't show it. Null
+ * keeps Send off, so a reply to a message that's gone never goes to the thread's top.
+ */
+export function threadReplyTarget(
+  threadId: string,
+  chosen: string | null,
+  shown: readonly { readonly id: string }[],
+): Extract<ReplyTarget, { kind: "thread" }> | null {
+  if (chosen === null) return { kind: "thread", threadId, parentMessageId: null };
+  return shown.some((message) => message.id === chosen)
+    ? { kind: "thread", threadId, parentMessageId: chosen }
+    : null;
+}
+
+/**
  * What the composer holds: the body, a post's title, and whether New post is chosen. Each has a revision that every
  * edit raises, so an edit away and back still counts as an edit. The body's is the native field's.
  */

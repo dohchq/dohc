@@ -1,19 +1,34 @@
 import { noticesWords } from "@dohc/interface-words/notices";
-import { LegendList } from "@legendapp/list/react-native";
-import { Stack } from "expo-router";
+import { LegendList, type OnViewableItemsChangedInfo } from "@legendapp/list/react-native";
+import { Stack, useIsFocused } from "expo-router";
 import { Check } from "lucide-react-native";
+import { useCallback, useEffect, useRef } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { useTheme } from "../theme";
 import { HoldRow } from "../workspace/ListStates";
 import { NoticeRow } from "./NoticeRow";
 import { useNotices } from "./NoticesState";
+import type { PhoneNotice } from "./phoneNotice";
 
 // The account's Notices, and failures held on this phone. The header shows at once. Until the whole list is known,
 // from the server or from the copy saved at the last launch, an empty list holds its place, so it never says All
 // clear too soon. A read that failed is a row here with its cause and Try again. Pulling down reads the list again.
+// The rows on screen, only while Notices is, go to `see`, so a mention among them can read its message for Reply.
 export function ServerNotices() {
   const theme = useTheme();
-  const { notices, unread, known, dismiss, setRead, markAllRead, refresh } = useNotices();
+  const { notices, unread, known, dismiss, setRead, markAllRead, refresh, see } = useNotices();
+  const focused = useIsFocused();
+  const onScreen = useRef<readonly string[]>([]);
+  const isFocused = useRef(focused);
+  isFocused.current = focused;
+  useEffect(() => see(focused ? onScreen.current : []), [focused, see]);
+  const onViewableItemsChanged = useCallback(
+    ({ viewableItems }: OnViewableItemsChangedInfo<PhoneNotice>) => {
+      onScreen.current = viewableItems.map(({ item }) => item.id);
+      if (isFocused.current) see(onScreen.current);
+    },
+    [see],
+  );
   return (
     <>
       <Stack.Screen options={{ title: noticesWords.heading }} />
@@ -32,6 +47,7 @@ export function ServerNotices() {
         contentInsetAdjustmentBehavior="automatic"
         refreshing={false}
         onRefresh={refresh}
+        onViewableItemsChanged={onViewableItemsChanged}
         ListFooterComponent={
           notices.length > 0 ? undefined : known ? (
             <View style={styles.empty}>

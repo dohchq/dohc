@@ -18,8 +18,18 @@ import { sampleBuild } from "../sampleBuild";
 import type { NoticeRecord } from "../server/notices";
 import type { NoticeFailure, NoticeListState } from "../server/noticeStore";
 import { serverName } from "../server/origin";
+import { phoneWrites } from "../server/phoneWrites";
+import { readThread } from "../server/workspaceReads";
 import { failureStep, type Reported } from "../workspace/failureReports";
-import { presentNotice, type PhoneNotice, type PhoneTarget } from "./phoneNotice";
+import {
+  createNoticeTargets,
+  noticeAction,
+  replyCandidate,
+  targetKey,
+  type MentionTarget,
+  type TargetRead,
+} from "./noticeWrites";
+import { phoneTarget, presentNotice, type PhoneNotice, type PhoneTarget } from "./phoneNotice";
 import { useHideToast, useShowToast } from "./Toast";
 import { doneToast } from "./toastSlots";
 
@@ -42,6 +52,8 @@ interface NoticesState {
   markAllRead(): void;
   /** Reads the account's Notices again from the start. */
   refresh(): void;
+  /** The rows on screen, by ID, while Notices is: a mention among them reads its message, to offer Reply. */
+  see(ids: readonly string[]): void;
 }
 
 const State = createContext<NoticesState | null>(null);
@@ -82,7 +94,9 @@ function SampleNoticesState({ children }: { children: ReactNode }) {
           demoMode === "notice-clipped" ||
           demoMode === "notice-clipped-open"
         ? [sample.endFailedSample, ...sample.sampleNotices]
-        : sample.sampleNotices,
+        : demoMode === "notices-reply"
+          ? [...sample.sampleNotices, sample.replySample]
+          : sample.sampleNotices,
   );
   const value = useMemo<NoticesState>(
     () => ({
@@ -94,6 +108,7 @@ function SampleNoticesState({ children }: { children: ReactNode }) {
       setRead: () => undefined,
       markAllRead: local.readAll,
       refresh: () => undefined,
+      see: () => undefined,
     }),
     [local],
   );
@@ -108,6 +123,8 @@ const NO_NOTICES: NoticeListState = {
 };
 const noSubscribe = () => () => undefined;
 const noState = () => NO_NOTICES;
+const NO_READS: ReadonlyMap<string, TargetRead> = new Map();
+const noReads = () => NO_READS;
 
 // The account's Notices from the server, with failures held on this phone on top.
 function ServerNoticesState({ children }: { children: ReactNode }) {
@@ -122,6 +139,26 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
   const local = useLocalNotices([]);
   const router = useRouter();
   const showToast = useShowToast();
+  const signIn = useSignIn();
+
+  // The reads behind Reply, one sign-in's, made only where phone writes are on. Making one starts nothing: rows on
+  // screen ask for theirs through `see`.
+  const targets = useMemo(
+    () =>
+      phoneWrites
+        ? createNoticeTargets({
+            signIn,
+            read: (workspaceId, threadId, signal) =>
+              readThread(signIn.client, workspaceId, threadId, signal),
+          })
+        : null,
+    [signIn],
+  );
+  useEffect(() => () => targets?.stop(), [targets]);
+  const reads = useSyncExternalStore(targets?.subscribe ?? noSubscribe, targets?.state ?? noReads);
+  // The handlers check the latest list and records through these when the person acts.
+  const latest = useRef({ workspaces, records: relay.notices });
+  latest.current = { workspaces, records: relay.notices };
 
   // Opening reads the Notice, and opens its target in its own workspace. It never runs anything.
   const open = useCallback(
@@ -147,22 +184,114 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
     [store, router, chooseWorkspace],
   );
 
-  // A row the store didn't change keeps its object, so its NoticeRow doesn't draw again.
+  // Reply opens a mention's thread with its message chosen, as Open opens it, once the latest list, sign-in and read
+  // still show that message. When they no longer do, it opens the target as Open does, if the phone still shows it.
+  const reply = useCallback(
+    (record: NoticeRecord) => {
+      const list = latest.current.workspaces;
+      const action = noticeAction(record, {
+        list,
+        writes: phoneWrites,
+        signIn,
+        reads: targets?.state() ?? NO_READS,
+      });
+      if (action.kind !== "reply") {
+        const target = phoneTarget(record, list);
+        return target ? open(record, target) : undefined;
+      }
+      const { workspaceId, threadId, messageId } = action.target;
+      if (record.readAtMs === null) store?.mark(record.noticeId, "read");
+      chooseWorkspace(workspaceId);
+      router.push({
+        pathname: "/chat/[id]",
+        params: {
+          id: threadId,
+          thread: "1",
+          workspace: workspaceId,
+          message: messageId,
+          reply: messageId,
+        },
+      });
+    },
+    [signIn, targets, open, store, chooseWorkspace, router],
+  );
+  const retryTarget = useCallback(
+    (record: NoticeRecord) => {
+      const target = replyCandidate(record, latest.current.workspaces, phoneWrites);
+      if (target) targets?.retry(target);
+    },
+    [targets],
+  );
+
+  // A row the store didn't change, whose read didn't change, keeps its object, so its NoticeRow doesn't draw again.
   const presented = useMemo(
-    () => new WeakMap<NoticeRecord, PhoneNotice>(),
-    [workspaces, currentWorkspaceId, open],
+    () =>
+      new WeakMap<
+        NoticeRecord,
+        { readonly read: TargetRead | undefined; readonly notice: PhoneNotice }
+      >(),
+    [workspaces, currentWorkspaceId, open, reply, retryTarget],
   );
   const relayNotices = useMemo(
     () =>
       relay.notices.map((record) => {
+        const candidate = replyCandidate(record, workspaces, phoneWrites);
+        const read = candidate ? reads.get(targetKey(candidate)) : undefined;
         const known = presented.get(record);
-        if (known) return known;
-        const notice = presentNotice(record, { list: workspaces, currentWorkspaceId, open });
-        presented.set(record, notice);
+        if (known && known.read === read) return known.notice;
+        const action = noticeAction(record, {
+          list: workspaces,
+          writes: phoneWrites,
+          signIn,
+          reads,
+        });
+        const notice = presentNotice(record, {
+          list: workspaces,
+          currentWorkspaceId,
+          action,
+          open,
+          reply,
+          retryTarget,
+        });
+        presented.set(record, { read, notice });
         return notice;
       }),
-    [relay.notices, presented, workspaces, currentWorkspaceId, open],
+    [
+      relay.notices,
+      presented,
+      workspaces,
+      currentWorkspaceId,
+      open,
+      reply,
+      retryTarget,
+      reads,
+      signIn,
+    ],
   );
+
+  // Only the mentions on screen read their messages, one read per workspace and thread.
+  const visible = useRef<readonly string[]>([]);
+  const wantVisible = useCallback(() => {
+    if (!targets) return;
+    const ids = new Set(visible.current);
+    const { workspaces: list, records } = latest.current;
+    const wanted: MentionTarget[] = [];
+    for (const record of records) {
+      if (!ids.has(`relay:${record.noticeId}`)) continue;
+      const candidate = replyCandidate(record, list, phoneWrites);
+      if (candidate) wanted.push(candidate);
+    }
+    targets.want(wanted);
+  }, [targets]);
+  const see = useCallback(
+    (ids: readonly string[]) => {
+      visible.current = ids;
+      wantVisible();
+    },
+    [wantVisible],
+  );
+  // A list that became ready, or a row that changed, while on screen.
+  useEffect(() => wantVisible(), [wantVisible, workspaces, relay.notices]);
   const notices = useMemo(() => [...local.notices, ...relayNotices], [local.notices, relayNotices]);
   // The handlers read the list through this, so they keep their identity: a failure report takes itself back when its
   // `dismiss` changes.
@@ -189,11 +318,13 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
     store?.markAllRead();
     local.readAll();
   }, [store, local.readAll]);
-  // A refresh reads the workspace list too, for a Show on phone change made on another device.
+  // A refresh reads the workspace list too, for a Show on phone change made on another device, and the mentions'
+  // messages.
   const refresh = useCallback(() => {
     store?.refresh();
     reloadWorkspaces();
-  }, [store, reloadWorkspaces]);
+    targets?.refresh();
+  }, [store, reloadWorkspaces, targets]);
 
   const instance = store?.instance ?? 0;
   useReport("notices:reads", noticesWords.readFailed, relay.reads, instance, refresh, local);
@@ -210,8 +341,9 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
       setRead,
       markAllRead,
       refresh,
+      see,
     }),
-    [notices, relay.known, local.add, dismiss, setRead, markAllRead, refresh],
+    [notices, relay.known, local.add, dismiss, setRead, markAllRead, refresh, see],
   );
   return <State value={value}>{children}</State>;
 }

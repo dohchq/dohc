@@ -19,6 +19,8 @@ import {
   lanesOf,
   replyParentGone,
   replyWrite,
+  routeReply,
+  threadReplyTarget,
   type Draft,
   type WriteActivation,
   type WriteOutbox,
@@ -26,6 +28,56 @@ import {
 
 type Server = ReturnType<typeof testServer>;
 type Disk = ReturnType<typeof durableDisk>;
+
+// A thread opened from a Notice's Reply chooses the message the Notice named. If that message is gone by the time the
+// thread's read answers, the reply must never go to the thread's top instead.
+describe("where a thread's composer replies", () => {
+  const shown = [{ id: "m1" }, { id: "m2" }];
+
+  it("replies under a chosen message the read shows, and at the top with none chosen", () => {
+    expect(threadReplyTarget("t1", "m2", shown)).toEqual({
+      kind: "thread",
+      threadId: "t1",
+      parentMessageId: "m2",
+    });
+    expect(threadReplyTarget("t1", null, shown)).toEqual({
+      kind: "thread",
+      threadId: "t1",
+      parentMessageId: null,
+    });
+  });
+
+  it("has no target for a chosen message the read doesn't show, so nothing goes to the thread's top", () => {
+    expect(threadReplyTarget("t1", "gone", shown)).toBeNull();
+    expect(threadReplyTarget("t1", "m1", [])).toBeNull();
+  });
+
+  it("never carries resolves on an ordinary reply", () => {
+    const target = threadReplyTarget("t1", "m1", shown);
+    const reply = target && replyWrite(target, "On it");
+    expect(reply?.write).toEqual({
+      operation: "reply",
+      args: { threadId: "t1", body: "On it", parentMessageId: "m1" },
+    });
+  });
+});
+
+// The relay refuses a write to a workspace that isn't the one open, but the phone never builds one.
+describe("a thread opened to reply", () => {
+  it("chooses the route's message when the route names the open workspace", () => {
+    expect(routeReply("m1", "ws-1", "ws-1")).toBe("m1");
+  });
+
+  it("chooses nothing for a route that names another workspace, or none", () => {
+    expect(routeReply("m1", "ws-2", "ws-1")).toBeNull();
+    expect(routeReply("m1", undefined, "ws-1")).toBeNull();
+    expect(routeReply("m1", "ws-1", null)).toBeNull();
+  });
+
+  it("chooses nothing without a reply", () => {
+    expect(routeReply(undefined, "ws-1", "ws-1")).toBeNull();
+  });
+});
 
 const ORIGIN = "https://dohc.example.com";
 const ops = (result: unknown): Answer => ({
