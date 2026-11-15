@@ -241,6 +241,9 @@ fn map_runtime_inner(error: &RuntimeError) -> WireError {
     if let RuntimeError::Domain(DomainError::UndoRefused { .. }) = error {
         return WireError::new(ErrorCode::Conflict, error.to_string());
     }
+    if let RuntimeError::AccessRuleHeld { .. } = error {
+        return WireError::new(ErrorCode::Conflict, error.to_string());
+    }
     if let RuntimeError::CaptureFileHeld { path } = error {
         return WireError::new(ErrorCode::Conflict, format!("capture-file-held: {path}"));
     }

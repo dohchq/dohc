@@ -33,6 +33,7 @@ pub mod search;
 pub mod supervisor;
 
 pub use actor::{
+    ACCESS_RULE_HELD, ACCESS_RULE_SETTLE, ACCESS_RULE_WAITS, AccessRuleDecision, AccessRuleSignals,
     ActiveVersionSwitch, ActorHandle, AutomationClaimListener, BinaryWriteExecutionResult,
     CAPTURE_NEW_FILE_LIVE, CaptureBatchReads, CheckpointCycle, CollectionReconciliation,
     HistoryPageRead, LifecycleState, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS,

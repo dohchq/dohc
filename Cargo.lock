@@ -494,6 +494,7 @@ dependencies = [
  "dohc-macos-files",
  "file-guard",
  "file-id",
+ "filetime",
  "fs4",
  "rusqlite",
  "rustix",

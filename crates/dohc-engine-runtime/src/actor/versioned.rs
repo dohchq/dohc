@@ -1,4 +1,5 @@
 use super::ActorHandle;
+use super::access_order;
 use super::capture::{WorkspaceRootGuard, validate_workspace_root};
 use super::journal::journal_moment_outbound_in_tx;
 use super::materialization::{
@@ -869,6 +870,12 @@ pub(super) fn versioned_text_write_with_publication_on_store(
         return Err(RuntimeError::Cancelled);
     }
     dohc_engine_domain::validate_write_input(input).map_err(RuntimeError::from)?;
+    access_order::order_writer(
+        store,
+        &input.workspace_id,
+        &input.version_id,
+        &[access_order::Touch::write(&input.path)],
+    )?;
     // The write's author names who changed the record's fields: an agent, an
     // automation at its chain depth, or a person.
     let (actor, attribution) =
@@ -1021,6 +1028,12 @@ fn versioned_binary_write_conditioned_on_store(
         &input.version_id,
         input.now_ms,
         faults,
+    )?;
+    access_order::order_writer(
+        store,
+        &input.workspace_id,
+        &input.version_id,
+        &[access_order::Touch::write(&input.path)],
     )?;
     let outcome = store.write_with(faults, |tx| {
         let fingerprint = conditions.map(WriteConditions::fingerprint);
@@ -1262,6 +1275,20 @@ fn versioned_text_rename_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    if dohc_engine_files::access_rules::is_access_rule_path(&input.from_path)
+        || dohc_engine_files::access_rules::is_access_rule_path(&input.to_path)
+    {
+        return rename_access_rule_on_store(store, input, root_dir, self_writes, faults, token);
+    }
+    access_order::order_writer(
+        store,
+        &input.workspace_id,
+        &input.version_id,
+        &[
+            access_order::Touch::delete(&input.from_path),
+            access_order::Touch::write(&input.to_path),
+        ],
+    )?;
     let result = VersionedTextStore::new(store)
         .rename_text_file_with(input, faults, |tx, result| {
             if !result.deduped {
@@ -1342,6 +1369,85 @@ fn versioned_text_rename_on_store(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// A rule never moves as a rename: members reach a folder through its rule,
+/// so the rule is written at its destination before anything moves under it,
+/// and deleted at its source once its files have left.
+fn rename_access_rule_on_store(
+    store: &mut EngineStore,
+    input: &RenameTextFile,
+    root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<RenameResult, RuntimeError> {
+    let source = store.read_with(|conn| {
+        dohc_engine_domain::select_snapshot_by_path_in_tx(
+            conn,
+            &input.workspace_id,
+            &input.version_id,
+            &input.from_path,
+        )
+    })?;
+    let Some(source) = source.snapshot else {
+        return Err(DomainError::FileNotFound.into());
+    };
+    let suffixed = |id: &str, side: &str| format!("{id}-{side}");
+    let written = versioned_text_write_on_store(
+        store,
+        &WriteText {
+            workspace_id: input.workspace_id.clone(),
+            version_id: input.version_id.clone(),
+            object_id: dohc_engine_domain::derive_capture_object_id(
+                &input.workspace_id,
+                &input.version_id,
+                &input.to_path,
+            ),
+            path: input.to_path.clone(),
+            text: source.text,
+            moment_id: suffixed(&input.moment_id, "to"),
+            metadata_origin: input.metadata_origin.clone(),
+            metadata_summary: input.metadata_summary.clone(),
+            metadata_correlation_id: input.metadata_correlation_id.clone(),
+            author_json: input.author_json.clone(),
+            now_ms: input.now_ms,
+            request_id: input.request_id.as_deref().map(|id| suffixed(id, "to")),
+        },
+        Some(root_dir),
+        None,
+        faults,
+        token,
+    )?;
+    let deleted = versioned_text_delete_on_store(
+        store,
+        &DeleteTextFile {
+            workspace_id: input.workspace_id.clone(),
+            version_id: input.version_id.clone(),
+            path: input.from_path.clone(),
+            moment_id: suffixed(&input.moment_id, "from"),
+            request_id: input.request_id.as_deref().map(|id| suffixed(id, "from")),
+            metadata_origin: input.metadata_origin.clone(),
+            metadata_summary: input.metadata_summary.clone(),
+            metadata_correlation_id: input.metadata_correlation_id.clone(),
+            author_json: input.author_json.clone(),
+            now_ms: input.now_ms,
+        },
+        None,
+        None,
+        false,
+        root_dir,
+        self_writes,
+        faults,
+        token,
+    )?;
+    Ok(RenameResult {
+        deduped: written.deduped && deleted.deduped,
+        object: written.object,
+        before: deleted.before,
+        after: written.snapshot,
+        moment: written.moment,
+    })
+}
+
 fn versioned_text_delete_on_store(
     store: &mut EngineStore,
     input: &DeleteTextFile,
@@ -1356,6 +1462,12 @@ fn versioned_text_delete_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    access_order::order_writer(
+        store,
+        &input.workspace_id,
+        &input.version_id,
+        &[access_order::Touch::delete(&input.path)],
+    )?;
     if let Some(expected) = expected_sha256 {
         return checked_delete_on_store(
             store,

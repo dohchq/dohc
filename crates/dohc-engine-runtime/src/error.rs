@@ -24,6 +24,11 @@ pub enum RuntimeError {
     ChatConversationLinksChanged,
     #[error("links-edges-source-changed")]
     LinksEdgesSourceChanged,
+    #[error("access-rule-held: {reason} {folder}")]
+    AccessRuleHeld {
+        folder: String,
+        reason: &'static str,
+    },
     #[error("capture-file-held: {path}")]
     CaptureFileHeld { path: String },
     #[error("capture-not-owned: {path}")]
@@ -180,6 +185,7 @@ impl RuntimeError {
             RuntimeError::ChatMentionVersionChanged => "chat-mention-version-changed",
             RuntimeError::ChatConversationLinksChanged => "chat-conversation-links-changed",
             RuntimeError::LinksEdgesSourceChanged => "links-edges-source-changed",
+            RuntimeError::AccessRuleHeld { .. } => "access-rule-held",
             RuntimeError::CaptureFileHeld { .. } => "capture-file-held",
             RuntimeError::CaptureNotOwnedAfterHold { .. } => "capture-not-owned",
             RuntimeError::Identity { .. } => "identity-unresolved",

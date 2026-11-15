@@ -1,0 +1,659 @@
+//! A folder's access.yaml reaches the journal before the files it covers, and
+//! a rule changed outside dohc in a way that widens reach waits for its owner.
+use dohc_engine_domain::VersionedTextStore;
+use dohc_engine_runtime::{
+    ACCESS_RULE_WAITS, AccessRuleDecision, ActorHandle, CancellationToken, CaptureIngest,
+    CaptureIngestBinary, CaptureRetire, DeleteTextFile, NoFaults, RenameTextFile, RuntimeError,
+    WorkspaceSupervisor, WriteBinary, WriteText,
+};
+use dohc_engine_storage::EngineStore;
+use dohc_engine_sync::SyncError;
+use dohc_engine_testkit::capture::ExistingRootGuard;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+const WS: &str = "ws-access-order";
+const VIEW: &str = "members: view\n";
+const NOBODY: &str = "people: {}\n";
+const EDIT: &str = "members: edit\n";
+
+struct Fixture {
+    scratch: ScratchDir,
+    db: PathBuf,
+    supervisor: WorkspaceSupervisor,
+    actor: ActorHandle,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let f = Self::local();
+        f.replicate();
+        f
+    }
+
+    /// A workspace that does not replicate yet, so nothing orders its moments.
+    fn local() -> Self {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = engine_db_path(&scratch).expect("db");
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version(WS, "main", 1, &NoFaults)
+            .expect("main version");
+        drop(store);
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        Self {
+            scratch,
+            db,
+            supervisor,
+            actor,
+            runtime,
+        }
+    }
+
+    fn replicate(&self) {
+        let conn = rusqlite::Connection::open(&self.db).expect("open db");
+        conn.execute_batch(&format!(
+            "INSERT INTO sync_identity \
+             (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+             VALUES ('{WS}', 'origin-local', 'epoch-local', 'stream-local', 1); \
+             INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) \
+             VALUES ('{WS}', 'origin-local', 0);"
+        ))
+        .expect("seed sync state");
+    }
+
+    fn root(&self) -> &Path {
+        self.scratch.path()
+    }
+
+    /// Write `text` at `path` on disk, as an outside editor would.
+    fn put(&self, path: &str, text: &str) {
+        let absolute = self.root().join(path);
+        std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        std::fs::write(absolute, text).unwrap();
+    }
+
+    /// Make every entry under the root look older than the settle period.
+    fn settle(&self) {
+        let then =
+            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(60));
+        let mut pending = vec![self.root().to_path_buf()];
+        while let Some(path) = pending.pop() {
+            if path.ends_with(".dohc") {
+                continue;
+            }
+            if path.is_dir() {
+                pending.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+            }
+            filetime::set_file_mtime(&path, then).unwrap();
+        }
+    }
+
+    fn capture(&self, paths: &[&str]) -> Vec<Result<(), RuntimeError>> {
+        let inputs: Vec<CaptureIngest> = paths
+            .iter()
+            .map(|path| {
+                ingest(
+                    path,
+                    &std::fs::read_to_string(self.root().join(path)).unwrap(),
+                )
+            })
+            .collect();
+        self.actor
+            .capture_ingest_batch_blocking(
+                inputs,
+                Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+                    self.root(),
+                )),
+                dohc_engine_collab::LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                self.root().to_path_buf(),
+                Arc::new(ExistingRootGuard),
+            )
+            .expect("capture batch")
+            .into_iter()
+            .map(|result| result.map(drop))
+            .collect()
+    }
+
+    fn capture_ok(&self, paths: &[&str]) {
+        for (path, result) in paths.iter().zip(self.capture(paths)) {
+            result.unwrap_or_else(|error| panic!("capture {path}: {error}"));
+        }
+    }
+
+    fn retire(&self, path: &str) -> Result<(), RuntimeError> {
+        self.actor
+            .capture_retire_materialized_blocking_guarded(
+                CaptureRetire {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    path: path.to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 20,
+                    request_id: None,
+                    only_if_text_head: false,
+                    only_if_capture_origin: false,
+                    allow_ydoc_origin: true,
+                },
+                self.root().to_path_buf(),
+                true,
+                Arc::new(()),
+                dohc_engine_collab::LeaseRegistry::new(),
+                Arc::new(NoFaults),
+                Arc::new(ExistingRootGuard),
+            )
+            .map(drop)
+    }
+
+    fn decide(&self, folder: &str, decision: AccessRuleDecision) -> Result<(), RuntimeError> {
+        self.runtime.block_on(self.actor.decide_access_rule(
+            WS.to_owned(),
+            "main".to_owned(),
+            folder.to_owned(),
+            decision,
+            self.root().to_path_buf(),
+            Arc::new(()),
+            30,
+            Arc::new(NoFaults),
+        ))
+    }
+
+    fn holds(&self) -> Vec<(String, String)> {
+        self.runtime
+            .block_on(self.actor.access_rule_holds(WS.to_owned()))
+            .expect("holds")
+            .into_iter()
+            .map(|hold| (hold.folder, hold.reason))
+            .collect()
+    }
+
+    /// The moments the relay would replay, in origin order.
+    fn journal(&self) -> Vec<String> {
+        let conn = rusqlite::Connection::open(&self.db).expect("open db");
+        conn.prepare(
+            "SELECT json_extract(payload_json,'$.operation') || ' ' || \
+             json_extract(payload_json,'$.path') FROM replication_log \
+             WHERE workspace_id=?1 AND imported=0 AND op_kind='moment.append' \
+             ORDER BY origin_seq",
+        )
+        .unwrap()
+        .query_map([WS], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .unwrap()
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = self.supervisor.close(&self.db);
+    }
+}
+
+fn ingest(path: &str, text: &str) -> CaptureIngest {
+    CaptureIngest {
+        workspace_id: WS.to_owned(),
+        version_id: "main".to_owned(),
+        path: path.to_owned(),
+        text: text.to_owned(),
+        metadata_origin: "capture".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 10,
+        request_id: None,
+        claim_foreign_head: true,
+    }
+}
+
+fn waits(result: &Result<(), RuntimeError>) -> bool {
+    matches!(
+        result,
+        Err(RuntimeError::Sync(SyncError::RetryableState { reason })) if *reason == ACCESS_RULE_WAITS
+    )
+}
+
+fn held(result: &Result<(), RuntimeError>, folder: &str) -> bool {
+    matches!(result, Err(RuntimeError::AccessRuleHeld { folder: held, .. }) if held == folder)
+}
+
+fn lines(lines: &[&str]) -> Vec<String> {
+    lines.iter().map(|line| (*line).to_owned()).collect()
+}
+
+/// A team folder whose committed rule lets members view.
+fn ruled_team() -> Fixture {
+    let f = Fixture::new();
+    f.put("team/access.yaml", VIEW);
+    f.put("team/a.md", "alpha");
+    f.settle();
+    f.capture_ok(&["team/access.yaml", "team/a.md"]);
+    f
+}
+
+#[test]
+fn a_batch_journals_its_rule_first_in_either_order() {
+    for order in [
+        ["team/access.yaml", "team/a.md"],
+        ["team/a.md", "team/access.yaml"],
+    ] {
+        let f = Fixture::new();
+        f.put("team/access.yaml", VIEW);
+        f.put("team/a.md", "alpha");
+        f.settle();
+        f.capture_ok(&order);
+        assert_eq!(
+            f.journal(),
+            lines(&["write team/access.yaml", "write team/a.md"]),
+            "{order:?}"
+        );
+    }
+}
+
+#[test]
+fn a_narrowed_rule_journals_before_the_file_that_follows_it() {
+    let f = ruled_team();
+    f.put("team/access.yaml", NOBODY);
+    f.put("team/a.md", "alpha 2");
+    f.settle();
+    f.capture_ok(&["team/a.md"]);
+    assert_eq!(
+        f.journal(),
+        lines(&[
+            "write team/access.yaml",
+            "write team/a.md",
+            "write team/access.yaml",
+            "write team/a.md",
+        ])
+    );
+}
+
+#[test]
+fn a_widened_rule_holds_its_folder_until_the_owner_accepts_it() {
+    let f = ruled_team();
+    let before = f.journal();
+    f.put("team/access.yaml", EDIT);
+    f.put("team/a.md", "alpha 2");
+    f.settle();
+    let results = f.capture(&["team/a.md", "team/access.yaml"]);
+    assert!(
+        results.iter().all(|result| held(result, "team")),
+        "{results:?}"
+    );
+    assert_eq!(f.journal(), before, "nothing under the folder journals");
+    assert_eq!(f.holds(), vec![("team".to_owned(), "widened".to_owned())]);
+
+    f.decide("team", AccessRuleDecision::Accept)
+        .expect("accept");
+    assert!(f.holds().is_empty());
+    f.capture_ok(&["team/a.md"]);
+    let mut expected = before;
+    expected.extend(lines(&["write team/access.yaml", "write team/a.md"]));
+    assert_eq!(f.journal(), expected);
+}
+
+#[test]
+fn restoring_a_widened_rule_puts_the_committed_bytes_back() {
+    let f = ruled_team();
+    let before = f.journal();
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    f.decide("team", AccessRuleDecision::Restore)
+        .expect("restore");
+    assert_eq!(
+        std::fs::read_to_string(f.root().join("team/access.yaml")).unwrap(),
+        VIEW
+    );
+    assert!(f.holds().is_empty());
+    assert_eq!(f.journal(), before);
+}
+
+#[test]
+fn an_editor_save_inside_the_settle_period_journals_no_widening() {
+    let f = ruled_team();
+    let before = f.journal();
+    // The editor deletes the rule, then renames its copy into place.
+    std::fs::remove_file(f.root().join("team/access.yaml")).unwrap();
+    assert!(waits(&f.retire("team/access.yaml")));
+    assert!(waits(&f.capture(&["team/a.md"])[0]));
+    f.put("team/access.yaml.tmp", EDIT);
+    std::fs::rename(
+        f.root().join("team/access.yaml.tmp"),
+        f.root().join("team/access.yaml"),
+    )
+    .unwrap();
+    assert!(waits(&f.capture(&["team/access.yaml", "team/a.md"])[0]));
+    assert_eq!(f.journal(), before);
+    assert!(f.holds().is_empty(), "nothing settled long enough to judge");
+}
+
+#[test]
+fn a_rule_removed_over_files_holds_and_a_removed_folder_deletes_rule_last() {
+    let f = ruled_team();
+    std::fs::remove_file(f.root().join("team/access.yaml")).unwrap();
+    f.settle();
+    assert!(held(&f.retire("team/access.yaml"), "team"));
+    assert_eq!(f.holds(), vec![("team".to_owned(), "removed".to_owned())]);
+
+    let f = ruled_team();
+    let before = f.journal();
+    std::fs::remove_dir_all(f.root().join("team")).unwrap();
+    f.settle();
+    // The rule waits for the deletes of the files it covers.
+    assert!(waits(&f.retire("team/access.yaml")));
+    f.retire("team/a.md").expect("retire file");
+    f.retire("team/access.yaml").expect("retire rule");
+    let mut expected = before;
+    expected.extend(lines(&["delete team/a.md", "delete team/access.yaml"]));
+    assert_eq!(f.journal(), expected);
+    assert!(f.holds().is_empty());
+}
+
+#[test]
+fn a_rule_rename_journals_a_create_then_a_delete() {
+    let f = Fixture::new();
+    let token = CancellationToken::new;
+    f.runtime
+        .block_on(f.actor.versioned_text_write_indexed(
+            write("team/access.yaml", VIEW, "m-rule"),
+            f.root().to_path_buf(),
+            Arc::new(NoFaults),
+            token(),
+        ))
+        .expect("write rule");
+    f.runtime
+        .block_on(f.actor.versioned_text_rename(
+            RenameTextFile {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                from_path: "team/access.yaml".to_owned(),
+                to_path: "crew/access.yaml".to_owned(),
+                moment_id: "m-move".to_owned(),
+                request_id: None,
+                metadata_origin: "cli".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 40,
+            },
+            f.root().to_path_buf(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            token(),
+        ))
+        .expect("rename rule");
+    assert_eq!(
+        f.journal(),
+        lines(&[
+            "write team/access.yaml",
+            "write crew/access.yaml",
+            "delete team/access.yaml",
+        ])
+    );
+}
+
+/// A rule written without publication is only in the store. Its absence on
+/// disk is not a removal outside dohc.
+#[test]
+fn an_unpublished_rule_is_not_read_as_removed() {
+    let f = Fixture::new();
+    for (path, text, moment) in [
+        ("team/access.yaml", VIEW, "m-rule"),
+        ("team/a.md", "alpha", "m-a"),
+    ] {
+        f.runtime
+            .block_on(f.actor.versioned_text_write_indexed(
+                write(path, text, moment),
+                f.root().to_path_buf(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            ))
+            .expect("write");
+        f.settle();
+    }
+    assert_eq!(
+        f.journal(),
+        lines(&["write team/access.yaml", "write team/a.md"])
+    );
+    assert!(f.holds().is_empty());
+}
+
+const OP: &str = "dohc-operation:remove-team";
+
+fn delete(path: &str, moment: &str) -> DeleteTextFile {
+    DeleteTextFile {
+        workspace_id: WS.to_owned(),
+        version_id: "main".to_owned(),
+        path: path.to_owned(),
+        moment_id: moment.to_owned(),
+        request_id: None,
+        metadata_origin: "cli".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: Some(OP.to_owned()),
+        author_json: None,
+        now_ms: 50,
+    }
+}
+
+#[test]
+fn restoring_a_deleted_ruled_folder_journals_its_rule_first() {
+    let f = Fixture::local();
+    for (path, text, moment) in [
+        ("team/access.yaml", VIEW, "m-rule"),
+        ("team/a.md", "alpha", "m-a"),
+    ] {
+        f.runtime
+            .block_on(f.actor.versioned_text_write_indexed(
+                write(path, text, moment),
+                f.root().to_path_buf(),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            ))
+            .expect("write");
+    }
+    // Recorded before the workspace replicated, so nothing put the rule's
+    // delete last; Undo replays the operation backwards.
+    for (path, moment) in [("team/access.yaml", "d-rule"), ("team/a.md", "d-a")] {
+        f.runtime
+            .block_on(f.actor.versioned_text_delete(
+                delete(path, moment),
+                f.root().to_path_buf(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            ))
+            .expect("delete");
+    }
+    f.replicate();
+    f.runtime
+        .block_on(f.actor.history_undo_in_turns(
+            WS.to_owned(),
+            OP.to_owned(),
+            "undo-remove-team".to_owned(),
+            None,
+            f.root().to_path_buf(),
+            Arc::new(NoFaults),
+            60,
+            [Arc::default(), Arc::default()],
+            Arc::new(()),
+            None,
+            CancellationToken::new(),
+        ))
+        .expect("undo");
+    let journal = f.journal();
+    assert_eq!(
+        journal
+            .iter()
+            .map(|line| line.split_once(' ').unwrap().1)
+            .collect::<Vec<_>>(),
+        ["team/access.yaml", "team/a.md"],
+        "{journal:?}"
+    );
+}
+
+fn write(path: &str, text: &str, moment: &str) -> WriteText {
+    WriteText {
+        workspace_id: WS.to_owned(),
+        version_id: "main".to_owned(),
+        object_id: format!("object-{moment}"),
+        path: path.to_owned(),
+        text: text.to_owned(),
+        moment_id: moment.to_owned(),
+        metadata_origin: "cli".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 40,
+        request_id: None,
+    }
+}
+
+/// Every kind of writer reaches the step: a writer that changes a file under
+/// a folder whose new rule sits on disk uncommitted commits the rule first,
+/// then its own change, on its first attempt.
+#[test]
+fn every_writer_puts_a_pending_rule_before_its_file() {
+    type Writer = fn(&Fixture) -> Result<(), RuntimeError>;
+    let writers: [(&str, Writer); 7] = [
+        ("capture text", |f| {
+            f.put("team/a.md", "alpha 2");
+            f.capture(&["team/a.md"]).remove(0)
+        }),
+        ("capture binary", |f| {
+            f.actor
+                .capture_ingest_binary_blocking(
+                    Arc::new(CaptureIngestBinary {
+                        workspace_id: WS.to_owned(),
+                        version_id: "main".to_owned(),
+                        path: "team/a.md".to_owned(),
+                        bytes: vec![0, 159, 146, 150],
+                        metadata_origin: "capture".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 10,
+                        request_id: None,
+                        claim_foreign_head: true,
+                    }),
+                    dohc_engine_collab::LeaseRegistry::new(),
+                    Arc::new(NoFaults),
+                )
+                .map(drop)
+        }),
+        ("versioned binary write", |f| {
+            f.runtime
+                .block_on(f.actor.versioned_binary_write(
+                    WriteBinary {
+                        workspace_id: WS.to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "object-binary".to_owned(),
+                        path: "team/a.md".to_owned(),
+                        bytes: vec![0, 159, 146, 150],
+                        moment_id: "m-binary".to_owned(),
+                        metadata_origin: "cli".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 40,
+                        request_id: None,
+                    },
+                    f.root().to_path_buf(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                ))
+                .map(drop)
+        }),
+        ("capture retire", |f| {
+            // Removing the file restarts the folder's settle period.
+            let _ = std::fs::remove_file(f.root().join("team/a.md"));
+            f.settle();
+            f.retire("team/a.md")
+        }),
+        ("versioned write", |f| {
+            f.runtime
+                .block_on(f.actor.versioned_text_write_indexed(
+                    write("team/a.md", "written", "m-write"),
+                    f.root().to_path_buf(),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                ))
+                .map(drop)
+        }),
+        ("versioned delete", |f| {
+            f.runtime
+                .block_on(f.actor.versioned_text_delete(
+                    DeleteTextFile {
+                        workspace_id: WS.to_owned(),
+                        version_id: "main".to_owned(),
+                        path: "team/a.md".to_owned(),
+                        moment_id: "m-delete".to_owned(),
+                        request_id: None,
+                        metadata_origin: "cli".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 40,
+                    },
+                    f.root().to_path_buf(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                ))
+                .map(drop)
+        }),
+        ("versioned rename", |f| {
+            f.runtime
+                .block_on(f.actor.versioned_text_rename(
+                    RenameTextFile {
+                        workspace_id: WS.to_owned(),
+                        version_id: "main".to_owned(),
+                        from_path: "team/a.md".to_owned(),
+                        to_path: "team/b.md".to_owned(),
+                        moment_id: "m-rename".to_owned(),
+                        request_id: None,
+                        metadata_origin: "cli".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 40,
+                    },
+                    f.root().to_path_buf(),
+                    Arc::new(()),
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                ))
+                .map(drop)
+        }),
+    ];
+    for (name, writer) in writers {
+        let f = Fixture::new();
+        f.put("team/a.md", "alpha");
+        f.settle();
+        f.capture_ok(&["team/a.md"]);
+        let before = f.journal();
+        f.put("team/access.yaml", VIEW);
+        f.settle();
+        writer(&f).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let journal = f.journal();
+        assert_eq!(journal[..before.len()], before[..], "{name}");
+        assert_eq!(
+            journal.get(before.len()).map(String::as_str),
+            Some("write team/access.yaml"),
+            "{name}: {journal:?}"
+        );
+        assert!(journal.len() > before.len() + 1, "{name}: {journal:?}");
+    }
+}

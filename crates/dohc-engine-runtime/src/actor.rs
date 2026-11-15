@@ -21,6 +21,10 @@
 //! task outlives the actor). Cancellation ([`CancellationToken`](tokio_util::sync::CancellationToken)) is checked
 //! between bounded units, never inside a transaction.
 
+mod access_order;
+pub use access_order::{
+    ACCESS_RULE_HELD, ACCESS_RULE_SETTLE, ACCESS_RULE_WAITS, AccessRuleDecision, AccessRuleSignals,
+};
 mod automations;
 mod capture;
 mod recovery_import;
@@ -208,6 +212,7 @@ enum Command {
 /// callers use [`ActorHandle`]s. Dropping it joins the worker.
 pub struct WorkspaceActor {
     markdown_recovery: Arc<MarkdownRecoverySignal>,
+    access_rules: Arc<AccessRuleSignals>,
     reader_configured: Arc<AtomicBool>,
     reader_hung_until: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     identity: EngineDbIdentity,
@@ -469,6 +474,8 @@ impl WorkspaceActor {
         let markdown_recovery = Arc::new(MarkdownRecoverySignal::default());
         let worker_markdown_recovery = markdown_recovery.clone();
         let wake = tx.downgrade();
+        let access_rules = Arc::new(AccessRuleSignals::default());
+        let worker_access_rules = access_rules.clone();
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
             .spawn(move || {
@@ -487,6 +494,7 @@ impl WorkspaceActor {
                     work,
                     worker_tails,
                     worker_markdown_recovery,
+                    worker_access_rules,
                 )
             })
             .map_err(RuntimeError::ThreadSpawn)?;
@@ -499,6 +507,7 @@ impl WorkspaceActor {
                 #[allow(unused_mut)]
                 let mut actor = WorkspaceActor {
                     markdown_recovery,
+                    access_rules,
                     reader_configured: Arc::default(),
                     reader_hung_until: Arc::default(),
                     identity,
@@ -549,6 +558,7 @@ impl WorkspaceActor {
     pub fn handle(&self) -> ActorHandle {
         ActorHandle {
             markdown_recovery: self.markdown_recovery.clone(),
+            access_rules: self.access_rules.clone(),
             reader_configured: Arc::clone(&self.reader_configured),
             reader_hung_until: Arc::clone(&self.reader_hung_until),
             identity: self.identity.clone(),
@@ -686,6 +696,7 @@ pub type CheckpointCycle = Arc<dyn Fn() -> CheckpointWait + Send + Sync>;
 #[derive(Clone)]
 pub struct ActorHandle {
     markdown_recovery: Arc<MarkdownRecoverySignal>,
+    access_rules: Arc<AccessRuleSignals>,
     reader_configured: Arc<AtomicBool>,
     /// Until when capture skips a reader that missed its deadline.
     reader_hung_until: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
@@ -1235,6 +1246,7 @@ fn worker_main(
     work_count: Option<Arc<AtomicU64>>,
     released_tails: ReleasedTails,
     markdown_recovery: Arc<MarkdownRecoverySignal>,
+    access_rules: Arc<AccessRuleSignals>,
 ) {
     // Publish Closed on any exit — normal return OR a panic unwind (e.g. a
     // panicking fault injector). Declared before `store` so `store` (and its
@@ -1265,6 +1277,7 @@ fn worker_main(
             }
         })
     };
+    access_order::install(&db_path, access_rules);
     let mut store = match if matches!(mode, ActorOpenMode::ReadOnly) {
         EngineStore::open_read_only_counting(&db_path, work_count.clone()).and_then(|store| {
             if store.is_passive() {
@@ -1497,6 +1510,7 @@ fn worker_main(
         let changes_before = store
             .read_with(|conn| Ok::<_, StorageError>(conn.total_changes()))
             .unwrap_or(0);
+        access_order::begin_command();
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
             Command::WakeLinks => {}
@@ -1514,6 +1528,7 @@ fn worker_main(
                 break;
             }
         }
+        access_order::finish_command(&mut store);
         let changes_after = store
             .read_with(|conn| Ok::<_, StorageError>(conn.total_changes()))
             .unwrap_or(0);
@@ -1853,6 +1868,7 @@ pub(crate) mod test_support {
         let holds = Arc::new(AtomicU64::new(0));
         let mut actor = WorkspaceActor {
             markdown_recovery: Arc::default(),
+            access_rules: Arc::default(),
             reader_configured: Arc::default(),
             reader_hung_until: Arc::default(),
             identity,
@@ -1887,6 +1903,7 @@ pub(crate) mod test_support {
         let holds = Arc::clone(&actor.link_drain_holds);
         let markdown_recovery = actor.markdown_recovery.clone();
         let wake = actor.tx.downgrade();
+        let access_rules = actor.access_rules.clone();
         actor.worker = Some(std::thread::spawn(move || {
             worker_main(
                 db,
@@ -1903,6 +1920,7 @@ pub(crate) mod test_support {
                 None,
                 ReleasedTails::default(),
                 markdown_recovery,
+                access_rules,
             );
         }));
         let pages_checked;
