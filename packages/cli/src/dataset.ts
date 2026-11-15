@@ -161,30 +161,9 @@ export const DatasetPermissionsPage = z
   .strict();
 export type DatasetPermissionsPage = z.infer<typeof DatasetPermissionsPage>;
 const host = z.string().min(1).max(260);
-/**
- * Where a Collection is. `here`: only on this computer. Giving a person
- * access or publishing an app on a link moves it to `server`, the
- * workspace's server, for good; null when the workspace has none. `runs` is
- * what that server runs, null when dohc could not ask or had no automations
- * to ask about. The counts are of the Collection's automations and of those a
- * schedule or Group message starts. `server`: on that server, which it needs
- * from then on.
- */
+/** Where a Collection is. `here`: only on this computer. `server`: on the server at `host`. */
 export const DatasetPlace = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("here"),
-      server: z
-        .object({
-          host,
-          runs: z.enum(["all", "no-schedules", "off"]).nullable(),
-          automations: z.number().int().min(0),
-          scheduledAutomations: z.number().int().min(0),
-        })
-        .strict()
-        .nullable(),
-    })
-    .strict(),
+  z.object({ kind: z.literal("here") }).strict(),
   z.object({ kind: z.literal("server"), host }).strict(),
 ]);
 export type DatasetPlace = z.infer<typeof DatasetPlace>;
@@ -484,12 +463,6 @@ export const DatasetRequest = z.discriminatedUnion("action", [
       action: z.literal("setGrant"),
       grantId: z.string().min(1).max(256),
       grant: DatasetDataGrant,
-      moveToServer: z
-        .literal(true)
-        .describe(
-          "Agree to move a Collection that is only on this computer to the workspace's server for good.",
-        )
-        .optional(),
     })
     .strict(),
   z
@@ -792,27 +765,13 @@ const computerLabel = z
     (label) => isNoticeLine(label, AUTOMATION_COMPUTER_LABEL_MAX_CHARS),
     "Invalid computer name.",
   );
-/**
- * A list on a computer that doesn't keep the workspace's Collections. It
- * holds the Collections on `server`, which this computer asked, and
- * `computer` keeps the others. `sameName`: that computer has this one's name.
- */
-export const DatasetListElsewhere = z
-  .object({
-    server: z.string().url().max(2048),
-    computer: z.object({ label: computerLabel, sameName: z.boolean() }).strict(),
-  })
-  .strict();
-export type DatasetListElsewhere = z.infer<typeof DatasetListElsewhere>;
 // No limit: an unreadable record's words can carry the error that stopped dohc reading it, with the workspace's path.
 const refusalWords = z.string().min(1);
 const refusalComputer = computerLabel.nullable();
 /**
  * Why this computer can't list a workspace's Collections. `words` say why
  * and what to do. `elsewhere`: another computer keeps them, and `computer`
- * names it. `server-unavailable`: another computer keeps them, and this
- * computer's server didn't answer. Its `words` say where the Collections
- * are, and `failure` is the server's error.
+ * names it.
  */
 export const DatasetListRefusal = z.discriminatedUnion("kind", [
   z
@@ -823,14 +782,6 @@ export const DatasetListRefusal = z.discriminatedUnion("kind", [
     .strict(),
   z
     .object({ kind: z.literal("elsewhere"), words: refusalWords, computer: refusalComputer })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("server-unavailable"),
-      words: refusalWords,
-      computer: refusalComputer,
-      failure: z.string().max(4096),
-    })
     .strict(),
 ]);
 export type DatasetListRefusal = z.infer<typeof DatasetListRefusal>;
@@ -868,7 +819,6 @@ export const DatasetResult = z.discriminatedUnion("kind", [
       kind: z.literal("list"),
       datasets: z.array(description).max(100),
       nextCursor: identity.nullable(),
-      elsewhere: DatasetListElsewhere.optional(),
     })
     .strict(),
   z.object({ kind: z.literal("collections-refused"), refusal: DatasetListRefusal }).strict(),

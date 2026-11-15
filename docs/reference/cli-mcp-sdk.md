@@ -1545,14 +1545,12 @@ Each verb takes one JSON object that names workspaceId. Find workspaceId in .doh
 
 List Collections.
 
-On a computer that doesn't keep the workspace's Collections, list returns the Collections on this computer's server. elsewhere names that server and the computer that keeps the others.
-
 - `workspaceId`: `string`. Required.
 - `after`: `UUID`
 - `limit`: `integer`
 - `includeArchived`: `boolean`
 
-Returns `{ kind: "list", datasets, nextCursor, elsewhere?: { server, computer } }` or `{ kind: "collections-refused", refusal: { kind, words } | { kind: "elsewhere", words, computer } | { kind: "server-unavailable", words, computer, failure } }`.
+Returns `{ kind: "list", datasets, nextCursor }` or `{ kind: "collections-refused", refusal: { kind, words } | { kind: "elsewhere", words, computer } }`.
 
 #### `dohc dataset describe`
 
@@ -1616,20 +1614,19 @@ List app bindings and explicit data grants.
 - `after`: `string`
 - `limit`: `integer`
 
-Returns `{ kind: "permissions", permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor, place?: { kind: "here", server } | { kind: "server", host } }`.
+Returns `{ kind: "permissions", permissions: ({ kind: "data", principal, current, metadata } | { kind: "app", principal, current, metadata })[], nextCursor, place?: { kind: "here" } | { kind: "server", host } }`.
 
 #### `dohc dataset setGrant`
 
 Add or change an explicit data grant.
 
-grant names revision, revisionSha256, operationIds, and discover. A Collection only on this computer moves to the workspace's server first, for good. permissions shows its place. Send moveToServer: true to agree.
+grant names revision, revisionSha256, operationIds, and discover.
 
 - `workspaceId`: `string`. Required.
 - `datasetPath`: `string`. Required.
 - `expectedDatasetId`: `UUID`
 - `grantId`: `string`. Required.
 - `grant`: `{ revision: integer, revisionSha256: SHA-256 hex, operationIds: UUID[], discover: boolean }`. Required.
-- `moveToServer`: `true`
 
 Returns `{ kind: "grant-updated" }`.
 

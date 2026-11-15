@@ -105,26 +105,17 @@ async function answer(request: OwnerAppPublicationRequest): Promise<OwnerAppPubl
     return { kind: "withdrawn", publicationId: published.publicationId, authorityRevision: 2 };
   return { kind: "cancelled" };
 }
-// A Collection already on the server, so Publish moves nothing.
-const datasetAnswer = async (input?: unknown): Promise<unknown> =>
-  (input as { action?: string } | undefined)?.action === "permissions"
-    ? {
-        kind: "permissions",
-        permissions: [],
-        nextCursor: null,
-        place: { kind: "server", host: "sync.example.test" },
-      }
-    : {
-        kind: "list",
-        datasets: [
-          {
-            datasetId: datasetCapability.datasetId,
-            datasetPath: "data/dataset.json",
-            datasetAddressStatus: "available",
-          },
-        ],
-        nextCursor: null,
-      };
+const datasetAnswer = async (): Promise<unknown> => ({
+  kind: "list",
+  datasets: [
+    {
+      datasetId: datasetCapability.datasetId,
+      datasetPath: "data/dataset.json",
+      datasetAddressStatus: "available",
+    },
+  ],
+  nextCursor: null,
+});
 const api = {
   dataset: vi.fn(datasetAnswer),
   listRelayShareLinks: vi.fn(async (): Promise<ListRelayShareLinksResult> => page),
@@ -181,37 +172,6 @@ describe("owner app publication", () => {
     api.cloudStatus.mockResolvedValue({ connected: true, workspaceSynced: true });
     api.getSyncStatus.mockResolvedValue(syncedStatus);
     api.dataset.mockImplementation(datasetAnswer);
-  });
-
-  it("keeps Publish off until dohc knows where the Collection is, including after a failed check", async () => {
-    const place = deferred<unknown>();
-    api.dataset.mockImplementation(async (input?: unknown) =>
-      (input as { action: string }).action === "permissions" ? place.promise : datasetAnswer(input),
-    );
-    api.publishOwnerApp.mockImplementation(async (request) =>
-      request.action === "prepare"
-        ? { ...prepared, capabilities: [datasetCapability] }
-        : answer(request),
-    );
-    const reportError = vi.fn();
-    render(<OwnerAppPublication workspaceId="ws-trip" appRoot="trip" reportError={reportError} />);
-    await review();
-    const publish = screen.getByRole("button", {
-      name: "Publish this revision",
-    }) as HTMLButtonElement;
-    expect(publish.disabled).toBe(true);
-    place.reject(Error("Engine connection lost"));
-    await waitFor(() =>
-      expect(reportError).toHaveBeenCalledWith(
-        "dohc could not check where this Collection is.",
-        expect.any(Error),
-        expect.any(Function),
-      ),
-    );
-    expect(publish.disabled).toBe(true);
-    api.dataset.mockImplementation(datasetAnswer);
-    act(() => reportError.mock.calls[0]![2]());
-    await waitFor(() => expect(publish.disabled).toBe(false));
   });
 
   it("reviews exact source and network consequences before approval", async () => {

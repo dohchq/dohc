@@ -5,7 +5,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   admitCollectionsStore,
   collectionsHolderRequired,
-  collectionsKeptElsewhere,
   CollectionsRefusalError,
   createHoldingCheck,
   holderWork,
@@ -174,43 +173,6 @@ describe("a workspace's Collections holder", () => {
     );
   });
 
-  it("tells from the record alone that another computer keeps them, and nothing else", async () => {
-    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toBeNull();
-    await named(laptop, storeId);
-    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toEqual({
-      kind: "elsewhere",
-      computer: laptop,
-      sameName: false,
-    });
-    await named({ installId: "install-old", label: "Studio" });
-    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toEqual({
-      kind: "elsewhere",
-      computer: { installId: "install-old", label: "Studio" },
-      sameName: true,
-    });
-    // This computer keeps them, a share needs no holder, and a record dohc cannot read names nobody.
-    await named(here, storeId);
-    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toBeNull();
-    await named(laptop, storeId);
-    expect(
-      await collectionsKeptElsewhere(root, workspaceId, {
-        here: () => here,
-        required: () => false,
-      }),
-    ).toBeNull();
-    await record({
-      version: 2,
-      workspaceId,
-      installId: laptop.installId,
-      label: laptop.label,
-      storeId,
-    });
-    expect(await collectionsKeptElsewhere(root, workspaceId, required)).toBeNull();
-    await named(laptop, storeId);
-    expect(await collectionsKeptElsewhere(root, "w-2", required)).toBeNull();
-    expect(await readdir(join(root, ".dohc"))).toEqual(["collections.json"]);
-  });
-
   it("refuses a store this computer keeps that is not there, without creating one", async () => {
     await named(here, storeId);
     const refused = await refusal(admitCollectionsStore(root, workspaceId, required));
@@ -366,23 +328,18 @@ describe("a workspace's Collections holder", () => {
     );
   });
 
-  it("needs a holder in every workspace of the person's own, synced through a server or not, and none in a received share", async () => {
+  it("needs a holder only in a workspace of the person's own with no server: the server keeps a syncing or paused workspace's Collections", async () => {
     expect(
       await admitCollectionsStore(root, workspaceId, { here: () => here, required: () => false }),
     ).toEqual({ kind: "unguarded" });
     expect(collectionsHolderRequired({})).toBe(true);
     expect(collectionsHolderRequired(undefined)).toBe(true);
-    // A server's sync never carries .dohc, so the record cannot travel through it.
+    expect(collectionsHolderRequired({ remote: { serverUrl: "https://server.dohc.test" } })).toBe(
+      false,
+    );
     expect(
-      collectionsHolderRequired({ remote: { serverUrl: "https://server.dohc.test" } } as {
-        shareView?: unknown;
-      }),
-    ).toBe(true);
-    expect(
-      collectionsHolderRequired({ pausedRemote: { serverUrl: "https://server.dohc.test" } } as {
-        shareView?: unknown;
-      }),
-    ).toBe(true);
+      collectionsHolderRequired({ pausedRemote: { serverUrl: "https://server.dohc.test" } }),
+    ).toBe(false);
     expect(collectionsHolderRequired({ shareView: { shareId: "s" } })).toBe(false);
   });
 

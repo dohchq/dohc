@@ -259,6 +259,33 @@ it("pages local Collection permissions live without disclosing stored grant cred
   expect(JSON.stringify(first)).not.toContain("secret-grant-token");
 });
 
+it("refuses a restore in a workspace whose Collections are on its server", async () => {
+  const sourceHost = await open(),
+    approved = await activate(sourceHost.host);
+  await sourceHost.host.invoke(call(approved, id(6), "saved", { name: "Preserved" }));
+  const archive = await sourceHost.host.prepareExport(id(1));
+  const sourcePath = join(sourceHost.workspaceRoot, "syncing.dohc-recovery");
+  await writeDatasetRecoveryExport({
+    workspaceRoots: [],
+    path: sourcePath,
+    stream: archive.stream(),
+    signal: new AbortController().signal,
+    maxBytes: archive.maxBytes,
+    authorize() {},
+  });
+  await archive.dispose();
+  let syncing = false;
+  const target = await open({ collectionsServer: () => (syncing ? ({} as never) : null) });
+  const prepared = await target.host.prepareRecovery({ sourcePath });
+  syncing = true;
+  const refused = "Restore this Collection in a workspace that does not sync.";
+  await expect(target.host.prepareRecovery({ sourcePath })).rejects.toThrow(refused);
+  await expect(target.host.claimRecovery({ ...prepared, oldHostStopped: true })).rejects.toThrow(
+    refused,
+  );
+  expect(target.host.keptDatasetIds()).toEqual([]);
+});
+
 it("finishes a restore that dohc quit partway through", async () => {
   const sourceHost = await open(),
     approved = await activate(sourceHost.host);

@@ -84,7 +84,9 @@ export interface TableFieldMark {
 
 /**
  * What the person did to one cell that the host has not confirmed. `value`
- * shows in place of the stored one, and the editor opens on it. The host
+ * shows in place of the stored one, and the editor opens on it. With
+ * `stored`, the Collection refused the change: the cell shows the stored
+ * value, and `value` only starts the next edit. The host
  * gives the words: the table cannot know why a change waits or was refused.
  * `discard` gives the change up for good. Absent, the cell offers only Try again.
  */
@@ -92,7 +94,7 @@ export type TableCellStatus = { value: CollectionValue } & (
   | { state: "pending" }
   | { state: "waiting"; reason: string }
   | { state: "unconfirmed"; reason: string; retry(): void; discard?(): void }
-  | { state: "refused"; reason: string; dismiss(): void }
+  | { state: "refused"; reason: string; dismiss(): void; stored?: true }
 );
 
 /**
@@ -668,13 +670,14 @@ export function StatusMark({ status }: { status: TableCellStatus }) {
   );
 }
 
-/** A status's value in place of the stored one. */
+/** A status's value in place of the stored one. A change the Collection refused only starts the next edit. */
 export function shownValue(
   field: string,
   indexed: CollectionIndexedValue | undefined,
   status: TableCellStatus | undefined,
+  editing = false,
 ): CollectionIndexedValue | undefined {
-  if (!status) return indexed;
+  if (!status || (status.state === "refused" && status.stored && !editing)) return indexed;
   return {
     field,
     value: status.value,
@@ -1878,11 +1881,12 @@ export function TableView({
                     carried={
                       editingField.type === "multi-select" ? carriedSelection(editing) : undefined
                     }
-                    // The edit starts from what the cell shows, so a refused value is not typed twice.
+                    // The edit starts from what was typed, so a refused value is not typed twice.
                     indexed={shownValue(
                       editingField.name,
                       editingValue,
                       statuses.get(editing.recordId, editing.field),
+                      true,
                     )}
                     emit={(value, previousValues) =>
                       onCellChange({

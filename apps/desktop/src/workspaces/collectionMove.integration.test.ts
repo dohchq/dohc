@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import {
   fixture as relayFixture,
   limits as relayLimits,
@@ -15,7 +16,12 @@ import { unguardedCollections } from "../testing/collectionsHolder";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import { openedLocalState } from "../testing/preparedLocalState";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
-import { collectionPlace, finishedTransfer, moveCollectionToServer } from "./collectionMove";
+import {
+  collectionPlace,
+  createCollectionsSendUp,
+  finishedTransfer,
+  sendCollectionsUp,
+} from "./collectionMove";
 import { createLocalDatasetHost } from "./localDatasetHost";
 import { createDatasetAuthorityRouter, createRemoteDatasetData } from "./remoteDataset";
 
@@ -263,17 +269,7 @@ async function collectionOnThisComputer(
     },
     hostForWorkspace: async () => local,
     dataForWorkspace: async () => data(),
-    collectionPlace: async (_workspace, datasetId) =>
-      collectionPlace({
-        transfer: await finished(datasetId),
-        relayUrl: "https://relay.test",
-        automations: async () => ({ automations: 0, scheduledAutomations: 0 }),
-        runs: async () => {
-          throw Error("Nothing asks without automations.");
-        },
-      }),
-    moveToServer: (_workspace, datasetId, signal) =>
-      moveCollectionToServer({ local, datasetId, ...move, signal }),
+    collectionPlace: async (_workspace, datasetId) => collectionPlace(await finished(datasetId)),
     flushSourceCapture: async () => ({ heldFiles: [], deferredWrites: [] }),
     withAdapter: async (_workspace, work) => work(adapter),
     createSources: async () => {
@@ -314,10 +310,20 @@ async function collectionOnThisComputer(
     restart,
     controller,
     transferStatus: (datasetId: string) => local.transferStatus(datasetId),
+    owner,
+    relayHost,
+    sendUp: () =>
+      sendCollectionsUp({ local, ...move, server: async () => move, signal: controller.signal }),
+    sendUpOnOpen: (reported: (unsent: Map<string, unknown>) => void) =>
+      createCollectionsSendUp({
+        open: async () => local,
+        session: () => ({ ...move, server: async () => move, signal: controller.signal }),
+        reported,
+      }),
   };
 }
 
-it("gives a teammate access to a Collection on this computer by moving it to the server, once the owner agrees", async () => {
+it("gives a teammate access to a Collection once it has gone up to the server, and not before", async () => {
   const {
     collection,
     teammate,
@@ -325,28 +331,25 @@ it("gives a teammate access to a Collection on this computer by moving it to the
     invoke,
     ownerInvoke,
     setGrant,
+    sendUp,
     controller,
     transferStatus,
   } = await collectionOnThisComputer();
 
   expect(await collection("window", { ...address, action: "permissions" })).toMatchObject({
     kind: "permissions",
-    place: {
-      kind: "here",
-      server: { host: "relay.test", runs: null, automations: 0, scheduledAutomations: 0 },
-    },
+    place: { kind: "here" },
   });
   await expect(collection("window", setGrant)).rejects.toThrow(
-    "Giving a person access moves this Collection to relay.test.",
+    "Sync this workspace with a server before giving a person access.",
   );
   expect(transferStatus(id(1))).toBeNull();
   await expect(
     teammate.invoke(invoke(id(6), "teammate-before", { name: "Too early" })),
   ).rejects.toThrow();
 
-  await expect(collection("window", { ...setGrant, moveToServer: true })).resolves.toEqual({
-    kind: "grant-updated",
-  });
+  expect(await sendUp()).toEqual(new Map());
+  await expect(collection("window", setGrant)).resolves.toEqual({ kind: "grant-updated" });
   expect(transferStatus(id(1))?.state).toBe("imported");
   expect(await collection("window", { ...address, action: "permissions" })).toMatchObject({
     kind: "permissions",
@@ -391,6 +394,7 @@ it.each([
     invoke,
     ownerInvoke,
     setGrant,
+    sendUp,
     restart,
     controller,
     transferStatus,
@@ -403,7 +407,7 @@ it.each([
       throw Error("The server stopped answering.");
     },
   });
-  await expect(collection("window", { ...setGrant, moveToServer: true })).rejects.toThrow(stopped);
+  expect(String((await sendUp()).get(id(1)))).toContain(stopped);
   expect(transferStatus(id(1))?.state).toBe("ready");
 
   await restart();
@@ -428,6 +432,78 @@ it.each([
   ).resolves.toMatchObject({ result: { name: "Teammate" } });
   expect(await ownerInvoke(id(5), "owner-list-after")).toMatchObject({
     result: [{ name: "Owner" }, { name: "Teammate" }],
+  });
+  controller.abort();
+});
+
+it("sends a Collection this computer keeps to the workspace's server once, with its records", async () => {
+  const imports: string[] = [];
+  const { owner, invoke, sendUp, transferStatus, controller } = await collectionOnThisComputer({
+    relay(path, init, send) {
+      if (path.includes("/imports/")) imports.push(`${init.method} ${path}`);
+      return send(init);
+    },
+  });
+  expect(await sendUp()).toEqual(new Map());
+  expect(transferStatus(id(1))?.state).toBe("imported");
+  expect(await owner.invoke(invoke(id(5), "owner-list"))).toMatchObject({
+    result: [{ name: "Owner" }],
+  });
+  const sent = imports.length;
+  expect(sent).toBeGreaterThan(0);
+
+  expect(await sendUp()).toEqual(new Map());
+  expect(imports).toHaveLength(sent);
+  controller.abort();
+});
+
+it("reports a Collection the server already has, and overwrites neither copy", async () => {
+  const { owner, invoke, sendUp, relayHost, transferStatus, controller } =
+    await collectionOnThisComputer();
+  const schemaSql = sources.get(definition.schemaPath)!,
+    operationSource = sources.get(definition.operationsPath)!;
+  await relayHost.activate(
+    { kind: "named", workspaceId: "w", userId: "owner" },
+    {
+      workspaceId: "w",
+      revision: describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource }),
+      schemaSql,
+      operationSource,
+    },
+  );
+
+  const unsent = await sendUp();
+  expect([...unsent.keys()]).toEqual([id(1)]);
+  expect(String((unsent.get(id(1)) as Error).message)).toContain("relay.test");
+  expect(await owner.invoke(invoke(id(5), "server-list"))).toMatchObject({ result: [] });
+  // This computer keeps the Collection's records, ready to send once the person sorts it out.
+  expect(transferStatus(id(1))?.state).toBe("ready");
+  controller.abort();
+});
+
+it("a read of a Collection still going up waits for it, and one that didn't arrive goes again", async () => {
+  let down = true;
+  const reports: Array<Map<string, unknown>> = [];
+  const { owner, invoke, sendUpOnOpen, transferStatus, controller } =
+    await collectionOnThisComputer({
+      relay(_path, init, send) {
+        if (down) throw Error("The server stopped answering.");
+        return send(init);
+      },
+    });
+  const sendUp = sendUpOnOpen((unsent) => reports.push(unsent));
+  sendUp.start();
+  await expect(sendUp.sent(id(1), controller.signal)).rejects.toThrow("relay.test");
+  expect(reports.map((unsent) => [...unsent.keys()])).toEqual([[id(1)], [id(1)]]);
+  // Another Collection, which this computer never kept, doesn't wait.
+  await expect(sendUp.sent(id(9), controller.signal)).resolves.toBeUndefined();
+
+  down = false;
+  await expect(sendUp.sent(id(1), controller.signal)).resolves.toBeUndefined();
+  expect(transferStatus(id(1))?.state).toBe("imported");
+  expect(reports.at(-1)).toEqual(new Map());
+  expect(await owner.invoke(invoke(id(5), "owner-list"))).toMatchObject({
+    result: [{ name: "Owner" }],
   });
   controller.abort();
 });

@@ -917,6 +917,9 @@ function makeBaseBridge(
       (_listener: (event: { workspaceId: string }) => void) => () => undefined,
     ),
     onCollectionRulesChanged: vi.fn(() => () => undefined),
+    onCollectionCopyChanged: vi.fn(
+      (_listener: (event: { workspaceId: string; datasetId?: string }) => void) => () => undefined,
+    ),
     readCrashReport: vi.fn(
       async (_payload: Record<string, never>): Promise<ReadCrashReportResult> => ({
         report: null,

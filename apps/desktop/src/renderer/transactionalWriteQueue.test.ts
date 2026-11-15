@@ -7,6 +7,7 @@ import type { TransactionalInvoke } from "./TransactionalCollectionPage";
 import { admitCollectionChanges, openCollectionChangeShell } from "./collectionChangeShells";
 import {
   hasWriteQueueForTests,
+  NOT_CONFIRMED,
   resetWriteQueuesForTests,
   writeQueueFor,
   type WriteQueueHost,
@@ -135,6 +136,61 @@ const state = (page: ReturnType<typeof open>["page"], record: number, field: Tra
 afterEach(resetWriteQueuesForTests);
 
 describe("the order changes go in", () => {
+  it("drops every change not yet sent when this computer refuses one because the Collection's server is out of reach, says so once, and shows the true values", async () => {
+    const rules = host(),
+      { queue, page } = open(rules);
+    queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    queue.enqueue(edit(row(2, 4), name, "Beatrice"));
+    const words =
+      "dohc didn't save this change. This Collection is read-only until relay.test is reachable.";
+    rules.calls[0]!.answer.reject(
+      Object.assign(new Error(words), {
+        code: "operation_refused",
+        refusal: { code: "offline", message: words },
+      }),
+    );
+    await vi.waitFor(() => expect(queue.size).toBe(0));
+    for (const record of ["1", "2"])
+      expect(page.statuses.get(record, "name")).toMatchObject({
+        state: "refused",
+        reason: words,
+        stored: true,
+      });
+    expect(rules.calls).toHaveLength(1);
+    expect(rules.onError).toHaveBeenCalledOnce();
+    expect(rules.onError).toHaveBeenCalledWith(words, expect.any(Error), null);
+  });
+
+  it("keeps a change that may have run as one dohc could not confirm, with its Try again, when its retry meets a refused connection", async () => {
+    const rules = host(),
+      { queue, page } = open(rules);
+    const lost = queue.enqueue(edit(row(1, 2), name, "Alicia"));
+    rules.calls[0]!.answer.reject(new Error("Lost reply"));
+    await vi.waitFor(() => expect(state(page, 1, name)).toBe("unconfirmed"));
+    queue.retry(lost);
+    const words =
+      "dohc didn't save this change. This Collection is read-only until relay.test is reachable.";
+    // The refused connection proves only that this try ran nothing: the first may have saved.
+    rules.calls[1]!.answer.reject(
+      Object.assign(new Error(words), {
+        code: "operation_refused",
+        refusal: { code: "offline", message: words },
+      }),
+    );
+    await vi.waitFor(() => expect(state(page, 1, name)).toBe("unconfirmed"));
+    expect(queue.size).toBe(1);
+    expect(rules.dropped).not.toHaveBeenCalled();
+    // The notice says only that dohc could not confirm it, not that it didn't save.
+    const [said, cause, retry] = rules.onError.mock.lastCall!;
+    expect([said, (cause as Error).message, typeof retry]).toEqual([
+      NOT_CONFIRMED,
+      NOT_CONFIRMED,
+      "function",
+    ]);
+    queue.retry(lost);
+    expect(rules.calls[2]!.request).toEqual(rules.calls[0]!.request);
+  });
+
   it("sends one request at a time, in the order the changes were made", async () => {
     const rules = host(),
       { queue } = open(rules);
@@ -823,14 +879,17 @@ describe("the rules of a table open at two revisions", () => {
     const a = open(old),
       b = open(next);
     b.page.sync({ ...next, offline: true });
+    // An offline copy refuses a change at once and keeps nothing to send later.
     b.queue.enqueue(edit(row(1, 2), name, "Alicia"), b.page);
     expect(b.page.statuses.get("1", "name")).toMatchObject({
-      state: "waiting",
-      reason: "Waiting for the Collection to come back online",
+      state: "refused",
+      reason: "dohc didn't save this change. This Collection is read-only until it is back online.",
     });
     a.page.sync(old);
-    expect([old.calls, next.calls].map((calls) => calls.length)).toEqual([0, 0]);
+    b.queue.enqueue(edit(row(2, 4), name, "Bea"), b.page);
+    expect(state(b.page, 2, name)).toBe("refused");
     b.page.sync(next);
+    b.queue.enqueue(edit(row(3, 1), name, "Cy"), b.page);
     expect([old.calls, next.calls].map((calls) => calls.length)).toEqual([0, 1]);
   });
 });

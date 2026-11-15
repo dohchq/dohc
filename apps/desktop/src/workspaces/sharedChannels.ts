@@ -29,46 +29,61 @@ export const RELAY_FETCH_TIMEOUT_MS = 15_000;
 // the timeout instead of blocking the Chats surface indefinitely. Errors ride
 // the pass's normal transient-failure path (logged, retried next pass).
 //
-// A Collection request waits a limited time for the server's answer even when
-// its caller passes a signal, and then fails as a network failure, so a read
-// uses the kept copy. A read waits `timeoutMs`. A POST can change records, so
-// it waits until just past the server's own 30 s deadline: a slow change is
-// never reported as failed while the server still commits it. Only the wait
-// for the answer is limited: a file can take longer to arrive. A recovery export
-// or import is answered only once it is prepared or installed, under the server's
-// own longer deadline, so it keeps waiting, as do long-polls and other requests
-// with their own signal.
-export const COLLECTION_CHANGE_ANSWER_MS = 35_000;
+// A Collection request, or an app's request to its Collection, waits a limited
+// time for the server's answer even when its caller passes a signal, and then
+// fails as a network failure: a read shows the kept copy, and a change says
+// dohc can't reach the server. A read, or a kept copy's request for the
+// server's history, waits `timeoutMs` for its answer to start; a file can take
+// longer to arrive. The owner's record change waits `timeoutMs` for its whole
+// answer, which is short; a change the server takes longer to finish may still
+// be saved there, which the copy shows once it comes up to date. Other POSTs
+// send or prepare files, or migrate, and a named recipient's keep their earlier
+// limit, so they wait until just past the server's own 30 s deadline. A recovery export or import is answered
+// only once it is prepared or installed, under the server's own longer
+// deadline, so it keeps waiting, as do long-polls and other requests with
+// their own signal.
+const COLLECTION_POST_ANSWER_MS = 35_000;
 
 export function relayFetchWithTimeout(
   timeoutMs: number,
   baseFetch: typeof fetch = fetch,
-  changeAnswerMs = COLLECTION_CHANGE_ANSWER_MS,
 ): typeof fetch {
   const request = relayApiFetch(baseFetch);
   return async (input, init) => {
     if (!init?.signal) return request(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
     const path = requestPath(input),
-      read = (init.method ?? "GET").toUpperCase() === "GET";
+      read = (init.method ?? "GET").toUpperCase() === "GET" || REPLICA_PATH.test(path);
     if (!COLLECTION_PATH.test(path) || (read ? EXPORT_PATH : IMPORT_PATH).test(path))
       return request(input, init);
+    const change = !read && CHANGE_PATH.test(path);
     const deadline = new AbortController();
     const timer = setTimeout(
       () => deadline.abort(new TypeError("The server did not answer in time.")),
-      read ? timeoutMs : changeAnswerMs,
+      read || change ? timeoutMs : COLLECTION_POST_ANSWER_MS,
     );
+    timer.unref?.();
     try {
-      return await request(input, {
+      const response = await request(input, {
         ...init,
         signal: AbortSignal.any([init.signal, deadline.signal]),
       });
-    } finally {
+      // A change's limit runs on until its answer has arrived; it ends nothing once it has.
+      if (!change) clearTimeout(timer);
+      return response;
+    } catch (error) {
       clearTimeout(timer);
+      throw error;
     }
   };
 }
 
-const COLLECTION_PATH = /^\/sync\/(?:shares\/)?[^/]+\/datasets(?:[/?]|$)/;
+// A Collection's routes, and those of an app the owner approved on this computer over one.
+const COLLECTION_PATH =
+  /^\/sync\/(?:shares\/)?[^/]+\/(?:datasets(?:[/?]|$)|app-publications\/[^/]+\/backend\/)/;
+// The owner's record change, or that of an app on the owner's computer.
+const CHANGE_PATH = /^\/sync\/[^/]+\/(?:datasets\/[^/]+|app-publications\/[^/]+\/backend)\/invoke$/;
+// A kept copy's requests for the server's head, history and records.
+const REPLICA_PATH = /\/datasets\/[^/]+\/replica\/[a-z]+$/;
 // A GET of the import path only asks for its status, so it keeps the read limit.
 const EXPORT_PATH = /\/datasets\/[^/]+\/export$/;
 const IMPORT_PATH = /\/datasets\/[^/]+\/imports\/[^/]+$/;
