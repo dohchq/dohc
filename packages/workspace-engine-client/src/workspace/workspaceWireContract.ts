@@ -1123,6 +1123,15 @@ const CaptureFileHoldSchema = mutableStruct({
   retryRequested: Schema.Boolean,
 });
 
+/** A reach a rule gives: a level, none, or the member's workspace level where no rule sets one. */
+const AccessRuleReachSchema = Schema.Union([
+  Schema.Literal("view"),
+  Schema.Literal("comment"),
+  Schema.Literal("edit"),
+  Schema.Literal("none"),
+  Schema.Literal("workspace"),
+]);
+
 /** A folder whose access rule changed outside dohc and waits for its owner. */
 const AccessRuleHoldSchema = mutableStruct({
   versionId: Schema.NonEmptyString,
@@ -1132,6 +1141,24 @@ const AccessRuleHoldSchema = mutableStruct({
   /** The rule's bytes on disk when it was judged; null when it is gone. */
   observedSha256: Schema.NullOr(Schema.NonEmptyString),
   recordedAtMs: Schema.Int,
+  /** The rule dohc recorded at the folder, when it is one text file. */
+  recordedRule: Schema.NullOr(Schema.String),
+  /** The rule file on disk, when there is exactly one. */
+  rulePath: Schema.NullOr(Schema.NonEmptyString),
+  /** `members` or a person's email, with the reach before and now; for a removal, now is what the folder falls back to. */
+  changes: Schema.mutable(
+    Schema.Array(
+      mutableStruct({
+        who: Schema.NonEmptyString,
+        before: AccessRuleReachSchema,
+        after: AccessRuleReachSchema,
+      }),
+    ),
+  ),
+  /** Which rule dohc cannot read, if either. */
+  unreadable: Schema.NullOr(Schema.Union([Schema.Literal("on-disk"), Schema.Literal("recorded")])),
+  /** For a removal, the folder whose rule then applies; null when none above does. */
+  fallsBackTo: Schema.NullOr(Schema.String),
 });
 
 /** A decision on a held folder. `kept` names the rule files from outside dohc that Restore kept as kept copies. */
@@ -1139,6 +1166,14 @@ const AccessRuleDecidedSchema = mutableStruct({
   folder: Schema.String,
   decided: Schema.Literal(true),
   kept: Schema.mutable(Schema.Array(Schema.String)),
+  /** The file change that reverses the decision: write `text` over `expectedSha256` (create when null), or delete when `text` is null. */
+  undo: Schema.NullOr(
+    mutableStruct({
+      path: Schema.NonEmptyString,
+      text: Schema.NullOr(Schema.String),
+      expectedSha256: Schema.NullOr(Schema.NonEmptyString),
+    }),
+  ),
 });
 
 const NonNegativeIntSchema = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));

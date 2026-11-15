@@ -1139,13 +1139,34 @@ it("decodes folders whose access rule waits for the owner", () => {
         reason: "widened",
         observedSha256: "a".repeat(64),
         recordedAtMs: 5,
+        recordedRule: "members: view\n",
+        rulePath: "team/access.yaml",
+        changes: [{ who: "members", before: "view", after: "edit" }],
+        unreadable: null,
+        fallsBackTo: null,
       },
-      { versionId: "main", folder: "", reason: "removed", observedSha256: null, recordedAtMs: 6 },
+      {
+        versionId: "main",
+        folder: "",
+        reason: "removed",
+        observedSha256: null,
+        recordedAtMs: 6,
+        recordedRule: null,
+        rulePath: null,
+        changes: [],
+        unreadable: "recorded",
+        fallsBackTo: null,
+      },
     ],
   };
   expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, status)).toEqual(status);
-  for (const reason of ["narrowed", null]) {
-    const heldAccessRules = [{ ...status.heldAccessRules[0], reason }];
+  for (const change of [
+    { reason: "narrowed" },
+    { reason: null },
+    { changes: [{ who: "members", before: "admin", after: "edit" }] },
+    { unreadable: "both" },
+  ]) {
+    const heldAccessRules = [{ ...status.heldAccessRules[0], ...change }];
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...status, heldAccessRules }),
     ).toThrow(ProtocolShapeError);
@@ -1154,10 +1175,20 @@ it("decodes folders whose access rule waits for the owner", () => {
     WORKSPACE_METHOD.captureAcceptAccessRule,
     WORKSPACE_METHOD.captureRestoreAccessRule,
   ]) {
-    expect(decodeWorkspaceResult(method, { folder: "team", decided: true })).toEqual({
+    const decided = {
       folder: "team",
       decided: true,
+      kept: ["team/access.yaml"],
+      undo: { path: "team/access.yaml", text: "members: edit\n", expectedSha256: "a".repeat(64) },
+    };
+    expect(decodeWorkspaceResult(method, decided)).toEqual(decided);
+    expect(decodeWorkspaceResult(method, { ...decided, undo: null })).toEqual({
+      ...decided,
+      undo: null,
     });
+    expect(() =>
+      decodeWorkspaceResult(method, { folder: "team", decided: true, kept: [] }),
+    ).toThrow(ProtocolShapeError);
   }
 });
 

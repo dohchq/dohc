@@ -1636,13 +1636,34 @@ export const CaptureHoldsEvent = z
 // A folder whose access rule changed outside dohc. The rule dohc last
 // recorded still applies until the owner decides. `folder` is empty for the
 // workspace's own rule, and `observedSha256` is null when the rule is gone.
+// `changes` lists who reaches the folder differently, from the rule dohc
+// recorded to the rule on disk now; for a removal, to what the folder falls
+// back to: the rule of `fallsBackTo`, or the workspace level when it is null.
+const AccessRuleReach = z.enum(["view", "comment", "edit", "none", "workspace"]);
 export const AccessRuleHold = z.object({
   versionId: z.string().min(1),
   folder: z.string(),
   reason: z.enum(["widened", "removed"]),
   observedSha256: z.string().min(1).nullable(),
   recordedAtMs: z.number().int(),
+  recordedRule: z.string().nullable(),
+  rulePath: z.string().min(1).nullable(),
+  changes: z.array(
+    z.object({ who: z.string().min(1), before: AccessRuleReach, after: AccessRuleReach }),
+  ),
+  unreadable: z.enum(["on-disk", "recorded"]).nullable(),
+  fallsBackTo: z.string().nullable(),
 });
+export type AccessRuleReach = z.infer<typeof AccessRuleReach>;
+// The file change that reverses a decision: write `text` over the bytes
+// `expectedSha256` names, create the file when that is null, or delete it
+// when `text` is null.
+export const AccessRuleUndo = z.object({
+  path: z.string().min(1),
+  text: z.string().nullable(),
+  expectedSha256: z.string().min(1).nullable(),
+});
+export type AccessRuleUndo = z.infer<typeof AccessRuleUndo>;
 export type AccessRuleHold = z.infer<typeof AccessRuleHold>;
 export type CaptureHoldsEvent = z.infer<typeof CaptureHoldsEvent>;
 
@@ -1925,7 +1946,11 @@ export const captureRecoveryOperations = {
       expectedReason: z.enum(["widened", "removed"]),
     }),
     // `kept` names the rule files from outside dohc that Restore kept as kept copies.
-    result: z.object({ heldAccessRules: z.array(AccessRuleHold), kept: z.array(z.string()) }),
+    result: z.object({
+      heldAccessRules: z.array(AccessRuleHold),
+      kept: z.array(z.string()),
+      undo: AccessRuleUndo.nullable(),
+    }),
     guard: "trusted-sender",
     scope: "workspace",
     handlerCheck: {

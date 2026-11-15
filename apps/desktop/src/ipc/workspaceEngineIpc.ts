@@ -925,7 +925,7 @@ export function createWorkspaceEngineIpc<
                 const { heldAccessRules } = await adapter.watcherStatus();
                 dependencies.recordHeldAccessRules(operation.workspace, heldAccessRules);
                 if ("error" in decided) throw decided.error;
-                return { heldAccessRules, kept: decided.result.kept };
+                return { heldAccessRules, kept: decided.result.kept, undo: decided.result.undo };
               });
               if (result === null) throw new Error("The workspace engine is not running.");
               return result;

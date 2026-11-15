@@ -315,6 +315,11 @@ async function harness(
       folder: input.folder,
       decided: true as const,
       kept: [`${input.folder}/access.yaml`],
+      undo: {
+        path: `${input.folder}/access.yaml`,
+        text: "members: edit\n",
+        expectedSha256: "c".repeat(64),
+      },
     })),
     listCollections: vi.fn<VersionedLiveAdapter["listCollections"]>(async () => ({
       collections: [],
@@ -867,6 +872,11 @@ describe("workspace engine IPC registrations", () => {
       reason: "widened" as const,
       observedSha256: "b".repeat(64),
       recordedAtMs: 2,
+      recordedRule: "members: view\n",
+      rulePath: "team/access.yaml",
+      changes: [{ who: "members", before: "view" as const, after: "edit" as const }],
+      unreadable: null,
+      fallsBackTo: null,
     };
     expect(
       await bridge.decideAccessRule({
@@ -877,7 +887,11 @@ describe("workspace engine IPC registrations", () => {
         expectedSha256: "a".repeat(64),
         expectedReason: "widened",
       }),
-    ).toEqual({ heldAccessRules: [], kept: ["team/access.yaml"] });
+    ).toEqual({
+      heldAccessRules: [],
+      kept: ["team/access.yaml"],
+      undo: { path: "team/access.yaml", text: "members: edit\n", expectedSha256: "c".repeat(64) },
+    });
     expect(h.adapter.decideAccessRule).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
         versionId: "main",

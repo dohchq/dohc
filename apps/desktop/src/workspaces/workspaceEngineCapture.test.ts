@@ -97,6 +97,18 @@ function sha256Utf8(text: string): string {
 }
 
 const WORKSPACE_ID = "engine-capture-test";
+const REMOVED_TEAM = {
+  versionId: "main",
+  folder: "team",
+  reason: "removed" as const,
+  observedSha256: null,
+  recordedAtMs: 1,
+  recordedRule: "members: view\n",
+  rulePath: null,
+  changes: [{ who: "members", before: "view" as const, after: "workspace" as const }],
+  unreadable: null,
+  fallsBackTo: null,
+};
 const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 
 it.each(["text"])("replays a keyed %s restore without reversing a later edit", async (kind) => {
@@ -1966,15 +1978,7 @@ describe("workspaceEngineCapture batch capture", () => {
               recoveryUnavailable: true,
               secretKeyUnavailable: "key-missing",
               heldFiles: [],
-              heldAccessRules: [
-                {
-                  versionId: "main",
-                  folder: "team",
-                  reason: "removed",
-                  observedSha256: null,
-                  recordedAtMs: 1,
-                },
-              ],
+              heldAccessRules: [REMOVED_TEAM],
             });
           if (property === "listKeptCopies") return async () => native;
           if (property === "listPendingCollectionAdoptions") return adoptions;
@@ -2013,15 +2017,7 @@ describe("workspaceEngineCapture batch capture", () => {
         expect(recovery).toHaveBeenCalledWith(true);
         expect(secretKey).toHaveBeenCalledWith("key-missing");
         expect(held).toHaveBeenCalledWith([]);
-        expect(heldRules).toHaveBeenCalledWith([
-          {
-            versionId: "main",
-            folder: "team",
-            reason: "removed",
-            observedSha256: null,
-            recordedAtMs: 1,
-          },
-        ]);
+        expect(heldRules).toHaveBeenCalledWith([REMOVED_TEAM]);
         expect(adoptions).toHaveBeenCalled();
         expect(outcomes).toHaveBeenLastCalledWith(null, null);
         expect(errors).not.toHaveBeenCalled();

@@ -186,6 +186,11 @@ describe("workspaceActivity capture hooks", () => {
       reason: "widened" as const,
       observedSha256: "digest",
       recordedAtMs: 1,
+      recordedRule: null,
+      rulePath: null,
+      changes: [],
+      unreadable: null,
+      fallsBackTo: null,
     };
     expect(activity.getStatus("activity-test").heldAccessRules).toEqual([]);
     hooks.onHeldAccessRules([rule]);
