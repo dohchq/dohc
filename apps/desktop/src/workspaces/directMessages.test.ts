@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DirectConversation, DirectMessage } from "@dohc/security-contract/direct-messages";
 import { createDirectMessages, DirectMessageError } from "./directMessages";
 
-// Lets a test hold a save at its first filesystem step.
-const fsGate = vi.hoisted(() => ({ hold: null as Promise<void> | null, entered: false }));
+// Lets a test hold a save at its first filesystem step, or hold or fail a deletion.
+const fsGate = vi.hoisted(() => ({ hold: null as Promise<void> | null, entered: false, removing: null as ((path: string) => Promise<void> | undefined) | null, deleting: 0 }));
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof import("node:fs/promises")>();
   return {
@@ -15,6 +16,15 @@ vi.mock("node:fs/promises", async (original) => {
       fsGate.entered = true;
       await fsGate.hold;
       return actual.mkdir(...args);
+    },
+    rm: async (...args: Parameters<typeof actual.rm>) => {
+      fsGate.deleting += 1;
+      try {
+        await fsGate.removing?.(String(args[0]));
+        return await actual.rm(...args);
+      } finally {
+        fsGate.deleting -= 1;
+      }
     },
   };
 });
@@ -31,6 +41,7 @@ const conversation = (last: DirectMessage | null): DirectConversation => ({
 let stateDir: string;
 beforeEach(async () => { stateDir = await mkdtemp(join(tmpdir(), "dohc-direct-")); });
 afterEach(async () => {
+  fsGate.removing = null;
   fsGate.hold = null;
   fsGate.entered = false;
   await rm(stateDir, { recursive: true, force: true });
@@ -195,6 +206,37 @@ describe("direct messages on this computer", () => {
     release();
     await Promise.all([listing, cleanup]);
     expect(await readdir(join(stateDir, "direct-messages")).catch(() => [] as string[])).toEqual([]);
+  });
+
+  it("finishes every deletion before a later save, even when one deletion fails", async () => {
+    const h = harness();
+    h.routes.set("/sync/direct/conversations", () => Response.json({ revision: 1, conversations: [conversation(message(1))] }));
+    const cat = { relayUrl: "https://relay.test", userId: "cat" };
+    await h.service.list();
+    h.signInAs(cat);
+    await h.service.list();
+    const catFolder = createHash("sha256").update(`${cat.relayUrl}
+${cat.userId}`).digest("hex").slice(0, 32);
+    // Ann's folder can't be deleted; deleting Cat's waits until released.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let holding = true;
+    fsGate.removing = (path) => {
+      if (path.endsWith(catFolder)) return holding ? held : undefined;
+      return Promise.reject(Object.assign(new Error("busy"), { code: "EBUSY" }));
+    };
+
+    const signedOut = h.service.credentialsChanged(null).catch(() => "failed");
+    const signedIn = h.service.credentialsChanged(cat).catch(() => "failed");
+    const listing = h.service.list();
+    // Let a save that does not wait for the deletion finish first.
+    await Promise.race([listing, new Promise((resolve) => setTimeout(resolve, 50))]);
+    holding = false;
+    release();
+    expect(await signedOut).toBe("failed");
+    await Promise.all([signedIn, listing]);
+    await expect.poll(() => fsGate.deleting).toBe(0);
+    expect(await readdir(join(stateDir, "direct-messages"))).toContain(catFolder);
   });
 
   it("tells listeners once the server answers after starting offline", async () => {

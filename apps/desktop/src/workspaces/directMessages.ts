@@ -222,7 +222,10 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
       return serial(async () => {
         const root = join(dependencies.stateDir(), "direct-messages");
         const folders = await readdir(root).catch(() => [] as string[]);
-        await Promise.all(folders.filter((name) => name !== kept).map((name) => rm(join(root, name), { recursive: true, force: true })));
+        // Wait for every deletion, even after one fails: one still running could delete a copy saved after this cleanup.
+        const removed = await Promise.allSettled(folders.filter((name) => name !== kept).map((name) => rm(join(root, name), { recursive: true, force: true })));
+        const failed = removed.find((result) => result.status === "rejected");
+        if (failed) throw failed.reason;
       });
     },
 
