@@ -13,7 +13,7 @@ import { StyleSheet, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
-import type { ChatKind } from "../chats/sample";
+import type { ChatKind } from "../chats/types";
 import type { WakeTarget } from "../server/chatWakes";
 import { phoneWrites } from "../server/phoneWrites";
 import { views, type ViewState } from "../server/workspaceData";

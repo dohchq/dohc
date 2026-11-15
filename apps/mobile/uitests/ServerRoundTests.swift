@@ -94,6 +94,27 @@ final class ServerRoundTests: XCTestCase {
     openKickoff(app)
   }
 
+  // Folding Groups hides every chat in it, unread ones too. Unfolded, Planning opens and Back returns to Chats.
+  @MainActor
+  func test2b_chatsFoldASectionAndOpenAChat() throws {
+    let app = XCUIApplication()
+    app.launch()
+    tab(app, "Chats")
+    let planning = app.buttons["Planning"]
+    XCTAssertTrue(planning.waitForExistence(timeout: 30), "Chats should show the group Planning")
+    // A folded section with unread chats says so in its label.
+    let groups = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Groups")).firstMatch
+    groups.tap()
+    XCTAssertTrue(planning.waitForNonExistence(timeout: 10), "Folding Groups should hide Planning")
+    groups.tap()
+    XCTAssertTrue(planning.waitForExistence(timeout: 10), "Unfolding Groups should show Planning again")
+    planning.tap()
+    let replies = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "replies, last at")).firstMatch
+    XCTAssertTrue(replies.waitForExistence(timeout: 30), "Planning should open")
+    back(app)
+    XCTAssertTrue(planning.waitForExistence(timeout: 30), "Back should return to Chats")
+  }
+
   // The thread is open when the change arrives, so the feed brings the reply. Plan opens afterwards and reads the edit.
   @MainActor
   func test3_feedShowsTheChange() throws {

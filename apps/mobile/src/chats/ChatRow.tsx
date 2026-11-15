@@ -4,7 +4,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { AgentMark } from "../AgentMark";
 import { useTheme, type Theme } from "../theme";
 import { chatWords, countText } from "./chatLabels";
-import type { ChatRowData } from "./sample";
+import type { ChatRowData } from "./types";
 
 // One line per chat, as in Slack: the leading mark says what it is, bold says unread, grey says muted.
 export const ChatRow = memo(function ChatRow({
