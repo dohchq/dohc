@@ -10,6 +10,7 @@ import {
   isStoppedWorkspaceCall,
   isStoppedWorkspaceRead,
   KEEPABLE_COLLECTIONS_REFUSALS,
+  LASTING_COLLECTIONS_REFUSALS,
   readCollectionsRefusal,
   readError,
   refusalCode,
@@ -548,7 +549,12 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
               ? { identity }
               : {}),
           ...(details.length ? { details } : {}),
-          retry: canRetry === false || isStoppedWorkspaceCall(error) ? null : retry,
+          retry:
+            canRetry === false ||
+            isStoppedWorkspaceCall(error) ||
+            LASTING_COLLECTIONS_REFUSALS.includes(readCollectionsRefusal(error)?.kind ?? "changed")
+              ? null
+              : retry,
           ...(isPrivacyDenied(error)
             ? { action: privacySettingsAction }
             : KEEPABLE_COLLECTIONS_REFUSALS.includes(

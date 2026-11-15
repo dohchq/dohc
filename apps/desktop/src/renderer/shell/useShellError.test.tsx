@@ -1044,6 +1044,7 @@ describe("useShellError", () => {
       const row = result.current.shellErrors[0]!;
       expect(row.message).toBe(`Could not create the Collection. ${words}`);
       expect(row.action?.label).toBe("Use this computer");
+      expect(row.retry, "only keeping them here helps").toBeNull();
       await act(async () => {
         result.current.runShellErrorAction(row.id);
       });
@@ -1077,6 +1078,18 @@ describe("useShellError", () => {
         );
         expect(result.current.shellErrors.at(-1)!.action).toBeUndefined();
       }
+      // Nothing on this computer changes where a joined computer's Collections are.
+      act(() =>
+        result.current.reportShellError(
+          "Could not create the Collection.",
+          new Error(
+            "Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-joined]: Another computer keeps this workspace's Collections. Open this workspace there to use them.",
+          ),
+          retry,
+        ),
+      );
+      expect(result.current.shellErrors.at(-1)).toMatchObject({ retry: null });
+      expect(result.current.shellErrors.at(-1)!.action).toBeUndefined();
     } finally {
       vi.unstubAllGlobals();
     }
