@@ -81,6 +81,10 @@ export interface LiveRooms {
 
 interface Subscriber {
   readonly queue: NamedFrameAppliedUpdate[];
+  /** About how many bytes its queue holds that were passed on to it. */
+  bytes: number;
+  /** It fell a whole note behind, so its session ends and the page syncs afresh. */
+  behind?: true;
   /** Gets only the edits the room takes, as rows, and none of the room's feed. */
   readonly owner?: true;
   wake?: () => void;
@@ -275,11 +279,21 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     from: { readonly taken: boolean; readonly except?: Subscriber },
   ) {
     room.position = update.journalCursor;
+    const size = update.updateBytes.byteLength;
     for (const subscriber of room.subscribers) {
-      if (subscriber === from.except) continue;
+      if (subscriber === from.except || subscriber.behind) continue;
       // The owner's own capture already brings it every change the journal took.
       if (subscriber.owner && !from.taken) continue;
-      subscriber.queue.push(subscriber.owner ? { ...update, roomRow: true } : update);
+      // A page that stops reading is never ended by its frame session, which only stops pulling.
+      // Past a whole note's worth, a fresh sync is the cheaper way to catch it up.
+      if (subscriber.queue.length && subscriber.bytes + size > options.maxNoteBytes) {
+        subscriber.behind = true;
+        subscriber.queue.length = 0;
+        subscriber.bytes = 0;
+      } else {
+        subscriber.queue.push(subscriber.owner ? { ...update, roomRow: true } : update);
+        subscriber.bytes += size;
+      }
       subscriber.wake?.();
     }
   }
@@ -560,6 +574,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       signal.throwIfAborted();
       room.lifetime.signal.throwIfAborted();
       current();
+      if (subscriber.behind) throw new Error("This page fell too far behind the live note.");
       if (subscriber.queue.length) {
         // Everything waiting leaves as one update, up to the applied-update bound.
         let take = 0,
@@ -570,6 +585,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           take += 1;
         }
         const waiting = subscriber.queue.splice(0, take);
+        subscriber.bytes = Math.max(0, subscriber.bytes - size);
         const updateBytes =
           take === 1 ? waiting[0]!.updateBytes : Y.mergeUpdates(waiting.map((u) => u.updateBytes));
         return {
@@ -632,8 +648,12 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
         signal.throwIfAborted();
         room.lifetime.signal.throwIfAborted();
         current();
+        if (subscriber.behind) throw new Error("This page fell too far behind the live note.");
         const row = subscriber.queue.shift();
-        if (row) return { value: row, release() {} };
+        if (row) {
+          subscriber.bytes = Math.max(0, subscriber.bytes - row.updateBytes.byteLength);
+          return { value: row, release() {} };
+        }
         if (read) {
           const lease = read;
           read = undefined;
@@ -707,9 +727,11 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
             const sync = await host.openSync(clientVector, signal);
             held.lifetime.signal.throwIfAborted();
             host.assertCurrent();
-            // Every edit the room took and no committed save holds, oldest first.
+            // Every edit the room took and no committed save holds, oldest first. They are the
+            // room's own, so they don't count toward how far behind it may fall.
             const own: Subscriber = {
               owner: true,
+              bytes: 0,
               queue: held.unsaved
                 .filter((edit) => edit.position > held.savedThrough)
                 .map((edit) => ({
@@ -739,7 +761,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
               ),
             };
           }
-          const own: Subscriber = { queue: [] };
+          const own: Subscriber = { queue: [], bytes: 0 };
           subscriber = own;
           held.subscribers.add(own);
           return {

@@ -121,13 +121,14 @@ function rooms(
     saveTimeoutMs?: number;
     saveEveryMs?: number;
     pauseAfterMs?: number;
+    maxNoteBytes?: number;
   } = {},
   engine: Engine = {},
 ) {
   const created = createLiveRooms({
     storage: f.storage,
     maxUpdateBytes: limits.maxUpdateBytes ?? 1 << 20,
-    maxNoteBytes: 1 << 22,
+    maxNoteBytes: limits.maxNoteBytes ?? 1 << 22,
     maxAppliedBytes: 1 << 20,
     namesEverySender: limits.names ?? false,
     // Tests save by leaving unless they set the timer.
@@ -707,6 +708,28 @@ it("keeps a pause's copy until the owner's desktop records it written, and resum
   expect(liveRoomPaused(storage, f.input.evidence.document)).toBe(false);
   expect(pauses(f)).toEqual([]);
   expect(usage(f)).toBe(before);
+});
+
+it("ends a page that stops reading once it falls a note behind, and goes on for everyone else", async () => {
+  const f = note();
+  const room = rooms(f, { saveEveryMs: 5, maxNoteBytes: 4_000 });
+  const a = editor(f, room, ana),
+    b = editor(f, room, ben),
+    stalled = editor(f, room, olu);
+  await a.open();
+  await b.open();
+  await stalled.open();
+  // One letter at a time, as typing is: each edit is about 30 bytes and adds a few to the note,
+  // so the stalled page's queue outgrows the note while the note stays well inside its bound.
+  for (let sent = 0; sent < 200; sent++) {
+    expect((await a.submit(a.change("title", String(sent % 10)))).result).toBe("success");
+    await b.next();
+    if (sent % 50 === 49) await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  }
+  await expect(stalled.next()).rejects.toThrow("fell too far behind");
+  expect((await a.submit(a.change("place", "Porto"))).result).toBe("success");
+  await b.next();
+  expect(b.doc.getMap("frontmatter").get("place")).toBe("Porto");
 });
 
 it("refuses an edit under an editor id tied to someone else and writes nothing", async () => {
