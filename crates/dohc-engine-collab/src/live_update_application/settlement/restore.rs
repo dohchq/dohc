@@ -392,16 +392,16 @@ pub(super) fn restored_origin(
         crate::limits::MAX_YDOC_UPDATE_BYTES,
     )?
     .ok_or(ApplicationError::Corrupt)?;
-    let (application,markdown):(String,String) = conn.query_row(
-        "SELECT f.application_json,json_extract(f.proposal_json,'$.point.markdownDigest') FROM live_device_settlements s JOIN live_restore_fences f ON f.relay_database_namespace=s.relay_database_namespace AND f.operation_id=s.restore_operation_id WHERE s.settlement_id=?1 AND f.workspace_id=s.workspace_id AND f.main_version_id=s.main_version_id AND f.object_id=s.object_id",
-        [&anchor.id],|row|Ok((row.get(0)?,row.get(1)?)),
+    // The anchor's Markdown is this engine's; the point's digest is the relay writer's.
+    let application: String = conn.query_row(
+        "SELECT f.application_json FROM live_device_settlements s JOIN live_restore_fences f ON f.relay_database_namespace=s.relay_database_namespace AND f.operation_id=s.restore_operation_id WHERE s.settlement_id=?1 AND f.workspace_id=s.workspace_id AND f.main_version_id=s.main_version_id AND f.object_id=s.object_id",
+        [&anchor.id],|row|row.get(0),
     ).map_err(read_sql)?;
     let application: NativeRestoreApplicationReceipt =
         serde_json::from_str(&application).map_err(|_| ApplicationError::Corrupt)?;
     if application.admitted.accepted.binding != anchor.binding
         || application.local_head_sequence != anchor.sequence
         || application.admitted.accepted.receipt.journal_cursor != anchor.cursor
-        || markdown != anchor.markdown
     {
         return Err(ApplicationError::Corrupt);
     }

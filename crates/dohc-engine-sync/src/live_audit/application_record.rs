@@ -862,6 +862,7 @@ fn insert_event(
             .iter()
             .all(|saved| saved == &manifest.record_digest));
     }
+    // restore_markdown_digest is the relay writer's digest of the point, kept as its claim; no check reads it.
     tx.execute("INSERT INTO live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count,record_digest,evidence_digest,journal_cursor,delivery_id,accepting_host_epoch,restore_operation_id,restore_markdown_digest,canonical_version,restore_generation) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",params![p[0],p[1],p[2],p[3],p[4],record.header.event_count,manifest.record_digest,record.header.evidence_digest,record.accepted.receipt.journal_cursor,record.accepted.receipt.delivery_id,record.accepted.receipt.accepting_host_epoch,record.suffix.source_restore.as_ref().map(|s|&s.operation_id),record.suffix.source_restore.as_ref().map(|s|&s.point.markdown_digest),record.canonical_version,record.accepted.binding.restore_fence_generation]).map_err(SyncError::persist)?;
     Ok(true)
 }

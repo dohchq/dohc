@@ -421,9 +421,9 @@ fn prepare_in(
             .preserved_markdown_source(&point_projection)
             .unwrap_or_else(|| point_projection.clone())
     };
-    // The relay's writer made the point's digests and can spell the same state
-    // differently. Only a reader-built point's digest names a file, its retained one.
-    if point.has_reader_source() && hex_sha256(markdown.as_bytes()) != input.point.markdown_digest {
+    if retains_reader_file(&point, &markdown)
+        && hex_sha256(markdown.as_bytes()) != input.point.markdown_digest
+    {
         return Err(ApplicationError::Conflict);
     }
     if markdown.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
@@ -772,7 +772,7 @@ fn verify_candidate(
         || actual != expected
         || projection != point_projection
         || exact.as_deref() != Some(source.as_str())
-        || (point.has_reader_source()
+        || (retains_reader_file(&point, &source)
             && hex_sha256(source.as_bytes()) != receipt.point.markdown_digest)
         || doc.canonical_content_sha256() != receipt.final_content_digest
         || doc.encode_state_vector() != receipt.after_state_vector
@@ -815,6 +815,15 @@ fn prefix_source(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The relay's writer made a point's digests and can spell the same state
+/// differently. Only a point whose Markdown is the reader's retained file has a
+/// digest both sides share; an expired witness falls back to this engine's.
+fn retains_reader_file(point: &Ydoc, markdown: &str) -> bool {
+    point.markdown_source_reference().is_some_and(|reference| {
+        point.has_reader_source() && reference.source_sha256 == hex_sha256(markdown.as_bytes())
+    })
+}
+
 pub(super) fn point_source(
     conn: &Connection,
     held: &Registration,

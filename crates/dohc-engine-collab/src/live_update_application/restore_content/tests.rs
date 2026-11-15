@@ -363,7 +363,12 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
         let expected_reader = !direction.starts_with("reader-to-native");
         let target = if direction.starts_with("expired-") {
             let edit = f.doc.richdoc_append_paragraph("expired selected point");
-            f.accept(edit, 2)
+            let mut point = f.accept(edit, 2);
+            // An expired witness names no retained file, so the relay's writer spells the point.
+            let relay = format!("{}\n", f.doc.project(ContentKind::Richdoc).unwrap().content);
+            point.markdown_digest = hex_sha256(relay.as_bytes());
+            point.projection_digest = hex_sha256(relay.as_bytes());
+            point
         } else {
             f.baseline_point.clone()
         };
@@ -2052,7 +2057,7 @@ fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
             &mut f.store,
             f.resolver.as_ref(),
             NativeRestoreResume {
-                application: input,
+                application: input.clone(),
                 settlement_id: restored.settlement_id.clone().unwrap(),
             },
             f.host.clone(),
@@ -2064,6 +2069,7 @@ fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
         )
         .unwrap();
     f.binding = resumed.binding.clone();
+    f.terminal = Some(input.admitted.accepted.receipt);
     f.handle = f
         .owner
         .register(
@@ -2098,6 +2104,18 @@ fn a_point_another_writer_spelled_restores_settles_and_resumes_in_the_engines_sp
         })
         .unwrap();
     assert_eq!(settled, hex_sha256(b"# Baseline\n"));
+    // A settlement after resume reads the restore as its origin, in the engine's spelling; here it replays it.
+    let next = with_settlement(
+        &mut f.store,
+        &f.handle,
+        f.terminal.clone(),
+        100,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
+        |store, audit| record_test_projection(store, audit, "restore-moment"),
+    );
+    next.unwrap();
 }
 
 #[test]
