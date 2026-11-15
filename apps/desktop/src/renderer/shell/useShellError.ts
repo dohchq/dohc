@@ -162,6 +162,7 @@ export interface ShellError {
   // afterRetry puts the action after Try again, so F6 lands on Try again.
   // `busy` names the step that is running, 0 for the action and 1 on for
   // each additional one: it reads as working and every step waits.
+  // `stays`: its steps run where the row is, so Notices stays open on it.
   action?: {
     label: string;
     run: () => void;
@@ -170,6 +171,7 @@ export interface ShellError {
     afterRetry?: true;
     additional?: { label: string; run: () => void }[];
     busy?: number;
+    stays?: true;
   };
   // Where a press on the row goes: what it is about. Opening never runs
   // the row's action, so it never retries or ends the row.

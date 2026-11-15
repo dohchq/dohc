@@ -7624,6 +7624,7 @@ export function DesktopWorkspaceShell(props: {
           ? { additionalActionLabels: error.action.additional.map((action) => action.label) }
           : {}),
         ...(error.action?.busy !== undefined ? { actionBusy: error.action.busy } : {}),
+        ...(error.action?.stays ? { actionStays: true } : {}),
         seen: error.seen,
         ...(error.read ? { read: true } : {}),
         ...(error.noDismiss ? { noDismiss: true } : {}),

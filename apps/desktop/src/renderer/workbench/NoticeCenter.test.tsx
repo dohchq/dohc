@@ -59,6 +59,85 @@ it("shows the running step as working, with every step waiting, on the toast and
   expect(action).not.toHaveBeenCalled();
 });
 
+it("keeps Notices open on a step that runs in place, with focus on its row and then on its outcome", async () => {
+  const held: WorkspaceErrorNotice = {
+    id: "held",
+    tone: "warning",
+    title: "Access to team was widened outside dohc",
+    message: "Until you choose…",
+    atMs: 1,
+    canRetry: false,
+    seen: true,
+    actionLabel: "Restore rule",
+    additionalActionLabels: ["Allow new access"],
+    actionStays: true,
+    noDismiss: true,
+    target: { to: "folder", path: "team" },
+  };
+  const action = vi.fn();
+  const props = { onWorkspaceErrorAction: action, onOpenTarget: async () => null };
+  const view = renderNotices({ ...props, workspaceErrors: [held] });
+  await userEvent.click(screen.getByTestId("notice-center-toggle"));
+  await userEvent.click(
+    within(screen.getByTestId("notice-held")).getByRole("button", { name: "Allow new access" }),
+  );
+  expect(action).toHaveBeenCalledExactlyOnceWith("held", 1);
+  const opens = (id: string) =>
+    screen.getByTestId(`notice-${id}`).querySelector("[data-notice-open]");
+  expect(document.activeElement).toBe(opens("held"));
+
+  // Working: the row stays in Notices, its steps wait, and focus stays on it.
+  const busy = { ...held, additionalActionLabels: ["Allowing…"], actionBusy: 1 };
+  view.rerender(noticeElement({ ...props, workspaceErrors: [busy] }));
+  expect(
+    within(screen.getByTestId("notice-held"))
+      .getByRole("button", { name: "Allowing…" })
+      .getAttribute("aria-busy"),
+  ).toBe("true");
+  expect(
+    within(screen.getByTestId("notice-held"))
+      .getByRole("button", { name: "Restore rule" })
+      .hasAttribute("disabled"),
+  ).toBe(true);
+  expect(document.activeElement).toBe(opens("held"));
+
+  // Done: the outcome files while the row still waits, then the row goes.
+  const done: WorkspaceErrorNotice = {
+    id: "done",
+    tone: "success",
+    message: "Members can now edit team.",
+    atMs: 2,
+    canRetry: false,
+    seen: true,
+  };
+  view.rerender(noticeElement({ ...props, workspaceErrors: [busy, done] }));
+  expect(document.activeElement).toBe(opens("held"));
+  view.rerender(noticeElement({ ...props, workspaceErrors: [done] }));
+  expect(screen.getByTestId("notice-done").contains(document.activeElement)).toBe(true);
+
+  // A failure puts the row back; focus stays on it beside the failure's row.
+  view.rerender(noticeElement({ ...props, workspaceErrors: [held] }));
+  await userEvent.click(
+    within(screen.getByTestId("notice-held")).getByRole("button", { name: "Restore rule" }),
+  );
+  view.rerender(
+    noticeElement({
+      ...props,
+      workspaceErrors: [{ ...held, actionLabel: "Restoring…", actionBusy: 0 }],
+    }),
+  );
+  const failed: WorkspaceErrorNotice = {
+    id: "failed",
+    message: "dohc could not restore the access rule for team",
+    atMs: 3,
+    canRetry: true,
+    seen: true,
+  };
+  view.rerender(noticeElement({ ...props, workspaceErrors: [held, failed] }));
+  expect(screen.getByTestId("notice-failed")).toBeTruthy();
+  expect(document.activeElement).toBe(opens("held"));
+});
+
 it("opens Notices at the row a request names and moves focus into it", async () => {
   const errors: WorkspaceErrorNotice[] = ["outer", "inner"].map((id) => ({
     id,

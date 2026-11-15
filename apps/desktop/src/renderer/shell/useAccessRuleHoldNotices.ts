@@ -171,6 +171,8 @@ export function useAccessRuleHoldNotices(
         { label: busy === "accept" ? words.accepting : words.accept, run: decide("accept") },
       ],
       ...(busy ? { busy: busy === "restore" ? 0 : 1 } : {}),
+      // A choice runs on its row, so Notices stays open on what it does.
+      stays: true,
     };
     latest.current.reportShellFailure({
       identity: identityOf(hold),

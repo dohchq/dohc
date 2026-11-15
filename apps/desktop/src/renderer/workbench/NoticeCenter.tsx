@@ -75,6 +75,8 @@ export type NoticeAction = {
   // button's description.
   reason?: string;
   busy?: boolean;
+  // It runs where the row is: Notices stays open and focus stays on the row.
+  stays?: boolean;
 };
 
 // What opening a row comes to: null once its target opened, or a sentence
@@ -153,6 +155,8 @@ export interface WorkspaceErrorNotice {
   // The step that is running, 0 for the action and 1 on for each additional
   // one. It reads as working, and every step waits until it ends.
   actionBusy?: number;
+  // Its steps run in place: Notices stays open while they work.
+  actionStays?: boolean;
   seen: boolean;
   read?: boolean;
   // The row has no Dismiss: it stays until its action runs.
@@ -1205,7 +1209,7 @@ export function LocalNoticeRow(props: {
   unread: boolean;
   reach?: ReachHandlers;
   onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
-  onAction: (action: NoticeAction) => void;
+  onAction: (action: NoticeAction, from: HTMLElement) => void;
   onDismiss: (event: MouseEvent<HTMLButtonElement>) => void;
   // Opens the row's target. Absent while a note says why it cannot.
   onOpen?: () => void;
@@ -1296,14 +1300,15 @@ export function LocalNoticeRow(props: {
                 <div className={ROW_ACTIONS_CLASS}>
                   {notice.actions?.map((action, index) => (
                     <button
-                      key={action.label}
+                      // By place: a step that reads as working keeps its button.
+                      key={index}
                       type="button"
                       disabled={action.disabled}
                       aria-describedby={
                         action.reason === undefined ? undefined : `${reasonId}-${index}`
                       }
                       aria-busy={action.busy || undefined}
-                      onClick={() => props.onAction(action)}
+                      onClick={(event) => props.onAction(action, event.currentTarget)}
                       className={ROW_ACTION_CLASS}
                     >
                       {action.label}
@@ -1812,6 +1817,7 @@ export function NoticeCenter(props: {
                 ...(error.actionBusy !== undefined
                   ? { disabled: true, busy: error.actionBusy === 0 }
                   : {}),
+                ...(error.actionStays ? { stays: true } : {}),
               },
             ]
           : []),
@@ -1822,6 +1828,7 @@ export function NoticeCenter(props: {
               ...(error.actionBusy !== undefined
                 ? { disabled: true, busy: error.actionBusy === index + 1 }
                 : {}),
+              ...(error.actionStays ? { stays: true } : {}),
             }))
           : []),
       ];
@@ -2324,6 +2331,42 @@ export function NoticeCenter(props: {
     return () => clearTimeout(timer);
   }, [sentToastKey, sentToastFades, onHideSentNoticeToast]);
 
+  const rowsNow = () => [...(centerRef.current?.querySelectorAll<HTMLElement>(NOTICE_ROW) ?? [])];
+  // A step that runs in place keeps focus on its row while the row reads as
+  // working. When the row goes, focus moves to the row that came since, its
+  // outcome, waiting on the panel until it comes. `row` is null while it waits.
+  const keptFocus = useRef<{ row: HTMLElement | null; before: Set<HTMLElement> } | null>(null);
+  useLayoutEffect(() => {
+    const kept = keptFocus.current;
+    const center = centerRef.current;
+    if (!kept) return;
+    if (!open || !center) {
+      keptFocus.current = null;
+      return;
+    }
+    const active = document.activeElement;
+    const { row } = kept;
+    if (row?.isConnected) {
+      // A step that failed puts the row back as it was; focus stays there.
+      if (!row.querySelector("[aria-busy='true']")) keptFocus.current = null;
+      else if (active === null || active === document.body) rowStop(row)?.focus();
+      return;
+    }
+    // Focus the person moved stays where they put it.
+    if (active !== null && active !== document.body && active !== center) {
+      keptFocus.current = null;
+      return;
+    }
+    const outcome = rowsNow().find((next) => !kept.before.has(next));
+    if (outcome) {
+      rowStop(outcome)?.focus();
+      keptFocus.current = null;
+    } else if (row) {
+      center.focus();
+      keptFocus.current = { row: null, before: kept.before };
+    }
+  });
+
   // A row about to go takes focus to the next row, or the one before, or
   // the panel, so the keyboard keeps its place in the list.
   const focusPastRow = (element: Element) => {
@@ -2359,7 +2402,16 @@ export function NoticeCenter(props: {
     event.preventDefault();
     rowStop(next)?.focus();
   };
-  const runLocalAction = (action: NoticeAction) => {
+  const runLocalAction = (action: NoticeAction, from: HTMLElement) => {
+    if (action.stays) {
+      // The pressed step goes disabled while it works, which drops its focus,
+      // so the row's own stop takes it.
+      const row = from.closest<HTMLElement>(NOTICE_ROW);
+      rowStop(row ?? undefined)?.focus();
+      keptFocus.current = row ? { row, before: new Set(rowsNow()) } : null;
+      action.onClick();
+      return;
+    }
     returnTarget()?.focus({ preventScroll: true });
     action.onClick();
     setOpen(false);
