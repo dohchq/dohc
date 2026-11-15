@@ -503,6 +503,44 @@ it("saves an edit again when its save's transaction rolls back", async () => {
   expect(unsaved(f)).toEqual([]);
 });
 
+// Proves: a save that committed is not saved again when a read the storage makes after its
+// commit fails.
+it("saves an edit once when a read after its save's commit fails", async () => {
+  const f = note();
+  const room = rooms(f, { saveEveryMs: 20 });
+  const a = editor(f, room, ana);
+  await a.open();
+  // A host listening for writes makes each one read the database's revision before and after.
+  // The first such write is the save's, and its read after the commit fails.
+  const stop = observeRelayWrites(f.storage, () => {});
+  const storage = f.storage as StorageContext;
+  const prepare = storage.db.prepare.bind(storage.db);
+  let reads = 0;
+  storage.db.prepare = ((sql: string) => {
+    const statement = prepare(sql);
+    if (!sql.startsWith("SELECT total_changes()")) return statement;
+    return {
+      get: () => {
+        reads += 1;
+        if (reads === 2) throw new Error("The read failed.");
+        return statement.get();
+      },
+    };
+  }) as typeof storage.db.prepare;
+  try {
+    expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+    await vi.waitFor(() => expect(savedAuthors(f)).toEqual([ana]));
+    // A second save would have come within a few save timer turns.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(reads).toBeGreaterThanOrEqual(2);
+    expect(savedAuthors(f)).toEqual([ana]);
+    expect(unsaved(f)).toEqual([]);
+  } finally {
+    storage.db.prepare = prepare;
+    stop();
+  }
+});
+
 // Proves: a lease the owner's feed read and holds for the owner's next read is released when the
 // owner closes, as each holds reserved output bytes.
 it("releases the owner's held feed lease when the owner closes", async () => {
