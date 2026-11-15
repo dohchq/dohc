@@ -1008,11 +1008,13 @@ fn folder_holds_files(
     Ok((!files.is_empty(), on_disk))
 }
 
-fn materialization_pending(
+/// The rule files dohc is still placing in `folder`, with the bytes each
+/// placement writes.
+fn pending_rule_jobs(
     conn: &Connection,
     workspace: &str,
     folder: &str,
-) -> Result<bool, RuntimeError> {
+) -> Result<Vec<(String, String)>, RuntimeError> {
     let mut probe = conn
         .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') \
@@ -1021,12 +1023,12 @@ fn materialization_pending(
         .map_err(StorageError::corrupt_public)?;
     let mut scan = conn
         .prepare_cached(
-            "SELECT target_path FROM materialization_jobs WHERE workspace_id IN (?1,'') \
-             AND status='pending' AND target_path>=?2 AND target_path<?3 \
-             AND instr(substr(target_path, ?4), '/')=0",
+            "SELECT target_path, content_sha256 FROM materialization_jobs \
+             WHERE workspace_id IN (?1,'') AND status='pending' AND target_path>=?2 \
+             AND target_path<?3 AND instr(substr(target_path, ?4), '/')=0",
         )
         .map_err(StorageError::corrupt_public)?;
-    let mut pending = false;
+    let mut pending = Vec::new();
     walk_rule_names(
         folder,
         |low, high| {
@@ -1037,11 +1039,14 @@ fn materialization_pending(
         |low, high, name_start| {
             let paths = scan
                 .query_map(params![workspace, low, high, name_start], |row| {
-                    row.get::<_, String>(0)
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })
                 .map_err(StorageError::corrupt_public)?;
-            for path in paths {
-                pending |= is_rule_of(&path.map_err(StorageError::corrupt_public)?, folder);
+            for job in paths {
+                let job = job.map_err(StorageError::corrupt_public)?;
+                if is_rule_of(&job.0, folder) {
+                    pending.push(job);
+                }
             }
             Ok(())
         },
@@ -1126,8 +1131,18 @@ fn judge_folder(
         }
         return Ok(Plan::Verdict(Verdict::Clear(Clearance::RuleLast)));
     }
-    if materialization_pending(conn, workspace, folder)? {
-        // dohc wrote this rule and its file is on the way to disk.
+    let pending = pending_rule_jobs(conn, workspace, folder)?;
+    // dohc wrote this rule and its file is on the way to disk, unless capture
+    // read other bytes there: those are judged like any rule on disk.
+    let placing = |touch: &Touch<'_>| {
+        touch.observed.is_none_or(|bytes| {
+            let sha256 = dohc_engine_storage::hex_sha256(bytes);
+            pending
+                .iter()
+                .any(|(path, content)| path == touch.path && *content == sha256)
+        })
+    };
+    if !pending.is_empty() && rule_touches.iter().all(placing) {
         return Ok(Plan::Verdict(Verdict::Clear(Clearance::Open)));
     }
     let disk = match read_disk_rule(order.root, folder) {
@@ -1769,7 +1784,7 @@ mod tests {
             "CREATE TABLE path_aliases (workspace_id TEXT, version_id TEXT, path TEXT, \
              object_id TEXT, PRIMARY KEY (workspace_id, version_id, path)); \
              CREATE TABLE materialization_jobs (workspace_id TEXT, target_path TEXT, \
-             status TEXT, PRIMARY KEY (workspace_id, target_path))",
+             content_sha256 TEXT, status TEXT, PRIMARY KEY (workspace_id, target_path))",
         )
         .unwrap();
         let names = [
@@ -1813,14 +1828,14 @@ mod tests {
                 "pending"
             };
             conn.execute(
-                "INSERT INTO materialization_jobs VALUES ('ws',?1,?2)",
+                "INSERT INTO materialization_jobs VALUES ('ws',?1,'sha',?2)",
                 [path.as_str(), status],
             )
             .unwrap();
         }
         for folder in ["", "T", "T/sub", "T/apps", "\u{65E5}\u{672C}", "U"] {
             assert_eq!(
-                materialization_pending(&conn, "ws", folder).unwrap(),
+                !pending_rule_jobs(&conn, "ws", folder).unwrap().is_empty(),
                 folder != "T/sub" && paths.iter().any(|path| is_rule_of(path, folder)),
                 "pending in {folder:?}"
             );

@@ -418,6 +418,31 @@ fn restoring_an_uncommitted_rule_keeps_its_bytes() {
     assert!(f.holds().is_empty());
 }
 
+/// A rule dohc is still placing on disk goes unjudged only while capture
+/// reads the bytes being placed. A widening saved over the placement holds.
+#[test]
+fn a_widening_saved_over_a_pending_rule_placement_holds() {
+    let f = ruled_team();
+    let before = f.journal();
+    rusqlite::Connection::open(&f.db)
+        .unwrap()
+        .execute(
+            "INSERT INTO materialization_jobs (job_id, target_path, content_sha256, \
+             preimage_present, target_generation, created_at_ms, workspace_id) \
+             VALUES ('job-rule', 'team/access.yaml', ?1, 0, 1, 1, ?2)",
+            [
+                dohc_engine_storage::hex_sha256(VIEW.as_bytes()),
+                WS.to_owned(),
+            ],
+        )
+        .unwrap();
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/access.yaml"])[0], "team"));
+    assert_eq!(f.journal(), before);
+    assert_eq!(f.holds(), vec![("team".to_owned(), "widened".to_owned())]);
+}
+
 #[test]
 fn an_editor_save_inside_the_settle_period_journals_no_widening() {
     let f = ruled_team();
