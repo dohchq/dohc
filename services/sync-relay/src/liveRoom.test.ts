@@ -1086,6 +1086,18 @@ it("gives the next page every taken edit before they are saved, and saves them w
   expect(savedAuthors(f)).toEqual([ana, ben, ben]);
 });
 
+it("tells a page that joins after a save that the note it gets holds that save", async () => {
+  const f = note();
+  const room = rooms(f, { saveEveryMs: 10 });
+  const a = editor(f, room, ana);
+  await a.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await vi.waitFor(() => expect(f.journalRows().journal).toHaveLength(1));
+  // A page that read the note as saved first would otherwise stop as given an older cut.
+  const late = await editor(f, room, ben).open();
+  expect(late.appliedThroughJournalCursor).toBe(Number(f.journalRows().journal[0]!.journal_cursor));
+});
+
 it("puts a stopped relay's leftover edits in a copy once their note has failed to open for long enough", async () => {
   const f = note();
   const saved = rooms(f);
