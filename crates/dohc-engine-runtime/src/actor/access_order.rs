@@ -2035,6 +2035,9 @@ fn undo_on_store(
         return Err(changed());
     }
     let present = disk.get(&undo.path).map(Vec::as_slice);
+    // Commit the rule Undo placed, not what disk holds after: an outside
+    // save that lands since is capture's to judge.
+    let mut requested = OnDisk::new();
     match (&undo.text, &undo.expected_sha256) {
         (Some(text), _) => {
             let bytes = text.as_bytes();
@@ -2048,16 +2051,16 @@ fn undo_on_store(
                 present,
                 self_writes,
             )?;
+            requested.insert(undo.path.clone(), bytes.to_vec());
         }
         (None, Some(sha256)) => remove_checked(order, &undo.path, sha256)?,
         (None, None) => return Ok(()),
     }
-    let disk = read_disk_rule(order.root, folder).map_err(|()| waits())?;
     commit_rule_changes(
         store,
         order,
         folder,
-        rule_changes(committed.as_ref(), &disk),
+        rule_changes(committed.as_ref(), &requested),
     )
 }
 

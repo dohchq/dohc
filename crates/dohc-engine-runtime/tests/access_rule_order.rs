@@ -234,6 +234,15 @@ impl Fixture {
         folder: &str,
         undo: dohc_engine_runtime::AccessRuleUndo,
     ) -> Result<(), RuntimeError> {
+        self.undo_rule_with(folder, undo, Arc::new(NoFaults))
+    }
+
+    fn undo_rule_with(
+        &self,
+        folder: &str,
+        undo: dohc_engine_runtime::AccessRuleUndo,
+        faults: Arc<dyn dohc_engine_storage::FaultInjector>,
+    ) -> Result<(), RuntimeError> {
         self.runtime.block_on(self.actor.undo_access_rule(
             WS.to_owned(),
             "main".to_owned(),
@@ -242,7 +251,7 @@ impl Fixture {
             self.root().to_path_buf(),
             Arc::new(()),
             40,
-            Arc::new(NoFaults),
+            faults,
         ))
     }
 
@@ -1103,6 +1112,47 @@ fn undo_after_the_rule_changed_again_is_refused() {
         NOBODY
     );
     assert_eq!(f.journal(), before);
+}
+
+/// Undo commits the rule it placed. An outside save that lands before that
+/// commit is capture's to judge, so a widening holds.
+#[test]
+fn an_outside_save_during_an_undo_is_judged_after_it() {
+    struct SaveAfterPlacement(PathBuf);
+    impl dohc_engine_storage::FaultInjector for SaveAfterPlacement {
+        fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+            if point == dohc_engine_storage::FaultPoint::MaterializeAfterRenameBeforeComplete {
+                std::fs::write(&self.0, EDIT).unwrap();
+            }
+            dohc_engine_storage::FaultAction::Continue
+        }
+    }
+    let f = ruled_team();
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    let decided = f
+        .decided_on(
+            "team",
+            AccessRuleDecision::Accept,
+            Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes())),
+            "widened",
+        )
+        .expect("accept");
+    let before = f.journal();
+    f.undo_rule_with(
+        "team",
+        decided.undo.expect("an undo"),
+        Arc::new(SaveAfterPlacement(f.root().join("team/access.yaml"))),
+    )
+    .expect("undo");
+    assert_eq!(
+        f.journal()[before.len()..],
+        lines(&["write team/access.yaml"])
+    );
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    assert_eq!(f.holds(), vec![("team".to_owned(), "widened".to_owned())]);
 }
 
 /// Restoring a folder whose new rule nothing committed removes that rule
