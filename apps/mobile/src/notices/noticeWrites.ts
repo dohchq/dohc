@@ -151,25 +151,38 @@ export function createNoticeTargets(options: {
       listeners.add(listener);
       return () => void listeners.delete(listener);
     },
+    // The rows wanted now, whole: a thread no row wants any more, as when its row leaves the screen, its workspace hides
+    // or the screen does, has its read stopped and its contents dropped. One wanted again is read again.
     want(wanted) {
-      for (const target of wanted) {
-        const key = targetKey(target);
-        if (!entries.has(key)) start(key, target);
+      const keyed = new Map(wanted.map((target) => [targetKey(target), target] as const));
+      const gone = [...targets.keys()].filter((key) => !keyed.has(key));
+      for (const key of gone) {
+        running.get(key)?.abort();
+        running.delete(key);
+        targets.delete(key);
       }
+      if (gone.some((key) => entries.has(key))) {
+        const next = new Map(entries);
+        for (const key of gone) next.delete(key);
+        entries = next;
+        for (const listener of listeners) listener();
+      }
+      for (const [key, target] of keyed) if (!entries.has(key)) start(key, target);
     },
-    retry: (target) => start(targetKey(target), target),
+    retry: (target) => {
+      const key = targetKey(target);
+      if (targets.has(key)) start(key, target);
+    },
     refresh() {
       for (const [key, target] of targets) start(key, target);
     },
+    // Ends every read and drops every thread it read. The next `want` reads again, as when an effect runs again.
     stop() {
       for (const controller of running.values()) controller.abort();
-      // A read it ended is asked again by the next `want`, as when an effect runs again.
-      const ended = [...running.keys()].filter((key) => entries.get(key)?.kind === "reading");
       running.clear();
-      if (ended.length === 0) return;
-      const next = new Map(entries);
-      for (const key of ended) next.delete(key);
-      entries = next;
+      targets.clear();
+      if (entries.size === 0) return;
+      entries = new Map();
       for (const listener of listeners) listener();
     },
   };

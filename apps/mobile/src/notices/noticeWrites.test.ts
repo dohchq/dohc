@@ -311,6 +311,50 @@ describe("the reads behind Reply", () => {
     });
   });
 
+  it("stops and drops the read of a thread no row wants any more, and reads it again when one does", async () => {
+    const { targets, calls } = harness();
+    const T2 = { ...T1, threadId: "t2" };
+    targets.want([T1, T2]);
+    calls[0]?.answer.resolve(answer(thread([message()])));
+    await settle();
+    // T1's row leaves the screen, its workspace hides, or the screen does: T1's thread goes, T2's read is stopped.
+    targets.want([]);
+    expect(calls[1]?.signal.aborted).toBe(true);
+    expect(targets.state().size).toBe(0);
+    calls[1]?.answer.resolve(answer(thread([message({ threadId: "t2" })])));
+    await settle();
+    expect(targets.state().size).toBe(0);
+    // Refresh and Try again read nothing nobody wants.
+    targets.refresh();
+    targets.retry(T1);
+    expect(calls).toHaveLength(2);
+    // Wanted again, it's read again, never answered from the dropped read.
+    targets.want([T1]);
+    expect(calls).toHaveLength(3);
+    expect(targets.state().get(KEY)).toEqual({ kind: "reading" });
+  });
+
+  it("keeps a thread's read while another row still names it", async () => {
+    const { targets, calls } = harness();
+    targets.want([T1, { ...T1, messageId: "m2" }]);
+    calls[0]?.answer.resolve(answer(thread([message(), message({ id: "m2" })])));
+    await settle();
+    targets.want([{ ...T1, messageId: "m2" }]);
+    expect(calls).toHaveLength(1);
+    expect(targets.state().get(KEY)?.kind).toBe("read");
+  });
+
+  it("drops every read on stop, finished ones too", async () => {
+    const { targets, calls } = harness();
+    targets.want([T1]);
+    calls[0]?.answer.resolve(answer(thread([message()])));
+    await settle();
+    targets.stop();
+    expect(targets.state().size).toBe(0);
+    targets.refresh();
+    expect(calls).toHaveLength(1);
+  });
+
   it("tells its listeners at each change, with a new map", async () => {
     const { targets, calls } = harness();
     let changes = 0;
