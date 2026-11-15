@@ -155,15 +155,6 @@
       "completed_at": "2026-11-11T13:10:22Z"
     },
     {
-      "name": "Rust tests 6",
-      "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
-      "status": "completed",
-      "conclusion": "success",
-      "created_at": "2026-11-11T13:08:09Z",
-      "started_at": "2026-11-11T13:08:15Z",
-      "completed_at": "2026-11-11T13:10:32Z"
-    },
-    {
       "name": "Rust tests 2",
       "head_sha": "9f5de214993f8a0639c33a440dc25d164da056fb",
       "status": "completed",
@@ -209,5 +200,5 @@
       "completed_at": "2026-11-11T13:11:29Z"
     }
   ],
-  "adaptation": "Build and confinement jobs folded into the current graph; completion times retained. Rust worker starts retained to model delayed scheduling. Removed Rust test jobs above 6; retained all remaining timestamps."
+  "adaptation": "Build and confinement jobs folded into the current graph; completion times retained. Rust worker starts retained to model delayed scheduling. Removed Rust test jobs above 5; retained all remaining timestamps."
 }
