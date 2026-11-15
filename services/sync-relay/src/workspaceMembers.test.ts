@@ -382,6 +382,26 @@ describe("what a member reaches", () => {
     expect(await pulledText(h, "ana", shareId, LATER_GROUP)).toContain("a new group");
   });
 
+  it("refreshes a member's email before each feed read", async () => {
+    let email = "ana@dohc.test";
+    const { h, storage } = await seed({
+      overrides: {
+        lookupAccountEmail: async (userId) => ({
+          email: userId === "ana" ? email : `${userId}@dohc.test`,
+          verified: true,
+        }),
+      },
+    });
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    await ownerWrite(h, "docs/access.yaml", "people:\n  ana@dohc.test: edit\n");
+    expect(await pulledText(h, "ana", shareId)).toContain("docs/plan.md");
+    const revision = storage.memberReach(WORKSPACE, "ana", "member", "comment").revision;
+    email = "another@dohc.test";
+    expect(await pulledText(h, "ana", shareId)).not.toContain("docs/plan.md");
+    expect(storage.memberReach(WORKSPACE, "ana", "member", "comment").revision).not.toBe(revision);
+  });
+
   it("never serves a member a folder's access rule or a copy of one, and serves both to an admin", async () => {
     const { h } = await seed();
     const ana = await invited(h, "ana");

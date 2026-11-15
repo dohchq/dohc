@@ -162,8 +162,8 @@ export function createNamedShareTransportRoutes(
       });
     }
     if (route.route === "share-log" && request.method === "GET") {
-      await claimPendingShares(actor.userId);
       let authorized: AuthorizedShareAction;
+      let claimed = false;
       try {
         authorized = requireShareAction(route.shareId, actor.userId, "read");
       } catch (error) {
@@ -172,6 +172,11 @@ export function createNamedShareTransportRoutes(
           (error.code !== "not_found" && error.code !== "share_access_removed")
         )
           throw error;
+        await claimPendingShares(actor.userId);
+        claimed = true;
+        authorized = requireShareAction(route.shareId, actor.userId, "read");
+      }
+      if (!claimed && isWorkspaceSelector(authorized.effectiveSelector)) {
         await claimPendingShares(actor.userId);
         authorized = requireShareAction(route.shareId, actor.userId, "read");
       }
