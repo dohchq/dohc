@@ -92,7 +92,8 @@ export function useMergeRemovalNotices(input: {
         .then(({ moment }) => {
           // A later Copy, or leaving the workspace, wins over this one.
           if (request !== copying || !here()) return;
-          if (typeof moment?.beforeText !== "string")
+          if (!moment) throw new Error("dohc could not read this text from History.");
+          if (typeof moment.beforeText !== "string")
             throw new Error("The text is too long to copy here. Open its change in History.");
           return clipboard.writeText(moment.beforeText);
         })
