@@ -261,6 +261,79 @@ fn a_batch_journals_its_rule_first_in_either_order() {
     }
 }
 
+/// The relay reads `team/ACCESS.yaml` as team's rule, so the engine does too.
+#[test]
+fn a_rule_spelled_with_other_capitals_journals_before_its_files() {
+    let f = Fixture::new();
+    f.put("team/a.md", "alpha");
+    f.settle();
+    f.capture_ok(&["team/a.md"]);
+    f.put("team/ACCESS.yaml", VIEW);
+    f.put("team/a.md", "alpha 2");
+    f.settle();
+    f.capture_ok(&["team/a.md"]);
+    assert_eq!(
+        f.journal(),
+        lines(&[
+            "write team/a.md",
+            "write team/ACCESS.yaml",
+            "write team/a.md"
+        ])
+    );
+
+    // Its removal is a removal, whatever the spelling.
+    std::fs::remove_file(f.root().join("team/ACCESS.yaml")).unwrap();
+    f.put("team/a.md", "alpha 3");
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    assert_eq!(f.holds(), vec![("team".to_owned(), "removed".to_owned())]);
+}
+
+/// Respelling a rule on disk retires the old spelling first in a capture
+/// plan. The new spelling reaches the journal before the old one goes.
+#[test]
+fn a_respelled_rule_journals_its_new_spelling_before_the_old_ones_delete() {
+    let f = ruled_team();
+    let before = f.journal();
+    std::fs::rename(
+        f.root().join("team/access.yaml"),
+        f.root().join("team/Access.yaml"),
+    )
+    .unwrap();
+    f.settle();
+    f.actor
+        .capture_retire_respelled_blocking_guarded(
+            CaptureRetire {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: "team/access.yaml".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms: 20,
+                request_id: None,
+                only_if_text_head: false,
+                only_if_capture_origin: true,
+                allow_ydoc_origin: true,
+            },
+            "team/Access.yaml".to_owned(),
+            dohc_engine_storage::hex_sha256(VIEW.as_bytes()),
+            f.root().to_path_buf(),
+            Arc::new(()),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect("retire old spelling");
+    f.capture_ok(&["team/Access.yaml"]);
+    let mut expected = before;
+    expected.extend(lines(&[
+        "write team/Access.yaml",
+        "delete team/access.yaml",
+    ]));
+    assert_eq!(f.journal(), expected);
+    assert!(f.holds().is_empty());
+}
+
 #[test]
 fn a_narrowed_rule_journals_before_the_file_that_follows_it() {
     let f = ruled_team();

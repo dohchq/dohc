@@ -5,7 +5,9 @@
 //! crate's journal calls before it takes an origin seq, on the actor's one
 //! writer thread. For each folder over the moment's path, from the workspace
 //! root down, the check compares the rule on disk with the rule last
-//! committed there:
+//! committed there. A folder's rule is every file in exactly that folder whose
+//! name folds to `access.yaml`, as the relay reads it; two of them are one
+//! unreadable rule, which hides the folder.
 //!
 //! - the same rule, or none on either side, clears the folder, as does a
 //!   committed rule that never reached disk (written without publication);
@@ -37,7 +39,7 @@ use crate::error::RuntimeError;
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::{CaptureIngest, CaptureIngestBinary, CaptureRetire, DomainError};
 use dohc_engine_files::access_rules::{
-    ACCESS_RULE_FILE, AccessRule, ReachBefore, access_rule_folder, is_access_rule_path,
+    ACCESS_RULE_FILE, AccessRule, ReachBefore, access_rule_folder, is_access_rule_path, is_rule_of,
     parse_access_rule, rule_change_narrows,
 };
 use dohc_engine_files::materialize::{PublicationTarget, read_publication_target};
@@ -259,7 +261,7 @@ fn order_folder(
 ) -> Result<Verdict, RuntimeError> {
     let mut verdict = Verdict::Clear(Clearance::Open);
     for above in folders_of(&rule_path(folder)) {
-        verdict = judge_one(store, order, above, None, writes_under || above != folder)?;
+        verdict = judge_one(store, order, above, &[], writes_under || above != folder)?;
         if !matches!(verdict, Verdict::Clear(_)) {
             break;
         }
@@ -309,6 +311,13 @@ fn rule_path(folder: &str) -> String {
         ACCESS_RULE_FILE.to_owned()
     } else {
         format!("{folder}/{ACCESS_RULE_FILE}")
+    }
+}
+
+fn sync_error(error: RuntimeError) -> SyncError {
+    match error {
+        RuntimeError::Storage(error) => SyncError::Storage(error),
+        _ => retry(ACCESS_RULE_WAITS),
     }
 }
 
@@ -362,6 +371,14 @@ fn admit(
     deletes: bool,
 ) -> Result<(), SyncError> {
     let own_rule = is_access_rule_path(path).then(|| access_rule_folder(path));
+    // Deleting one of several files that spell a folder's rule changes the
+    // rule rather than removing it.
+    let deletes = match own_rule {
+        Some(folder) if deletes => committed_rule_paths(tx, workspace, version, folder)
+            .map_err(sync_error)?
+            .is_empty(),
+        _ => deletes,
+    };
     for folder in folders_of(path) {
         let is_rule = own_rule == Some(folder);
         let clearance = match clearance(workspace, version, folder) {
@@ -421,10 +438,7 @@ fn judge_in_tx(
         version_id: version,
         writer: Writer::Capture,
     };
-    let plan = judge_folder(tx, &scope, folder, None, !deletes).map_err(|error| match error {
-        RuntimeError::Storage(error) => SyncError::Storage(error),
-        _ => retry(ACCESS_RULE_WAITS),
-    })?;
+    let plan = judge_folder(tx, &scope, folder, &[], !deletes).map_err(sync_error)?;
     let reason = match plan {
         Plan::Verdict(Verdict::Clear(clearance)) => return Ok(clearance),
         Plan::Verdict(Verdict::Held { .. }) => ACCESS_RULE_HELD,
@@ -541,21 +555,86 @@ enum Verdict {
     Held { reason: &'static str },
 }
 
-/// What is on disk at a folder's rule.
-enum OnDisk {
-    Absent,
-    Bytes(Vec<u8>),
+/// A folder's rule files on disk, by path.
+type OnDisk = BTreeMap<String, Vec<u8>>;
+
+/// One file of the rule last committed at a folder.
+struct CommittedFile {
+    sha256: String,
+    /// `None` when it is binary or does not parse.
+    rule: Option<AccessRule>,
+    binary: bool,
 }
 
 /// The rule last committed at a folder.
 struct Committed {
-    sha256: String,
-    /// `None` when it is binary or does not parse.
-    rule: Option<AccessRule>,
-    /// Capture read it from disk, or dohc placed it there. A rule written
-    /// without publication lives only in the store, so a disk without it
-    /// says nothing about an outside change.
+    files: BTreeMap<String, CommittedFile>,
+    /// Capture read one of its files from disk, or dohc placed it there. A
+    /// rule written without publication lives only in the store, so a disk
+    /// without it says nothing about an outside change.
     reached_disk: bool,
+}
+
+impl Committed {
+    /// The rule members see: `None` when it is unreadable, as several files
+    /// are.
+    fn rule(&self) -> Option<&AccessRule> {
+        match self.files.len() {
+            1 => self
+                .files
+                .values()
+                .next()
+                .and_then(|file| file.rule.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+/// The paths at or under `folder`, as a range of the path index.
+fn folder_range(folder: &str) -> (String, String) {
+    if folder.is_empty() {
+        (String::new(), "\u{10FFFF}".to_owned())
+    } else {
+        (format!("{folder}/"), format!("{folder}0"))
+    }
+}
+
+/// The paths the store holds for `folder`'s rule files.
+fn committed_rule_paths(
+    conn: &Connection,
+    workspace: &str,
+    version: &str,
+    folder: &str,
+) -> Result<Vec<String>, RuntimeError> {
+    let (low, high) = folder_range(folder);
+    // `substr` counts characters; a name starts after the folder's slash.
+    let name_start = folder.chars().count() + usize::from(!folder.is_empty()) + 1;
+    let mut query = conn
+        .prepare_cached(
+            "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
+             AND path>=?3 AND path<?4 AND instr(substr(path, ?5), '/')=0",
+        )
+        .map_err(StorageError::corrupt_public)?;
+    let paths = query
+        .query_map(
+            params![
+                workspace,
+                version,
+                low,
+                high,
+                i64::try_from(name_start).unwrap_or(i64::MAX)
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(StorageError::corrupt_public)?;
+    let mut rules = Vec::new();
+    for path in paths {
+        let path = path.map_err(StorageError::corrupt_public)?;
+        if is_rule_of(&path, folder) {
+            rules.push(path);
+        }
+    }
+    Ok(rules)
 }
 
 fn committed_rule(
@@ -564,45 +643,140 @@ fn committed_rule(
     version: &str,
     folder: &str,
 ) -> Result<Option<Committed>, RuntimeError> {
-    let path = rule_path(folder);
-    let state = dohc_engine_domain::select_snapshot_by_path_in_tx(conn, workspace, version, &path)?;
-    let (sha256, rule) = match (state.snapshot, state.binary_sha256) {
-        (Some(snapshot), _) => (snapshot.blob_sha256, parse_access_rule(&snapshot.text)),
-        (None, Some(sha256)) => (sha256, None),
-        (None, None) => return Ok(None),
-    };
-    let reached_disk = conn
-        .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2              AND path=?3 AND metadata_origin=?5)              OR EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'')              AND target_path=?3 AND content_sha256=?4 AND status='complete')",
-        )
-        .map_err(StorageError::corrupt_public)?
-        .query_row(
-            params![workspace, version, path, sha256, dohc_engine_domain::store::CAPTURE_ORIGIN],
-            |row| row.get(0),
-        )
-        .map_err(StorageError::corrupt_public)?;
-    Ok(Some(Committed {
-        sha256,
-        rule,
+    let mut files = BTreeMap::new();
+    let mut reached_disk = false;
+    for path in committed_rule_paths(conn, workspace, version, folder)? {
+        let state =
+            dohc_engine_domain::select_snapshot_by_path_in_tx(conn, workspace, version, &path)?;
+        let file = match (state.snapshot, state.binary_sha256) {
+            (Some(snapshot), _) => CommittedFile {
+                rule: parse_access_rule(&snapshot.text),
+                sha256: snapshot.blob_sha256,
+                binary: false,
+            },
+            (None, Some(sha256)) => CommittedFile {
+                sha256,
+                rule: None,
+                binary: true,
+            },
+            (None, None) => continue,
+        };
+        reached_disk |= conn
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 \
+                 AND path=?3 AND metadata_origin=?5) \
+                 OR EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') \
+                 AND target_path=?3 AND content_sha256=?4 AND status='complete')",
+            )
+            .map_err(StorageError::corrupt_public)?
+            .query_row(
+                params![
+                    workspace,
+                    version,
+                    path,
+                    file.sha256,
+                    dohc_engine_domain::store::CAPTURE_ORIGIN
+                ],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(StorageError::corrupt_public)?;
+        files.insert(path, file);
+    }
+    Ok((!files.is_empty()).then_some(Committed {
+        files,
         reached_disk,
     }))
 }
 
+/// Read every file in exactly `folder` whose name folds to `access.yaml`.
 fn read_disk_rule(root: &Path, folder: &str) -> Result<OnDisk, ()> {
-    match read_publication_target(root, &rule_path(folder)) {
-        Ok(PublicationTarget::Bytes(bytes)) => Ok(OnDisk::Bytes(bytes)),
-        // A folder or an oversized file is nothing capture records.
-        Ok(PublicationTarget::Absent | PublicationTarget::Untracked) => Ok(OnDisk::Absent),
-        Err(_) => Err(()),
+    let dir = root.join(folder);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(OnDisk::new());
+        }
+        Err(_) if std::fs::symlink_metadata(&dir).is_ok_and(|meta| !meta.is_dir()) => {
+            return Ok(OnDisk::new());
+        }
+        Err(_) => return Err(()),
+    };
+    let mut files = OnDisk::new();
+    for entry in entries {
+        let name = entry.map_err(|_| ())?.file_name();
+        // A name that is not UTF-8 is nothing capture records.
+        let Some(name) = name.to_str().filter(|name| is_access_rule_path(name)) else {
+            continue;
+        };
+        let path = if folder.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{folder}/{name}")
+        };
+        match read_publication_target(root, &path) {
+            Ok(PublicationTarget::Bytes(bytes)) => {
+                files.insert(path, bytes);
+            }
+            // A folder or an oversized file is nothing capture records.
+            Ok(PublicationTarget::Absent | PublicationTarget::Untracked) => {}
+            Err(_) => return Err(()),
+        }
     }
+    Ok(files)
 }
 
-/// Whether the folder and its rule have gone unchanged for the settle
+/// The rule on disk once the writer's own changes land: capture's observed
+/// bytes stand for what it read, and its deletes for the files it found gone.
+fn with_touches(mut disk: OnDisk, touches: &[Touch<'_>]) -> OnDisk {
+    for touch in touches {
+        match (touch.observed, touch.deletes) {
+            (Some(bytes), _) => {
+                disk.insert(touch.path.to_owned(), bytes.to_vec());
+            }
+            (None, true) => {
+                disk.remove(touch.path);
+            }
+            (None, false) => {}
+        }
+    }
+    disk
+}
+
+/// The rule files to commit so the store matches `disk`: writes first, in
+/// path order, then deletes, so no step holds fewer rule files than both
+/// ends do.
+fn rule_changes(committed: Option<&Committed>, disk: &OnDisk) -> Vec<(String, Option<Vec<u8>>)> {
+    let committed_sha = |path: &str| {
+        committed
+            .and_then(|committed| committed.files.get(path))
+            .map(|file| file.sha256.clone())
+    };
+    let writes = disk
+        .iter()
+        .filter(|(path, bytes)| committed_sha(path) != Some(dohc_engine_storage::hex_sha256(bytes)))
+        .map(|(path, bytes)| (path.clone(), Some(bytes.clone())));
+    let deletes = committed
+        .into_iter()
+        .flat_map(|committed| committed.files.keys())
+        .filter(|path| !disk.contains_key(*path))
+        .map(|path| (path.clone(), None));
+    writes.chain(deletes).collect()
+}
+
+/// Whether the folder and its rule files have gone unchanged for the settle
 /// period. A folder that is gone answers for its nearest existing ancestor,
 /// whose entry list changed when it went.
-fn settled(root: &Path, folder: &str) -> bool {
+fn settled(root: &Path, folder: &str, disk: &OnDisk) -> bool {
     let modified = |path: &Path| std::fs::symlink_metadata(path).and_then(|m| m.modified());
-    let mut newest = modified(&root.join(rule_path(folder))).ok();
+    let mut newest = disk
+        .keys()
+        .filter_map(|path| modified(&root.join(path)).ok())
+        .max();
     let mut candidate = Some(folder);
     while let Some(dir) = candidate {
         if let Ok(time) = modified(&root.join(dir)) {
@@ -643,26 +817,24 @@ fn folder_holds_files(
     version: &str,
     folder: &str,
 ) -> Result<(bool, bool), RuntimeError> {
-    let (low, high) = if folder.is_empty() {
-        (String::new(), "\u{10FFFF}".to_owned())
-    } else {
-        (format!("{folder}/"), format!("{folder}0"))
-    };
-    let rule = rule_path(folder);
+    let (low, high) = folder_range(folder);
     let mut query = conn
         .prepare_cached(
-            "SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 \
-             AND path>=?3 AND path<?4 AND path<>?5",
+            "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
+             AND path>=?3 AND path<?4",
         )
         .map_err(StorageError::corrupt_public)?;
     let paths = query
-        .query_map(params![workspace, version, low, high, rule], |row| {
+        .query_map(params![workspace, version, low, high], |row| {
             row.get::<_, String>(0)
         })
         .map_err(StorageError::corrupt_public)?;
     let mut recorded = false;
     for path in paths {
         let path = path.map_err(StorageError::corrupt_public)?;
+        if is_rule_of(&path, folder) {
+            continue;
+        }
         recorded = true;
         if std::fs::symlink_metadata(root.join(&path)).is_ok() {
             return Ok((true, true));
@@ -676,35 +848,84 @@ fn materialization_pending(
     workspace: &str,
     folder: &str,
 ) -> Result<bool, RuntimeError> {
-    conn.prepare_cached(
-        "SELECT EXISTS(SELECT 1 FROM materialization_jobs \
-         WHERE workspace_id IN (?1,'') AND target_path=?2 AND status='pending')",
-    )
-    .map_err(StorageError::corrupt_public)?
-    .query_row(params![workspace, rule_path(folder)], |row| row.get(0))
-    .map_err(StorageError::corrupt_public)
-    .map_err(RuntimeError::from)
+    let (low, high) = folder_range(folder);
+    let mut query = conn
+        .prepare_cached(
+            "SELECT target_path FROM materialization_jobs WHERE workspace_id IN (?1,'') \
+             AND status='pending' AND target_path>=?2 AND target_path<?3",
+        )
+        .map_err(StorageError::corrupt_public)?;
+    let paths = query
+        .query_map(params![workspace, low, high], |row| row.get::<_, String>(0))
+        .map_err(StorageError::corrupt_public)?;
+    for path in paths {
+        if is_rule_of(&path.map_err(StorageError::corrupt_public)?, folder) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
+
+/// A rule file to commit: its bytes, or `None` to delete it.
+type RuleChange = (String, Option<Vec<u8>>);
 
 /// What to do at one folder before the writer's transaction opens.
 enum Plan {
     Verdict(Verdict),
-    /// Commit the disk's rule first, as its own moment.
-    CommitRule(Vec<u8>),
+    /// Commit the disk's rule first, each file as its own moment.
+    CommitRule(Vec<RuleChange>),
+}
+
+/// Whether each rule members see while `changes` commit one by one gives
+/// nobody more than `before`. Several files are one unreadable rule.
+fn every_step_narrows(
+    before: ReachBefore<'_>,
+    committed: Option<&Committed>,
+    changes: &[RuleChange],
+) -> bool {
+    let mut files: BTreeMap<&str, Option<AccessRule>> = committed
+        .iter()
+        .flat_map(|committed| committed.files.iter())
+        .map(|(path, file)| (path.as_str(), file.rule.clone()))
+        .collect();
+    changes.iter().all(|(path, bytes)| {
+        match bytes {
+            Some(bytes) => {
+                let rule = std::str::from_utf8(bytes).ok().and_then(parse_access_rule);
+                files.insert(path, rule);
+            }
+            None => {
+                files.remove(path.as_str());
+            }
+        }
+        let rule = match files.len() {
+            1 => files.values().next().and_then(Option::as_ref),
+            _ => None,
+        };
+        rule_change_narrows(before, rule)
+    })
 }
 
 fn judge_folder(
     conn: &Connection,
     order: &Scope<'_>,
     folder: &str,
-    rule_touch: Option<&Touch<'_>>,
+    rule_touches: &[Touch<'_>],
     writes_under: bool,
 ) -> Result<Plan, RuntimeError> {
     let (workspace, version) = (order.workspace_id, order.version_id);
-    if order.writer == Writer::Deliberate
-        && let Some(touch) = rule_touch
-    {
-        let clearance = if touch.deletes {
+    let committed = committed_rule(conn, workspace, version, folder)?;
+    if order.writer == Writer::Deliberate && !rule_touches.is_empty() {
+        // A change made through dohc goes as written. Only deleting every
+        // file of the rule closes the folder behind it.
+        let removes = rule_touches.iter().all(|touch| touch.deletes)
+            && committed.as_ref().is_none_or(|committed| {
+                committed
+                    .files
+                    .keys()
+                    .all(|path| rule_touches.iter().any(|touch| touch.path == path))
+            });
+        let clearance = if removes {
             Clearance::RuleLast
         } else {
             Clearance::RuleFirst
@@ -715,68 +936,59 @@ fn judge_folder(
         // dohc wrote this rule and its file is on the way to disk.
         return Ok(Plan::Verdict(Verdict::Clear(Clearance::Open)));
     }
-    let committed = committed_rule(conn, workspace, version, folder)?;
-    let disk = match rule_touch {
-        Some(Touch {
-            observed: Some(bytes),
-            ..
-        }) => OnDisk::Bytes(bytes.to_vec()),
-        Some(Touch { deletes: true, .. }) => OnDisk::Absent,
-        _ => match read_disk_rule(order.root, folder) {
-            Ok(disk) => disk,
-            Err(()) => return Ok(Plan::Verdict(Verdict::Waits)),
-        },
+    let disk = match read_disk_rule(order.root, folder) {
+        Ok(disk) => with_touches(disk, rule_touches),
+        Err(()) => return Ok(Plan::Verdict(Verdict::Waits)),
     };
-    match (disk, committed) {
-        (OnDisk::Absent, None) => Ok(Plan::Verdict(Verdict::Clear(Clearance::Open))),
-        (OnDisk::Bytes(bytes), Some(committed))
-            if dohc_engine_storage::hex_sha256(&bytes) == committed.sha256 =>
-        {
-            // Capture records the committed rule again; its moment dedupes.
-            Ok(Plan::Verdict(Verdict::Clear(Clearance::Open)))
-        }
-        (_, Some(committed)) if rule_touch.is_none() && !committed.reached_disk => {
-            Ok(Plan::Verdict(Verdict::Clear(Clearance::Open)))
-        }
-        _ if !settled(order.root, folder) => Ok(Plan::Verdict(Verdict::Waits)),
-        (OnDisk::Bytes(bytes), committed) => {
-            let next = std::str::from_utf8(&bytes).ok().and_then(parse_access_rule);
-            let above = match &committed {
-                Some(_) => None,
-                None => nearest_committed_above(conn, workspace, version, folder)?,
-            };
-            let before = match (&committed, &above) {
-                (Some(own), _) => ReachBefore::Own(own.rule.as_ref()),
-                (None, Some(above)) => ReachBefore::Inherited(above.rule.as_ref()),
-                (None, None) => ReachBefore::WorkspaceLevel,
-            };
-            if !rule_change_narrows(before, next.as_ref()) {
-                return Ok(Plan::Verdict(Verdict::Held {
-                    reason: access_rule_holds::WIDENED,
-                }));
-            }
-            if rule_touch.is_some() {
-                Ok(Plan::Verdict(Verdict::Clear(Clearance::RuleFirst)))
-            } else {
-                Ok(Plan::CommitRule(bytes))
-            }
-        }
-        (OnDisk::Absent, Some(_)) => {
-            let (recorded, on_disk) =
-                folder_holds_files(conn, order.root, workspace, version, folder)?;
-            if on_disk || writes_under {
-                return Ok(Plan::Verdict(Verdict::Held {
-                    reason: access_rule_holds::REMOVED,
-                }));
-            }
-            Ok(Plan::Verdict(match (rule_touch, recorded) {
-                // The rule's delete waits for the deletes of its files.
-                (Some(_), true) => Verdict::Waits,
-                (Some(_), false) => Verdict::Clear(Clearance::RuleLast),
-                (None, _) => Verdict::Clear(Clearance::DeletesOnly),
-            }))
-        }
+    let changes = rule_changes(committed.as_ref(), &disk);
+    if changes.is_empty() {
+        // Capture records the committed rule again; its moment dedupes.
+        return Ok(Plan::Verdict(Verdict::Clear(Clearance::Open)));
     }
+    if rule_touches.is_empty() && committed.as_ref().is_some_and(|c| !c.reached_disk) {
+        return Ok(Plan::Verdict(Verdict::Clear(Clearance::Open)));
+    }
+    if !settled(order.root, folder, &disk) {
+        return Ok(Plan::Verdict(Verdict::Waits));
+    }
+    // The writer's own moments commit the change when they cover all of it.
+    let covered = changes
+        .iter()
+        .all(|(path, _)| rule_touches.iter().any(|touch| touch.path == path));
+    if disk.is_empty() {
+        let (recorded, on_disk) = folder_holds_files(conn, order.root, workspace, version, folder)?;
+        if on_disk || writes_under {
+            return Ok(Plan::Verdict(Verdict::Held {
+                reason: access_rule_holds::REMOVED,
+            }));
+        }
+        return Ok(match (rule_touches.is_empty(), recorded) {
+            (true, _) => Plan::Verdict(Verdict::Clear(Clearance::DeletesOnly)),
+            // The rule's delete waits for the deletes of its files.
+            (false, true) => Plan::Verdict(Verdict::Waits),
+            (false, false) if covered => Plan::Verdict(Verdict::Clear(Clearance::RuleLast)),
+            (false, false) => Plan::CommitRule(changes),
+        });
+    }
+    let above = match &committed {
+        Some(_) => None,
+        None => nearest_committed_above(conn, workspace, version, folder)?,
+    };
+    let before = match (&committed, &above) {
+        (Some(own), _) => ReachBefore::Own(own.rule()),
+        (None, Some(above)) => ReachBefore::Inherited(above.rule()),
+        (None, None) => ReachBefore::WorkspaceLevel,
+    };
+    if !every_step_narrows(before, committed.as_ref(), &changes) {
+        return Ok(Plan::Verdict(Verdict::Held {
+            reason: access_rule_holds::WIDENED,
+        }));
+    }
+    Ok(if covered {
+        Plan::Verdict(Verdict::Clear(Clearance::RuleFirst))
+    } else {
+        Plan::CommitRule(changes)
+    })
 }
 
 /// Put the access rules over `touches` in order before a writer changes
@@ -789,7 +1001,7 @@ pub(super) fn order_paths(
     order: &Order<'_>,
     touches: &[Touch<'_>],
 ) -> Result<Vec<Result<(), RuntimeError>>, RuntimeError> {
-    let mut folders: BTreeMap<(usize, &str), (Option<Touch<'_>>, bool)> = BTreeMap::new();
+    let mut folders: BTreeMap<(usize, &str), (Vec<Touch<'_>>, bool)> = BTreeMap::new();
     for touch in touches {
         let own = is_access_rule_path(touch.path).then(|| access_rule_folder(touch.path));
         for folder in folders_of(touch.path) {
@@ -800,14 +1012,14 @@ pub(super) fn order_paths(
                 ))
                 .or_default();
             if own == Some(folder) {
-                entry.0 = Some(*touch);
+                entry.0.push(*touch);
             } else if !touch.deletes {
                 entry.1 = true;
             }
         }
     }
     let mut verdicts: HashMap<&str, Verdict> = HashMap::new();
-    for ((_, folder), (rule_touch, writes_under)) in &folders {
+    for ((_, folder), (rule_touches, writes_under)) in &folders {
         // A folder under one that waits or is held waits with it.
         let above = folders_of(folder)
             .into_iter()
@@ -817,14 +1029,14 @@ pub(super) fn order_paths(
                     .get(above)
                     .filter(|v| !matches!(v, Verdict::Clear(_)))
             });
-        let cleared = rule_touch
-            .is_none()
+        let cleared = rule_touches
+            .is_empty()
             .then(|| clearance(order.workspace_id, order.version_id, folder))
             .flatten();
         let verdict = match (above, cleared) {
             (Some(_), _) => Verdict::Waits,
             (None, Some(cleared)) => Verdict::Clear(cleared),
-            (None, None) => judge_one(store, order, folder, rule_touch.as_ref(), *writes_under)?,
+            (None, None) => judge_one(store, order, folder, rule_touches, *writes_under)?,
         };
         verdicts.insert(folder, verdict);
     }
@@ -935,11 +1147,37 @@ fn record_hold(
     Ok(recorded)
 }
 
-/// Commit `bytes`, the folder's rule as it is on disk, as its own moment.
+/// Commit `changes`, the folder's rule files as they are on disk, each as its
+/// own moment and in the order given.
+fn commit_rule_changes(
+    store: &mut EngineStore,
+    order: &Order<'_>,
+    folder: &str,
+    changes: Vec<RuleChange>,
+) -> Result<(), RuntimeError> {
+    let writes = changes.iter().filter(|(_, bytes)| bytes.is_some()).count();
+    let deletes = changes.len() - writes;
+    let remains = store
+        .read_with(|conn| committed_rule_paths(conn, order.workspace_id, order.version_id, folder))?
+        .len()
+        + writes
+        > deletes;
+    for (path, bytes) in changes {
+        match bytes {
+            Some(bytes) => commit_disk_rule(store, order, folder, path, bytes)?,
+            None => retire_rule(store, order, folder, path, !remains)?,
+        }
+    }
+    Ok(())
+}
+
+/// Commit `bytes`, one of the folder's rule files as it is on disk, as its
+/// own moment.
 fn commit_disk_rule(
     store: &mut EngineStore,
     order: &Order<'_>,
     folder: &str,
+    path: String,
     bytes: Vec<u8>,
 ) -> Result<(), RuntimeError> {
     set(
@@ -948,7 +1186,6 @@ fn commit_disk_rule(
         folder,
         Clearance::RuleFirst,
     );
-    let path = rule_path(folder);
     let token = CancellationToken::new();
     let summary = Some(format!("Updated {ACCESS_RULE_FILE}"));
     match String::from_utf8(bytes) {
@@ -1008,22 +1245,29 @@ fn commit_disk_rule(
     Ok(())
 }
 
-/// Delete the folder's committed rule as its own moment.
+/// Delete one of the folder's committed rule files as its own moment.
+/// `closes` when no other file of the rule remains.
 fn retire_rule(
     store: &mut EngineStore,
     order: &Order<'_>,
     folder: &str,
+    path: String,
+    closes: bool,
 ) -> Result<(), RuntimeError> {
     set(
         order.workspace_id,
         order.version_id,
         folder,
-        Clearance::RuleLast,
+        if closes {
+            Clearance::RuleLast
+        } else {
+            Clearance::RuleFirst
+        },
     );
     let input = CaptureRetire {
         workspace_id: order.workspace_id.to_owned(),
         version_id: order.version_id.to_owned(),
-        path: rule_path(folder),
+        path,
         metadata_summary: Some(format!("Removed {ACCESS_RULE_FILE}")),
         metadata_correlation_id: None,
         now_ms: order.now_ms,
@@ -1076,7 +1320,7 @@ fn decide_on_store(
         if above == folder {
             continue;
         }
-        match judge_one(store, order, above, None, false)? {
+        match judge_one(store, order, above, &[], false)? {
             Verdict::Clear(_) => {}
             Verdict::Waits => return Err(waits()),
             Verdict::Held { reason } => {
@@ -1088,44 +1332,34 @@ fn decide_on_store(
         }
     }
     let disk = read_disk_rule(order.root, folder).map_err(|()| waits())?;
-    let path = rule_path(folder);
+    let committed = store
+        .read_with(|conn| committed_rule(conn, order.workspace_id, order.version_id, folder))?;
     match decision {
         AccessRuleDecision::Accept => {
-            let committed = store.read_with(|conn| {
-                committed_rule(conn, order.workspace_id, order.version_id, folder)
-            })?;
-            match disk {
-                OnDisk::Bytes(bytes) => commit_disk_rule(store, order, folder, bytes)?,
-                OnDisk::Absent if committed.is_some() => retire_rule(store, order, folder)?,
-                OnDisk::Absent => {}
-            }
+            let changes = rule_changes(committed.as_ref(), &disk);
+            commit_rule_changes(store, order, folder, changes)?;
         }
         AccessRuleDecision::Restore => {
-            let disk = match &disk {
-                OnDisk::Bytes(bytes) => Some(bytes.as_slice()),
-                OnDisk::Absent => None,
-            };
-            let disk_sha256 = disk.map(dohc_engine_storage::hex_sha256);
-            let committed = store.read_with(|conn| {
-                let state = dohc_engine_domain::select_snapshot_by_path_in_tx(
-                    conn,
-                    order.workspace_id,
-                    order.version_id,
-                    &path,
-                )?;
-                if state.binary_sha256.is_some() {
-                    return Err(RuntimeError::Domain(DomainError::InvalidInput {
-                        reason: "an unreadable binary access rule cannot be restored",
-                    }));
+            let files = committed
+                .map(|committed| committed.files)
+                .unwrap_or_default();
+            if files.values().any(|file| file.binary) {
+                return Err(RuntimeError::Domain(DomainError::InvalidInput {
+                    reason: "an unreadable binary access rule cannot be restored",
+                }));
+            }
+            // Files nothing committed go first: on a disk that ignores case,
+            // a committed spelling can only return once they are gone.
+            for (path, bytes) in &disk {
+                if !files.contains_key(path) {
+                    remove_rule(order.root, path, &dohc_engine_storage::hex_sha256(bytes))?;
                 }
-                Ok(state.snapshot.map(|snapshot| snapshot.blob_sha256))
-            })?;
-            match (committed, disk_sha256) {
-                (Some(committed), sha256) if sha256.as_deref() != Some(committed.as_str()) => {
-                    place_rule(store, order, &path, &committed, disk, self_writes)?;
+            }
+            for (path, file) in &files {
+                let bytes = disk.get(path).map(Vec::as_slice);
+                if bytes.map(dohc_engine_storage::hex_sha256).as_ref() != Some(&file.sha256) {
+                    place_rule(store, order, path, &file.sha256, bytes, self_writes)?;
                 }
-                (Some(_), _) | (None, None) => {}
-                (None, Some(sha256)) => remove_rule(order.root, &path, &sha256)?,
             }
         }
     }
@@ -1136,15 +1370,15 @@ fn judge_one(
     store: &mut EngineStore,
     order: &Order<'_>,
     folder: &str,
-    rule_touch: Option<&Touch<'_>>,
+    rule_touches: &[Touch<'_>],
     writes_under: bool,
 ) -> Result<Verdict, RuntimeError> {
     let plan = store
-        .read_with(|conn| judge_folder(conn, &order.scope(), folder, rule_touch, writes_under))?;
+        .read_with(|conn| judge_folder(conn, &order.scope(), folder, rule_touches, writes_under))?;
     let verdict = match plan {
         Plan::Verdict(verdict) => verdict,
-        Plan::CommitRule(bytes) => {
-            commit_disk_rule(store, order, folder, bytes)?;
+        Plan::CommitRule(changes) => {
+            commit_rule_changes(store, order, folder, changes)?;
             Verdict::Clear(Clearance::Open)
         }
     };
@@ -1155,7 +1389,10 @@ fn judge_one(
         }
         Verdict::Held { reason } => {
             let observed = match read_disk_rule(order.root, folder) {
-                Ok(OnDisk::Bytes(bytes)) => Some(dohc_engine_storage::hex_sha256(&bytes)),
+                Ok(disk) if disk.len() == 1 => disk
+                    .values()
+                    .next()
+                    .map(|bytes| dohc_engine_storage::hex_sha256(bytes)),
                 _ => None,
             };
             record_hold(store, order, folder, reason, observed)?;
@@ -1280,5 +1517,96 @@ impl ActorHandle {
             decide_on_store(store, &order, &folder, decision, self_writes.as_ref())
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn committed(files: &[(&str, &str)]) -> Committed {
+        Committed {
+            files: files
+                .iter()
+                .map(|(path, text)| {
+                    let file = CommittedFile {
+                        sha256: dohc_engine_storage::hex_sha256(text.as_bytes()),
+                        rule: parse_access_rule(text),
+                        binary: false,
+                    };
+                    ((*path).to_owned(), file)
+                })
+                .collect(),
+            reached_disk: true,
+        }
+    }
+
+    fn write(path: &str, text: &str) -> RuleChange {
+        (path.to_owned(), Some(text.as_bytes().to_vec()))
+    }
+
+    #[test]
+    fn two_spellings_of_a_rule_are_one_unreadable_rule() {
+        let view = committed(&[("T/access.yaml", "members: view\n")]);
+        let before = ReachBefore::Own(view.rule());
+        // A second spelling that grants edit hides the folder: it narrows.
+        assert!(every_step_narrows(
+            before,
+            Some(&view),
+            &[write("T/ACCESS.yaml", "members: edit\n")]
+        ));
+        // Taking one of two spellings away makes the other readable again,
+        // which widens a hidden folder.
+        let both = committed(&[
+            ("T/ACCESS.yaml", "members: edit\n"),
+            ("T/access.yaml", "members: view\n"),
+        ]);
+        assert!(both.rule().is_none());
+        assert!(!every_step_narrows(
+            ReachBefore::Own(both.rule()),
+            Some(&both),
+            &[("T/ACCESS.yaml".to_owned(), None)]
+        ));
+    }
+
+    #[test]
+    fn a_respelled_rule_is_judged_at_every_step() {
+        let view = committed(&[("T/access.yaml", "members: view\n")]);
+        let disk = OnDisk::from([("T/ACCESS.yaml".to_owned(), b"members: view\n".to_vec())]);
+        let changes = rule_changes(Some(&view), &disk);
+        assert_eq!(
+            changes,
+            [
+                write("T/ACCESS.yaml", "members: view\n"),
+                ("T/access.yaml".to_owned(), None)
+            ]
+        );
+        assert!(every_step_narrows(
+            ReachBefore::Own(view.rule()),
+            Some(&view),
+            &changes
+        ));
+        let disk = OnDisk::from([("T/ACCESS.yaml".to_owned(), b"members: edit\n".to_vec())]);
+        assert!(!every_step_narrows(
+            ReachBefore::Own(view.rule()),
+            Some(&view),
+            &rule_changes(Some(&view), &disk)
+        ));
+    }
+
+    #[test]
+    fn reads_every_spelling_of_a_rule_in_exactly_that_folder() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        let root = scratch.path();
+        std::fs::create_dir_all(root.join("T/sub")).unwrap();
+        std::fs::write(root.join("T/ACCESS.yaml"), "members: view\n").unwrap();
+        std::fs::write(root.join("T/access.yaml.tmp"), "members: edit\n").unwrap();
+        std::fs::write(root.join("T/sub/access.yaml"), "members: edit\n").unwrap();
+        std::fs::write(root.join("Access.YAML"), "members: edit\n").unwrap();
+        let disk = read_disk_rule(root, "T").expect("read");
+        assert_eq!(disk.keys().collect::<Vec<_>>(), ["T/ACCESS.yaml"]);
+        let disk = read_disk_rule(root, "").expect("read");
+        assert_eq!(disk.keys().collect::<Vec<_>>(), ["Access.YAML"]);
+        assert!(read_disk_rule(root, "missing").expect("read").is_empty());
     }
 }
