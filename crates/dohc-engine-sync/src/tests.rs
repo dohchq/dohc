@@ -1650,3 +1650,48 @@ mod nested_contract_production_folds {
 }
 
 mod passive_store;
+
+/// Every way a file moment reaches the journal passes the commit-point
+/// check before it takes an origin seq.
+#[test]
+fn a_replicated_moment_passes_the_order_check_before_its_seq() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_identity(&mut engine);
+    install_moment_order_check(std::rc::Rc::new(|_, _, payload| {
+        match payload.get("path").and_then(serde_json::Value::as_str) {
+            Some("team/a.md") => Err(SyncError::RetryableState {
+                reason: "test-refusal",
+            }),
+            _ => Ok(()),
+        }
+    }));
+    let journal = |engine: &mut EngineStore, path: &str| {
+        journal_local_replication_op(
+            engine,
+            "ws",
+            "local",
+            "epoch-1",
+            "stream-1",
+            "moment.append",
+            &json!({"versionId": "main", "path": path}),
+            1_000,
+            &NoFaults,
+        )
+    };
+    let refused = journal(&mut engine, "team/a.md");
+    install_moment_order_check(std::rc::Rc::new(|_, _, _| Ok(())));
+    assert!(
+        matches!(
+            refused,
+            Err(SyncError::RetryableState {
+                reason: "test-refusal"
+            })
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(
+        journal(&mut engine, "team/b.md").expect("journal"),
+        TxnOutcome::Committed(1),
+        "the refused moment took no seq"
+    );
+}

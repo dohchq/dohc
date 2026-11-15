@@ -362,6 +362,9 @@ pub fn journal_local_replication_op(
         if identity != (origin_id.to_owned(), replication_epoch.to_owned(), stream_identity.to_owned()) {
             return Err(SyncError::CoordinateDiverged);
         }
+        if op_kind == "moment.append" {
+            check_moment_order(tx, workspace_id, &payload_json)?;
+        }
         let origin_seq =
             next_local_origin_seq(tx, workspace_id, origin_id, op_kind, &payload_json)?;
         tx.execute(
