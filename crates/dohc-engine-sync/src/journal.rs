@@ -752,6 +752,29 @@ fn read_ack_conn(
     .map_err(SyncError::corrupt)
 }
 
+/// Move `origin_id`'s ack from `acked` over the run of its coordinates the
+/// journal holds, which may have applied ahead of held work.
+pub(crate) fn advance_ack_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    origin_id: &str,
+    acked: i64,
+) -> Result<(), SyncError> {
+    let end: i64 = tx
+        .query_row(
+            "WITH RECURSIVE run(seq) AS (SELECT ?3 UNION ALL SELECT run.seq+1 FROM run \
+             JOIN replication_log l ON l.workspace_id=?1 AND l.origin_id=?2 AND l.origin_seq=run.seq+1) \
+             SELECT MAX(seq) FROM run",
+            params![workspace_id, origin_id, acked],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if end > acked {
+        ack_tx(tx, workspace_id, origin_id, end)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn ack_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,

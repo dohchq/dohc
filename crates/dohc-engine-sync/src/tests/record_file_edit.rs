@@ -146,6 +146,22 @@ fn a_creates_apollo(a: &mut EngineStore, apollo: &str) -> Vec<ReplicationEnvelop
 }
 
 fn pull(b: &mut EngineStore, from: i64, ops: &[ReplicationEnvelope], texts: &[&str]) {
+    let leases = LeaseRegistry::new();
+    let (client, cursor) = pull_leased(b, from, ops, texts, &leases);
+    client
+        .commit_pull_cursor(b, "ws", &cursor, &NoFaults, &leases, 2_100)
+        .expect("commit the pull cursor");
+}
+
+/// One pull pass of `ops` at relay position `from`, under `leases`, that
+/// stops before it commits its cursor.
+fn pull_leased(
+    b: &mut EngineStore,
+    from: i64,
+    ops: &[ReplicationEnvelope],
+    texts: &[&str],
+    leases: &LeaseRegistry,
+) -> (RelaySyncClient<PagedRelay>, RelayCursor) {
     let next = from + ops.len() as i64;
     let mut relay = PagedRelay::new([(
         from,
@@ -162,14 +178,13 @@ fn pull(b: &mut EngineStore, from: i64, ops: &[ReplicationEnvelope], texts: &[&s
         relay.blobs.insert(sha(text), text.as_bytes().to_vec());
     }
     let client = RelaySyncClient::new(relay);
-    let leases = LeaseRegistry::new();
     let result = client
         .pull_chat_workspace(
             b,
             &mut WriterDocCache::new(),
             "ws",
             &NoFaults,
-            &leases,
+            leases,
             2_100,
         )
         .expect("pull");
@@ -180,9 +195,7 @@ fn pull(b: &mut EngineStore, from: i64, ops: &[ReplicationEnvelope], texts: &[&s
     else {
         panic!("{result:?}");
     };
-    client
-        .commit_pull_cursor(b, "ws", &cursor, &NoFaults, &leases, 2_100)
-        .expect("commit the pull cursor");
+    (client, cursor)
 }
 
 fn device_b(
@@ -195,11 +208,17 @@ fn device_b(
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
     pull(&mut b, 0, created, &[SCHEMA, apollo]);
+    reconcile(&mut b);
+    (scratch, path, b)
+}
+
+/// What the desktop runs once a pull completes: bind records and check
+/// their fields against their Collection's schema.
+fn reconcile(b: &mut EngineStore) {
     b.write_with(&NoFaults, |tx| {
         dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")
     })
-    .expect("bind the record");
-    (scratch, path, b)
+    .expect("reconcile Collections");
 }
 
 /// B opens Apollo: `doc` seeds it from `file`, then each of `typing` is a
@@ -417,6 +436,10 @@ fn lineage_text(b: &EngineStore) -> String {
 }
 
 fn resolve(b: &mut EngineStore, resolution: ResolveConflictKind) {
+    resolve_named(b, resolution, "apollo-resolved", "apollo-resolution-object");
+}
+
+fn resolve_named(b: &mut EngineStore, resolution: ResolveConflictKind, name: &str, object: &str) {
     let conflict_id: String = b
         .read_with(|conn| {
             conn.query_row(
@@ -430,9 +453,9 @@ fn resolve(b: &mut EngineStore, resolution: ResolveConflictKind) {
         workspace_id: "ws".into(),
         conflict_id,
         resolution,
-        object_id: "apollo-resolution-object".into(),
-        write_moment_id: "apollo-resolved".into(),
-        delete_moment_id: "apollo-resolved-delete".into(),
+        object_id: object.into(),
+        write_moment_id: name.into(),
+        delete_moment_id: format!("{name}-delete"),
         metadata_origin: "sync".into(),
         metadata_summary: None,
         metadata_correlation_id: None,
@@ -1223,7 +1246,7 @@ fn saves_of_another_file_or_version_are_not_waiting_versions() {
 }
 
 #[test]
-fn only_the_first_retained_save_of_an_origin_is_a_waiting_version() {
+fn only_the_first_retained_save_of_a_file_is_a_waiting_version() {
     let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
     let gemini_op = a_saves(&mut d, "gemini", GEMINI_PATH, GEMINI, "gemini-saved", 45);
     let splashed = format!("{}\nSplashed down.\n", md(FLOWN));
@@ -1240,16 +1263,6 @@ fn only_the_first_retained_save_of_an_origin_is_a_waiting_version() {
     b_retains(
         &mut b,
         &[
-            from_origin(&gemini_op, "device-f", 0),
-            from_origin(&splashed_op, "device-f", 1),
-        ],
-        &[GEMINI, &splashed],
-    );
-    assert!(waiting(&b).is_empty(), "D's save waits on Gemini");
-
-    b_retains(
-        &mut b,
-        &[
             from_origin(&splashed_op, "device-g", 0),
             from_origin(&crewed_op, "device-g", 1),
         ],
@@ -1258,7 +1271,22 @@ fn only_the_first_retained_save_of_an_origin_is_a_waiting_version() {
     assert_eq!(
         waiting(&b),
         vec![(RECORD.to_owned(), "device-g".to_owned(), 0)],
-        "the first held save is the one waiting"
+        "the first held save of Apollo is the one waiting"
+    );
+
+    // device-f sorts before device-g, so its save is the one shown.
+    b_retains(
+        &mut b,
+        &[
+            from_origin(&gemini_op, "device-f", 0),
+            from_origin(&splashed_op, "device-f", 1),
+        ],
+        &[GEMINI, &splashed],
+    );
+    assert_eq!(
+        waiting(&b),
+        vec![(RECORD.to_owned(), "device-f".to_owned(), 1)],
+        "a save retained behind another file still waits on Apollo's conflict"
     );
 }
 
@@ -1292,4 +1320,664 @@ fn an_applied_retained_save_is_not_a_waiting_version() {
     })
     .expect("device-f applied");
     assert!(waiting(&b).is_empty());
+}
+
+// A plain file outside the Collection, unrelated to Apollo.
+const PACKING: &str = "packing";
+const PACKING_PATH: &str = "trip/packing.md";
+const PACKING_TEXT: &str = "# Packing\n";
+
+fn moments(b: &EngineStore, moment: &str) -> i64 {
+    b.read_with(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM moments WHERE moment_id=?1",
+            [moment],
+            |row| row.get(0),
+        )
+    })
+    .expect("moments")
+}
+
+/// Control: the save that opens the conflict applies, so the unrelated save
+/// behind it from the same device applies in the same pull, today as well.
+#[test]
+fn a_save_that_opens_a_conflict_lets_the_same_devices_next_file_through() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, _b_path, mut b) = device_b(&created, &planned);
+    b_opens(&mut b, &richdoc(&planned), &planned, &[NOTES]);
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    let packing_op = a_saves(
+        &mut a,
+        PACKING,
+        PACKING_PATH,
+        PACKING_TEXT,
+        "packing-saved",
+        40,
+    );
+    pull(&mut b, 2, &[flown_op, packing_op], &[&flown, PACKING_TEXT]);
+    assert_eq!(open_conflicts(&b).len(), 1);
+    assert_eq!(head_text(&b, PACKING), Some(PACKING_TEXT.to_owned()));
+}
+
+/// D, which has not seen A's save, edits Apollo while B holds Apollo's
+/// conflict open, then saves an unrelated file. D's Apollo save waits for
+/// the person to resolve; the unrelated file should not wait with it.
+#[test]
+fn a_save_waiting_on_a_conflict_holds_back_only_its_file() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let splashed = format!("{flown}\nSplashed down.\n");
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_d_scratch, mut d) = device("device-d");
+    hydrate(&mut d, &[SCHEMA, &planned]);
+    for op in &created {
+        deliver(&mut d, op, &NoLiveLeases).expect("D pulls A's record");
+    }
+    let (_b_scratch, b_path, mut b) = device_b(&created, &planned);
+    b_opens(&mut b, &richdoc(&planned), &planned, &[NOTES]);
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    pull(&mut b, 2, std::slice::from_ref(&flown_op), &[&flown]);
+    assert_eq!(open_conflicts(&b).len(), 1, "B holds Apollo's conflict");
+
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
+    let packing_op = a_saves(
+        &mut d,
+        PACKING,
+        PACKING_PATH,
+        PACKING_TEXT,
+        "packing-saved",
+        60,
+    );
+    assert_eq!(packing_op.origin_seq, splashed_op.origin_seq + 1);
+    let ops = [splashed_op.clone(), packing_op.clone()];
+    let texts = [splashed.as_str(), PACKING_TEXT];
+    let ack = |b: &EngineStore| read_replication_acked_seq(b, "ws", "device-d").expect("D's ack");
+
+    // B stops after applying the pull and before it commits its cursor, so
+    // the relay hands the same page again after B restarts.
+    let leases = LeaseRegistry::new();
+    let _ = pull_leased(&mut b, 3, &ops, &texts, &leases);
+    assert_eq!(
+        head_text(&b, PACKING),
+        Some(PACKING_TEXT.to_owned()),
+        "the first pass applies D's unrelated file"
+    );
+    // B edits Packing locally, so applying D's save again would overwrite it.
+    let edited = "# Packing\nTent.\n";
+    a_saves(
+        &mut b,
+        PACKING,
+        PACKING_PATH,
+        edited,
+        "packing-edited-on-b",
+        2_200,
+    );
+    drop(b);
+    let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
+    pull(&mut b, 3, &ops, &texts);
+
+    let held = vec![(
+        RECORD.to_owned(),
+        "device-d".to_owned(),
+        splashed_op.origin_seq,
+    )];
+    assert_eq!(waiting(&b), held, "D's Apollo save waits on the conflict");
+    assert_eq!(moments(&b, "apollo-splashed"), 0);
+    assert_eq!(
+        head_text(&b, PACKING),
+        Some(edited.to_owned()),
+        "redelivery does not apply D's file again over B's edit"
+    );
+    assert_eq!(moments(&b, "packing-saved"), 1);
+    assert!(ack(&b) < splashed_op.origin_seq);
+
+    // Resolving frees D's Apollo save, which then meets the resolved head.
+    resolve(&mut b, ResolveConflictKind::KeepCurrent);
+    drop(b);
+    let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
+    pull(&mut b, 5, &[], &[]);
+    assert_eq!(ack(&b), packing_op.origin_seq, "D's work is all in");
+    assert_eq!(moments(&b, "apollo-splashed"), 1);
+    assert_eq!(moments(&b, "packing-saved"), 1);
+    assert!(waiting(&b).is_empty());
+    assert!(
+        !crate::deferred::has_unapplied(&b, "ws").expect("retained work"),
+        "nothing retained is left to apply"
+    );
+    assert_eq!(
+        open_conflicts(&b).len(),
+        1,
+        "D's save meets B's resolved head"
+    );
+    resolve_named(
+        &mut b,
+        ResolveConflictKind::ApplyIncoming,
+        "apollo-resolved-again",
+        "apollo-again-object",
+    );
+    assert!(open_conflicts(&b).is_empty());
+    assert_eq!(head_text(&b, RECORD), Some(splashed.clone()));
+    assert_eq!(head_text(&d, RECORD), Some(splashed));
+    assert_eq!(head_text(&b, PACKING), Some(edited.to_owned()));
+}
+
+/// B has Apollo open in a live editor while A saves Apollo and then an
+/// unrelated file. Only two devices take part.
+#[test]
+fn a_save_held_by_an_open_editor_holds_back_only_its_file() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, b_path, mut b) = device_b(&created, &planned);
+    b_opens(&mut b, &richdoc(&planned), &planned, &[]);
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    let packing_op = a_saves(
+        &mut a,
+        PACKING,
+        PACKING_PATH,
+        PACKING_TEXT,
+        "packing-saved",
+        40,
+    );
+    let leases = LeaseRegistry::new();
+    let open = leases.acquire(&key()).expect("B opens Apollo");
+    let (client, cursor) = pull_leased(
+        &mut b,
+        2,
+        &[flown_op, packing_op.clone()],
+        &[&flown, PACKING_TEXT],
+        &leases,
+    );
+    client
+        .commit_pull_cursor(&mut b, "ws", &cursor, &NoFaults, &leases, 2_100)
+        .expect("commit");
+    assert_eq!(
+        head_text(&b, RECORD),
+        Some(planned.clone()),
+        "Apollo waits for the editor"
+    );
+    assert_eq!(
+        head_text(&b, PACKING),
+        Some(PACKING_TEXT.to_owned()),
+        "A's unrelated file arrives while Apollo is open"
+    );
+
+    // B restarts and opens Apollo again before the next pull.
+    drop(b);
+    let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
+    let (client, cursor) = pull_leased(&mut b, 4, &[], &[], &leases);
+    client
+        .commit_pull_cursor(&mut b, "ws", &cursor, &NoFaults, &leases, 2_100)
+        .expect("commit");
+    assert_eq!(
+        head_text(&b, RECORD),
+        Some(planned),
+        "Apollo still waits for the editor"
+    );
+    assert_eq!(moments(&b, "packing-saved"), 1);
+    assert!(read_replication_acked_seq(&b, "ws", "device-a").expect("ack") < packing_op.origin_seq);
+
+    drop(open);
+    pull(&mut b, 4, &[], &[]);
+    assert_eq!(
+        read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
+        packing_op.origin_seq
+    );
+    for object in [RECORD, PACKING] {
+        assert_eq!(head_text(&b, object), head_text(&a, object), "{object}");
+    }
+}
+
+fn crew_status(b: &EngineStore) -> Option<String> {
+    b.read_with(|conn| {
+        conn.query_row(
+            "SELECT f.validation_status FROM collection_record_fields f              JOIN collection_records r ON r.workspace_id=f.workspace_id               AND r.version_id=f.version_id AND r.record_id=f.record_id              WHERE r.object_id=?1 AND f.field_name='Crew'",
+            [RECORD],
+            |row| row.get(0),
+        )
+        .optional()
+    })
+    .expect("Crew's index entry")
+}
+
+/// B has the Collection's schema open in an editor while A adds a Crew field
+/// to it and then sets Crew on Apollo. Apollo's text arrives at once; the
+/// table types Crew once the schema arrives.
+#[test]
+fn a_record_save_passes_its_collections_held_schema_save() {
+    let planned = md(PLANNED);
+    let crewed_schema = "fields:
+  Crew:
+    type: text
+";
+    let crewed = "---
+id: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa
+Status: Planned
+Crew: Armstrong
+---
+# Apollo
+";
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_b_scratch, b_path, mut b) = device_b(&created, &planned);
+    let schema_op = a_saves(
+        &mut a,
+        "missions-schema",
+        SCHEMA_PATH,
+        crewed_schema,
+        "schema-crew",
+        30,
+    );
+    let crew_op = a_saves(&mut a, RECORD, RECORD_PATH, crewed, "apollo-crew", 40);
+    let leases = LeaseRegistry::new();
+    let schema_key = DocKey::new("ws", "main", "missions-schema").expect("schema key");
+    let open = leases.acquire(&schema_key).expect("B opens the schema");
+    let (client, cursor) = pull_leased(
+        &mut b,
+        2,
+        &[schema_op, crew_op.clone()],
+        &[crewed_schema, crewed],
+        &leases,
+    );
+    client
+        .commit_pull_cursor(&mut b, "ws", &cursor, &NoFaults, &leases, 2_100)
+        .expect("commit");
+    reconcile(&mut b);
+    assert_eq!(head_text(&b, "missions-schema"), Some(SCHEMA.to_owned()));
+    assert_eq!(
+        head_text(&b, RECORD),
+        Some(crewed.to_owned()),
+        "Apollo's text is kept"
+    );
+    assert_eq!(
+        crew_status(&b).as_deref(),
+        Some("untyped"),
+        "the old schema has no Crew"
+    );
+
+    drop(open);
+    drop(b);
+    let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
+    pull(&mut b, 4, &[], &[]);
+    reconcile(&mut b);
+    assert_eq!(
+        read_replication_acked_seq(&b, "ws", "device-a").expect("ack"),
+        crew_op.origin_seq
+    );
+    assert_eq!(
+        head_text(&b, "missions-schema"),
+        Some(crewed_schema.to_owned())
+    );
+    assert_eq!(
+        crew_status(&b).as_deref(),
+        Some("valid"),
+        "the table catches up"
+    );
+}
+
+/// A device's held Apollo saves fill a replay page; its held Packing save
+/// after them still gets a turn.
+#[test]
+fn a_file_with_a_page_of_held_saves_leaves_room_for_another_file() {
+    let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
+    let splashed = format!("{}\nSplashed down.\n", md(FLOWN));
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
+    let packing_op = a_saves(
+        &mut d,
+        PACKING,
+        PACKING_PATH,
+        PACKING_TEXT,
+        "packing-saved",
+        60,
+    );
+    // A replay page holds 500 ops.
+    let mut held = (0..500)
+        .map(|seq| from_origin(&splashed_op, "device-f", seq))
+        .collect::<Vec<_>>();
+    held.push(from_origin(&packing_op, "device-f", 500));
+    b_retains(&mut b, &held, &[&splashed, PACKING_TEXT]);
+    let identity = read_sync_identity(&b, "ws")
+        .expect("identity")
+        .expect("B has an identity");
+    let (page, _) = crate::deferred::read(&b, "ws", &identity).expect("replay page");
+    assert_eq!(page.len(), 500);
+    assert!(
+        page.iter().any(|op| op.origin_seq == 500),
+        "Packing's save is in the page"
+    );
+}
+
+#[test]
+fn a_ready_file_behind_a_page_of_held_files_gets_its_turn() {
+    let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
+    let packing_op = a_saves(
+        &mut d,
+        PACKING,
+        PACKING_PATH,
+        PACKING_TEXT,
+        "packing-saved",
+        60,
+    );
+    // A replay page holds 500 ops, here one save of each of 500 other files.
+    let mut retained = (0..500)
+        .map(|seq| {
+            let mut op = from_origin(&packing_op, "device-f", seq);
+            op.payload["objectId"] = json!(format!("held-{seq}"));
+            op
+        })
+        .collect::<Vec<_>>();
+    retained.push(from_origin(&packing_op, "device-f", 500));
+    b_retains(&mut b, &retained, &[PACKING_TEXT]);
+    b_retains(&mut b, &[from_origin(&packing_op, "device-g", 0)], &[]);
+    let identity = read_sync_identity(&b, "ws")
+        .expect("identity")
+        .expect("B has an identity");
+    let (page, _) = crate::deferred::read(&b, "ws", &identity).expect("replay page");
+    assert!(
+        page.iter()
+            .all(|op| op.origin_id == "device-f" && op.origin_seq < 500)
+    );
+    crate::deferred::claim_report(&mut b, "ws", &page, &[], &mut None, &NoFaults)
+        .expect("the pass checks the page");
+    // Another computer's work comes first, then device-f's file not yet checked.
+    let (page, _) = crate::deferred::read(&b, "ws", &identity).expect("next replay page");
+    let first = page
+        .iter()
+        .take(2)
+        .map(|op| (op.origin_id.as_str(), op.origin_seq))
+        .collect::<Vec<_>>();
+    assert_eq!(first, [("device-g", 0), ("device-f", 500)]);
+}
+
+/// B has a draft it never saved, and D deletes that draft behind its Apollo
+/// save that waits on B's conflict. B refuses the delete until the draft
+/// settles, which is not a durable hold, so the delete and D's next change to
+/// the draft wait retained with the Apollo save and each pull completes.
+#[test]
+fn a_refused_change_behind_held_work_waits_retained() {
+    const DRAFT: &str = "draft";
+    const DRAFT_PATH: &str = "notes/draft.md";
+    const DRAFT_TEXT: &str = "# Draft\n";
+    let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
+    b.write_with(&NoFaults, |tx| {
+        tx.execute(
+            "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) VALUES ('ws',?1,1)",
+            [DRAFT],
+        )
+        .map_err(SyncError::persist)
+    })
+    .expect("B's draft object");
+    dohc_engine_collab::record_local_update(
+        &mut b,
+        &mut WriterDocCache::new(),
+        &DocKey::new("ws", "main", DRAFT).expect("draft key"),
+        &Ydoc::wire().plaintext_insert(0, "never saved"),
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some(DRAFT_PATH),
+                content_kind: ContentKind::Plaintext,
+                regime: Regime::LocalOnly,
+            }),
+            ..Default::default()
+        },
+        &NoFaults,
+        2_200,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .expect("B types a draft");
+
+    let splashed = format!("{}\nSplashed down.\n", md(FLOWN));
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
+    let mut delete = a_saves(&mut d, DRAFT, DRAFT_PATH, DRAFT_TEXT, "draft-saved", 60);
+    delete.payload = json!({
+        "momentId": "draft-deleted", "versionId": "main", "objectId": DRAFT,
+        "objectCreatedAtMs": 1, "path": DRAFT_PATH, "recordedAtMs": 2_000,
+        "operation": "delete",
+        "payloadBeforeBlobSha256": sha(DRAFT_TEXT), "payloadBeforePath": DRAFT_PATH,
+        "payloadAfterBlobSha256": sha(""), "payloadAfterPath": DRAFT_PATH,
+        "metadata": {"origin": "sync", "summary": "peer"},
+        "beforePresent": "present", "beforeObjectId": DRAFT, "beforeVersionId": "main",
+        "beforePath": DRAFT_PATH, "beforeBlobSha256": sha(DRAFT_TEXT),
+        "beforeUpdatedAtMs": 100, "beforeLatestMomentId": "draft-saved",
+        "beforeMetadata": {"origin": "api"}
+    });
+    let mut again = from_origin(&delete, "device-d", delete.origin_seq + 1);
+    again.payload["momentId"] = json!("draft-deleted-again");
+    let texts = [splashed.as_str(), DRAFT_TEXT, ""];
+    hydrate(&mut b, &texts);
+    let retained = |b: &EngineStore| count(b, "SELECT COUNT(*) FROM relay_deferred_ops");
+    let ack = |b: &EngineStore| read_replication_acked_seq(b, "ws", "device-d").expect("D's ack");
+
+    pull(&mut b, 3, &[splashed_op.clone(), delete, again], &texts);
+    assert_eq!(retained(&b), 3);
+    assert!(ack(&b) < splashed_op.origin_seq);
+    // The replay refuses the delete again, and the pull still completes.
+    pull(&mut b, 6, &[], &[]);
+    assert_eq!(retained(&b), 3);
+    assert_eq!(
+        waiting(&b),
+        vec![(
+            RECORD.to_owned(),
+            "device-d".to_owned(),
+            splashed_op.origin_seq
+        )]
+    );
+}
+
+/// A crash after B retains D's waiting Apollo save, inside the commit of
+/// D's next file, loses nothing and applies nothing twice.
+#[test]
+fn a_crash_between_a_held_save_and_the_next_file_loses_nothing() {
+    let (planned, flown) = (md(PLANNED), md(FLOWN));
+    let splashed = format!("{flown}\nSplashed down.\n");
+    let (_a_scratch, mut a) = device("device-a");
+    let created = a_creates_apollo(&mut a, &planned);
+    let (_d_scratch, mut d) = device("device-d");
+    hydrate(&mut d, &[SCHEMA, &planned]);
+    for op in &created {
+        deliver(&mut d, op, &NoLiveLeases).expect("D pulls A's record");
+    }
+    let (_b_scratch, b_path, mut b) = device_b(&created, &planned);
+    b_opens(&mut b, &richdoc(&planned), &planned, &[NOTES]);
+    let flown_op = a_saves(&mut a, RECORD, RECORD_PATH, &flown, "apollo-flown", 30);
+    pull(&mut b, 2, std::slice::from_ref(&flown_op), &[&flown]);
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
+    let packing_op = a_saves(
+        &mut d,
+        PACKING,
+        PACKING_PATH,
+        PACKING_TEXT,
+        "packing-saved",
+        60,
+    );
+    let ops = vec![splashed_op.clone(), packing_op.clone()];
+
+    let mut relay = PagedRelay::new([(
+        3,
+        PullResponse {
+            work_references: Vec::new(),
+            next_reference_after: None,
+            reference_has_more: false,
+            ops: ops.clone(),
+            next_cursor: 5,
+            has_more: false,
+        },
+    )]);
+    for text in [splashed.as_str(), PACKING_TEXT] {
+        relay.blobs.insert(sha(text), text.as_bytes().to_vec());
+    }
+    let crash = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
+    let result = RelaySyncClient::new(relay).pull_chat_workspace(
+        &mut b,
+        &mut WriterDocCache::new(),
+        "ws",
+        crash.as_ref(),
+        &LeaseRegistry::new(),
+        2_100,
+    );
+    assert!(crash.fired() && result.is_err(), "{result:?}");
+    let retained = |b: &EngineStore| count(b, "SELECT COUNT(*) FROM relay_deferred_ops");
+    assert_eq!(
+        retained(&b),
+        1,
+        "the Apollo save was retained before the crash"
+    );
+    assert_eq!(
+        head_text(&b, PACKING),
+        None,
+        "the crash rolled the next file back"
+    );
+
+    drop(b);
+    let mut b = EngineStore::open(&b_path, 3_000).expect("restart B");
+    pull(&mut b, 3, &ops, &[&splashed, PACKING_TEXT]);
+    assert_eq!(head_text(&b, PACKING), Some(PACKING_TEXT.to_owned()));
+    assert_eq!(moments(&b, "packing-saved"), 1);
+    assert_eq!(moments(&b, "apollo-splashed"), 0);
+    assert_eq!(retained(&b), 1);
+    assert_eq!(
+        waiting(&b),
+        vec![(
+            RECORD.to_owned(),
+            "device-d".to_owned(),
+            splashed_op.origin_seq
+        )]
+    );
+    resolve(&mut b, ResolveConflictKind::KeepCurrent);
+    pull(&mut b, 5, &[], &[]);
+    assert_eq!(
+        read_replication_acked_seq(&b, "ws", "device-d").expect("ack"),
+        packing_op.origin_seq
+    );
+    assert_eq!(moments(&b, "apollo-splashed"), 1);
+    assert_eq!(moments(&b, "packing-saved"), 1);
+}
+
+/// Which later ops may apply ahead of a retained rename of Apollo from
+/// missions/apollo.md to missions/apollo-11.md.
+#[test]
+fn only_independent_files_pass_held_work() {
+    let (_scratch, _a, mut b, mut d) = b_holds_a_conflict();
+    let splashed = format!("{}\nSplashed down.\n", md(FLOWN));
+    let splashed_op = a_saves(
+        &mut d,
+        RECORD,
+        RECORD_PATH,
+        &splashed,
+        "apollo-splashed",
+        50,
+    );
+    let packing_op = a_saves(
+        &mut d,
+        PACKING,
+        PACKING_PATH,
+        PACKING_TEXT,
+        "packing-saved",
+        60,
+    );
+    let mut rename = from_origin(&splashed_op, "device-h", 0);
+    rename.payload["path"] = json!(MOVED_PATH);
+    rename.payload["payloadAfterPath"] = json!(MOVED_PATH);
+    rename.payload["payloadBeforePath"] = json!(RECORD_PATH);
+    b_retains(&mut b, &[rename], &[&splashed, PACKING_TEXT]);
+    let mut barrier = from_origin(&packing_op, "device-k", 0);
+    barrier.payload["conflictId"] = json!("some-conflict");
+    b_retains(&mut b, &[barrier], &[]);
+
+    let next = |origin: &str, seq: i64, change: &dyn Fn(&mut serde_json::Value)| {
+        let mut op = from_origin(&packing_op, origin, seq);
+        change(&mut op.payload);
+        op
+    };
+    let at = |path: &'static str| {
+        move |payload: &mut serde_json::Value| {
+            payload["objectId"] = json!("intruder");
+            payload["path"] = json!(path);
+            payload["payloadAfterPath"] = json!(path);
+        }
+    };
+    let cases: Vec<(&str, ReplicationEnvelope, bool)> = vec![
+        ("an unrelated file", next("device-h", 1, &|_| {}), true),
+        (
+            "a new file at the old path",
+            next("device-h", 1, &at(RECORD_PATH)),
+            false,
+        ),
+        (
+            "a new file at the new path",
+            next("device-h", 1, &at(MOVED_PATH)),
+            false,
+        ),
+        (
+            "another spelling of the old path",
+            next("device-h", 1, &at("Missions/Apollo.md")),
+            false,
+        ),
+        (
+            "a file where the folder is",
+            next("device-h", 1, &at("missions")),
+            false,
+        ),
+        (
+            "the held file itself",
+            next("device-h", 1, &|p| p["objectId"] = json!(RECORD)),
+            false,
+        ),
+        ("a gap nobody holds", next("device-h", 2, &|_| {}), false),
+        (
+            "an op naming no file",
+            {
+                let mut op = next("device-h", 1, &|_| {});
+                op.op_kind = "version.create".into();
+                op
+            },
+            false,
+        ),
+        (
+            "work behind a conflict's effect",
+            next("device-k", 1, &|_| {}),
+            false,
+        ),
+    ];
+    for (label, op, expected) in cases {
+        let outcome = b
+            .write_with(&NoFaults, |tx| {
+                crate::deferred::passes_held_work(tx, &op, -1)
+            })
+            .expect(label);
+        let TxnOutcome::Committed(passes) = outcome else {
+            panic!("{label}");
+        };
+        assert_eq!(passes, expected, "{label}");
+    }
 }
