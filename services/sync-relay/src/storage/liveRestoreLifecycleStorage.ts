@@ -50,8 +50,8 @@ export function validateRestoreLifecycle(
         settlement.terminalCursor === admission.admitted.accepted.receipt.journalCursor &&
         settlement.previousCursor < settlement.terminalCursor &&
         settlement.previousCursor <= (operation.terminal?.journalCursor ?? 0) &&
-        settlement.localYDocSequence === application.localHeadSequence &&
-        settlement.markdownDigest === admission.preparation.point.markdownDigest,
+        // The owner engine writes its own spelling of the point; the point's digest is this relay's.
+        settlement.localYDocSequence === application.localHeadSequence,
     );
   if (resume)
     require(

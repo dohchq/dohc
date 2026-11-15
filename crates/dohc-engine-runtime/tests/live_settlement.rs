@@ -32,6 +32,11 @@ fn restore_coordinate() -> ApplicationHostCoordinate {
     }
 }
 
+/// Another writer's spelling of the same text, with an extra trailing newline.
+fn relay_spelling(engine: &[u8]) -> String {
+    format!("{}\n", String::from_utf8_lossy(engine))
+}
+
 async fn applied_restore(
     f: &Fixture,
     terminal: Option<LiveUpdateReceipt>,
@@ -50,12 +55,16 @@ async fn applied_restore(
     };
     point.apply(&baseline).unwrap();
     let projection = point.project(ContentKind::Richdoc).unwrap().content;
-    let markdown = if reader {
-        point
+    // The relay chooses a point with its own writer, which can spell the
+    // engine's projection differently. A reader point names its retained file.
+    let (markdown, projection) = if reader {
+        let source = point
             .markdown_source(&point.markdown_source_reference().unwrap())
-            .unwrap()
+            .unwrap();
+        (source, projection)
     } else {
-        projection.clone()
+        let relay = relay_spelling(projection.as_bytes());
+        (relay.clone(), relay)
     };
     let fence = f
         .owner
@@ -180,7 +189,8 @@ async fn restore_settlement_replays_real_projection_commit_and_materialization_c
             .await
             .unwrap();
         assert!(result.materialized, "{fault:?}");
-        assert_eq!(
+        // The settlement names the engine's own spelling, the file it wrote.
+        assert_ne!(
             result.markdown_digest,
             input.preparation.point.markdown_digest
         );
@@ -1104,7 +1114,7 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
                 })?;
             assert_eq!(count, 2);
             let restore:(String,String)=conn.query_row("SELECT restore_operation_id,restore_markdown_digest FROM live_audit_events WHERE restore_operation_id IS NOT NULL",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            assert_eq!(restore,("restore-settlement".into(),hex_sha256(&expected)));
+            assert_eq!(restore,("restore-settlement".into(),hex_sha256(relay_spelling(&expected).as_bytes())));
             let chunks:Vec<Vec<u8>>=conn.prepare("SELECT b.bytes FROM live_audit_events e JOIN live_audit_record_chunks c ON c.record_digest=e.record_digest JOIN binary_blobs b ON b.sha256=c.chunk_sha256 WHERE e.restore_operation_id IS NOT NULL ORDER BY c.ordinal")?.query_map([],|r|r.get(0))?.collect::<Result<_,_>>()?;
             let bytes:Vec<u8>=chunks.into_iter().flatten().collect();
             let audit:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
@@ -1113,7 +1123,7 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
             assert_eq!(audit["sourceRestore"]["selected"]["eventCount"],0);
             assert_eq!(audit["sourceRestore"]["accepted"]["eventCount"],1);
             assert_eq!(audit["metadata"]["accepted"]["binding"]["restoreFenceGeneration"],1);
-            assert_eq!(audit["sourceRestore"]["point"]["markdownDigest"],hex_sha256(&expected));
+            assert_eq!(audit["sourceRestore"]["point"]["markdownDigest"],hex_sha256(relay_spelling(&expected).as_bytes()));
             assert_eq!(audit["sourceRestore"]["finalContentDigest"],final_content_digest);
             assert!(audit["sourceRestore"].get("nativeSources").is_none());
             for table in [

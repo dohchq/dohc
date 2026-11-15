@@ -2076,6 +2076,30 @@ fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
     restored
 }
 
+/// The relay chooses a restore point with its own writer, which can spell
+/// the point differently from this engine. The engine restores, settles and
+/// resumes with its own spelling of the point's proven state.
+#[test]
+fn a_point_another_writer_spelled_restores_settles_and_resumes_in_the_engines_spelling() {
+    let mut f = Fixture::new("# Baseline\n");
+    f.edit("Later work.\n", 7);
+    let other = "# Baseline  \n";
+    f.baseline_point.markdown_digest = hex_sha256(other.as_bytes());
+    f.baseline_point.projection_digest = hex_sha256(other.as_bytes());
+    let restored = restore_and_resume(&mut f);
+    let settled: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT markdown_digest FROM live_device_settlements WHERE settlement_id=?1",
+                [restored.settlement_id.as_deref().unwrap()],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(settled, hex_sha256(b"# Baseline\n"));
+}
+
 #[test]
 fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repeated_restore() {
     let mut f = Fixture::new("Original");

@@ -331,6 +331,32 @@ it("a note typed within today's entry limit activates", async () => {
   });
 });
 
+// The owner's engine writes the source file, and its Markdown may differ from the relay's for the same state.
+// Past the entry limit, the checkpoint folds the source's row.
+it.each([
+  ["within", 100],
+  ["past", ACTIVATION.maxActivationHistoryEntries + 1],
+])(
+  "a note typed %s today's entry limit whose owner wrote its source in its own Markdown activates",
+  async (_, keystrokes) => {
+    const note = await typedRelayNote(keystrokes);
+    const spelled = Buffer.from("# Owner's own spelling\n");
+    const capture = {
+      ...note.capture,
+      source: {
+        ...note.capture.source,
+        sourceDigest: createHash("sha256").update(spelled).digest("hex"),
+        sourceByteLength: spelled.length,
+      },
+    };
+    expect((await activate(note, validation(), capture)).outcome).toEqual({
+      document: note.document,
+      replayed: false,
+      completed: false,
+    });
+  },
+);
+
 // The server log shows only fixed words, so the refusal must carry its reason as one.
 it("an activation refused for its baseline names why in the server log", async () => {
   const note = await typedRelayNote(100);

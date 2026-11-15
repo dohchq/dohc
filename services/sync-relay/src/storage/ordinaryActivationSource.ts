@@ -563,7 +563,8 @@ export function readOrdinaryActivationHistory(
       anchor = rows[index]!.relay_seq;
       from = index + offset;
     } else {
-      // A source the checkpoint folded is one of its last rows, and every row after it kept the source's projection.
+      // A source the checkpoint folded is one of its last rows, and every row after it kept the checkpoint's projection,
+      // which validation checks is the captured state's.
       const tail = checkpoint?.tail ?? [],
         at = tail.findIndex((row) => names({ origin_id: row.originId, origin_seq: row.originSeq }));
       if (at >= 0) {
@@ -574,8 +575,10 @@ export function readOrdinaryActivationHistory(
         for (const row of tail.slice(at)) {
           if (!row.projection) return { kind: "base" };
           requireValue(
-            row.projection.projectedMarkdownSha256 === source.sourceDigest &&
-              row.projection.projectedMarkdownByteLength === source.sourceByteLength,
+            row.projection.projectedMarkdownSha256 ===
+              checkpoint?.projection.projectedMarkdownSha256 &&
+              row.projection.projectedMarkdownByteLength ===
+                checkpoint.projection.projectedMarkdownByteLength,
             "Native activation source moment does not project the captured source.",
           );
         }
@@ -594,6 +597,7 @@ export function readOrdinaryActivationHistory(
         settled = { state: proved.state, stateSha256: proved.stateSha256 };
         if (checkpoint && anchor <= checkpoint.throughRelaySeq) {
           // A settlement the checkpoint folded: the fold kept the projection of the history before it, and the tail the rows after it.
+          // Each must be the checkpoint's projection, which validation checks is the captured state's.
           const moment = checkpoint.moments.find((kept) => kept.relaySeq === anchor),
             tail = checkpoint.tail;
           if (!moment || tail[0]!.relaySeq >= anchor) return { kind: "base" };
@@ -603,8 +607,9 @@ export function readOrdinaryActivationHistory(
           ]) {
             if (!row) return { kind: "base" };
             requireValue(
-              row.projectedMarkdownSha256 === source.sourceDigest &&
-                row.projectedMarkdownByteLength === source.sourceByteLength,
+              row.projectedMarkdownSha256 === checkpoint.projection.projectedMarkdownSha256 &&
+                row.projectedMarkdownByteLength ===
+                  checkpoint.projection.projectedMarkdownByteLength,
               "Native activation source moment does not project the captured source.",
             );
           }

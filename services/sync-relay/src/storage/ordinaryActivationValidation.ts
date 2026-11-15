@@ -204,9 +204,6 @@ function checkOrdinaryActivationHistory(
     );
     charged += bytes;
   };
-  const projects = (evidence: Projection) =>
-    evidence.projectedMarkdownSha256 === source.sourceDigest &&
-    evidence.projectedMarkdownByteLength === source.sourceByteLength;
   charge(fullState.length);
   const full = validateRegistration({
     document,
@@ -217,6 +214,11 @@ function checkOrdinaryActivationHistory(
     full.kind === "accepted",
     "Native activation is not a complete standalone CRDT state.",
   );
+  // The owner's engine wrote the source file in its own Markdown, so a prefix projects the source when this relay
+  // writes it as it writes the captured state.
+  const projects = (evidence: Projection) =>
+    evidence.projectedMarkdownSha256 === full.evidence.projectedMarkdownSha256 &&
+    evidence.projectedMarkdownByteLength === full.evidence.projectedMarkdownByteLength;
   if (settled) {
     // The state the source settlement settled, from bytes the read charged.
     const state = validateRegistration({
