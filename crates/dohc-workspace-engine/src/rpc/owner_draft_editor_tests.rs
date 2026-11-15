@@ -325,6 +325,7 @@ async fn accepted_frame_editor_case(case: EditorCase) {
                 byte_length: update.len(),
                 digest: hex_sha256(&update),
                 host_vector_byte_length: None,
+                rows_through: None,
             },
         ),
         bytes: update,

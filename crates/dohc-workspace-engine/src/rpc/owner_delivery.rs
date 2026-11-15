@@ -125,6 +125,9 @@ pub(crate) struct OwnerUploadParams {
     pub byte_length: usize,
     pub digest: String,
     pub host_vector_byte_length: Option<usize>,
+    /// The last room position a room's save holds, below its journal cursor.
+    #[serde(default)]
+    pub rows_through: Option<i64>,
 }
 
 impl OwnerUploadParams {
@@ -134,6 +137,12 @@ impl OwnerUploadParams {
             ("ydoc.ownerDelivery.applyAcceptedFrame", None) => 0,
             _ => return Err(invalid()),
         };
+        if self
+            .rows_through
+            .is_some_and(|through| vector_len != 0 || !(1..self.journal_cursor).contains(&through))
+        {
+            return Err(invalid());
+        }
         if self.byte_length < vector_len + 2 || self.byte_length - vector_len > MAX {
             return Err(invalid());
         }
@@ -619,6 +628,7 @@ impl EngineService {
                         .owner_ydoc_apply_accepted(
                             guard.open.workspace_id.clone(),
                             applied,
+                            p.rows_through,
                             now,
                             token,
                             reservation.clone(),
@@ -1112,11 +1122,23 @@ mod tests {
             byte_length: MAX,
             digest: "cd".repeat(32),
             host_vector_byte_length: None,
+            rows_through: None,
         };
         assert!(p.validate("ydoc.ownerDelivery.applyAcceptedFrame").is_ok());
         assert!(p.validate("ydoc.ownerDelivery.applyInitialSync").is_err());
+        // A room's save holds rows below its own journal cursor.
+        p.journal_cursor = 3;
+        p.rows_through = Some(2);
+        assert!(p.validate("ydoc.ownerDelivery.applyAcceptedFrame").is_ok());
+        for through in [0, 3] {
+            p.rows_through = Some(through);
+            assert!(p.validate("ydoc.ownerDelivery.applyAcceptedFrame").is_err());
+        }
+        p.rows_through = Some(2);
         p.host_vector_byte_length = Some(MAX);
         p.byte_length = MAX * 2;
+        assert!(p.validate("ydoc.ownerDelivery.applyInitialSync").is_err());
+        p.rows_through = None;
         assert!(p.validate("ydoc.ownerDelivery.applyInitialSync").is_ok());
         assert!(p.validate("ydoc.ownerDelivery.applyAcceptedFrame").is_err());
         p.byte_length += 1;

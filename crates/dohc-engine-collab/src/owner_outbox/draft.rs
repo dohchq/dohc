@@ -25,13 +25,16 @@ pub struct OwnerDraft {
     pub layered: bool,
 }
 
-/// Rows the relay committed above this computer's accepted cursor, held in
-/// memory for the owner's screen. They never reach the store; the route sends
-/// them again from its open's cursor after a reconnect or a restart.
+/// Edits the note's room took and has not saved yet, keyed by room position
+/// and held in memory for the owner's screen. They never reach the store; the
+/// room sends its unsaved edits again after a reconnect or a restart. A save
+/// names the last room position it holds, which can be below its own journal
+/// cursor, so rows go only through that position.
 #[derive(Default)]
 pub(crate) struct OwnerLayer {
     binding: Option<(String, i64)>,
     rows: std::collections::BTreeMap<i64, (String, Vec<u8>)>,
+    saved_through: i64,
 }
 
 impl OwnerLayer {
@@ -46,24 +49,22 @@ impl OwnerLayer {
     }
 
     pub(crate) fn drop_through(&mut self, cursor: i64) {
+        self.saved_through = self.saved_through.max(cursor);
         self.rows.retain(|held, _| *held > cursor);
     }
 
-    fn above(&self, binding: &LiveObjectBinding, accepted_cursor: i64) -> Vec<Vec<u8>> {
+    fn unsaved(&self, binding: &LiveObjectBinding) -> Vec<Vec<u8>> {
         if !self.holds(binding) {
             return Vec::new();
         }
-        self.rows
-            .range(accepted_cursor.saturating_add(1)..)
-            .map(|(_, (_, bytes))| bytes.clone())
-            .collect()
+        self.rows.values().map(|(_, bytes)| bytes.clone()).collect()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OwnerRowOutcome {
     Added,
-    /// The same row again, or one at or below the accepted cursor.
+    /// The same row again, or one at or below the last saved room position.
     Unchanged,
     /// A different row at a held cursor. Every row is dropped, and the route
     /// must reopen to send them again.
@@ -430,9 +431,10 @@ pub fn append_draft_cached(
     }
 }
 
-/// A row the relay committed for this note above the accepted cursor, for the
-/// owner's screen only. A cached draft takes it at once; a rebuilt one
-/// composes it from the layer.
+/// An edit the note's room took at room position `cursor`, for the owner's
+/// screen only. A cached draft takes it at once; a rebuilt one composes it from
+/// the layer. One a save already holds changes nothing: a Yjs update applies
+/// once.
 pub fn put_committed_row(
     store: &EngineStore,
     cache: &mut crate::WriterDocCache,
@@ -451,10 +453,8 @@ pub fn put_committed_row(
     }
     Ydoc::validate_update(&bytes).map_err(collab)?;
     let key = key(binding)?;
-    let accepted = store.read_with(|conn| super::accepted::current(conn, binding))?;
-    if cursor <= accepted.accepted_cursor {
-        return Ok(OwnerRowOutcome::Unchanged);
-    }
+    // Only the note's current binding shows rows.
+    store.read_with(|conn| super::accepted::current(conn, binding).map(|_| ()))?;
     let digest = hex_sha256(&bytes);
     let layer = cache.owner_layer_mut(&key);
     if !layer.holds(binding) {
@@ -463,8 +463,11 @@ pub fn put_committed_row(
                 binding.lineage_claim_id.clone(),
                 binding.restore_fence_generation,
             )),
-            rows: Default::default(),
+            ..OwnerLayer::default()
         };
+    }
+    if cursor <= layer.saved_through {
+        return Ok(OwnerRowOutcome::Unchanged);
     }
     match layer.rows.get(&cursor).map(|(held, _)| *held == digest) {
         Some(true) => return Ok(OwnerRowOutcome::Unchanged),
@@ -812,9 +815,7 @@ pub(super) fn open_layered_draft_in(
     let doc = Ydoc::wire();
     doc.apply(&bounded_blob(conn, &observed.checkpoint_digest)?)
         .map_err(collab)?;
-    let rows = layer.map_or_else(Vec::new, |layer| {
-        layer.above(binding, observed.accepted_cursor)
-    });
+    let rows = layer.map_or_else(Vec::new, |layer| layer.unsaved(binding));
     for row in &rows {
         doc.apply(row).map_err(collab)?;
     }
@@ -3364,6 +3365,45 @@ mod tests {
     }
 
     #[test]
+    fn a_save_drops_only_the_rows_it_holds() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&checkpoint).unwrap();
+        let first = collaborator.richdoc_append_paragraph("Saved row");
+        let second = collaborator.richdoc_append_paragraph("Unsaved row");
+        let put = |store: &EngineStore, cache: &mut crate::WriterDocCache, cursor, bytes: &[u8]| {
+            put_committed_row(store, cache, &observed.binding, cursor, bytes.to_vec()).unwrap()
+        };
+        assert_eq!(put(&store, &mut cache, 5, &first), OwnerRowOutcome::Added);
+        assert_eq!(put(&store, &mut cache, 6, &second), OwnerRowOutcome::Added);
+        let shown = |store: &EngineStore, cache: &mut crate::WriterDocCache| {
+            snapshot_text(
+                &open_draft_cached(store, cache, &observed.binding, revision(store, &observed))
+                    .unwrap(),
+            )
+        };
+
+        // The save's journal cursor, 7, is above the row at 6 it does not hold.
+        feed(&mut store, &observed, 7, first.clone());
+        cache.remove(&key);
+        cache.drop_owner_rows_through(&key, 5);
+        assert!(shown(&store, &mut cache).contains("Unsaved row"));
+        assert_eq!(
+            put(&store, &mut cache, 5, &first),
+            OwnerRowOutcome::Unchanged
+        );
+
+        // After a restart the room sends its unsaved row again.
+        restart_committed_rows(&mut cache, &key);
+        assert_eq!(put(&store, &mut cache, 6, &second), OwnerRowOutcome::Added);
+        let text = shown(&store, &mut cache);
+        assert!(text.contains("Saved row") && text.contains("Unsaved row"));
+    }
+
+    #[test]
     fn owner_layer_rows_survive_draft_eviction_and_clear_on_binding_change() {
         let (_dir, mut store, observed, checkpoint) = fixture();
         install(&mut store, &observed, &checkpoint);
@@ -3389,7 +3429,7 @@ mod tests {
         // Rows of another binding generation are never composed.
         let mut later = observed.binding.clone();
         later.restore_fence_generation += 1;
-        assert!(cache.owner_layer(&key).unwrap().above(&later, 0).is_empty());
+        assert!(cache.owner_layer(&key).unwrap().unsaved(&later).is_empty());
         restart_committed_rows(&mut cache, &key);
         let text = snapshot_text(
             &open_draft_cached(

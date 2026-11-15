@@ -131,6 +131,8 @@ export interface OwnerYDocDeliveryApplyInput extends OwnerYDocDeliveryTarget {
   readonly previousAcceptedCursor: number;
   readonly journalCursor: number;
   readonly updateBytes: Uint8Array;
+  /** A room's save: the last room position it holds, below its journal cursor. */
+  readonly rowsThrough?: number;
 }
 export interface OwnerYDocDeliveryReceipt {
   readonly deliveryId: string;
@@ -1713,7 +1715,12 @@ export class EngineClient implements EngineTransport {
       (!vector && input.journalCursor === input.previousAcceptedCursor) ||
       input.updateBytes.byteLength < 2 ||
       input.updateBytes.byteLength > MAX_LIVE_UPDATE_BYTES ||
-      (vector && (vector.byteLength < 1 || vector.byteLength > MAX_LIVE_UPDATE_BYTES))
+      (vector && (vector.byteLength < 1 || vector.byteLength > MAX_LIVE_UPDATE_BYTES)) ||
+      (input.rowsThrough !== undefined &&
+        (vector ||
+          !Number.isSafeInteger(input.rowsThrough) ||
+          input.rowsThrough < 1 ||
+          input.rowsThrough >= input.journalCursor))
     )
       throw new TypeError("Invalid owner accepted input.");
     const byteLength = input.updateBytes.byteLength + (vector?.byteLength ?? 0);
@@ -1724,6 +1731,7 @@ export class EngineClient implements EngineTransport {
       previousAcceptedCursor: input.previousAcceptedCursor,
       journalCursor: input.journalCursor,
       hostVectorByteLength: vector?.byteLength ?? null,
+      ...(input.rowsThrough === undefined ? {} : { rowsThrough: input.rowsThrough }),
     };
     const response = await this.sendLiveUpload(
       request,

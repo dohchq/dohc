@@ -504,10 +504,14 @@ impl ActorHandle {
     }
 
     /// Main-owned authenticated feed only. A delivery ACK never calls this method.
+    /// A room's save names `rows_through`, the last room position it holds;
+    /// the owner's screen then drops the room's rows through it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn owner_ydoc_apply_accepted(
         &self,
         workspace_id: String,
         input: dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput,
+        rows_through: Option<i64>,
         now_ms: i64,
         token: CancellationToken,
         reservation: Arc<dyn Send + Sync>,
@@ -518,8 +522,16 @@ impl ActorHandle {
         >,
         RuntimeError,
     > {
-        self.owner_ydoc_apply_ordered(workspace_id, input, None, now_ms, token, reservation)
-            .await
+        self.owner_ydoc_apply_ordered(
+            workspace_id,
+            input,
+            None,
+            rows_through,
+            now_ms,
+            token,
+            reservation,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -542,6 +554,7 @@ impl ActorHandle {
             workspace_id,
             input,
             Some(host_vector),
+            None,
             now_ms,
             token,
             reservation,
@@ -555,6 +568,7 @@ impl ActorHandle {
         workspace_id: String,
         input: dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput,
         host_vector: Option<Vec<u8>>,
+        rows_through: Option<i64>,
         now_ms: i64,
         token: CancellationToken,
         reservation: Arc<dyn Send + Sync>,
@@ -599,8 +613,10 @@ impl ActorHandle {
                 Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
                 Err(error) => Err(error),
             };
-            if let Ok(applied) = &result {
-                cache.drop_owner_rows_through(&key, applied.accepted_cursor);
+            if result.is_ok() {
+                if let Some(through) = rows_through {
+                    cache.drop_owner_rows_through(&key, through);
+                }
                 dohc_engine_collab::compact_after_commit(store, &key, &NoFaults, now_ms);
                 decide_owner_holds_after_commit(store, cache, &key);
             }

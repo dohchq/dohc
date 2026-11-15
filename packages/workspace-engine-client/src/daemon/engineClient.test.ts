@@ -1039,6 +1039,57 @@ describe("private owner delivery transport", () => {
       transport.close();
     }
   });
+
+  it("sends a room save's rows-through and refuses one at or above its journal cursor", async () => {
+    const peer = new FakePeerConnection(),
+      transport = client(peer, {
+        privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 },
+      });
+    peer.acknowledge();
+    await transport.ready();
+    let wireId = 0,
+      params: unknown;
+    peer.onEnvelope = (e) => {
+      if (e.type !== "request") return;
+      wireId = e.id;
+      params = e.params;
+    };
+    peer.onBlobChunk = (frame) => {
+      if (frame.fin)
+        peer.send({
+          type: "response",
+          id: wireId,
+          result: { revision: 2, acceptedCursor: 19, nativeHeadSequence: 2 },
+        });
+    };
+    const frame = {
+      ...target,
+      expectedRevision: 1,
+      expectedNativeHeadSequence: 2,
+      previousAcceptedCursor: 0,
+      journalCursor: 19,
+      updateBytes: Uint8Array.of(0, 0),
+    };
+    try {
+      await transport.ownerYDocApplyAcceptedFrame(
+        { ...request, id: 972 },
+        { ...frame, rowsThrough: 17 },
+      );
+      expect(params).toMatchObject({ journalCursor: 19, rowsThrough: 17 });
+      for (const rowsThrough of [0, 19])
+        await expect(
+          transport.ownerYDocApplyAcceptedFrame({ ...request, id: 973 }, { ...frame, rowsThrough }),
+        ).rejects.toThrow("Invalid owner accepted input.");
+      await expect(
+        transport.ownerYDocApplyInitialSync(
+          { ...request, id: 974 },
+          { ...frame, rowsThrough: 17, hostVector: Uint8Array.of(0) },
+        ),
+      ).rejects.toThrow("Invalid owner accepted input.");
+    } finally {
+      transport.close();
+    }
+  });
 });
 
 describe("private imported owner capture", () => {
