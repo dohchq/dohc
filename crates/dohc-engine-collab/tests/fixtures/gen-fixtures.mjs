@@ -954,6 +954,35 @@ const RICHDOC_PROJECTION_CASES = [
         ]),
       ]),
   },
+  {
+    // #4110: a table pads its columns to the text a cell writes, references
+    // and empty links included.
+    name: "table-cell-references",
+    makeDoc: () =>
+      directRichdoc([
+        table([
+          tableRow([tableCell("tableHeader", "head")]),
+          tableRow([tableCell("tableCell", "a\u00a0b")]),
+          tableRow([tableCell("tableCell", "x\ry")]),
+          tableRow([
+            tableCell("tableCell", [xmlText("a"), xmlElement("hardBreak"), xmlText("\tb")]),
+          ]),
+          tableRow([tableCell("tableCell", "[](a&b)")]),
+          tableRow([tableCell("tableCell", "[](a\u00a0b)")]),
+          tableRow([tableCell("tableCell", "a&b <c>")]),
+          tableRow([tableCell("tableCell", '[](a "x <br> y")')]),
+          tableRow([tableCell("tableCell", "[](a<br>b)")]),
+          tableRow([tableCell("tableCell", "[](a&lt;br&gt;b)")]),
+          tableRow([tableCell("tableCell", [xmlText("&lt;br&gt;", { code: {} })])]),
+          tableRow([tableCell("tableCell", [xmlText("&amp;lt;br&amp;gt;", { code: {} })])]),
+          tableRow([
+            xmlElement("tableCell", { colspan: 1, rowspan: 1 }, [
+              table([tableRow([tableCell("tableHeader", "a|b")])]),
+            ]),
+          ]),
+        ]),
+      ]),
+  },
 ];
 
 function makeRichdocProjection(index, fixture) {

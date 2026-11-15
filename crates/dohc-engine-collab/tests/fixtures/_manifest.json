@@ -80,6 +80,7 @@
   "richdocProjection-raw-html-literal-text.json",
   "richdocProjection-leading-hard-break.json",
   "richdocProjection-non-breaking-space.json",
+  "richdocProjection-table-cell-references.json",
   "offsetProbe.json",
   "surrogateProbe.json",
   "nestedFrontmatter.json",

@@ -26,6 +26,7 @@ import {
   MarkdownParagraph,
   MarkdownTaskList,
   markdownListParseState,
+  writingTableCellTokens,
 } from "./dohc-markdown-extensions.js";
 import { assertSupportedListMarkdown } from "./list-markdown.js";
 import { sanitizeImageSrc } from "./image-src.js";
@@ -1090,35 +1091,31 @@ export function serializeRichdocBody(root: JSONContent): string {
   }
 
   const prepared = visit(root);
-  let markdown = markdownManager.serialize(prepared);
-  if (prepared.content?.[0]?.type === "horizontalRule") {
-    markdown = "***" + markdown.slice(3);
-  }
-  markdown = restoreCharacterSentinels(
-    markdown,
+  // A character token's text can hold the other tokens, so it is written
+  // first. Every token is reserved by now.
+  const written = [
     new Map(
       Array.from(characterSentinels, ([character, sentinel]) => [sentinel, character] as const),
     ),
-  );
-  markdown = restoreCharacterSentinels(
-    markdown,
     new Map(
       Array.from(
         blockEscapeSentinels,
         ([character, sentinel]) => [sentinel, `&#${character.codePointAt(0)};`] as const,
       ),
     ),
-  );
-  markdown = restoreCharacterSentinels(
-    markdown,
     new Map(
       Array.from(
         leadingWhitespaceSentinels,
         ([whitespace, sentinel]) => [sentinel, whitespace === " " ? "&#32;" : "&#9;"] as const,
       ),
     ),
-  );
-  return rewriteCodeBlockFences(markdown, codeBlocks);
+  ];
+  const writeTokens = (text: string) => written.reduce(restoreCharacterSentinels, text);
+  let markdown = writingTableCellTokens(writeTokens, () => markdownManager.serialize(prepared));
+  if (prepared.content?.[0]?.type === "horizontalRule") {
+    markdown = "***" + markdown.slice(3);
+  }
+  return rewriteCodeBlockFences(writeTokens(markdown), codeBlocks);
 }
 
 function escapeLeadingIndentedCode(

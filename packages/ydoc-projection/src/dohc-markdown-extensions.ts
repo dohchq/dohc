@@ -1121,13 +1121,32 @@ export const dohcMarkdownExtensions = [
 // GFM forbids block nodes inside table cells but permits inline raw HTML, so a
 // multi-block ProseMirror cell uses a visible hard break instead of U+001F.
 export const GFM_TABLE_CELL_BLOCK_SEPARATOR = "<br>";
-function prepareRenderedTableCell(markdown: string): string {
-  // Raw inline HTML is the canonical representation of cell block boundaries.
-  // The importer represents those tags as text, so normalize them before the
-  // table renderer measures the cell again.
-  markdown = markdown
+
+// The projector holds some written text as tokens until it has serialized the
+// document. A table pads its columns to the widths it measures, so each cell
+// writes its tokens' text first.
+let writeTableCellTokens: ((markdown: string) => string) | undefined;
+export function writingTableCellTokens<T>(write: (markdown: string) => string, render: () => T): T {
+  const previous = writeTableCellTokens;
+  writeTableCellTokens = write;
+  try {
+    return render();
+  } finally {
+    writeTableCellTokens = previous;
+  }
+}
+
+// Raw inline HTML is the canonical representation of cell block boundaries.
+// The importer represents those tags as text, so normalize them before the
+// table renderer measures the cell again.
+function writeTableCellBreaks(markdown: string): string {
+  return markdown
     .replaceAll("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
     .replaceAll("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR);
+}
+
+function prepareRenderedTableCell(markdown: string): string {
+  markdown = writeTableCellBreaks(markdown);
   let output = "";
   let precedingBackslashes = 0;
 
@@ -1139,7 +1158,9 @@ function prepareRenderedTableCell(markdown: string): string {
     precedingBackslashes = character === "\\" ? precedingBackslashes + 1 : 0;
   }
 
-  return output;
+  // After the pipes, which a token's text must not change. A token's text can
+  // spell a break too, as the engine reads it once written.
+  return writeTableCellTokens ? writeTableCellBreaks(writeTableCellTokens(output)) : output;
 }
 
 const tableTokenizer = Table.config.markdownTokenizer!;
