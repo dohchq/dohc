@@ -302,6 +302,33 @@ async fn the_last_change_outlives_its_stop_and_its_document() {
 }
 
 #[tokio::test]
+async fn a_stop_the_relay_already_retired_owes_it_nothing() {
+    let scratch = ScratchDir::new().unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open(&transport, &scratch, false).await;
+    for (id, action, owed) in [(2, "request", true), (4, "requestRetired", false)] {
+        let path = format!("notes/{action}.md");
+        call(
+            &transport,
+            &handle,
+            id,
+            "versionedText.write",
+            json!({ "versionId": "main", "path": path, "text": "Plan.", "origin": "api" }),
+        )
+        .await;
+        let stops = call(
+            &transport,
+            &handle,
+            id + 1,
+            &format!("ydoc.ownerStop.{action}"),
+            json!({ "path": path }),
+        )
+        .await;
+        assert_eq!(stops["stops"][0]["retirementOwed"], owed, "{action}");
+    }
+}
+
+#[tokio::test]
 async fn a_received_share_records_no_live_changes() {
     let scratch = ScratchDir::new().unwrap();
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));

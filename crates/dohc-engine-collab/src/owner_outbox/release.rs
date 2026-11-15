@@ -99,9 +99,12 @@ fn read_in(conn: &Connection, key: &DocKey) -> Result<Option<OwnerLiveStop>, Own
     .transpose()
 }
 
+/// `retirement_owed` is false when the relay already retired the note, as
+/// when its last link ended, so nothing asks the relay to Stop it.
 pub fn request_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
+    retirement_owed: bool,
     now_ms: i64,
 ) -> Result<OwnerLiveStop, OwnerOutboxError> {
     require_not_host_in(tx, key)?;
@@ -182,7 +185,7 @@ pub fn request_in_tx(
             object_id: key.object_id.clone(),
             current_path,
         },
-        retirement_owed: true,
+        retirement_owed,
         state: if draft.is_some() {
             "requested"
         } else {

@@ -1191,14 +1191,19 @@ export class EngineClient implements EngineTransport {
     };
   }
 
+  /**
+   * Records a Stop. `retired` records one the relay already retired, as when
+   * the note's last link ended, so no pass asks the relay to Stop it.
+   */
   async ownerYDocStopRequest(
     request: OwnerYDocDeliveryRequest,
     target: string | { mainVersionId: string; objectId: string; currentPath: string },
     signal?: AbortSignal,
+    options?: { retired: boolean },
   ) {
     const rows = await this.ownerLiveStop(
       request,
-      "request",
+      options?.retired ? "requestRetired" : "request",
       typeof target === "string" ? { path: target } : { document: target },
       signal,
     );

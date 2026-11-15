@@ -103,7 +103,7 @@ async fn released_owner_accepts_an_ordinary_peer_update_through_replication() {
     let key = DocKey::new("ws", "main", "owner").unwrap();
     store
         .write_with(&NoFaults, |tx| {
-            release::request_in_tx(tx, &key, 20)?;
+            release::request_in_tx(tx, &key, true, 20)?;
             release::release_in_tx(
                 tx,
                 &observed.binding,
@@ -1201,7 +1201,7 @@ fn a_released_owned_page_moves() {
     let key = DocKey::new("ws", "main", "owner").unwrap();
     store
         .write_with(&NoFaults, |tx| {
-            release::request_in_tx(tx, &key, 20)?;
+            release::request_in_tx(tx, &key, true, 20)?;
             release::release_in_tx(
                 tx,
                 &observed.binding,

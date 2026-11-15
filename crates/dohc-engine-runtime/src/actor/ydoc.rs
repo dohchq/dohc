@@ -228,7 +228,7 @@ impl ActorHandle {
             };
             let preparations=cache.retirement_preparations();
             let outcome=store.write_with(faults.as_ref(),|tx|match action.as_str() {
-                "request"=>release::request_in_tx(tx,&key,now_ms).map(|row|vec![row]),
+                "request"|"requestRetired"=>release::request_in_tx(tx,&key,action=="request",now_ms).map(|row|vec![row]),
                 "clear"=>release::clear_in_tx(tx,&key).map(|cleared|cleared.into_iter().collect()),
                 "retired"=>release::retired_in_tx(tx,&key,now_ms).map(|()|vec![]),
                 "release"=>{

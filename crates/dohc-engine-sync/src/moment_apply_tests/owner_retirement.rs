@@ -354,7 +354,7 @@ fn retiring_a_page_whose_stop_was_deferred_closes_its_generation() {
     let TxnOutcome::Committed(stop) = owner
         .store
         .write_with(&NoFaults, |tx| {
-            request_in_tx(tx, &key(), 21)?;
+            request_in_tx(tx, &key(), true, 21)?;
             release_in_tx(tx, &binding, Some(cursor + 1), None, 22, |_, _, _, _, _| {
                 Ok(())
             })

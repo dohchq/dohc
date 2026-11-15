@@ -743,7 +743,7 @@ impl EngineService {
             || params
                 .accepted_cursor
                 .is_some_and(|cursor| !(0..=9_007_199_254_740_991).contains(&cursor))
-            || (matches!(action, "request" | "clear" | "retired"))
+            || (matches!(action, "request" | "requestRetired" | "clear" | "retired"))
                 != (params.path.is_some() || params.document.is_some())
             || (params.path.is_some() && params.document.is_some())
         {

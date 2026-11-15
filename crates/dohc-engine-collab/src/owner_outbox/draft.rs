@@ -3812,7 +3812,7 @@ mod tests {
         );
         let stopped = committed(
             store
-                .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, 21))
+                .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, true, 21))
                 .unwrap(),
         )
         .unwrap();

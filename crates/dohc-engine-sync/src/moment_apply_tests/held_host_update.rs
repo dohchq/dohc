@@ -370,7 +370,7 @@ fn stop(owner: &mut RestoreOwner, cut: i64) {
     let dohc_engine_storage::TxnOutcome::Committed(stop) = owner
         .store
         .write_with(&NoFaults, |tx| {
-            release::request_in_tx(tx, &key(), 21)?;
+            release::request_in_tx(tx, &key(), true, 21)?;
             crate::ydoc_apply::unbind_owner_in_tx(
                 tx,
                 &key(),
@@ -424,7 +424,7 @@ fn deferred_stop(owner: &mut RestoreOwner) {
     let TxnOutcome::Committed(stop) = owner
         .store
         .write_with(&NoFaults, |tx| {
-            release::request_in_tx(tx, &key(), 21)?;
+            release::request_in_tx(tx, &key(), true, 21)?;
             unbind_owner_in_tx(
                 tx,
                 &key(),

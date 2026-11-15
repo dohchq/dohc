@@ -9,6 +9,7 @@ import { workspaceRemoteMatchesCredentials } from "./chatRelayIdentity";
 import { canonicalRelayUrl } from "./syncCode";
 import { OwnerLiveRefusalsResult } from "../ipc/bridgeContract";
 import { ServerKeptEditsConflict, ServerRecoveryCopyRefusedError } from "./ownerLiveQuarantine";
+import { OwnerJournalPage } from "./ownerJournal";
 import { z } from "zod";
 
 // A list page holds up to 256 rows of edits the server kept. A row is at most
@@ -16,6 +17,8 @@ import { z } from "zod";
 const KEPT_EDITS_PAGE_BYTES = 256 * 13 * 1024 + 64 * 1024;
 // The live document list carries its documents and the first such page.
 const LIVE_DOCUMENTS_BYTES = 1_048_576 + KEPT_EDITS_PAGE_BYTES;
+// A page of saves holds at least one, of up to 20 MiB, as base64.
+const JOURNAL_PAGE_BYTES = 28 * 1024 * 1024;
 
 export function createServerOwnerConnection(options: {
   stateDir(): string;
@@ -359,6 +362,43 @@ export function createServerOwnerConnection(options: {
             .parse(value);
           discovery.delete(workspace.workspaceId);
           return retired.acceptedCursor;
+        },
+        async journal(binding, after, attempt) {
+          assertCurrent();
+          const requestSignal = AbortSignal.any([signal, attempt]);
+          const query = new URLSearchParams({
+            objectId: binding.objectId,
+            lineageClaimId: binding.lineageClaimId,
+            restoreFenceGeneration: String(binding.restoreFenceGeneration),
+            after: String(after),
+          });
+          const response = await options.fetch(
+            `${relayUrl}/sync/${encodeURIComponent(workspace.workspaceId)}/live-host/journal?${query}`,
+            {
+              headers: { authorization: `Bearer ${session.value.token}` },
+              signal: requestSignal,
+              redirect: "error",
+            },
+          );
+          assertCurrent();
+          requestSignal.throwIfAborted();
+          if (!response.ok && response.status !== 409) {
+            await response.body?.cancel();
+            throw new Error("dohc could not read this note's saves on the server. Try again.");
+          }
+          const value = await readBoundedJson(response, JOURNAL_PAGE_BYTES, requestSignal);
+          assertCurrent();
+          if (response.status === 409) {
+            if (
+              value &&
+              typeof value === "object" &&
+              "code" in value &&
+              value.code === "retirement-not-found"
+            )
+              return "not-retired";
+            throw new Error("dohc could not read this note's saves on the server. Try again.");
+          }
+          return OwnerJournalPage.parse(value);
         },
         async documents(attempt, fresh = false) {
           assertCurrent();
