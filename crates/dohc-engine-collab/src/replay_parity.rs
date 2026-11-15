@@ -1043,7 +1043,7 @@ pub fn with_armed_scratch_apply_error_for_test<T>(f: impl FnOnce() -> T) -> T {
 /// marked before mutation so its caller can evict it after the transaction
 /// rolls back. The writer base and durable store remain untouched.
 pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), CollabError> {
-    validate_replay_parity_contained(base, candidate, None, None, None, true).map(drop)
+    validate_replay_parity_contained(base, candidate, None, None, None, true, false).map(drop)
 }
 
 /// Validate and apply each update in order, reusing the batch's replay gate.
@@ -1135,11 +1135,44 @@ pub fn validate_replay_parity_with_scratch(
     base: &Ydoc,
     candidate: &[u8],
 ) -> Result<Ydoc, CollabError> {
-    validate_replay_parity_contained(base, candidate, None, None, None, true).map(|validation| {
-        validation
-            .scratch
-            .expect("a cold gate always builds a fresh scratch")
-    })
+    validate_replay_parity_contained(base, candidate, None, None, None, true, false).map(
+        |validation| {
+            validation
+                .scratch
+                .expect("a cold gate always builds a fresh scratch")
+        },
+    )
+}
+
+/// What applying a candidate deleted in the gate's scratch, and what it named.
+pub(crate) struct MergeDeletions {
+    /// Everything the merge marked deleted, the items it integrated into an
+    /// already deleted parent included. Nothing deleted before is in it.
+    pub(crate) merged: IdSet,
+    /// The candidate's own delete set, with the deletes still waiting in the
+    /// base, which this merge may apply. Empty when `merged` is.
+    pub(crate) named: IdSet,
+}
+
+/// [`validate_replay_parity_with_scratch`], with what the candidate's merge
+/// deleted there. `named` comes from the gate's own scan of the candidate, so
+/// this costs no extra decode.
+pub(crate) fn validate_replay_parity_seeing_deletions(
+    base: &Ydoc,
+    candidate: &[u8],
+) -> Result<(Ydoc, MergeDeletions), CollabError> {
+    validate_replay_parity_contained(base, candidate, None, None, None, true, true).map(
+        |validation| {
+            (
+                validation
+                    .scratch
+                    .expect("a cold gate always builds a fresh scratch"),
+                validation
+                    .deletions
+                    .expect("a cold gate seeing deletions always reports them"),
+            )
+        },
+    )
 }
 
 pub(crate) struct CachedGateValidation {
@@ -1179,6 +1212,7 @@ fn validate_replay_parity_for_burst(
         scratch,
         scratch.is_some().then_some(scratch_mutated),
         audit_scratch,
+        false,
     )?;
     Ok(CachedGateValidation {
         candidate: IntegratedFrontierDelta::from_structure(validation.candidate_structure),
@@ -1195,7 +1229,7 @@ pub(crate) fn validate_replay_parity_with_delta(
     base: &Ydoc,
     candidate: &[u8],
 ) -> Result<IntegratedFrontierDelta, CollabError> {
-    validate_replay_parity_contained(base, candidate, None, None, None, true)
+    validate_replay_parity_contained(base, candidate, None, None, None, true, false)
         .map(|validation| IntegratedFrontierDelta::from_structure(validation.candidate_structure))
 }
 
@@ -1207,6 +1241,8 @@ struct GateValidation {
     /// Present only on the cold path, where the scan can also seed a frontier
     /// without re-scanning the base after commit.
     base_structure: Option<WireStructure>,
+    /// Present only when asked for, on the cold path.
+    deletions: Option<MergeDeletions>,
 }
 
 fn validate_replay_parity_contained(
@@ -1216,6 +1252,7 @@ fn validate_replay_parity_contained(
     scratch: Option<&Ydoc>,
     scratch_mutated: Option<&mut bool>,
     audit_scratch: bool,
+    see_deletions: bool,
 ) -> Result<GateValidation, CollabError> {
     #[cfg(any(test, feature = "test-support"))]
     REPLAY_VALIDATION_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -1227,6 +1264,7 @@ fn validate_replay_parity_contained(
             scratch_mutated,
             candidate,
             audit_scratch,
+            see_deletions,
         )
     }));
     match outcome {
@@ -1255,6 +1293,7 @@ fn validate_replay_parity_inner(
     persistent_scratch_mutated: Option<&mut bool>,
     candidate: &[u8],
     audit_scratch: bool,
+    see_deletions: bool,
 ) -> Result<GateValidation, CollabError> {
     #[cfg(test)]
     if PANIC_INJECT.with(std::cell::Cell::get) {
@@ -1399,6 +1438,7 @@ fn validate_replay_parity_inner(
     // The verdict reads only merge-insensitive state-vector and pending-maxima
     // facts. It never reads content or structural boundaries from the scratch.
     let mut rebuilt_scratch = None;
+    let mut merged = see_deletions.then(IdSet::new);
     let scratch = match persistent_scratch {
         Some(scratch) => {
             // Checks 1-3 have all returned successfully. From this point an
@@ -1416,10 +1456,15 @@ fn validate_replay_parity_inner(
         }
         None => {
             let scratch = match base_full.as_deref() {
-                Some(bytes) => {
-                    replay_gate_scratch_from_bytes(bytes, pending_bytes.as_deref(), candidate)?
+                Some(bytes) => replay_gate_scratch_from_bytes(
+                    bytes,
+                    pending_bytes.as_deref(),
+                    candidate,
+                    merged.as_mut(),
+                )?,
+                None => {
+                    replay_gate_scratch(base, pending_bytes.as_deref(), candidate, merged.as_mut())?
                 }
-                None => replay_gate_scratch(base, pending_bytes.as_deref(), candidate)?,
             };
             rebuilt_scratch = Some(scratch);
             rebuilt_scratch
@@ -1431,7 +1476,7 @@ fn validate_replay_parity_inner(
     let scratch_facts = gate_scratch_facts(scratch)?;
     #[cfg(any(test, debug_assertions))]
     if audit_scratch && persistent_scratch.is_some() {
-        let fresh = replay_gate_scratch(base, pending_bytes.as_deref(), candidate)?;
+        let fresh = replay_gate_scratch(base, pending_bytes.as_deref(), candidate, None)?;
         let fresh_facts = gate_scratch_facts(&fresh)?;
         if scratch_facts != fresh_facts {
             std::panic::panic_any(
@@ -1456,10 +1501,23 @@ fn validate_replay_parity_inner(
             });
         }
     }
+    // Only a merge that deleted something needs to know what it named.
+    let deletions = merged.map(|merged| {
+        let mut named = IdSet::new();
+        if !merged.is_empty() {
+            named = id_set_from_ranges(&candidate_structure.deleted_ranges);
+            named.merge_with(id_set_from_ranges(&pending_structure.deleted_ranges));
+            if let Some(waiting) = base.pending_delete_set() {
+                named.merge_with(waiting);
+            }
+        }
+        MergeDeletions { merged, named }
+    });
     Ok(GateValidation {
         scratch: rebuilt_scratch,
         candidate_structure,
         base_structure,
+        deletions,
     })
 }
 
@@ -1486,9 +1544,10 @@ fn replay_gate_scratch(
     base: &Ydoc,
     pending: Option<&[u8]>,
     candidate: &[u8],
+    merged: Option<&mut IdSet>,
 ) -> Result<Ydoc, CollabError> {
     let base_full = base.encode_full_state();
-    replay_gate_scratch_from_bytes(&base_full, pending, candidate)
+    replay_gate_scratch_from_bytes(&base_full, pending, candidate, merged)
 }
 
 /// Build the ordinary-remote consumer's full-content projection document.
@@ -1497,20 +1556,27 @@ fn replay_gate_scratch(
 /// writer cache or use it for durable lineage bytes.
 pub(crate) fn build_remote_projection(base: &Ydoc, candidate: &[u8]) -> Result<Ydoc, CollabError> {
     let pending = base.pending_update_v1();
-    replay_gate_scratch(base, pending.as_deref(), candidate)
+    replay_gate_scratch(base, pending.as_deref(), candidate, None)
 }
 
+/// `merged`, when given, receives what applying the candidate deleted.
 fn replay_gate_scratch_from_bytes(
     base_full: &[u8],
     pending: Option<&[u8]>,
     candidate: &[u8],
+    merged: Option<&mut IdSet>,
 ) -> Result<Ydoc, CollabError> {
     let scratch = Ydoc::wire();
     scratch.apply(base_full)?;
     if let Some(pending) = pending {
         scratch.apply(pending)?;
     }
-    scratch.apply(candidate)?;
+    match merged {
+        Some(merged) => scratch.apply_seeing_deletions(candidate, |deleted| {
+            merged.clone_from(deleted);
+        })?,
+        None => scratch.apply(candidate)?,
+    }
     Ok(scratch)
 }
 

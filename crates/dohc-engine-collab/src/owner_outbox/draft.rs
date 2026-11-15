@@ -2953,4 +2953,38 @@ mod tests {
         assert_eq!(after.native_head_sequence, final_state.native_head_sequence);
         assert_eq!(after.revision, final_state.revision);
     }
+
+    #[test]
+    fn accepted_feed_keeps_typing_another_computers_delete_removed_without_an_author() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let ana = Ydoc::wire();
+        ana.apply(&checkpoint).unwrap();
+        let line = ana.richdoc_append_paragraph("Hello");
+        let index = ana.richdoc_block_count() - 1;
+        let ben = Ydoc::wire();
+        ben.apply(&checkpoint).unwrap();
+        ben.apply(&line).unwrap();
+        let typed = ana.richdoc_insert_text(index, 5, " world").unwrap();
+        let deleted = ben.richdoc_remove_block(index);
+        for (cursor, update) in [line, typed, deleted].into_iter().enumerate() {
+            feed(&mut store, &observed, cursor as i64 + 1, update);
+        }
+        let removals = store
+            .read_with(|c| dohc_engine_domain::merge_removals_in(c, "workspace"))
+            .unwrap();
+        assert_eq!(removals.len(), 1, "{removals:?}");
+        assert_eq!(removals[0].text, " world");
+        assert!(!removals[0].author_known);
+        let author: Option<String> = store
+            .read_with(|c| {
+                c.query_row(
+                    "SELECT author_json FROM moments WHERE moment_id=?1",
+                    [&removals[0].moment_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(author, None);
+    }
 }

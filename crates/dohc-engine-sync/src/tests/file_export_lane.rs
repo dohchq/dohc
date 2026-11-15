@@ -1363,3 +1363,66 @@ fn lane_first_local_export_uses_the_imported_state_as_its_bootstrap_preimage() {
     assert_eq!(count(&original, "conflicts"), 0);
     assert_eq!(count(&original, "moments"), 2);
 }
+
+#[test]
+fn merge_removal_text_stays_on_the_engine_that_kept_it() {
+    let (_scratch, _, mut store) = owner();
+    write(&mut store, "note", "saved", "note.md", "Hello\n", "user", 2);
+    let before = exports(&store).len();
+    let record = |store: &mut EngineStore| {
+        store
+            .write_with(&NoFaults, |tx| {
+                let saved =
+                    dohc_engine_domain::store::recovery_snapshot_in(tx, "ws", "main", "note")
+                        .unwrap()
+                        .unwrap();
+                dohc_engine_domain::record_merge_removal_in(
+                    tx,
+                    "ws",
+                    &saved,
+                    " world",
+                    "removal",
+                    Some(r#"[{"kind":"human"}]"#),
+                    3,
+                )
+                .unwrap();
+                journal_moment_append_in_tx(tx, "ws", "removal")
+            })
+            .unwrap();
+    };
+    record(&mut store);
+    assert_eq!(
+        exports(&store).len(),
+        before,
+        "the removal is not journaled"
+    );
+    let refused = store.write_with(&NoFaults, |tx| {
+        crate::outbound::moment_append_payload_in_tx(tx, "ws", "removal")
+    });
+    assert!(refused.is_err(), "the outbound payload refuses the removal");
+    let removals = store
+        .read_with(|conn| dohc_engine_domain::merge_removals_in(conn, "ws"))
+        .unwrap();
+    assert_eq!(removals.len(), 1);
+    assert_eq!(removals[0].text, " world");
+    assert!(removals[0].author_known);
+    store
+        .read_with(|conn| dohc_engine_domain::clear_capture_recovery_in(conn, "ws", "removal"))
+        .unwrap();
+    assert!(
+        store
+            .read_with(|conn| dohc_engine_domain::merge_removals_in(conn, "ws"))
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .write_with(&NoFaults, |tx| {
+            journal_moment_append_in_tx(tx, "ws", "removal")
+        })
+        .unwrap();
+    assert_eq!(
+        exports(&store).len(),
+        before,
+        "a dismissed removal stays local"
+    );
+}
