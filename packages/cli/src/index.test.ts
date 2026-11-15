@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CLI_PROTOCOL_VERSION,
+  cliRequestSchema,
   CLI_JSON_SCHEMA_VERSION,
   type CliRequestWithoutToken,
 } from "./protocol";
@@ -536,6 +537,35 @@ describe("executeCli", () => {
       verb: "chatRetry",
       args: { cwd: PROJECT, actor: "agent", runId: "run_ambient", thread: "th_8f" },
     });
+  });
+
+  // --workspace names the workspace on the request, never in a verb's args,
+  // which the socket parses strictly.
+  it.each([
+    [["chat", "retry", "th_8f"], "chatRetry", { thread: "th_8f" }],
+    [["links", "edges"], "linksEdges", {}],
+  ] as const)("keeps --workspace out of the args of %j", async (argv, verb, fields) => {
+    const requests: CliRequestWithoutToken[] = [];
+    await executeCli({
+      argv: [...argv, "--workspace", "ws-1"],
+      cwd: "/workspace/project",
+      env: {},
+      request: async (request) => {
+        requests.push(request);
+        return { ok: false, reason: "Stopped here." };
+      },
+    });
+    expect(requests).toEqual([
+      {
+        protocolVersion: CLI_PROTOCOL_VERSION,
+        verb,
+        workspaceId: "ws-1",
+        args: { cwd: PROJECT, actor: "human", ...fields },
+      },
+    ]);
+    expect(cliRequestSchema.safeParse({ token: "a".repeat(64), ...requests[0] }).success).toBe(
+      true,
+    );
   });
 
   it("names the agent with --agent on a post and a reply, and refuses a name with a slash", async () => {

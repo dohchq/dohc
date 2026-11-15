@@ -78,8 +78,16 @@ export function mountLiveBodyEditor(
             );
           show();
         });
-        label.append(box, document.createElement("span"));
-        dom.append(label, contentDOM);
+        const marker = document.createElement("span");
+        // A browser joining text into the item can delete the box with it. The editor redraws
+        // nothing outside the item's text, so the view puts its box back itself.
+        const restore = () => {
+          if (box.parentNode !== label || marker.parentNode !== label)
+            label.replaceChildren(box, marker);
+          if (dom.firstChild !== label) dom.insertBefore(label, dom.firstChild);
+        };
+        restore();
+        dom.append(contentDOM);
         show();
         return {
           dom,
@@ -87,12 +95,16 @@ export function mountLiveBodyEditor(
           update(next) {
             if (next.type !== node.type) return false;
             node = next;
+            restore();
             show();
             return true;
           },
           // The box and its marker are this view's own; only the item's text is the document's.
-          ignoreMutation: (mutation) =>
-            mutation.type !== "selection" && !contentDOM.contains(mutation.target),
+          ignoreMutation(mutation) {
+            if (mutation.type === "selection" || contentDOM.contains(mutation.target)) return false;
+            restore();
+            return true;
+          },
         };
       },
     },

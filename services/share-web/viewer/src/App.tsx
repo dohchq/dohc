@@ -22,6 +22,7 @@ import { CommentsPanel } from "./CommentsPanel";
 import { LinkChannelPanel } from "./LinkChannelPanel";
 import { LinkDocumentEditor } from "./LinkDocumentEditor";
 import { CollectionFileEditor, isCollectionOwnFile } from "./CollectionFileEditor";
+import { showLinkDocument } from "./linkLive";
 import { LinkAbout, LinkAgent } from "./LinkEntry";
 import { DohcMark, Icon, fileIcon } from "./icons";
 import { RETRY_BUDGET_MS, RETRY_INITIAL_MS, RETRY_MAX_MS } from "./retry";
@@ -1499,6 +1500,26 @@ export function App() {
   }, [readySession]);
 
   const ready = state.status === "ready" ? state : null;
+  const meta = ready?.meta ?? null;
+  const files = ready?.files ?? [];
+  const selected = editing
+    ? files.find((file) => file.path === editing.path)
+    : (files.find((file) => file.path === selectedPath) ?? files[0]);
+  // A note an Edit link can change: the page fetches its state while it shows it, so a press soon after can type at
+  // once. Pressing Edit keeps the same note, so the press can take that state.
+  const shownNote =
+    meta?.access === "edit" &&
+    meta.effectiveSelector.versionId === null &&
+    selected?.contentKind === "text" &&
+    /\.md$/i.test(selected.path) &&
+    !isCollectionOwnFile(selected.path)
+      ? selected.path
+      : null;
+  const shownSession = ready?.session;
+  useEffect(
+    () => (shownSession && shownNote ? showLinkDocument(shownSession, shownNote) : undefined),
+    [shownSession, shownNote],
+  );
   // An open editor stays through every state, so its draft remains recoverable.
   if (!editing) {
     if (state.status === "refused") return <Unavailable />;
@@ -1536,11 +1557,6 @@ export function App() {
     }
     if (state.status === "loading") return <Opening />;
   }
-  const meta = ready?.meta ?? null;
-  const files = ready?.files ?? [];
-  const selected = editing
-    ? files.find((file) => file.path === editing.path)
-    : (files.find((file) => file.path === selectedPath) ?? files[0]);
   const tree = fileTree(files);
   const several = files.length > 1;
   const filesShown = several && !editing && (narrow ? filesToggled : !filesToggled);

@@ -1707,6 +1707,148 @@ async fn unavailable_publication_after_handover(
     supervisor.close_all().unwrap();
 }
 
+/// Echoes this device's ops after `after` through the settlement's moment,
+/// with the relay refusing that moment. Returns the moment's origin sequence.
+fn refuse_publication_after(
+    store: &mut EngineStore,
+    settlement: &LiveSettlementResult,
+    after: i64,
+) -> i64 {
+    use dohc_engine_sync::{NoLiveLeases, SettlementAdmission, apply_replication_envelope};
+    let mut echoes =
+        dohc_engine_sync::list_replication_ops(store, "workspace", "origin", after, 500).unwrap();
+    let last = echoes
+        .iter()
+        .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == settlement.moment_id)
+        .unwrap()
+        .origin_seq;
+    for echoed in &mut echoes {
+        if echoed.origin_seq > last {
+            break;
+        }
+        echoed.relay_seq = Some(echoed.origin_seq + 1);
+        if echoed.op_kind == "moment.append" && echoed.payload["momentId"] == settlement.moment_id {
+            echoed.settlement_admission = Some(SettlementAdmission::Refused {
+                settlement_id: settlement.settlement_id.clone().unwrap(),
+                reason: "authorship-mismatch".into(),
+            });
+        }
+        apply_replication_envelope(
+            store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            echoed,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+    }
+    last
+}
+
+// #4093: after the relay refuses a settlement, the next one covers again from
+// the refused one's start. A run of refusals that lasts longer than the
+// application limit must not leave the note unable to settle once the relay
+// accepts again, whether each refusal arrives before the next settlement or
+// the settlements queue up before their refusals.
+#[tokio::test]
+async fn refusals_past_the_application_limit_still_let_the_note_settle() {
+    catch_up_after_refusals(false).await;
+}
+
+#[tokio::test]
+async fn queued_refusals_past_the_application_limit_still_let_the_note_settle() {
+    catch_up_after_refusals(true).await;
+}
+
+async fn catch_up_after_refusals(queued: bool) {
+    const LIMIT: usize = 4;
+    let mut f = Fixture::with_source(0, true);
+    let cut = f.edit_accepted_before_handover_with_source(7, false, false);
+    let receipt = cut.terminal_receipt.clone();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    support::configure_witness_reader(&actor, &f.root).await;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt_cut(&owner, cut).await;
+    f.settle_with_limit(&handle, receipt, LIMIT).await;
+    let mut echoed = -1;
+    let mut queue = Vec::new();
+    for cursor in 8..8 + 2 * LIMIT as i64 {
+        f.record(
+            &actor,
+            f.doc
+                .richdoc_append_paragraph(&format!("Accepted edit {cursor}")),
+            &format!("edit-{cursor}"),
+            40 + cursor,
+        )
+        .await;
+        let accepted = f.accept_pending(&actor, &handle, cursor).await;
+        let settled = handle
+            .settle(
+                Some(accepted),
+                LIMIT,
+                f.root.path().to_owned(),
+                30,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
+                    policy:
+                        dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                            working_reserve_bytes: 8 * 1024 * 1024,
+                        },
+                    reservation: Arc::new(()),
+                },
+            )
+            .await;
+        let settled = match settled {
+            Ok(settled) => settled,
+            Err(error) => panic!(
+                "edit {cursor} could not settle after {} settlements: {} {error}",
+                cursor - 8,
+                error.code()
+            ),
+        };
+        if queued {
+            queue.push(settled);
+        } else {
+            echoed = refuse_publication_after(&mut f.store, &settled, echoed);
+        }
+    }
+    for settled in &queue {
+        echoed = refuse_publication_after(&mut f.store, settled, echoed);
+    }
+    // Once the relay accepts, one settlement covers every edit since the
+    // first refusal and the file holds them all.
+    let last = 8 + 2 * LIMIT as i64;
+    f.record(
+        &actor,
+        f.doc
+            .richdoc_append_paragraph("Accepted after the refusals"),
+        "edit-last",
+        40 + last,
+    )
+    .await;
+    let accepted = f.accept_pending(&actor, &handle, last).await;
+    let caught_up = f.settle_with_limit(&handle, Some(accepted), LIMIT).await;
+    assert_eq!(
+        (
+            caught_up.previous_cursor,
+            caught_up.terminal_cursor,
+            caught_up.application_count
+        ),
+        (7, last, 2 * LIMIT + 1)
+    );
+    for cursor in 8..last {
+        assert!(f.file().contains(&format!("Accepted edit {cursor}")));
+    }
+    assert!(f.file().contains("Accepted after the refusals"));
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
 fn recorded_settlements(store: &EngineStore) -> (i64, i64) {
     store
         .read_with(|conn| {

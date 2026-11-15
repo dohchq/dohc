@@ -25,6 +25,13 @@ use crate::{ReplicationEnvelope, SyncError};
 /// owner's own lane, whatever its payload says.
 const FOREIGN_ORIGIN_PREFIXES: [&str; 4] = ["shared:", "share:", "relay:", "service-host:"];
 
+/// Whether `origin_id` is one of the owner's own devices: no other account, share, the relay or a service host writes it.
+pub(crate) fn owner_device_origin(origin_id: &str) -> bool {
+    !FOREIGN_ORIGIN_PREFIXES
+        .iter()
+        .any(|prefix| origin_id.starts_with(prefix))
+}
+
 /// `engine_requests` already keys the engine's own markers. These rows use
 /// NUL-prefixed ids, which no client request id can take.
 ///
@@ -69,11 +76,7 @@ fn owner_account(conn: &Connection, workspace_id: &str) -> Result<Option<String>
 fn retains_quietly(conn: &Connection, envelope: &ReplicationEnvelope) -> Result<bool, SyncError> {
     // Every registered owner-private kind is a chat kind, replayed by the
     // chat applier.
-    if !envelope.op_kind.starts_with("chat.")
-        || FOREIGN_ORIGIN_PREFIXES
-            .iter()
-            .any(|prefix| envelope.origin_id.starts_with(prefix))
-    {
+    if !envelope.op_kind.starts_with("chat.") || !owner_device_origin(&envelope.origin_id) {
         return Ok(false);
     }
     let Some(marked) = envelope

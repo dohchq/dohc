@@ -171,8 +171,35 @@ export function reminderText(target: ReplyTarget): string {
   ].join("\n");
 }
 
+// What a thread that holds more than one workspace's messages is asked. dohc
+// cannot make it do so (ADR 0016).
+const SEVERAL_WORKSPACES = [
+  "Each message says which workspace it came from, and its commands reply in that workspace.",
+  "Other people may read a workspace's chats. Post in a workspace only what belongs there. Do not carry what you learned from one workspace into another unless the person asks you to.",
+];
+
+/**
+ * What dohc tells an agent thread when its person turns a workspace on for
+ * it. The thread can then hold more than one workspace's messages, and other
+ * people can read what it posts in each (ADR 0016).
+ */
+export function anotherWorkspaceText(input: { agentName: string; workspaceName: string }): string {
+  return [
+    `The person who connected this thread to dohc as their agent ${quoted(input.agentName)} now forwards their messages from the workspace named ${quoted(input.workspaceName)} to this thread.`,
+    "",
+    ...["This thread can hold messages from more than one workspace.", ...SEVERAL_WORKSPACES].map(
+      (line) => `- ${line}`,
+    ),
+  ].join("\n");
+}
+
 /** What dohc tells an agent thread once, when a person connects it. */
-export function introductionText(input: { cli: CliForThread; agentName: string }): string {
+export function introductionText(input: {
+  cli: CliForThread;
+  agentName: string;
+  /** The agent forwards from more than one workspace, as a thread it is changed to must know. */
+  severalWorkspaces?: boolean;
+}): string {
   return [
     `A person connected this thread to dohc as their agent ${quoted(input.agentName)}. dohc is the workspace where they keep files, chats, and apps.`,
     "",
@@ -185,5 +212,10 @@ export function introductionText(input: { cli: CliForThread; agentName: string }
       ? "- Report long work with --work and --link."
       : `- Report long work with --work and --link. \`${input.cli.program} chat reply --help\` lists every option.`,
     ...cliNotes(input.cli).map((line) => `- ${line}`),
+    ...(input.severalWorkspaces
+      ? ["The person forwards messages from more than one workspace.", ...SEVERAL_WORKSPACES].map(
+          (line) => `- ${line}`,
+        )
+      : []),
   ].join("\n");
 }

@@ -28,7 +28,7 @@ use dohc_engine_domain::{
 };
 
 use crate::error::local_corruption;
-use crate::journal::{ack_tx, crashes, read_ack_tx};
+use crate::journal::{advance_ack_tx, crashes, read_ack_tx};
 use crate::{ReplicationEnvelope, SyncError};
 
 pub(crate) const DIRECT_RPC_REFUSAL_REPORT_ID: &str = "direct-rpc";
@@ -326,15 +326,18 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 return redelivered(tx, envelope, journaled_coordinate(tx, envelope)?);
             }
             let expected = acked.checked_add(1).ok_or(SyncError::CoordinateDiverged)?;
-            if envelope.origin_seq != expected {
-                return Err(SyncError::SequenceGap);
-            }
+            // A coordinate past the ack may have applied ahead of held work.
             if let Some(row) = journaled_coordinate(tx, envelope)? {
                 if !coordinate_matches(&row, envelope)? {
                     return Err(SyncError::CoordinateDiverged);
                 }
-                ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+                advance_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, acked)?;
                 return redelivered(tx, envelope, None);
+            }
+            if envelope.origin_seq != expected
+                && !crate::deferred::passes_held_work(tx, envelope, acked)?
+            {
+                return Err(SyncError::SequenceGap);
             }
         }
         tx.execute_batch("SAVEPOINT dohc_replication_mutation")
@@ -471,7 +474,8 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         if hosted {
             crate::hosted::record_unmaterialized_in_tx(tx, envelope)?;
         } else {
-            ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+            let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
+            advance_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, acked)?;
         }
         if crashes(faults, FaultPoint::SyncBeforeApplyCommit) {
             return Err(SyncError::FaultCrash);

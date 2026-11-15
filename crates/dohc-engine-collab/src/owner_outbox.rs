@@ -1065,6 +1065,80 @@ fn retain_fenced_in_tx(
     Ok(())
 }
 
+/// Queues an owner device's edit, which this host imported for a note it holds
+/// live, as that device's own edit: a journal row with the actor and
+/// attribution the device recorded, then its outbox entry, as a local edit
+/// queues. The relay delivers it as it delivers every owner edit. Returns
+/// the outbox entry it joined, or writes nothing and returns none when the
+/// note has no current activation here or is at another path.
+#[allow(clippy::too_many_arguments)]
+pub fn queue_imported_device_update_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &crate::DocKey,
+    path: &str,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    preparations: &crate::live_update_application::RetirementPreparations,
+    now_ms: i64,
+) -> Result<Option<QueuedDeviceUpdate>, crate::CollabError> {
+    let map = |error: OwnerOutboxError| match error {
+        OwnerOutboxError::Storage(error) => crate::CollabError::Storage(error),
+        error => crate::CollabError::Corrupt {
+            reason: format!("imported device update: {error}"),
+        },
+    };
+    let marker = crate::durable::read_marker_in(tx, key)?.ok_or(crate::CollabError::NoMarker)?;
+    let Some(lineage) = marker.lineage_claim_id else {
+        return Ok(None);
+    };
+    if marker.path.as_deref() != Some(path) {
+        return Ok(None);
+    }
+    let active: bool = tx
+        .query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM {CURRENT_ACTIVATIONS}
+         WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4)"
+            ),
+            params![key.workspace_id, key.version_id, key.object_id, lineage],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)
+        .map_err(map)?;
+    if !active {
+        return Ok(None);
+    }
+    // The gates a local edit passes: no owner binding observed here, and no
+    // restore fence active.
+    draft::require_ordinary_write(tx, key)?;
+    crate::live_update_application::restore_generation(tx, key)?;
+    let outcome = crate::durable::record_authorized_update_in_tx(
+        tx,
+        key,
+        update,
+        true,
+        actor_origin_id,
+        attribution,
+        false,
+        now_ms,
+    )?;
+    let entry =
+        append_adopted_entry_in_tx(tx, key, path, outcome.seq, update, preparations, now_ms)?
+            .ok_or_else(|| crate::CollabError::Corrupt {
+                reason: "imported device update joined no owner queue".into(),
+            })?;
+    Ok(Some(QueuedDeviceUpdate {
+        delivery_id: entry.delivery_id,
+    }))
+}
+
+/// The owner outbox entry an imported device edit joined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedDeviceUpdate {
+    pub delivery_id: String,
+}
+
 /// Called only by the ordinary local append transaction. Remote applications
 /// use their own receipt ledger and never enter this path. An activation
 /// whose Stop prepared, or whose retirement began, refuses the append as a
@@ -1078,6 +1152,21 @@ pub fn append_adopted_local_update_in_tx(
     preparations: &crate::live_update_application::RetirementPreparations,
     now_ms: i64,
 ) -> Result<(), crate::CollabError> {
+    append_adopted_entry_in_tx(tx, key, path, sequence, update, preparations, now_ms)?;
+    Ok(())
+}
+
+/// [`append_adopted_local_update_in_tx`], returning the entry it appended,
+/// or none when the note has no current activation here.
+fn append_adopted_entry_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &crate::DocKey,
+    path: &str,
+    sequence: i64,
+    update: &[u8],
+    preparations: &crate::live_update_application::RetirementPreparations,
+    now_ms: i64,
+) -> Result<Option<OwnerOutboxAppendResult>, crate::CollabError> {
     use crate::CollabError;
     let map = |error: OwnerOutboxError| match error {
         OwnerOutboxError::Frozen => CollabError::OwnerOutboxFrozen,
@@ -1091,7 +1180,7 @@ pub fn append_adopted_local_update_in_tx(
         if has_adopted_owner_in(tx, key)? {
             return Err(CollabError::OwnerOutboxFrozen);
         }
-        return Ok(());
+        return Ok(None);
     };
     let saved: Option<(String, i64, i64, String, String)> = tx
         .query_row(
@@ -1108,7 +1197,7 @@ pub fn append_adopted_local_update_in_tx(
         if has_adopted_owner_in(tx, key)? {
             return Err(CollabError::OwnerOutboxFrozen);
         }
-        return Ok(());
+        return Ok(None);
     };
     let original: LiveObjectBinding =
         serde_json::from_str(&binding_json).map_err(|_| map(OwnerOutboxError::Corrupt))?;
@@ -1183,7 +1272,7 @@ pub fn append_adopted_local_update_in_tx(
     )
     .map_err(map)?;
     retain_native_source(tx, &result, &source).map_err(map)?;
-    Ok(())
+    Ok(Some(result))
 }
 
 pub fn read_pending(

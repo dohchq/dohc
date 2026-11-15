@@ -1178,6 +1178,55 @@ describe("registered account share handlers", () => {
     reconciled.resolve();
     await expect(pending).rejects.toThrow("session changed");
   });
+
+  it("shows a share whose version id the relay would refuse as damaged, and keeps the others", async () => {
+    const h = harness();
+    const row = (shareId: string, versionId: string) => ({
+      shareId,
+      grantId: `${shareId}-grant`,
+      generation: 1,
+      createdAtMs: 1,
+      selector: { paths: [], versionId },
+      access: "view",
+    });
+    const granted = (shareId: string, versionId: string) => ({
+      ...row(shareId, versionId),
+      workspaceId,
+      recipientUserId: "friend",
+      recipientEmail: "friend@example.com",
+      revokedAtMs: null,
+    });
+    const received = (shareId: string, versionId: string) => ({
+      ...row(shareId, versionId),
+      granterEmail: "owner@example.com",
+      genericChatWritable: false,
+    });
+    h.accountRequest.mockResolvedValueOnce({
+      granted: [granted("good", "v1"), granted("padded", " v1")],
+      received: [received("empty", ""), received("long", "v".repeat(129))],
+    });
+    const listing = (await h.invoke(relayShareOperations.listRelayShares.channel)) as {
+      granted: Array<{ shareId: string; selector: unknown; damaged?: true }>;
+      received: Array<{ shareId: string; selector: unknown; damaged?: true }>;
+    };
+    expect(
+      [...listing.granted, ...listing.received].map(({ shareId, selector, damaged }) => ({
+        shareId,
+        selector,
+        damaged,
+      })),
+    ).toEqual([
+      { shareId: "good", selector: { paths: [], versionId: "v1" }, damaged: undefined },
+      { shareId: "padded", selector: null, damaged: true },
+      { shareId: "empty", selector: null, damaged: true },
+      { shareId: "long", selector: null, damaged: true },
+    ]);
+
+    h.request.mockResolvedValueOnce({ kind: "success", body: received("padded", " v1") });
+    await expect(
+      h.invoke(relayShareOperations.getRelayReceivedShare.channel, { shareId: "padded" }),
+    ).resolves.toMatchObject({ found: true, share: { selector: null, damaged: true } });
+  });
 });
 
 describe("registered discussion poll lifetime", () => {

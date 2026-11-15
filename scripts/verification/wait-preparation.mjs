@@ -8,13 +8,12 @@ export async function waitForPreparation(
 ) {
   const preparation =
     scope === "js"
-      ? { job: "shared preparation", artifacts: ["javascript-prepared"] }
-      : scope === "compiler"
-        ? { job: "shared preparation", artifacts: ["javascript-prepared", "compiler-tests"] }
-        : scope === "rust"
-          ? { job: "Rust build once", artifacts: ["rust-tests"] }
-          : null;
-  if (!preparation) throw new Error("Select js, compiler or rust preparation.");
+      ? { job: "shared preparation", artifact: "javascript-prepared", minutes: 15 }
+      : scope === "rust"
+        ? // Rust consumers start while engine gate compiles, so the cap covers a cold build.
+          { job: "engine gate", artifact: "rust-tests", minutes: 25 }
+        : null;
+  if (!preparation) throw new Error("Select js or rust preparation.");
   for (const key of [
     "GITHUB_API_URL",
     "GITHUB_REPOSITORY",
@@ -25,13 +24,11 @@ export async function waitForPreparation(
     if (!env[key]) throw new Error(`Missing ${key} for shared preparation.`);
   }
   const startedAt = now(),
-    deadline = startedAt + 15 * 60_000,
+    deadline = startedAt + preparation.minutes * 60_000,
     api = cloudApi({ env, request, pause, now, deadline });
-  const names = preparation.artifacts.map((artifact) => `${artifact}-${env.GITHUB_RUN_ATTEMPT}`);
-  let name = names.shift();
+  const name = `${preparation.artifact}-${env.GITHUB_RUN_ATTEMPT}`;
   let build,
-    // Rust consumers start after their build has ended, so a missing archive is checked at once.
-    checkAt = scope === "rust" ? startedAt : startedAt + 120_000;
+    checkAt = startedAt + 120_000;
   const checkBuild = async () => {
     const { jobs } = await api.read(`/attempts/${env.GITHUB_RUN_ATTEMPT}/jobs?per_page=100`, {
       deadline: now() >= deadline ? now() + 10_000 : deadline,
@@ -52,7 +49,7 @@ export async function waitForPreparation(
       const queued = build && QUEUED_STATUSES.includes(build.status);
       if (now() >= deadline)
         throw new Error(
-          `Shared ${scope} preparation exceeded its 15-minute wait cap; ${preparation.job} ${!build ? "build job missing from the job list" : queued ? "still queued for a runner" : build.status === "in_progress" ? "still running" : "has no published artifact"}.`,
+          `Shared ${scope} preparation exceeded its ${preparation.minutes}-minute wait cap; ${preparation.job} ${!build ? "build job missing from the job list" : queued ? "still queued for a runner" : build.status === "in_progress" ? "still running" : "has no published artifact"}.`,
         );
       {
         const { artifacts } = await api.read(
@@ -133,9 +130,7 @@ export async function waitForPreparation(
                 }
               }
               await response.body.cancel();
-              if (!names.length) return { artifact };
-              name = names.shift();
-              break;
+              return { artifact };
             }
             sawUnavailable = true;
             await response.body?.cancel();

@@ -347,7 +347,6 @@ describe("public Markdown schema", () => {
         nested.insert(0, [new Y.XmlText()]);
         paragraph.insert(0, [nested]);
       }),
-      "projection-mutated",
     );
     refused(
       encode("Text", (doc) => {
@@ -393,10 +392,8 @@ describe("public Markdown schema", () => {
     refused(encode("Text", (doc) => doc.getMap("unknown").set("hidden", true)));
   });
   it("rejects invalid children, attributes and marks that the schema drops", () => {
-    // y-prosemirror removes an unknown element in a transaction before failing.
     refused(
       encode("Text", (doc) => doc.getXmlFragment("body").insert(0, [new Y.XmlElement("unknown")])),
-      "projection-mutated",
     );
     refused(
       encode("Text", (doc) =>
@@ -409,8 +406,85 @@ describe("public Markdown schema", () => {
           unknown: {},
         }),
       ),
-      "projection-mutated",
     );
+  });
+  // Two people turning neighbouring to-dos into plain lines at once merge into an empty list.
+  it("accepts a list or item left empty by a merge, and refuses one that holds text", () => {
+    const plain = accepted(encode("- [ ] alpha\n\nbravo")).projectedMarkdown;
+    const withShells = accepted(
+      encode("- [ ] alpha\n\nbravo", (doc) => {
+        const body = doc.getXmlFragment("body");
+        const list = new Y.XmlElement("taskList");
+        list.insert(0, [new Y.XmlElement("taskItem")]);
+        body.insert(1, [list]);
+        (body.get(0) as Y.XmlElement).insert(1, [new Y.XmlElement("taskItem")]);
+      }),
+    );
+    expect(withShells.projectedMarkdown).toBe(plain);
+    refused(
+      encode("- [ ] alpha\n\nbravo", (doc) => {
+        const list = new Y.XmlElement("taskList"),
+          paragraph = new Y.XmlElement("paragraph");
+        paragraph.insert(0, [new Y.XmlText("hidden")]);
+        list.insert(0, [paragraph]);
+        doc.getXmlFragment("body").insert(1, [list]);
+      }),
+    );
+  });
+  const first = (parent: Y.XmlFragment) => parent.get(0) as Y.XmlElement;
+  const shell = () => {
+    const list = new Y.XmlElement("bulletList");
+    list.insert(0, [new Y.XmlElement("listItem")]);
+    return list;
+  };
+  // Each would still change the Markdown file the engine writes, though a reading leaves it out.
+  it.each<[string, string, (body: Y.XmlFragment) => void]>([
+    [
+      "a ticked to-do holding an empty list, which keeps its box",
+      "- [ ] alpha\n- [x] ticked",
+      (body) => {
+        const ticked = first(body).get(1) as Y.XmlElement;
+        ticked.delete(0, ticked.length);
+        ticked.insert(0, [new Y.XmlElement("taskList")]);
+      },
+    ],
+    [
+      "an empty to-do with an attribute the schema doesn't define",
+      "- [ ] alpha",
+      (body) => {
+        const hidden = new Y.XmlElement("taskItem");
+        hidden.setAttribute("x-hidden", "secret");
+        first(body).insert(1, [hidden]);
+      },
+    ],
+    [
+      "an empty item at the top of a numbered list, which renumbers it",
+      "1. alpha\n2. bravo",
+      (body) => first(body).insert(0, [new Y.XmlElement("listItem")]),
+    ],
+    [
+      "an empty list before an item's text, which moves the text out of the list",
+      "- alpha\n- bravo",
+      (body) => (first(body).get(1) as Y.XmlElement).insert(0, [shell()]),
+    ],
+    [
+      "an empty list in a table cell, which adds a break to the cell",
+      "| h |\n|---|\n| a |",
+      (body) => ((first(body).get(1) as Y.XmlElement).get(0) as Y.XmlElement).insert(1, [shell()]),
+    ],
+    [
+      "an empty callout, whose title the file keeps",
+      "alpha",
+      (body) => {
+        const callout = new Y.XmlElement("callout");
+        callout.setAttribute("calloutType", "note");
+        callout.setAttribute("title", "hidden");
+        body.insert(1, [callout]);
+      },
+    ],
+  ])("refuses %s", (_, markdown, change) => {
+    accepted(encode(markdown));
+    refused(encode(markdown, (doc) => change(doc.getXmlFragment("body"))));
   });
   it("accepts a full 2 MiB file as one text run, and refuses one UTF-8 byte over", () => {
     // The limit counts the projected file, final newline included.

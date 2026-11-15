@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown, getDohcYDocBodyFragment } from "@dohc/ydoc-projection";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
@@ -78,6 +78,34 @@ it("sends a tick and an untick from a to-do box while live", () => {
     expect(sent).toBe(2);
     expect(yDocToMarkdown(doc)).toBe("- [ ] tick me\n");
     expect(box.checked).toBe(false);
+  } finally {
+    editor.destroy();
+    doc.destroy();
+    mount.remove();
+  }
+});
+// A browser joining text into a to-do can delete the drawn box with it, while the item stays a
+// to-do in the document.
+it("puts back a to-do box the browser removed, showing the saved tick and still sending ticks", async () => {
+  const doc = markdownToYDoc("- [ ] alpha\n- [x] bravo\n"),
+    mount = document.createElement("div");
+  document.body.append(mount);
+  const editor = mountLiveBodyEditor(mount, {
+    body: getDohcYDocBodyFragment(doc),
+    label: "Shared file editor",
+    canEdit: () => true,
+    edit(change) {
+      doc.transact(change);
+      return true;
+    },
+  });
+  const boxes = () => [...mount.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
+  try {
+    mount.querySelectorAll('li[data-type="taskItem"]')[1]!.querySelector("label")!.remove();
+    await vi.waitFor(() => expect(boxes().map((box) => box.checked)).toEqual([false, true]));
+    boxes()[1]!.click();
+    expect(yDocToMarkdown(doc)).toBe("- [ ] alpha\n- [ ] bravo\n");
+    expect(boxes().map((box) => box.checked)).toEqual([false, false]);
   } finally {
     editor.destroy();
     doc.destroy();

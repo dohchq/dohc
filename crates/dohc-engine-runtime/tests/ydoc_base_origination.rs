@@ -13,7 +13,10 @@
 //! reconstructs them from its own private tables.
 
 use dohc_engine_collab::{ContentKind, DocKey, LeaseRegistry, Regime, Ydoc};
-use dohc_engine_domain::{RenameTextFile, VersionedTextStore, WriteText};
+use dohc_engine_domain::{
+    RenameTextFile, RollbackTextFileMutation, VersionedTextStore, WriteText,
+    rollback_compensating_moment_id,
+};
 use dohc_engine_runtime::{
     CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
@@ -542,6 +545,108 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
         replay_into_clean_peer(&store, &ops, WS, PATH),
         "hello world",
         "a peer with no file and no prior state reconstructs the document"
+    );
+}
+
+/// A write through the file API, or an outside change to the file, folds the
+/// new text into a note's closed lineage. The edit it journals names the
+/// write's file change, so a replica can pair the two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_folded_edit_names_the_file_change_it_came_from() {
+    const WS: &str = "ws-folded-edit-names-moment";
+    const PATH: &str = "notes/named.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    enable_sync(&db, WS);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    capture_seed(&handle, WS, PATH, 100).await;
+    let (key, _, seed) = open_with_seed(&handle, WS, PATH).await;
+    record_editor_update(&handle, &key, PATH, seed, None, true).await;
+    supervisor.close(&db).expect("close actor");
+    let journaled = local_ydoc_ops(&db).len();
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    let written = handle
+        .versioned_text_write(
+            WriteText {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: key.object_id.clone(),
+                path: PATH.to_owned(),
+                text: "written through the API\n".to_owned(),
+                moment_id: "moment-api-write".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 400,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("API write");
+    let captured = handle
+        .capture_ingest(
+            CaptureIngest {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: PATH.to_owned(),
+                text: "changed outside dohc\n".to_owned(),
+                metadata_origin: "capture".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 500,
+                request_id: Some("folded-edit-capture".to_owned()),
+                claim_foreign_head: true,
+            },
+            LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture");
+    let root = ScratchDir::new().expect("root");
+    handle
+        .versioned_text_rollback(
+            RollbackTextFileMutation {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: PATH.to_owned(),
+                mutation_moment_id: captured.moment.moment_id.clone(),
+                request_id: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
+            },
+            root.path().to_path_buf(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("rollback");
+    supervisor.close(&db).expect("close actor");
+
+    let named: Vec<_> = local_ydoc_ops(&db)[journaled..]
+        .iter()
+        .map(|op| op.payload.get("momentId").cloned())
+        .collect();
+    assert_eq!(
+        named,
+        [
+            Some(serde_json::json!(written.moment.moment_id)),
+            Some(serde_json::json!(captured.moment.moment_id)),
+            Some(serde_json::json!(rollback_compensating_moment_id(
+                WS,
+                "main",
+                &captured.moment.moment_id
+            ))),
+        ]
     );
 }
 

@@ -7,10 +7,10 @@ import { useRequestSequence } from "../useRequestSequence";
 import { T3CodeChoice, type T3CodeThreadChoice } from "./T3CodeThread";
 
 /**
- * Connects an agent to another T3 Code thread. The new thread gets dohc's
- * introduction first, and `onChanged` then saves the agent with it, so a
- * thread T3 Code refuses is never saved. While that runs the dialog stays
- * open. A refusal says why above the buttons and keeps the choice.
+ * Connects an agent to another T3 Code thread. Main gives the new thread
+ * dohc's introduction and then saves the agent with it, so a thread T3 Code
+ * refuses is never saved. The dialog stays open until main answers. A refusal,
+ * or a save that failed, says why above the buttons and keeps the choice.
  */
 export function ChangeThreadDialog(props: {
   workspaceId: string;
@@ -18,11 +18,12 @@ export function ChangeThreadDialog(props: {
   agentName: string;
   // The thread the agent has now.
   threadId: string;
-  // The new thread is ready: save the agent with it.
-  onChanged: (threadId: string) => void;
+  // How many workspaces besides this one the agent forwards from. An agent
+  // has one thread, so their messages go to the new thread too.
+  otherWorkspaces: number;
   onClose: () => void;
 }) {
-  const { workspaceId, agentId, agentName } = props;
+  const { workspaceId, agentId, agentName, otherWorkspaces } = props;
   const [thread, setThread] = useState<T3CodeThreadChoice | null>(null);
   const [ready, setReady] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -30,9 +31,6 @@ export function ChangeThreadDialog(props: {
   const busyRef = useRef(false);
   // An answer for a dialog that is gone, or for another agent or workspace, changes nothing.
   const changes = useRequestSequence([workspaceId, agentId]);
-  // The answer saves through the newest render's settings, not the ones it started with.
-  const latest = useRef(props);
-  latest.current = props;
   const id = useId();
   const panel = useRef<HTMLDivElement>(null);
   const choice = useRef<HTMLDivElement>(null);
@@ -41,7 +39,9 @@ export function ChangeThreadDialog(props: {
     setThread(next);
     setFailure(null);
   }, []);
-  const same = thread?.id === props.threadId;
+  // Main's settings can name the picked thread before its answer closes the
+  // dialog. That is the change itself, so the dialog does not call it no change.
+  const same = !busy && thread?.id === props.threadId;
 
   // The dialog holds focus until its first control shows: the project field,
   // or the first control of the ask while dohc is not allowed in T3 Code, which
@@ -72,13 +72,12 @@ export function ChangeThreadDialog(props: {
 
   async function change() {
     if (busyRef.current || !thread || same) return;
-    const threadId = thread.id;
     const token = changes.next();
     busyRef.current = true;
     setBusy(true);
     setFailure(null);
     try {
-      await bridge().changeAgentThread({ workspaceId, agentId, threadId });
+      await bridge().changeAgentThread({ workspaceId, agentId, threadId: thread.id });
     } catch (cause) {
       if (!changes.isCurrent(token)) return;
       busyRef.current = false;
@@ -86,9 +85,7 @@ export function ChangeThreadDialog(props: {
       setFailure(ipcErrorMessage(cause, `dohc could not change ${agentName}'s thread.`));
       return;
     }
-    if (!changes.isCurrent(token)) return;
-    latest.current.onChanged(threadId);
-    latest.current.onClose();
+    if (changes.isCurrent(token)) props.onClose();
   }
 
   const note = failure ? `${id}-failure` : same ? `${id}-same` : undefined;
@@ -116,10 +113,19 @@ export function ChangeThreadDialog(props: {
           <h2 id={`${id}-title`} className="m-0 text-base font-semibold text-ink wrap-anywhere">
             Change {agentName}&apos;s thread
           </h2>
-          <p id={`${id}-body`} className="m-0 text-[13px] text-muted">
-            From now on, dohc forwards to the thread you choose, and the old thread keeps the
-            messages it has.
-          </p>
+          <div id={`${id}-body`} className="flex flex-col gap-1 text-[13px] text-muted">
+            <p className="m-0">
+              From now on, dohc forwards to the thread you choose, and the old thread keeps the
+              messages it has.
+            </p>
+            {otherWorkspaces > 0 ? (
+              <p data-testid="agent-thread-change-workspaces" className="m-0">
+                {`The thread you choose gets messages from this workspace and ${otherWorkspaces} other ${
+                  otherWorkspaces === 1 ? "workspace" : "workspaces"
+                }.`}
+              </p>
+            ) : null}
+          </div>
         </div>
         {/* The choice holds still while its thread is readied. */}
         <div ref={choice} inert={busy} className="flex flex-col gap-4">

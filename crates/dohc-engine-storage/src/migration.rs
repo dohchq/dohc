@@ -3729,6 +3729,14 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("held_outside_changes.sql"),
         sets_user_version: None,
     },
+    // A file change whose edit joined a live note's owner queue waits for
+    // that entry, then applies with no file write.
+    Migration {
+        ordinal: 102,
+        id: "v2-live-device-update-cover",
+        sql: include_str!("live_device_update_covers.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5692,6 +5700,10 @@ mod tests {
             (
                 "v2-held-outside-change",
                 "0f40b74d415c8d28fba7d4626976d32b8995bdc4213d662abd3c95dce323060c",
+            ),
+            (
+                "v2-live-device-update-cover",
+                "4b4a83e956cd254979b190b7cb18b343a6ba66ea0a607a097255bb203491d5e0",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

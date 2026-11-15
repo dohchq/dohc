@@ -91,7 +91,7 @@ function setup(
   const lineChanges: string[] = [];
   const forward = vi.fn(async (input: Sent): Promise<{ runId: string | null } | void> => {
     order.push(
-      `sent ${input.forwardId.startsWith("dohc-intro-") ? "intro" : input.forwardId.startsWith("remind-") ? "reminder" : "message"}`,
+      `sent ${input.forwardId.startsWith("dohc-intro-") ? "intro" : input.forwardId.startsWith("dohc-workspace-") ? "workspace" : input.forwardId.startsWith("remind-") ? "reminder" : "message"}`,
     );
     sent.push(input);
     return { runId: `run-${sent.length}` };
@@ -431,6 +431,12 @@ describe("agent threads", () => {
     expect(order).toEqual(["sent intro"]);
     expect(sent[0]).toMatchObject({ threadId: "t3-thread-2", how: "line" });
     expect(sent[0]!.message).toContain('their agent "Chief"');
+    expect(sent[0]!.message).not.toContain("more than one workspace");
+
+    // A thread that gets several workspaces' messages is told so, and asked to keep them apart.
+    await agentThreads.change(WORKSPACE, { ...next, workspaces: [WORKSPACE, "ws-2"] });
+    expect(sent[1]!.message).toContain("forwards messages from more than one workspace");
+    expect(sent[1]!.message).toContain("Do not carry what you learned from one workspace");
 
     const refused = new T3CodeError("thread-gone", "This thread is no longer in T3 Code.");
     forward.mockRejectedValueOnce(refused);
@@ -438,6 +444,96 @@ describe("agent threads", () => {
     await expect(agentThreads.change("ws-gone", next)).rejects.toThrow(
       "no longer has this workspace",
     );
+  });
+
+  it("turns a workspace on in steps: what is unread is set aside around telling the thread, and what comes after is forwarded", async () => {
+    const off = { ...chief, workspaces: [] };
+    const { agentThreads, order, sent, forward, save, arrive } = started(
+      setup({ chief: off }, ["m1", "m2"]),
+    );
+    const agent = { id: "chief", name: "Chief", thread };
+    agentThreads.watch(WORKSPACE);
+    await settled();
+    expect(order).toEqual([]);
+
+    await agentThreads.setAside(WORKSPACE, agent);
+    // A message is written while the thread is told, before the workspace is on.
+    forward.mockImplementationOnce(async (input) => {
+      order.push("sent workspace");
+      sent.push(input);
+      arrive("m3");
+      await settled();
+      return { runId: null };
+    });
+    await agentThreads.tellOfWorkspace(WORKSPACE, agent);
+    await agentThreads.setAside(WORKSPACE, agent);
+    expect(order).toEqual(["read m2", "sent workspace", "read m3"]);
+    expect(sent[0]).toMatchObject({ threadId: "t3-thread-1", how: "line" });
+    // The thread learns it can hold several workspaces' messages, and the name is quoted.
+    expect(sent[0]!.message.split("\n")[0]).toContain('from the workspace named "Launch"');
+    expect(sent[0]!.message).toContain("Do not carry what you learned from one workspace");
+
+    // The workspace is saved as on, and what is written then goes to the thread.
+    save({ chief });
+    agentThreads.settingsChanged();
+    arrive("m4");
+    await vi.waitFor(() => expect(order.slice(3)).toEqual(["sent message", "read m4"]));
+    expect(String(sent[1]!.message)).toContain("body of m4");
+  });
+
+  it("tells no thread it cannot reach, and sets nothing aside in a workspace that is gone", async () => {
+    const { agentThreads, forward, order } = started(
+      setup({ chief: { ...chief, workspaces: [] } }, []),
+    );
+    const agent = { id: "chief", name: "Chief", thread };
+
+    const refused = new T3CodeError("thread-gone", "This thread is no longer in T3 Code.");
+    forward.mockRejectedValueOnce(refused);
+    await expect(agentThreads.tellOfWorkspace(WORKSPACE, agent)).rejects.toBe(refused);
+    await expect(agentThreads.tellOfWorkspace("ws-gone", agent)).rejects.toThrow(
+      "no longer has this workspace",
+    );
+    await expect(agentThreads.setAside("ws-gone", agent)).rejects.toThrow(
+      "no longer has this workspace",
+    );
+    expect(order).toEqual([]);
+  });
+
+  it("gives no line to a message the tool took before its workspace was turned off and on again", async () => {
+    const { agentThreads, forward, save, tool, order, rows } = started(setup({ chief }));
+    tool.state = {
+      ...tool.state,
+      runs: [
+        { id: "run-1", state: "working", requestedAtMs: 100, startedAtMs: 200, endedAtMs: null },
+      ],
+    };
+    // The tool holds the message until the test lets it go.
+    let taken!: () => void;
+    const holding = new Promise<void>((resolve) => {
+      taken = resolve;
+    });
+    forward.mockImplementationOnce(async () => {
+      await holding;
+      return { runId: "run-1" };
+    });
+    agentThreads.watch(WORKSPACE);
+    await vi.waitFor(() => expect(forward).toHaveBeenCalledTimes(1));
+
+    // The person turns the workspace off for the agent, and on again.
+    save({ chief: { ...chief, workspaces: [] } });
+    agentThreads.settingsChanged();
+    await settled();
+    await agentThreads.setAside(WORKSPACE, { id: "chief", name: "Chief", thread });
+    save({ chief });
+    agentThreads.settingsChanged();
+    expect(order).toEqual(["read m1"]);
+
+    // Then the tool answers for the message it took before all that. The
+    // pass marks the message read once it has told what it forwarded.
+    taken();
+    await vi.waitFor(() => expect(order.filter((entry) => entry === "read m1")).toHaveLength(2));
+    expect(agentThreads.lines(WORKSPACE)).toEqual([]);
+    expect(rows()).toEqual([]);
   });
 
   it("keeps no line for a thread the agent left while the tool took a message for it", async () => {

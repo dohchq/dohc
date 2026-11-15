@@ -17,7 +17,7 @@ import {
   readChange,
   readChat,
   replyToChat,
-  retryChatRun,
+  requestDeclaredWriteTool,
   startGroupChat,
   type ToolContext,
 } from "./tools";
@@ -369,13 +369,17 @@ describe("desktop CLI proxy", () => {
         },
       };
 
-      await expect(retryChatRun(ctx, { threadId: thread.id })).resolves.toEqual({
+      await expect(
+        requestDeclaredWriteTool(ctx, "dohc_retry_chat_run", { threadId: thread.id }),
+      ).resolves.toEqual({
         ok: true,
         status: "queued",
         threadId: "thread-1",
       });
       answer = { ok: false, reason: "No agent request in this conversation has stopped." };
-      await expect(retryChatRun(ctx, { threadId: thread.id })).resolves.toEqual(answer);
+      await expect(
+        requestDeclaredWriteTool(ctx, "dohc_retry_chat_run", { threadId: thread.id }),
+      ).resolves.toEqual(answer);
       const sent = {
         verb: "chatRetry",
         args: { cwd: base.root, actor: "agent", thread: "thread-1" },

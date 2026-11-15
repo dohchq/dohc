@@ -20,7 +20,6 @@ import {
   chatDispatchNoticeOperations,
   updateDownloadOperations,
   agentRunStateOperations,
-  stoppedRunOperations,
   chatDispatchPauseOperations,
   agentThreadOperations,
   agentsListeningOperations,
@@ -49,9 +48,12 @@ import {
   appViewOperations,
 } from "./bridgeContract";
 import { settingsOperations } from "./settingsOperations";
+import { protectedCopyOperations, stoppedRunOperations } from "./writeOperations";
 import { CHANNELS } from "./channels";
 import { DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-declarations";
 import type { OperationFamily } from "@dohc/workspace-contracts/operation-declaration";
+import { WRITE_DECLARATION_FAMILIES } from "@dohc/workspace-contracts/all-write-declarations";
+import type { WriteFamily } from "@dohc/workspace-contracts/write-declaration";
 import type { OperationDefinition, OperationTable } from "./operationTable";
 import { shareCopyOperations } from "./shareCopyOperations";
 import { accessOperations } from "./accessOperations";
@@ -101,6 +103,7 @@ export const OPERATION_TABLES = [
   chatDispatchNoticeOperations,
   agentRunStateOperations,
   stoppedRunOperations,
+  protectedCopyOperations,
   chatDispatchPauseOperations,
   agentThreadOperations,
   agentsListeningOperations,
@@ -122,4 +125,9 @@ if (repeated) throw new Error(`${repeated} is declared twice.`);
 for (const family of Object.values<OperationFamily>(DECLARATION_FAMILIES)) {
   for (const [name, { ipc }] of Object.entries(family))
     if (!rowChannels.includes(ipc.channel)) throw new Error(`${name} has no IPC row.`);
+}
+for (const family of Object.values<WriteFamily>(WRITE_DECLARATION_FAMILIES)) {
+  for (const [name, { ipc }] of Object.entries(family))
+    if (!("none" in ipc) && !rowChannels.includes(ipc.channel))
+      throw new Error(`${name} has no IPC row.`);
 }

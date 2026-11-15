@@ -18,6 +18,7 @@ import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   markdownToYDoc,
+  isEmptyShell,
   yDocToMarkdown,
 } from "./import-export.js";
 import {
@@ -850,11 +851,30 @@ function bodyFingerprint(
   const permitsText =
     body instanceof Y.XmlElement &&
     schema.nodes[body.nodeName]?.contentMatch.matchType(schema.nodes.text) != null;
+  // The engine's Markdown writer turns a left-out shell into blank lines only in the body or a
+  // bullet or to-do list. Elsewhere it changes the file, such as a list's numbers or a table cell.
+  const leavesOutShells =
+    !(body instanceof Y.XmlElement) ||
+    body.nodeName === "bulletList" ||
+    body.nodeName === "taskList";
   const children: XmlFingerprint[] = [];
   for (const child of body.toArray()) {
     const fingerprint = xmlFingerprint(child, depth, budget);
-    if (!permitsText || fingerprint.kind !== "text" || fingerprint.delta.length !== 0)
-      children.push(fingerprint);
+    if (permitsText && fingerprint.kind === "text" && fingerprint.delta.length === 0) continue;
+    // A reading leaves out an empty shell, so the comparison does too. A shell carrying an
+    // attribute the schema doesn't know would hide it, so that one is still compared and refused.
+    if (
+      leavesOutShells &&
+      fingerprint.kind === "element" &&
+      fingerprint.children.length === 0 &&
+      child instanceof Y.XmlElement &&
+      isEmptyShell(child) &&
+      fingerprint.attributes.every(([key]) =>
+        Object.hasOwn(schema.nodes[child.nodeName]!.spec.attrs ?? {}, key),
+      )
+    )
+      continue;
+    children.push(fingerprint);
   }
   return children;
 }

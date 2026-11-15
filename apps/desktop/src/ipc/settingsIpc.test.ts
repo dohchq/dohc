@@ -227,6 +227,7 @@ async function harness() {
     second,
     open,
     zoom: capability.stepWindowZoom,
+    changeAgent: capability.changeAgent,
     setCachedNames,
     applyZoomLevelToWindows,
     applyThemeMode,
@@ -790,6 +791,123 @@ describe("registered settings IPC", () => {
     });
     expect(h.scanWorkspace).not.toHaveBeenCalled();
     expect(h.refreshDispatchTray).toHaveBeenCalledTimes(3);
+  });
+
+  it("changes one agent from the file as it is now, so two changes at once both land", async () => {
+    const h = await harness();
+    // An agent with a thread has no launch: its tool runs it.
+    const { launch: _launch, ...unlaunched } = testAgent({ name: "Chief" });
+    const chief = {
+      ...unlaunched,
+      thread: { tool: "t3-code" as const, id: "t3-thread-1" },
+      workspaces: ["workspace-a", "workspace-b"],
+    };
+    const seeded = { ...DEFAULT_USER_SETTINGS, agents: { chief } };
+    await h.invoke(settingsOperations.setUserSettings.channel, {
+      settings: seeded,
+      base: DEFAULT_USER_SETTINGS,
+    });
+    const without = (workspaceId: string) =>
+      h.changeAgent("chief", (agent) => ({
+        ...agent,
+        workspaces: (agent.workspaces ?? []).filter((id) => id !== workspaceId),
+      }));
+
+    // Each window takes its own workspace away. Neither puts the other's back.
+    await Promise.all([without("workspace-a"), without("workspace-b")]);
+    const saved = async () =>
+      (await userSettingsStore.readUserSettingsFile(h.stateDirectory())).settings.agents.chief;
+    expect((await saved())?.workspaces).toEqual([]);
+
+    // A change can refuse, and one for an agent that is gone is refused. Neither saves.
+    await expect(
+      h.changeAgent("chief", () => {
+        throw new Error("Chief was connected to another thread meanwhile. Try again.");
+      }),
+    ).rejects.toThrow("connected to another thread meanwhile");
+    await expect(h.changeAgent("gone", (agent) => ({ ...agent, name: "Gone" }))).rejects.toThrow(
+      "no longer in Settings",
+    );
+    expect(await saved()).toMatchObject({ name: "Chief", workspaces: [] });
+    // What follows a save can fail. The agent is saved, so the change does not fail with it.
+    h.refreshDispatchTray.mockRejectedValueOnce(new Error("tray unavailable"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(
+      h.changeAgent("chief", (agent) => ({ ...agent, workspaces: ["workspace-b"] })),
+    ).resolves.toMatchObject({ settings: { agents: { chief: { workspaces: ["workspace-b"] } } } });
+    expect(logged).toHaveBeenCalledOnce();
+    logged.mockRestore();
+    expect((await saved())?.workspaces).toEqual(["workspace-b"]);
+    // An agent given back unchanged announces nothing.
+    const announced = h.broadcastUserSettings.mock.calls.length;
+    await h.changeAgent("chief", (agent) => agent);
+    expect(h.broadcastUserSettings).toHaveBeenCalledTimes(announced);
+  });
+
+  it("runs a step before an agent's change in the same turn, so nothing comes into effect between them", async () => {
+    const h = await harness();
+    const { launch: _launch, ...unlaunched } = testAgent({ name: "Chief" });
+    const chief = {
+      ...unlaunched,
+      thread: { tool: "t3-code" as const, id: "t3-thread-1" },
+      workspaces: ["workspace-a"],
+    };
+    await h.invoke(settingsOperations.setUserSettings.channel, {
+      settings: { ...DEFAULT_USER_SETTINGS, agents: { chief } },
+      base: DEFAULT_USER_SETTINGS,
+    });
+    const order: string[] = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+
+    // The step gets the agent as it is in effect, and the change waits for it.
+    const first = h.changeAgent(
+      "chief",
+      (agent) => ({ ...agent, workspaces: [...(agent.workspaces ?? []), "workspace-b"] }),
+      async (inEffect) => {
+        order.push(`step sees ${String(inEffect.workspaces)}`);
+        await held;
+        order.push("step done");
+      },
+    );
+    // Another change asked for meanwhile takes its turn after both.
+    const second = h.changeAgent("chief", (agent) => {
+      order.push(`next sees ${String(agent.workspaces)}`);
+      return {
+        ...agent,
+        workspaces: (agent.workspaces ?? []).filter((id) => id !== "workspace-a"),
+      };
+    });
+    await vi.waitFor(() => expect(order).toEqual(["step sees workspace-a"]));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(order).toEqual(["step sees workspace-a"]);
+    release();
+    await Promise.all([first, second]);
+    expect(order).toEqual([
+      "step sees workspace-a",
+      "step done",
+      "next sees workspace-a,workspace-b",
+    ]);
+    const saved = async () =>
+      (await userSettingsStore.readUserSettingsFile(h.stateDirectory())).settings.agents.chief;
+    expect((await saved())?.workspaces).toEqual(["workspace-b"]);
+
+    // A step that fails saves nothing, and one for an agent that is gone does not run.
+    await expect(
+      h.changeAgent(
+        "chief",
+        (agent) => ({ ...agent, workspaces: [] }),
+        async () => {
+          throw new Error("The window changed workspaces.");
+        },
+      ),
+    ).rejects.toThrow("The window changed workspaces.");
+    const step = vi.fn(async () => {});
+    await expect(h.changeAgent("gone", (agent) => agent, step)).rejects.toThrow(
+      "no longer in Settings",
+    );
+    expect(step).not.toHaveBeenCalled();
+    expect((await saved())?.workspaces).toEqual(["workspace-b"]);
   });
 
   it("applies two quick pins to the file one after the other, so both land", async () => {

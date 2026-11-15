@@ -60,6 +60,8 @@ import {
   CLI_PROTOCOL_VERSION,
   APP_PUBLICATION_CAPABILITIES,
   DECLARED_VERBS,
+  DECLARED_WRITES,
+  type DeclaredWrite,
   collectionCreateFieldsSchema,
   collectionQueryCursorSchema,
   collectionQueryFilterSchema,
@@ -99,8 +101,31 @@ export const DECLARED_TOOLS = byName(
   (operation) => operation.mcp.tool,
 );
 
+// The tool of each declared write that MCP offers.
+type ToolWrite = Extract<DeclaredWrite, { readonly mcp: { readonly tool: string } }>;
+type DeclaredWriteTool = ToolWrite["mcp"]["tool"];
+type ToolWriteOf<Tool extends DeclaredWriteTool> = Extract<
+  ToolWrite,
+  { readonly mcp: { readonly tool: Tool } }
+>;
+// A tool that takes its own input, not the socket's.
+type OwnInputTool = {
+  [Tool in DeclaredWriteTool]: ToolWriteOf<Tool>["mcp"] extends { readonly input: z.ZodType }
+    ? Tool
+    : never;
+}[DeclaredWriteTool];
+export const DECLARED_WRITE_TOOLS = byName(
+  Object.values<DeclaredWrite>(DECLARED_WRITES).filter(
+    (write): write is ToolWrite => !("none" in write.mcp),
+  ),
+  (write) => write.mcp.tool,
+);
+
 export const MCP_TOOL_CAPABILITIES = distinct(
-  mapNamed(DECLARED_TOOLS, (operation) => [operation.capabilityId] as const),
+  distinct(
+    mapNamed(DECLARED_TOOLS, (operation) => [operation.capabilityId] as const),
+    mapNamed(DECLARED_WRITE_TOOLS, (write) => [write.capabilityId] as const),
+  ),
   {
     dohc_read_share_copy: ["share.copy.read"],
     dohc_list_link_agents: ["share.link.agents.list"],
@@ -116,7 +141,6 @@ export const MCP_TOOL_CAPABILITIES = distinct(
     dohc_list_kept_copies: ["file.kept.list"],
     dohc_list_notices: ["notice.list"],
     dohc_save_kept_copy: ["file.kept.save"],
-    dohc_restore_protected_copy: ["file.protected.restore"],
     dohc_discard_protected_copy: ["file.protected.discard"],
     dohc_save_recovery_copy: ["share.live.document.recovery.save"],
     dohc_retry_kept_edits: ["share.live.document.retry"],
@@ -164,7 +188,6 @@ export const MCP_TOOL_CAPABILITIES = distinct(
     dohc_start_group_chat: ["chat.post"],
     dohc_start_file_chat: ["file.chat.start"],
     dohc_reply_to_chat: ["chat.reply"],
-    dohc_retry_chat_run: ["agent.run.retry"],
     dohc_query_collection: ["collection.query"],
     dohc_read_record: ["collection.record.read"],
     dohc_set_record_fields: ["collection.record.edit"],
@@ -2121,6 +2144,51 @@ export async function requestDeclaredTool(ctx: ToolContext, tool: DeclaredTool, 
   return requestCli(ctx, cli.verb, schema.parse(input));
 }
 
+// How a tool with its own input becomes its socket verb's input, and how the
+// verb's answer becomes the tool's when they differ. The type requires an entry
+// for each such tool.
+const WRITE_TOOL_SHAPES: {
+  readonly [Tool in OwnInputTool]: {
+    readonly toSocket: (
+      args: z.output<NonNullable<ToolWriteOf<Tool>["mcp"]["input"]>>,
+    ) => z.input<ToolWriteOf<Tool>["socket"]["input"]>;
+    readonly fromSocket?: (
+      result: z.output<ToolWriteOf<Tool>["socket"]["result"]>,
+    ) => Record<string, unknown>;
+  };
+} = {
+  // The desktop runs it only for someone who may post in the conversation, and
+  // a run only in its own workspace.
+  dohc_retry_chat_run: {
+    toSocket: ({ threadId }) => ({ thread: threadId }),
+    fromSocket: (result) =>
+      result.ok ? { ...result, threadId: engineThreadId(result.threadId) } : result,
+  },
+  dohc_restore_protected_copy: { toSocket: ({ id }) => ({ id }) },
+};
+
+// Sends a declared write's tool call as its socket verb, with the run's id
+// when the declaration lets a request name its run.
+export async function requestDeclaredWriteTool(
+  ctx: ToolContext,
+  tool: DeclaredWriteTool,
+  args: unknown,
+): Promise<Record<string, unknown> | null> {
+  const { socket } = DECLARED_WRITE_TOOLS[tool];
+  const shape = Object.hasOwn(WRITE_TOOL_SHAPES, tool)
+    ? (WRITE_TOOL_SHAPES[tool as OwnInputTool] as {
+        toSocket: (args: unknown) => object;
+        fromSocket?: (result: unknown) => Record<string, unknown>;
+      })
+    : undefined;
+  const namesRun = socket.admission.run === "may-name-its-run" && ctx.runId !== undefined;
+  const result = (await requestCli(ctx, socket.verb, {
+    ...(namesRun ? { runId: ctx.runId } : {}),
+    ...(shape ? shape.toSocket(args) : (args as object)),
+  } as never)) as Record<string, unknown> | null;
+  return shape?.fromSocket ? shape.fromSocket(result) : result;
+}
+
 export async function readOperation(
   ctx: ToolContext,
   args: { operationId: string; cursor?: string },
@@ -2636,9 +2704,6 @@ export async function saveKeptCopy(ctx: ToolContext, args: { id: number }) {
 }
 
 // A protected file's change a sync replaced, kept on this computer only.
-export async function restoreProtectedCopy(ctx: ToolContext, args: { id: string }) {
-  return requestCli(ctx, "restoreProtectedCopy", { id: args.id });
-}
 
 export async function discardProtectedCopy(ctx: ToolContext, args: { id: string }) {
   return requestCli(ctx, "discardProtectedCopy", { id: args.id });
@@ -2791,16 +2856,6 @@ export async function retryAutomationRun(
     run: args.run,
     startOver: args.startOver ?? false,
   });
-}
-
-// The desktop runs it only for someone who may post in the conversation, and
-// a run only in its own workspace.
-export async function retryChatRun(ctx: ToolContext, args: { threadId: string }) {
-  const result = await requestCli(ctx, "chatRetry", {
-    ...(ctx.runId !== undefined ? { runId: ctx.runId } : {}),
-    thread: args.threadId,
-  });
-  return result.ok ? { ...result, threadId: engineThreadId(result.threadId) } : result;
 }
 
 // The desktop checks current access and hosts shared Collection Buttons.

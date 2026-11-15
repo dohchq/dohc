@@ -22,7 +22,7 @@ on:
       runner_provider:
         description: Runner provider for this manual measurement
         type: choice
-        options: [github, blacksmith, blacksmith-builds]
+        options: [github, blacksmith]
         default: github
       runner_size:
         description: Blacksmith vCPUs, ignored on GitHub's runners
@@ -232,13 +232,9 @@ jobs:
     name: shared preparation
     needs: changes
     if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
-    runs-on: >-
-      ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' ||
-      (github.event_name == 'workflow_dispatch' && (inputs.runner_provider == 'blacksmith' || inputs.runner_provider == 'blacksmith-builds'))) &&
-      format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') ||
-      (vars.BLACKSMITH_BUILD_VCPUS == '4' || vars.BLACKSMITH_BUILD_VCPUS == '8') &&
-      format('["blacksmith-{0}vcpu-ubuntu-2404"]', vars.BLACKSMITH_BUILD_VCPUS) || '["ubuntu-24.04"]') }}
-    timeout-minutes: 20
+    # Confinement requires Landlock on GitHub's kernel.
+    runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
+    timeout-minutes: 30
     env:
       DOHC_CONFINEMENT_SUITES: exclude
       CARGO_INCREMENTAL: '0'
@@ -288,64 +284,14 @@ jobs:
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
         with:
           tool: cargo-nextest@0.9.143
-      - name: Archive compiler confinement test binaries
-        run: cargo nextest archive --locked --package dohc-compiler-owner --archive-file .agent-artifacts/verification/compiler-tests.tar.zst --zstd-level=-1
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: compiler-tests-${{ github.run_attempt }}
-          path: .agent-artifacts/verification/compiler-tests.tar.zst
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-
-  confinement-compiler:
-    name: compiler confinement
-    needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
-    runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
-    timeout-minutes: 20
-    env:
-      CARGO_INCREMENTAL: '0'
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 2
-          persist-credentials: false
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2.85.2
-        with:
-          tool: cargo-nextest@0.9.143
-      - name: Wait for the prepared engine and compiler tests
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/verification/wait-preparation.mjs compiler
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: javascript-prepared-${{ github.run_attempt }}
-          path: /tmp/prepared
-      - name: Restore prepared artifacts
-        run: |
-          tar -I zstd -xf /tmp/prepared/javascript-prepared.tar.zst
-          node --input-type=module -e "import { assertPrepared } from './scripts/verification/build.mjs'; assertPrepared();"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: compiler-tests-${{ github.run_attempt }}
-          path: .agent-artifacts/verification
-      - name: Compiler confinement
+      - name: Build compiler confinement tests
+        run: cargo nextest run --locked --package dohc-compiler-owner --no-run
+      - name: Compiler and relay confinement
         run: |
           set -euo pipefail
           mkdir -p .agent-artifacts/confinement
           compiler() {
-            cargo nextest run --archive-file .agent-artifacts/verification/compiler-tests.tar.zst --workspace-remap "$PWD" --retries=0 --no-tests=fail
+            env -u DOHC_CONFINEMENT_SUITES cargo nextest run --locked --package dohc-compiler-owner --retries=0 --no-tests=fail
             report="$PWD/.agent-artifacts/confinement/compiler.tap"
             DOHC_CONFINEMENT_SUITES=only pnpm --filter @dohc/desktop exec node --test --test-concurrency=1 \
               --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination="$report" \
@@ -353,56 +299,6 @@ jobs:
             grep -qx '# skipped 0' "$report" && grep -qx '# todo 0' "$report" && ! grep -qx '# pass 0' "$report" ||
               { grep '^# ' "$report"; echo "::error::Some app compiler tests did not run."; return 1; }
           }
-          compiler
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: verification-confinement-compiler-${{ github.run_attempt }}
-          path: .agent-artifacts/confinement/**
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-
-  confinement-relay:
-    name: relay confinement
-    needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
-    runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
-    timeout-minutes: 20
-    env:
-      CARGO_INCREMENTAL: '0'
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 2
-          persist-credentials: false
-      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: .node-version
-          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
-      - name: Wait for the prepared engine
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/verification/wait-preparation.mjs js
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: javascript-prepared-${{ github.run_attempt }}
-          path: /tmp/prepared
-      - name: Restore prepared artifacts
-        run: |
-          tar -I zstd -xf /tmp/prepared/javascript-prepared.tar.zst
-          node --input-type=module -e "import { assertPrepared } from './scripts/verification/build.mjs'; assertPrepared({ engineOnly: true });"
-      - name: Relay confinement
-        run: |
-          set -euo pipefail
-          mkdir -p .agent-artifacts/confinement
           relay() {
             node_root="$(dirname "$(dirname "$(command -v node)")")"
             report="$PWD/.agent-artifacts/confinement/relay.json"
@@ -419,12 +315,35 @@ jobs:
               if (!r.numTotalTests || r.numPendingTests || r.numTodoTests) throw new Error((r.numPendingTests + r.numTodoTests) + " of " + r.numTotalTests + " replica tests did not run.");
               console.log(r.numPassedTests + " replica tests passed under the default seccomp profile.");' "$report"
           }
-          relay
+          relay > .agent-artifacts/confinement/relay.log 2>&1 &
+          relay_pid=$!
+          compiler_status=0
+          (compiler) > .agent-artifacts/confinement/compiler.log 2>&1 &
+          compiler_pid=$!
+          wait "$compiler_pid" || compiler_status=$?
+          relay_status=0
+          wait "$relay_pid" || relay_status=$?
+          echo '::group::Compiler confinement'
+          cat .agent-artifacts/confinement/compiler.log
+          echo '::endgroup::'
+          echo '::group::Relay confinement'
+          cat .agent-artifacts/confinement/relay.log
+          echo '::endgroup::'
+          test "$compiler_status" -eq 0 && test "$relay_status" -eq 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: verification-confinement-compiler-${{ github.run_attempt }}
+          path: .agent-artifacts/confinement/compiler.*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: verification-confinement-relay-${{ github.run_attempt }}
-          path: .agent-artifacts/confinement/**
+          path: .agent-artifacts/confinement/relay.*
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
@@ -546,68 +465,15 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-  rust-archive:
-    name: Rust build once
-    needs: changes
-    if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true'
-    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    timeout-minutes: 25
-    env:
-      NEXTEST_PROFILE: without-confinement
-      CARGO_INCREMENTAL: '0'
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 2
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version-file: .node-version
-      - name: Reader test Node
-        run: |-
-          dir="$(mktemp -d)"
-          install -m 0500 "$(command -v node)" "$dir/node"
-          echo "DOHC_READER_TEST_NODE=$dir/node" >> "$GITHUB_ENV"
-      - name: Rust toolchain
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
-        if: inputs.cache != 'cold'
-        with:
-          shared-key: engine-archive
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
-        with:
-          tool: cargo-nextest@0.9.143
-      - name: Compile and inventory every workspace test
-        run: node scripts/verification/cloud-rust.mjs archive
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: rust-tests-${{ github.run_attempt }}
-          path: |-
-            .agent-artifacts/verification/rust-tests.tar.zst
-            .agent-artifacts/verification/rust-inventory.json
-            .agent-artifacts/verification/empty-store.db
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: verification-rust-archive-${{ github.run_attempt }}
-          path: .agent-artifacts/verification/cloud-rust/**
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
   rust-tests:
     name: Rust tests ${{ matrix.shard }}
-    needs: [changes, rust-archive]
+    needs: changes
     if: >-
       always() && !cancelled() && needs.changes.result == 'success' &&
       ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    timeout-minutes: 25
+    # The archive wait is capped at 25 minutes; the download and partition follow it.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -617,8 +483,6 @@ jobs:
           - 3
           - 4
           - 5
-          - 6
-          - 7
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'
@@ -713,10 +577,11 @@ jobs:
           compression-level: 0
   rust:
     name: engine gate
-    needs: [changes, rust-archive]
-    if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
+    needs: changes
+    if: always() && !cancelled() && needs.changes.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
-    timeout-minutes: 40
+    # Covers the archive build (formerly its own 25-minute job), partition 0 and the group wait.
+    timeout-minutes: 55
     env:
       NEXTEST_PROFILE: without-confinement
       CARGO_INCREMENTAL: '0'
@@ -731,6 +596,42 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version-file: .node-version
+      - name: Reader test Node
+        run: |-
+          dir="$(mktemp -d)"
+          install -m 0500 "$(command -v node)" "$dir/node"
+          echo "DOHC_READER_TEST_NODE=$dir/node" >> "$GITHUB_ENV"
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        if: inputs.cache != 'cold'
+        with:
+          shared-key: engine-archive
+      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
+        with:
+          tool: cargo-nextest@0.9.143
+      - name: Compile and inventory every workspace test
+        run: node scripts/verification/cloud-rust.mjs archive
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rust-tests-${{ github.run_attempt }}
+          path: |-
+            .agent-artifacts/verification/rust-tests.tar.zst
+            .agent-artifacts/verification/rust-inventory.json
+            .agent-artifacts/verification/empty-store.db
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: verification-rust-archive-${{ github.run_attempt }}
+          path: .agent-artifacts/verification/cloud-rust/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
       - id: pnpm-store
         if: inputs.cache != 'cold'
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
@@ -741,32 +642,15 @@ jobs:
           key: node-cache-${{ runner.os }}-x64-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Install dependencies
         run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
-      - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf
-        with:
-          tool: cargo-nextest@0.9.143
-      - name: Wait for the shared Rust archive
-        run: node scripts/verification/wait-preparation.mjs rust
-      - id: rust-archive-download
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        timeout-minutes: 2
-        continue-on-error: true
-        with:
-          name: rust-tests-${{ github.run_attempt }}
-          path: .agent-artifacts/verification
-      - name: Download the shared Rust archive again after a stalled transfer
-        if: steps.rust-archive-download.outcome == 'failure'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        timeout-minutes: 3
-        with:
-          name: rust-tests-${{ github.run_attempt }}
-          path: .agent-artifacts/verification
       - name: Run every assigned test from the shared native archive
         run: node scripts/verification/cloud-rust.mjs tests 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: verification-rust-tests-0-${{ github.run_attempt }}
-          path: .agent-artifacts/verification/cloud-rust/**
+          path: |-
+            .agent-artifacts/verification/cloud-rust/**
+            !.agent-artifacts/verification/cloud-rust/archive/**
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
@@ -793,7 +677,7 @@ jobs:
 
   verification:
     name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}
-    needs: [changes, javascript, rust, javascript-prepare, confinement-compiler, confinement-relay]
+    needs: [changes, javascript, rust, javascript-prepare]
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
@@ -838,9 +722,7 @@ jobs:
             if (selected) await verifyCompletedCloud(gate);
           }));
           const confined = process.env.EVENT_NAME === 'workflow_dispatch' || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
-          for (const name of ['javascript-prepare', 'confinement-compiler', 'confinement-relay']) {
-            assert.equal(jobs[name].result, confined ? 'success' : 'skipped', `${name} job did not complete as selected`);
-          }
+          assert.equal(jobs['javascript-prepare'].result, confined ? 'success' : 'skipped', 'shared preparation did not complete as selected');
           const failures = verdicts.filter(verdict => verdict.status === 'rejected').map(verdict => verdict.reason);
           if (failures.length) throw new AggregateError(failures, 'Selected verification gates failed');
           NODE

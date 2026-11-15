@@ -6,12 +6,10 @@ Blacksmith is optional and off. Without it, PR checks run on GitHub-hosted `ubun
 ## Keep Blacksmith off
 
 The repository variable `BLACKSMITH_ENABLED` chooses the runners in the [`PR checks` workflow](../../.github/workflows/pr-checks.yml).
-With both runner variables unset, PR checks and default manual dispatch use GitHub-hosted `ubuntu-24.04` runners.
+With the variable unset, PR checks and default manual dispatch use GitHub-hosted `ubuntu-24.04` runners.
 A manual dispatch with `runner_provider=blacksmith` opts that run into Blacksmith while the switch stays off.
 
-Set `BLACKSMITH_BUILD_VCPUS` to `4` or `8` to move only the shared JavaScript build (`shared preparation`) to Blacksmith.
-An absent, empty, or other value leaves that job on GitHub. Manual `runner_provider=blacksmith-builds` selects only that job using `runner_size`.
-The full-gate switch and manual `blacksmith` selection keep their existing runner sizes; manual build-only selection overrides the build variable's size.
+Shared preparation stays on GitHub because it also runs the confinement suites.
 
 Inspect the switch:
 
@@ -67,9 +65,9 @@ gh workflow run pr-checks.yml --repo dohchq/dohc --ref main -f gate=all -f runne
 ```
 
 The `gate` input accepts `all`, `js`, or `rust`.
-The `runner_provider` input accepts `github` (default), `blacksmith`, or `blacksmith-builds` for a manual opt-in.
+The `runner_provider` input accepts `github` (default) or `blacksmith` for a manual opt-in.
 The default does not override `BLACKSMITH_ENABLED=true`.
-The `runner_size` input accepts `4` or `8` vCPUs and affects both manual Blacksmith modes.
+The `runner_size` input accepts `4` or `8` vCPUs for manual Blacksmith runs.
 Manual runs execute the requested gates. Automatic PR runs execute the gates that the changed files select.
 The cloud timing targets and ceilings apply to these runs. Read the timing verdict as [the verification procedure](verify-agent-work.md#verify-a-pull-request) describes.
 
@@ -104,10 +102,10 @@ An 8-vCPU runner costs twice as much per minute. Choose it only after comparing 
 ## Sandbox suites run on GitHub's image
 
 Blacksmith's kernel has no Landlock, which the app compiler and the relay's replicas apply.
-The `compiler confinement` and `relay confinement` jobs therefore always use GitHub's `ubuntu-24.04` image, whenever either gate runs.
-Both jobs fail if any required test skips.
+The `shared preparation` job therefore always uses GitHub's `ubuntu-24.04` image, whenever either gate runs.
+It runs both confinement suites after publishing the prepared artifacts and fails if any required test skips.
 If confinement fails, select **Re-run all jobs**. **Re-run failed jobs** does not create preparation artifacts for the new attempt.
-The local gate runs no Linux JavaScript, so the replica suites run only in the relay confinement job.
+The local gate runs no Linux JavaScript, so the replica suites run only in shared preparation.
 The workflow holds the rest of the job graph and the confinement setup.
 
 ## Read the result

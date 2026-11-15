@@ -6,6 +6,7 @@ import {
   Clock,
   ExternalLink,
   FilePenLine,
+  Folder,
   Forward,
   History,
   KeyRound,
@@ -43,10 +44,12 @@ import { RetryRow, SecondaryButton } from "../ui/controls";
 import { isComposingKey } from "../ui/keys";
 import { Menu } from "../ui/Menu";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { useRequestSequence } from "../useRequestSequence";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { useWorkspaceQuery } from "../workspace/useWorkspaceQuery";
 import { useWorkspaceSession } from "../workspace/workspaceSession";
 import { ChangeThreadDialog } from "./ChangeThreadDialog";
+import { ForwardWorkspaceDialog } from "./ForwardWorkspaceDialog";
 import { HueControl, SwitchControl } from "./SettingRow";
 import {
   T3_CODE,
@@ -315,7 +318,9 @@ function AgentNote(props: {
 const THREAD_READ_FAILED = "dohc could not read this thread from T3 Code.";
 
 // The thread an agent is connected to, by its title in T3 Code, with the ways
-// to open it there and to connect the agent to another one. The title is read
+// to open it there and to connect the agent to another one. Main finds the
+// thread only from a workspace the agent forwards from, so the page shows the
+// row only there. The title is read
 // once the page knows T3 Code allows dohc, or could not check. While the page
 // says T3 Code does not allow dohc, no title can be read, and the row does not
 // say why a second time.
@@ -324,7 +329,6 @@ function ThreadRow(props: {
   thread: AgentThread;
   workspaceId: string;
   access: "checking" | "refused" | "usable";
-  onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
   onError?: PageError | undefined;
   // The dialog may have got dohc allowed in T3 Code.
   onAllowChecked: () => void;
@@ -339,9 +343,9 @@ function ThreadRow(props: {
     load: () => bridge().readAgentThread({ workspaceId, agentId: agent.id }),
   });
   const { error, retry } = read;
-  // Settings show a save before it lands, so the answer may be for the thread
-  // the agent had until now. It is not shown, and the thread is read again
-  // until the answer is for the thread the agent has here.
+  // Main saves a new thread, and its settings reach this window on their own.
+  // An answer for another thread than the one the settings here name is not
+  // shown, and the thread is read again until the two agree.
   const answered = read.value;
   const current = answered?.threadId === thread.id ? answered : undefined;
   const value = current && "title" in current ? current : undefined;
@@ -434,11 +438,7 @@ function ThreadRow(props: {
           agentId={agent.id}
           agentName={agent.name}
           threadId={thread.id}
-          onChanged={(id) =>
-            props.onChange((current) =>
-              current.thread ? { ...current, thread: { ...current.thread, id } } : current,
-            )
-          }
+          otherWorkspaces={(agent.workspaces ?? []).filter((id) => id !== workspaceId).length}
           onClose={() => {
             setChanging(false);
             // The dialog can allow dohc, or allow it again with another mode.
@@ -450,16 +450,90 @@ function ThreadRow(props: {
   );
 }
 
+// The switch for the workspace the window shows. Main makes both changes and
+// saves them. Turning it on asks first. Turning it off asks nothing, because
+// the switch turns it on again. It moves at the click and holds still until
+// main answers, and then shows what the settings say, so a workspace main
+// could not turn off reads as on again.
+function WorkspaceSwitch(props: {
+  agent: Agent;
+  workspaceId: string;
+  // The saved settings have this workspace on for the agent.
+  serves: boolean;
+  onAsk: () => void;
+  onError?: PageError | undefined;
+}) {
+  const { agent, workspaceId } = props;
+  const [turningOff, setTurningOff] = useState(false);
+  const running = useRef(false);
+  // An answer for a switch that is gone, with its agent or its workspace, reports and changes nothing.
+  const calls = useRequestSequence();
+  const report = useRef(props.onError);
+  report.current = props.onError;
+  const turnOff = async (): Promise<void> => {
+    const token = calls.next();
+    running.current = true;
+    setTurningOff(true);
+    try {
+      await bridge().setAgentThreadWorkspace({ workspaceId, agentId: agent.id, on: false });
+    } catch (cause) {
+      if (!calls.isCurrent(token)) return;
+      running.current = false;
+      setTurningOff(false);
+      report.current?.(
+        ipcErrorMessage(
+          cause,
+          `dohc could not stop forwarding from this workspace to ${agent.name}.`,
+        ),
+        cause,
+        // Try again on a notice this switch has outlived, or a later press replaced, does nothing.
+        async () => {
+          if (calls.isCurrent(token)) await turnOff();
+        },
+      );
+      return;
+    }
+    if (!calls.isCurrent(token)) return;
+    running.current = false;
+    setTurningOff(false);
+  };
+  const on = props.serves && !turningOff;
+  return (
+    <SwitchControl
+      label={`Forward messages from this workspace to ${agent.name}`}
+      tooltip={`${on ? "Turn off" : "Turn on"} for this workspace`}
+      description={on ? "Turn off" : "Turn on"}
+      checked={on}
+      busy={turningOff}
+      // Not disabled while it runs, because a disabled switch drops keyboard
+      // focus. A press then does nothing.
+      onChange={(next) => {
+        if (running.current) return;
+        if (next) props.onAsk();
+        else void turnOff();
+      }}
+    />
+  );
+}
+
 // What a person changes about an agent with a thread: whether dohc forwards
-// to it, which thread it is, whether T3 Code still allows dohc, what a message
-// does while the thread works, and the note that goes with each one.
+// to it, whether it forwards from this workspace, which thread it is, whether
+// T3 Code still allows dohc, what a message does while the thread works, and
+// the note that goes with each one.
 function ThreadAgentBoxes(props: {
   agent: Agent;
   workspaceId: string;
+  workspaceName: string;
   onChange: (change: (agent: AgentSettings) => AgentSettings) => void;
   onError?: PageError | undefined;
 }) {
   const { agent, onChange } = props;
+  const serves = agent.workspaces?.includes(props.workspaceId) ?? false;
+  // The ask before this workspace is turned on, for the agent and workspace
+  // it was opened on. Another agent or workspace closes it.
+  const here = `${props.workspaceId}:${agent.id}`;
+  const [asking, setAsking] = useState<string | null>(null);
+  if (asking !== null && asking !== here) setAsking(null);
   const report = useRef(props.onError);
   report.current = props.onError;
   const access = useT3CodeAccess((message, cause, retry) =>
@@ -489,7 +563,45 @@ function ThreadAgentBoxes(props: {
             />
           </span>
         </PageRow>
-        {agent.thread ? (
+        <PageRow
+          testId="agent-thread-workspace"
+          icon={<Folder size={14} />}
+          label={
+            <>
+              Forward from this workspace
+              {serves ? null : (
+                <span className="mt-1 block text-[12px] text-muted">
+                  Its thread gets no messages from this workspace.
+                </span>
+              )}
+            </>
+          }
+        >
+          <span className={VALUE}>
+            {/* Another agent or workspace starts the switch over. */}
+            <WorkspaceSwitch
+              key={here}
+              agent={agent}
+              workspaceId={props.workspaceId}
+              serves={serves}
+              onAsk={() => setAsking(here)}
+              onError={props.onError}
+            />
+          </span>
+        </PageRow>
+        {asking === here ? (
+          <ForwardWorkspaceDialog
+            key={here}
+            workspaceId={props.workspaceId}
+            workspaceName={props.workspaceName}
+            agent={agent}
+            onClose={() => setAsking(null)}
+          />
+        ) : null}
+        {/* Main finds the thread only from a workspace it has saved for the
+            agent, so the row waits for the settings to have it, and for the
+            ask to close. */}
+        {agent.thread && serves && asking !== here ? (
           // Another agent or workspace starts the row over, which closes its dialog.
           <ThreadRow
             key={`${props.workspaceId}:${agent.id}`}
@@ -505,7 +617,6 @@ function ThreadAgentBoxes(props: {
                   ? "usable"
                   : "refused"
             }
-            onChange={onChange}
             onError={props.onError}
             onAllowChecked={() => void retryRead()}
           />
@@ -595,7 +706,8 @@ function ThreadAgentBoxes(props: {
  * One agent's page in Settings › Agents: who it is, then what a person
  * changes about it. An agent dohc starts has its switch, its check, what it
  * can do and how dohc starts it. An agent with a thread has the switch that
- * forwards to it, whether its tool allows dohc, and what goes with a message.
+ * forwards to it, the switch for this workspace, whether its tool allows dohc,
+ * and what goes with a message.
  * An agent you run has its MCP config and the run that marks this workspace's
  * changes as its own. Each change saves at once.
  */
@@ -603,6 +715,8 @@ export function AgentPage(props: {
   agent: Agent;
   agents: DesktopUserSettings["agents"];
   workspaceId: string;
+  // What the open workspace goes by.
+  workspaceName: string;
   tools: AgentToolsResult | null;
   // For an agent you run: its MCP config, or null when this workspace has none.
   mcpConfig: string | null;
@@ -763,6 +877,7 @@ export function AgentPage(props: {
         <ThreadAgentBoxes
           agent={agent}
           workspaceId={props.workspaceId}
+          workspaceName={props.workspaceName}
           onChange={onChange}
           onError={props.onError}
         />
@@ -998,15 +1113,7 @@ export function AgentPage(props: {
               )}
             </span>
           </PageRow>
-        ) : forwarded ? (
-          <PageRow label="Forwards from">
-            <span data-testid="agent-thread-workspace" className={VALUE}>
-              {agent.workspaces?.includes(props.workspaceId)
-                ? "This workspace"
-                : "Another workspace"}
-            </span>
-          </PageRow>
-        ) : (
+        ) : forwarded ? null : (
           <PageRow label="Reaches">
             <span className={VALUE}>Every workspace dohc opens on this computer</span>
           </PageRow>

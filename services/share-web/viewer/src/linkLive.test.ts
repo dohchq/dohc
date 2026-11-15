@@ -4,7 +4,7 @@ import * as Y from "yjs";
 import { encodeLiveFrameSync } from "@dohc/live-session-contract/live-frame";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
-import { openLinkDocument } from "./linkLive";
+import { openLinkDocument, showLinkDocument, SHOWN_STATE_FRESH_MS } from "./linkLive";
 import * as browserTransport from "@dohc/ydoc-projection/named-live-browser-transport";
 import {
   LINK_REFUSALS,
@@ -335,3 +335,67 @@ it("takes the host's early state for a link's file before the page asks for a ti
     session.close();
   }
 });
+
+const stateAnswer = (host: Y.Doc, through: number) =>
+  new Response(
+    encodeLiveFrameSync(
+      {
+        binding,
+        hostVector: Y.encodeStateVector(host),
+        missingStateUpdate: Y.encodeStateAsUpdate(host),
+      },
+      limits.provider.frames.receive,
+    ) as Uint8Array<ArrayBuffer>,
+    {
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-dohc-live-object-id": "document",
+        "x-dohc-live-applied-through": String(through),
+      },
+    },
+  );
+
+it.each([
+  { press: SHOWN_STATE_FRESH_MS, typesOn: "Shared text", asks: 1 },
+  // Another person's edit lands after the page showed the note. A press past the age limit must not type on the copy
+  // from before it.
+  { press: SHOWN_STATE_FRESH_MS + 1, typesOn: "Shared text, edited", asks: 2 },
+  // The clock was set back after the page showed the note, so the copy's real age is unknown.
+  { press: -1, typesOn: "Shared text, edited", asks: 2 },
+])(
+  "takes the state fetched when the note was shown only while it is young ($press ms)",
+  async ({ press, typesOn, asks }) => {
+    const host = markdownToYDoc("Shared text");
+    let through = 7;
+    const fetch = vi.fn(async (path: string) => {
+      if (path === "/api/live/link-document")
+        return Response.json({ objectId: "document", limits });
+      if (path === "/api/live/link-document-state") return stateAnswer(host, through);
+      throw new Error(`Unexpected request ${path}`);
+    });
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("location", { origin: "https://share.example" });
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    showLinkDocument("abcdefghijkl", "docs/a.md");
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    const paragraph = host.getXmlFragment("body").get(0) as Y.XmlElement;
+    (paragraph.get(0) as Y.XmlText).insert("Shared text".length, ", edited");
+    through = 8;
+    now.mockReturnValue(1_000 + press);
+    const session = await openLinkDocument(
+      "abcdefghijkl",
+      "docs/a.md",
+      new AbortController().signal,
+    );
+    try {
+      await vi.waitFor(() => expect(session.state().typingAhead).toBe(true));
+      const text = (session.body.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+      expect(text.toString()).toBe(typesOn);
+      expect(
+        fetch.mock.calls.filter(([path]) => path === "/api/live/link-document-state"),
+      ).toHaveLength(asks);
+    } finally {
+      session.close();
+    }
+  },
+);

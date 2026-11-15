@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentRunsIpc } from "./agentRunsIpc";
 import { CHANNELS } from "./channels";
-import { stoppedRunOperations } from "./bridgeContract";
+import { stoppedRunOperations } from "./writeOperations";
 import { createRegistryStore, type RegistryEntry } from "../workspaces/registryStore";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";

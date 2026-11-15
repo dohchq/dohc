@@ -1,6 +1,8 @@
 // Metadata describes existing doors and drives desktop MCP registration. It never invokes a handler or admits a call.
 import { DECLARATION_FAMILIES } from "./allDeclarations";
 import type { McpAccessLevel, OperationDeclaration } from "./operationDeclaration";
+import type { WriteDeclaration } from "./writeDeclaration";
+import { WRITE_DECLARATION_FAMILIES } from "./allWriteDeclarations";
 
 export const CAPABILITY_WAYS = [
   "control",
@@ -482,12 +484,7 @@ const LISTED_CAPABILITIES = {
   }),
   "file.protected.restore": capability(
     "Write back a protected file's change that a sync replaced, kept on this computer.",
-    {
-      ipc: ["restoreProtectedCopy"],
-      mcp: { owner: ["dohc_restore_protected_copy"] },
-      mcpReason:
-        "The copy stays on the computer that kept it, so shared profiles omit this write. Socket read-only admission and per-verb checks remain the gates.",
-    },
+    { ipc: [], mcp: {} },
   ),
   "file.protected.discard": capability("Remove a protected file's kept change for good.", {
     ipc: ["discardProtectedCopy"],
@@ -602,11 +599,7 @@ const LISTED_CAPABILITIES = {
   ),
   "agent.run.retry": capability(
     "Run an agent's stopped request in a conversation again, as Try again does.",
-    {
-      ipc: ["retryStoppedRun"],
-      mcp: { owner: ["dohc_retry_chat_run"] },
-      mcpReason: "Only the computer that ran a request can run it again. Shared profiles omit it.",
-    },
+    { ipc: [], mcp: {} },
   ),
   "agent.listening.read": capability(
     "Read which agents you run are waiting for messages on this computer.",
@@ -614,7 +607,7 @@ const LISTED_CAPABILITIES = {
   ),
   "agent.thread.connect": capability(
     "Connect one of your agents to its own thread in another tool.",
-    { ipc: ["readyAgentThread", "changeAgentThread"] },
+    { ipc: ["readyAgentThread", "changeAgentThread", "setAgentThreadWorkspace"] },
   ),
   "agent.thread.lines.read": capability(
     "Read what your agents' threads are doing with the messages dohc forwarded.",
@@ -1508,9 +1501,60 @@ function withDeclarations<Listed extends Readonly<Record<string, CapabilityMetad
   return joined as Listed;
 }
 
-export const CAPABILITIES = withDeclarations(
-  LISTED_CAPABILITIES,
-  ...Object.values(DECLARATION_FAMILIES),
+// Each declared write joins its capability the same way. Its declaration gives
+// the reason for its MCP levels, and for a door it is not offered at.
+function withWrites<Listed extends Readonly<Record<string, CapabilityMetadata>>>(
+  listed: Listed,
+  ...families: readonly Readonly<
+    Record<string, WriteDeclaration & { readonly capabilityId: keyof Listed }>
+  >[]
+): Listed {
+  const joined: Record<string, CapabilityMetadata> = { ...listed };
+  const operations = new Set(Object.values(listed).flatMap((meta) => meta.ipc.operations));
+  const tools = new Set(
+    Object.values(listed).flatMap((meta) => [
+      ...meta.mcp.owner,
+      ...meta.mcp.view,
+      ...meta.mcp.comment,
+      ...meta.mcp.edit,
+    ]),
+  );
+  for (const family of families) {
+    for (const [name, { capabilityId, ipc, mcp }] of Object.entries(family)) {
+      const id = capabilityId as string;
+      let meta = joined[id];
+      if (!meta) throw new Error(`${name} names an unknown capability ${id}.`);
+      if ("none" in ipc) meta = { ...meta, ipc: { ...meta.ipc, reason: ipc.none } };
+      else {
+        if (operations.has(name)) throw new Error(`${name} is declared twice.`);
+        operations.add(name);
+        meta = { ...meta, ipc: { ...meta.ipc, operations: [...meta.ipc.operations, name] } };
+      }
+      if ("none" in mcp) meta = { ...meta, mcp: { ...meta.mcp, reason: mcp.none } };
+      else {
+        if (tools.has(mcp.tool)) throw new Error(`${mcp.tool} is declared twice.`);
+        tools.add(mcp.tool);
+        const current = meta.mcp;
+        meta = {
+          ...meta,
+          mcp: {
+            ...current,
+            ...Object.fromEntries(
+              mcp.levels.map((level) => [level, [...current[level], mcp.tool]]),
+            ),
+            reason: mcp.reason,
+          },
+        };
+      }
+      joined[id] = meta;
+    }
+  }
+  return joined as Listed;
+}
+
+export const CAPABILITIES = withWrites(
+  withDeclarations(LISTED_CAPABILITIES, ...Object.values(DECLARATION_FAMILIES)),
+  ...Object.values(WRITE_DECLARATION_FAMILIES),
 );
 
 export type CapabilityId = keyof typeof CAPABILITIES;

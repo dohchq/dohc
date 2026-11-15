@@ -1157,6 +1157,8 @@ async function completedServiceOwner(
   // The engine's reason for refusing native capture, as for a document with an open sync conflict, and its reasons for single paths.
   let refusal: Error | undefined, detachFailure: Error | undefined;
   const refusals = new Map<string, Error>();
+  // Objects whose settlements the engine refuses as invalid input, as one does past its application limit.
+  const settleRefusals = new Set<string>();
   // Completed activations of other documents, by activation ID. Capture resumes one when named, and the owner
   // state of a registration for one reports its own adoption, with no native queue.
   const otherActivations = new Map<string, NativeOwnerActivation>();
@@ -1441,7 +1443,10 @@ async function completedServiceOwner(
           return reply({ status: "released", replayed, boundary: engine.boundary });
         }
         case "liveApplication.settle": {
-          if (seedFrozen())
+          const settling = [...(registrationsByObject ?? [])].find(
+            ([, id]) => id === request.params.registrationId,
+          )?.[0];
+          if (seedFrozen() || (settling !== undefined && settleRefusals.has(settling)))
             throw new EngineRequestError(request.id, {
               code: "INVALID_PARAMS",
               message: "live-application-invalid-input",
@@ -1828,6 +1833,9 @@ async function completedServiceOwner(
     },
     refuseCaptureAt(path: string, error: Error) {
       refusals.set(path, error);
+    },
+    refuseSettleFor(objectId: string) {
+      settleRefusals.add(objectId);
     },
     otherActivations,
     refuseRegistration(error: Error | undefined) {
@@ -6963,6 +6971,103 @@ it("pushes a live document's settled edit on the next pass while another documen
     unreadyPulls(),
     "The workspace must not pull every pass while the other document backs off.",
   ).toBe(pulled);
+});
+
+// Proves: a note whose owner activation can never settle, as in #4093, does not hold back its workspace's push. A sibling's
+// settled edit is pushed while the note waits to retry, so the owner's computer gets it.
+it("pushes a settled sibling while another note's owner activation keeps failing to settle", async () => {
+  const o = await enrolledServiceHost(),
+    workspaces = [o.workspace],
+    driver = heldDriver();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  o.distinctRegistrations();
+  const locked = await replacementActivation(o, { name: "locked", path: "docs/c.md" });
+  o.f.storage.ensureOwnedLiveDocument({
+    intent: "share",
+    workspaceId: locked.workspaceId,
+    ownerUserId: "owner",
+    shareId: "share",
+    path: locked.path,
+    nowMs: 35,
+    guard() {},
+  });
+  o.refuseSettleFor(locked.objectId);
+  const documentFor = (row: typeof o.sibling) => {
+    const capture = [o.engine.capture, ...o.otherActivations.values()].find(
+      (value) => value.source.objectId === row.objectId,
+    )!;
+    return {
+      workspaceId: row.workspaceId,
+      mainVersionId: "main" as const,
+      objectId: row.objectId,
+      lineageClaimId: capture.source.lineageClaimId,
+    };
+  };
+  await o.host.update({ workspaces, documents: [o.sibling, locked], ...stay });
+  await vi.waitFor(() => expect(o.host.isDocumentReady(documentFor(o.sibling))).toBe(true));
+  await vi.waitFor(() =>
+    expect(log).toHaveBeenCalledWith("Service activation pass failed.", expect.anything()),
+  );
+  expect(o.host.isDocumentReady(documentFor(locked))).toBe(false);
+  // The server holds the locked note's owner, the case a backoff alone (#3829) did not cover.
+  expect(driver()!.ownerDocument(locked)).toEqual(documentFor(locked));
+  const requests = () =>
+    o.client().sendRequest.mock.calls.map(
+      (call) =>
+        (call as unknown[])[0] as {
+          method: string;
+          params: { terminalReceipt?: { deliveryId: string } | null };
+        },
+    );
+  const document = documentFor(o.sibling),
+    actor = { kind: "owner" as const, userId: "owner" };
+  const current = o.f.storage.resolveCurrentLiveDocumentBinding({ document, actor }),
+    read = o.f.storage.readLiveUpdateJournalCut({ document });
+  if (current.kind !== "current" || read.kind !== "cut")
+    throw new Error("Missing sibling authority.");
+  const doc = new Y.Doc(),
+    suffix = read.cut.suffix.map((row) => row.bytes);
+  for (const bytes of [read.cut.checkpoint.bytes, ...suffix]) Y.applyUpdate(doc, bytes);
+  const vector = Y.encodeStateVector(doc);
+  doc.getMap("frontmatter").set("edit", "while-another-is-locked");
+  const updateBytes = Buffer.from(Y.encodeStateAsUpdate(doc, vector));
+  doc.destroy();
+  const validation = o.validateJournal({
+    document,
+    currentPath: o.sibling.path,
+    checkpoint: read.cut.checkpoint.bytes,
+    suffix,
+    candidate: updateBytes,
+  });
+  const accepted = o.f.storage.commitLiveUpdateJournal({
+    host: o.host.coordinate,
+    actor,
+    expectedAuthority: current.authority,
+    metadata: {
+      deliveryId: "sibling-while-locked",
+      updateDigest: sha256(updateBytes),
+      binding: current.binding,
+    },
+    cutToken: read.cut,
+    validation,
+    updateBytes,
+    receivedAtMs: 50,
+  });
+  expect(accepted.result.kind).toBe("accepted");
+  const settledAt = () =>
+    requests().findIndex(
+      (request) =>
+        request.method === "liveApplication.settle" &&
+        request.params.terminalReceipt?.deliveryId === "sibling-while-locked",
+    );
+  await vi.waitFor(() => expect(settledAt()).toBeGreaterThan(-1));
+  for (let pass = 0; pass < 3; pass++) await o.nextPass();
+  expect(
+    requests()
+      .slice(settledAt() + 1)
+      .some((request) => request.method === "sync.push"),
+    "The workspace must publish the settled sibling while another note cannot go live.",
+  ).toBe(true);
 });
 
 // An activation whose drain runs past every pass deadline fails each time it runs, as one does on an engine whose owner

@@ -75,8 +75,6 @@ import {
 import type { LiveRecoveryFiles, LiveRecoveryPackage } from "./ownerLiveRecoveryCopy";
 import type { DocumentProjection } from "./documentProjection";
 import { createDurableFile } from "./workspaceFiles";
-import { lstat } from "node:fs/promises";
-import { join } from "node:path";
 import type { OwnerLiveQuarantine } from "../ipc/bridgeContract";
 import type { LiveObjectBinding } from "@dohc/workspace-engine-client";
 
@@ -1859,14 +1857,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         create: (relative: string, text: string) =>
           createDurableFile(workspace.rootPath, relative, text),
         keep: recovery.keepOnThisComputer(workspace),
-        exists: (relative: string) =>
-          lstat(join(workspace.rootPath, relative)).then(
-            () => true,
-            (error: NodeJS.ErrnoException) => {
-              if (error.code === "ENOENT") return false;
-              throw error;
-            },
-          ),
+        exists: recovery.existsInWorkspace(workspace),
       };
       // Edits the server keeps: read them whole, one bounded page at a time,
       // write them here, then tell the server a durable copy of this refusal

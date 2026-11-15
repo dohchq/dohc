@@ -12,9 +12,12 @@ import {
   versionResolutionSchema,
   parseCliResult,
   isDeclaredVerb,
+  DECLARED_WRITES,
+  isDeclaredWriteVerb,
   type CliRequestWithoutToken,
   type CliResultByVerb,
   type DeclaredVerb,
+  type DeclaredWriteVerb,
 } from "./protocol";
 import { renderCliResult } from "./render";
 import { readPassword, readStdinText } from "./stdin";
@@ -84,6 +87,12 @@ function isDeclaredCommand(
   return isDeclaredVerb(command.verb);
 }
 
+function isDeclaredWriteCommand(
+  command: ParsedCliCommand,
+): command is Extract<ParsedCliCommand, { verb: DeclaredWriteVerb }> {
+  return isDeclaredWriteVerb(command.verb);
+}
+
 function buildCliRequest(
   command: ParsedCliCommand,
   cwdInput: string,
@@ -99,11 +108,41 @@ function buildCliRequest(
   if (isDeclaredCommand(command)) {
     // A declared verb sends its parsed fields as they are. The cast pairs each
     // verb with its fields, which TypeScript does not do across a union.
-    const { verb, actor: _actor, agentId: _agentId, json: _json, ...fields } = command;
+    const {
+      verb,
+      actor: _actor,
+      agentId: _agentId,
+      workspaceId: _workspaceId,
+      json: _json,
+      ...fields
+    } = command;
     return {
       protocolVersion: common.protocolVersion,
       verb,
       args: { cwd: common.cwd, actor: common.actor, ...fields },
+    } as CliRequestWithoutToken;
+  }
+  if (isDeclaredWriteCommand(command)) {
+    // A declared write sends its parsed fields as they are, and the run's id
+    // when its declaration lets a request name its run.
+    const {
+      verb,
+      actor: _actor,
+      agentId: _agentId,
+      workspaceId: _workspaceId,
+      json: _json,
+      ...fields
+    } = command;
+    const namesRun = DECLARED_WRITES[verb].socket.admission.run === "may-name-its-run";
+    return {
+      protocolVersion: common.protocolVersion,
+      verb,
+      args: {
+        cwd: common.cwd,
+        actor: common.actor,
+        ...(namesRun && runId ? { runId } : {}),
+        ...fields,
+      },
     } as CliRequestWithoutToken;
   }
   switch (command.verb) {
@@ -189,17 +228,6 @@ function buildCliRequest(
         protocolVersion: common.protocolVersion,
         verb: command.verb,
         args: { cwd: common.cwd, actor: common.actor, operationId: command.operationId },
-      };
-    case "chatRetry":
-      return {
-        protocolVersion: common.protocolVersion,
-        verb: command.verb,
-        args: {
-          cwd: common.cwd,
-          actor: common.actor,
-          ...(runId ? { runId } : {}),
-          thread: command.thread,
-        },
       };
     case "stopSync":
       return {
@@ -732,7 +760,10 @@ const REFUSING_VERBS = new Set([
   "automationRetry",
   "automationButtons",
   "automationPress",
-  "chatRetry",
+  // A declared write answers a refusal as { ok: false, reason }.
+  ...Object.values(DECLARED_WRITES).flatMap(({ cli, socket }) =>
+    "none" in cli ? [] : [socket.verb],
+  ),
 ]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {

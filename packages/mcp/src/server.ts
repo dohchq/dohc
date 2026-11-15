@@ -40,7 +40,9 @@ import {
   MCP_TOOL_CAPABILITIES,
   heldNoteChange,
   DECLARED_TOOLS,
+  DECLARED_WRITE_TOOLS,
   requestDeclaredTool,
+  requestDeclaredWriteTool,
   makeLink,
   readOperation,
   undoOperation,
@@ -69,7 +71,6 @@ import {
   queryCollection,
   readAutomationRun,
   retryAutomationRun,
-  retryChatRun,
   readRecord,
   setRecordFields,
   waitForMessages,
@@ -98,7 +99,6 @@ import {
   readHeldChange,
   readWorkspaceFile,
   saveKeptCopy,
-  restoreProtectedCopy,
   discardProtectedCopy,
   saveRecoveryCopy,
   retryKeptEdits,
@@ -330,6 +330,13 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       text(await requestDeclaredTool(ctx, mcp.tool, args)),
     );
   }
+  for (const { mcp, socket } of Object.values(DECLARED_WRITE_TOOLS)) {
+    register(
+      mcp.tool,
+      { description: mcp.description, inputSchema: (mcp.input ?? socket.input).shape },
+      async (args) => text(await requestDeclaredWriteTool(ctx, mcp.tool, args)),
+    );
+  }
   register(
     "dohc_duplicate_file",
     {
@@ -470,16 +477,6 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
       inputSchema: { id: z.number().int() },
     },
     async (args) => text(await saveKeptCopy(ctx, args)),
-  );
-
-  register(
-    "dohc_restore_protected_copy",
-    {
-      description:
-        "Write one entry from `protectedCopies` in dohc_list_kept_copies back to its protected file. Each entry is [path, id, keptAtMs]: a change to a protected file such as `.env` that a sync replaced or deleted, kept on this computer only. The synced text stays in the file's History, so the restore can be reversed there. `status` is `restored` with the file's `path`.",
-      inputSchema: { id: z.string() },
-    },
-    async (args) => text(await restoreProtectedCopy(ctx, args)),
   );
 
   register(
@@ -1057,16 +1054,6 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
         });
       return text(await replyToChat(ctx, { ...args, body }, agentName(), reported(model)));
     },
-  );
-
-  register(
-    "dohc_retry_chat_run",
-    {
-      description:
-        "Run an agent's stopped request in a dohc Chat thread again, as Try again does under its message. dohc_read_chat reports a stopped run under dispatch.lastRun. Each request gets two attempts. Only the computer that ran it can run it again, and only for someone who may post in the thread.",
-      inputSchema: { threadId: z.string().min(1).max(200) },
-    },
-    async (args) => text(await retryChatRun(ctx, args)),
   );
 
   register(

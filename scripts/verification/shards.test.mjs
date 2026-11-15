@@ -10,12 +10,15 @@ import {
   javascriptTasks,
   nativeTestFiles,
   partitionJavascript,
-  partitionTasks,
   preparedArtifactPaths,
+  simulateJavascript,
 } from "./shards.mjs";
+import { MIN_TASK_SECONDS, refreshShardTimes } from "./refresh-shard-times.mjs";
 import { readWorkspacePackages } from "./selection.mjs";
 import {
   CLOUD_JOB_GRAPH,
+  RUST_ARCHIVE_BUILD_STEP,
+  RUST_ARCHIVE_WAIT_STEP,
   aggregateCloud,
   aggregateJavascript,
   aggregateRust,
@@ -26,13 +29,19 @@ import {
 import { JS_SHARDS } from "./cloud.mjs";
 import {
   RUST_ARCHIVE_PROOFS,
+  RUST_PARTITION_ZERO_DELAY_SECONDS,
   RUST_POLICY_STEPS,
   RUST_READER_SHARD,
   RUST_SHARDS,
   RUST_TEST_PROOFS,
+  RUST_TEST_THREADS,
   passedRustTests,
   rustTestInventory,
+  partitionRustTests,
+  rustPartitionFilters,
+  assertRustPartitionInventory,
 } from "./cloud-rust.mjs";
+import { recordedRustTimes, rustTimingSamples } from "./refresh-rust-times.mjs";
 import { waitForPreparation } from "./wait-preparation.mjs";
 import { cloudApi } from "./cloud-api.mjs";
 import { runVitestGroup } from "./vitest-group.mjs";
@@ -101,8 +110,8 @@ test("shards cover every task once, including uneven and small workloads", () =>
         id: `task-${index}`,
         weight: index + 1,
       }));
-      const shards = partitionTasks(tasks, count);
-      assert.deepEqual(shards, partitionTasks(tasks.toReversed(), count));
+      const shards = partitionJavascript(tasks, count);
+      assert.deepEqual(shards, partitionJavascript(tasks.toReversed(), count));
       const records = shards.map((tasks, part) => ({
         part,
         verdict: "PASS",
@@ -265,7 +274,7 @@ test("execution groups preserve files, projects, native prerequisites, and comma
   assert.deepEqual(javascriptGroups(tasks.toReversed()), groups);
   assertTaskCoverage(
     tasks,
-    partitionTasks(groups, JS_SHARDS).map((groups, part) => ({
+    partitionJavascript(groups, JS_SHARDS).map((groups, part) => ({
       part,
       verdict: "PASS",
       completed: groups.flatMap((group) => group.tasks.map((task) => task.id)),
@@ -273,32 +282,7 @@ test("execution groups preserve files, projects, native prerequisites, and comma
   );
 });
 
-test("native preparation does not leave one worker with most of the native work", () => {
-  const groups = [false, true].flatMap((native) =>
-    [90, 70, 50, 30].map((weight, index) => ({ id: `${native}-${index}`, native, weight })),
-  );
-  const shards = partitionJavascript(groups, 2);
-  for (const native of [false, true]) {
-    assert.deepEqual(
-      shards.map((shard) =>
-        shard
-          .filter((group) => group.native === native)
-          .reduce((total, group) => total + group.weight, 0),
-      ),
-      [120, 120],
-    );
-  }
-  assertTaskCoverage(
-    groups,
-    shards.map((shard, part) => ({
-      part,
-      verdict: "PASS",
-      completed: shard.map((group) => group.id),
-    })),
-  );
-});
-
-test("only browser groups reserve two slots and double their partition cost", () => {
+test("only browser groups reserve two slots without changing their wall time", () => {
   const tasks = ["desktop", "accounts", "self-host-native", "command"].map((kind) => ({
     id: kind,
     kind,
@@ -309,20 +293,186 @@ test("only browser groups reserve two slots and double their partition cost", ()
   const groups = javascriptGroups([...tasks, ...files]);
   for (const task of tasks) {
     const group = groups.find((group) => group.id === task.id);
-    assert.equal(group.weight, ["desktop", "accounts"].includes(task.kind) ? 40 : 20);
+    assert.equal(group.weight, 20);
     assert.equal(group.slots, ["desktop", "accounts"].includes(task.kind) ? 2 : undefined);
     assert.equal(task.weight, 20);
   }
   const vitest = groups.find((group) => group.kind === "vitest");
   assert.equal(vitest.weight, 24);
   assert.equal(vitest.slots, undefined);
+});
+
+test("simulation admits pure work before preparation and widens to three slots afterward", () => {
+  const groups = [
+    { id: "pure", weight: 30 },
+    ...["native-a", "native-b", "native-c"].map((id) => ({ id, weight: 20, native: true })),
+  ];
+  const result = simulateJavascript(groups, { inventory: 0, nativeReady: 10 });
   assert.deepEqual(
-    partitionTasks(
-      groups.filter((group) => group.kind !== "vitest"),
-      2,
-    ).map((shard) => shard.reduce((n, group) => n + group.weight, 0)),
-    [60, 60],
+    result.steps.find((step) => step.id === "pure"),
+    {
+      id: "pure",
+      startedAt: 0,
+      finishedAt: 30,
+    },
   );
+  for (const id of ["native-a", "native-b"])
+    assert.equal(result.steps.find((step) => step.id === id).startedAt, 10);
+  assert.equal(result.steps.find((step) => step.id === "native-c").startedAt, 30);
+  assert.equal(result.seconds, 50);
+  assert.equal(
+    simulateJavascript(
+      ["pure-a", "pure-b", "pure-c"].map((id) => ({ id, weight: 10 })),
+      { inventory: 0 },
+    ).seconds,
+    10,
+  );
+});
+
+test("simulation excludes shared resources and accounts for browser slots and the final runtime writer", () => {
+  const groups = [
+    { id: "database-a", resource: "postgres", weight: 30 },
+    { id: "database-b", resource: "postgres", weight: 20 },
+    { id: "mobile-a", resource: "mobile-editor", weight: 25 },
+    { id: "mobile-b", resource: "mobile-editor", weight: 15 },
+    { id: "browser", kind: "desktop", slots: 2, weight: 10 },
+    {
+      id: "runtime",
+      weight: 100,
+      tasks: [{ id: "node:apps/desktop/scripts/stage-app-backend-runtime.test.mjs" }],
+    },
+  ];
+  const result = simulateJavascript(groups, { inventory: 0, postgres: 0 });
+  for (const resource of ["postgres", "mobile-editor"]) {
+    const work = result.steps.filter(
+      (step) => groups.find((group) => group.id === step.id).resource === resource,
+    );
+    assert.ok(work[1].startedAt >= work[0].finishedAt);
+  }
+  for (const step of result.steps) {
+    const running = result.steps.filter(
+      (other) => other.startedAt <= step.startedAt && other.finishedAt > step.startedAt,
+    );
+    assert.ok(
+      running.reduce(
+        (sum, other) => sum + (groups.find((group) => group.id === other.id).slots ?? 1),
+        0,
+      ) <= 3,
+    );
+  }
+  const runtime = result.steps.find((step) => step.id === "runtime");
+  assert.ok(
+    result.steps
+      .filter((step) => step !== runtime)
+      .every((step) => step.finishedAt <= runtime.startedAt),
+  );
+});
+
+test("CPU contention slows active groups when native work arrives and releases capacity when they finish", () => {
+  const result = simulateJavascript(
+    [
+      { id: "pure-a", weight: 40, cpu: 2.5 },
+      { id: "pure-b", weight: 40, cpu: 2.5 },
+      { id: "native", weight: 40, cpu: 2.5, native: true },
+    ],
+    { inventory: 0, nativeReady: 10 },
+  );
+  assert.deepEqual(result.steps, [
+    { id: "pure-a", startedAt: 0, finishedAt: 70 },
+    { id: "pure-b", startedAt: 0, finishedAt: 70 },
+    { id: "native", startedAt: 10, finishedAt: 78 },
+  ]);
+  assert.equal(result.seconds, 78);
+});
+
+test("partitioning spreads desktop browser groups, projection tests, lint, and desktop typecheck", () => {
+  const tasks = [
+    ...Array.from({ length: 4 }, (_, index) => ({
+      id: `desktop-${index}`,
+      kind: "vitest",
+      package: "@dohc/desktop",
+      project: "desktop",
+      weight: 60,
+    })),
+    ...Array.from({ length: 2 }, (_, index) => ({
+      id: `projection-${index}`,
+      kind: "vitest",
+      package: "@dohc/ydoc-projection",
+      weight: 60,
+    })),
+    { id: "repository:pnpm lint", kind: "command", weight: 60 },
+    { id: "typecheck:@dohc/desktop", kind: "command", weight: 60 },
+  ];
+  const shards = partitionJavascript(javascriptGroups(tasks), 5);
+  assert.deepEqual(
+    shards.map((shard) => shard.length),
+    [1, 1, 1, 1, 1],
+  );
+  assertTaskCoverage(
+    tasks,
+    shards.map((shard, part) => ({
+      part,
+      verdict: "PASS",
+      completed: shard.flatMap((group) => group.tasks.map((task) => task.id)),
+    })),
+  );
+});
+
+test("partitioning balances finish time when resources serialize work", () => {
+  const groups = [10, 20, 50, 50, 20, 10, 20, 50].map((weight, index) => ({
+    id: `task-${index}`,
+    weight,
+    resource: [1, 3].includes(index) ? "postgres" : undefined,
+  }));
+  const shards = partitionJavascript(groups, 2);
+  assert.deepEqual(shards, partitionJavascript(groups.toReversed(), 2));
+  assert.deepEqual(
+    shards.map((shard) => simulateJavascript(shard, { inventory: 0, postgres: 0 }).seconds),
+    [50, 50],
+  );
+  assertTaskCoverage(
+    groups,
+    shards.map((shard, part) => ({
+      part,
+      verdict: "PASS",
+      completed: shard.map((group) => group.id),
+    })),
+  );
+  assert.throws(() => partitionJavascript(groups, 0), /positive integer/u);
+  assert.throws(() => partitionJavascript([groups[0], groups[0]], 2), /Duplicate/u);
+  for (const weight of [Number.NaN, Infinity, -1, "7", undefined])
+    assert.throws(
+      () => partitionJavascript([groups[0], { id: "bad", weight }], 2),
+      /finite, non-negative/u,
+    );
+});
+
+test("timing refresh uses measured medians, retains missing weights, and keeps planner keys", () => {
+  const record = (seconds) => ({
+    scope: "js",
+    verdict: "PASS",
+    tests: [
+      { id: "vitest:example:node:src/example.test.ts", seconds },
+      { id: "vitest:example::src/tiny.test.ts", seconds: 0 },
+    ],
+    steps: [
+      { name: "typecheck:example", seconds: seconds + 1 },
+      { name: "native preparation", seconds: 100 },
+    ],
+  });
+  const records = [record(1), record(8), record(3), record(5)];
+  const weights = refreshShardTimes(records, { missing: 7 });
+  assert.deepEqual(weights, {
+    missing: 7,
+    "src/example.test.ts": 4,
+    "src/tiny.test.ts": MIN_TASK_SECONDS,
+    "typecheck:example": 5,
+  });
+  assert.deepEqual(weights, refreshShardTimes(records.toReversed(), { missing: 7 }));
+  const override = "vitest:example:node:src/example.test.ts";
+  assert.equal(refreshShardTimes(records, { [override]: 10 })[override], 4);
+  assert.throws(() => refreshShardTimes([{ ...record(1), verdict: "FAIL" }]), /passing/u);
+  assert.throws(() => refreshShardTimes([record(NaN)]), /Invalid/u);
 });
 
 test("JavaScript receipts reject missing, failed, duplicated, or different-head work", () => {
@@ -478,21 +628,162 @@ test("Rust inventory retains selected ordinary tests and counts only actual pass
   );
 });
 
+test("Rust time partitions are deterministic and cover each test exactly once", () => {
+  const times = {
+    defaultSeconds: 0.5,
+    binaries: { crate: 1 },
+    tests: { "crate slow": 66, "crate medium": 7, "crate fast": 2 },
+  };
+  const inventory = [
+    "crate slow",
+    "crate medium",
+    "crate fast",
+    ...Array.from({ length: 601 }, (_, i) => `crate new_${i}`),
+  ];
+  for (const count of [1, 4, 5, 6, 7, 8, inventory.length + 1]) {
+    const partitions = partitionRustTests(inventory, count, times);
+    assert.deepEqual(partitions, partitionRustTests(inventory.toReversed(), count, times));
+    assert.equal(partitions.length, count);
+    assert.deepEqual(partitions.flat().sort(), inventory.toSorted());
+    assert.equal(new Set(partitions.flat()).size, inventory.length);
+  }
+  assert.throws(() => partitionRustTests(["crate same", "crate same"]), /Duplicate/u);
+  for (const count of [0, -1, 1.5, NaN])
+    assert.throws(() => partitionRustTests(inventory, count), /positive integer/u);
+});
+
+test("Rust partitions use binary defaults for new tests and the global default for new binaries", () => {
+  const times = { defaultSeconds: 1, binaries: { known: 3 }, tests: { "known slow": 5 } };
+  assert.deepEqual(
+    partitionRustTests(
+      ["known slow", "known new_a", "known new_b", "new_crate new", "constructor new"],
+      2,
+      times,
+      0,
+      0,
+    ),
+    [
+      ["known slow", "constructor new", "new_crate new"],
+      ["known new_a", "known new_b"],
+    ],
+  );
+  assert.deepEqual(partitionRustTests([], 2, times), [[], []]);
+});
+
+test("The reader reserve holds back wall seconds times the test thread count", () => {
+  const times = { defaultSeconds: 10, binaries: {}, tests: {} };
+  const inventory = Array.from({ length: 24 }, (_, i) => `crate t${i}`);
+  assert.equal(RUST_READER_SHARD, 1);
+  assert.equal(RUST_TEST_THREADS, 4);
+  // A 20 s wall reserve holds back 20, 40, or 80 test-seconds at 1, 2, or 4 threads.
+  for (const [threads, sizes] of [
+    [1, [13, 11]],
+    [2, [14, 10]],
+    [undefined, [16, 8]],
+  ]) {
+    const partitions = partitionRustTests(inventory, 2, times, 20, 0, threads);
+    assert.deepEqual(
+      partitions.map((tests) => tests.length),
+      sizes,
+    );
+  }
+});
+
+test("Rust partition zero converts its wall delay to test-seconds at four threads", () => {
+  const times = { defaultSeconds: 1, binaries: {}, tests: {} };
+  // With 204 one-second tests and 4 threads, the 17 s wall reserve balances both at 34 s wall.
+  const inventory = Array.from({ length: 204 }, (_, i) => `crate t${i}`);
+  const partitions = partitionRustTests(inventory, 2, times, 0);
+  assert.equal(RUST_PARTITION_ZERO_DELAY_SECONDS, 17);
+  assert.deepEqual(
+    partitions.map((tests) => tests.length),
+    [68, 136],
+  );
+});
+
+test("Rust filters select exact tests in exact binaries and escape filterset syntax", () => {
+  assert.deepEqual(rustPartitionFilters(["crate same", "crate::integration same_longer"]), [
+    "-E",
+    "(binary_id(=crate) & test(=same)) | (binary_id(=crate::integration) & test(=same_longer))",
+  ]);
+  assert.deepEqual(rustPartitionFilters(["crate::bin/tool test(a,b)\\ path\n雪"]), [
+    "-E",
+    "(binary_id(=crate::bin\\u{2f}tool) & test(=test\\u{28}a\\u{2c}b\\u{29}\\u{5c}\\u{20}path\\u{a}\\u{96ea}))",
+  ]);
+  assert.deepEqual(rustPartitionFilters([]), ["-E", "none()"]);
+});
+
+test("Rust filters split large selections without dropping or repeating tests", () => {
+  const assigned = Array.from(
+    { length: 1600 },
+    (_, i) => `crate::integration test_${i}_${"x".repeat(150)}_雪`,
+  );
+  const args = rustPartitionFilters(assigned);
+  const filters = args.filter((_, index) => index % 2);
+  assert.ok(filters.length > 1);
+  for (let index = 0; index < args.length; index += 2) {
+    assert.equal(args[index], "-E");
+    assert.ok(Buffer.byteLength(args[index + 1]) + 1 < 128 * 1024);
+  }
+  const decode = (name) =>
+    name.replace(/\\u\{([a-f0-9]+)\}/gu, (_, hex) => String.fromCodePoint(parseInt(hex, 16)));
+  const selected = filters.flatMap((filter) =>
+    [...filter.matchAll(/\(binary_id\(=([^)]*)\) & test\(=([^)]*)\)\)/gu)].map(
+      (match) => `${decode(match[1])} ${decode(match[2])}`,
+    ),
+  );
+  assert.deepEqual(selected, assigned);
+  assert.throws(() => rustPartitionFilters([`crate ${"雪".repeat(32768)}`]), /too long/u);
+});
+
+test("Rust partition inventory rejects missing, unexpected, and duplicate listed tests", () => {
+  const assigned = ["crate first", "crate second"];
+  assert.doesNotThrow(() => assertRustPartitionInventory(assigned, assigned.toReversed()));
+  for (const listed of [
+    [],
+    assigned.slice(1),
+    [...assigned, "crate extra"],
+    [assigned[0], assigned[0]],
+  ])
+    assert.throws(
+      () => assertRustPartitionInventory(assigned, listed),
+      /differs from its assignment/u,
+    );
+});
+
+test("Rust time refresh records per-test medians and estimates the remaining work per binary", () => {
+  const samples = rustTimingSamples(
+    "\u001b[32mPASS [ 1.0s] (1/3) crate fast\u001b[0m\nPASS [ 9.0s] crate slow\nFAIL [ 2.0s] crate failed\nFLAKY 2/2 [ 1.0s] crate retry\nPASS [ 0.0s] other tiny",
+  );
+  assert.deepEqual(samples, [
+    { id: "crate fast", seconds: 1 },
+    { id: "crate slow", seconds: 9 },
+    { id: "other tiny", seconds: 0 },
+  ]);
+  const rows = [
+    ...samples,
+    { id: "crate fast", seconds: 2 },
+    { id: "crate small", seconds: 0.5 },
+    { id: "crate slow", seconds: 5 },
+    { id: "crate slow", seconds: 100 },
+  ];
+  assert.deepEqual(recordedRustTimes(rows), {
+    thresholdSeconds: 2,
+    defaultSeconds: 0.667,
+    binaries: { crate: 1, other: 0.001 },
+    tests: { "crate slow": 9 },
+  });
+  assert.deepEqual(recordedRustTimes(rows), recordedRustTimes(rows.toReversed()));
+  assert.deepEqual(recordedRustTimes([{ id: "crate boundary", seconds: 2 }]).tests, {
+    "crate boundary": 2,
+  });
+  assert.throws(() => recordedRustTimes([]), /No passed/u);
+});
+
 function passingCloudJobs() {
   const { jobs } = JSON.parse(
     readFileSync(new URL("./fixtures/passing-cloud-jobs.json", import.meta.url), "utf8"),
   );
-  // Split the saved combined job at its artifact publication and proof start.
-  const prepared = jobs.find((job) => job.name === "shared preparation + confinement");
-  prepared.name = "shared preparation";
-  jobs.push({
-    ...prepared,
-    name: "compiler confinement",
-    created_at: "2026-11-11T13:06:40Z",
-    started_at: "2026-11-11T13:06:40Z",
-  });
-  jobs.push({ ...jobs.at(-1), name: "relay confinement", completed_at: "2026-11-11T13:07:00Z" });
-  prepared.completed_at = "2026-11-11T13:06:40Z";
   for (const [prefix, count] of [
     ["JS worker", JS_SHARDS],
     ["Rust tests", RUST_SHARDS],
@@ -561,7 +852,7 @@ test("the timing fixture covers every current workflow job name exactly once", (
   );
 });
 
-test("the saved passing run includes both confinement jobs in the gate span", () => {
+test("the adapted saved run includes shared preparation in the gate span", () => {
   const jobs = passingCloudJobs();
   for (const [scope, seconds] of [
     ["js", 241],
@@ -571,23 +862,23 @@ test("the saved passing run includes both confinement jobs in the gate span", ()
     assert.equal(result.spanSeconds, seconds);
     assert.equal("confinementSeconds" in result, false);
     assert.equal(result.seconds, seconds);
-    // The saved Rust jobs started after JavaScript; their archive-to-start gap now counts.
+    // The saved Rust workers started late; their wait from selection now counts.
     assert.equal(result.contended, scope === "rust");
     assert.equal(result.timing, "within budget");
     assert.ok(result.jobs.every((job) => Number.isFinite(job.runnerWaitSeconds)));
   }
-  const relay = jobs.find((job) => job.name === "relay confinement");
-  relay.completed_at = new Date(Date.parse(relay.started_at) + 90_000).toISOString();
+  const prepared = jobs.find((job) => job.name === "shared preparation");
+  prepared.completed_at = new Date(Date.parse(jobs[0].started_at) + 242_000).toISOString();
   assert.equal(
     completedGateTiming("js", jobs, jobs[0].head_sha).seconds,
     242,
-    "the last proof job sets the span",
+    "preparation finishes one second after the saved JavaScript gate",
   );
 });
 
-test("run 43478162335 on the current graph is within budget and uncontended in both gates", () => {
+test("run 43478162335 adapted to the current graph retains its span and delayed Rust starts", () => {
   const { jobs } = JSON.parse(
-    readFileSync(new URL("./fixtures/passing-29-job-run.json", import.meta.url), "utf8"),
+    readFileSync(new URL("./fixtures/folded-passing-run.json", import.meta.url), "utf8"),
   );
   for (const [scope, seconds] of [
     ["js", 280],
@@ -595,7 +886,7 @@ test("run 43478162335 on the current graph is within budget and uncontended in b
   ]) {
     const result = completedGateTiming(scope, jobs, jobs[0].head_sha);
     assert.equal(result.seconds, seconds);
-    assert.equal(result.contended, false);
+    assert.equal(result.contended, scope === "rust");
     assert.equal(result.timing, "within budget");
   }
 });
@@ -645,70 +936,56 @@ test("uncontended ceiling overruns fail; contended overruns retain their measure
   );
 });
 
-test("confinement execution uses the wall span and its runner wait counts as contention", (t) => {
+test("shared preparation uses the wall span and its runner wait counts as contention", (t) => {
   t.mock.method(console, "warn", () => {});
-  for (const name of ["compiler confinement", "relay confinement"])
-    for (const scope of ["js", "rust"]) {
-      const jobs = withoutWaits(),
-        proof = jobs.find((job) => job.name === name);
-      proof.completed_at = new Date(Date.parse(jobs[0].started_at) + 750_000).toISOString();
-      assert.throws(
-        () => completedGateTiming(scope, jobs, jobs[0].head_sha),
-        (error) => {
-          assert.equal(error.timing.seconds, 750);
-          assert.equal(error.timing.contended, false);
-          return /exceeding/u.test(error.message);
-        },
-      );
-      proof.started_at = new Date(Date.parse(proof.started_at) + 7_200_000).toISOString();
-      proof.completed_at = new Date(Date.parse(proof.completed_at) + 7_200_000).toISOString();
-      const result = completedGateTiming(scope, jobs, jobs[0].head_sha);
-      assert.equal(result.seconds, 7950);
-      assert.equal(result.spanSeconds, result.seconds);
-      assert.equal(result.contended, true);
-      assert.equal(result.timing, "unmeasured");
-      assert.ok(result.warning.includes(name));
-    }
+  const name = "shared preparation";
+  for (const scope of ["js", "rust"]) {
+    const jobs = withoutWaits(),
+      proof = jobs.find((job) => job.name === name);
+    proof.completed_at = new Date(Date.parse(jobs[0].started_at) + 750_000).toISOString();
+    assert.throws(
+      () => completedGateTiming(scope, jobs, jobs[0].head_sha),
+      (error) => {
+        assert.equal(error.timing.seconds, 750);
+        assert.equal(error.timing.contended, false);
+        return /exceeding/u.test(error.message);
+      },
+    );
+    proof.started_at = new Date(Date.parse(proof.started_at) + 7_200_000).toISOString();
+    proof.completed_at = new Date(Date.parse(proof.completed_at) + 7_200_000).toISOString();
+    const result = completedGateTiming(scope, jobs, jobs[0].head_sha);
+    assert.equal(result.seconds, 7950);
+    assert.equal(result.spanSeconds, result.seconds);
+    assert.equal(result.contended, true);
+    assert.equal(result.timing, "unmeasured");
+    assert.ok(result.warning.includes(name));
+  }
 });
 
-test("confinement runner waits count only after preparation has finished", (t) => {
-  t.mock.method(console, "warn", () => {});
-  for (const scope of ["js", "rust"])
-    for (const name of ["compiler confinement", "relay confinement"]) {
-      for (const offset of [-1000, 0, 1000]) {
-        const jobs = withoutWaits(),
-          proof = jobs.find((job) => job.name === name);
-        withRunnerWait(jobs, name, 35);
-        jobs.find((job) => job.name === "shared preparation").completed_at = new Date(
-          Date.parse(proof.started_at) - offset,
-        ).toISOString();
-        proof.completed_at = new Date(Date.parse(jobs[0].started_at) + 750_000).toISOString();
-        if (offset <= 0) {
-          assert.throws(
-            () => completedGateTiming(scope, jobs, jobs[0].head_sha),
-            (error) => {
-              assert.equal(error.timing.contended, false);
-              assert.equal(error.timing.timing, "over budget");
-              assert.equal(
-                error.timing.jobs.find((job) => job.name === name).runnerWaitSeconds,
-                35,
-              );
-              return /exceeding/u.test(error.message);
-            },
-          );
-          const otherName = scope === "js" ? "JS worker 1" : "Rust tests 1";
-          withRunnerWait(jobs, otherName, 31);
-          const result = completedGateTiming(scope, jobs, jobs[0].head_sha);
-          assert.equal(result.timing, "unmeasured");
-          assert.match(result.warning, new RegExp(`longest runner wait ${otherName}: 31s`, "u"));
-        } else {
-          const result = completedGateTiming(scope, jobs, jobs[0].head_sha);
-          assert.equal(result.contended, true);
-          assert.equal(result.timing, "unmeasured");
-          assert.match(result.warning, new RegExp(`longest runner wait ${name}: 35s`, "u"));
-        }
-      }
-    }
+test("Rust archive polling does not count as a runner wait", () => {
+  const jobs = withoutWaits(),
+    partition = jobs.find((job) => job.name === "Rust tests 1"),
+    start = Date.parse(jobs[0].started_at);
+  partition.steps = [
+    {
+      name: "Wait for the shared Rust archive",
+      started_at: partition.started_at,
+      completed_at: new Date(start + 250_000).toISOString(),
+    },
+  ];
+  jobs.find((job) => job.name === "engine gate").completed_at = new Date(
+    start + 750_000,
+  ).toISOString();
+  assert.throws(
+    () => completedGateTiming("rust", jobs, jobs[0].head_sha),
+    (error) => {
+      assert.equal(
+        error.timing.jobs.find((job) => job.name === partition.name).runnerWaitSeconds,
+        0,
+      );
+      return error.timing.timing === "over budget";
+    },
+  );
 });
 
 test("a failed JavaScript worker leaves Rust's independent verdict visible", () => {
@@ -778,7 +1055,7 @@ test("negative waits clamp to zero and invalid or incomplete evidence always fai
   );
   for (const scope of ["js", "rust"])
     for (const mutate of [
-      ...["compiler confinement", "relay confinement"].flatMap((name) => [
+      ...["shared preparation"].flatMap((name) => [
         (rows) =>
           rows.splice(
             rows.findIndex((job) => job.name === name),
@@ -809,10 +1086,6 @@ test("negative waits clamp to zero and invalid or incomplete evidence always fai
           rows.find((job) => job.name === name).head_sha = "other";
         },
       ]),
-      (rows) => rows.push(rows.find((job) => job.name === "shared preparation")),
-      ...["cancelled", "failure", "skipped"].map((conclusion) => (rows) => {
-        rows.find((job) => job.name === "compiler confinement").conclusion = conclusion;
-      }),
       (rows) => {
         rows[0].head_sha = "other-head";
       },
@@ -1150,7 +1423,7 @@ test("prepared artifact body timing excludes readiness retries", async (t) => {
 
 for (const [scope, jobName, artifact] of [
   ["js", "shared preparation", "javascript-prepared"],
-  ["rust", "Rust build once", "rust-tests"],
+  ["rust", "engine gate", "rust-tests"],
 ]) {
   test(`${scope} preparation polls artifacts conditionally before reading jobs`, async (t) => {
     let clock = 0,
@@ -1194,12 +1467,11 @@ for (const [scope, jobName, artifact] of [
     });
     assert.equal(result.artifact.id, 42);
     assert.equal(clock, 5_000);
-    // A Rust consumer starts after its build has ended, so it reads the jobs once when the archive is missing.
-    assert.equal(jobReads, scope === "rust" ? 1 : 0);
+    assert.equal(jobReads, 0);
     assert.match(
       log.mock.calls.at(-1).arguments[0],
       new RegExp(
-        `x-ratelimit-limit=1000 x-ratelimit-remaining=997 x-ratelimit-used=3 counted=${scope === "rust" ? 4 : 3} 304=1`,
+        `x-ratelimit-limit=1000 x-ratelimit-remaining=997 x-ratelimit-used=3 counted=3 304=1`,
         "u",
       ),
     );
@@ -1376,7 +1648,9 @@ for (const [scope, jobName, artifact] of [
     assert.equal(clock, 22_500);
   });
 
-  test(`${scope} preparation stops after 15 minutes with the last observed build state`, async () => {
+  const capMinutes = scope === "rust" ? 25 : 15,
+    cap = capMinutes * 60_000;
+  test(`${scope} preparation stops after ${capMinutes} minutes with the last observed build state`, async () => {
     for (const state of ["queued", "in_progress", "missing", "completed"]) {
       let clock = 0,
         lastJobRead = -1;
@@ -1409,15 +1683,19 @@ for (const [scope, jobName, artifact] of [
           },
         }),
         new RegExp(
-          `15-minute wait cap.*${state === "missing" ? "build job missing from the job list" : state === "completed" ? "no published artifact" : state === "queued" ? "queued for a runner" : "running"}`,
+          `${capMinutes}-minute wait cap.*${state === "missing" ? "build job missing from the job list" : state === "completed" ? "no published artifact" : state === "queued" ? "queued for a runner" : "running"}`,
           "u",
         ),
       );
-      assert.equal(clock, 900_000);
-      assert.equal(lastJobRead, 900_000, "the cap refreshes the build state");
+      assert.equal(clock, cap);
+      assert.equal(lastJobRead, cap, "the cap refreshes the build state");
+      // The build job is read every two minutes until the cap, then once more at the cap.
       assert.deepEqual(jobReadTimes, [
-        ...(scope === "rust" ? [0] : []),
-        ...[120_000, 240_000, 360_000, 480_000, 600_000, 720_000, 840_000, 900_000],
+        ...Array.from(
+          { length: Math.ceil(cap / 120_000) - 1 },
+          (_, index) => (index + 1) * 120_000,
+        ),
+        cap,
       ]);
     }
     for (const conclusion of ["failure", "cancelled", "skipped", "duplicate"]) {
@@ -1441,45 +1719,10 @@ for (const [scope, jobName, artifact] of [
         }),
         conclusion === "duplicate" ? /Duplicate/u : new RegExp(`ended with ${conclusion}`, "u"),
       );
-      assert.equal(clock, scope === "rust" ? 0 : 120_000);
+      assert.equal(clock, 120_000);
     }
   });
 }
-
-test("compiler preparation waits for exactly both consumed artifacts under one cap", async () => {
-  for (const publishArchive of [false, true]) {
-    let clock = 0;
-    const listed = [],
-      downloaded = [];
-    const waiting = waitForPreparation("compiler", {
-      env: apiEnv,
-      now: () => clock,
-      pause: async (ms) => {
-        clock += ms;
-      },
-      request: async (url) => {
-        if (url.includes("/jobs?"))
-          return apiResponse({ jobs: [{ name: "shared preparation", status: "in_progress" }] });
-        if (url.endsWith("/zip")) {
-          downloaded.push(url);
-          return apiResponse("archive");
-        }
-        const name = new URL(url).searchParams.get("name");
-        listed.push(name);
-        const ready =
-          name === "javascript-prepared-2" ? clock >= 840_000 : publishArchive && clock >= 850_000;
-        return apiResponse({
-          artifacts: ready ? [{ id: name === "javascript-prepared-2" ? 41 : 42, name }] : [],
-        });
-      },
-    });
-    if (publishArchive) await waiting;
-    else await assert.rejects(waiting, /15-minute wait cap.*still running/u);
-    assert.deepEqual([...new Set(listed)], ["javascript-prepared-2", "compiler-tests-2"]);
-    assert.equal(downloaded.length, publishArchive ? 2 : 1);
-    assert.ok(clock <= 900_000, "the second artifact cannot restart the 15-minute cap");
-  }
-});
 
 test("reporting joins its own successful group and caps queued or running siblings at 20 minutes", async () => {
   for (const scope of ["js", "rust"]) {
@@ -1513,7 +1756,7 @@ test("reporting joins its own successful group and caps queued or running siblin
       );
     }
     Object.assign(sibling, { conclusion: "success" });
-    const proof = jobs.find((job) => job.name === "compiler confinement");
+    const proof = jobs.find((job) => job.name === "shared preparation");
     Object.assign(proof, { status: "queued", conclusion: null });
     let polls = 0;
     await waitForGate(scope, {
@@ -1759,9 +2002,10 @@ test("delayed job creation in run 43235841741 is unmeasured in both timing check
   assert.ok(jobs.every((job) => Date.parse(job.started_at) - Date.parse(job.created_at) <= 30_000));
   t.mock.method(console, "log", () => {});
   const warn = t.mock.method(console, "warn", () => {});
+  // Rust workers are ready at selection (32s), so their retained 660s start gives a 628s wait.
   for (const [scope, name, seconds, completedSeconds, longest, wait] of [
     ["js", "typecheck + tests", 401, 405, "JS worker 8", 126],
-    ["rust", "engine gate", 853, 857, lastRust, 144],
+    ["rust", "engine gate", 853, 857, lastRust, 628],
   ])
     await t.test(scope, async () => {
       const root = mkdtempSync(join(tmpdir(), "creation-gap-")),
@@ -1837,8 +2081,8 @@ test("job creation waits follow each gate's dependencies", async (t) => {
       if (scope === "rust")
         assert.equal(
           ready,
-          Date.parse(jobs.find((job) => job.name === "Rust build once").completed_at),
-          "Rust becomes ready at archive completion even when JavaScript workers finish later",
+          Date.parse(jobs.find((job) => job.name === "what changed").completed_at),
+          "Rust setup becomes ready at selection even when JavaScript workers finish later",
         );
       job.started_at = new Date(ready + wait * 1000).toISOString();
       job.created_at = new Date(ready + (wait - 1) * 1000).toISOString();
@@ -1890,7 +2134,7 @@ test("job readiness falls back for later prerequisites and partial re-runs", () 
     job.started_at = new Date(Date.parse(job.started_at) + 200_000).toISOString();
     job.created_at = new Date(Date.parse(job.started_at) - 5000).toISOString();
     job.completed_at = new Date(Date.parse(job.started_at) + 1000).toISOString();
-    jobs.find((job) => job.name === "Rust build once").completed_at = new Date(
+    jobs.find((job) => job.name === "what changed").completed_at = new Date(
       Date.parse(job.started_at) + 1000,
     ).toISOString();
     jobs.find((job) => job.name === "engine gate").completed_at = new Date(
@@ -1977,6 +2221,57 @@ test("timing warnings name the larger part of a job's scheduling wait", () => {
     }
 });
 
+test("a Rust test job's runner wait counts only by how late it reached the published archive", () => {
+  // Each worker sets up for `setup` seconds after its runner starts, then waits for the archive.
+  for (const [startBeforePublish, setup, expected] of [
+    [100, 60, null],
+    [10, 50, 40],
+    [100, undefined, 105],
+  ]) {
+    const jobs = withoutWaits(),
+      worker = jobs.find((job) => job.name === "Rust tests 1"),
+      gate = jobs.find((job) => job.name === "engine gate"),
+      ready = dependencyFinishedAt(jobs, worker.name),
+      builtAt = ready + 200_000,
+      publishedAt = builtAt + 5_000,
+      at = (time) => new Date(time).toISOString();
+    gate.steps = [
+      { name: RUST_ARCHIVE_BUILD_STEP, started_at: at(ready), completed_at: at(builtAt) },
+      {
+        name: "Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        started_at: at(builtAt),
+        completed_at: at(publishedAt),
+      },
+    ];
+    const startedAt = publishedAt - startBeforePublish * 1000;
+    worker.created_at = at(ready);
+    worker.started_at = at(startedAt);
+    worker.completed_at = at(startedAt + 120_000);
+    // Without the wait step the whole runner wait still counts.
+    worker.steps =
+      setup === undefined
+        ? []
+        : [
+            {
+              name: RUST_ARCHIVE_WAIT_STEP,
+              started_at: at(startedAt + setup * 1000),
+              completed_at: at(startedAt + setup * 1000 + 1000),
+            },
+          ];
+    gate.completed_at = at(Date.parse(jobs[0].started_at) + 750_000);
+    if (expected === null)
+      assert.throws(
+        () => completedGateTiming("rust", jobs, jobs[0].head_sha),
+        (error) => error.timing.timing === "over budget",
+      );
+    else
+      assert.match(
+        completedGateTiming("rust", jobs, jobs[0].head_sha).warning,
+        new RegExp(`longest runner wait Rust tests 1: ${expected}s`, "u"),
+      );
+  }
+});
+
 test("Rust scheduling ignores JavaScript matrix metadata in both timing checks", async (t) => {
   t.mock.method(console, "log", () => {});
   t.mock.method(console, "warn", () => {});
@@ -1994,7 +2289,7 @@ test("Rust scheduling ignores JavaScript matrix metadata in both timing checks",
     const original = withoutWaits(),
       workers = original.filter((job) => names.includes(job.name));
     const jobs = original.filter((job) => !names.includes(job.name)),
-      ready = Date.parse(jobs.find((job) => job.name === "Rust build once").completed_at);
+      ready = Date.parse(jobs.find((job) => job.name === "what changed").completed_at);
     if (mode === "placeholder") {
       jobs.push({
         name: placeholderName,
@@ -2423,24 +2718,18 @@ test("aggregate receipts use the same timing rule and remain incomplete", async 
   assert.equal(adjusted.contended, true);
   const queuedProof = structuredClone(jobs);
   Object.assign(
-    queuedProof.find((job) => job.name === "compiler confinement"),
+    queuedProof.find((job) => job.name === "shared preparation"),
     { status: "queued", started_at: null, completed_at: null },
   );
   await assert.rejects(run(queuedProof, now), /missing or did not finish successfully/u);
   const proofWait = structuredClone(jobs);
-  const proof = proofWait.find((job) => job.name === "compiler confinement");
-  proof.created_at = new Date(Date.parse(proof.started_at) - 31_000).toISOString();
-  await assert.rejects(
-    run(proofWait, Date.parse(jobs[0].started_at) + 401_000),
-    /exceeding.*budget/u,
-  );
-  proof.started_at = new Date(Date.parse(proof.started_at) + 1000).toISOString();
-  proof.created_at = new Date(Date.parse(proof.started_at) - 31_000).toISOString();
+  const proof = proofWait.find((job) => job.name === "shared preparation");
+  withRunnerWait(proofWait, proof.name, 31);
   const unmeasured = await run(proofWait, Date.parse(jobs[0].started_at) + 401_000);
   assert.equal(
     unmeasured.timing,
     "unmeasured",
-    "a confinement wait after preparation also governs aggregate timing",
+    "a shared preparation runner wait also governs aggregate timing",
   );
   const zeroWait = structuredClone(jobs);
   zeroWait.forEach((job) => {
@@ -2556,17 +2845,17 @@ test("JavaScript flaky evidence survives aggregation and the completed receipt w
 });
 test("preparation spends only artifact requests before two minutes", async (t) => {
   const log = t.mock.method(console, "log", () => {});
-  // A Rust consumer starts after its build has ended, so it checks a missing archive at once.
   for (const [scope, readyAt, expectedJobs, expectedCounted, jobsAt] of [
     ["rust", 0, 0, 2],
-    ["rust", 5_000, 1, 4, 0],
+    ["rust", 5_000, 0, 3],
+    ["rust", 130_000, 1, 4, 120_000],
     ["js", 0, 0, 2],
     ["js", 90_000, 0, 3],
     ["js", 130_000, 1, 4, 120_000],
   ]) {
     const [job, artifact] =
       scope === "rust"
-        ? ["Rust build once", "rust-tests-2"]
+        ? ["engine gate", "rust-tests-2"]
         : ["shared preparation", "javascript-prepared-2"];
     let clock = 0,
       jobs = 0,

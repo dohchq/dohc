@@ -402,6 +402,57 @@ test("connects a T3 Code thread as an agent and forwards a chat message to it", 
     await expect.poll(() => sends().length, { timeout: 30_000 }).toBe(5);
     expect(sends()[4]!.args.threadId).toBe("t-issues");
     expect(String(sends()[4]!.args.message)).toContain("And the Windows build?");
+
+    // The person turns this workspace off for the agent. Its thread is not
+    // offered there, and a message written then is not forwarded.
+    const openAgentPage = async () => {
+      await page.getByTestId(activityPin("settings")).click();
+      await page.getByTestId(settingsNavPin("agents")).click();
+      await expect(section).toBeVisible();
+      if ((await agentPage.count()) === 0) await row.click();
+    };
+    const closeSettings = async () => {
+      await page.getByRole("button", { name: "Close settings" }).click();
+      await expect(dialog).toHaveCount(0);
+    };
+    await openAgentPage();
+    const here = agentPage.getByTestId("agent-thread-workspace");
+    await here.getByRole("switch").click();
+    await expect(here).toContainText("Its thread gets no messages from this workspace.");
+    await expect(agentPage.getByTestId("agent-page-thread-title")).toHaveCount(0);
+    await expect(agentPage.getByTestId("agent-page-thread-change")).toHaveCount(0);
+    await shoot(page, dialog, "t3-code-l-workspace-off");
+    await closeSettings();
+    await page.getByTestId("chats-lane-composer").fill("Written while it was off.");
+    await page.getByTestId("chats-lane-composer").press("Enter");
+    await expect(page.getByText("Written while it was off.").first()).toBeVisible();
+
+    // Turning it on again asks first, and says what the thread then holds.
+    // dohc tells the thread, and forwards what comes after, not what came before.
+    await openAgentPage();
+    await here.getByRole("switch").click();
+    const ask = page.getByTestId("agent-workspace-dialog");
+    await expect(ask).toContainText("can appear in what it posts in another");
+    expect(sends()).toHaveLength(5);
+    await shoot(page, page, "t3-code-m-workspace-ask");
+    await page.getByTestId("agent-workspace-confirm").click();
+    await expect(ask).toHaveCount(0);
+    await expect(agentPage.getByTestId("agent-page-thread-title")).toContainText(
+      "Issue owner: triage",
+    );
+    expect(sends()).toHaveLength(6);
+    expect(sends()[5]!.args.threadId).toBe("t-issues");
+    expect(String(sends()[5]!.args.message)).toContain(
+      "now forwards their messages from the workspace named",
+    );
+    await closeSettings();
+    await page.getByTestId("chats-lane-composer").fill("After it was on again.");
+    await page.getByTestId("chats-lane-composer").press("Enter");
+    await expect.poll(() => sends().length, { timeout: 30_000 }).toBe(7);
+    expect(String(sends()[6]!.args.message)).toContain("After it was on again.");
+    expect(
+      sends().some((call) => String(call.args.message).includes("Written while it was off.")),
+    ).toBe(false);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
     await t3.close();

@@ -51,7 +51,11 @@ import { DatasetHistoryPage } from "@dohc/cli/dataset";
 import type { datasetOperations } from "./datasetOperations";
 import type { OwnerAppResponsesRequest, OwnerAppResponsesResult } from "@dohc/cli/app-responses";
 import { normalizeShareDiscussionBody } from "@dohc/security-contract/share-discussion";
-import { SHARE_ACCESS_VALUES, shareAccessRank } from "@dohc/security-contract/share-selector";
+import {
+  isValidShareVersionId,
+  SHARE_ACCESS_VALUES,
+  shareAccessRank,
+} from "@dohc/security-contract/share-selector";
 import { hasEngineIgnoredSegment, WORKSPACE_KINDS, WORKSPACE_MODES } from "@dohc/workspace-core";
 import { z } from "zod";
 import { AGENT_HUES } from "@dohc/workspace-contracts/agent-hues";
@@ -166,6 +170,7 @@ import type {
 import type { workspaceFileOperations } from "./workspaceFileOperations";
 import type { explorerMenuOperations } from "./explorerMenuOperations";
 import type { OperationBridge, OperationTable } from "./operationTable";
+import type { protectedCopyOperations, stoppedRunOperations } from "./writeOperations";
 import { isLoopbackHostname } from "../security/loopback";
 import {
   AgentId,
@@ -304,6 +309,8 @@ export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 // Only edit opens file writes (`shareViewTakesLocalWrites`).
 // The chat grant's own binary access is a different field.
 const SHARE_ACCESS = z.enum(SHARE_ACCESS_VALUES);
+// The relay's own rule, so this side reads no version id the relay would refuse.
+const SHARE_VERSION_ID = z.string().refine(isValidShareVersionId);
 export type ShareAccess = z.infer<typeof SHARE_ACCESS>;
 
 // Ops a share pull skipped, and why. Durable state, not a status: the pull
@@ -3742,10 +3749,6 @@ export const ProtectedCopyPayload = z.object({
   workspaceId: WORKSPACE_ID,
   id: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/),
 });
-export const RestoreProtectedCopyResult = z.object({
-  status: z.literal("restored"),
-  path: z.string().min(1),
-});
 export const DiscardProtectedCopyResult = z.object({
   status: z.literal("discarded"),
   path: z.string().min(1),
@@ -3923,13 +3926,6 @@ export const workspaceVersionOperations = {
     channel: "desktop:save-kept-copy",
     payload: SaveKeptCopyPayload,
     result: SaveKeptCopyResult,
-    ...versionGuard,
-  },
-  restoreProtectedCopy: {
-    capabilityId: "file.protected.restore",
-    channel: "desktop:restore-protected-copy",
-    payload: ProtectedCopyPayload,
-    result: RestoreProtectedCopyResult,
     ...versionGuard,
   },
   discardProtectedCopy: {
@@ -4571,7 +4567,7 @@ export type CloudJoinWorkspaceResult = z.infer<typeof CloudJoinWorkspaceResult>;
 
 export const RelayShareSelector = z.object({
   paths: z.array(PATH_STRING).max(100),
-  versionId: z.string().min(1).max(128).nullable(),
+  versionId: SHARE_VERSION_ID.nullable(),
 });
 export type RelayShareSelector = z.infer<typeof RelayShareSelector>;
 
@@ -4696,7 +4692,7 @@ export const CreateRelaySharePayload = z.object({
   workspaceId: WORKSPACE_ID,
   recipientEmail: EMAIL_STRING,
   paths: z.array(PATH_STRING).min(1).max(100).optional(),
-  versionId: z.string().min(1).max(128).optional(),
+  versionId: SHARE_VERSION_ID.optional(),
   // Required. There is no default at either boundary: the relay
   // refuses a create that names no level, and so does this one. A caller that
   // sends nothing has not chosen `view`, it has failed to say what the share
@@ -4774,7 +4770,7 @@ export const CreateRelayShareLinkPayload = z.union([
     .object({
       workspaceId: WORKSPACE_ID,
       paths: z.never().optional(),
-      versionId: z.string().min(1).max(128),
+      versionId: SHARE_VERSION_ID,
       access: z.enum(["view", "comment"]),
     })
     .strict(),
@@ -6908,29 +6904,9 @@ export const ChatDispatchStateForThreadResult = z
   .strict();
 export type ChatDispatchStateForThreadResult = z.infer<typeof ChatDispatchStateForThreadResult>;
 
-export const RetryStoppedRunPayload = z
-  .object({
-    workspaceId: WORKSPACE_ID,
-    threadId: OPAQUE_ID,
-    runId: OPAQUE_ID,
-  })
-  .strict();
-export type RetryStoppedRunPayload = z.infer<typeof RetryStoppedRunPayload>;
-
-// False when the run can't be tried again any more, as after a second press.
-export const RetryStoppedRunResult = z.object({ queued: z.boolean() }).strict();
-export type RetryStoppedRunResult = z.infer<typeof RetryStoppedRunResult>;
-export const stoppedRunOperations = {
-  retryStoppedRun: {
-    capabilityId: "agent.run.retry",
-    scope: "workspace",
-    channel: "desktop:retry-stopped-run",
-    payload: RetryStoppedRunPayload,
-    result: RetryStoppedRunResult,
-    guard: "active-workspace",
-    inactiveMessage: "This window changed workspaces.",
-  },
-} as const satisfies OperationTable;
+export type RetryStoppedRunResult = Awaited<
+  ReturnType<OperationBridge<typeof stoppedRunOperations>["retryStoppedRun"]>
+>;
 
 export const RunnerSelfTestResult = z
   .object({
@@ -8391,6 +8367,7 @@ export const agentThreadOperations = {
     }),
     guard: "active-workspace",
     inactiveMessage: "The thread was not changed because this window changed workspaces.",
+    // Main saves the agent with the thread once the thread is ready.
   },
   // Reads the question the agent's thread waits on. Main finds the thread from
   // the agent's saved settings, and keeps no copy of the question.
@@ -8429,6 +8406,23 @@ export const agentThreadOperations = {
     }),
     guard: "active-workspace",
     inactiveMessage: "The thread was not connected because this window changed workspaces.",
+  },
+  // Turns this workspace on or off for an agent's thread, and saves the agent
+  // with the change. On: sets aside what the agent has unread here, tells the
+  // thread, then saves. Main finds the thread from the agent, so a window
+  // cannot name one, and makes the change from the settings as they are then,
+  // so two windows cannot write over each other.
+  setAgentThreadWorkspace: {
+    capabilityId: "agent.thread.connect",
+    scope: "workspace",
+    channel: "desktop:set-agent-thread-workspace",
+    payload: z.strictObject({
+      workspaceId: z.string().min(1),
+      agentId: AgentId,
+      on: z.boolean(),
+    }),
+    guard: "active-workspace",
+    inactiveMessage: "Nothing was changed because this window changed workspaces.",
   },
 } as const satisfies OperationTable;
 
@@ -9167,6 +9161,7 @@ export interface DohcDesktopBridge
     OperationBridge<typeof chatDispatchNoticeOperations>,
     OperationBridge<typeof agentRunStateOperations>,
     OperationBridge<typeof stoppedRunOperations>,
+    OperationBridge<typeof protectedCopyOperations>,
     OperationBridge<typeof chatDispatchPauseOperations>,
     OperationBridge<typeof agentThreadOperations>,
     OperationBridge<typeof agentsListeningOperations>,
