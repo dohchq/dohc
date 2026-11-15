@@ -422,6 +422,10 @@ export function createServiceHostFeed(
         refuseOp(op, { opKind: op.opKind, payloadSha256: received.get(op)!, reason });
       let pushOrigin = "",
         batched = false;
+      // Whether a retiring note stays in place: its enrollment has no owner Stop and the note is still at its path.
+      const staysInPlace = ({ workspaceId, objectId, path }: ServiceActivationRetirement) =>
+        storage.readServiceHostEnrollmentByObjectId(workspaceId, objectId)?.ownerStop === null &&
+        storage.objectIdAtPathInVersion({ workspaceId, versionId: "main", path }) === objectId;
       const admission: HostedAdmission = {
         async screen(originId, ops) {
           await warmReach(workspaceId);
@@ -482,10 +486,15 @@ export function createServiceHostFeed(
             const decision = hostedPublication(scope, known, op);
             if (decision.kind === "refused") refuse(op, decision.reason);
             else if (decision.kind === "retiring") {
-              // Verified retirement output keeps its history and moves no projection.
+              // Verified retirement output keeps its history. A note that stays, as when its Edit access
+              // ended, also moves its file and history to it, so the stored note holds its last save.
+              // A Stop's, moved or deleted note's moves none.
               const refusal = storage.admitRetirementPublication(decision.retirement, op, batch);
-              if (refusal === null) op.relayAdmission = "departed";
-              else refuse(op, refusal);
+              if (refusal !== null) refuse(op, refusal);
+              else {
+                op.relayAdmission = "departed";
+                if (staysInPlace(decision.retirement)) op.departedInPlace = true;
+              }
             } else if (decision.kind === "departed") op.relayAdmission = "departed";
           }
         },

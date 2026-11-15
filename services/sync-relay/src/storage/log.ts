@@ -332,11 +332,13 @@ export function appendLogBatchInTransaction(
     );
     inserted += 1;
     // A departed publication must move neither projection: either one
-    // alone would bring the document back where it no longer is. A
-    // redundant copy keeps the accepted creation's object, path and file.
+    // alone would bring the document back where it no longer is. One whose
+    // note stays where it is moves both. A redundant copy keeps the accepted
+    // creation's object, path and file.
     if (
       op.settlementAdmission?.status === "refused" ||
-      op.relayAdmission !== undefined ||
+      op.relayAdmission === "refused" ||
+      (op.relayAdmission === "departed" && !op.departedInPlace) ||
       redundant.has(op.originSeq)
     )
       continue;

@@ -16,6 +16,8 @@ import { parseLogOp, SERVICE_HOST_ORIGIN_PREFIX, type LogAuthorNameLookup } from
 import { referencedBlobShas } from "./storage/blobReferences";
 import { stableJsonStringify } from "./canonicalJson";
 import { openSyncRelayStorage } from "./storage";
+import type { StorageContext } from "./storage/context";
+import { retireUncoveredServiceActivations } from "./storage/serviceHostEnrollment";
 import nativeAuthoredSettlement from "./testing/fixtures/nativeAuthoredSettlement.json";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -712,6 +714,83 @@ it("keeps a retiring document out of hosted reads and writes while its sibling s
     [binding.objectId],
   ]);
 });
+
+// Proves: the last save a retiring note publishes reaches the stored note when the note stays, as
+// when its Edit access ended, and moves nothing after a Stop.
+it.each(["access ended", "stopped"] as const)(
+  "publishes a retiring note's last save to the stored note only while the note stays: %s",
+  async (ending) => {
+    const f = await fixture();
+    retainServiceActivation(f.raw, namespace, true);
+    const last = blob("last save");
+    // The activation's retained source moment is a row a retirement proves without a settlement.
+    f.raw
+      .prepare(
+        "UPDATE sync_relay_service_activations SET source_json=json_set(source_json,'$.sourceDigest',?,'$.sourceByteLength',?)",
+      )
+      .run(last.sha256, last.content.byteLength);
+    // The save names the file it replaces, as the host's settlement does.
+    for (const content of [A, last]) await f.upload(content);
+    if (ending === "stopped") {
+      preparedStop(f.storage, {
+        workspaceId: ws,
+        path: "docs/a.md",
+        ownerUserId: "owner-1",
+        enabled: false,
+        retire: true,
+        nowMs: 20,
+        guard() {},
+      });
+    } else {
+      f.setGrant(scope.shareId, "status='revoked',revoked_at_ms=20");
+      f.storage.tx(() =>
+        retireUncoveredServiceActivations(
+          f.storage as unknown as StorageContext,
+          [f.storage.readServiceHostEnrollment(ws, "docs/a.md")!],
+          20,
+        ),
+      );
+    }
+    expect([...f.storage.readServiceHostFeedScope(ws)!.settling.keys()]).toEqual([
+      binding.objectId,
+    ]);
+    const body = (await (
+      await f.push([
+        [
+          "moment.append",
+          write(binding.objectId, "docs/a.md", last, {
+            momentId: "moment-1",
+            metadata: {},
+            beforePresent: true,
+            payloadBeforePath: "docs/a.md",
+            payloadBeforeBlobSha256: A.sha256,
+          }),
+        ],
+      ])
+    ).json()) as PushAnswer;
+    expect(body).toMatchObject({ inserted: 1 });
+    expect(body.refusals).toBeUndefined();
+    const stays = ending === "access ended";
+    // The row stays departed either way, so a desktop that reads the log sees what it saw before.
+    expect(
+      f.raw
+        .prepare("SELECT relay_admission FROM sync_relay_log WHERE origin_id=?")
+        .get(HOST_ORIGIN)!.relay_admission,
+    ).toBe("departed");
+    expect(
+      f.raw
+        .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?")
+        .get(ws, "docs/a.md")!.blob_sha256,
+    ).toBe(stays ? last.sha256 : A.sha256);
+    expect(
+      f.raw
+        .prepare(
+          "SELECT count(*) AS count FROM sync_relay_object_moments m JOIN sync_relay_log l ON l.relay_seq=m.relay_seq WHERE m.workspace_id=? AND l.origin_id=?",
+        )
+        .get(ws, HOST_ORIGIN)!.count,
+    ).toBe(stays ? 1 : 0);
+  },
+);
 
 it("fails a write naming a blob the host never fetched or uploaded as missing, and keeps it unreadable", async () => {
   const f = await fixture();

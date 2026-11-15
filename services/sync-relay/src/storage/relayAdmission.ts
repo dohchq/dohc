@@ -7,7 +7,9 @@ import type { SqliteDb, SyncRelayLogInput } from "./types";
  * `refused`: the row is a relay-written refusal at the client's coordinate.
  * `departed`: a hosted document's publication accepted after the document
  * left its enrolled path. It keeps its history and attribution, and no
- * projection reads it, so it cannot bring the document back.
+ * projection reads it, so it cannot bring the document back. Output of a
+ * retiring note that stays at its path moves its file and history once, as it
+ * is appended (`departedInPlace`), and is stored as departed like the rest.
  */
 export type RelayAdmission = "refused" | "departed";
 
