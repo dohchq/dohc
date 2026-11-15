@@ -1,33 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { bridge } from "../bridge";
-import type {
-  AddressedDatasetDescription as DatasetDescription,
-  DatasetListElsewhere,
-} from "@dohc/cli/dataset";
-import {
-  collectionsElsewhereWords,
-  collectionsRefusalError,
-  type CollectionsElsewhere,
-  type CollectionsRefusalRead,
-} from "../../ipc/errorWords";
+import type { AddressedDatasetDescription as DatasetDescription } from "@dohc/cli/dataset";
+import { collectionsRefusalError, type CollectionsRefusalRead } from "../../ipc/errorWords";
 
 // Stable empty set: the Explorer is memoized, so the "no collections"
 // default must not be a fresh identity per render.
 const EMPTY_COLLECTION_FOLDERS: ReadonlySet<string> = new Set();
 const EMPTY_DATASETS: DatasetDescription[] = [];
-
-// Where the Collections this computer doesn't list are, beside the ones it lists.
-const elsewhereOf = (
-  elsewhere: DatasetListElsewhere | undefined,
-  datasets: readonly DatasetDescription[],
-): CollectionsElsewhere | null =>
-  elsewhere
-    ? {
-        computer: elsewhere.computer.label,
-        others: datasets.length > 0,
-        words: collectionsElsewhereWords(elsewhere.computer, datasets.length > 0),
-      }
-    : null;
 
 export function useCollectionFolders(
   workspaceId: string,
@@ -36,7 +15,11 @@ export function useCollectionFolders(
   // Healthy received shares read Collections within their pinned grant.
   shareViewReadsCollections = false,
   shareViewEnded = false,
+  // A read of the Collections list worked.
+  onListed?: () => void,
 ) {
+  const listed = useRef(onListed);
+  listed.current = onListed;
   // Collection folders: the engine's collections.list result,
   // cached as the set of folder paths so the Explorer can route a click on a
   // collection folder to its views. Only the latest issued request commits;
@@ -48,24 +31,18 @@ export function useCollectionFolders(
   const [unclaimedDatasetFolders, setUnclaimedDatasetFolders] =
     useState<ReadonlySet<string>>(EMPTY_COLLECTION_FOLDERS);
   const collectionsRequest = useRef(0);
-  // `elsewhere`: another computer keeps the workspace's Collections, and the
-  // list holds the ones on this computer's server. It says where the others
-  // are, or, when the server didn't answer, where all of them are.
   // `unknown`: the list was cleared for another read, such as the archived
   // list, and no read has landed since. It is being read, or that read failed.
   const [dataState, setDataState] = useState<{
     workspaceId: string;
     datasets: DatasetDescription[];
     nextCursor: string | null;
-    elsewhere: CollectionsElsewhere | null;
     unknown?: "reading" | "failed";
   } | null>(null);
   const datasets =
     !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.datasets : EMPTY_DATASETS;
   const nextDataset =
     !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.nextCursor : null;
-  const collectionsElsewhere =
-    !shareViewEnded && dataState?.workspaceId === workspaceId ? dataState.elsewhere : null;
   // The list has loaded at least once. Showing the archived list again keeps it loaded.
   const collectionsListed = !shareViewEnded && dataState?.workspaceId === workspaceId;
   const collectionsUnknown = collectionsListed ? dataState?.unknown : undefined;
@@ -92,7 +69,6 @@ export function useCollectionFolders(
         workspaceId,
         datasets: [],
         nextCursor: null,
-        elsewhere: null,
         unknown: "reading",
       });
       setArchiveView({ workspaceId, enabled });
@@ -108,14 +84,14 @@ export function useCollectionFolders(
         ? { ...current, unknown: "reading" }
         : current,
     );
-    const failed = (error: unknown): never => {
-      if (request === datasetRequest.current) {
-        setDataState((current) =>
-          current?.workspaceId === workspaceId && current.unknown
-            ? { ...current, unknown: "failed" }
-            : current,
-        );
-      }
+    // A read a newer one replaced fails without a word, as it answers without one.
+    const failed = (error: unknown) => {
+      if (request !== datasetRequest.current) return null;
+      setDataState((current) =>
+        current?.workspaceId === workspaceId && current.unknown
+          ? { ...current, unknown: "failed" }
+          : current,
+      );
       throw error;
     };
     const result = await bridge()
@@ -126,42 +102,27 @@ export function useCollectionFolders(
         ...(includeArchived ? { includeArchived: true } : {}),
       })
       .catch(failed);
+    if (!result) return;
     const latest = request === datasetRequest.current;
     if (result.kind === "collections-refused") {
-      const { refusal } = result;
-      if (refusal.kind !== "server-unavailable") {
-        if (latest) {
-          setDataState({ workspaceId, datasets: [], nextCursor: null, elsewhere: null });
-          setRefusalState({ workspaceId, refusal });
-        }
-        return;
-      }
-      // The server didn't answer: the list keeps what it last showed, or
-      // says where the Collections are, and the failure is reported.
       if (latest) {
-        setDataState((current) =>
-          current?.workspaceId === workspaceId && current.elsewhere !== null
-            ? current
-            : {
-                workspaceId,
-                datasets: [],
-                nextCursor: null,
-                elsewhere: { computer: refusal.computer, others: false, words: refusal.words },
-              },
-        );
-        setRefusalState(null);
+        setDataState({ workspaceId, datasets: [], nextCursor: null });
+        setRefusalState({ workspaceId, refusal: result.refusal });
       }
-      throw new Error(refusal.failure);
+      return;
     }
     if (!latest) return;
-    if (result.kind !== "list") return failed(Error("dohc could not read the Collections list."));
+    if (result.kind !== "list") {
+      failed(Error("dohc could not read the Collections list."));
+      return;
+    }
     setDataState({
       workspaceId,
       datasets: result.datasets,
       nextCursor: result.nextCursor,
-      elsewhere: elsewhereOf(result.elsewhere, result.datasets),
     });
     setRefusalState(null);
+    listed.current?.();
   }, [workspaceId, includeArchived]);
   const loadMoreDatasets = useCallback(async () => {
     if (!nextDataset) return;
@@ -177,18 +138,14 @@ export function useCollectionFolders(
     if (result.kind === "collections-refused") throw collectionsRefusalError(result.refusal);
     if (request !== datasetRequest.current) return;
     if (result.kind !== "list") throw Error("dohc could not read the Collections list.");
-    setDataState((current) => {
-      const datasets = [
+    setDataState((current) => ({
+      workspaceId,
+      datasets: [
         ...(current?.workspaceId === workspaceId ? current.datasets : []),
         ...result.datasets,
-      ];
-      return {
-        workspaceId,
-        datasets,
-        nextCursor: result.nextCursor,
-        elsewhere: elsewhereOf(result.elsewhere, datasets),
-      };
-    });
+      ],
+      nextCursor: result.nextCursor,
+    }));
   }, [workspaceId, nextDataset, includeArchived]);
   const refreshCollections = useCallback(async () => {
     const request = ++collectionsRequest.current;
@@ -237,7 +194,6 @@ export function useCollectionFolders(
     includeArchived,
     setIncludeArchived,
     collectionsRefusal,
-    collectionsElsewhere,
     collectionsListed,
     collectionsUnknown,
   };

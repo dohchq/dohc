@@ -115,7 +115,6 @@ import {
   readError,
   USE_THIS_COMPUTER,
   withErrorWords,
-  type CollectionsElsewhere,
   type CollectionsRefusalRead,
 } from "../../ipc/errorWords";
 import { workspaceDestinationError } from "@dohc/workspace-contracts/workspace-paths";
@@ -206,9 +205,6 @@ export interface ExplorerProps {
   // words, such as another computer keeping them. The section says so in
   // place of the list.
   collectionsRefusal?: CollectionsRefusalRead | null;
-  // Another computer keeps the workspace's Collections, and the list holds
-  // the ones on this computer's server. This names that computer.
-  collectionsElsewhere?: CollectionsElsewhere | null;
   onKeepCollections?: () => void;
   onRetryCollections?: () => void;
   // The shell flushes the stable active editor before disk changes and returns
@@ -2987,38 +2983,6 @@ function CollectionsNote({
         </>
       )}
     </p>
-  );
-}
-
-// Below the Collections on this computer's server: the computer that keeps
-// the workspace's other Collections, where a move to a server starts. The
-// whole sentence is the row's tooltip, or the row itself when main named no
-// computer.
-export function CollectionsElsewhereRow({
-  elsewhere,
-  onKeep,
-}: {
-  elsewhere: CollectionsElsewhere;
-  onKeep?: () => void;
-}) {
-  const { computer, others, words } = elsewhere;
-  return (
-    <div
-      data-testid="collections-elsewhere"
-      className="@container flex flex-col items-start gap-1.5 px-2 py-1"
-    >
-      <CollectionsNote
-        icon={Laptop}
-        iconClassName=""
-        words={computer === null ? words : `${others ? "Others on" : "On"} ${computer}`}
-        detail={computer === null ? null : words}
-      />
-      {onKeep && (
-        <SecondaryButton data-testid="collections-keep-here" onClick={() => onKeep()}>
-          {USE_THIS_COMPUTER}
-        </SecondaryButton>
-      )}
-    </div>
   );
 }
 

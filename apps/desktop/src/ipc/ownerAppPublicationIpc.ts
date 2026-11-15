@@ -9,7 +9,6 @@ import {
   parseAppCollectionCapability,
   APP_PUBLICATION_MAX_BLOB_BYTES,
   APP_PUBLICATION_MAX_REQUEST_BYTES,
-  type AppPublicationCandidate,
 } from "@dohc/security-contract/app-publication";
 import { createHash, randomUUID } from "node:crypto";
 import { CHANNELS } from "./channels";
@@ -96,12 +95,7 @@ export function createOwnerAppPublicationHandler<
     operation: Operation,
     attribution: ApprovalAgent | null,
   ): Promise<OwnerAppPublicationResult | null>;
-  beforeSharedPublish?(
-    workspace: Workspace,
-    candidate: AppPublicationCandidate,
-    signal: AbortSignal,
-  ): Promise<void>;
-  /** May resolve local approved rules before an explicit authority transfer at publication. */
+  /** Reads a Collection's approved rules from whoever answers for it, in place of the server alone. */
   resolveDatasetRevision?(
     workspace: Workspace,
     binding: AppDatasetBinding,
@@ -539,9 +533,6 @@ export function createOwnerAppPublicationHandler<
           if (!capability) throw new Error("This app has no Collection access to approve.");
           if (input.linkReads.length) capability.linkReads = input.linkReads;
         }
-        await dependencies.beforeSharedPublish?.(operation.workspace, candidate, operation.signal);
-        session.assertCurrent();
-        operation.signal.throwIfAborted();
         const dataset = candidate.capabilities.find((capability) => capability.kind === "dataset");
         if (dataset) {
           const revision = await resolveRemoteDatasetRevision(remoteData, dataset);

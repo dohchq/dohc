@@ -6,6 +6,7 @@ import { atomicWriteFile } from "../atomicReplaceFile";
 import { createOwnerDatasetCopy } from "./ownerDatasetCopy";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { localDatasetFolder } from "./localDatasetFolders";
+import type { SavedCollectionsList } from "./collectionsHome";
 import { ownedSqliteFiles } from "./workspaceLocalState";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -347,6 +348,37 @@ export function createOwnerDatasetCopyRegistry(options: {
     // The workspaces where dohc could not remove a folder, and whether it
     // could not read its record of them.
     leftover,
+    // The last Collections list this computer read from a syncing workspace's
+    // server, kept with its copies under the same account rules.
+    savedList(input: {
+      workspaceId: string;
+      rootPath: string;
+      attachmentId?: symbol;
+      origin: string;
+      ownerKey: string;
+    }): SavedCollectionsList {
+      const key = `${ownerTag(input.ownerKey)}-${hash([resolve(input.rootPath), input.workspaceId, "list", new URL(input.origin).origin, input.ownerKey]).slice(0, 16)}`;
+      const file = async () => {
+        if (stopped || ownerKey !== input.ownerKey)
+          throw Error("The Collection owner changed. Reopen the workspace.");
+        await barrier.catch(() => undefined);
+        requested.add(input.rootPath);
+        const folder = await localDatasetFolder(
+          {
+            workspaceId: input.workspaceId,
+            rootPath: input.rootPath,
+            attachmentId: input.attachmentId,
+          },
+          "copies",
+          key,
+        );
+        return join(resolve(await realpath(folder)), "list.json");
+      };
+      return {
+        read: async () => JSON.parse(await readFile(await file(), "utf8")) as unknown,
+        write: async (value) => atomicWriteFile(await file(), JSON.stringify(value)),
+      };
+    },
     async get(input: {
       workspaceId: string;
       rootPath: string;
@@ -357,6 +389,8 @@ export function createOwnerDatasetCopyRegistry(options: {
       ownerKey: string;
       assertOwner(): void;
       runtime?: Parameters<typeof createOwnerDatasetCopy>[0]["runtime"];
+      /** Hears that what the copy shows changed. The request that opens the copy names it. */
+      onChanged?(): void;
     }): Promise<Copy> {
       z.string().uuid().parse(input.datasetId);
       const origin = new URL(input.origin);
@@ -425,6 +459,7 @@ export function createOwnerDatasetCopyRegistry(options: {
             origin: origin.origin,
             assertOwner: authorize,
             runtime: input.runtime,
+            ...(input.onChanged ? { onChanged: input.onChanged } : {}),
           });
           const scoped: Copy = {
             ...copy,

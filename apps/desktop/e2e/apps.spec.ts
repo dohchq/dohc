@@ -12,7 +12,6 @@ import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
-  keepCollectionsHere,
   openExplorerHome,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
@@ -223,7 +222,6 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
     desktop = await launchDesktopApp({ workspace });
     const { page, app: electronApp } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
-    await keepCollectionsHere(page, workspaceId);
     await openExplorerHome(page);
 
     const publishAndOpen = async (root: string) => {
@@ -433,7 +431,6 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     desktop = await launchDesktopApp({ workspace });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
-    await keepCollectionsHere(page, workspaceId);
 
     await openExplorerHome(page);
     await page.locator('[data-testid="sites-row"][data-root="reading-list"]').click();

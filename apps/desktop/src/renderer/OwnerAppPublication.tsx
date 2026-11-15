@@ -26,7 +26,6 @@ import {
 } from "../ipc/ownerAppPublicationContract";
 import { collectionsRefusalError } from "../ipc/errorWords";
 import { bridge } from "./bridge";
-import { CollectionMoveNote, type CollectionServer } from "./collections/CollectionMoveNote";
 import { ipcErrorMessage } from "./ipcError";
 import { Overlay } from "./Overlay";
 import { OwnerAppResponses } from "./OwnerAppResponses";
@@ -61,22 +60,14 @@ function OperationNames({ operations }: { operations: AppDatasetCapability["oper
   );
 }
 
-/**
- * `moves`: publishing moves a Collection on this computer to the workspace's server.
- * `onPlace` hears where to: a server, null when nothing moves, or undefined until dohc knows.
- */
 function DatasetApproval({
   capability,
   workspaceId,
   reportError,
-  moves = false,
-  onPlace,
 }: {
   capability: AppDatasetCapability;
   workspaceId: string;
   reportError: ReportError;
-  moves?: boolean;
-  onPlace?(server: CollectionServer | null | undefined): void;
 }) {
   const [address, setAddress] = useState<{
     workspaceId: string;
@@ -87,13 +78,9 @@ function DatasetApproval({
   const [reload, setReload] = useState(0);
   const report = useRef(reportError);
   report.current = reportError;
-  const placed = useRef(onPlace);
-  placed.current = onPlace;
   useEffect(() => {
-    let current = true,
-      failure = "dohc could not find this Collection.";
+    let current = true;
     setAddress(null);
-    placed.current?.(undefined);
     void (async () => {
       let after: string | undefined;
       const seen = new Set<string>();
@@ -109,34 +96,12 @@ function DatasetApproval({
         if (page.kind !== "list") throw Error("dohc could not find this Collection.");
         const dataset = page.datasets.find((value) => value.datasetId === capability.datasetId);
         if (dataset) {
-          failure = "dohc could not check where this Collection is.";
-          const access =
-            moves && dataset.datasetPath
-              ? await bridge().dataset({
-                  action: "permissions",
-                  workspaceId,
-                  datasetPath: dataset.datasetPath,
-                  expectedDatasetId: capability.datasetId,
-                  limit: 1,
-                })
-              : null;
-          if (!current) return;
-          const place = access?.kind === "permissions" ? access.place : undefined;
           setAddress({
             workspaceId,
             datasetId: capability.datasetId,
             path: dataset.datasetPath,
             status: dataset.datasetAddressStatus ?? (dataset.datasetPath ? "available" : "missing"),
           });
-          placed.current?.(
-            !moves
-              ? null
-              : place === undefined
-                ? undefined
-                : place.kind === "here"
-                  ? place.server
-                  : null,
-          );
           return;
         }
         after = page.nextCursor ?? undefined;
@@ -145,18 +110,17 @@ function DatasetApproval({
       } while (after);
       if (!current) return;
       setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "missing" });
-      placed.current?.(moves ? undefined : null);
     })().catch((error) => {
       if (!current) return;
       setAddress({ workspaceId, datasetId: capability.datasetId, path: null, status: "failed" });
-      report.current(failure, error, () => {
+      report.current("dohc could not find this Collection.", error, () => {
         if (current) setReload((value) => value + 1);
       });
     });
     return () => {
       current = false;
     };
-  }, [workspaceId, capability.datasetId, moves, reload]);
+  }, [workspaceId, capability.datasetId, reload]);
   const found =
     address?.workspaceId === workspaceId && address.datasetId === capability.datasetId
       ? address
@@ -645,34 +609,6 @@ function PublicationDialog(
       return next;
     });
   }, []);
-  // Where Publish moves each of a preparation's Collections, once dohc knows, so the review says it before Publish can run.
-  const [collectionPlaces, setCollectionPlaces] = useState<
-    ReadonlyMap<string, CollectionServer | null>
-  >(new Map());
-  const collectionPlaced = useCallback(
-    (key: string, server: CollectionServer | null | undefined) =>
-      setCollectionPlaces((previous) => {
-        if (server === undefined ? !previous.has(key) : previous.get(key) === server)
-          return previous;
-        const next = new Map(previous);
-        if (server === undefined) next.delete(key);
-        else next.set(key, server);
-        return next;
-      }),
-    [],
-  );
-  const collectionKeys = prepared
-    ? prepared.capabilities.flatMap((capability) =>
-        capability.kind === "dataset"
-          ? [collectionKey(prepared.approvalId, capability.datasetId)]
-          : [],
-      )
-    : [];
-  const collectionsUnchecked = collectionKeys.some((key) => !collectionPlaces.has(key));
-  const collectionMoves = collectionKeys.flatMap((key) => {
-    const server = collectionPlaces.get(key);
-    return server ? [{ key, server }] : [];
-  });
   const [publicationsError, setPublicationsError] = useState<string | null>(null);
   const [publicationsReload, setPublicationsReload] = useState(0);
   // Share links stays hidden when the server does not publish apps here, or when the sync status already says it is unreachable.
@@ -1200,7 +1136,6 @@ function PublicationDialog(
       if (result.kind !== "published" || result.local === true)
         throw new Error("dohc could not confirm publication. Reload the app publications.");
       candidate.current = null;
-      // Publishing a Collection app on a link moves its data off this device, which ends any approval here.
       localChanged();
       setPublicationsReload((value) => value + 1);
       setPrepared(null);
@@ -1737,13 +1672,6 @@ function PublicationDialog(
                         reportError={reportError}
                         workspaceId={props.workspaceId}
                         key={collectionKey(prepared.approvalId, capability.datasetId)}
-                        moves={!reactivating}
-                        onPlace={(server) =>
-                          collectionPlaced(
-                            collectionKey(prepared.approvalId, capability.datasetId),
-                            server,
-                          )
-                        }
                         capability={
                           !reactivating
                             ? { ...capability, ...(linkReads.length ? { linkReads } : {}) }
@@ -1824,14 +1752,6 @@ function PublicationDialog(
                         ) : null,
                       )
                   : null}
-                {collectionMoves.map((move) => (
-                  <CollectionMoveNote
-                    key={move.key}
-                    action="Publishing"
-                    server={move.server}
-                    className="m-0"
-                  />
-                ))}
                 <p className="m-0">
                   The app can use external services and send them data it receives.
                 </p>
@@ -1865,7 +1785,7 @@ function PublicationDialog(
                 </SecondaryButton>
                 <PrimaryButton
                   data-testid="app-publication-approve"
-                  disabled={!!busy || responsesBusy || collectionsUnchecked}
+                  disabled={!!busy || responsesBusy}
                   onClick={() => void approve()}
                 >
                   {busy === "approve"

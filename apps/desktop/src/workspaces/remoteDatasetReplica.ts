@@ -13,6 +13,27 @@ import { credentialScopedOperation } from "./credentialScopedOperation";
 const MAX_BYTES = 1024 * 1024;
 export class DatasetCopyOfflineError extends Error {}
 
+/**
+ * Whether the relay itself refused this owner access to the Collection: a 403 or 404 with its own JSON refusal.
+ * A 401, or the relay asking the person to sign in again, is a session to renew. A 401, 403 or 404 without that
+ * refusal comes from something in front of the relay, such as a proxy, a captive portal or Tailscale Serve.
+ * The copy stays for both.
+ */
+async function accessEnded(response: Response, signal: AbortSignal): Promise<boolean> {
+  if (response.status !== 403 && response.status !== 404) return false;
+  const refusal = (await readBoundedJson(response, 16 * 1024, signal).catch(() => null)) as {
+    ok?: unknown;
+    error?: unknown;
+    code?: unknown;
+  } | null;
+  return (
+    refusal?.ok === false &&
+    typeof refusal.error === "string" &&
+    typeof refusal.code === "string" &&
+    refusal.code !== "sign_in_again"
+  );
+}
+
 /** Only fetch transport failures permit stale reads; invalid responses and lost access never do. */
 export function createRemoteDatasetReplicaSource(input: {
   workspaceId: string;
@@ -89,7 +110,9 @@ export function createRemoteDatasetReplicaSource(input: {
       try {
         session.assertCurrent();
         signal.throwIfAborted();
-        if ([401, 403, 404].includes(response.status)) {
+        if (await accessEnded(response, signal)) {
+          session.assertCurrent();
+          signal.throwIfAborted();
           await input.onAccessLost();
           throw Error("This Collection copy is no longer available.");
         }

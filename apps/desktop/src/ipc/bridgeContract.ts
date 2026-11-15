@@ -481,6 +481,13 @@ export const CollectionRulesChangedEvent = z.strictObject({
 });
 export type CollectionRulesChangedEvent = z.infer<typeof CollectionRulesChangedEvent>;
 
+// No Collection: the saved Collections list changed.
+export const CollectionCopyChangedEvent = z.strictObject({
+  workspaceId: WORKSPACE_ID,
+  datasetId: z.uuid().optional(),
+});
+export type CollectionCopyChangedEvent = z.infer<typeof CollectionCopyChangedEvent>;
+
 export const RevealWorkspaceFolderPayload = WorkspaceIdPayload.extend({
   recoveryCopies: z.boolean().optional(),
 });
@@ -9442,6 +9449,9 @@ export interface DohcDesktopBridge
   // A change to a Collection's fields or rules applied, from any window or
   // the CLI: a page that shows that Collection reads it again.
   onCollectionRulesChanged(listener: (event: CollectionRulesChangedEvent) => void): () => void;
+  // This computer's copy of a syncing workspace's Collection, or its saved
+  // Collections list, came up to date from the server: what shows it reads again.
+  onCollectionCopyChanged(listener: (event: CollectionCopyChangedEvent) => void): () => void;
   // A press this window made settled, or waits. Each event names its
   // workspace; a window on another workspace drops it.
   onAutomationRunSettled(listener: (event: AutomationRunSettledEvent) => void): () => void;

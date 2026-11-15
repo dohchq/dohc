@@ -246,6 +246,40 @@ describe("shell tab surfaces", () => {
     await waitFor(() => expect(bridge.listCollections.mock.calls.length).toBeGreaterThan(reads));
   });
 
+  it("reads the Collections list again when this computer's saved list changes, and clears its notice once a read works", async () => {
+    const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
+    const copyChanged: Array<(event: { workspaceId: string; datasetId?: string }) => void> = [];
+    bridge.onCollectionCopyChanged.mockImplementation((listener) => {
+      copyChanged.push(listener);
+      return () => undefined;
+    });
+    const list = bridge.dataset.getMockImplementation()!;
+    bridge.dataset.mockImplementationOnce(async () => {
+      throw new Error(
+        "This workspace's Collections are on sync.example.test, which dohc can't reach.",
+      );
+    });
+    renderShell(bridge);
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell-error").textContent).toContain(
+        "Could not read Collections.",
+      ),
+    );
+    bridge.dataset.mockImplementation(list);
+    const reads = bridge.dataset.mock.calls.length;
+    act(() => {
+      for (const listener of copyChanged) listener({ workspaceId: "ws-shell-other" });
+      for (const listener of copyChanged)
+        listener({ workspaceId: "ws-shell-test", datasetId: crypto.randomUUID() });
+    });
+    expect(bridge.dataset.mock.calls.length).toBe(reads);
+    act(() => {
+      for (const listener of copyChanged) listener({ workspaceId: "ws-shell-test" });
+    });
+    await waitFor(() => expect(screen.queryByTestId("workspace-shell-error")).toBeNull());
+    expect(bridge.dataset.mock.calls.length).toBeGreaterThan(reads);
+  });
+
   it("reads Home's Collection folders again once a fresh walk replaces the cached listing", async () => {
     const bridge = makeBridge(Promise.resolve(storedStateWithTabs([])));
     const fresh = Promise.withResolvers<Awaited<ReturnType<typeof bridge.listWorkspaceFiles>>>();

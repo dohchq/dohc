@@ -5,7 +5,8 @@ import {
   parseRecoveryJournalRecord,
   type DatasetReplicaSource,
 } from "@dohc/app-backend-runtime/replica";
-import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
+import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import type { DatasetCursor, JournalExportRecord } from "@dohc/app-backend-runtime/journal";
 import {
   describeApprovedDataset,
   parseDatasetRevision,
@@ -14,17 +15,29 @@ import {
 } from "@dohc/security-contract/dataset";
 import { createHash } from "node:crypto";
 import { atomicReplaceFile } from "../atomicReplaceFile";
-import { open, rename, rm } from "node:fs/promises";
+import { mkdtemp, open, rename, rm } from "node:fs/promises";
 import { readOwnedFile } from "@dohc/workspace-core/owned-file";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 import type { DatasetCatchUp, OwnerDatasetData } from "./remoteDataset";
 import { DatasetCopyOfflineError } from "./remoteDatasetReplica";
 import { CollectionServerUnreachableError } from "../ipc/errorWords";
 
 // A read this soon after this computer's own change brought the copy to the
-// server's head shows that change without asking the server again.
+// server's head needs no update from the server.
 const FRESH_AFTER_CHANGE_MS = 1000;
+
+// A copy that can't reach its server asks again this often, so it shows the
+// server coming back without anyone asking.
+const RETRY_MS = 10_000;
+
+// A server that has not answered within this long reads as out of reach until it does.
+const SLOW_MS = 2_000;
+
+// A computer with no copy yet waits this long for the server, once.
+const FIRST_OPEN_MS = 15_000;
+
+const CHUNK = 1024 * 1024;
 
 // The connection never opened, so the server cannot have the change.
 const NEVER_SENT = new Set([
@@ -34,6 +47,12 @@ const NEVER_SENT = new Set([
   "ENETUNREACH",
   "EHOSTUNREACH",
 ]);
+/** A change made while the server is out of reach: refused here, so nothing ran and nothing waits to be sent. */
+const offline = (host: string) =>
+  new AppBackendRuntimeError({
+    code: "offline",
+    message: `dohc didn't save this change. This Collection is read-only until ${host} is reachable.`,
+  });
 function neverSent(error: unknown): boolean {
   if (!(error instanceof TypeError)) return false;
   const cause: unknown = error.cause;
@@ -42,14 +61,133 @@ function neverSent(error: unknown): boolean {
   return cause instanceof AggregateError ? cause.errors.every(code) : code(cause);
 }
 
-/** An owner-bound copy retains committed reads only. It never becomes a second writer. */
-export async function createOwnerDatasetCopy(options: Parameters<typeof createDatasetReplica>[0]) {
-  const replica = await createDatasetReplica(options);
+type Capture = Awaited<ReturnType<DatasetReplicaSource["capture"]>>;
+type Page = Awaited<ReturnType<DatasetReplicaSource["page"]>>;
+
+/**
+ * Brings in everything the copy's catch-up needs from the server into files in
+ * `directory`: the captured checkpoint for a copy that has none, then the
+ * journal from there or from `after` to the captured head. The catch-up, which
+ * reads wait behind, then takes it from those files instead of the network,
+ * and checks everything it applies. Anything not fetched here is left to the
+ * catch-up to fetch.
+ */
+async function prefetch(
+  source: DatasetReplicaSource,
+  head: Capture,
+  after: DatasetCursor | undefined,
+  directory: string,
+  signal: AbortSignal,
+): Promise<DatasetReplicaSource> {
+  const pages: Array<{ page: Page; first: number }> = [],
+    files = new Map<number, string>(),
+    through = parseRecoveryCursor(head.head);
+  const fetchRecord = async (record: JournalExportRecord) => {
+    const path = join(directory, `${record.cursor.revision}`),
+      file = await open(path, "wx", 0o600);
+    try {
+      for (let offset = 0; offset < record.byteLength; offset += CHUNK) {
+        const length = Math.min(CHUNK, record.byteLength - offset),
+          chunk = await source.blob({ record, offset, length, signal });
+        if (!(chunk instanceof Uint8Array) || chunk.length !== length) return false;
+        await file.write(chunk);
+      }
+    } finally {
+      await file.close();
+    }
+    files.set(record.cursor.revision, path);
+    return true;
+  };
+  fetching: {
+    if (!after) {
+      const checkpoint = parseRecoveryJournalRecord(head.checkpoint);
+      if (!(await fetchRecord(checkpoint))) break fetching;
+      after = checkpoint.cursor;
+    }
+    while (after.revision < through.revision) {
+      const page = await source.page({ through: head.head, after, limit: 32, signal });
+      const records = page.records.map((raw) => parseRecoveryJournalRecord(raw));
+      if (!records.length) break;
+      for (const record of records) if (!(await fetchRecord(record))) break fetching;
+      pages.push({ page, first: records[0]!.cursor.revision });
+      after = records.at(-1)!.cursor;
+    }
+  }
+  return {
+    capture: async () => head,
+    // A change's own answer can move the copy partway into a page, so a page is
+    // served from wherever the copy's cursor now is.
+    async page(input) {
+      const next = input.after.revision + 1,
+        staged = pages.find(
+          ({ page, first }) => first <= next && next < first + page.records.length,
+        );
+      if (!staged || input.after.hostEpoch !== through.hostEpoch) return source.page(input);
+      return {
+        through: staged.page.through,
+        after: input.after,
+        records: staged.page.records.slice(next - staged.first),
+      };
+    },
+    async blob(input) {
+      const path = files.get(input.record.cursor.revision);
+      if (!path) return source.blob(input);
+      const file = await open(path, "r");
+      try {
+        const bytes = Buffer.alloc(input.length),
+          { bytesRead } = await file.read(bytes, 0, input.length, input.offset);
+        return bytes.subarray(0, bytesRead);
+      } finally {
+        await file.close();
+      }
+    },
+  };
+}
+
+/**
+ * An owner-bound copy retains committed reads only. It never becomes a second
+ * writer. A read shows what the copy kept at once and brings the copy up to
+ * date from the server afterwards; `onChanged` hears when that changed what a
+ * read shows. Only a computer with no copy yet waits for the server to read.
+ */
+export async function createOwnerDatasetCopy(
+  options: Parameters<typeof createDatasetReplica>[0] & {
+    onChanged?(): void;
+    retryMs?: number;
+    slowMs?: number;
+    firstOpenMs?: number;
+  },
+) {
+  const {
+    onChanged,
+    retryMs = RETRY_MS,
+    slowMs = SLOW_MS,
+    firstOpenMs = FIRST_OPEN_MS,
+    ...replicaOptions
+  } = options;
+  const replica = await createDatasetReplica(replicaOptions);
+  // The replica removes a leftover work- folder when it opens, so an update's spool never outlives a crash.
+  const replicaRoot = resolve(options.directory);
   let denied = false,
     closing = false,
     confirmed: { cursor: DatasetCursor; atMs: number } | null = null,
     changes = 0,
-    pending = 0;
+    pending = 0,
+    // Whether the server answered the last time the copy asked; null before it asks.
+    reachable: boolean | null = null,
+    // The server has not answered the running update for `slowMs`.
+    slow = false,
+    // Why the last update failed, for a read that has no copy to show.
+    failure: unknown = null,
+    // The server and session of the latest request, which updates use.
+    latest: {
+      remote: OwnerDatasetData;
+      source: DatasetReplicaSource;
+      signal: AbortSignal;
+    } | null = null,
+    updating: Promise<void> | null = null,
+    retry: ReturnType<typeof setTimeout> | undefined;
+  const lifetime = new AbortController();
   const confirmations = new Set<Promise<unknown>>();
   const trackConfirmation = <T>(work: () => Promise<T>): Promise<T> => {
     const result = work();
@@ -103,15 +241,236 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
   };
   const revoke = async () => {
     denied = true;
+    clearTimeout(retry);
     await metadataPending;
     await replica.revoke();
     await clearArchive();
   };
-  const archivedResult = () =>
-    archived && {
-      dataset: { ...archived.dataset, archived: true },
-      copy: { offline: true, savedAtMs: archived.savedAtMs, host },
+  const authorize = (signal: AbortSignal) => {
+    options.assertOwner();
+    signal.throwIfAborted();
+    if (denied || closing)
+      throw Error(
+        "This Collection copy is unavailable. Restore access, then reopen the workspace.",
+      );
+  };
+  const describe = (definitionJson: string): DatasetDescription => {
+    const approved = parseDatasetRevision(JSON.parse(definitionJson));
+    // The authority's own description projection: schema-only fields are not Collection controls.
+    return parseDatasetDescription(
+      describeApprovedDataset(approved, approved.definition.operations),
+    );
+  };
+  const describeRemote = (
+    remote: OwnerDatasetData,
+    signal: AbortSignal,
+    datasetId: string,
+    metadata?: { includeArchived?: boolean },
+  ) =>
+    enqueueMetadata(async () => {
+      authorize(signal);
+      const dataset = await remote.describe(datasetId, metadata);
+      authorize(signal);
+      if ("archived" in dataset && dataset.archived === true) {
+        const value = markerSchema.parse({ binding, dataset, savedAtMs: Date.now() });
+        let temporary: string | undefined;
+        try {
+          await atomicReplaceFile(
+            markerPath,
+            async (path) => {
+              temporary = path;
+              const file = await open(path, "wx", 0o600);
+              try {
+                await file.writeFile(JSON.stringify(value));
+                await file.sync();
+              } finally {
+                await file.close();
+              }
+            },
+            {
+              rename: async (source, target) => {
+                authorize(signal);
+                await rename(source, target);
+              },
+            },
+          );
+          archived = value;
+        } finally {
+          if (temporary) await rm(temporary, { force: true });
+        }
+      } else if (archived) await clearArchive();
+      authorize(signal);
+      return dataset;
+    });
+  // What a read shows now, without asking the server.
+  const offlineNow = () => reachable === false || slow;
+  const kept = () => {
+    const copy = (savedAtMs: number) => ({ offline: offlineNow(), savedAtMs, host });
+    if (archived)
+      return {
+        dataset: { ...archived.dataset, archived: true },
+        copy: copy(archived.savedAtMs),
+      };
+    const state = replica.state();
+    return (
+      state && { dataset: describe(state.checkpoint.definitionJson), copy: copy(state.savedAtMs) }
+    );
+  };
+  const fresh = () => {
+    const state = replica.state();
+    return (
+      !!state &&
+      !!confirmed &&
+      equalRecoveryCursor(state.cursor, confirmed.cursor) &&
+      Date.now() - confirmed.atMs < FRESH_AFTER_CHANGE_MS
+    );
+  };
+  const tellChanged = () => {
+    if (!closing) onChanged?.();
+  };
+  const scheduleRetry = () => {
+    if (retry !== undefined || closing || denied) return;
+    retry = setTimeout(() => {
+      retry = undefined;
+      void update();
+    }, retryMs);
+    retry.unref?.();
+  };
+  const unreachableNow = () => {
+    const was = reachable;
+    reachable = false;
+    scheduleRetry();
+    if (was !== false) tellChanged();
+  };
+  // Whether the copy moved from at or behind the captured head to past it.
+  const passed = (captured: Capture | undefined, from: DatasetCursor | undefined) => {
+    const cursor = replica.state()?.cursor;
+    if (!captured || !cursor) return false;
+    const through = parseRecoveryCursor(captured.head);
+    const at = (c: DatasetCursor) => c.hostEpoch === through.hostEpoch;
+    return (
+      (!from || (at(from) && from.revision <= through.revision)) &&
+      at(cursor) &&
+      cursor.revision >= through.revision
+    );
+  };
+  const updateOnce = async ({ remote, source, signal }: NonNullable<typeof latest>) => {
+    const before = {
+      cursor: replica.state()?.cursor,
+      offline: offlineNow(),
+      archived: archived !== null,
     };
+    const both = AbortSignal.any([signal, lifetime.signal]);
+    const waiting = setTimeout(() => {
+      if (reachable === false || closing) return;
+      slow = true;
+      tellChanged();
+    }, slowMs);
+    waiting.unref?.();
+    let head: Capture | undefined;
+    try {
+      authorize(signal);
+      // Reads wait for the copy's catch-up, so the copy fetches what it needs first.
+      head = await source.capture(both);
+      const spool = await mkdtemp(join(replicaRoot, "work-"));
+      try {
+        const fetched = await prefetch(source, head, replica.state()?.cursor, spool, both);
+        clearTimeout(waiting);
+        await replica.catchUp(fetched, both);
+      } finally {
+        await rm(spool, { recursive: true, force: true });
+      }
+      // The host refuses capture while archived; a successful capture confirms restoration.
+      if (archived)
+        await enqueueMetadata(async () => {
+          authorize(signal);
+          if (archived) await clearArchive();
+        });
+      reachable = true;
+      failure = null;
+    } catch (error) {
+      if (denied) {
+        failure = error;
+        await revoke();
+        tellChanged();
+        return;
+      }
+      if (closing || both.aborted) return;
+      failure = error;
+      if (passed(head, before.cursor)) {
+        // This computer's own change took the copy past the head this update
+        // captured, so the catch-up had nothing to bring in.
+        reachable = true;
+        failure = null;
+      } else if (error instanceof DatasetCopyOfflineError) reachable = false;
+      else {
+        // The server answered with an error, as a front whose server is down
+        // does, or the copy could not take what it sent. Only an archived
+        // Collection, whose capture the host refuses, explains it. Otherwise
+        // the copy may not be current, and asks again.
+        try {
+          await describeRemote(remote, signal, options.scope.datasetId, { includeArchived: true });
+          reachable = archived !== null;
+          if (archived) failure = null;
+        } catch {
+          if (closing || both.aborted) return;
+          reachable = false;
+        }
+      }
+    } finally {
+      clearTimeout(waiting);
+      // A cancelled update says the copy is no longer waiting on the server.
+      if (slow && (closing || both.aborted)) {
+        slow = false;
+        tellChanged();
+      }
+    }
+    const shownOffline = before.offline || slow;
+    slow = false;
+    if (reachable === false) scheduleRetry();
+    const cursor = replica.state()?.cursor;
+    if (
+      shownOffline !== (reachable === false) ||
+      before.archived !== (archived !== null) ||
+      (before.cursor && cursor
+        ? !equalRecoveryCursor(before.cursor, cursor)
+        : before.cursor !== cursor)
+    )
+      tellChanged();
+  };
+  // Brings the copy up to date from the server, one update at a time. It never
+  // fails: `failure` and `reachable` say how it went.
+  const update = (): Promise<void> => {
+    if (!latest || closing || denied) return Promise.resolve();
+    return (updating ??= updateOnce(latest)
+      .catch(() => undefined)
+      .finally(() => {
+        updating = null;
+      }));
+  };
+  // What a read shows: the copy at once, while an update runs. Only a computer
+  // with no copy yet waits for the server, once, up to `firstOpenMs`.
+  const current = async (signal: AbortSignal) => {
+    authorize(signal);
+    const shown = kept();
+    if (shown) {
+      if (!fresh()) void update();
+      return shown;
+    }
+    let limit: ReturnType<typeof setTimeout> | undefined;
+    const answered = await Promise.race([
+      update().then(() => true),
+      new Promise<false>((resolve) => {
+        limit = setTimeout(() => resolve(false), firstOpenMs);
+      }),
+    ]).finally(() => clearTimeout(limit));
+    authorize(signal);
+    const now = kept();
+    if (now) return now;
+    if (!answered || failure === null || failure instanceof DatasetCopyOfflineError)
+      throw unreachable();
+    throw failure;
+  };
   return {
     // Called inside source requests. Revoke after catchUp settles, avoiding its serialized work queue.
     accessLost() {
@@ -120,6 +479,9 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
     revoke,
     close: async () => {
       closing = true;
+      clearTimeout(retry);
+      lifetime.abort();
+      await updating;
       await Promise.allSettled([...confirmations]);
       await metadataPending;
       await replica.close();
@@ -129,107 +491,15 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
       source: DatasetReplicaSource,
       signal: AbortSignal,
     ): OwnerDatasetData {
-      const authorize = () => {
-        options.assertOwner();
-        signal.throwIfAborted();
-        if (denied || closing)
-          throw Error(
-            "This Collection copy is unavailable. Restore access, then reopen the workspace.",
-          );
-      };
+      latest = { remote, source, signal };
       const selected = (datasetId: string) => {
-        authorize();
+        authorize(signal);
         if (datasetId !== options.scope.datasetId)
           throw Error("This copy belongs to another Collection.");
       };
-      const remoteDescribe: (
-        datasetId: string,
-        options?: { includeArchived?: boolean },
-      ) => ReturnType<OwnerDatasetData["describe"]> = remote.describe;
-      const describeRemote = (datasetId: string, metadata?: { includeArchived?: boolean }) =>
-        enqueueMetadata(async () => {
-          authorize();
-          const dataset = await remoteDescribe(datasetId, metadata);
-          authorize();
-          if ("archived" in dataset && dataset.archived === true) {
-            const value = markerSchema.parse({ binding, dataset, savedAtMs: Date.now() });
-            let temporary: string | undefined;
-            try {
-              await atomicReplaceFile(
-                markerPath,
-                async (path) => {
-                  temporary = path;
-                  const file = await open(path, "wx", 0o600);
-                  try {
-                    await file.writeFile(JSON.stringify(value));
-                    await file.sync();
-                  } finally {
-                    await file.close();
-                  }
-                },
-                {
-                  rename: async (source, target) => {
-                    authorize();
-                    await rename(source, target);
-                  },
-                },
-              );
-              archived = value;
-            } finally {
-              if (temporary) await rm(temporary, { force: true });
-            }
-          } else if (archived) await clearArchive();
-          authorize();
-          return dataset;
-        });
-      const describe = (definitionJson: string): DatasetDescription => {
-        const approved = parseDatasetRevision(JSON.parse(definitionJson));
-        // The authority's own description projection: schema-only fields are not Collection controls.
-        return parseDatasetDescription(
-          describeApprovedDataset(approved, approved.definition.operations),
-        );
-      };
-      const capture = async () => {
-        authorize();
-        let offline = false;
-        const priorArchived = archived;
-        try {
-          const saved = replica.state();
-          if (
-            priorArchived ||
-            !saved ||
-            !confirmed ||
-            !equalRecoveryCursor(saved.cursor, confirmed.cursor) ||
-            Date.now() - confirmed.atMs >= FRESH_AFTER_CHANGE_MS
-          )
-            await replica.catchUp(source, signal);
-          // The host refuses replica capture while archived; a successful capture confirms restoration.
-          if (priorArchived)
-            await enqueueMetadata(async () => {
-              authorize();
-              if (archived === priorArchived) await clearArchive();
-            });
-        } catch (error) {
-          if (denied) {
-            await revoke();
-            throw error;
-          }
-          authorize();
-          if (!(error instanceof DatasetCopyOfflineError)) throw error;
-          offline = true;
-        }
-        if (offline && archived) return archivedResult()!;
-        authorize();
-        const state = replica.state();
-        if (!state) throw unreachable();
-        return {
-          dataset: describe(state.checkpoint.definitionJson),
-          copy: { offline, savedAtMs: state.savedAtMs, host },
-        };
-      };
       // The change's response carries the journal after the copy's cursor, which the
       // copy checks and applies as if it had asked for it. Anything else waits for
-      // the next read's catch-up.
+      // the next update.
       const applyCatchUp = async (catchUp: DatasetCatchUp) => {
         const saved = replica.state();
         if (!saved || catchUp.records.length !== catchUp.changesets.length) return;
@@ -257,7 +527,7 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
         input: Parameters<OwnerDatasetData["invoke"]>[0],
         after: DatasetCursor,
       ) => {
-        // Until this change's own journal reaches the head, a read asks the server.
+        // Until this change's own journal reaches the head, a read waits for the server.
         // Changes in flight together can commit in any order, so only a change that
         // overlapped no other can vouch for the head its journal reached.
         const alone = pending++ === 0,
@@ -268,25 +538,41 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
           try {
             result = await remote.invoke({ ...input, after });
           } catch (error) {
-            authorize();
-            if (neverSent(error))
-              throw Error(
-                `dohc didn't save this change. This Collection is read-only until ${host} is reachable.`,
-                { cause: error },
-              );
-            if (error instanceof TypeError) throw unreachable();
+            authorize(signal);
+            if (neverSent(error)) {
+              unreachableNow();
+              throw offline(host);
+            }
+            if (error instanceof TypeError) {
+              // The server may have taken it; the copy shows it once the server answers.
+              unreachableNow();
+              throw unreachable();
+            }
+            // Any other answer, as from a front whose server is down, may mean the
+            // server is gone, which an update finds out.
+            void update();
             throw error;
           }
-          authorize();
+          if (reachable === false) {
+            reachable = true;
+            tellChanged();
+          } else reachable = true;
+          authorize(signal);
           const { catchUp, ...committed } = result;
           const head = catchUp
             ? await applyCatchUp(catchUp).catch(() => {
-                // The change is saved on the server; the next read catches the copy up.
+                // The change is saved on the server; the next update brings the copy up to date.
                 return null;
               })
             : null;
-          if (head && alone && mine === changes) confirmed = { cursor: head, atMs: Date.now() };
-          authorize();
+          if (head && alone && mine === changes) {
+            confirmed = { cursor: head, atMs: Date.now() };
+            // Windows showing the copy read it again, as for a change an agent made.
+            tellChanged();
+          }
+          // An update that starts after this change brings it in, and says so.
+          else void (updating ?? Promise.resolve()).then(update);
+          authorize(signal);
           return committed;
         } finally {
           pending--;
@@ -324,62 +610,38 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
                 return trackConfirmation(async () => {
                   const result = await remote.deletionStatus!(input);
                   if (result.deleted) await revoke();
-                  else authorize();
+                  else authorize(signal);
                   return result;
                 });
               },
             }
           : {}),
-        async inspect(datasetId, metadata?: { includeArchived?: boolean }) {
+        async inspect(datasetId) {
           selected(datasetId);
-          try {
-            const dataset = await describeRemote(datasetId, metadata);
-            authorize();
-            if ("archived" in dataset && dataset.archived === true) return { dataset };
-          } catch (error) {
-            authorize();
-            if (!(error instanceof TypeError)) {
-              try {
-                await source.capture(signal);
-              } catch (captureError) {
-                if (denied) {
-                  await revoke();
-                  throw captureError;
-                }
-              }
-              throw error;
-            }
-            // The replica source independently classifies network failure and detects revoked access.
-          }
-          return capture();
+          return current(signal);
         },
         async describe(datasetId, metadata?: { includeArchived?: boolean }) {
           selected(datasetId);
           // Sidebar discovery reads bounded metadata, never every Collection's database bytes.
+          const shown = kept();
+          if (shown) {
+            if (!fresh()) void update();
+            return shown.dataset;
+          }
           try {
-            const dataset = await describeRemote(datasetId, metadata);
-            authorize();
+            const dataset = await describeRemote(remote, signal, datasetId, metadata);
+            authorize(signal);
             return dataset;
           } catch (error) {
-            authorize();
-            try {
-              await source.capture(signal);
-            } catch (captureError) {
-              if (denied) {
-                await revoke();
-                throw captureError;
-              }
-              authorize();
-              if (
-                !(error instanceof TypeError) ||
-                !(captureError instanceof DatasetCopyOfflineError)
-              )
-                throw error;
-              if (archived) return archivedResult()!.dataset;
-              const saved = replica.state();
-              if (!saved) throw unreachable();
-              return describe(saved.checkpoint.definitionJson);
-            }
+            authorize(signal);
+            // Not answering is not a refusal, and asking again would wait as long.
+            if (error instanceof TypeError) throw unreachable();
+            // The replica source independently detects revoked access.
+            await source.capture(signal).catch(async (captureError: unknown) => {
+              if (!denied) return;
+              await revoke();
+              throw captureError;
+            });
             throw error;
           }
         },
@@ -395,7 +657,7 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
             )
           )
             return change(input, saved.cursor);
-          const state = await capture();
+          const state = await current(signal);
           if ("archived" in state.dataset && state.dataset.archived === true)
             throw Error(
               "This Collection is archived. Reconnect and restore it before using its records.",
@@ -404,14 +666,11 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
             (operation) => operation.operationId === input.operationId,
           );
           if (!operation?.readOnly) {
-            if (state.copy.offline)
-              throw Error(
-                `dohc didn't save this change. This Collection is read-only until ${host} is reachable.`,
-              );
+            if (state.copy.offline) throw offline(host);
             return change(input, replica.state()!.cursor);
           }
           const result = await replica.read(input);
-          authorize();
+          authorize(signal);
           return {
             result: result.result,
             revision: result.revision,

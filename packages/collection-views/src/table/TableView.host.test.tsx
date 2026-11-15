@@ -401,6 +401,25 @@ describe("what the host allows and has not confirmed", () => {
     expect(cell(0, 1).getAttribute("aria-selected")).toBe("true");
   });
 
+  it("shows the stored value on a change the Collection refused, with why, and starts the next edit from what was typed", () => {
+    const { store } = statusStore({
+      "rec-a:title": {
+        state: "refused",
+        value: "Typed",
+        reason: "Enter a shorter name.",
+        dismiss: vi.fn(),
+        stored: true,
+      },
+    });
+    const { cell, editor } = setup({ cellStatuses: store });
+    expect(cell(0, 0).querySelector('[data-cell-status="refused"]')?.getAttribute("title")).toBe(
+      "Enter a shorter name.",
+    );
+    expect(cell(0, 0).textContent).not.toContain("Typed");
+    fireEvent.click(cell(0, 0));
+    expect(editor()!.querySelector("input")!.value).toBe("Typed");
+  });
+
   it("acts on the value the cell shows: Space ticks off a box whose tick is pending", () => {
     const { store } = statusStore({ "rec-a:done": { state: "pending", value: true } });
     const { cell, press, onCellChange } = setup({ cellStatuses: store });

@@ -111,6 +111,10 @@ export function registerCloudIpcHandlers<
     workspaceId: string,
     remote: NonNullable<RegistryEntry["remote"]>,
   ): Promise<void>;
+  /** Sends the Collections this computer keeps to the workspace's server, or rejects with why one couldn't go. */
+  sendCollectionsUp(workspace: RegistryEntry, credentials: CloudCredentials): Promise<void>;
+  /** Sends, in the background, the Collections this computer still keeps once the workspace syncs. */
+  sendCollectionsUpLater(workspace: RegistryEntry): void;
   usableRoot(rootPath: string): string;
   readdir(rootPath: string): Promise<string[]>;
   mkdir(rootPath: string, options: { recursive: true }): Promise<unknown>;
@@ -156,6 +160,8 @@ export function registerCloudIpcHandlers<
     enrollWorkspaceKeyEnvelope,
     installWorkspaceDataKey,
     setWorkspaceRemote,
+    sendCollectionsUp,
+    sendCollectionsUpLater,
     usableRoot,
     readdir,
     mkdir,
@@ -333,10 +339,15 @@ export function registerCloudIpcHandlers<
               await installWorkspaceDataKey(workspace.rootPath, unwrapped),
           });
           operation.assertCurrent();
+          // Before any file syncs, so no other computer sees a Collection's folder before its records are on the server.
+          await sendCollectionsUp(workspace, credentials);
+          operation.assertCurrent();
           await setWorkspaceRemote(workspace.workspaceId, {
             serverUrl: credentials.serverUrl,
             ownerUserId: credentials.userId,
           });
+          // A Collection made here while the others went up stayed here. New ones go to the server from now on.
+          sendCollectionsUpLater(workspace);
           operation.assertCurrent();
           await activity.enableCloud(workspace);
           operation.assertCurrent();

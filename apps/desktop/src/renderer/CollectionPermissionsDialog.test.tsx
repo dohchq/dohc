@@ -92,28 +92,14 @@ it("grants only selected shareable actions from the displayed revision to a work
     }),
   );
 });
-it("says what moving to the server means before saving access to a Collection on this computer, then where it is", async () => {
-  let place: object = {
-    kind: "here",
-    server: { host: "sync.example.test", runs: "off", automations: 2, scheduledAutomations: 0 },
-  };
-  api.dataset.mockImplementation(async (input) =>
-    input.action === "permissions"
-      ? { kind: "permissions", permissions: [], nextCursor: null, place }
-      : ((place = { kind: "server", host: "sync.example.test" }), { kind: "grant-updated" }),
-  );
-  api.listRelayShares.mockResolvedValue({
-    granted: [
-      {
-        workspaceId: "w",
-        grantId: "grant",
-        recipientUserId: "person",
-        recipientEmail: "friend@example.test",
-        revokedAtMs: null,
-      },
-    ],
+it("says which server a Collection is on", async () => {
+  api.dataset.mockResolvedValue({
+    kind: "permissions",
+    permissions: [],
+    nextCursor: null,
+    place: { kind: "server", host: "sync.example.test" },
   });
-  const onMoved = vi.fn();
+  api.listRelayShares.mockResolvedValue({ granted: [] });
   render(
     <CollectionPermissionsDialog
       datasetPath="data/dataset.json"
@@ -121,42 +107,11 @@ it("says what moving to the server means before saving access to a Collection on
       dataset={dataset}
       onClose={vi.fn()}
       onError={vi.fn()}
-      onMoved={onMoved}
     />,
   );
-  expect((await screen.findByTestId("collection-move-note")).textContent).toBe(
-    "Saving moves this Collection to sync.example.test. Even on this computer, " +
-      "it then works only while sync.example.test is reachable. dohc can't move it back. Its automations stop, because sync.example.test doesn't run automations.",
-  );
-  expect(screen.queryByText(/Saving replaces this person's allowed actions/)).toBeNull();
-  fireEvent.change(screen.getByLabelText("Collection access person"), {
-    target: { value: "grant" },
-  });
-  fireEvent.click(screen.getByRole("checkbox", { name: /Read orders/ }));
-  fireEvent.click(screen.getByRole("button", { name: "Move and save access" }));
-  await waitFor(() =>
-    expect(api.dataset).toHaveBeenCalledWith(
-      expect.objectContaining({ action: "setGrant", moveToServer: true }),
-    ),
-  );
   await screen.findByText("This Collection is on sync.example.test.");
-  expect(onMoved).toHaveBeenCalledTimes(1);
-  expect(screen.queryByTestId("collection-move-note")).toBeNull();
+  expect(screen.getByText(/Saving replaces this person's allowed actions/)).toBeTruthy();
   expect(screen.getByRole("button", { name: "Save access" })).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("Collection access person"), {
-    target: { value: "grant" },
-  });
-  fireEvent.click(screen.getByRole("checkbox", { name: /Read orders/ }));
-  fireEvent.click(screen.getByRole("button", { name: "Save access" }));
-  await waitFor(() =>
-    expect(api.dataset.mock.calls.filter(([input]) => input.action === "setGrant")).toHaveLength(2),
-  );
-  await waitFor(() =>
-    expect(
-      screen.getByRole("button", { name: "Save access" }).getAttribute("aria-disabled"),
-    ).toBeNull(),
-  );
-  expect(onMoved).toHaveBeenCalledTimes(1);
 });
 const stopped = Error(
   "CollectionMoveUnfinishedError: This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.",

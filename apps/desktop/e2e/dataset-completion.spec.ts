@@ -16,7 +16,6 @@ import {
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
-  keepCollectionsHere,
   openExplorerHome,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
@@ -87,7 +86,6 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
-    await keepCollectionsHere(page, workspaceId);
     await page.keyboard.press("ControlOrMeta+k");
     await page
       .getByTestId("command-palette")

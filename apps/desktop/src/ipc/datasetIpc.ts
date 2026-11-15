@@ -16,7 +16,6 @@ import {
   DatasetMigrationPreviewPage,
   DatasetDeletePreview,
   DatasetDeleted,
-  type DatasetListElsewhere,
   type DatasetListRefusal,
   type DatasetPlace,
 } from "@dohc/cli/dataset";
@@ -28,10 +27,7 @@ import { generateDatasetFormSources } from "../workspaces/datasetFormGenerator";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { datasetOwnerOnlyError } from "./errorWords";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
-import {
-  ServerCollectionsUnavailableError,
-  type OwnerDatasetData,
-} from "../workspaces/remoteDataset";
+import type { OwnerDatasetData } from "../workspaces/remoteDataset";
 import {
   approveLocalDatasetMigration,
   createLocalDatasetMigrations,
@@ -70,26 +66,8 @@ type Operation<W extends Workspace> = {
   assertCurrent(): void;
 };
 
-/**
- * On a computer that doesn't keep a workspace's Collections, the ones on its
- * signed-in server, and where the others are.
- */
-export interface ServerCollections {
-  data: OwnerDatasetData;
-  elsewhere: DatasetListElsewhere;
-}
-
 // Why this computer can't list the Collections, or null for any other error.
 function listRefusalOf(error: unknown): DatasetListRefusal | null {
-  if (error instanceof ServerCollectionsUnavailableError) {
-    const { elsewhere, failure } = error;
-    return {
-      kind: "server-unavailable",
-      words: elsewhere.message,
-      computer: elsewhere.computerLabel,
-      failure: failure.slice(0, 4096),
-    };
-  }
   if (!(error instanceof CollectionsRefusalError)) return null;
   const { refusal, message: words } = error;
   return refusal.kind === "elsewhere"
@@ -117,12 +95,6 @@ export function createDatasetHandler<
   hostForWorkspace(workspace: W, signal: AbortSignal): Promise<LocalDatasetHost>;
   /** Resolves the dataset's current authority. Remote failures must never fall back to local writes. */
   dataForWorkspace?(workspace: W, signal: AbortSignal): Promise<OwnerDatasetData>;
-  /**
-   * The Collections on this computer's server when another computer keeps
-   * the workspace's own, or null. Null leaves the local store to admit or
-   * refuse, as it does for the computer that keeps them.
-   */
-  serverCollectionsFor?(workspace: W, signal: AbortSignal): Promise<ServerCollections | null>;
   currentCredentialGeneration?(): number;
   namedDataForWorkspace?(
     workspace: W,
@@ -152,8 +124,6 @@ export function createDatasetHandler<
   automationName?(workspace: W, automationId: string): Promise<string | null>;
   /** Where a Collection is: only on this computer, or on the workspace's server. */
   collectionPlace?(workspace: W, datasetId: string, signal: AbortSignal): Promise<DatasetPlace>;
-  /** Moves a Collection that is only on this computer to the workspace's server for good. */
-  moveToServer?(workspace: W, datasetId: string, signal: AbortSignal): Promise<void>;
   collectionRulesChanged?(workspaceId: string, datasetId: string): void;
 }) {
   const migrations = new Map<
@@ -397,8 +367,6 @@ export function createDatasetHandler<
             (input.action === "approve" || input.action === "approveMigration")
           )
             throw new Error("Automations cannot approve Collection rules.");
-          if (agent && agent.depth > 0 && input.action === "setGrant" && input.moveToServer)
-            throw new Error("Automations cannot move a Collection to the server.");
           const approvalAgent = agent
             ? (agent.approvalAgent ?? {
                 kind: "agent" as const,
@@ -541,17 +509,10 @@ export function createDatasetHandler<
             "discardMigration",
             "migrationPreviewPage",
           ].includes(input.action);
-          // Creating, approving and recovering stay with the computer that keeps the Collections.
-          const server =
-            readsData && dependencies.serverCollectionsFor
-              ? await dependencies.serverCollectionsFor(operation.workspace, operation.signal)
-              : null;
-          current();
           const openData = async () =>
-            server?.data ??
-            (readsData && dependencies.dataForWorkspace
+            readsData && dependencies.dataForWorkspace
               ? await dependencies.dataForWorkspace(operation.workspace, operation.signal)
-              : await localHost());
+              : await localHost();
           if (input.action === "list") {
             try {
               const data = await openData();
@@ -567,7 +528,6 @@ export function createDatasetHandler<
               return {
                 kind: "list" as const,
                 ...(await addressPage(result, approvedFolder)),
-                ...(server ? { elsewhere: server.elsewhere } : {}),
               };
             } catch (error) {
               current();
@@ -895,29 +855,16 @@ export function createDatasetHandler<
             return { kind: "permissions" as const, ...result, ...(place ? { place } : {}) };
           }
           if (input.action === "setGrant" || input.action === "removeGrant") {
-            // A person reaches a Collection through the workspace's server, so it moves there first, once its owner agrees.
-            const place =
-              input.action === "setGrant"
-                ? await dependencies.collectionPlace?.(
-                    operation.workspace,
-                    input.datasetId,
-                    operation.signal,
-                  )
-                : undefined;
-            current();
-            if (input.action === "setGrant" && place?.kind === "here") {
-              if (!place.server || !dependencies.moveToServer)
-                throw new Error("Sync this workspace with a server before giving a person access.");
-              if (!input.moveToServer)
-                throw new Error(
-                  `Giving a person access moves this Collection to ${place.server.host}. It then works only while ${place.server.host} is reachable, and dohc can't move it back. Send moveToServer: true to agree.`,
-                );
-              await dependencies.moveToServer(
+            // A person reaches a Collection through the workspace's server.
+            if (input.action === "setGrant") {
+              const place = await dependencies.collectionPlace?.(
                 operation.workspace,
                 input.datasetId,
                 operation.signal,
               );
               current();
+              if (place?.kind === "here")
+                throw new Error("Sync this workspace with a server before giving a person access.");
             }
             if (!("setGrant" in data) || !data.setGrant)
               throw new Error("Collection access is unavailable on this computer.");

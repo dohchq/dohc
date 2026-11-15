@@ -1,15 +1,24 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as renderBare,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import { deferred } from "../testing/deferred";
-import type { ReactNode } from "react";
+import type { ReactElement, ReactNode } from "react";
 import type {
   AutomationRunSettledEvent,
   FindDatasetCollectionResult,
   ListCollectionAutomationsResult,
 } from "../ipc/bridgeContract";
 import { ConnectedTransactionalCollection } from "./ConnectedTransactionalCollection";
+import { WorkspaceSessionProvider } from "./workspace/workspaceSession";
 import { resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
 import { resetKeptAutomationDraftsForTests } from "./collections/AutomationsPanel";
 import type {
@@ -23,6 +32,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { openPersistentAppBackend } from "../../../../packages/app-backend-runtime/src/persistent";
+
+// The page reads inside the shell's workspace session.
+const render = (ui: ReactElement) =>
+  renderBare(ui, {
+    wrapper: ({ children }) => (
+      <WorkspaceSessionProvider workspaceId="workspace-a">{children}</WorkspaceSessionProvider>
+    ),
+  });
 
 const backend = vi.hoisted(() => ({
   dataset: vi.fn(),
@@ -54,6 +71,9 @@ const backend = vi.hoisted(() => ({
   onAutomationHoldsChanged: vi.fn(() => () => undefined),
   onCollectionRulesChanged: vi.fn(
     (_listener: (event: { workspaceId: string; datasetId: string }) => void) => () => undefined,
+  ),
+  onCollectionCopyChanged: vi.fn(
+    (_listener: (event: { workspaceId: string; datasetId?: string }) => void) => () => undefined,
   ),
   settled: [] as Array<(event: AutomationRunSettledEvent) => void>,
   onAutomationRunSettled: vi.fn(),
@@ -957,6 +977,243 @@ it("reads the records again in place when runs in its workspace end, however the
   // The quiet read, not the one that shows a loading line.
   expect(input.getAttribute("data-records-version")).toBe("1");
 });
+it("shows its kept copy brought up to date in place, and leaves read-only by itself once the server is reachable", async () => {
+  const copyChanged: Array<(event: { workspaceId: string; datasetId?: string }) => void> = [];
+  backend.onCollectionCopyChanged.mockImplementation((listener) => {
+    copyChanged.push(listener);
+    return () => undefined;
+  });
+  backend.dataset.mockResolvedValue({
+    kind: "description",
+    dataset,
+    copy: { offline: true, host: "sync.example.test" },
+  });
+  render(
+    <ConnectedTransactionalCollection
+      workspaceId="workspace-a"
+      datasetPath="data/dataset.json"
+      tableId={id(2)}
+      onError={vi.fn()}
+      onFormCreated={vi.fn()}
+      onOpenFile={vi.fn()}
+      onOpenScheduleSettings={vi.fn()}
+    />,
+  );
+  const input = await screen.findByLabelText("Collection view state");
+  await waitFor(() => expect(input.getAttribute("data-records-version")).toBe("1"));
+  expect(screen.queryByRole("button", { name: "Create form" })).toBeNull();
+  const changed = (workspaceId: string, datasetId: string) =>
+    act(() => {
+      for (const listener of copyChanged) listener({ workspaceId, datasetId });
+    });
+  const describes = () =>
+    backend.dataset.mock.calls.filter(([request]) => request.action === "describe").length;
+  changed("workspace-b", id(1));
+  changed("workspace-a", id(9));
+  expect(describes()).toBe(1);
+
+  backend.dataset.mockResolvedValue({ kind: "description", dataset, copy: { offline: false } });
+  changed("workspace-a", id(1));
+  await screen.findByRole("button", { name: "Create form" });
+  // The table reads its records again in place, without the loading line.
+  expect(input.getAttribute("data-records-changed")).toBe("1");
+  expect(input.getAttribute("data-records-version")).toBe("1");
+});
+
+it("shows a slow quiet read's answer when another change arrives during it", async () => {
+  const copyChanged: Array<(event: { workspaceId: string; datasetId?: string }) => void> = [];
+  backend.onCollectionCopyChanged.mockImplementation((listener) => {
+    copyChanged.push(listener);
+    return () => undefined;
+  });
+  backend.dataset.mockResolvedValue({
+    kind: "description",
+    dataset,
+    copy: { offline: true, host: "sync.example.test" },
+  });
+  render(
+    <ConnectedTransactionalCollection
+      workspaceId="workspace-a"
+      datasetPath="data/dataset.json"
+      tableId={id(2)}
+      onError={vi.fn()}
+      onFormCreated={vi.fn()}
+      onOpenFile={vi.fn()}
+      onOpenScheduleSettings={vi.fn()}
+    />,
+  );
+  const input = await screen.findByLabelText("Collection view state");
+  await waitFor(() => expect(input.getAttribute("data-records-version")).toBe("1"));
+  const changed = () =>
+    act(() => {
+      for (const listener of copyChanged)
+        listener({ workspaceId: "workspace-a", datasetId: id(1) });
+    });
+  const slow = deferred<unknown>();
+  backend.dataset.mockReturnValueOnce(slow.promise as never);
+  changed();
+  // Another change arrives while that read is under way, and any read after it never answers.
+  backend.dataset.mockReturnValue(new Promise(() => undefined) as never);
+  changed();
+  await act(async () => slow.resolve({ kind: "description", dataset, copy: { offline: false } }));
+  await screen.findByRole("button", { name: "Create form" });
+  expect(input.getAttribute("data-records-changed")).toBe("1");
+});
+
+describe("a quiet read beside one the page started", () => {
+  const copyChanged: Array<(event: { workspaceId: string; datasetId?: string }) => void> = [];
+  const changed = () =>
+    act(() => {
+      for (const listener of copyChanged)
+        listener({ workspaceId: "workspace-a", datasetId: id(1) });
+    });
+  async function open(props: { onError?: () => void; onSettled?: (row: string) => void } = {}) {
+    copyChanged.length = 0;
+    backend.onCollectionCopyChanged.mockImplementation((listener) => {
+      copyChanged.push(listener);
+      return () => undefined;
+    });
+    backend.dataset.mockResolvedValue({
+      kind: "description",
+      dataset,
+      copy: { offline: true, host: "sync.example.test" },
+    });
+    render(
+      <ConnectedTransactionalCollection
+        workspaceId="workspace-a"
+        datasetPath="data/dataset.json"
+        tableId={id(2)}
+        onError={props.onError ?? vi.fn()}
+        onSettled={props.onSettled}
+        onFormCreated={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenScheduleSettings={vi.fn()}
+      />,
+    );
+    const input = await screen.findByLabelText("Collection view state");
+    await waitFor(() => expect(input.getAttribute("data-records-version")).toBe("1"));
+    return input;
+  }
+
+  it("keeps the quiet read's answer when the page's own read, started before it, answers last", async () => {
+    const input = await open();
+    const manual = deferred<unknown>();
+    backend.dataset.mockReturnValueOnce(manual.promise as never);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+    backend.dataset.mockResolvedValueOnce({
+      kind: "description",
+      dataset,
+      copy: { offline: false },
+    });
+    changed();
+    await screen.findByRole("button", { name: "Create form" });
+    await act(async () =>
+      manual.resolve({
+        kind: "description",
+        dataset,
+        copy: { offline: true, host: "sync.example.test" },
+      }),
+    );
+    await waitFor(() => expect(input.getAttribute("data-records-version")).toBe("2"));
+    expect(screen.getByRole("button", { name: "Create form" })).toBeTruthy();
+  });
+
+  it("reports nothing when the page's own read fails after a quiet read started later showed the Collection", async () => {
+    const onError = vi.fn();
+    const input = await open({ onError });
+    const manual = deferred<unknown>();
+    backend.dataset.mockReturnValueOnce(manual.promise as never);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+    backend.dataset.mockResolvedValueOnce({
+      kind: "description",
+      dataset,
+      copy: { offline: false },
+    });
+    changed();
+    await screen.findByRole("button", { name: "Create form" });
+    await act(async () => manual.reject(Error("Disk busy")));
+    expect(onError).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Create form" })).toBeTruthy();
+    expect(input.getAttribute("data-fields")).toBeTruthy();
+  });
+
+  it("still shows a refusal the page's own read met after a quiet read started later showed the Collection", async () => {
+    await open();
+    const manual = deferred<unknown>();
+    backend.dataset.mockReturnValueOnce(manual.promise as never);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+    backend.dataset.mockResolvedValueOnce({
+      kind: "description",
+      dataset,
+      copy: { offline: false },
+    });
+    changed();
+    await screen.findByRole("button", { name: "Create form" });
+    await act(async () =>
+      manual.reject(
+        Error(
+          "Error invoking remote method 'desktop:dataset': CollectionsRefusalError [collections-replaced]: Another copy replaced this computer's Collections.",
+        ),
+      ),
+    );
+    expect((await screen.findByTestId("collection-refusal")).textContent).toContain(
+      "Another copy replaced",
+    );
+  });
+
+  it("takes back the page's failed-read row when a quiet read then succeeds", async () => {
+    const onError = vi.fn(),
+      onSettled = vi.fn();
+    await open({ onError, onSettled });
+    backend.dataset.mockRejectedValueOnce(Error("Disk busy"));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
+    const row = "collection-open:data/dataset.json";
+    await waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        "Could not open this Collection.",
+        expect.anything(),
+        expect.any(Function),
+        row,
+      ),
+    );
+    onSettled.mockClear();
+    changed();
+    await waitFor(() => expect(onSettled).toHaveBeenCalledWith(row));
+  });
+});
+
+it("asks for the Collection again while it is open, so a change made elsewhere reaches it", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  try {
+    backend.dataset.mockResolvedValue({ kind: "description", dataset, copy: { offline: false } });
+    const { unmount } = render(
+      <ConnectedTransactionalCollection
+        workspaceId="workspace-a"
+        datasetPath="data/dataset.json"
+        tableId={id(2)}
+        onError={vi.fn()}
+        onFormCreated={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenScheduleSettings={vi.fn()}
+      />,
+    );
+    const input = await screen.findByLabelText("Collection view state");
+    await waitFor(() => expect(input.getAttribute("data-records-version")).toBe("1"));
+    const describes = () =>
+      backend.dataset.mock.calls.filter(([request]) => request.action === "describe").length;
+    expect(describes()).toBe(1);
+    act(() => vi.advanceTimersByTime(10_000));
+    await waitFor(() => expect(describes()).toBe(2));
+    // A quiet read: no loading line.
+    expect(input.getAttribute("data-records-version")).toBe("1");
+    unmount();
+    act(() => vi.advanceTimersByTime(30_000));
+    expect(describes()).toBe(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it("keeps the page mounted through successful and failed metadata refreshes", async () => {
   backend.dataset.mockResolvedValue({ kind: "description", dataset });
   const onError = vi.fn();
@@ -2367,51 +2624,21 @@ describe("a Collection this computer cannot use", () => {
 });
 
 describe("a read that waited for this Collection's move", () => {
-  it("files one row naming the Collection, and takes it back when a save that moves the Collection reads it again", async () => {
+  it("files one row naming the Collection, and takes it back when the Collection reads again", async () => {
     const waited = Error(
       "CollectionMoveUnfinishedError [waited]: This Collection didn't finish moving to sync.example.test. Its records are kept on this computer.",
     );
-    const shareable: DatasetDescription = {
-      ...dataset,
-      operations: [{ ...dataset.operations[0]!, access: "helper" }],
-    };
     let describes = 0;
     backend.dataset.mockImplementation(async (input: { action: string }) => {
       if (input.action === "describe") {
         describes += 1;
         if (describes === 2) throw waited;
-        return { kind: "description", dataset: shareable };
+        return { kind: "description", dataset };
       }
-      if (input.action === "permissions")
-        return {
-          kind: "permissions",
-          permissions: [],
-          nextCursor: null,
-          place: {
-            kind: "here",
-            server: {
-              host: "sync.example.test",
-              runs: "off",
-              automations: 0,
-              scheduledAutomations: 0,
-            },
-          },
-        };
       return { kind: "grant-updated" };
     });
-    // Another request that waited for the move: the save leaves it to its own Try again.
+    // Another request that waited for the move: the read again leaves it to its own Try again.
     backend.findDatasetCollection.mockRejectedValueOnce(waited);
-    backend.listRelayShares.mockResolvedValue({
-      granted: [
-        {
-          workspaceId: "workspace-a",
-          grantId: "grant",
-          recipientUserId: "person",
-          recipientEmail: "friend@example.test",
-          revokedAtMs: null,
-        },
-      ],
-    });
     const onError = vi.fn(),
       onSettled = vi.fn();
     render(
@@ -2443,13 +2670,7 @@ describe("a read that waited for this Collection's move", () => {
       ),
     );
     onSettled.mockClear();
-    fireEvent.click(screen.getByRole("button", { name: "Manage access" }));
-    await screen.findByRole("option", { name: /friend@example.test/ });
-    fireEvent.change(screen.getByLabelText("Collection access person"), {
-      target: { value: "grant" },
-    });
-    fireEvent.click(screen.getByRole("checkbox", { name: /Create/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Move and save access" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh records" }));
     await waitFor(() => expect(describes).toBe(3));
     await waitFor(() => expect(onSettled).toHaveBeenCalledWith(row));
     expect(backend.findDatasetCollection).toHaveBeenCalledTimes(1);

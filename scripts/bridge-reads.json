@@ -55,7 +55,6 @@
     "apps/desktop/src/renderer/OpenSharedView.tsx | getDefaultShareRoot",
     "apps/desktop/src/renderer/OpenSharedView.tsx | getRelayReceivedShare",
     "apps/desktop/src/renderer/OwnerAppPublication.tsx | dataset:list",
-    "apps/desktop/src/renderer/OwnerAppPublication.tsx | dataset:permissions",
     "apps/desktop/src/renderer/OwnerRestoreDialog.tsx | ownerRestore:options",
     "apps/desktop/src/renderer/OwnerRestoreDialog.tsx | ownerRestore:status",
     "apps/desktop/src/renderer/OwnerRestoreDialog.tsx | ownerRestore:status #2",
