@@ -18,6 +18,7 @@ import type { StorageContext } from "./storage/context";
 import { createLiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import {
   createServiceHostEnrollmentRoutes,
+  isServiceHostEnrollmentPath,
   discoverServiceHostDocuments,
 } from "./serviceHostEnrollmentRoutes";
 import { createServiceHostReplication } from "./serviceHostReplication";
@@ -1099,6 +1100,10 @@ it("serves a finished retirement's F and journal to the workspace owner alone", 
     })}`;
   const journal = (values: Record<string, string> = {}) =>
     f.handle(f.request("GET", undefined, {}, query(values)));
+  // The relay sends these routes only the paths this matcher accepts.
+  expect(
+    isServiceHostEnrollmentPath(new URL(f.request("GET", undefined, {}, query({})).url).pathname),
+  ).toBe(true);
   const retired = async () =>
     (
       (await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()) as {

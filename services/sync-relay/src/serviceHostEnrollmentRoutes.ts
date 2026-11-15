@@ -297,9 +297,12 @@ async function keptEditsAction(
   return { ok: true };
 }
 
-/** The paths the enrollment routes answer: the workspace's live host and the owner's actions on edits the server kept. */
+/**
+ * The paths the enrollment routes answer: the workspace's live host, the owner's actions on edits
+ * the server kept, and a retired note's journal.
+ */
 export const isServiceHostEnrollmentPath = (pathname: string) =>
-  /^\/sync\/[^/]+\/live-host(?:\/kept-edits)?$/.test(pathname);
+  /^\/sync\/[^/]+\/live-host(?:\/kept-edits|\/journal)?$/.test(pathname);
 
 type KeptEditsHost = Pick<
   Awaited<ReturnType<typeof startSelfHostedLiveHost>>,
