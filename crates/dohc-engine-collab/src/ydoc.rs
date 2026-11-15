@@ -8659,8 +8659,9 @@ fn render_inline(
             .iter()
             .position(|part| !is_break(part))
             .unwrap_or(rest.len());
-        // Before another line, only spaces and tabs make it blank. A backslash
-        // followed only by whitespace to the paragraph's end is literal.
+        // Before another line, only spaces and tabs make it blank. On the
+        // paragraph's last line any whitespace does, as a backslash followed
+        // only by whitespace to the end is literal.
         let mut shows_before_line = false;
         let mut shows_before_end = false;
         for part in &rest[first_line..] {

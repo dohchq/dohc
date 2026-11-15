@@ -1325,7 +1325,9 @@ function showsLineAfter(content: JSONContent[], index: number): boolean {
     if (lineEnd !== -1) return /[^ \t]/u.test(line + node.text.slice(0, lineEnd));
     line += node.text;
   }
-  // A backslash followed only by whitespace to the paragraph's end is literal.
+  // Before another line, only spaces and tabs make it blank. On the paragraph's
+  // last line any whitespace does, as a backslash followed only by whitespace
+  // to the end is literal.
   return next < content.length ? /[^ \t]/u.test(line) : /\S/u.test(line);
 }
 
