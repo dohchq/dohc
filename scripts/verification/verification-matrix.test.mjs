@@ -495,7 +495,7 @@ test(
       ["pr", "js", "desktop-cancelled"],
       // The gallery is required only where it runs, so its missing-proof case exists only there.
       ...(process.platform === "win32" ? [["pr", "js", "gallery-missing"]] : []),
-      // A change to one package selects only the JavaScript gate locally, which runs that package and its dependents, and only the repository tests that read the source tree. In CI it also selects the iOS UI tests.
+      // A change to one package selects only the JavaScript gate locally, which runs that package and its dependents, and only the repository tests that read the source tree.
       ["pr", null, null, "packages/fixture/src/index.ts"],
       ["pr", "js", null, "packages/fixture/src/index.ts", false, true],
       ["pr", null, null, null, true],
@@ -532,7 +532,7 @@ test(
             const js = mode === "pr" && job !== "rust";
             // The lockfile is an Android input too. A --job run keeps only its own gate, and Android never runs locally.
             const android = mode === "pr" && !job && (full || changed === "pnpm-lock.yaml");
-            // The iOS UI tests also read every package, so a package's source selects them, in CI only.
+            // The iOS UI tests read the lockfile but not this fixture package, and run in CI only.
             const ios = mode === "pr" && !job && (full || changed === "pnpm-lock.yaml");
             // The lockfile is a tooling input; a package's source is not. An empty diff narrows nothing.
             const repositoryTests =
