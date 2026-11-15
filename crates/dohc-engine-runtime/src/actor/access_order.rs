@@ -697,6 +697,55 @@ fn folder_range(folder: &str) -> (String, String) {
     }
 }
 
+/// Find the paths in exactly `folder` that may name its rule, without reading
+/// the folder's other paths. `exists(low, high)` says whether a stored path
+/// falls in that range; `read(low, high, name_start)` reads the paths there
+/// whose name, from character `name_start`, holds no slash.
+///
+/// A name folds to `access.yaml` only if its characters before the first one
+/// that is not ASCII spell `access.yaml` in some case. So the walk seeks only
+/// the prefixes some stored path has, and reads names only where they leave
+/// ASCII or once they spell the rule in full.
+fn walk_rule_names(
+    folder: &str,
+    mut exists: impl FnMut(&str, &str) -> Result<bool, RuntimeError>,
+    mut read: impl FnMut(&str, &str, i64) -> Result<(), RuntimeError>,
+) -> Result<(), RuntimeError> {
+    let (base, end) = folder_range(folder);
+    // `substr` counts characters; a name starts after the folder's slash.
+    let name_start = i64::try_from(base.chars().count() + 1).unwrap_or(i64::MAX);
+    // Just past every path that starts with `prefix`, which ends in ASCII.
+    let past = |prefix: &str| {
+        let mut bytes = prefix.as_bytes().to_vec();
+        match bytes.pop() {
+            Some(last) if last < 0x7f => {
+                bytes.push(last + 1);
+                String::from_utf8(bytes).unwrap_or_else(|_| end.clone())
+            }
+            _ => end.clone(),
+        }
+    };
+    let mut prefixes = vec![base.clone()];
+    while let Some(prefix) = prefixes.pop() {
+        let high = past(&prefix);
+        let Some(&letter) = ACCESS_RULE_FILE.as_bytes().get(prefix.len() - base.len()) else {
+            // Spelled in full; only dots and spaces may follow.
+            read(&prefix, &high, name_start)?;
+            continue;
+        };
+        // A name that leaves ASCII here folds by Unicode: read each one.
+        read(&format!("{prefix}\u{80}"), &high, name_start)?;
+        let (lower, upper) = (letter.to_ascii_lowercase(), letter.to_ascii_uppercase());
+        for next in std::iter::once(lower).chain((upper != lower).then_some(upper)) {
+            let candidate = format!("{prefix}{}", char::from(next));
+            if exists(&candidate, &past(&candidate))? {
+                prefixes.push(candidate);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The paths the store holds for `folder`'s rule files.
 fn committed_rule_paths(
     conn: &Connection,
@@ -704,34 +753,42 @@ fn committed_rule_paths(
     version: &str,
     folder: &str,
 ) -> Result<Vec<String>, RuntimeError> {
-    let (low, high) = folder_range(folder);
-    // `substr` counts characters; a name starts after the folder's slash.
-    let name_start = folder.chars().count() + usize::from(!folder.is_empty()) + 1;
-    let mut query = conn
+    let mut probe = conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
+             AND path>=?3 AND path<?4)",
+        )
+        .map_err(StorageError::corrupt_public)?;
+    let mut scan = conn
         .prepare_cached(
             "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
              AND path>=?3 AND path<?4 AND instr(substr(path, ?5), '/')=0",
         )
         .map_err(StorageError::corrupt_public)?;
-    let paths = query
-        .query_map(
-            params![
-                workspace,
-                version,
-                low,
-                high,
-                i64::try_from(name_start).unwrap_or(i64::MAX)
-            ],
-            |row| row.get::<_, String>(0),
-        )
-        .map_err(StorageError::corrupt_public)?;
     let mut rules = Vec::new();
-    for path in paths {
-        let path = path.map_err(StorageError::corrupt_public)?;
-        if is_rule_of(&path, folder) {
-            rules.push(path);
-        }
-    }
+    walk_rule_names(
+        folder,
+        |low, high| {
+            probe
+                .query_row(params![workspace, version, low, high], |row| row.get(0))
+                .map_err(|error| StorageError::corrupt_public(error).into())
+        },
+        |low, high, name_start| {
+            let paths = scan
+                .query_map(params![workspace, version, low, high, name_start], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(StorageError::corrupt_public)?;
+            for path in paths {
+                let path = path.map_err(StorageError::corrupt_public)?;
+                if is_rule_of(&path, folder) {
+                    rules.push(path);
+                }
+            }
+            Ok(())
+        },
+    )?;
+    rules.sort_unstable();
     Ok(rules)
 }
 
@@ -956,22 +1013,40 @@ fn materialization_pending(
     workspace: &str,
     folder: &str,
 ) -> Result<bool, RuntimeError> {
-    let (low, high) = folder_range(folder);
-    let mut query = conn
+    let mut probe = conn
         .prepare_cached(
-            "SELECT target_path FROM materialization_jobs WHERE workspace_id IN (?1,'') \
-             AND status='pending' AND target_path>=?2 AND target_path<?3",
+            "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') \
+             AND status='pending' AND target_path>=?2 AND target_path<?3)",
         )
         .map_err(StorageError::corrupt_public)?;
-    let paths = query
-        .query_map(params![workspace, low, high], |row| row.get::<_, String>(0))
+    let mut scan = conn
+        .prepare_cached(
+            "SELECT target_path FROM materialization_jobs WHERE workspace_id IN (?1,'') \
+             AND status='pending' AND target_path>=?2 AND target_path<?3 \
+             AND instr(substr(target_path, ?4), '/')=0",
+        )
         .map_err(StorageError::corrupt_public)?;
-    for path in paths {
-        if is_rule_of(&path.map_err(StorageError::corrupt_public)?, folder) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    let mut pending = false;
+    walk_rule_names(
+        folder,
+        |low, high| {
+            probe
+                .query_row(params![workspace, low, high], |row| row.get(0))
+                .map_err(|error| StorageError::corrupt_public(error).into())
+        },
+        |low, high, name_start| {
+            let paths = scan
+                .query_map(params![workspace, low, high, name_start], |row| {
+                    row.get::<_, String>(0)
+                })
+                .map_err(StorageError::corrupt_public)?;
+            for path in paths {
+                pending |= is_rule_of(&path.map_err(StorageError::corrupt_public)?, folder);
+            }
+            Ok(())
+        },
+    )?;
+    Ok(pending)
 }
 
 /// A rule file to commit: its bytes, or `None` to delete it.
@@ -1672,6 +1747,91 @@ impl ActorHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule lookup seeks prefixes rather than reading every name in a
+    /// folder, and must still find each spelling a full read would.
+    #[test]
+    fn finds_every_spelling_of_a_rule_a_full_read_finds() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE path_aliases (workspace_id TEXT, version_id TEXT, path TEXT, \
+             object_id TEXT, PRIMARY KEY (workspace_id, version_id, path)); \
+             CREATE TABLE materialization_jobs (workspace_id TEXT, target_path TEXT, \
+             status TEXT, PRIMARY KEY (workspace_id, target_path))",
+        )
+        .unwrap();
+        let names = [
+            "access.yaml",
+            "ACCESS.YAML",
+            "Access.yaml.",
+            "access.yaml ",
+            "a\u{200B}ccess.yaml",
+            "\u{FF41}ccess.yaml",
+            "acce\u{DF}.yaml",
+            "acc\u{E9}ss.yaml",
+            "access.yaml.tmp",
+            "access.yml",
+            "apps",
+            "b.md",
+            "\u{65E5}\u{672C}.md",
+        ];
+        let mut paths = Vec::new();
+        for folder in ["", "T", "T/sub", "\u{65E5}\u{672C}"] {
+            for name in names {
+                let path = if folder.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{folder}/{name}")
+                };
+                paths.push(format!("{path}/access.yaml"));
+                paths.push(path);
+            }
+        }
+        paths.extend(["T0".to_owned(), "Tx/access.yaml".to_owned()]);
+        for path in &paths {
+            conn.execute(
+                "INSERT INTO path_aliases VALUES ('ws','main',?1,'o')",
+                [path],
+            )
+            .unwrap();
+            // Every rule but those in `T/sub` is still on its way to disk.
+            let status = if path.starts_with("T/sub/") {
+                "complete"
+            } else {
+                "pending"
+            };
+            conn.execute(
+                "INSERT INTO materialization_jobs VALUES ('ws',?1,?2)",
+                [path.as_str(), status],
+            )
+            .unwrap();
+        }
+        for folder in ["", "T", "T/sub", "T/apps", "\u{65E5}\u{672C}", "U"] {
+            assert_eq!(
+                materialization_pending(&conn, "ws", folder).unwrap(),
+                folder != "T/sub" && paths.iter().any(|path| is_rule_of(path, folder)),
+                "pending in {folder:?}"
+            );
+            let mut expected: Vec<String> = paths
+                .iter()
+                .filter(|path| is_rule_of(path, folder))
+                .cloned()
+                .collect();
+            expected.sort_unstable();
+            assert_eq!(
+                committed_rule_paths(&conn, "ws", "main", folder).unwrap(),
+                expected,
+                "folder {folder:?}"
+            );
+        }
+        assert_eq!(
+            committed_rule_paths(&conn, "ws", "main", "T")
+                .unwrap()
+                .len(),
+            7,
+            "seven of the names fold to the rule"
+        );
+    }
 
     /// Enrolment backfills history recorded before the workspace replicated.
     /// Rules go before the files they cover, and the last delete of a rule
