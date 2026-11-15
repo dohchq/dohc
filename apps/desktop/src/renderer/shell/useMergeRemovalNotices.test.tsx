@@ -155,6 +155,37 @@ describe("useMergeRemovalNotices", () => {
     });
   });
 
+  it("keeps the last Copy text clicked when an earlier one is still reading History", async () => {
+    const text = "long ".repeat(400);
+    const long = {
+      ...REMOVAL,
+      authorKnown: false,
+      quote: text.slice(0, 1024),
+      length: text.length,
+    };
+    const short = { ...REMOVAL, momentId: "moment-merge-removal-b", authorKnown: false };
+    const bridge = engine([long, short], { [REMOVAL.momentId]: text });
+    // History answers the first Copy only after the second has copied.
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const read = bridge.readEngineMoment.getMockImplementation()!;
+    let reading: Promise<unknown> = Promise.resolve();
+    bridge.readEngineMoment.mockImplementationOnce(
+      (input) => (reading = held.then(() => read(input))) as Promise<ReadEngineMomentResult>,
+    );
+    const copied = vi.fn<(text: string) => Promise<void>>().mockResolvedValue();
+    vi.stubGlobal("navigator", { clipboard: { writeText: copied } });
+    const shown = open();
+    await waitFor(() => expect(rows(shown.result)).toHaveLength(2));
+    const [first, second] = rows(shown.result);
+    act(() => shown.result.current.runShellErrorAction(first!.id));
+    act(() => shown.result.current.runShellErrorAction(second!.id));
+    release();
+    await act(() => reading);
+    expect(copied).toHaveBeenCalledExactlyOnceWith(" world");
+    expect(rows(shown.result)).toHaveLength(2);
+  });
+
   it("copies a short text as the engine sent it", async () => {
     const bridge = engine([{ ...REMOVAL, authorKnown: false }]);
     const copied = vi.fn<(text: string) => Promise<void>>().mockResolvedValue();

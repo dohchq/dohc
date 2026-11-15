@@ -156,8 +156,8 @@ fn record_kept_text_in(
 /// The most of a removal's text a status read carries, in UTF-16 units. The
 /// notice quotes less than this; Copy text reads the whole text from History.
 pub const MERGE_REMOVAL_QUOTE_UNITS: usize = 1024;
-/// The most removals one status read lists, oldest first. Dismissing one
-/// brings the next into the list.
+/// The most removals one status read lists: the newest, so each new removal
+/// is announced. Older ones stay in History.
 pub const MERGE_REMOVALS_LISTED: i64 = 100;
 
 /// Text a merge removed, kept until the person dismisses its notice.
@@ -195,8 +195,12 @@ pub fn merge_removals_in(
     validate_identifier(workspace_id, "workspace_id")?;
     let mut query = conn
         .prepare(
-            "SELECT moment_id,version_id,object_id,path,payload_before_blob_sha256,author_json IS NOT NULL
-             FROM moments WHERE workspace_id=?1 AND metadata_origin=?2 ORDER BY moment_order LIMIT ?3",
+            "SELECT moment_id,version_id,object_id,path,text_sha,author_known FROM (
+               SELECT moment_order,moment_id,version_id,object_id,path,
+                 payload_before_blob_sha256 AS text_sha,author_json IS NOT NULL AS author_known
+               FROM moments WHERE workspace_id=?1 AND metadata_origin=?2
+               ORDER BY moment_order DESC LIMIT ?3)
+             ORDER BY moment_order",
         )
         .map_err(DomainError::sql_corrupt)?;
     let rows = query

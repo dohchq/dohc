@@ -1365,7 +1365,7 @@ fn lane_first_local_export_uses_the_imported_state_as_its_bootstrap_preimage() {
 }
 
 #[test]
-fn a_status_read_quotes_each_removal_and_lists_at_most_a_hundred() {
+fn a_status_read_quotes_each_removal_and_lists_the_newest_hundred() {
     use dohc_engine_domain::store::{MERGE_REMOVAL_QUOTE_UNITS, MERGE_REMOVALS_LISTED};
     let (_scratch, _, mut store) = owner();
     write(&mut store, "note", "saved", "note.md", "Hello\n", "user", 2);
@@ -1377,7 +1377,7 @@ fn a_status_read_quotes_each_removal_and_lists_at_most_a_hundred() {
                 .unwrap()
                 .unwrap();
             for index in 0..=MERGE_REMOVALS_LISTED {
-                let removed = if index == 0 { long.as_str() } else { "x" };
+                let removed = if index == MERGE_REMOVALS_LISTED { long.as_str() } else { "x" };
                 dohc_engine_domain::record_merge_removal_in(
                     tx,
                     "ws",
@@ -1396,13 +1396,16 @@ fn a_status_read_quotes_each_removal_and_lists_at_most_a_hundred() {
         .read_with(|conn| dohc_engine_domain::merge_removals_in(conn, "ws"))
         .unwrap();
     assert_eq!(removals.len() as i64, MERGE_REMOVALS_LISTED);
-    assert_eq!(removals[0].moment_id, "removal-0", "oldest first");
+    // The oldest drops out, so the newest is announced; the list stays in order.
+    assert_eq!(removals[0].moment_id, "removal-1");
+    let newest = removals.last().unwrap();
+    assert_eq!(newest.moment_id, format!("removal-{MERGE_REMOVALS_LISTED}"));
     assert_eq!(
-        removals[0].quote,
+        newest.quote,
         format!("a{}", "😀".repeat(MERGE_REMOVAL_QUOTE_UNITS / 2 - 1))
     );
-    assert_eq!(removals[0].length, 1 + 2 * MERGE_REMOVAL_QUOTE_UNITS);
-    assert_eq!((removals[1].quote.as_str(), removals[1].length), ("x", 1));
+    assert_eq!(newest.length, 1 + 2 * MERGE_REMOVAL_QUOTE_UNITS);
+    assert_eq!((removals[0].quote.as_str(), removals[0].length), ("x", 1));
 }
 
 #[test]

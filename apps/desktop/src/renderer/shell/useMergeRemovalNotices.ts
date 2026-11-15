@@ -55,6 +55,8 @@ export function useMergeRemovalNotices(input: {
     const authors = new Map<string, string | undefined>();
     // The engine's newest list.
     let listed: readonly MergeRemoval[] = [];
+    // The newest Copy text click.
+    let copying = 0;
 
     // Only a removal whose dismissal the engine refused raises its toast again.
     const publish = (raised?: string) =>
@@ -79,6 +81,7 @@ export function useMergeRemovalNotices(input: {
       };
       const clipboard = navigator.clipboard;
       if (!clipboard) return failed(new Error("The clipboard is not available."));
+      const request = ++copying;
       if (removal.quote.length === removal.length) {
         clipboard.writeText(removal.quote).catch(failed);
         return;
@@ -87,6 +90,8 @@ export function useMergeRemovalNotices(input: {
       bridge()
         .readEngineMoment({ workspaceId, momentId: removal.momentId })
         .then(({ moment }) => {
+          // A later Copy, or leaving the workspace, wins over this one.
+          if (request !== copying || !here()) return;
           if (typeof moment?.beforeText !== "string")
             throw new Error("The text is too long to copy here. Open its change in History.");
           return clipboard.writeText(moment.beforeText);
