@@ -143,6 +143,7 @@ export function createWorkspaceEngineIpc<
         | "clearCaptureRecovery"
         | "retryHeldCapture"
         | "decideAccessRule"
+        | "undoAccessRule"
       >,
     ) => Promise<Result>,
   ): Promise<Result | null>;
@@ -918,7 +919,17 @@ export function createWorkspaceEngineIpc<
                 // A refusal, such as a rule that changed since the owner saw it,
                 // still records the holds the engine now lists, so the Notice
                 // shows the rule as it is.
-                const decided = await adapter.decideAccessRule(input).then(
+                const run =
+                  input.decision === "undo"
+                    ? adapter
+                        .undoAccessRule({
+                          versionId: input.versionId,
+                          folder: input.folder,
+                          ...input.undo,
+                        })
+                        .then(() => ({ kept: [], undo: null }))
+                    : adapter.decideAccessRule(input);
+                const decided = await run.then(
                   (result) => ({ result }),
                   (error: unknown) => ({ error }),
                 );

@@ -1190,6 +1190,12 @@ it("decodes folders whose access rule waits for the owner", () => {
       decodeWorkspaceResult(method, { folder: "team", decided: true, kept: [] }),
     ).toThrow(ProtocolShapeError);
   }
+  expect(
+    decodeWorkspaceResult(WORKSPACE_METHOD.captureUndoAccessRule, { folder: "team", undone: true }),
+  ).toEqual({ folder: "team", undone: true });
+  expect(() =>
+    decodeWorkspaceResult(WORKSPACE_METHOD.captureUndoAccessRule, { folder: "team" }),
+  ).toThrow(ProtocolShapeError);
 });
 
 it("decodes outside writes waiting for an open document", () => {

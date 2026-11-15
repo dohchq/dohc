@@ -1,5 +1,6 @@
 import type {
   AccessRuleDecisionParams,
+  AccessRuleUndoParams,
   HeldNoteChangeInput,
   HeldNoteChangeResult,
 } from "../workspace/workspaceWireContract";
@@ -1852,6 +1853,18 @@ export class VersionedLiveAdapter implements HistoryOperationsStore {
         : WORKSPACE_METHOD.captureRestoreAccessRule;
     const { versionId, folder, expectedSha256, expectedReason } = input;
     return this.workspaceRequest(method, { versionId, folder, expectedSha256, expectedReason });
+  }
+
+  /** Reverses a decision with the change it returned, while the folder's rule is still the one it left. */
+  async undoAccessRule(input: AccessRuleUndoParams) {
+    const { versionId, folder, path, text, expectedSha256 } = input;
+    return this.workspaceRequest(WORKSPACE_METHOD.captureUndoAccessRule, {
+      versionId,
+      folder,
+      path,
+      text,
+      expectedSha256,
+    });
   }
 
   async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {
