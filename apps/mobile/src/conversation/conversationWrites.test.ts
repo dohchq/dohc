@@ -1,0 +1,564 @@
+import { describe, expect, it, vi } from "vitest";
+import type { AccountState, SignIn } from "../server/account";
+import type { ChatWrite } from "../server/chatWrites";
+import { createServerClient } from "../server/client";
+import { createDurableFiles } from "../server/durableFiles";
+import { createOutbox, OutboxError, type Outbox, type OutboxState } from "../server/outbox";
+import { phoneWrites } from "../server/phoneWrites";
+import { durableDisk } from "../server/testDurableDisk";
+import { deferred, testServer, type Answer } from "../server/testServer";
+import {
+  blockedBy,
+  chatWrite,
+  clearSent,
+  clearStatus,
+  closePost,
+  createConversationWrites,
+  createWriteScope,
+  fieldChanged,
+  lanesOf,
+  type Draft,
+  type WriteActivation,
+  type WriteOutbox,
+} from "./conversationWrites";
+
+type Server = ReturnType<typeof testServer>;
+type Disk = ReturnType<typeof durableDisk>;
+
+const ORIGIN = "https://dohc.example.com";
+const ops = (result: unknown): Answer => ({
+  status: 200,
+  body: { ok: true, result, cursor: "0.1.1" },
+});
+const SAVED = ops({ ok: true, state: "saved", threadId: "thread-s" });
+const send = (body: string): ChatWrite => ({
+  operation: "send",
+  args: { streamId: "group-1", body },
+});
+const requests = (server: Server, operation: string) =>
+  server.calls
+    .filter((call) => call.path === `/sync/ws-1/ops/${operation}`)
+    .map((call) => call.body);
+
+const READY: OutboxState = {
+  status: "ready",
+  records: [],
+  aside: [],
+  unreadable: [],
+  deletion: "none",
+};
+
+/** An outbox that records what it was asked, and answers as each test says. */
+function fakeOutbox(state: OutboxState = READY, enqueue?: WriteOutbox["enqueue"]) {
+  const asked: string[] = [];
+  const outbox: WriteOutbox = {
+    state: () => state,
+    subscribe: () => () => undefined,
+    enqueue: (input) => {
+      asked.push("enqueue");
+      return enqueue ? enqueue(input) : Promise.reject(new Error("unexpected"));
+    },
+    retryEnqueue: () => {
+      asked.push("retryEnqueue");
+      return Promise.reject(new OutboxError("invalid"));
+    },
+    discard: () => {
+      asked.push("discard");
+      return Promise.resolve();
+    },
+    wake: () => {
+      asked.push("wake");
+    },
+  };
+  return { outbox, asked };
+}
+
+/** The phone's sign-in, as the account gives it, for the real outbox. */
+function fakeAccount() {
+  let state: AccountState = { status: "loading" };
+  const listeners = new Set<() => void>();
+  return {
+    state: () => state,
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => void listeners.delete(listener);
+    },
+    signIn(server: Server): SignIn {
+      const signIn: SignIn = {
+        origin: server.origin,
+        userId: "u-1",
+        email: "u-1@example.com",
+        isCurrent: () => true,
+        client: createServerClient({
+          origin: server.origin,
+          token: "tok-1",
+          fetch: server.fetch,
+          signal: new AbortController().signal,
+          onSignedOut: () => undefined,
+        }),
+      };
+      state = { status: "signed-in", signIn };
+      for (const listener of listeners) listener();
+      return signIn;
+    },
+  };
+}
+
+/** The real outbox over `disk`, signed in to `server`, with retry waits that never end on their own. */
+function launch(disk: Disk, server: Server): Outbox {
+  const outbox = createOutbox({
+    files: createDurableFiles(disk.launch()),
+    sleep: (_ms, signal) =>
+      new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("cut")))),
+  });
+  const account = fakeAccount();
+  outbox.follow(account);
+  account.signIn(server);
+  return outbox;
+}
+
+const ready = (outbox: Outbox) => vi.waitFor(() => expect(outbox.state().status).toBe("ready"));
+
+describe("the phone writes gate", () => {
+  it("is off in a build that doesn't turn it on", () => {
+    expect(phoneWrites).toBe(false);
+    expect(blockedBy(READY, phoneWrites)).toBe("off");
+  });
+
+  it("reaches no outbox call while off", async () => {
+    const { outbox, asked } = fakeOutbox(READY, () => Promise.reject(new Error("never")));
+    const writes = createConversationWrites({
+      outbox,
+      enabled: phoneWrites,
+      isCurrent: () => true,
+    });
+    expect(await writes.submit("ws-1", send("Hi"))).toEqual({ kind: "blocked" });
+    expect(await writes.retry("op-1")).toEqual({ kind: "blocked" });
+    expect(await writes.discard({ kind: "record", operationId: "op-1" })).toEqual({
+      kind: "blocked",
+    });
+    expect(asked).toEqual([]);
+  });
+});
+
+describe("blockedBy", () => {
+  it("holds every write while a Sign out's delete is owed, whatever the read says", () => {
+    for (const deletion of ["owed", "failed", "failed-unmarked"] as const)
+      expect(blockedBy({ ...READY, deletion }, true)).toBe("deleting");
+  });
+
+  it("waits for the records to be read", () => {
+    for (const status of ["loading", "locked", "failed"] as const)
+      expect(blockedBy({ ...READY, status }, true)).toBe(status);
+    expect(blockedBy(READY, true)).toBeNull();
+  });
+
+  it("asks the outbox nothing while a delete is owed", async () => {
+    const { outbox, asked } = fakeOutbox({ ...READY, deletion: "owed" });
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.submit("ws-1", send("Hi"))).toEqual({ kind: "blocked" });
+    expect(await writes.retry("op-1")).toEqual({ kind: "blocked" });
+    expect(await writes.discard({ kind: "record", operationId: "op-1" })).toEqual({
+      kind: "blocked",
+    });
+    expect(asked).toEqual([]);
+  });
+});
+
+describe("a stream's writes", () => {
+  it("send to the chat and post to the Group, by the engine channel", () => {
+    expect(chatWrite({ kind: "send", streamId: "ch-1" }, "Hi")).toEqual({
+      operation: "send",
+      args: { streamId: "ch-1", body: "Hi" },
+    });
+    expect(chatWrite({ kind: "post", groupId: "ch-1" }, "Body", "  Plan  ")).toEqual({
+      operation: "post",
+      args: { groupId: "ch-1", body: "Body", title: "Plan" },
+    });
+    expect(chatWrite({ kind: "post", groupId: "ch-1" }, "Body", "   ")).toEqual({
+      operation: "post",
+      args: { groupId: "ch-1", body: "Body" },
+    });
+  });
+
+  it("keep the body as typed, and make nothing of spaces alone", () => {
+    expect(chatWrite({ kind: "send", streamId: "ch-1" }, "  two\nlines ")).toMatchObject({
+      args: { body: "  two\nlines " },
+    });
+    expect(chatWrite({ kind: "send", streamId: "ch-1" }, " \n ")).toBeNull();
+  });
+
+  it("offer New post only in a Group that takes posts", () => {
+    expect(lanesOf({ groupKind: "group", canPost: true, canSend: true })).toEqual({
+      post: true,
+      send: true,
+    });
+    expect(lanesOf({ groupKind: "group", canPost: true, canSend: false })).toEqual({
+      post: true,
+      send: false,
+    });
+    expect(lanesOf({ groupKind: "dm", canPost: true, canSend: true })).toEqual({
+      post: false,
+      send: true,
+    });
+    expect(lanesOf({ groupKind: "agent", canPost: false, canSend: true }).post).toBe(false);
+  });
+});
+
+describe("submit", () => {
+  it("keeps the write in the outbox, and says so only once it is durable", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", "/sync/ws-1/ops/send", SAVED);
+    const outbox = launch(disk, server);
+    await ready(outbox);
+    const release = disk.holdWrites();
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    let outcome: unknown = null;
+    const pending = writes.submit("ws-1", send("Hello")).then((value) => {
+      outcome = value;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    // The composer keeps its text until the record would survive a crash.
+    expect(outcome).toBeNull();
+    release();
+    await pending;
+    expect(outcome).toEqual({ kind: "kept" });
+    await vi.waitFor(() => expect(requests(server, "send")).toHaveLength(1));
+    expect(requests(server, "send")[0]).toMatchObject({ streamId: "group-1", body: "Hello" });
+  });
+
+  it("does nothing on a second tap while the first is on its way", async () => {
+    const answer = deferred<Awaited<ReturnType<WriteOutbox["enqueue"]>>>();
+    const { outbox, asked } = fakeOutbox(READY, () => answer.promise);
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    const first = writes.submit("ws-1", send("Once"));
+    expect(await writes.submit("ws-1", send("Once"))).toEqual({ kind: "blocked" });
+    expect(asked).toEqual(["enqueue"]);
+    answer.resolve({} as Awaited<ReturnType<WriteOutbox["enqueue"]>>);
+    expect(await first).toEqual({ kind: "kept" });
+  });
+
+  it("keeps the text when the outbox kept nothing", async () => {
+    const disk = durableDisk();
+    const outbox = launch(disk, testServer());
+    await ready(outbox);
+    disk.failWrites = "write";
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.submit("ws-1", send("Lost"))).toEqual({ kind: "not-kept" });
+    expect(outbox.state().records).toEqual([]);
+  });
+
+  it("names a write the outbox may keep withheld, so Send retries that one operation", async () => {
+    const { outbox } = fakeOutbox(READY, () =>
+      Promise.reject(new OutboxError("indeterminate", "op-7")),
+    );
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.submit("ws-1", send("Maybe"))).toEqual({
+      kind: "withheld",
+      operationId: "op-7",
+    });
+  });
+
+  it("does nothing with an answer for an account or workspace no longer shown", async () => {
+    const answer = deferred<Awaited<ReturnType<WriteOutbox["enqueue"]>>>();
+    const { outbox } = fakeOutbox(READY, () => answer.promise);
+    let current = true;
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => current });
+    const pending = writes.submit("ws-1", send("Late"));
+    current = false;
+    answer.resolve({} as Awaited<ReturnType<WriteOutbox["enqueue"]>>);
+    expect(await pending).toEqual({ kind: "stale" });
+  });
+});
+
+describe("Send on a withheld message", () => {
+  it("sends the record's own operation and body", async () => {
+    const disk = durableDisk();
+    const server = testServer();
+    server.on("POST", "/sync/ws-1/ops/send", SAVED);
+    disk.files.set(
+      "m-000000000001",
+      JSON.stringify({
+        format: 1,
+        origin: ORIGIN,
+        accountId: "u-1",
+        workspaceId: "ws-1",
+        operationId: "op-kept",
+        messageId: "message-kept",
+        sequence: 1,
+        dependsOn: null,
+        target: { kind: "stream", id: "group-1" },
+        write: send("Kept text"),
+        stage: "queued",
+        attempted: false,
+        withheld: true,
+        pendingSinceMs: null,
+        result: null,
+      }),
+    );
+    const outbox = launch(disk, server);
+    await ready(outbox);
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.retry("op-kept")).toEqual({ kind: "kept" });
+    await vi.waitFor(() => expect(requests(server, "send")).toHaveLength(1));
+    expect(requests(server, "send")).toEqual([
+      { operationId: "op-kept", streamId: "group-1", body: "Kept text" },
+    ]);
+  });
+
+  it("stays withheld with Try again when the outbox can't keep it for sending", async () => {
+    const { outbox } = fakeOutbox(READY);
+    outbox.retryEnqueue = () => Promise.reject(new OutboxError("indeterminate", "op-1"));
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.retry("op-1")).toEqual({ kind: "not-kept" });
+  });
+});
+
+describe("Discard", () => {
+  it("says when a relaunch may still send the message", async () => {
+    const { outbox } = fakeOutbox(READY);
+    outbox.discard = () => Promise.reject(new OutboxError("withheld-in-memory", "op-1"));
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.discard({ kind: "record", operationId: "op-1" })).toEqual({
+      kind: "may-send",
+    });
+  });
+
+  it("deletes a record that can't be read by its handle", async () => {
+    const { outbox, asked } = fakeOutbox(READY);
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.discard({ kind: "unreadable", handle: "h-1" })).toEqual({
+      kind: "discarded",
+    });
+    expect(asked).toEqual(["discard"]);
+  });
+
+  it("deletes nothing when the workspace changes while its confirmation is open", async () => {
+    const { outbox, asked } = fakeOutbox(READY);
+    let current = true;
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => current });
+    const confirmation = deferred<boolean>();
+    const pending = confirmation.promise.then(() =>
+      writes.discard({ kind: "record", operationId: "op-1" }),
+    );
+    current = false;
+    confirmation.resolve(true);
+    expect(await pending).toEqual({ kind: "stale" });
+    expect(asked).toEqual([]);
+  });
+});
+
+describe("a screen no longer shown", () => {
+  it("asks the outbox nothing", async () => {
+    const { outbox, asked } = fakeOutbox(READY, () => Promise.reject(new Error("never")));
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => false });
+    expect(await writes.submit("ws-1", send("Hi"))).toEqual({ kind: "stale" });
+    expect(await writes.retry("op-1")).toEqual({ kind: "stale" });
+    expect(await writes.discard({ kind: "record", operationId: "op-1" })).toEqual({
+      kind: "stale",
+    });
+    expect(asked).toEqual([]);
+  });
+});
+
+describe("a sent draft", () => {
+  const sent: Draft = {
+    text: "A",
+    textRevision: 5,
+    title: "Plan",
+    titleRevision: 2,
+    chosen: "post",
+    chosenRevision: 1,
+  };
+  // What the native field reports when it clears the body sent: its next revision.
+  const fieldCleared = (draft: Draft): Draft => ({
+    ...draft,
+    text: "",
+    textRevision: sent.textRevision + 1,
+  });
+  const keptAndCleared = (current: Draft) =>
+    closePost(fieldCleared(clearSent(current, sent)), sent);
+
+  it("empties the title, then closes New post once the field clears, when nothing changed meanwhile", () => {
+    const kept = clearSent(sent, sent);
+    expect(kept).toEqual({ ...sent, title: "" });
+    expect(closePost(fieldCleared(kept), sent)).toMatchObject({
+      text: "",
+      title: "",
+      chosen: "send",
+    });
+  });
+
+  it("keeps a newer body a post, without the title sent, as the field keeps the body", () => {
+    const current = { ...sent, text: "B", textRevision: 6 };
+    expect(clearSent(current, sent)).toEqual({ ...current, title: "" });
+  });
+
+  it("keeps a newer title, and New post with it", () => {
+    const current = { ...sent, title: "Later", titleRevision: 3 };
+    expect(keptAndCleared(current)).toMatchObject({ title: "Later", chosen: "post" });
+  });
+
+  it("keeps a title edited away and back, and New post with it", () => {
+    const current = { ...sent, titleRevision: 4 };
+    expect(keptAndCleared(current)).toMatchObject({ title: "Plan", chosen: "post" });
+  });
+
+  it("keeps New post when it was closed and chosen again", () => {
+    const current = { ...sent, chosenRevision: 3 };
+    expect(keptAndCleared(current)).toMatchObject({ title: "", chosen: "post" });
+  });
+
+  it("keeps New post chosen after a message was sent", () => {
+    const message: Draft = { ...sent, title: "", chosen: "send" };
+    const current = { ...message, chosen: "post" as const, chosenRevision: 2 };
+    expect(closePost(fieldCleared(clearSent(current, message)), message)).toMatchObject({
+      chosen: "post",
+    });
+  });
+});
+
+describe("a clear asked of the field", () => {
+  const request = { revision: 5, token: 1 };
+
+  it("waits until the field answers, so a second Send can't replace it", () => {
+    expect(clearStatus(request, 5, 0)).toBe("waiting");
+  });
+
+  it("settles when the field clears for it", () => {
+    expect(clearStatus(request, 6, 0)).toBe("settled");
+  });
+
+  it("settles when a newer edit made the field refuse it", () => {
+    expect(clearStatus(request, 9, 0)).toBe("settled");
+  });
+
+  it("keeps waiting through an older change, or another request's refusal", () => {
+    expect(clearStatus(request, 4, 0)).toBe("waiting");
+    expect(clearStatus({ revision: 5, token: 2 }, 5, 1)).toBe("waiting");
+  });
+
+  it("asks nothing before the first send", () => {
+    expect(clearStatus({ revision: 0, token: 0 }, 0, 0)).toBe("settled");
+  });
+
+  it("stops waiting when the field refuses it at the same revision, and keeps Send off for that body", () => {
+    expect(clearStatus(request, 5, 1)).toBe("refused");
+  });
+
+  it("lets Send again once the body refused is edited", () => {
+    expect(clearStatus(request, 6, 1)).toBe("settled");
+  });
+});
+
+describe("a field change", () => {
+  const sent: Draft = {
+    text: "A",
+    textRevision: 5,
+    title: "",
+    titleRevision: 2,
+    chosen: "post",
+    chosenRevision: 1,
+  };
+  const request = { revision: 5, token: 1 };
+
+  it("keeps New post open when the field refuses the clear", () => {
+    const refusal = { text: "A", revision: 5, cleared: 0, refused: 1 };
+    expect(fieldChanged(sent, refusal, request, sent)).toEqual(sent);
+  });
+
+  it("closes New post only once the field clears for the request", () => {
+    const edit = { text: "", revision: 6, cleared: 0, refused: 0 };
+    expect(fieldChanged(sent, edit, request, sent)).toMatchObject({ chosen: "post" });
+    const accepted = { text: "", revision: 6, cleared: 1, refused: 0 };
+    expect(fieldChanged(sent, accepted, request, sent)).toMatchObject({
+      text: "",
+      textRevision: 6,
+      chosen: "send",
+    });
+  });
+});
+
+describe("a write scope", () => {
+  /** A controller for `activation`, as the screen makes one. */
+  const controller = (
+    outbox: WriteOutbox,
+    scope: ReturnType<typeof createWriteScope>,
+    activation: WriteActivation,
+  ) =>
+    createConversationWrites({ outbox, enabled: true, isCurrent: () => scope.shows(activation) });
+
+  it("stops a controller made for another chat in the same store", async () => {
+    const { outbox, asked } = fakeOutbox(READY);
+    const scope = createWriteScope();
+    const store = {};
+    const a = { store, target: "group-a" };
+    const b = { store, target: "group-b" };
+    const leave = scope.show(a);
+    const forA = controller(outbox, scope, a);
+    const confirmation = deferred<boolean>();
+    const pending = confirmation.promise.then(() =>
+      forA.discard({ kind: "record", operationId: "op-1" }),
+    );
+    leave();
+    scope.show(b);
+    confirmation.resolve(true);
+    expect(await pending).toEqual({ kind: "stale" });
+    expect(asked).toEqual([]);
+    expect(scope.shows(b)).toBe(true);
+  });
+
+  it("keeps a controller stopped when its chat is shown again", async () => {
+    const { outbox, asked } = fakeOutbox(READY);
+    const scope = createWriteScope();
+    const store = {};
+    const first = { store, target: "group-a" };
+    const leaveFirst = scope.show(first);
+    const forA = controller(outbox, scope, first);
+    const confirmation = deferred<boolean>();
+    const pending = confirmation.promise.then(() =>
+      forA.discard({ kind: "record", operationId: "op-1" }),
+    );
+    leaveFirst();
+    scope.show({ store, target: "group-b" })();
+    const again = { store, target: "group-a" };
+    scope.show(again);
+    confirmation.resolve(true);
+    expect(await pending).toEqual({ kind: "stale" });
+    expect(asked).toEqual([]);
+    expect(scope.shows(again)).toBe(true);
+  });
+
+  it("calls a held enqueue stale when its chat is shown again before it lands", async () => {
+    const answer = deferred<Awaited<ReturnType<WriteOutbox["enqueue"]>>>();
+    const { outbox } = fakeOutbox(READY, () => answer.promise);
+    const scope = createWriteScope();
+    const store = {};
+    const first = { store, target: "group-a" };
+    const leaveFirst = scope.show(first);
+    const pending = controller(outbox, scope, first).submit("ws-1", send("Late"));
+    leaveFirst();
+    scope.show({ store, target: "group-b" })();
+    scope.show({ store, target: "group-a" });
+    answer.resolve({} as Awaited<ReturnType<WriteOutbox["enqueue"]>>);
+    expect(await pending).toEqual({ kind: "stale" });
+  });
+
+  it("keeps a newer chat shown when an older one's end comes late", () => {
+    const scope = createWriteScope();
+    const store = {};
+    const leaveA = scope.show({ store, target: "group-a" });
+    const b = { store, target: "group-b" };
+    scope.show(b);
+    leaveA();
+    expect(scope.shows(b)).toBe(true);
+  });
+
+  it("shows nothing once the screen closes", () => {
+    const scope = createWriteScope();
+    const a = { store: {}, target: "group-a" };
+    scope.show(a)();
+    expect(scope.shows(a)).toBe(false);
+  });
+});

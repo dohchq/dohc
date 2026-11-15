@@ -62,6 +62,61 @@ export const phoneSyncBody: Record<keyof typeof syncProblemSentence, string> = {
 export const chatWords = {
   /** A message written while the server can't be reached, queued on this device. */
   waitingToSend: "Waiting to send",
+
+  // The phone's composer and the messages waiting on the phone.
+  send: "Send",
+  /** The send button's accessible name. */
+  sendMessage: "Send message",
+  newPost: "New post",
+  post: "Post",
+  title: "Title",
+  /** The composer's placeholder, and the name of its field. */
+  messageTo: (name: string) => `Message ${name}`,
+  /** A message's author while only this phone has it. */
+  you: "You",
+  /** A message on its way: a request may have reached the server. */
+  sending: "Sending",
+  /** The server has answered "pending" for a long time. It may still be saved. */
+  stillSending: "Still sending",
+  /** Kept on the phone, withheld: nothing sends it until Send. */
+  notSent: "This message has not been sent.",
+  /** Enqueue failed and nothing was kept: the text stays in the composer. */
+  notKept: "dohc could not keep this message on your phone.",
+  unlockToSend: "Unlock this phone to send messages",
+  /** The read of which messages a chat takes failed, so the composer can't show. */
+  lanesFailed: "dohc could not read what you can send in this chat.",
+  outboxUnreadable: "dohc could not read messages waiting on this phone.",
+  /** A record in the outbox that can't be read: nothing of its text, chat or workspace is known. */
+  unreadableMessage: "This message could not be read",
+  copyMessage: "Copy message",
+  discard: "Discard",
+  discardTitle: "Discard this message?",
+  /** Discard deletes the phone's copy only. The server may already have it. */
+  maySend: "It may still send.",
+  discardFailed: "dohc could not discard this message.",
+  /** Discard made neither the withheld record nor its delete durable. */
+  discardNotKept:
+    "dohc could not discard this message. It may send if you close dohc and open it again.",
+  /** Settings' link to every message waiting on this phone, and that screen's title. */
+  messagesOnPhone: "Messages on this phone",
+  noMessagesOnPhone: "No messages are waiting on this phone.",
+  /** A refused write's reason, as the relay names it, in plain words. */
+  refused: (reason: string): string => {
+    switch (reason) {
+      case "The message it replies to wasn't sent":
+        return "This message wasn't sent, because the message it replies to wasn't sent.";
+      case "This workspace changed on your server":
+        return "This message wasn't sent, because this workspace changed on your server.";
+      case "too old":
+        return "This message wasn't sent, because it waited too long.";
+      case "already answered":
+        return "This message wasn't sent, because another answer was chosen.";
+      default:
+        return "dohc could not send this message.";
+    }
+  },
+  /** The chat a message was for is gone, or this account can't reach it. */
+  missing: "This message wasn't sent, because dohc could not find its chat.",
 } as const;
 
 // A notice's time, as the desktop's Notices show it (apps/desktop/src/renderer/relativeTime.ts, which can move here).

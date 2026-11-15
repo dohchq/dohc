@@ -350,6 +350,51 @@ export function readStream(
   );
 }
 
+/** Which writes a chat's stream takes, as the server says for the account. */
+export interface StreamLanes {
+  readonly kind: "lanes";
+  readonly groupKind: ChatGroupKind;
+  readonly canPost: boolean;
+  readonly canSend: boolean;
+}
+
+/**
+ * The lanes of a chat's stream, from the server's context for the phone (`chatContext`, its stream form). The same
+ * answer names who can be mentioned and the latest wakes of its messages; the phone doesn't read those yet.
+ */
+export function readStreamLanes(
+  client: ServerClient,
+  workspaceId: string,
+  groupId: string,
+  signal: AbortSignal,
+): Promise<Read<StreamLanes | MissingChat>> {
+  return operation<StreamLanes | MissingChat>(
+    client,
+    workspaceId,
+    "chatContext",
+    { group: groupId },
+    (result) => {
+      const missing = missingChat(result);
+      if (missing) return missing;
+      if (!isFields(result) || result.ok !== true || !isFields(result.conversation)) return null;
+      const stream = result.conversation;
+      return stream.kind === "stream" &&
+        stream.groupId === groupId &&
+        isGroupKind(stream.groupKind) &&
+        typeof stream.canPost === "boolean" &&
+        typeof stream.canSend === "boolean"
+        ? {
+            kind: "lanes",
+            groupKind: stream.groupKind,
+            canPost: stream.canPost,
+            canSend: stream.canSend,
+          }
+        : null;
+    },
+    signal,
+  );
+}
+
 export interface ChatThread {
   readonly kind: "thread";
   readonly id: string;

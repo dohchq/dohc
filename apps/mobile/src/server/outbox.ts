@@ -299,6 +299,11 @@ function withThread(
 
 export function createOutbox(options: {
   readonly files: DurableFiles;
+  /**
+   * Whether the outbox sends anything. Off, it still reads its records, discards and deletes them at Sign out, but no
+   * record reaches the server, not even one an earlier build kept. Defaults to on.
+   */
+  readonly sends?: boolean;
   readonly now?: () => number;
   readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   /** The wait before trying again after `failures` failed or pending answers, or failed changes, in a row. */
@@ -307,6 +312,7 @@ export function createOutbox(options: {
   readonly stalledRetryMs?: number;
 }): Outbox {
   const { files } = options;
+  const sends = options.sends ?? true;
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? timerSleep;
   const retryMs =
@@ -663,7 +669,7 @@ export function createOutbox(options: {
    * already belongs to that thread's lane.
    */
   function pump() {
-    if (status !== "ready" || owed) return;
+    if (!sends || status !== "ready" || owed) return;
     const ordered = [...records.values()].sort((a, b) => a.sequence - b.sequence);
     const heads = new Map<string, OutboxRecord>();
     const busy = new Set<string>();

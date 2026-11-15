@@ -10,11 +10,14 @@ import Animated, {
   withRepeat,
   withTiming,
 } from "react-native-reanimated";
+import { chatWords } from "@dohc/interface-words/notices";
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import { AgentMark } from "../AgentMark";
+import { ActionPill } from "../notices/ActionPill";
 import { sampleBuild } from "../sampleBuild";
 import { useTheme, type Theme } from "../theme";
-import type { Author, Message, Segment } from "./sample";
+import type { Author, LocalMark, Message, Segment } from "./types";
+import type { LocalActions } from "./useOutbox";
 
 // One message, as in Slack: an author line starts a group; follow-ups from the same author within a few minutes don't repeat it.
 export const MessageRow = memo(function MessageRow({
@@ -22,11 +25,14 @@ export const MessageRow = memo(function MessageRow({
   continued,
   afterExtras,
   onOpenReplies,
+  actions,
 }: {
   message: Message;
   continued: boolean;
   afterExtras: boolean;
   onOpenReplies?(message: Message): void;
+  /** What a message only this phone has offers. */
+  actions?: LocalActions;
 }) {
   const theme = useTheme();
   const paddingTop = continued ? (afterExtras ? 12 : 8) : 14;
@@ -49,14 +55,24 @@ export const MessageRow = memo(function MessageRow({
             >
               {message.author.name}
             </Text>
-            <Text style={[styles.time, { color: theme.subtle }]}>{message.at}</Text>
+            {message.local ? (
+              <LocalStateText mark={message.local} theme={theme} />
+            ) : (
+              <Text style={[styles.time, { color: theme.subtle }]}>{message.at}</Text>
+            )}
           </View>
         )}
+        {message.title ? (
+          <Text style={[styles.postTitle, { color: theme.ink }]}>{message.title}</Text>
+        ) : null}
         {message.working ? (
           <Working label={message.working} theme={theme} />
         ) : (
           <Body segments={message.body} theme={theme} />
         )}
+        {message.local && actions ? (
+          <LocalFooter mark={message.local} actions={actions} theme={theme} />
+        ) : null}
         {message.question ? (
           <Question
             options={message.question.options}
@@ -128,6 +144,76 @@ export const MessageRow = memo(function MessageRow({
 });
 
 type Box = { x: number; y: number; width: number; height: number };
+
+/** Where a message only this phone has stands, in the time's place. A saved one shows nothing until a read has it. */
+function LocalStateText({ mark, theme }: { mark: LocalMark; theme: Theme }) {
+  const text =
+    mark.state.kind === "waiting"
+      ? chatWords.waitingToSend
+      : mark.state.kind === "sending"
+        ? chatWords.sending
+        : mark.state.kind === "stalled"
+          ? chatWords.stillSending
+          : null;
+  return text ? <Text style={[styles.time, { color: theme.subtle }]}>{text}</Text> : null;
+}
+
+/**
+ * Under a message only this phone has: why it wasn't sent, and what can be done. A withheld message has Send and
+ * Discard. One still sending for a long time, or one the server refused, has Copy beside it and Discard; neither is
+ * sent again as another message.
+ */
+function LocalFooter({
+  mark,
+  actions,
+  theme,
+}: {
+  mark: LocalMark;
+  actions: LocalActions;
+  theme: Theme;
+}) {
+  const { state } = mark;
+  const problem = actions.problems.get(mark.operationId);
+  const reason =
+    state.kind === "withheld"
+      ? chatWords.notSent
+      : state.kind === "refused"
+        ? chatWords.refused(state.reason)
+        : state.kind === "missing"
+          ? chatWords.missing
+          : null;
+  const copy = state.kind === "stalled" || state.kind === "refused" || state.kind === "missing";
+  if (reason === null && !copy && problem === undefined) return null;
+  return (
+    <View style={styles.local}>
+      {reason ? <Text style={[styles.localText, { color: theme.danger }]}>{reason}</Text> : null}
+      {problem ? (
+        <Text style={[styles.localText, { color: theme.danger }]} accessibilityRole="alert">
+          {problem}
+        </Text>
+      ) : null}
+      <View style={styles.localActions}>
+        {state.kind === "withheld" ? (
+          <ActionPill
+            label={chatWords.send}
+            disabled={actions.blocked}
+            onPress={() => actions.send(mark)}
+          />
+        ) : null}
+        {copy ? (
+          <ActionPill label={chatWords.copyMessage} onPress={() => actions.copy(mark)} />
+        ) : null}
+        {reason !== null || copy ? (
+          <ActionPill
+            label={chatWords.discard}
+            disabled={actions.blocked}
+            onPress={() => actions.discard(mark)}
+          />
+        ) : null}
+      </View>
+    </View>
+  );
+}
 
 // An agent's mark and name are one tap target, as the desktop's badge is: a tap opens the agent's card. One button lies
 // over both, taking touches only on the mark and the name, so a tap on the message's words beside the mark doesn't open
@@ -291,6 +377,10 @@ const styles = StyleSheet.create({
   author: { fontSize: 15, fontWeight: "600" },
   time: { fontSize: 12 },
   body: { fontSize: 16, lineHeight: 22 },
+  postTitle: { fontSize: 16, lineHeight: 22, fontWeight: "600" },
+  local: { gap: 6, marginTop: 6 },
+  localText: { fontSize: 15, lineHeight: 20 },
+  localActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   mention: { fontWeight: "600" },
   reactions: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 6 },
   reaction: {

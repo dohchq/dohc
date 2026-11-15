@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createServerClient } from "./client";
 import { testServer } from "./testServer";
-import { markThreadRead, readChats, readStream, readThread } from "./workspaceReads";
+import {
+  markThreadRead,
+  readChats,
+  readStream,
+  readStreamLanes,
+  readThread,
+} from "./workspaceReads";
 
 // The phone's chat reads keep what later controls need: a reply's parent, attachments, a question or poll with its
 // answer, reactions, and the account's unread counts and read place, each checked before it is kept. A field that fails
@@ -351,5 +357,57 @@ describe("the account's unread state", () => {
     await expect(
       markThreadRead(failed.client, "ws-a", "thread-1", "message-2", signal),
     ).rejects.toMatchObject({ problem: "invalid" });
+  });
+});
+
+describe("a stream's lanes", () => {
+  const signal = new AbortController().signal;
+  function serve(result: unknown) {
+    const server = testServer();
+    server.on("POST", "/sync/ws-a/ops/chatContext", answered(result));
+    const client = createServerClient({
+      origin: server.origin,
+      token: "tok",
+      fetch: server.fetch,
+      signal,
+    });
+    return { server, client };
+  }
+  const context = (conversation: Record<string, unknown>) => ({
+    ok: true,
+    conversation: {
+      kind: "stream",
+      groupId: "channel-1",
+      groupKind: "group",
+      canPost: true,
+      canSend: false,
+      ...conversation,
+    },
+    mentions: [],
+    wakes: [],
+    wakeCursor: "4",
+  });
+
+  it("asks the server's context for the stream, and keeps which writes it takes", async () => {
+    const { server, client } = serve(context({}));
+    await expect(readStreamLanes(client, "ws-a", "channel-1", signal)).resolves.toEqual({
+      value: { kind: "lanes", groupKind: "group", canPost: true, canSend: false },
+      cursor: "0.1.1",
+    });
+    expect(server.calls.map((call) => call.body)).toEqual([{ group: "channel-1" }]);
+  });
+
+  it("takes a hidden or missing chat as missing, and rejects another stream's answer", async () => {
+    const missing = serve({ ok: false, refusal: "missing", reason: "chat not found" });
+    await expect(readStreamLanes(missing.client, "ws-a", "channel-1", signal)).resolves.toEqual({
+      value: { kind: "missing" },
+      cursor: "0.1.1",
+    });
+    for (const wrong of [{ groupId: "channel-2" }, { canSend: "yes" }, { kind: "thread" }]) {
+      const { client } = serve(context(wrong));
+      await expect(readStreamLanes(client, "ws-a", "channel-1", signal)).rejects.toMatchObject({
+        problem: "invalid",
+      });
+    }
   });
 });

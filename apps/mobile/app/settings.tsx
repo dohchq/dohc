@@ -1,11 +1,17 @@
 import { accountWords, type ServerProblemKind } from "@dohc/interface-words/account";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { chatWords } from "@dohc/interface-words/notices";
+import { useRouter } from "expo-router";
+import { SymbolView } from "expo-symbols";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../src/account/AccountProvider";
 import { ProblemLine } from "../src/account/ProblemLine";
 import { AgentMark } from "../src/AgentMark";
 import { workspaceName } from "../src/chats/workspaceName";
 import { confirm } from "../src/confirm";
+import { recoveryRows } from "../src/conversation/outboxMessages";
+import { useOutboxState } from "../src/conversation/useOutbox";
+import { phoneWrites } from "../src/server/phoneWrites";
 import type { SignIn } from "../src/server/account";
 import {
   changeAgent,
@@ -97,6 +103,17 @@ function SettingsScreen() {
   const signIn = useSignIn();
   const { account, outbox, workspaces, reloadWorkspaces, setShowOnPhone } = useAccount();
   const server = serverName(signIn.origin);
+  const router = useRouter();
+  const outboxState = useOutboxState(outbox);
+  // Every message of the account that isn't saved, and every record that can't be read.
+  const waiting = useMemo(() => {
+    if (!outboxState) return 0;
+    const { rows, unreadable } = recoveryRows(outboxState, {
+      origin: signIn.origin,
+      accountId: signIn.userId,
+    });
+    return rows.length + unreadable.length;
+  }, [outboxState, signIn]);
   const sessions = useServerList(signIn, listSessions);
   const agents = useServerList(signIn, listAgents);
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
@@ -305,6 +322,37 @@ function SettingsScreen() {
           }
         </Loaded>
       </Section>
+
+      {/* Messages waiting on this phone stay reachable here when their chat is closed or no longer shows. */}
+      {phoneWrites ? (
+        <Section>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => router.push("/outbox")}
+            style={({ pressed }) => [
+              styles.row,
+              {
+                borderBottomColor: theme.line,
+                backgroundColor: pressed ? theme.panel2 : undefined,
+              },
+            ]}
+          >
+            <View style={styles.rowText}>
+              <Text style={[styles.title, { color: theme.ink }]}>{chatWords.messagesOnPhone}</Text>
+            </View>
+            {waiting > 0 ? (
+              <Text style={[styles.detail, { color: theme.muted }]}>{waiting}</Text>
+            ) : null}
+            <SymbolView
+              name="chevron.right"
+              size={13}
+              weight="semibold"
+              tintColor={theme.subtle}
+              fallback={null}
+            />
+          </Pressable>
+        </Section>
+      ) : null}
 
       <Section>
         {signOutFailed ? <ProblemLine text={accountWords.signOutFailed} onRetry={leave} /> : null}

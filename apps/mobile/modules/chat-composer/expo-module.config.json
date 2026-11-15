@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["ChatComposerModule"]
+  },
+  "android": {
+    "modules": ["app.dohc.chatcomposer.ChatComposerModule"]
+  }
+}

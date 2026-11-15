@@ -1,49 +1,9 @@
-import type { ReportedAgent } from "../chats/agentCard";
-import type { IdentityHue } from "../theme";
+import type { ChatWrite } from "../server/chatWrites";
+import type { OutboxState } from "../server/outbox";
+import type { Lanes, WriteOutbox } from "./conversationWrites";
+import type { Author, Message } from "./types";
 
 // Sample conversation for design review only. Real messages come from the server's chat operations.
-export interface Author {
-  readonly id: string;
-  readonly name: string;
-  readonly kind: "person" | "agent";
-  /** People only: initials and colour. */
-  readonly initials?: string;
-  readonly hue?: string;
-  /** Agents only: a connected agent, one dohc does not start, which shows the plug in place of the sparkle. */
-  readonly connected?: boolean;
-  /** Agents only: the agent's chosen identity colour; none takes the agent olive. */
-  readonly agentHue?: IdentityHue;
-  /** Your own agents only: the owner's display name, when it could be read. */
-  readonly owner?: string;
-  /** Connected agents only: what the agent's client reported about itself. */
-  readonly reported?: ReportedAgent;
-}
-
-export type Segment =
-  | { readonly text: string }
-  | { readonly mention: string; readonly agent?: boolean };
-
-export interface Message {
-  readonly id: string;
-  readonly threadId?: string;
-  readonly author: Author;
-  readonly at: string;
-  /** Minutes since the conversation's first message, for grouping. */
-  readonly minute: number;
-  readonly body: readonly Segment[];
-  readonly reactions?: readonly {
-    readonly emoji: string;
-    readonly count: number;
-    readonly mine?: boolean;
-  }[];
-  readonly replies?: {
-    readonly count: number;
-    readonly last: string;
-    readonly people: readonly Author[];
-  };
-  readonly question?: { readonly options: readonly string[]; readonly chosen?: string };
-  readonly working?: string;
-}
 
 const maya: Author = {
   id: "maya",
@@ -197,4 +157,137 @@ export function sampleMessagesFor(chatId: string): readonly Message[] {
 /** An agent in this sample, by its author id, for its card. */
 export function sampleAgent(id: string): Author | undefined {
   return [nova, scout].find((agent) => agent.id === id);
+}
+
+/** The author of what the sample's composer sends. */
+export const sampleYou = me;
+
+/** Whose records the sample's outbox keeps, and where. */
+export const sampleScope = {
+  origin: "https://sample.dohc.invalid",
+  accountId: "me",
+  workspaceId: "sample",
+} as const;
+
+/** The sample's chats take what the desktop's do: a Group takes posts and messages, and every other chat messages. */
+export const sampleLanes = (kind: string): Lanes => ({ post: kind === "group", send: true });
+
+type SampleRecord = OutboxState["records"][number];
+
+/** A message in #planning as the outbox would keep it, at each stage `talk-outbox` shows. */
+function seeded(sequence: number, body: string, fields: Partial<SampleRecord>): SampleRecord {
+  return {
+    ...sampleScope,
+    operationId: `sample-op-${sequence}`,
+    messageId: `sample-message-${sequence}`,
+    sequence,
+    dependsOn: null,
+    target: { kind: "stream", id: "g-planning" },
+    write: { operation: "send", args: { streamId: "g-planning", body } },
+    stage: "queued",
+    attempted: false,
+    withheld: false,
+    pendingSinceMs: null,
+    result: null,
+    ...fields,
+  };
+}
+
+/** Design review only: `-dohcDemo talk-outbox` opens #planning with a message at each state that needs the person. */
+const talkOutbox = (): SampleRecord[] => [
+  seeded(1, "Can we push dinner to 8?", { withheld: true }),
+  seeded(2, "Booked the 19:52 back from Porto.", { stage: "stalled", attempted: true }),
+  seeded(3, "I'll bring the adapter.", {
+    stage: "refused",
+    attempted: true,
+    result: {
+      kind: "refused",
+      reason: "Couldn't send",
+      threadId: null,
+      winnerMessageId: null,
+    },
+  }),
+  seeded(4, "On my way.", {}),
+];
+
+/**
+ * The sample build's outbox, in memory: it never reaches a server. A write it takes shows Waiting to send, then
+ * Sending, then stays as a message. Send on a withheld message does the same. Discard deletes it.
+ */
+export function createSampleOutbox(seed: string | null): WriteOutbox {
+  let records: SampleRecord[] = seed === "talk-outbox" ? talkOutbox() : [];
+  let next = records.length + 1;
+  let snapshot: OutboxState | null = null;
+  const listeners = new Set<() => void>();
+  const changed = () => {
+    snapshot = null;
+    for (const listener of listeners) listener();
+  };
+  const update = (operationId: string, fields: Partial<SampleRecord>) => {
+    records = records.map((record) =>
+      record.operationId === operationId ? { ...record, ...fields } : record,
+    );
+    changed();
+  };
+  const run = (record: SampleRecord) => {
+    setTimeout(() => update(record.operationId, { stage: "sending", attempted: true }), 700);
+    setTimeout(
+      () =>
+        update(record.operationId, {
+          stage: "saved",
+          result: { kind: "saved", threadId: null, messageId: record.messageId },
+        }),
+      1600,
+    );
+  };
+  const make = (write: ChatWrite): SampleRecord => {
+    const sequence = next;
+    next += 1;
+    const streamId =
+      write.operation === "send"
+        ? write.args.streamId
+        : write.operation === "post"
+          ? write.args.groupId
+          : "";
+    return {
+      ...seeded(sequence, "", {}),
+      target: { kind: "stream", id: streamId },
+      write,
+    };
+  };
+  return {
+    state: () =>
+      (snapshot ??= {
+        status: "ready",
+        records,
+        aside: [],
+        unreadable: [],
+        deletion: "none",
+      }),
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => void listeners.delete(listener);
+    },
+    async enqueue({ write }) {
+      const record = make(write);
+      records = [...records, record];
+      changed();
+      run(record);
+      return record;
+    },
+    async retryEnqueue(operationId) {
+      const record = records.find((entry) => entry.operationId === operationId && entry.withheld);
+      if (!record) throw new Error("No withheld message");
+      const sendable = { ...record, withheld: false };
+      update(operationId, { withheld: false });
+      run(sendable);
+      return sendable;
+    },
+    async discard(target) {
+      if (target.kind === "record")
+        records = records.filter((record) => record.operationId !== target.operationId);
+      changed();
+    },
+    wake: () => undefined,
+  };
 }

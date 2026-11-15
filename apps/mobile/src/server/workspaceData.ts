@@ -15,6 +15,7 @@ import {
   readFiles,
   readPage,
   readStream,
+  readStreamLanes,
   readThread,
   type ChatGroup,
   type ChatMessage,
@@ -25,6 +26,7 @@ import {
   type MissingChat,
   type PageRead,
   type Read,
+  type StreamLanes,
   type WorkspaceFile,
 } from "./workspaceReads";
 import type { SavedList } from "./workspaceList";
@@ -120,6 +122,26 @@ export const views = {
     };
   },
 
+  /**
+   * Which writes a chat's stream takes. Read only where writes are on. A change to one of its threads, or to a thread
+   * the store can't place in a chat yet, reads it again, since that's where a chat's own changes show.
+   */
+  lanes(groupId: string): View<StreamLanes | MissingChat> {
+    return {
+      id: `lanes:${groupId}`,
+      read: (client, workspaceId, signal) => readStreamLanes(client, workspaceId, groupId, signal),
+      affectedBy(changes, known) {
+        if (changes.chats === undefined) return false;
+        const chats = known.chats;
+        if (changes.chats.length === 0 || chats === null) return true;
+        return changes.chats.some(
+          (threadId) =>
+            !chats.some((group) => group.id !== groupId && group.threadIds.includes(threadId)),
+        );
+      },
+    };
+  },
+
   thread(threadId: string): View<ChatThread | MissingChat> {
     return {
       id: `thread:${threadId}`,
@@ -170,6 +192,7 @@ export function viewOf(id: string): View<unknown> | null {
   const key = rest.join(":");
   if (key === "") return null;
   if (kind === "stream") return views.stream(key);
+  if (kind === "lanes") return views.lanes(key);
   if (kind === "thread") return views.thread(key);
   if (kind === "page") return views.page(key);
   return null;
