@@ -394,6 +394,30 @@ fn restoring_a_widened_rule_puts_the_committed_bytes_back() {
     assert_eq!(f.journal(), before);
 }
 
+/// Restoring a folder whose new rule nothing committed removes that rule
+/// from disk and keeps its bytes in the store, so the restore can be undone.
+#[test]
+fn restoring_an_uncommitted_rule_keeps_its_bytes() {
+    let f = ruled_team();
+    f.put("team/sub/access.yaml", EDIT);
+    f.put("team/sub/b.md", "beta");
+    f.settle();
+    assert!(held(&f.capture(&["team/sub/b.md"])[0], "team/sub"));
+    f.decide("team/sub", AccessRuleDecision::Restore)
+        .expect("restore");
+    assert!(!f.root().join("team/sub/access.yaml").exists());
+    let kept: bool = rusqlite::Connection::open(&f.db)
+        .unwrap()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM binary_blobs WHERE sha256=?1)",
+            [dohc_engine_storage::hex_sha256(EDIT.as_bytes())],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(kept, "the removed rule's bytes stay in the store");
+    assert!(f.holds().is_empty());
+}
+
 #[test]
 fn an_editor_save_inside_the_settle_period_journals_no_widening() {
     let f = ruled_team();

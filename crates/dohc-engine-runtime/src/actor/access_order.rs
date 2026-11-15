@@ -1567,7 +1567,7 @@ fn decide_on_store(
             // a committed spelling can only return once they are gone.
             for (path, bytes) in &disk {
                 if !files.contains_key(path) {
-                    remove_rule(order.root, path, &dohc_engine_storage::hex_sha256(bytes))?;
+                    remove_rule(store, order, path, &dohc_engine_storage::hex_sha256(bytes))?;
                 }
             }
             for (path, file) in &files {
@@ -1676,15 +1676,27 @@ fn place_rule(
     if placed { Ok(()) } else { Err(waits()) }
 }
 
-/// Remove a rule nothing committed, if it still holds the judged bytes.
-fn remove_rule(root: &Path, path: &str, judged_sha256: &str) -> Result<(), RuntimeError> {
-    match read_publication_target(root, path) {
+/// Remove a rule nothing committed, if it still holds the judged bytes. Its
+/// bytes stay in the store, as the ones [`place_rule`] displaces do.
+fn remove_rule(
+    store: &mut EngineStore,
+    order: &Order<'_>,
+    path: &str,
+    judged_sha256: &str,
+) -> Result<(), RuntimeError> {
+    let bytes = match read_publication_target(order.root, path) {
         Ok(PublicationTarget::Bytes(bytes))
-            if dohc_engine_storage::hex_sha256(&bytes) == judged_sha256 => {}
+            if dohc_engine_storage::hex_sha256(&bytes) == judged_sha256 =>
+        {
+            bytes
+        }
         Ok(PublicationTarget::Absent) => return Ok(()),
         _ => return Err(waits()),
-    }
-    match std::fs::remove_file(root.join(path)) {
+    };
+    committed(store.write_with(order.faults, |tx| {
+        dohc_engine_storage::put_binary_blob(tx, &bytes)
+    })?)?;
+    match std::fs::remove_file(order.root.join(path)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
             Err(RuntimeError::Storage(StorageError::persist_public(error)))
         }
