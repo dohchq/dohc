@@ -1314,6 +1314,7 @@ function escapeLeadingMarkdownBlockSyntax(
 function showsLineAfter(content: JSONContent[], index: number): boolean {
   let next = index + 1;
   while (content[next]?.type === "hardBreak") next += 1;
+  let line = "";
   for (; next < content.length && content[next].type !== "hardBreak"; next += 1) {
     const node = content[next];
     // A code span of blank space is written in backticks, so it shows.
@@ -1321,10 +1322,11 @@ function showsLineAfter(content: JSONContent[], index: number): boolean {
       return true;
     }
     const lineEnd = node.text.indexOf("\n");
-    if (/[^ \t]/u.test(lineEnd === -1 ? node.text : node.text.slice(0, lineEnd))) return true;
-    if (lineEnd !== -1) return false;
+    if (lineEnd !== -1) return /[^ \t]/u.test(line + node.text.slice(0, lineEnd));
+    line += node.text;
   }
-  return false;
+  // A backslash followed only by whitespace to the paragraph's end is literal.
+  return next < content.length ? /[^ \t]/u.test(line) : /\S/u.test(line);
 }
 
 // Whether a paragraph is plain text that marked reads back as the one link

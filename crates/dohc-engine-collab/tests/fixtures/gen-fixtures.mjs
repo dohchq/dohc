@@ -722,6 +722,14 @@ const RICHDOC_PROJECTION_CASES = [
           xmlText("after a break and a line of a space"),
         ]),
         paragraph([xmlElement("hardBreak"), xmlText(" \nafter a line of a space in the text")]),
+        // Other Unicode spaces are blank only on a paragraph's last line.
+        paragraph([xmlElement("hardBreak"), xmlText("　")]),
+        paragraph([
+          xmlElement("hardBreak"),
+          xmlText(" "),
+          xmlElement("hardBreak"),
+          xmlText("after a line of an em space"),
+        ]),
         // A code span of a space is visible, so the break keeps its backslash.
         paragraph([xmlElement("hardBreak"), xmlText(" ", { code: {} })]),
         xmlElement("bulletList", {}, [

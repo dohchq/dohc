@@ -8659,22 +8659,25 @@ fn render_inline(
             .iter()
             .position(|part| !is_break(part))
             .unwrap_or(rest.len());
+        // Before another line, only spaces and tabs make it blank. A backslash
+        // followed only by whitespace to the paragraph's end is literal.
+        let mut shows_before_line = false;
+        let mut shows_before_end = false;
         for part in &rest[first_line..] {
             let InlinePart::Text { run, .. } = part else {
-                return !is_break(part);
+                return !is_break(part) || shows_before_line;
             };
             let (line, ends) = match run.text.split_once('\n') {
                 Some((line, _)) => (line, true),
                 None => (run.text.as_str(), false),
             };
-            if line.chars().any(|c| c != ' ' && c != '\t') {
-                return true;
-            }
+            shows_before_line |= line.chars().any(|c| c != ' ' && c != '\t');
+            shows_before_end |= line.chars().any(|c| !is_js_whitespace(c));
             if ends {
-                return false;
+                return shows_before_line;
             }
         }
-        false
+        shows_before_end
     }
 
     let mut rendered_nodes = BTreeMap::new();

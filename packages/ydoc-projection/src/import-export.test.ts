@@ -526,6 +526,16 @@ it.each([
     ],
   ],
   ["a line of a space in the text", [{ type: "hardBreak" }, { type: "text", text: " \nx" }]],
+  ["an ideographic space", [{ type: "hardBreak" }, { type: "text", text: "　" }]],
+  [
+    "a break and an em space",
+    [
+      { type: "text", text: "a" },
+      { type: "hardBreak" },
+      { type: "hardBreak" },
+      { type: "text", text: " " },
+    ],
+  ],
 ] satisfies Array<[string, JSONContent[]]>)(
   "writes no backslash for a hard break followed by %s",
   (_name, content) => {
