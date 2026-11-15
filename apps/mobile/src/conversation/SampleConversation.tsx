@@ -15,12 +15,14 @@ import {
   type ReplyTarget,
   type SubmitOutcome,
 } from "./conversationWrites";
+import { answerPlace, answerRecords, answerWrite, decisionOf } from "./decisionAnswers";
 import { MessageRow } from "./MessageRow";
 import { streamRows, threadRows } from "./outboxMessages";
 import { reactionRecords, withReactions } from "./reactions";
 import type { ReplyTo } from "./ReplyContext";
 import {
   createSampleOutbox,
+  sampleAsks,
   sampleConversation,
   sampleLanes,
   sampleMessagesFor,
@@ -30,7 +32,14 @@ import {
 } from "./sample";
 import { localMessage } from "./serverMessages";
 import type { Message } from "./types";
-import { useConversationWrites, useLocalActions, useOutboxState, useReact } from "./useOutbox";
+import {
+  useChoose,
+  useConversationWrites,
+  useLocalActions,
+  useOutboxState,
+  useReact,
+  type AnswerActions,
+} from "./useOutbox";
 import { chatSubtitle, chatTitle } from "../chats/chatLabels";
 import { sampleChat } from "../chats/sample";
 import { demoMode } from "../demo";
@@ -65,15 +74,17 @@ const replyingTo = (message: Message, threadId: string): Chosen => ({
 // A conversation, as in Slack: newest at the bottom, the composer riding the keyboard. The composer writes to an
 // outbox in memory, which never reaches a server, so the composer and its message states can be seen without one.
 // A thread (`thread=1`) replies in its composer. Reply on a message in a chat opens its thread; on a post or send
-// still in the outbox, the composer replies to it in place.
+// still in the outbox, the composer replies to it in place. A poll's choice answers it at once; Answer on a question
+// opens its thread with the composer answering it.
 export function SampleConversation() {
   const theme = useTheme();
   const router = useRouter();
-  const { id, name, thread, reply } = useLocalSearchParams<{
+  const { id, name, thread, reply, answer } = useLocalSearchParams<{
     id: string;
     name?: string;
     thread?: string;
     reply?: string;
+    answer?: string;
   }>();
   const inThread = thread === "1";
   const title = name ?? sampleConversation.name;
@@ -90,25 +101,64 @@ export function SampleConversation() {
   const blocked = state ? blockedBy(state, true) : "loading";
   const actions = useLocalActions(writes, blocked !== null);
   const react = useReact(writes, sampleScope);
+  const chooser = useChoose(writes, sampleScope.workspaceId);
   const messages = useMemo(
-    () => (inThread ? sampleThreadFor(id) : sampleMessagesFor(id)),
+    () => (inThread ? sampleThreadFor(id, demoMode) : sampleMessagesFor(id, demoMode)),
     [inThread, id],
   );
-  // A thread opened to reply to one of its messages starts with it chosen.
+  // A thread opened to reply to one of its messages, or answer its question, starts with it chosen.
   const [chosen, setChosen] = useState<Chosen | null>(() => {
     const message = inThread && reply ? messages.find((each) => each.id === reply) : undefined;
     return message ? replyingTo(message, id) : null;
   });
+  const [answering, setAnswering] = useState<string | null>(inThread ? (answer ?? null) : null);
+  const answersByQuestion = useMemo(
+    () => (state ? answerRecords(state, sampleScope) : null),
+    [state],
+  );
+  // The sample's messages have no parents, and every one is in #planning's chat or the Porto thread.
+  const parentOf = useCallback(
+    (messageId: string) => (messages.some((each) => each.id === messageId) ? null : undefined),
+    [messages],
+  );
+  const decisionFor = useCallback(
+    (message: Message) => {
+      const ask = sampleAsks.get(message.id);
+      if (!ask) return null;
+      return decisionOf(ask, answersByQuestion?.get(ask.id), (shownId) => {
+        const entry = messages.find((each) => each.id === shownId);
+        return entry ? { authorName: entry.author.name, body: excerptOf(entry) } : undefined;
+      });
+    },
+    [answersByQuestion, messages],
+  );
+  const question = useMemo(() => {
+    const message = answering === null ? undefined : messages.find((each) => each.id === answering);
+    const ask = message && sampleAsks.get(message.id);
+    const decision = message && decisionFor(message);
+    if (!message || !ask || decision?.state.kind !== "open" || decision.options.length > 0)
+      return null;
+    return {
+      id: ask.id,
+      place: answerPlace(ask, parentOf, { post: false, poll: false }),
+      to: { name: message.author.name, excerpt: excerptOf(message), answers: true },
+    };
+  }, [answering, messages, decisionFor, parentOf]);
 
   const items = useMemo<Item[]>(() => {
     const byMessage = state ? reactionRecords(state, sampleScope) : null;
-    const shownMessages = messages.map((message) =>
-      withReactions(message, message.reactions ?? [], byMessage?.get(message.id)),
+    const shownMessages = messages.map((message) => {
+      const made = withReactions(message, message.reactions ?? [], byMessage?.get(message.id));
+      const decision = decisionFor(message);
+      return decision ? { ...made, decision } : made;
+    });
+    const questions = new Set(
+      messages.filter((each) => sampleAsks.has(each.id)).map((each) => each.id),
     );
     const rows = state
       ? inThread
         ? threadRows(state, sampleScope, id, new Set())
-        : streamRows(state, sampleScope, id, new Set())
+        : streamRows(state, sampleScope, id, new Set(), questions)
       : [];
     const local = rows.map((row) => localMessage(row, sampleYou));
     return [
@@ -132,12 +182,42 @@ export function SampleConversation() {
         afterExtras: false,
       })),
     ];
-  }, [id, inThread, messages, state]);
+  }, [id, inThread, messages, state, decisionFor]);
+
+  // A poll's choice answers at once. Answer on a question opens its thread to answer there, or names it in a thread.
+  const answers = useMemo<AnswerActions>(
+    () => ({
+      blocked: actions.blocked,
+      problems: chooser.problems,
+      choose: (message, option) => {
+        const ask = sampleAsks.get(message.id);
+        if (ask)
+          chooser.choose(answerPlace(ask, parentOf, { post: false, poll: true }), ask.id, option);
+      },
+      answer: (message) => {
+        const ask = sampleAsks.get(message.id);
+        if (!ask) return;
+        if (inThread) {
+          setAnswering(ask.id);
+          setChosen(null);
+          return;
+        }
+        router.push({
+          pathname: "/chat/[id]",
+          params: { id: ask.threadId, thread: "1", answer: ask.id },
+        });
+      },
+    }),
+    [actions.blocked, chooser, parentOf, inThread, router],
+  );
 
   const onReply = useCallback(
     (message: Message) => {
       if (inThread) {
-        if (!message.local) setChosen(replyingTo(message, id));
+        if (!message.local) {
+          setChosen(replyingTo(message, id));
+          setAnswering(null);
+        }
         return;
       }
       const parent = message.replyable;
@@ -180,6 +260,14 @@ export function SampleConversation() {
     body: string,
     postTitle: string,
   ): Promise<SubmitOutcome> => {
+    if (kind === "reply" && question) {
+      const write = answerWrite(question.place, question.id, body);
+      if (!write) return { kind: "blocked" };
+      const outcome = await writes.submit(sampleScope.workspaceId, write);
+      if (outcome.kind === "kept" || outcome.kind === "withheld")
+        setAnswering((current) => (current === question.id ? null : current));
+      return outcome;
+    }
     if (kind === "reply") {
       // In a thread with none chosen, the reply goes at the top of the thread.
       const target: ReplyTarget | null =
@@ -271,6 +359,7 @@ export function SampleConversation() {
               react={react}
               onReply={onReply}
               onOpenReplies={onOpenReplies}
+              answers={answers}
             />
           )
         }
@@ -281,8 +370,11 @@ export function SampleConversation() {
         blocked={blocked}
         problem={null}
         replies={inThread || chosen !== null}
-        replyTo={chosen?.to ?? null}
-        onCancelReply={() => setChosen(null)}
+        replyTo={question?.to ?? chosen?.to ?? null}
+        onCancelReply={() => {
+          setChosen(null);
+          setAnswering(null);
+        }}
         onSubmit={submit}
         onLayoutHeight={setComposerHeight}
       />

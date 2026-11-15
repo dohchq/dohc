@@ -66,6 +66,29 @@ export interface ReactionMark {
   readonly mark: LocalMark;
 }
 
+/**
+ * Where a message's question or poll stands. `open`: it takes an answer. `held`: this phone keeps an answer withheld,
+ * which its reply's Send or Discard settles, so it takes no other. `answering`: this phone's answer is on its way.
+ * `answered`: the server, or this phone's saved answer, says it's answered. `lost`: the server took another answer
+ * first; `winner` is that answer when a read shows it, and `replySent` says a read shows this phone's reply.
+ * `chosen` is the poll's choice that state shows, or null.
+ */
+export type DecisionState =
+  | { readonly kind: "open" | "held" }
+  | { readonly kind: "answering" | "answered"; readonly chosen: string | null }
+  | {
+      readonly kind: "lost";
+      readonly chosen: string | null;
+      readonly winner: { readonly name: string; readonly body: string } | null;
+      readonly replySent: boolean;
+    };
+
+export interface Decision {
+  /** A poll's choices, in its author's own words. A question has none. */
+  readonly options: readonly string[];
+  readonly state: DecisionState;
+}
+
 export interface Message {
   readonly id: string;
   readonly threadId?: string;
@@ -85,7 +108,8 @@ export interface Message {
     readonly last: string;
     readonly people: readonly Author[];
   };
-  readonly question?: { readonly options: readonly string[]; readonly chosen?: string };
+  /** The question or poll it asks, with this phone's answer over the server's state. */
+  readonly decision?: Decision;
   readonly working?: string;
   /** Only this phone has it, in its outbox: its state shows where the time would. */
   readonly local?: LocalMark;

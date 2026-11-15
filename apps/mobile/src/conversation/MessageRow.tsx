@@ -1,4 +1,3 @@
-import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
 import { useRouter } from "expo-router";
 import { Reply, SmilePlus, X } from "lucide-react-native";
@@ -25,12 +24,14 @@ import { AgentMark } from "../AgentMark";
 import { ActionPill } from "../notices/ActionPill";
 import { sampleBuild } from "../sampleBuild";
 import { useTheme, type Theme } from "../theme";
+import { DecisionCard } from "./DecisionCard";
 import type { Author, LocalMark, Message, Reaction, ReactionMark, Segment } from "./types";
-import type { LocalActions, ReactActions } from "./useOutbox";
+import type { AnswerActions, LocalActions, ReactActions } from "./useOutbox";
 
 // One message, as in Slack: an author line starts a group; follow-ups from the same author within a few minutes don't repeat it.
 // Where writes are on, a message the server has offers its reactions, Add reaction and Reply; one only this phone has
-// offers Reply when a reply can wait for it.
+// offers Reply when a reply can wait for it. A message that asks a question or a poll shows its card, which takes
+// answers where writes are on.
 export const MessageRow = memo(function MessageRow({
   message,
   continued,
@@ -39,6 +40,7 @@ export const MessageRow = memo(function MessageRow({
   actions,
   react,
   onReply,
+  answers,
 }: {
   message: Message;
   continued: boolean;
@@ -49,6 +51,8 @@ export const MessageRow = memo(function MessageRow({
   /** Reactions, where writes are on. */
   react?: ReactActions;
   onReply?(message: Message): void;
+  /** A question's or poll's answers, where writes are on. */
+  answers?: AnswerActions;
 }) {
   const theme = useTheme();
   const paddingTop = continued ? (afterExtras ? 12 : 8) : 14;
@@ -89,11 +93,11 @@ export const MessageRow = memo(function MessageRow({
         {message.local && actions ? (
           <LocalFooter mark={message.local} actions={actions} theme={theme} />
         ) : null}
-        {message.question ? (
-          <Question
-            options={message.question.options}
-            initial={message.question.chosen}
-            theme={theme}
+        {message.decision ? (
+          <DecisionCard
+            message={message}
+            decision={message.decision}
+            {...(answers ? { answers } : {})}
           />
         ) : null}
         {message.local === undefined && message.threadId && react ? (
@@ -527,60 +531,6 @@ function Body({ segments, theme }: { segments: readonly Segment[]; theme: Theme 
   );
 }
 
-// An agent's question: one tap answers it with the same record the desktop sends; the choice stays visible.
-function Question({
-  options,
-  initial,
-  theme,
-}: {
-  options: readonly string[];
-  initial?: string;
-  theme: Theme;
-}) {
-  const [chosen, setChosen] = useState<string | null>(initial ?? null);
-  return (
-    <View style={styles.options}>
-      {options.map((option) => {
-        const selected = chosen === option;
-        return (
-          <Pressable
-            key={option}
-            disabled={chosen !== null}
-            hitSlop={{ top: 2, bottom: 2 }}
-            onPress={() => {
-              void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-              setChosen(option);
-            }}
-            style={({ pressed }) => [
-              styles.option,
-              {
-                backgroundColor: selected ? theme.accent : pressed ? theme.panel2 : "transparent",
-                borderColor: selected ? theme.accent : theme.outline,
-                opacity: chosen !== null && !selected ? 0.6 : 1,
-              },
-            ]}
-            accessibilityRole="button"
-            accessibilityState={{ selected, disabled: chosen !== null }}
-          >
-            {selected ? (
-              <SymbolView
-                name="checkmark"
-                size={13}
-                weight="bold"
-                tintColor={theme.bg}
-                fallback={null}
-              />
-            ) : null}
-            <Text style={[styles.optionText, { color: selected ? theme.bg : theme.ink }]}>
-              {option}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
-}
-
 // The agent is running: a small dot that breathes, still when Reduce Motion is on.
 function Working({ label, theme }: { label: string; theme: Theme }) {
   const reduced = useReducedMotion();
@@ -668,17 +618,6 @@ const styles = StyleSheet.create({
   },
   pile: { flexDirection: "row", gap: 3, marginRight: 2 },
   repliesText: { fontSize: 14, fontWeight: "600" },
-  options: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 },
-  option: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    minHeight: 40,
-    paddingHorizontal: 16,
-    borderRadius: 20,
-    borderWidth: 1,
-  },
-  optionText: { fontSize: 15, fontWeight: "600", fontVariant: ["tabular-nums"] },
   working: { flexDirection: "row", alignItems: "center", gap: 7, minHeight: 22 },
   pulse: { width: 7, height: 7, borderRadius: 3.5, marginTop: 1 },
   workingText: { fontSize: 14 },

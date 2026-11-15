@@ -10,13 +10,19 @@ export interface ReplyTo {
   readonly name: string;
   /** Its text, which shows on one line. */
   readonly excerpt: string;
+  /** The reply answers the message's question. */
+  readonly answers?: boolean;
 }
+
+/** "Reply to <name>", or "Answer <name>" for a reply that answers a question: the context's words and the field's name. */
+export const replyLabel = (to: ReplyTo) =>
+  to.answers ? chatWords.answerTo(to.name) : chatWords.replyTo(to.name);
 
 // Above the composer while a reply answers a chosen message: whose, and its start, then Cancel reply. It comes before
 // the field, so VoiceOver reads it first.
 export function ReplyContext({ to, onCancel }: { to: ReplyTo; onCancel(): void }) {
   const theme = useTheme();
-  const label = chatWords.replyTo(to.name);
+  const label = replyLabel(to);
   return (
     <View style={styles.row}>
       <View style={[styles.bar, { backgroundColor: theme.accent }]} />

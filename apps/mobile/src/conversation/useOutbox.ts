@@ -9,6 +9,7 @@ import {
   type ConversationWrites,
   type WriteOutbox,
 } from "./conversationWrites";
+import { answerWrite, type AnswerPlace } from "./decisionAnswers";
 import type { OutboxScope } from "./outboxMessages";
 import { nextReaction } from "./reactions";
 import type { LocalMark, Message } from "./types";
@@ -183,4 +184,35 @@ export function useReact(
     [writes, scope, setProblem],
   );
   return useMemo(() => ({ react, problems }), [react, problems]);
+}
+
+/** A question's or poll's answers, as a message's card offers them. */
+export interface AnswerActions {
+  /** Every answer waits, as while a Sign out's delete is owed. */
+  readonly blocked: boolean;
+  /** A choice the outbox couldn't keep, by question, shown under its card. */
+  readonly problems: ReadonlyMap<string, string>;
+  /** Sends a poll's choice as its answer. */
+  choose(message: Message, option: string): void;
+  /** Starts a reply that answers a question without choices, in the composer. */
+  answer(message: Message): void;
+}
+
+/** Sends a poll's choice through the conversation's writes, in `workspaceId`, or nothing while no workspace is open. */
+export function useChoose(writes: ConversationWrites, workspaceId: string | null) {
+  const [problems, setProblem] = useProblems();
+  const choose = useCallback(
+    (place: AnswerPlace, questionId: string, option: string) => {
+      const write = answerWrite(place, questionId, option, option);
+      if (workspaceId === null || write === null) return;
+      setProblem(questionId, null);
+      void writes.submit(workspaceId, write).then((outcome) => {
+        if (outcome.kind !== "not-kept") return;
+        setProblem(questionId, chatWords.notKept);
+        AccessibilityInfo.announceForAccessibility(chatWords.notKept);
+      });
+    },
+    [writes, workspaceId, setProblem],
+  );
+  return useMemo(() => ({ choose, problems }), [choose, problems]);
 }

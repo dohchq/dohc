@@ -12,7 +12,7 @@ import { ChatComposerField, type ClearRequest } from "../../modules/chat-compose
 import { ProblemLine } from "../account/ProblemLine";
 import type { OutboxState } from "../server/outbox";
 import { useTheme } from "../theme";
-import { ReplyContext, type ReplyTo } from "./ReplyContext";
+import { ReplyContext, replyLabel, type ReplyTo } from "./ReplyContext";
 import {
   clearSent,
   clearStatus,
@@ -150,7 +150,7 @@ export function Composer({
   }
 
   const label = mode === "post" ? chatWords.post : chatWords.sendMessage;
-  const fieldLabel = replyTo ? chatWords.replyTo(replyTo.name) : placeholder;
+  const fieldLabel = replyTo ? replyLabel(replyTo) : placeholder;
   return (
     <Dock onLayoutHeight={onLayoutHeight}>
       {problem ? (

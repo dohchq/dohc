@@ -40,6 +40,7 @@ import {
 } from "../workspace/ListStates";
 import { useKeptContentProblem, useProblemText, useView } from "../workspace/useView";
 import { Composer, ComposerProblem, outboxProblem } from "./Composer";
+import { answerPlace, answerRecords, answerWrite, decisionOf, type Shown } from "./decisionAnswers";
 import {
   blockedBy,
   chatWrite,
@@ -62,10 +63,12 @@ import {
 } from "./serverMessages";
 import type { Author, Message } from "./types";
 import {
+  useChoose,
   useConversationWrites,
   useLocalActions,
   useOutboxState,
   useReact,
+  type AnswerActions,
   type LocalActions,
   type ReactActions,
 } from "./useOutbox";
@@ -81,6 +84,8 @@ export function ServerConversation() {
     workspace,
     message,
     reply,
+    answer,
+    post,
   } = useLocalSearchParams<{
     id: string;
     name?: string;
@@ -89,6 +94,10 @@ export function ServerConversation() {
     message?: string;
     /** A thread opened to reply to one of its messages. */
     reply?: string;
+    /** A thread opened to answer one of its messages' questions. */
+    answer?: string;
+    /** "1": a post's thread, opened from its stream, whose answers go at its top. */
+    post?: string;
   }>();
   const { data } = useAccount();
   if (workspace !== undefined && data?.workspaceId !== workspace) return <ElsewhereChat />;
@@ -103,6 +112,8 @@ export function ServerConversation() {
         threadId={id}
         messageId={message ?? null}
         replyId={reply ?? null}
+        answerId={answer ?? null}
+        post={post === "1"}
       />
     ) : (
       <Thread threadId={id} messageId={message ?? null} />
@@ -114,12 +125,20 @@ export function ServerConversation() {
   );
 }
 
-/** Opens a thread in the open workspace, at a message, to reply to it when one is named. */
+/**
+ * Opens a thread in the open workspace, at a message, to reply to it or answer its question when one is named. `post`
+ * says it's a post's thread.
+ */
 function openThread(
   router: ReturnType<typeof useRouter>,
   workspaceId: string | null,
   threadId: string,
-  at: { readonly message?: string; readonly reply?: string } = {},
+  at: {
+    readonly message?: string;
+    readonly reply?: string;
+    readonly answer?: string;
+    readonly post?: "1";
+  } = {},
 ) {
   router.push({
     pathname: "/chat/[id]",
@@ -142,14 +161,19 @@ function ElsewhereChat() {
   );
 }
 
-/** What a stream or thread adds where phone writes are on: outbox rows, reactions, Reply, and the composer. */
+/** What a stream or thread adds where phone writes are on: outbox rows, reactions, Reply, answers, and the composer. */
 interface ScreenWrites {
-  /** The messages only this phone has, given the IDs the screen's read shows. */
-  local(shown: ReadonlySet<string>): readonly Message[];
-  /** A message the server has, with this phone's reactions over the server's. */
-  message(entry: ChatMessage, base: Message): Message;
+  /**
+   * The messages only this phone has, given the IDs the screen's read shows, and the IDs of the questions and polls
+   * among them, whose answers show here until the outbox saves them.
+   */
+  local(shown: ReadonlySet<string>, questions: ReadonlySet<string>): readonly Message[];
+  /** A message the server has, with this phone's reactions and answer over the server's. */
+  message(entry: ChatMessage, base: Message, shown: Shown): Message;
   readonly actions: LocalActions;
   readonly react: ReactActions;
+  /** The answers its cards offer, given the screen's messages by ID and which of them are posts. */
+  answers(byId: ReadonlyMap<string, ChatMessage>, posts: ReadonlySet<string>): AnswerActions;
   /** Reply on a message. In a stream, `post` says it's a post, whose thread is its own. */
   reply(message: Message, post: boolean): void;
   /** Null until the server says which lanes a stream takes, or its read fails. */
@@ -201,27 +225,37 @@ function useScreenWrites(target: string) {
     () => (state && rowScope ? reactionRecords(state, rowScope) : null),
     [state, rowScope],
   );
+  const answersByQuestion = useMemo(
+    () => (state && rowScope ? answerRecords(state, rowScope) : null),
+    [state, rowScope],
+  );
   const unconfirmed = state?.unconfirmed;
-  // A message this phone has no reaction for keeps its object while the outbox changes, so its row doesn't draw again.
+  // A message this phone has no reaction or answer for keeps its object while the outbox changes, so its row doesn't
+  // draw again.
   const [plain] = useState(() => new WeakMap<Message, Message>());
   const message = useCallback(
-    (entry: ChatMessage, base: Message) => {
+    (entry: ChatMessage, base: Message, shown: Shown) => {
       const records = reactionsByMessage?.get(entry.id);
-      if (records)
-        return withReactions(
+      const answers = answersByQuestion?.get(entry.id);
+      if (records || answers) {
+        const made = withReactions(
           base,
           confirmedReactions(entry.reactions, signIn.userId),
           records,
           unconfirmed,
         );
+        const decision = answers ? decisionOf(entry, answers, shown) : null;
+        return decision ? { ...made, decision } : made;
+      }
       const kept = plain.get(base);
       if (kept) return kept;
       const made = withReactions(base, confirmedReactions(entry.reactions, signIn.userId));
       plain.set(base, made);
       return made;
     },
-    [signIn, reactionsByMessage, unconfirmed, plain],
+    [signIn, reactionsByMessage, answersByQuestion, unconfirmed, plain],
   );
+  const chooser = useChoose(writes, workspaceId);
   const problem = useMemo(
     () => outboxProblem(state, blocked, () => outbox.wake()),
     [state, blocked, outbox],
@@ -237,8 +271,21 @@ function useScreenWrites(target: string) {
     rowScope,
     message,
     problem,
+    answersByQuestion,
+    chooser,
   };
 }
+
+/** The parent of each message a read shows, by ID: undefined for one it doesn't show. */
+const parentsIn = (byId: ReadonlyMap<string, ChatMessage>) => (id: string) =>
+  byId.get(id)?.parentMessageId;
+
+/** The messages a read shows, by ID. */
+const byIdOf = (messages: readonly ChatMessage[]): ReadonlyMap<string, ChatMessage> =>
+  new Map(messages.map((entry) => [entry.id, entry]));
+
+const questionsIn = (messages: readonly ChatMessage[]): ReadonlySet<string> =>
+  new Set(messages.filter((entry) => entry.needsDecision).map((entry) => entry.id));
 
 /** A reply chosen in a stream: to an outbox post or send whose thread isn't known yet. */
 interface StreamReply {
@@ -275,14 +322,44 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
     rowScope,
     message,
     problem: outboxProblemNow,
+    chooser,
   } = useScreenWrites(groupId);
   const [replyTo, setReplyTo] = useState<StreamReply | null>(null);
   const local = useCallback(
-    (shown: ReadonlySet<string>) =>
+    (shown: ReadonlySet<string>, questions: ReadonlySet<string>) =>
       state && rowScope
-        ? streamRows(state, rowScope, groupId, shown).map((row) => localMessage(row, you))
+        ? streamRows(state, rowScope, groupId, shown, questions).map((row) =>
+            localMessage(row, you),
+          )
         : [],
     [state, rowScope, groupId, you],
+  );
+  // A poll's choice answers at once, where the poll is. Answer on a question opens its thread to answer there, as
+  // Reply does.
+  const answers = useCallback(
+    (byId: ReadonlyMap<string, ChatMessage>, posts: ReadonlySet<string>): AnswerActions => ({
+      blocked: actions.blocked,
+      problems: chooser.problems,
+      choose: (entry, option) => {
+        const question = byId.get(entry.id);
+        if (!question) return;
+        const how = { post: posts.has(question.id), poll: true };
+        chooser.choose(answerPlace(question, parentsIn(byId), how), question.id, option);
+      },
+      answer: (entry) => {
+        const question = byId.get(entry.id);
+        if (!question) return;
+        openThread(
+          router,
+          workspaceId,
+          question.threadId,
+          posts.has(question.id)
+            ? { post: "1", answer: question.id }
+            : { message: question.id, answer: question.id },
+        );
+      },
+    }),
+    [actions.blocked, chooser, router, workspaceId],
   );
   const reply = useCallback(
     (entry: Message, post: boolean) => {
@@ -309,7 +386,7 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
         router,
         workspaceId,
         entry.threadId,
-        post ? {} : { message: entry.id, reply: entry.id },
+        post ? { post: "1" } : { message: entry.id, reply: entry.id },
       );
     },
     [router, workspaceId],
@@ -375,30 +452,50 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
     [lanes, blocked, problem, replyTo, cancelReply, submit, lanesProblem],
   );
   const streamWrites = useMemo<ScreenWrites>(
-    () => ({ local, message, actions, react, reply, composer }),
-    [local, message, actions, react, reply, composer],
+    () => ({ local, message, actions, react, answers, reply, composer }),
+    [local, message, actions, react, answers, reply, composer],
   );
   return <Stream groupId={groupId} name={name} writes={streamWrites} />;
 }
 
 // A thread where phone writes are on: every message in its composer is a reply. Reply on a message names it above the
-// field, and the reply goes under it; with none chosen, it goes at the top of the thread. A thread opened to reply to
-// a message starts with it chosen, once the read shows it.
+// field, and the reply goes under it; with none chosen, it goes at the top of the thread. Answer on a question names
+// it instead, and the reply answers it, where the desktop puts an answer (`answerPlace`). A thread opened to reply to
+// a message, or to answer its question, starts with it chosen, once the read shows it.
 function WritableThread({
   threadId,
   messageId,
   replyId,
+  answerId,
+  post,
 }: {
   threadId: string;
   messageId: string | null;
   replyId: string | null;
+  answerId: string | null;
+  /** A post's thread, whose answers go at its top. */
+  post: boolean;
 }) {
-  const { state, writes, blocked, actions, react, workspaceId, you, rowScope, message, problem } =
-    useScreenWrites(threadId);
+  const {
+    state,
+    writes,
+    blocked,
+    actions,
+    react,
+    workspaceId,
+    you,
+    rowScope,
+    message,
+    problem,
+    answersByQuestion,
+    chooser,
+  } = useScreenWrites(threadId);
   const view = useMemo(() => views.thread(threadId), [threadId]);
   const value = useView(view).state.value;
   const thread = value?.kind === "thread" ? value : null;
-  const [chosen, setChosen] = useState<string | null>(replyId);
+  // The message a reply goes under, or the question it answers, never both.
+  const [chosen, setChosen] = useState<string | null>(answerId === null ? replyId : null);
+  const [answering, setAnswering] = useState<string | null>(answerId);
   // Only a message the read shows is named and replied under: one it doesn't is never guessed at.
   const parent = useMemo(() => {
     const entry = chosen === null ? undefined : thread?.messages.find((each) => each.id === chosen);
@@ -406,6 +503,20 @@ function WritableThread({
       ? { id: entry.id, to: { name: entry.authorName, excerpt: entry.body } satisfies ReplyTo }
       : null;
   }, [chosen, thread]);
+  // A question is answered only while the read shows it taking an answer. Once it doesn't, the composer names nothing.
+  const question = useMemo(() => {
+    const entry =
+      answering === null ? undefined : thread?.messages.find((each) => each.id === answering);
+    if (!entry) return null;
+    const decision = decisionOf(entry, answersByQuestion?.get(entry.id));
+    if (decision?.state.kind !== "open" || decision.options.length > 0) return null;
+    const byId = byIdOf(thread?.messages ?? []);
+    return {
+      id: entry.id,
+      place: answerPlace(entry, parentsIn(byId), { post, poll: false }),
+      to: { name: entry.authorName, excerpt: entry.body, answers: true } satisfies ReplyTo,
+    };
+  }, [answering, thread, answersByQuestion, post]);
   const local = useCallback(
     (shown: ReadonlySet<string>) =>
       state && rowScope
@@ -414,24 +525,55 @@ function WritableThread({
     [state, rowScope, threadId, you],
   );
   const reply = useCallback((entry: Message) => {
-    if (!entry.local) setChosen(entry.id);
+    if (entry.local) return;
+    setChosen(entry.id);
+    setAnswering(null);
   }, []);
+  const answers = useCallback(
+    (byId: ReadonlyMap<string, ChatMessage>): AnswerActions => ({
+      blocked: actions.blocked,
+      problems: chooser.problems,
+      choose: (entry, option) => {
+        const asked = byId.get(entry.id);
+        if (!asked) return;
+        const how = { post, poll: true };
+        chooser.choose(answerPlace(asked, parentsIn(byId), how), asked.id, option);
+      },
+      answer: (entry) => {
+        setAnswering(entry.id);
+        setChosen(null);
+      },
+    }),
+    [actions.blocked, chooser, post],
+  );
   const submit = useCallback(
     async (_kind: "send" | "post" | "reply", body: string) => {
+      if (workspaceId === null) return { kind: "blocked" as const };
+      if (question) {
+        const write = answerWrite(question.place, question.id, body);
+        if (!write) return { kind: "blocked" as const };
+        const outcome = await writes.submit(workspaceId, write);
+        if (outcome.kind === "kept" || outcome.kind === "withheld")
+          setAnswering((current) => (current === question.id ? null : current));
+        return outcome;
+      }
       const next = replyWrite(
         { kind: "thread", threadId, parentMessageId: parent?.id ?? null },
         body,
       );
-      if (!next || workspaceId === null) return { kind: "blocked" as const };
+      if (!next) return { kind: "blocked" as const };
       const outcome = await writes.submit(workspaceId, next.write);
       const answered = parent?.id ?? null;
       if (outcome.kind === "kept" || outcome.kind === "withheld")
         setChosen((current) => (current === answered ? null : current));
       return outcome;
     },
-    [writes, workspaceId, threadId, parent],
+    [writes, workspaceId, threadId, parent, question],
   );
-  const cancelReply = useCallback(() => setChosen(null), []);
+  const cancelReply = useCallback(() => {
+    setChosen(null);
+    setAnswering(null);
+  }, []);
   const composer = useMemo(
     () => (onLayoutHeight: (height: number) => void) => (
       <Composer
@@ -440,17 +582,17 @@ function WritableThread({
         blocked={blocked}
         problem={problem}
         replies
-        replyTo={parent?.to ?? null}
+        replyTo={question?.to ?? parent?.to ?? null}
         onCancelReply={cancelReply}
         onSubmit={submit}
         onLayoutHeight={onLayoutHeight}
       />
     ),
-    [blocked, problem, parent, cancelReply, submit],
+    [blocked, problem, question, parent, cancelReply, submit],
   );
   const threadWrites = useMemo<ScreenWrites>(
-    () => ({ local, message, actions, react, reply, composer }),
-    [local, message, actions, react, reply, composer],
+    () => ({ local, message, actions, react, answers, reply, composer }),
+    [local, message, actions, react, answers, reply, composer],
   );
   return <Thread threadId={threadId} messageId={messageId} writes={threadWrites} />;
 }
@@ -496,23 +638,24 @@ function Stream({
       ) ?? null,
     [stream],
   );
+  const byId = useMemo(() => byIdOf(stream?.items.map((item) => item.message) ?? []), [stream]);
   const decorate = writes?.message;
   const messages = useMemo(
     () =>
       bases && stream && decorate
         ? bases.map((base, index) => {
             const item = stream.items[index];
-            return item ? decorate(item.message, base) : base;
+            return item ? decorate(item.message, base, (id) => byId.get(id)) : base;
           })
         : bases,
-    [bases, stream, decorate],
+    [bases, stream, decorate, byId],
   );
   const local = useMemo(
     () =>
       writes && stream
-        ? writes.local(new Set(stream.items.map((item) => item.message.id)))
+        ? writes.local(new Set(byId.keys()), questionsIn([...byId.values()]))
         : undefined,
-    [writes, stream],
+    [writes, stream, byId],
   );
   const posts = useMemo(
     () =>
@@ -524,18 +667,20 @@ function Stream({
     () => reply && ((message: Message) => reply(message, posts.has(message.id))),
     [reply, posts],
   );
+  const answers = useMemo(() => writes?.answers(byId, posts), [writes, byId, posts]);
   return (
     <Conversation
       title={chatTitle(kindOf(stream?.groupKind ?? "group"), stream?.name ?? name)}
       state={state}
       messages={messages}
       retry={retry}
-      {...(writes && onReply
+      {...(writes && onReply && answers
         ? {
             local: local ?? [],
             actions: writes.actions,
             react: writes.react,
             onReply,
+            answers,
             composer: writes.composer,
           }
         : {})}
@@ -575,26 +720,25 @@ function Thread({
     () => thread?.messages.map((entry) => serverMessage(entry, null, workspaceMarkFills)) ?? null,
     [thread],
   );
+  const byId = useMemo(() => byIdOf(thread?.messages ?? []), [thread]);
   const decorate = writes?.message;
   const messages = useMemo(
     () =>
       bases && thread && decorate
         ? bases.map((base, index) => {
             const entry = thread.messages[index];
-            return entry ? decorate(entry, base) : base;
+            return entry ? decorate(entry, base, (id) => byId.get(id)) : base;
           })
         : bases,
-    [bases, thread, decorate],
+    [bases, thread, decorate, byId],
   );
   const local = useMemo(
-    () =>
-      writes && thread
-        ? writes.local(new Set(thread.messages.map((entry) => entry.id)))
-        : undefined,
-    [writes, thread],
+    () => (writes && thread ? writes.local(new Set(byId.keys()), new Set()) : undefined),
+    [writes, thread, byId],
   );
   const reply = writes?.reply;
   const onReply = useMemo(() => reply && ((message: Message) => reply(message, false)), [reply]);
+  const answers = useMemo(() => writes?.answers(byId, new Set()), [writes, byId]);
   return (
     <Conversation
       title={thread?.title || workspaceWords.thread}
@@ -603,12 +747,13 @@ function Thread({
       retry={retry}
       anchor={messageId}
       {...(messageId === null ? {} : { onShown: addOnScreen })}
-      {...(writes && onReply
+      {...(writes && onReply && answers
         ? {
             local: local ?? [],
             actions: writes.actions,
             react: writes.react,
             onReply,
+            answers,
             composer: writes.composer,
           }
         : {})}
@@ -627,6 +772,7 @@ function Conversation({
   actions,
   react,
   onReply,
+  answers,
   composer,
 }: {
   title: string;
@@ -642,6 +788,7 @@ function Conversation({
   actions?: LocalActions;
   react?: ReactActions;
   onReply?: (message: Message) => void;
+  answers?: AnswerActions;
   /** Where writes are on: the composer, or null until the server says which lanes the chat takes. */
   composer?: ScreenWrites["composer"];
 }) {
@@ -661,9 +808,10 @@ function Conversation({
     anchor === null
       ? -1
       : items.findIndex((item) => item.type !== "day" && item.message.id === anchor);
+  // Only a post shows its replies' link.
   const openReplies = useCallback(
     (entry: Message) => {
-      if (entry.threadId) openThread(router, workspaceId, entry.threadId);
+      if (entry.threadId) openThread(router, workspaceId, entry.threadId, { post: "1" });
     },
     [router, workspaceId],
   );
@@ -692,6 +840,7 @@ function Conversation({
         {...(actions ? { actions } : {})}
         {...(react ? { react } : {})}
         {...(onReply ? { onReply } : {})}
+        {...(answers ? { answers } : {})}
       />
     );
   const gap = useWorkspaceGap();

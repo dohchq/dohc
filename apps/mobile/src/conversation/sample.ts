@@ -1,6 +1,7 @@
 import type { ChatWrite } from "../server/chatWrites";
 import { OutboxError, type OutboxState } from "../server/outbox";
 import type { Lanes, WriteOutbox } from "./conversationWrites";
+import type { Asked } from "./decisionAnswers";
 import type { Author, Message } from "./types";
 
 // Sample conversation for design review only. Real messages come from the server's chat operations.
@@ -91,7 +92,6 @@ export const sampleMessages: readonly Message[] = [
         text: "The 8:09 Alfa Pendular gets you to Porto at 10:58. Which return should the itinerary use?",
       },
     ],
-    question: { options: ["17:52", "19:52", "21:07"], chosen: "19:52" },
   },
   {
     id: "m6",
@@ -161,11 +161,72 @@ const scoutMessages: readonly Message[] = [
   },
 ];
 
-/** The sample messages for a chat: the agents' direct chats have their own; every other chat shows #planning's. */
-export function sampleMessagesFor(chatId: string): readonly Message[] {
+/** Design review only: the open poll and question `talk-decisions` adds to #planning, before Nova's work. */
+const openDecisions: readonly Message[] = [
+  {
+    id: "d1",
+    threadId: PLANNING_THREAD,
+    author: maya,
+    at: "9:40",
+    minute: 38,
+    body: [{ text: "Dinner on the 13th: where should I book?" }],
+  },
+  {
+    id: "d2",
+    threadId: PLANNING_THREAD,
+    author: nova,
+    at: "9:41",
+    minute: 39,
+    body: [{ text: "What should I call the shared photo album?" }],
+  },
+];
+
+/** #planning's messages, with `talk-decisions`'s open poll and question before Nova's work. */
+const planningFor = (demo: string | null): readonly Message[] =>
+  demo === "talk-decisions"
+    ? [...sampleMessages.slice(0, -1), ...openDecisions, ...sampleMessages.slice(-1)]
+    : sampleMessages;
+
+/** The question or poll a sample message asks, as the server would give it. */
+const asked = (id: string, fields: Partial<Asked>): Asked => ({
+  id,
+  threadId: PLANNING_THREAD,
+  parentMessageId: null,
+  decisionState: "open",
+  options: [],
+  chosenOption: null,
+  resolvedByMessageId: null,
+  ...fields,
+});
+
+/** The sample's questions and polls, by message: Nova's answered return train, and `talk-decisions`'s open two. */
+export const sampleAsks: ReadonlyMap<string, Asked> = new Map([
+  [
+    "m5",
+    asked("m5", {
+      decisionState: "resolved",
+      options: ["17:52", "19:52", "21:07"],
+      chosenOption: "19:52",
+      resolvedByMessageId: "m6",
+    }),
+  ],
+  [
+    "d1",
+    asked("d1", {
+      options: ["Time Out Market", "Taberna da Rua das Flores", "Cook on the terrace"],
+    }),
+  ],
+  ["d2", asked("d2", {})],
+]);
+
+/**
+ * The sample messages for a chat: the agents' direct chats have their own; every other chat shows #planning's, with
+ * the open decisions when `demo` is `talk-decisions`.
+ */
+export function sampleMessagesFor(chatId: string, demo: string | null = null): readonly Message[] {
   if (chatId === "a-nova") return novaMessages;
   if (chatId === "a-scout") return scoutMessages;
-  return sampleMessages;
+  return planningFor(demo);
 }
 
 /** The Porto thread: the message it hangs from, then its replies. */
@@ -205,8 +266,8 @@ const portoMessages: readonly Message[] = [
 ];
 
 /** A thread's messages: the Porto thread's, and #planning's for its chat, which is one thread. */
-export function sampleThreadFor(threadId: string): readonly Message[] {
-  return threadId === PORTO_THREAD ? portoMessages : sampleMessages;
+export function sampleThreadFor(threadId: string, demo: string | null = null): readonly Message[] {
+  return threadId === PORTO_THREAD ? portoMessages : planningFor(demo);
 }
 
 /** An agent in this sample, by its author id, for its card. */
