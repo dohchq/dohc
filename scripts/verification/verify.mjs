@@ -180,6 +180,9 @@ export function passedSpecTitles(suites = []) {
   ]);
 }
 
+/** The PR checks a selection needs a passing CI run of, because no local run performs them. */
+export const ciEvidence = (gates) => (gates.android ? ["Android Kotlin compile"] : []);
+
 export function changedFiles(baseCommit, includeUncommitted = false, root = repoRoot) {
   const paths = (args) => readGit(args, root).split("\0").filter(Boolean);
   return [
@@ -408,7 +411,7 @@ export async function verify(args) {
     const files = base ? changedFiles(baseCommit, mode === "plan") : [];
     const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
     const requiredGates = selectedGates(files, workflow);
-    if (full) Object.assign(requiredGates, { rust: true, js: true });
+    if (full) Object.assign(requiredGates, { rust: true, js: true, android: true });
     if (job) requiredGates[job] = true;
     const gates = Object.fromEntries(
       Object.entries(requiredGates).map(([name, needed]) => [
@@ -442,7 +445,13 @@ export async function verify(args) {
           proofs: ["self-host-native", "accounts", ...desktopProofTags().required],
         }
       : null;
-    console.log(JSON.stringify({ base, baseCommit, files, gates, javascript, linux }, null, 2));
+    console.log(
+      JSON.stringify(
+        { base, baseCommit, files, gates, ciEvidence: ciEvidence(gates), javascript, linux },
+        null,
+        2,
+      ),
+    );
     return;
   }
   let treeState;
@@ -558,6 +567,7 @@ export async function verify(args) {
         files: selected.files,
         requiredGates: selected.requiredGates,
         gates: selected.gates,
+        ciEvidence: ciEvidence(selected.gates),
         repositoryTests: selected.repositoryTests,
         ...(selected.linux ? { linux: { distro: selected.linux } } : {}),
         commit: git(["rev-parse", "HEAD"]),
@@ -649,7 +659,8 @@ export async function verify(args) {
               baseRef: base,
               scope: report.scope,
               full,
-              gates,
+              // The lane runs only the local gates.
+              gates: { rust: gates.rust, js: gates.js },
               branch,
               checkout: repoRoot,
               ownerName,
@@ -1210,6 +1221,10 @@ export async function verify(args) {
       if (rerun.length) report.rerun = rerun;
       save();
       console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
+      for (const check of report.ciEvidence ?? [])
+        console.log(
+          `[verification] ${check} runs only in CI. A merge needs its passing PR checks run for ${report.commit}.`,
+        );
       if (report.repositoryTests === "test:repo:tree")
         console.log(
           "[verification] repository tests: tree set only (no tooling change). --full runs every repository test.",

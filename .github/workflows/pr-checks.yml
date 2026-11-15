@@ -12,7 +12,7 @@ on:
       gate:
         description: Full gate to run
         type: choice
-        options: [all, js, rust]
+        options: [all, js, rust, android]
         default: all
       cache:
         description: Build-cache condition for measurement
@@ -56,6 +56,7 @@ jobs:
     outputs:
       js: ${{ steps.filter.outputs.js }}
       rust: ${{ steps.filter.outputs.rust }}
+      android: ${{ steps.filter.outputs.android }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         if: github.event_name == 'pull_request'
@@ -174,6 +175,26 @@ jobs:
               - 'rust-toolchain.toml'
               - '.gitignore'
               - '.github/workflows/pr-checks.yml'
+            # The Expo prebuild reads the app config, its plugins, and each
+            # module's config; the frozen install reads every workspace manifest.
+            # A new input to the prebuild or Gradle adds its path here.
+            android:
+              - 'apps/mobile/modules/**/android/**'
+              - 'apps/mobile/modules/**/expo-module.config.json'
+              - 'apps/mobile/app.json'
+              - 'apps/mobile/app.config.*'
+              - 'apps/mobile/plugins/**'
+              - '**/package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - '.npmrc'
+              - '.pnpmfile.cjs'
+              - '.pnpmfile.mjs'
+              - '.node-version'
+              - '.nvmrc'
+              - 'patches/**'
+              - 'scripts/verification/**'
+              - '.github/workflows/pr-checks.yml'
             # Only the local verifier reads this filter; no job uses it. When
             # the JavaScript gate runs, a change here runs every repository
             # test (pnpm test:repo). Any other change runs only the tests that
@@ -231,7 +252,7 @@ jobs:
   javascript-prepare:
     name: shared preparation
     needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
+    if: (github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'js' || inputs.gate == 'rust')) || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
     # Confinement requires Landlock on GitHub's kernel.
     runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
     timeout-minutes: 30
@@ -352,7 +373,7 @@ jobs:
   javascript-workers:
     name: JS worker ${{ matrix.shard }}
     needs: changes
-    if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true'
+    if: (github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'js')) || needs.changes.outputs.js == 'true'
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 25
     strategy:
@@ -404,7 +425,7 @@ jobs:
   javascript:
     name: typecheck + tests
     needs: changes
-    if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'rust') || needs.changes.outputs.js == 'true')
+    if: always() && !cancelled() && ((github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'js')) || needs.changes.outputs.js == 'true')
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 40
     env:
@@ -469,7 +490,7 @@ jobs:
     needs: changes
     if: >-
       always() && !cancelled() && needs.changes.result == 'success' &&
-      ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
+      ((github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'rust')) || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     # The archive wait is capped at 25 minutes; the download and partition follow it.
     timeout-minutes: 35
@@ -532,7 +553,7 @@ jobs:
   rust-policy:
     name: Rust policy checks
     needs: changes
-    if: always() && !cancelled() && needs.changes.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
+    if: always() && !cancelled() && needs.changes.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'rust')) || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     timeout-minutes: 25
     env:
@@ -577,7 +598,7 @@ jobs:
   rust:
     name: engine gate
     needs: changes
-    if: always() && !cancelled() && needs.changes.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.gate != 'js') || needs.changes.outputs.rust == 'true')
+    if: always() && !cancelled() && needs.changes.result == 'success' && ((github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'rust')) || needs.changes.outputs.rust == 'true')
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
     # Covers the archive build (formerly its own 25-minute job), partition 0 and the group wait.
     timeout-minutes: 55
@@ -674,9 +695,49 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  # The local verifier never compiles Android; this job's pass is the gate's only evidence.
+  android:
+    name: Android Kotlin compile
+    needs: changes
+    if: (github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'android')) || needs.changes.outputs.android == 'true'
+    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    timeout-minutes: 20
+    env:
+      EXPO_NO_TELEMETRY: '1'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: ${{ inputs.cache != 'cold' && 'gradle' || '' }}
+      - name: Install dependencies
+        run: pnpm --filter @dohc/mobile... install --frozen-lockfile
+      # The versions are compileSdk, buildTools, and ndkVersion in react-native/gradle/libs.versions.toml.
+      - name: Install the Android SDK components
+        run: >-
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          'platforms;android-37' 'build-tools;37.0.0' 'ndk;27.1.12297006'
+      # apps/mobile ignores the generated android/ folder. The bundled template avoids a template download.
+      - name: Generate the Android project
+        working-directory: apps/mobile
+        run: pnpm exec expo prebuild --platform android --no-install --template ./node_modules/expo/template.tgz
+      - name: Compile the native modules' Kotlin
+        working-directory: apps/mobile/android
+        run: ./gradlew :chat-composer:compileDebugKotlin :durable-file:compileDebugKotlin --no-daemon --console=plain --stacktrace
+
   verification:
     name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}
-    needs: [changes, javascript, rust, javascript-prepare]
+    needs: [changes, javascript, rust, javascript-prepare, android]
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
@@ -710,7 +771,7 @@ jobs:
           import { verifyCompletedCloud } from './scripts/verification/cloud-aggregate.mjs';
           const jobs = JSON.parse(process.env.JOBS);
           assert.equal(jobs.changes.result, 'success', 'Gate selection failed');
-          const verdicts = await Promise.allSettled([['js', 'javascript'], ['rust', 'rust']].map(async ([gate, job]) => {
+          const verdicts = await Promise.allSettled([['js', 'javascript'], ['rust', 'rust'], ['android', 'android']].map(async ([gate, job]) => {
             if (process.env.EVENT_NAME === 'pull_request') {
               assert.ok(['true', 'false'].includes(jobs.changes.outputs[gate]), `${gate} selection is missing`);
             }
@@ -718,9 +779,10 @@ jobs:
               ? process.env.REQUESTED_GATE === 'all' || process.env.REQUESTED_GATE === gate
               : jobs.changes.outputs[gate] === 'true';
             assert.equal(jobs[job].result, selected ? 'success' : 'skipped', `${gate} gate did not complete as selected`);
-            if (selected) await verifyCompletedCloud(gate);
+            // Android is one job, so its success is its whole proof.
+            if (selected && gate !== 'android') await verifyCompletedCloud(gate);
           }));
-          const confined = process.env.EVENT_NAME === 'workflow_dispatch' || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
+          const confined = (process.env.EVENT_NAME === 'workflow_dispatch' && process.env.REQUESTED_GATE !== 'android') || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
           assert.equal(jobs['javascript-prepare'].result, confined ? 'success' : 'skipped', 'shared preparation did not complete as selected');
           const failures = verdicts.filter(verdict => verdict.status === 'rejected').map(verdict => verdict.reason);
           if (failures.length) throw new AggregateError(failures, 'Selected verification gates failed');

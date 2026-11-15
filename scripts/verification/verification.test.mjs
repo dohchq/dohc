@@ -27,6 +27,7 @@ import {
 } from "./build.mjs";
 import {
   changedFiles,
+  ciEvidence,
   desktopProofCommand,
   desktopProofTags,
   postgres,
@@ -1406,6 +1407,12 @@ test("artifact identity includes nested file bytes and names", () => {
   }
 });
 
+// The Rust and JavaScript selection. The Android filter has its own test.
+const localGates = (files, workflow) => {
+  const { rust, js } = selectedGates(files, workflow);
+  return { rust, js };
+};
+
 test("gate selection covers root self-host deployment inputs", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   for (const file of [
@@ -1415,28 +1422,84 @@ test("gate selection covers root self-host deployment inputs", () => {
     "scripts/self-host-health.test.mjs",
     "tools/self-host/health.mjs",
   ]) {
-    assert.deepEqual(selectedGates([file], workflow), { rust: false, js: true }, file);
+    assert.deepEqual(
+      selectedGates([file], workflow),
+      { rust: false, js: true, android: false },
+      file,
+    );
   }
+});
+
+test("the Android filter in the workflow selects native module, Expo config, and install inputs", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+  for (const file of [
+    "apps/mobile/modules/chat-composer/android/src/main/java/app/dohc/chatcomposer/ChatComposerView.kt",
+    "apps/mobile/modules/durable-file/android/build.gradle",
+    "apps/mobile/modules/durable-file/expo-module.config.json",
+    "apps/mobile/app.json",
+    "apps/mobile/plugins/iosCameraWithoutBarcodeCompanion.js",
+    "apps/mobile/package.json",
+    "packages/brand/package.json",
+    "pnpm-lock.yaml",
+    "patches/prosemirror-view@1.42.2.patch",
+    "scripts/verification/selection.mjs",
+    ".github/workflows/pr-checks.yml",
+  ]) {
+    assert.equal(selectedGates([file], workflow).android, true, file);
+  }
+  for (const file of [
+    "apps/mobile/src/app/index.tsx",
+    "apps/mobile/modules/chat-composer/index.ts",
+    "apps/mobile/modules/chat-composer/ios/ChatComposerView.swift",
+    "apps/desktop/src/main.ts",
+    "crates/example/src/lib.rs",
+    "scripts/check-brand.mjs",
+    "docs/guide.md",
+  ]) {
+    assert.equal(selectedGates([file], workflow).android, false, file);
+  }
+  assert.deepEqual(selectedGates(["apps/mobile/app.json"], workflow), {
+    rust: false,
+    js: true,
+    android: true,
+  });
+  // The selection reads the filter from the workflow, so a filter change moves it.
+  const narrowed = workflow.replace("- 'apps/mobile/app.json'", "- 'apps/mobile/other.json'");
+  assert.notEqual(narrowed, workflow);
+  assert.equal(selectedGates(["apps/mobile/app.json"], narrowed).android, false);
+});
+
+test("a selected Android gate needs CI evidence, because no local run compiles it", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+  assert.deepEqual(
+    ciEvidence(selectedGates(["apps/mobile/modules/durable-file/android/build.gradle"], workflow)),
+    ["Android Kotlin compile"],
+  );
+  assert.deepEqual(ciEvidence(selectedGates(["apps/desktop/src/main.ts"], workflow)), []);
 });
 
 test("gate selection follows workflow inputs, including shared and gate implementation files", () => {
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
-  assert.deepEqual(selectedGates(["docs/guide.md"], workflow), { rust: false, js: false });
-  assert.deepEqual(selectedGates(["apps/desktop/src/main.ts"], workflow), {
+  assert.deepEqual(selectedGates(["docs/guide.md"], workflow), {
+    rust: false,
+    js: false,
+    android: false,
+  });
+  assert.deepEqual(localGates(["apps/desktop/src/main.ts"], workflow), {
     rust: false,
     js: true,
   });
-  assert.deepEqual(selectedGates(["patches/prosemirror-view@1.42.2.patch"], workflow), {
+  assert.deepEqual(localGates(["patches/prosemirror-view@1.42.2.patch"], workflow), {
     rust: true,
     js: true,
   });
-  assert.deepEqual(selectedGates([".config/nextest.toml"], workflow), { rust: true, js: false });
+  assert.deepEqual(localGates([".config/nextest.toml"], workflow), { rust: true, js: false });
   assert.deepEqual(
-    selectedGates(["packages/excalidraw-scene/fixtures/canonical-json.json"], workflow),
+    localGates(["packages/excalidraw-scene/fixtures/canonical-json.json"], workflow),
     { rust: true, js: true },
   );
   for (const file of ["examples/fundraiser/backend.ts", "examples/stock-orders/schema.sql"]) {
-    assert.deepEqual(selectedGates([file], workflow), { rust: false, js: true }, file);
+    assert.deepEqual(localGates([file], workflow), { rust: false, js: true }, file);
   }
   for (const file of [
     "crates/example/src/lib.rs",
@@ -1462,7 +1525,7 @@ test("gate selection follows workflow inputs, including shared and gate implemen
     "apps/desktop/package.json",
     "tsconfig.base.json",
   ]) {
-    assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
+    assert.deepEqual(localGates([file], workflow), { rust: true, js: true }, file);
   }
 });
 
@@ -1473,9 +1536,9 @@ test("gate selection covers provenance inputs without selecting Rust for ordinar
     "vendor/file-guard/src/lib.rs",
     "tools/rust-engine-program/run-rust-checks.mjs",
   ]) {
-    assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
+    assert.deepEqual(localGates([file], workflow), { rust: true, js: true }, file);
   }
-  assert.deepEqual(selectedGates(["scripts/check-brand.mjs"], workflow), { rust: false, js: true });
+  assert.deepEqual(localGates(["scripts/check-brand.mjs"], workflow), { rust: false, js: true });
 });
 
 test("shared native test fixtures select the Rust gate", () => {
@@ -1492,7 +1555,7 @@ test("path folding data and fixtures select Rust and their TypeScript drift chec
     "crates/dohc-engine-files/src/pathCollisionFixtures.json",
     "packages/workspace-contracts/src/pathFoldData.json",
   ]) {
-    assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
+    assert.deepEqual(localGates([file], workflow), { rust: true, js: true }, file);
   }
 });
 
@@ -1528,7 +1591,7 @@ test("gate selection includes the old path of committed, staged, and unstaged re
     const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
     const assertRenameGates = (files) => {
       assert.deepEqual(new Set(files), new Set([oldPath, newPath]));
-      assert.deepEqual(selectedGates(files, workflow), { rust: true, js: true });
+      assert.deepEqual(localGates(files, workflow), { rust: true, js: true });
     };
     renameSync(join(root, oldPath), join(root, newPath));
     assert.deepEqual(changedFiles(base, false, root), []);
@@ -1687,7 +1750,8 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     assert.equal(report.commit, head);
     assert.equal(report.provenance.status, "PASS");
     assert.equal(report.dirty, false);
-    assert.deepEqual(report.gates, { rust: false, js: false });
+    assert.deepEqual(report.gates, { rust: false, js: false, android: false });
+    assert.deepEqual(report.ciEvidence, []);
     assert.deepEqual(report.steps, []);
     assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);
     assert.deepEqual(
