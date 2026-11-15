@@ -1976,11 +1976,10 @@ describe("a new page under Edit", () => {
     reach: {
       evaluated: { revision: "test", role: "member", level: "edit", rules: [] },
       revision: "test",
-      signature: "test",
+      signature: () => "test",
       levelAt: () => "edit",
       folderLevel: () => "edit",
       hasLevel: (level) => level === "edit",
-      folderExists: () => true,
       nearestRule: () => "",
       objectVisible: () => true,
       objectPath: () => null,

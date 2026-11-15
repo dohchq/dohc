@@ -209,11 +209,13 @@ export function createPresenceRoutes(
   ): Promise<Response> => {
     const scopeKey = presenceScopeKey(workspaceId, topic);
     const authorize = () => {
-      if (shareId) {
-        const authorized = authorizeShare(shareId, userId, topic);
-        if (authorized.share.workspaceId !== workspaceId) throw notFound();
-        return editsTopic(authorized, topic);
-      }
+      // The edit check reads the object's path in the same cut as the grant.
+      if (shareId)
+        return inRead(() => {
+          const authorized = authorizeShare(shareId, userId, topic);
+          if (authorized.share.workspaceId !== workspaceId) throw notFound();
+          return editsTopic(authorized, topic);
+        });
       if (!storage.workspaceIsOwnedBy(workspaceId, userId)) throw notFound();
       return true;
     };

@@ -5,6 +5,7 @@ import {
   fileLevel,
   folderLevel,
   ruleLevel,
+  type AccessRule,
   type AccessRuleSet,
   type ReachViewer,
 } from "@dohc/security-contract/access-rules";
@@ -23,10 +24,9 @@ export interface EvaluatedMemberReach {
 export interface MemberReach {
   evaluated: EvaluatedMemberReach;
   hasLevel(level: ShareAccess): boolean;
-  folderExists(folder: string): boolean;
   refresh(): MemberReach;
   revision: string;
-  signature: string;
+  signature(): string;
   levelAt(path: string): ShareAccess | null;
   folderLevel(folder: string): ShareAccess | null;
   objectVisible(objectId: string): boolean;
@@ -64,6 +64,7 @@ export function memberReach(
   const levelAt = (path: string) => fileLevel(rules, viewer, path);
   const atFolder = (folder: string) => folderLevel(rules, viewer, folder);
   const floor = accessRuleHistoryFloor(db, workspaceId);
+  const parsedRules = new Map<string, AccessRule | null>();
   const objects = new Map<string, { visible: boolean; path: string | null }>();
   const object = (id: string) => {
     const cached = objects.get(id);
@@ -84,8 +85,11 @@ export function memberReach(
       const seq = Number(latest!.relay_seq);
       visible =
         seq > floor &&
-        fileLevel(knownRules(accessRuleSetBefore(db, workspaceId, "main", seq)), viewer, path!) !==
-          null;
+        fileLevel(
+          knownRules(accessRuleSetBefore(db, workspaceId, "main", seq, parsedRules)),
+          viewer,
+          path!,
+        ) !== null;
     }
     const result = { visible, path };
     objects.set(id, result);
@@ -99,37 +103,33 @@ export function memberReach(
       folder = accessRuleFolder(folder);
     }
   };
-  // Describe evaluated boundaries, rather than rule text or ordinary content.
-  const boundaries = [...rules.exact.keys()]
-    .sort()
-    .flatMap((folder) =>
-      folder !== "" && atFolder(folder) === atFolder(accessRuleFolder(folder))
-        ? []
-        : [[folder, atFolder(folder)]],
-    );
-  const moves = db
-    .prepare(`SELECT relay_seq, payload_json FROM sync_relay_log
-    WHERE workspace_id = ? AND op_kind = 'moment.append' AND json_valid(payload_json)
-      AND json_extract(payload_json, '$.operation') = 'rename'`)
-    .all(workspaceId)
-    .flatMap((row) => {
-      const p = JSON.parse(String(row.payload_json)) as Record<string, unknown>;
-      return typeof p.payloadBeforePath === "string" &&
-        typeof p.payloadAfterPath === "string" &&
-        nearestRule(p.payloadBeforePath) !== nearestRule(p.payloadAfterPath) &&
-        levelAt(p.payloadBeforePath) !== levelAt(p.payloadAfterPath)
-        ? [Number(row.relay_seq)]
-        : [];
-    });
-  const signature = createHash("sha256")
-    .update(JSON.stringify([userId, role, atFolder(""), boundaries, moves]))
-    .digest("hex");
+  // Settle compares this to decide whether reach changed. It names hidden
+  // folders, so it stays a function: it never serializes into a selector or
+  // reaches a member.
+  const signature = () =>
+    createHash("sha256")
+      .update(
+        JSON.stringify([
+          role,
+          atFolder(""),
+          [...rules.exact.keys()]
+            .sort()
+            .flatMap((folder) =>
+              folder !== "" && atFolder(folder) === atFolder(accessRuleFolder(folder))
+                ? []
+                : [[folder, atFolder(folder)]],
+            ),
+        ]),
+      )
+      .digest("hex");
+  // Only `settleMemberRevisions` writes revisions, at the end of each write
+  // transaction, so a read takes the stored one as it is.
   const stored = db
     .prepare(
-      "SELECT signature, revision FROM sync_relay_member_revisions WHERE workspace_id = ? AND user_id = ?",
+      "SELECT revision FROM sync_relay_member_revisions WHERE workspace_id = ? AND user_id = ?",
     )
     .get(workspaceId, userId);
-  const revision = stored?.signature === signature ? String(stored.revision) : signature;
+  const revision = stored ? String(stored.revision) : "unsettled";
   return {
     evaluated: {
       revision,
@@ -143,13 +143,6 @@ export function memberReach(
     hasLevel: (level) =>
       atFolder("") === level ||
       [...rules.exact.keys()].some((folder) => atFolder(folder) === level),
-    folderExists: (folder) =>
-      folder === "" ||
-      db
-        .prepare(
-          `SELECT 1 FROM sync_relay_current_files WHERE workspace_id=? AND version_id='main' AND substr(path,1,length(?)+1)=? || '/' LIMIT 1`,
-        )
-        .get(workspaceId, folder, folder) !== undefined,
     revision,
     signature,
     levelAt,

@@ -24,29 +24,35 @@ export function assertMemberChanges(
     if ([before, after].some((path) => typeof path === "string" && isAccessRuleRelatedPath(path)))
       throw relayError("share_op_rejected");
     if (selector.role !== "member") continue;
+    const reach = selector.reach;
+    const refuse = (message?: string): never => {
+      // Only refusals cost a token: they are what a member could probe with.
+      if (charge && !limiter(owner).allow(userId, nowMs))
+        throw relayError("share_access_rate_limited");
+      throw relayError("share_op_rejected", message);
+    };
+    if (typeof before === "string" && typeof after === "string" && before !== after) {
+      if (!reach || reach.levelAt(before) === null || reach.levelAt(after) === null) refuse();
+      // Both ends are visible, so naming the rule boundary shows nothing hidden.
+      else if (reach.nearestRule(before) !== reach.nearestRule(after))
+        refuse("Ask an admin to move this.");
+    }
     if (
-      typeof before === "string" &&
+      before == null &&
       typeof after === "string" &&
-      before !== after &&
-      selector.reach &&
-      selector.reach.nearestRule(before) !== selector.reach.nearestRule(after)
-    ) {
-      throw relayError("share_op_rejected", "Ask an admin to move this.");
-    }
-    if (before == null && typeof after === "string") {
-      let limiter = createLimits.get(owner);
-      if (!limiter) {
-        limiter = new TokenBucketLimiter(30, 0.5, 10_000);
-        createLimits.set(owner, limiter);
-      }
-      if (charge && !limiter.allow(userId, nowMs))
-        throw relayError("collection_write_rate_limited");
-      if (
-        !selector.reach ||
-        selector.reach.folderLevel(accessRuleFolder(after)) === null ||
-        !selector.reach.folderExists(accessRuleFolder(after))
-      )
-        throw relayError("share_op_rejected", "can't create here");
-    }
+      (!reach || reach.folderLevel(accessRuleFolder(after)) === null)
+    )
+      refuse("can't create here");
   }
+}
+
+// Per storage instance: the relay has one writer process, so this bounds a
+// member across all of their requests.
+function limiter(owner: object): TokenBucketLimiter {
+  let found = createLimits.get(owner);
+  if (!found) {
+    found = new TokenBucketLimiter(30, 0.5, 10_000);
+    createLimits.set(owner, found);
+  }
+  return found;
 }

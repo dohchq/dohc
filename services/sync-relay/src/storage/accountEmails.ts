@@ -1,3 +1,4 @@
+import { normalizeRuleEmail } from "@dohc/security-contract/access-rules";
 import type { SqliteDb } from "./types";
 
 export interface AccountEmail {
@@ -33,7 +34,7 @@ export function refreshAccountEmail(
     ON CONFLICT(user_id) DO UPDATE SET email = excluded.email, verified = excluded.verified, refreshed_at_ms = excluded.refreshed_at_ms
     WHERE email != excluded.email OR verified != excluded.verified`).run(
     userId,
-    email.email.trim().toLowerCase(),
+    normalizeRuleEmail(email.email),
     Number(email.verified),
     nowMs,
   );

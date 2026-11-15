@@ -3,7 +3,8 @@ import { isWorkspaceSelector, type AnyShareSelector } from "./shareFilter";
 import { memberReach } from "./storage/memberReach";
 import { memberInventory } from "./storage/memberInventory";
 import { watchMemberReachWrites, settleMemberRevisions } from "./storage/memberRevisions";
-import { refreshAccountEmail, type AccountEmail } from "./storage/accountEmails";
+import { accountEmail, refreshAccountEmail, type AccountEmail } from "./storage/accountEmails";
+import { normalizeRuleEmail } from "@dohc/security-contract/access-rules";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { reusePreparedStatements } from "./storage/preparedStatements";
 import * as workReferenceStorage from "./storage/workReferences";
@@ -396,6 +397,7 @@ export function openSyncRelayStorage(
     owner.write(() => initializeSyncRelaySchema(db));
     watchLiveAuthorityWrites(db);
     watchMemberReachWrites(db);
+    owner.write(() => settleMemberRevisions(db));
     const storage = new SqliteSyncRelayStorage(
       reusePreparedStatements(db),
       {
@@ -2264,7 +2266,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   // A write no live host needs to hear about, such as current view persistence or a room's
   // taken edit, wakes no relay-write observer.
   quietTx<T>(run: () => T): T {
-    return this.owner.write(run);
+    return this.owner.write(() => {
+      const value = run();
+      settleMemberRevisions(this.db);
+      return value;
+    });
   }
 
   /**
@@ -2462,6 +2468,13 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   refreshAccountEmail(userId: string, email: AccountEmail | null, nowMs: number): void {
+    // Most refreshes find the same email; skip the write transaction for those.
+    const stored = this.readShareTx(() => accountEmail(this.db, userId));
+    const normalized = email && {
+      email: normalizeRuleEmail(email.email),
+      verified: email.verified,
+    };
+    if (stored?.email === normalized?.email && stored?.verified === normalized?.verified) return;
     this.tx(() => refreshAccountEmail(this.db, userId, email, nowMs));
   }
 

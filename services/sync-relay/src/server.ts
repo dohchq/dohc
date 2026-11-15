@@ -583,28 +583,51 @@ export function createSyncRelayHandler({
   };
 
   // Claim email invites only after the authenticated account verifies its address.
-  const claimPendingShares = async (userId: string, signal?: AbortSignal): Promise<void> => {
-    signal?.throwIfAborted();
+  // One lookup per account at a time, so a slower lookup can't store an older
+  // email over a newer one. `refreshedAt` lets the member feed skip a repeat
+  // lookup within `maxAgeMs`.
+  const accountRefreshes = new Map<string, Promise<void>>();
+  const refreshedAt = new Map<string, number>();
+  const refreshAccount = async (userId: string): Promise<void> => {
+    const startedAt = nowMs();
     if (!lookupAccountEmail && !lookupVerifiedUserEmail) {
-      storage.refreshAccountEmail(userId, null, nowMs());
+      storage.refreshAccountEmail(userId, null, startedAt);
       return;
     }
+    // A failed lookup throws and keeps the stored email: design §1 makes it an error.
     let account: { email: string; verified: boolean } | null;
-    try {
-      if (lookupAccountEmail) account = await lookupAccountEmail(userId);
-      else {
-        const verified = await lookupVerifiedUserEmail!(userId);
-        const email = verified ?? (await lookupUserEmail?.(userId));
-        account = email ? { email, verified: verified !== null } : null;
-      }
-    } catch (error) {
-      storage.refreshAccountEmail(userId, null, nowMs());
-      throw error;
+    if (lookupAccountEmail) account = await lookupAccountEmail(userId);
+    else {
+      const verified = await lookupVerifiedUserEmail!(userId);
+      const email = verified ?? (await lookupUserEmail?.(userId));
+      account = email ? { email, verified: verified !== null } : null;
     }
-    signal?.throwIfAborted();
-    storage.refreshAccountEmail(userId, account, nowMs());
+    storage.refreshAccountEmail(userId, account, startedAt);
+    refreshedAt.set(userId, startedAt);
     const email = account?.verified ? account.email : null;
     if (email) storage.claimPendingSharesForEmail(email, userId);
+  };
+  // Returns the shared refresh itself, adding no awaits of its own.
+  const claimPendingShares = (
+    userId: string,
+    signal?: AbortSignal,
+    maxAgeMs?: number,
+  ): Promise<void> => {
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    const last = refreshedAt.get(userId);
+    if (maxAgeMs !== undefined && last !== undefined && nowMs() - last < maxAgeMs)
+      return Promise.resolve();
+    let running = accountRefreshes.get(userId);
+    if (!running) {
+      const started = refreshAccount(userId);
+      running = started;
+      accountRefreshes.set(userId, started);
+      const clear = () => {
+        if (accountRefreshes.get(userId) === started) accountRefreshes.delete(userId);
+      };
+      started.then(clear, clear);
+    }
+    return signal ? running.then(() => signal.throwIfAborted()) : running;
   };
 
   function requireShareAction(

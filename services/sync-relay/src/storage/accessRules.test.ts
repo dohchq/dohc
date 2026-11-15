@@ -223,11 +223,11 @@ describe("the relay's access rule index", () => {
     }
   });
 
-  it("revises evaluated reach for rules, identity, level and role, but not ordinary writes", () => {
+  it("signs evaluated reach for rules, identity, level and role, but not ordinary writes", () => {
     const r = relay();
     try {
       const revision = (role: "member" | "admin" = "member", level: "edit" | "view" = "edit") =>
-        memberReach(r.storageDb, "ws", "sam", role, level).revision;
+        memberReach(r.storageDb, "ws", "sam", role, level).signature();
       const first = revision();
       r.write("Public/note.md", "hello");
       expect(revision()).toBe(first);
