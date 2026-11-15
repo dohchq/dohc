@@ -26,7 +26,11 @@ it("allows file and artifact bodies without relaxing operation or error response
   expect(await readDatasetResponse(new Response(body), "artifacts", signal)).toEqual(
     JSON.parse(body),
   );
-  await expect(readDatasetResponse(new Response(body), "invoke", signal)).rejects.toThrow(/limit/);
+  // A change's response holds its result and the journal for the owner's kept copy, and no more.
+  const change = JSON.stringify({ bytes: "a".repeat(3 * 1024 * 1024) });
+  await expect(readDatasetResponse(new Response(change), "invoke", signal)).rejects.toThrow(
+    /limit/,
+  );
   await expect(
     readDatasetResponse(new Response(body, { status: 500 }), "file", signal),
   ).rejects.toThrow(/limit/);

@@ -24,7 +24,10 @@ import {
   type DatasetRevision,
 } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
-import type { AppBackendFile } from "@dohc/security-contract/app-backend";
+import {
+  APP_BACKEND_CATCH_UP_HEADER,
+  type AppBackendFile,
+} from "@dohc/security-contract/app-backend";
 import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import type { RecoveryImportReceipt } from "@dohc/app-backend-runtime/recovery-install";
 import type { LocalDatasetInvocation } from "./localDatasetHost";
@@ -122,7 +125,10 @@ export interface OwnerDatasetData {
     active: boolean;
     cursor: DatasetCursor;
   }>;
-  invoke(input: LocalDatasetInvocation): Promise<DatasetInvocationResult>;
+  /** With `after`, the owner's server returns the journal from there, when it fits. */
+  invoke(
+    input: LocalDatasetInvocation & { after?: DatasetCursor },
+  ): Promise<DatasetInvocationResult & { catchUp?: DatasetCatchUp }>;
   upload(
     input: Extract<DatasetRequest, { action: "upload" }> & { signal?: AbortSignal },
   ): Promise<{ file: AppBackendFile; replayed: boolean }>;
@@ -195,6 +201,16 @@ const artifacts = z
   })
   .strict();
 
+const DatasetCatchUp = z
+  .object({
+    head: z.unknown(),
+    records: z.array(z.unknown()).max(32),
+    changesets: z.array(z.string()).max(32),
+  })
+  .strict();
+/** The journal after a kept copy's cursor, as one change's response carries it. The copy checks it. */
+export type DatasetCatchUp = z.infer<typeof DatasetCatchUp>;
+
 /** A remote authority is never replaced by a local fallback when the server is unavailable. */
 export function createRemoteDatasetData(input: {
   workspaceId: string;
@@ -222,7 +238,12 @@ export function createRemoteDatasetData(input: {
   const path = (datasetId: string) => `${base}/${identity.parse(datasetId)}`;
   const confirmationSignal = () =>
     AbortSignal.any([input.signal, AbortSignal.timeout(RELAY_FETCH_TIMEOUT_MS)]);
-  const request = (url: string, body?: unknown, signal = input.signal) =>
+  const request = (
+    url: string,
+    body?: unknown,
+    signal = input.signal,
+    headers: Record<string, string> = {},
+  ) =>
     session.run(async () => {
       signal.throwIfAborted();
       const value = await input.relayJson(input.credentials, url, {
@@ -230,7 +251,10 @@ export function createRemoteDatasetData(input: {
         method: body === undefined ? "GET" : "POST",
         ...(body === undefined
           ? {}
-          : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+          : {
+              headers: { "content-type": "application/json", ...headers },
+              body: JSON.stringify(body),
+            }),
       });
       signal.throwIfAborted();
       return value;
@@ -558,17 +582,29 @@ export function createRemoteDatasetData(input: {
         );
     },
     async invoke(invocation) {
-      const { datasetId, revision, revisionSha256, operationId, idempotencyKey } = invocation;
+      const { datasetId, revision, revisionSha256, operationId, idempotencyKey, after } =
+        invocation;
       const signal = invocation.signal
         ? AbortSignal.any([input.signal, invocation.signal])
         : input.signal;
-      return DatasetInvocationResult.parse(
-        await request(
-          `${path(datasetId)}/invoke`,
-          { revision, revisionSha256, operationId, input: invocation.input, idempotencyKey },
-          signal,
-        ),
-      );
+      const { catchUp, ...result } = z
+        .record(z.string(), z.unknown())
+        .parse(
+          await request(
+            `${path(datasetId)}/invoke`,
+            { revision, revisionSha256, operationId, input: invocation.input, idempotencyKey },
+            signal,
+            after === undefined || input.shareId !== undefined
+              ? {}
+              : { [APP_BACKEND_CATCH_UP_HEADER]: JSON.stringify(after) },
+          ),
+        );
+      // The change is committed whatever the journal holds; the copy catches up later without it.
+      const journal = DatasetCatchUp.safeParse(catchUp);
+      return {
+        ...DatasetInvocationResult.parse(result),
+        ...(journal.success ? { catchUp: journal.data } : {}),
+      };
     },
     async upload(upload) {
       const signal = upload.signal ? AbortSignal.any([input.signal, upload.signal]) : input.signal;

@@ -1,7 +1,7 @@
 import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { readBoundedJson } from "@dohc/service-http";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
-import { JournalError } from "@dohc/app-backend-runtime/journal";
+import { JournalError, type DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import {
   DatasetHostError,
   DatasetBindingPendingAttemptError,
@@ -14,6 +14,8 @@ import {
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import {
+  APP_BACKEND_CATCH_UP_BYTES,
+  APP_BACKEND_CATCH_UP_HEADER,
   APP_BACKEND_UPLOAD_REQUEST_BYTES,
   parseAppBackendJson,
   parseAppBackendInvokeRequest,
@@ -37,6 +39,47 @@ export function datasetRequestBytes(action: DatasetRoute["action"]): number {
     : action === "activate" || action === "prepare-migration"
       ? 1024 * 1024
       : 128 * 1024;
+}
+
+/**
+ * The journal from `after` to the head, with each change's bytes, or null when
+ * it holds a checkpoint, more than one page, or more than the response carries.
+ * The kept copy then catches up through its own routes.
+ */
+function journalAfter(
+  host: RelayDatasetHost,
+  auth: Extract<AppBackendAuth, { kind: "named" }>,
+  scope: { workspaceId: string; datasetId: string },
+  after: DatasetCursor,
+) {
+  try {
+    const { head } = host.replicaCapture(auth, scope);
+    if (head.revision < after.revision) return null;
+    const page =
+      head.revision === after.revision
+        ? { records: [] }
+        : host.replicaPage(auth, { ...scope, through: head, after, limit: 32 });
+    if (page.records.length !== head.revision - after.revision) return null;
+    let bytes = 0;
+    const changesets: string[] = [];
+    for (const record of page.records) {
+      if (record.kind !== "event") return null;
+      bytes += record.byteLength;
+      if (bytes > APP_BACKEND_CATCH_UP_BYTES / 2) return null;
+      const changeset = host.replicaBlob(auth, {
+        ...scope,
+        record,
+        offset: 0,
+        length: record.byteLength,
+      });
+      changesets.push(Buffer.from(changeset).toString("base64"));
+    }
+    const catchUp = { head, records: page.records, changesets };
+    return Buffer.byteLength(JSON.stringify(catchUp)) > APP_BACKEND_CATCH_UP_BYTES ? null : catchUp;
+  } catch {
+    // The change is committed either way; the copy's own catch-up reports any problem.
+    return null;
+  }
 }
 
 export interface DatasetRoute {
@@ -119,6 +162,30 @@ function digest(value: unknown): string {
   if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value))
     throw badRequest("Invalid dataset digest.");
   return value;
+}
+function cursor(value: unknown, scope: { workspaceId: string; datasetId: string }): DatasetCursor {
+  const row = record(value, [
+    "workspaceId",
+    "datasetId",
+    "hostEpoch",
+    "approvedRevisionHash",
+    "revision",
+    "digest",
+  ]);
+  if (
+    row.workspaceId !== scope.workspaceId ||
+    row.datasetId !== scope.datasetId ||
+    !Number.isSafeInteger(row.revision) ||
+    Number(row.revision) < 0
+  )
+    throw badRequest("Invalid dataset cursor.");
+  return {
+    ...scope,
+    hostEpoch: text(row.hostEpoch),
+    approvedRevisionHash: digest(row.approvedRevisionHash),
+    revision: Number(row.revision),
+    digest: digest(row.digest),
+  };
 }
 function input(value: unknown) {
   try {
@@ -672,7 +739,19 @@ export function createDatasetRoutes(
             "input",
             "idempotencyKey",
           ]);
-          return host.invoke(auth, {
+          const named = request.headers.get(APP_BACKEND_CATCH_UP_HEADER);
+          let after: DatasetCursor | undefined;
+          if (named !== null) {
+            if (Buffer.byteLength(named) > 1024) throw badRequest("Invalid dataset cursor.");
+            let value: unknown;
+            try {
+              value = JSON.parse(named);
+            } catch {
+              throw badRequest("Invalid dataset cursor.");
+            }
+            after = cursor(value, scope);
+          }
+          const result = await host.invoke(auth, {
             ...scope,
             revision: positive(body.revision),
             revisionSha256: digest(body.revisionSha256),
@@ -681,6 +760,16 @@ export function createDatasetRoutes(
             idempotencyKey: text(body.idempotencyKey, 128),
             signal,
           });
+          // The owner's kept copy names where it is, and gets the journal after it, so it
+          // needs no other request. Only the owner reads the journal, as on the copy's routes.
+          if (
+            after === undefined ||
+            !storage.workspaceIsOwnedBy(scope.workspaceId, auth.userId) ||
+            auth.grantId
+          )
+            return result;
+          const catchUp = journalAfter(host, auth, scope, after);
+          return catchUp ? { ...result, catchUp } : result;
         }
         if (route.action === "binding") {
           const body = record(raw, ["publicationId", "enabled"]);

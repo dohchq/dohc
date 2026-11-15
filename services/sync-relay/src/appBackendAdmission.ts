@@ -27,8 +27,9 @@ export const DEFAULT_APP_BACKEND_ADMISSION_LIMITS: AppBackendAdmissionLimits = {
   link: { capacity: 600, refillPerSecond: 10 },
   dataset: { capacity: 1200, refillPerSecond: 20 },
   global: { capacity: 2400, refillPerSecond: 40 },
-  organizer: { capacity: 120, refillPerSecond: 4 },
-  organizerGlobal: { capacity: 240, refillPerSecond: 8 },
+  // The owner's window sends one request a change, so quick typing and pasting stay under these.
+  organizer: { capacity: 600, refillPerSecond: 20 },
+  organizerGlobal: { capacity: 1200, refillPerSecond: 40 },
   maxKeys: 2048,
   maxPending: 64,
   maxOrganizerPending: 8,

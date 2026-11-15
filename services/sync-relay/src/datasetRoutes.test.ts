@@ -360,6 +360,80 @@ it("exposes bounded owner history and denies helpers, strangers, and malformed c
   expect((await f.http(`${f.path}/history?after=x`)).status).toBe(400);
 });
 
+it("returns the journal after the owner's kept copy with a change, and to no one else", async () => {
+  const f = await httpFixture();
+  await f.activate();
+  const { head: after } = await (await f.http(`${f.path}/replica/capture`)).json();
+  const change = {
+    revision: 1,
+    revisionSha256: revision.revisionSha256,
+    operationId: id(5),
+    input: { name: "Friend" },
+    idempotencyKey: "journal-change",
+  };
+  const copyAt = (cursor: unknown) => ({ "x-dohc-copy-after": JSON.stringify(cursor) });
+  const answer = await (await f.http(`${f.path}/invoke`, change, copyAt(after))).json();
+  expect(answer).toMatchObject({
+    result: { accepted: true },
+    replayed: false,
+    catchUp: { records: [{ kind: "event", cursor: { revision: after.revision + 1 } }] },
+  });
+  const [record] = answer.catchUp.records;
+  expect(answer.catchUp.head).toEqual(record.cursor);
+  const blob = await f.http(`${f.path}/replica/blob`, {
+    record,
+    offset: 0,
+    length: record.byteLength,
+  });
+  expect(Buffer.from(answer.catchUp.changesets[0], "base64")).toEqual(
+    Buffer.from(await blob.arrayBuffer()),
+  );
+  // A helper with a grant reads, but never the journal, which holds every change.
+  f.storage.tx(() =>
+    f.storage.db
+      .prepare(`INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES('journal-helper','s','user','helper',NULL,'view',1,'active',1,NULL,NULL)`)
+      .run(),
+  );
+  await f.http(`${f.path}/grants`, {
+    grantId: "journal-helper",
+    grant: {
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationIds: [id(6)],
+      discover: true,
+    },
+  });
+  const helped = await f.http(
+    `${f.path}/invoke`,
+    { ...change, operationId: id(6), input: {}, idempotencyKey: "helper-read" },
+    {
+      authorization: "Bearer helper",
+      "x-dohc-dataset-grant": "journal-helper",
+      ...copyAt(after),
+    },
+  );
+  expect(helped.status).toBe(200);
+  expect(await helped.json()).not.toHaveProperty("catchUp");
+  expect(
+    (
+      await f.http(
+        `${f.path}/invoke`,
+        { ...change, idempotencyKey: "other-collection" },
+        copyAt({ ...after, datasetId: id(9) }),
+      )
+    ).status,
+  ).toBe(400);
+  expect(
+    (
+      await f.http(
+        `${f.path}/invoke`,
+        { ...change, idempotencyKey: "not-json" },
+        { "x-dohc-copy-after": "{" },
+      )
+    ).status,
+  ).toBe(400);
+});
 it("answers a dataset read its client closed as closed, without an error line, and still logs any other failure", async () => {
   const f = await httpFixture();
   const errors = vi.spyOn(console, "error").mockImplementation(() => {});

@@ -3,6 +3,13 @@ import { SHA256_HEX_PATTERN } from "./wirePatterns";
 export const APP_BACKEND_INPUT_BYTES = 64 * 1024;
 export const APP_BACKEND_REQUEST_BYTES = 128 * 1024;
 export const APP_BACKEND_RESULT_BYTES = 1024 * 1024;
+/** The most journal JSON a change's response carries to the owner's kept copy. */
+export const APP_BACKEND_CATCH_UP_BYTES = 1024 * 1024;
+/**
+ * The owner's kept copy names its cursor, as JSON, in this header of a change.
+ * A header, so a server without this ignores it and the copy catches up as before.
+ */
+export const APP_BACKEND_CATCH_UP_HEADER = "x-dohc-copy-after";
 export const APP_BACKEND_UPLOAD_BYTES = 5 * 1024 * 1024;
 /** Maximum file metadata entries admitted to one operation by local and shared hosts. */
 export const APP_BACKEND_OPERATION_FILES = 32;
