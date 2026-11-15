@@ -1293,19 +1293,22 @@ describe("an account's chat writes through the server's copy", () => {
         );
       else storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
     };
+    // The computers' routes and the phone's share one counted check, as one resolver served both before.
+    const resolve: ResolveAccountSession = async (request) => {
+      const session = await resolveAccountSession(request);
+      checks += 1;
+      if (changeAt !== null && checks === changeAt.check) change(changeAt.kind);
+      if (heldCheck !== null && checks === heldCheck.at) {
+        const hold = heldCheck;
+        heldCheck = null;
+        hold.reached();
+        await hold.open;
+      }
+      return signedOut ? { ...session, sessionId: "another" } : session;
+    };
     const h = testHandler(storage, {
-      resolvePhoneCapableAccountSession: async (request) => {
-        const session = await resolveAccountSession(request);
-        checks += 1;
-        if (changeAt !== null && checks === changeAt.check) change(changeAt.kind);
-        if (heldCheck !== null && checks === heldCheck.at) {
-          const hold = heldCheck;
-          heldCheck = null;
-          hold.reached();
-          await hold.open;
-        }
-        return signedOut ? { ...session, sessionId: "another" } : session;
-      },
+      resolveAccountSession: resolve,
+      resolvePhoneCapableAccountSession: resolve,
       serverCopies: () => copies,
       accountOperationRateLimiter: options.limiter ?? new TokenBucketLimiter(10_000, 1, 16),
       lookupUserDisplayName: () => name(),
