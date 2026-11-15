@@ -32,6 +32,10 @@ const SPELLCHECK = process.env.DOHC_LARGE_NOTE_SPELLCHECK !== "0";
 // Extra Chromium switches for a controlled comparison, separated by spaces.
 // CSS added to the page for a controlled comparison, such as hiding one kind of widget.
 const EXTRA_CSS = process.env.DOHC_LARGE_NOTE_CSS ?? "";
+// Chromium features to turn off for a controlled comparison, separated by commas.
+const DISABLED_FEATURES = (process.env.DOHC_LARGE_NOTE_DISABLE_FEATURES ?? "")
+  .split(",")
+  .filter(Boolean);
 const SWITCHES = (process.env.DOHC_LARGE_NOTE_SWITCHES ?? "").split(" ").filter(Boolean);
 // Alternate order to expose host drift instead of favoring one note.
 const ORDER = (process.env.DOHC_LARGE_NOTE_ORDER ?? "small,plain,rich,rich,plain,small").split(
@@ -260,7 +264,8 @@ test("@large-note-typing times keystrokes in small, plain and block-heavy notes"
       // Windows stops drawing a window that another one covers, and gates on this
       // host open their own windows. A covered window would read as a freeze.
       switches: [
-        "--disable-features=CalculateNativeWinOcclusion",
+        // Chromium reads one --disable-features switch, so the list is joined.
+        `--disable-features=${["CalculateNativeWinOcclusion", ...DISABLED_FEATURES].join(",")}`,
         "--disable-backgrounding-occluded-windows",
         "--disable-renderer-backgrounding",
         ...SWITCHES,
@@ -437,6 +442,7 @@ test("@large-note-typing times keystrokes in small, plain and block-heavy notes"
       profiling: TRACE,
       spellcheck: SPELLCHECK,
       switches: SWITCHES,
+      disabledFeatures: DISABLED_FEATURES,
       extraCss: EXTRA_CSS,
       host: {
         platform: process.platform,
