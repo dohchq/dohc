@@ -268,6 +268,24 @@ describe("the account's unread state", () => {
     ]);
   });
 
+  it("keeps which threads are posts, by the lane each names", async () => {
+    const { client } = serveOps(
+      "groupsFull",
+      listed(
+        { ...listedThread("thread-1", 0), lane: "posts" },
+        { ...listedThread("thread-2", 0), lane: "chat" },
+        listedThread("thread-3", 0),
+      ),
+    );
+    expect((await readChats(client, "ws-a", signal)).value).toMatchObject([
+      { threadIds: ["thread-1", "thread-2", "thread-3"], postThreadIds: ["thread-1"] },
+    ]);
+    const bad = serveOps("groupsFull", listed({ ...listedThread("thread-1", 0), lane: "feed" }));
+    await expect(readChats(bad.client, "ws-a", signal)).rejects.toMatchObject({
+      problem: "invalid",
+    });
+  });
+
   it("fails the whole chat list when a thread's unread count doesn't check", async () => {
     for (const unreadCount of [undefined, -1, 1.5, "2", null]) {
       const { client } = serveOps(

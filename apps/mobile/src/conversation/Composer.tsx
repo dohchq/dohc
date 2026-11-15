@@ -12,7 +12,7 @@ import { ChatComposerField, type ClearRequest } from "../../modules/chat-compose
 import { ProblemLine } from "../account/ProblemLine";
 import type { OutboxState } from "../server/outbox";
 import { useTheme } from "../theme";
-import { ReplyContext, type ReplyTo } from "./ReplyContext";
+import { ReplyContext, replyLabel, type ReplyTo } from "./ReplyContext";
 import {
   clearSent,
   clearStatus,
@@ -66,6 +66,8 @@ export function outboxProblem(
 //
 // `replies`: every message is a reply, as in a thread, or in a stream once a message is chosen to reply to. Then there
 // is no New post, and the reply's clear leaves New post as it was. `replyTo` names the chosen message above the field.
+// `closed` says why the chosen message no longer takes the text: Send stays off, and the text stays, until the person
+// cancels it or chooses another.
 export function Composer({
   placeholder,
   lanes,
@@ -73,6 +75,7 @@ export function Composer({
   problem,
   replies = false,
   replyTo = null,
+  closed = null,
   onCancelReply,
   onSubmit,
   onLayoutHeight,
@@ -83,6 +86,7 @@ export function Composer({
   problem: OutboxProblem | null;
   replies?: boolean;
   replyTo?: ReplyTo | null;
+  closed?: string | null;
   onCancelReply?(): void;
   onSubmit(kind: "send" | "post" | "reply", body: string, title: string): Promise<SubmitOutcome>;
   onLayoutHeight(height: number): void;
@@ -119,6 +123,7 @@ export function Composer({
     blocked === null &&
     !submitting &&
     status === "settled" &&
+    closed === null &&
     !replyParentGone(failure, replyTo);
 
   async function submit() {
@@ -150,7 +155,7 @@ export function Composer({
   }
 
   const label = mode === "post" ? chatWords.post : chatWords.sendMessage;
-  const fieldLabel = replyTo ? chatWords.replyTo(replyTo.name) : placeholder;
+  const fieldLabel = replyTo ? replyLabel(replyTo) : placeholder;
   return (
     <Dock onLayoutHeight={onLayoutHeight}>
       {problem ? (
@@ -160,7 +165,11 @@ export function Composer({
           <Text style={[styles.problem, { color: theme.muted }]}>{problem.text}</Text>
         )
       ) : null}
-      {failure?.kind === "not-kept" ? (
+      {closed !== null ? (
+        <Text style={[styles.problem, { color: theme.danger }]} accessibilityRole="alert">
+          {closed}
+        </Text>
+      ) : failure?.kind === "not-kept" ? (
         <ProblemLine text={chatWords.notKept} onRetry={() => void submit()} />
       ) : failure?.kind === "parent-gone" ? (
         <Text style={[styles.problem, { color: theme.danger }]} accessibilityRole="alert">

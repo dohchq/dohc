@@ -1,5 +1,6 @@
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import type { ChatMessage } from "../server/workspaceReads";
+import { decisionOf } from "./decisionAnswers";
 import type { LocalRow } from "./outboxMessages";
 import type { Author, Message } from "./types";
 
@@ -40,11 +41,13 @@ function author(entry: ChatMessage, fills: readonly string[]): Author {
   return { id, name: entry.authorName, kind: "person", initials, hue: fills[hash % fills.length] };
 }
 
+/** A message from the server, with its question or poll as the server has it. */
 export function serverMessage(
   entry: ChatMessage,
   replies: { count: number; lastMs: number } | null,
   fills: readonly string[],
 ): Message {
+  const decision = decisionOf(entry);
   return {
     id: entry.id,
     threadId: entry.threadId,
@@ -55,6 +58,7 @@ export function serverMessage(
     ...(replies
       ? { replies: { count: replies.count, last: timeOf(replies.lastMs), people: [] } }
       : {}),
+    ...(decision ? { decision } : {}),
   };
 }
 

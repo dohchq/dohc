@@ -109,8 +109,9 @@ export const chatWords = {
         return "This message wasn't sent, because this workspace changed on your server.";
       case "too old":
         return "This message wasn't sent, because it waited too long.";
+      // The reply may still have published: only the question's answer was lost.
       case "already answered":
-        return "This message wasn't sent, because another answer was chosen.";
+        return "Another answer was chosen.";
       default:
         return "dohc could not send this message.";
     }
@@ -144,6 +145,25 @@ export const chatWords = {
   /** Enqueue failed and nothing was kept. */
   reactionNotKept: "dohc could not keep this reaction on your phone.",
   discardReactionTitle: "Discard this reaction?",
+
+  // A message's question or poll (apps/desktop/src/renderer/workbench/ChatPosts.tsx DecisionStatus).
+  unanswered: "Unanswered",
+  answered: "Answered",
+  /** Starts a reply that answers a question without choices. */
+  answer: "Answer",
+  /** The field's name while its reply answers a question (AgentThreadAnswerDialog.tsx's title). */
+  answerTo: (name: string) => `Answer ${name}`,
+  /** The phone's: this phone's answer is on its way, and the server hasn't saved it yet. */
+  answering: "Answering",
+  /** The phone's: the server took another answer before this phone's, and the winning one is shown. */
+  alreadyAnswered: "Already answered",
+  /** The phone's: a read shows this phone's reply, and the server took another answer. */
+  answerLost: "Sent your reply. Another answer was chosen.",
+  /**
+   * The phone's: a read since Answer shows the question answered or no longer shows it. The text stays, and Cancel reply
+   * keeps it as an ordinary reply.
+   */
+  answerClosed: "dohc can't send this answer, because the question was answered or removed.",
 } as const;
 
 // A notice's time, as the desktop's Notices show it (apps/desktop/src/renderer/relativeTime.ts, which can move here).

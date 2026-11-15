@@ -89,12 +89,16 @@ const here = (record: OutboxRecord, scope: OutboxScope & { readonly workspaceId:
  * replies that wait for it to name its thread. `shown` holds the IDs of the messages the stream's read shows: a record
  * whose message is among them is the server's row now, even before the outbox hands it off, so the message never
  * shows twice. A reply moves to its thread once the outbox gives it one.
+ *
+ * An answer to one of the stream's `questions` shows too, saved or not, until a read shows its reply and the outbox
+ * hands it off. A stream's read holds no replies, so its saved receipt alone never takes the row away.
  */
 export function streamRows(
   state: OutboxState,
   scope: OutboxScope & { readonly workspaceId: string },
   streamId: string,
   shown: ReadonlySet<string>,
+  questions: ReadonlySet<string> = new Set(),
 ): LocalRow[] {
   const parents = new Set<string>();
   return state.records.flatMap((record): LocalRow[] => {
@@ -114,6 +118,14 @@ export function streamRows(
       write.args.threadId === null &&
       record.dependsOn !== null &&
       parents.has(record.dependsOn)
+    ) {
+      const local = row(record, "reply", shown);
+      return local ? [local] : [];
+    }
+    if (
+      write.operation === "reply" &&
+      write.args.resolves !== undefined &&
+      questions.has(write.args.resolves.messageId)
     ) {
       const local = row(record, "reply", shown);
       return local ? [local] : [];

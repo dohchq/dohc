@@ -6,17 +6,33 @@ import { useTheme } from "../theme";
 
 /** The message a reply answers, as the composer names it. */
 export interface ReplyTo {
-  /** Its author's name. */
+  /** Its author's name, or empty for a question the read doesn't show. */
   readonly name: string;
   /** Its text, which shows on one line. */
   readonly excerpt: string;
+  /** The reply answers the message's question. */
+  readonly answers?: boolean;
 }
+
+/**
+ * "Reply to <name>", or "Answer <name>" for a reply that answers a question, or "Answer" when the read doesn't show it:
+ * the context's words and the field's name.
+ */
+export const replyLabel = (to: ReplyTo) =>
+  to.answers
+    ? to.name === ""
+      ? chatWords.answer
+      : chatWords.answerTo(to.name)
+    : chatWords.replyTo(to.name);
+
+/** An answer to a question the read doesn't show, as when a read since Answer no longer shows it. */
+export const UNSHOWN_QUESTION: ReplyTo = { name: "", excerpt: "", answers: true };
 
 // Above the composer while a reply answers a chosen message: whose, and its start, then Cancel reply. It comes before
 // the field, so VoiceOver reads it first.
 export function ReplyContext({ to, onCancel }: { to: ReplyTo; onCancel(): void }) {
   const theme = useTheme();
-  const label = chatWords.replyTo(to.name);
+  const label = replyLabel(to);
   return (
     <View style={styles.row}>
       <View style={[styles.bar, { backgroundColor: theme.accent }]} />
