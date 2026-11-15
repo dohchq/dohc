@@ -1088,10 +1088,16 @@ it("gives the next page every taken edit before they are saved, and saves them w
 
 it("puts a stopped relay's leftover edits in a copy once their note has failed to open for long enough", async () => {
   const f = note();
-  const first = rooms(f, {}, { answers: ["retry", "retry"] });
-  const a = editor(f, first, ana);
+  const saved = rooms(f);
+  const a = editor(f, saved, ana);
   await a.open();
   expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await saved.close();
+  // The edit left builds on the saved one, so the copy needs the note as saved under it.
+  const first = rooms(f, {}, { answers: ["retry", "retry"] });
+  const b = editor(f, first, ben);
+  await b.open();
+  expect((await b.submit(b.change("title", "Porto"))).result).toBe("success");
   await first.close();
   expect(unsaved(f)).toHaveLength(1);
 
@@ -1107,13 +1113,13 @@ it("puts a stopped relay's leftover edits in a copy once their note has failed t
   await vi.waitFor(() => expect(pauses(f)).toHaveLength(1));
   expect(unsaved(f)).toEqual([]);
   const [paused] = pauses(f);
-  expect(paused).toMatchObject({ cause: "failing", refusal: null, named: [ana] });
+  expect(paused).toMatchObject({ cause: "failing", refusal: null, named: [ben] });
   const copy = new Y.Doc();
   Y.applyUpdate(copy, liveRoomCopy(f, paused!.pauseId));
-  expect(copy.getMap("frontmatter").get("title")).toBe("Lisbon");
+  expect(copy.getMap("frontmatter").get("title")).toBe("Porto");
 });
 
-it("saves a note's taken edits before a step while a lineage it ended is paused", async () => {
+it("saves a note's taken edits before a step, and lets editors in, while a lineage it ended is paused", async () => {
   const f = note();
   const document = f.input.evidence.document;
   const room = rooms(f);
@@ -1128,6 +1134,13 @@ it("saves a note's taken edits before a step while a lineage it ended is paused"
     copy: Y.encodeStateAsUpdate(new Y.Doc()),
     pausedAtMs: 1,
   });
+  // That pause holds back only its own lineage.
+  const storage = f.storage as StorageContext;
+  expect(liveRoomPaused(storage, { ...document, lineageClaimId: "ended-lineage" })).toBe(true);
+  expect(liveRoomPaused(storage, document)).toBe(false);
+  expect(
+    liveRoomPaused(storage, { workspaceId: document.workspaceId, objectId: document.objectId }),
+  ).toBe(false);
   const left = await room.saveFirst(
     document,
     () => unsaved(f).length,

@@ -113,17 +113,59 @@ export function pauseLiveRoom(
   return pauseId;
 }
 
-/** Whether a note is paused, which keeps every live edit out until its owner resumes it. */
+/**
+ * Whether a note is paused, which keeps every live edit out until its owner resumes it. A pause
+ * holds only its own lineage: the one given, or else the note's current one. A pause on a lineage
+ * that has since ended holds nothing back; its copy is still kept for the owner.
+ */
 export function liveRoomPaused(
   storage: StorageContext,
-  document: { readonly workspaceId: string; readonly objectId: string },
+  document: {
+    readonly workspaceId: string;
+    readonly objectId: string;
+    readonly lineageClaimId?: string;
+  },
 ): boolean {
+  const { workspaceId, objectId, lineageClaimId } = document;
   return storage.readTx(
     () =>
-      storage.db
-        .prepare(`SELECT 1 FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND object_id=? LIMIT 1`)
-        .get(document.workspaceId, document.objectId) !== undefined,
+      (lineageClaimId === undefined
+        ? storage.db
+            .prepare(
+              `SELECT 1 FROM ${LIVE_ROOM_PAUSES} p JOIN sync_relay_live_documents d USING (workspace_id,main_version_id,object_id,lineage_claim_id) WHERE p.workspace_id=? AND p.object_id=? AND d.lineage_state='current' LIMIT 1`,
+            )
+            .get(workspaceId, objectId)
+        : storage.db
+            .prepare(
+              `SELECT 1 FROM ${LIVE_ROOM_PAUSES} WHERE workspace_id=? AND object_id=? AND lineage_claim_id=? LIMIT 1`,
+            )
+            .get(workspaceId, objectId, lineageClaimId)) !== undefined,
   );
+}
+
+/**
+ * A note as saved: its lineage's baseline and every change its journal took. The relay keeps
+ * both after the lineage ends, so a copy built on them opens on its own.
+ */
+export function liveRoomSavedState(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+): Uint8Array[] {
+  return storage.readTx(() => {
+    const where = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
+    const baseline = storage.db
+      .prepare(`SELECT baseline_bytes FROM sync_relay_live_documents WHERE ${where}`)
+      .get(...documentParams(document));
+    if (!baseline) return [];
+    const journal = storage.db
+      .prepare(
+        `SELECT update_bytes FROM sync_relay_live_update_journal WHERE ${where} ORDER BY journal_cursor`,
+      )
+      .all(...documentParams(document));
+    return [baseline.baseline_bytes, ...journal.map((row) => row.update_bytes)].map(
+      (bytes) => new Uint8Array(bytes as Uint8Array),
+    );
+  });
 }
 
 /** A workspace's paused notes, oldest pause first. */

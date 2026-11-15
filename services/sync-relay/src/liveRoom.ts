@@ -46,6 +46,7 @@ import {
 } from "./storage/liveRoomEdits.js";
 import {
   liveRoomPaused,
+  liveRoomSavedState,
   pauseLiveRoom,
   type LiveRoomPauseCause,
 } from "./storage/liveRoomPauses.js";
@@ -594,13 +595,17 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
         unopened.delete(key);
       } catch (error) {
         // Edits a stopped relay left go into a copy once their note has failed to open for as
-        // long as saves may fail, as they would in a room that opened.
+        // long as saves may fail, as they would in a room that opened. The copy holds the note
+        // as saved under them, so it opens on its own even when their lineage has ended.
         const left = liveRoomEdits(storage, document);
         if (!left.length) throw error;
         const since = unopened.get(key) ?? Date.now();
         unopened.set(key, since);
         if (Date.now() - since < pauseAfterMs) throw error;
-        const copy = Y.mergeUpdates(left.map((row) => row.updateBytes));
+        const copy = Y.mergeUpdates([
+          ...liveRoomSavedState(storage, document),
+          ...left.map((row) => row.updateBytes),
+        ]);
         if (!pause(room, "failing", null, senders(left), copy)) throw error;
         unopened.delete(key);
         return;
