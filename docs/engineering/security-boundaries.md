@@ -100,8 +100,9 @@ is `personal`, with the agent's id and no grant. Each edit records the agent as
 its author, on behalf of the workspace's owner. The relay ignores any context
 an update declares.
 
-The relay reads the fence again before it sends the initial state, before it
-releases each received update, and before it commits each edit. Each session
+The relay reads the fence again before it sends the initial state and before it
+accepts each edit. It reads it at most once a second while it hands the
+session others' edits, as for any reader of a live document. Each session
 registers as running work that needs Edit. Sign-out, removing the agent,
 narrowing its reach, lowering its level below Edit, and a newer fence each end
 the session at the commit that makes the change. An expired token ends it at
@@ -119,8 +120,17 @@ before acknowledgement and settles Markdown through the engine.
 With no host online, shared files remain readable but live editing pauses.
 Automatic device-to-service failover requires fences against competing writers.
 
-Direct Edit requires commit-time grant checks, durable attribution, and stop and
-restore. Restore creates a forward change and preserves legitimate unsynced work.
+Direct Edit checks the sender's grant in full when the relay accepts each edit,
+not again when the edit is saved to the note. An edit accepted before access
+ended is kept and saved, and each save records who sent which edit. Others'
+edits handed to a reader check its access again at most once a second, so a
+reader whose link session or token expires can receive them for up to a second
+more. Its own edits are refused at once, and access removed by hand ends its
+connection at once.
+
+Direct Edit also requires stop and restore. Stop and restore save every edit
+the relay accepted before they close the note.
+Restore creates a forward change and preserves legitimate unsynced work.
 It cannot promise selective removal of one author's interleaved edits or recovery
 of work already deleted before the restore point.
 
