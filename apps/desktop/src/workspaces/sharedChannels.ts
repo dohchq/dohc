@@ -28,13 +28,46 @@ export const RELAY_FETCH_TIMEOUT_MS = 15_000;
 // listChatChannels awaits the pass, so a hung relay socket must abort after
 // the timeout instead of blocking the Chats surface indefinitely. Errors ride
 // the pass's normal transient-failure path (logged, retried next pass).
+//
+// A Collection request waits a limited time for the server's answer even when
+// its caller passes a signal, and then fails as a network failure, so a read
+// uses the kept copy. A read waits `timeoutMs`. A POST can change records, so
+// it waits until just past the server's own 30 s deadline: a slow change is
+// never reported as failed while the server still commits it. Only the wait
+// for the answer is limited: an import, export, or file can take longer to
+// arrive. Other requests with their own signal, such as long-polls, keep waiting.
+export const COLLECTION_CHANGE_ANSWER_MS = 35_000;
+
 export function relayFetchWithTimeout(
   timeoutMs: number,
   baseFetch: typeof fetch = fetch,
+  changeAnswerMs = COLLECTION_CHANGE_ANSWER_MS,
 ): typeof fetch {
   const request = relayApiFetch(baseFetch);
-  return (input, init) =>
-    request(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(timeoutMs) });
+  return async (input, init) => {
+    if (!init?.signal) return request(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    if (!COLLECTION_PATH.test(requestPath(input))) return request(input, init);
+    const deadline = new AbortController();
+    const timer = setTimeout(
+      () => deadline.abort(new TypeError("The server did not answer in time.")),
+      (init.method ?? "GET").toUpperCase() === "GET" ? timeoutMs : changeAnswerMs,
+    );
+    try {
+      return await request(input, {
+        ...init,
+        signal: AbortSignal.any([init.signal, deadline.signal]),
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+const COLLECTION_PATH = /^\/sync\/(?:shares\/)?[^/]+\/datasets(?:[/?]|$)/;
+
+function requestPath(input: string | URL | Request): string {
+  return new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url)
+    .pathname;
 }
 
 // Every desktop request to the relay names the relay API version this build
