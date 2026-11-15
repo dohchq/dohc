@@ -45,10 +45,39 @@ This flow makes conflicting offline edits, resolves them through the UI, and che
 It does not prove unsolicited updates to an idle desktop.
 Run `pnpm qa:artifacts` to prove that an intentional failure retains its evidence.
 
+Run `pnpm test:together` after a change to shared editing. See [Editing together](#editing-together).
+
 The runner writes a result, step logs, and desktop evidence under `.agent-artifacts/verification/<run>`.
 Each Electron instance records its process, profile, workspace, and prepared build.
 Read the failing assertion and its logs together. Inspect the screenshot and Playwright trace when the behavior is unclear.
 Treat traces as private artifacts. They can contain document text and credentials entered during the test.
+
+## Editing together
+
+`pnpm test:together` puts several people on one share link and has them edit the same note.
+The people are headless browsers. The server is a sync relay with its own engine and the share page's server, started on your computer.
+A headless engine plays the note's owner. The tests start no desktop app and reach no other server.
+
+Run `pnpm qa:prepare` first. It builds the engine, the Markdown reader, and the share page that the tests start.
+
+The tests cover four things:
+
+- Two people change the same place at the same moment.
+- The relay is killed and started again while people type.
+- The share page's server restarts under open pages.
+- Several people make ordinary edits for some minutes. Set `TOGETHER_MINUTES`, `TOGETHER_PEOPLE`, or `TOGETHER_SEED` to change the run.
+
+[`knownFaults.ts`](../../apps/desktop/e2e/together/knownFaults.ts) lists the faults that are known and not yet fixed.
+A listed case must fail the way its fault does. The check fails if that case comes out right, or goes wrong another way.
+If you fix a listed fault, remove its line in the same change.
+If a case fails that is not listed, your change broke it, or you found a new fault. Do not add a line to pass the check without an issue that describes the fault.
+
+The PR checks run these tests in the `editing together` job when a change touches the relay, the share page, the engine, a workspace package, or the desktop code the tests load.
+The desktop's engine capture plays the note's owner, so most code changes select the job.
+The job's filter is `together` in [`pr-checks.yml`](../../.github/workflows/pr-checks.yml). `PR verification` requires the job when the filter selects it.
+`pnpm verify:pr` does not run these tests. When it selects `together`, the report lists the job under `ciEvidence`, and a merge needs a passing run of it for the head.
+
+To read a failure, open `test-results/together-report.json`. Each case records what every page showed and what the services printed.
 
 ## Debug a separate app
 
@@ -132,7 +161,7 @@ Receipts record the target as `targetSeconds` and the ceiling as `budgetSeconds`
 
 `"unmeasured"` excuses time only. Failed tests, incomplete inventory or coverage, wrong commits, and missing, duplicated, cancelled, or failed jobs still fail.
 The organisation's Team plan permits 60 concurrent standard-runner jobs.
-A combined run peaks at 22 jobs, so two combined runs fit and a third can queue.
+A combined run peaks at 23 jobs, so two combined runs fit and a third can queue.
 The workflow holds the job graph, wait caps, and job timeouts.
 [`cloud.mjs`](../../scripts/verification/cloud.mjs) and [`cloud-rust.mjs`](../../scripts/verification/cloud-rust.mjs) run each job's tests. [`cloud-aggregate.mjs`](../../scripts/verification/cloud-aggregate.mjs) checks the receipts and computes the timing verdict.
 

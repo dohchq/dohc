@@ -171,7 +171,7 @@ export async function startSharedDatasetBrowser(input: {
 }
 
 /** A certificate for the viewer and app hosts. Windows makes it with PowerShell, other hosts with OpenSSL. */
-function testCertificate(): { tls: https.ServerOptions; cert: X509Certificate } {
+export function testCertificate(): { tls: https.ServerOptions; cert: X509Certificate } {
   if (process.platform !== "win32") {
     // Files, not /dev/stdin and /dev/stdout: on Linux a child's stdio is a socket, which those can't open.
     const dir = mkdtempSync(join(tmpdir(), "dohc-dataset-cert-"));
