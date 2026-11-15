@@ -35,6 +35,26 @@ struct RetryHeldParams {
     path: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccessRuleDecisionParams {
+    folder: String,
+}
+
+fn access_rule_holds_json(
+    holds: &[dohc_engine_storage::access_rule_holds::AccessRuleHold],
+) -> Value {
+    json!(
+        holds
+            .iter()
+            .map(|hold| json!({
+                "versionId": hold.version_id, "folder": hold.folder, "reason": hold.reason,
+                "observedSha256": hold.observed_sha256, "recordedAtMs": hold.recorded_at_ms,
+            }))
+            .collect::<Vec<_>>()
+    )
+}
+
 fn held_files_json(holds: &[dohc_engine_storage::capture_file_holds::CaptureFileHold]) -> Value {
     json!(holds.iter().map(|hold| json!({
         "workspaceId": hold.workspace_id, "sourceVersionId": hold.source_version_id,
@@ -502,6 +522,7 @@ impl EngineService {
         response["retried"] = json!(retried);
         Ok(response)
     }
+
     /// Files that changed outside dohc while their note was live.
     pub(super) async fn capture_outside_changes(
         &self,
@@ -515,6 +536,61 @@ impl EngineService {
             .map_err(map_runtime)?;
         Ok(json!({ "outsideChanges": outside_changes_json(&changes) }))
     }
+
+    /// Settle a folder whose access rule waits for its owner: accept the
+    /// rule on disk, or restore the one last committed.
+    pub(super) async fn capture_decide_access_rule(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        decision: dohc_engine_runtime::AccessRuleDecision,
+    ) -> Result<Value, WireError> {
+        let input: AccessRuleDecisionParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        if !open.is_local_owner() {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "access rule decisions need the workspace's owning handle",
+            ));
+        }
+        let holds = open
+            .actor
+            .access_rule_holds(open.workspace_id.clone())
+            .await
+            .map_err(map_runtime)?;
+        let Some(hold) = holds.into_iter().find(|hold| hold.folder == input.folder) else {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "access-rule-not-held",
+            ));
+        };
+        let cancellation = OperationCancellation::new(ctx);
+        let gate = tokio::select! {
+            () = cancellation.token.cancelled() => return Err(cancellation.interruption("access rule decision (queued)")),
+            guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
+        };
+        open.actor
+            .decide_access_rule(
+                open.workspace_id.clone(),
+                hold.version_id,
+                hold.folder,
+                decision,
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
+                now_ms()?,
+                Arc::new(dohc_engine_storage::NoFaults),
+            )
+            .await
+            .map_err(map_runtime)?;
+        // The files under the folder follow on the next capture pass.
+        if let Some(driver) = lock(&open.capture).as_ref() {
+            driver.request_manifest_refresh();
+        }
+        drop(gate);
+        Ok(json!({ "folder": input.folder, "decided": true }))
+    }
+
     pub(super) async fn capture_clear_recovery(
         &self,
         handle: Option<WorkspaceHandle>,
@@ -541,13 +617,14 @@ impl EngineService {
             .kept_materialization_files(open.workspace_id.clone(), open.root.clone())
             .await
             .unwrap_or_default();
-        let (capture_recoveries, holds, outside_changes, merge_removals) = open
+        let (capture_recoveries, holds, outside_changes, merge_removals, access_holds) = open
             .actor
             .capture_notices(open.workspace_id.clone())
             .await
             .map_err(map_runtime)?;
         let held_files = held_files_json(&holds);
         let outside_changes = outside_changes_json(&outside_changes);
+        let held_access_rules = access_rule_holds_json(&access_holds);
         let retained_copies = crate::rpc::retained_copies::summary_json(
             crate::rpc::retained_copies::retained_summary(&open)
                 .await
@@ -570,6 +647,7 @@ impl EngineService {
                     "mergeRemovals": merge_removals,
                     "heldFiles": held_files,
                     "outsideChanges": outside_changes,
+                    "heldAccessRules": held_access_rules,
                     "deferredWrites": driver.status().deferred_writes(),
                     "recoveryUnavailable": recovery_unavailable,
                     "retainedCopies": retained_copies,
@@ -593,6 +671,7 @@ impl EngineService {
                 "mergeRemovals": merge_removals,
                 "heldFiles": held_files,
                 "outsideChanges": outside_changes,
+                "heldAccessRules": held_access_rules,
                 "deferredWrites": [],
                 "recoveryUnavailable": recovery_unavailable,
                 "retainedCopies": retained_copies,

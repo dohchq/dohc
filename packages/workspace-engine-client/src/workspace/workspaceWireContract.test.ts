@@ -1107,6 +1107,7 @@ it("decodes whether a recovery keeps typing for a deleted file", () => {
       mergeRemovals: [],
       heldFiles: [],
       outsideChanges: [],
+      heldAccessRules: [],
       retainedCopies: { count: 0, bytes: 0 },
     }),
   ).toMatchObject({
@@ -1116,6 +1117,48 @@ it("decodes whether a recovery keeps typing for a deleted file", () => {
     outsideChanges: [],
     retainedCopies: { count: 0, bytes: 0 },
   });
+});
+
+it("decodes folders whose access rule waits for the owner", () => {
+  const status = {
+    running: true,
+    degraded: false,
+    terminal: false,
+    phase: "ready",
+    noAtomicPlacement: false,
+    recoveryUnavailable: false,
+    keptFiles: [],
+    captureRecoveries: [],
+    heldFiles: [],
+    retainedCopies: { count: 0, bytes: 0 },
+    deferredWrites: [],
+    heldAccessRules: [
+      {
+        versionId: "main",
+        folder: "team",
+        reason: "widened",
+        observedSha256: "a".repeat(64),
+        recordedAtMs: 5,
+      },
+      { versionId: "main", folder: "", reason: "removed", observedSha256: null, recordedAtMs: 6 },
+    ],
+  };
+  expect(decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, status)).toEqual(status);
+  for (const reason of ["narrowed", null]) {
+    const heldAccessRules = [{ ...status.heldAccessRules[0], reason }];
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.watcherStatus, { ...status, heldAccessRules }),
+    ).toThrow(ProtocolShapeError);
+  }
+  for (const method of [
+    WORKSPACE_METHOD.captureAcceptAccessRule,
+    WORKSPACE_METHOD.captureRestoreAccessRule,
+  ]) {
+    expect(decodeWorkspaceResult(method, { folder: "team", decided: true })).toEqual({
+      folder: "team",
+      decided: true,
+    });
+  }
 });
 
 it("decodes outside writes waiting for an open document", () => {
@@ -1131,6 +1174,7 @@ it("decodes outside writes waiting for an open document", () => {
     mergeRemovals: [],
     heldFiles: [],
     outsideChanges: [],
+    heldAccessRules: [],
     retainedCopies: { count: 0, bytes: 0 },
     deferredWrites: ["notes/open.md"],
   };
@@ -1155,6 +1199,7 @@ it("decodes why protected files wait on the secret key", () => {
     mergeRemovals: [],
     heldFiles: [],
     outsideChanges: [],
+    heldAccessRules: [],
     retainedCopies: { count: 0, bytes: 0 },
     deferredWrites: [],
     secretKeyUnavailable: "volume-shares-new-files",
@@ -1210,6 +1255,7 @@ const holdReplies: Array<[WorkspaceMethod, Record<string, JsonValue>]> = [
       captureRecoveries: [],
       mergeRemovals: [],
       outsideChanges: [],
+      heldAccessRules: [],
       retainedCopies: { count: 0, bytes: 0 },
     },
   ],

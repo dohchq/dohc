@@ -52,6 +52,8 @@ export const WORKSPACE_METHOD = {
   captureRetry: "capture.retry",
   captureRetryHeld: "capture.retryHeld",
   captureOutsideChanges: "capture.outsideChanges",
+  captureAcceptAccessRule: "capture.acceptAccessRule",
+  captureRestoreAccessRule: "capture.restoreAccessRule",
   captureSetAuthor: "capture.setAuthor",
   captureHold: "capture.hold",
   captureRenew: "capture.renew",
@@ -527,6 +529,8 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureRetry]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureRetryHeld]: WorkspaceJsonObject & { path: string };
   [WORKSPACE_METHOD.captureOutsideChanges]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.captureAcceptAccessRule]: WorkspaceJsonObject & { folder: string };
+  [WORKSPACE_METHOD.captureRestoreAccessRule]: WorkspaceJsonObject & { folder: string };
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
   [WORKSPACE_METHOD.captureHold]: WorkspaceJsonObject & { operationId?: string };
   [WORKSPACE_METHOD.captureRenew]: WorkspaceJsonObject & { holdId: string };
@@ -1107,6 +1111,17 @@ const CaptureFileHoldSchema = mutableStruct({
   retryRequested: Schema.Boolean,
 });
 
+/** A folder whose access rule changed outside dohc and waits for its owner. */
+const AccessRuleHoldSchema = mutableStruct({
+  versionId: Schema.NonEmptyString,
+  /** The folder's path; empty for the workspace's own rule. */
+  folder: Schema.String,
+  reason: Schema.Union([Schema.Literal("widened"), Schema.Literal("removed")]),
+  /** The rule's bytes on disk when it was judged; null when it is gone. */
+  observedSha256: Schema.NullOr(Schema.NonEmptyString),
+  recordedAtMs: Schema.Int,
+});
+
 const NonNegativeIntSchema = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
 // Its bytes are in neither the note nor History. It ends when the file
@@ -1415,6 +1430,7 @@ const WorkspaceResultSchemas = {
     deferredWrites: Schema.mutable(Schema.Array(Schema.NonEmptyString)),
     heldFiles: Schema.mutable(Schema.Array(CaptureFileHoldSchema)),
     outsideChanges: Schema.mutable(Schema.Array(OutsideChangeSchema)),
+    heldAccessRules: Schema.mutable(Schema.Array(AccessRuleHoldSchema)),
     running: Schema.Boolean,
     degraded: Schema.Boolean,
     terminal: Schema.Boolean,
@@ -1518,6 +1534,14 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.captureRetryHeld]: mutableStruct({
     ...CaptureFlushResultSchema.fields,
     retried: Schema.Boolean,
+  }),
+  [WORKSPACE_METHOD.captureAcceptAccessRule]: mutableStruct({
+    folder: Schema.String,
+    decided: Schema.Literal(true),
+  }),
+  [WORKSPACE_METHOD.captureRestoreAccessRule]: mutableStruct({
+    folder: Schema.String,
+    decided: Schema.Literal(true),
   }),
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({
     updated: Schema.Literal(true),
