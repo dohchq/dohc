@@ -530,8 +530,8 @@ it("saves an edit once when a read after its save's commit fails", async () => {
   try {
     expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
     await vi.waitFor(() => expect(savedAuthors(f)).toEqual([ana]));
-    // A second save would have come within a few save timer turns.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Saving what the room holds would save the edit again if the room still counted it unsaved.
+    await room.saveFirst(f.input.evidence.document, () => {}, AbortSignal.timeout(5_000));
     expect(reads).toBeGreaterThanOrEqual(2);
     expect(savedAuthors(f)).toEqual([ana]);
     expect(unsaved(f)).toEqual([]);
