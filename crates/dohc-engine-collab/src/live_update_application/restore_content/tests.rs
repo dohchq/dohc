@@ -363,7 +363,12 @@ fn reader_restore_applies_settles_and_resumes_in_both_directions() {
         let expected_reader = !direction.starts_with("reader-to-native");
         let target = if direction.starts_with("expired-") {
             let edit = f.doc.richdoc_append_paragraph("expired selected point");
-            f.accept(edit, 2)
+            let mut point = f.accept(edit, 2);
+            // An expired witness names no retained file, so the relay's writer spells the point.
+            let relay = format!("{}\n", f.doc.project(ContentKind::Richdoc).unwrap().content);
+            point.markdown_digest = hex_sha256(relay.as_bytes());
+            point.projection_digest = hex_sha256(relay.as_bytes());
+            point
         } else {
             f.baseline_point.clone()
         };
@@ -2052,7 +2057,7 @@ fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
             &mut f.store,
             f.resolver.as_ref(),
             NativeRestoreResume {
-                application: input,
+                application: input.clone(),
                 settlement_id: restored.settlement_id.clone().unwrap(),
             },
             f.host.clone(),
@@ -2064,6 +2069,7 @@ fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
         )
         .unwrap();
     f.binding = resumed.binding.clone();
+    f.terminal = Some(input.admitted.accepted.receipt);
     f.handle = f
         .owner
         .register(
@@ -2074,6 +2080,42 @@ fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
         )
         .unwrap();
     restored
+}
+
+/// The relay chooses a restore point with its own writer, which can spell
+/// the point differently from this engine. The engine restores, settles and
+/// resumes with its own spelling of the point's proven state.
+#[test]
+fn a_point_another_writer_spelled_restores_settles_and_resumes_in_the_engines_spelling() {
+    let mut f = Fixture::new("# Baseline\n");
+    f.edit("Later work.\n", 7);
+    let other = "# Baseline  \n";
+    f.baseline_point.markdown_digest = hex_sha256(other.as_bytes());
+    f.baseline_point.projection_digest = hex_sha256(other.as_bytes());
+    let restored = restore_and_resume(&mut f);
+    let settled: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT markdown_digest FROM live_device_settlements WHERE settlement_id=?1",
+                [restored.settlement_id.as_deref().unwrap()],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(settled, hex_sha256(b"# Baseline\n"));
+    // A settlement after resume reads the restore as its origin, in the engine's spelling; here it replays it.
+    let next = with_settlement(
+        &mut f.store,
+        &f.handle,
+        f.terminal.clone(),
+        100,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
+        |store, audit| record_test_projection(store, audit, "restore-moment"),
+    );
+    next.unwrap();
 }
 
 #[test]

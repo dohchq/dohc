@@ -2784,8 +2784,10 @@ it("refuses a successor under a changed workspace identity, from another baselin
       "successor has another baseline",
     );
     await expect(
-      prepareSuccessor(f, successor(f, { sourceDigest: "b".repeat(64) })),
-    ).rejects.toThrow("Native activation differs from the complete ordinary CRDT history.");
+      prepareSuccessor(f, successor(f, { sourceMomentId: "moment-not-in-history" })),
+    ).rejects.toThrow(
+      "Native activation source moment is neither ordinary history nor a proved settlement.",
+    );
     expect(activations(f)).toHaveLength(1);
     expect(
       f.storage.rotateWorkspaceIdentity({

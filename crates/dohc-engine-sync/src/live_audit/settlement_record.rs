@@ -255,16 +255,12 @@ fn require_restore_application(
         return Ok(());
     };
     let p = scope(&record.relay_database_namespace, &record.binding);
-    let proof:Option<(Option<String>,Option<String>)>=conn.query_row(&format!("SELECT restore_operation_id,restore_markdown_digest FROM live_audit_events WHERE {SCOPE} AND journal_cursor=?6"),params![p[0],p[1],p[2],p[3],p[4],record.terminal_cursor],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(SyncError::corrupt)?;
+    // The point's Markdown digest is the relay writer's; the settlement's is the engine's.
+    let proof:Option<Option<String>>=conn.query_row(&format!("SELECT restore_operation_id FROM live_audit_events WHERE {SCOPE} AND journal_cursor=?6"),params![p[0],p[1],p[2],p[3],p[4],record.terminal_cursor],|r|r.get(0)).optional().map_err(SyncError::corrupt)?;
     let proof = proof.ok_or(SyncError::RetryableState {
         reason: "settlement restore application is unavailable",
     })?;
-    if proof
-        != (
-            Some(operation.clone()),
-            Some(record.markdown_digest.clone()),
-        )
-    {
+    if proof.as_ref() != Some(operation) {
         return Err(invalid("settlement restore provenance differs"));
     }
     Ok(())

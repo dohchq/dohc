@@ -58,11 +58,17 @@ pub struct NativeRestoreProposal {
     native_source_bytes: Vec<Vec<u8>>,
     #[serde(skip)]
     reader_source: Option<String>,
+    /// This engine's own Markdown of the point, which its restore settlement writes.
+    #[serde(skip)]
+    markdown_digest: String,
 }
 
 impl NativeRestoreProposal {
     pub(super) fn reader_source(&self) -> Option<&str> {
         self.reader_source.as_deref()
+    }
+    pub(super) fn markdown_digest(&self) -> &str {
+        &self.markdown_digest
     }
     pub fn receipt(&self) -> &NativeRestoreProposalReceipt {
         &self.receipt
@@ -415,8 +421,8 @@ fn prepare_in(
             .preserved_markdown_source(&point_projection)
             .unwrap_or_else(|| point_projection.clone())
     };
-    if hex_sha256(point_projection.as_bytes()) != input.point.projection_digest
-        || hex_sha256(markdown.as_bytes()) != input.point.markdown_digest
+    if retains_reader_file(&point, &markdown)
+        && hex_sha256(markdown.as_bytes()) != input.point.markdown_digest
     {
         return Err(ApplicationError::Conflict);
     }
@@ -476,6 +482,7 @@ fn prepare_in(
             frozen_state_bytes,
             point_state_bytes,
             native_source_bytes,
+            markdown_digest: hex_sha256(markdown.as_bytes()),
             reader_source: point.has_reader_source().then_some(markdown),
         };
         if let Some(applied) = &applied {
@@ -585,6 +592,7 @@ fn prepare_in(
         frozen_state_bytes,
         point_state_bytes,
         native_source_bytes,
+        markdown_digest: hex_sha256(markdown.as_bytes()),
         reader_source: point.has_reader_source().then_some(markdown),
     })
 }
@@ -764,8 +772,8 @@ fn verify_candidate(
         || actual != expected
         || projection != point_projection
         || exact.as_deref() != Some(source.as_str())
-        || hex_sha256(source.as_bytes()) != receipt.point.markdown_digest
-        || hex_sha256(projection.as_bytes()) != receipt.point.projection_digest
+        || (retains_reader_file(&point, &source)
+            && hex_sha256(source.as_bytes()) != receipt.point.markdown_digest)
         || doc.canonical_content_sha256() != receipt.final_content_digest
         || doc.encode_state_vector() != receipt.after_state_vector
     {
@@ -804,6 +812,15 @@ fn prefix_source(
     )?;
     budget.charge(length)?;
     Ok(())
+}
+
+/// The relay's writer made a point's digests and can spell the same state
+/// differently. Only a point whose Markdown is the reader's retained file has a
+/// digest both sides share; an expired witness falls back to this engine's.
+fn retains_reader_file(point: &Ydoc, markdown: &str) -> bool {
+    point.markdown_source_reference().is_some_and(|reference| {
+        point.has_reader_source() && reference.source_sha256 == hex_sha256(markdown.as_bytes())
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

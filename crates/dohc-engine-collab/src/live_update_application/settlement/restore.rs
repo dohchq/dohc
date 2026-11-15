@@ -21,6 +21,8 @@ pub(super) struct RestoreAudit {
     input: NativeRestoreApplication,
     application: NativeRestoreApplicationReceipt,
     expected_vector: String,
+    /// This engine's own Markdown of the point, not the relay's.
+    expected_markdown: String,
     prior: Option<PriorAnchor>,
     max_bytes: usize,
     max_events: usize,
@@ -64,7 +66,7 @@ impl RestoreAudit {
             || saved.previous_sequence != audit.previous_sequence
             || saved.interval != audit.interval_digest
             || saved.application_count != audit.application_count
-            || saved.markdown != self.input.preparation.point.markdown_digest
+            || saved.markdown != self.expected_markdown
             || saved.vector != self.expected_vector
         {
             return Err(ApplicationError::Corrupt);
@@ -116,7 +118,7 @@ impl RestoreAudit {
                 &receipts,
                 self.max_bytes,
             )? != audit.interval_digest
-            || markdown != proposal.receipt().point.markdown_digest
+            || markdown != proposal.markdown_digest()
             || vector != hex_sha256(&proposal.receipt().after_state_vector)
         {
             return Err(ApplicationError::Corrupt);
@@ -149,7 +151,7 @@ impl RestoreAudit {
             params![audit.namespace, audit.binding.workspace_id, audit.binding.main_version_id, audit.binding.object_id, audit.binding.lineage_claim_id, self.operation_id(), audit.terminal_cursor, audit.sequence, audit.interval_digest, moment, markdown, application_json],
             |row| row.get(0),
         ).map_err(read_sql)?;
-        Ok(matches && markdown == self.input.preparation.point.markdown_digest)
+        Ok(matches && markdown == self.expected_markdown)
     }
 }
 
@@ -220,7 +222,7 @@ impl ApplicationOwner {
                 previous_sequence, sequence: application.local_head_sequence, observed_head: application.local_head_sequence, accepted: None, terminal_source: false, application_count: receipts.len(), interval_digest,
                 bootstrap_moment: expected_moment, bootstrap_digest: expected_digest,
                 first: owner.is_none() && prior.is_none() && last_settled.is_none(),
-                restore: Some(Box::new(RestoreAudit { source, reader_resolver: resolver.cloned(), input: input.clone(), expected_vector: hex_sha256(&proposal.receipt().after_state_vector), application, prior, max_bytes, max_events })),
+                restore: Some(Box::new(RestoreAudit { source, reader_resolver: resolver.cloned(), input: input.clone(), expected_vector: hex_sha256(&proposal.receipt().after_state_vector), expected_markdown: proposal.markdown_digest().to_owned(), application, prior, max_bytes, max_events })),
                 replay_anchor: None,
                 empty: false,
             };
@@ -390,16 +392,16 @@ pub(super) fn restored_origin(
         crate::limits::MAX_YDOC_UPDATE_BYTES,
     )?
     .ok_or(ApplicationError::Corrupt)?;
-    let (application,markdown):(String,String) = conn.query_row(
-        "SELECT f.application_json,json_extract(f.proposal_json,'$.point.markdownDigest') FROM live_device_settlements s JOIN live_restore_fences f ON f.relay_database_namespace=s.relay_database_namespace AND f.operation_id=s.restore_operation_id WHERE s.settlement_id=?1 AND f.workspace_id=s.workspace_id AND f.main_version_id=s.main_version_id AND f.object_id=s.object_id",
-        [&anchor.id],|row|Ok((row.get(0)?,row.get(1)?)),
+    // The anchor's Markdown is this engine's; the point's digest is the relay writer's.
+    let application: String = conn.query_row(
+        "SELECT f.application_json FROM live_device_settlements s JOIN live_restore_fences f ON f.relay_database_namespace=s.relay_database_namespace AND f.operation_id=s.restore_operation_id WHERE s.settlement_id=?1 AND f.workspace_id=s.workspace_id AND f.main_version_id=s.main_version_id AND f.object_id=s.object_id",
+        [&anchor.id],|row|row.get(0),
     ).map_err(read_sql)?;
     let application: NativeRestoreApplicationReceipt =
         serde_json::from_str(&application).map_err(|_| ApplicationError::Corrupt)?;
     if application.admitted.accepted.binding != anchor.binding
         || application.local_head_sequence != anchor.sequence
         || application.admitted.accepted.receipt.journal_cursor != anchor.cursor
-        || markdown != anchor.markdown
     {
         return Err(ApplicationError::Corrupt);
     }

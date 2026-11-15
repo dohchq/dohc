@@ -2,6 +2,7 @@ import type { StorageContext } from "./context";
 import { replicaStatement as statement } from "./replicaStatements";
 import type { ReplicaCurrentView } from "@dohc/workspace-engine-client/daemon";
 import { objectMomentFromMomentValue } from "./currentFiles";
+import { SETTLEMENT_BINDINGS } from "./hostedSettlementSchema";
 
 const historyAdmittedContent = `op_kind IN ('moment.append','ydoc.update') AND relay_admission IS NULL
   AND (settlement_admission_json IS NULL OR json_extract(settlement_admission_json,'$.status')<>'refused')`;
@@ -49,10 +50,13 @@ export function replicaHistoryReplacement(
     // Ordinary Y.Doc rows have no recorded projection. They remain replacements.
     log = same ? null : (log ?? Number(row.relay_seq));
   }
+  // The file is the owner engine's Markdown, so a cut's state is the same only as the file its settlement wrote.
   const updates = statement(
     storage,
-    `SELECT j.journal_cursor,j.current_path,j.lineage_claim_id,j.restore_fence_generation,c.markdown_sha256
-    FROM sync_relay_live_update_journal j LEFT JOIN sync_relay_live_settlement_cuts c ON c.journal_cursor=j.journal_cursor
+    `SELECT j.journal_cursor,j.current_path,j.lineage_claim_id,j.restore_fence_generation,b.markdown_sha256
+    FROM sync_relay_live_update_journal j LEFT JOIN ${SETTLEMENT_BINDINGS} b ON b.workspace_id=j.workspace_id
+      AND b.main_version_id=j.main_version_id AND b.object_id=j.object_id AND b.lineage_claim_id=j.lineage_claim_id
+      AND b.terminal_cursor=j.journal_cursor
     WHERE j.workspace_id=? AND j.main_version_id=? AND j.object_id=? AND j.journal_cursor>? AND j.journal_cursor<=?
     ORDER BY j.journal_cursor LIMIT 10001`,
   ).all(workspace, version, object, fromJournal, toJournal);

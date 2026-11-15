@@ -1445,10 +1445,12 @@ it.each([
         applicationCount: 3,
         localYDocSequence: application.localHeadSequence,
         momentId: "restore-moment",
-        markdownDigest: admitted.preparation.point.markdownDigest,
+        // The owner engine writes its own spelling of the point, which this relay's need not match.
+        markdownDigest: "e".repeat(64),
         materialized: false,
         collectionReconcileRequired: false,
       };
+      expect(settlement.markdownDigest).not.toBe(admitted.preparation.point.markdownDigest);
       expect(f.store.acknowledgeStopRestoreSettlement(f.input, settlement).phase).toBe(
         "native-applied",
       );
