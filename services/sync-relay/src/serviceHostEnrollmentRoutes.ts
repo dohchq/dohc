@@ -31,6 +31,7 @@ import {
   type ServiceKeptEdits,
 } from "./storage/serviceKeptEdits";
 import { ServiceActivationDamaged } from "./storage/serviceActivation";
+import { LiveRoomUnsavedError, type LiveRooms } from "./liveRoom";
 
 export function serviceHostSharePaths(
   storage: SyncRelayStorage,
@@ -491,6 +492,7 @@ export function createServiceHostEnrollmentRoutes(options: {
       Awaited<ReturnType<typeof startSelfHostedLiveHost>>,
       "reconcile" | "unblock" | "keptEdits" | "stop"
     >;
+  rooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
 }) {
   const { storage, history, host } = options;
   const activation = storage.createServiceActivationStore(history),
@@ -714,10 +716,20 @@ export function createServiceHostEnrollmentRoutes(options: {
             ? undefined
             : ((input.objectId as string | undefined) ??
               storage.readServiceHostEnrollment(workspaceId, input.path)?.objectId);
-        const row =
+        const stop = () =>
           objectId === undefined
             ? fence()
-            : await host.stop({ workspaceId, objectId }, fence, request.signal);
+            : host.stop({ workspaceId, objectId }, fence, request.signal);
+        // Stop ends the note's live room, so every edit it took is saved first.
+        const rooms = objectId === undefined ? undefined : options.rooms?.();
+        const row = rooms
+          ? await rooms
+              .saveFirst({ workspaceId, objectId: objectId! }, stop, request.signal)
+              .catch((error: unknown) => {
+                if (error instanceof LiveRoomUnsavedError) return "waiting" as const;
+                throw error;
+              })
+          : await stop();
         if (row === "waiting") throw relayError("edits-pending");
         if (!row) throw notFound();
         // `changed` says whether this request retired the document, as its transaction found the row.

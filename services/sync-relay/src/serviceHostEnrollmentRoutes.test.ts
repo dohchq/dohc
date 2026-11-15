@@ -28,6 +28,7 @@ import type { ServiceHostedHold } from "./serviceHostedReplication";
 import { RecoveryCopyRefusal, type ServiceKeptEdits } from "./storage/serviceKeptEdits";
 import type { JsonValue } from "@dohc/workspace-engine-client";
 import { heldDocumentFixture } from "./heldDocument.test-helper";
+import { LiveRoomUnsavedError, type LiveRooms } from "./liveRoom";
 import type { KnownRefusalWord } from "./serverLogWords";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -57,7 +58,7 @@ const serviceReplication = (storage: Parameters<typeof authorizeServiceHostRepli
     hostedFeed: true,
     authorize: (input) => authorizeServiceHostReplication(storage, { key, namespace, ...input }),
   });
-async function fixture() {
+async function fixture(options: { rooms?: Pick<LiveRooms, "saveFirst"> } = {}) {
   const f = await ticketFixture();
   cleanup.push(f.close);
   f.storage.claimWorkspaceIdentity({
@@ -140,6 +141,7 @@ async function fixture() {
     history,
     host,
     resolveActor,
+    ...(options.rooms ? { rooms: () => options.rooms } : {}),
   });
   const input = {
     workspaceId: scope.workspaceId,
@@ -1182,6 +1184,42 @@ it("waits to stop a hosted document until its pending edit is delivered, then re
   });
   expect(retirement()).toMatchObject({ objectId: binding.objectId, acceptedThrough: cursor });
   expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(false);
+});
+
+// Proves: Stop has the note's live room save every edit it took before it retires, and waits,
+// fencing nothing, while the room can't save them yet.
+it("saves a live room's taken edits before Stop retires the note", async () => {
+  const notes: unknown[] = [];
+  let saved = false;
+  const rooms: Pick<LiveRooms, "saveFirst"> = {
+    async saveFirst(note, then) {
+      notes.push(note);
+      if (!saved) throw new LiveRoomUnsavedError();
+      return then();
+    },
+  };
+  const f = await fixture({ rooms }),
+    enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+  retainServiceActivation(f.raw, namespace, true);
+  const stop = () =>
+    f.handle(
+      f.request("DELETE", {
+        path: binding.currentPath,
+        retire: true,
+        restoreFenceGeneration: binding.restoreFenceGeneration,
+      }),
+    );
+  const waiting = await stop();
+  expect(waiting.status).toBe(409);
+  expect(await waiting.json()).toMatchObject({ code: "edits-pending" });
+  expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(true);
+  saved = true;
+  expect(await (await stop()).json()).toMatchObject({ ok: true, status: "retired" });
+  expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(false);
+  expect(notes).toEqual([
+    { workspaceId: scope.workspaceId, objectId: binding.objectId },
+    { workspaceId: scope.workspaceId, objectId: binding.objectId },
+  ]);
 });
 
 // Proves: a Stop whose reply was lost is done in the relay's durable state.

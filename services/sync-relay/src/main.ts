@@ -1143,6 +1143,7 @@ if (selfHost && deployment)
     history: deployment.history,
     host: selfHost,
     resolveActor: resolveAccountActor,
+    rooms: () => liveRooms,
   });
 // Every relay answers a personal open. Only one running the self-hosted live host hosts it.
 personalLiveDocument = createPersonalLiveDocumentRoute({

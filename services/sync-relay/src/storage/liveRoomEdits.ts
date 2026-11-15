@@ -214,3 +214,15 @@ export function liveRoomDocuments(storage: StorageContext): LiveDocumentKey[] {
       lineageClaimId: String(row.lineage_claim_id),
     }));
 }
+
+/** Whether the note is its object's current lineage. Edits taken on an ended one can't be saved. */
+export function liveRoomLineageIsCurrent(storage: StorageContext, document: LiveDocumentKey) {
+  const row = storage.readTx(() =>
+    storage.db
+      .prepare(
+        `SELECT 1 FROM sync_relay_live_documents WHERE ${DOCUMENT} AND lineage_state='current'`,
+      )
+      .get(...documentParams(document)),
+  );
+  return row !== undefined;
+}

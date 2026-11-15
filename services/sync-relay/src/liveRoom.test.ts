@@ -8,7 +8,13 @@ import {
   cleanupLiveDeliveryFixtures,
   registered,
 } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
-import { createLiveRooms, LiveRoomPausedError, nextSave, roomAdmissible } from "./liveRoom.js";
+import {
+  createLiveRooms,
+  LiveRoomPausedError,
+  LiveRoomUnsavedError,
+  nextSave,
+  roomAdmissible,
+} from "./liveRoom.js";
 import { createLiveRoomPauseRoutes } from "./liveRoomPauseRoutes.js";
 import type { NamedFrameRoomHost } from "./namedLiveFrameHost.js";
 import type {
@@ -824,7 +830,7 @@ it("refuses an edit that adds what a note can't hold, before it writes or passes
   expect(unsaved(f)).toHaveLength(1);
 });
 
-it("saves every taken edit before a step that closes the note, taking none meanwhile, then ends the room", async () => {
+it("saves every taken edit before a step that closes the note, taking none until the step ends, then ends the room", async () => {
   const f = note();
   let release!: () => void;
   const hold = new Promise<void>((resolve) => {
@@ -837,19 +843,48 @@ it("saves every taken edit before a step that closes the note, taking none meanw
   await b.open();
   expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
   await b.next();
+  let finish!: () => void;
+  const stepEnds = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  let found: unknown;
   const done = room.saveFirst(
     f.input.evidence.document,
-    () => ({ unsaved: unsaved(f).length, saved: savedAuthors(f) }),
+    async () => {
+      found = { unsaved: unsaved(f).length, saved: savedAuthors(f) };
+      await stepEnds;
+      return "stopped";
+    },
     new AbortController().signal,
   );
+  const waits = { result: "retry", reason: "admission-unavailable" };
   // While the room saves, a new edit waits on its page.
-  expect(await b.submit(b.change("place", "Porto"))).toEqual({
-    result: "retry",
-    reason: "admission-unavailable",
-  });
+  expect(await b.submit(b.change("place", "Porto"))).toEqual(waits);
   release();
-  expect(await done).toEqual({ unsaved: 0, saved: [ana] });
+  await vi.waitFor(() => expect(found).toEqual({ unsaved: 0, saved: [ana] }));
+  // And while a step that waits runs, as the owner's Stop waits for the engine.
+  expect(await b.submit(b.change("note", "late"))).toEqual(waits);
+  finish();
+  expect(await done).toBe("stopped");
   await expect(a.next()).rejects.toThrow();
+});
+
+it("runs a step at once when the note's taken edits are on a lineage that ended", async () => {
+  const f = note();
+  const room = rooms(f, {}, { answers: Array<"retry">(100).fill("retry") });
+  const a = editor(f, room, ana);
+  await a.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  const signal = new AbortController().signal;
+  await expect(room.saveFirst(f.input.evidence.document, () => "ran", signal)).rejects.toThrow(
+    LiveRoomUnsavedError,
+  );
+  (f.storage as StorageContext).db
+    .prepare(
+      "UPDATE sync_relay_live_documents SET lineage_state='retired', admission_state='closed', retired_at_ms=1 WHERE object_id=?",
+    )
+    .run(f.input.evidence.document.objectId);
+  expect(await room.saveFirst(f.input.evidence.document, () => "ran", signal)).toBe("ran");
 });
 
 it("runs no step while a room's edits can't be saved, and runs it once a refused save pauses the note", async () => {
@@ -862,7 +897,7 @@ it("runs no step while a room's edits can't be saved, and runs it once a refused
   const step = () => (ran += 1);
   const signal = new AbortController().signal;
   await expect(room.saveFirst(f.input.evidence.document, step, signal)).rejects.toThrow(
-    "not saved yet",
+    LiveRoomUnsavedError,
   );
   expect(ran).toBe(0);
   expect(unsaved(f)).toHaveLength(1);

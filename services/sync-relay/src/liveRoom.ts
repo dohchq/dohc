@@ -41,6 +41,7 @@ import {
   deleteSavedLiveRoomEdits,
   liveRoomDocuments,
   liveRoomEdits,
+  liveRoomLineageIsCurrent,
   liveRoomPosition,
 } from "./storage/liveRoomEdits.js";
 import {
@@ -78,12 +79,16 @@ export interface LiveRooms {
    */
   join(host: NamedFrameRoomHost, options?: { readonly owner?: boolean }): NamedFrameHostSession;
   /**
-   * Saves every edit the note's room holds, taking no new ones meanwhile, then runs `then` with
-   * nothing taken in between and ends the room: for a step that closes the note to them, such as
-   * a restore's fence. A refused save pauses the note, which keeps its edits in the copy, and
-   * `then` still runs. Throws without running `then` if the edits could not be saved yet.
+   * Saves every edit the note's rooms hold, taking no new ones until `then` ends, then ends the
+   * rooms: for a step that closes the note to them, such as a restore's fence or the owner's
+   * Stop. A refused save pauses the note, which keeps its edits in the copy, and `then` still
+   * runs. Throws `LiveRoomUnsavedError` without running `then` if the edits could not be saved yet.
    */
-  saveFirst<T>(document: LiveDocumentKey, then: () => T, signal: AbortSignal): Promise<T>;
+  saveFirst<T>(
+    note: { readonly workspaceId: string; readonly objectId: string },
+    then: () => T | Promise<T>,
+    signal: AbortSignal,
+  ): Promise<T>;
   /** Takes no new edits, saves what each room holds, and ends every room. */
   close(): Promise<void>;
 }
@@ -156,6 +161,11 @@ interface Room {
 export class LiveRoomPausedError extends Error {
   constructor() {
     super("Live editing of this note is paused.");
+  }
+}
+export class LiveRoomUnsavedError extends Error {
+  constructor() {
+    super("The note's live edits are not saved yet.");
   }
 }
 /**
@@ -282,6 +292,10 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
   const log = (room: Room, line: string, detail: Record<string, unknown> = {}) =>
     write(line, { objectId: room.document.objectId, unsaved: room.unsaved.length, ...detail });
   const rooms = new Map<string, Room>();
+  // Notes whose rooms take no edits while a step that closes them runs, by workspace and object.
+  const holding = new Map<string, number>();
+  const noteKey = (note: { readonly workspaceId: string; readonly objectId: string }) =>
+    JSON.stringify([note.workspaceId, note.objectId]);
   let closed = false;
 
   function passOn(
@@ -828,7 +842,8 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           if (!held || !subscriber || held.lifetime.signal.aborted)
             throw new Error("Live room is not open.");
           // The room is saving everything before the note closes; this edit waits on its page.
-          if (held.closing) return { result: "retry", reason: "admission-unavailable" };
+          if (held.closing || holding.has(noteKey(held.document)))
+            return { result: "retry", reason: "admission-unavailable" };
           if (
             input.trustedAutomation ||
             input.trustedAutomationPress ||
@@ -895,21 +910,40 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
         },
       };
     },
-    async saveFirst(document, then, signal) {
+    async saveFirst(note, then, signal) {
       if (closed) throw new Error("Live rooms are closed.");
-      const key = JSON.stringify(documentParams(document));
-      // A paused note's edits are in its copy, and a note with no room has none taken.
-      if (
-        liveRoomPaused(storage, document) ||
-        (!rooms.has(key) && !liveRoomEdits(storage, document).length)
-      )
-        return then();
-      const room = openRoom(document);
-      await drain(room, signal);
-      if (room.unsaved.length) throw new Error("The note's live edits are not saved yet.");
-      const result = then();
-      if (!room.lifetime.signal.aborted) dispose(room);
-      return result;
+      const key = noteKey(note);
+      holding.set(key, (holding.get(key) ?? 0) + 1);
+      try {
+        // The note's current lineage, if it has a room or taken edits. A paused note's edits are in
+        // its copy, and an ended lineage's can't be saved, so neither holds the step up.
+        const held = new Map<string, LiveDocumentKey>();
+        for (const document of [
+          ...[...rooms.values()].map((room) => room.document),
+          ...liveRoomDocuments(storage),
+        ])
+          if (
+            noteKey(document) === key &&
+            !liveRoomPaused(storage, document) &&
+            liveRoomLineageIsCurrent(storage, document)
+          )
+            held.set(JSON.stringify(documentParams(document)), document);
+        const saving = [...held.values()].map(openRoom);
+        // A room that could not open holds edits it could not save.
+        await Promise.all(saving.map((room) => drain(room, signal))).catch(() => {
+          signal.throwIfAborted();
+          throw new LiveRoomUnsavedError();
+        });
+        if (saving.some((room) => room.unsaved.length)) throw new LiveRoomUnsavedError();
+        const result = await then();
+        for (const room of [...rooms.values()])
+          if (noteKey(room.document) === key && !room.lifetime.signal.aborted) dispose(room);
+        return result;
+      } finally {
+        const left = holding.get(key)! - 1;
+        if (left) holding.set(key, left);
+        else holding.delete(key);
+      }
     },
     async close() {
       closed = true;
