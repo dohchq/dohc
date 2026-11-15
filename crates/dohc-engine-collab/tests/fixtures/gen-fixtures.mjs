@@ -973,6 +973,8 @@ const RICHDOC_PROJECTION_CASES = [
           tableRow([tableCell("tableCell", '[](a "x <br> y")')]),
           tableRow([tableCell("tableCell", "[](a<br>b)")]),
           tableRow([tableCell("tableCell", "[](a&lt;br&gt;b)")]),
+          tableRow([tableCell("tableCell", [xmlText("&lt;br&gt;", { code: {} })])]),
+          tableRow([tableCell("tableCell", [xmlText("&amp;lt;br&amp;gt;", { code: {} })])]),
           tableRow([
             xmlElement("tableCell", { colspan: 1, rowspan: 1 }, [
               table([tableRow([tableCell("tableHeader", "a|b")])]),
