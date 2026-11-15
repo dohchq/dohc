@@ -76,8 +76,9 @@ export const NoticeRow = memo(function NoticeRow({
   };
   const router = useRouter();
   const { label, actions } = noticeRowAccessibility(notice);
-  // While the row's answer is open, it has no Done and no swipe, and its pill is Open. Closing it puts VoiceOver back on
-  // the row, after layout.
+  // While the row's answer is open, its pill is Open. While it's open, or this phone has an answer on it that isn't
+  // saved, it has no Done and no swipe, so Done never hides an answer that still needs the person. Closing it puts
+  // VoiceOver back on the row, after layout.
   const answer = notice.answer;
   const editing = answer !== undefined && answer.editing !== null;
   const expanded = isExpanded(notice);
@@ -117,7 +118,7 @@ export const NoticeRow = memo(function NoticeRow({
     <TitleControls
       copyLabel={notice.failed ? noticesWords.copyErrorDetails : noticesWords.copyNoticeDetails}
       onCopy={handlers.copy}
-      dismissLabel={notice.dismissible && !editing ? dismissLabel(notice) : undefined}
+      dismissLabel={notice.dismissible && !expanded ? dismissLabel(notice) : undefined}
       onDismiss={dismiss}
       done={done}
       demoCopied={demoMode === "notice-copied" && notice.id === "n1"}
@@ -200,7 +201,7 @@ export const NoticeRow = memo(function NoticeRow({
       </View>
     </View>
   );
-  if (!notice.dismissible || editing) return row;
+  if (!notice.dismissible || expanded) return row;
   // Swiping left is Done, or Dismiss for a failure held on this phone. Swiping right marks a read Notice from the
   // server unread, then springs back; an unread one offers no swipe right. A wake, which the phone's scope leaves out,
   // isn't dismissible, so it has no swipe at all.

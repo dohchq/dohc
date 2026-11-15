@@ -240,7 +240,7 @@ describe("the reads behind Reply", () => {
     // A failed read isn't read again just by showing the row again; Try again does it.
     targets.want([T1]);
     expect(calls).toHaveLength(1);
-    targets.retry(T1);
+    expect(targets.retry(T1)).toBe(true);
     expect(calls).toHaveLength(2);
     expect(calls[0]?.signal.aborted).toBe(false);
     calls[1]?.answer.resolve(answer(thread([message()])));
@@ -269,6 +269,7 @@ describe("the reads behind Reply", () => {
     expect(targets.state().get(KEY)).toEqual({ kind: "reading" });
     // A sign-in that has ended asks nothing more.
     targets.want([{ ...T1, threadId: "t3" }]);
+    expect(targets.retry(T1)).toBe(false);
     expect(calls).toHaveLength(2);
 
     const second = harness();
@@ -327,9 +328,9 @@ describe("the reads behind Reply", () => {
     calls[1]?.answer.resolve(answer(thread([message({ threadId: "t2" })])));
     await settle();
     expect(targets.state().size).toBe(0);
-    // Refresh and Try again read nothing nobody wants.
+    // Refresh and Try again read nothing nobody wants, and Try again says it started nothing.
     targets.refresh();
-    targets.retry(T1);
+    expect(targets.retry(T1)).toBe(false);
     expect(calls).toHaveLength(2);
     // Wanted again, it's read again, never answered from the dropped read.
     targets.want([T1]);

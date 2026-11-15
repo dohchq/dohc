@@ -58,6 +58,34 @@ export const localMark = (record: OutboxRecord): LocalMark => ({
   body: bodyOf(record),
 });
 
+/**
+ * What a message only this phone has offers under it. A withheld one has Send and Discard; without `sendable`, as for
+ * an answer whose Notice's workspace no longer shows on the phone, only Discard. One still sending for a long time,
+ * refused, or whose chat is gone has Copy and Discard; none is sent again as another message. With `discardsPending`,
+ * as in a Notice's row, one waiting or sending has Discard too, so an answer for a workspace the phone can no longer
+ * open can always be taken back.
+ */
+export function localOffers(
+  mark: LocalMark,
+  options: { readonly sendable: boolean; readonly discardsPending: boolean },
+): { readonly send: boolean; readonly copy: boolean; readonly discard: boolean } {
+  const { state } = mark;
+  const copy = state.kind === "stalled" || state.kind === "refused" || state.kind === "missing";
+  const pending = options.discardsPending && (state.kind === "waiting" || state.kind === "sending");
+  return {
+    send: state.kind === "withheld" && options.sendable,
+    copy,
+    discard: state.kind === "withheld" || copy || pending,
+  };
+}
+
+/** A settled message won't send. One a request may have reached, unsettled, may still send after Discard. */
+export const maySend = (mark: LocalMark) =>
+  mark.attempted &&
+  (mark.state.kind === "sending" ||
+    mark.state.kind === "stalled" ||
+    mark.state.kind === "withheld");
+
 /** The row of a record whose message a read doesn't show yet, or null. */
 function row(
   record: OutboxRecord,

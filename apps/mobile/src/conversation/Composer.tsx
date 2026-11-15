@@ -14,6 +14,7 @@ import type { OutboxState } from "../server/outbox";
 import { useTheme } from "../theme";
 import { ReplyContext, replyLabel, type ReplyTo } from "./ReplyContext";
 import {
+  clearedBy,
   clearSent,
   clearStatus,
   EMPTY_DRAFT,
@@ -67,7 +68,12 @@ export function outboxProblem(
 // `replies`: every message is a reply, as in a thread, or in a stream once a message is chosen to reply to. Then there
 // is no New post, and the reply's clear leaves New post as it was. `replyTo` names the chosen message above the field.
 // `closed` says why the chosen message no longer takes the text: Send stays off, and the text stays, until the person
-// cancels it or chooses another. Undocked, as in a Notice's row, it sits where it's placed, without the bar.
+// cancels it or chooses another; it shows once the field has answered for any text being sent. Undocked, as in a
+// Notice's row, it sits where it's placed, without the bar.
+//
+// `initialText` is a draft kept elsewhere, as a Notice's answer keeps its text above its recycled row: the field shows
+// it once, only while it's still empty and unedited, and reports it as an edit. `onText` follows the field's text, and
+// `onCleared` says the field cleared the text the outbox kept.
 export function Composer({
   placeholder,
   lanes,
@@ -76,8 +82,11 @@ export function Composer({
   replies = false,
   replyTo = null,
   closed = null,
+  initialText = "",
   onCancelReply,
   onSubmit,
+  onText,
+  onCleared,
   onLayoutHeight,
   docked = true,
 }: {
@@ -88,8 +97,11 @@ export function Composer({
   replies?: boolean;
   replyTo?: ReplyTo | null;
   closed?: string | null;
+  initialText?: string;
   onCancelReply?(): void;
   onSubmit(kind: "send" | "post" | "reply", body: string, title: string): Promise<SubmitOutcome>;
+  onText?(text: string): void;
+  onCleared?(): void;
   onLayoutHeight?(height: number): void;
   docked?: boolean;
 }) {
@@ -169,9 +181,11 @@ export function Composer({
         )
       ) : null}
       {closed !== null ? (
-        <Text style={[styles.problem, { color: theme.danger }]} accessibilityRole="alert">
-          {closed}
-        </Text>
+        busy ? null : (
+          <Text style={[styles.problem, { color: theme.danger }]} accessibilityRole="alert">
+            {closed}
+          </Text>
+        )
       ) : failure?.kind === "not-kept" ? (
         <ProblemLine text={chatWords.notKept} onRetry={() => void submit()} />
       ) : failure?.kind === "parent-gone" ? (
@@ -237,9 +251,12 @@ export function Composer({
             textColor={theme.ink}
             placeholderColor={theme.subtle}
             clearIf={clear.request}
+            initialText={initialText}
             onChangeText={({ nativeEvent: change }) => {
               if (change.refused !== 0) setRefused(change.refused);
               setDraft((current) => fieldChanged(current, change, clear.request, clear.sent));
+              onText?.(change.text);
+              if (clearedBy(change, clear.request)) onCleared?.();
             }}
             onContentHeight={(event) => setHeight(event.nativeEvent.height)}
             style={{ height: Math.min(Math.max(height, FIELD_MIN), FIELD_MAX) }}

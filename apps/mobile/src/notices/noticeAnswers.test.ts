@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { OutboxRecord, WriteOutbox } from "../conversation/conversationWrites";
+import {
+  clearedBy,
+  clearStatus,
+  type OutboxRecord,
+  type WriteOutbox,
+} from "../conversation/conversationWrites";
+import { localOffers, maySend } from "../conversation/outboxMessages";
+import type { LocalMark } from "../conversation/types";
 import type { LocalActions } from "../conversation/useOutbox";
 import { OutboxError } from "../server/outbox";
 import type { ChatMessage, ChatThread } from "../server/workspaceReads";
@@ -8,8 +15,10 @@ import {
   answerSurface,
   answerView,
   createNoticeEditor,
+  rereadSaved,
   type NoticeEditor,
 } from "./noticeAnswers";
+import { isExpanded } from "./rowAccessibility";
 import {
   shownQuestion,
   verifiedQuestion,
@@ -172,8 +181,8 @@ describe("answering a Notice's question in its row", () => {
         },
       },
     ]);
-    // Kept, the row's answer closes.
-    expect(editor.state()).toBeNull();
+    // Kept, the answer stays open until its field clears the text sent.
+    expect(editor.state()).not.toBeNull();
   });
 
   it("places a poll's choice beside the poll, and a post's answer at its thread's top", async () => {
@@ -287,8 +296,9 @@ describe("answering a Notice's question in its row", () => {
       kind: "withheld",
       operationId: "op-held",
     });
-    // It closes, so its text never goes again as another answer: the row's Send retries the same operation.
-    expect(editor.state()).toBeNull();
+    // Its field clears the text, as for a kept answer, so it never goes again as another: the row's Send retries the
+    // same operation.
+    expect(editor.state()).not.toBeNull();
     expect(await editor.recovery.retry("op-held")).toEqual({ kind: "kept" });
     expect(box.retried).toEqual(["op-held"]);
     expect(box.enqueued).toHaveLength(1);
@@ -331,6 +341,7 @@ describe("what a Notice's row shows of its question", () => {
       noticeId: "relay:n1",
       shown,
       verified,
+      showing: shown !== null,
       named,
       answers,
       editor: harness().editor,
@@ -407,5 +418,227 @@ describe("what a Notice's row shows of its question", () => {
     const answers = answerLookup(box.outbox.state(), SCOPE)("wB", "q1");
     expect(answers.map((each) => each.operationId)).toEqual(["mine"]);
     expect(answerLookup(null, SCOPE)("wB", "q1")).toEqual([]);
+  });
+});
+
+describe("an answer the person is still writing or sending", () => {
+  const named = { threadId: "t1", messageId: "q1" };
+  /** The row's view now, as a recycled row coming back on screen draws it. */
+  const rowView = (
+    editor: NoticeEditor,
+    read: TargetRead,
+    answers: readonly OutboxRecord[] = [],
+    showing = true,
+  ) =>
+    answerView({
+      noticeId: "relay:n1",
+      shown: showing ? shownQuestion(TARGET, read) : null,
+      verified: showing ? verifiedQuestion(TARGET, read) : null,
+      showing,
+      named,
+      answers,
+      editor,
+      visit: editor.state(),
+      actions: noActions,
+    });
+
+  it("sends one answer when the answer is cancelled and opened again while the outbox keeps the first", async () => {
+    const { editor, box } = harness();
+    editor.open("relay:n1");
+    const gate = deferred();
+    box.holdUntil(gate.promise);
+    const first = editor.submit(visitOf(editor), "Yes");
+    // Cancel reply, then Answer again, before the outbox has the first answer in its records.
+    editor.close("relay:n1");
+    expect(editor.open("relay:n1")).toBe(true);
+    expect(await editor.submit(visitOf(editor), "No")).toEqual({ kind: "blocked" });
+    gate.resolve();
+    // The first visit ended, so its outcome is stale, but the outbox kept it, once.
+    expect(await first).toEqual({ kind: "stale" });
+    expect(box.enqueued).toHaveLength(1);
+    expect(await editor.submit(visitOf(editor), "No")).toEqual({ kind: "blocked" });
+    expect(box.enqueued).toHaveLength(1);
+  });
+
+  it("lets a question take an answer again once a submit the outbox refused has ended", async () => {
+    const { editor, box } = harness();
+    editor.open("relay:n1");
+    box.fail(new OutboxError("closed"));
+    expect(await editor.submit(visitOf(editor), "Yes")).toEqual({ kind: "blocked" });
+    box.fail(null);
+    expect(await editor.submit(visitOf(editor), "Yes")).toEqual({ kind: "kept" });
+  });
+
+  it("closes a free answer only once its field cleared the text sent, so text typed meanwhile stays", async () => {
+    const { editor } = harness();
+    editor.open("relay:n1");
+    const visit = visitOf(editor);
+    editor.keepDraft(visit, "Yes, and");
+    expect(await editor.submit(visit, "Yes")).toEqual({ kind: "kept" });
+    // Kept, it stays open with what the field holds, until the field says it cleared the body sent.
+    expect(editor.state()).toBe(visit);
+    expect(editor.draft(visit)).toBe("Yes, and");
+
+    // Sent at revision 3 under token 1. The field's own clear for that request closes it.
+    const request = { revision: 3, token: 1 };
+    expect(clearedBy({ text: "", revision: 4, cleared: 1, refused: 0 }, request)).toBe(true);
+    // Text typed meanwhile: the field refuses, keeps it, and the answer stays open with Send on for the new text.
+    const typed = { text: "Yes, and", revision: 5, cleared: 0, refused: 1 };
+    expect(clearedBy(typed, request)).toBe(false);
+    expect(clearStatus(request, typed.revision, typed.refused)).toBe("settled");
+    // Text still being composed: refused unchanged, so Send stays off for the body already kept.
+    expect(clearedBy({ text: "Yes", revision: 3, cleared: 0, refused: 1 }, request)).toBe(false);
+    expect(clearStatus(request, 3, 1)).toBe("refused");
+    // An edit, or an earlier request's clear, closes nothing.
+    expect(clearedBy({ text: "Ye", revision: 4, cleared: 0, refused: 0 }, request)).toBe(false);
+    expect(
+      clearedBy({ text: "", revision: 4, cleared: 1, refused: 0 }, { revision: 6, token: 2 }),
+    ).toBe(false);
+  });
+
+  it("closes a poll's answer once the outbox keeps the choice", async () => {
+    const { editor } = harness(readOf([question({ options: ["17:52", "19:52"] })]));
+    editor.open("relay:n1");
+    expect(await editor.submit(visitOf(editor), "19:52", "19:52")).toEqual({ kind: "kept" });
+    expect(editor.state()).toBeNull();
+  });
+
+  it("keeps the open answer's text above its row, and drops it when the answer closes or the sign-in changes", () => {
+    const read = readOf([question()]);
+    const { editor } = harness(read);
+    editor.open("relay:n1");
+    const visit = visitOf(editor);
+    editor.keepDraft(visit, "Lisbon, then");
+    // The row scrolls away and comes back: its new view gives the field the same text.
+    expect(rowView(editor, read)?.draft()).toBe("Lisbon, then");
+    rowView(editor, read)?.keepDraft("Lisbon, then Porto");
+    expect(rowView(editor, read)?.draft()).toBe("Lisbon, then Porto");
+
+    // Cancel reply drops it, and the next visit starts empty.
+    editor.close("relay:n1");
+    expect(editor.draft(visit)).toBe("");
+    editor.open("relay:n1");
+    const next = visitOf(editor);
+    expect(editor.draft(next)).toBe("");
+    // An earlier visit's field keeps nothing.
+    editor.keepDraft(visit, "Stale");
+    expect(editor.draft(next)).toBe("");
+
+    // A sign-in change stops this sign-in's editor, and its text goes with it.
+    editor.keepDraft(next, "Porto");
+    editor.stop();
+    expect(editor.draft(next)).toBe("");
+    expect(rowView(editor, read)?.draft()).toBe("");
+  });
+
+  it("keeps an open answer, its question and its text through a failed read, with Send off", async () => {
+    const read = readOf([question()]);
+    const h = harness(read);
+    h.editor.open("relay:n1");
+    const visit = visitOf(h.editor);
+    h.editor.keepDraft(visit, "Half an answer");
+    h.read({ kind: "failed" });
+    const failed = rowView(h.editor, { kind: "failed" });
+    expect(failed?.editing).toBe(visit.number);
+    expect(failed?.question).toEqual({
+      id: "q1",
+      authorName: "Scout",
+      body: "Which return train?",
+    });
+    expect(failed?.current).toBe(false);
+    expect(failed?.answerable).toBe(false);
+    expect(failed?.sendable).toBe(false);
+    expect(failed?.draft()).toBe("Half an answer");
+    expect(await h.editor.submit(visit, "Half an answer")).toEqual({ kind: "blocked" });
+    expect(h.editor.state()).toBe(visit);
+    // Try again reads it: the question is current again, and Send can go.
+    h.read(read);
+    expect(rowView(h.editor, read)).toMatchObject({ current: true, answerable: true });
+    expect(await h.editor.submit(visit, "Half an answer")).toEqual({ kind: "kept" });
+
+    // Once the workspace stops showing on the phone, the row shows nothing of the question.
+    const hidden = harness(read);
+    hidden.editor.open("relay:n1");
+    expect(rowView(hidden.editor, { kind: "failed" }, [], false)).toBeNull();
+  });
+
+  it("offers Discard on an answer still sending in a workspace the phone no longer shows, warning it may still send", async () => {
+    const discarded: LocalMark[] = [];
+    const { editor } = harness();
+    const sending = answerView({
+      noticeId: "relay:n1",
+      shown: null,
+      verified: null,
+      showing: false,
+      named,
+      // Repeated 404s leave it sending, with no result.
+      answers: [record({ stage: "sending", attempted: true })],
+      editor,
+      visit: null,
+      actions: { ...noActions, discard: (mark) => void discarded.push(mark) },
+    });
+    expect(sending?.decision.state.kind).toBe("answering");
+    const mark = sending?.marks[0];
+    if (!sending || !mark) throw new Error("The row shows no answer");
+    expect(mark.state.kind).toBe("sending");
+    // The row opens to show it, with Discard and nothing else, and no Done.
+    const row = {
+      id: "relay:n1",
+      relayId: "n1",
+      senderKind: "agent" as const,
+      senderLabel: "Nova",
+      title: "Nova has a question",
+      minutesAgo: 0,
+      read: true,
+      dismissible: true,
+      answer: sending,
+    };
+    expect(isExpanded(row)).toBe(true);
+    expect(localOffers(mark, { sendable: sending.sendable, discardsPending: true })).toEqual({
+      send: false,
+      copy: false,
+      discard: true,
+    });
+    // Its request may have reached the server, so Discard warns that it may still send.
+    expect(maySend(mark)).toBe(true);
+    sending.actions.discard(mark);
+    expect(discarded).toEqual([mark]);
+    // Discard goes through this sign-in's recovery, whatever the list says.
+    expect(
+      await editor.recovery.discard({ kind: "record", operationId: mark.operationId }),
+    ).toEqual({ kind: "discarded" });
+
+    // One not yet tried has Discard too, without the warning. Elsewhere, a waiting message offers nothing.
+    const waiting = { ...mark, state: { kind: "waiting" as const }, attempted: false };
+    expect(localOffers(waiting, { sendable: false, discardsPending: true }).discard).toBe(true);
+    expect(maySend(waiting)).toBe(false);
+    expect(localOffers(waiting, { sendable: true, discardsPending: false }).discard).toBe(false);
+  });
+
+  it("marks a saved answer read again only once a read of its thread started", () => {
+    const saved = record({
+      stage: "saved",
+      result: { kind: "saved", threadId: "t1", messageId: "m-op-1" },
+    });
+    const done = new Set<string>();
+    const started: MessageTarget[] = [];
+    let wanted = false;
+    const retry = (target: MessageTarget) => {
+      if (!wanted) return false;
+      started.push(target);
+      return true;
+    };
+    // The person left Notices before the answer saved: no row wants the thread, so no read starts, and it waits.
+    rereadSaved([TARGET], () => [saved], retry, done);
+    expect(done.size).toBe(0);
+    // Wanted again, the next change reads it, once.
+    wanted = true;
+    rereadSaved([TARGET], () => [saved], retry, done);
+    rereadSaved([TARGET], () => [saved], retry, done);
+    expect(started).toEqual([TARGET]);
+    expect([...done]).toEqual(["op-1"]);
+    // An answer not saved yet reads nothing.
+    rereadSaved([TARGET], () => [record()], retry, new Set());
+    expect(started).toHaveLength(1);
   });
 });

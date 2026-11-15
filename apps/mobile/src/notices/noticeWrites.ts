@@ -186,8 +186,8 @@ export interface NoticeTargets {
   subscribe(listener: () => void): () => void;
   /** Reads each target's thread once, unless it's read or being read already. */
   want(targets: readonly MessageTarget[]): void;
-  /** Reads the target's thread again, as Try again does. */
-  retry(target: MessageTarget): void;
+  /** Reads the target's thread again, as Try again does, and says whether a read started: none for a thread no row wants. */
+  retry(target: MessageTarget): boolean;
   /** Reads every thread again. A verified read stays until its next answer. */
   refresh(): void;
   /** Ends every read under way: nothing they answer applies. A later `want` asks again. */
@@ -226,8 +226,9 @@ export function createNoticeTargets(options: {
     for (const listener of listeners) listener();
   };
 
-  const start = (key: string, target: MessageTarget) => {
-    if (!signIn.isCurrent()) return;
+  /** Starts the target's read, unless the sign-in has ended, and says whether it did. */
+  const start = (key: string, target: MessageTarget): boolean => {
+    if (!signIn.isCurrent()) return false;
     running.get(key)?.abort();
     const controller = new AbortController();
     running.set(key, controller);
@@ -256,6 +257,7 @@ export function createNoticeTargets(options: {
         set(key, { kind: "failed" });
       },
     );
+    return true;
   };
 
   return {
@@ -294,7 +296,7 @@ export function createNoticeTargets(options: {
     },
     retry: (target) => {
       const known = targets.get(targetKey(target));
-      if (known) start(targetKey(target), known);
+      return known ? start(targetKey(target), known) : false;
     },
     refresh() {
       for (const [key, target] of targets) start(key, target);

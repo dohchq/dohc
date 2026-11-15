@@ -16,10 +16,13 @@ const view = (state: DecisionState): NoticeAnswerView => ({
   decision: { options: [], state },
   marks: [],
   editing: null,
+  current: true,
   answerable: state.kind === "open",
   sendable: true,
   cancel: () => undefined,
   submit: async () => ({ kind: "kept" }),
+  draft: () => "",
+  keepDraft: () => undefined,
   actions: {
     blocked: false,
     problems: new Map(),
@@ -105,7 +108,7 @@ describe("a Notices row's actions", () => {
     expect(isExpanded(answered)).toBe(false);
   });
 
-  it("is one element until its answer opens, or an answer of this phone's needs the person", () => {
+  it("is one element until its answer opens, or this phone keeps an answer to it that isn't saved", () => {
     const open = view({ kind: "open" });
     expect(isExpanded({ ...base, answer: open })).toBe(false);
     expect(isExpanded({ ...base, answer: { ...open, editing: 1 } })).toBe(true);
@@ -115,17 +118,17 @@ describe("a Notices row's actions", () => {
       attempted: false,
       body: "Yes",
     });
-    for (const kind of ["withheld", "stalled", "missing"] as const)
+    // Waiting and sending too, so an answer for a workspace the phone can no longer open keeps Discard in reach.
+    for (const kind of ["waiting", "sending", "withheld", "stalled", "missing"] as const)
       expect(isExpanded({ ...base, answer: { ...open, marks: [mark({ kind })] } }), kind).toBe(
         true,
       );
     expect(
       isExpanded({ ...base, answer: { ...open, marks: [mark({ kind: "refused", reason: "x" })] } }),
     ).toBe(true);
-    for (const kind of ["waiting", "sending", "saved"] as const)
-      expect(isExpanded({ ...base, answer: { ...open, marks: [mark({ kind })] } }), kind).toBe(
-        false,
-      );
+    expect(isExpanded({ ...base, answer: { ...open, marks: [mark({ kind: "saved" })] } })).toBe(
+      false,
+    );
     expect(isExpanded(base)).toBe(false);
   });
 

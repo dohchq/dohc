@@ -28,6 +28,7 @@ import {
   answerView,
   createNoticeEditor,
   namedQuestion,
+  rereadSaved,
   type AnswerVisit,
 } from "./noticeAnswers";
 import {
@@ -178,6 +179,7 @@ function useSampleAnswers(notices: readonly PhoneNotice[]): readonly PhoneNotice
         noticeId: notice.id,
         shown: shownQuestion(ask.target, read),
         verified: verifiedQuestion(ask.target, read),
+        showing: true,
         named: ask.target,
         answers: answersOf(ask.target.workspaceId, ask.target.messageId),
         editor,
@@ -412,6 +414,7 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
               noticeId: notice.id,
               shown: asked ? shownQuestion(asked, read) : null,
               verified: asked ? verifiedQuestion(asked, read) : null,
+              showing: asked !== null,
               named,
               answers,
               editor,
@@ -482,15 +485,11 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!targets) return;
     const { workspaces: list, records } = latest.current;
-    for (const record of records) {
+    const questions = records.flatMap((record) => {
       const candidate = answerCandidate(record, list, phoneWrites);
-      if (!candidate) continue;
-      for (const saved of answersFor(candidate)) {
-        if (saved.stage !== "saved" || reread.has(saved.operationId)) continue;
-        reread.add(saved.operationId);
-        targets.retry(candidate);
-      }
-    }
+      return candidate ? [candidate] : [];
+    });
+    rereadSaved(questions, answersFor, targets.retry, reread);
   }, [targets, answersFor, reread]);
 
   const notices = useMemo(() => [...local.notices, ...relayNotices], [local.notices, relayNotices]);

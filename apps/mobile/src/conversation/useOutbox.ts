@@ -10,7 +10,7 @@ import {
   type WriteOutbox,
 } from "./conversationWrites";
 import { answerWrite, type AnswerPlace } from "./decisionAnswers";
-import type { OutboxScope } from "./outboxMessages";
+import { maySend, type OutboxScope } from "./outboxMessages";
 import { nextReaction } from "./reactions";
 import type { LocalMark, Message } from "./types";
 
@@ -54,13 +54,6 @@ export interface LocalActions {
   discardUnreadable(handle: string): void;
   copy(mark: LocalMark): void;
 }
-
-/** A settled message won't send. One a request may have reached, unsettled, may still send after Discard. */
-const maySend = (mark: LocalMark) =>
-  mark.attempted &&
-  (mark.state.kind === "sending" ||
-    mark.state.kind === "stalled" ||
-    mark.state.kind === "withheld");
 
 /** Failures shown in place, by key, with a setter that clears one with null. */
 function useProblems() {

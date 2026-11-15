@@ -25,6 +25,7 @@ import { ActionPill } from "../notices/ActionPill";
 import { sampleBuild } from "../sampleBuild";
 import { useTheme, type Theme } from "../theme";
 import { DecisionCard } from "./DecisionCard";
+import { localOffers } from "./outboxMessages";
 import type { Author, LocalMark, Message, Reaction, ReactionMark, Segment } from "./types";
 import type { AnswerActions, LocalActions, ReactActions } from "./useOutbox";
 
@@ -171,22 +172,19 @@ function LocalStateText({ mark, theme }: { mark: LocalMark; theme: Theme }) {
   return text ? <Text style={[styles.time, { color: theme.subtle }]}>{text}</Text> : null;
 }
 
-/**
- * Under a message only this phone has: why it wasn't sent, and what can be done. A withheld message has Send and
- * Discard. One still sending for a long time, or one the server refused, has Copy beside it and Discard; neither is
- * sent again as another message. Without `sendable`, as for an answer whose Notice's workspace no longer shows on the
- * phone, a withheld one has only Discard.
- */
+/** Under a message only this phone has: why it wasn't sent, and what can be done (`localOffers`). */
 export function LocalFooter({
   mark,
   actions,
   theme,
   sendable = true,
+  discardsPending = false,
 }: {
   mark: LocalMark;
   actions: LocalActions;
   theme: Theme;
   sendable?: boolean;
+  discardsPending?: boolean;
 }) {
   const { state } = mark;
   const problem = actions.problems.get(mark.operationId);
@@ -198,8 +196,8 @@ export function LocalFooter({
         : state.kind === "missing"
           ? chatWords.missing
           : null;
-  const copy = state.kind === "stalled" || state.kind === "refused" || state.kind === "missing";
-  if (reason === null && !copy && problem === undefined) return null;
+  const offers = localOffers(mark, { sendable, discardsPending });
+  if (!offers.discard && problem === undefined) return null;
   return (
     <View style={styles.local}>
       {reason ? <Text style={[styles.localText, { color: theme.danger }]}>{reason}</Text> : null}
@@ -209,17 +207,17 @@ export function LocalFooter({
         </Text>
       ) : null}
       <View style={styles.localActions}>
-        {state.kind === "withheld" && sendable ? (
+        {offers.send ? (
           <ActionPill
             label={chatWords.send}
             disabled={actions.blocked}
             onPress={() => actions.send(mark)}
           />
         ) : null}
-        {copy ? (
+        {offers.copy ? (
           <ActionPill label={chatWords.copyMessage} onPress={() => actions.copy(mark)} />
         ) : null}
-        {reason !== null || copy ? (
+        {offers.discard ? (
           <ActionPill
             label={chatWords.discard}
             disabled={actions.blocked}

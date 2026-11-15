@@ -88,4 +88,23 @@ final class NoticesAnswerTests: XCTestCase {
     XCTAssertTrue(waitGone(field), "The field stayed open after Cancel reply")
     XCTAssertTrue(row(app, question, ", Unanswered,").waitForExistence(timeout: 5), "The row didn't come back")
   }
+
+  @MainActor
+  func testCancelDropsTheTextAndTheNextAnswerStartsEmpty() {
+    let app = launch()
+    tapAnswer(app, question)
+
+    let field = app.textViews["Answer Nova"]
+    XCTAssertTrue(field.waitForExistence(timeout: 10), "The answer's field didn't open in the row")
+    field.tap()
+    field.typeText("Porto album")
+    app.buttons["Cancel reply"].tap()
+    XCTAssertTrue(waitGone(field), "The field stayed open after Cancel reply")
+
+    // Cancelling is deliberate, so the text the phone kept for the row goes with it.
+    tapAnswer(app, question)
+    let again = app.textViews["Answer Nova"]
+    XCTAssertTrue(again.waitForExistence(timeout: 10), "The answer's field didn't open again")
+    XCTAssertFalse((again.value as? String ?? "").contains("Porto"), "The cancelled text came back")
+  }
 }

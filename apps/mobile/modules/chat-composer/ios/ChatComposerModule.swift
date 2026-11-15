@@ -18,6 +18,7 @@ public final class ChatComposerModule: Module {
       Prop("textColor") { (view: ChatComposerView, value: String) in view.textView.textColor = color(value) }
       Prop("placeholderColor") { (view: ChatComposerView, value: String) in view.setPlaceholderColor(color(value)) }
       Prop("clearIf") { (view: ChatComposerView, value: ClearRequest) in view.clear(if: value) }
+      Prop("initialText") { (view: ChatComposerView, value: String) in view.seed(value) }
     }
   }
 }
@@ -86,6 +87,17 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
     }
     textView.text = ""
     changed(cleared: request.token)
+  }
+
+  /// Shows `text`, a draft kept elsewhere, once, only while the field is still empty and unedited. It waits a turn of
+  /// the main loop, until the field is mounted and can report, then reports it as an edit, with a new revision.
+  func seed(_ text: String) {
+    guard !text.isEmpty else { return }
+    DispatchQueue.main.async { [weak self] in
+      guard let self = self, self.revision == 0, self.textView.text.isEmpty else { return }
+      self.textView.text = text
+      self.changed()
+    }
   }
 
   override func layoutSubviews() {

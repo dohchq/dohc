@@ -15,8 +15,9 @@ import type { NoticeAnswerView } from "./phoneNotice";
 // An agent's question in its Notice's row. Collapsed, the row shows where the question stands, in its one element.
 // Expanded, as a group whose controls VoiceOver reaches one by one, it shows the whole question as a read verified it,
 // a poll's choices, which answer at a tap, or the field named "Answer <name>" with Send and Cancel reply, and this
-// phone's answers that need the person, with Send, Copy and Discard. The name is the verified message's author's,
-// never the Notice's sender's.
+// phone's answers that aren't saved, with Send, Copy and Discard. The name is the verified message's author's, never
+// the Notice's sender's. The field's text is kept above the row, so a recycled row shows it again, and through a failed
+// read, with Send off. It closes once the field cleared the answer the outbox kept, so text typed meanwhile stays.
 
 /** Every answer is a reply, and never a post. */
 const REPLY_LANES: Lanes = { post: false, send: true };
@@ -97,6 +98,7 @@ export function NoticeAnswer({ answer }: { answer: NoticeAnswerView }) {
           actions={actions}
           theme={theme}
           sendable={answer.sendable}
+          discardsPending
         />
       ))}
       {open && !polls ? (
@@ -104,13 +106,19 @@ export function NoticeAnswer({ answer }: { answer: NoticeAnswerView }) {
           key={editing}
           placeholder={replyLabel(to)}
           lanes={REPLY_LANES}
-          blocked={actions.blocked ? "loading" : null}
+          blocked={actions.blocked || !answer.current ? "loading" : null}
           problem={null}
           replies
           replyTo={to}
-          closed={answer.answerable ? null : chatWords.answerClosed}
+          closed={answer.answerable || !answer.current ? null : chatWords.answerClosed}
+          initialText={answer.draft()}
           onCancelReply={answer.cancel}
-          onSubmit={(_kind, body) => answer.submit(body).then(settle)}
+          onSubmit={(_kind, body) => answer.submit(body)}
+          onText={answer.keepDraft}
+          onCleared={() => {
+            Keyboard.dismiss();
+            answer.cancel();
+          }}
           docked={false}
         />
       ) : null}

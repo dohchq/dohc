@@ -61,17 +61,22 @@ export interface PhoneNotice {
  * keeps an answer to it, so an answer queued for a workspace that later hides stays in sight, with Discard.
  */
 export interface NoticeAnswerView {
-  /** The question as a current read shows it, or null when none does. */
+  /**
+   * The question as a current read shows it, or as the open answer's visit verified it, through a failed read. Null
+   * when neither does.
+   */
   readonly question: {
     readonly id: string;
     readonly authorName: string;
     readonly body: string;
   } | null;
   readonly decision: Decision;
-  /** This phone's answers that aren't saved, oldest first: Send on a withheld one, Copy and Discard. */
+  /** This phone's answers that aren't saved, oldest first: Send on a withheld one, Copy, and Discard on each. */
   readonly marks: readonly LocalMark[];
   /** The open visit's number, which keys its field, or null while the row's answer isn't open. */
   readonly editing: number | null;
+  /** A current read shows the question. Without one, the open answer keeps its text with Send off. */
+  readonly current: boolean;
   /** Whether a new answer may go now: the latest list and read verify the question, open. */
   readonly answerable: boolean;
   /** Whether Send may go on a withheld answer: the latest list and read still show the question. */
@@ -82,6 +87,10 @@ export interface NoticeAnswerView {
   open?(): void;
   /** Answers with `body`, or with a poll's `option`. */
   submit(body: string, option?: string): Promise<SubmitOutcome>;
+  /** The open answer's text, kept above the recycled rows, for its field to show again when the row returns. */
+  draft(): string;
+  /** Keeps the open answer's text as its field reports it. */
+  keepDraft(text: string): void;
   /** Send, Copy and Discard on this phone's answers. */
   readonly actions: LocalActions;
 }

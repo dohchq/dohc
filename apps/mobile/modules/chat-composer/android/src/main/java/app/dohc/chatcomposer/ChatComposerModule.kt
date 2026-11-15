@@ -39,6 +39,7 @@ class ChatComposerModule : Module() {
         parse(value)?.let { view.field.setHintTextColor(it) }
       }
       Prop("clearIf") { view: ChatComposerView, value: ClearRequest -> view.clearIf(value.revision, value.token) }
+      Prop("initialText") { view: ChatComposerView, value: String -> view.seed(value) }
     }
   }
 }
@@ -113,6 +114,17 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
     clearing = token
     field.setText("")
     clearing = 0
+  }
+
+  /** Shows `text`, a draft kept elsewhere, once, only while the field is still empty and unedited. It waits until the
+   * field is attached and can report; the watcher then reports it as an edit, with a new revision. */
+  fun seed(text: String) {
+    if (text.isEmpty()) return
+    field.post {
+      if (revision != 0 || field.text.isNotEmpty()) return@post
+      field.setText(text)
+      field.setSelection(field.text.length)
+    }
   }
 
   override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {

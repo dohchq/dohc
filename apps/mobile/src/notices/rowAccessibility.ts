@@ -89,7 +89,8 @@ export function wordedLabel(notice: PhoneNotice): string | null {
 
 /**
  * Whether the row is a group whose controls VoiceOver reaches one by one, not one element: while its answer is open,
- * or while this phone keeps an answer to its question that needs the person, with Send, Copy or Discard.
+ * or while this phone keeps an answer to its question that isn't saved, with Discard, and Send or Copy. It then has no
+ * Done and no swipe.
  */
 export const isExpanded = (notice: PhoneNotice) =>
   notice.answer !== undefined &&
