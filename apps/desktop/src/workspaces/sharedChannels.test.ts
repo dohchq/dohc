@@ -1,4 +1,6 @@
 import { rm } from "node:fs/promises";
+import { createServer, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import {
   RelayApiVersionError,
@@ -669,6 +671,108 @@ describe("relayFetchWithTimeout", () => {
       });
     const fetchWithTimeout = relayFetchWithTimeout(25, hungFetch);
     await expect(fetchWithTimeout("http://relay.test/sync/shares")).rejects.toThrow();
+  });
+
+  // A real socket: the server takes the connection and the request, then says nothing.
+  async function silentServer(answer?: (path: string, response: ServerResponse) => void) {
+    const held: ServerResponse[] = [];
+    const server = createServer((request, response) => {
+      held.push(response);
+      answer?.(request.url ?? "", response);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    return {
+      url: (path: string) => `http://127.0.0.1:${port}${path}`,
+      async [Symbol.asyncDispose]() {
+        for (const response of held) response.destroy();
+        server.closeAllConnections();
+        await new Promise((resolve) => server.close(resolve));
+      },
+    };
+  }
+
+  it.each([
+    ["a read", "GET", `/sync/ws-1/datasets/${crypto.randomUUID()}/replica/capture`],
+    ["a change", "POST", `/sync/ws-1/datasets/${crypto.randomUUID()}/invoke`],
+    [
+      "a recovery import's status",
+      "GET",
+      `/sync/ws-1/datasets/${crypto.randomUUID()}/imports/${crypto.randomUUID()}`,
+    ],
+  ])(
+    "gives up on %s the server never answers, even when the caller passes its own signal",
+    async (_kind, method, path) => {
+      await using server = await silentServer();
+      const caller = new AbortController();
+      const request = relayFetchWithTimeout(
+        100,
+        fetch,
+        200,
+      )(server.url(path), {
+        method,
+        ...(method === "POST" ? { body: "{}" } : {}),
+        signal: caller.signal,
+      });
+      // A network failure, so reads use the kept copy and changes fail as they do offline.
+      await expect(request).rejects.toBeInstanceOf(TypeError);
+      expect(caller.signal.aborted).toBe(false);
+    },
+  );
+
+  it("waits for a change past the read limit, so the server can finish it", async () => {
+    await using server = await silentServer((_path, response) => {
+      setTimeout(() => response.end('{"ok":true}'), 250);
+    });
+    const response = await relayFetchWithTimeout(
+      100,
+      fetch,
+      2_000,
+    )(server.url(`/sync/ws-1/datasets/${crypto.randomUUID()}/invoke`), {
+      method: "POST",
+      body: "{}",
+      signal: new AbortController().signal,
+    });
+    expect(await response.json()).toEqual({ ok: true });
+  });
+
+  it("does not cut off a Collection response whose body takes longer than the limit", async () => {
+    await using server = await silentServer((_path, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write('{"rows":');
+      setTimeout(() => response.end("[1,2]}"), 250);
+    });
+    const response = await relayFetchWithTimeout(100)(
+      server.url("/sync/shares/share-1/datasets/list"),
+      { signal: new AbortController().signal },
+    );
+    expect(await response.json()).toEqual({ rows: [1, 2] });
+  });
+
+  // The server answers a recovery export once it has prepared the file, and an
+  // import once it has received and installed it. Each has its own deadline there.
+  it.each([
+    ["a long-poll", "GET", "/sync/ws-1/presses?waitMs=25000"],
+    ["a recovery export", "GET", `/sync/ws-1/datasets/${crypto.randomUUID()}/export`],
+    [
+      "a recovery import",
+      "POST",
+      `/sync/ws-1/datasets/${crypto.randomUUID()}/imports/${crypto.randomUUID()}`,
+    ],
+  ])("leaves %s with its own signal waiting past the limit", async (_kind, method, path) => {
+    await using server = await silentServer((_path, response) => {
+      setTimeout(() => response.end("{}"), 250);
+    });
+    const response = await relayFetchWithTimeout(
+      100,
+      fetch,
+      100,
+    )(server.url(path), {
+      method,
+      ...(method === "POST" ? { body: "{}" } : {}),
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(200);
   });
 
   it("passes fast responses through untouched", async () => {
