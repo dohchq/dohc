@@ -340,3 +340,34 @@ it("lets a read of a Collection that went up go on while another is still going 
   stop(Error("stopped"));
   await done;
 });
+
+it("starts a send that couldn't open this computer's store once more before a read goes to the server", async () => {
+  const unreadable = Error("The store didn't open.");
+  const looks = new Map<string, number>();
+  const store = {
+    keptDatasetIds: () => ["a"],
+    // "a" arrives as soon as the send reaches it.
+    transferStatus(datasetId: string) {
+      const seen = looks.get(datasetId) ?? 0;
+      looks.set(datasetId, seen + 1);
+      return seen > 0 ? transfer("imported") : null;
+    },
+    transferInFlight: () => null,
+    transferToShared() {},
+  } as never;
+  const session = () =>
+    ({ server: () => new Promise<never>(() => {}), signal: new AbortController().signal }) as never;
+  const open = vi.fn(async () => store).mockRejectedValueOnce(unreadable);
+  const sendUp = createCollectionsSendUp({ open, session, reported() {} });
+  await expect(sendUp.start()).rejects.toBe(unreadable);
+  await expect(sendUp.sent("a", new AbortController().signal)).resolves.toBeUndefined();
+  expect(open).toHaveBeenCalledTimes(2);
+  expect(looks.get("a")).toBe(2);
+
+  // A store that still doesn't open leaves the read to the server, where Collections that went up are.
+  const broken = vi.fn(async () => store).mockRejectedValue(unreadable);
+  const stuck = createCollectionsSendUp({ open: broken, session, reported() {} });
+  await expect(stuck.start()).rejects.toBe(unreadable);
+  await expect(stuck.sent("a", new AbortController().signal)).resolves.toBeUndefined();
+  expect(broken).toHaveBeenCalledTimes(2);
+});

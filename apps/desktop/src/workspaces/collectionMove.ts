@@ -151,6 +151,7 @@ type SendUpStore = Parameters<typeof sendCollectionsUp>[0]["local"];
  * running; `reported` hears each send's Collections that didn't arrive. A
  * read of a Collection still going up waits for it with `sent`. One that
  * didn't arrive goes again, and the read rejects with why if it still can't.
+ * A send that couldn't open this computer's store starts again once.
  */
 export function createCollectionsSendUp(input: {
   /** This computer's store, or null where it has none. */
@@ -218,12 +219,19 @@ export function createCollectionsSendUp(input: {
   }
   async function sent(datasetId: string, signal: AbortSignal): Promise<void> {
     for (let attempt = 0; ; attempt += 1) {
-      const started =
-        current &&
-        (await abortable(
-          current.run.catch(() => null),
-          signal,
-        ));
+      if (!current) return;
+      const started = await abortable(
+        current.run.catch(() => undefined),
+        signal,
+      );
+      if (started === undefined) {
+        // The send couldn't look at this computer's Collections, so this one may
+        // still be here. Look once more. If that fails too, the read goes on to
+        // the server, so Collections already there stay readable.
+        if (attempt > 0) return;
+        void start().catch(() => undefined);
+        continue;
+      }
       const wait = started?.waits.get(datasetId);
       if (!started || !wait) return;
       const failure = await abortable(wait, signal);
