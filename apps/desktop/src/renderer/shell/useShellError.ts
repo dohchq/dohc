@@ -54,11 +54,24 @@ export interface CaptureRecoveryNotice {
   dismiss: () => void;
 }
 
+// Text a change from elsewhere removed unseen, which the engine kept, as its
+// Notices row reads.
+export interface MergeRemovalNotice {
+  momentId: string;
+  path: string;
+  title: string;
+  message: string;
+  lastLine?: string;
+  copy: () => void;
+  dismiss: () => void;
+}
+
 export type SettingsFileKind = "user-settings-file" | "workspace-settings-file";
 export type ShellErrorKind =
   | "typing-checkpoint"
   | "typing-import"
   | "capture-recovery"
+  | "merge-removal"
   | "capture-held"
   | "outside-copy-read"
   | "protected-copy-read"
@@ -232,6 +245,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
   // Sibling notices restored from local storage have a row without a toast.
   const shownOutsideCopies = useRef(new Map<string, string>());
   const shownCaptureRecoveries = useRef(new Set<string>());
+  const shownMergeRemovals = useRef(new Set<string>());
   const shownCaptureHolds = useRef(new Set<string>());
 
   // A new error replaces an older one that says the same thing, or one of
@@ -476,6 +490,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     shownKeptCopies.current = new Set();
     shownKeptCopiesMore.current = false;
     shownCaptureRecoveries.current = new Set();
+    shownMergeRemovals.current = new Set();
     shownCaptureHolds.current = new Set();
     filedShareCapture.current = null;
   }, [workspaceId]);
@@ -1285,6 +1300,45 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
       return fresh.length === 0 && stays.length === current.length ? current : [...stays, ...fresh];
     });
   }, []);
+  // One row per removed text the engine lists. One listed for the first time
+  // arrives as a toast; afterwards its row stays as it is, or stays
+  // dismissed, and one no longer listed goes. A row opens its History change.
+  const showMergeRemovals = useCallback((removals: readonly MergeRemovalNotice[]) => {
+    const identityOf = (momentId: string) => `merge-removal:${momentId}`;
+    const listed = new Set(removals.map((removal) => identityOf(removal.momentId)));
+    for (const momentId of shownMergeRemovals.current) {
+      if (!listed.has(identityOf(momentId))) shownMergeRemovals.current.delete(momentId);
+    }
+    const atMs = Date.now();
+    const fresh = removals.flatMap((removal): ShellError[] => {
+      if (shownMergeRemovals.current.has(removal.momentId)) return [];
+      shownMergeRemovals.current.add(removal.momentId);
+      nextId.current += 1;
+      return [
+        {
+          id: `shell-error-${nextId.current}`,
+          identity: identityOf(removal.momentId),
+          kind: "merge-removal",
+          tone: "warning",
+          title: removal.title,
+          message: removal.message,
+          ...(removal.lastLine ? { lastLine: removal.lastLine } : {}),
+          retry: null,
+          action: { label: "Copy text", run: removal.copy, reads: true },
+          target: { to: "history-change", moment: removal.momentId, path: removal.path },
+          onDismiss: removal.dismiss,
+          atMs,
+          seen: false,
+        },
+      ];
+    });
+    setShellErrors((current) => {
+      const stays = current.filter(
+        (error) => error.kind !== "merge-removal" || listed.has(error.identity ?? ""),
+      );
+      return fresh.length === 0 && stays.length === current.length ? current : [...stays, ...fresh];
+    });
+  }, []);
   // Visible sibling copies open directly; native displacements use Save copy.
   const showOutsideCopies = useCallback(
     (copies: readonly (readonly [string, string, string])[], open: (path: string) => void) => {
@@ -1521,6 +1575,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     showKeptCopySaved,
     showOutsideCopies,
     showCaptureRecoveries,
+    showMergeRemovals,
     showCaptureHolds,
     hideShellError,
     dismissShellError,
