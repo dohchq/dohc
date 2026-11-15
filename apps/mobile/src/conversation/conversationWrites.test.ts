@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { FieldChange } from "../../modules/chat-composer";
 import type { AccountState, SignIn } from "../server/account";
 import type { ChatWrite } from "../server/chatWrites";
 import { createServerClient } from "../server/client";
@@ -10,6 +11,7 @@ import { deferred, testServer, type Answer } from "../server/testServer";
 import {
   blockedBy,
   chatWrite,
+  clearedBy,
   clearSent,
   clearStatus,
   closePost,
@@ -25,6 +27,30 @@ import {
   type WriteActivation,
   type WriteOutbox,
 } from "./conversationWrites";
+import {
+  askReplacement,
+  latestSnapshot,
+  NO_REPLACING,
+  replacementAnswered,
+  type Replacing,
+} from "./mentionDraft";
+
+/** A report from the native field: an edit at `revision`, with the caret at the text's end, unless `fields` say more. */
+const fieldReport = (
+  text: string,
+  revision: number,
+  sequence: number,
+  fields: Partial<FieldChange> = {},
+): FieldChange => ({
+  text,
+  revision,
+  sequence,
+  selectionStart: text.length,
+  selectionEnd: text.length,
+  cleared: 0,
+  refused: 0,
+  ...fields,
+});
 
 type Server = ReturnType<typeof testServer>;
 type Disk = ReturnType<typeof durableDisk>;
@@ -519,19 +545,102 @@ describe("a field change", () => {
   const request = { revision: 5, token: 1 };
 
   it("keeps New post open when the field refuses the clear", () => {
-    const refusal = { text: "A", revision: 5, cleared: 0, refused: 1 };
+    const refusal = fieldReport("A", 5, 3, { refused: 1 });
     expect(fieldChanged(sent, refusal, request, sent)).toEqual(sent);
   });
 
   it("closes New post only once the field clears for the request", () => {
-    const edit = { text: "", revision: 6, cleared: 0, refused: 0 };
+    const edit = fieldReport("", 6, 3);
     expect(fieldChanged(sent, edit, request, sent)).toMatchObject({ chosen: "post" });
-    const accepted = { text: "", revision: 6, cleared: 1, refused: 0 };
+    const accepted = fieldReport("", 6, 3, { cleared: 1 });
     expect(fieldChanged(sent, accepted, request, sent)).toMatchObject({
       text: "",
       textRevision: 6,
       chosen: "send",
     });
+  });
+
+  // Moving the caret, selecting, or composing reports the field without an edit: the body sent is still the field's.
+  it("leaves the clear waiting through a selection or composition alone", () => {
+    for (const moved of [
+      fieldReport("A", 5, 4, { selectionStart: 0, selectionEnd: 0 }),
+      fieldReport("A", 5, 4, { selectionStart: 0, selectionEnd: 1 }),
+      fieldReport("A", 5, 4, { composing: { start: 0, end: 1 } }),
+    ]) {
+      const draft = fieldChanged(sent, moved, request, sent);
+      expect(draft).toEqual(sent);
+      expect(clearedBy(moved, request)).toBe(false);
+      expect(clearStatus(request, draft.textRevision, 0)).toBe("waiting");
+    }
+  });
+
+  it("still closes New post on the clear after a selection alone", () => {
+    const moved = fieldChanged(sent, fieldReport("A", 5, 4, { selectionStart: 0 }), request, sent);
+    const accepted = fieldReport("", 6, 5, { cleared: 1 });
+    expect(fieldChanged(moved, accepted, request, sent)).toMatchObject({
+      text: "",
+      chosen: "send",
+    });
+  });
+
+  it("lets Send again for a body edited away and back, which the field refused to clear", () => {
+    let draft = sent;
+    draft = fieldChanged(draft, fieldReport("AB", 6, 4), request, sent);
+    draft = fieldChanged(draft, fieldReport("A", 7, 5), request, sent);
+    const refusal = fieldReport("A", 7, 6, { refused: 1 });
+    draft = fieldChanged(draft, refusal, request, sent);
+    expect(draft).toMatchObject({ text: "A", textRevision: 7, chosen: "post" });
+    expect(clearStatus(request, draft.textRevision, 1)).toBe("settled");
+  });
+});
+
+// A replacement and a clear each check the field's revision, so whichever the field takes first, the other changes
+// nothing, and the body the outbox kept never loses a replacement made after it was sent.
+describe("a replacement and a clear together", () => {
+  const sent: Draft = {
+    text: "Hi @sa",
+    textRevision: 5,
+    title: "",
+    titleRevision: 0,
+    chosen: "post",
+    chosenRevision: 1,
+  };
+  const request = { revision: 5, token: 1 };
+  const snapshot = latestSnapshot(null, fieldReport("Hi @sa", 5, 3));
+  const asked = askReplacement(NO_REPLACING, snapshot, {
+    start: 3,
+    end: 6,
+    replacement: "@sam ",
+    caret: 8,
+  });
+  if (asked.kind !== "asked") throw new Error("no request");
+  const replacing: Replacing = asked.replacing;
+
+  it("keeps the replaced body when the replacement lands before the clear", () => {
+    const applied = fieldReport("Hi @sam ", 6, 4, { replaced: { token: 1, applied: true } });
+    let draft = fieldChanged(sent, applied, request, sent);
+    expect(replacementAnswered(replacing, applied).answer).toEqual({ token: 1, applied: true });
+    // The clear is owed nothing now: the field will refuse it, as its body changed since it was sent.
+    expect(clearStatus(request, draft.textRevision, 0)).toBe("settled");
+    const refusal = fieldReport("Hi @sam ", 6, 5, { refused: 1 });
+    draft = fieldChanged(draft, refusal, request, sent);
+    expect(draft).toMatchObject({ text: "Hi @sam ", textRevision: 6, chosen: "post" });
+  });
+
+  it("closes New post when the clear lands first, and the replacement is refused", () => {
+    const cleared = fieldReport("", 6, 4, { cleared: 1 });
+    let draft = fieldChanged(sent, cleared, request, sent);
+    const refused = fieldReport("", 6, 5, { replaced: { token: 1, applied: false } });
+    draft = fieldChanged(draft, refused, request, sent);
+    expect(draft).toMatchObject({ text: "", textRevision: 6, chosen: "send" });
+    expect(clearedBy(refused, request)).toBe(false);
+    expect(replacementAnswered(replacing, refused).answer).toEqual({ token: 1, applied: false });
+  });
+
+  it("makes no clear of a replacement's answer", () => {
+    const applied = fieldReport("Hi @sam ", 6, 4, { replaced: { token: 1, applied: true } });
+    expect(clearedBy(applied, request)).toBe(false);
+    expect(fieldChanged(sent, applied, request, sent)).toMatchObject({ chosen: "post" });
   });
 });
 
@@ -873,7 +982,7 @@ describe("a reply's clear", () => {
       chosen: "post",
       chosenRevision: 1,
     };
-    const accepted = { text: "", revision: 6, cleared: 1, refused: 0 };
+    const accepted = fieldReport("", 6, 3, { cleared: 1 });
     expect(fieldChanged(draft, accepted, { revision: 5, token: 1 }, null)).toMatchObject({
       text: "",
       chosen: "post",
