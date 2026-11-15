@@ -641,7 +641,8 @@ describe("ChatsView direct messages", () => {
 
   it("says when a picked person is someone the viewer blocks, by their account, not their membership", async () => {
     const user = userEvent.setup();
-    signedIn([]);
+    // Only Sam's conversation is listed, and it can't undo a block on Ana.
+    signedIn([conversation({ conversationId: "conversation-sam", people: [sam] })]);
     // Membership ids differ from account ids; only the resolution knows who is blocked.
     members([
       { memberId: "membership-sam", name: "Sam Rivera" },
@@ -661,6 +662,8 @@ describe("ChatsView direct messages", () => {
     );
     // No conversation holds the block here, so there is nothing to unblock it from.
     expect(screen.queryByTestId("chats-dm-new-unblock")).toBeNull();
+    expect(screen.queryByTestId("chats-dm-new-blocked-line")).toBeNull();
+    expect(screen.getByTestId("chats-dm-new-composer")).toBeTruthy();
   });
 
   it("offers no composer to a person the viewer blocked, as their conversation does, until Unblock", async () => {
@@ -700,8 +703,11 @@ describe("ChatsView direct messages", () => {
 
   it("treats a person blocked only in a group like one blocked in their own conversation, and unblocks from the group", async () => {
     const user = userEvent.setup();
-    // The block belongs to the account, so the group the two share can undo it.
-    signedIn([conversation({ conversationId: "conversation-group", people: [sam, { ...ana, blocked: true }] })]);
+    // The block belongs to the account, so the group the two share can undo it. Sam's own conversation can't.
+    signedIn([
+      conversation({ conversationId: "conversation-sam", people: [sam] }),
+      conversation({ conversationId: "conversation-group", people: [sam, { ...ana, blocked: true }] }),
+    ]);
     members([{ memberId: "membership-ana", name: "Ana Diaz" }]);
     bridgeMock.directResolve
       .mockResolvedValueOnce({ conversationId: null, people: [{ ...ana, blocked: true }] })

@@ -727,8 +727,13 @@ function NewMessageForAccount(props: NewMessageProps) {
     return from;
   };
   const highlighted = Math.min(highlight, matches.length - 1);
-  const activeIndex = highlighted < 0 || pickable(matches[highlighted]!) ? highlighted
-    : step(highlighted, 1) !== highlighted ? step(highlighted, 1) : step(highlighted, -1) !== highlighted ? step(highlighted, -1) : -1;
+  const nearestPickable = () => {
+    const after = step(highlighted, 1);
+    if (after !== highlighted) return after;
+    const before = step(highlighted, -1);
+    return before !== highlighted ? before : -1;
+  };
+  const activeIndex = highlighted < 0 || pickable(matches[highlighted]!) ? highlighted : nearestPickable();
   const active = activeIndex >= 0 ? matches[activeIndex]! : null;
   const toggle = (memberId: string) => {
     goStraight.current = false;
