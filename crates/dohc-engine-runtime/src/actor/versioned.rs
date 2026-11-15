@@ -1368,7 +1368,6 @@ fn versioned_text_rename_on_store(
     Ok(result)
 }
 
-#[allow(clippy::too_many_arguments)]
 /// A rule never moves as a rename: members reach a folder through its rule,
 /// so the rule is written at its destination before anything moves under it,
 /// and deleted at its source once its files have left.
@@ -1448,6 +1447,7 @@ fn rename_access_rule_on_store(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn versioned_text_delete_on_store(
     store: &mut EngineStore,
     input: &DeleteTextFile,
