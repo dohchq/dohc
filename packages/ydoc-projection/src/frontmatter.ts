@@ -839,9 +839,22 @@ export function frontmatterBlockFor(
   if (kept !== undefined) {
     // A closing delimiter at the end of the file needs a line break before
     // the body a person adds under it.
-    return kept !== "" && body !== "" && !kept.endsWith("\n")
-      ? `${kept}${lineEnding}${lineEnding}`
-      : kept;
+    if (kept !== "" && body !== "" && !kept.endsWith("\n")) {
+      return `${kept}${lineEnding}${lineEnding}`;
+    }
+    // A body that starts with line breaks writes the blank lines under its
+    // frontmatter itself, as under a canonical block.
+    let trimmed = kept;
+    for (let index = 0; index < body.length && body[index] === "\n"; index += 1) {
+      const rest = trimmed.endsWith("\r\n")
+        ? trimmed.slice(0, -2)
+        : trimmed.endsWith("\n")
+          ? trimmed.slice(0, -1)
+          : undefined;
+      if (rest === undefined || !rest.endsWith("\n")) break;
+      trimmed = rest;
+    }
+    return trimmed;
   }
   if (typeof source === "string") throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
   if (Object.keys(frontmatter).length === 0) return "";

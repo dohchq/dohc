@@ -27,10 +27,7 @@ interface Case {
 }
 const cases = JSON.parse(
   readFileSync(
-    new URL(
-      "../../../tools/rust-engine-program/nested1b-allowlist-witnesses.json",
-      import.meta.url,
-    ),
+    new URL("../../../tools/rust-engine-program/nested-source-builders.json", import.meta.url),
     "utf8",
   ),
 ) as Case[];
@@ -121,7 +118,6 @@ const document = {
 };
 
 it("compares production successor and relation seed trees and witnesses with desktop imports", () => {
-  expect(cases.length).toBeGreaterThan(2000);
   const sources = [
     "- parent\n  - child\n    - grandchild",
     "3) parent\n    0) child\n        - grandchild",

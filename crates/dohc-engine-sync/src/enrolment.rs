@@ -2019,6 +2019,11 @@ mod tests {
         seed_retained_artifact_named(store, "seed-object", "seed-moment", text, kind);
     }
 
+    /// A body the reader refuses: quotes nested past its limit.
+    fn too_deep(frontmatter: &str) -> String {
+        format!("{frontmatter}{} a", ">".repeat(121))
+    }
+
     fn seed_refused_richdoc_artifact(store: &mut EngineStore, source: &str, canonical: &str) {
         write_text(
             store,
@@ -2190,7 +2195,7 @@ mod tests {
         for failure in ["load", "kind", "projection", "journal"] {
             let (_scratch, _, mut store) = open_store();
             seed_main(&mut store);
-            seed_refused_richdoc_artifact(&mut store, "- \n\n  - b\n - c", "- \n\n- b\n\n- c");
+            seed_refused_richdoc_artifact(&mut store, &too_deep(""), "a");
             enroll(&mut store).expect("originate unexportable seed base");
             let bad_bytes = if failure == "projection" {
                 Ydoc::wire().plaintext_insert(
@@ -2313,7 +2318,7 @@ mod tests {
     fn failed_projection_retries_only_after_moment_or_document_head_changes() {
         let (_scratch, path, mut store) = open_store();
         seed_main(&mut store);
-        seed_refused_richdoc_artifact(&mut store, "- \n\n  - b\n - c", "- \n\n- b\n\n- c");
+        seed_refused_richdoc_artifact(&mut store, &too_deep(""), "a");
         mark_head_settled(&mut store);
         enroll(&mut store).expect("enroll unprojectable seed");
         observe_export_attempts(&mut store);
@@ -2336,7 +2341,7 @@ mod tests {
             "main",
             "seed-object",
             "next-moment",
-            "- \n\n  - b\n - c",
+            &too_deep(""),
             "ydoc",
             102,
         );
@@ -2573,16 +2578,13 @@ mod tests {
     }
 
     #[test]
-    fn normalizing_richdoc_seed_and_lenient_settle_do_not_export_unprojectable_bytes() {
+    fn a_refused_richdoc_seed_exports_only_its_base_settled_or_not() {
         for settled in [false, true] {
             let (_scratch, _, mut store) = open_store();
             seed_main(&mut store);
-            let source = "---\nid: rec\n---\n\n- \n\n  - b\n - c";
-            seed_refused_richdoc_artifact(
-                &mut store,
-                source,
-                "---\nid: rec\n---\n\n- \n\n- b\n- c",
-            );
+            let source = too_deep("---\nid: rec\n---\n\n");
+            let source = source.as_str();
+            seed_refused_richdoc_artifact(&mut store, source, "---\nid: rec\n---\n\na");
             let key = DocKey::new("ws", "main", "seed-object").expect("key");
             let doc = store
                 .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
@@ -2600,8 +2602,8 @@ mod tests {
                     })
                     .expect("local projection");
                 assert_eq!(
-                    local_projection.content, source,
-                    "the lenient snapshot fallback keeps the source locally"
+                    local_projection.content, projection,
+                    "a source the reader refuses is not kept, even beside its snapshot"
                 );
                 mark_head_settled(&mut store);
             }

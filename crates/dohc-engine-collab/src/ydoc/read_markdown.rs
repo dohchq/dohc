@@ -16,9 +16,13 @@ use pulldown_cmark::{
 use yrs::types::{Attrs, Delta};
 use yrs::{Any, Text, Xml, XmlElementPrelim, XmlFragment, XmlTextPrelim};
 
-/// The deepest element nesting the reader builds. It is below the
-/// projector's depth limit, so whatever the reader builds can be written.
-pub(super) const MAX_DEPTH: usize = 120;
+/// The deepest a text sits in what the reader builds, from the body's
+/// blocks at 0. The projector reads a link's fields three levels below its
+/// text and refuses past 128, so whatever the reader builds can be written.
+pub(super) const MAX_DEPTH: usize = 125;
+
+/// The most quotes the reader nests, as the editor's reader allows.
+pub(super) const MAX_QUOTES: usize = 120;
 
 /// One element the editor writes, with its attributes and children.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +49,16 @@ pub(super) struct Marks {
     highlight: bool,
     /// A link's href and title.
     link: Option<(String, Option<String>)>,
+    /// Text the editor keeps as written that a renderer reads as markup: raw
+    /// HTML, a comment, or a reference it decodes. Not written to the Y.Doc;
+    /// it tells two readings apart where a renderer would.
+    raw: bool,
+}
+
+/// Whether a renderer reads markup in `text` that the editor keeps as text.
+fn renders_markup(text: &str) -> bool {
+    text.match_indices('<')
+        .any(|(at, _)| super::inline_syntax(&text[at..]).is_some())
 }
 
 impl Marks {
@@ -82,13 +96,71 @@ impl Marks {
 pub(super) enum Unreadable {
     /// Elements nest deeper than [`MAX_DEPTH`] outside a quote.
     TooDeep,
-    /// Quotes nest deeper than [`MAX_DEPTH`].
+    /// Quotes nest deeper than [`MAX_QUOTES`], or elements deeper than
+    /// [`MAX_DEPTH`] inside one.
     QuoteTooDeep,
 }
 
 /// The body's blocks as the editor reads them.
 pub(super) fn read_markdown(body: &str) -> Result<Vec<Element>, Unreadable> {
-    read_blocks(body, 0, &HashMap::new())
+    read_blocks(body, 0, 0, &HashMap::new())
+}
+
+/// Whether a source shows what its projection shows: the same elements, with
+/// an escaped character read as the character it shows. Only the source's
+/// markup counts, since the source is what would be written; markup the
+/// projection writes, such as a cell's `<br>`, is not written.
+pub(super) fn shows_alike(source: &[Element], projection: &[Element]) -> bool {
+    fn shown(children: &[Child], raw_counts: bool) -> Vec<Child> {
+        let mut out: Vec<Child> = Vec::new();
+        for child in children {
+            let runs = match child {
+                Child::Element(element) if element.tag == "escapedPunctuation" => {
+                    let value = element.attrs.iter().find_map(|(name, value)| match value {
+                        Any::String(text) if *name == "value" => Some(text.to_string()),
+                        _ => None,
+                    });
+                    vec![(value.unwrap_or_default(), Marks::default())]
+                }
+                Child::Element(element) => {
+                    out.push(Child::Element(Element {
+                        tag: element.tag,
+                        attrs: element.attrs.clone(),
+                        children: shown(&element.children, raw_counts),
+                    }));
+                    continue;
+                }
+                Child::Text(runs) => runs.clone(),
+            };
+            if !matches!(out.last(), Some(Child::Text(_))) {
+                out.push(Child::Text(Vec::new()));
+            }
+            let Some(Child::Text(last)) = out.last_mut() else {
+                unreachable!("a text child was just pushed");
+            };
+            for (text, mut marks) in runs {
+                marks.raw &= raw_counts;
+                match last.last_mut() {
+                    Some((before, before_marks)) if *before_marks == marks => {
+                        before.push_str(&text)
+                    }
+                    _ => last.push((text, marks)),
+                }
+            }
+        }
+        out
+    }
+    let shown = |elements: &[Element], raw_counts| {
+        shown(
+            &elements
+                .iter()
+                .cloned()
+                .map(Child::Element)
+                .collect::<Vec<_>>(),
+            raw_counts,
+        )
+    };
+    shown(source, true) == shown(projection, false)
 }
 
 /// Insert `element` at `index` of `parent`.
@@ -106,12 +178,15 @@ pub(super) fn insert_element<F: XmlFragment>(
     for child in element.children.iter().rev() {
         match child {
             Child::Element(child) => insert_element(txn, &el, 0, child),
+            Child::Text(runs) if runs.len() == 1 && runs[0].1.attrs().is_none() => {
+                el.insert(txn, 0, XmlTextPrelim::new(runs[0].0.as_str()));
+            }
             Child::Text(runs) => {
                 let text = el.insert(txn, 0, XmlTextPrelim::new(""));
                 text.apply_delta(
                     txn,
                     runs.iter().map(|(run, marks)| {
-                        Delta::Inserted(run.clone(), marks.attrs().map(Box::new))
+                        Delta::Inserted(run.as_str(), marks.attrs().map(Box::new))
                     }),
                 );
             }
@@ -138,7 +213,12 @@ fn label_key(label: &str) -> String {
         .to_lowercase()
 }
 
-fn read_blocks(src: &str, depth: usize, outer: &Definitions) -> Result<Vec<Element>, Unreadable> {
+fn read_blocks(
+    src: &str,
+    depth: usize,
+    quotes: usize,
+    outer: &Definitions,
+) -> Result<Vec<Element>, Unreadable> {
     let mut resolve = |link: BrokenLink<'_>| {
         outer
             .get(&label_key(&link.reference))
@@ -149,22 +229,24 @@ fn read_blocks(src: &str, depth: usize, outer: &Definitions) -> Result<Vec<Eleme
     let mut spans = Vec::new();
     for (label, definition) in parser.reference_definitions().iter() {
         spans.push(definition.span.clone());
-        definitions
-            .entry(label_key(label))
-            .or_insert_with(|| {
-                let raw = &src[definition.span.clone()];
-                raw.contains('&')
-                    .then(|| raw.find("]:").and_then(|at| link_target(&raw[at + 2..])))
-                    .flatten()
-                    .unwrap_or_else(|| {
-                        (definition.dest.to_string(), definition.title.as_deref().unwrap_or("").to_owned())
-                    })
-            });
+        definitions.entry(label_key(label)).or_insert_with(|| {
+            let raw = &src[definition.span.clone()];
+            raw.contains('&')
+                .then(|| raw.find("]:").and_then(|at| link_target(&raw[at + 2..])))
+                .flatten()
+                .unwrap_or_else(|| {
+                    (
+                        definition.dest.to_string(),
+                        definition.title.as_deref().unwrap_or("").to_owned(),
+                    )
+                })
+        });
     }
     spans.sort_by_key(|span| span.start);
     let mut reader = Reader {
         src,
         depth,
+        quotes,
         definitions,
         spans,
         next_span: 0,
@@ -198,7 +280,9 @@ enum Kind {
         indent: usize,
         blank_first: bool,
     },
-    Paragraph { implicit: bool },
+    Paragraph {
+        implicit: bool,
+    },
     Heading(i64),
     Cell,
     CodeBlock(String),
@@ -215,13 +299,14 @@ impl Kind {
 
 struct Frame {
     kind: Kind,
-    start: usize,
     blocks: Vec<Element>,
     pieces: Vec<Piece>,
     text: String,
     /// Open HTML tags in this text block: name, piece count, source start,
     /// and the marks they opened under.
     tags: Vec<(String, usize, usize, Marks)>,
+    /// The pieces that are a `&lt;` or `&gt;`, which bound the tag span.
+    brackets: Vec<usize>,
     /// The end of the last piece's source, to tell an escape's backslash
     /// from one that is text.
     covered: usize,
@@ -234,11 +319,11 @@ impl Frame {
     fn new(kind: Kind, start: usize) -> Self {
         Frame {
             kind,
-            start,
             blocks: Vec::new(),
             pieces: Vec::new(),
             text: String::new(),
             tags: Vec::new(),
+            brackets: Vec::new(),
             covered: start,
             last_end: None,
         }
@@ -256,7 +341,10 @@ enum Piece {
     },
     Node(Element),
     /// A `$$` math span, which stands alone on its lines to be a block.
-    DisplayMath { tex: String, source: Range<usize> },
+    DisplayMath {
+        tex: String,
+        source: Range<usize>,
+    },
 }
 
 struct Image {
@@ -268,7 +356,9 @@ struct Image {
 
 struct Reader<'a> {
     src: &'a str,
+    /// The depth and quotes of the block this body is read in.
     depth: usize,
+    quotes: usize,
     definitions: Definitions,
     spans: Vec<Range<usize>>,
     next_span: usize,
@@ -308,13 +398,22 @@ impl<'a> Reader<'a> {
         self.frames.last_mut().expect("the body frame")
     }
 
-    fn push_frame(&mut self, kind: Kind, start: usize) -> Result<(), Unreadable> {
-        if self.depth + self.frames.len() > MAX_DEPTH {
-            let quoted = self
+    /// The quotes around the innermost frame, callouts' included.
+    fn quotes(&self) -> usize {
+        self.quotes
+            + self
                 .frames
                 .iter()
-                .any(|frame| matches!(frame.kind, Kind::Quote));
-            return Err(if quoted || self.depth > 0 {
+                .filter(|frame| matches!(frame.kind, Kind::Quote))
+                .count()
+    }
+
+    fn push_frame(&mut self, kind: Kind, start: usize) -> Result<(), Unreadable> {
+        let quotes = self.quotes() + usize::from(matches!(kind, Kind::Quote));
+        // The new frame's element sits `frames.len() - 1` below the body's
+        // depth, and what it holds one further.
+        if self.depth + self.frames.len() > MAX_DEPTH || quotes > MAX_QUOTES {
+            return Err(if quotes > 0 {
                 Unreadable::QuoteTooDeep
             } else {
                 Unreadable::TooDeep
@@ -354,31 +453,43 @@ impl<'a> Reader<'a> {
     /// line breaks count.
     fn separators(&self, from: usize, to: usize, include_first: bool) -> usize {
         let from = from.min(to);
-        let region = &self.src[from..to];
-        let mut lines = region.split('\n');
-        if from == 0 || self.src.as_bytes()[from - 1] == b'\n' {
-            let text = lines
-                .map(|line| self.strip_containers(line))
-                .collect::<Vec<_>>()
-                .join("\n");
-            return text.matches("\n\n").count();
+        let mut lines = self.src[from..to].split('\n');
+        let at_line_start = from == 0 || self.src.as_bytes()[from - 1] == b'\n';
+        // The lines joined with their prefixes gone: each run of line breaks
+        // between two lines with content holds half its length in pairs.
+        let mut pairs = 0;
+        let mut run = 0;
+        if at_line_start {
+            lines.next();
+            for line in lines {
+                run += 1;
+                if !self.strip_containers(line).is_empty() {
+                    pairs += run / 2;
+                    run = 0;
+                }
+            }
+            return pairs + run / 2;
         }
+        // The first line is the block's own. The line breaks before the
+        // next content go with it, unless no content follows.
         lines.next();
-        let mut text = String::new();
+        let mut skip = !include_first;
+        let mut leading = true;
         for line in lines {
-            text.push('\n');
-            text.push_str(self.strip_containers(line));
+            if skip {
+                skip = false;
+            } else {
+                run += 1;
+            }
+            if !self.strip_containers(line).is_empty() {
+                if !leading {
+                    pairs += run / 2;
+                }
+                leading = false;
+                run = 0;
+            }
         }
-        if !include_first && !text.is_empty() {
-            text.remove(0);
-        }
-        let absorbed = text.bytes().take_while(|byte| *byte == b'\n').count();
-        let rest = &text[absorbed..];
-        if rest.is_empty() {
-            text.matches("\n\n").count()
-        } else {
-            rest.matches("\n\n").count()
-        }
+        pairs + run / 2
     }
 
     /// The tiptap reader the editor uses keeps a blank line beyond a block
@@ -569,7 +680,13 @@ impl<'a> Reader<'a> {
             }
             Event::DisplayMath(_) => {
                 self.text_block(range.start)?;
-                let tex = self.src[range.start + 2..range.end - 2].to_owned();
+                // Each later line drops what its containers put before it.
+                let mut lines = self.src[range.start + 2..range.end - 2].split('\n');
+                let mut tex = lines.next().unwrap_or_default().to_owned();
+                for line in lines {
+                    tex.push('\n');
+                    tex.push_str(self.strip_containers(line));
+                }
                 self.push_piece(
                     Piece::DisplayMath {
                         tex,
@@ -610,7 +727,10 @@ impl<'a> Reader<'a> {
             }
             Event::HardBreak => {
                 self.text_block(range.start)?;
-                self.push_piece(Piece::Node(element("hardBreak", Vec::new(), Vec::new())), &range);
+                self.push_piece(
+                    Piece::Node(element("hardBreak", Vec::new(), Vec::new())),
+                    &range,
+                );
                 // The editor keeps the next line's indentation.
                 let end = self.content_start(range.end);
                 let indent = self.kept_indent(range.end, end);
@@ -645,9 +765,8 @@ impl<'a> Reader<'a> {
             .frames
             .iter()
             .rposition(|frame| matches!(frame.kind, Kind::Item { .. }));
-        let ordered = item.is_some_and(|at| {
-            at > 0 && matches!(self.frames[at - 1].kind, Kind::List(Some(_)))
-        });
+        let ordered = item
+            .is_some_and(|at| at > 0 && matches!(self.frames[at - 1].kind, Kind::List(Some(_))));
         if ordered {
             // The editor reads no task in an ordered list: the marker stays
             // text, with the spaces after it.
@@ -691,7 +810,11 @@ impl<'a> Reader<'a> {
             if (in_cell && value == "|") || !self.links.is_empty() {
                 self.push_text(value, None, &piece_range);
             } else {
-                let node = element("escapedPunctuation", vec![("value", Any::from(value))], Vec::new());
+                let node = element(
+                    "escapedPunctuation",
+                    vec![("value", Any::from(value))],
+                    Vec::new(),
+                );
                 self.push_piece(Piece::Node(node), &piece_range);
             }
             let rest = &text[1..];
@@ -704,17 +827,37 @@ impl<'a> Reader<'a> {
             self.push_text(text, Some(range.start), &range);
         } else if source.starts_with('&') && source.ends_with(';') {
             let name = &source[1..source.len() - 1];
-            // A tab or space reference that only spaces come before on its
-            // line reads as its character.
-            let leading = || self.src[self.line_start(range.start)..range.start].bytes().all(|byte| byte == b' ');
+            // A tab or space reference that starts its block, or that only
+            // spaces come before on its line, reads as its character. The
+            // writer spells leading white space that way.
+            let leading = || {
+                self.frames
+                    .last()
+                    .is_some_and(|frame| frame.pieces.is_empty())
+                    || self
+                        .kept_indent(self.line_start(range.start), range.start)
+                        .bytes()
+                        .all(|byte| byte == b' ')
+            };
             let decoded = match name {
                 "#9" if leading() => Some("\t"),
                 "#32" if leading() => Some(" "),
                 _ => decoded_reference(name),
             };
             match decoded {
-                Some(decoded) => self.push_text(decoded, None, &range),
-                None => self.push_text(source, Some(range.start), &range),
+                Some(decoded) => {
+                    if matches!(name, "lt" | "gt") {
+                        let frame = self.top();
+                        frame.brackets.push(frame.pieces.len());
+                    }
+                    self.push_text(decoded, None, &range)
+                }
+                None => {
+                    let raw =
+                        std::mem::replace(&mut self.marks.raw, super::rendered_reference(name));
+                    self.push_text(source, Some(range.start), &range);
+                    self.marks.raw = raw;
+                }
             }
         } else {
             self.push_text(text, None, &range);
@@ -753,10 +896,12 @@ impl<'a> Reader<'a> {
                 .iter()
                 .position(|(open, ..)| open.eq_ignore_ascii_case(name))
             {
-                let (_, pieces, start, marks) = frame.tags[at].clone();
+                let (_, pieces, start, mut marks) = frame.tags[at].clone();
                 frame.tags.truncate(at);
                 frame.pieces.truncate(pieces);
+                frame.brackets.retain(|&index| index < pieces);
                 let run = self.src[start..range.end].trim_end().to_owned();
+                marks.raw = renders_markup(&run);
                 self.push_piece(
                     Piece::Text {
                         text: run,
@@ -779,7 +924,10 @@ impl<'a> Reader<'a> {
         self.push_piece(
             Piece::Text {
                 text: raw.to_owned(),
-                marks,
+                marks: Marks {
+                    raw: renders_markup(raw),
+                    ..marks
+                },
                 at: None,
             },
             &range,
@@ -802,7 +950,12 @@ impl<'a> Reader<'a> {
             Tag::CodeBlock(kind) => {
                 let language = match kind {
                     // The editor keeps references in the language as written.
-                    CodeBlockKind::Fenced(_) if self.src[range.clone()].lines().next().is_some_and(|line| line.contains('&')) => {
+                    CodeBlockKind::Fenced(_)
+                        if self.src[range.clone()]
+                            .lines()
+                            .next()
+                            .is_some_and(|line| line.contains('&')) =>
+                    {
                         let line = self.src[range.clone()].lines().next().unwrap_or("");
                         let line = line.trim_start();
                         let fence = line.as_bytes().first().copied().unwrap_or(b'`');
@@ -823,7 +976,8 @@ impl<'a> Reader<'a> {
                 if let (Some(end), Some(_)) = (list.last_end, list.blocks.last()) {
                     let count = self.separators(end, self.line_start(range.start), false);
                     if let Some(item) = self.top().blocks.last_mut() {
-                        item.children.extend((0..count).map(|_| Child::Element(paragraph(Vec::new()))));
+                        item.children
+                            .extend((0..count).map(|_| Child::Element(paragraph(Vec::new()))));
                     }
                 }
                 let (indent, blank_first) = self.item_indent(range.start);
@@ -944,10 +1098,19 @@ impl<'a> Reader<'a> {
                 let frame = self.frames.pop().expect("a text block");
                 let blocks = match frame.kind {
                     Kind::Heading(level) => {
-                        let children = children(merge(frame.pieces));
-                        vec![element("heading", vec![("level", Any::from(level))], children)]
+                        let mut pieces = frame.pieces;
+                        tag_span_references(&mut pieces, &frame.brackets);
+                        let children = children(merge(pieces));
+                        vec![element(
+                            "heading",
+                            vec![("level", Any::from(level))],
+                            children,
+                        )]
                     }
-                    _ => self.finish_paragraph(frame),
+                    _ => match written_definition(&self.src[range.clone()]) {
+                        Some(text) => vec![text_paragraph(text)],
+                        None => self.finish_paragraph(frame),
+                    },
                 };
                 for block in blocks {
                     self.push_block(block);
@@ -956,7 +1119,9 @@ impl<'a> Reader<'a> {
             }
             TagEnd::TableCell => {
                 let frame = self.frames.pop().expect("a cell");
-                let children = children(inline_syntax(merge(frame.pieces), self.src));
+                let mut pieces = frame.pieces;
+                tag_span_references(&mut pieces, &frame.brackets);
+                let children = children(inline_syntax(merge(pieces), self.src));
                 self.push_block(paragraph(children));
             }
             TagEnd::TableHead | TagEnd::TableRow => {
@@ -964,9 +1129,15 @@ impl<'a> Reader<'a> {
                 let cells = frame
                     .blocks
                     .into_iter()
-                    .map(|paragraph| element("tableCell", Vec::new(), vec![Child::Element(paragraph)]))
+                    .map(|paragraph| {
+                        element("tableCell", Vec::new(), vec![Child::Element(paragraph)])
+                    })
                     .collect::<Vec<_>>();
-                self.push_block(element("tableRow", Vec::new(), cells.into_iter().map(Child::Element).collect()));
+                self.push_block(element(
+                    "tableRow",
+                    Vec::new(),
+                    cells.into_iter().map(Child::Element).collect(),
+                ));
             }
             TagEnd::Table => {
                 let frame = self.frames.pop().expect("a table");
@@ -975,11 +1146,16 @@ impl<'a> Reader<'a> {
                 };
                 let mut rows = frame.blocks;
                 for (index, row) in rows.iter_mut().enumerate() {
-                    let tag = if index == 0 { "tableHeader" } else { "tableCell" };
+                    let tag = if index == 0 {
+                        "tableHeader"
+                    } else {
+                        "tableCell"
+                    };
                     for (column, cell) in row.children.iter_mut().enumerate() {
                         let Child::Element(cell) = cell else { continue };
                         cell.tag = tag;
-                        cell.attrs = vec![("colspan", Any::from(1_i64)), ("rowspan", Any::from(1_i64))];
+                        cell.attrs =
+                            vec![("colspan", Any::from(1_i64)), ("rowspan", Any::from(1_i64))];
                         let align = match alignments.get(column) {
                             Some(Alignment::Left) => Some("left"),
                             Some(Alignment::Center) => Some("center"),
@@ -996,7 +1172,11 @@ impl<'a> Reader<'a> {
                         row.attrs.push(("height", Any::from(height)));
                     }
                 }
-                self.push_block(element("table", Vec::new(), rows.into_iter().map(Child::Element).collect()));
+                self.push_block(element(
+                    "table",
+                    Vec::new(),
+                    rows.into_iter().map(Child::Element).collect(),
+                ));
                 self.block_ends(range.end);
             }
             TagEnd::BlockQuote(_) => {
@@ -1040,7 +1220,12 @@ impl<'a> Reader<'a> {
                 let heights = (!text.contains('\n'))
                     .then(|| super::parse_table_row_heights(text.trim_end()))
                     .flatten();
-                self.container().blocks.push(text_paragraph(text));
+                let raw = renders_markup(&text);
+                let mut block = text_paragraph(text);
+                if let Some(Child::Text(runs)) = block.children.first_mut() {
+                    runs[0].1.raw = raw;
+                }
+                self.container().blocks.push(block);
                 if let Some(heights) = heights {
                     let container = self
                         .frames
@@ -1067,7 +1252,10 @@ impl<'a> Reader<'a> {
                 self.close_implicit();
                 self.flush_definitions(range.end);
                 let frame = self.frames.pop().expect("an item");
-                let Kind::Item { task, blank_first, .. } = frame.kind else {
+                let Kind::Item {
+                    task, blank_first, ..
+                } = frame.kind
+                else {
                     unreachable!("an item frame");
                 };
                 let mut blocks = frame.blocks;
@@ -1081,7 +1269,9 @@ impl<'a> Reader<'a> {
                 let end = frame.last_end.unwrap_or(range.start + 1);
                 let children = blocks.into_iter().map(Child::Element).collect();
                 let item = match task {
-                    Some(checked) => element("taskItem", vec![("checked", Any::Bool(checked))], children),
+                    Some(checked) => {
+                        element("taskItem", vec![("checked", Any::Bool(checked))], children)
+                    }
                     None => element("listItem", Vec::new(), children),
                 };
                 let list = self.frames.last_mut().expect("a list");
@@ -1101,7 +1291,21 @@ impl<'a> Reader<'a> {
                     // The editor keeps a link with no text as the text it is.
                     if self.top().pieces.len() == pieces {
                         let text = &self.src[source.clone()];
-                        self.push_text(text, Some(source.start), &source);
+                        if text.contains('\n') {
+                            // Its later lines lose their containers and
+                            // indentation, as a paragraph's lines do.
+                            let mut lines = text.split('\n');
+                            let mut kept = lines.next().unwrap_or("").to_owned();
+                            for line in lines {
+                                kept.push('\n');
+                                kept.push_str(
+                                    self.strip_containers(line).trim_start_matches([' ', '\t']),
+                                );
+                            }
+                            self.push_text(&kept, None, &source);
+                        } else {
+                            self.push_text(text, Some(source.start), &source);
+                        }
                     }
                 }
             }
@@ -1133,14 +1337,22 @@ impl<'a> Reader<'a> {
         let mut blocks = if body.trim().is_empty() {
             Vec::new()
         } else {
-            read_blocks(&body, self.depth + self.frames.len(), &self.definitions)?
+            read_blocks(
+                &body,
+                self.depth + self.frames.len(),
+                self.quotes() + 1,
+                &self.definitions,
+            )?
         };
         if blocks.is_empty() {
             blocks.push(paragraph(Vec::new()));
         }
         let kind = kind.trim();
         let attrs = vec![
-            ("calloutType", Any::from(if kind.is_empty() { "note" } else { kind })),
+            (
+                "calloutType",
+                Any::from(if kind.is_empty() { "note" } else { kind }),
+            ),
             ("title", Any::from(title.trim())),
             ("fold", Any::from(fold)),
         ];
@@ -1157,15 +1369,28 @@ impl<'a> Reader<'a> {
         let mut pieces = frame.pieces;
         // The editor keeps the spaces that end a paragraph's last line.
         let rest = &self.src[frame.covered.min(self.src.len())..];
-        let spaces = rest.bytes().take_while(|byte| matches!(byte, b' ' | b'\t')).count();
-        if spaces > 0 && !pieces.is_empty() && matches!(rest.as_bytes().get(spaces), None | Some(b'\n')) {
+        let spaces = rest
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+        if spaces > 0
+            && !pieces.is_empty()
+            && matches!(rest.as_bytes().get(spaces), None | Some(b'\n'))
+        {
             pieces.push(Piece::Text {
                 text: rest[..spaces].to_owned(),
                 marks: Marks::default(),
                 at: Some(frame.covered),
             });
         }
+        tag_span_references(&mut pieces, &frame.brackets);
         let pieces = inline_syntax(merge(pieces), self.src);
+        if !pieces
+            .iter()
+            .any(|piece| matches!(piece, Piece::DisplayMath { .. }))
+        {
+            return vec![paragraph(children(pieces))];
+        }
         let mut blocks = Vec::new();
         let mut current: Vec<Piece> = Vec::new();
         let count = pieces.len();
@@ -1196,9 +1421,16 @@ impl<'a> Reader<'a> {
             if !current.is_empty() {
                 blocks.push(paragraph(children(std::mem::take(&mut current))));
             }
-            blocks.push(element("mathBlock", vec![("tex", Any::from(tex))], Vec::new()));
+            blocks.push(element(
+                "mathBlock",
+                vec![("tex", Any::from(tex))],
+                Vec::new(),
+            ));
             if let Some((_, Piece::Text { text, .. })) = pieces.peek_mut() {
-                let rest = text.trim_start_matches('\n').trim_start_matches([' ', '\t']).to_owned();
+                let rest = text
+                    .trim_start_matches('\n')
+                    .trim_start_matches([' ', '\t'])
+                    .to_owned();
                 *text = rest;
             }
         }
@@ -1274,19 +1506,114 @@ fn opening_tag_name(raw: &str) -> Option<&str> {
     let name = tag_name(rest);
     let after = rest[name.len()..].chars().next();
     (!name.is_empty()
-        && after.is_none_or(|character| character.is_whitespace() || matches!(character, '>' | '/')))
+        && after
+            .is_none_or(|character| character.is_whitespace() || matches!(character, '>' | '/')))
     .then_some(name)
 }
 
 fn tag_name(text: &str) -> &str {
     let end = text
-        .find(|character: char| !(character.is_alphanumeric() || character == '_' || character == '-'))
+        .find(|character: char| {
+            !(character.is_alphanumeric() || character == '_' || character == '-')
+        })
         .unwrap_or(text.len());
     &text[..end]
 }
 
+/// The text of a one-line paragraph that is a kept reference definition as
+/// the writer writes it, with its punctuation as references so it is not a
+/// definition again. The editor reads it back as that text.
+fn written_definition(raw: &str) -> Option<String> {
+    let raw = raw.trim_end_matches([' ', '\t', '\n']);
+    if raw.contains('\n') || !raw.starts_with("&#91;") {
+        return None;
+    }
+    let mut text = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(amp) = rest.find('&') {
+        text.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        let end = after.find(';')?;
+        let name = &after[..end];
+        let character = match name {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            _ => char::from_u32(name.strip_prefix('#')?.parse().ok()?)?,
+        };
+        text.push(character);
+        rest = &after[end + 1..];
+    }
+    text.push_str(rest);
+    let written: String = text
+        .chars()
+        .map(|character| match character {
+            '&' => "&amp;".to_owned(),
+            '<' => "&lt;".to_owned(),
+            '>' => "&gt;".to_owned(),
+            '"'..='.' | ':'..='>' | '@' | '['..='`' | '{'..='~' | '\r' | '\u{a0}' => {
+                format!("&#{};", u32::from(character))
+            }
+            other => other.to_string(),
+        })
+        .collect();
+    let definitions = Parser::new_ext(&text, options());
+    let is_definition = definitions
+        .reference_definitions()
+        .iter()
+        .any(|(_, definition)| {
+            definition.span.start == 0 && definition.span.end >= text.trim_end().len()
+        });
+    (written == raw && is_definition).then_some(text)
+}
+
 /// The character a reference reads as, for the references the editor's
 /// reader decodes in text. Others stay the text they spell.
+/// The editor reads a block's tag span, from its first `&lt;` that opens a
+/// tag to its last `&gt;`, with each reference the writer spells there as
+/// its character: ASCII punctuation, white space, and NBSP.
+fn tag_span_references(pieces: &mut [Piece], brackets: &[usize]) {
+    fn text(piece: &Piece) -> Option<&str> {
+        match piece {
+            Piece::Text { text, marks, .. } if !marks.code => Some(text),
+            _ => None,
+        }
+    }
+    let start = brackets.iter().copied().find(|&index| {
+        text(&pieces[index]) == Some("<")
+            && pieces[index + 1..]
+                .iter()
+                .find_map(|piece| text(piece).and_then(|text| text.chars().next()))
+                .is_some_and(|next| matches!(next, '!' | '/' | '?') || next.is_ascii_alphabetic())
+    });
+    let end = brackets
+        .iter()
+        .copied()
+        .rfind(|&index| text(&pieces[index]) == Some(">"));
+    let (Some(start), Some(end)) = (start, end) else {
+        return;
+    };
+    for piece in pieces.iter_mut().take(end).skip(start + 1) {
+        let Piece::Text { text, marks, at } = piece else {
+            continue;
+        };
+        let decoded = text
+            .strip_prefix("&#")
+            .and_then(|rest| rest.strip_suffix(';'))
+            .filter(|code| !code.starts_with('0'))
+            .and_then(|code| code.parse::<u32>().ok())
+            .filter(
+                |code| matches!(code, 9 | 10 | 13 | 32..=47 | 58..=64 | 91..=96 | 123..=126 | 160),
+            )
+            .and_then(char::from_u32);
+        if let (Some(decoded), false) = (decoded, marks.code) {
+            *text = decoded.to_string();
+            marks.raw = false;
+            *at = None;
+        }
+    }
+}
+
 fn decoded_reference(name: &str) -> Option<&'static str> {
     Some(match name {
         "amp" => "&",
@@ -1325,37 +1652,33 @@ fn unescaped(text: &str, character: char) -> Option<usize> {
 }
 
 /// Join neighbouring text that has the same marks.
-fn merge(pieces: Vec<Piece>) -> Vec<Piece> {
-    let mut merged: Vec<Piece> = Vec::with_capacity(pieces.len());
-    for piece in pieces {
-        if let (
-            Some(Piece::Text {
-                text,
-                marks,
-                at,
-            }),
+fn merge(mut pieces: Vec<Piece>) -> Vec<Piece> {
+    pieces.dedup_by(|piece, kept| {
+        let (
             Piece::Text {
                 text: next,
                 marks: next_marks,
                 at: next_at,
             },
-        ) = (merged.last_mut(), &piece)
-        {
-            // Source text joins only the source text right after it, so each
-            // piece with an offset is still the source as written there.
-            let joins = match (*at, *next_at) {
-                (Some(at), Some(next_at)) => at + text.len() == next_at,
-                (None, None) => true,
-                _ => false,
-            };
-            if *marks == *next_marks && joins {
-                text.push_str(next);
-                continue;
-            }
+            Piece::Text { text, marks, at },
+        ) = (piece, kept)
+        else {
+            return false;
+        };
+        // Source text joins only the source text right after it, so each
+        // piece with an offset is still the source as written there.
+        let joins = match (*at, *next_at) {
+            (Some(at), Some(next_at)) => at + text.len() == next_at,
+            (None, None) => true,
+            _ => false,
+        };
+        let joins = joins && *marks == *next_marks;
+        if joins {
+            text.push_str(next);
         }
-        merged.push(piece);
-    }
-    merged
+        joins
+    });
+    pieces
 }
 
 /// The text's children: each run of text one text node.
@@ -1392,6 +1715,26 @@ fn children(pieces: Vec<Piece>) -> Vec<Child> {
 /// atoms, highlight, underline and links from bare URLs. Each is read only
 /// in text that is still its source.
 fn inline_syntax(pieces: Vec<Piece>, src: &str) -> Vec<Piece> {
+    // Each syntax here holds one of these in source text.
+    let candidate = |text: &str| {
+        let bytes = text.as_bytes();
+        (0..bytes.len()).any(|at| {
+            let rest = &bytes[at..];
+            match bytes[at] {
+                b'[' | b'{' | b'=' | b'+' => rest.get(1) == Some(&bytes[at]),
+                b':' => rest.starts_with(b"://"),
+                b'@' => true,
+                b'w' | b'W' => rest.len() >= 4 && rest[..4].eq_ignore_ascii_case(b"www."),
+                _ => false,
+            }
+        })
+    };
+    if !pieces
+        .iter()
+        .any(|piece| plain_source(piece).is_some_and(|(text, ..)| candidate(text)))
+    {
+        return pieces;
+    }
     let pieces = nodes_in_text(pieces);
     let pieces = paired(pieces, src, Pair::Highlight);
     let pieces = paired(pieces, src, Pair::Underline);
@@ -1483,7 +1826,10 @@ fn wikilink(text: &str) -> Option<(usize, Element)> {
         return None;
     }
     let (target, label) = match unescaped(inner, '|') {
-        Some(bar) => (unescape_wikilink(&inner[..bar]), Some(unescape_wikilink(&inner[bar + 1..]))),
+        Some(bar) => (
+            unescape_wikilink(&inner[..bar]),
+            Some(unescape_wikilink(&inner[bar + 1..])),
+        ),
         None => (unescape_wikilink(inner), None),
     };
     let mut attrs = vec![("target", Any::from(target))];
@@ -1630,7 +1976,9 @@ fn next_pair(
     search: usize,
 ) -> Option<(usize, usize)> {
     let end = pieces.iter().rev().find_map(|piece| match piece {
-        Piece::Text { text, at: Some(at), .. } => Some(at + text.len()),
+        Piece::Text {
+            text, at: Some(at), ..
+        } => Some(at + text.len()),
         _ => None,
     })?;
     for piece in pieces {
@@ -1650,7 +1998,8 @@ fn next_pair(
                 Pair::Highlight => {
                     before != Some('\\')
                         && before != Some('=')
-                        && after.is_some_and(|character| !character.is_whitespace() && character != '=')
+                        && after
+                            .is_some_and(|character| !character.is_whitespace() && character != '=')
                 }
                 Pair::Underline => after.is_some(),
             };
@@ -1662,7 +2011,8 @@ fn next_pair(
             };
             let inside = |offset: usize| {
                 pieces.iter().any(|piece| {
-                    plain_source(piece).is_some_and(|(text, at, _)| at <= offset && offset + 2 <= at + text.len())
+                    plain_source(piece)
+                        .is_some_and(|(text, at, _)| at <= offset && offset + 2 <= at + text.len())
                 })
             };
             if inside(close) {
@@ -1710,9 +2060,8 @@ fn bare_links(pieces: Vec<Piece>) -> Vec<Piece> {
                 marks,
                 at: Some(_),
             } if marks.link.is_none() && !marks.code => {
-                (text.contains("://") || text.contains('@') || contains_ignore_case(text, "www.")).then(|| {
-                    (text.clone(), marks.clone())
-                })
+                (text.contains("://") || text.contains('@') || contains_ignore_case(text, "www."))
+                    .then(|| (text.clone(), marks.clone()))
             }
             _ => None,
         };
@@ -1773,7 +2122,8 @@ fn email_boundary(byte: u8) -> bool {
 fn bare_link(text: &str, index: usize) -> Option<(usize, String)> {
     let rest = &text[index..];
     let lower = |prefix: &str| {
-        rest.len() >= prefix.len() && rest.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+        rest.len() >= prefix.len()
+            && rest.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
     };
     let prefix = ["https://", "http://", "ftp://", "www."]
         .into_iter()
@@ -1864,7 +2214,9 @@ fn backpedal(mut link: &str) -> &str {
             let entity = &link[amp + 1..];
             if entity.len() > 1
                 && entity.ends_with(';')
-                && entity[..entity.len() - 1].bytes().all(|byte| byte.is_ascii_alphanumeric())
+                && entity[..entity.len() - 1]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric())
             {
                 link = &link[..amp];
             }
@@ -1901,9 +2253,7 @@ fn inline_link_target(source: &str) -> Option<(String, String)> {
             b']' => {
                 depth -= 1;
                 if depth == 0 {
-                    return source[index + 1..]
-                        .strip_prefix('(')
-                        .and_then(link_target);
+                    return source[index + 1..].strip_prefix('(').and_then(link_target);
                 }
             }
             _ => {}

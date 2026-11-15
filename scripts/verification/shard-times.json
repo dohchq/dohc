@@ -1396,7 +1396,7 @@
   "packages/ydoc-projection/src/liveRestoreValidation.test.ts": 1.861,
   "packages/ydoc-projection/src/lossy-markdown.test.ts": 2.296,
   "packages/ydoc-projection/src/marked-oracle.test.ts": 0.336,
-  "packages/ydoc-projection/src/nestedAllowlist.test.ts": 0.621,
+  "packages/ydoc-projection/src/nestedBuilders.test.ts": 0.621,
   "packages/ydoc-projection/src/nestedMarkdownContract.test.ts": 1.169,
   "packages/ydoc-projection/src/orderedLiveUpdateCut.test.ts": 0.811,
   "packages/ydoc-projection/src/orderedLiveUpdateCut.typing.test.ts": 4.138,

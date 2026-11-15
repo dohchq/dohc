@@ -1,5 +1,4 @@
 use super::*;
-use base64::Engine;
 
 fn successor(source: &str) -> Result<SuccessorBase, CollabError> {
     let key = crate::DocKey::new("workspace", "main", "object").unwrap();
@@ -19,108 +18,30 @@ fn successor(source: &str) -> Result<SuccessorBase, CollabError> {
 }
 
 #[test]
-fn nested1b_disagreeing_readings_hold() {
-    for source in [
-        "- a\n\n- b\n  - c",
-        "- p\n  - a\n\n  - b",
-        "* parent\n  * a\n\n  * b\n",
-        "1. a\n    1. child\n\n2. b\n",
-        "- parent\n  - child\n\n| h |\n| --- |\n| v |\n",
-    ] {
-        assert!(!outside_markdown_is_allowlisted(source), "{source:?}");
-        assert!(successor(source).is_err(), "{source:?}");
-        assert!(
-            Ydoc::wire()
-                .seed_collection_relation_markdown(source)
-                .is_err(),
-            "{source:?}"
-        );
-    }
-}
-
-#[test]
-fn nested1b_multiline_setext_and_any_reading_item_blocks_hold() {
-    let sources = [
-        "- a\n  b\n  ===\n  - c\n",
-        "- a\n  --\n  - c",
-        "- a\n  b\n  --\n  - c",
-        "- a\n  -",
-        "```\nx\n````\n- a\n  - b\n```\n",
-    ];
-    assert_eq!(sources.map(outside_markdown_is_allowlisted), [false; 5]);
-    for source in sources {
-        assert!(successor(source).is_err(), "{source:?}");
-        assert!(
-            Ydoc::wire()
-                .seed_collection_relation_markdown(source)
-                .is_err(),
-            "{source:?}"
-        );
-    }
-}
-
-#[test]
-fn nested1b_dash_setext_continuations_hold() {
-    for source in ["- a\n  --\n  - c", "- a\n  b\n  --\n  - c"] {
-        assert!(!outside_markdown_is_allowlisted(source), "{source:?}");
-        assert!(successor(source).is_err(), "{source:?}");
-        assert!(
-            Ydoc::wire()
-                .seed_collection_relation_markdown(source)
-                .is_err(),
-            "{source:?}"
-        );
-    }
-}
-
-#[test]
-fn nested1b_desktop_block_starts_hold() {
-    for source in [
-        "- step\n\n  $$\n  x^2\n  $$\n  - sub\n",
-        "- $$\n  x^2\n  $$\n  - sub\n",
-        "- parent\n\n  <div\n  - child",
-        "- parent\n\n  <div \n  - child",
-        "- parent\n\n  <pre\n  - child",
-    ] {
-        assert!(!outside_markdown_is_allowlisted(source), "{source:?}");
-        assert!(successor(source).is_err(), "{source:?}");
-        assert!(
-            Ydoc::wire()
-                .seed_collection_relation_markdown(source)
-                .is_err(),
-            "{source:?}"
-        );
-    }
-}
-
-#[test]
-fn nested1b_fence_tracking_cannot_hide_blocks() {
-    for source in [
-        "- a\n\n  ```\n  code\n  ````\n  <div>\n  ```\n",
-        "- a\n\n  ```\n  code\n   ```\n  <div>\n  ```\n",
-        "```bad`info\n```\n- a\n  - child\n  <div>\n```\n",
-    ] {
-        assert!(!outside_markdown_is_allowlisted(source), "{source:?}");
-        assert!(successor(source).is_err(), "{source:?}");
-        assert!(
-            Ydoc::wire()
-                .seed_collection_relation_markdown(source)
-                .is_err(),
-            "{source:?}"
-        );
-    }
-}
-
-#[test]
-fn nested1b_flat_successor_keeps_indented_code_but_holds_quote_overflow() {
+fn a_successor_keeps_indented_code_and_refuses_quote_overflow() {
     for source in ["Text\n\n    code\n", "Install:\n\n    npm i foo"] {
         assert!(successor(source).is_ok(), "{source:?}");
     }
     assert!(successor(&format!("{}deep", "> ".repeat(121))).is_err());
 }
 
+/// A formula in an item or a quote reads without the indentation and quote
+/// markers its container puts on each line, as the editor reads it, so it
+/// is written back as it was rather than indented again.
 #[test]
-fn nested1b_frontmatter_repairs_missing_schema_version() {
+fn a_formula_in_a_container_reads_without_the_container_prefix() {
+    for source in ["- step\n\n  $$\n  x^2\n  $$\n", "> $$\n> x^2\n> $$\n"] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+            .unwrap();
+        let body = doc.canonical_content()["body"].to_string();
+        assert!(body.contains(r#""tex":"\nx^2\n""#), "{source:?}: {body}");
+        assert_eq!(doc.project_richdoc().unwrap(), source);
+    }
+}
+
+#[test]
+fn a_frontmatter_fold_repairs_a_missing_schema_version() {
     let doc = Ydoc::wire();
     doc.rewrite_content_to_markdown(ContentKind::Richdoc, "- parent\n  - child\n")
         .unwrap();
@@ -135,7 +56,7 @@ fn nested1b_frontmatter_repairs_missing_schema_version() {
 }
 
 #[test]
-fn nested1b_canonical_frontmatter_fold_drops_redundant_witness() {
+fn a_canonical_frontmatter_fold_drops_a_redundant_witness() {
     let source = "---\nstatus: open\n---\n- parent\n  - child\n";
     let doc = Ydoc::wire();
     doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, source)
@@ -148,19 +69,7 @@ fn nested1b_canonical_frontmatter_fold_drops_redundant_witness() {
     assert!(doc.markdown_source_reference().is_none());
 }
 
-#[test]
-fn nested1b_flat_unsupported_marker_keeps_builder_refusal() {
-    let source = "-\tparent\n  - child";
-    let normalized = normalize_list_tabs(source, MarkdownReading::Source);
-    let (blocks, _) = parse_markdown_blocks_checked(&normalized, MarkdownReading::Source);
-    assert!(!refused_fold_item_bodies(&blocks));
-    assert!(successor(source).is_err());
-    assert!(Ydoc::wire()
-        .seed_collection_relation_markdown(source)
-        .is_err());
-}
-
-fn held_sources() -> Vec<&'static str> {
+fn nested_sources() -> Vec<&'static str> {
     [
         "- a\n  b\n  ===\n  - c\n",
         "- a\n  --\n  - c",
@@ -185,10 +94,10 @@ fn held_sources() -> Vec<&'static str> {
         "- parent\n  - child\n\n<!-- dohc:table row-heights=1:40 -->\n| h |\n| --- |\n| [link](https://example.com) |",
         "- [link](https://example.com) and `code`\n  - child",
         "- ~~strike~~ &amp; \\*literal\\*\n  - child",
-    ].into_iter().chain(inline_proof_held_sources()).collect()
+    ].into_iter().chain(inline_sources()).collect()
 }
 
-fn inline_accepted_sources() -> [&'static str; 8] {
+fn plain_inline_sources() -> [&'static str; 8] {
     [
         "- plain text\n  - child",
         "- Café 中文 ١٢٣ . , ; : ! ? ' \" ( ) - /\n  - child",
@@ -319,7 +228,7 @@ fn generated_sources() -> Vec<String> {
             sources.push(source);
         }
     }
-    sources.extend(inline_accepted_sources().map(str::to_owned));
+    sources.extend(plain_inline_sources().map(str::to_owned));
     sources.push("- p\n  more\n  - c".to_owned());
     sources
 }
@@ -336,125 +245,120 @@ fn production_docs(source: &str) -> [Ydoc; 2] {
     [doc, relation]
 }
 
-fn witness(doc: &Ydoc) -> Value {
-    let meta = doc.doc.get_or_insert_map(ROOT_META);
-    let txn = doc.doc.transact();
-    json!([
-        MARKDOWN_SOURCE_META_KEY,
-        MARKDOWN_SOURCE_SHA_META_KEY,
-        MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY
-    ]
-    .map(|key| match meta.get(&txn, key) {
-        Some(Out::Any(Any::String(value))) => json!(value.as_ref()),
-        None => Value::Null,
-        other => panic!("unexpected witness field: {other:?}"),
-    }))
-}
-
+/// Every source seeds both builders with the body the reader reads, and the
+/// first fold may restyle the note but folding what it writes changes
+/// nothing.
 #[test]
-fn nested1b_positive_grammar_and_strict_admission_remains_off() {
-    let fixtures: Vec<Value> = serde_json::from_str(include_str!(
-        "../../../../tools/rust-engine-program/nested1b-allowlist-witnesses.json"
-    ))
-    .unwrap();
-    let sources = generated_sources();
-    assert_eq!(sources.len() + held_sources().len(), fixtures.len());
-    assert_eq!(
-        fixtures.iter().filter(|row| row["held"] == true).count(),
-        held_sources().len()
-    );
-    for (source, fixture) in held_sources()
+fn every_source_seeds_both_builders_and_folds_stably() {
+    let sources = nested_sources()
         .into_iter()
-        .zip(fixtures.iter().filter(|row| row["held"] == true))
-    {
-        assert_eq!(fixture["source"], source);
-        assert_eq!(fixture["builders"].as_array().unwrap().len(), 0);
-        assert!(successor(source).is_err());
-        assert!(Ydoc::wire()
-            .seed_collection_relation_markdown(source)
-            .is_err());
-    }
-    for (source, fixture) in sources
-        .into_iter()
-        .zip(fixtures.iter().filter(|row| row["held"] != true))
-    {
-        assert!(outside_markdown_is_allowlisted(&source), "{source:?}");
-        assert_eq!(fixture["source"], source);
-        assert_eq!(fixture["builders"].as_array().unwrap().len(), 2);
-        let source_doc = Ydoc::wire();
-        source_doc
-            .rewrite_content_to_markdown_as(ContentKind::Richdoc, &source, MarkdownReading::Source)
-            .unwrap();
-        for (doc, builder) in production_docs(&source)
-            .into_iter()
-            .zip(fixture["builders"].as_array().unwrap())
-        {
-            assert_eq!(
-                doc.canonical_content()["body"],
-                source_doc.canonical_content()["body"],
-                "{source:?}"
-            );
-            assert_eq!(
-                doc.canonical_content()["body"],
-                fixture["body"],
-                "{source:?}"
-            );
-            assert_eq!(witness(&doc), builder["witness"], "{source:?}");
-            let canonical = doc.project_richdoc().unwrap();
-            let expected = if canonical == source {
-                json!([null, null, null])
-            } else {
-                json!([
-                    source,
-                    crate::hex_sha256(source.as_bytes()),
-                    crate::hex_sha256(canonical.as_bytes())
-                ])
-            };
-            assert_eq!(witness(&doc), expected, "{source:?}");
-            let replay = Ydoc::wire();
-            replay
-                .apply(
-                    &base64::engine::general_purpose::STANDARD
-                        .decode(builder["nativeBase64"].as_str().unwrap())
-                        .unwrap(),
-                )
-                .unwrap();
-            assert_eq!(witness(&doc), witness(&replay), "{source:?}");
-            assert_eq!(
-                replay.canonical_content()["body"],
-                fixture["body"],
-                "{source:?}"
-            );
-            assert_eq!(
-                doc.project_richdoc().unwrap(),
-                fixture["canonical"].as_str().unwrap(),
+        .chain(shapes())
+        .chain(flat_inline_sources())
+        .map(str::to_owned)
+        .chain(generated_sources());
+    // The writer writes a heading that holds a line break as an ATX heading,
+    // which ends at the break, and gives neighbouring lists of one kind one
+    // marker, so they read back as one list. These are unstable and a
+    // relation does not seed them: #4139.
+    let writer_gap = |source: &str| {
+        let mut lines = source.lines().rev().map(str::trim_start);
+        let changes_marker = match (lines.next(), lines.next()) {
+            (Some(last), Some(before)) => [
+                ("-", "*"),
+                ("*", "+"),
+                ("+", "-"),
+                ("1.", "2)"),
+                ("1)", "2."),
+            ]
+            .iter()
+            .any(|(first, next)| {
+                before == format!("{first} sibling") && last == format!("{next} changed")
+            }),
+            _ => false,
+        };
+        changes_marker || ["- a\n  b\n  ===\n  - c\n", "- a\n  b\n  --\n  - c"].contains(&source)
+    };
+    // A renderer reads these lines as HTML, which the document holds as
+    // text, so the source is not kept and a relation does not seed it.
+    let html = [
+        "- parent\n\n  <div\n  - child",
+        "- parent\n\n  <div \n  - child",
+        "- parent\n\n  <pre\n  - child",
+        "- parent\n\n  <span>inline</span>\n  - child",
+        "- parent\n\n  <meta>text\n  - child",
+        "- a\n\n  <div>html</div>",
+        "- a\n\n  ```\n  code\n  ````\n  <div>\n  ```\n",
+        "- a\n\n  ```\n  code\n   ```\n  <div>\n  ```\n",
+    ];
+    let mut unstable = Vec::new();
+    for source in sources {
+        let read = Ydoc::wire();
+        read.rewrite_content_to_markdown(ContentKind::Richdoc, &source)
+            .unwrap_or_else(|error| panic!("read {source:?}: {error}"));
+        let body = read.canonical_content()["body"].clone();
+        if writer_gap(&source) || html.contains(&source.as_str()) {
+            assert!(
+                matches!(
+                    Ydoc::wire().seed_collection_relation_markdown(&source),
+                    Err(CollabError::MarkdownNotRepresentable)
+                ),
                 "{source:?}"
             );
         }
+        if writer_gap(&source) {
+            continue;
+        }
+        if html.contains(&source.as_str()) {
+            let doc = Ydoc::wire();
+            doc.apply(&successor(&source).unwrap().update).unwrap();
+            assert_eq!(doc.canonical_content()["body"], body, "{source:?}");
+        } else {
+            for built in production_docs(&source) {
+                assert_eq!(built.canonical_content()["body"], body, "{source:?}");
+            }
+        }
+        let canonical = read.project_richdoc().unwrap();
+        let again = Ydoc::wire();
+        again
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &canonical)
+            .unwrap();
+        // The writer escapes the backtick that would open a fence, which
+        // reads back as an escaped backtick: the same text and the same file.
+        let escapes_a_fence = source.starts_with("```bad`info\n");
+        if (again.canonical_content()["body"] != body && !escapes_a_fence)
+            || again.project_richdoc().unwrap() != canonical
+        {
+            unstable.push(source);
+        }
     }
+    assert!(unstable.is_empty(), "{unstable:?}");
 }
 
 #[test]
-fn nested1b_changed_nested_fold_still_refuses() {
+fn a_nested_fold_reads_the_file() {
     for source in [
         "- parent\n  - child",
         "1. parent\n    1. child",
         "- [X] parent\n  - [x] child",
     ] {
         let doc = Ydoc::wire();
-        assert!(
-            matches!(
-                doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source),
-                Err(CollabError::MarkdownNotRepresentable)
-            ),
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Original")
+            .unwrap();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, source)
+            .unwrap_or_else(|error| panic!("{source:?}: {error}"));
+        let read = Ydoc::wire();
+        read.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+            .unwrap();
+        assert_eq!(
+            doc.canonical_content()["body"],
+            read.canonical_content()["body"],
             "{source:?}"
         );
     }
 }
 
-#[test]
-fn nested1b_non_allowlisted_shapes() {
-    for source in [
+fn shapes() -> [&'static str; 24] {
+    [
         "- a\n  b\n  ===\n  - c\n",
         "- a\n  ---",
         "- a\n  ===",
@@ -479,12 +383,10 @@ fn nested1b_non_allowlisted_shapes() {
         "- parent\n  - [x]\tchild",
         "- a\n   - child",
         "- a\n     - child",
-    ] {
-        assert!(!outside_markdown_is_allowlisted(source), "{source:?}");
-    }
+    ]
 }
 
-fn inline_proof_held_sources() -> [&'static str; 81] {
+fn inline_sources() -> [&'static str; 81] {
     [
         "- [label][ref]\n  - child\n\n[ref]: https://example.com",
         "- <https://example.com>\n  - child",
@@ -570,26 +472,8 @@ fn inline_proof_held_sources() -> [&'static str; 81] {
     ]
 }
 
-#[test]
-fn nested1b_positive_inline_allowlist_on_both_builders() {
-    for source in inline_proof_held_sources() {
-        assert!(successor(source).is_err(), "{source:?}");
-        assert!(
-            Ydoc::wire()
-                .seed_collection_relation_markdown(source)
-                .is_err(),
-            "{source:?}"
-        );
-    }
-    for source in inline_accepted_sources() {
-        assert!(outside_markdown_is_allowlisted(source));
-        production_docs(source);
-    }
-}
-
-#[test]
-fn nested1b_flat_inline_bodies_keep_existing_builder_behavior() {
-    for source in [
+fn flat_inline_sources() -> [&'static str; 11] {
+    [
         "- see https://example.com",
         "- www.example.com",
         "- mail a@b.co",
@@ -601,27 +485,13 @@ fn nested1b_flat_inline_bodies_keep_existing_builder_behavior() {
         "- [[Meeting notes]]",
         "- ![](shot.png)",
         "- {{atom:example name=Tom&Jerry}}",
-    ] {
-        assert_eq!(outside_markdown_allowlist(source), Some(false));
-        production_docs(source);
-    }
+    ]
 }
 
+/// A fresh successor whose source differs from its projection keeps the
+/// source only within the public witness band.
 #[test]
-fn nested1b_fresh_witness_band() {
-    let prefix = "- parent\n  - ";
-    for bytes in [
-        crate::limits::MAX_PUBLIC_MARKDOWN_BYTES,
-        crate::limits::MAX_PUBLIC_MARKDOWN_BYTES + 1,
-    ] {
-        let source = prefix.to_owned() + &"p".repeat(bytes - prefix.len());
-        assert_eq!(
-            outside_markdown_is_allowlisted(&source),
-            bytes <= crate::limits::MAX_PUBLIC_MARKDOWN_BYTES
-        );
-    }
-    // Flat files do not need the nested grammar, but a fresh noncanonical
-    // successor must still obey the public witness band.
+fn a_fresh_successor_obeys_the_witness_band() {
     for bytes in [
         crate::limits::MAX_PUBLIC_MARKDOWN_BYTES,
         crate::limits::MAX_PUBLIC_MARKDOWN_BYTES + 1,
@@ -648,14 +518,10 @@ fn nested1b_fresh_witness_band() {
 }
 
 #[test]
-fn nested1b_forged_witness_is_not_authority() {
+fn a_forged_witness_is_not_authority() {
     let doc = Ydoc::wire();
-    doc.rewrite_content_to_markdown_as(
-        ContentKind::Richdoc,
-        "- parent\n  - child",
-        MarkdownReading::Source,
-    )
-    .unwrap();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, "- parent\n  - child")
+        .unwrap();
     let canonical = doc.project_richdoc().unwrap();
     doc.record_validated_markdown_source_reference("* forged\n  * child")
         .unwrap();
@@ -667,45 +533,7 @@ fn nested1b_forged_witness_is_not_authority() {
 }
 
 #[test]
-#[ignore = "regenerate production-builder differential witnesses"]
-fn nested1b_export_differential_witnesses() {
-    let mut rows = Vec::new();
-    for source in generated_sources() {
-        assert!(outside_markdown_is_allowlisted(&source), "{source:?}");
-        let docs = production_docs(&source);
-        let doc = &docs[0];
-        let canonical = doc.project_richdoc().unwrap();
-        let builders: Vec<_> = docs.iter().map(|doc| {
-            if canonical != source {
-                assert_eq!(doc.preserved_markdown_source(&canonical).as_deref(), Some(source.as_str()), "{source:?}");
-            }
-            // The public journal schema excludes the private successor epoch.
-            if doc.lineage_epoch_tag().is_none() {
-                doc.validate_public_baseline(&doc.encode_full_state()).unwrap();
-            }
-            json!({"nativeBase64": base64_encode(&doc.encode_full_state()), "witness": witness(doc)})
-        }).collect();
-        rows.push(json!({"source": source, "canonical": canonical, "body": doc.canonical_content()["body"], "builders": builders}));
-    }
-    for source in held_sources() {
-        assert!(successor(source).is_err(), "{source:?}");
-        assert!(
-            Ydoc::wire()
-                .seed_collection_relation_markdown(source)
-                .is_err(),
-            "{source:?}"
-        );
-        rows.push(json!({"source": source, "held": true, "builders": []}));
-    }
-    std::fs::write(
-        std::env::var("DOHC_NESTED1B_DIFFERENTIAL").unwrap(),
-        serde_json::to_vec(&rows).unwrap(),
-    )
-    .unwrap();
-}
-
-#[test]
-fn nested1b_frontmatter_stage_keeps_unwitnessed_body_xml() {
+fn a_frontmatter_stage_keeps_an_unwitnessed_body() {
     let initial = "---\nstatus: open\n---\n* parent\n\n    * child\n";
     let chosen = initial.replace("open", "done");
     let doc = Ydoc::wire();
@@ -731,4 +559,91 @@ fn nested1b_frontmatter_stage_keeps_unwitnessed_body_xml() {
         doc.settled_markdown_source(&canonical, || Ok::<_, ()>(Some(initial.to_owned()))),
         Ok(None)
     );
+}
+
+/// The sources the desktop's `nestedBuilders.test.ts` compares with its own
+/// import, as both production builders build them.
+const DESKTOP_SOURCES: [&str; 3] = [
+    "- parent\n  - child\n    - grandchild",
+    "3) parent\n    0) child\n        - grandchild",
+    "- [ ] parent\n\n  * [x] child\n    - grandchild\n\n  second paragraph",
+];
+
+fn witness(doc: &Ydoc) -> Value {
+    let meta = doc.doc.get_or_insert_map(ROOT_META);
+    let txn = doc.doc.transact();
+    serde_json::json!([
+        MARKDOWN_SOURCE_META_KEY,
+        MARKDOWN_SOURCE_SHA_META_KEY,
+        MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY
+    ]
+    .map(|key| match meta.get(&txn, key) {
+        Some(Out::Any(Any::String(value))) => serde_json::json!(value.as_ref()),
+        _ => Value::Null,
+    }))
+}
+
+fn desktop_row(source: &str) -> Value {
+    use base64::Engine as _;
+    let docs = production_docs(source);
+    serde_json::json!({
+        "source": source,
+        "canonical": docs[0].project_richdoc().unwrap(),
+        "body": docs[0].canonical_content()["body"],
+        "builders": docs.iter().map(|doc| serde_json::json!({
+            "nativeBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
+            "witness": witness(doc),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// The desktop's fixture holds what the builders build now: each builder's
+/// update replays to the same body and witness.
+#[test]
+fn the_desktop_fixture_holds_what_the_builders_build() {
+    use base64::Engine as _;
+    let fixture: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../../tools/rust-engine-program/nested-source-builders.json"
+    ))
+    .unwrap();
+    assert_eq!(fixture.len(), DESKTOP_SOURCES.len());
+    for (row, source) in fixture.iter().zip(DESKTOP_SOURCES) {
+        let built = desktop_row(source);
+        for key in ["source", "canonical", "body"] {
+            assert_eq!(row[key], built[key], "{source:?} {key}");
+        }
+        let builders = row["builders"].as_array().unwrap();
+        assert_eq!(builders.len(), 2);
+        for (builder, expected) in builders.iter().zip(built["builders"].as_array().unwrap()) {
+            assert_eq!(builder["witness"], expected["witness"], "{source:?}");
+            let replay = Ydoc::wire();
+            replay
+                .apply(
+                    &base64::engine::general_purpose::STANDARD
+                        .decode(builder["nativeBase64"].as_str().unwrap())
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                replay.canonical_content()["body"],
+                built["body"],
+                "{source:?}"
+            );
+            assert_eq!(witness(&replay), expected["witness"], "{source:?}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "writes the desktop fixture"]
+fn write_the_desktop_fixture() {
+    let rows: Vec<Value> = DESKTOP_SOURCES.into_iter().map(desktop_row).collect();
+    std::fs::write(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/rust-engine-program/nested-source-builders.json"
+        ),
+        serde_json::to_string_pretty(&rows).unwrap() + "\n",
+    )
+    .unwrap();
 }

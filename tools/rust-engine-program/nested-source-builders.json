@@ -1,0 +1,307 @@
+[
+  {
+    "body": {
+      "children": [
+        {
+          "attrs": {},
+          "children": [
+            {
+              "attrs": {},
+              "children": [
+                {
+                  "attrs": {},
+                  "children": [
+                    {
+                      "delta": [
+                        {
+                          "insert": "parent"
+                        }
+                      ],
+                      "type": "xmlText"
+                    }
+                  ],
+                  "tag": "paragraph",
+                  "type": "element"
+                },
+                {
+                  "attrs": {},
+                  "children": [
+                    {
+                      "attrs": {},
+                      "children": [
+                        {
+                          "attrs": {},
+                          "children": [
+                            {
+                              "delta": [
+                                {
+                                  "insert": "child"
+                                }
+                              ],
+                              "type": "xmlText"
+                            }
+                          ],
+                          "tag": "paragraph",
+                          "type": "element"
+                        },
+                        {
+                          "attrs": {},
+                          "children": [
+                            {
+                              "attrs": {},
+                              "children": [
+                                {
+                                  "attrs": {},
+                                  "children": [
+                                    {
+                                      "delta": [
+                                        {
+                                          "insert": "grandchild"
+                                        }
+                                      ],
+                                      "type": "xmlText"
+                                    }
+                                  ],
+                                  "tag": "paragraph",
+                                  "type": "element"
+                                }
+                              ],
+                              "tag": "listItem",
+                              "type": "element"
+                            }
+                          ],
+                          "tag": "bulletList",
+                          "type": "element"
+                        }
+                      ],
+                      "tag": "listItem",
+                      "type": "element"
+                    }
+                  ],
+                  "tag": "bulletList",
+                  "type": "element"
+                }
+              ],
+              "tag": "listItem",
+              "type": "element"
+            }
+          ],
+          "tag": "bulletList",
+          "type": "element"
+        }
+      ],
+      "type": "xmlFragment"
+    },
+    "builders": [
+      {
+        "nativeBase64": "ARTrt8mE+oyCBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQRtZXRhEGRvaGNMaW5lYWdlRXBvY2gBd0AxOGNiYWU0YzI3YWZhODI2NDI2NzVmMTRiMDM5MTE0NDE0YWJjOTkxODBjMmY3MDAwNTNlM2UxNjVmY2ZkMWJkBwEEYm9keQMKYnVsbGV0TGlzdAcA67fJhPqMggcCAwhsaXN0SXRlbQcA67fJhPqMggcDAwpidWxsZXRMaXN0BwDrt8mE+oyCBwQDCGxpc3RJdGVtBwDrt8mE+oyCBwUDCmJ1bGxldExpc3QHAOu3yYT6jIIHBgMIbGlzdEl0ZW0HAOu3yYT6jIIHBwMJcGFyYWdyYXBoBwDrt8mE+oyCBwgGBADrt8mE+oyCBwkKZ3JhbmRjaGlsZEfrt8mE+oyCBwYDCXBhcmFncmFwaAcA67fJhPqMggcUBgQA67fJhPqMggcVBWNoaWxkR+u3yYT6jIIHBAMJcGFyYWdyYXBoBwDrt8mE+oyCBxsGBADrt8mE+oyCBxwGcGFyZW50KAEEbWV0YRJkb2hjTWFya2Rvd25Tb3VyY2UBdyMtIHBhcmVudAogIC0gY2hpbGQKICAgIC0gZ3JhbmRjaGlsZCgBBG1ldGEYZG9oY01hcmtkb3duU291cmNlU2hhMjU2AXdAMTYxNDZjMWFhYWEyNGI4YmE5NzQ5YmJhMDQ0YjU3YWQ0YTJmMzA2M2ZjYWU5ZDRhYTk4MWY4MjJhZjU2NmY5MigBBG1ldGEiZG9oY01hcmtkb3duU291cmNlUHJvamVjdGlvblNoYTI1NgF3QDhkZDYzOWE2ZTUzZDE1MTE2MTEyYzZkZjBkYjBiZmEyMTJmOTE5MWQxOTg1MTBkZDliMjY2NzIyZGQxZjVmYmUA",
+        "witness": [
+          "- parent\n  - child\n    - grandchild",
+          "16146c1aaaa24b8ba9749bba044b57ad4a2f3063fcae9d4aa981f822af566f92",
+          "8dd639a6e53d15116112c6df0db0bfa212f9191d198510dd9b266722dd1f5fbe"
+        ]
+      },
+      {
+        "nativeBase64": "AgPK77G15sz1CwAoAQRtZXRhEmRvaGNNYXJrZG93blNvdXJjZQF3Iy0gcGFyZW50CiAgLSBjaGlsZAogICAgLSBncmFuZGNoaWxkKAEEbWV0YRhkb2hjTWFya2Rvd25Tb3VyY2VTaGEyNTYBd0AxNjE0NmMxYWFhYTI0YjhiYTk3NDliYmEwNDRiNTdhZDRhMmYzMDYzZmNhZTlkNGFhOTgxZjgyMmFmNTY2ZjkyKAEEbWV0YSJkb2hjTWFya2Rvd25Tb3VyY2VQcm9qZWN0aW9uU2hhMjU2AXdAOGRkNjM5YTZlNTNkMTUxMTYxMTJjNmRmMGRiMGJmYTIxMmY5MTkxZDE5ODUxMGRkOWIyNjY3MjJkZDFmNWZiZRCF36Lx3uvDAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwCF36Lx3uvDAgEDCGxpc3RJdGVtBwCF36Lx3uvDAgIDCmJ1bGxldExpc3QHAIXfovHe68MCAwMIbGlzdEl0ZW0HAIXfovHe68MCBAMKYnVsbGV0TGlzdAcAhd+i8d7rwwIFAwhsaXN0SXRlbQcAhd+i8d7rwwIGAwlwYXJhZ3JhcGgHAIXfovHe68MCBwYEAIXfovHe68MCCApncmFuZGNoaWxkR4XfovHe68MCBQMJcGFyYWdyYXBoBwCF36Lx3uvDAhMGBACF36Lx3uvDAhQFY2hpbGRHhd+i8d7rwwIDAwlwYXJhZ3JhcGgHAIXfovHe68MCGgYEAIXfovHe68MCGwZwYXJlbnQA",
+        "witness": [
+          "- parent\n  - child\n    - grandchild",
+          "16146c1aaaa24b8ba9749bba044b57ad4a2f3063fcae9d4aa981f822af566f92",
+          "8dd639a6e53d15116112c6df0db0bfa212f9191d198510dd9b266722dd1f5fbe"
+        ]
+      }
+    ],
+    "canonical": "- parent\n  - child\n    - grandchild\n",
+    "source": "- parent\n  - child\n    - grandchild"
+  },
+  {
+    "body": {
+      "children": [
+        {
+          "attrs": {
+            "start": 3
+          },
+          "children": [
+            {
+              "attrs": {},
+              "children": [
+                {
+                  "attrs": {},
+                  "children": [
+                    {
+                      "delta": [
+                        {
+                          "insert": "parent\n 0) child\n     - grandchild"
+                        }
+                      ],
+                      "type": "xmlText"
+                    }
+                  ],
+                  "tag": "paragraph",
+                  "type": "element"
+                }
+              ],
+              "tag": "listItem",
+              "type": "element"
+            }
+          ],
+          "tag": "orderedList",
+          "type": "element"
+        }
+      ],
+      "type": "xmlFragment"
+    },
+    "builders": [
+      {
+        "nativeBase64": "AQv/mILO1/qXAwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQRtZXRhEGRvaGNMaW5lYWdlRXBvY2gBd0A0Njg2ZjY3ODE4ODMxMThiNGYzYzQ0MjFhMTA3MmJiYTU4OGY0NWZjNjJlMGY3MWM3ZjdkNDMwYjgzZDZhZjRjBwEEYm9keQMLb3JkZXJlZExpc3QoAP+Ygs7X+pcDAgVzdGFydAF9AwcA/5iCztf6lwMCAwhsaXN0SXRlbQcA/5iCztf6lwMEAwlwYXJhZ3JhcGgHAP+Ygs7X+pcDBQYEAP+Ygs7X+pcDBiJwYXJlbnQKIDApIGNoaWxkCiAgICAgLSBncmFuZGNoaWxkKAEEbWV0YRJkb2hjTWFya2Rvd25Tb3VyY2UBdyszKSBwYXJlbnQKICAgIDApIGNoaWxkCiAgICAgICAgLSBncmFuZGNoaWxkKAEEbWV0YRhkb2hjTWFya2Rvd25Tb3VyY2VTaGEyNTYBd0A4YmFlZDQxMzU2OTI2ZWEwZWMzNmNhN2JkODc4YWViNGQ3NDhlN2Q1MmM1ZmUyYWI4NzNjZjg4YmUzNGQ0NmIzKAEEbWV0YSJkb2hjTWFya2Rvd25Tb3VyY2VQcm9qZWN0aW9uU2hhMjU2AXdAMTM2NmY0Nzc2OTY4ZGQ4MjQzZTNhOWI2ZjM2MWVlMTZjZjg3YWE5NmM0Y2RlMTI1MDIyMGI0YzlhN2RjYjg1OAA=",
+        "witness": [
+          "3) parent\n    0) child\n        - grandchild",
+          "8baed41356926ea0ec36ca7bd878aeb4d748e7d52c5fe2ab873cf88be34d46b3",
+          "1366f4776968dd8243e3a9b6f361ee16cf87aa96c4cde1250220b4c9a7dcb858"
+        ]
+      },
+      {
+        "nativeBase64": "Agf2kKjR6qKQDAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgA9pCo0eqikAwBBXN0YXJ0AX0DBwD2kKjR6qKQDAEDCGxpc3RJdGVtBwD2kKjR6qKQDAMDCXBhcmFncmFwaAcA9pCo0eqikAwEBgQA9pCo0eqikAwFInBhcmVudAogMCkgY2hpbGQKICAgICAtIGdyYW5kY2hpbGQD9duo5/TY+gMAKAEEbWV0YRJkb2hjTWFya2Rvd25Tb3VyY2UBdyszKSBwYXJlbnQKICAgIDApIGNoaWxkCiAgICAgICAgLSBncmFuZGNoaWxkKAEEbWV0YRhkb2hjTWFya2Rvd25Tb3VyY2VTaGEyNTYBd0A4YmFlZDQxMzU2OTI2ZWEwZWMzNmNhN2JkODc4YWViNGQ3NDhlN2Q1MmM1ZmUyYWI4NzNjZjg4YmUzNGQ0NmIzKAEEbWV0YSJkb2hjTWFya2Rvd25Tb3VyY2VQcm9qZWN0aW9uU2hhMjU2AXdAMTM2NmY0Nzc2OTY4ZGQ4MjQzZTNhOWI2ZjM2MWVlMTZjZjg3YWE5NmM0Y2RlMTI1MDIyMGI0YzlhN2RjYjg1OAA=",
+        "witness": [
+          "3) parent\n    0) child\n        - grandchild",
+          "8baed41356926ea0ec36ca7bd878aeb4d748e7d52c5fe2ab873cf88be34d46b3",
+          "1366f4776968dd8243e3a9b6f361ee16cf87aa96c4cde1250220b4c9a7dcb858"
+        ]
+      }
+    ],
+    "canonical": "3. parent\n    0&#41; child\n   &#32;    - grandchild\n",
+    "source": "3) parent\n    0) child\n        - grandchild"
+  },
+  {
+    "body": {
+      "children": [
+        {
+          "attrs": {},
+          "children": [
+            {
+              "attrs": {
+                "checked": false
+              },
+              "children": [
+                {
+                  "attrs": {},
+                  "children": [
+                    {
+                      "delta": [
+                        {
+                          "insert": "parent"
+                        }
+                      ],
+                      "type": "xmlText"
+                    }
+                  ],
+                  "tag": "paragraph",
+                  "type": "element"
+                },
+                {
+                  "attrs": {},
+                  "children": [
+                    {
+                      "attrs": {
+                        "checked": true
+                      },
+                      "children": [
+                        {
+                          "attrs": {},
+                          "children": [
+                            {
+                              "delta": [
+                                {
+                                  "insert": "child"
+                                }
+                              ],
+                              "type": "xmlText"
+                            }
+                          ],
+                          "tag": "paragraph",
+                          "type": "element"
+                        },
+                        {
+                          "attrs": {},
+                          "children": [
+                            {
+                              "attrs": {},
+                              "children": [
+                                {
+                                  "attrs": {},
+                                  "children": [
+                                    {
+                                      "delta": [
+                                        {
+                                          "insert": "grandchild"
+                                        }
+                                      ],
+                                      "type": "xmlText"
+                                    }
+                                  ],
+                                  "tag": "paragraph",
+                                  "type": "element"
+                                }
+                              ],
+                              "tag": "listItem",
+                              "type": "element"
+                            }
+                          ],
+                          "tag": "bulletList",
+                          "type": "element"
+                        }
+                      ],
+                      "tag": "taskItem",
+                      "type": "element"
+                    }
+                  ],
+                  "tag": "taskList",
+                  "type": "element"
+                },
+                {
+                  "attrs": {},
+                  "children": [
+                    {
+                      "delta": [
+                        {
+                          "insert": "second paragraph"
+                        }
+                      ],
+                      "type": "xmlText"
+                    }
+                  ],
+                  "tag": "paragraph",
+                  "type": "element"
+                }
+              ],
+              "tag": "taskItem",
+              "type": "element"
+            }
+          ],
+          "tag": "taskList",
+          "type": "element"
+        }
+      ],
+      "type": "xmlFragment"
+    },
+    "builders": [
+      {
+        "nativeBase64": "ARmv09vM7feABQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEoAQRtZXRhEGRvaGNMaW5lYWdlRXBvY2gBd0AyYzA2NjAwYTVhN2Y4MTM2NjVkNGQyZjg3YjgxMmQ4OGIxMTIxYjBlMmI3MTA4MjEyOTMwYmQ4NWUxYzFlYjllBwEEYm9keQMIdGFza0xpc3QHAK/T28zt94AFAgMIdGFza0l0ZW0oAK/T28zt94AFAwdjaGVja2VkAXkHAK/T28zt94AFAwMJcGFyYWdyYXBoBwCv09vM7feABQUGBACv09vM7feABQYQc2Vjb25kIHBhcmFncmFwaEev09vM7feABQUDCHRhc2tMaXN0BwCv09vM7feABRcDCHRhc2tJdGVtKACv09vM7feABRgHY2hlY2tlZAF4BwCv09vM7feABRgDCmJ1bGxldExpc3QHAK/T28zt94AFGgMIbGlzdEl0ZW0HAK/T28zt94AFGwMJcGFyYWdyYXBoBwCv09vM7feABRwGBACv09vM7feABR0KZ3JhbmRjaGlsZEev09vM7feABRoDCXBhcmFncmFwaAcAr9PbzO33gAUoBgQAr9PbzO33gAUpBWNoaWxkR6/T28zt94AFFwMJcGFyYWdyYXBoBwCv09vM7feABS8GBACv09vM7feABTAGcGFyZW50KAEEbWV0YRJkb2hjTWFya2Rvd25Tb3VyY2UBd0AtIFsgXSBwYXJlbnQKCiAgKiBbeF0gY2hpbGQKICAgIC0gZ3JhbmRjaGlsZAoKICBzZWNvbmQgcGFyYWdyYXBoKAEEbWV0YRhkb2hjTWFya2Rvd25Tb3VyY2VTaGEyNTYBd0A0MTI3MGUwYjI1NWI4YzI0YzhmOTEwNjlkYTcyNjQ0OWYxNTQwMDBiYjU4NDZiZTA2Zjk2ZjFkOWRmMTc5N2VmKAEEbWV0YSJkb2hjTWFya2Rvd25Tb3VyY2VQcm9qZWN0aW9uU2hhMjU2AXdAOGFlNDlmNWUzOGRjMWU0NjgyZTk5MWM3ZTUyNWUyMmU0ZGI1NjQ5ZDU0MzVkMzAxYmNhNTU4ZjY5M2FlM2JjOAA=",
+        "witness": [
+          "- [ ] parent\n\n  * [x] child\n    - grandchild\n\n  second paragraph",
+          "41270e0b255b8c24c8f91069da726449f154000bb5846be06f96f1d9df1797ef",
+          "8ae49f5e38dc1e4682e991c7e525e22e4db5649d5435d301bca558f693ae3bc8"
+        ]
+      },
+      {
+        "nativeBase64": "AhW2q7+ypOaDDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcAtqu/sqTmgw8BAwh0YXNrSXRlbSgAtqu/sqTmgw8CB2NoZWNrZWQBeQcAtqu/sqTmgw8CAwlwYXJhZ3JhcGgHALarv7Kk5oMPBAYEALarv7Kk5oMPBRBzZWNvbmQgcGFyYWdyYXBoR7arv7Kk5oMPBAMIdGFza0xpc3QHALarv7Kk5oMPFgMIdGFza0l0ZW0oALarv7Kk5oMPFwdjaGVja2VkAXgHALarv7Kk5oMPFwMKYnVsbGV0TGlzdAcAtqu/sqTmgw8ZAwhsaXN0SXRlbQcAtqu/sqTmgw8aAwlwYXJhZ3JhcGgHALarv7Kk5oMPGwYEALarv7Kk5oMPHApncmFuZGNoaWxkR7arv7Kk5oMPGQMJcGFyYWdyYXBoBwC2q7+ypOaDDycGBAC2q7+ypOaDDygFY2hpbGRHtqu/sqTmgw8WAwlwYXJhZ3JhcGgHALarv7Kk5oMPLgYEALarv7Kk5oMPLwZwYXJlbnQD65uIgNPQ5Q0AKAEEbWV0YRJkb2hjTWFya2Rvd25Tb3VyY2UBd0AtIFsgXSBwYXJlbnQKCiAgKiBbeF0gY2hpbGQKICAgIC0gZ3JhbmRjaGlsZAoKICBzZWNvbmQgcGFyYWdyYXBoKAEEbWV0YRhkb2hjTWFya2Rvd25Tb3VyY2VTaGEyNTYBd0A0MTI3MGUwYjI1NWI4YzI0YzhmOTEwNjlkYTcyNjQ0OWYxNTQwMDBiYjU4NDZiZTA2Zjk2ZjFkOWRmMTc5N2VmKAEEbWV0YSJkb2hjTWFya2Rvd25Tb3VyY2VQcm9qZWN0aW9uU2hhMjU2AXdAOGFlNDlmNWUzOGRjMWU0NjgyZTk5MWM3ZTUyNWUyMmU0ZGI1NjQ5ZDU0MzVkMzAxYmNhNTU4ZjY5M2FlM2JjOAA=",
+        "witness": [
+          "- [ ] parent\n\n  * [x] child\n    - grandchild\n\n  second paragraph",
+          "41270e0b255b8c24c8f91069da726449f154000bb5846be06f96f1d9df1797ef",
+          "8ae49f5e38dc1e4682e991c7e525e22e4db5649d5435d301bca558f693ae3bc8"
+        ]
+      }
+    ],
+    "canonical": "- [ ] parent\n  - [x] child\n    - grandchild\n\n  second paragraph\n",
+    "source": "- [ ] parent\n\n  * [x] child\n    - grandchild\n\n  second paragraph"
+  }
+]
