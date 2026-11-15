@@ -482,6 +482,21 @@ describe("ChatsView direct messages", () => {
     expect(await screen.findByRole("menuitem", { name: "Block Ana Diaz" })).toBeTruthy();
   });
 
+  it("says in a group conversation who the viewer blocked, keeps the composer, and unblocks from the line", async () => {
+    const group = conversation({ conversationId: "conversation-group", people: [sam, { ...ana, blocked: true }], last: sent(5, "sam", "Booked the table") });
+    signedIn([group]);
+    history([sent(5, "sam", "Booked the table")]);
+    bridgeMock.directBlock.mockResolvedValue(undefined);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    await openSam();
+    expect((await screen.findByTestId("chats-dm-group-blocked")).textContent).toBe("You blocked Ana Diaz. You won't see their new messages.Unblock");
+    expect(screen.getByTestId("chats-dm-composer")).toBeTruthy();
+    signedIn([{ ...group, people: [sam, ana] }]);
+    fireEvent.click(screen.getByTestId("chats-dm-group-unblock"));
+    await waitFor(() => expect(bridgeMock.directBlock).toHaveBeenCalledWith({ conversationId: "conversation-group", personId: "ana", blocked: false }));
+    await waitFor(() => expect(screen.queryByTestId("chats-dm-group-blocked")).toBeNull());
+  });
+
   it("shows the saved copy read-only, with why, while the server is away", async () => {
     signedIn([conversation()], true);
     history([sent(2, "sam", "See you at nine")], true);
@@ -557,6 +572,12 @@ describe("ChatsView direct messages", () => {
     await user.click(options[6]!);
     expect(screen.getByTestId("chats-dm-new-full").textContent).toBe("A conversation holds up to 8 people, you included.");
     expect(options[7]!.getAttribute("aria-disabled")).toBe("true");
+    // The highlight passes over the member who can't be added.
+    const recipients = screen.getByTestId("chats-dm-recipients");
+    await user.hover(options[7]!);
+    fireEvent.keyDown(recipients, { key: "ArrowDown" });
+    expect(recipients.getAttribute("aria-activedescendant")).not.toContain("member-7");
+    expect((screen.getByTestId("chats-dm-new-composer") as HTMLTextAreaElement).placeholder).toBe("Message Person 0 and 6 others");
   });
 
   it("starts a new message with people picked from the workspace's members", async () => {
@@ -670,6 +691,25 @@ describe("ChatsView direct messages", () => {
     });
     await waitFor(() => expect(screen.queryByTestId("chats-dm-new-blocked-line")).toBeNull());
     expect(screen.getByTestId("chats-dm-new-composer")).toBeTruthy();
+  });
+
+  it("treats a person blocked only in a group like one blocked in their own conversation, and unblocks from the group", async () => {
+    const user = userEvent.setup();
+    // The block belongs to the account, so the group the two share can undo it.
+    signedIn([conversation({ conversationId: "conversation-group", people: [sam, { ...ana, blocked: true }] })]);
+    members([{ memberId: "membership-ana", name: "Ana Diaz" }]);
+    bridgeMock.directResolve
+      .mockResolvedValueOnce({ conversationId: null, people: [{ ...ana, blocked: true }] })
+      .mockResolvedValue({ conversationId: null, people: [ana] });
+    bridgeMock.directBlock.mockResolvedValue(undefined);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
+    await user.click(await screen.findByTestId("chats-dm-new-member"));
+    expect((await screen.findByTestId("chats-dm-new-blocked-line")).textContent).toContain("You blocked Ana Diaz. They can't message you.");
+    expect(screen.queryByTestId("chats-dm-new-composer")).toBeNull();
+    await user.click(screen.getByTestId("chats-dm-new-blocked-line-action"));
+    expect(bridgeMock.directBlock).toHaveBeenCalledWith({ conversationId: "conversation-group", personId: "ana", blocked: false });
+    expect(await screen.findByTestId("chats-dm-new-composer")).toBeTruthy();
   });
 
   it("says a blocked person in a group can still write there, but the viewer won't see it", async () => {

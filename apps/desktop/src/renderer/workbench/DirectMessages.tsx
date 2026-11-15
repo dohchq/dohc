@@ -227,7 +227,7 @@ async function blockPerson(input: {
   person: DirectPerson;
   blocked: boolean;
   reporting: Reporting;
-  // In a group, the notice holds Undo: nothing else on screen shows the block.
+  // In a group, the notice holds Undo, since the block doesn't take the composer's place.
   withUndo?: boolean;
   /** Runs once the change is made, by the first try or by the notice's Try again. */
   onDone?: () => void;
@@ -553,20 +553,36 @@ function ConversationForAccount(props: ConversationProps) {
         </DirectComposerLine>
       );
     } else {
+      // A group keeps its composer: a block there hides the person's new messages, so the line says so and offers Unblock.
+      const blockedHere = single ? [] : conversation.people.filter((person) => person.blocked);
       footer = (
-        <MentionComposer
-          pinned
-          testIdPrefix="chats-dm"
-          composerId={`chats-dm-composer-${conversationId}`}
-          value={draft}
-          sending={sending}
-          placeholder={`Message ${title}`}
-          sendLabel="Send message"
-          candidates={props.mentionCandidates ?? NO_CANDIDATES}
-          onChange={setDraft}
-          onSend={submit}
-          inset={props.variant === "page" ? "stream" : "narrow"}
-        />
+        <>
+          {blockedHere.length > 0 ? (
+            <BlockedPeopleLine
+              testId="chats-dm-group-blocked"
+              unblockTestId="chats-dm-group-unblock"
+              className="shrink-0 border-t border-line px-3 py-1.5"
+              onUnblock={blockedHere.length === 1
+                ? () => void blockPerson({ store, conversationId, person: blockedHere[0]!, blocked: false, reporting: props })
+                : null}
+            >
+              {groupBlockedWords(blockedHere)}
+            </BlockedPeopleLine>
+          ) : null}
+          <MentionComposer
+            pinned
+            testIdPrefix="chats-dm"
+            composerId={`chats-dm-composer-${conversationId}`}
+            value={draft}
+            sending={sending}
+            placeholder={conversation.people.length > 0 ? messagePlaceholder(conversation.people.map(directPersonName)) : `Message ${title}`}
+            sendLabel="Send message"
+            candidates={props.mentionCandidates ?? NO_CANDIDATES}
+            onChange={setDraft}
+            onSend={submit}
+            inset={props.variant === "page" ? "stream" : "narrow"}
+          />
+        </>
       );
     }
   }
@@ -587,6 +603,28 @@ function SettingsStep(props: { onOpenSettings: OpenSettings | undefined; section
   if (!onOpenSettings) return null;
   return <SecondaryButton data-testid={props.testId} onClick={() => onOpenSettings(section)}>{props.label}</SecondaryButton>;
 }
+
+/** "Message Sam Rivera", or "Message Sam Rivera and 6 others" once the names would run long. */
+function messagePlaceholder(names: readonly string[]): string {
+  return names.length > 2 ? `Message ${names[0]} and ${names.length - 1} others` : `Message ${names.join(" and ")}`;
+}
+
+/** Who the viewer blocked, in a line above the composer or under To, with Unblock when there is one person to unblock. */
+function BlockedPeopleLine(props: { testId: string; unblockTestId: string; children: string; onUnblock: (() => void) | null; className: string }) {
+  return (
+    <p data-testid={props.testId} className={`m-0 flex items-center gap-2 text-[12px] text-muted ${props.className}`}>
+      <Ban size={12} aria-hidden className="shrink-0 text-subtle" />
+      <span className="min-w-0 flex-1 truncate">{props.children}</span>
+      {props.onUnblock ? (
+        <SecondaryButton size="compact" data-testid={props.unblockTestId} onClick={props.onUnblock}>
+          Unblock
+        </SecondaryButton>
+      ) : null}
+    </p>
+  );
+}
+
+const groupBlockedWords = (blocked: readonly DirectPerson[]) => `You blocked ${directTitle(blocked)}. You won't see their new messages.`;
 
 /** Where the composer would be, when it can't be: why, and what to do. */
 function DirectComposerLine(props: { testId: string; icon: ReactNode; children: string; action: { label: string; run: () => void } }) {
@@ -693,8 +731,17 @@ function NewMessageForAccount(props: NewMessageProps) {
     const words = query.trim().toLocaleLowerCase();
     return words ? members.members.filter((member) => member.name.toLocaleLowerCase().includes(words)) : members.members;
   }, [members, query]);
-  const active = matches[Math.min(highlight, matches.length - 1)] ?? null;
   const full = shownPicks.length >= MAX_PICKS;
+  // Once the picks are full, the highlight passes over the members who can't be added.
+  const pickable = (member: Member) => !full || shownPicks.includes(member.memberId);
+  const step = (from: number, by: 1 | -1): number => {
+    for (let index = from + by; index >= 0 && index < matches.length; index += by) if (pickable(matches[index]!)) return index;
+    return from;
+  };
+  const highlighted = Math.min(highlight, matches.length - 1);
+  const activeIndex = highlighted < 0 || pickable(matches[highlighted]!) ? highlighted
+    : step(highlighted, 1) !== highlighted ? step(highlighted, 1) : step(highlighted, -1) !== highlighted ? step(highlighted, -1) : -1;
+  const active = activeIndex >= 0 ? matches[activeIndex]! : null;
   const toggle = (memberId: string) => {
     goStraight.current = false;
     setPickError(false);
@@ -707,10 +754,10 @@ function NewMessageForAccount(props: NewMessageProps) {
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      setHighlight((index) => Math.min(index + 1, Math.max(matches.length - 1, 0)));
+      setHighlight(step(activeIndex, 1));
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
-      setHighlight((index) => Math.max(index - 1, 0));
+      setHighlight(activeIndex <= 0 ? 0 : step(activeIndex, -1));
     } else if (event.key === "Enter" && active) {
       event.preventDefault();
       if (!full || shownPicks.includes(active.memberId)) toggle(active.memberId);
@@ -751,10 +798,16 @@ function NewMessageForAccount(props: NewMessageProps) {
     };
   }, [pickKey, members.status, state.status, workspaceId, resolveAgain]);
   const resolved = existing?.key === pickKey ? existing : null;
-  // A two-person conversation the viewer blocked shows no composer, here as in the conversation.
-  const blockedChat = resolved && !resolved.group && resolved.conversationId && resolved.blocked.length === 1
-    ? { conversationId: resolved.conversationId, person: resolved.blocked[0]! }
-    : null;
+  // A block belongs to the account, so it is undone from any conversation the two share, a group included.
+  const sharedWith = (person: DirectPerson): string | null => resolved?.conversationId
+    ?? (state.status === "ready" ? state.conversations.find((entry) => entry.people.some((one) => one.personId === person.personId))?.conversationId : undefined)
+    ?? null;
+  // Writing to one person the viewer blocked shows no composer, here as in their conversation.
+  const blockedPerson = resolved && !resolved.group && resolved.blocked.length === 1 ? resolved.blocked[0]! : null;
+  const blockedFrom = blockedPerson ? sharedWith(blockedPerson) : null;
+  const blockedChat = blockedPerson && blockedFrom ? { conversationId: blockedFrom, person: blockedPerson } : null;
+  const unblockOne = resolved?.blocked.length === 1 ? resolved.blocked[0]! : null;
+  const unblockOneFrom = unblockOne ? sharedWith(unblockOne) : null;
   const unblock = (conversationId: string, person: DirectPerson) => void blockPerson({
     store, conversationId, person, blocked: false, reporting: props,
     onDone: () => setResolveAgain((count) => count + 1),
@@ -864,7 +917,9 @@ function NewMessageForAccount(props: NewMessageProps) {
               data-member-id={member.memberId}
               title={disabled ? `A conversation holds up to ${MAX_DIRECT_PEOPLE} people, you included.` : undefined}
               onMouseDown={(event) => event.preventDefault()}
-              onMouseEnter={() => setHighlight(index)}
+              onMouseEnter={() => {
+                if (!disabled) setHighlight(index);
+              }}
               onClick={() => {
                 if (!disabled) toggle(member.memberId);
               }}
@@ -940,20 +995,14 @@ function NewMessageForAccount(props: NewMessageProps) {
               <p data-testid="chats-dm-new-full" className="m-0 mt-1.5 text-[12px] text-muted">{`A conversation holds up to ${MAX_DIRECT_PEOPLE} people, you included.`}</p>
             ) : null}
             {resolved && resolved.blocked.length > 0 && !blockedChat ? (
-              <p data-testid="chats-dm-new-blocked" className="m-0 mt-1.5 flex items-center gap-2 text-[12px] text-muted">
-                <Ban size={12} aria-hidden className="shrink-0 text-subtle" />
-                <span className="min-w-0 flex-1 truncate">
-                  {resolved.group
-                    ? `You blocked ${directTitle(resolved.blocked)}. You won't see their new messages.`
-                    : `You blocked ${directTitle(resolved.blocked)}. They can't message you.`}
-                </span>
-                {/* A block is set from a conversation, so it is undone from one. */}
-                {resolved.conversationId && resolved.blocked.length === 1 ? (
-                  <SecondaryButton size="compact" data-testid="chats-dm-new-unblock" onClick={() => unblock(resolved.conversationId!, resolved.blocked[0]!)}>
-                    Unblock
-                  </SecondaryButton>
-                ) : null}
-              </p>
+              <BlockedPeopleLine
+                testId="chats-dm-new-blocked"
+                unblockTestId="chats-dm-new-unblock"
+                className="mt-1.5"
+                onUnblock={unblockOne && unblockOneFrom ? () => unblock(unblockOneFrom, unblockOne) : null}
+              >
+                {resolved.group ? groupBlockedWords(resolved.blocked) : `You blocked ${directTitle(resolved.blocked)}. They can't message you.`}
+              </BlockedPeopleLine>
             ) : null}
             {resolved?.conversationId ? (
               <p data-testid="chats-dm-new-existing" className="m-0 mt-1.5 flex items-center gap-2 text-[12px] text-muted">
@@ -981,7 +1030,7 @@ function NewMessageForAccount(props: NewMessageProps) {
             composerId="chats-dm-new-composer"
             value={draft}
             sending={sending}
-            placeholder={names.length > 0 ? `Message ${names.join(", ")}` : "Write a message"}
+            placeholder={names.length > 0 ? messagePlaceholder(names) : "Write a message"}
             sendLabel="Send message"
             candidates={props.mentionCandidates ?? NO_CANDIDATES}
             onChange={setDraft}
