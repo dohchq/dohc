@@ -343,26 +343,23 @@ it("lets a read of a Collection that went up go on while another is still going 
 
 it("starts a send that couldn't open this computer's store once more before a read goes to the server", async () => {
   const unreadable = Error("The store didn't open.");
-  const looks = new Map<string, number>();
   const store = {
     keptDatasetIds: () => ["a"],
-    // "a" arrives as soon as the send reaches it.
-    transferStatus(datasetId: string) {
-      const seen = looks.get(datasetId) ?? 0;
-      looks.set(datasetId, seen + 1);
-      return seen > 0 ? transfer("imported") : null;
-    },
+    transferStatus: () => null,
     transferInFlight: () => null,
     transferToShared() {},
   } as never;
-  const session = () =>
-    ({ server: () => new Promise<never>(() => {}), signal: new AbortController().signal }) as never;
+  let refuse!: (error: Error) => void;
+  const refused = new Promise<never>((_resolve, reject) => (refuse = reject));
+  const session = () => ({ server: () => refused, signal: new AbortController().signal }) as never;
   const open = vi.fn(async () => store).mockRejectedValueOnce(unreadable);
   const sendUp = createCollectionsSendUp({ open, session, reported() {} });
   await expect(sendUp.start()).rejects.toBe(unreadable);
-  await expect(sendUp.sent("a", new AbortController().signal)).resolves.toBeUndefined();
-  expect(open).toHaveBeenCalledTimes(2);
-  expect(looks.get("a")).toBe(2);
+  const read = sendUp.sent("a", new AbortController().signal);
+  await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(2));
+  // Only the second send can give the read this server's refusal.
+  refuse(Error("The server refused."));
+  await expect(read).rejects.toThrow("The server refused.");
 
   // A store that still doesn't open leaves the read to the server, where Collections that went up are.
   const broken = vi.fn(async () => store).mockRejectedValue(unreadable);
