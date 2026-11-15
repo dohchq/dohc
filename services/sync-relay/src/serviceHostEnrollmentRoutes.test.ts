@@ -29,6 +29,7 @@ import { RecoveryCopyRefusal, type ServiceKeptEdits } from "./storage/serviceKep
 import type { JsonValue } from "@dohc/workspace-engine-client";
 import { heldDocumentFixture } from "./heldDocument.test-helper";
 import { LiveRoomUnsavedError, type LiveRooms } from "./liveRoom";
+import { jsonBody, request, testHandler } from "./testing";
 import type { KnownRefusalWord } from "./serverLogWords";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -1220,6 +1221,61 @@ it("saves a live room's taken edits before Stop retires the note", async () => {
     { workspaceId: scope.workspaceId, objectId: binding.objectId },
     { workspaceId: scope.workspaceId, objectId: binding.objectId },
   ]);
+});
+
+// Proves: ending the Edit access that hosts a note has its live room save the edits it took first,
+// while the note is still hosted, and ends access whatever becomes of that save or the request.
+it("saves a live room's taken edits before ending the Edit access that hosts the note", async () => {
+  for (const outcome of [
+    "saved",
+    "unsaved",
+    "failed",
+    "fails-after-ending",
+    "request-aborted",
+  ] as const) {
+    const f = await fixture(),
+      enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+    const notes: unknown[] = [];
+    const aborting = new AbortController();
+    let saving!: () => void;
+    const rooms: Pick<LiveRooms, "saveFirst"> = {
+      async saveFirst(note, then, signal) {
+        notes.push({ ...note, hosted: f.storage.serviceHostDocumentEnabled(enrolled) });
+        if (outcome === "unsaved") throw new LiveRoomUnsavedError();
+        if (outcome === "failed") throw new Error("Live rooms are closed.");
+        if (outcome === "request-aborted")
+          // Waits as a save does, and gives up as one does once its signal aborts.
+          await new Promise<void>((resolve, reject) => {
+            saving = resolve;
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        const result = await then();
+        if (outcome === "fails-after-ending") throw new Error("Live rooms are closed.");
+        return result;
+      },
+    };
+    const h = testHandler(f.storage, { liveRooms: () => rooms });
+    const ending = h(
+      request("owner-1", `/sync/shares/${scope.shareId}/grants/${scope.grantId}/revoke`, {
+        ...jsonBody({ workspaceId: scope.workspaceId }),
+        signal: aborting.signal,
+      }),
+    );
+    if (outcome === "request-aborted") {
+      await vi.waitFor(() => expect(notes).toHaveLength(1));
+      aborting.abort();
+      saving();
+      await ending.catch(() => undefined);
+    } else {
+      const ended = await ending;
+      expect(ended.status, await ended.clone().text()).toBe(200);
+    }
+    expect(notes, outcome).toEqual([
+      { workspaceId: scope.workspaceId, objectId: binding.objectId, hosted: true },
+    ]);
+    expect(f.storage.getShareGrant(scope.grantId)?.status, outcome).toBe("revoked");
+    expect(f.storage.serviceHostDocumentEnabled(enrolled), outcome).toBe(false);
+  }
 });
 
 // Proves: a Stop whose reply was lost is done in the relay's durable state.

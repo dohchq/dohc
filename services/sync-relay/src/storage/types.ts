@@ -901,6 +901,10 @@ export interface SyncRelayStorage {
   setServiceHostEnrollmentEnabled(
     input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput,
   ): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  /** The enrolled documents an active Edit grant on the share covers. */
+  serviceHostEnrollmentsCoveredByShare(
+    shareId: string,
+  ): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   /** Whether an Edit grant of its owner, or the owner's restore that kept its live session, keeps the enrolled document live. */
   serviceHostEnrollmentCovered(
     enrollment: Pick<

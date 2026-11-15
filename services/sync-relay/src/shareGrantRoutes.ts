@@ -6,6 +6,7 @@ import type { PublicEditRelease } from "@dohc/security-contract";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, RELAY_ERRORS, relayError } from "./errors";
 import type { createLinkResponseStreams } from "./linkResponseStreams";
+import type { LiveRooms } from "./liveRoom";
 import {
   composePublicLinkUrl,
   hashLinkBearer,
@@ -99,6 +100,9 @@ export function requireOwnedShareGrant(
   return { share, grant };
 }
 
+// A room's save takes well under a second. Access ends after this whether or not it is done.
+const ACCESS_END_SAVE_MS = 5_000;
+
 export function createShareGrantRoutes(
   storage: Pick<
     SyncRelayStorage,
@@ -112,6 +116,7 @@ export function createShareGrantRoutes(
     | "revokeShareGrant"
     | "revokeShare"
     | "removeShareAccess"
+    | "serviceHostEnrollmentsCoveredByShare"
     | "undoShareRemoval"
     | "readLinkCreation"
     | "createFileLinkShare"
@@ -142,7 +147,39 @@ export function createShareGrantRoutes(
   dependentGrantSummary: ReturnType<typeof createShareSummaries>["dependentGrantSummary"],
   namedBrowserInvitation: ReturnType<typeof createShareSummaries>["namedBrowserInvitation"],
   publicEditRelease?: PublicEditRelease,
+  liveRooms: () => Pick<LiveRooms, "saveFirst"> | undefined = () => undefined,
 ) {
+  // Ending Edit access ends the hosting of the notes it covered, and a note's live room saves
+  // through that hosting, so the edits its room took are saved first. Access always ends, whatever
+  // becomes of the request: edits not saved in time stay in the room and go to the note's copy when
+  // it pauses. Only an error from ending access itself reaches the caller.
+  const endAccess = async <T>(shareId: string, endsEdit: boolean, end: () => T): Promise<T> => {
+    const rooms = liveRooms();
+    if (!endsEdit || !rooms) return end();
+    let ended = undefined as { result: T } | { error: unknown } | undefined;
+    try {
+      const deadline = AbortSignal.timeout(ACCESS_END_SAVE_MS);
+      await storage
+        .serviceHostEnrollmentsCoveredByShare(shareId)
+        .reduceRight<() => Promise<unknown>>(
+          (then, { workspaceId, objectId }) =>
+            () =>
+              rooms.saveFirst({ workspaceId, objectId }, then, deadline),
+          async () => {
+            try {
+              ended = { result: end() };
+            } catch (error) {
+              // Rethrown so the rooms stay open when access did not end.
+              ended = { error };
+              throw error;
+            }
+          },
+        )();
+    } catch {}
+    if (!ended) return end();
+    if ("error" in ended) throw ended.error;
+    return ended.result;
+  };
   const requireEditableSelector = (access: string, selectorJson: string) => {
     const selector = parseStoredAnyShareSelectorJson(selectorJson);
     if (access === "edit" && (!selector || "kind" in selector || selector.versionId !== null)) {
@@ -287,30 +324,36 @@ export function createShareGrantRoutes(
       const widening = levels.indexOf(access) > levels.indexOf(grant.access);
       if (widening && (!linkKey || !shareWebOrigin)) throw notFound();
       let secret: string | null = null;
-      const result = storage.retuneShareGrant({
-        shareId: share.shareId,
-        grantId: grant.grantId,
-        access,
-        changedAtMs: nowMs(),
-        expectedDependentGrantIds,
-        guard: () => {
-          const current = requireOwnedGrant("link", share.shareId, grant.grantId, actor);
-          requireShareWorkspace(current.share, workspaceId);
-        },
-        ...(widening
-          ? {
-              mintCredential: () => {
-                secret = newLinkBearer();
-                const credentialId = newId();
-                return {
-                  credentialId,
-                  secretSealed: sealLinkBearer(secret, linkKey!, credentialId, grant.grantId),
-                  secretHash: hashLinkBearer(secret, linkKey!),
-                };
-              },
-            }
-          : {}),
-      });
+      const retune = () =>
+        storage.retuneShareGrant({
+          shareId: share.shareId,
+          grantId: grant.grantId,
+          access,
+          changedAtMs: nowMs(),
+          expectedDependentGrantIds,
+          guard: () => {
+            const current = requireOwnedGrant("link", share.shareId, grant.grantId, actor);
+            requireShareWorkspace(current.share, workspaceId);
+          },
+          ...(widening
+            ? {
+                mintCredential: () => {
+                  secret = newLinkBearer();
+                  const credentialId = newId();
+                  return {
+                    credentialId,
+                    secretSealed: sealLinkBearer(secret, linkKey!, credentialId, grant.grantId),
+                    secretHash: hashLinkBearer(secret, linkKey!),
+                  };
+                },
+              }
+            : {}),
+        });
+      const result = await endAccess(
+        share.shareId,
+        grant.access === "edit" && access !== "edit",
+        retune,
+      );
       if (!result.ok) {
         if ("reason" in result && result.reason === "dependents-changed") {
           return dependentSetConflict(result.dependents, share.workspaceId, actor.userId);
@@ -364,20 +407,22 @@ export function createShareGrantRoutes(
       if (Object.keys(input).some((key) => key !== "workspaceId")) {
         throw badRequest("request body contains an unknown field");
       }
-      const { share } = requireOwnedGrant("user", route.shareId, route.grantId, actor, true);
+      const { share, grant } = requireOwnedGrant("user", route.shareId, route.grantId, actor, true);
       requireShareWorkspace(share, workspaceId);
-      const result = storage.removeShareAccess({
-        shareId: route.shareId,
-        grantId: route.grantId,
-        actorUserId: actor.userId,
-        nowMs: nowMs(),
-        guard: () => {
-          requireShareWorkspace(
-            requireOwnedGrant("user", route.shareId, route.grantId, actor, true).share,
-            workspaceId,
-          );
-        },
-      });
+      const result = await endAccess(route.shareId, grant.access === "edit", () =>
+        storage.removeShareAccess({
+          shareId: route.shareId,
+          grantId: route.grantId,
+          actorUserId: actor.userId,
+          nowMs: nowMs(),
+          guard: () => {
+            requireShareWorkspace(
+              requireOwnedGrant("user", route.shareId, route.grantId, actor, true).share,
+              workspaceId,
+            );
+          },
+        }),
+      );
       if (!result.ok) throw notFound();
       discussionActivity.wake(route.shareId);
       discussionActivity.wakeLog(share.workspaceId);
@@ -411,19 +456,21 @@ export function createShareGrantRoutes(
           "workspaceId",
           "expectedDependentGrantIds",
         ]);
-        const result = storage.removeShareAccess({
-          shareId: share.shareId,
-          grantId,
-          actorUserId: actor.userId,
-          nowMs: nowMs(),
-          guard: () => {
-            requireShareWorkspace(
-              requireOwnedGrant("link", share.shareId, grantId, actor, true).share,
-              workspaceId,
-            );
-          },
-          expectedDependentGrantIds,
-        });
+        const result = await endAccess(share.shareId, grant.access === "edit", () =>
+          storage.removeShareAccess({
+            shareId: share.shareId,
+            grantId,
+            actorUserId: actor.userId,
+            nowMs: nowMs(),
+            guard: () => {
+              requireShareWorkspace(
+                requireOwnedGrant("link", share.shareId, grantId, actor, true).share,
+                workspaceId,
+              );
+            },
+            expectedDependentGrantIds,
+          }),
+        );
         if (!result.ok) {
           if ("reason" in result && result.reason === "dependents-changed") {
             return dependentSetConflict(result.dependents, share.workspaceId, actor.userId);
@@ -435,11 +482,13 @@ export function createShareGrantRoutes(
         discussionActivity.wakeLog(share.workspaceId);
         return jsonResponse({ ok: true, ...linkGrantBody(result.grant!), undo: result.undo });
       }
-      const result = storage.removeShareAccess({
-        shareId: route.shareId,
-        actorUserId: actor.userId,
-        nowMs: nowMs(),
-      });
+      const result = await endAccess(route.shareId, true, () =>
+        storage.removeShareAccess({
+          shareId: route.shareId,
+          actorUserId: actor.userId,
+          nowMs: nowMs(),
+        }),
+      );
       if (result.ok) {
         terminateLinkStreamsForShare(route.shareId);
         discussionActivity.wake(route.shareId);

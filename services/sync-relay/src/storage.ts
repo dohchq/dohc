@@ -638,6 +638,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       notifyDesktopReadiness(this, { workspaceId: result.workspaceId, path: result.path });
     return result;
   }
+  serviceHostEnrollmentsCoveredByShare(shareId: string) {
+    return serviceHostEnrollmentStorage.serviceHostEnrollmentsCoveredByShare(this, shareId);
+  }
   serviceHostEnrollmentCovered(
     enrollment: Pick<
       serviceHostEnrollmentStorage.ServiceHostEnrollment,
