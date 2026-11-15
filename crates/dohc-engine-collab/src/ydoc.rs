@@ -8136,6 +8136,11 @@ fn render_inline(
                         continue;
                     }
                 };
+                // Its own part is written after the text before it, so a DEL it
+                // holds is held as itself here.
+                if holds {
+                    held.extend(written.matches(HELD).map(|_| Held::Character(HELD)));
+                }
                 if !text.is_empty() {
                     materialize(
                         &mut escaped_parts,
@@ -8304,10 +8309,14 @@ fn render_inline(
                 if in_span(offset + from, offset + to) {
                     continue;
                 }
+                // A link written as references between two is a part of its own.
                 stretch = match stretch {
                     Some((start, end))
                         if !in_span(offset + end, offset + from)
-                            && !written_differently(&link[end..from]) =>
+                            && !written_differently(&link[end..from])
+                            && !text_links[part_index]
+                                .iter()
+                                .any(|&(at, _)| end <= at && at < from) =>
                     {
                         Some((start, to))
                     }
@@ -10168,6 +10177,15 @@ mod projection_tests {
     fn empty_link_lines_are_written_as_they_are() {
         for (text, expected) in [
             ("[](u \"a\n2. b\")", "[](u \"a\n2. b\")"),
+            (
+                "[](u \"&\")[](u \"\r\")[](u \"&\")",
+                "[](u \"&\")&#91;&#93;&#40;u &#34;&#13;&#34;&#41;[](u \"&\")",
+            ),
+            // A DEL in a link written as references is written as itself.
+            (
+                "[](u \"\u{7f}\n# b\") [](a&b)",
+                "&#91;&#93;&#40;u &#34;\u{7f}\n&#35; b&#34;&#41; [](a&b)",
+            ),
             ("[](u \"a\n[x] b\")", "[](u \"a\n[x] b\")"),
             ("[](u \"x\n    y\")", "[](u \"x\n    y\")"),
             (

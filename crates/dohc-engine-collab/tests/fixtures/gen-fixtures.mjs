@@ -1010,6 +1010,9 @@ const RICHDOC_PROJECTION_CASES = [
         ]),
         paragraph([xmlText("<a-b>", { bold: {}, strike: {} }), xmlText("c", { strike: {} })]),
         paragraph([xmlText("x\n# y", { bold: {}, strike: {} }), xmlText("c", { strike: {} })]),
+        paragraph("[](u \"\u007f\n# b\") [](a&b)"),
+        paragraph("[](u \"&\")[](u \"\r\")[](u \"&\")"),
+        paragraph([xmlText("[](u \"&\n=\") <a-b>", { highlight: {} })]),
       ]),
   },
 ];
