@@ -1092,8 +1092,8 @@ export function serializeRichdocBody(root: JSONContent): string {
 
   const prepared = visit(root);
   // A character token's text can hold the other tokens, so it is written
-  // first. Serializing reserves tokens too, so the maps follow the reserved ones.
-  const writtenTokens = () => [
+  // first. Every token is reserved by now.
+  const written = [
     new Map(
       Array.from(characterSentinels, ([character, sentinel]) => [sentinel, character] as const),
     ),
@@ -1110,17 +1110,7 @@ export function serializeRichdocBody(root: JSONContent): string {
       ),
     ),
   ];
-  let written = writtenTokens();
-  const writeTokens = (text: string) => {
-    if (
-      written[0].size !== characterSentinels.size ||
-      written[1].size !== blockEscapeSentinels.size ||
-      written[2].size !== leadingWhitespaceSentinels.size
-    ) {
-      written = writtenTokens();
-    }
-    return written.reduce(restoreCharacterSentinels, text);
-  };
+  const writeTokens = (text: string) => written.reduce(restoreCharacterSentinels, text);
   let markdown = writingTableCellTokens(writeTokens, () => markdownManager.serialize(prepared));
   if (prepared.content?.[0]?.type === "horizontalRule") {
     markdown = "***" + markdown.slice(3);

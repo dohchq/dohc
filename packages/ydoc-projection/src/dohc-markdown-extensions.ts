@@ -1136,13 +1136,17 @@ export function writingTableCellTokens<T>(write: (markdown: string) => string, r
   }
 }
 
-function prepareRenderedTableCell(markdown: string): string {
-  // Raw inline HTML is the canonical representation of cell block boundaries.
-  // The importer represents those tags as text, so normalize them before the
-  // table renderer measures the cell again.
-  markdown = markdown
+// Raw inline HTML is the canonical representation of cell block boundaries.
+// The importer represents those tags as text, so normalize them before the
+// table renderer measures the cell again.
+function writeTableCellBreaks(markdown: string): string {
+  return markdown
     .replaceAll("&amp;lt;br&amp;gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR)
     .replaceAll("&lt;br&gt;", GFM_TABLE_CELL_BLOCK_SEPARATOR);
+}
+
+function prepareRenderedTableCell(markdown: string): string {
+  markdown = writeTableCellBreaks(markdown);
   let output = "";
   let precedingBackslashes = 0;
 
@@ -1154,8 +1158,9 @@ function prepareRenderedTableCell(markdown: string): string {
     precedingBackslashes = character === "\\" ? precedingBackslashes + 1 : 0;
   }
 
-  // After the pipes, which a token's text must not change.
-  return writeTableCellTokens ? writeTableCellTokens(output) : output;
+  // After the pipes, which a token's text must not change. A token's text can
+  // spell a break too, as the engine reads it once written.
+  return writeTableCellTokens ? writeTableCellBreaks(writeTableCellTokens(output)) : output;
 }
 
 const tableTokenizer = Table.config.markdownTokenizer!;
