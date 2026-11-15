@@ -30,6 +30,13 @@ export function initializeAccessRuleSchema(db: SqliteDb): void {
     ) STRICT;
     CREATE INDEX IF NOT EXISTS idx_sync_relay_access_rules_open
       ON sync_relay_access_rules(workspace_id, version_id, folder) WHERE to_seq IS NULL;
+    -- Where each workspace's rule history begins. Rows came from current
+    -- files, so a rule removed earlier left none: below this seq, the rules
+    -- that held aren't known.
+    CREATE TABLE IF NOT EXISTS sync_relay_access_rule_floors (
+      workspace_id TEXT PRIMARY KEY REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
+      relay_seq INTEGER NOT NULL
+    ) STRICT;
   `);
   if (
     db
@@ -37,6 +44,11 @@ export function initializeAccessRuleSchema(db: SqliteDb): void {
       .get(ACCESS_RULES_MIGRATION_ID)
   )
     return;
+  db.prepare(
+    `INSERT INTO sync_relay_access_rule_floors (workspace_id, relay_seq)
+     SELECT w.workspace_id, MAX(l.relay_seq) FROM sync_relay_workspaces w
+     JOIN sync_relay_log l ON l.workspace_id = w.workspace_id GROUP BY w.workspace_id`,
+  ).run();
   // A rule file written before this table existed starts its span at the
   // file's own state.
   const statements = accessRuleStatements(db);
@@ -153,6 +165,17 @@ export function refreshAccessRule(
     else statements.close.run(relaySeq, workspaceId, versionId, folder, fromSeq);
   }
   if (present) statements.insert.run(workspaceId, versionId, folder, text, relaySeq);
+}
+
+/**
+ * The seq at or below which a workspace's past rules aren't known. Judging
+ * History there, treat what a member could reach then as nothing.
+ */
+export function accessRuleHistoryFloor(db: SqliteDb, workspaceId: string): number {
+  const row = db
+    .prepare("SELECT relay_seq FROM sync_relay_access_rule_floors WHERE workspace_id = ?")
+    .get(workspaceId);
+  return row ? Number(row.relay_seq) : 0;
 }
 
 /** The rules that hold now in one Version. */

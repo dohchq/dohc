@@ -1,8 +1,14 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
-import { folderLevel } from "@dohc/security-contract/access-rules";
-import { currentAccessRuleSet, initializeAccessRuleSchema } from "./accessRules";
+import { folderLevel, isAccessRulePath } from "@dohc/security-contract/access-rules";
+import { pathCollisionKey as contractCollisionKey } from "@dohc/workspace-contracts/path-floor";
+import { pathCollisionKey } from "../pathCollisionKey";
+import {
+  accessRuleHistoryFloor,
+  currentAccessRuleSet,
+  initializeAccessRuleSchema,
+} from "./accessRules";
 import { applyCurrentFileOp, currentFileStatements } from "./currentFiles";
 import { initializeSyncRelaySchema } from "./schema";
 import type { SqliteDb } from "./types";
@@ -208,15 +214,56 @@ describe("the relay's access rule index", () => {
     try {
       const seq = r.write("Drafts/access.yaml", "members: comment\n");
       r.write("Drafts/notes.md", "hello");
+      // A rule removed before the table existed leaves no row, so the floor
+      // marks where the history begins.
+      r.write("Old/access.yaml", "");
+      const head = r.remove("Old/access.yaml");
+      expect(accessRuleHistoryFloor(r.storageDb, "ws")).toBe(0);
       r.db.exec(
-        "DROP TABLE sync_relay_access_rules; DELETE FROM sync_relay_migrations WHERE migration_id = 'access-rules-v1'",
+        "DROP TABLE sync_relay_access_rules; DROP TABLE sync_relay_access_rule_floors; DELETE FROM sync_relay_migrations WHERE migration_id = 'access-rules-v1'",
       );
       initializeAccessRuleSchema(r.storageDb);
       expect(r.rows()).toEqual([
         { folder: "Drafts", rule_text: "members: comment\n", from_seq: seq, to_seq: null },
       ]);
+      expect(accessRuleHistoryFloor(r.storageDb, "ws")).toBe(head);
+      // A rerun changes nothing, and a workspace with no log has no floor.
+      initializeAccessRuleSchema(r.storageDb);
+      expect(accessRuleHistoryFloor(r.storageDb, "ws")).toBe(head);
+      expect(accessRuleHistoryFloor(r.storageDb, "elsewhere")).toBe(0);
     } finally {
       r.db.close();
     }
+  });
+
+  it("writes a rule whose keys need quoting so it reads back as the same rule", () => {
+    const r = relay();
+    try {
+      r.write("Drafts/access.yaml", 'members: edit\npeople:\n  "#sam@example.com": view\n');
+      const set = currentAccessRuleSet(r.storageDb, "ws", "main");
+      const sam = {
+        role: "member",
+        level: "edit",
+        verifiedEmail: "#sam@example.com",
+        unverifiedEmail: null,
+      } as const;
+      expect(folderLevel(set, sam, "Drafts")).toBe("view");
+    } finally {
+      r.db.close();
+    }
+  });
+
+  // The relay's key finds a folder's rule files; the contract's decides what
+  // counts as one. They must fold every spelling the same way.
+  it.each([
+    "access.yaml",
+    "ACCESS.YAML",
+    "Access.yaml.",
+    "ａccess.yaml",
+    "Team/ACCESS.yaml",
+    "Team/access.yaml~",
+  ])("folds %s the same way in the relay and the contract", (path) => {
+    expect(pathCollisionKey(path)).toBe(contractCollisionKey(path));
+    expect(isAccessRulePath(path)).toBe(path.endsWith("~") ? false : true);
   });
 });
