@@ -607,6 +607,11 @@ const ELSEWHERE_REFUSAL = {
   computer: STUDIO_MAC.label,
   words: collectionsElsewhereWords(STUDIO_MAC),
 } as const;
+const JOINED_REFUSAL = {
+  kind: "joined",
+  words:
+    "Another computer keeps this workspace's Collections. Open this workspace there to use them.",
+} as const;
 const OTHERS_ELSEWHERE = {
   computer: STUDIO_MAC.label,
   others: true,
@@ -3250,7 +3255,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         {[SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MIN_WIDTH].map((width) => (
           <Specimen
             key={width}
-            label={`no computer keeps them; another one does; others beside the server's, ${width}px`}
+            label={`no computer keeps them; another one does; this one joined; others beside the server's, ${width}px`}
           >
             <div className="flex flex-col gap-2">
               <CollectionsSectionSpecimen width={width}>
@@ -3258,6 +3263,9 @@ function Pane(props: { theme: "light" | "dark" }) {
               </CollectionsSectionSpecimen>
               <CollectionsSectionSpecimen width={width}>
                 <CollectionsRefusalRow refusal={ELSEWHERE_REFUSAL} onKeep={noop} onRetry={noop} />
+              </CollectionsSectionSpecimen>
+              <CollectionsSectionSpecimen width={width}>
+                <CollectionsRefusalRow refusal={JOINED_REFUSAL} onKeep={noop} onRetry={noop} />
               </CollectionsSectionSpecimen>
               <CollectionsSectionSpecimen width={width}>
                 <CollectionsElsewhereRow elsewhere={OTHERS_ELSEWHERE} onKeep={noop} />

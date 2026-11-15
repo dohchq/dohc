@@ -106,7 +106,9 @@ import {
   isLiveEditingRefusal,
   isLiveFolderRefusal,
   isLivePageOwnedRefusal,
+  HELD_COLLECTIONS_REFUSALS,
   KEEPABLE_COLLECTIONS_REFUSALS,
+  LASTING_COLLECTIONS_REFUSALS,
   livePageTitle,
   namedList,
   notVersionedPaths,
@@ -3033,8 +3035,13 @@ export function CollectionsRefusalRow({
   onKeep?: () => void;
   onRetry?: () => void;
 }) {
-  const held = refusal.kind === "unclaimed" || refusal.kind === "elsewhere";
-  const named = refusal.kind === "elsewhere" && refusal.computer !== null ? refusal.computer : null;
+  const held = HELD_COLLECTIONS_REFUSALS.includes(refusal.kind);
+  const named =
+    refusal.kind === "elsewhere" && refusal.computer !== null
+      ? refusal.computer
+      : refusal.kind === "joined"
+        ? "another computer"
+        : null;
   const words =
     refusal.kind === "unclaimed"
       ? "Which computer keeps these Collections?"
@@ -3059,7 +3066,7 @@ export function CollectionsRefusalRow({
             {USE_THIS_COMPUTER}
           </SecondaryButton>
         )}
-        {refusal.kind !== "unclaimed" && onRetry && (
+        {!LASTING_COLLECTIONS_REFUSALS.includes(refusal.kind) && onRetry && (
           <SecondaryButton onClick={() => onRetry()}>Try again</SecondaryButton>
         )}
       </div>

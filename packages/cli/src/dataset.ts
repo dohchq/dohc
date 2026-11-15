@@ -817,7 +817,7 @@ const refusalComputer = computerLabel.nullable();
 export const DatasetListRefusal = z.discriminatedUnion("kind", [
   z
     .object({
-      kind: z.enum(["unclaimed", "unreadable", "missing", "replaced", "changed"]),
+      kind: z.enum(["unclaimed", "joined", "unreadable", "missing", "replaced", "changed"]),
       words: refusalWords,
     })
     .strict(),

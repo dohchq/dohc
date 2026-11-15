@@ -19,7 +19,7 @@ import { realpathSync, type BigIntStats } from "node:fs";
 import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, join, parse } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
-import { recordNeverSynced, recordSynced, type Computer } from "./syncHistory";
+import { recordJoined, recordNeverSynced, recordSynced, type Computer } from "./syncHistory";
 import { recordNewCollectionsHolder } from "./collectionsHolder";
 import { identityOf } from "./workspaceTrust";
 
@@ -305,11 +305,15 @@ export async function createWorkspaceFolderWithFreshness(input: {
   });
   await assertSameFolder();
   // A folder that had no manifest was never a dohc workspace. A join names
-  // the synced workspace's id, and its folder records that it synced.
+  // the synced workspace's id, and its folder records that it synced and
+  // joined, so it never keeps Collections it has no store for.
   if (input.workspaceId === undefined) {
     await recordNeverSynced(rootPath, input.computer);
     await recordNewCollectionsHolder(rootPath, manifest.workspaceId, input.computer);
-  } else await recordSynced(rootPath);
+  } else {
+    await recordJoined(rootPath);
+    await recordSynced(rootPath);
+  }
   const fresh = startedEmpty && (await holdsOnlyNewMetadata(rootPath, metadataDir));
   await assertSameFolder();
   return {

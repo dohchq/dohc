@@ -21,6 +21,7 @@ import {
   guardedFileExists,
   parseObject,
   readGuardedFile,
+  joinedThroughServer,
   type Computer,
 } from "./syncHistory";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
@@ -44,7 +45,10 @@ import { OLD_STORE_PATH, STORE_PATH } from "./localDatasetFolders";
 // until that installation first creates the store. A workspace with no
 // record, or one dohc cannot read, opens no store until a person keeps the
 // Collections on one computer: a synced folder can bring the record or the
-// store late, so dohc never claims them by itself.
+// store late, so dohc never claims them by itself. A computer that joined
+// through a server has neither, and they can never arrive there. Where it
+// has no store, it refuses even a person's choice to keep them, since a store
+// made there would be a second one.
 //
 // The record sits beside manifest.json, outside .dohc/local, which iCloud
 // Drive skips, so a synced folder carries it. .dohc resolves through
@@ -70,6 +74,8 @@ export type CollectionsRefusal =
   | { kind: "unclaimed" }
   /** Another installation keeps them. */
   | { kind: "elsewhere"; computer: Computer; sameName: boolean }
+  /** No record or store here, on a computer that joined through a server: another computer keeps them. */
+  | { kind: "joined" }
   /** dohc cannot read the record, or it is not a file. */
   | { kind: "unreadable"; words: string }
   /** This installation keeps them, but their store is not there. */
@@ -92,6 +98,8 @@ function collectionsRefusalMessage(refusal: CollectionsRefusal): string {
         label: refusal.computer.label,
         sameName: refusal.sameName,
       });
+    case "joined":
+      return "Another computer keeps this workspace's Collections. Open this workspace there to use them.";
     case "unreadable":
       return refusal.words;
     case "missing":
@@ -329,6 +337,12 @@ export async function admitCollectionsStore(
 ): Promise<CollectionsAdmission> {
   if (!check.required()) return { kind: "unguarded" };
   const seen = await readRecord(rootPath, workspaceId);
+  if (
+    seen.kind === "absent" &&
+    !(await collectionsStorePresent(rootPath)) &&
+    (await joinedThroughServer(rootPath))
+  )
+    throw refused({ kind: "joined" });
   const { storeId } = heldBy(seen, check.here());
   if (storeId === null) {
     // A store the record never named may be another computer's.
@@ -439,7 +453,8 @@ export interface KeepSteps {
  *   here takes a new id, then the record names it. When another computer
  *   made the workspace, the person confirms first, since its Collections
  *   may still be syncing. Without that, a store here with no record naming
- *   it is one a creation cut short left.
+ *   it is one a creation cut short left. With no record and no store, on a
+ *   computer that joined a synced workspace, this refuses.
  * - A record naming another installation: this computer may be that one
  *   before dohc was set up again. The person confirms, and only the store
  *   the record names, here, is kept: the record changes installation and
@@ -461,6 +476,8 @@ export async function keepCollectionsHere(
   const refuseElsewhere = (holder: CollectionsHolder) =>
     refused(elsewhereOf(holder.computer, here));
   let question: KeepQuestion | null = null;
+  const joined = seen.kind === "absent" && (await joinedThroughServer(rootPath));
+  if (joined && !(await collectionsStorePresent(rootPath))) throw refused({ kind: "joined" });
   if (elsewhere !== null) {
     if (elsewhere.storeId === null && (await collectionsStorePresent(rootPath)))
       throw refuseElsewhere(elsewhere);
@@ -491,6 +508,7 @@ export async function keepCollectionsHere(
       return true;
     }
     if (!present) {
+      if (joined) throw refused({ kind: "joined" });
       await replaceRecord(rootPath, workspaceId, seen, { computer: here, storeId: null });
       return true;
     }

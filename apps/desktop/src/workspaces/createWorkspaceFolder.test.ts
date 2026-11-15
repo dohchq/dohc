@@ -19,7 +19,12 @@ import {
   canonicalWorkspaceRoot,
   createWorkspaceFolder,
 } from "./createWorkspaceFolder";
-import { readSyncHistory, recordSynced, scheduleComputer } from "./syncHistory";
+import {
+  joinedThroughServer,
+  readSyncHistory,
+  recordSynced,
+  scheduleComputer,
+} from "./syncHistory";
 import { createTestScratch } from "./testTemp";
 
 // The refusal's name crosses IPC, so the screen that shows it offers
@@ -238,6 +243,8 @@ describe("createWorkspaceFolder", () => {
       workspaceId: "ws-synced-elsewhere",
     });
     expect(await readSyncHistory(joined), "a join synced").toBe("synced");
+    expect(await joinedThroughServer(joined), "and joined").toBe(true);
+    expect(await joinedThroughServer(root), "a folder made here did not").toBe(false);
 
     const legacy = join(base, "legacy");
     await mkdir(join(legacy, ".dohc"), { recursive: true });

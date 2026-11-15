@@ -26,7 +26,9 @@ import { CollectionPendingResponsesDialog } from "./CollectionPendingResponsesDi
 import { EmptyState, SecondaryButton } from "./ui/controls";
 import { Laptop, TriangleAlert } from "lucide-react";
 import {
+  HELD_COLLECTIONS_REFUSALS,
   KEEPABLE_COLLECTIONS_REFUSALS,
+  LASTING_COLLECTIONS_REFUSALS,
   namingCollectionMove,
   readCollectionServerUnreachable,
   readCollectionsRefusal,
@@ -442,7 +444,7 @@ function ScopedCollection({
     );
   // The same place as the tab's fallback lines, which these take over.
   if ((!dataset || !columns) && refusal && !loading) {
-    const held = refusal.kind === "unclaimed" || refusal.kind === "elsewhere";
+    const held = HELD_COLLECTIONS_REFUSALS.includes(refusal.kind);
     return (
       <EmptyState
         data-testid="collection-refusal"
@@ -462,7 +464,7 @@ function ScopedCollection({
               {USE_THIS_COMPUTER}
             </SecondaryButton>
           )}
-          {refusal.kind !== "unclaimed" && (
+          {!LASTING_COLLECTIONS_REFUSALS.includes(refusal.kind) && (
             <SecondaryButton
               onClick={() => {
                 void refresh();

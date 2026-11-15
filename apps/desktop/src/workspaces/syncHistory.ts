@@ -38,7 +38,7 @@ interface HistoryRecord {
   host: Computer | null;
 }
 
-type Mark = "synced" | "received-share";
+type Mark = "synced" | "received-share" | "joined";
 type FileRead =
   | { kind: "text"; text: string }
   | { kind: "absent" }
@@ -66,6 +66,35 @@ export async function recordNeverSynced(rootPath: string, computer: Computer): P
 /** The workspace synced or opened as a share. Nothing undoes it. */
 export function recordSynced(rootPath: string): Promise<void> {
   return mark(rootPath, "synced");
+}
+
+/**
+ * This folder joined a workspace that syncs through a server from another
+ * computer. Nothing undoes it.
+ */
+export function recordJoined(rootPath: string): Promise<void> {
+  return mark(rootPath, "joined");
+}
+
+/**
+ * Whether this folder joined a workspace through a server, or dohc can't
+ * tell. False for a folder that has no marks yet.
+ */
+export async function joinedThroughServer(rootPath: string): Promise<boolean> {
+  let metadata: string | null;
+  try {
+    metadata = await resolveWorkspaceMetadataDir(rootPath, { create: false });
+  } catch {
+    return true;
+  }
+  if (metadata === null) return false;
+  const marks = join(metadata, "sync-history");
+  const stats = await lstat(marks).catch((error: NodeJS.ErrnoException) =>
+    error.code === "ENOENT" ? null : error,
+  );
+  if (stats === null) return false;
+  if (stats instanceof Error || stats.isSymbolicLink() || !stats.isDirectory()) return true;
+  return (await marked(marks, "joined")) !== false;
 }
 
 /**

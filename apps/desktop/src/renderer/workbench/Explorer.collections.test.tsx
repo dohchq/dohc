@@ -450,6 +450,22 @@ describe("Collections this computer cannot use", () => {
     expect(onRetryCollections).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Use this computer" }));
     expect(onKeepCollections).toHaveBeenCalledTimes(2);
+    // Keeping them here would make a second store, and nothing here changes
+    // until the person opens the workspace on the other computer.
+    const joined =
+      "Another computer keeps this workspace's Collections. Open this workspace there to use them.";
+    rerender(
+      <Explorer
+        {...explorerProps({
+          mode: "home",
+          collectionsRefusal: { kind: "joined", words: joined },
+          onKeepCollections,
+          onRetryCollections,
+        })}
+      />,
+    );
+    expect(within(screen.getByTestId("collections-refusal")).queryByRole("button")).toBeNull();
+    expectTooltip(screen.getByText("On another computer"), joined);
     rerender(
       <Explorer
         {...explorerProps({
