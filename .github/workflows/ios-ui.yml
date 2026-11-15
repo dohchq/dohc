@@ -188,14 +188,30 @@ jobs:
             for class in $(node scripts/verification/ios-ui.mjs classes); do
               bundle="$RUNNER_TEMP/dohc-results/$class-$appearance.xcresult"
               json="$OUT/results/$class-$appearance.json"
-              started=$SECONDS status=0 runs=$((runs + 1))
-              xcodebuild test-without-building -xctestrun "$XCTESTRUN" -destination "id=$udid" -derivedDataPath "$DD" \
-                "-only-testing:dohcUITests/$class" $(node scripts/verification/ios-ui.mjs skips "$class") \
-                -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 300 \
-                -resultBundlePath "$bundle" > "$OUT/logs/$class-$appearance.log" 2>&1 || status=$?
-              xcrun xcresulttool get test-results tests --path "$bundle" --compact > "$json" || true
-              rm -rf "$bundle"
-              node scripts/verification/ios-ui.mjs check "$class" "$appearance" "$json" "$status" | tee -a "$OUT/summary.txt" || failed=$((failed + 1))
+              started=$SECONDS runs=$((runs + 1))
+              for attempt in 1 2; do
+                status=0 log="$OUT/logs/$class-$appearance$([[ $attempt == 2 ]] && echo -retry).log"
+                xcodebuild test-without-building -xctestrun "$XCTESTRUN" -destination "id=$udid" -derivedDataPath "$DD" \
+                  "-only-testing:dohcUITests/$class" $(node scripts/verification/ios-ui.mjs skips "$class") \
+                  -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 300 \
+                  -resultBundlePath "$bundle" > "$log" 2>&1 || status=$?
+                xcrun xcresulttool get test-results tests --path "$bundle" --compact > "$json" || true
+                rm -rf "$bundle"
+                verdict=0
+                node scripts/verification/ios-ui.mjs check "$class" "$appearance" "$json" "$status" > "$OUT/check.txt" || verdict=1
+                # The shared runner sometimes loses the app at launch. Only then, restart the simulator and run the class once more.
+                if (( verdict == 1 && attempt == 1 )) && grep -qE "does not have a process ID|Failed to get background assertion" "$log" \
+                  && ! grep -E "error: -\[" "$log" | grep -vqE "does not have a process ID|Failed to get background assertion"; then
+                  echo "$class $appearance: the simulator lost the app at launch; restarting it and running the class again" | tee -a "$OUT/summary.txt"
+                  xcrun simctl shutdown "$udid" || true
+                  xcrun simctl bootstatus "$udid" -b
+                  xcrun simctl ui "$udid" appearance "$appearance"
+                  continue
+                fi
+                break
+              done
+              tee -a "$OUT/summary.txt" < "$OUT/check.txt"
+              (( verdict == 0 )) || failed=$((failed + 1))
               echo "  $((SECONDS - started)) s" | tee -a "$OUT/summary.txt"
             done
           done
