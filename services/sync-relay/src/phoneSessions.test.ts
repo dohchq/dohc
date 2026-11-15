@@ -97,6 +97,7 @@ function call(
 
 const PUBLICATION = "a".repeat(64);
 const DATASET = "00000000-0000-4000-8000-000000000000";
+const WAKE = `wake-${"0".repeat(32)}`;
 
 it("refuses the owner's phone on every workspace route, as if it had no sign-in", async () => {
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -113,6 +114,11 @@ it("refuses the owner's phone on every workspace route, as if it had no sign-in"
     ["POST", "/sync/trip/automation-presses/accept", {}],
     ["GET", "/sync/trip/held-documents"],
     ["PUT", "/sync/workspaces/trip/name", { name: "Trip" }],
+    // The owner's computers' wake routes: the phone reads wakes through its operations route.
+    ["GET", "/sync/wakes"],
+    ["POST", `/sync/wakes/${WAKE}/claim`, {}],
+    ["POST", `/sync/wakes/${WAKE}/queued`, {}],
+    ["PUT", "/sync/workspaces/trip/runners", { installId: "i", computerLabel: "c", runners: [] }],
   ] as const;
   for (const route of routes) {
     const label = `${route[0]} ${route[1]}`;

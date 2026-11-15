@@ -83,6 +83,7 @@ async function relay() {
   };
   const hub = new DiscussionActivityHub();
   const h = testHandler(storage, {
+    resolveAccountSession,
     resolvePhoneCapableAccountSession: resolveAccountSession,
     discussionActivity: hub,
     nowMs: () => NOW,

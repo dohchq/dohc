@@ -638,10 +638,11 @@ export function createSyncRelayHandler({
         serverUrl: relayPublicOrigin,
       })
     : undefined;
-  const respondToChatWakes = resolvePhoneCapableAccountSession
+  // The owner's computers claim wakes here; the phone reads wakes through its operations route.
+  const respondToChatWakes = resolveAccountSession
     ? createChatWakeRoutes({
         storage,
-        resolveAccountSession: resolvePhoneCapableAccountSession,
+        resolveAccountSession,
         waits: chatWakeWaits,
         nowMs,
         limiter: accountOperationRateLimiter,
