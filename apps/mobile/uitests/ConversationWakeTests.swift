@@ -28,12 +28,13 @@ final class ConversationWakeTests: XCTestCase {
   }
 
   /// The button labelled `label` nearest below the line `value`: each line's pill sits under its words, and other lines
-  /// may offer a pill with the same label.
+  /// may offer a pill with the same label. A pill's 44 pt touch area reaches 6 pt above the pill, over the words' last
+  /// line, so the button's centre, not its top, is what lies below them.
   private func pill(_ app: XCUIApplication, _ label: String, under value: String) -> XCUIElement? {
     let line = text(app, value).frame
     return app.buttons.matching(NSPredicate(format: "label == %@", label)).allElementsBoundByIndex
-      .filter { $0.frame.minY >= line.maxY - 1 }
-      .min { $0.frame.minY < $1.frame.minY }
+      .filter { $0.frame.midY > line.maxY }
+      .min { $0.frame.midY < $1.frame.midY }
   }
 
   @MainActor
