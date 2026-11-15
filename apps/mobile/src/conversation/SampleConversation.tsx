@@ -4,7 +4,8 @@ import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { SymbolView } from "expo-symbols";
 import { documentWords } from "@dohc/interface-words/documents";
-import { useCallback, useMemo, useState } from "react";
+import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Composer } from "./Composer";
 import {
@@ -28,17 +29,19 @@ import { reactionRecords, withReactions } from "./reactions";
 import { UNSHOWN_QUESTION, type ReplyTo } from "./ReplyContext";
 import {
   createSampleOutbox,
+  createSampleWakes,
   sampleAsks,
   sampleConversation,
   sampleLanes,
   sampleMessagesFor,
   sampleScope,
   sampleThreadFor,
-  sampleWakesFor,
   sampleYou,
 } from "./sample";
+import { confirmTryElsewhere } from "./wakeRetryAlert";
 import { localMessage } from "./serverMessages";
 import type { Message } from "./types";
+import { useShowing, useVisible } from "./useVisible";
 import {
   useChoose,
   useConversationWrites,
@@ -58,12 +61,6 @@ type Item =
   | { type: "message"; key: string; message: Message; continued: boolean; afterExtras: boolean };
 
 const always = () => true;
-/** `talk-wakes`'s wakes, shown as a server read's would be. They never change, so they never fail or need Try again. */
-const sampleWakes = sampleWakesFor(demoMode);
-const wakesFor = (message: Message) => {
-  const wakes = message.local === undefined ? sampleWakes?.get(message.id) : undefined;
-  return wakes ? { wakes } : {};
-};
 /** A thread takes replies, and never a post. */
 const REPLY_LANES: Lanes = { post: false, send: true };
 
@@ -115,6 +112,33 @@ export function SampleConversation() {
   const actions = useLocalActions(writes, blocked !== null);
   const react = useReact(writes, sampleScope);
   const chooser = useChoose(writes, sampleScope.workspaceId);
+  // `talk-wakes`'s wakes, shown as a server read's would be, with Try again where the sample's writes aren't blocked.
+  const [sampleWakes] = useState(() => createSampleWakes(demoMode));
+  useEffect(() => () => sampleWakes.stop(), [sampleWakes]);
+  const wakes = useSyncExternalStore(sampleWakes.subscribe, sampleWakes.byMessage);
+  const wakeRetries = useSyncExternalStore(sampleWakes.subscribe, sampleWakes.retries);
+  const writable = blocked === null;
+  // As a server conversation's: the screen still shows the chat it was pressed in, and the outbox, read when called,
+  // isn't blocked.
+  const showing = useShowing(useVisible());
+  const retryWake = useCallback(
+    (wake: PhoneChatWake) => {
+      const shown = showing();
+      sampleWakes.retry(wake, {
+        allowed: () => shown() && blockedBy(outbox.state(), true) === null,
+        confirm: confirmTryElsewhere,
+      });
+    },
+    [sampleWakes, showing, outbox],
+  );
+  const wakesFor = (message: Message) => {
+    const own = message.local === undefined ? wakes?.get(message.id) : undefined;
+    return own ? { wakes: own, wakeRetries, ...(writable ? { onRetryWake: retryWake } : {}) } : {};
+  };
+  const wakeData = useMemo(
+    () => ({ wakes, wakeRetries, writable }),
+    [wakes, wakeRetries, writable],
+  );
   const messages = useMemo(
     () => (inThread ? sampleThreadFor(id, demoMode) : sampleMessagesFor(id, demoMode)),
     [inThread, id],
@@ -352,6 +376,8 @@ export function SampleConversation() {
       />
       <KeyboardAwareLegendList
         data={items}
+        // Wakes and their Try again states change apart from the messages: their rows draw again.
+        extraData={wakeData}
         keyExtractor={(item) => item.key}
         getItemType={(item) => item.type}
         estimatedItemSize={64}

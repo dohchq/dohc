@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   CHAT_WAKE_WAIT_MAX_MS,
+  ChatWakeView,
   PhoneChatContext,
   PhoneChatWake,
   PhoneWakeChanges,
 } from "@dohc/workspace-contracts/chat-wakes";
 import {
+  chatWakeView,
   earlierWakeCursor,
   phoneChatContext,
   phoneChatWake,
@@ -13,6 +15,7 @@ import {
   readChatContext,
   readConversationWakes,
   readWakeChanges,
+  retryWake,
   WAKE_HOLD_MS,
 } from "./chatWakes";
 import { createServerClient, ServerError } from "./client";
@@ -212,6 +215,79 @@ describe("readWakeChanges", () => {
   });
 });
 
+/** A generation as the retry route answers it. */
+const view = (fields: Record<string, unknown> = {}) => ({
+  wakeId: `wake-${"2".padStart(32, "0")}`,
+  workspaceId: "w1",
+  messageId: "m-1",
+  threadId: "thread-1",
+  generation: 2,
+  state: "waiting",
+  prerequisiteMessageId: null,
+  winnerLabel: null,
+  ...fields,
+});
+
+describe("retryWake", () => {
+  const RETRY = "/sync/w1/ops/retryWake";
+  const send = (client: ReturnType<typeof serve>["client"]) =>
+    retryWake(client, "w1", "op-1", wake(1).wakeId, signal);
+
+  it("sends only the operation ID and the wake, and answers the generation", async () => {
+    const { server, client } = serve();
+    server.on("POST", RETRY, answered({ ok: true, wake: view() }));
+    await expect(send(client)).resolves.toEqual({ kind: "retried", wake: view() });
+    expect(server.calls[0]?.body).toEqual({ operationId: "op-1", wakeId: wake(1).wakeId });
+  });
+
+  it("answers a refusal and a wake the server doesn't have", async () => {
+    const { server, client } = serve();
+    server.on(
+      "POST",
+      RETRY,
+      answered({ ok: false, refusal: "refused", reason: "Couldn't send" }),
+      answered({ ok: false, refusal: "refused", reason: "too old" }),
+      answered({ ok: false, refusal: "missing", reason: "no such wake" }),
+    );
+    await expect(send(client)).resolves.toEqual({ kind: "refused" });
+    await expect(send(client)).resolves.toEqual({ kind: "refused" });
+    await expect(send(client)).resolves.toEqual({ kind: "missing" });
+  });
+
+  it("takes any cursor the route sends, and never keeps it", async () => {
+    const { server, client } = serve();
+    server.on("POST", RETRY, {
+      status: 200,
+      body: { ok: true, result: { ok: true, wake: view() }, cursor: "0.4.7" },
+    });
+    const answer = await send(client);
+    expect(answer).toEqual({ kind: "retried", wake: view() });
+    expect(JSON.stringify(answer)).not.toContain("0.4.7");
+  });
+
+  it.each([
+    ["another workspace's generation", { ok: true, wake: view({ workspaceId: "w2" }) }],
+    ["a generation with a field the contract doesn't name", { ok: true, wake: view({ x: 1 }) }],
+    ["a phone wake in place of the generation", { ok: true, wake: wake(2) }],
+    ["a refusal outside the closed list", { ok: false, refusal: "refused", reason: "nope" }],
+    ["a missing wake without a reason", { ok: false, refusal: "missing" }],
+    ["no result", undefined],
+  ])("rejects %s", async (_case, result) => {
+    const { server, client } = serve();
+    server.on("POST", RETRY, answered(result));
+    await expect(send(client)).rejects.toMatchObject({ problem: "invalid" });
+  });
+
+  it("rejects an answer without a cursor", async () => {
+    const { server, client } = serve();
+    server.on("POST", RETRY, {
+      status: 200,
+      body: { ok: true, result: { ok: true, wake: view() } },
+    });
+    await expect(send(client)).rejects.toMatchObject({ problem: "invalid" });
+  });
+});
+
 describe("earlierWakeCursor", () => {
   it("compares decimal cursors by value", () => {
     expect(earlierWakeCursor("9", "10")).toBe("9");
@@ -279,5 +355,25 @@ describe("the hand checks agree with the contract", () => {
   for (const [index, item] of changes.entries())
     it(`agrees on wake changes ${index + 1}`, () => {
       expect(phoneWakeChanges(item) !== null).toBe(PhoneWakeChanges.safeParse(item).success);
+    });
+
+  // A Try again answers its generation as the account's computers see it.
+  const views: unknown[] = [
+    view(),
+    view({ state: "unconfirmed", winnerLabel: "Ice's Mac", prerequisiteMessageId: "q-1" }),
+    view({ generation: Number.MAX_SAFE_INTEGER }),
+    view({ generation: 0 }),
+    view({ wakeId: "wake-2" }),
+    view({ workspaceId: "" }),
+    view({ state: "running" }),
+    view({ prerequisiteMessageId: " q-1" }),
+    view({ winnerLabel: "m".repeat(65) }),
+    view({ canRetry: true }),
+    (({ prerequisiteMessageId: _, ...rest }) => rest)(view()),
+    wake(1),
+  ];
+  for (const [index, item] of views.entries())
+    it(`agrees on retried generation ${index + 1}`, () => {
+      expect(chatWakeView(item) !== null).toBe(ChatWakeView.safeParse(item).success);
     });
 });

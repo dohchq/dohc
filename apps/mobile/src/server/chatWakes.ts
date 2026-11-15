@@ -1,10 +1,11 @@
-import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
-import { each, isFields, okAnswer, segment } from "./api";
+import type { ChatWakeView, PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
+import { each, isFields, okAnswer, segment, text } from "./api";
+import { isRefusalReason } from "./chatWrites";
 import { REQUEST_TIMEOUT_MS, ServerError, type ServerClient } from "./client";
 import { isCursor, type MissingChat } from "./workspaceReads";
 
-// The wakes of the messages a chat or thread shows, from the server's context for the phone, and the account's wake
-// changes. Both answers are checked by hand against the relay's contract (packages/workspace-contracts/src/chatWakes.ts)
+// The wakes of the messages a chat or thread shows, from the server's context for the phone, the account's wake
+// changes, and Try again on a wake. Every answer is checked by hand against the relay's contract (packages/workspace-contracts/src/chatWakes.ts)
 // before the phone keeps them, as the phone's other reads are: the contract's schemas would bring zod into the app.
 // chatWakes.test.ts holds these checks to the contract's. The wake cursor is decimal text, apart from the workspace
 // feed's dotted cursor.
@@ -233,6 +234,98 @@ export function readWakeChanges(
     },
     undefined,
     { signal: options.signal, timeoutMs: options.holdMs + REQUEST_TIMEOUT_MS },
+  );
+}
+
+/** A wake as the account's computers see it, the contract's `ChatWakeView`, or null. */
+export function chatWakeView(item: unknown): ChatWakeView | null {
+  if (!isFields(item)) return null;
+  const {
+    wakeId,
+    workspaceId,
+    messageId,
+    threadId,
+    generation,
+    state,
+    prerequisiteMessageId,
+    winnerLabel,
+  } = item;
+  if (
+    Object.keys(item).length !== 8 ||
+    typeof wakeId !== "string" ||
+    !WAKE_ID.test(wakeId) ||
+    !id(workspaceId) ||
+    !id(messageId) ||
+    !id(threadId) ||
+    !order(generation) ||
+    typeof state !== "string" ||
+    !WAKE_STATES.has(state) ||
+    (prerequisiteMessageId !== null && !id(prerequisiteMessageId)) ||
+    (winnerLabel !== null && !line(winnerLabel, 64))
+  )
+    return null;
+  return {
+    wakeId,
+    workspaceId,
+    messageId,
+    threadId,
+    generation,
+    state: state as ChatWakeView["state"],
+    prerequisiteMessageId,
+    winnerLabel,
+  };
+}
+
+/**
+ * A Try again's answer. `retried` names the generation the server answered, which proves nothing ran; the phone shows
+ * nothing of it and reads the conversation's context again. `refused` doesn't mean the wake didn't start. `missing`:
+ * the server has no wake the account may see by that ID.
+ */
+export type RetryWakeAnswer =
+  | { readonly kind: "retried"; readonly wake: ChatWakeView }
+  | { readonly kind: "refused" }
+  | { readonly kind: "missing" };
+
+/** The `result` of a Try again's answer (services/sync-relay/src/accountChatWrites.ts `runAccountRetryWake`), or null. */
+export function retryWakeResult(result: unknown): RetryWakeAnswer | null {
+  if (!isFields(result)) return null;
+  if (result.ok === true) {
+    const wake = chatWakeView(result.wake);
+    return wake && { kind: "retried", wake };
+  }
+  if (result.ok === false && result.refusal === "refused" && isRefusalReason(result.reason))
+    return { kind: "refused" };
+  if (result.ok === false && result.refusal === "missing" && text(result.reason))
+    return { kind: "missing" };
+  return null;
+}
+
+/** As long as a chat write waits: the relay syncs its copy, twice at most, before it answers. */
+const RETRY_TIMEOUT_MS = 30_000;
+
+/**
+ * Tries a wake again, `POST /sync/<workspace>/ops/retryWake`. The same operation ID sent again answers the generation
+ * the first answered. The cursor is checked, never used: a retry moves neither the feed nor the wake cursor.
+ */
+export function retryWake(
+  client: ServerClient,
+  workspaceId: string,
+  operationId: string,
+  wakeId: string,
+  signal: AbortSignal,
+): Promise<RetryWakeAnswer> {
+  return client.send(
+    "POST",
+    `/sync/${segment(workspaceId)}/ops/retryWake`,
+    (body): RetryWakeAnswer | null => {
+      const answer = okAnswer(body);
+      if (!answer || !isCursor(answer.cursor)) return null;
+      const result = retryWakeResult(answer.result);
+      if (result?.kind === "retried" && result.wake.workspaceId !== workspaceId) return null;
+      return result;
+    },
+    { operationId, wakeId },
+    { signal, timeoutMs: RETRY_TIMEOUT_MS },
   );
 }
 

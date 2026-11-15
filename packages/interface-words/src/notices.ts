@@ -183,6 +183,13 @@ export const chatWords = {
   wakeNoOtherComputer: "No other computer can run this agent.",
   /** A read of a conversation's wakes failed: the last lines stay, with Try again. */
   wakeReadFailed: "dohc could not read this agent's state.",
+  /** Tries a wake that wasn't confirmed on another computer: the line's pill, and its alert's title and action. */
+  wakeTryElsewhere: "Try on another computer",
+  /** That alert's body. The agent is "an agent" mid-sentence when it has no name, as the lines' "An agent". */
+  wakeRunTwice: (name: string | null, computer: string | null) =>
+    `If ${computer ?? "that computer"} already started ${name ?? "an agent"}, it may run twice.`,
+  /** A Try again on a wake failed or was refused: the line keeps its state, with Try again. */
+  wakeRetryFailed: "dohc could not retry this agent.",
 } as const;
 
 // A notice's time, as the desktop's Notices show it (apps/desktop/src/renderer/relativeTime.ts, which can move here).

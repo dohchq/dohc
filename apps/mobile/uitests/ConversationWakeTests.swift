@@ -2,7 +2,8 @@ import XCTest
 
 // The sample's agent wakes in #planning (`-dohcDemo talk-wakes`): one line per wake, with the agent's name or "An
 // agent", the computer or "a computer", and "No other computer can run this agent." under an ended wake no computer
-// could try again. Held and queued wakes show no line. The lines only read: they offer no action. It reaches no server.
+// could try again. Held and queued wakes show no line. A line that didn't start offers Try again, and one not confirmed
+// Try on another computer, which asks first; each ends with the agent waiting. It reaches no server.
 final class ConversationWakeTests: XCTestCase {
   private func launch() -> XCUIApplication {
     let app = XCUIApplication()
@@ -24,6 +25,16 @@ final class ConversationWakeTests: XCTestCase {
   /// same label and frame, so a test counts frames, never elements.
   private func places(_ app: XCUIApplication, _ value: String) -> Set<String> {
     Set(texts(app, value).allElementsBoundByIndex.map { String(describing: $0.frame) })
+  }
+
+  /// The button labelled `label` nearest below the line `value`: each line's pill sits under its words, and other lines
+  /// may offer a pill with the same label. A pill's 44 pt touch area reaches 6 pt above the pill, over the words' last
+  /// line, so the button's centre, not its top, is what lies below them.
+  private func pill(_ app: XCUIApplication, _ label: String, under value: String) -> XCUIElement? {
+    let line = text(app, value).frame
+    return app.buttons.matching(NSPredicate(format: "label == %@", label)).allElementsBoundByIndex
+      .filter { $0.frame.midY > line.maxY }
+      .min { $0.frame.midY < $1.frame.midY }
   }
 
   @MainActor
@@ -61,6 +72,53 @@ final class ConversationWakeTests: XCTestCase {
       app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Mention the agent")).firstMatch.exists,
       "No line should ask for a mention"
     )
-    XCTAssertFalse(app.buttons["Try again"].exists, "The lines should offer no action")
+  }
+
+  @MainActor
+  func testTryAgainOnALineThatDidNotStartEndsWithTheAgentWaiting() {
+    let app = launch()
+    let line = "Scout didn't start"
+    XCTAssertTrue(text(app, line).waitForExistence(timeout: 5), "Scout's wake should say it didn't start")
+    guard let button = pill(app, "Try again", under: line) else {
+      return XCTFail("Scout's line should offer Try again")
+    }
+    button.tap()
+    XCTAssertTrue(
+      text(app, "Scout is waiting for a computer").waitForExistence(timeout: 10),
+      "Try again should end with Scout waiting for a computer"
+    )
+    XCTAssertFalse(text(app, line).exists, "The line that didn't start should be replaced")
+  }
+
+  @MainActor
+  func testTryOnAnotherComputerAsksFirstAndCancelChangesNothing() {
+    let app = launch()
+    let line = "Iris isn't confirmed on Ice's Mac. It may have started."
+    let waiting = "Iris is waiting for a computer"
+    XCTAssertTrue(text(app, line).waitForExistence(timeout: 5), "Iris's wake should say it isn't confirmed")
+    guard let button = pill(app, "Try on another computer", under: line) else {
+      return XCTFail("Iris's line should offer Try on another computer")
+    }
+    button.tap()
+    let sheet = app.sheets.firstMatch
+    XCTAssertTrue(sheet.waitForExistence(timeout: 5), "Try on another computer should ask first")
+    XCTAssertTrue(
+      sheet.staticTexts["If Ice's Mac already started Iris, it may run twice."].exists,
+      "The alert should name the computer and the agent"
+    )
+    sheet.buttons["Cancel"].tap()
+    XCTAssertTrue(text(app, line).exists, "Cancel should leave the line as it was")
+    XCTAssertFalse(text(app, waiting).exists, "Cancel should try nothing")
+
+    guard let again = pill(app, "Try on another computer", under: line) else {
+      return XCTFail("The line should still offer Try on another computer after Cancel")
+    }
+    again.tap()
+    XCTAssertTrue(sheet.waitForExistence(timeout: 5), "Try on another computer should ask again")
+    sheet.buttons["Try on another computer"].tap()
+    XCTAssertTrue(
+      text(app, waiting).waitForExistence(timeout: 10),
+      "Confirming should end with Iris waiting for a computer"
+    )
   }
 }

@@ -29,12 +29,14 @@ import { DecisionCard } from "./DecisionCard";
 import { localOffers } from "./outboxMessages";
 import type { Author, LocalMark, Message, Reaction, ReactionMark, Segment } from "./types";
 import type { AnswerActions, LocalActions, ReactActions } from "./useOutbox";
+import type { WakeRetry } from "./chatWakeState";
 import { WakeState } from "./WakeState";
 
 // One message, as in Slack: an author line starts a group; follow-ups from the same author within a few minutes don't repeat it.
 // Where writes are on, a message the server has offers its reactions, Add reaction and Reply; one only this phone has
 // offers Reply when a reply can wait for it. A message that asks a question or a poll shows its card, which takes
-// answers where writes are on. A message the server has shows where each agent it woke stands, read-only.
+// answers where writes are on. A message the server has shows where each agent it woke stands, and, where writes are
+// on, Try again on an agent that didn't start or wasn't confirmed.
 export const MessageRow = memo(function MessageRow({
   message,
   continued,
@@ -47,6 +49,8 @@ export const MessageRow = memo(function MessageRow({
   wakes,
   wakesFailed = false,
   onRetryWakes,
+  wakeRetries,
+  onRetryWake,
 }: {
   message: Message;
   continued: boolean;
@@ -64,6 +68,10 @@ export const MessageRow = memo(function MessageRow({
   /** That read failed, so the wakes are from the read before. */
   wakesFailed?: boolean;
   onRetryWakes?(): void;
+  /** Its conversation's lines' Try again states, by wake ID. */
+  wakeRetries?: ReadonlyMap<string, WakeRetry>;
+  /** Try again on one of its lines, where writes are on and the read holds. */
+  onRetryWake?(wake: PhoneChatWake): void;
 }) {
   const theme = useTheme();
   const paddingTop = continued ? (afterExtras ? 12 : 8) : 14;
@@ -116,6 +124,8 @@ export const MessageRow = memo(function MessageRow({
             wakes={wakes}
             failed={wakesFailed}
             {...(onRetryWakes ? { onRetry: onRetryWakes } : {})}
+            {...(wakeRetries ? { retries: wakeRetries } : {})}
+            {...(onRetryWake ? { onRetryWake } : {})}
           />
         ) : null}
         {message.local === undefined && message.threadId && react ? (
