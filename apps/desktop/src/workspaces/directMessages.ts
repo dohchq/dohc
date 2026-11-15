@@ -184,11 +184,14 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
         if (unchanged) await pause(dependencies.retryMs ?? 1_000);
       } catch {
         if (stop.aborted) return;
-        // The first failure is a change, so a window falls back to the saved copy instead of waiting to fail a send.
-        if (since >= 0) dependencies.changed();
+        // Every failure is a change, so a window falls back to the saved copy instead of waiting to fail a send.
+        // Not only the first: a server shutting down can fail this call and still answer the list read it starts.
+        dependencies.changed();
+        // The first retry comes soon, so that case settles in a second rather than a full wait.
+        const first = since >= 0;
         // The answer after a failure counts as a change too: a window may have fallen back to the saved copy meanwhile.
         since = -1;
-        await pause(dependencies.retryMs ?? 15_000);
+        await pause(dependencies.retryMs ?? (first ? 1_000 : 15_000));
       }
     }
   }

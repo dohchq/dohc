@@ -270,27 +270,30 @@ ${cat.userId}`).digest("hex").slice(0, 32);
     h.routes.set("/sync/direct/activity", () => Response.json({ revision: 42 }));
     h.goOffline();
     const stop = h.service.listen();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(h.changes()).toBe(0);
+    await expect.poll(() => h.requests.length).toBeGreaterThan(1);
     h.goOnline();
-    await expect.poll(() => h.changes()).toBe(1);
+    const offline = h.changes();
+    await expect.poll(() => h.changes()).toBeGreaterThan(offline);
     stop();
   });
 
-  it("tells listeners once when the server goes away, and again when it answers with nothing new", async () => {
+  it("tells listeners on each failure while the server is away, and once when it answers with nothing new", async () => {
     const h = harness();
     h.routes.set("/sync/direct/activity", () => Response.json({ revision: 7 }));
     const stop = h.service.listen();
     await expect.poll(() => h.changes()).toBe(1);
     h.goOffline();
-    // Losing the server is a change too, so an open conversation shows the saved copy.
-    await expect.poll(() => h.changes()).toBe(2);
-    const failedFrom = h.requests.length;
-    await expect.poll(() => h.requests.length).toBeGreaterThan(failedFrom + 1);
-    // Failing again is not another change.
-    expect(h.changes()).toBe(2);
+    // Losing the server is a change, so an open conversation shows the saved copy.
+    // So is each later failure: the first may have raced a server still answering the list as it shut down.
+    await expect.poll(() => h.changes()).toBeGreaterThanOrEqual(3);
     h.goOnline();
-    await expect.poll(() => h.changes()).toBe(3);
+    const offline = h.changes();
+    await expect.poll(() => h.changes()).toBeGreaterThan(offline);
+    // Back online with nothing new, it stops telling.
+    const settled = h.changes();
+    const from = h.requests.length;
+    await expect.poll(() => h.requests.length).toBeGreaterThan(from + 2);
+    expect(h.changes()).toBe(settled);
     stop();
   });
 
