@@ -3762,6 +3762,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("share_view_fences.sql"),
         sets_user_version: None,
     },
+    // A folder whose rule changed on disk and waits for its owner.
+    Migration {
+        ordinal: 106,
+        id: "v2-access-rule-holds",
+        sql: include_str!("access_rule_holds.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5745,6 +5752,10 @@ mod tests {
             (
                 "v2-share-view-fences",
                 "106779c42c404b7cb144a53d3f7394ecf24da6458f1e391466b1967ea66b5315",
+            ),
+            (
+                "v2-access-rule-holds",
+                "7d6ca51f44d9243f4b9c0385a6d4e8e61d02037ef050eb5bfe6b652d8a1be69b",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

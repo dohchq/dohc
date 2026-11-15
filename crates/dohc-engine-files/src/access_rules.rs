@@ -265,6 +265,59 @@ pub fn rule_only_narrows(previous: &AccessRule, next: &AccessRule) -> bool {
         })
 }
 
+/// What members could reach at a folder before a new rule there.
+#[derive(Clone, Copy, Debug)]
+pub enum ReachBefore<'a> {
+    /// The rule last committed at this folder; `None` when it was unreadable.
+    Own(Option<&'a AccessRule>),
+    /// No rule was committed here; this is the nearest ancestor's, `None`
+    /// when that one was unreadable.
+    Inherited(Option<&'a AccessRule>),
+    /// No rule above either: members hold their workspace level, which the
+    /// engine does not know.
+    WorkspaceLevel,
+}
+
+/// Whether `next` (`None` when unreadable) gives nobody more than they could
+/// reach before. An unreadable rule hides its folder, so it always narrows.
+pub fn rule_change_narrows(before: ReachBefore<'_>, next: Option<&AccessRule>) -> bool {
+    let Some(next) = next else {
+        return true;
+    };
+    match before {
+        ReachBefore::Own(None) => false,
+        ReachBefore::Own(Some(previous)) => rule_only_narrows(previous, next),
+        // Whatever an unreadable ancestor hides stays hidden below it.
+        ReachBefore::Inherited(None) => true,
+        ReachBefore::Inherited(Some(above)) => {
+            let fits = |before: Option<Level>, after: Option<Level>| {
+                before.is_none() || lower(before, after) == after
+            };
+            fits(above.members, next.members)
+                && emails(above, next).into_iter().all(|email| {
+                    fits(level_for_email(above, email), level_for_email(next, email))
+                })
+        }
+        ReachBefore::WorkspaceLevel => next
+            .members
+            .iter()
+            .chain(next.people.values())
+            .all(|level| *level == Level::View),
+    }
+}
+
+/// Where a change at `path` goes in an operation that changes many paths:
+/// rule writes first, outer folders before inner ones; rule deletes last,
+/// inner folders before outer ones; every other path between, in its order.
+/// Sorting by path alone is wrong: `a/Z.md` sorts before `a/access.yaml`.
+pub fn access_rule_rank(path: &str, deletes: bool) -> (u8, i64) {
+    if !is_access_rule_path(path) {
+        return (1, 0);
+    }
+    let depth = i64::try_from(path.matches('/').count()).unwrap_or(i64::MAX);
+    if deletes { (2, -depth) } else { (0, depth) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +408,51 @@ mod tests {
     fn refuses_a_rule_over_the_size_cap() {
         let text = format!("members: view\n#{}\n", "x".repeat(ACCESS_RULE_MAX_BYTES));
         assert_eq!(parse_access_rule(&text), None);
+    }
+
+    fn rule(text: &str) -> AccessRule {
+        parse_access_rule(text).expect("a readable rule")
+    }
+
+    #[test]
+    fn judges_a_new_or_changed_rule_against_what_members_reached_before() {
+        let view = rule("members: view\n");
+        let edit = rule("members: edit\n");
+        let sam_edit = rule("people:\n  sam@example.com: edit\n");
+        let nobody = rule("");
+        let cases = [
+            ("unreadable hides", ReachBefore::Own(Some(&view)), None, true),
+            ("own narrows", ReachBefore::Own(Some(&edit)), Some(&view), true),
+            ("own widens", ReachBefore::Own(Some(&view)), Some(&edit), false),
+            ("readable after unreadable", ReachBefore::Own(None), Some(&nobody), false),
+            ("under a view rule", ReachBefore::Inherited(Some(&view)), Some(&edit), false),
+            ("under an edit rule", ReachBefore::Inherited(Some(&edit)), Some(&view), true),
+            // Sam alone could reach the ancestor; the rest were hidden there.
+            (
+                "under a rule that hides members",
+                ReachBefore::Inherited(Some(&sam_edit)),
+                Some(&edit),
+                true,
+            ),
+            ("under an unreadable rule", ReachBefore::Inherited(None), Some(&edit), true),
+            ("view for all", ReachBefore::WorkspaceLevel, Some(&view), true),
+            ("names nobody", ReachBefore::WorkspaceLevel, Some(&nobody), true),
+            ("edit for members", ReachBefore::WorkspaceLevel, Some(&edit), false),
+            ("edit for sam", ReachBefore::WorkspaceLevel, Some(&sam_edit), false),
+        ];
+        for (name, before, next, narrows) in cases {
+            assert_eq!(rule_change_narrows(before, next), narrows, "{name}");
+        }
+    }
+
+    #[test]
+    fn sorts_rule_writes_first_and_rule_deletes_last() {
+        let mut writes = vec!["a/Z.md", "a/b/access.yaml", "a/access.yaml", "access.yaml"];
+        writes.sort_by_key(|path| (access_rule_rank(path, false), *path));
+        assert_eq!(writes, ["access.yaml", "a/access.yaml", "a/b/access.yaml", "a/Z.md"]);
+        let mut deletes = vec!["access.yaml", "a/access.yaml", "a/b/access.yaml", "a/Z.md"];
+        deletes.sort_by_key(|path| (access_rule_rank(path, true), *path));
+        assert_eq!(deletes, ["a/Z.md", "a/b/access.yaml", "a/access.yaml", "access.yaml"]);
     }
 
     #[test]
