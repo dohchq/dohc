@@ -19,7 +19,7 @@ import { realpathSync, type BigIntStats } from "node:fs";
 import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, join, parse } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
-import { recordNeverSynced, recordSynced, type Computer } from "./syncHistory";
+import { recordJoined, recordNeverSynced, recordSynced, type Computer } from "./syncHistory";
 import { recordNewCollectionsHolder } from "./collectionsHolder";
 import { identityOf } from "./workspaceTrust";
 
@@ -298,6 +298,10 @@ export async function createWorkspaceFolderWithFreshness(input: {
     kind: input.kind,
   });
 
+  // Before the manifest: a join cut short after it would leave a folder that
+  // joins again as an existing workspace, with no mark, so it could keep
+  // Collections another computer has.
+  if (input.workspaceId !== undefined) await recordJoined(rootPath);
   // inspectManifest checked the entry itself: Windows "wx" can follow a
   // dangling link. "wx" keeps a competing regular file from being replaced.
   await writeFile(join(metadataDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, {

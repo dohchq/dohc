@@ -2320,6 +2320,17 @@ describe("a Collection this computer cannot use", () => {
     await screen.findByLabelText("Collection view state");
   });
 
+  it("offers no way to keep Collections here on a computer that joined, where that would make a second store", async () => {
+    const words =
+      "Another computer keeps this workspace's Collections. Open this workspace there to use them.";
+    backend.dataset.mockRejectedValueOnce(refused("collections-joined", words));
+    render(
+      <ConnectedTransactionalCollection {...props} onError={vi.fn()} onKeepCollections={vi.fn()} />,
+    );
+    expect((await screen.findByTestId("collection-refusal")).textContent).toBe(words);
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
   it("names the server it needs in place, without a toast, when there is no saved copy, and reads again on Try again", async () => {
     const words = "This Collection needs sync.example.test, which dohc can't reach.";
     backend.dataset.mockRejectedValueOnce(

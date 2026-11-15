@@ -982,6 +982,10 @@ describe("error words", () => {
     ).toEqual(unclaimed);
     for (const [returned, thrown] of [
       [unclaimed, new CollectionsRefusalError({ kind: "unclaimed" })],
+      [
+        { kind: "joined", words: new CollectionsRefusalError({ kind: "joined" }).message },
+        new CollectionsRefusalError({ kind: "joined" }),
+      ],
       [{ kind: "elsewhere", words: elsewhere.message, computer: "Laptop" }, elsewhere],
     ] as const) {
       expect(readError(collectionsRefusalError(returned))).toEqual(

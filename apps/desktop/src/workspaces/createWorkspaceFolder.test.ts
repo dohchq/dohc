@@ -19,7 +19,12 @@ import {
   canonicalWorkspaceRoot,
   createWorkspaceFolder,
 } from "./createWorkspaceFolder";
-import { readSyncHistory, recordSynced, scheduleComputer } from "./syncHistory";
+import {
+  joinedThroughServer,
+  readSyncHistory,
+  recordSynced,
+  scheduleComputer,
+} from "./syncHistory";
 import { createTestScratch } from "./testTemp";
 
 // The refusal's name crosses IPC, so the screen that shows it offers
@@ -221,6 +226,30 @@ describe("createWorkspaceFolder", () => {
     expect(await readdir(join(joined, ".dohc"))).not.toContain("collections.json");
   });
 
+  it("marks a join before its manifest, so a join cut short and tried again is still marked", async () => {
+    const root = join(base, "joined-again");
+    const join_ = () =>
+      createWorkspaceFolder({
+        rootPath: root,
+        homeDir,
+        stateDir,
+        computer,
+        kind: "personal",
+        workspaceId: "ws-synced-elsewhere",
+      });
+    // The first join stops where the mark's folder is made, as a crash would.
+    let stopped = false;
+    vi.mocked(mkdir).mockImplementation(async (path, options) => {
+      if (stopped || basename(String(path)) !== "sync-history")
+        return actualFs.mkdir(path, options);
+      stopped = true;
+      throw Object.assign(new Error(`EPERM: ${String(path)}`), { code: "EPERM" });
+    });
+    await expect(join_()).rejects.toThrow("EPERM");
+    await join_();
+    expect(await joinedThroughServer(root)).toBe(true);
+  });
+
   it("keeps a workspace's sync history in its folder, so a reattach still knows it synced", async () => {
     const root = join(base, "reattached");
     await createWorkspaceFolder({ rootPath: root, homeDir, stateDir, computer, kind: "personal" });
@@ -238,6 +267,8 @@ describe("createWorkspaceFolder", () => {
       workspaceId: "ws-synced-elsewhere",
     });
     expect(await readSyncHistory(joined), "a join synced").toBe("synced");
+    expect(await joinedThroughServer(joined), "and joined").toBe(true);
+    expect(await joinedThroughServer(root), "a folder made here did not").toBe(false);
 
     const legacy = join(base, "legacy");
     await mkdir(join(legacy, ".dohc"), { recursive: true });

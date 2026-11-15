@@ -15,6 +15,7 @@ import {
   recordNewCollectionsHolder,
   type KeepSteps,
 } from "./collectionsHolder";
+import { recordJoined, recordNeverSynced, recordSynced } from "./syncHistory";
 import { createTestScratch } from "./testTemp";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -471,6 +472,48 @@ describe("keeping the Collections on this computer", () => {
     expect(await admitCollectionsStore(root, workspaceId, required)).toMatchObject({
       kind: "create",
     });
+  });
+
+  // A server's sync never carries .dohc, so a computer that joined through
+  // it has no record and no store, and its Collections can never arrive. A
+  // store made here would be a second, empty one for the same Collections.
+  it("refuses, and records nothing, on a computer that joined a synced workspace and has no store", async () => {
+    await recordJoined(root);
+    await recordSynced(root);
+    const kept = steps();
+    const refused = await refusal(keepCollectionsHere(root, workspaceId, here, kept));
+    expect(refused.refusal).toEqual({ kind: "joined" });
+    expect(refused.code).toBe("collections-joined");
+    expect(refused.message).toBe(
+      "Another computer keeps this workspace's Collections. Open this workspace there to use them.",
+    );
+    expect(kept.confirm).not.toHaveBeenCalled();
+    expect(await exists(recordPath()), "nothing kept").toBe(false);
+    expect((await refusal(admitCollectionsStore(root, workspaceId, required))).refusal).toEqual({
+      kind: "joined",
+    });
+  });
+
+  // As a workspace from before dohc kept the record does, on the computer that made it.
+  it("still keeps the Collections of a synced workspace this computer did not join", async () => {
+    await recordNeverSynced(root, here);
+    await recordSynced(root);
+    const kept = steps({ madeBy: async () => here });
+    expect(await keepCollectionsHere(root, workspaceId, here, kept)).toBe(true);
+    expect(await recordNow()).toMatchObject({ installId: "install-here", storeId: null });
+  });
+
+  it("adopts a store on a computer that joined, since adopting makes no second store", async () => {
+    await recordJoined(root);
+    await addStore();
+    let adopted = "";
+    const kept = steps({
+      adoptStore: async (id) => {
+        adopted = id;
+      },
+    });
+    expect(await keepCollectionsHere(root, workspaceId, here, kept)).toBe(true);
+    expect((await recordNow()).storeId).toBe(adopted);
   });
 
   it("leaves Collections this computer keeps as they are", async () => {

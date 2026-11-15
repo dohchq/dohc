@@ -384,6 +384,7 @@ This check uses the form that the desktop creates for a Collection.
 1. **Operator:** On the desktop you connected in [Account email](#account-email), open a synced workspace.
    Choose **New collection** in the command palette (Ctrl+K, or Cmd+K on a Mac). Name it `Drive entry check` and the UTC date and time, such as `Drive entry check 20260115-0130`, so each run gets new folders. Turn on **Require Name**.
    If dohc says it doesn't know which computer keeps this workspace's Collections, choose **Use this computer**.
+   If it says another computer keeps them, run this check on that computer.
 2. **Operator:** In the Collection's toolbar, choose **Manage Collection**, then **Create form**. Keep the Name field and choose **Create form**.
 3. **Operator:** Choose **Review and open app**. Review its files and the access it requests, then choose **Approve and open**.
 4. **Operator:** Open the app's review and choose **Publish on a link**, then **Share app folder**.
