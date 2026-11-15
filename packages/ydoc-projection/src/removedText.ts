@@ -124,7 +124,8 @@ function unnamed(item: Y.Item, named: DeleteSet): [number, number][] {
     else high = middle;
   }
   let cursor = from;
-  for (const deleted of listed.slice(low)) {
+  for (let at = low; at < listed.length; at++) {
+    const deleted = listed[at]!;
     if (deleted.clock >= to) break;
     if (deleted.clock > cursor) ranges.push([cursor - from, deleted.clock - from]);
     cursor = Math.max(cursor, deleted.clock + deleted.len);
