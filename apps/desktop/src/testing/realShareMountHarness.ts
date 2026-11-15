@@ -18,6 +18,7 @@ import {
 } from "../workspaces/shareMounts";
 import { createShareSkipRecorder } from "../workspaces/shareSkipRecorder";
 import { createShareViewFiles, type ShareViewFiles } from "../workspaces/shareViewFiles";
+import { sharedViewHistory } from "../workspaces/sharedViewHistory";
 import { resolveRegisteredShareViewFilesTarget } from "../workspaces/shareViewFilesTarget";
 import { fetchShareViewInfo } from "../workspaces/shareViewInfo";
 import { withExclusiveWorkspaceOperation } from "../workspaces/workspaceAssets";
@@ -193,6 +194,24 @@ export function createRealShareMountHarness(input: {
     mount: (shareCode: string) => commands.mount({ workspace, shareCode, assertCurrent }),
     refresh: () => commands.refresh({ workspace, assertCurrent }),
     unmount: (shareId: string) => commands.unmount({ workspace, shareId, assertCurrent }),
+    // The mount's History as the desktop's History list and its open read it.
+    history: async (shareId: string) => {
+      const target = resolveRegisteredShareViewFilesTarget(workspace, {
+        kind: "mount",
+        workspaceId: workspace.workspaceId,
+        shareId,
+      });
+      if (!target) throw new Error("Missing mount");
+      const history = sharedViewHistory(
+        received.storeFor({
+          engineWorkspaceId: target.storeWorkspaceId,
+          rootPath: target.rootPath,
+        }),
+        target.storeWorkspaceId,
+      );
+      const { moments } = await history.listMoments({ limit: 50 });
+      return await Promise.all(moments.map((moment) => history.readMoment(moment.id)));
+    },
     linksEdges: (shareId: string, cursor?: string) =>
       files.linksEdges(
         { kind: "mount", workspaceId: workspace.workspaceId, shareId },

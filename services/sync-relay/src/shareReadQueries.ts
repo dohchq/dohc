@@ -60,6 +60,7 @@ export function createShareReadQueries(
     | "laterObjectMomentPaths"
     | "listLinkRevisionLogRows"
     | "currentObjectFile"
+    | "isCurrentFileState"
     | "indexReceivedWorkTargets"
   >,
   linkFreshnessPageSize: number,
@@ -187,6 +188,57 @@ export function createShareReadQueries(
     return null;
   };
 
+  // Below Edit a recipient reads current files only. A moment or fork
+  // snapshot is current while the file it produced is still that file's
+  // state (docs/engineering/security-boundaries.md).
+  const isCurrentState = (
+    workspaceId: string,
+    selector: ShareSelector,
+    row: Pick<SyncRelayLogRow, "relaySeq">,
+    path: unknown,
+  ) =>
+    typeof path === "string" &&
+    storage.isCurrentFileState({
+      workspaceId,
+      versionId: targetVersionId(selector),
+      path,
+      relaySeq: row.relaySeq,
+    });
+
+  // Rewrites a served file op for a recipient below Edit, or drops it. A
+  // replaced write is dropped. A replaced rename becomes a delete of its old
+  // path, so a recipient that already holds that path loses it. A delete names
+  // no content and is served unchanged. No served op keeps a before-hash.
+  const currentFilesOp = (
+    workspaceId: string,
+    selector: ShareSelector,
+    row: Pick<SyncRelayLogRow, "relaySeq" | "opKind">,
+    served: Record<string, unknown>,
+  ): Record<string, unknown> | null => {
+    if (row.opKind === "version.create") {
+      const snapshots = Array.isArray(served.forkSnapshots) ? served.forkSnapshots : [];
+      served.forkSnapshots = snapshots.filter((snapshot: Record<string, unknown>) =>
+        isCurrentState(workspaceId, selector, row, snapshot.path),
+      );
+      return served;
+    }
+    if (row.opKind !== "moment.append") return served;
+    served.payloadBeforeBlobSha256 = null;
+    if (served.operation === "delete") return served;
+    if (isCurrentState(workspaceId, selector, row, served.payloadAfterPath ?? served.path))
+      return served;
+    if (served.operation !== "rename" || typeof served.payloadBeforePath !== "string") return null;
+    return {
+      operation: "delete",
+      versionId: served.versionId,
+      metadata: served.metadata,
+      payloadBeforeBlobSha256: null,
+      path: served.payloadBeforePath,
+      payloadBeforePath: served.payloadBeforePath,
+      ...(served.objectId !== undefined ? { objectId: served.objectId } : {}),
+    };
+  };
+
   const filteredLogPage = (
     workspaceId: string,
     shareId: string,
@@ -228,6 +280,8 @@ export function createShareReadQueries(
         ? createAccountlessPathProjection(fileSelector)
         : null;
     const currentFiles = new Map<string, ReturnType<typeof storage.currentObjectFile>>();
+    const currentFilesSelector =
+      audience === "authenticated" && fileSelector?.access !== "edit" ? fileSelector : null;
     const page = scanFilteredLog(
       storage,
       {
@@ -250,7 +304,7 @@ export function createShareReadQueries(
           chatResolver,
           half,
         );
-        const payload = decision.allowed
+        let payload = decision.allowed
           ? accountlessProjection
             ? accountlessProjection.projectPayload(decision.payload)
             : decision.payload
@@ -275,6 +329,15 @@ export function createShareReadQueries(
             served: payload as Record<string, unknown>,
             ...(accountlessProjection ? { projectPath: accountlessProjection.projectPath } : {}),
           });
+        if (currentFilesSelector) {
+          payload = currentFilesOp(
+            workspaceId,
+            currentFilesSelector,
+            row,
+            payload as Record<string, unknown>,
+          );
+          if (payload === null) return null;
+        }
         if (currentOnly) {
           if (!fileSelector || !accountlessProjection || !recipient) return null;
           const reset = { relaySeq: row.relaySeq, opKind: "files.reset", payload: {} };
@@ -415,7 +478,10 @@ export function createShareReadQueries(
     return { lastSettledAtMs: null, lastSettledKnown: false };
   };
 
-  const historicalSharedBlob = (
+  // A named recipient's blob: the after-content of an op the log would serve.
+  // Edit reads any op the filter admits. Below Edit the op must still be its
+  // file's current state.
+  const namedShareBlob = (
     workspaceId: string,
     selector: AnyShareSelector,
     sha256: string,
@@ -445,7 +511,16 @@ export function createShareReadQueries(
     const chatResolver = chatResolverFor(workspaceId);
     const reachable = candidates.some((row) => {
       const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
-      return decision.allowed && decision.blobSha256s.includes(sha256);
+      if (!decision.allowed || !decision.blobSha256s.includes(sha256)) return false;
+      if (selector.access === "edit") return true;
+      const served = decision.payload as Record<string, unknown>;
+      if (row.opKind === "version.create")
+        return (Array.isArray(served.forkSnapshots) ? served.forkSnapshots : []).some(
+          (snapshot: Record<string, unknown>) =>
+            snapshot.blobSha256 === sha256 &&
+            isCurrentState(workspaceId, selector, row, snapshot.path),
+        );
+      return isCurrentState(workspaceId, selector, row, served.payloadAfterPath ?? served.path);
     });
     return reachable ? storage.getBlob(workspaceId, sha256) : null;
   };
@@ -516,7 +591,7 @@ export function createShareReadQueries(
     chatResolverFor,
     filteredLogPage,
     newestFilteredOpFreshness,
-    historicalSharedBlob,
+    namedShareBlob,
     linkRevisionByteLength,
   };
 }

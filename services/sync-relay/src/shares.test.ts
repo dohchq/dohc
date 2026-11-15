@@ -597,28 +597,34 @@ describe("share grants", () => {
     expect((await h(request(RECIPIENT, `/sync/shares/${shareId}/log?since=0`))).status).toBe(404);
   });
 
-  it("serves an earlier write's blob to an authenticated recipient replaying share history", async () => {
-    const storage = await testStorage();
-    const h = handler(storage);
-    await createWorkspace(h);
-    const earlierContent = "earlier body";
-    const replacementContent = "replacement body";
-    const earlierSha = await putBlob(h, earlierContent);
-    await putBlob(h, replacementContent);
-    await appendOps(h, [
-      momentOp("docs/shared.md", earlierContent),
-      momentOp("docs/shared.md", replacementContent, {
-        payloadBeforeBlobSha256: earlierSha,
-        payloadBeforePath: "docs/shared.md",
-        beforePresent: "present",
-      }),
-    ]);
-    await createShare(h);
+  it.each([
+    ["view", 404],
+    ["edit", 200],
+  ] as const)(
+    "serves an earlier write's blob to a %s recipient only at Edit",
+    async (access, status) => {
+      const storage = await testStorage();
+      const h = handler(storage);
+      await createWorkspace(h);
+      const earlierContent = "earlier body";
+      const replacementContent = "replacement body";
+      const earlierSha = await putBlob(h, earlierContent);
+      await putBlob(h, replacementContent);
+      await appendOps(h, [
+        momentOp("docs/shared.md", earlierContent),
+        momentOp("docs/shared.md", replacementContent, {
+          payloadBeforeBlobSha256: earlierSha,
+          payloadBeforePath: "docs/shared.md",
+          beforePresent: "present",
+        }),
+      ]);
+      await createShare(h, { recipientEmail: `${RECIPIENT}@dohc.test`, paths: ["docs"], access });
 
-    const earlier = await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${earlierSha}`));
-    expect(earlier.status, await earlier.clone().text()).toBe(200);
-    expect(await earlier.text()).toBe(earlierContent);
-  });
+      const earlier = await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${earlierSha}`));
+      expect(earlier.status, await earlier.clone().text()).toBe(status);
+      if (status === 200) expect(await earlier.text()).toBe(earlierContent);
+    },
+  );
 
   it("stops serving a revoked share and explains the removal only to its named recipient", async () => {
     const storage = await testStorage();
@@ -718,7 +724,9 @@ describe("share grants", () => {
     expect(serialized).not.toContain("private/b.md");
     expect(serialized).not.toContain(dropSha);
     const ops = page.ops as Array<{ opKind: string }>;
-    expect(ops.map((op) => op.opKind)).toEqual(["version.create", "moment.append"]);
+    // The write repeats the snapshot, so the snapshot stays the file's current
+    // state and a View recipient receives only the snapshot.
+    expect(ops.map((op) => op.opKind)).toEqual(["version.create"]);
 
     expect((await h(request(RECIPIENT, `/sync/shares/share-0/blobs/${keepSha}`))).status).toBe(200);
     const unknown = await denialBytes(

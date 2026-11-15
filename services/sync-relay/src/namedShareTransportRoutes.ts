@@ -66,7 +66,7 @@ export function createNamedShareTransportRoutes(
     workspaceId: string,
   ) => () => void,
   filteredLogPage: ReturnType<typeof createShareReadQueries>["filteredLogPage"],
-  historicalSharedBlob: ReturnType<typeof createShareReadQueries>["historicalSharedBlob"],
+  namedShareBlob: ReturnType<typeof createShareReadQueries>["namedShareBlob"],
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
   lookupUserDisplayName?: LogAuthorNameLookup,
   identityKey?: string | Uint8Array,
@@ -379,11 +379,13 @@ export function createNamedShareTransportRoutes(
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
       assertSha256(route.sha256);
       // A blob is served to a recipient only when at least one op that
-      // passes the share filter legitimately references it. Everything
-      // else — a blob of an unshared file, a secret ciphertext blob, a
-      // random hash — is the same generic 404 as a nonexistent share.
+      // passes the share filter legitimately references it, and below Edit
+      // only while that op is still its file's current state. Everything
+      // else — a replaced version, a blob of an unshared file, a secret
+      // ciphertext blob, a random hash — is the same generic 404 as a
+      // nonexistent share.
       // Chat shares expose no blob because their filter decisions name none.
-      const blob = historicalSharedBlob(share.workspaceId, share.selector, route.sha256);
+      const blob = namedShareBlob(share.workspaceId, share.selector, route.sha256);
       if (!blob) throw notFound();
       // Re-check revocation immediately before returning the blob body: a
       // revoke that raced with this in-flight read must abort rather than

@@ -778,6 +778,21 @@ export function currentObjectPath(
   return typeof row?.path === "string" ? row.path : null;
 }
 
+/** Whether the log row at `relaySeq` produced the current file at `path`. */
+export function isCurrentFileState(
+  storage: StorageContext,
+  input: { workspaceId: string; versionId: string; path: string; relaySeq: number },
+): boolean {
+  return (
+    storage.db
+      .prepare(
+        `SELECT 1 FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_path
+         WHERE workspace_id = ? AND version_id = ? AND path = ? AND state_relay_seq = ?`,
+      )
+      .get(input.workspaceId, input.versionId, input.path, input.relaySeq) !== undefined
+  );
+}
+
 export function currentObjectFile(
   storage: StorageContext,
   input: {

@@ -1724,6 +1724,12 @@ export interface SyncRelayStorage {
     epochLogFloor: number;
   }): SyncRelayLogRow[];
   captureReadRevisionMatches(): () => boolean;
+  isCurrentFileState(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+    relaySeq: number;
+  }): boolean;
   currentObjectFile(input: {
     workspaceId: string;
     versionId: string;

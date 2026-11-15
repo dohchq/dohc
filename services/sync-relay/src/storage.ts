@@ -2213,6 +2213,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return captureSqliteReadRevisionMatches(this.db);
   }
 
+  isCurrentFileState(input: {
+    workspaceId: string;
+    versionId: string;
+    path: string;
+    relaySeq: number;
+  }): boolean {
+    return currentFilesStorage.isCurrentFileState(this, input);
+  }
+
   currentObjectFile(input: {
     workspaceId: string;
     versionId: string;
