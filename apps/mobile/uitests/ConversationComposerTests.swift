@@ -33,9 +33,12 @@ final class ConversationComposerTests: XCTestCase {
     XCTAssertTrue(text(app, "Lunch at 1?").waitForExistence(timeout: 5), "The message should show in the chat")
     XCTAssertEqual(input.value as? String ?? "", "", "The field should clear once the outbox keeps the message")
     // The sample's outbox moves the message on by itself, to Sending at 0.7 s and to saved at 1.6 s, when its state words
-    // go, so which words show here depends on timing. ConversationOutboxTests checks each state on seeded messages that
-    // stay put. What must never show is that the outbox didn't keep it.
-    XCTAssertFalse(text(app, "could not keep this message").exists, "The outbox should keep the message")
+    // go, so which of those words shows here depends on timing. ConversationOutboxTests checks each state on seeded
+    // messages that stay put. Here the row must still show, waiting, sending or saved: never withheld, refused or lost.
+    XCTAssertTrue(text(app, "Lunch at 1?").exists, "The message should still show")
+    for words in ["could not keep this message", "has not been sent", "could not send this message", "wasn't sent"] {
+      XCTAssertFalse(text(app, words).exists, "The message should be waiting, sending or saved, not \"\(words)\"")
+    }
   }
 
   @MainActor
