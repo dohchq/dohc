@@ -695,6 +695,11 @@ describe("relayFetchWithTimeout", () => {
   it.each([
     ["a read", "GET", `/sync/ws-1/datasets/${crypto.randomUUID()}/replica/capture`],
     ["a change", "POST", `/sync/ws-1/datasets/${crypto.randomUUID()}/invoke`],
+    [
+      "a recovery import's status",
+      "GET",
+      `/sync/ws-1/datasets/${crypto.randomUUID()}/imports/${crypto.randomUUID()}`,
+    ],
   ])(
     "gives up on %s the server never answers, even when the caller passes its own signal",
     async (_kind, method, path) => {

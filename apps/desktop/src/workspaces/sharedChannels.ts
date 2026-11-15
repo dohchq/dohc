@@ -48,12 +48,14 @@ export function relayFetchWithTimeout(
   const request = relayApiFetch(baseFetch);
   return async (input, init) => {
     if (!init?.signal) return request(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
-    const path = requestPath(input);
-    if (!COLLECTION_PATH.test(path) || RECOVERY_PATH.test(path)) return request(input, init);
+    const path = requestPath(input),
+      read = (init.method ?? "GET").toUpperCase() === "GET";
+    if (!COLLECTION_PATH.test(path) || (read ? EXPORT_PATH : IMPORT_PATH).test(path))
+      return request(input, init);
     const deadline = new AbortController();
     const timer = setTimeout(
       () => deadline.abort(new TypeError("The server did not answer in time.")),
-      (init.method ?? "GET").toUpperCase() === "GET" ? timeoutMs : changeAnswerMs,
+      read ? timeoutMs : changeAnswerMs,
     );
     try {
       return await request(input, {
@@ -67,7 +69,9 @@ export function relayFetchWithTimeout(
 }
 
 const COLLECTION_PATH = /^\/sync\/(?:shares\/)?[^/]+\/datasets(?:[/?]|$)/;
-const RECOVERY_PATH = /\/datasets\/[^/]+\/(?:export|imports\/[^/]+)$/;
+// A GET of the import path only asks for its status, so it keeps the read limit.
+const EXPORT_PATH = /\/datasets\/[^/]+\/export$/;
+const IMPORT_PATH = /\/datasets\/[^/]+\/imports\/[^/]+$/;
 
 function requestPath(input: string | URL | Request): string {
   return new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url)
