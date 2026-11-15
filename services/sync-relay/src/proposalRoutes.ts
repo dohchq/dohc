@@ -5,7 +5,12 @@ import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { parseString, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
-import { filterProposedChangeForShare, targetVersionId, type ShareSelector } from "./shareFilter";
+import {
+  filterProposedChangeForShare,
+  isWorkspaceSelector,
+  targetVersionId,
+  type ShareSelector,
+} from "./shareFilter";
 import { destinationPath, proposalBase, proposalMomentPayload } from "./recipientMoments";
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
 import { assertMemberChanges } from "./memberActions";
@@ -205,7 +210,11 @@ export function createProposalRoutes(
             // unresolvable base refuses the whole submit rather than
             // dropping one change out of an intent the recipient stated as
             // a unit. It names the file because the recipient chose it.
-            throw relayError("share_op_rejected");
+            if (isWorkspaceSelector(share.selector)) throw relayError("share_op_rejected");
+            throw badRequest(
+              `no file is shared at ${change.basedOnPath} any more, so this change ` +
+                `has nothing to build on; refresh the share and send again`,
+            );
           }
         }
         if (change.afterBlobSha256 !== null) referencedShas.add(change.afterBlobSha256);

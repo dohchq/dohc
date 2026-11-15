@@ -157,12 +157,12 @@ export function createPresenceRoutes(
       current(): boolean;
     }
   >();
-  const prepareSnapshot = (snapshot: PresenceSnapshot, workspaceId: string, topic: string) =>
-    inRead(() => {
-      const cached = preparedSnapshots.get(snapshot);
-      if (cached?.current()) return cached.value;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const current = storage.captureReadRevisionMatches();
+  const prepareSnapshot = (snapshot: PresenceSnapshot, workspaceId: string, topic: string) => {
+    const cached = preparedSnapshots.get(snapshot);
+    if (cached?.current()) return cached.value;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const current = storage.captureReadRevisionMatches();
+      const value = inRead(() => {
         const resolver = chatResolverFor(workspaceId);
         const thread = parseChatThreadTopic(topic);
         const chatAttribution =
@@ -190,14 +190,15 @@ export function createPresenceRoutes(
             // A peer whose grant or selected path no longer admits it is absent.
           }
         }
-        const value = { peers, chatAttribution };
-        if (current()) {
-          preparedSnapshots.set(snapshot, { value, current });
-          return value;
-        }
+        return { peers, chatAttribution };
+      });
+      if (current()) {
+        preparedSnapshots.set(snapshot, { value, current });
+        return value;
       }
-      throw notFound();
-    });
+    }
+    throw notFound();
+  };
 
   const respondPresence = async (
     request: Request,

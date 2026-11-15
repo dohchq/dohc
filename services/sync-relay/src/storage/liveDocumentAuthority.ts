@@ -1674,7 +1674,11 @@ export function authorizeLiveDocument(
             principal: { kind: "user", userId: actor.userId },
             action: "read",
           });
-    if (!named.ok) return { kind: "refused", reason: "not-authorized" };
+    if (!named.ok)
+      return {
+        kind: "refused",
+        reason: named.reason === "stale-selector" ? "stale-selector" : "not-authorized",
+      };
     if (
       access === "read" &&
       !("kind" in named.effectiveSelector && named.effectiveSelector.kind === "workspace")
