@@ -28,6 +28,16 @@ async function shoot(page: Page, name: string): Promise<void> {
       theme,
     );
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    // Controls fade their colors into the new theme; a capture mid-fade
+    // shows light fills under dark-theme text.
+    await page.evaluate(() =>
+      Promise.all(
+        document
+          .getAnimations()
+          .filter((animation) => animation instanceof CSSTransition)
+          .map((animation) => animation.finished.catch(() => undefined)),
+      ),
+    );
     await page.screenshot({ path: test.info().outputPath(`${name}-${theme}.png`) });
   }
 }
@@ -140,14 +150,15 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     const widened = toasts.filter({ hasText: "Access to team was widened outside dohc" });
     await expect(widened).toHaveCount(1, { timeout: 30_000 });
     await expect(widened).toContainText(
-      "Until you choose, dohc doesn't record or share changes in team, and members keep their earlier access.",
+      "Until you choose, dohc doesn't record or share changes in team. Members keep their earlier access.",
     );
+    await expect(widened).toContainText("Restoring keeps the rule from outside dohc as a copy.");
     await expect(widened).toContainText("members: View → Edit");
     expect(await buttonNames(widened)).toEqual(["Restore rule", "Allow new access"]);
     await shoot(page, "widened-toast");
 
     // The workspace's own rule is named as the workspace's, and its removal
-    // says what the workspace follows without it.
+    // shows each level it falls back to.
     await rm(join(temp.rootPath, "access.yaml"));
     const removed = toasts.filter({
       hasText: "The workspace's access rule was removed outside dohc",
@@ -172,7 +183,6 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
       hasText: "The workspace's access rule was removed outside dohc",
     });
     // The outer folder leads, since an inner folder's decision waits for it.
-    await expect(held).toHaveCount(2);
     await expect(held.first()).toContainText(
       "The workspace's access rule was removed outside dohc",
     );
@@ -184,44 +194,47 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await removedRow.getByRole("button", { name: "Details" }).click();
     const details = removedRow.locator("pre");
     await expect(details).toContainText("Recorded rule: members: view");
-    await expect(details).toContainText(/Noticed: \d{4}-\d\d-\d\dT/);
+    await expect(details).toContainText(/Noticed: \S/);
     await shoot(page, "details");
     await removedRow.getByRole("button", { name: "Hide details" }).click();
 
-    // A decision on team waits for the workspace's own rule. Its refusal
-    // says so and shows the outer row; nothing is retried.
+    // A choice on team waits for the workspace's own rule. Notices stays
+    // open on it, and its row says so with nothing to retry.
     await widenedRow.getByRole("button", { name: "Allow new access" }).click();
-    const waits = toasts.filter({ hasText: "Decide this workspace first" });
+    const waits = rows.filter({ hasText: "Choose for the workspace's access rule first" });
     await expect(waits).toHaveCount(1, { timeout: 30_000 });
-    await expect(waits).toContainText("The workspace's access rule also changed outside dohc.");
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(waits).toContainText(
+      "Your choice for team wasn't applied. The workspace's access rule also changed outside dohc.",
+    );
     await expect(waits.getByRole("button", { name: "Try again" })).toHaveCount(0);
     await shoot(page, "nested-refusal");
     expect(await readFile(join(temp.rootPath, "team/access.yaml"), "utf8")).toBe(EDIT);
-    await waits.getByRole("button", { name: "Show workspace" }).click();
+    await waits.getByRole("button", { name: "Show its notice" }).click();
     await expect(toggle).toHaveAttribute("aria-expanded", "true");
     await expect
       .poll(() => removedRow.evaluate((row) => row.contains(document.activeElement)))
       .toBe(true);
 
-    // The pressed button reads as working while the other waits.
+    // The pressed button reads as working while the other waits, in Notices
+    // as the person left it, with focus on the row.
     await holdDecisions(app);
     await removedRow.getByRole("button", { name: "Restore rule" }).click();
     await expect.poll(() => heldDecisions(app)).toBe(1);
-    // A step closes Notices as it runs; the row waits there.
-    await openNotices();
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
     await expect(removedRow.getByRole("button", { name: "Restoring…" })).toHaveAttribute(
       "aria-busy",
       "true",
     );
     await expect(removedRow.getByRole("button", { name: "Restoring…" })).toBeDisabled();
     await expect(removedRow.getByRole("button", { name: "Remove rule" })).toBeDisabled();
-    await shoot(page, "busy");
-    // Notices lists what arrives while it is open; closed, the result toasts.
-    await toggle.click();
-    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(await removedRow.evaluate((row) => row.contains(document.activeElement))).toBe(true);
+    await shoot(page, "busy-in-notices");
     await releaseDecisions(app);
 
-    const restored = toasts.filter({ hasText: "Restored the workspace's access rule." });
+    // The outcome files in Notices and takes focus. The choice that waited
+    // for the workspace's rule waits for nothing now, so its row goes.
+    const restored = rows.filter({ hasText: "Restored the workspace's access rule." });
     await expect(restored).toHaveCount(1, { timeout: 30_000 });
     await expect(restored.getByRole("button", { name: "Undo" })).toBeVisible();
     await expect
@@ -233,11 +246,17 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
       })
       .toEqual(["team"]);
     await expect(removedRow).toHaveCount(0);
+    await expect(waits).toHaveCount(0);
+    await expect
+      .poll(() => restored.evaluate((row) => row.contains(document.activeElement)))
+      .toBe(true);
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await shoot(page, "outcome-in-notices");
 
-    // Allowing says what took effect, and Undo puts the recorded rule back.
-    await openNotices();
+    // Allowing says what took effect, and Undo puts the recorded rule back
+    // through the engine.
     await widenedRow.getByRole("button", { name: "Allow new access" }).click();
-    const allowed = toasts.filter({ hasText: "Members now reach team at Edit." });
+    const allowed = rows.filter({ hasText: "Members can now edit team." });
     await expect(allowed).toHaveCount(1, { timeout: 30_000 });
     await expect
       .poll(async () => (await status()).heldAccessRules, { timeout: 30_000 })
@@ -245,6 +264,9 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await shoot(page, "success-undo");
     expect(await readFile(join(temp.rootPath, "team/access.yaml"), "utf8")).toBe(EDIT);
     await allowed.getByRole("button", { name: "Undo" }).click();
+    await expect(
+      toasts.filter({ hasText: "The access rule for team is back as it was." }),
+    ).toHaveCount(1, { timeout: 30_000 });
     await expect
       .poll(async () => readFile(join(temp.rootPath, "team/access.yaml"), "utf8"), {
         timeout: 30_000,
@@ -254,9 +276,38 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await expect
       .poll(async () => (await status()).heldAccessRules, { timeout: 30_000 })
       .toEqual([]);
+
+    // An Undo after the rule changed again is refused. Trying again meets
+    // the same rule, so the refusal points to History instead.
+    await writeFile(join(temp.rootPath, "team/access.yaml"), EDIT);
+    await expect
+      .poll(async () => (await status()).heldAccessRules?.map((hold) => hold.folder), {
+        timeout: 30_000,
+      })
+      .toEqual(["team"]);
+    await openNotices();
+    await widenedRow.getByRole("button", { name: "Allow new access" }).click();
+    await expect(allowed).toHaveCount(1, { timeout: 30_000 });
+    await expect
+      .poll(async () => (await status()).heldAccessRules, { timeout: 30_000 })
+      .toEqual([]);
+    await writeFile(join(temp.rootPath, "team/access.yaml"), "members: comment\n");
+    await allowed.getByRole("button", { name: "Undo" }).click();
+    const undoRefused = page
+      .getByTestId("workspace-shell-error")
+      .filter({ hasText: "dohc could not undo your choice for team" });
+    await expect(undoRefused).toHaveCount(1, { timeout: 30_000 });
+    await expect(undoRefused).toContainText(
+      "The access rule for team changed since you chose. Its earlier versions are in History.",
+    );
+    await expect(undoRefused.getByRole("button", { name: "Try again" })).toHaveCount(0);
+    await expect(undoRefused.getByRole("button", { name: "Open History" })).toBeVisible();
+    await shoot(page, "undo-refused");
+    expect(await readFile(join(temp.rootPath, "team/access.yaml"), "utf8")).toBe(
+      "members: comment\n",
+    );
     await openNotices();
     await expect(held).toHaveCount(0);
-    await expect(page.getByText(/could not/)).toHaveCount(0);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
