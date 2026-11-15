@@ -531,6 +531,9 @@ describe("what a member reaches", () => {
     // A rule on a case twin hides `hide/` too.
     await ownerWrite(h, "Hide/access.yaml", "");
     await ownerWrite(h, "hide/d.md", "d");
+    // Only `Edit/`'s own rule raises its level; its twin `edit/` keeps the default.
+    await ownerWrite(h, "Edit/access.yaml", "members: edit\n");
+    await ownerWrite(h, "Edit/e.md", "e");
     const revision = async () => {
       const response = await h(request("ana", `/sync/shares/${shareId}/reach`));
       expect(response.status, await response.clone().text()).toBe(200);
@@ -553,6 +556,8 @@ describe("what a member reaches", () => {
     await expectRevision(true, "move across rules to another level");
     await ownerRename(h, "hide/d.md", "docs/d.md");
     await expectRevision(true, "move out of a case twin's hidden folder");
+    await ownerRename(h, "Edit/e.md", "edit/e.md");
+    await expectRevision(true, "move from a ruled folder to its case twin");
     // A rename in another Version leaves main's reach alone.
     const context = storage as StorageContext;
     context.tx(() =>
@@ -638,6 +643,16 @@ describe("what a member reaches", () => {
       "moved",
     );
     expect(await moved.json()).toMatchObject({
+      code: "share_op_rejected",
+      error: "Ask an admin to move this.",
+    });
+    // Case twins with their own rules are two boundaries.
+    await ownerWrite(h, "Other/access.yaml", "members: edit\n");
+    const twin = await proposal(
+      change("other/file.md", "Other/file.md", sha256("editable")),
+      "twin",
+    );
+    expect(await twin.json()).toMatchObject({
       code: "share_op_rejected",
       error: "Ask an admin to move this.",
     });

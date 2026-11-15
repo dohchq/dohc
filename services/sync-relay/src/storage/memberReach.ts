@@ -36,17 +36,15 @@ export interface MemberReach {
 }
 
 /**
- * The folded name of the nearest folder with a rule over `path`, or "" for the
- * root. It depends only on where rules are, so it's the same for every member.
- * Case twins count, as they do for levels.
+ * The nearest folder over `path` that a rule or its case twin governs, or ""
+ * for the root. It depends only on where rules are, so it's the same for every
+ * member. It keeps the exact spelling: a twin hides, but only the exact
+ * folder's own rule sets its level.
  */
 export function nearestRuleFolder(rules: AccessRuleSet, path: string): string {
   let folder = accessRuleFolder(path);
-  for (;;) {
-    const key = pathCollisionKey(folder);
-    if (rules.folded.has(key) || !folder) return key;
-    folder = accessRuleFolder(folder);
-  }
+  while (folder && !rules.folded.has(pathCollisionKey(folder))) folder = accessRuleFolder(folder);
+  return folder;
 }
 
 /**
