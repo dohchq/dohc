@@ -1,6 +1,6 @@
 //! A folder's access.yaml reaches the journal before the files it covers, and
 //! a rule changed outside dohc in a way that widens reach waits for its owner.
-use dohc_engine_domain::{CreateNamedVersion, DuplicateFile, VersionedTextStore};
+use dohc_engine_domain::{CreateNamedVersion, DomainError, DuplicateFile, VersionedTextStore};
 use dohc_engine_runtime::{
     ACCESS_RULE_WAITS, AccessRuleDecision, ActorHandle, CancellationToken, CaptureIngest,
     CaptureIngestBinary, CaptureRetire, DeleteTextFile, MergeTextFileFromVersion, NoFaults,
@@ -476,6 +476,48 @@ fn a_rule_rename_journals_a_create_then_a_delete() {
             "delete team/access.yaml",
         ])
     );
+}
+
+/// A rule rename onto another folder's rule is refused, as any rename onto
+/// an existing file is, before either rule changes.
+#[test]
+fn a_rule_rename_onto_another_rule_is_refused() {
+    let f = Fixture::new();
+    for (path, text, moment) in [
+        ("team/access.yaml", VIEW, "m-team"),
+        ("crew/access.yaml", NOBODY, "m-crew"),
+    ] {
+        f.versioned_write(write(path, text, moment))
+            .expect("write rule");
+    }
+    let before = f.journal();
+    let renamed = f.runtime.block_on(f.actor.versioned_text_rename(
+        RenameTextFile {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            from_path: "team/access.yaml".to_owned(),
+            to_path: "crew/access.yaml".to_owned(),
+            moment_id: "m-move".to_owned(),
+            request_id: Some("r-move".to_owned()),
+            metadata_origin: "cli".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 40,
+        },
+        f.root().to_path_buf(),
+        Arc::new(()),
+        Arc::new(NoFaults),
+        CancellationToken::new(),
+    ));
+    assert!(
+        matches!(
+            renamed,
+            Err(RuntimeError::Domain(DomainError::TargetPathExists))
+        ),
+        "{renamed:?}"
+    );
+    assert_eq!(f.journal(), before);
 }
 
 /// A rule written without publication is only in the store. Its absence on

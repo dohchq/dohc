@@ -1395,6 +1395,33 @@ fn rename_access_rule_on_store(
         return Err(DomainError::FileNotFound.into());
     };
     let suffixed = |id: &str, side: &str| format!("{id}-{side}");
+    // Like any rename, never onto another file; a retry finds its own write.
+    let to_request = input.request_id.as_deref().map(|id| suffixed(id, "to"));
+    let occupied = store.read_with(|conn| {
+        let target = dohc_engine_domain::select_snapshot_by_path_in_tx(
+            conn,
+            &input.workspace_id,
+            &input.version_id,
+            &input.to_path,
+        )?;
+        if target.snapshot.is_none() && target.binary_sha256.is_none() {
+            return Ok::<_, RuntimeError>(false);
+        }
+        let retried = match &to_request {
+            Some(id) => conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
+                    [id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
+            None => false,
+        };
+        Ok(!retried)
+    })?;
+    if occupied {
+        return Err(DomainError::TargetPathExists.into());
+    }
     let written = versioned_text_write_on_store(
         store,
         &WriteText {
@@ -1413,7 +1440,7 @@ fn rename_access_rule_on_store(
             metadata_correlation_id: input.metadata_correlation_id.clone(),
             author_json: input.author_json.clone(),
             now_ms: input.now_ms,
-            request_id: input.request_id.as_deref().map(|id| suffixed(id, "to")),
+            request_id: to_request,
         },
         Some(root_dir),
         None,
