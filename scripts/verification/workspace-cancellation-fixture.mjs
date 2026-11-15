@@ -53,7 +53,7 @@ export async function runCanonicalCancellationFixture(root, sourceRoot) {
   put(".github/workflows/pr-checks.yml", "fixture workflow");
   put(
     "node_modules/js-yaml/index.js",
-    "exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],repository:[]};",
+    "exports.load=s=>s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**'],android:[],repository:[]};",
   );
   put(
     "node_modules/pnpm/package.json",

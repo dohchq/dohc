@@ -1070,6 +1070,7 @@ export function serializeRichdocBody(root: JSONContent): string {
       }
       content = renderInlineCodeRuns(content, characterSentinels, () => reserveToken("CHARACTER"));
       content = protectMarkdownSyntax(content, characterSentinels, () => reserveToken("CHARACTER"));
+      content = openNoDelimitersAroundWhitespace(content);
     }
 
     return content ? { ...node, content } : { ...node };
@@ -1944,6 +1945,73 @@ function mapRanges(
     cursor = to;
   }
   return output + text.slice(cursor);
+}
+
+const DELIMITER_MARKS = new Set(["bold", "italic", "strike", "underline", "highlight"]);
+
+type Mark = NonNullable<JSONContent["marks"]>[number];
+
+const sameMark = (left: Mark, right: Mark): boolean =>
+  left.type === right.type &&
+  JSON.stringify(left.attrs ?? {}) === JSON.stringify(right.attrs ?? {});
+
+// Markdown reads no delimiter beside only whitespace as a mark, so a mark that
+// opens or closes inside whitespace reads back as literal asterisks. A run of
+// only whitespace keeps a mark that continues through it to text on both
+// sides, or that opens right before a character, where the whitespace is
+// written before the delimiter. It keeps one that closes right after a
+// character, where the whitespace is written after it, unless the run also
+// opens a mark: closing and opening in one run writes them inside the
+// whitespace. It drops the others. Each kept mark is written where the old
+// writer wrote it, whose nesting the reader depends on. The engine writer does
+// the same.
+function openNoDelimitersAroundWhitespace(content: JSONContent[]): JSONContent[] {
+  const blank = content.map((node) => node.type === "text" && /^\s*$/u.test(node.text ?? ""));
+  if (!blank.includes(true)) return content;
+  const textAt = (index: number) => (content[index]?.type === "text" && content[index].text) || "";
+  // For each blank run, the marks it shares with the text the order visits
+  // before it, through blank runs that carry them too.
+  const reachingText = (order: number[]): Mark[][] => {
+    const reached: Mark[][] = content.map(() => []);
+    let before: number | undefined;
+    for (const index of order) {
+      if (content[index]!.type !== "text") {
+        before = undefined;
+        continue;
+      }
+      if (blank[index] && before !== undefined) {
+        const carried = blank[before] ? reached[before]! : (content[before]!.marks ?? []);
+        reached[index] = (content[index]!.marks ?? []).filter((mark) =>
+          carried.some((other) => sameMark(other, mark)),
+        );
+      }
+      before = index;
+    }
+    return reached;
+  };
+  const indexes = content.map((_, index) => index);
+  const fromBefore = reachingText(indexes);
+  const fromAfter = reachingText([...indexes].reverse());
+  return content.map((node, index) => {
+    if (!blank[index] || !node.marks?.length) return node;
+    const beforeText = /^\S/u.test(textAt(index + 1));
+    const afterText = /\S$/u.test(textAt(index - 1));
+    const back = (mark: Mark) => fromBefore[index]!.some((other) => sameMark(other, mark));
+    const ahead = (mark: Mark) => fromAfter[index]!.some((other) => sameMark(other, mark));
+    const delimits = (mark: Mark) => DELIMITER_MARKS.has(mark.type);
+    const opens = node.marks.some(
+      (mark) => delimits(mark) && beforeText && ahead(mark) && !back(mark),
+    );
+    const marks = node.marks.filter(
+      (mark) =>
+        !delimits(mark) ||
+        (back(mark) && ahead(mark)) ||
+        (ahead(mark) && beforeText) ||
+        (back(mark) && afterText && !opens),
+    );
+    if (marks.length === node.marks.length) return node;
+    return marks.length ? { ...node, marks } : { type: node.type, text: node.text };
+  });
 }
 
 function protectMarkdownSyntax(
