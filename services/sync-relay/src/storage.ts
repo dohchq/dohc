@@ -1949,6 +1949,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   ) {
     return workspaceMembersStorage.workspaceMemberGrantIsCurrent(this, ...args);
   }
+  workspaceMemberGrantRole(...args: Parameters<SyncRelayStorage["workspaceMemberGrantRole"]>) {
+    return workspaceMembersStorage.workspaceMemberGrantRole(this, ...args);
+  }
   workspaceRoleOf(...args: Parameters<SyncRelayStorage["workspaceRoleOf"]>) {
     return workspaceMembersStorage.workspaceRoleOf(this, ...args);
   }

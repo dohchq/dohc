@@ -124,13 +124,17 @@ export type StoredAnyShareSelector =
   | StoredGroupShareSelector
   | StoredWorkspaceShareSelector;
 
+// A workspace share's role decides whether its reach includes rule files.
+// Only share authorization knows it; a caller that passes none gets a
+// member's reach, which hides them.
 export function effectiveShareSelector(
   selector: StoredAnyShareSelector,
   access: unknown,
+  workspaceRole: "admin" | "member" = "member",
 ): AnyShareSelector | null {
   if ("kind" in selector) {
     if (selector.kind === "workspace")
-      return isShareAccessValue(access) ? { ...selector, access } : null;
+      return isShareAccessValue(access) ? { ...selector, access, role: workspaceRole } : null;
     return isChatShareAccessValue(access) ? { ...selector, access } : null;
   }
   return isShareAccessValue(access) ? { ...selector, access } : null;

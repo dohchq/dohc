@@ -145,15 +145,17 @@ describe("share selector validation", () => {
 
   it("requires a nonempty main-version file selector, or the whole workspace, at exact Edit access", () => {
     expect(isLiveEditShareSelector({ ...pathShare, access: "edit" })).toBe(true);
-    expect(isLiveEditShareSelector({ kind: "workspace", access: "edit" })).toBe(true);
+    expect(isLiveEditShareSelector({ kind: "workspace", access: "edit", role: "member" })).toBe(
+      true,
+    );
     for (const selector of [
       pathShare,
       { ...pathShare, access: "comment" as const },
       { ...pathShare, access: "edit" as const, versionId: "pinned-version" },
       { ...pathShare, access: "edit" as const, paths: [] },
       { kind: "chat" as const, channelWireId: "channel-1", access: "read-write" as const },
-      { kind: "workspace" as const, access: "view" as const },
-      { kind: "workspace" as const, access: "comment" as const },
+      { kind: "workspace" as const, access: "view" as const, role: "member" as const },
+      { kind: "workspace" as const, access: "comment" as const, role: "member" as const },
     ]) {
       expect(isLiveEditShareSelector(selector), JSON.stringify(selector)).toBe(false);
     }
@@ -1967,7 +1969,7 @@ describe("a new page under Edit", () => {
     recordedAtMs: 1,
     ...overrides,
   });
-  const member: WorkspaceShareSelector = { kind: "workspace", access: "edit" };
+  const member: WorkspaceShareSelector = { kind: "workspace", access: "edit", role: "member" };
   // The owner's main holds `docs/plan.md`, a Collection at `trip/packing`,
   // and a dataset at `trip/people`.
   const files = ["docs/plan.md", "trip/packing/collection.yaml", "trip/people/dataset.json"];
@@ -1999,9 +2001,10 @@ describe("a new page under Edit", () => {
 
   it("refuses View and Comment", () => {
     for (const access of ["view", "comment"] as const) {
-      expect(decide({ kind: "workspace", access }, [page("docs/idea.md")]), access).toEqual(
-        REFUSED,
-      );
+      expect(
+        decide({ kind: "workspace", access, role: "member" }, [page("docs/idea.md")]),
+        access,
+      ).toEqual(REFUSED);
     }
   });
 
@@ -2037,7 +2040,11 @@ describe("a new page under Edit", () => {
       expect(decision.allowed && decision.write.kind, path).toBe("new-page");
     }
     expect(
-      decide({ kind: "workspace", access: "comment" }, [page("drafts/idea.md")], true),
+      decide(
+        { kind: "workspace", access: "comment", role: "member" },
+        [page("drafts/idea.md")],
+        true,
+      ),
     ).toEqual(REFUSED);
   });
 

@@ -1,5 +1,13 @@
 import { pathCollisionKey } from "@dohc/workspace-contracts/path-floor";
+import { accessRuleFolder, isAccessRuleRelatedPath } from "./accessRuleFiles";
 import { SHARE_ACCESS_VALUES, shareAccessRank, type ShareAccess } from "./shareSelector";
+
+export {
+  ACCESS_RULE_FILE,
+  accessRuleFolder,
+  isAccessRulePath,
+  isAccessRuleRelatedPath,
+} from "./accessRuleFiles";
 
 /**
  * A folder's access rule, read from the `access.yaml` inside it
@@ -13,33 +21,9 @@ export interface AccessRule {
   readonly people: ReadonlyMap<string, ShareAccess>;
 }
 
-export const ACCESS_RULE_FILE = "access.yaml";
 export const ACCESS_RULE_MAX_BYTES = 64 * 1024;
 export const ACCESS_RULE_MAX_PEOPLE = 1_000;
 const MAX_EMAIL_CHARS = 320;
-
-function lastSegmentKey(path: string): string {
-  return pathCollisionKey(path.slice(path.lastIndexOf("/") + 1));
-}
-
-/** Whether this file is a folder's rule, however the filesystem spells it. */
-export function isAccessRulePath(path: string): boolean {
-  return lastSegmentKey(path) === ACCESS_RULE_FILE;
-}
-
-/**
- * Whether this file is a rule or a copy of one: an editor's backup, swap or
- * temp file keeps the rule's emails, so members never see or write these either.
- */
-export function isAccessRuleRelatedPath(path: string): boolean {
-  return lastSegmentKey(path).includes(ACCESS_RULE_FILE);
-}
-
-/** The folder a rule file belongs to: "" for the workspace root. */
-export function accessRuleFolder(path: string): string {
-  const slash = path.lastIndexOf("/");
-  return slash < 0 ? "" : path.slice(0, slash);
-}
 
 /** The one form rule keys and account emails are compared in (`normalizeEmail` in workspace-auth). */
 export function normalizeRuleEmail(email: string): string {

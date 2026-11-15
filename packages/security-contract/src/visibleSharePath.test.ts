@@ -52,6 +52,28 @@ it.each([
   expect(visibleSharePath({ paths: [], versionId: "version" }, path)).toBeNull();
 });
 
+it.each([
+  "Trip/access.yaml",
+  "Trip/ACCESS.yaml",
+  "access.yaml",
+  "Trip/access.yaml~",
+  "Trip/.access.yaml.swp",
+])("hides the access rule or rule copy %s from every scope without ruleFiles", (path) => {
+  for (const scope of [
+    { paths: ["Trip"], versionId: null },
+    { paths: [], versionId: "version" },
+    { paths: [], versionId: null, wholeWorkspace: true },
+  ]) {
+    expect(visibleSharePath(scope, path)).toBeNull();
+  }
+  expect(
+    visibleSharePath({ paths: [], versionId: null, wholeWorkspace: true, ruleFiles: true }, path),
+  ).toBe(path);
+  expect(
+    visibleSharePath({ paths: [], versionId: null, wholeWorkspace: true }, "Trip/access.yml"),
+  ).toBe("Trip/access.yml");
+});
+
 it("returns the normalized spelling that the relay previously served", () => {
   expect(visibleSharePath({ paths: ["Trip"], versionId: null }, "Trip\\a.md")).toBe("Trip/a.md");
 });

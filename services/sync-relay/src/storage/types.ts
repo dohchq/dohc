@@ -1949,6 +1949,7 @@ export interface SyncRelayStorage {
   hasPendingInvite(email: string): boolean;
   // Workspace members (storage/workspaceMembers.ts).
   workspaceMemberGrantIsCurrent: WorkspaceMembersMethod<"workspaceMemberGrantIsCurrent">;
+  workspaceMemberGrantRole: WorkspaceMembersMethod<"workspaceMemberGrantRole">;
   workspaceRoleOf: WorkspaceMembersMethod<"workspaceRoleOf">;
   workspaceLevelChangedBy: WorkspaceMembersMethod<"workspaceLevelChangedBy">;
   readWorkspaceMembers: WorkspaceMembersMethod<"readWorkspaceMembers">;

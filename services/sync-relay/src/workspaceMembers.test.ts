@@ -378,6 +378,25 @@ describe("what a member reaches", () => {
     expect(await pulledText(h, "ana", shareId, LATER_GROUP)).toContain("a new group");
   });
 
+  it("never serves a member a folder's access rule or a copy of one, and serves both to an admin", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    await ownerWrite(h, "docs/access.yaml", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "docs/.access.yaml.swp", "people:\n  ben@dohc.test: edit\n");
+
+    const asMember = await pulledText(h, "ana", shareId);
+    expect(asMember).toContain("docs/plan.md");
+    expect(asMember).not.toContain("access.yaml");
+
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    const asAdmin = await pulledText(h, "ana", shareId);
+    expect(asAdmin).toContain("docs/access.yaml");
+    expect(asAdmin).toContain("docs/.access.yaml.swp");
+  });
+
   it("joins presence for Groups and files, and never for General, direct messages, or agent chats", async () => {
     const { h } = await seed();
     await invited(h, "ana");

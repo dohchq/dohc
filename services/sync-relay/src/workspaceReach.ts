@@ -18,15 +18,20 @@ export interface StoredWorkspaceShareSelector {
 
 export interface WorkspaceShareSelector extends StoredWorkspaceShareSelector {
   access: ShareAccess;
+  role: "admin" | "member";
 }
 
-/** The file side: a scope only the relay builds, never stored or sent. */
+/**
+ * The file side: a scope only the relay builds, never stored or sent. Admins
+ * also reach rule files, which every other scope hides.
+ */
 export function workspaceFileReach(selector: WorkspaceShareSelector) {
   return {
     paths: [] as string[],
     versionId: null,
     access: selector.access,
     wholeWorkspace: true as const,
+    ...(selector.role === "admin" ? { ruleFiles: true as const } : {}),
   };
 }
 
