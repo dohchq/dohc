@@ -35,6 +35,20 @@ export function workspaceFileReach(selector: WorkspaceShareSelector) {
   };
 }
 
+/**
+ * The file side a write is judged against. An admin reads rule files but
+ * can't write one through sync: the owner's engine refuses a rule it didn't
+ * write, so the relay's index would hold a rule the owner never kept.
+ */
+export function workspaceFileWriteReach(selector: WorkspaceShareSelector) {
+  return {
+    paths: [] as string[],
+    versionId: null,
+    access: selector.access,
+    wholeWorkspace: true as const,
+  };
+}
+
 /** Whether the workspace share reaches this channel's messages. */
 export function workspaceGroupReachable(
   channelWireId: unknown,

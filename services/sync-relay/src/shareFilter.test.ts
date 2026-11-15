@@ -2083,6 +2083,21 @@ describe("a new page under Edit", () => {
     );
   });
 
+  it("serves an admin the rule but refuses their change to it through a proposal or a Collection write", () => {
+    const admin: WorkspaceShareSelector = { ...member, role: "admin" };
+    const change = page("docs/access.yaml", { afterContentKind: "text" });
+    expect(filterProposedChangeForShare(admin, change).allowed).toBe(false);
+    expect(decide(admin, [change], true)).toEqual(REFUSED);
+    expect(decide(admin, [page("docs/access.yaml.md")], true)).toEqual(REFUSED);
+    // The same ordinary file is still theirs to change.
+    expect(
+      filterProposedChangeForShare(
+        admin,
+        page("docs/plan.md", { basedOnPath: "docs/plan.md", basedOnBlobSha256: sha(3) }),
+      ).allowed,
+    ).toBe(true);
+  });
+
   it("refuses a member's new Collection, which would create a folder, and takes an admin's", () => {
     const schema = page("docs/Packing/collection.yaml", { afterBlobSha256: sha(2) });
     expect(decide(member, [schema])).toEqual(REFUSED);

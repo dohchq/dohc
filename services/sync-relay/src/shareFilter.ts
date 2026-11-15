@@ -30,6 +30,7 @@ import {
 import { PERSONAL_AGENT_ID_PREFIX } from "./relayLogInputs";
 import {
   workspaceFileReach,
+  workspaceFileWriteReach,
   workspaceGroupReach,
   workspaceGroupReachable,
   type StoredWorkspaceShareSelector,
@@ -1587,7 +1588,7 @@ export function filterProposedChangeForShare(
   // A chat grant shares no files, so it can propose no change to one.
   if (isChatChannelSelector(selector)) return { allowed: false };
   if (isWorkspaceSelector(selector))
-    return filterProposedChangeForShare(workspaceFileReach(selector), raw, chat);
+    return filterProposedChangeForShare(workspaceFileWriteReach(selector), raw, chat);
   if (isGroupSelector(selector)) {
     if (!groupChannelIsOrdinary(selector, chat)) return { allowed: false };
     return filterProposedChangeForShare(fileHalfOfGroup(selector), raw, chat);
@@ -1739,7 +1740,7 @@ export function collectionEditSelector(
       : null;
   }
   if (isWorkspaceSelector(selector))
-    return collectionEditSelector(workspaceFileReach(selector), chat);
+    return collectionEditSelector(workspaceFileWriteReach(selector), chat);
   if (selector.access !== "edit" || selector.versionId !== null || !namesFiles(selector))
     return null;
   return selector;
