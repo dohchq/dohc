@@ -468,11 +468,14 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       .then((outcome) => {
         room.saving = undefined;
         if (room.lifetime.signal.aborted) return;
+        // The first failure in a run is tried again at once, through a new capture if the old
+        // one closed, as the owner's capture does whenever its host moves on. Later ones wait.
+        const first = outcome === "retry" && room.failingSince === undefined;
         if (outcome === "saved") room.failingSince = undefined;
         else if (outcome !== "retry") return pause(room, "refused", outcome.refusal, outcome.named);
         else if (Date.now() - (room.failingSince ??= Date.now()) >= pauseAfterMs)
           return pause(room, "failing", null, senders(room.unsaved));
-        if (room.unsaved.length) scheduleSave(room, outcome === "saved" ? 0 : saveEveryMs);
+        if (room.unsaved.length) scheduleSave(room, outcome === "saved" || first ? 0 : saveEveryMs);
         else disposeIfIdle(room);
       });
   }

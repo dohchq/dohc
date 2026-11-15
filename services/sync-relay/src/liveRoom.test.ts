@@ -634,6 +634,28 @@ it("tries a busy engine again without pausing, and pauses once saves have failed
   expect(unsaved(g)).toEqual([]);
 });
 
+it("tries a failed save again at once, then waits between later tries", async () => {
+  const once: Engine = { answers: ["retry"] };
+  const f = note();
+  const a = editor(f, rooms(f, { saveEveryMs: 60_000 }, once), ana);
+  await a.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  a.session.close();
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  expect(once.saves).toBe(2);
+
+  const twice: Engine = { answers: ["retry", "retry"] };
+  const g = note();
+  const b = editor(g, rooms(g, { saveEveryMs: 60_000 }, twice), ana);
+  await b.open();
+  expect((await b.submit(b.change("title", "Porto"))).result).toBe("success");
+  b.session.close();
+  await vi.waitFor(() => expect(twice.saves).toBe(2));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(twice.saves).toBe(2);
+  expect(unsaved(g)).toHaveLength(1);
+});
+
 it("saves through a new capture when the old one went stale, without pausing", async () => {
   const f = note();
   const engine: Engine = { answers: ["stale-binding"] };
