@@ -16,6 +16,7 @@ import {
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import { cliThreadId } from "@dohc/workspace-operations/chats";
 import { asRecord } from "@dohc/workspace-core";
+import { PhoneChatContext } from "@dohc/workspace-contracts/chat-wakes";
 import {
   ChatsLoopbackEngine,
   VersionedLoopbackEngine,
@@ -2370,6 +2371,24 @@ describe("an account's chat writes through the server's copy", () => {
     });
     return wakeId;
   };
+  // The Mac, which wins unconfirmedWake's claims, declares its agent switched off under `displayName`, which no mention
+  // names.
+  const nameMac = (f: WriteRelay, displayName: string) =>
+    f.storage.replaceChatRunners({
+      accountId: "ana",
+      workspaceId: "trip",
+      installId: "mac",
+      computerLabel: "mac",
+      runners: [
+        {
+          agentId: "default",
+          handle: displayName.toLowerCase().replaceAll(" ", ""),
+          displayName,
+          enabled: false,
+        },
+      ],
+      nowMs: RETRY_NOW,
+    });
   const count = (f: WriteRelay, sql: string) =>
     Number((f.storage as StorageContext).db.prepare(sql).get()?.n);
 
@@ -2952,10 +2971,13 @@ describe("an account's chat writes through the server's copy", () => {
     personalAgent(f, "a", "Scout", "active", ["trip"]);
     personalAgent(f, "b", "Ranger", "active", []);
     personalAgent(f, "c", "Ghost", "signed_out", ["trip"]);
+    nameMac(f, "Claude at work");
 
     const response = await f.write("chatContext", { group: planning.channelId });
     const text = await response.clone().text();
-    expect(await answer(response)).toEqual({
+    const read = await answer(response);
+    expect(PhoneChatContext.safeParse(read).success, "the phone takes the whole answer").toBe(true);
+    expect(read).toEqual({
       ok: true,
       conversation: {
         kind: "stream",
@@ -2977,12 +2999,23 @@ describe("an account's chat writes through the server's copy", () => {
           generation: 1,
           state: "unconfirmed",
           winnerLabel: "mac",
+          // The winner's current name, though switched off and so no mention.
+          agentName: "Claude at work",
           canRetry: true,
         },
       ],
       wakeCursor: String(f.storage.chatWakeHead("ana")),
     });
-    for (const withheld of ["install-9f2c", "installId", "candidates", '"matched"', "mention:"])
+    for (const withheld of [
+      "install-9f2c",
+      "installId",
+      "agentId",
+      "candidates",
+      '"matched"',
+      '"target"',
+      "mention:",
+      "winner_",
+    ])
       expect(text).not.toContain(withheld);
 
     const chats = new ChatsLiveAdapter(f.engine.chats, "trip", { workspaceId: "trip" });
@@ -3054,6 +3087,7 @@ describe("an account's chat writes through the server's copy", () => {
           generation: 2,
           state: "unconfirmed",
           winnerLabel: "laptop",
+          agentName: "Claude",
           canRetry: false,
         }),
       ],
@@ -3067,6 +3101,7 @@ describe("an account's chat writes through the server's copy", () => {
     const f = await writeRelay({ nowMs: () => LATE });
     const { onSecret } = f.seeded;
     const hidden = unconfirmedWake(f, "op-hidden", "message-hidden", onSecret.id);
+    nameMac(f, "Hidden Claude");
     const missing = await denialBytes(await f.h(op("nowhere", "groups")));
     const bytes = async (args: Record<string, string>) =>
       (await (await f.write("chatContext", args)).text()).replaceAll(
@@ -3077,6 +3112,7 @@ describe("an account's chat writes through the server's copy", () => {
     expect(secret).toBe(await bytes({ threadId: "thread-nowhere" }));
     expect(secret).toContain('"refusal":"missing"');
     expect(secret).not.toContain(hidden);
+    expect(secret).not.toContain("Hidden Claude");
     expect(await answer(await f.write("chatContext", { group: "group-nowhere" }))).toEqual({
       ok: false,
       reason: "no such group: group-nowhere",
@@ -3141,6 +3177,7 @@ describe("an account's chat writes through the server's copy", () => {
       linkedFile: { objectId: "object-notes", pathHint: "notes.md" },
     });
     const wakeId = unconfirmedWake(f, "op-notes", "message-notes", onNotes.id);
+    nameMac(f, "Notes Claude");
     const db = (f.storage as StorageContext).db;
     // Another device's move of the notes, which the relay accepts.
     const accepted = (originSeq: number, path: string) => {
@@ -3171,7 +3208,9 @@ describe("an account's chat writes through the server's copy", () => {
     });
     held.release();
     const response = await reading;
-    expect(await response.clone().text()).not.toContain(wakeId);
+    const hiddenText = await response.clone().text();
+    expect(hiddenText).not.toContain(wakeId);
+    expect(hiddenText).not.toContain("Notes Claude");
     expect(await answer(response)).toEqual({
       ok: false,
       reason: `chat thread not found: ${onNotes.id}`,
@@ -3216,6 +3255,7 @@ describe("an account's chat writes through the server's copy", () => {
       });
     const oldest = unconfirmedWake(f, "op-oldest", "long-0", "thread-long");
     const newest = unconfirmedWake(f, "op-newest", "long-249", "thread-long");
+    nameMac(f, "Claude at work");
     const covered = async (args: Record<string, number>) => {
       const from = f.engine.asked.length;
       const result = await answer(
@@ -3258,6 +3298,17 @@ describe("an account's chat writes through the server's copy", () => {
     expect((await covered({ before: 1_000 })).nextBefore, "past the end covers the newest").toBe(
       150,
     );
+    // Each page names its wakes' agent.
+    for (const [args, wakeId] of [
+      [{}, newest],
+      [{ before: 50 }, oldest],
+    ] as const) {
+      const page = await answer(await f.write("chatContext", { threadId: "thread-long", ...args }));
+      expect(PhoneChatContext.safeParse(page).success).toBe(true);
+      expect(page.wakes, JSON.stringify(args)).toEqual([
+        expect.objectContaining({ wakeId, agentName: "Claude at work" }),
+      ]);
+    }
 
     // As the engine's byte budget does, it ends each page at three messages and says where to go on. Each context still
     // covers its whole interval, so every message is covered exactly once.

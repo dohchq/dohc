@@ -402,7 +402,19 @@ describe("a stream's lanes", () => {
       ...conversation,
     },
     mentions: [],
-    wakes: [],
+    // The lanes read ignores wakes; the server sends them named.
+    wakes: [
+      {
+        wakeId: `wake-${"0".repeat(32)}`,
+        messageId: "message-1",
+        threadId: "thread-1",
+        generation: 1,
+        state: "waiting",
+        winnerLabel: null,
+        agentName: "Claude",
+        canRetry: false,
+      },
+    ],
     wakeCursor: "4",
   });
 
