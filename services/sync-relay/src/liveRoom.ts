@@ -10,6 +10,7 @@
 // Each save tells it the last position the save holds, so it can let go of those.
 import { createHash, randomUUID } from "node:crypto";
 import * as Y from "yjs";
+import { liveEditFitsNote } from "@dohc/ydoc-projection/live-journal-validation";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
 import {
   liveAuthorIdentity,
@@ -849,7 +850,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           const sender = host.room.sender(input.authorContext);
           if (!sender) return refused("provenance-refused");
           const plan = roomAdmissible(held.doc, bytes);
-          if (!plan) return refused("invalid-update");
+          if (!plan || !liveEditFitsNote(held.doc, bytes)) return refused("invalid-update");
           const seed = liveJournalSeedClientId(storage, held.document);
           if (plan.clients.some((clientId) => clientId === seed))
             return refused("provenance-refused");

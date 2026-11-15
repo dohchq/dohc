@@ -11,6 +11,7 @@ import { type OrderedLiveUpdateCutPolicy } from "./orderedLiveUpdateCut.js";
 import {
   createLiveMarkdownJournalValidator,
   createLiveMarkdownRegistrationValidator,
+  liveEditFitsNote,
   type LiveMarkdownRegistrationEvidence,
 } from "./liveDocumentValidation.js";
 import { WORKER_LIVE_VALIDATION_POLICY, withinLiveNoteCapacity } from "./liveValidationPolicy.js";
@@ -1043,4 +1044,133 @@ describe("live note capacity (#3575, #2534)", () => {
     // It walks the deleted blocks once; well under the time that would stall the window.
     expect(elapsed).toBeLessThan(1_000);
   }, 60_000);
+});
+
+describe("live edit format guard", () => {
+  const markdown = [
+    "---",
+    "title: Trip",
+    "tags: [a, b]",
+    "---",
+    "# Plan",
+    "",
+    "Hello **world**",
+    "",
+    "<div>kept as written</div>",
+    "",
+    "| a | b |",
+    "| - | - |",
+    "| 1 | 2 |",
+    "",
+    "- [ ] pack",
+    "",
+  ].join("\n");
+  // The edit a page holding `note` sends after `edit`.
+  function sent(note: Y.Doc, edit: (page: Y.Doc) => void) {
+    const page = new Y.Doc();
+    Y.applyUpdate(page, Y.encodeStateAsUpdate(note));
+    const before = Y.encodeStateVector(page);
+    edit(page);
+    return Y.encodeStateAsUpdate(page, before);
+  }
+  const paragraph = (page: Y.Doc) =>
+    page
+      .getXmlFragment("body")
+      .toArray()
+      .find(
+        (node) => node instanceof Y.XmlElement && node.nodeName === "paragraph",
+      ) as Y.XmlElement;
+  const words = (page: Y.Doc) => paragraph(page).get(0) as Y.XmlText;
+
+  it("takes a whole note and the edits a page makes to it", () => {
+    const note = markdownToYDoc(markdown);
+    expect(liveEditFitsNote(new Y.Doc(), Y.encodeStateAsUpdate(note))).toBe(true);
+    const edits: ((page: Y.Doc) => void)[] = [
+      (page) => words(page).insert(5, " there", { bold: {} }),
+      (page) => words(page).format(0, 5, { italic: {} }),
+      (page) => words(page).delete(0, 3),
+      (page) => {
+        const heading = new Y.XmlElement("heading");
+        heading.setAttribute("level", 2 as never);
+        heading.insert(0, [new Y.XmlText("Day one")]);
+        page.getXmlFragment("body").insert(1, [heading]);
+      },
+      (page) => page.getMap("frontmatter").set("title", "Trip to Kyoto"),
+      (page) => {
+        const days = new Y.Array<unknown>();
+        days.push([1, "two"]);
+        page.getMap("frontmatter").set("days", days);
+      },
+      (page) => page.getMap("meta").set("dohcMarkdownCrlf", true),
+      (page) => page.getMap("meta").set("dohcFrontmatterSourceItem:title", "x"),
+    ];
+    for (const edit of edits) expect(liveEditFitsNote(note, sent(note, edit))).toBe(true);
+  });
+
+  it("refuses an edit that adds what a note can't hold", () => {
+    const note = markdownToYDoc(markdown);
+    const edits: Record<string, (page: Y.Doc) => void> = {
+      root: (page) => page.getMap("extra").set("a", 1),
+      element: (page) => page.getXmlFragment("body").insert(0, [new Y.XmlElement("script")]),
+      top: (page) => page.getXmlFragment("body").insert(0, [new Y.XmlElement("doc")]),
+      attribute: (page) => paragraph(page).setAttribute("onclick", "x"),
+      mark: (page) => words(page).insert(2, "x", { blink: true }),
+      "mark on existing words": (page) => words(page).format(0, 2, { blink: true }),
+      embed: (page) => words(page).insertEmbed(1, { image: "x" }),
+      "plain text in body": (page) =>
+        page.getXmlFragment("body").insert(0, [new Y.Text("x") as never]),
+      "map in body": (page) => paragraph(page).insert(0, [new Y.Map() as never]),
+      "binary value": (page) => page.getMap("frontmatter").set("blob", new Uint8Array([1])),
+      "nested note": (page) => page.getMap("frontmatter").set("doc", new Y.Doc()),
+      hook: (page) => page.getMap("frontmatter").set("hook", new Y.XmlHook("h") as never),
+      "meta key": (page) => page.getMap("meta").set("owner", "me"),
+      "meta type": (page) => page.getMap("meta").set("schemaVersion", new Y.Map() as never),
+    };
+    for (const [name, edit] of Object.entries(edits))
+      expect(liveEditFitsNote(note, sent(note, edit)), name).toBe(false);
+    expect(liveEditFitsNote(note, new Uint8Array([1, 2, 3]))).toBe(false);
+  });
+
+  it("follows a run of typing back to where it starts", () => {
+    const note = markdownToYDoc(markdown);
+    // The bold letter builds on the typed ones, and only they name a neighbour the note holds.
+    const typed = sent(note, (page) => {
+      words(page).insert(1, "abc");
+      words(page).insert(4, "d", { bold: {} });
+    });
+    expect(liveEditFitsNote(note, typed)).toBe(true);
+    const marked = sent(note, (page) => {
+      words(page).insert(1, "abc");
+      words(page).insert(4, "d", { blink: true });
+    });
+    expect(liveEditFitsNote(note, marked)).toBe(false);
+  });
+
+  it("passes what the note already holds or has already collected", () => {
+    const note = markdownToYDoc(markdown);
+    expect(liveEditFitsNote(note, Y.encodeStateAsUpdate(note))).toBe(true);
+    // A page types into a paragraph another page removed, and the note collected its words.
+    const late = sent(note, (page) => words(page).insert(1, "x"));
+    const removed = sent(note, (page) =>
+      page
+        .getXmlFragment("body")
+        .delete(page.getXmlFragment("body").toArray().indexOf(paragraph(page))),
+    );
+    Y.applyUpdate(note, removed);
+    expect(liveEditFitsNote(note, late)).toBe(true);
+
+    // One edit can hold both the words typed into a paragraph and its collected removal.
+    const page = new Y.Doc();
+    Y.applyUpdate(page, Y.encodeStateAsUpdate(note));
+    const start = Y.encodeStateVector(page);
+    const added = new Y.XmlElement("paragraph");
+    added.insert(0, [new Y.XmlText("ab")]);
+    page.getXmlFragment("body").insert(0, [added]);
+    const typed = sent(page, (other) =>
+      ((other.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText).insert(1, "x"),
+    );
+    page.getXmlFragment("body").delete(0);
+    const both = Y.mergeUpdates([Y.encodeStateAsUpdate(page, start), typed]);
+    expect(liveEditFitsNote(note, both)).toBe(true);
+  });
 });

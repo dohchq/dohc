@@ -806,6 +806,24 @@ it("refuses an edit that builds on something the room does not have, or is too l
   expect(unsaved(f)).toEqual([]);
 });
 
+it("refuses an edit that adds what a note can't hold, before it writes or passes it on", async () => {
+  const f = note();
+  const room = rooms(f);
+  const a = editor(f, room, ana),
+    b = editor(f, room, ben);
+  await a.open();
+  await b.open();
+  const before = Y.encodeStateVector(a.doc);
+  a.doc.getMap("extra").set("hidden", "x");
+  expect(await a.submit(Y.encodeStateAsUpdate(a.doc, before))).toEqual({
+    result: "refused",
+    reason: "invalid-update",
+  });
+  expect(unsaved(f)).toEqual([]);
+  expect((await b.submit(b.change("title", "Lisbon"))).result).toBe("success");
+  expect(unsaved(f)).toHaveLength(1);
+});
+
 it("saves every taken edit before a step that closes the note, taking none meanwhile, then ends the room", async () => {
   const f = note();
   let release!: () => void;

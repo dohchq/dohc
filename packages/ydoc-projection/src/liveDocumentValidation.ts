@@ -65,6 +65,8 @@ const META_KEYS = new Set([
 const PROJECTION_SOURCE_META_KEYS = [...SOURCE_META_KEYS, "dohcFrontmatterSource"] as const;
 // The item each frontmatter key held when its text was kept, one entry per key.
 const FRONTMATTER_SOURCE_ITEM_META_PREFIX = "dohcFrontmatterSourceItem:";
+// Metadata only the engine's Markdown reader writes.
+const ENGINE_META_KEYS = new Set(["dohcLineageEpoch", "dohcMarkdownSourceReader"]);
 const ByteArray = Uint8Array;
 const typedArrayPrototype = Object.getPrototypeOf(ByteArray.prototype) as object;
 const byteTag = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag)!.get!;
@@ -836,15 +838,167 @@ function validBodyAttribute(nodeName: string, key: string, value: unknown): bool
   }
 }
 
+// y-prosemirror appends an eight-character hash to nonexclusive mark names.
+const markNameOf = (name: string) => /(.*)(--[a-zA-Z0-9+/=]{8})$/.exec(name)?.[1] ?? name;
+
 function validateMarkAttributes(name: string, value: unknown): void {
-  // y-prosemirror appends an eight-character hash to nonexclusive mark names.
-  const markName = /(.*)(--[a-zA-Z0-9+/=]{8})$/.exec(name)?.[1] ?? name;
+  const markName = markNameOf(name);
   if (markName !== "link" || value === null || typeof value !== "object") return;
   for (const key of ["href", "target", "rel", "class", "title"]) {
     const attribute = (value as Record<string, unknown>)[key];
     if (attribute !== undefined && attribute !== null && typeof attribute !== "string")
       refuse("invalid-schema");
   }
+}
+
+type Shared = ReturnType<Y.Doc["get"]>;
+/** Where an item sits: a root by name or a shared type, and the key it sets, if any. */
+type Place = { readonly parent: string | Shared; readonly sub: string | null };
+const GONE = Symbol("gone");
+
+/**
+ * Whether an edit adds only kinds of content a note can hold: the three roots, the elements and
+ * marks the shared schema has, each element's own attributes, and frontmatter and metadata
+ * values. It reads the edit and the items it builds on, not the whole note, and checks no values
+ * or nesting; the full check at save does that. False when the edit builds on something neither
+ * it nor `doc` has.
+ */
+export function liveEditFitsNote(doc: Y.Doc, update: Uint8Array): boolean {
+  let structs: ReturnType<typeof Y.decodeUpdate>["structs"];
+  try {
+    structs = Y.decodeUpdate(update).structs;
+  } catch {
+    return false;
+  }
+  const schema = getDohcProseMirrorSchema();
+  const own = new Map<number, (Y.Item | Y.GC)[]>();
+  for (const struct of structs) {
+    if (struct instanceof Y.Skip) continue;
+    const items = own.get(struct.id.client) ?? [];
+    items.push(struct);
+    own.set(struct.id.client, items);
+  }
+  for (const items of own.values()) items.sort((a, b) => a.id.clock - b.id.clock);
+  const inEdit = (id: Y.ID) => {
+    const items = own.get(id.client) ?? [];
+    let low = 0,
+      high = items.length - 1;
+    while (low <= high) {
+      const middle = (low + high) >> 1,
+        item = items[middle]!;
+      if (id.clock < item.id.clock) high = middle - 1;
+      else if (id.clock >= item.id.clock + item.length) low = middle + 1;
+      else return item;
+    }
+    return undefined;
+  };
+  const inDoc = (id: Y.ID) => {
+    try {
+      return Y.getItem(doc.store, id) as Y.Item | Y.GC;
+    } catch {
+      return undefined;
+    }
+  };
+  const roots = new Map<Shared, string>();
+  for (const [name, type] of doc.share) roots.set(type, name);
+  const places = new Map<Y.Item, Place | typeof GONE | null>();
+  // An item with a left or right neighbour carries no parent of its own and sits beside it.
+  const placeOf = (start: Y.Item) => {
+    const chain: Y.Item[] = [];
+    let item = start;
+    let found: Place | typeof GONE | null | undefined;
+    for (;;) {
+      found = places.get(item);
+      if (found !== undefined) break;
+      // A neighbour that leads back here is never resolved.
+      places.set(item, null);
+      chain.push(item);
+      const parent = item.parent as string | Y.ID | null;
+      const near =
+        typeof parent === "string"
+          ? undefined
+          : parent
+            ? (inEdit(parent) ?? inDoc(parent))
+            : item.origin || item.rightOrigin
+              ? (inEdit((item.origin ?? item.rightOrigin)!) ??
+                inDoc((item.origin ?? item.rightOrigin)!))
+              : undefined;
+      // Yjs drops an item whose parent or neighbour the note has already collected.
+      if (
+        near &&
+        (!(near instanceof Y.Item) || (parent && near.content instanceof Y.ContentDeleted))
+      ) {
+        found = GONE;
+        break;
+      }
+      if (typeof parent === "string") found = { parent, sub: item.parentSub };
+      else if (parent)
+        found =
+          near?.content instanceof Y.ContentType
+            ? { parent: near.content.type, sub: item.parentSub }
+            : null;
+      else if (near instanceof Y.Item && near === inEdit(near.id)) {
+        item = near;
+        continue;
+      } else {
+        const type = near?.parent as Shared | null | undefined;
+        found = near && type ? { parent: roots.get(type) ?? type, sub: near.parentSub } : null;
+      }
+      break;
+    }
+    for (const item of chain) places.set(item, found);
+    return found;
+  };
+  const xmlChild = (content: Y.Item["content"]) =>
+    content instanceof Y.ContentType &&
+    (content.type instanceof Y.XmlText ||
+      (content.type instanceof Y.XmlElement &&
+        Object.hasOwn(schema.nodes, content.type.nodeName) &&
+        content.type.nodeName !== schema.topNodeType.name &&
+        content.type.nodeName !== "text"));
+  const value = (content: Y.Item["content"]) =>
+    content instanceof Y.ContentAny ||
+    (content instanceof Y.ContentType &&
+      !(content.type instanceof Y.XmlHook) &&
+      (content.type instanceof Y.Map || content.type instanceof Y.Array));
+  for (const struct of structs) {
+    if (!(struct instanceof Y.Item) || struct.content instanceof Y.ContentDeleted) continue;
+    const place = placeOf(struct);
+    if (place === GONE) continue;
+    if (!place) return false;
+    const { parent, sub } = place,
+      content = struct.content;
+    const fits =
+      parent === "body"
+        ? sub === null && xmlChild(content)
+        : parent === "frontmatter"
+          ? sub !== null && value(content)
+          : parent === "meta"
+            ? sub !== null &&
+              (META_KEYS.has(sub) ||
+                ENGINE_META_KEYS.has(sub) ||
+                sub.startsWith(FRONTMATTER_SOURCE_ITEM_META_PREFIX)) &&
+              content instanceof Y.ContentAny
+            : typeof parent === "string"
+              ? false
+              : parent instanceof Y.XmlElement
+                ? sub === null
+                  ? xmlChild(content)
+                  : Object.hasOwn(schema.nodes[parent.nodeName]?.spec.attrs ?? {}, sub) &&
+                    content instanceof Y.ContentAny
+                : parent instanceof Y.XmlText
+                  ? sub === null &&
+                    (content instanceof Y.ContentString ||
+                      (content instanceof Y.ContentFormat &&
+                        Object.hasOwn(schema.marks, markNameOf(content.key))))
+                  : parent instanceof Y.XmlHook || parent instanceof Y.XmlFragment
+                    ? false
+                    : parent instanceof Y.Map
+                      ? sub !== null && value(content)
+                      : parent instanceof Y.Array && sub === null && value(content);
+    if (!fits) return false;
+  }
+  return true;
 }
 
 function bodyFingerprint(
