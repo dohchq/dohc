@@ -200,15 +200,21 @@ impl Places {
         if let Some(index) = self.indexes.get(&item.id) {
             return *index;
         }
-        let mut offset = 0;
+        // Every sibling the walk passes is kept too, so runs that arrive right
+        // to left, such as typing at a line's start, walk the line once.
+        let mut passed = Vec::new();
         let mut left = item.left;
-        while let Some(sibling) = left {
+        let mut offset = loop {
+            let Some(sibling) = left else { break 0 };
             if let Some(known) = self.indexes.get(&sibling.id) {
-                offset += known + sibling.len;
-                break;
+                break known + sibling.len;
             }
-            offset += sibling.len;
+            passed.push(sibling);
             left = sibling.left;
+        };
+        for sibling in passed.into_iter().rev() {
+            self.indexes.insert(sibling.id, offset);
+            offset += sibling.len;
         }
         self.indexes.insert(item.id, offset);
         offset

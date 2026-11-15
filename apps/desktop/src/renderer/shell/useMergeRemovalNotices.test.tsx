@@ -160,6 +160,18 @@ describe("useMergeRemovalNotices", () => {
     await waitFor(() => expect(bridge.getCaptureRecoveryStatus).toHaveBeenCalledTimes(4));
     expect(rows(second.result)).toEqual([]);
   });
+
+  it("brings the row back when the engine refuses a dismissal, and keeps it on refresh", async () => {
+    const bridge = engine([REMOVAL]);
+    bridge.clearCaptureRecovery.mockRejectedValueOnce(new Error("engine busy"));
+    const shown = open();
+    await waitFor(() => expect(rows(shown.result)).toHaveLength(1));
+    act(() => shown.result.current.dismissShellError(rows(shown.result)[0]!.id));
+    await waitFor(() => expect(rows(shown.result)).toHaveLength(1));
+    expect(rows(shown.result)[0]!.identity).toBe("merge-removal:moment-merge-removal-a");
+    await act(() => shown.result.current.notices.refresh());
+    expect(rows(shown.result)).toHaveLength(1);
+  });
 });
 
 it("cuts a long quote at six lines", () => {

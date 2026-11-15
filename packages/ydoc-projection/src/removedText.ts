@@ -76,22 +76,24 @@ function findRemovedText(
   });
   if (deleted.length === 0) return null;
   const listed = named();
-  const pieces: Piece[] = deleted.flatMap((item) =>
-    unnamed(item, listed).map(([start, end]) => ({ item, start, end })),
-  );
+  // A piece that shows nothing, such as an embed the note never writes, is not removed text.
+  const pieces = deleted
+    .flatMap((item) => unnamed(item, listed).map(([start, end]) => ({ item, start, end })))
+    .map((piece) => ({ piece, shown: render(piece) }))
+    .filter(({ shown }) => shown !== "");
   if (pieces.length === 0) return null;
   const places = new Places();
   const sorted = pieces
-    .map((piece) => ({ piece, line: lineOf(piece.item), at: places.of(piece) }))
+    .map((entry) => ({ ...entry, line: lineOf(entry.piece.item), at: places.of(entry.piece) }))
     .sort((left, right) => compare(left.at, right.at));
   let text = "";
   let line: Y.AbstractType<unknown> | null = null;
   for (const entry of sorted) {
     if (line !== null && entry.line !== line) text += "\n";
     line = entry.line;
-    text += render(entry.piece);
+    text += entry.shown;
   }
-  return { text, clients: new Set(pieces.map((piece) => piece.item.id.client)) };
+  return { text, clients: new Set(pieces.map(({ piece }) => piece.item.id.client)) };
 }
 
 /** Characters, and inline items such as an image, a link or a line break. */
@@ -112,9 +114,17 @@ function unnamed(item: Y.Item, named: DeleteSet): [number, number][] {
   const from = item.id.clock;
   const to = from + item.length;
   const ranges: [number, number][] = [];
+  const listed = named.clients.get(item.id.client) ?? [];
+  // A delete set lists each client's ranges in clock order. Start at the
+  // first that reaches this item, so many ranges cost no rescan per item.
+  let low = 0;
+  for (let high = listed.length; low < high;) {
+    const middle = (low + high) >>> 1;
+    if (listed[middle]!.clock + listed[middle]!.len <= from) low = middle + 1;
+    else high = middle;
+  }
   let cursor = from;
-  for (const deleted of named.clients.get(item.id.client) ?? []) {
-    if (deleted.clock + deleted.len <= cursor) continue;
+  for (const deleted of listed.slice(low)) {
     if (deleted.clock >= to) break;
     if (deleted.clock > cursor) ranges.push([cursor - from, deleted.clock - from]);
     cursor = Math.max(cursor, deleted.clock + deleted.len);
@@ -150,21 +160,26 @@ class Places {
 
   /** The item's offset among its siblings: lengths for text, one per element. */
   private index(item: Y.Item): number {
-    let index = this.indexes.get(item);
-    if (index === undefined) {
-      let offset = 0;
-      for (let left = item.left; left; left = left.left) {
-        const known = this.indexes.get(left);
-        if (known !== undefined) {
-          offset += known + left.length;
-          break;
-        }
-        offset += left.length;
+    const index = this.indexes.get(item);
+    if (index !== undefined) return index;
+    // Every sibling the walk passes is kept too, so runs that arrive right
+    // to left, such as typing at a line's start, walk the line once.
+    const passed: Y.Item[] = [];
+    let offset = 0;
+    for (let left = item.left; left; left = left.left) {
+      const known = this.indexes.get(left);
+      if (known !== undefined) {
+        offset = known + left.length;
+        break;
       }
-      index = offset;
-      this.indexes.set(item, index);
+      passed.push(left);
     }
-    return index;
+    for (const sibling of passed.reverse()) {
+      this.indexes.set(sibling, offset);
+      offset += sibling.length;
+    }
+    this.indexes.set(item, offset);
+    return offset;
   }
 }
 
@@ -179,6 +194,9 @@ function compare(left: number[], right: number[]): number {
 function render({ item, start, end }: Piece): string {
   const content = item.content;
   if (content instanceof Y.ContentString) return content.str.slice(start, end);
+  // The note's Markdown writes a string embed as its text and leaves out any other.
+  if (content instanceof Y.ContentEmbed)
+    return typeof content.embed === "string" ? content.embed : "";
   if (content instanceof Y.ContentType && content.type instanceof Y.XmlElement)
     return inline(content.type);
   return "";

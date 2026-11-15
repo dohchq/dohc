@@ -51,31 +51,32 @@ impl Ydoc {
         }
         let unseen = deletions.merged.diff(&deletions.named);
         let mut places = Places::default();
-        let mut pieces: Vec<(Vec<u32>, Option<ID>, DeletedRun<'_>)> = deleted_runs(&txn, &unseen)
-            .into_iter()
-            .filter(holds_text)
-            .map(|run| (run.place(&mut places), run.line(), run))
-            .collect();
+        // A piece that shows nothing, such as an embed the note never writes,
+        // is not removed text.
+        let mut pieces: Vec<(Vec<u32>, Option<ID>, DeletedRun<'_>, String)> =
+            deleted_runs(&txn, &unseen)
+                .into_iter()
+                .filter(holds_text)
+                .map(|run| (shown(&run), run))
+                .filter(|(shown, _)| !shown.is_empty())
+                .map(|(shown, run)| (run.place(&mut places), run.line(), run, shown))
+                .collect();
         if pieces.is_empty() {
             return None;
         }
         pieces.sort_by(|left, right| left.0.cmp(&right.0));
         let mut text = String::new();
         let mut line = None;
-        for (_, piece_line, piece) in &pieces {
+        for (_, piece_line, _, shown) in &pieces {
             if line.is_some_and(|line| line != *piece_line) {
                 text.push('\n');
             }
             line = Some(*piece_line);
-            if let Some(characters) = piece.text() {
-                text.push_str(characters);
-            } else if let Some(element) = piece.element() {
-                text.push_str(&inline(element));
-            }
+            text.push_str(shown);
         }
         let deleted_by_change = pieces
             .iter()
-            .any(|(_, _, piece)| piece.id().clock < before.get(&piece.id().client));
+            .any(|(_, _, piece, _)| piece.id().clock < before.get(&piece.id().client));
         Some(RemovedText {
             text,
             deleted_by_change,
@@ -93,6 +94,21 @@ fn holds_text(run: &DeletedRun<'_>) -> bool {
     }
     run.element()
         .is_some_and(|element| INLINE_NODES.contains(&element.name()))
+}
+
+/// What the piece shows in the note. The note's Markdown writes a string embed
+/// as its text and leaves out any other.
+fn shown(run: &DeletedRun<'_>) -> String {
+    if let Some(characters) = run.text() {
+        return characters.to_owned();
+    }
+    if let Some(element) = run.element() {
+        return inline(element);
+    }
+    match run.embed() {
+        Some(Any::String(text)) => text.to_string(),
+        _ => String::new(),
+    }
 }
 
 /// A deleted element's attributes are deleted too; read the last value written.
@@ -266,6 +282,30 @@ mod tests {
         let deleted = ben.richdoc_remove_block(0);
         assert_eq!(merge(&host, &empty), None);
         assert_eq!(merge(&host, &deleted), None);
+    }
+
+    #[test]
+    fn an_embed_the_note_leaves_out_removes_nothing_and_a_text_embed_reads_as_written() {
+        for (embed, expected) in [
+            (Any::Number(7.0), None),
+            (Any::String("kept".into()), removed("kept", true)),
+        ] {
+            let (host, ana, ben) = shared(&[""]);
+            let before = ana.state_vector();
+            let line = paragraph(&ana, 0);
+            {
+                let mut txn = ana.doc.transact_mut();
+                match line.get(&txn, 0) {
+                    Some(XmlOut::Text(text)) => text.insert_embed(&mut txn, 0, embed),
+                    _ => panic!("no text"),
+                };
+                line.insert(&mut txn, 1, XmlElementPrelim::empty("escapedPunctuation"));
+            }
+            let typed = ana.doc.transact().encode_state_as_update_v1(&before);
+            let deleted = ben.richdoc_remove_block(0);
+            assert_eq!(merge(&host, &typed), None);
+            assert_eq!(merge(&host, &deleted), expected);
+        }
     }
 
     #[test]

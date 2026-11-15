@@ -51,14 +51,18 @@ export function useMergeRemovalNotices(input: {
     const here = () => latest.current.workspaceId === workspaceId;
     // Each record's author, read once from its History change.
     const authors = new Map<string, string | undefined>();
+    // The engine's newest list.
+    let listed: readonly MergeRemoval[] = [];
 
-    const publish = (listed: readonly MergeRemoval[]) =>
+    // Only a removal whose dismissal the engine refused raises its toast again.
+    const publish = (raised?: string) =>
       latest.current.show(
         listed.map((removal) => ({
           momentId: removal.momentId,
           path: removal.path,
           title: MERGE_REMOVAL_TITLE,
           ...mergeRemovalWords(removal.text, authors.get(removal.momentId)),
+          raise: removal.momentId === raised,
           copy: () => copy(removal),
           dismiss: () => clear(removal),
         })),
@@ -91,7 +95,8 @@ export function useMergeRemovalNotices(input: {
         if (!reads.isCurrent(request) || !here()) return;
         await Promise.all(mergeRemovals.map(named));
         if (!reads.isCurrent(request) || !here()) return;
-        publish(mergeRemovals);
+        listed = mergeRemovals;
+        publish();
       } catch (error) {
         if (!reads.isCurrent(request) || !here()) return;
         latest.current.reportShellError(
@@ -114,6 +119,8 @@ export function useMergeRemovalNotices(input: {
         })
         .catch((error: unknown) => {
           if (!here()) return;
+          // The engine still lists it, so its row comes back.
+          publish(removal.momentId);
           latest.current.reportShellError(
             `dohc could not remove the notice about "${removal.path}".`,
             error,

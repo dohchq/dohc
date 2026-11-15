@@ -181,6 +181,37 @@ describe("text a merged change removes without having seen it", () => {
     expect(receive(ana, deleted)?.text).toBe(" first\n![A cat](cat.png)\nsecond");
   });
 
+  it("keeps note order for typing added at a line's start, one character at a time", () => {
+    const [ana, ben] = pair("");
+    for (const character of "cba") change(ana, (body) => piece(body, 0).insert(0, character));
+    const deleted = change(ben, (body) => body.delete(0, 1));
+
+    expect(receive(ana, deleted)?.text).toBe("abc");
+  });
+
+  it("quotes a text embed as the note writes it and reports nothing for embeds the note leaves out", () => {
+    const [ana, ben] = pair("", "");
+    change(ana, (body) => {
+      piece(body, 0).insertEmbed(0, { kind: "widget" });
+      (body.get(1) as Y.XmlElement).insert(1, [new Y.XmlElement("escapedPunctuation")]);
+    });
+    expect(
+      receive(
+        ana,
+        change(ben, (body) => body.delete(0, 2)),
+      ),
+    ).toBeNull();
+
+    const [carol, dan] = pair("");
+    change(carol, (body) => piece(body, 0).insertEmbed(0, "kept"));
+    expect(
+      receive(
+        carol,
+        change(dan, (body) => body.delete(0, 1)),
+      )?.text,
+    ).toBe("kept");
+  });
+
   it("reports nothing for a change that deletes nothing", () => {
     const [ana, ben] = pair("Hello");
     const typed = change(ben, (body) => piece(body, 0).insert(0, "Hi. "));

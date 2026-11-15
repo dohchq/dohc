@@ -55,13 +55,15 @@ export interface CaptureRecoveryNotice {
 }
 
 // Text a change from elsewhere removed unseen, which the engine kept, as its
-// Notices row reads.
+// Notices row reads. `raise` puts the row back, with its toast, after a
+// dismissal the engine refused.
 export interface MergeRemovalNotice {
   momentId: string;
   path: string;
   title: string;
   message: string;
   lastLine?: string;
+  raise: boolean;
   copy: () => void;
   dismiss: () => void;
 }
@@ -1311,7 +1313,7 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
     }
     const atMs = Date.now();
     const fresh = removals.flatMap((removal): ShellError[] => {
-      if (shownMergeRemovals.current.has(removal.momentId)) return [];
+      if (shownMergeRemovals.current.has(removal.momentId) && !removal.raise) return [];
       shownMergeRemovals.current.add(removal.momentId);
       nextId.current += 1;
       return [
@@ -1332,9 +1334,12 @@ export function useShellError(workspaceId: string, retrySharedView?: () => void)
         },
       ];
     });
+    const replaced = new Set(fresh.map((error) => error.identity));
     setShellErrors((current) => {
       const stays = current.filter(
-        (error) => error.kind !== "merge-removal" || listed.has(error.identity ?? ""),
+        (error) =>
+          error.kind !== "merge-removal" ||
+          (listed.has(error.identity ?? "") && !replaced.has(error.identity)),
       );
       return fresh.length === 0 && stays.length === current.length ? current : [...stays, ...fresh];
     });

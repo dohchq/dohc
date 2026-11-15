@@ -71,48 +71,19 @@ function statusText(state: NamedLiveBrowserState, link: boolean): string {
     return "The server could not open the file for editing. dohc keeps trying.";
   return "Editing paused. Check your connection, then retry.";
 }
-/**
- * Ice's choice 2 for #3983. False: the lasting copy is the one the file's owner keeps in
- * History. True: this browser also keeps the text until the person dismisses it.
- */
-export const KEEP_REMOVED_TEXT_IN_BROWSER = false;
-const REMOVED_KEY = "dohc.removed-text";
 type Removed = { id: string; text: string };
-function storedRemoved(): Removed[] {
-  if (!KEEP_REMOVED_TEXT_IN_BROWSER) return [];
-  try {
-    const value: unknown = JSON.parse(localStorage.getItem(REMOVED_KEY) ?? "[]");
-    return Array.isArray(value)
-      ? value.filter(
-          (entry): entry is Removed =>
-            typeof entry?.id === "string" && typeof entry?.text === "string",
-        )
-      : [];
-  } catch {
-    return [];
-  }
-}
-function storeRemoved(list: Removed[]) {
-  if (!KEEP_REMOVED_TEXT_IN_BROWSER) return;
-  try {
-    localStorage.setItem(REMOVED_KEY, JSON.stringify(list));
-  } catch {
-    /* The notice still shows; only the copy across reloads is lost. */
-  }
-}
 
-/** Text someone else's change removed from this page without having seen it. */
+/**
+ * Text someone else's change removed from this page without having seen it. The lasting copy
+ * is the one the file's owner keeps in History.
+ */
 function RemovedTextNotice({ session }: { session: NamedDocumentSession }) {
-  const [removed, setRemoved] = useState<Removed[]>(storedRemoved);
+  const [removed, setRemoved] = useState<Removed[]>([]);
   const [copy, setCopy] = useState<"idle" | "copied" | "failed">("idle");
   useEffect(
     () =>
       session.onRemovedText(({ text }) =>
-        setRemoved((list) => {
-          const next = [...list, { id: crypto.randomUUID(), text }];
-          storeRemoved(next);
-          return next;
-        }),
+        setRemoved((list) => [...list, { id: crypto.randomUUID(), text }]),
       ),
     [session],
   );
@@ -120,12 +91,7 @@ function RemovedTextNotice({ session }: { session: NamedDocumentSession }) {
   useEffect(() => setCopy("idle"), [latest?.id]);
   if (!latest) return null;
   const { quoted, more } = quoteRemovedText(latest.text);
-  const dismiss = () =>
-    setRemoved((list) => {
-      const next = list.filter((entry) => entry.id !== latest.id);
-      storeRemoved(next);
-      return next;
-    });
+  const dismiss = () => setRemoved((list) => list.filter((entry) => entry.id !== latest.id));
   const copyText = async () => {
     try {
       await navigator.clipboard.writeText(latest.text);
@@ -142,12 +108,10 @@ function RemovedTextNotice({ session }: { session: NamedDocumentSession }) {
       <div>
         <p className="edit-notice-title">Someone else's change removed this text</p>
         <blockquote className="removed-text-quote">{quoted}</blockquote>
-        {more > 0 && <p>And {more.toLocaleString()} more characters. Copy text copies all of it.</p>}
-        <p>
-          {KEEP_REMOVED_TEXT_IN_BROWSER
-            ? "This browser keeps it until you dismiss it."
-            : "The file's owner keeps a copy in History."}
-        </p>
+        {more > 0 && (
+          <p>And {more.toLocaleString()} more characters. Copy text copies all of it.</p>
+        )}
+        <p>The file's owner keeps a copy in History.</p>
         <div className="edit-notice-actions">
           <button className="handoff-button secondary" onClick={() => void copyText()}>
             {copy === "copied" ? "Copied" : copy === "failed" ? "Could not copy" : "Copy text"}
