@@ -318,6 +318,7 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
       };
     }
     if (parts.length === 4 && parts[3] === "log") return { route: "share-log", shareId };
+    if (parts.length === 4 && parts[3] === "reach") return { route: "share-reach", shareId };
     if (parts.length === 4 && parts[3] === "discussion") {
       return { route: "share-discussion", shareId };
     }

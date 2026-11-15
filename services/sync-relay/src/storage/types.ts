@@ -1787,6 +1787,27 @@ export interface SyncRelayStorage {
     path: string;
     relaySeq: number;
   }): boolean;
+  readMemberReach(
+    selector: import("../shareFilter").AnyShareSelector,
+    workspaceId: string,
+  ): import("../shareFilter").AnyShareSelector;
+  readShareTx<T>(read: () => T): T;
+  memberInventory(
+    shareId: string,
+    userId: string,
+    key: string | Uint8Array,
+  ): import("./memberInventory").MemberInventory;
+  memberReach(
+    workspaceId: string,
+    userId: string,
+    role: "admin" | "member",
+    level: import("@dohc/security-contract/share-selector").ShareAccess,
+  ): import("./memberReach").MemberReach;
+  refreshAccountEmail(
+    userId: string,
+    email: import("./accountEmails").AccountEmail | null,
+    nowMs: number,
+  ): void;
   currentObjectFile(input: {
     workspaceId: string;
     versionId: string;
@@ -2190,6 +2211,7 @@ export interface SqliteStatement {
 }
 
 export interface SqliteDb {
+  readonly isTransaction?: boolean;
   exec(sql: string): void;
   prepare(sql: string): SqliteStatement;
   close(): void;

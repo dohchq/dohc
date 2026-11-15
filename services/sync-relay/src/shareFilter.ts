@@ -79,6 +79,7 @@ export interface ShareSelector extends StoredShareSelector {
   access: ShareAccess;
   // A workspace member's file reach (`workspaceFileReach`). Never stored.
   wholeWorkspace?: true;
+  levelAt?: (path: string) => ShareAccess | null;
 }
 
 // Shared channels: a bidirectional chat grant. Unlike the
@@ -1298,14 +1299,78 @@ export function filterOpForShare(
 
   if (isWorkspaceSelector(selector)) {
     const files = workspaceFileReach(selector);
+    if (opKind === "moment.append" && selector.reach) {
+      const record = asRecord(payload);
+      if (!record || record.versionId !== "main" || !hasValidShareMomentShape(record))
+        return { allowed: false };
+      const before = typeof record.payloadBeforePath === "string" ? record.payloadBeforePath : null;
+      const after = typeof record.payloadAfterPath === "string" ? record.payloadAfterPath : null;
+      const beforeVisible = before !== null && pathVisibleThroughShare(files, before);
+      const afterVisible = after !== null && pathVisibleThroughShare(files, after);
+      if (record.operation === "rename" && beforeVisible !== afterVisible) {
+        if (beforeVisible) {
+          const departure = filterOpForShare(
+            files,
+            opKind,
+            JSON.stringify({
+              operation: "delete",
+              versionId: "main",
+              path: before,
+              payloadBeforePath: before,
+              payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
+            }),
+            chat,
+          );
+          if (departure.allowed)
+            (departure.payload as Record<string, unknown>).payloadBeforeBlobSha256 = null;
+          return departure;
+        }
+        if (typeof record.objectId !== "string" || !selector.reach.objectVisible(record.objectId))
+          return { allowed: false };
+        return filterOpForShare(
+          files,
+          opKind,
+          JSON.stringify({
+            operation: "write",
+            versionId: "main",
+            path: after,
+            payloadAfterPath: after,
+            payloadAfterBlobSha256: record.payloadAfterBlobSha256,
+            payloadAfterContentKind: record.payloadAfterContentKind,
+          }),
+          chat,
+        );
+      }
+      if (typeof record.objectId !== "string" || !selector.reach.objectVisible(record.objectId))
+        return { allowed: false };
+    }
     if (!opKind.startsWith("chat.")) return filterOpForShare(files, opKind, payloadJson, chat);
     const side = workspaceChatSide(selector, opKind, payload, chat);
-    if (side === "files")
+    if (side === "files") {
+      const binding =
+        opKind === "chat.thread.create"
+          ? threadCreateBinding(asRecord(payload)!)
+          : chat?.threadFileBinding(String(asRecord(payload)?.threadId));
+      if (binding?.kind === "object" && selector.reach) {
+        if (!selector.reach.objectVisible(binding.objectId)) return { allowed: false };
+        const reach = selector.reach;
+        const resolver = {
+          ...chat!,
+          objectCurrentPath: (id: string) =>
+            reach.objectVisible(id) ? reach.objectPath(id) : null,
+        };
+        return withheldLinks(
+          filterFileChatOpForPathShare(files, opKind, payload, resolver),
+          opKind,
+          files,
+        );
+      }
       return withheldLinks(
         filterFileChatOpForPathShare(files, opKind, payload, chat),
         opKind,
         files,
       );
+    }
     if (!side) return { allowed: false };
     // A Group's folder path is served only when the share reaches that folder.
     const folderPath = asRecord(payload)?.folderPath;

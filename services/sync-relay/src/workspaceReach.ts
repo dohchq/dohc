@@ -1,6 +1,7 @@
 import { isWorkspaceGroup } from "@dohc/security-contract/chat-wire-ids";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import type { ChatShareAccess } from "@dohc/security-contract/share-grant";
+import type { MemberReach } from "./storage/memberReach";
 
 // What a person in a workspace reaches through the workspace share. Every
 // surface asks these functions and nothing else, so access rules (piece 4 of
@@ -19,6 +20,7 @@ export interface StoredWorkspaceShareSelector {
 export interface WorkspaceShareSelector extends StoredWorkspaceShareSelector {
   access: ShareAccess;
   role: "admin" | "member";
+  reach?: MemberReach;
 }
 
 /**
@@ -31,6 +33,9 @@ export function workspaceFileReach(selector: WorkspaceShareSelector) {
     versionId: null,
     access: selector.access,
     wholeWorkspace: true as const,
+    levelAt:
+      selector.reach?.levelAt ??
+      (() => (selector.role === "admin" ? ("edit" as const) : selector.access)),
     ...(selector.role === "admin" ? { ruleFiles: true as const } : {}),
   };
 }
@@ -46,6 +51,9 @@ export function workspaceFileWriteReach(selector: WorkspaceShareSelector) {
     versionId: null,
     access: selector.access,
     wholeWorkspace: true as const,
+    levelAt:
+      selector.reach?.levelAt ??
+      (() => (selector.role === "admin" ? ("edit" as const) : selector.access)),
   };
 }
 

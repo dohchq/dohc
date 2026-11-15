@@ -181,3 +181,25 @@ export function currentAccessRuleSet(db: SqliteDb, workspaceId: string): AccessR
     }),
   );
 }
+
+/** Rules immediately before the deleting operation, including a rule it removes. */
+export function accessRuleSetBefore(
+  db: SqliteDb,
+  workspaceId: string,
+  versionId: string,
+  seq: number,
+): AccessRuleSet {
+  const rows = db
+    .prepare(`SELECT folder, rule_text FROM sync_relay_access_rules
+    WHERE workspace_id = ? AND version_id = ? AND from_seq < ? AND (to_seq IS NULL OR to_seq >= ?)`)
+    .all(workspaceId, versionId, seq, seq);
+  return accessRuleSet(
+    rows.map(
+      (row) =>
+        [
+          String(row.folder),
+          typeof row.rule_text === "string" ? parseAccessRule(row.rule_text) : null,
+        ] as const,
+    ),
+  );
+}

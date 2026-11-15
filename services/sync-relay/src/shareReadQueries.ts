@@ -13,6 +13,7 @@ import {
   hasValidShareMomentShape,
   fileSideOf,
   isGroupSelector,
+  isWorkspaceSelector,
   parseShareOpPayloadWithReferencedPaths,
   pathVisibleThroughShare,
   targetVersionId,
@@ -63,10 +64,14 @@ export function createShareReadQueries(
     | "isCurrentFileState"
     | "listCurrentFileLogRowsByBlob"
     | "indexReceivedWorkTargets"
+    | "readMemberReach"
+    | "readShareTx"
   >,
   linkFreshnessPageSize: number,
   linkKey?: string | Uint8Array,
 ) {
+  const inRead = <T>(selector: AnyShareSelector, run: () => T): T =>
+    isWorkspaceSelector(selector) && storage.readShareTx ? storage.readShareTx(run) : run();
   // The thread→channel resolver the chat share filter scopes by. Backed
   // by the shared workspace's own log (earliest chat.thread.create wins), so a
   // member-pushed forgery can never re-bind an existing thread. Memoized per
@@ -265,6 +270,7 @@ export function createShareReadQueries(
       string,
       Parameters<SyncRelayStorage["indexReceivedWorkTargets"]>[0][number]
     >();
+    selector = storage.readMemberReach?.(selector, workspaceId) ?? selector;
     const identity = createReceivedIdentity(
       linkKey,
       (recipient, workspaceId, objectId, objectToken) => {
@@ -288,153 +294,157 @@ export function createShareReadQueries(
     const currentFiles = new Map<string, ReturnType<typeof storage.currentObjectFile>>();
     const currentFilesSelector =
       audience === "authenticated" && fileSelector?.access !== "edit" ? fileSelector : null;
-    const page = scanFilteredLog(
-      storage,
-      {
-        workspaceId,
-        since,
-        limit,
-        maxRawRows: audience === "accountless" ? MAX_RAW_ROWS_PER_LINK_PAGE : limit,
-      },
-      (row) => {
-        // A departed publication names a path its document no longer holds.
-        if (row.settlementAdmission?.status === "refused" || row.relayAdmission !== undefined)
-          return null;
-        if (audience === "accountless" && !ACCOUNTLESS_FILE_REPLAY_OP_KINDS.has(row.opKind)) {
-          return null;
-        }
-        const decision = filterOpForShare(
-          selector,
-          row.opKind,
-          row.payloadJson,
-          chatResolver,
-          half,
-        );
-        let payload = decision.allowed
-          ? accountlessProjection
-            ? accountlessProjection.projectPayload(decision.payload)
-            : decision.payload
-          : accountlessProjection
-            ? matchRefusedBoundaryMove(selector, accountlessProjection, row, chatResolver)
-            : null;
-        if (payload === null) return null;
-        const authenticatedMoment = audience === "authenticated" && row.opKind === "moment.append";
-        const original =
-          recipient || authenticatedMoment
-            ? (JSON.parse(row.payloadJson) as Record<string, unknown>)
-            : undefined;
-        if (recipient && original)
-          tokenizeReceivedPayload({
-            identity,
-            recipient,
-            workspaceId,
-            selector,
-            chat: chatResolver,
-            opKind: row.opKind,
-            original,
-            served: payload as Record<string, unknown>,
-            ...(accountlessProjection ? { projectPath: accountlessProjection.projectPath } : {}),
-          });
-        if (currentFilesSelector) {
-          payload = currentFilesOp(
-            workspaceId,
-            currentFilesSelector,
-            row,
-            payload as Record<string, unknown>,
-          );
-          if (payload === null) return null;
-        }
-        if (currentOnly) {
-          if (!fileSelector || !accountlessProjection || !recipient) return null;
-          const reset = { relaySeq: row.relaySeq, opKind: "files.reset", payload: {} };
-          if (row.opKind === "version.create") return reset;
-          if (row.opKind !== "moment.append") return null;
-          const objectId = original?.objectId;
-          const receivedObject = identity.object(recipient, workspaceId, objectId);
-          if (typeof objectId !== "string" || !receivedObject) return reset;
-          const versionId = targetVersionId(fileSelector);
-          if (!currentFiles.has(objectId)) {
-            currentFiles.set(
-              objectId,
-              storage.currentObjectFile({ workspaceId, versionId, objectId, epochLogFloor }),
-            );
+    const page = inRead(selector, () => {
+      selector = storage.readMemberReach?.(selector, workspaceId) ?? selector;
+      return scanFilteredLog(
+        storage,
+        {
+          workspaceId,
+          since,
+          limit,
+          maxRawRows: audience === "accountless" ? MAX_RAW_ROWS_PER_LINK_PAGE : limit,
+        },
+        (row) => {
+          // A departed publication names a path its document no longer holds.
+          if (row.settlementAdmission?.status === "refused" || row.relayAdmission !== undefined)
+            return null;
+          if (audience === "accountless" && !ACCOUNTLESS_FILE_REPLAY_OP_KINDS.has(row.opKind)) {
+            return null;
           }
-          const current = currentFiles.get(objectId)!;
-          if (current === "reset") return reset;
-          const projected =
-            current === null || visibleSharePath(fileSelector, current.path) === null
-              ? null
-              : accountlessProjection.projectPath(current.path);
-          return {
-            relaySeq: row.relaySeq,
-            opKind: "file.current",
-            payload: {
-              objectId: receivedObject,
-              file:
-                current && projected !== null
-                  ? {
-                      objectId: receivedObject,
-                      path: projected,
-                      blobSha256: current.blobSha256,
-                      contentKind: current.contentKind,
-                    }
-                  : null,
-            },
-          };
-        }
-        if (authenticatedMoment && original) {
-          (payload as Record<string, unknown>).authors = sharedMomentAuthors(
-            row.admittedAuthorSnapshot,
+          const decision = filterOpForShare(
+            selector,
+            row.opKind,
+            row.payloadJson,
+            chatResolver,
+            half,
           );
-          const mark = original.attributionUnavailable;
-          if (mark && typeof mark === "object" && !Array.isArray(mark)) {
-            const unavailable = mark as Record<string, unknown>;
-            if (
-              typeof unavailable.settlementId === "string" &&
-              unavailable.settlementId.length > 0 &&
-              unavailable.settlementId.length <= 512 &&
-              typeof unavailable.reason === "string" &&
-              unavailable.reason.length > 0 &&
-              unavailable.reason.length <= 4096 &&
-              typeof original.momentId === "string" &&
-              storage.hasRefusedSettlement({
-                workspaceId,
-                originId: row.originId,
-                originSeq: row.originSeq,
-                momentId: original.momentId,
-                settlementId: unavailable.settlementId,
-                reason: unavailable.reason,
-              })
-            ) {
-              (payload as Record<string, unknown>).metadata = {
-                origin: "sync",
-                summary: "Attribution unavailable",
-              };
+          let payload = decision.allowed
+            ? accountlessProjection
+              ? accountlessProjection.projectPayload(decision.payload)
+              : decision.payload
+            : accountlessProjection
+              ? matchRefusedBoundaryMove(selector, accountlessProjection, row, chatResolver)
+              : null;
+          if (payload === null) return null;
+          const authenticatedMoment =
+            audience === "authenticated" && row.opKind === "moment.append";
+          const original =
+            recipient || authenticatedMoment
+              ? (JSON.parse(row.payloadJson) as Record<string, unknown>)
+              : undefined;
+          if (recipient && original)
+            tokenizeReceivedPayload({
+              identity,
+              recipient,
+              workspaceId,
+              selector,
+              chat: chatResolver,
+              opKind: row.opKind,
+              original,
+              served: payload as Record<string, unknown>,
+              ...(accountlessProjection ? { projectPath: accountlessProjection.projectPath } : {}),
+            });
+          if (currentFilesSelector) {
+            payload = currentFilesOp(
+              workspaceId,
+              currentFilesSelector,
+              row,
+              payload as Record<string, unknown>,
+            );
+            if (payload === null) return null;
+          }
+          if (currentOnly) {
+            if (!fileSelector || !accountlessProjection || !recipient) return null;
+            const reset = { relaySeq: row.relaySeq, opKind: "files.reset", payload: {} };
+            if (row.opKind === "version.create") return reset;
+            if (row.opKind !== "moment.append") return null;
+            const objectId = original?.objectId;
+            const receivedObject = identity.object(recipient, workspaceId, objectId);
+            if (typeof objectId !== "string" || !receivedObject) return reset;
+            const versionId = targetVersionId(fileSelector);
+            if (!currentFiles.has(objectId)) {
+              currentFiles.set(
+                objectId,
+                storage.currentObjectFile({ workspaceId, versionId, objectId, epochLogFloor }),
+              );
+            }
+            const current = currentFiles.get(objectId)!;
+            if (current === "reset") return reset;
+            const projected =
+              current === null || visibleSharePath(fileSelector, current.path) === null
+                ? null
+                : accountlessProjection.projectPath(current.path);
+            return {
+              relaySeq: row.relaySeq,
+              opKind: "file.current",
+              payload: {
+                objectId: receivedObject,
+                file:
+                  current && projected !== null
+                    ? {
+                        objectId: receivedObject,
+                        path: projected,
+                        blobSha256: current.blobSha256,
+                        contentKind: current.contentKind,
+                      }
+                    : null,
+              },
+            };
+          }
+          if (authenticatedMoment && original) {
+            (payload as Record<string, unknown>).authors = sharedMomentAuthors(
+              row.admittedAuthorSnapshot,
+            );
+            const mark = original.attributionUnavailable;
+            if (mark && typeof mark === "object" && !Array.isArray(mark)) {
+              const unavailable = mark as Record<string, unknown>;
+              if (
+                typeof unavailable.settlementId === "string" &&
+                unavailable.settlementId.length > 0 &&
+                unavailable.settlementId.length <= 512 &&
+                typeof unavailable.reason === "string" &&
+                unavailable.reason.length > 0 &&
+                unavailable.reason.length <= 4096 &&
+                typeof original.momentId === "string" &&
+                storage.hasRefusedSettlement({
+                  workspaceId,
+                  originId: row.originId,
+                  originSeq: row.originSeq,
+                  momentId: original.momentId,
+                  settlementId: unavailable.settlementId,
+                  reason: unavailable.reason,
+                })
+              ) {
+                (payload as Record<string, unknown>).metadata = {
+                  origin: "sync",
+                  summary: "Attribution unavailable",
+                };
+              }
             }
           }
-        }
-        const collectionOriginPrefix = row.originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)
-          ? COLLECTION_FILE_ORIGIN_PREFIX
-          : row.originId.startsWith(COLLECTION_CREATE_ORIGIN_PREFIX)
-            ? COLLECTION_CREATE_ORIGIN_PREFIX
-            : undefined;
-        return {
-          relaySeq: row.relaySeq,
-          ...(audience === "authenticated"
-            ? {
-                originId:
-                  collectionOriginPrefix !== undefined
-                    ? `${collectionOriginPrefix}${createHmac("sha256", shareId).update(row.originId).digest("hex")}`
-                    : row.originId,
-              }
-            : {}),
-          originSeq: row.originSeq,
-          opKind: row.opKind,
-          payload,
-          recordedAtMs: row.recordedAtMs,
-        };
-      },
-    );
+          const collectionOriginPrefix = row.originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)
+            ? COLLECTION_FILE_ORIGIN_PREFIX
+            : row.originId.startsWith(COLLECTION_CREATE_ORIGIN_PREFIX)
+              ? COLLECTION_CREATE_ORIGIN_PREFIX
+              : undefined;
+          return {
+            relaySeq: row.relaySeq,
+            ...(audience === "authenticated"
+              ? {
+                  originId:
+                    collectionOriginPrefix !== undefined
+                      ? `${collectionOriginPrefix}${createHmac("sha256", shareId).update(row.originId).digest("hex")}`
+                      : row.originId,
+                }
+              : {}),
+            originSeq: row.originSeq,
+            opKind: row.opKind,
+            payload,
+            recordedAtMs: row.recordedAtMs,
+          };
+        },
+      );
+    });
     if (observed.size) storage.indexReceivedWorkTargets([...observed.values()]);
     return { ops: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
   };
@@ -502,15 +512,23 @@ export function createShareReadQueries(
     ) {
       return null;
     }
+    selector = storage.readMemberReach?.(selector, workspaceId) ?? selector;
     const fileSelector = fileSideOf(selector);
     if (!fileSelector) return null;
+    // A member's reach also judges objects, so the filter keeps a workspace selector whole.
+    const filterSelector = isWorkspaceSelector(selector) ? selector : fileSelector;
     selector = fileSelector;
     const versionId = targetVersionId(selector);
     const chatResolver = chatResolverFor(workspaceId);
     if (selector.access !== "edit") {
       // Page past rows the share filter refuses, so they cannot hide an admitted file.
       const produced = ({ path, row }: { path: string; row: SyncRelayLogRow }) => {
-        const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
+        const decision = filterOpForShare(
+          filterSelector,
+          row.opKind,
+          row.payloadJson,
+          chatResolver,
+        );
         if (!decision.allowed || !decision.blobSha256s.includes(sha256)) return false;
         const served = decision.payload as Record<string, unknown>;
         if (row.opKind === "version.create")
@@ -546,7 +564,7 @@ export function createShareReadQueries(
       .sort((left, right) => right.relaySeq - left.relaySeq)
       .slice(0, SHARED_BLOB_CANDIDATE_LIMIT);
     const reachable = candidates.some((row) => {
-      const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
+      const decision = filterOpForShare(filterSelector, row.opKind, row.payloadJson, chatResolver);
       return decision.allowed && decision.blobSha256s.includes(sha256);
     });
     return reachable ? storage.getBlob(workspaceId, sha256) : null;
@@ -617,8 +635,10 @@ export function createShareReadQueries(
   return {
     chatResolverFor,
     filteredLogPage,
-    newestFilteredOpFreshness,
-    namedShareBlob,
+    newestFilteredOpFreshness: (...args: Parameters<typeof newestFilteredOpFreshness>) =>
+      inRead(args[1], () => newestFilteredOpFreshness(...args)),
+    namedShareBlob: (...args: Parameters<typeof namedShareBlob>) =>
+      inRead(args[1], () => namedShareBlob(...args)),
     linkRevisionByteLength,
   };
 }

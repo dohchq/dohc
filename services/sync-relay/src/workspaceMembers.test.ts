@@ -40,6 +40,7 @@ const AGENT = "wire-agent";
 const UNKNOWN = "wire-never-created";
 
 let ownerSeq = 0;
+const ownerHeads = new Map<string, string>();
 
 function channel(wireId: string, name: string, kind: "channel" | "dm" | "agent" = "channel") {
   return logOp(
@@ -75,6 +76,7 @@ async function ownerAppend(h: SyncRelayHandler, ops: unknown[]): Promise<void> {
 async function ownerWrite(h: SyncRelayHandler, path: string, text: string): Promise<void> {
   const sha = await putBlob(h, OWNER, WORKSPACE, text);
   const seq = ownerSeq++;
+  const before = ownerHeads.get(path) ?? null;
   await ownerAppend(h, [
     logOp("moment.append", {
       momentId: `m-${seq}`,
@@ -83,14 +85,15 @@ async function ownerWrite(h: SyncRelayHandler, path: string, text: string): Prom
       path,
       recordedAtMs: 1000 + seq,
       operation: "write",
-      payloadBeforeBlobSha256: null,
-      payloadBeforePath: null,
+      payloadBeforeBlobSha256: before,
+      payloadBeforePath: before ? path : null,
       payloadAfterBlobSha256: sha,
       payloadAfterPath: path,
       metadata: { origin: "user" },
       beforePresent: "null",
     }),
   ]);
+  ownerHeads.set(path, sha);
 }
 
 // The owner's workspace: a Group, General, a direct message, an agent chat,
@@ -101,6 +104,7 @@ async function seed(
 ) {
   resetOpSeq();
   ownerSeq = 0;
+  ownerHeads.clear();
   const storage = await testStorage();
   const h = testHandler(storage, {
     lookupUserDisplayName: (userId: string) => `Name ${userId}`,
@@ -386,7 +390,7 @@ describe("what a member reaches", () => {
     await ownerWrite(h, "docs/.access.yaml.swp", "people:\n  ben@dohc.test: edit\n");
 
     const asMember = await pulledText(h, "ana", shareId);
-    expect(asMember).toContain("docs/plan.md");
+    expect(asMember).not.toContain("docs/plan.md");
     expect(asMember).not.toContain("access.yaml");
 
     expect(
@@ -395,6 +399,58 @@ describe("what a member reaches", () => {
     const asAdmin = await pulledText(h, "ana", shareId);
     expect(asAdmin).toContain("docs/access.yaml");
     expect(asAdmin).toContain("docs/.access.yaml.swp");
+  });
+
+  it("filters member ops and blobs, and inventories current and deleted reachable objects in one cut", async () => {
+    const { h } = await seed();
+    const ana = await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    await ownerWrite(h, "private/access.yaml", "");
+    await ownerWrite(h, "private/deep/secret.md", "PRIVATE CONTENT");
+    await ownerWrite(h, "public/deep/hello.md", "PUBLIC CONTENT");
+    const inventory = async () => {
+      const response = await h(request("ana", `/sync/shares/${shareId}/reach`));
+      expect(response.status, await response.clone().text()).toBe(200);
+      return json(response);
+    };
+    const first = await inventory();
+    expect(first.folders).toEqual([
+      { path: "", level: "comment" },
+      { path: "docs", level: "comment" },
+      { path: "public", level: "comment" },
+      { path: "public/deep", level: "comment" },
+    ]);
+    expect((first.files as Array<{ path: string }>).map((f) => f.path)).toEqual([
+      "docs/plan.md",
+      "public/deep/hello.md",
+    ]);
+    expect(first.objects).toHaveLength(2);
+    const body = await pulledText(h, "ana", shareId);
+    expect(body).not.toContain("private/");
+    expect(body).not.toContain(sha256("PRIVATE CONTENT"));
+    expect(body).toContain("public/deep/hello.md");
+    const blob = (user: string, text: string) =>
+      h(request(user, `/sync/shares/${shareId}/blobs/${sha256(text)}`));
+    expect((await blob("ana", "PRIVATE CONTENT")).status).toBe(404);
+    expect((await blob("ana", "PUBLIC CONTENT")).status).toBe(200);
+    await ownerWrite(h, "public/deep/hello.md", "changed");
+    expect((await inventory()).revision).toBe(first.revision);
+    await ownerWrite(h, "private/access.yaml", "members: view\n");
+    const opened = await inventory();
+    expect(opened.revision).not.toBe(first.revision);
+    expect(
+      (opened.files as Array<{ path: string }>).some((f) => f.path === "private/deep/secret.md"),
+    ).toBe(true);
+    await ownerWrite(h, "private/access.yaml", "");
+    const restored = await inventory();
+    expect(restored.revision).not.toBe(first.revision);
+    expect(restored.revision).not.toBe(opened.revision);
+    expect(
+      (await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status,
+    ).toBe(200);
+    expect((await inventory()).revision).not.toBe(first.revision);
+    expect((await blob("ana", "PRIVATE CONTENT")).status).toBe(200);
+    expect(await pulledText(h, "ana", shareId)).toContain("private/deep/secret.md");
   });
 
   it("joins presence for Groups and files, and never for General, direct messages, or agent chats", async () => {

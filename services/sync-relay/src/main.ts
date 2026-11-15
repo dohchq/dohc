@@ -457,6 +457,9 @@ const TEST_EMAIL_SUFFIX = "@dohc.test";
 let resolveUserIdByEmail: (email: string) => Promise<string | null> | string | null;
 let lookupUserEmail: (userId: string) => Promise<string | null> | string | null;
 let lookupVerifiedUserEmail: (userId: string) => Promise<string | null> | string | null;
+let lookupAccountEmail:
+  | ((userId: string) => Promise<{ email: string; verified: boolean } | null>)
+  | undefined;
 let lookupUserDisplayName: (userId: string) => Promise<string | null> | string | null;
 // The test seam has no browser sign-ins, so it serves no push subscriptions
 // and no personal agent sign-in. Its Bearer identities are desktop sign-ins.
@@ -647,7 +650,7 @@ if (testAuthSeam) {
   lookupUserDisplayName = (userId) => userId;
 } else {
   // Better Auth's canonical table/column names on the shared Postgres.
-  ({ resolveUserIdByEmail, lookupVerifiedUserEmail } = createVerifiedEmailLookups(pool!));
+  ({ resolveUserIdByEmail, lookupVerifiedUserEmail, lookupAccountEmail } = createVerifiedEmailLookups(pool!));
   lookupUserEmail = async (userId) => {
     const result = await pool!.query<{ email: string }>(
       'SELECT email FROM "user" WHERE id = $1 LIMIT 1',
@@ -700,6 +703,7 @@ const relayApplication = createSyncRelayHandler({
     return new Map(result.rows.map((row) => [row.id, row.email]));
   },
   lookupVerifiedUserEmail: (userId) => lookupVerifiedUserEmail(userId),
+  lookupAccountEmail,
   lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
   presence,
   linkKey,

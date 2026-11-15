@@ -42,11 +42,14 @@ import type { SyncRelayStorage } from "./storage";
 import { MAX_BLOB_BYTES, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 
 export type NamedShareTransportRoute =
+  | { route: "share-reach"; shareId: string }
   | { route: "share-log"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string };
 
 /** What a share reaches, without its level. */
 function shareScopeKey(selector: AnyShareSelector): string {
+  if (isWorkspaceSelector(selector))
+    return JSON.stringify({ kind: "workspace", role: selector.role });
   const { access: _access, ...scope } = selector;
   return JSON.stringify(scope);
 }
@@ -122,6 +125,7 @@ export function createNamedShareTransportRoutes(
     | "appendBrowserChatBatch"
     | "putBlob"
     | "listWorkReferences"
+    | "memberInventory"
   >,
   nowMs: () => number,
   claimPendingShares: (userId: string) => Promise<void>,
@@ -148,7 +152,17 @@ export function createNamedShareTransportRoutes(
     actor: { userId: string },
     browserMessageId?: string,
   ): Promise<Response> {
+    if (route.route === "share-reach") {
+      if (request.method !== "GET") throw relayError("method_not_allowed");
+      await claimPendingShares(actor.userId);
+      if (!identityKey) throw notFound();
+      return jsonResponse({
+        ok: true,
+        ...storage.memberInventory(route.shareId, actor.userId, identityKey),
+      });
+    }
     if (route.route === "share-log" && request.method === "GET") {
+      await claimPendingShares(actor.userId);
       let authorized: AuthorizedShareAction;
       try {
         authorized = requireShareAction(route.shareId, actor.userId, "read");

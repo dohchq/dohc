@@ -1,4 +1,9 @@
 import type { MemberFolders } from "./shareFilter";
+import { isWorkspaceSelector, type AnyShareSelector } from "./shareFilter";
+import { memberReach } from "./storage/memberReach";
+import { memberInventory } from "./storage/memberInventory";
+import { watchMemberReachWrites, settleMemberRevisions } from "./storage/memberRevisions";
+import { refreshAccountEmail, type AccountEmail } from "./storage/accountEmails";
 import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { reusePreparedStatements } from "./storage/preparedStatements";
 import * as workReferenceStorage from "./storage/workReferences";
@@ -390,6 +395,7 @@ export function openSyncRelayStorage(
     owner = createOwner ? createOwner(db) : new RelayWriteOwner(db);
     owner.write(() => initializeSyncRelaySchema(db));
     watchLiveAuthorityWrites(db);
+    watchMemberReachWrites(db);
     const storage = new SqliteSyncRelayStorage(
       reusePreparedStatements(db),
       {
@@ -2269,6 +2275,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
    * changed the schema or a table in `LIVE_AUTHORITY_TABLES`.
    */
   tx<T>(run: () => T, scope?: RelayWriteScope): T {
+    const operation = run;
+    run = () => {
+      const value = operation();
+      settleMemberRevisions(this.db);
+      return value;
+    };
     if (!hasRelayWriteObservers(this)) return this.owner.write(run);
     const revision = this.db
       .prepare(`SELECT total_changes() AS changes,(SELECT schema_version FROM pragma_schema_version) AS schema_version,
@@ -2420,6 +2432,33 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     relaySeq: number;
   }): boolean {
     return currentFilesStorage.isCurrentFileState(this, input);
+  }
+
+  memberReach(
+    workspaceId: string,
+    userId: string,
+    role: "admin" | "member",
+    level: import("@dohc/security-contract/share-selector").ShareAccess,
+  ) {
+    return memberReach(this.db, workspaceId, userId, role, level);
+  }
+
+  readMemberReach(selector: AnyShareSelector, _workspaceId: string): AnyShareSelector {
+    return isWorkspaceSelector(selector) && selector.reach
+      ? { ...selector, reach: selector.reach.refresh() }
+      : selector;
+  }
+
+  readShareTx<T>(read: () => T): T {
+    return this.db.isTransaction ? read() : this.readTx(read);
+  }
+
+  memberInventory(shareId: string, userId: string, key: string | Uint8Array) {
+    return memberInventory(this, shareId, userId, key);
+  }
+
+  refreshAccountEmail(userId: string, email: AccountEmail | null, nowMs: number): void {
+    this.tx(() => refreshAccountEmail(this.db, userId, email, nowMs));
   }
 
   currentObjectFile(input: {

@@ -5,12 +5,24 @@ import { folderLevel, isAccessRulePath } from "@dohc/security-contract/access-ru
 import { pathCollisionKey as contractCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { pathCollisionKey } from "../pathCollisionKey";
 import { closeTestStorages, moment, testStorage } from "../testing";
-import { currentAccessRuleSet, initializeAccessRuleSchema } from "./accessRules";
-import { applyCurrentFileOp, currentFileStatements } from "./currentFiles";
+import {
+  accessRuleHistoryFloor,
+  currentAccessRuleSet,
+  initializeAccessRuleSchema,
+} from "./accessRules";
+import {
+  applyCurrentFileOp,
+  currentFileStatements,
+  objectMomentFromMomentPayload,
+  OBJECT_MOMENT_INSERT_SQL,
+} from "./currentFiles";
 import { initializeSyncRelaySchema } from "./schema";
 import type { SqliteDb } from "./types";
 import type { StorageContext } from "./context";
 import { workspaceUsageBytes } from "./workspaces";
+import { memberReach } from "./memberReach";
+import { refreshAccountEmail } from "./accountEmails";
+import { filterOpForShare } from "../shareFilter";
 
 afterAll(closeTestStorages);
 
@@ -36,6 +48,7 @@ function relay() {
     return sha;
   };
   const append = (opKind: string, payload: Record<string, unknown>) => {
+    payload = { recordedAtMs: originSeq + 1, ...payload };
     const json = JSON.stringify(payload);
     const row = db
       .prepare(
@@ -43,6 +56,20 @@ function relay() {
       )
       .run("ws", "owner", ++originSeq, opKind, json, originSeq);
     applyCurrentFileOp(statements, "ws", opKind, json, Number(row.lastInsertRowid));
+    const m = opKind === "moment.append" ? objectMomentFromMomentPayload(json) : null;
+    if (m)
+      db.prepare(OBJECT_MOMENT_INSERT_SQL).run(
+        "ws",
+        m.objectId,
+        Number(row.lastInsertRowid),
+        m.momentId,
+        m.versionId,
+        m.path,
+        m.blobSha256,
+        m.contentKind,
+        m.byteLength,
+        m.recordedAtMs,
+      );
     return Number(row.lastInsertRowid);
   };
   const moment = (
@@ -93,6 +120,128 @@ function relay() {
 }
 
 describe("the relay's access rule index", () => {
+  it("fails closed on unknown identity and lets an unverified identity only narrow", () => {
+    const r = relay();
+    try {
+      r.write("People/access.yaml", "members: view\npeople:\n  sam@example.com: edit\n");
+      const reach = () => memberReach(r.storageDb, "ws", "sam", "member", "comment");
+      expect(reach().levelAt("People/note.md")).toBeNull();
+      expect(reach().levelAt("Public/note.md")).toBe("comment");
+      refreshAccountEmail(r.storageDb, "sam", { email: "sam@example.com", verified: true }, 1);
+      expect(reach().levelAt("People/note.md")).toBe("edit");
+      refreshAccountEmail(r.storageDb, "sam", { email: "sam@example.com", verified: false }, 2);
+      expect(reach().levelAt("People/note.md")).toBe("view");
+      expect(
+        memberReach(r.storageDb, "ws", "admin", "admin", "view").levelAt("People/access.yaml"),
+      ).toBe("edit");
+    } finally {
+      r.db.close();
+    }
+  });
+
+  it("keeps deleted objects hidden if hidden at deletion, and refuses unknown rule history", () => {
+    const r = relay();
+    try {
+      r.write("Hidden/access.yaml", "");
+      r.write("Hidden/note.md", "secret");
+      r.remove("Hidden/note.md");
+      r.remove("Hidden/access.yaml");
+      r.write("Public/note.md", "hello");
+      const deletion = r.remove("Public/note.md");
+      const reach = () => memberReach(r.storageDb, "ws", "sam", "member", "edit");
+      expect(reach().objectVisible("o:Hidden/note.md")).toBe(false);
+      expect(reach().objectVisible("o:Public/note.md")).toBe(true);
+      r.db.prepare("INSERT INTO sync_relay_access_rule_floors VALUES (?, ?)").run("ws", deletion);
+      expect(reach().objectVisible("o:Public/note.md")).toBe(false);
+      expect(
+        memberReach(r.storageDb, "ws", "admin", "admin", "edit").objectVisible("o:Public/note.md"),
+      ).toBe(true);
+    } finally {
+      r.db.close();
+    }
+  });
+
+  it("serves boundary renames as content-free departures or visible arrivals and withholds hidden object history", () => {
+    const r = relay();
+    try {
+      r.write("Hidden/access.yaml", "");
+      const sha = r.blob(Buffer.from("content"));
+      const write = {
+        objectId: "moving",
+        momentId: "create",
+        versionId: "main",
+        operation: "write",
+        path: "Public/note.md",
+        payloadAfterPath: "Public/note.md",
+        payloadAfterBlobSha256: sha,
+      };
+      r.append("moment.append", write);
+      const move = {
+        ...write,
+        momentId: "move",
+        operation: "rename",
+        path: "Hidden/note.md",
+        payloadBeforePath: "Public/note.md",
+        payloadBeforeBlobSha256: sha,
+        payloadAfterPath: "Hidden/note.md",
+      };
+      r.append("moment.append", move);
+      const selector = () => ({
+        kind: "workspace" as const,
+        access: "edit" as const,
+        role: "member" as const,
+        reach: memberReach(r.storageDb, "ws", "sam", "member", "edit"),
+      });
+      expect(filterOpForShare(selector(), "moment.append", JSON.stringify(write))).toEqual({
+        allowed: false,
+      });
+      const departure = filterOpForShare(selector(), "moment.append", JSON.stringify(move));
+      expect(departure).toMatchObject({
+        allowed: true,
+        payload: { operation: "delete", path: "Public/note.md" },
+        blobSha256s: [],
+      });
+      expect(JSON.stringify(departure)).not.toContain("Hidden");
+      expect(JSON.stringify(departure)).not.toContain(sha);
+      const arrival = {
+        ...move,
+        momentId: "return",
+        path: "Public/returned.md",
+        payloadBeforePath: "Hidden/note.md",
+        payloadAfterPath: "Public/returned.md",
+      };
+      r.append("moment.append", arrival);
+      const served = filterOpForShare(selector(), "moment.append", JSON.stringify(arrival));
+      expect(served).toMatchObject({
+        allowed: true,
+        payload: { operation: "write", path: "Public/returned.md" },
+        blobSha256s: [sha],
+      });
+      expect(JSON.stringify(served)).not.toContain("Hidden");
+    } finally {
+      r.db.close();
+    }
+  });
+
+  it("revises evaluated reach for rules, identity, level and role, but not ordinary writes", () => {
+    const r = relay();
+    try {
+      const revision = (role: "member" | "admin" = "member", level: "edit" | "view" = "edit") =>
+        memberReach(r.storageDb, "ws", "sam", role, level).revision;
+      const first = revision();
+      r.write("Public/note.md", "hello");
+      expect(revision()).toBe(first);
+      r.write("Private/access.yaml", "people:\n  sam@example.com: edit\n");
+      const hidden = revision();
+      expect(hidden).not.toBe(first);
+      refreshAccountEmail(r.storageDb, "sam", { email: "sam@example.com", verified: true }, 1);
+      expect(revision()).not.toBe(hidden);
+      expect(revision("member", "view")).not.toBe(revision());
+      expect(revision("admin")).not.toBe(revision());
+    } finally {
+      r.db.close();
+    }
+  });
   it("keeps each folder's rule by the span it held for", () => {
     const r = relay();
     try {

@@ -44,7 +44,7 @@ type ShareAuthorizationStorage = Pick<
   | "listActiveShareGrantsForRecipient"
   | "workspaceIsOwnedBy"
 > &
-  Partial<Pick<SyncRelayStorage, "workspaceMemberGrantRole">>;
+  Partial<Pick<SyncRelayStorage, "workspaceMemberGrantRole" | "memberReach">>;
 
 export interface AuthorizedShareAction<Selector extends AnyShareSelector = AnyShareSelector> {
   ok: true;
@@ -272,6 +272,16 @@ function validateCurrentShareGrant(
   }
   const effectiveSelector = effectiveShareSelector(storedSelector, grant.access, workspaceRole);
   if (!effectiveSelector) return { ok: false, reason: "gauntlet" };
+  if (isWorkspaceSelector(effectiveSelector)) {
+    const reach = storage.memberReach?.(
+      share.workspaceId,
+      grant.principalUserId!,
+      effectiveSelector.role,
+      effectiveSelector.access,
+    );
+    if (!reach) return { ok: false, reason: "gauntlet" };
+    effectiveSelector.reach = reach;
+  }
 
   return { ok: true, share, grant, effectiveSelector };
 }

@@ -3,7 +3,7 @@ import { prepareSharePath, visibleSharePath } from "@dohc/security-contract/shar
 import type { ReplicaCurrentView } from "@dohc/workspace-engine-client/daemon";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { authorizeShareGrantAction, type AuthorizedShareAction } from "./shareAuthorization";
-import { fileSideOf, targetVersionId } from "./shareFilter";
+import { fileSideOf, targetVersionId, isWorkspaceSelector } from "./shareFilter";
 import type { StorageContext } from "./storage/context";
 import type { CurrentShareGrantPrincipal } from "./storage/currentShareGrant";
 import { replicaGrantFloor, replicaViewReachesFloor } from "./storage/replicaGrantFloors";
@@ -499,7 +499,15 @@ export function withReplicaCurrentView<T>(
       if (!authorized.ok) return { status: "denied" };
       const selector = fileSideOf(authorized.effectiveSelector);
       if (!selector) return { status: "denied" };
-      if (authority?.history && selector.access !== "edit") return { status: "denied" };
+      if (
+        authority?.history &&
+        !isWorkspaceSelector(authorized.effectiveSelector) &&
+        selector.access !== "edit"
+      )
+        return { status: "denied" };
+      const member = isWorkspaceSelector(authorized.effectiveSelector)
+        ? authorized.effectiveSelector.reach
+        : undefined;
       if (input.principal.kind === "link") {
         const session = input.principal.requireSession();
         if (session.grantId !== input.grantId || session.generation !== input.generation)
@@ -635,6 +643,7 @@ export function withReplicaCurrentView<T>(
         const indexed = row === incoming.row ? incoming : old;
         if (!row || !indexed) continue;
         const file = row;
+        if (member && !member.objectVisible(file.objectId)) continue;
         if (!visible(file.versionId, indexed.path)) continue;
         const path = project(file.path);
         if (path === null || (requestedPath !== undefined && path !== requestedPath)) continue;
@@ -656,6 +665,7 @@ export function withReplicaCurrentView<T>(
         : directOmitted
           ? [directOmitted]
           : []) {
+        if (member && !member.objectVisible(omitted.row.objectId)) continue;
         if (!visible(omitted.row.versionId, omitted.path)) continue;
         const path = project(omitted.row.path);
         if (path !== null && (requestedPath === undefined || path === requestedPath))

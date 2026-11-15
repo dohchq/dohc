@@ -200,6 +200,7 @@ export interface CreateSyncRelayHandlerOptions {
   resolveUserIdByEmail?: (email: string) => Promise<string | null> | string | null;
   // Returns an address only when the account has verified it server-side.
   lookupVerifiedUserEmail?: (userId: string) => Promise<string | null> | string | null;
+  lookupAccountEmail?: (userId: string) => Promise<{ email: string; verified: boolean } | null>;
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
   lookupUserEmails?: (userIds: readonly string[]) => Promise<ReadonlyMap<string, string>>;
@@ -305,6 +306,7 @@ export function createSyncRelayHandler({
   elapsedMs,
   resolveUserIdByEmail,
   lookupVerifiedUserEmail,
+  lookupAccountEmail,
   lookupUserEmail,
   lookupUserEmails,
   lookupUserDisplayName: lookupAccountDisplayName,
@@ -583,9 +585,25 @@ export function createSyncRelayHandler({
   // Claim email invites only after the authenticated account verifies its address.
   const claimPendingShares = async (userId: string, signal?: AbortSignal): Promise<void> => {
     signal?.throwIfAborted();
-    if (!lookupVerifiedUserEmail) return;
-    const email = await lookupVerifiedUserEmail(userId);
+    if (!lookupAccountEmail && !lookupVerifiedUserEmail) {
+      storage.refreshAccountEmail(userId, null, nowMs());
+      return;
+    }
+    let account: { email: string; verified: boolean } | null;
+    try {
+      if (lookupAccountEmail) account = await lookupAccountEmail(userId);
+      else {
+        const verified = await lookupVerifiedUserEmail!(userId);
+        const email = verified ?? (await lookupUserEmail?.(userId));
+        account = email ? { email, verified: verified !== null } : null;
+      }
+    } catch (error) {
+      storage.refreshAccountEmail(userId, null, nowMs());
+      throw error;
+    }
     signal?.throwIfAborted();
+    storage.refreshAccountEmail(userId, account, nowMs());
+    const email = account?.verified ? account.email : null;
     if (email) storage.claimPendingSharesForEmail(email, userId);
   };
 
@@ -1755,7 +1773,11 @@ export function createSyncRelayHandler({
         return respondToLinkAgents(request, route, actor);
       }
 
-      if (route.route === "share-log" || route.route === "share-blob") {
+      if (
+        route.route === "share-log" ||
+        route.route === "share-blob" ||
+        route.route === "share-reach"
+      ) {
         return await respondToNamedShareTransport(request, route, actor);
       }
 

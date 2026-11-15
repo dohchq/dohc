@@ -36,6 +36,7 @@ export interface ShareFileScope {
   versionId: string | null;
   wholeWorkspace?: boolean;
   ruleFiles?: true;
+  levelAt?: (path: string) => ShareAccess | null;
 }
 
 /** The normalized tracked path selected by a file scope, or null. Versions are checked by the caller. */
@@ -47,6 +48,7 @@ export function visibleSharePath(
     typeof path === "string" ? prepareSharePath(path) : preparedPaths.has(path) ? path : null;
   if (!prepared) return null;
   const normalized = prepared.path;
+  if (selector.levelAt && selector.levelAt(normalized) === null) return null;
   if (selector.ruleFiles !== true && isAccessRuleRelatedPath(normalized)) return null;
   if (selector.wholeWorkspace === true) {
     return selector.paths.length === 0 && selector.versionId === null ? normalized : null;
