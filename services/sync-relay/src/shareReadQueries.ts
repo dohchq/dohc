@@ -71,7 +71,10 @@ export function createShareReadQueries(
   linkKey?: string | Uint8Array,
 ) {
   const inRead = <T>(selector: AnyShareSelector, run: () => T): T =>
-    isWorkspaceSelector(selector) && storage.readShareTx ? storage.readShareTx(run) : run();
+    (isWorkspaceSelector(selector) || (!("kind" in selector) && "reach" in selector)) &&
+    storage.readShareTx
+      ? storage.readShareTx(run)
+      : run();
   // The thread→channel resolver the chat share filter scopes by. Backed
   // by the shared workspace's own log (earliest chat.thread.create wins), so a
   // member-pushed forgery can never re-bind an existing thread. Memoized per
@@ -211,6 +214,10 @@ export function createShareReadQueries(
       relaySeq: row.relaySeq,
     });
 
+  // A member's reach has a level per folder, so it reads as below Edit.
+  const belowEdit = (selector: ShareSelector) =>
+    ("access" in selector ? selector.access : null) !== "edit";
+
   // Rewrites a served file op for a recipient below Edit, or drops it. A
   // replaced write is dropped. A replaced rename becomes a delete of its old
   // path, so a recipient that already holds that path loses it. A delete is
@@ -270,32 +277,31 @@ export function createShareReadQueries(
       string,
       Parameters<SyncRelayStorage["indexReceivedWorkTargets"]>[0][number]
     >();
-    selector = storage.readMemberReach?.(selector, workspaceId) ?? selector;
-    const identity = createReceivedIdentity(
-      linkKey,
-      (recipient, workspaceId, objectId, objectToken) => {
-        const sourceHandle = identity.source(recipient, workspaceId);
-        if (sourceHandle)
-          observed.set(objectToken, {
-            recipient,
-            workspaceId,
-            objectId,
-            objectToken,
-            sourceHandle,
-          });
-      },
-    );
-    const chatResolver = chatResolverFor(workspaceId);
-    const fileSelector = fileSideOf(selector);
-    const accountlessProjection =
-      audience === "accountless" && fileSelector
-        ? createAccountlessPathProjection(fileSelector)
-        : null;
-    const currentFiles = new Map<string, ReturnType<typeof storage.currentObjectFile>>();
-    const currentFilesSelector =
-      audience === "authenticated" && fileSelector?.access !== "edit" ? fileSelector : null;
     const page = inRead(selector, () => {
       selector = storage.readMemberReach?.(selector, workspaceId) ?? selector;
+      const identity = createReceivedIdentity(
+        linkKey,
+        (recipient, workspaceId, objectId, objectToken) => {
+          const sourceHandle = identity.source(recipient, workspaceId);
+          if (sourceHandle)
+            observed.set(objectToken, {
+              recipient,
+              workspaceId,
+              objectId,
+              objectToken,
+              sourceHandle,
+            });
+        },
+      );
+      const chatResolver = chatResolverFor(workspaceId);
+      const fileSelector = fileSideOf(selector);
+      const accountlessProjection =
+        audience === "accountless" && fileSelector
+          ? createAccountlessPathProjection(fileSelector)
+          : null;
+      const currentFiles = new Map<string, ReturnType<typeof storage.currentObjectFile>>();
+      const currentFilesSelector =
+        audience === "authenticated" && fileSelector && belowEdit(fileSelector) ? fileSelector : null;
       return scanFilteredLog(
         storage,
         {
@@ -457,6 +463,7 @@ export function createShareReadQueries(
     | { lastSettledAtMs: number; lastSettledKnown: true }
     | { lastSettledAtMs: null; lastSettledKnown: true }
     | { lastSettledAtMs: null; lastSettledKnown: false } => {
+    selector = storage.readMemberReach?.(selector, workspaceId) ?? selector;
     let beforeRelaySeq: number | null = null;
     const chatResolver = chatResolverFor(workspaceId);
     const fileSelector = fileSideOf(selector);
@@ -520,7 +527,7 @@ export function createShareReadQueries(
     selector = fileSelector;
     const versionId = targetVersionId(selector);
     const chatResolver = chatResolverFor(workspaceId);
-    if (selector.access !== "edit") {
+    if (belowEdit(selector)) {
       // Page past rows the share filter refuses, so they cannot hide an admitted file.
       const produced = ({ path, row }: { path: string; row: SyncRelayLogRow }) => {
         const decision = filterOpForShare(
@@ -582,6 +589,10 @@ export function createShareReadQueries(
     sha256: string,
     epochLogFloor: number,
   ): number | null => {
+    const refreshed = storage.readMemberReach?.(selector, workspaceId);
+    if (refreshed && !("kind" in refreshed)) selector = refreshed;
+    if ("reach" in selector && selector.reach)
+      return namedShareBlob(workspaceId, selector, sha256)?.byteLength ?? null;
     const versionId = targetVersionId(selector);
     const candidates = [
       ...storage.listLinkRevisionLogRows({
@@ -639,7 +650,8 @@ export function createShareReadQueries(
       inRead(args[1], () => newestFilteredOpFreshness(...args)),
     namedShareBlob: (...args: Parameters<typeof namedShareBlob>) =>
       inRead(args[1], () => namedShareBlob(...args)),
-    linkRevisionByteLength,
+    linkRevisionByteLength: (...args: Parameters<typeof linkRevisionByteLength>) =>
+      inRead(args[1], () => linkRevisionByteLength(...args)),
   };
 }
 

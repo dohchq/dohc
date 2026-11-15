@@ -2440,13 +2440,17 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     role: "admin" | "member",
     level: import("@dohc/security-contract/share-selector").ShareAccess,
   ) {
-    return memberReach(this.db, workspaceId, userId, role, level);
+    return this.readShareTx(() => memberReach(this.db, workspaceId, userId, role, level));
   }
 
   readMemberReach(selector: AnyShareSelector, _workspaceId: string): AnyShareSelector {
-    return isWorkspaceSelector(selector) && selector.reach
-      ? { ...selector, reach: selector.reach.refresh() }
-      : selector;
+    if (isWorkspaceSelector(selector) && selector.reach)
+      return { ...selector, reach: selector.reach.refresh() };
+    if (!("kind" in selector) && "reach" in selector && selector.reach) {
+      const reach = selector.reach.refresh();
+      return { ...selector, reach, levelAt: reach.levelAt };
+    }
+    return selector;
   }
 
   readShareTx<T>(read: () => T): T {

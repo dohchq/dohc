@@ -31,6 +31,7 @@ import {
 } from "./storage";
 import type { CommittedCollectionWrite } from "./storage/collectionWrites";
 import type { PersonalCredential } from "./storage/personalAgentChat";
+import { assertMemberChanges } from "./memberActions";
 
 export type CollectionWriteRoute = { route: "share-collection-writes"; shareId: string };
 export type LinkCollectionWriteRoute = { route: "link-collection-writes" };
@@ -125,6 +126,14 @@ export function createCollectionWriteRoutes(input: {
       throw relayError("share_op_rejected");
     }
     const submitId = parseString(body.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
+    assertMemberChanges(
+      storage,
+      authorized.effectiveSelector,
+      actorUserId,
+      body.changes,
+      input.nowMs(),
+      true,
+    );
     const decision = filterCollectionWriteForShare(
       authorized.effectiveSelector,
       body.changes,

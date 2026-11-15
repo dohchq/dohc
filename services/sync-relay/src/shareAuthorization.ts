@@ -11,6 +11,8 @@ import {
   type AnyShareSelector,
   type GroupShareSelector,
   type ShareSelector,
+  type PathShareSelector,
+  pathLevel,
   type StoredAnyShareSelector,
   type WorkspaceShareSelector,
 } from "./shareFilter";
@@ -71,6 +73,7 @@ type ShareAuthorizationInput = {
   actorUserId: string;
   shareId: string;
   action: ShareAction;
+  target?: string;
 };
 
 type ShareGrantAuthorizationInput = {
@@ -79,6 +82,7 @@ type ShareGrantAuthorizationInput = {
   action: ShareAction;
   principal: CurrentShareGrantPrincipal;
   generation?: number;
+  target?: string;
 };
 
 export type NamedLiveEditShareGrantResult =
@@ -152,6 +156,7 @@ export function authorizeShareAction(input: ShareAuthorizationInput): ShareAutho
       storage: input.storage,
       grantId: grant.grantId,
       action: input.action,
+      target: input.target,
       principal: { kind: "user", userId: input.actorUserId },
     });
     if (!result.ok) {
@@ -160,8 +165,8 @@ export function authorizeShareAction(input: ShareAuthorizationInput): ShareAutho
     }
     if (
       authorized === null ||
-      effectiveAccessRank(result.effectiveSelector) >
-        effectiveAccessRank(authorized.effectiveSelector)
+      effectiveAccessRank(result.effectiveSelector, input.target) >
+        effectiveAccessRank(authorized.effectiveSelector, input.target)
     ) {
       authorized = result;
     }
@@ -205,14 +210,14 @@ export function authorizeLinkShareAction(
   input: Omit<ShareGrantAuthorizationInput, "principal" | "action"> & {
     action: "read" | "live-edit" | "direct-write";
   },
-): ShareAuthorizationResult<ShareSelector> {
+): ShareAuthorizationResult<PathShareSelector> {
   const result = authorizeShareGrantAction({ ...input, principal: { kind: "link" } });
   // A link never holds a workspace share.
   const files =
     result.ok && !isWorkspaceSelector(result.effectiveSelector)
       ? fileSideOf(result.effectiveSelector)
       : null;
-  if (!result.ok || !files) return { ok: false, reason: "gauntlet" };
+  if (!result.ok || !files || !("access" in files)) return { ok: false, reason: "gauntlet" };
   return { ...result, effectiveSelector: files };
 }
 
@@ -233,7 +238,9 @@ export function authorizeShareGrantAction(
 ): ShareAuthorizationResult {
   const validated = validateShareGrant(input);
   if (!validated.ok) return validated;
-  return actionAllowed(validated, input.action) ? validated : { ok: false, reason: "denied" };
+  return actionAllowed(validated, input.action, input.target)
+    ? validated
+    : { ok: false, reason: "denied" };
 }
 
 function validateShareGrant(
@@ -286,7 +293,26 @@ function validateCurrentShareGrant(
   return { ok: true, share, grant, effectiveSelector };
 }
 
-function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): boolean {
+function actionAllowed(
+  authorized: AuthorizedShareAction,
+  action: ShareAction,
+  target?: string,
+): boolean {
+  const selector = authorized.effectiveSelector;
+  const files = fileSideOf(selector);
+  const level = files
+    ? target !== undefined
+      ? pathLevel(files, target)
+      : "access" in files
+        ? files.access
+        : null
+    : null;
+  const deferredMemberTarget = isWorkspaceSelector(selector) && target === undefined;
+  const memberEdit = isWorkspaceSelector(selector) && !!selector.reach?.hasLevel("edit");
+  const memberComment =
+    memberEdit ||
+    (isWorkspaceSelector(selector) &&
+      (!!selector.reach?.hasLevel("comment") || selector.access !== "view"));
   switch (action) {
     case "read":
     case "presence":
@@ -299,41 +325,52 @@ function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): 
       if (chat) return chat.access === "read-write";
       // A workspace share posts in its Groups and comments on its files at
       // Comment or Edit; the filter decides which Groups and files.
-      const files = fileSideOf(authorized.effectiveSelector);
       return (
         files !== null &&
         namesFiles(files) &&
-        (files.access === "comment" || files.access === "edit")
+        (deferredMemberTarget ? memberComment : level === "comment" || level === "edit")
       );
     }
     case "propose": {
-      const files = fileSideOf(authorized.effectiveSelector);
-      return files !== null && namesFiles(files) && files.access === "edit";
+      return (
+        files !== null &&
+        namesFiles(files) &&
+        (deferredMemberTarget ? memberEdit : level === "edit")
+      );
     }
     // Writing a Collection's own files straight into the owner's workspace
     // (ADR 0013), for an Edit share link. A named recipient keeps the
     // proposal rule and its own route; neither widens the other.
     case "direct-write": {
-      const files = fileSideOf(authorized.effectiveSelector);
       return (
         authorized.grant.principalKind === "link" &&
         files !== null &&
         files.paths.length > 0 &&
-        files.access === "edit"
+        level === "edit"
       );
     }
     case "live-edit":
       return (
         (authorized.grant.principalKind === "user" || authorized.grant.principalKind === "link") &&
-        isLiveEditShareSelector(authorized.effectiveSelector)
+        isLiveEditShareSelector(authorized.effectiveSelector) &&
+        (deferredMemberTarget ? memberEdit : level === "edit")
       );
   }
 }
 
-function effectiveAccessRank(selector: AnyShareSelector): number {
-  if (isWorkspaceSelector(selector)) return shareAccessRank(selector.access);
+function effectiveAccessRank(selector: AnyShareSelector, target?: string): number {
+  if (isWorkspaceSelector(selector)) {
+    const level = target === undefined ? selector.access : selector.reach?.levelAt(target);
+    return level ? shareAccessRank(level) : -1;
+  }
   if ("kind" in selector) {
     return selector.access === "read-write" ? 1 : 0;
   }
-  return shareAccessRank(selector.access);
+  const level =
+    target === undefined
+      ? "access" in selector
+        ? selector.access
+        : null
+      : pathLevel(selector, target);
+  return level ? shareAccessRank(level) : -1;
 }

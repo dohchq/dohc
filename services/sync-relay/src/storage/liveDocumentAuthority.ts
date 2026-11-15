@@ -69,6 +69,7 @@ import {
   fileWriteSideOf,
   isLiveEditShareSelector,
   pathVisibleThroughShare,
+  pathLevel,
 } from "../shareFilter";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import type { StorageContext } from "./context";
@@ -81,7 +82,7 @@ import {
   type RedeemedLiveTicket,
 } from "@dohc/live-session-contract/live-ticket";
 import type { LiveTicketScope } from "../liveBrowserContext";
-import { authorizeNamedLiveEditShareGrant } from "../shareAuthorization";
+import { authorizeNamedLiveEditShareGrant, authorizeShareGrantAction } from "../shareAuthorization";
 import { showsOnPhone } from "./accountWorkspaces";
 import { readLiveHostControl, parseHostControlTimestamp } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
@@ -699,6 +700,18 @@ export function resolveCurrentLiveDocumentBinding(
 ): CurrentLiveBindingResult {
   const request = snapshotCurrentBindingRequest(input);
   return storage.readLiveAuthority(() => currentLiveDocumentBinding(storage, request, activation));
+}
+
+/** A standing member editor can keep reading after losing Edit. Never used for tickets or writes. */
+export function resolveReadableMemberLiveDocumentBinding(
+  storage: StorageContext,
+  input: CurrentLiveBindingRequest,
+): CurrentLiveBindingResult {
+  const request = snapshotCurrentBindingRequest(input);
+  if (request.actor.kind !== "named") return { kind: "refused", reason: "not-authorized" };
+  return storage.readLiveAuthority(() =>
+    currentLiveDocumentBinding(storage, request, undefined, readLiveDocumentAuthority, "read"),
+  );
 }
 
 /**
@@ -1614,6 +1627,7 @@ export function currentLiveDocumentBinding(
     db: SqliteDb,
     document: LiveDocumentKey,
   ) => StoredLiveBinding | null = readLiveDocumentAuthority,
+  access: "read" | "edit" = "edit",
 ): CurrentLiveBindingResult {
   const host = readLiveHostControl(storage.db);
   if (host !== null) assertCurrentAuthorityHost(storage.db, host);
@@ -1627,6 +1641,7 @@ export function currentLiveDocumentBinding(
     host,
     read(storage.db, document),
     activation,
+    access,
   );
 }
 
@@ -1639,18 +1654,34 @@ export function authorizeLiveDocument(
     "binding" | "current" | "open" | "baselineSequence"
   > | null,
   activation?: ServiceActivationAccess,
+  access: "read" | "edit" = "edit",
 ): CurrentLiveBindingResult {
   if (!serviceHostDocumentEnabled(storage, document, actor.kind === "owner" ? actor : undefined))
     return { kind: "refused", reason: "host-unavailable" };
   let bound: BoundLiveDocument | LiveBindingRefusal;
   let authority: ServerDerivedLiveUpdateAuthority;
   if (actor.kind === "named") {
-    const named = authorizeNamedLiveEditShareGrant({
-      storage: storage,
-      actorUserId: actor.userId,
-      grantId: actor.grantId,
-    });
-    if (!named.ok) return { kind: "refused", reason: named.reason };
+    const named =
+      access === "edit"
+        ? authorizeNamedLiveEditShareGrant({
+            storage,
+            actorUserId: actor.userId,
+            grantId: actor.grantId,
+          })
+        : authorizeShareGrantAction({
+            storage,
+            grantId: actor.grantId,
+            principal: { kind: "user", userId: actor.userId },
+            action: "read",
+          });
+    if (!named.ok) return { kind: "refused", reason: "not-authorized" };
+    if (
+      access === "read" &&
+      !("kind" in named.effectiveSelector && named.effectiveSelector.kind === "workspace")
+    )
+      return { kind: "refused", reason: "not-authorized" };
+    if ("kind" in named.effectiveSelector && named.effectiveSelector.kind !== "workspace")
+      return { kind: "refused", reason: "not-authorized" };
     authority = parseServerDerivedLiveUpdateAuthority({
       principalKind: "named",
       principalId: actor.userId,
@@ -1664,6 +1695,7 @@ export function authorizeLiveDocument(
       actor,
       named.share,
       named.effectiveSelector,
+      access,
     );
   } else if (actor.kind === "link") {
     const link = currentLinkEdit(storage, actor);
@@ -1861,6 +1893,7 @@ function bindLiveDocument(
   actor: LiveRecipient,
   share: SyncRelayShareRow,
   selector: ShareSelector | WorkspaceShareSelector,
+  access: "read" | "edit" = "edit",
 ): BoundLiveDocument | LiveBindingRefusal {
   if (!liveDocumentIsCurrent(storage, document, stored))
     return { kind: "refused", reason: "stale-document" };
@@ -1874,6 +1907,12 @@ function bindLiveDocument(
       ? pathVisibleThroughShare(fileWriteSideOf(selector)!, path)
       : canonicalLiveSelector(share, selector) && visibleSharePath(selector, path) === path;
   if (!reached) return { kind: "refused", reason: "stale-selector" };
+  const files = fileSideOf(selector);
+  if (
+    !files ||
+    (access === "edit" ? pathLevel(files, path) !== "edit" : pathLevel(files, path) === null)
+  )
+    return { kind: "refused", reason: "not-authorized" };
   const bound = bindRecordedLiveDocument(storage, document, stored);
   if (bound.kind !== "bound") return bound;
   const view = liveRecipientView(

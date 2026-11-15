@@ -553,7 +553,12 @@ describe("Groups a workspace membership reaches", () => {
       grantId: `m-${who.userId}`,
       recipientUserId: who.userId,
       recipientEmail: who.email,
-      files: { paths: [], versionId: null, wholeWorkspace: true, access },
+      files: {
+        paths: [],
+        versionId: null,
+        memberReach: { revision: "test", role: "member", level: access, rules: [] },
+        access,
+      },
       chat: { kind: "groups", canPost: access !== "view" },
     };
   }
@@ -1132,5 +1137,28 @@ describe("share impact", () => {
         ),
       ).toEqual([]);
     }
+  });
+});
+
+it("stops each step outside any Collection editor's evaluated folder reach", () => {
+  const member: RosterGrant = {
+    grantId: "membership",
+    recipientUserId: ana.userId,
+    recipientEmail: ana.email,
+    files: {
+      paths: [],
+      versionId: null,
+      access: "edit",
+      memberReach: { revision: "one", role: "member", level: "edit", rules: [["Budget", null]] },
+    },
+    chat: null,
+  };
+  expect(check(owner(member), change(budget))).toMatchObject({ allowed: false, person: ana.email });
+  expect(check(owner(member), find(budget))).toMatchObject({ allowed: false, person: ana.email });
+  member.files!.memberReach!.rules = [["Budget", "view"]];
+  expect(check(owner(member), find(budget))).toEqual(allowed);
+  expect(check(owner(member), change(budget))).toMatchObject({ allowed: false });
+  expect(check(owner(member), change(trip), trip, ["Trip/access.yaml~"])).toMatchObject({
+    allowed: false,
   });
 });

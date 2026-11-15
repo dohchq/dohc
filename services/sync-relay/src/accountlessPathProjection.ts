@@ -14,8 +14,8 @@ interface ProjectionRoot {
   visiblePath: string;
 }
 
-interface AccountlessPathProjection {
-  selector: ShareSelector;
+interface AccountlessPathProjection<Selector extends ShareSelector> {
+  selector: Selector;
   projectPath(path: string): string | null;
   resolvePath(path: string): string | null;
   projectPayload(payload: unknown): unknown | null;
@@ -75,9 +75,9 @@ function projectNestedPaths(
   return projected;
 }
 
-export function createAccountlessPathProjection(
-  selector: ShareSelector,
-): AccountlessPathProjection {
+export function createAccountlessPathProjection<Selector extends ShareSelector>(
+  selector: Selector,
+): AccountlessPathProjection<Selector> {
   const roots = projectionRoots(selector.paths);
   const projectPath = (path: string): string | null => {
     if (roots.length === 0) return path;

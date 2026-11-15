@@ -31,11 +31,10 @@ export function workspaceFileReach(selector: WorkspaceShareSelector) {
   return {
     paths: [] as string[],
     versionId: null,
-    access: selector.access,
     wholeWorkspace: true as const,
+    reach: selector.reach,
     levelAt:
-      selector.reach?.levelAt ??
-      (() => (selector.role === "admin" ? ("edit" as const) : selector.access)),
+      selector.reach?.levelAt ?? (() => (selector.role === "admin" ? ("edit" as const) : null)),
     ...(selector.role === "admin" ? { ruleFiles: true as const } : {}),
   };
 }
@@ -49,11 +48,10 @@ export function workspaceFileWriteReach(selector: WorkspaceShareSelector) {
   return {
     paths: [] as string[],
     versionId: null,
-    access: selector.access,
     wholeWorkspace: true as const,
+    reach: selector.reach,
     levelAt:
-      selector.reach?.levelAt ??
-      (() => (selector.role === "admin" ? ("edit" as const) : selector.access)),
+      selector.reach?.levelAt ?? (() => (selector.role === "admin" ? ("edit" as const) : null)),
   };
 }
 

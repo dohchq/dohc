@@ -108,6 +108,12 @@ const WorkspaceGrant = z.object({
     role: z.enum(["admin", "member"]).optional(),
   }),
   access: z.enum(SHARE_ACCESS_VALUES),
+  memberReach: z.object({
+    revision: z.string().min(1),
+    role: z.enum(["admin", "member"]),
+    level: z.enum(SHARE_ACCESS_VALUES),
+    rules: z.array(z.tuple([z.string(), z.enum(SHARE_ACCESS_VALUES).nullable()])),
+  }),
 });
 const GrantSchema = z.union([GroupGrant, ChatGrant, FileGrant, WorkspaceGrant]);
 const ListedGrantSchema = GrantSchema.refine(
@@ -219,8 +225,6 @@ function isWorkspaceGrant(grant: ListedGrant): grant is z.infer<typeof Workspace
   return grant.selector.kind === "workspace";
 }
 
-const WHOLE_WORKSPACE = { paths: [], versionId: null, wholeWorkspace: true } as const;
-
 function rosterGrantOf(grant: ListedGrant): RosterGrant {
   const recipient = {
     grantId: grant.grantId,
@@ -235,7 +239,7 @@ function rosterGrantOf(grant: ListedGrant): RosterGrant {
   if (isWorkspaceGrant(grant)) {
     return {
       ...recipient,
-      files: { ...WHOLE_WORKSPACE, access: grant.access },
+      files: { paths: [], versionId: null, memberReach: grant.memberReach, access: grant.access },
       chat: { kind: "groups", canPost: grant.access !== "view" },
     };
   }
@@ -523,7 +527,11 @@ function formerEditorOf(
   if (grant.selector.kind === "chat") return [];
   const files =
     grant.selector.kind === "workspace"
-      ? WHOLE_WORKSPACE
+      ? {
+          paths: [],
+          versionId: null,
+          memberReach: "memberReach" in grant ? grant.memberReach : undefined,
+        }
       : { paths: grant.selector.paths, versionId: grant.selector.versionId };
   return [
     {

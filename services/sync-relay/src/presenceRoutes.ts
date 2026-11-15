@@ -13,6 +13,7 @@ import {
   isWorkspaceSelector,
   parseChatThreadTopic,
   targetVersionId,
+  pathLevel,
   type ChatShareThreadResolver,
 } from "./shareFilter";
 import type { AuthorizedShareAction } from "./shareAuthorization";
@@ -78,7 +79,8 @@ export function createPresenceRoutes(
   storage: Pick<
     SyncRelayStorage,
     "workspaceIsOwnedBy" | "currentObjectPath" | "captureReadRevisionMatches"
-  >,
+  > &
+    Partial<Pick<SyncRelayStorage, "readShareTx">>,
   claimPendingShares: (userId: string) => Promise<void>,
   requireShareAction: (
     shareId: string,
@@ -89,6 +91,29 @@ export function createPresenceRoutes(
   lookupLabel?: (userId: string) => string | null | Promise<string | null>,
 ) {
   const project = createPresenceProjection(lookupLabel, nowMs);
+  const inRead = <T>(run: () => T): T => (storage.readShareTx ? storage.readShareTx(run) : run());
+  const editsTopic = (authorized: AuthorizedShareAction, topic: string): boolean => {
+    const files = fileSideOf(authorized.effectiveSelector);
+    if (!files) return false;
+    const object = parsePresenceObjectTopic(topic);
+    if (object) {
+      const path = storage.currentObjectPath(object);
+      return path !== null && pathLevel(files, path) === "edit";
+    }
+    const thread = parseChatThreadTopic(topic);
+    if (thread) {
+      const resolver = chatResolverFor(authorized.share.workspaceId),
+        binding = resolver.threadFileBinding(thread);
+      const path =
+        binding?.kind === "path"
+          ? binding.path
+          : binding?.kind === "object"
+            ? resolver.objectCurrentPath(binding.objectId)
+            : null;
+      return typeof path === "string" && pathLevel(files, path) === "edit";
+    }
+    return pathLevel(files, topic) === "edit";
+  };
   const authorizeObject = (
     workspaceId: string,
     topic: string,
@@ -103,26 +128,27 @@ export function createPresenceRoutes(
     if (!path || visibleSharePath(files, path) !== path) throw notFound();
     return true;
   };
-  const authorizeShare = (shareId: string, userId: string, topic: string) => {
-    const authorized = requireShareAction(shareId, userId, "presence");
-    const resolver = chatResolverFor(authorized.share.workspaceId);
-    const objectTopic = authorizeObject(authorized.share.workspaceId, topic, authorized);
-    if (!objectTopic) {
-      // A path spelled like an existing channel never grants that channel's attribution.
-      const thread = parseChatThreadTopic(topic);
-      const channelTopic =
-        thread !== null
-          ? resolver.threadChannelWireId(thread) != null
-          : resolver.channelKind(topic) != null;
-      // A workspace share answers for each Group itself.
-      const selector =
-        channelTopic && !isWorkspaceSelector(authorized.effectiveSelector)
-          ? chatSideOf(authorized.effectiveSelector)
-          : authorized.effectiveSelector;
-      if (!selector || !presenceTopicAllowedForShare(selector, topic, resolver)) throw notFound();
-    }
-    return authorized;
-  };
+  const authorizeShare = (shareId: string, userId: string, topic: string) =>
+    inRead(() => {
+      const authorized = requireShareAction(shareId, userId, "presence");
+      const resolver = chatResolverFor(authorized.share.workspaceId);
+      const objectTopic = authorizeObject(authorized.share.workspaceId, topic, authorized);
+      if (!objectTopic) {
+        // A path spelled like an existing channel never grants that channel's attribution.
+        const thread = parseChatThreadTopic(topic);
+        const channelTopic =
+          thread !== null
+            ? resolver.threadChannelWireId(thread) != null
+            : resolver.channelKind(topic) != null;
+        // A workspace share answers for each Group itself.
+        const selector =
+          channelTopic && !isWorkspaceSelector(authorized.effectiveSelector)
+            ? chatSideOf(authorized.effectiveSelector)
+            : authorized.effectiveSelector;
+        if (!selector || !presenceTopicAllowedForShare(selector, topic, resolver)) throw notFound();
+      }
+      return authorized;
+    });
 
   const preparedSnapshots = new WeakMap<
     PresenceSnapshot,
@@ -131,46 +157,47 @@ export function createPresenceRoutes(
       current(): boolean;
     }
   >();
-  const prepareSnapshot = (snapshot: PresenceSnapshot, workspaceId: string, topic: string) => {
-    const cached = preparedSnapshots.get(snapshot);
-    if (cached?.current()) return cached.value;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const current = storage.captureReadRevisionMatches();
-      const resolver = chatResolverFor(workspaceId);
-      const thread = parseChatThreadTopic(topic);
-      const chatAttribution =
-        parsePresenceObjectTopic(topic) === null &&
-        (thread !== null
-          ? resolver.threadChannelWireId(thread) != null ||
-            resolver.threadFileBinding(thread) != null
-          : resolver.channelKind(topic) != null);
-      const peers: PreparedPresenceSnapshot["peers"] = [];
-      for (const peer of snapshot.peers) {
-        try {
-          const isOwner = storage.workspaceIsOwnedBy(workspaceId, peer.userId);
-          let canEdit = isOwner;
-          if (peer.shareId) {
-            const auth = authorizeShare(peer.shareId, peer.userId, topic);
-            if (auth.share.workspaceId !== workspaceId) continue;
-            canEdit = fileSideOf(auth.effectiveSelector)?.access === "edit";
-          } else if (!isOwner) continue;
-          peers.push({
-            peer,
-            isOwner,
-            state: presenceStateForAccess(peer.state, canEdit),
-          });
-        } catch {
-          // A peer whose grant or selected path no longer admits it is absent.
+  const prepareSnapshot = (snapshot: PresenceSnapshot, workspaceId: string, topic: string) =>
+    inRead(() => {
+      const cached = preparedSnapshots.get(snapshot);
+      if (cached?.current()) return cached.value;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const current = storage.captureReadRevisionMatches();
+        const resolver = chatResolverFor(workspaceId);
+        const thread = parseChatThreadTopic(topic);
+        const chatAttribution =
+          parsePresenceObjectTopic(topic) === null &&
+          (thread !== null
+            ? resolver.threadChannelWireId(thread) != null ||
+              resolver.threadFileBinding(thread) != null
+            : resolver.channelKind(topic) != null);
+        const peers: PreparedPresenceSnapshot["peers"] = [];
+        for (const peer of snapshot.peers) {
+          try {
+            const isOwner = storage.workspaceIsOwnedBy(workspaceId, peer.userId);
+            let canEdit = isOwner;
+            if (peer.shareId) {
+              const auth = authorizeShare(peer.shareId, peer.userId, topic);
+              if (auth.share.workspaceId !== workspaceId) continue;
+              canEdit = editsTopic(auth, topic);
+            } else if (!isOwner) continue;
+            peers.push({
+              peer,
+              isOwner,
+              state: presenceStateForAccess(peer.state, canEdit),
+            });
+          } catch {
+            // A peer whose grant or selected path no longer admits it is absent.
+          }
+        }
+        const value = { peers, chatAttribution };
+        if (current()) {
+          preparedSnapshots.set(snapshot, { value, current });
+          return value;
         }
       }
-      const value = { peers, chatAttribution };
-      if (current()) {
-        preparedSnapshots.set(snapshot, { value, current });
-        return value;
-      }
-    }
-    throw notFound();
-  };
+      throw notFound();
+    });
 
   const respondPresence = async (
     request: Request,
@@ -184,7 +211,7 @@ export function createPresenceRoutes(
       if (shareId) {
         const authorized = authorizeShare(shareId, userId, topic);
         if (authorized.share.workspaceId !== workspaceId) throw notFound();
-        return fileSideOf(authorized.effectiveSelector)?.access === "edit";
+        return editsTopic(authorized, topic);
       }
       if (!storage.workspaceIsOwnedBy(workspaceId, userId)) throw notFound();
       return true;

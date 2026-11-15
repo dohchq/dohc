@@ -75,11 +75,25 @@ export interface StoredShareSelector {
   versionId: string | null;
 }
 
-export interface ShareSelector extends StoredShareSelector {
+export interface PathShareSelector extends StoredShareSelector {
   access: ShareAccess;
   // A workspace member's file reach (`workspaceFileReach`). Never stored.
   wholeWorkspace?: true;
   levelAt?: (path: string) => ShareAccess | null;
+}
+
+export interface WorkspaceFileSelector extends StoredShareSelector {
+  reach?: import("./storage/memberReach").MemberReach;
+  wholeWorkspace: true;
+  ruleFiles?: true;
+  levelAt(path: string): ShareAccess | null;
+}
+
+export type ShareSelector = PathShareSelector | WorkspaceFileSelector;
+
+export function pathLevel(selector: ShareSelector, path: string): ShareAccess | null {
+  if (visibleSharePath(selector, path) === null) return null;
+  return selector.levelAt ? selector.levelAt(path) : "access" in selector ? selector.access : null;
 }
 
 // Shared channels: a bidirectional chat grant. Unlike the
@@ -169,7 +183,7 @@ export function chatHalfOfGroup(selector: GroupShareSelector): ChatChannelShareS
 
 // The file half of a group grant. read-write edits the folder; read-only
 // views it.
-export function fileHalfOfGroup(selector: GroupShareSelector): ShareSelector {
+export function fileHalfOfGroup(selector: GroupShareSelector): PathShareSelector {
   return {
     paths: selector.paths,
     versionId: null,
@@ -270,9 +284,14 @@ export function isLiveEditShareSelector(
 ): selector is ShareSelector | WorkspaceShareSelector {
   // A workspace share at Edit opens every document its file reach covers;
   // the caller checks the path with `fileSideOf`.
-  if (isWorkspaceSelector(selector)) return selector.access === "edit";
+  if (isWorkspaceSelector(selector))
+    return selector.reach ? selector.reach.hasLevel("edit") : selector.access === "edit";
   if ("kind" in selector) return false;
-  return selector.access === "edit" && selector.versionId === null && selector.paths.length > 0;
+  return (
+    (!("access" in selector) || selector.access === "edit") &&
+    selector.versionId === null &&
+    selector.paths.length > 0
+  );
 }
 
 // A file side that names files: its paths, or the whole workspace. A version
@@ -1297,53 +1316,61 @@ export function filterOpForShare(
   if (!parsed) return { allowed: false };
   const { payload, referencedPaths } = parsed;
 
-  if (isWorkspaceSelector(selector)) {
-    const files = workspaceFileReach(selector);
-    if (opKind === "moment.append" && selector.reach) {
-      const record = asRecord(payload);
-      if (!record || record.versionId !== "main" || !hasValidShareMomentShape(record))
-        return { allowed: false };
-      const before = typeof record.payloadBeforePath === "string" ? record.payloadBeforePath : null;
-      const after = typeof record.payloadAfterPath === "string" ? record.payloadAfterPath : null;
-      const beforeVisible = before !== null && pathVisibleThroughShare(files, before);
-      const afterVisible = after !== null && pathVisibleThroughShare(files, after);
-      if (record.operation === "rename" && beforeVisible !== afterVisible) {
-        if (beforeVisible) {
-          const departure = filterOpForShare(
-            files,
-            opKind,
-            JSON.stringify({
-              operation: "delete",
-              versionId: "main",
-              path: before,
-              payloadBeforePath: before,
-              payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
-            }),
-            chat,
-          );
-          if (departure.allowed)
-            (departure.payload as Record<string, unknown>).payloadBeforeBlobSha256 = null;
-          return departure;
-        }
-        if (typeof record.objectId !== "string" || !selector.reach.objectVisible(record.objectId))
-          return { allowed: false };
-        return filterOpForShare(
+  if (
+    !("kind" in selector) &&
+    "reach" in selector &&
+    selector.reach &&
+    opKind === "moment.append"
+  ) {
+    const files = { ...selector, reach: undefined };
+    const record = asRecord(payload);
+    if (!record || record.versionId !== "main" || !hasValidShareMomentShape(record))
+      return { allowed: false };
+    const before = typeof record.payloadBeforePath === "string" ? record.payloadBeforePath : null;
+    const after = typeof record.payloadAfterPath === "string" ? record.payloadAfterPath : null;
+    const beforeVisible = before !== null && pathVisibleThroughShare(files, before);
+    const afterVisible = after !== null && pathVisibleThroughShare(files, after);
+    if (record.operation === "rename" && beforeVisible !== afterVisible) {
+      if (beforeVisible) {
+        const departure = filterOpForShare(
           files,
           opKind,
           JSON.stringify({
-            operation: "write",
+            operation: "delete",
             versionId: "main",
-            path: after,
-            payloadAfterPath: after,
-            payloadAfterBlobSha256: record.payloadAfterBlobSha256,
-            payloadAfterContentKind: record.payloadAfterContentKind,
+            path: before,
+            payloadBeforePath: before,
+            payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
           }),
           chat,
         );
+        if (departure.allowed)
+          (departure.payload as Record<string, unknown>).payloadBeforeBlobSha256 = null;
+        return departure;
       }
       if (typeof record.objectId !== "string" || !selector.reach.objectVisible(record.objectId))
         return { allowed: false };
+      return filterOpForShare(
+        files,
+        opKind,
+        JSON.stringify({
+          operation: "write",
+          versionId: "main",
+          path: after,
+          payloadAfterPath: after,
+          payloadAfterBlobSha256: record.payloadAfterBlobSha256,
+          payloadAfterContentKind: record.payloadAfterContentKind,
+        }),
+        chat,
+      );
     }
+    if (typeof record.objectId !== "string" || !selector.reach.objectVisible(record.objectId))
+      return { allowed: false };
+    return filterOpForShare(files, opKind, payloadJson, chat);
+  }
+
+  if (isWorkspaceSelector(selector)) {
+    const files = workspaceFileReach(selector);
     if (!opKind.startsWith("chat.")) return filterOpForShare(files, opKind, payloadJson, chat);
     const side = workspaceChatSide(selector, opKind, payload, chat);
     if (side === "files") {
@@ -1599,9 +1626,21 @@ export function filterOpForShareAppend(
     // Only the owner and admins create Groups, and not through this lane.
     if (opKind === "chat.channel.create") return { allowed: false };
     const side = workspaceChatSide(selector, opKind, payload, chat);
-    if (side === "files")
-      return filterFileChatOpForPathShare(workspaceFileReach(selector), opKind, payload, chat);
-    return side ? filterChatOpForChannelShare(side, opKind, payload, chat) : { allowed: false };
+    if (side === "files") {
+      const record = asRecord(payload);
+      const bound =
+        opKind === "chat.thread.create" && record
+          ? threadCreateBinding(record)
+          : chat?.threadFileBinding(String(record?.threadId));
+      const path = resolvedThreadPath(chat!, bound);
+      const files = workspaceFileReach(selector);
+      const level = path === null ? null : pathLevel(files, path);
+      if (level !== "comment" && level !== "edit") return { allowed: false };
+      return filterFileChatOpForPathShare(files, opKind, payload, chat);
+    }
+    return side && side.access === "read-write"
+      ? filterChatOpForChannelShare(side, opKind, payload, chat)
+      : { allowed: false };
   }
   if (isGroupSelector(selector)) {
     if (!groupChannelIsOrdinary(selector, chat)) return { allowed: false };
@@ -1658,8 +1697,20 @@ export function filterProposedChangeForShare(
 ): ProposedChangeDecision {
   // A chat grant shares no files, so it can propose no change to one.
   if (isChatChannelSelector(selector)) return { allowed: false };
-  if (isWorkspaceSelector(selector))
+  if (isWorkspaceSelector(selector)) {
+    const record = asRecord(raw);
+    if (
+      selector.role === "member" &&
+      selector.reach &&
+      typeof record?.basedOnPath === "string" &&
+      typeof record.afterPath === "string" &&
+      record.basedOnPath !== record.afterPath &&
+      selector.reach.nearestRule(record.basedOnPath) !==
+        selector.reach.nearestRule(record.afterPath)
+    )
+      return { allowed: false };
     return filterProposedChangeForShare(workspaceFileWriteReach(selector), raw, chat);
+  }
   if (isGroupSelector(selector)) {
     if (!groupChannelIsOrdinary(selector, chat)) return { allowed: false };
     return filterProposedChangeForShare(fileHalfOfGroup(selector), raw, chat);
@@ -1691,6 +1742,7 @@ export function filterProposedChangeForShare(
     if (!SHA256_HEX_PATTERN.test(claimedBaseSha)) return { allowed: false };
     basedOnPath = visibleSharePath(selector, claimedBasePath);
     if (basedOnPath === null) return { allowed: false };
+    if (pathLevel(selector, basedOnPath) !== "edit") return { allowed: false };
     basedOnBlobSha256 = claimedBaseSha;
   }
 
@@ -1726,6 +1778,7 @@ export function filterProposedChangeForShare(
   // outside the selector is refused rather than admitted and clipped later.
   const afterPath = visibleSharePath(selector, claimedAfterPath);
   if (afterPath === null) return { allowed: false };
+  if (pathLevel(selector, afterPath) !== "edit") return { allowed: false };
 
   const afterContentKind = record.afterContentKind;
   if (afterContentKind !== "text" && afterContentKind !== "binary") {
@@ -1812,14 +1865,23 @@ export function collectionEditSelector(
   }
   if (isWorkspaceSelector(selector))
     return collectionEditSelector(workspaceFileWriteReach(selector), chat);
-  if (selector.access !== "edit" || selector.versionId !== null || !namesFiles(selector))
+  if (
+    ("access" in selector && selector.access !== "edit") ||
+    selector.versionId !== null ||
+    !namesFiles(selector)
+  )
     return null;
   return selector;
 }
 
 /** Edit on the Collection folder itself or a folder above it, not only on its files. */
 export function coversCollectionFolder(selector: ShareSelector, folder: string): boolean {
-  return folder !== "" && visibleSharePath(selector, folder) === folder;
+  return (
+    folder !== "" &&
+    (selector.wholeWorkspace === true ||
+      selector.paths.some((root) => folder === root || folder.startsWith(`${root}/`))) &&
+    pathLevel(selector, `${folder}/collection.yaml`) === "edit"
+  );
 }
 
 // The single decision point for what a recipient may WRITE DIRECTLY. It is a
@@ -1956,6 +2018,7 @@ function decideCollectionWrite(
     if (changes.length !== 1) return refused;
     const change = changes[0]!;
     const collectionPath = parentPath(change.afterPath!);
+    if (member && pathLevel(files, change.afterPath!) !== "edit") return refused;
     const file = baseName(change.afterPath!);
     // A page goes in a folder that holds a file, so a missing or hidden
     // folder answers as a folder outside reach does. Only an admin creates

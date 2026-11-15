@@ -54,7 +54,8 @@ function readableAccess(selector: StoredAnyShareSelector, access: string): boole
 }
 
 export function createShareSummaries(
-  storage: Pick<SyncRelayStorage, "findChannelCreateKind" | "workspaceRoleOf">,
+  storage: Pick<SyncRelayStorage, "findChannelCreateKind" | "workspaceRoleOf"> &
+    Partial<Pick<SyncRelayStorage, "memberReach">>,
   labels: (
     shareId: string,
     reader: ShareLabelReader,
@@ -157,6 +158,25 @@ export function createShareSummaries(
     return {
       ...base,
       ...ownerMembershipRole(row, base.selector),
+      ...(storage.memberReach &&
+      roster &&
+      selector &&
+      "kind" in selector &&
+      selector.kind === "workspace" &&
+      isShareAccessValue(grant.access)
+        ? {
+            memberReach: storage.memberReach(
+              share.workspaceId,
+              grant.principalUserId ?? `pending:${grant.grantId}`,
+              (grant.principalUserId
+                ? storage.workspaceRoleOf(share.workspaceId, grant.principalUserId)?.role
+                : null) === "admin"
+                ? "admin"
+                : "member",
+              grant.access,
+            ).evaluated,
+          }
+        : {}),
       ...(roster
         ? {
             granterUserId: share.granterUserId,

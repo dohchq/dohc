@@ -502,7 +502,7 @@ export function withReplicaCurrentView<T>(
       if (
         authority?.history &&
         !isWorkspaceSelector(authorized.effectiveSelector) &&
-        selector.access !== "edit"
+        (!("access" in selector) || selector.access !== "edit")
       )
         return { status: "denied" };
       const member = isWorkspaceSelector(authorized.effectiveSelector)

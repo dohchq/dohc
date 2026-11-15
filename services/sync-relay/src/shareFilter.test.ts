@@ -1969,7 +1969,24 @@ describe("a new page under Edit", () => {
     recordedAtMs: 1,
     ...overrides,
   });
-  const member: WorkspaceShareSelector = { kind: "workspace", access: "edit", role: "member" };
+  const member: WorkspaceShareSelector = {
+    kind: "workspace",
+    access: "edit",
+    role: "member",
+    reach: {
+      evaluated: { revision: "test", role: "member", level: "edit", rules: [] },
+      revision: "test",
+      signature: "test",
+      levelAt: () => "edit",
+      folderLevel: () => "edit",
+      hasLevel: (level) => level === "edit",
+      folderExists: () => true,
+      nearestRule: () => "",
+      objectVisible: () => true,
+      objectPath: () => null,
+      refresh: () => member.reach!,
+    },
+  };
   // The owner's main holds `docs/plan.md`, a Collection at `trip/packing`,
   // and a dataset at `trip/people`.
   const files = ["docs/plan.md", "trip/packing/collection.yaml", "trip/people/dataset.json"];

@@ -205,7 +205,7 @@ function memberRead(
 const refusalBytes = async (response: Response) => `${response.status}:${await response.text()}`;
 
 describe("a member reads the workspace through the link read routes", () => {
-  it("reads the workspace's name and files at View, Comment and Edit, and the history only at Edit", async () => {
+  it("reads the workspace's name, reached files, and history at View, Comment and Edit", async () => {
     const { h, storage, planSha } = await seed();
     const ana = await member(h, storage, "ana");
     for (const level of ["view", "comment", "edit"] as const) {
@@ -237,7 +237,7 @@ describe("a member reads the workspace through the link read routes", () => {
       );
       expect(currentLog.status).toBe(200);
       const log = await memberRead(h, "/sync/link/log?since=0&limit=500", ana.grantId, "ana");
-      expect(log.status, level).toBe(level === "edit" ? 200 : 404);
+      expect(log.status, level).toBe(200);
     }
   });
 
@@ -972,4 +972,29 @@ describe("a member's file Comments in a browser", () => {
     );
     expect((await held).status).toBe(404);
   });
+});
+
+it("filters member browser feeds and blobs and stops an open download when folder reach changes", async () => {
+  const { h, storage, planSha } = await seed();
+  const ana = await member(h, storage, "ana");
+  const download = await memberRead(h, `/sync/link/blobs/${planSha}`, ana.grantId, "ana");
+  expect(download.status).toBe(200);
+  const context = storage as StorageContext;
+  context.tx(() =>
+    context.db
+      .prepare(
+        `INSERT INTO sync_relay_access_rules (workspace_id,version_id,folder,rule_text,from_seq,to_seq) VALUES (?,'main','docs','',100,NULL)`,
+      )
+      .run(WORKSPACE),
+  );
+  await expect(download.text()).rejects.toThrow();
+  const current = await json(await memberRead(h, "/sync/link/current", ana.grantId, "ana"));
+  expect(current.files).toEqual([]);
+  const feed = await json(
+    await memberRead(h, "/sync/link/log?since=0&limit=500", ana.grantId, "ana"),
+  );
+  expect(JSON.stringify(feed)).not.toContain("docs/plan.md");
+  const hidden = await memberRead(h, `/sync/link/blobs/${planSha}`, ana.grantId, "ana");
+  const missing = await memberRead(h, `/sync/link/blobs/${sha256("missing")}`, ana.grantId, "ana");
+  expect(await refusalBytes(hidden)).toBe(await refusalBytes(missing));
 });

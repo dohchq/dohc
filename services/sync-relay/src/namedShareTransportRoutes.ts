@@ -28,7 +28,6 @@ import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
   chatSideFor,
   chatSideOf,
-  fileSideOf,
   filterOpForShareAppend,
   isGroupSelector,
   isWorkspaceSelector,
@@ -50,6 +49,8 @@ export type NamedShareTransportRoute =
 function shareScopeKey(selector: AnyShareSelector): string {
   if (isWorkspaceSelector(selector))
     return JSON.stringify({ kind: "workspace", role: selector.role });
+  if (!("access" in selector))
+    return JSON.stringify({ paths: selector.paths, versionId: selector.versionId });
   const { access: _access, ...scope } = selector;
   return JSON.stringify(scope);
 }
@@ -238,7 +239,8 @@ export function createNamedShareTransportRoutes(
       if (
         hold > 0 &&
         isShareAccessValue(knew) &&
-        knew !== (fileSideOf(authorized.effectiveSelector)?.access ?? "view")
+        knew !==
+          ("access" in authorized.effectiveSelector ? authorized.effectiveSelector.access : "view")
       ) {
         return jsonResponse({
           ok: true,
@@ -509,7 +511,17 @@ export function createNamedShareTransportRoutes(
         // in standing, and still a selector that accepts appends at its
         // current level on the same workspace bucket — a level
         // narrowed mid-flight loses the race the same way a revoke does.
-        guard: shareActionGuard(route.shareId, actor.userId, "append", share.workspaceId),
+        guard: () => {
+          shareActionGuard(route.shareId, actor.userId, "append", share.workspaceId)();
+          const fresh = requireShareAction(route.shareId, actor.userId, "append");
+          for (const op of ops) {
+            if (
+              !filterOpForShareAppend(fresh.effectiveSelector, op.opKind, op.payloadJson, resolver)
+                .allowed
+            )
+              throw relayError("share_op_rejected");
+          }
+        },
       };
       const result =
         browserMessageId === undefined

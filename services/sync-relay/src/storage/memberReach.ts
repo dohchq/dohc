@@ -4,6 +4,7 @@ import {
   accessRuleSet,
   fileLevel,
   folderLevel,
+  ruleLevel,
   type AccessRuleSet,
   type ReachViewer,
 } from "@dohc/security-contract/access-rules";
@@ -12,7 +13,17 @@ import { accountEmail } from "./accountEmails";
 import { accessRuleHistoryFloor, accessRuleSetBefore, currentAccessRuleSet } from "./accessRules";
 import type { SqliteDb } from "./types";
 
+export interface EvaluatedMemberReach {
+  revision: string;
+  role: "admin" | "member";
+  level: ShareAccess;
+  rules: [string, ShareAccess | null][];
+}
+
 export interface MemberReach {
+  evaluated: EvaluatedMemberReach;
+  hasLevel(level: ShareAccess): boolean;
+  folderExists(folder: string): boolean;
   refresh(): MemberReach;
   revision: string;
   signature: string;
@@ -120,6 +131,25 @@ export function memberReach(
     .get(workspaceId, userId);
   const revision = stored?.signature === signature ? String(stored.revision) : signature;
   return {
+    evaluated: {
+      revision,
+      role,
+      level,
+      rules: [...rules.exact].map(([folder, rule]) => [
+        folder,
+        viewer.role === "member" ? ruleLevel(rule, viewer) : "edit",
+      ]),
+    },
+    hasLevel: (level) =>
+      atFolder("") === level ||
+      [...rules.exact.keys()].some((folder) => atFolder(folder) === level),
+    folderExists: (folder) =>
+      folder === "" ||
+      db
+        .prepare(
+          `SELECT 1 FROM sync_relay_current_files WHERE workspace_id=? AND version_id='main' AND substr(path,1,length(?)+1)=? || '/' LIMIT 1`,
+        )
+        .get(workspaceId, folder, folder) !== undefined,
     revision,
     signature,
     levelAt,

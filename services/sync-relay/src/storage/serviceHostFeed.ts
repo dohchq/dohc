@@ -3,13 +3,10 @@ import type { StorageContext } from "./context";
 import type { SqliteDb, SyncRelayLogRow } from "./types";
 import { rowToLogRow } from "./rows";
 import {
-  effectiveShareSelector,
-  isLiveEditShareSelector,
-  parseStoredAnyShareSelectorJson,
-  pathVisibleThroughShare,
-} from "../shareFilter";
-import { canonicalLiveSelector } from "./liveDocumentAuthority";
-import { currentServiceHostEnrollments, serviceHostOwnerRetains } from "./serviceHostEnrollment";
+  currentServiceHostEnrollments,
+  serviceHostOwnerRetains,
+  coversEnrolledPath,
+} from "./serviceHostEnrollment";
 import {
   listServiceActivationRetirements,
   type ServiceActivationRetirement,
@@ -104,25 +101,11 @@ export function readServiceHostFeedScope(
   }
   const settling = settlingScope(storage, workspaceId),
     enrollments = all.filter((row) => !settling.has(row.objectId));
-  const selectors = storage.db
+  const shares = storage.db
     .prepare(`SELECT s.share_id,s.workspace_id,s.granter_user_id,s.selector_json,s.created_at_ms
     FROM sync_relay_shares s INDEXED BY idx_sync_relay_shares_service_candidates WHERE s.workspace_id=? AND s.granter_user_id=?
-      AND EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active' AND g.access='edit')`)
-    .all(workspaceId, ownerUserId)
-    .flatMap((value) => {
-      const share = {
-        shareId: String(value.share_id),
-        workspaceId: String(value.workspace_id),
-        granterUserId: String(value.granter_user_id),
-        selectorJson: String(value.selector_json),
-        createdAtMs: Number(value.created_at_ms),
-      };
-      const parsed = parseStoredAnyShareSelectorJson(share.selectorJson),
-        selector = parsed && effectiveShareSelector(parsed, "edit");
-      return selector && isLiveEditShareSelector(selector) && canonicalLiveSelector(share, selector)
-        ? [selector]
-        : [];
-    });
+      AND EXISTS(SELECT 1 FROM sync_relay_share_grants g WHERE g.share_id=s.share_id AND g.status='active')`)
+    .all(workspaceId, ownerUserId);
   const hosted = new Map<string, string>(),
     departed = new Set<string>(),
     shared = new Map<string, string>();
@@ -139,7 +122,7 @@ export function readServiceHostFeedScope(
     else if (
       row.ownerStop === null &&
       (row.demandAtMs !== null ||
-        selectors.some((selector) => pathVisibleThroughShare(selector, row.path)) ||
+        shares.some((share) => coversEnrolledPath(storage, share, row.path)) ||
         serviceHostOwnerRetains(storage, row))
     ) {
       shared.set(row.objectId, row.path);

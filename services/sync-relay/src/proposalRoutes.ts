@@ -8,6 +8,7 @@ import type { AuthorizedShareAction } from "./shareAuthorization";
 import { filterProposedChangeForShare, targetVersionId, type ShareSelector } from "./shareFilter";
 import { destinationPath, proposalBase, proposalMomentPayload } from "./recipientMoments";
 import { PROPOSAL_ORIGIN_PREFIX } from "./shareProposals";
+import { assertMemberChanges } from "./memberActions";
 import {
   SyncRelayBlobMissingError,
   type ShareProposalOpRow,
@@ -155,6 +156,7 @@ export function createProposalRoutes(
         );
       }
       const ops: ShareProposalOpRow[] = [];
+      assertMemberChanges(storage, share.selector, actorUserId, input.ops, nowMs(), true);
       // One net change per file, proven here rather than trusted. The
       // recipient consolidates before it submits — it knows its own object
       // ids — but a proposal carrying two changes for one file would give
@@ -203,10 +205,7 @@ export function createProposalRoutes(
             // unresolvable base refuses the whole submit rather than
             // dropping one change out of an intent the recipient stated as
             // a unit. It names the file because the recipient chose it.
-            throw badRequest(
-              `no file is shared at ${change.basedOnPath} any more, so this change ` +
-                `has nothing to build on; refresh the share and send again`,
-            );
+            throw relayError("share_op_rejected");
           }
         }
         if (change.afterBlobSha256 !== null) referencedShas.add(change.afterBlobSha256);

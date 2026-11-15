@@ -457,6 +457,7 @@ describe("workspace members on the roster", () => {
       recipientEmail: `${access}@dohc.test`,
       selector: { kind: "workspace" },
       access,
+      memberReach: { revision: "test", role: "member", level: access, rules: [] },
       ...overrides,
     });
   const trip = { path: "Trip", name: "Trip" };
@@ -480,8 +481,18 @@ describe("workspace members on the roster", () => {
     const edit = await rosterOf([membership("edit"), membership("view")]);
     if (edit.kind !== "owner") throw new Error("expected an owner roster");
     expect(edit.grants.map((grant) => grant.files)).toEqual([
-      { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
-      { paths: [], versionId: null, access: "view", wholeWorkspace: true },
+      {
+        paths: [],
+        versionId: null,
+        access: "edit",
+        memberReach: { revision: "test", role: "member", level: "edit", rules: [] },
+      },
+      {
+        paths: [],
+        versionId: null,
+        access: "view",
+        memberReach: { revision: "test", role: "member", level: "view", rules: [] },
+      },
     ]);
     expect(
       checkAutomationReach(edit, {

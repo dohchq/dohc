@@ -67,6 +67,7 @@ import {
 import type { SqliteDb } from "./types";
 import { assertWorkspaceQuota } from "./workspaces";
 import { workspaceRoleOf } from "./workspaceMembers";
+import { assertMemberChanges } from "../memberActions";
 
 // The same bound the relay puts on a schema it reads for an app Collection.
 const MAX_COLLECTION_SCHEMA_BYTES = 65_536;
@@ -285,6 +286,14 @@ export function commitCollectionWrite(
 
   return storage.tx(() => {
     const current = currentWriter(storage, input);
+    if (current.kind === "named")
+      assertMemberChanges(
+        storage,
+        current.authorized.effectiveSelector,
+        current.userId,
+        input.rawChanges,
+        input.nowMs,
+      );
     const decision = filterCollectionWriteForShare(
       current.authorized.effectiveSelector,
       input.rawChanges,

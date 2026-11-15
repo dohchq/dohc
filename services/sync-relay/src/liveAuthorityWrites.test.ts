@@ -273,7 +273,9 @@ it("lists every table the live checks read, and watches each for writes", async 
   // Each listed table counts its writes, except the log's new rows.
   const watched = (
     f.storage.db
-      .prepare("SELECT tbl_name AS name, sql FROM sqlite_temp_schema WHERE type = 'trigger'")
+      .prepare(
+        "SELECT tbl_name AS name, sql FROM sqlite_temp_schema WHERE type = 'trigger' AND name LIKE 'sync_relay_live_authority_writes_%'",
+      )
       .all() as Array<{ name: string; sql: string }>
   ).map(({ name, sql }) => `${name} ${/AFTER (INSERT|UPDATE|DELETE) ON/u.exec(sql)?.[1]}`);
   const expected = LIVE_AUTHORITY_TABLES.flatMap((table) =>

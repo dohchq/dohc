@@ -24,7 +24,7 @@ import {
 } from "./linkSecurity";
 import { readJsonObject } from "./requestInputs";
 import { authorizeLinkShareAction, type AuthorizedShareAction } from "./shareAuthorization";
-import type { ShareSelector } from "./shareFilter";
+import type { PathShareSelector } from "./shareFilter";
 import type { SyncRelayStorage } from "./storage";
 
 export function createLinkCredentialRoutes(
@@ -83,7 +83,7 @@ export function createLinkCredentialRoutes(
   };
 
   const linkExchangeResult = (
-    authorized: AuthorizedShareAction<ShareSelector>,
+    authorized: AuthorizedShareAction<PathShareSelector>,
     capabilityToken: string,
     capabilityExpiresAtMs: number,
   ): LinkExchangeResult => {

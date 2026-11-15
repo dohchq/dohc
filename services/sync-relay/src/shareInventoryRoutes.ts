@@ -17,7 +17,6 @@ import {
 } from "./shareAuthorization";
 import {
   effectiveShareSelector,
-  fileSideOf,
   isWorkspaceSelector,
   parseStoredAnyShareSelectorJson,
 } from "./shareFilter";
@@ -214,7 +213,8 @@ export function createShareInventoryRoutes(
       return jsonResponse(
         {
           status: "current",
-          access: fileSideOf(authorized.effectiveSelector)?.access ?? "view",
+          access:
+            "access" in authorized.effectiveSelector ? authorized.effectiveSelector.access : "view",
           ...(role === undefined ? {} : { role }),
           ...(levelChangedBy === null ? {} : { levelChangedBy }),
         },

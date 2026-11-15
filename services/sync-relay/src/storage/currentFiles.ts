@@ -716,7 +716,7 @@ export function readCurrentFileState(
   if (!Number.isSafeInteger(input.limit) || input.limit <= 0) {
     throw new Error("current file limit must be a positive safe integer");
   }
-  return storage.readTx(() => {
+  return storage.readShareTx(() => {
     const workspace = storage.db
       .prepare(
         `SELECT COALESCE(epoch_log_floor, 0) AS epoch_log_floor
