@@ -408,6 +408,29 @@ describe("public Markdown schema", () => {
       ),
     );
   });
+  it("accepts sealed pieces and a loose list, and refuses them with values the writers cannot write", () => {
+    const sealed = (
+      edit?: (block: Y.XmlElement, inline: Y.XmlElement, list: Y.XmlElement) => void,
+    ) =>
+      encode("Before\n\n- a\n- b", (doc) => {
+        const body = doc.getXmlFragment("body");
+        const block = new Y.XmlElement("rawBlock");
+        block.setAttribute("source", "<details>\n<summary>More</summary>\n</details>");
+        const inline = new Y.XmlElement("rawInline");
+        inline.setAttribute("source", "&nbsp;");
+        (body.get(0) as Y.XmlElement).insert(1, [inline]);
+        body.insert(1, [block]);
+        const list = body.get(2) as Y.XmlElement;
+        (list as unknown as Y.XmlElement<{ loose: boolean }>).setAttribute("loose", true);
+        edit?.(block, inline, list);
+      });
+    expect(accepted(sealed()).projectedMarkdown).toBe(
+      "Before&nbsp;\n\n<details>\n<summary>More</summary>\n</details>\n\n- a\n\n- b\n",
+    );
+    refused(sealed((block) => block.setAttribute("source", 1 as unknown as string)));
+    refused(sealed((_block, inline) => inline.setAttribute("source", {} as unknown as string)));
+    refused(sealed((_block, _inline, list) => list.setAttribute("loose", "yes")));
+  });
   // Two people turning neighbouring to-dos into plain lines at once merge into an empty list.
   it("accepts a list or item left empty by a merge, and refuses one that holds text", () => {
     const plain = accepted(encode("- [ ] alpha\n\nbravo")).projectedMarkdown;

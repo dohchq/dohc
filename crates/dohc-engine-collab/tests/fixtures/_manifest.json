@@ -82,6 +82,8 @@
   "richdocProjection-non-breaking-space.json",
   "richdocProjection-table-cell-references.json",
   "richdocProjection-written-inside-text.json",
+  "richdocProjection-sealed-pieces-and-loose-lists.json",
+  "richdocProjection-sealed-entity-alone.json",
   "offsetProbe.json",
   "surrogateProbe.json",
   "nestedFrontmatter.json",

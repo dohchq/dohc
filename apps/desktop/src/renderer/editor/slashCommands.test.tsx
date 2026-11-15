@@ -2,7 +2,8 @@
 import { createElement, useEffect, useRef, useState } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Editor, Extension } from "@tiptap/core";
+import { type AnyExtension, Editor, Extension } from "@tiptap/core";
+import { DohcRawInline } from "@dohc/ydoc-projection/markdown-extensions";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Collaboration } from "@tiptap/extension-collaboration";
 import * as yTiptap from "@tiptap/y-tiptap";
@@ -150,12 +151,13 @@ describe("slash menu render stability", () => {
   });
 });
 
-function makeSlashEditor(ydoc?: Y.Doc) {
+function makeSlashEditor(ydoc?: Y.Doc, extra: AnyExtension[] = []) {
   const stateRef: { current: SlashCommandState } = { current: CLOSED_SLASH_COMMAND_STATE };
   const editor = new Editor({
     element: document.createElement("div"),
     extensions: [
       StarterKit.configure({ trailingNode: false, undoRedo: false }),
+      ...extra,
       ...(ydoc ? [Collaboration.configure({ document: ydoc })] : []),
       Extension.create({
         name: "dohcTestSlash",
@@ -224,6 +226,32 @@ describe("Escape on the slash menu", () => {
     expect(stateRef.current.open).toBe(false);
     editor.commands.setTextSelection(6);
     expect(stateRef.current).toMatchObject({ open: true, from: 1, query: "head" });
+    editor.destroy();
+  });
+});
+
+describe("the slash trigger after an inline atom", () => {
+  // A sealed piece's text is its source, so text offsets and positions differ.
+  it.each(["<kbd>", "&nbsp;"])("finds the / after a sealed %s", (source) => {
+    const { editor, stateRef } = makeSlashEditor(undefined, [DohcRawInline]);
+    editor.commands.insertContent([
+      { type: "text", text: "Press " },
+      { type: "rawInline", attrs: { source } },
+      { type: "text", text: "K /he" },
+    ]);
+    // "Press " fills 1-6, the piece 7, "K " 8-9, so the / is at 10.
+    expect(stateRef.current).toMatchObject({ open: true, from: 10, query: "he" });
+    editor.destroy();
+  });
+
+  it("finds the / that starts a line after a hard break", () => {
+    const { editor, stateRef } = makeSlashEditor();
+    editor.commands.insertContent([
+      { type: "text", text: "a" },
+      { type: "hardBreak" },
+      { type: "text", text: "/he" },
+    ]);
+    expect(stateRef.current).toMatchObject({ open: true, from: 3, query: "he" });
     editor.destroy();
   });
 });

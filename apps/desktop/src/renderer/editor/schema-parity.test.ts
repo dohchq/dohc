@@ -4,6 +4,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Editor, JSONContent, TiptapEditorHTMLElement } from "@tiptap/core";
 import { undoDepth } from "@tiptap/pm/history";
+import { DOMParser as ProseMirrorDOMParser, DOMSerializer } from "@tiptap/pm/model";
 import { prosemirrorJSONToYXmlFragment, yXmlFragmentToProseMirrorRootNode } from "y-prosemirror";
 import * as Y from "yjs";
 import {
@@ -90,6 +91,31 @@ function setFirstColumnWidth(doc: Y.Doc, width: number): void {
     const cell = (row as Y.XmlElement).get(0) as Y.XmlElement<{ colwidth: number[] }>;
     cell.setAttribute("colwidth", [width]);
   }
+}
+
+// No reader makes sealed pieces or loose lists yet, so they enter through the
+// Y.Doc, as a later reader will write them.
+function appendSealedPiecesAndLooseList(doc: Y.Doc): void {
+  const rawBlock = new Y.XmlElement("rawBlock");
+  rawBlock.setAttribute("source", "<details>\n<summary>More</summary>\n</details>");
+  const rawInline = new Y.XmlElement("rawInline");
+  rawInline.setAttribute("source", "<kbd>");
+  const paragraph = new Y.XmlElement("paragraph");
+  paragraph.insert(0, [new Y.XmlText("Press "), rawInline, new Y.XmlText("K")]);
+  const list = new Y.XmlElement("bulletList");
+  (list as unknown as Y.XmlElement<{ loose: boolean }>).setAttribute("loose", true);
+  list.insert(
+    0,
+    ["first", "second"].map((text) => {
+      const item = new Y.XmlElement("listItem");
+      const body = new Y.XmlElement("paragraph");
+      body.insert(0, [new Y.XmlText(text)]);
+      item.insert(0, [body]);
+      return item;
+    }),
+  );
+  const body = getDohcYDocBodyFragment(doc);
+  body.insert(body.length, [rawBlock, paragraph, list]);
 }
 
 function mountedEditor(): Editor {
@@ -300,9 +326,52 @@ describe("raw HTML in a browser", () => {
 });
 
 describe("desktop editor schema parity", () => {
+  // Copy and paste carry a document as the schema's HTML, so a sealed piece's
+  // source has to come back from that HTML or a paste empties it.
+  it("keeps sealed pieces' source through the HTML that copy and paste carry", () => {
+    const doc = canonical.nodeFromJSON({
+      type: "doc",
+      content: [
+        { type: "rawBlock", attrs: { source: '<div align="center">\n  <b>x</b>\n</div>' } },
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "Press " },
+            { type: "rawInline", attrs: { source: "<kbd>" } },
+          ],
+        },
+        {
+          type: "bulletList",
+          attrs: { loose: true },
+          content: ["a", "b"].map((text) => ({
+            type: "listItem",
+            content: [{ type: "paragraph", content: [{ type: "text", text }] }],
+          })),
+        },
+      ],
+    });
+    const host = document.createElement("div");
+    host.append(DOMSerializer.fromSchema(canonical).serializeFragment(doc.content));
+    expect(ProseMirrorDOMParser.fromSchema(canonical).parse(host).toJSON()).toEqual(doc.toJSON());
+  });
+
+  // The check accepts only true or no value, so HTML from elsewhere must not
+  // set a list's `loose` to anything else.
+  it("reads a pasted list as loose only from its own mark", () => {
+    const host = document.createElement("div");
+    host.innerHTML = [
+      '<ul loose="yes"><li><p>a</p></li></ul>',
+      '<ol loose=""><li><p>b</p></li></ol>',
+      '<ul data-loose="false"><li><p>c</p></li></ul>',
+    ].join("");
+    const lists = ProseMirrorDOMParser.fromSchema(canonical).parse(host).toJSON().content;
+    expect(lists.map((list: JSONContent) => list.attrs?.loose)).toEqual([null, null, true]);
+  });
+
   it("carries edge content and shared frontmatter exactly through the wire and both schemas", async () => {
     const doc = receivedYDoc(`${EDGE_FRONTMATTER}${PARITY_BODY}`);
     setFirstColumnWidth(doc, 120);
+    appendSealedPiecesAndLooseList(doc);
     const expected = yXmlFragmentToProseMirrorRootNode(
       getDohcYDocBodyFragment(doc),
       canonical,
@@ -319,8 +388,11 @@ describe("desktop editor schema parity", () => {
         "image",
         "table",
         "codeBlock",
+        "rawBlock",
+        "rawInline",
       ]),
     );
+    expect(expected.content?.at(-1)?.attrs?.loose).toBe(true);
     // Text carrying two marks, whose order in the document is their rank.
     expect(marksOn(expected, "both")?.sort()).toEqual(["bold", "highlight"]);
     expect(marksOn(expected, "italic")?.sort()).toEqual(["highlight", "italic"]);

@@ -3960,6 +3960,7 @@ describe("Y.Doc markdown import/export", () => {
       "mathBlock",
       "orderedList",
       "paragraph",
+      "rawBlock",
       "table",
       "taskList",
     ]);
@@ -3969,6 +3970,7 @@ describe("Y.Doc markdown import/export", () => {
       "image",
       "inlineAtom",
       "mathInline",
+      "rawInline",
       "text",
       "wikilink",
     ]);
@@ -4052,6 +4054,10 @@ describe("Y.Doc markdown import/export", () => {
     {
       type: "mathBlock",
       block: { type: "mathBlock", attrs: { tex: "a|`b`" } },
+    },
+    {
+      type: "rawBlock",
+      block: { type: "rawBlock", attrs: { source: "<div>\na|`b`\n</div>" } },
     },
     {
       type: "orderedList",
@@ -5154,3 +5160,49 @@ it.each(["Total\n1.\n\n  x", "Total\n*\n\tfoo"])(
     }
   },
 );
+
+describe("sealed pieces", () => {
+  const paragraph = (...content: JSONContent[]): JSONContent => ({ type: "paragraph", content });
+  const raw = (type: "rawBlock" | "rawInline", source: string): JSONContent => ({
+    type,
+    attrs: { source },
+  });
+
+  // An empty note's blank lines are `&nbsp;`, so a writer drops output of
+  // only that. A sealed `&nbsp;` is the file's own text.
+  it.each([
+    ["an inline piece", paragraph(raw("rawInline", "&nbsp;"))],
+    ["a block piece", raw("rawBlock", "&nbsp;")],
+  ])("writes a note holding only a sealed entity as %s", (_name, block) => {
+    expect(serializeRichdocBody({ type: "doc", content: [block] })).toBe("&nbsp;");
+  });
+
+  it("escapes the text after a piece that ends a line, as at any line start", () => {
+    expect(
+      serializeRichdocBody({
+        type: "doc",
+        content: [
+          paragraph({ type: "text", text: "a" }, raw("rawInline", "<br>\n"), {
+            type: "text",
+            text: "# b",
+          }),
+        ],
+      }),
+    ).toBe("a<br>\n\\# b");
+  });
+
+  // Plain-text copy, which the share page and phone paste, reads a leaf's text.
+  it("gives each piece its source as text, so a plain-text copy keeps it", () => {
+    const doc = getDohcProseMirrorSchema().nodeFromJSON({
+      type: "doc",
+      content: [
+        raw("rawBlock", "<div>\nx\n</div>"),
+        paragraph({ type: "text", text: "Press " }, raw("rawInline", "<kbd>"), {
+          type: "text",
+          text: "K",
+        }),
+      ],
+    });
+    expect(doc.textBetween(0, doc.content.size, "\n\n")).toBe("<div>\nx\n</div>\n\nPress <kbd>K");
+  });
+});

@@ -183,3 +183,56 @@ it("renders remote image references without creating image fetches or navigable 
     mount.remove();
   }
 });
+// The binding deletes from the shared document any node or attribute its schema cannot make,
+// for everyone. So every editor must know sealed pieces and loose lists before a note has them.
+it("keeps sealed pieces and a loose list through a local edit", () => {
+  const doc = markdownToYDoc("Before\n\nAfter"),
+    mount = document.createElement("div");
+  document.body.append(mount);
+  const body = getDohcYDocBodyFragment(doc);
+  const sealedBlock = new Y.XmlElement("rawBlock");
+  sealedBlock.setAttribute("source", '<div align="center">\n<img src="/logo.png">\n</div>');
+  const inline = new Y.XmlElement("paragraph"),
+    sealedInline = new Y.XmlElement("rawInline");
+  sealedInline.setAttribute("source", "<kbd>");
+  inline.insert(0, [new Y.XmlText("Press "), sealedInline, new Y.XmlText("K")]);
+  const list = new Y.XmlElement("bulletList");
+  (list as unknown as Y.XmlElement<{ loose: boolean }>).setAttribute("loose", true);
+  for (const text of ["a", "b"]) {
+    const item = new Y.XmlElement("listItem"),
+      paragraph = new Y.XmlElement("paragraph");
+    paragraph.insert(0, [new Y.XmlText(text)]);
+    item.insert(0, [paragraph]);
+    list.insert(list.length, [item]);
+  }
+  body.insert(1, [sealedBlock, inline, list]);
+  const editor = mountLiveBodyEditor(mount, {
+    body,
+    label: "Shared file editor",
+    canEdit: () => true,
+    edit(change) {
+      doc.transact(change);
+      return true;
+    },
+  });
+  try {
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", {
+      value: { getData: (type: string) => (type === "text/plain" ? "Local edit " : ""), files: [] },
+    });
+    mount.querySelector('[role="textbox"]')!.dispatchEvent(event);
+    expect(yDocToMarkdown(doc)).toBe(
+      [
+        "Local edit Before",
+        '<div align="center">\n<img src="/logo.png">\n</div>',
+        "Press <kbd>K",
+        "- a\n\n- b",
+        "After\n",
+      ].join("\n\n"),
+    );
+  } finally {
+    editor.destroy();
+    doc.destroy();
+    mount.remove();
+  }
+});

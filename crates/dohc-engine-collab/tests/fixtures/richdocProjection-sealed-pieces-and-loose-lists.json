@@ -1,0 +1,33 @@
+{
+ "seed": -134,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-sealed-pieces-and-loose-lists",
+ "updates": [
+  "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"
+ ],
+ "mergedUpdateB64": "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",
+ "stateVectorB64": "Ae/er4AHkQE=",
+ "coverage": {
+  "nodes": [
+   "bulletList",
+   "doc",
+   "listItem",
+   "orderedList",
+   "paragraph",
+   "rawBlock",
+   "rawInline",
+   "table",
+   "tableCell",
+   "tableHeader",
+   "tableRow",
+   "taskItem",
+   "taskList",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "<p align=\"center\">\n  <img src=\"/logo.png\">\n</p>\n\nPress <kbd>K</kbd>&nbsp; now\n\n[docs]: https://example.com \"Docs\"\n\n- one\n\n- two\n\n  <!-- note -->\n\n3. three\n\n4. four\n\n   more\n\n- [x] done\n\n- [ ] open\n\n- tight\n- list\n\na<br>\n\\# b\n\n <kbd>x\n\n- \n  \n  <div>\n\n| Value                                            |\n| ------------------------------------------------ |\n| x <kbd>a\\|b</kbd>c\\|d<br><div><br>a\\|b<br></div> |\n"
+ }
+}
