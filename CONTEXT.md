@@ -245,7 +245,7 @@ Settlement cuts remain a separate concept.
 ## History pin
 
 An immutable recipient History version of one shared object, sampled from a stored replica current view.
-Only an Edit grant reads pins. The current grant, selector, and object visibility control access. A grant cannot read a pin superseded at or before that grant began.
+Only an Edit grant reads pins, including pins sampled before the grant began. A pin stays readable while its object is a current file in the share, at a path the share's selector shows. The relay serves pins only after the stored view reaches the log and journal positions recorded when the grant began, in the same replication epoch. Until then a read reports that the view is updating.
 Pins do not enter the owner's replication log or count against the owner's quota.
 
 ## History operation
