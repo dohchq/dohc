@@ -1072,7 +1072,7 @@ export async function startServiceLiveHost(options: {
               command: config.engineExecutable,
               authToken: randomBytes(32).toString("base64url"),
               protocolVersion: 2,
-              capabilities: ["blobs"],
+              capabilities: ["blobs", "progress"],
               privateLiveApplication: config.client,
               connectTimeoutMs: config.client.connectTimeoutMs,
               env: {
@@ -1400,11 +1400,13 @@ export async function startServiceLiveHost(options: {
         const engineCode = (error: unknown) =>
           error instanceof EngineRequestError ? error.wireError?.code : undefined;
         // A retired connection leaves the daemon unusable. Any other refusal keeps it for the next update.
+        // With `reports`, the deadline bounds the engine's silence and not the request's whole work.
         const membershipRequest = async (
           method: string,
           workspace: string | undefined,
           params: JsonValue,
           joined: AbortSignal,
+          reports = false,
         ) => {
           try {
             return (
@@ -1417,6 +1419,7 @@ export async function startServiceLiveHost(options: {
                   deadlineMs: config.client.requestDeadlineMs,
                 },
                 joined,
+                reports ? () => {} : undefined,
               )
             ).result;
           } catch (error) {
@@ -1426,11 +1429,13 @@ export async function startServiceLiveHost(options: {
         };
         const attach = async (workspace: ServiceWorkspace, joined: AbortSignal) => {
           const { hostedReplication, ...entry } = workspace;
+          // The attach opens the workspace's store, which takes as long as the store is large.
           const result = await membershipRequest(
             "liveApplication.attachWorkspace",
             undefined,
             { ...entry, ...(hostedReplication ? { relay: hostedReplication.relay } : {}) },
             joined,
+            true,
           );
           joined.throwIfAborted();
           try {

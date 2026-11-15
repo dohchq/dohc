@@ -6,7 +6,9 @@ use dohc_engine_collab::HostedStoreIdentity;
 use dohc_engine_collab::live_update_application::{ApplicationHostCoordinate, ApplicationOwner};
 use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::limits::{MAX_WIRE_INTEGER, MIN_NEGOTIABLE_FRAME_BYTES, WireLimits};
-use dohc_engine_protocol::transport::{ConnectionHandle, ConnectionOwner, RequestContext};
+use dohc_engine_protocol::transport::{
+    ConnectionHandle, ConnectionOwner, ProgressSink, RequestContext,
+};
 use dohc_engine_protocol::wire::{Envelope, Request, Response, WorkspaceHandle, encode_control};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -565,7 +567,10 @@ impl EngineService {
         });
         let mut result = Ok(());
         for workspace in config.workspaces {
-            if let Err(error) = service.attach_configured_workspace(workspace).await {
+            if let Err(error) = service
+                .attach_configured_workspace(workspace, ProgressSink::default())
+                .await
+            {
                 result = Err(error);
                 break;
             }
@@ -621,7 +626,8 @@ impl EngineService {
             .map_err(|_| invalid("invalid live host workspace configuration"))?;
         let _membership = discovery.membership.lock().await;
         self.configured_host_caller(ctx)?;
-        self.attach_configured_workspace(workspace).await
+        self.attach_configured_workspace(workspace, ctx.progress.clone())
+            .await
     }
 
     /// `liveApplication.detachWorkspace`: close one attached workspace. Its
@@ -930,9 +936,12 @@ impl EngineService {
     }
 
     /// Open, provision, and list one workspace. Callers serialize membership.
+    /// The open reports its work to `progress`, so a caller can tell a large
+    /// store from a stopped engine.
     async fn attach_configured_workspace(
         &self,
         mut workspace: WorkspaceConfig,
+        progress: ProgressSink,
     ) -> Result<Value, WireError> {
         let discovery = self
             .configured_live_host
@@ -991,7 +1000,7 @@ impl EngineService {
             self.workspace_close(Some(handle.clone())).await?;
             lock(&discovery.attached).retain(|entry| entry.handle != handle);
         }
-        let mut ctx = RequestContext::unbounded();
+        let mut ctx = RequestContext::unbounded().with_progress(progress);
         ctx.connection = Some(discovery.connection.clone());
         let opened = self
             .workspace_open(
@@ -1687,6 +1696,36 @@ mod tests {
             progress: false,
             params,
         }
+    }
+
+    // A paused clock polls the open's counters as often as the runtime is
+    // idle, so an open that takes milliseconds is still seen to move.
+    #[tokio::test(start_paused = true)]
+    async fn attach_reports_its_open_to_a_request_that_asked_for_progress() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let (service, owner, _ingress) = EngineService::configured_live_host(config(&[]))
+            .await
+            .unwrap();
+        let attach = || {
+            host_request(
+                "liveApplication.attachWorkspace",
+                None,
+                json!({"root": root.path(), "workspaceId": "reported", "maxRegistrations": 4}),
+            )
+        };
+        let reports = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&reports);
+        let mut ctx = RequestContext::unbounded().with_progress(ProgressSink::new(1, move |_| {
+            counted.fetch_add(1, Ordering::Relaxed);
+        }));
+        ctx.connection = Some(owner.handle());
+        service
+            .configured_attach_workspace(&ctx, attach())
+            .await
+            .unwrap();
+        assert!(reports.load(Ordering::Relaxed) > 0);
+        close(&service).await;
     }
 
     #[tokio::test]
