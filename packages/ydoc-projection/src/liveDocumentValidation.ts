@@ -966,21 +966,25 @@ export function liveEditFitsNote(doc: Y.Doc, update: Uint8Array): boolean {
       !(content.type instanceof Y.XmlHook) &&
       (content.type instanceof Y.Map || content.type instanceof Y.Array));
   for (const struct of structs) {
-    if (!(struct instanceof Y.Item) || struct.content instanceof Y.ContentDeleted) continue;
+    if (!(struct instanceof Y.Item)) continue;
+    const held = Y.getState(doc.store, struct.id.client) - struct.id.clock;
+    const runsOn = held > 0 && held < struct.length;
+    const deleted = struct.content instanceof Y.ContentDeleted;
+    if (deleted && !runsOn) continue;
     const place = placeOf(struct);
     if (place === GONE) continue;
     if (!place) return false;
     const { parent, sub } = place,
       content = struct.content;
     // Yjs links the part past what the note holds beside the note's last item of the run, and
-    // keeps the parent it read from the start. Both must be the same place.
-    const held = Y.getState(doc.store, struct.id.client) - struct.id.clock;
-    if (held > 0 && held < struct.length) {
+    // keeps the parent it read from the start. Both must be the same place, deleted or not.
+    if (runsOn) {
       const left = inDoc(Y.createID(struct.id.client, struct.id.clock + held - 1));
       if (!(left instanceof Y.Item)) return false;
       const type = left.parent as Shared | null;
       if (!type || (roots.get(type) ?? type) !== parent || left.parentSub !== sub) return false;
     }
+    if (deleted) continue;
     const fits =
       parent === "body"
         ? sub === null && xmlChild(content)

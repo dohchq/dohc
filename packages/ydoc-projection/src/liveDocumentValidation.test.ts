@@ -1293,6 +1293,24 @@ describe("live edit format guard", () => {
       (doc.getMap("frontmatter").get("days") as Y.Array<number>).push([1, 2, 3, 4, 5, 6]),
     );
     expect(liveEditFitsNote(holding(abc), days)).toBe(false);
+
+    // The note took a title and "ab". A title set five times under those ids sends the first four
+    // as one deleted struct, whose new part would be linked into the text as the title's value.
+    const titled = holding(
+      run((doc) => {
+        doc.getMap("frontmatter").set("title", "t");
+        text(doc, 0).insert(0, "ab");
+      }),
+    );
+    const retitled = run((doc) => {
+      for (const value of ["a", "b", "c", "d", "v"]) doc.getMap("frontmatter").set("title", value);
+    });
+    expect(
+      Y.decodeUpdate(retitled).structs.some(
+        (struct) => struct.length === 4 && (struct as Y.Item).content instanceof Y.ContentDeleted,
+      ),
+    ).toBe(true);
+    expect(liveEditFitsNote(titled, retitled)).toBe(false);
   });
 
   it("takes an edit that runs on from text the note already holds", () => {
