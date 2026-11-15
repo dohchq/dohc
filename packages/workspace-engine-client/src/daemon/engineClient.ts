@@ -197,6 +197,8 @@ export interface OwnerYDocPausedStop {
   readonly rowCursor: number;
   readonly copyPath: string;
   readonly copyWritten: boolean;
+  /** Some edits could not be shown as text, so the copy leaves them out. */
+  readonly leftOut: boolean;
 }
 
 /** One Stop row as `ydoc.ownerStop.<action>` or a paused copy returns it. */
@@ -234,12 +236,13 @@ function ownerStopRow(row: unknown, action: string) {
     if (
       !p ||
       typeof p !== "object" ||
-      Object.keys(p).sort().join() !== "appliedCursor,copyPath,copyWritten,rowCursor" ||
+      Object.keys(p).sort().join() !== "appliedCursor,copyPath,copyWritten,leftOut,rowCursor" ||
       !cursor(p.appliedCursor) ||
       !cursor(p.rowCursor) ||
       typeof p.copyPath !== "string" ||
       !validateUserWritePath(p.copyPath).ok ||
       typeof p.copyWritten !== "boolean" ||
+      typeof p.leftOut !== "boolean" ||
       r.state !== "released"
     )
       throw new TypeError("Invalid paused Stop.");
@@ -248,6 +251,7 @@ function ownerStopRow(row: unknown, action: string) {
       rowCursor: p.rowCursor as number,
       copyPath: p.copyPath,
       copyWritten: p.copyWritten,
+      leftOut: p.leftOut,
     };
   }
   if (r.materialized !== undefined && typeof r.materialized !== "boolean")

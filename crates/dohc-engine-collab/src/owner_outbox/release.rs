@@ -50,6 +50,9 @@ pub struct PausedOwnerStop {
     /// The copy is on disk. Until then the Stop row's `copy_digest` blob is
     /// the only place the owner's unapplied text lives.
     pub copy_written: bool,
+    /// Some edits could not be shown as text, so the copy leaves them out.
+    #[serde(default)]
+    pub left_out: bool,
 }
 
 pub fn require_not_host_in(conn: &Connection, key: &DocKey) -> Result<(), OwnerOutboxError> {
@@ -565,20 +568,8 @@ fn pause_in_tx(
     if held {
         return Err(OwnerOutboxError::StopConflict);
     }
-    let draft = super::draft::open_layered_draft_in(tx, binding, observed.revision, layer)?;
-    if draft.doc.has_pending_dependencies() {
-        return Err(OwnerOutboxError::AcceptedStateIncomplete);
-    }
-    let projection = draft
-        .doc
-        .project(crate::ContentKind::Richdoc)
-        .map_err(collab)?
-        .content;
-    let markdown = draft
-        .doc
-        .settled_markdown_source(&projection, || Ok::<_, CollabError>(None))
-        .map_err(collab)?
-        .unwrap_or(projection);
+    let parts = super::draft::layered_parts_in(tx, binding, observed.revision, layer)?;
+    let (markdown, left_out) = copy_text(parts)?;
     // A blob holds at least one byte; an empty note's copy is an empty file.
     let copy_digest = if markdown.is_empty() {
         None
@@ -650,6 +641,7 @@ fn pause_in_tx(
             row_cursor: input.row_cursor,
             copy_path: input.copy_path.clone(),
             copy_written: false,
+            left_out,
         }),
         record_facts: Vec::new(),
     };
@@ -667,8 +659,67 @@ fn pause_in_tx(
     Ok(stop)
 }
 
-/// The paused note's copy bytes, to write or write again. An empty copy has
-/// no blob.
+/// The copy's Markdown, and whether it leaves edits out. The pause must not
+/// depend on the owner's screen becoming Markdown: a collaborator's row can
+/// be too deep or too large to render. Then the copy keeps the longest run of
+/// rows that renders and, on top, the longest run of the owner's entries.
+fn copy_text(parts: super::draft::LayeredParts) -> Result<(String, bool), OwnerOutboxError> {
+    let base = parts.checkpoint;
+    let rows = parts.rows.len();
+    let mut kept = parts.rows;
+    kept.extend(parts.pending);
+    if let Some((markdown, waits)) = render(&base, &kept) {
+        // An owner entry waits for a row the route has not sent yet.
+        if waits {
+            return Err(OwnerOutboxError::AcceptedStateIncomplete);
+        }
+        return Ok((markdown, false));
+    }
+    if render(&base, &[]).is_none() {
+        return Ok((String::new(), true));
+    }
+    let pending = kept.split_off(rows);
+    keep_longest(&base, &mut kept, 0);
+    let from = kept.len();
+    kept.extend(pending);
+    keep_longest(&base, &mut kept, from);
+    // `keep_longest` keeps only a run that rendered.
+    let (markdown, _) = render(&base, &kept).ok_or(OwnerOutboxError::Corrupt)?;
+    Ok((markdown, true))
+}
+
+/// Shorten `updates` to the longest run past `from` that renders on `base`.
+/// `updates[..from]` renders already.
+fn keep_longest(base: &[u8], updates: &mut Vec<Vec<u8>>, from: usize) {
+    let (mut renders, mut fails) = (from, updates.len() + 1);
+    while fails - renders > 1 {
+        let mid = renders + (fails - renders) / 2;
+        if render(base, &updates[..mid]).is_some() {
+            renders = mid;
+        } else {
+            fails = mid;
+        }
+    }
+    updates.truncate(renders);
+}
+
+/// The Markdown of `base` with `updates` applied in order, and whether an
+/// update waits for one that is not there; `None` when it cannot be shown as
+/// text.
+fn render(base: &[u8], updates: &[Vec<u8>]) -> Option<(String, bool)> {
+    let doc = crate::Ydoc::wire();
+    doc.apply(base).ok()?;
+    for update in updates {
+        doc.apply(update).ok()?;
+    }
+    super::draft::bounded(&doc).ok()?;
+    let projection = doc.project(crate::ContentKind::Richdoc).ok()?.content;
+    let markdown = doc
+        .settled_markdown_source(&projection, || Ok::<_, CollabError>(None))
+        .ok()?
+        .unwrap_or(projection);
+    Some((markdown, doc.has_pending_dependencies()))
+}
 pub fn paused_copy_in(
     conn: &Connection,
     key: &DocKey,

@@ -664,7 +664,7 @@ describe("private owner delivery transport", () => {
       ...stopTarget,
       state: "released",
       retirementOwed: false,
-      paused: { ...paused, copyWritten },
+      paused: { ...paused, copyWritten, leftOut: false },
     });
     const copy = Buffer.from("Committed by a collaborator\n"),
       copyDigest = createHash("sha256").update(copy).digest("hex");
@@ -758,7 +758,7 @@ describe("private owner delivery transport", () => {
       });
       expect(
         (await transport.ownerYDocPausedCopyWritten(request, document, paused.copyPath)).paused,
-      ).toEqual({ ...paused, copyWritten: true });
+      ).toEqual({ ...paused, copyWritten: true, leftOut: false });
       expect(await transport.ownerYDocPausedCopy(request, document)).toEqual({
         stop: stop(true),
         bytes: null,
@@ -789,6 +789,7 @@ describe("private owner delivery transport", () => {
                   rowCursor: 0,
                   copyPath: "a copy.md",
                   copyWritten: false,
+                  leftOut: false,
                 },
               },
             ],

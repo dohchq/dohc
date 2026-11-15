@@ -53,7 +53,7 @@ impl OwnerLayer {
         self.rows.retain(|held, _| *held > cursor);
     }
 
-    fn unsaved(&self, binding: &LiveObjectBinding) -> Vec<Vec<u8>> {
+    pub(super) fn unsaved(&self, binding: &LiveObjectBinding) -> Vec<Vec<u8>> {
         if !self.holds(binding) {
             return Vec::new();
         }
@@ -805,6 +805,37 @@ pub(super) fn open_layered_draft_in(
     expected_revision: i64,
     layer: Option<&OwnerLayer>,
 ) -> Result<OwnerDraft, OwnerOutboxError> {
+    let parts = layered_parts_in(conn, binding, expected_revision, layer)?;
+    let doc = Ydoc::wire();
+    doc.apply(&parts.checkpoint).map_err(collab)?;
+    for row in &parts.rows {
+        doc.apply(row).map_err(collab)?;
+    }
+    for entry in &parts.pending {
+        doc.apply(entry).map_err(collab)?;
+        bounded(&doc)?;
+    }
+    Ok(OwnerDraft {
+        observed: parts.observed,
+        doc,
+        layered: !parts.rows.is_empty(),
+    })
+}
+
+/// What a layered draft is built from, in order, read with its checks.
+pub(super) struct LayeredParts {
+    pub observed: ObservedOwnerBinding,
+    pub checkpoint: Vec<u8>,
+    pub rows: Vec<Vec<u8>>,
+    pub pending: Vec<Vec<u8>>,
+}
+
+pub(super) fn layered_parts_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    expected_revision: i64,
+    layer: Option<&OwnerLayer>,
+) -> Result<LayeredParts, OwnerOutboxError> {
     let observed = read_observed_in(conn, binding)?.ok_or(OwnerOutboxError::NotFound)?;
     if observed.revision != expected_revision {
         return Err(OwnerOutboxError::ParentMismatch);
@@ -820,25 +851,19 @@ pub(super) fn open_layered_draft_in(
     {
         return Err(OwnerOutboxError::ParentMismatch);
     }
-    let doc = Ydoc::wire();
-    doc.apply(&bounded_blob(conn, &observed.checkpoint_digest)?)
-        .map_err(collab)?;
+    let checkpoint = bounded_blob(conn, &observed.checkpoint_digest)?;
     let rows = layer.map_or_else(Vec::new, |layer| layer.unsaved(binding));
-    for row in &rows {
-        doc.apply(row).map_err(collab)?;
-    }
-    let layered = !rows.is_empty();
-    apply_pending_in(
+    let pending = pending_updates_in(
         conn,
         binding,
-        &doc,
         observed.limits.max_pending_bytes,
         PendingReplay::Draft,
     )?;
-    Ok(OwnerDraft {
+    Ok(LayeredParts {
         observed,
-        doc,
-        layered,
+        checkpoint,
+        rows,
+        pending,
     })
 }
 
@@ -872,6 +897,32 @@ pub(super) fn apply_pending_in(
     max_pending_bytes: i64,
     replay: PendingReplay,
 ) -> Result<(), OwnerOutboxError> {
+    for bytes in pending_updates_in(conn, binding, max_pending_bytes, replay)? {
+        doc.apply(&bytes).map_err(collab)?;
+        if replay == PendingReplay::Draft {
+            bounded(doc)?;
+        }
+    }
+    // An owner entry typed into a collaborator's text the relay has not
+    // applied waits for that text. A draft opened without those rows, as after
+    // a restart, still opens; the entry shows when the rows or the applied
+    // frame arrive.
+    if replay == PendingReplay::Checkpoint && doc.has_pending_dependencies() {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    // Indexing reads fields only; it does not persist the merged document.
+    Ok(())
+}
+
+/// The owner's pending entries in order. A quarantined outbox keeps them out
+/// of a checkpoint and refuses a draft.
+fn pending_updates_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    max_pending_bytes: i64,
+    replay: PendingReplay,
+) -> Result<Vec<Vec<u8>>, OwnerOutboxError> {
+    let mut pending = Vec::new();
     if let Some(parent) = find_parent_for_binding(conn, binding)? {
         if parent.binding != *binding {
             return Err(OwnerOutboxError::Frozen);
@@ -879,11 +930,11 @@ pub(super) fn apply_pending_in(
         if parent.state == OwnerOutboxState::Quarantined {
             return match replay {
                 PendingReplay::Draft => Err(OwnerOutboxError::Frozen),
-                PendingReplay::Checkpoint => Ok(()),
+                PendingReplay::Checkpoint => Ok(pending),
             };
         }
         if replay == PendingReplay::Checkpoint && parent.pending_bytes == 0 {
-            return Ok(());
+            return Ok(pending);
         }
         let mut stmt = conn.prepare("SELECT update_digest,byte_length FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
         let rows = stmt
@@ -904,21 +955,10 @@ pub(super) fn apply_pending_in(
             if bytes.len() as i64 != len {
                 return Err(OwnerOutboxError::Corrupt);
             }
-            doc.apply(&bytes).map_err(collab)?;
-            if replay == PendingReplay::Draft {
-                bounded(doc)?;
-            }
+            pending.push(bytes);
         }
     }
-    // An owner entry typed into a collaborator's text the relay has not
-    // applied waits for that text. A draft opened without those rows, as after
-    // a restart, still opens; the entry shows when the rows or the applied
-    // frame arrive.
-    if replay == PendingReplay::Checkpoint && doc.has_pending_dependencies() {
-        return Err(OwnerOutboxError::ParentMismatch);
-    }
-    // Indexing reads fields only; it does not persist the merged document.
-    Ok(())
+    Ok(pending)
 }
 
 /// Enrollment and restore capture queue merged native state, which declares
@@ -3580,6 +3620,42 @@ mod tests {
             .read_with(|conn| super::super::release::paused_copy_in(conn, &key))
             .unwrap()
             .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+    }
+
+    #[test]
+    fn a_row_that_cannot_render_is_left_out_of_the_copy_and_the_pause_still_unbinds() {
+        use super::super::release;
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let mut cache = crate::WriterDocCache::default();
+        held_note(&mut store, &mut cache, &observed, &checkpoint);
+        let shown = open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap();
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&shown.initial_update).unwrap();
+        let deep =
+            collaborator.richdoc_append_quoted(crate::limits::MAX_PROJECTION_DEPTH + 2, "Too deep");
+        let after = collaborator.richdoc_append_paragraph("Typed after the deep quote");
+        for (cursor, row) in [(6, deep), (7, after)] {
+            put_committed_row(&store, &mut cache, &observed.binding, cursor, row).unwrap();
+        }
+        let mut input = pause_input(&observed);
+        input.row_cursor = 7;
+
+        let stop = release::pause_cached(&mut store, &mut cache, &input, &NoFaults, |tx, pause| {
+            pause(tx)
+        })
+        .unwrap();
+        assert!(stop.paused.unwrap().left_out);
+        let copy = copy_text(&store).unwrap();
+        assert!(copy.contains("Owner says: Committed by a collaborator"));
+        assert!(copy.contains("Standalone owner paragraph"));
+        assert!(!copy.contains("Too deep"));
+        assert!(!copy.contains("Typed after the deep quote"));
+        assert_eq!(entry_count(&store), 0);
+        assert!(store
+            .read_with(|conn| read_observed_in(conn, &observed.binding))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

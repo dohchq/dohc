@@ -1363,6 +1363,22 @@ impl Ydoc {
         })
     }
 
+    /// Append a paragraph holding `text` inside `depth` nested blockquotes and
+    /// return the encoded v1 delta.
+    #[cfg(test)]
+    pub(crate) fn richdoc_append_quoted(&self, depth: usize, text: &str) -> Vec<u8> {
+        let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        self.with_delta(|txn| {
+            let index = frag.len(txn);
+            let mut quote = frag.insert(txn, index, XmlElementPrelim::empty("blockquote"));
+            for _ in 1..depth {
+                quote = quote.insert(txn, 0, XmlElementPrelim::empty("blockquote"));
+            }
+            let paragraph = quote.insert(txn, 0, XmlElementPrelim::empty("paragraph"));
+            paragraph.insert(txn, 0, XmlTextPrelim::new(text));
+        })
+    }
+
     /// Remove the [`ROOT_BODY`] block at `index` and return the encoded v1
     /// delta.
     pub fn richdoc_remove_block(&self, index: u32) -> Vec<u8> {
