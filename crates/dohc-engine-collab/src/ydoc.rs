@@ -7186,7 +7186,12 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                 "---"
             }
             .to_string()),
-            "hardBreak" => Ok("  \n".to_string()),
+            "hardBreak" => Ok(if context.table_cell {
+                GFM_TABLE_CELL_BLOCK_SEPARATOR
+            } else {
+                "  \n"
+            }
+            .to_string()),
             "image" => render_image(attrs),
             "escapedPunctuation" => ensure_projection_string(format!(
                 "\\{}",
@@ -8672,6 +8677,18 @@ fn render_inline(
         }
 
         starts_line = match &parts[part_index] {
+            // A hard break's two spaces on a line with nothing else read back
+            // as a blank line, which ends the paragraph. A backslash keeps the
+            // break. A table cell writes it as <br>.
+            InlinePart::Node(MarkdownNode::Element { tag, .. })
+                if tag == "hardBreak"
+                    && starts_line
+                    && !table_cell
+                    && part_index + 1 < parts.len() =>
+            {
+                rendered_nodes.insert(part_index, "\\\n".to_string());
+                true
+            }
             InlinePart::Node(node) => {
                 let rendered = render_node(
                     node,

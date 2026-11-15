@@ -667,6 +667,50 @@ const RICHDOC_PROJECTION_CASES = [
       ]),
   },
   {
+    // #4093: a paragraph that starts with a hard break, at the top level and
+    // in list and task items.
+    name: "leading-hard-break",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph([xmlElement("hardBreak"), xmlText("after a leading break")]),
+        paragraph([xmlElement("hardBreak"), xmlText(" spaced after a leading break")]),
+        xmlElement("bulletList", {}, [
+          xmlElement("listItem", {}, [
+            paragraph("first"),
+            paragraph([xmlElement("hardBreak"), xmlText(" in a list item")]),
+          ]),
+        ]),
+        xmlElement("taskList", {}, [
+          xmlElement("taskItem", { checked: false }, [
+            paragraph("first"),
+            paragraph([xmlElement("hardBreak"), xmlText(" in a task item")]),
+          ]),
+        ]),
+        paragraph([
+          xmlElement("hardBreak"),
+          xmlElement("hardBreak"),
+          xmlText("after two leading breaks"),
+        ]),
+        paragraph([
+          xmlText("before"),
+          xmlElement("hardBreak"),
+          xmlElement("hardBreak"),
+          xmlText("after a blank line"),
+        ]),
+        paragraph([xmlText("ends with a break"), xmlElement("hardBreak")]),
+        table([
+          tableRow([tableCell("tableHeader", "head")]),
+          tableRow([
+            tableCell("tableCell", [xmlElement("hardBreak"), xmlText("in a cell")]),
+          ]),
+          tableRow([
+            tableCell("tableCell", [xmlText("a"), xmlElement("hardBreak"), xmlText("b")]),
+          ]),
+          tableRow([tableCell("tableCell", [xmlText("ends"), xmlElement("hardBreak")])]),
+        ]),
+      ]),
+  },
+  {
     name: "plain-text-mark-delimiters",
     makeDoc: () =>
       directRichdoc([

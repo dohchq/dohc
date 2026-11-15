@@ -438,6 +438,51 @@ function expectSavedAsTheSameDocument(document: JSONContent): void {
   expect(serializeRichdocBody(parseRichdocMarkdown(saved))).toBe(saved);
 }
 
+// #4093: a hard break's two spaces on a line with nothing else read back as a
+// blank line, so a hard break that starts a line is written as a backslash.
+it("keeps a hard break that starts a line", () => {
+  const breakThen = (text: string): JSONContent => ({
+    type: "paragraph",
+    content: [{ type: "hardBreak" }, { type: "text", text }],
+  });
+  const document: JSONContent = {
+    type: "doc",
+    content: [
+      breakThen("after a leading break"),
+      {
+        type: "paragraph",
+        content: [{ type: "hardBreak" }, { type: "hardBreak" }, { type: "text", text: "after two" }],
+      },
+      {
+        type: "paragraph",
+        content: [
+          { type: "text", text: "a" },
+          { type: "hardBreak" },
+          { type: "hardBreak" },
+          { type: "text", text: "b" },
+        ],
+      },
+      {
+        type: "taskList",
+        content: [
+          {
+            type: "taskItem",
+            attrs: { checked: false },
+            content: [
+              { type: "paragraph", content: [{ type: "text", text: "first" }] },
+              breakThen(" in a task item"),
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  expect(serializeRichdocBody(document)).toBe(
+    "\\\nafter a leading break\n\n\\\n\\\nafter two\n\na  \n\\\nb\n\n- [ ] first\n\n  \\\n   in a task item",
+  );
+  expectSavedAsTheSameDocument(document);
+});
+
 it.each([
   ["a backslash escape", "<b>\\*</b>"],
   ["a backslash line break", "<b>a\\\nb</b>"],

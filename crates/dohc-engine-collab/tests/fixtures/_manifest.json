@@ -68,6 +68,7 @@
   "richdocProjection-wikilink-delimiters.json",
   "richdocProjection-heading-leading-hash.json",
   "richdocProjection-paragraph-block-prefixes.json",
+  "richdocProjection-leading-hard-break.json",
   "richdocProjection-plain-text-mark-delimiters.json",
   "richdocProjection-marked-text-delimiters.json",
   "richdocProjection-math-dollar-delimiters.json",

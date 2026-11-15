@@ -931,6 +931,8 @@ export function serializeRichdocBody(root: JSONContent): string {
     leadingWhitespaceSentinels.set(value, token);
     return token;
   };
+  const encodeBackslash = (): string =>
+    replaceCharacters("\\", characterSentinels, () => reserveToken("CHARACTER"), /\\/g);
   const encodeBlockEscape = (value: string): string => {
     const existing = blockEscapeSentinels.get(value);
     if (existing) return existing;
@@ -1007,6 +1009,8 @@ export function serializeRichdocBody(root: JSONContent): string {
           content,
           encodeLeadingWhitespace,
           encodeBlockEscape,
+          // A table cell writes a hard break as <br>, which needs no backslash.
+          insideTableCell ? undefined : encodeBackslash,
           definition,
         );
         if (
@@ -1249,6 +1253,7 @@ function escapeLeadingMarkdownBlockSyntax(
   content: JSONContent[],
   encodeLeadingWhitespace: (value: " " | "\t") => string,
   encodeBlockEscape: (value: string) => string,
+  encodeBackslash: (() => string) | undefined,
   definition: boolean,
 ): JSONContent[] {
   const output: JSONContent[] = [];
@@ -1284,6 +1289,18 @@ function escapeLeadingMarkdownBlockSyntax(
       continue;
     }
 
+    // A hard break's two spaces on a line with nothing else read back as a
+    // blank line, which ends the paragraph. A backslash keeps the break.
+    if (
+      encodeBackslash &&
+      node.type === "hardBreak" &&
+      lineStart &&
+      index < preparedContent.length - 1
+    ) {
+      output.push({ type: "text", text: `${encodeBackslash()}\n` });
+      index += 1;
+      continue;
+    }
     output.push(node);
     lineStart = node.type === "hardBreak";
     index += 1;
