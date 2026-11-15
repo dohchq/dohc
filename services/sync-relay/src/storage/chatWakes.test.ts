@@ -659,6 +659,8 @@ it("gives the phone each shown message's latest generation per target, as its wa
       generation: 1,
       state: "claimed",
       winnerLabel: "mac label",
+      // The Mac won, and declares nothing.
+      agentName: null,
       canRetry: false,
     },
     [codex]: expect.objectContaining({ state: "claimed", canRetry: false }),
@@ -706,6 +708,8 @@ it("gives the phone each shown message's latest generation per target, as its wa
     generation: 2,
     state: "waiting",
     winnerLabel: null,
+    // Its only candidate is the laptop's agent.
+    agentName: "Claude",
     canRetry: false,
   });
   expect(latest[codex]).toMatchObject({ generation: 1, state: "unconfirmed" });
@@ -748,6 +752,134 @@ it("gives no hint once a wake's row is gone, rather than a guess", async () => {
   expect(hints(ended)).toEqual([expect.objectContaining({ state: "unclaimed", canRetry: false })]);
   expect(storage.sweepChatWakes(ended + CHAT_WAKE_KEEP_MS + 1)).toBe(1);
   expect(hints(ended + CHAT_WAKE_KEEP_MS + 1)).toEqual([]);
+});
+
+it("names a wake's agent as its computer declares it now: the winner's, or else the first candidate's, by the wake's own account, workspace, computer, and agent", async () => {
+  const storage = await relay();
+  const context = storage as StorageContext;
+  const declare = (
+    installId: string,
+    agents: Array<[agentId: string, displayName: string, enabled?: boolean]>,
+    input: { accountId?: string; workspaceId?: string } = {},
+  ) =>
+    expect(
+      storage.replaceChatRunners({
+        accountId: input.accountId ?? "ana",
+        workspaceId: input.workspaceId ?? "trip",
+        installId,
+        computerLabel: `${installId} label`,
+        runners: agents.map(([agentId, displayName, enabled = true]) => ({
+          agentId,
+          handle: displayName.toLowerCase().replaceAll(" ", ""),
+          displayName,
+          enabled,
+        })),
+        nowMs: NOW,
+      }),
+    ).toBe(true);
+  const implicit = (installId: string, agentId: string): ChatWakeTarget => ({
+    target: `implicit:${installId}:${agentId}`,
+    candidates: [
+      { installId, agentId, label: `${installId} label`, matched: { displayName: "Old Name" } },
+    ],
+  });
+  const hints = (nowMs: number, workspaceId = "trip", messageId = "message-1") =>
+    storage.phoneChatWakes({ accountId: "ana", workspaceId, messages: shown(messageId), nowMs });
+  const labels = (nowMs: number, workspaceId = "trip", messageId = "message-1") =>
+    Object.fromEntries(
+      hints(nowMs, workspaceId, messageId).map((hint) => [hint.wakeId, hint.agentName]),
+    );
+  const owner = (workspaceId: string, ownerUserId: string) =>
+    context.db
+      .prepare("UPDATE sync_relay_workspaces SET owner_user_id = ? WHERE workspace_id = ?")
+      .run(ownerUserId, workspaceId);
+
+  publish(storage, "op-trip", "message-1", [
+    target("claude", "mac", "laptop"),
+    implicit("desk", "helper"),
+    implicit("tablet", "helper"),
+  ]);
+  publish(storage, "op-other", "message-1", [target("claude", "mac"), implicit("desk", "helper")], {
+    workspaceId: "other",
+  });
+  const claude = wakeOf("message-1", "claude"),
+    desk = chatWakeId("ana", "trip", "message-1", "implicit:desk:helper", 1),
+    tablet = chatWakeId("ana", "trip", "message-1", "implicit:tablet:helper", 1),
+    otherClaude = wakeOf("message-1", "claude", 1, "other"),
+    otherDesk = chatWakeId("ana", "other", "message-1", "implicit:desk:helper", 1);
+
+  expect(labels(NOW), "no computer declares any of them").toEqual({
+    [claude]: null,
+    [desk]: null,
+    [tablet]: null,
+  });
+
+  // The two candidates of one mention name their agents apart; before a claim only the first one's shows. Two
+  // computers' agents of the same name stay two wakes.
+  declare("mac", [["default", "Claude"]]);
+  declare("laptop", [["default", "Claude Laptop"]]);
+  declare("desk", [["helper", "Helper"]]);
+  declare("tablet", [["helper", "Helper"]]);
+  expect(labels(NOW)).toEqual({ [claude]: "Claude", [desk]: "Helper", [tablet]: "Helper" });
+  for (const absent of ["Claude Laptop", "Old Name"])
+    expect(JSON.stringify(hints(NOW))).not.toContain(absent);
+
+  // Another workspace's wakes take only that workspace's declarations, and only their own account's: another account
+  // that owned the workspace and declared the same computer and agent IDs names nothing.
+  expect(labels(NOW, "other")).toEqual({ [otherClaude]: null, [otherDesk]: null });
+  owner("other", "ben");
+  declare("mac", [["default", "Ben's Claude"]], { accountId: "ben", workspaceId: "other" });
+  declare("desk", [["helper", "Ben's Helper"]], { accountId: "ben", workspaceId: "other" });
+  owner("other", "ana");
+  expect(labels(NOW, "other")).toEqual({ [otherClaude]: null, [otherDesk]: null });
+  declare("desk", [["helper", "Other Helper"]], { workspaceId: "other" });
+  expect(labels(NOW, "other")).toEqual({ [otherClaude]: null, [otherDesk]: "Other Helper" });
+  expect(labels(NOW)[desk]).toBe("Helper");
+
+  // A rename names the old mention and implicit wakes anew, switched off and past its lease too. The reads write nothing.
+  const head = storage.chatWakeHead("ana");
+  const rows = wakes(storage);
+  declare("mac", [["default", "Sonnet", false]]);
+  declare("desk", [["helper", "Scout"]]);
+  const leaseEnded = NOW + CHAT_RUNNER_LEASE_MS;
+  expect(
+    storage.enabledChatRunners({ accountId: "ana", workspaceId: "trip", nowMs: leaseEnded }),
+  ).toEqual([]);
+  expect(labels(leaseEnded)).toEqual({ [claude]: "Sonnet", [desk]: "Scout", [tablet]: "Helper" });
+  expect(storage.chatWakeHead("ana")).toBe(head);
+  expect(wakes(storage)).toEqual(rows);
+
+  // Once a computer claims a wake, its agent names it.
+  storage.claimChatWake({ accountId: "ana", wakeId: claude, installId: "laptop", nowMs: NOW + 1 });
+  expect(labels(NOW + 1)[claude]).toBe("Claude Laptop");
+
+  // A computer that stops declaring an agent leaves no name, not the one it had.
+  declare("desk", []);
+  expect(labels(NOW + 1)[desk]).toBeNull();
+  for (const absent of ["Scout", "Helper", "Old Name"])
+    expect(JSON.stringify(hints(NOW + 1).find((hint) => hint.wakeId === desk))).not.toContain(
+      absent,
+    );
+
+  // A retry that leaves out the unconfirmed winner names the next generation by its new first candidate.
+  publish(storage, "op-retry", "message-retry", [target("codex", "mac", "laptop")]);
+  const first = wakeOf("message-retry", "codex");
+  expect(labels(NOW + 1, "trip", "message-retry")).toEqual({ [first]: "Sonnet" });
+  storage.claimChatWake({ accountId: "ana", wakeId: first, installId: "mac", nowMs: NOW + 1 });
+  const late = NOW + 1 + CHAT_WAKE_CONFIRM_MS;
+  expect(labels(late, "trip", "message-retry")).toEqual({ [first]: "Sonnet" });
+  expect(
+    storage.retryChatWake({
+      accountId: "ana",
+      workspaceId: "trip",
+      operationId: "retry-1",
+      wakeId: first,
+      nowMs: late,
+    }).kind,
+  ).toBe("retried");
+  expect(labels(late, "trip", "message-retry")).toEqual({
+    [wakeOf("message-retry", "codex", 2)]: "Claude Laptop",
+  });
 });
 
 it("lists the threads whose wakes changed after a position, only in the workspace named and only the account's own", async () => {

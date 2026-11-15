@@ -536,7 +536,8 @@ const placeholders = (count: number) => Array.from({ length: count }, () => "?")
  * phone: only rows of the account in a workspace it owns, whose thread is the
  * one the caller read each message in. A row whose wait ran out reads as the
  * state it ends in, before a sweep writes it. A swept row, or one never made,
- * has no hint. Nothing here names a computer's install ID or candidates. At
+ * has no hint. Each names its agent as that account's computer declares it
+ * now, or null. Nothing here names a computer's install ID or candidates. At
  * most PHONE_CONTEXT_WAKES_MAX hints answer.
  */
 export function phoneChatWakes(
@@ -550,6 +551,19 @@ export function phoneChatWakes(
   },
 ): PhoneChatWake[] {
   return storage.readTx(() => {
+    // The agent's current name, by the wake row's own full key. Enabled or not, leased or not.
+    const declared = storage.db.prepare(
+      `SELECT display_name FROM sync_relay_chat_runners
+       WHERE account_id = ? AND workspace_id = ? AND install_id = ? AND agent_id = ?`,
+    );
+    const agentName = (row: Row): string | null => {
+      const { installId, agentId } =
+        row.winner_install_id === null
+          ? candidatesOf(row)[0]!
+          : { installId: row.winner_install_id, agentId: row.winner_agent_id };
+      const found = declared.get(row.account_id, row.workspace_id, installId, agentId);
+      return found === undefined ? null : String(found.display_name);
+    };
     const ids = [...input.messages.keys()];
     const hints: PhoneChatWake[] = [];
     for (let start = 0; start < ids.length; start += MESSAGE_BATCH) {
@@ -574,6 +588,7 @@ export function phoneChatWakes(
           generation: Number(row.generation),
           state,
           winnerLabel: nullableString(row.winner_label),
+          agentName: agentName(row),
           canRetry:
             (state === "unclaimed" || state === "unconfirmed") &&
             retryCandidates(storage, row, state, input.nowMs).length > 0,

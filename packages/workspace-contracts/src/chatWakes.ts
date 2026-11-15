@@ -173,6 +173,14 @@ export const PhoneChatWake = z.strictObject({
   generation: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
   state: ChatWakeState,
   winnerLabel: line(CHAT_RUNNER_COMPUTER_LABEL_MAX_CHARS).nullable(),
+  /**
+   * The current name of the wake's agent, as its computer last declared it, at this context read: the winner's, or
+   * before a claim the first candidate's. A rename doesn't move the wake cursor, so it can lag until the next context
+   * read. Null when no computer of the account declares that agent now, which can't tell a removed agent from a
+   * withdrawn one; the phone shows "An agent". Never an earlier name, never unique to one agent, and never an input to
+   * a retry or to who may do anything.
+   */
+  agentName: Name.nullable(),
   canRetry: z.boolean(),
 });
 export type PhoneChatWake = z.infer<typeof PhoneChatWake>;
