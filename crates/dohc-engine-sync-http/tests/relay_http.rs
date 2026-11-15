@@ -915,6 +915,8 @@ fn expected_relay_error(code: &str) -> RelayError {
         "blob_not_found" => RelayError::BlobMissing,
         "conflict"
         | "dependents_changed"
+        | "direct_alone"
+        | "direct_message_id_taken"
         | "link_name_already_set"
         | "member_exists"
         | "member_removed"
@@ -930,8 +932,10 @@ fn expected_relay_error(code: &str) -> RelayError {
         | "stale"
         | "workspace_full"
         | "workspace_share_managed" => RelayError::Conflict,
-        "collection_write_rate_limited" | "held_read_busy" => RelayError::HttpStatus(429),
-        "discussion_limit_reached" => RelayError::QuotaExceeded,
+        "collection_write_rate_limited" | "direct_rate_limited" | "held_read_busy" => {
+            RelayError::HttpStatus(429)
+        }
+        "direct_limit_reached" | "discussion_limit_reached" => RelayError::QuotaExceeded,
         "discussion_rate_limited" => RelayError::DiscussionRateLimited,
         "epoch_superseded" => RelayError::EpochSuperseded,
         "identity_not_recognized" => RelayError::IdentityNotRecognized,
@@ -939,7 +943,8 @@ fn expected_relay_error(code: &str) -> RelayError {
         "internal_error" => RelayError::ServerInternal,
         "invalid_chat" => RelayError::InvalidChannel,
         "key_envelope_not_found" => RelayError::KeyEnvelopeMissing,
-        "link_discussion_blocked"
+        "direct_blocked"
+        | "link_discussion_blocked"
         | "link_discussion_paused"
         | "members_forbidden"
         | "notice_refused"
