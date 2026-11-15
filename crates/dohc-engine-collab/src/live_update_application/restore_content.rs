@@ -814,7 +814,6 @@ fn prefix_source(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 /// The relay's writer made a point's digests and can spell the same state
 /// differently. Only a point whose Markdown is the reader's retained file has a
 /// digest both sides share; an expired witness falls back to this engine's.
@@ -824,6 +823,7 @@ fn retains_reader_file(point: &Ydoc, markdown: &str) -> bool {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn point_source(
     conn: &Connection,
     held: &Registration,
