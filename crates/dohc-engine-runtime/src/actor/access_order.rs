@@ -26,7 +26,7 @@
 //! binary writes, renames and deletes ([`order_writer`]) and Undo
 //! ([`order_undo`]) run [`order_paths`] before their transaction: it commits a
 //! changed rule first. Rollback and merge run through [`ordered`], which
-//! judges a folder the check refused and runs the writer once more, so their
+//! judges each folder the check refused and runs the writer again, so their
 //! callers never see that refusal either. Capture judges
 //! the rule bytes it read itself, so a widening it found is held rather than
 //! committed. A rule moment no step judged is a change made through dohc and
@@ -136,6 +136,8 @@ thread_local! {
     static CLEARED: RefCell<Cleared> = RefCell::new(Cleared::default());
     static ROOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static SIGNALS: RefCell<Option<Arc<AccessRuleSignals>>> = const { RefCell::new(None) };
+    /// Counts the rule files the ordering step committed on this thread.
+    static RULE_COMMITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn signal(pick: impl FnOnce(&AccessRuleSignals) -> &AtomicU64) {
@@ -278,43 +280,58 @@ fn order_as(
     order_paths(store, &order, touches)
 }
 
+/// How many times [`ordered`] runs a writer. Every run after the first
+/// follows a rule commit, so this bounds the folders one writer may find
+/// waiting in turn.
+const ORDERED_RUNS: usize = 8;
+
 /// Run a writer that has no step of its own. When the commit-point check
 /// refused one of its moments, judge the refused folders now, which commits
-/// a rule that goes first, and run the writer once more, so its caller never
+/// a rule that goes first, and run the writer again, so its caller never
 /// sees the refusal. A folder that waits or is held answers for the writer.
+/// The writers journal inside their one transaction, so a refused run left
+/// nothing behind.
 pub(super) fn ordered<R>(
     store: &mut EngineStore,
     mut work: impl FnMut(&mut EngineStore) -> Result<R, RuntimeError>,
 ) -> Result<R, RuntimeError> {
-    let outcome = work(store);
-    let deferred = CLEARED.with(|cleared| std::mem::take(&mut cleared.borrow_mut().deferred));
-    let root = root();
-    let (Err(_), Some(root)) = (&outcome, root.filter(|_| !deferred.is_empty())) else {
-        CLEARED.with(|cleared| cleared.borrow_mut().deferred.extend(deferred));
-        return outcome;
-    };
-    let leases = LeaseRegistry::new();
-    for ((workspace, version, folder), writes_under) in deferred {
-        begin_command();
-        let order = Order {
-            root: &root,
-            workspace_id: &workspace,
-            version_id: &version,
-            now_ms: wall_clock_ms(),
-            writer: Writer::Deliberate,
-            leases: &leases,
-            faults: &NoFaults,
+    let mut outcome = work(store);
+    for _ in 1..ORDERED_RUNS {
+        let deferred = CLEARED.with(|cleared| std::mem::take(&mut cleared.borrow_mut().deferred));
+        let root = root();
+        let (Err(_), Some(root)) = (&outcome, root.filter(|_| !deferred.is_empty())) else {
+            CLEARED.with(|cleared| cleared.borrow_mut().deferred.extend(deferred));
+            return outcome;
         };
-        match order_folder(store, &order, &folder, writes_under)? {
-            (_, Verdict::Clear(_)) => {}
-            (_, Verdict::Waits) => return Err(waits()),
-            (folder, Verdict::Held { reason } | Verdict::Refused { reason }) => {
-                return Err(RuntimeError::AccessRuleHeld { folder, reason });
+        let commits = RULE_COMMITS.with(std::cell::Cell::get);
+        let leases = LeaseRegistry::new();
+        for ((workspace, version, folder), writes_under) in deferred {
+            begin_command();
+            let order = Order {
+                root: &root,
+                workspace_id: &workspace,
+                version_id: &version,
+                now_ms: wall_clock_ms(),
+                writer: Writer::Deliberate,
+                leases: &leases,
+                faults: &NoFaults,
+            };
+            match order_folder(store, &order, &folder, writes_under)? {
+                (_, Verdict::Clear(_)) => {}
+                (_, Verdict::Waits) => return Err(waits()),
+                (folder, Verdict::Held { reason } | Verdict::Refused { reason }) => {
+                    return Err(RuntimeError::AccessRuleHeld { folder, reason });
+                }
             }
         }
+        begin_command();
+        if RULE_COMMITS.with(std::cell::Cell::get) == commits {
+            // Nothing changed that a new run would find.
+            return outcome;
+        }
+        outcome = work(store);
     }
-    begin_command();
-    work(store)
+    outcome
 }
 
 /// Judge `folder` and the folders above it, from the root down, and say
@@ -1397,6 +1414,7 @@ fn commit_rule_changes(
             Some(bytes) => commit_disk_rule(store, order, folder, path, bytes)?,
             None => retire_rule(store, order, folder, path, !remains)?,
         }
+        RULE_COMMITS.with(|commits| commits.set(commits.get() + 1));
     }
     Ok(())
 }

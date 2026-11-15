@@ -744,6 +744,86 @@ fn writers_without_a_step_of_their_own_put_a_pending_rule_first() {
     }
 }
 
+impl Fixture {
+    fn rollback(&self, moment: &str) -> Result<(), RuntimeError> {
+        self.runtime
+            .block_on(self.actor.versioned_text_rollback(
+                RollbackTextFileMutation {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    path: "crew/a.md".to_owned(),
+                    mutation_moment_id: moment.to_owned(),
+                    request_id: None,
+                    metadata_origin: "api".to_owned(),
+                    author_json: None,
+                },
+                self.root().to_path_buf(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            ))
+            .map(drop)
+    }
+}
+
+/// Rolling back a move between two folders whose new rules wait on disk
+/// commits both rules, one after the other, before the move back. A folder
+/// held for its owner answers for the rollback.
+#[test]
+fn a_rollback_across_two_waiting_rules_commits_both_first() {
+    for team_held in [false, true] {
+        let f = Fixture::new();
+        if team_held {
+            f.put("team/access.yaml", NOBODY);
+            f.settle();
+            f.capture_ok(&["team/access.yaml"]);
+        }
+        f.versioned_write(write("team/a.md", "alpha", "m-alpha"))
+            .expect("write");
+        f.runtime
+            .block_on(f.actor.versioned_text_rename(
+                RenameTextFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    from_path: "team/a.md".to_owned(),
+                    to_path: "crew/a.md".to_owned(),
+                    moment_id: "m-move".to_owned(),
+                    request_id: None,
+                    metadata_origin: "cli".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 40,
+                },
+                f.root().to_path_buf(),
+                Arc::new(()),
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+            ))
+            .expect("move");
+        let before = f.journal();
+        f.put("crew/access.yaml", VIEW);
+        f.put("team/access.yaml", if team_held { EDIT } else { VIEW });
+        f.settle();
+        let rolled = f.rollback("m-move");
+        let journal = f.journal();
+        if team_held {
+            assert!(held(&rolled, "team"), "{rolled:?}");
+            assert_eq!(journal[before.len()..], lines(&["write crew/access.yaml"]));
+        } else {
+            rolled.expect("rollback");
+            assert_eq!(
+                journal[before.len()..],
+                lines(&[
+                    "write crew/access.yaml",
+                    "write team/access.yaml",
+                    "rename team/a.md",
+                ])
+            );
+        }
+    }
+}
+
 const OP: &str = "dohc-operation:remove-team";
 const COPY: &str = "dohc-operation:copy-rule";
 
