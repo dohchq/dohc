@@ -1821,13 +1821,18 @@ const credentialSessionCache = new CredentialSessionCache<CloudSessionCredential
     if (settled && snapshot.credentials) retryStopAndRestoreReleases?.();
   },
 );
+// dohc stops reading and adding to a saved copy before deleting it. A deletion that fails, such as a file another program holds, must not fail the credential load.
+const forgetDirectMessages = () =>
+  directMessages
+    .credentialsChanged(null)
+    .catch((error) => console.error("Saved direct message cleanup failed", error));
 async function refreshCredentialCache(): Promise<void> {
   try {
     await credentialSessionCache.refresh(() => cloudLogin().credentials());
   } finally {
     if (!cachedCredentials) {
       await namedDatasetPages.credentialsChanged(null);
-      await directMessages.credentialsChanged(null);
+      await forgetDirectMessages();
     }
   }
 }
@@ -1835,7 +1840,7 @@ async function warmCredentialCache(): Promise<void> {
   await credentialSessionCache.warm(() => cloudLogin().credentials());
   if (!cachedCredentials) {
     await namedDatasetPages.credentialsChanged(null);
-    await directMessages.credentialsChanged(null);
+    await forgetDirectMessages();
   }
 }
 function clearCachedCredentials(): void {
@@ -1843,9 +1848,7 @@ function clearCachedCredentials(): void {
   void namedDatasetPages
     .credentialsChanged(null)
     .catch((error) => console.error("Saved Collection page cleanup failed", error));
-  void directMessages
-    .credentialsChanged(null)
-    .catch((error) => console.error("Saved direct message cleanup failed", error));
+  void forgetDirectMessages();
   peekedReceivedGrantKinds.clear();
 }
 
