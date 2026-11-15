@@ -65,7 +65,7 @@ async function seedHistory(): Promise<{ storage: SyncRelayStorage; h: SyncRelayH
       operation: "delete",
       beforeContent: "gone body",
       beforePath: "docs/gone.md",
-      afterContent: null,
+      // The engine records a delete with the deleted content as its after-hash.
       afterPath: "docs/gone.md",
     }),
   ]);
@@ -205,6 +205,35 @@ describe("named recipient History by access level", () => {
       expect((await blobStatus(h, "reader", shareId, update)).status).toBe(404);
     });
   }
+
+  it("serves a current file to a view recipient however many other files once held its bytes", async () => {
+    const { h } = await seedHistory();
+    await putBlob(h, GRANTER, WORKSPACE, "template");
+    const ops = [moment("docs/kept.md", "template", { objectId: "object-kept" })];
+    // More objects than the blob route's candidate limit, each newer than the
+    // kept file, that held the same bytes and then changed.
+    for (let index = 0; index < 65; index += 1) {
+      await putBlob(h, GRANTER, WORKSPACE, `filled ${index}`);
+      ops.push(
+        moment(`docs/note-${index}.md`, "template", { objectId: `object-note-${index}` }),
+        moment(`docs/note-${index}.md`, `filled ${index}`, {
+          objectId: `object-note-${index}`,
+          beforeContent: "template",
+          beforePath: `docs/note-${index}.md`,
+        }),
+      );
+    }
+    await appendLog(h, GRANTER, WORKSPACE, ops);
+    const shareId = await createShare(h, GRANTER, WORKSPACE, {
+      recipientEmail: "reader@dohc.test",
+      paths: ["docs"],
+      access: "view",
+    });
+    expect(await blobStatus(h, "reader", shareId, "template")).toEqual({
+      status: 200,
+      text: "template",
+    });
+  });
 
   it("gives an edit recipient the retained history, including what came before the share", async () => {
     const { h } = await seedHistory();

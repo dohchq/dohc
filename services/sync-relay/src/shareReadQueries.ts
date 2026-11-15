@@ -61,6 +61,7 @@ export function createShareReadQueries(
     | "listLinkRevisionLogRows"
     | "currentObjectFile"
     | "isCurrentFileState"
+    | "listCurrentFileLogRowsByBlob"
     | "indexReceivedWorkTargets"
   >,
   linkFreshnessPageSize: number,
@@ -207,8 +208,9 @@ export function createShareReadQueries(
 
   // Rewrites a served file op for a recipient below Edit, or drops it. A
   // replaced write is dropped. A replaced rename becomes a delete of its old
-  // path, so a recipient that already holds that path loses it. A delete names
-  // no content and is served unchanged. No served op keeps a before-hash.
+  // path, so a recipient that already holds that path loses it. A delete is
+  // served without content: the engine records the deleted content as its
+  // after-hash. No served op keeps a before-hash.
   const currentFilesOp = (
     workspaceId: string,
     selector: ShareSelector,
@@ -224,7 +226,11 @@ export function createShareReadQueries(
     }
     if (row.opKind !== "moment.append") return served;
     served.payloadBeforeBlobSha256 = null;
-    if (served.operation === "delete") return served;
+    if (served.operation === "delete") {
+      delete served.payloadAfterBlobSha256;
+      delete served.payloadAfterContentKind;
+      return served;
+    }
     if (isCurrentState(workspaceId, selector, row, served.payloadAfterPath ?? served.path))
       return served;
     if (served.operation !== "rename" || typeof served.payloadBeforePath !== "string") return null;
@@ -479,8 +485,10 @@ export function createShareReadQueries(
   };
 
   // A named recipient's blob: the after-content of an op the log would serve.
-  // Edit reads any op the filter admits. Below Edit the op must still be its
-  // file's current state.
+  // Edit reads any op the filter admits. Below Edit the op must have produced
+  // a current file, so the search starts from the current files: a cap on
+  // historical candidates could hide a current file whose bytes many newer
+  // objects once held, and the recipient's pull would stop at it.
   const namedShareBlob = (
     workspaceId: string,
     selector: AnyShareSelector,
@@ -496,6 +504,27 @@ export function createShareReadQueries(
     if (!fileSelector) return null;
     selector = fileSelector;
     const versionId = targetVersionId(selector);
+    const chatResolver = chatResolverFor(workspaceId);
+    if (selector.access !== "edit") {
+      const current = storage.listCurrentFileLogRowsByBlob({
+        workspaceId,
+        versionId,
+        selectorPaths: selector.paths,
+        sha256,
+      });
+      const produced = current.some(({ path, row }) => {
+        const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
+        if (!decision.allowed || !decision.blobSha256s.includes(sha256)) return false;
+        const served = decision.payload as Record<string, unknown>;
+        if (row.opKind === "version.create")
+          return (Array.isArray(served.forkSnapshots) ? served.forkSnapshots : []).some(
+            (snapshot: Record<string, unknown>) =>
+              snapshot.path === path && snapshot.blobSha256 === sha256,
+          );
+        return (served.payloadAfterPath ?? served.path) === path;
+      });
+      return produced ? storage.getBlob(workspaceId, sha256) : null;
+    }
     const candidates = [
       ...storage.listObjectMomentLogRowsByBlob({
         workspaceId,
@@ -508,19 +537,9 @@ export function createShareReadQueries(
     ]
       .sort((left, right) => right.relaySeq - left.relaySeq)
       .slice(0, SHARED_BLOB_CANDIDATE_LIMIT);
-    const chatResolver = chatResolverFor(workspaceId);
     const reachable = candidates.some((row) => {
       const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
-      if (!decision.allowed || !decision.blobSha256s.includes(sha256)) return false;
-      if (selector.access === "edit") return true;
-      const served = decision.payload as Record<string, unknown>;
-      if (row.opKind === "version.create")
-        return (Array.isArray(served.forkSnapshots) ? served.forkSnapshots : []).some(
-          (snapshot: Record<string, unknown>) =>
-            snapshot.blobSha256 === sha256 &&
-            isCurrentState(workspaceId, selector, row, snapshot.path),
-        );
-      return isCurrentState(workspaceId, selector, row, served.payloadAfterPath ?? served.path);
+      return decision.allowed && decision.blobSha256s.includes(sha256);
     });
     return reachable ? storage.getBlob(workspaceId, sha256) : null;
   };

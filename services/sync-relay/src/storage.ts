@@ -2213,6 +2213,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return captureSqliteReadRevisionMatches(this.db);
   }
 
+  listCurrentFileLogRowsByBlob(input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    sha256: string;
+  }): Array<{ path: string; row: SyncRelayLogRow }> {
+    return currentFilesStorage.listCurrentFileLogRowsByBlob(this, input);
+  }
+
   isCurrentFileState(input: {
     workspaceId: string;
     versionId: string;
