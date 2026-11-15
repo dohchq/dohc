@@ -84,6 +84,13 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
   let listeners = 0;
   // The account whose copy may stay on this computer: undefined until main knows, null once signed out.
   let keeping: string | null | undefined;
+  // Saves and cleanups run one at a time, in order, so a cleanup's deletion is the last word on a folder.
+  let queue: Promise<void> = Promise.resolve();
+  const serial = <T>(work: () => Promise<T>): Promise<T> => {
+    const run = queue.then(work);
+    queue = run.then(() => undefined, () => undefined);
+    return run;
+  };
 
   const account = async (): Promise<Credentials> => {
     const credentials = await dependencies.credentials();
@@ -116,7 +123,10 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
     }
   }
 
-  async function save(credentials: DirectAccount, file: string, value: unknown): Promise<void> {
+  const save = (credentials: DirectAccount, file: string, value: unknown) => serial(() => write(credentials, file, value));
+
+  /** Call only inside `serial`. */
+  async function write(credentials: DirectAccount, file: string, value: unknown): Promise<void> {
     if (keeping !== undefined && keeping !== accountKey(credentials)) return;
     try {
       await mkdir(folder(credentials), { recursive: true });
@@ -132,15 +142,13 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
     return messages.every((message): message is DirectMessage => message !== null) ? messages : null;
   };
 
-  /** Adds a page to the saved copy, by seq, and answers the whole copy. */
-  async function keep(credentials: DirectAccount, conversationId: string, page: readonly DirectMessage[]): Promise<DirectMessage[]> {
+  /** Adds a page to the saved copy, by seq. */
+  const keep = (credentials: DirectAccount, conversationId: string, page: readonly DirectMessage[]) => serial(async () => {
     const saved = await readSaved(credentials, conversationFile(conversationId), parseSavedMessages) ?? [];
     const bySeq = new Map(saved.map((message) => [message.seq, message]));
     for (const message of page) bySeq.set(message.seq, message);
-    const merged = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
-    await save(credentials, conversationFile(conversationId), merged);
-    return merged;
-  }
+    await write(credentials, conversationFile(conversationId), [...bySeq.values()].sort((a, b) => a.seq - b.seq));
+  });
 
   const pause = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref?.(); });
 
@@ -208,12 +216,14 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
      * Keeps only this account's saved copy, or none when signed out. Call it
      * once the account is known, not on a credential load's temporary null.
      */
-    async credentialsChanged(credentials: DirectAccount | null): Promise<void> {
-      const keep = credentials?.relayUrl ? accountKey(credentials) : null;
-      keeping = keep;
-      const root = join(dependencies.stateDir(), "direct-messages");
-      const folders = await readdir(root).catch(() => [] as string[]);
-      await Promise.all(folders.filter((name) => name !== keep).map((name) => rm(join(root, name), { recursive: true, force: true })));
+    credentialsChanged(credentials: DirectAccount | null): Promise<void> {
+      const kept = credentials?.relayUrl ? accountKey(credentials) : null;
+      keeping = kept;
+      return serial(async () => {
+        const root = join(dependencies.stateDir(), "direct-messages");
+        const folders = await readdir(root).catch(() => [] as string[]);
+        await Promise.all(folders.filter((name) => name !== kept).map((name) => rm(join(root, name), { recursive: true, force: true })));
+      });
     },
 
     async list(): Promise<DirectList> {

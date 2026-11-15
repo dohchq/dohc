@@ -1,9 +1,23 @@
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DirectConversation, DirectMessage } from "@dohc/security-contract/direct-messages";
 import { createDirectMessages, DirectMessageError } from "./directMessages";
+
+// Lets a test hold a save at its first filesystem step.
+const fsGate = vi.hoisted(() => ({ hold: null as Promise<void> | null, entered: false }));
+vi.mock("node:fs/promises", async (original) => {
+  const actual = await original<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
+      fsGate.entered = true;
+      await fsGate.hold;
+      return actual.mkdir(...args);
+    },
+  };
+});
 
 interface Account { relayUrl?: string; userId: string; token?: string }
 
@@ -16,7 +30,11 @@ const conversation = (last: DirectMessage | null): DirectConversation => ({
 
 let stateDir: string;
 beforeEach(async () => { stateDir = await mkdtemp(join(tmpdir(), "dohc-direct-")); });
-afterEach(async () => { await rm(stateDir, { recursive: true, force: true }); });
+afterEach(async () => {
+  fsGate.hold = null;
+  fsGate.entered = false;
+  await rm(stateDir, { recursive: true, force: true });
+});
 
 function harness(options: { account?: Account | null; retryMs?: number } = {}) {
   let account: Account | null = options.account === undefined ? { relayUrl: "https://relay.test", userId: "ann" } : options.account;
@@ -161,6 +179,22 @@ describe("direct messages on this computer", () => {
     h.signInAs({ relayUrl: "https://relay.test", userId: "ann" });
     await expect(h.service.list()).rejects.toMatchObject({ failure: "unreachable" });
     expect(await folders()).toEqual([]);
+  });
+
+  it("deletes a signed-out account's copy even when a save was on its way", async () => {
+    const h = harness();
+    h.routes.set("/sync/direct/conversations", () => Response.json({ revision: 1, conversations: [conversation(message(1))] }));
+    let release!: () => void;
+    fsGate.hold = new Promise((resolve) => { release = resolve; });
+    const listing = h.service.list();
+    await expect.poll(() => fsGate.entered).toBe(true);
+
+    const cleanup = h.service.credentialsChanged(null);
+    // Let a cleanup that does not wait for the save finish first.
+    await Promise.race([cleanup, new Promise((resolve) => setTimeout(resolve, 50))]);
+    release();
+    await Promise.all([listing, cleanup]);
+    expect(await readdir(join(stateDir, "direct-messages")).catch(() => [] as string[])).toEqual([]);
   });
 
   it("tells listeners once the server answers after starting offline", async () => {

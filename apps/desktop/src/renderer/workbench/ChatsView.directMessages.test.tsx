@@ -230,6 +230,31 @@ describe("ChatsView direct messages", () => {
     expect(bridgeMock.directSend).toHaveBeenCalledTimes(1);
   });
 
+  it("clears an open conversation when the account changes", async () => {
+    signedIn([conversation()]);
+    history([sent(1, VIEWER, "Dinner Friday?"), sent(2, "sam", "See you at nine")]);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    const view = await openSam();
+    await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(2));
+    bridgeMock.directConversations.mockReturnValue(new Promise(() => {}));
+    bridgeMock.directHistory.mockReturnValue(new Promise(() => {}));
+    act(() => emitCloudSessionChanged("session-other", "ready"));
+    expect(screen.queryAllByTestId("chats-dm-message")).toHaveLength(0);
+  });
+
+  it("clears New message's picks and words when the account changes", async () => {
+    const user = userEvent.setup();
+    signedIn([]);
+    members([{ memberId: "sam", name: "Sam Rivera" }, { memberId: "ana", name: "Ana Diaz" }]);
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, people: [ana] });
+    renderView(vi.fn(), vi.fn(), { variant: "page", initialNav: { level: "direct-new", memberIds: ["ana"] } });
+    await waitFor(() => expect(screen.getAllByTestId("chats-dm-new-pick")).toHaveLength(1));
+    await user.type(screen.getByTestId("chats-dm-new-composer"), "Written as the first account");
+    act(() => emitCloudSessionChanged("session-other", "ready"));
+    await waitFor(() => expect((screen.getByTestId("chats-dm-new-composer") as HTMLTextAreaElement).value).toBe(""));
+    expect(screen.queryAllByTestId("chats-dm-new-pick")).toHaveLength(0);
+  });
+
   it("sends with one message id, and Try again resends that same id", async () => {
     const user = userEvent.setup();
     signedIn([conversation()]);

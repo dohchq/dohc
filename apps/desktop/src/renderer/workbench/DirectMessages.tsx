@@ -275,8 +275,7 @@ type History =
   | { conversationId: string; status: "failed"; message: string }
   | { conversationId: string; status: "ready"; messages: readonly DirectMessage[]; more: boolean; saved: boolean; olderLoading: boolean };
 
-/** One direct conversation, read from the server, or this computer's copy while the server is away. */
-export function DirectConversationView(props: Reporting & {
+type ConversationProps = Reporting & {
   conversationId: string;
   variant: "panel" | "page";
   onBack?: () => void;
@@ -284,7 +283,16 @@ export function DirectConversationView(props: Reporting & {
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   /** The people's names, once the list knows them, for the tab. */
   onTitle?: (title: string) => void;
-}) {
+};
+
+/** One direct conversation, read from the server, or this computer's copy while the server is away. */
+export function DirectConversationView(props: ConversationProps) {
+  // A change of account starts the view over, so nothing read or typed for the last account stays on screen.
+  const { store } = useDirectConversations();
+  return <ConversationForAccount key={store.session()} {...props} />;
+}
+
+function ConversationForAccount(props: ConversationProps) {
   const { conversationId, onTitle } = props;
   const { state, store } = useDirectConversations();
   useListFailureReport(state, store, props);
@@ -572,15 +580,25 @@ function messageableMembers(result: MembersResult): Member[] {
 
 const MAX_PICKS = MAX_DIRECT_PEOPLE - 1;
 
-/** New message: pick people from this workspace's members, then write the first message. */
-export function NewDirectMessage(props: Reporting & {
+type NewMessageProps = Reporting & {
   workspaceId: string;
   memberIds?: readonly string[];
   variant: "panel" | "page";
   onBack?: () => void;
   mentionCandidates?: readonly MentionCandidate[];
   onOpenConversation: (conversationId: string, title: string) => void;
-}) {
+};
+
+/** New message: pick people from this workspace's members, then write the first message. */
+export function NewDirectMessage(props: NewMessageProps) {
+  // A change of account starts over with no one picked: the picks were made as the last account.
+  const { store } = useDirectConversations();
+  const session = store.session();
+  const opened = useRef(session);
+  return <NewMessageForAccount key={session} {...props} memberIds={session === opened.current ? props.memberIds : undefined} />;
+}
+
+function NewMessageForAccount(props: NewMessageProps) {
   const { workspaceId } = props;
   const { state, store } = useDirectConversations();
   const reporting = useRef<Reporting>(props);
