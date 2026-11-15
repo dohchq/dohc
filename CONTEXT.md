@@ -175,7 +175,7 @@ One grantee's authority on a share, with its own level, generation, and revocati
 _Avoid_: permission, membership
 
 **Share access**:
-The level a file-share grant carries: View, Comment, or Edit. Comment adds the share's discussion. Edit adds live co-editing of the share's live documents, attributed and reversible through history, and the direct Collection changes listed under Change proposal. Named recipients with Edit can also send change proposals. A Group or direct message grant carries read-only or read-write instead.
+The level a file-share grant carries: View, Comment, or Edit. View reads the share's current files and follows later changes, but no version replaced before the read. Comment adds the share's discussion. Edit adds the share's retained history, live co-editing of the share's live documents, attributed and reversible through history, and the direct Collection changes listed under Change proposal. Named recipients with Edit can also send change proposals. A Group or direct message grant carries read-only or read-write instead.
 _Avoid_: permission level, role
 
 **Change proposal**:
@@ -245,7 +245,7 @@ Settlement cuts remain a separate concept.
 ## History pin
 
 An immutable recipient History version of one shared object, sampled from a stored replica current view.
-The current grant, selector, and object visibility control access. A grant cannot read a pin superseded at or before that grant began.
+Only an Edit grant reads pins. The current grant, selector, and object visibility control access. A grant cannot read a pin superseded at or before that grant began.
 Pins do not enter the owner's replication log or count against the owner's quota.
 
 ## History operation

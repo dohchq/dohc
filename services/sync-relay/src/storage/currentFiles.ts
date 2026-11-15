@@ -778,6 +778,58 @@ export function currentObjectPath(
   return typeof row?.path === "string" ? row.path : null;
 }
 
+/**
+ * A page of the current files under `selectorPaths` holding `sha256`, in path
+ * order after `afterPath`, each with the log row that produced it.
+ */
+export function listCurrentFileLogRowsByBlob(
+  storage: StorageContext,
+  input: {
+    workspaceId: string;
+    versionId: string;
+    selectorPaths: readonly string[];
+    sha256: string;
+    afterPath?: string;
+  },
+): Array<{ path: string; row: SyncRelayLogRow }> {
+  const selector = currentFileSelectorClause(input.selectorPaths, "f.path");
+  const after = input.afterPath === undefined ? "" : " AND f.path > ?";
+  return storage.db
+    .prepare(
+      `SELECT f.path AS file_path, l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
+              l.payload_json, l.recorded_at_ms, l.relay_seq, l.admitted_author_snapshot_json
+       FROM sync_relay_current_files f INDEXED BY idx_sync_relay_current_files_blob
+       JOIN sync_relay_log l ON l.relay_seq = f.state_relay_seq
+       WHERE f.workspace_id = ? AND f.version_id = ? AND f.blob_sha256 = ?${selector.sql}${after}
+       ORDER BY f.path
+       LIMIT ?`,
+    )
+    .all(
+      input.workspaceId,
+      input.versionId,
+      input.sha256,
+      ...selector.params,
+      ...(input.afterPath === undefined ? [] : [input.afterPath]),
+      SHARED_BLOB_CANDIDATE_LIMIT,
+    )
+    .map((row) => ({ path: String(row.file_path), row: rowToLogRow(row) }));
+}
+
+/** Whether the log row at `relaySeq` produced the current file at `path`. */
+export function isCurrentFileState(
+  storage: StorageContext,
+  input: { workspaceId: string; versionId: string; path: string; relaySeq: number },
+): boolean {
+  return (
+    storage.db
+      .prepare(
+        `SELECT 1 FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_path
+         WHERE workspace_id = ? AND version_id = ? AND path = ? AND state_relay_seq = ?`,
+      )
+      .get(input.workspaceId, input.versionId, input.path, input.relaySeq) !== undefined
+  );
+}
+
 export function currentObjectFile(
   storage: StorageContext,
   input: {

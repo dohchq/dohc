@@ -457,7 +457,7 @@ export function createSyncRelayHandler({
     chatResolverFor,
     filteredLogPage,
     newestFilteredOpFreshness,
-    historicalSharedBlob,
+    namedShareBlob,
     linkRevisionByteLength,
   } = createShareReadQueries(storage, linkFreshnessPageSize, linkKey);
 
@@ -651,7 +651,7 @@ export function createSyncRelayHandler({
     requireShareAction,
     shareActionGuard,
     filteredLogPage,
-    historicalSharedBlob,
+    namedShareBlob,
     discussionActivity,
     lookupUserDisplayName,
     linkKey,

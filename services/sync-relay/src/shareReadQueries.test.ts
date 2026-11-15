@@ -22,9 +22,10 @@ function page(
 ) {
   const storage: Pick<
     Parameters<typeof createShareReadQueries>[0],
-    "fetchLogPage" | "hasRefusedSettlement"
+    "fetchLogPage" | "hasRefusedSettlement" | "isCurrentFileState"
   > = {
     hasRefusedSettlement: () => false,
+    isCurrentFileState: () => true,
     fetchLogPage: () => ({
       rows: [
         {
@@ -42,7 +43,7 @@ function page(
       hasMore: false,
     }),
   };
-  // Selected file moments use only fetchLogPage; the other query surfaces are outside this fixture.
+  // Selected file moments use only these reads; the other query surfaces are outside this fixture.
   const queries = createShareReadQueries(
     storage as unknown as Parameters<typeof createShareReadQueries>[0],
     500,
@@ -257,6 +258,7 @@ it("serves only relay-admitted settlement authors, keeps owner bytes, and advanc
     },
   ];
   const storage = {
+    isCurrentFileState: () => true,
     fetchLogPage: ({ sinceRelaySeq }: { sinceRelaySeq: number }) => ({
       rows: rows.filter((row) => row.relaySeq > sinceRelaySeq),
       nextCursor: 3,
@@ -327,7 +329,10 @@ it("converts admitted automation to the ordinary moment format only for authenti
     admittedAuthorSnapshot: authors,
     settlementAdmission: { status: "accepted", settlementId: "automation" },
   };
-  const storage = { fetchLogPage: () => ({ rows: [row], nextCursor: 1, hasMore: false }) };
+  const storage = {
+    fetchLogPage: () => ({ rows: [row], nextCursor: 1, hasMore: false }),
+    isCurrentFileState: () => true,
+  };
   const queries = createShareReadQueries(
     storage as unknown as Parameters<typeof createShareReadQueries>[0],
     500,

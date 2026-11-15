@@ -202,17 +202,28 @@ commit. The owner's engine admits only the allowed files and authors from the
 relay's origin. Each author kind requires working stop and restore.
 See the [Collection write tests](../../services/sync-relay/src/collectionWrites.test.ts).
 
-## Link history follows continuous sharing
+## Share history needs Edit
 
-A link can read earlier revisions only while the same file remains continuously
-inside its share and the revision remains above the workspace's epoch floor.
-Deletion or movement outside the share withdraws that file's history immediately.
-Moving it back does not restore earlier access. A content hash alone grants nothing.
+A View or Comment grant reads current files only, by link or by name.
+The relay serves such a grant a file's content only while it is that file's
+current state. No log op, content hash, blob, History pin, or live document
+session gives it a version replaced earlier. It keeps following later changes.
+The relay reads the level from the current grant on every request, so a
+narrowed grant loses history on its next read. Bytes a device already holds stay there.
 
-An overwrite leaves previous content readable within retention. Removing sensitive
-text from a link requires withdrawing the file or revoking the link.
+An Edit grant reads the share's retained history. A named Edit recipient reads
+every version that an op admitted by its selector names.
+A link with Edit reads earlier revisions only while the same file remains
+continuously inside its share and the revision remains above the workspace's
+epoch floor. Deletion or movement outside the share withdraws that file's
+history from the link immediately. Moving it back does not restore earlier
+access. A content hash alone grants nothing.
+
+An overwrite leaves previous content readable to Edit within retention. Removing
+sensitive text from an Edit share requires withdrawing the file or revoking the grant.
 Every read rechecks current authority and uses bounded history scans.
-See [share reads](../../services/sync-relay/src/shareReadQueries.ts).
+See [share reads](../../services/sync-relay/src/shareReadQueries.ts) and the
+[named recipient tests](../../services/sync-relay/src/namedShareHistory.test.ts).
 
 ## Decision numbers in existing code
 
@@ -227,4 +238,4 @@ Existing comments cite the former ADR numbers. Their current boundaries are here
 | ADR 0008, ADR 0012 | [Automation access](#automation-edits-do-not-widen-access) |
 | ADR 0009 | [Hosting requirements](../reference/desktop-capabilities.md) and [local ownership](../../AGENTS.md#product-commitments) |
 | ADR 0013 | [Direct Collection writes](#direct-collection-writes-stay-narrow) |
-| ADR 0014 | [Link history](#link-history-follows-continuous-sharing) |
+| ADR 0014 | [Share history](#share-history-needs-edit) |

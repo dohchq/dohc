@@ -66,7 +66,7 @@ export function createNamedShareTransportRoutes(
     workspaceId: string,
   ) => () => void,
   filteredLogPage: ReturnType<typeof createShareReadQueries>["filteredLogPage"],
-  historicalSharedBlob: ReturnType<typeof createShareReadQueries>["historicalSharedBlob"],
+  namedShareBlob: ReturnType<typeof createShareReadQueries>["namedShareBlob"],
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
   lookupUserDisplayName?: LogAuthorNameLookup,
   identityKey?: string | Uint8Array,
@@ -129,11 +129,14 @@ export function createNamedShareTransportRoutes(
         half,
         ["user", actor.userId],
       );
+      // The selector that filtered the page being returned. A held read
+      // refilters with the grant's level at each wake.
+      let pageSelector = share.selector;
       const hold = parseLinkLogHold(url.searchParams.get("hold"));
       if (hold > 0 && page.ops.length === 0 && !page.hasMore && page.nextCursor === since) {
         const deadline = Date.now() + hold;
         let scanSince = since;
-        const readPage = () => {
+        const readPage = (): typeof page => {
           const fresh = requireShareAction(route.shareId, actor.userId, "read");
           if (
             fresh.share.workspaceId !== share.workspaceId ||
@@ -141,7 +144,7 @@ export function createNamedShareTransportRoutes(
               chatSideOf(fresh.effectiveSelector)?.channelWireId !== channelWireId)
           )
             throw notFound();
-          return filteredLogPage(
+          const next = filteredLogPage(
             share.workspaceId,
             share.shareId,
             fresh.effectiveSelector,
@@ -151,6 +154,8 @@ export function createNamedShareTransportRoutes(
             half,
             ["user", actor.userId],
           );
+          pageSelector = fresh.effectiveSelector;
+          return next;
         };
         while (!request.signal.aborted && Date.now() < deadline) {
           try {
@@ -196,7 +201,11 @@ export function createNamedShareTransportRoutes(
               after: url.searchParams.get("referenceAfter") || undefined,
             });
       const latest = requireShareAction(route.shareId, actor.userId, "read");
-      if (JSON.stringify(latest.effectiveSelector) !== JSON.stringify(authorized.effectiveSelector))
+      const latestSelector = JSON.stringify(latest.effectiveSelector);
+      if (
+        latestSelector !== JSON.stringify(authorized.effectiveSelector) ||
+        latestSelector !== JSON.stringify(pageSelector)
+      )
         throw notFound();
       return jsonResponse({
         ok: true,
@@ -379,11 +388,13 @@ export function createNamedShareTransportRoutes(
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
       assertSha256(route.sha256);
       // A blob is served to a recipient only when at least one op that
-      // passes the share filter legitimately references it. Everything
-      // else — a blob of an unshared file, a secret ciphertext blob, a
-      // random hash — is the same generic 404 as a nonexistent share.
+      // passes the share filter legitimately references it, and below Edit
+      // only while that op is still its file's current state. Everything
+      // else — a replaced version, a blob of an unshared file, a secret
+      // ciphertext blob, a random hash — is the same generic 404 as a
+      // nonexistent share.
       // Chat shares expose no blob because their filter decisions name none.
-      const blob = historicalSharedBlob(share.workspaceId, share.selector, route.sha256);
+      const blob = namedShareBlob(share.workspaceId, share.selector, route.sha256);
       if (!blob) throw notFound();
       // Re-check revocation immediately before returning the blob body: a
       // revoke that raced with this in-flight read must abort rather than
