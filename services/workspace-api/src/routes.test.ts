@@ -49,8 +49,10 @@ function get(path: string, init: RequestInit = {}): Request {
 
 /** A Better Auth APIError carries its payload on `body`. */
 class ApiError extends Error {
-  constructor(readonly body: { error: string; error_description: string }) {
-    super(body.error_description);
+  constructor(
+    readonly body: { error: string; error_description: string } | { code: string; message: string },
+  ) {
+    super("error" in body ? body.error_description : body.message);
   }
 }
 
@@ -412,6 +414,25 @@ describe("device verification page", () => {
     const body = await response.text();
     expect(response.status).toBe(400);
     expect(body).toContain("expired");
+    expect(body).not.toContain('id="approve"');
+  });
+
+  it("refuses a phone's session with a way to sign in on a computer, and offers no decision", async () => {
+    const response = await router({
+      auth: gateway({
+        getSession: async () => SIGNED_IN,
+        deviceVerify: async () => {
+          throw new ApiError({
+            code: "PHONE_SESSION_REFUSED",
+            message: "A phone sign-in can't do this. Use dohc on a computer.",
+          });
+        },
+      }),
+    })(get("/device?user_code=ABCD-EFGH"));
+    const body = await response.text();
+    expect(response.status).toBe(403);
+    expect(body).toContain("Approve this on a computer");
+    expect(body).toContain("/account/sign-in?next=");
     expect(body).not.toContain('id="approve"');
   });
 

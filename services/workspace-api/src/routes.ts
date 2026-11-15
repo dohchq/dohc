@@ -236,6 +236,8 @@ async function devicePageFor(auth: AuthGateway, request: Request, url: URL): Pro
       headers: request.headers,
     });
   } catch (error) {
+    // A phone's session may read itself but never approve a device.
+    if (isPhoneSessionRefusal(error)) return page(devicePage({ kind: "phone", userCode }), 403);
     const kind = deviceErrorKind(error);
     if (!kind) throw error;
     return page(devicePage({ kind }), 400);
@@ -248,6 +250,10 @@ async function devicePageFor(auth: AuthGateway, request: Request, url: URL): Pro
   // A code without one can't be approved.
   if (!deviceKind) return page(devicePage({ kind: "invalid" }), 400);
   return page(devicePage({ kind: "review", userCode, email: session.user.email, deviceKind }));
+}
+
+function isPhoneSessionRefusal(error: unknown): boolean {
+  return (error as { body?: { code?: unknown } } | null)?.body?.code === "PHONE_SESSION_REFUSED";
 }
 
 function deviceErrorKind(error: unknown): "expired" | "invalid" | null {

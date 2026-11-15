@@ -174,6 +174,7 @@ export type DeviceState =
   | { kind: "review"; userCode: string; email: string; deviceKind: "phone" | "desktop" }
   | { kind: "expired" }
   | { kind: "invalid" }
+  | { kind: "phone"; userCode: string }
   | { kind: "handled"; status: string };
 
 export function devicePage(state: DeviceState): string {
@@ -223,6 +224,16 @@ ${field("user_code", "Device code", `type="text" name="user_code" autocomplete="
       main: `<h1>dohc does not know that code</h1>
 <p>Check the code on your device, or start the sign-in again to get a new one.</p>
 <p class="links"><a href="/device">Enter another code</a></p>`,
+    });
+  }
+  if (state.kind === "phone") {
+    const next = `/device?user_code=${encodeURIComponent(state.userCode)}`;
+    return shell({
+      title: "Connect your device",
+      page: "device-phone",
+      main: `<h1>Approve this on a computer</h1>
+<p>A phone's sign-in can't connect another device. Open this page on a computer, or sign in here with your email and password.</p>
+<p class="links"><a href="${escapeHtml(`/account/sign-in?next=${encodeURIComponent(next)}`)}">Sign in with your password</a></p>`,
     });
   }
   const connected = state.status === "approved";
