@@ -1,4 +1,9 @@
-import { noticesWords, relativeTime, spokenRelativeTime } from "@dohc/interface-words/notices";
+import {
+  chatWords,
+  noticesWords,
+  relativeTime,
+  spokenRelativeTime,
+} from "@dohc/interface-words/notices";
 import type { PhoneNotice } from "./phoneNotice";
 
 /** A notice's arrival time from how long ago it came, in the desktop's words: "2m ago". */
@@ -19,8 +24,11 @@ export const noticeDetails = (notice: PhoneNotice) =>
   [notice.title, notice.body].filter(Boolean).join("\n");
 
 export interface RowHandlers {
+  /** Open, Open note, or Reply. */
   open?(): void;
   retry?(): void;
+  /** Try again on a failed read of a mention's message. */
+  retryTarget?(): void;
   /** Marks a Notice from the server read, or unread. */
   setRead?(read: boolean): void;
   copy(): void;
@@ -46,6 +54,7 @@ export function noticeRowHandlers(
   const { setRead } = handlers;
   return {
     worded: notice.retry ? handlers.retry : notice.open ? handlers.open : undefined,
+    retryTarget: notice.retryTarget ? handlers.retryTarget : undefined,
     read: marksRead(notice) && setRead ? () => setRead(!notice.read) : undefined,
     copy: handlers.copy,
     dismiss: notice.dismissible ? handlers.dismiss : undefined,
@@ -59,23 +68,33 @@ export function noticeMeta(notice: PhoneNotice, time: string): string {
     .join(" · ");
 }
 
+/** The row's worded action, on its pill and first in the rotor: Try again, Open, Open note or Reply. */
+export function wordedLabel(notice: PhoneNotice): string | null {
+  if (notice.retry) return noticesWords.tryAgain;
+  switch (notice.open) {
+    case "openNote":
+      return noticesWords.openNote;
+    case "reply":
+      return chatWords.reply;
+    case "open":
+      return noticesWords.open;
+    default:
+      return null;
+  }
+}
+
 /**
- * What VoiceOver hears for a row, and its actions in rotor order: the worded action, Mark read or Mark unread, Copy,
- * then Done, or Dismiss for a failure held on this phone.
+ * What VoiceOver hears for a row, and its actions in rotor order: the worded action, Try again when the read that
+ * would offer Reply failed, Mark read or Mark unread, Copy, then Done, or Dismiss for a failure held on this phone.
  */
 export function noticeRowAccessibility(notice: PhoneNotice): {
   label: string;
   actions: { name: string; label: string }[];
 } {
-  const worded = notice.retry
-    ? noticesWords.tryAgain
-    : notice.open === "openNote"
-      ? noticesWords.openNote
-      : notice.open
-        ? noticesWords.open
-        : null;
+  const worded = wordedLabel(notice);
   const actions = [
     ...(worded ? [{ name: "worded", label: worded }] : []),
+    ...(notice.retryTarget ? [{ name: "retryTarget", label: noticesWords.tryAgain }] : []),
     ...(marksRead(notice)
       ? [{ name: "read", label: notice.read ? noticesWords.markUnread : noticesWords.markRead }]
       : []),
@@ -91,6 +110,7 @@ export function noticeRowAccessibility(notice: PhoneNotice): {
     notice.senderKind ? noticesWords.fromSender[notice.senderKind] : null,
     notice.title,
     notice.body,
+    notice.retryTarget ? noticesWords.targetReadFailed : null,
     noticeMeta(notice, time),
   ]
     .filter(Boolean)

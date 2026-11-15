@@ -119,11 +119,92 @@ describe("a Notice's row", () => {
       context,
     );
     expect(failed.retry).toBeUndefined();
+    expect(failed.retryTarget).toBeUndefined();
     expect(noticeRowAccessibility(failed).actions.map((action) => action.label)).toEqual([
       "Mark read",
       "Copy error details",
       "Done",
     ]);
+  });
+
+  describe("Reply on a mention", () => {
+    const mention: NoticeRecord = {
+      ...record,
+      kind: "mention",
+      senderKind: "person",
+      senderLabel: "Maya Chen",
+      title: "Maya Chen mentioned you in #planning",
+      target: { thread: "thread-1", message: "m-1" },
+    };
+    const target = { workspaceId: "w1", threadId: "thread-1", messageId: "m-1" };
+    const labels = (notice: ReturnType<typeof presentNotice>) =>
+      noticeRowAccessibility(notice).actions.map((action) => action.label);
+
+    it("puts Reply where Open was, through the one handler, then the marks, Copy and Done", () => {
+      const reply = vi.fn();
+      const open = vi.fn();
+      const notice = presentNotice(mention, {
+        ...context,
+        open,
+        reply,
+        action: { kind: "reply", target },
+      });
+      expect(notice.open).toBe("reply");
+      expect(labels(notice)).toEqual(["Reply", "Mark read", "Copy notice details", "Done"]);
+      notice.onOpen?.();
+      expect(reply).toHaveBeenCalledWith(mention);
+      expect(open).not.toHaveBeenCalled();
+    });
+
+    it("keeps Open without a verified read, or without a Reply handler", () => {
+      const open = vi.fn();
+      const notice = presentNotice(mention, { ...context, open });
+      expect(labels(notice)).toEqual(["Open", "Mark read", "Copy notice details", "Done"]);
+      expect(notice.retryTarget).toBeUndefined();
+      const unhandled = presentNotice(mention, {
+        ...context,
+        open,
+        action: { kind: "reply", target },
+      });
+      expect(unhandled.open).toBe("open");
+      unhandled.onOpen?.();
+      expect(open).toHaveBeenCalledWith(mention, expect.objectContaining({ kind: "thread" }));
+    });
+
+    it("keeps Open, with Try again after it, when the read failed", () => {
+      const retryTarget = vi.fn();
+      const notice = presentNotice(mention, {
+        ...context,
+        retryTarget,
+        action: {
+          kind: "open",
+          target: { kind: "thread", workspaceId: "w1", threadId: "thread-1", messageId: "m-1" },
+          readFailed: true,
+        },
+      });
+      expect(labels(notice)).toEqual([
+        "Open",
+        "Try again",
+        "Mark read",
+        "Copy notice details",
+        "Done",
+      ]);
+      expect(noticeRowAccessibility(notice).label).toContain("dohc could not read this message.");
+      notice.retryTarget?.();
+      expect(retryTarget).toHaveBeenCalledWith(mention);
+    });
+
+    it("says a computer opens it when the phone can't, whatever a read showed", () => {
+      const notice = presentNotice(mention, {
+        ...context,
+        list: listed([{ ...trip, showOnPhone: false }]),
+        reply: vi.fn(),
+        action: { kind: "elsewhere" },
+      });
+      expect(notice.elsewhere).toBe(true);
+      expect(notice.onOpen).toBeUndefined();
+      expect(labels(notice)).toEqual(["Mark read", "Copy notice details", "Done"]);
+    });
   });
 
   it("offers an automation wake, should one reach the phone, no Done and no swipe", () => {

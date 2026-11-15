@@ -54,6 +54,8 @@ import {
   createWriteScope,
   lanesOf,
   replyWrite,
+  routeReply,
+  threadReplyTarget,
   type Lanes,
   type ReplyTarget,
 } from "./conversationWrites";
@@ -61,7 +63,7 @@ import { MessageRow } from "./MessageRow";
 import { streamRows, threadRows } from "./outboxMessages";
 import { confirmedReactions, reactionRecords, withReactions } from "./reactions";
 import { markShown, markShownPosts, shownMessages } from "./readMarks";
-import { UNSHOWN_QUESTION, type ReplyTo } from "./ReplyContext";
+import { UNSHOWN_MESSAGE, UNSHOWN_QUESTION, type ReplyTo } from "./ReplyContext";
 import {
   conversationItems,
   localMessage,
@@ -115,8 +117,8 @@ export function ServerConversation() {
         key={writesKey}
         threadId={id}
         messageId={message ?? null}
-        replyId={reply ?? null}
-        answerId={answer ?? null}
+        replyId={routeReply(reply, workspace, data?.workspaceId ?? null)}
+        answerId={routeReply(answer, workspace, data?.workspaceId ?? null)}
       />
     ) : (
       <Thread threadId={id} messageId={message ?? null} />
@@ -521,12 +523,17 @@ function WritableThread({
   // The message a reply goes under, or the question it answers, never both.
   const [chosen, setChosen] = useState<string | null>(answerId === null ? replyId : null);
   const [answering, setAnswering] = useState<string | null>(answerId);
-  // Only a message the read shows is named and replied under: one it doesn't is never guessed at.
-  const parent = useMemo(() => {
-    const entry = chosen === null ? undefined : thread?.messages.find((each) => each.id === chosen);
-    return entry
-      ? { id: entry.id, to: { name: entry.authorName, excerpt: entry.body } satisfies ReplyTo }
-      : null;
+  // Only a message the read shows is named and replied under: one it doesn't is never guessed at. A chosen message the
+  // read doesn't show, as one that went before the thread opened from a Notice, keeps the reply context with Send off
+  // until the person cancels Reply or chooses another, so its text never goes to the thread's top.
+  const replyTarget = useMemo(
+    () => threadReplyTarget(threadId, chosen, thread?.messages ?? []),
+    [threadId, chosen, thread],
+  );
+  const parent = useMemo((): ReplyTo | null => {
+    if (chosen === null) return null;
+    const entry = thread?.messages.find((each) => each.id === chosen);
+    return entry ? { name: entry.authorName, excerpt: entry.body } : UNSHOWN_MESSAGE;
   }, [chosen, thread]);
   // While Answer names a question, the text only ever answers it. Once a read shows the question answered, or no longer
   // shows it, the context and text stay with Send off, until the person cancels Answer or chooses another message.
@@ -609,18 +616,15 @@ function WritableThread({
           setAnswering((current) => (current === question.id ? null : current));
         return outcome;
       }
-      const next = replyWrite(
-        { kind: "thread", threadId, parentMessageId: parent?.id ?? null },
-        body,
-      );
-      if (!next) return { kind: "blocked" as const };
+      const next = replyTarget === null ? null : replyWrite(replyTarget, body);
+      if (!replyTarget || !next) return { kind: "blocked" as const };
       const outcome = await writes.submit(workspaceId, next.write);
-      const answered = parent?.id ?? null;
+      const answered = replyTarget.parentMessageId;
       if (outcome.kind === "kept" || outcome.kind === "withheld")
         setChosen((current) => (current === answered ? null : current));
       return outcome;
     },
-    [writes, workspaceId, threadId, parent, question],
+    [writes, workspaceId, replyTarget, question],
   );
   const cancelReply = useCallback(() => {
     setChosen(null);
@@ -631,17 +635,22 @@ function WritableThread({
       <Composer
         placeholder={chatWords.reply}
         lanes={REPLY_LANES}
-        blocked={blocked ?? (question?.target.kind === "waiting" ? "loading" : null)}
+        blocked={
+          blocked ??
+          (question?.target.kind === "waiting" || (question === null && replyTarget === null)
+            ? "loading"
+            : null)
+        }
         problem={problem}
         replies
-        replyTo={question?.to ?? parent?.to ?? null}
+        replyTo={question?.to ?? parent}
         closed={question?.target.kind === "closed" ? chatWords.answerClosed : null}
         onCancelReply={cancelReply}
         onSubmit={submit}
         onLayoutHeight={onLayoutHeight}
       />
     ),
-    [blocked, problem, question, parent, cancelReply, submit],
+    [blocked, problem, question, replyTarget, parent, cancelReply, submit],
   );
   const threadWrites = useMemo<ScreenWrites>(
     () => ({ local, message, actions, react, answers, reply, composer }),

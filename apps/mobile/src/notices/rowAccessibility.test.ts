@@ -48,6 +48,23 @@ describe("a Notices row's actions", () => {
     ).toEqual(["Mark unread", "Copy notice details", "Done"]);
   });
 
+  it("puts Reply first on a mention whose message a read showed, with Try again after Open on a failed read", () => {
+    expect(
+      noticeRowAccessibility({ ...base, relayId: "n", open: "reply" }).actions.map(
+        (action) => action.label,
+      ),
+    ).toEqual(["Reply", "Mark read", "Copy notice details", "Done"]);
+    expect(
+      noticeRowAccessibility({
+        ...base,
+        relayId: "n",
+        read: true,
+        open: "open",
+        retryTarget: () => {},
+      }).actions.map((action) => action.label),
+    ).toEqual(["Open", "Try again", "Mark unread", "Copy notice details", "Done"]);
+  });
+
   it("swipes right only to mark a read Notice from the server unread", () => {
     expect(swipesUnread({ ...base, relayId: "n", read: true })).toBe(true);
     expect(swipesUnread({ ...base, relayId: "n", read: false })).toBe(false);
@@ -107,6 +124,7 @@ describe("a Notices row's handlers", () => {
   const all = {
     open: () => {},
     retry: () => {},
+    retryTarget: () => {},
     setRead: () => {},
     copy: () => {},
     dismiss: () => {},
@@ -118,8 +136,11 @@ describe("a Notices row's handlers", () => {
     { ...base, dismissible: false },
     base,
     { ...base, relayId: "n", open: "open" },
+    { ...base, relayId: "n", open: "reply" },
+    { ...base, relayId: "n", open: "open", retryTarget: () => {} },
     { ...base, relayId: "n", read: true, elsewhere: true },
     { ...base, relayId: "n", dismissible: false },
+    { ...base, relayId: "n", senderKind: "automation", failed: true },
   ];
 
   it("has one for every action the row offers", () => {
@@ -129,6 +150,38 @@ describe("a Notices row's handlers", () => {
         expect(handlers[action.name], `${notice.title}: ${action.label}`).toBeTypeOf("function");
       }
     }
+  });
+
+  it("offers only the row's own actions: no Run now, Answer, or other automation or agent action", () => {
+    const known = new Set(["worded", "retryTarget", "read", "copy", "dismiss"]);
+    const words = new Set([
+      "Open",
+      "Open note",
+      "Reply",
+      "Try again",
+      "Mark read",
+      "Mark unread",
+      "Copy notice details",
+      "Copy error details",
+      "Done",
+      "Dismiss notice",
+    ]);
+    for (const notice of rows)
+      for (const action of noticeRowAccessibility(notice).actions) {
+        expect(known.has(action.name), action.name).toBe(true);
+        expect(words.has(action.label), action.label).toBe(true);
+      }
+  });
+
+  it("gives Reply and its pill the same handler as Open", () => {
+    const opened: string[] = [];
+    const handlers = noticeRowHandlers(
+      { ...base, relayId: "n", open: "reply" },
+      { ...all, open: () => void opened.push("reply") },
+    );
+    handlers.worded?.();
+    expect(opened).toEqual(["reply"]);
+    expect(handlers.retryTarget).toBeUndefined();
   });
 
   it("keeps a failure held on this phone to its own actions, with no mark sent to the server", () => {

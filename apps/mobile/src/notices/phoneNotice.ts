@@ -2,6 +2,7 @@ import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { workspaceName } from "../chats/workspaceName";
 import type { NoticeRecord } from "../server/notices";
 import type { WorkspaceList } from "../server/workspaceList";
+import type { NoticeAction } from "./noticeWrites";
 
 // A row in the phone's Notices, and how a Notice from the server becomes one.
 
@@ -24,11 +25,19 @@ export interface PhoneNotice {
   readonly read: boolean;
   /** Another workspace's name, shown beside the time. */
   readonly folder?: string;
-  readonly open?: "open" | "openNote";
-  /** Where Open goes, in a sample build: a chat. */
-  readonly openChat?: { readonly id: string; readonly name: string };
-  /** Where Open goes, for a Notice from the server whose target the phone shows. */
+  /** The row's worded action, other than Try again: Open, Open note, or Reply to the message a mention names. */
+  readonly open?: "open" | "openNote" | "reply";
+  /** Where Open or Reply goes, in a sample build: a chat, or a thread with a message chosen to reply to. */
+  readonly openChat?: {
+    readonly id: string;
+    readonly name?: string;
+    readonly thread?: "1";
+    readonly reply?: string;
+  };
+  /** What Open or Reply does, for a Notice from the server whose target the phone shows. */
   readonly onOpen?: () => void;
+  /** The read that would offer Reply failed: the row says so, and this is its Try again. */
+  readonly retryTarget?: () => void;
   /** What it's about opens only on a computer. */
   readonly elsewhere?: boolean;
   readonly retry?: boolean;
@@ -78,19 +87,32 @@ export function phoneTarget(record: NoticeRecord, list: WorkspaceList): PhoneTar
 const openWord = (target: PhoneTarget): NonNullable<PhoneNotice["open"]> =>
   target.kind === "page" ? "openNote" : "open";
 
+/** The row's first action from its target alone: Open where the phone shows it, else only a computer opens it. */
+const openAction = (record: NoticeRecord, list: WorkspaceList): NoticeAction => {
+  const target = phoneTarget(record, list);
+  return target ? { kind: "open", target, readFailed: false } : { kind: "elsewhere" };
+};
+
 /**
  * The row for a Notice from the server. It shows the title and body the phone's scope sent, as plain text, and
- * nothing else of the Notice's words.
+ * nothing else of the Notice's words. `action` is its first action (`noticeAction`); without one, it opens its target.
  */
 export function presentNotice(
   record: NoticeRecord,
   context: {
     readonly list: WorkspaceList;
     readonly currentWorkspaceId: string | null;
+    readonly action?: NoticeAction;
     open(record: NoticeRecord, target: PhoneTarget): void;
+    /** Reply on a mention whose message a read showed. The handler checks again before it goes. */
+    reply?(record: NoticeRecord): void;
+    /** Try again on the read that would offer Reply. */
+    retryTarget?(record: NoticeRecord): void;
   },
 ): PhoneNotice {
-  const target = phoneTarget(record, context.list);
+  const { reply, retryTarget } = context;
+  const given = context.action ?? openAction(record, context.list);
+  const action = given.kind === "reply" && !reply ? openAction(record, context.list) : given;
   const workspace =
     context.list.status === "ready" && record.workspaceId !== context.currentWorkspaceId
       ? context.list.workspaces.find((item) => item.workspaceId === record.workspaceId)
@@ -106,9 +128,15 @@ export function presentNotice(
     atMs: record.createdAtMs,
     read: record.readAtMs !== null,
     ...(workspace ? { folder: workspaceName(workspace) } : {}),
-    ...(target
-      ? { open: openWord(target), onOpen: () => context.open(record, target) }
-      : { elsewhere: true }),
+    ...(action.kind === "reply" && reply
+      ? { open: "reply" as const, onOpen: () => reply(record) }
+      : action.kind === "open"
+        ? {
+            open: openWord(action.target),
+            onOpen: () => context.open(record, action.target),
+            ...(action.readFailed && retryTarget ? { retryTarget: () => retryTarget(record) } : {}),
+          }
+        : { elsewhere: true }),
     // A wake waits for a computer: the phone offers it no swipe and no Done, though its scope leaves wakes out.
     dismissible: record.kind !== "automation-wake",
     ...(record.kind === "automation-failed" ? { failed: true } : {}),
