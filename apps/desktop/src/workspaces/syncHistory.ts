@@ -69,8 +69,9 @@ export function recordSynced(rootPath: string): Promise<void> {
 }
 
 /**
- * This folder joined a workspace that syncs through a server from another
- * computer. Nothing undoes it.
+ * This folder took a workspace's id from elsewhere, as a join through a
+ * server or a received share does, so its Collections were made elsewhere.
+ * Nothing undoes it.
  */
 export function recordJoined(rootPath: string): Promise<void> {
   return mark(rootPath, "joined");

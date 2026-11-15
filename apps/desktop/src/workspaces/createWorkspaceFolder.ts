@@ -298,6 +298,10 @@ export async function createWorkspaceFolderWithFreshness(input: {
     kind: input.kind,
   });
 
+  // Before the manifest: a join cut short after it would leave a folder that
+  // joins again as an existing workspace, with no mark, so it could keep
+  // Collections another computer has.
+  if (input.workspaceId !== undefined) await recordJoined(rootPath);
   // inspectManifest checked the entry itself: Windows "wx" can follow a
   // dangling link. "wx" keeps a competing regular file from being replaced.
   await writeFile(join(metadataDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, {
@@ -305,15 +309,11 @@ export async function createWorkspaceFolderWithFreshness(input: {
   });
   await assertSameFolder();
   // A folder that had no manifest was never a dohc workspace. A join names
-  // the synced workspace's id, and its folder records that it synced and
-  // joined, so it never keeps Collections it has no store for.
+  // the synced workspace's id, and its folder records that it synced.
   if (input.workspaceId === undefined) {
     await recordNeverSynced(rootPath, input.computer);
     await recordNewCollectionsHolder(rootPath, manifest.workspaceId, input.computer);
-  } else {
-    await recordJoined(rootPath);
-    await recordSynced(rootPath);
-  }
+  } else await recordSynced(rootPath);
   const fresh = startedEmpty && (await holdsOnlyNewMetadata(rootPath, metadataDir));
   await assertSameFolder();
   return {
