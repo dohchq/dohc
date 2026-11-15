@@ -137,7 +137,7 @@ export function useAccessRuleHoldNotices(
   // The hold's row; `busy` names the pressed button, which reads as working
   // while both wait. A busy row, or one put back after a failure, files
   // without a new toast.
-  const show = (asked: string, hold: AccessRuleHold, busy?: Decision): void => {
+  const show = (asked: string, hold: AccessRuleHold, busy?: Decision, putBack = false): void => {
     const words = accessRuleHoldWords(hold);
     const decide = (decision: Decision) => () => decideRef.current(asked, hold, decision);
     const action: NonNullable<ShellError["action"]> = {
@@ -156,9 +156,8 @@ export function useAccessRuleHoldNotices(
       ...(words.rows.length ? { rows: words.rows } : {}),
       retry: null,
       noDismiss: true,
-      ...(busy ? { quiet: true } : {}),
+      ...(busy || putBack ? { quiet: true } : {}),
       details: [
-        ["Folder", placeOf(hold.folder)],
         [
           "Recorded rule",
           hold.recordedRule ?? (hold.unreadable === "recorded" ? "unreadable" : "none"),
@@ -196,10 +195,7 @@ export function useAccessRuleHoldNotices(
           title: `dohc could not undo the change to ${ruleOfLower(hold.folder)}`,
           message: `${ruleOf(hold.folder)} stays as you chose.`,
           cause: error,
-          details: [
-            ["Folder", placeOf(hold.folder)],
-            ["Path", change.path],
-          ],
+          details: [["Path", change.path]],
           retry: () => undo(asked, hold, change),
         });
       },
@@ -237,7 +233,7 @@ export function useAccessRuleHoldNotices(
           if (currentWorkspace.current !== asked) return;
           // A changed rule comes back as its notice, judged again.
           if (isAccessRuleChangedRefusal(error)) return;
-          show(asked, hold);
+          show(asked, hold, undefined, true);
           const outer = heldOuterAccessRuleFolder(error);
           if (outer !== null && outer !== hold.folder) {
             latest.current.reportShellFailure({
@@ -265,7 +261,6 @@ export function useAccessRuleHoldNotices(
                 : `dohc could not change access to ${place}`,
             message: `dohc still doesn't record or share changes in ${place}, and members keep their earlier access.`,
             cause: error,
-            details: [["Folder", place]],
             retry: () => decideRef.current(asked, hold, decision),
           });
         },

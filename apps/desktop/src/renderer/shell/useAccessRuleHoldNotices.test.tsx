@@ -149,7 +149,6 @@ describe("useAccessRuleHoldNotices", () => {
       target: { to: "file", path: "team/access.yaml" },
     });
     expect(h.row("team")!.details).toEqual([
-      ["Folder", "team"],
       ["Recorded rule", "members: view\n"],
       ["Noticed", new Date(1).toISOString()],
     ]);
@@ -286,7 +285,8 @@ describe("useAccessRuleHoldNotices", () => {
         "Error invoking remote method 'desktop:decide-access-rule': DaemonRefusalError [CONFLICT]: access-rule-held: widened team",
       ),
     );
-    act(() => h.errors().runShellErrorAction(h.row("team/sub")!.id));
+    const inner = h.row("team/sub")!.id;
+    act(() => h.errors().runShellErrorAction(inner));
     const waits = () =>
       h.errors().shellErrors.find((error) => error.identity === "access-rule:main:team/sub:waits");
     await waitFor(() =>
@@ -298,7 +298,8 @@ describe("useAccessRuleHoldNotices", () => {
         action: { label: "Show team" },
       }),
     );
-    // The inner row is back to its choices.
+    // The inner row is back to its choices where it stands, with no new toast.
+    expect(h.row("team/sub")!.id).toBe(inner);
     expect(h.row("team/sub")!.action).toMatchObject({
       label: "Restore rule",
       additional: [{ label: "Remove rule" }],
