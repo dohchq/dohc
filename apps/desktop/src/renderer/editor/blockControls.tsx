@@ -407,7 +407,9 @@ export function makeBlockControlsPlugin({
       },
       handleDOMEvents: {
         mousemove(view, event) {
-          hoverBlock(view, hoveredBlock(view, event.target, refs.live));
+          // Moving the controls changes the DOM beside a selection being
+          // dragged out, so they wait for the button to come up.
+          if (event.buttons === 0) hoverBlock(view, hoveredBlock(view, event.target, refs.live));
           return false;
         },
         mouseleave(view) {

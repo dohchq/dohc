@@ -713,6 +713,57 @@ describe("blockControls gutter coverage", () => {
     expect(shownFor(inner())).toEqual([block(2)]);
   });
 
+  const paragraphs = (count: number) =>
+    makeEditorWithControls({
+      type: "doc",
+      content: Array.from({ length: count }, (_, index) => ({
+        type: "paragraph",
+        content: [{ type: "text", text: `Paragraph ${index}` }],
+      })),
+    });
+
+  it("keeps two sets of controls at most in a long note, through pointer moves and typing", () => {
+    const editor = track(paragraphs(300));
+    const all = () => editor.view.dom.querySelectorAll(".dohc-block-affordance");
+    expect(all()).toHaveLength(1);
+    for (const index of [0, 150, 299, 7]) {
+      blockControls(editor, index);
+      expect(all().length).toBeLessThanOrEqual(2);
+    }
+    editor.commands.setTextSelection(topLevelBlocks(editor)[200]!.pos + 2);
+    editor.commands.insertContent("typed");
+    expect(all()).toHaveLength(2);
+    expect(Array.from(all(), blockAfter)).toEqual([
+      editor.view.nodeDOM(topLevelBlocks(editor)[7]!.pos),
+      editor.view.nodeDOM(topLevelBlocks(editor)[200]!.pos),
+    ]);
+  });
+
+  it("leaves the controls where they are while a mouse button is down", () => {
+    const editor = track(paragraphs(3));
+    const first = blockControls(editor, 0);
+    const second = editor.view.nodeDOM(topLevelBlocks(editor)[1]!.pos) as Element;
+    second.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, buttons: 1 }));
+    expect(visibleControls(editor)).toEqual([first]);
+    expect(hover(editor, second).map(blockAfter)).toEqual([second]);
+  });
+
+  it("keeps the handle whose menu is open while the pointer moves away", () => {
+    const editor = track(paragraphs(3));
+    const controls = blockControls(editor, 1);
+    const handle = controls.querySelector(".dohc-block-handle")!;
+    // The open menu marks the handle that opened it.
+    handle.setAttribute("aria-expanded", "true");
+    const first = editor.view.nodeDOM(0) as Element;
+    expect(hover(editor, first)).toEqual([controls]);
+    editor.view.dom.dispatchEvent(new MouseEvent("mouseleave", { bubbles: true }));
+    expect(visibleControls(editor)).toEqual([controls]);
+
+    handle.setAttribute("aria-expanded", "false");
+    expect(hover(editor, first).map(blockAfter)).toEqual([first]);
+    expect(controls.isConnected).toBe(false);
+  });
+
   it("shows no gutter over a Mermaid preview, which sits between the next block's gutter and that block", () => {
     const editor = track(
       makeEditorWithControls(
