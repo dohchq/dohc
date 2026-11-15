@@ -1572,6 +1572,14 @@ fn observed_sha256(disk: &OnDisk) -> Option<String> {
     }
 }
 
+/// What a decision did beyond settling the folder.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AccessRuleDecided {
+    /// The rule files from outside dohc that Restore replaced or removed,
+    /// each kept as a kept copy of its path.
+    pub kept: Vec<String>,
+}
+
 /// What the owner saw in a folder's hold when they decided.
 struct SeenHold<'a> {
     /// The hold's `observed_sha256`.
@@ -1589,7 +1597,7 @@ fn decide_on_store(
     decision: AccessRuleDecision,
     seen: &SeenHold<'_>,
     self_writes: &dyn super::materialization::SelfWriteRecorder,
-) -> Result<(), RuntimeError> {
+) -> Result<AccessRuleDecided, RuntimeError> {
     // The folders above settle first: their own holds answer for them.
     for above in folders_of(&rule_path(folder)) {
         if above == folder {
@@ -1622,6 +1630,7 @@ fn decide_on_store(
     }
     let committed = store
         .read_with(|conn| committed_rule(conn, order.workspace_id, order.version_id, folder))?;
+    let mut decided = AccessRuleDecided::default();
     match decision {
         AccessRuleDecision::Accept => {
             let changes = rule_changes(committed.as_ref(), &disk);
@@ -1641,17 +1650,48 @@ fn decide_on_store(
             for (path, bytes) in &disk {
                 if !files.contains_key(path) {
                     remove_rule(store, order, path, &dohc_engine_storage::hex_sha256(bytes))?;
+                    decided.kept.push(path.clone());
                 }
             }
             for (path, file) in &files {
                 let bytes = disk.get(path).map(Vec::as_slice);
                 if bytes.map(dohc_engine_storage::hex_sha256).as_ref() != Some(&file.sha256) {
                     place_rule(store, order, path, &file.sha256, bytes, self_writes)?;
+                    if bytes.is_some() {
+                        decided.kept.push(path.clone());
+                    }
                 }
             }
         }
     }
-    release_hold(store, order, folder)
+    release_hold(store, order, folder)?;
+    Ok(decided)
+}
+
+/// Keep the rule from outside dohc at `path` as a kept copy before Restore
+/// replaces or removes it, so the owner can still save it.
+fn keep_outside_rule(
+    store: &EngineStore,
+    order: &Order<'_>,
+    path: &str,
+    bytes: &[u8],
+) -> Result<(), RuntimeError> {
+    let job_id = format!(
+        "access-rule-kept_{}_{}",
+        dohc_engine_storage::hex_sha256(path.as_bytes()),
+        order.now_ms
+    );
+    dohc_engine_files::materialize::keep_copy_before_change(
+        store,
+        order.root,
+        order.workspace_id,
+        &job_id,
+        path,
+        bytes,
+        order.now_ms,
+        dohc_engine_files::materialize::DurabilityPolicy::per_os(),
+    )?;
+    Ok(())
 }
 
 fn judge_one(
@@ -1724,8 +1764,11 @@ fn place_rule(
         target_generation: order.now_ms,
         now_ms: order.now_ms,
     };
-    // The materializer replaces only bytes the store holds, so the widened
-    // rule it displaces stays recoverable.
+    // The materializer replaces only bytes the store holds. The rule it
+    // displaces stays as a kept copy the owner can save.
+    if let Some(bytes) = disk {
+        keep_outside_rule(store, order, path, bytes)?;
+    }
     committed(store.write_with(order.faults, |tx| {
         if let Some(bytes) = disk {
             dohc_engine_storage::put_binary_blob(tx, bytes)?;
@@ -1745,8 +1788,8 @@ fn place_rule(
     if placed { Ok(()) } else { Err(waits()) }
 }
 
-/// Remove a rule nothing committed, if it still holds the judged bytes. Its
-/// bytes stay in the store, as the ones [`place_rule`] displaces do.
+/// Remove a rule nothing committed, if it still holds the judged bytes. It
+/// stays as a kept copy, as the rule [`place_rule`] displaces does.
 fn remove_rule(
     store: &mut EngineStore,
     order: &Order<'_>,
@@ -1762,9 +1805,7 @@ fn remove_rule(
         Ok(PublicationTarget::Absent) => return Ok(()),
         _ => return Err(waits()),
     };
-    committed(store.write_with(order.faults, |tx| {
-        dohc_engine_storage::put_binary_blob(tx, &bytes)
-    })?)?;
+    keep_outside_rule(store, order, path, &bytes)?;
     match std::fs::remove_file(order.root.join(path)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
             Err(RuntimeError::Storage(StorageError::persist_public(error)))
@@ -1810,7 +1851,7 @@ impl ActorHandle {
         self_writes: std::sync::Arc<dyn super::materialization::SelfWriteRecorder>,
         now_ms: i64,
         faults: std::sync::Arc<dyn FaultInjector>,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<AccessRuleDecided, RuntimeError> {
         self.run(move |store, _| {
             begin_command();
             let leases = LeaseRegistry::new();

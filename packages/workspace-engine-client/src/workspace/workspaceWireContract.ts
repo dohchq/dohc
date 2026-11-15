@@ -1134,6 +1134,13 @@ const AccessRuleHoldSchema = mutableStruct({
   recordedAtMs: Schema.Int,
 });
 
+/** A decision on a held folder. `kept` names the rule files from outside dohc that Restore kept as kept copies. */
+const AccessRuleDecidedSchema = mutableStruct({
+  folder: Schema.String,
+  decided: Schema.Literal(true),
+  kept: Schema.mutable(Schema.Array(Schema.String)),
+});
+
 const NonNegativeIntSchema = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
 // Its bytes are in neither the note nor History. It ends when the file
@@ -1547,14 +1554,8 @@ const WorkspaceResultSchemas = {
     ...CaptureFlushResultSchema.fields,
     retried: Schema.Boolean,
   }),
-  [WORKSPACE_METHOD.captureAcceptAccessRule]: mutableStruct({
-    folder: Schema.String,
-    decided: Schema.Literal(true),
-  }),
-  [WORKSPACE_METHOD.captureRestoreAccessRule]: mutableStruct({
-    folder: Schema.String,
-    decided: Schema.Literal(true),
-  }),
+  [WORKSPACE_METHOD.captureAcceptAccessRule]: AccessRuleDecidedSchema,
+  [WORKSPACE_METHOD.captureRestoreAccessRule]: AccessRuleDecidedSchema,
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({
     updated: Schema.Literal(true),
   }),

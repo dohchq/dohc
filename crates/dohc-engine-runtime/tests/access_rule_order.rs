@@ -176,6 +176,16 @@ impl Fixture {
         seen: Option<String>,
         reason: &str,
     ) -> Result<(), RuntimeError> {
+        self.decided_on(folder, decision, seen, reason).map(drop)
+    }
+
+    fn decided_on(
+        &self,
+        folder: &str,
+        decision: AccessRuleDecision,
+        seen: Option<String>,
+        reason: &str,
+    ) -> Result<dohc_engine_runtime::AccessRuleDecided, RuntimeError> {
         self.runtime.block_on(self.actor.decide_access_rule(
             WS.to_owned(),
             "main".to_owned(),
@@ -447,6 +457,28 @@ fn a_decision_on_a_removal_that_became_two_spellings_is_refused() {
     }
 }
 
+impl Fixture {
+    /// The kept copies the workspace lists, by path, with their bytes.
+    fn kept_copies(&self) -> Vec<(String, String)> {
+        self.runtime
+            .block_on(
+                self.actor
+                    .kept_materialization_files(WS.to_owned(), self.root().to_path_buf()),
+            )
+            .expect("kept copies")
+            .into_iter()
+            .map(|(path, staged)| {
+                (
+                    path,
+                    std::fs::read_to_string(self.root().join(staged)).unwrap(),
+                )
+            })
+            .collect()
+    }
+}
+
+/// Restore puts the recorded rule back and keeps the one it replaced as a
+/// kept copy, which the owner can still save.
 #[test]
 fn restoring_a_widened_rule_puts_the_committed_bytes_back() {
     let f = ruled_team();
@@ -454,18 +486,29 @@ fn restoring_a_widened_rule_puts_the_committed_bytes_back() {
     f.put("team/access.yaml", EDIT);
     f.settle();
     assert!(held(&f.capture(&["team/a.md"])[0], "team"));
-    f.decide("team", AccessRuleDecision::Restore)
+    let decided = f
+        .decided_on(
+            "team",
+            AccessRuleDecision::Restore,
+            Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes())),
+            "widened",
+        )
         .expect("restore");
     assert_eq!(
         std::fs::read_to_string(f.root().join("team/access.yaml")).unwrap(),
         VIEW
+    );
+    assert_eq!(decided.kept, lines(&["team/access.yaml"]));
+    assert_eq!(
+        f.kept_copies(),
+        vec![("team/access.yaml".to_owned(), EDIT.to_owned())]
     );
     assert!(f.holds().is_empty());
     assert_eq!(f.journal(), before);
 }
 
 /// Restoring a folder whose new rule nothing committed removes that rule
-/// from disk and keeps its bytes in the store, so the restore can be undone.
+/// from disk and keeps it as a kept copy, so the restore can be undone.
 #[test]
 fn restoring_an_uncommitted_rule_keeps_its_bytes() {
     let f = ruled_team();
@@ -476,15 +519,10 @@ fn restoring_an_uncommitted_rule_keeps_its_bytes() {
     f.decide("team/sub", AccessRuleDecision::Restore)
         .expect("restore");
     assert!(!f.root().join("team/sub/access.yaml").exists());
-    let kept: bool = rusqlite::Connection::open(&f.db)
-        .unwrap()
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM binary_blobs WHERE sha256=?1)",
-            [dohc_engine_storage::hex_sha256(EDIT.as_bytes())],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(kept, "the removed rule's bytes stay in the store");
+    assert_eq!(
+        f.kept_copies(),
+        vec![("team/sub/access.yaml".to_owned(), EDIT.to_owned())]
+    );
     assert!(f.holds().is_empty());
 }
 

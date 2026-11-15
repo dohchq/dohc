@@ -3790,6 +3790,54 @@ pub enum KeptCopySave {
     NoValidName,
 }
 
+/// Keep a copy of `bytes`, the file at `path` that a deliberate change is
+/// about to replace or remove, as a kept copy of that path. The copy is
+/// durable before this returns, and stays listed with the workspace's kept
+/// copies until someone saves it beside `path` or discards it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the copy is named by its job, path and bytes"
+)]
+pub fn keep_copy_before_change(
+    store: &EngineStore,
+    root: &Path,
+    workspace_id: &str,
+    job_id: &str,
+    path: &str,
+    bytes: &[u8],
+    now_ms: i64,
+    policy: DurabilityPolicy,
+) -> Result<(), MaterializeError> {
+    let staging = checked_staging_dir(store.database_path(), root, true)?;
+    let taken: Vec<String> = store.displacement_names()?.into_iter().collect();
+    let name = unused_staged_name(&staging, job_id, &taken)?;
+    let file = staging.join(&name);
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&file)
+        .map_err(|err| MaterializeError::io(&file, &err))?;
+    std::io::Write::write_all(&mut out, bytes)
+        .and_then(|()| out.sync_all())
+        .map_err(|err| MaterializeError::io(&file, &err))?;
+    drop(out);
+    sync_staged(store, &staging, policy)?;
+    let sha256 = dohc_engine_storage::hex_sha256(bytes);
+    store.keep_displacement(
+        &DisplacementSpec {
+            job_id: job_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            target_path: path.to_owned(),
+            displaced_name: name,
+            expected_sha256: sha256.clone(),
+            content_sha256: None,
+            now_ms,
+        },
+        Some(&sha256),
+    )?;
+    Ok(())
+}
+
 /// Move a kept file from staging to a visible copy beside
 /// its path, `name (kept copy).ext`, and end its row. Capture then records
 /// the copy like any new file, and the person or an agent can open, compare

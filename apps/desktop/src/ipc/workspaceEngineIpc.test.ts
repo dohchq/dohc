@@ -314,6 +314,7 @@ async function harness(
     decideAccessRule: vi.fn<VersionedLiveAdapter["decideAccessRule"]>(async (input) => ({
       folder: input.folder,
       decided: true as const,
+      kept: [`${input.folder}/access.yaml`],
     })),
     listCollections: vi.fn<VersionedLiveAdapter["listCollections"]>(async () => ({
       collections: [],
@@ -876,7 +877,7 @@ describe("workspace engine IPC registrations", () => {
         expectedSha256: "a".repeat(64),
         expectedReason: "widened",
       }),
-    ).toEqual({ heldAccessRules: [] });
+    ).toEqual({ heldAccessRules: [], kept: ["team/access.yaml"] });
     expect(h.adapter.decideAccessRule).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
         versionId: "main",

@@ -55,6 +55,16 @@ function harness(initial: KeptCopy[]) {
 }
 
 describe("useKeptCopyNotices", () => {
+  it("says an access rule's kept copy is the outside rule Restore rule replaced", async () => {
+    const h = harness([{ id: 4, path: "team/ACCESS.yaml", keptAtMs: 1 }]);
+    await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(1));
+    expect(h.result.current.shellErrors[0]).toMatchObject({
+      message:
+        "dohc kept the access rule from outside dohc that Restore rule replaced at team/ACCESS.yaml.",
+      action: { label: "Save copy" },
+    });
+  });
+
   it("shows each kept copy as a row whose Save copy saves it, clears the row, and opens the copy", async () => {
     const h = harness([{ id: 3, path: "notes/a.md", keptAtMs: 1 }]);
     await waitFor(() => expect(h.result.current.shellErrors).toHaveLength(1));

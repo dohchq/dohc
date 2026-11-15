@@ -1924,7 +1924,8 @@ export const captureRecoveryOperations = {
       expectedSha256: z.string().min(1).nullable(),
       expectedReason: z.enum(["widened", "removed"]),
     }),
-    result: z.object({ heldAccessRules: z.array(AccessRuleHold) }),
+    // `kept` names the rule files from outside dohc that Restore kept as kept copies.
+    result: z.object({ heldAccessRules: z.array(AccessRuleHold), kept: z.array(z.string()) }),
     guard: "trusted-sender",
     scope: "workspace",
     handlerCheck: {

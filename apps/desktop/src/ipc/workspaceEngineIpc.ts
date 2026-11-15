@@ -919,13 +919,13 @@ export function createWorkspaceEngineIpc<
                 // still records the holds the engine now lists, so the Notice
                 // shows the rule as it is.
                 const decided = await adapter.decideAccessRule(input).then(
-                  () => null,
+                  (result) => ({ result }),
                   (error: unknown) => ({ error }),
                 );
                 const { heldAccessRules } = await adapter.watcherStatus();
                 dependencies.recordHeldAccessRules(operation.workspace, heldAccessRules);
-                if (decided) throw decided.error;
-                return { heldAccessRules };
+                if ("error" in decided) throw decided.error;
+                return { heldAccessRules, kept: decided.result.kept };
               });
               if (result === null) throw new Error("The workspace engine is not running.");
               return result;

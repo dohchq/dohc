@@ -597,7 +597,8 @@ impl EngineService {
             () = cancellation.token.cancelled() => return Err(cancellation.interruption("access rule decision (queued)")),
             guard = Arc::clone(&open.capture_apply_gate).lock_owned() => guard,
         };
-        open.actor
+        let decided = open
+            .actor
             .decide_access_rule(
                 open.workspace_id.clone(),
                 hold.version_id,
@@ -617,7 +618,7 @@ impl EngineService {
             driver.request_manifest_refresh();
         }
         drop(gate);
-        Ok(json!({ "folder": input.folder, "decided": true }))
+        Ok(json!({ "folder": input.folder, "decided": true, "kept": decided.kept }))
     }
 
     pub(super) async fn capture_clear_recovery(
