@@ -259,7 +259,7 @@ describe("a decision's card", () => {
 
   it("keeps a choice pending until the outbox saves it, then shows it answered", () => {
     for (const stage of ["queued", "sending", "stalled"] as const)
-      expect(decisionOf(poll(), [answer({ stage }, "Porto")]).state).toEqual({
+      expect(decisionOf(poll(), [answer({ stage }, "Porto")])?.state).toEqual({
         kind: "answering",
         chosen: "Porto",
       });
@@ -270,7 +270,7 @@ describe("a decision's card", () => {
       },
       "Porto",
     );
-    expect(decisionOf(poll(), [saved]).state).toEqual({ kind: "answered", chosen: "Porto" });
+    expect(decisionOf(poll(), [saved])?.state).toEqual({ kind: "answered", chosen: "Porto" });
   });
 
   it("lets the server's state win once a read shows the question answered", () => {
@@ -279,16 +279,16 @@ describe("a decision's card", () => {
       chosenOption: "Lisbon",
       resolvedByMessageId: "m-9",
     });
-    expect(decisionOf(resolved, [answer({ stage: "sending" }, "Porto")]).state).toEqual({
+    expect(decisionOf(resolved, [answer({ stage: "sending" }, "Porto")])?.state).toEqual({
       kind: "answered",
       chosen: "Lisbon",
     });
   });
 
   it("holds a withheld answer, so the question takes no other until Send or Discard", () => {
-    expect(decisionOf(question(), [answer({ withheld: true })]).state).toEqual({ kind: "held" });
+    expect(decisionOf(question(), [answer({ withheld: true })])?.state).toEqual({ kind: "held" });
     // Send again: the same record, sendable, is on its way.
-    expect(decisionOf(question(), [answer()]).state).toEqual({ kind: "answering", chosen: null });
+    expect(decisionOf(question(), [answer()])?.state).toEqual({ kind: "answering", chosen: null });
   });
 
   it("takes an answer again after one the server refused for another reason", () => {
@@ -297,11 +297,11 @@ describe("a decision's card", () => {
       attempted: true,
       result: { kind: "refused", reason: "Couldn't send", threadId: null, winnerMessageId: null },
     });
-    expect(decisionOf(question(), [refused]).state).toEqual({ kind: "open" });
+    expect(decisionOf(question(), [refused])?.state).toEqual({ kind: "open" });
     expect(
       decisionOf(question(), [
         answer({ stage: "refused", result: { kind: "missing", reason: "gone" } }),
-      ]).state,
+      ])?.state,
     ).toEqual({ kind: "open" });
   });
 
@@ -312,7 +312,7 @@ describe("a decision's card", () => {
       resolvedByMessageId: "m-9",
     });
     const shown = showing({ "m-9": { authorName: "Sam Ortiz", body: "Lisbon" } });
-    expect(decisionOf(resolved, [answer(lostTo("m-9"), "Porto")], shown).state).toEqual({
+    expect(decisionOf(resolved, [answer(lostTo("m-9"), "Porto")], shown)?.state).toEqual({
       kind: "lost",
       chosen: "Lisbon",
       winner: { name: "Sam Ortiz", body: "Lisbon" },
@@ -321,18 +321,18 @@ describe("a decision's card", () => {
   });
 
   it("names nobody when the winning answer isn't loaded", () => {
-    expect(decisionOf(question(), [answer(lostTo("m-9"))]).state).toEqual({
+    expect(decisionOf(question(), [answer(lostTo("m-9"))])?.state).toEqual({
       kind: "lost",
       chosen: null,
       winner: null,
       replySent: false,
     });
-    expect(decisionOf(question(), [answer(lostTo(null))]).state).toMatchObject({ winner: null });
+    expect(decisionOf(question(), [answer(lostTo(null))])?.state).toMatchObject({ winner: null });
   });
 
   it("says the reply was sent only once a read shows it", () => {
     const shown = showing({ "message-mine": { authorName: "You", body: "Mine" } });
-    expect(decisionOf(question(), [answer(lostTo("m-9"))], shown).state).toMatchObject({
+    expect(decisionOf(question(), [answer(lostTo("m-9"))], shown)?.state).toMatchObject({
       kind: "lost",
       winner: null,
       replySent: true,
@@ -439,7 +439,7 @@ describe("answers that wait", () => {
     server.on("POST", "/sync/ws-1/ops/reply", ops({ ok: true, state: "saved", threadId: "t" }));
     const real = launch(server, disk);
     await vi.waitFor(() => expect(real.state().status).toBe("ready"));
-    expect(decisionOf(poll(), answerRecords(real.state(), SCOPE).get("q-1")).state).toEqual({
+    expect(decisionOf(poll(), answerRecords(real.state(), SCOPE).get("q-1"))?.state).toEqual({
       kind: "held",
     });
     const retried = createConversationWrites({
