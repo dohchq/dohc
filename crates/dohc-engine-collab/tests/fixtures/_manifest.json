@@ -79,6 +79,7 @@
   "richdocProjection-empty-code-block-containers.json",
   "richdocProjection-raw-html-literal-text.json",
   "richdocProjection-leading-hard-break.json",
+  "richdocProjection-non-breaking-space.json",
   "offsetProbe.json",
   "surrogateProbe.json",
   "nestedFrontmatter.json",

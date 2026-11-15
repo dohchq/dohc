@@ -917,6 +917,43 @@ const RICHDOC_PROJECTION_CASES = [
         ]),
       ]),
   },
+  {
+    // #4110: a non-breaking space in paragraph text is written as a
+    // reference, as task-list parsing reads a literal one as indentation.
+    name: "non-breaking-space",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph("a\u00a0b"),
+        paragraph("\u00a0starts a paragraph"),
+        paragraph([xmlText("bold\u00a0text", { bold: {} })]),
+        paragraph([xmlText("code\u00a0span", { code: {} })]),
+        paragraph([xmlElement("hardBreak"), xmlText("\u00a0")]),
+        paragraph([xmlText("x"), xmlElement("hardBreak"), xmlElement("hardBreak"), xmlText("\u00a0")]),
+        paragraph("line\n\u00a0- after a newline"),
+        // An empty link keeps it as the file holds it, and text between two
+        // empty links is written as other text is.
+        paragraph('[](https://e.example "a\u00a0b")'),
+        paragraph("x [](a\u00a0b) \u00a0y"),
+        paragraph("[](a&b) \u00a0 [](c&d)"),
+        paragraph("[](&)\u00a0[](&)"),
+        // It opens no block, as other text does not.
+        paragraph("-\u00a0dash"),
+        paragraph("#\u00a0hash"),
+        paragraph("1.\u00a0one"),
+        paragraph("line\n-\u00a0dash after a newline"),
+        paragraph("-\rcarriage return"),
+        // Marks nest as they would around other text.
+        paragraph([xmlText("a\u00a0b", { bold: {}, strike: {} }), xmlText("c", { strike: {} })]),
+        paragraph([xmlText("a\u00a0", { bold: {} }), xmlText("b")]),
+        xmlElement("heading", { level: 2 }, [xmlText("heading\u00a0text")]),
+        xmlElement("bulletList", {}, [
+          xmlElement("listItem", {}, [paragraph("\u00a0in a list item")]),
+        ]),
+        xmlElement("taskList", {}, [
+          xmlElement("taskItem", { checked: false }, [paragraph("\u00a0in a task item")]),
+        ]),
+      ]),
+  },
 ];
 
 function makeRichdocProjection(index, fixture) {
