@@ -339,10 +339,14 @@ export interface RetiredJournalPage {
   readonly nextAfter: number | null;
 }
 
+// A journal page's most rows, and what each row costs past its update bytes.
+const JOURNAL_PAGE_ROWS = 4096;
+const JOURNAL_ROW_BYTES = 96;
+
 /**
  * The journal rows of a retired lineage after `after`, through its retirement's F, oldest first and
- * at most about `budgetBytes` of updates, always at least one row. Null when no completed
- * retirement of that lineage at that restore generation is the lineage's last activation.
+ * at most about `budgetBytes` with each row's overhead, always at least one row. Null when no
+ * completed retirement of that lineage at that restore generation is the lineage's last activation.
  */
 export function readRetiredJournalPage(
   storage: StorageContext,
@@ -365,35 +369,35 @@ export function readRetiredJournalPage(
     if (!retired) return null;
     const acceptedCursor = integer(retired.retire_accepted_cursor);
     const rows: { journalCursor: number; rowsThrough?: number; updateBytes: Uint8Array }[] = [];
-    let bytes = 0;
-    // Read one row at a time, so a page never holds more than its budget and one row.
-    const next = storage.db.prepare(`SELECT j.journal_cursor,j.update_bytes,s.rows_through
+    let bytes = 0,
+      full = false;
+    // Rows are read as the page takes them, so it holds no more than its budget and one row.
+    for (const row of storage.db
+      .prepare(`SELECT j.journal_cursor,j.update_bytes,s.rows_through
       FROM ${LIVE_JOURNAL_TABLE} j LEFT JOIN ${LIVE_ROOM_SAVES} s USING(journal_cursor)
       WHERE j.workspace_id=? AND j.main_version_id='main' AND j.object_id=? AND j.lineage_claim_id=?
-        AND j.journal_cursor>? AND j.journal_cursor<=? ORDER BY j.journal_cursor LIMIT 1`);
-    let after = input.after;
-    while (after < acceptedCursor) {
-      const row = next.get(
+        AND j.journal_cursor>? AND j.journal_cursor<=? ORDER BY j.journal_cursor LIMIT ?`)
+      .iterate(
         input.workspaceId,
         input.objectId,
         input.lineageClaimId,
-        after,
+        input.after,
         acceptedCursor,
-      );
-      if (!row) {
-        after = acceptedCursor;
+        JOURNAL_PAGE_ROWS + 1,
+      )) {
+      const updateBytes = row.update_bytes as Uint8Array,
+        cost = updateBytes.byteLength + JOURNAL_ROW_BYTES;
+      if (rows.length === JOURNAL_PAGE_ROWS || (rows.length && bytes + cost > input.budgetBytes)) {
+        full = true;
         break;
       }
-      const updateBytes = new Uint8Array(row.update_bytes as Uint8Array);
-      if (rows.length && bytes + updateBytes.byteLength > input.budgetBytes) break;
-      bytes += updateBytes.byteLength;
-      after = integer(row.journal_cursor);
+      bytes += cost;
       rows.push({
-        journalCursor: after,
+        journalCursor: integer(row.journal_cursor),
         ...(row.rows_through === null ? {} : { rowsThrough: integer(row.rows_through) }),
-        updateBytes,
+        updateBytes: new Uint8Array(updateBytes),
       });
     }
-    return { acceptedCursor, rows, nextAfter: after >= acceptedCursor ? null : after };
+    return { acceptedCursor, rows, nextAfter: full ? rows.at(-1)!.journalCursor : null };
   });
 }

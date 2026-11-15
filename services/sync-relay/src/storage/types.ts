@@ -184,8 +184,6 @@ export interface SyncRelayLogInput {
   admittedAuthorSnapshot?: LiveAuthorSnapshot;
   settlementAdmission?: import("./hostedSettlement").SettlementAdmission;
   relayAdmission?: import("./relayAdmission").RelayAdmission;
-  /** With `departed`: a retiring note's output that still moves its file and history, as the note stays. Not stored. */
-  departedInPlace?: true;
 }
 
 export interface SyncRelayLogRow extends SyncRelayLogInput {

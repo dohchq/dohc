@@ -772,12 +772,12 @@ it.each(["access ended", "stopped"] as const)(
     expect(body).toMatchObject({ inserted: 1 });
     expect(body.refusals).toBeUndefined();
     const stays = ending === "access ended";
-    // The row stays departed either way, so a desktop that reads the log sees what it saw before.
+    // A note that stays keeps the save as ordinary history, which every history reader counts.
     expect(
       f.raw
         .prepare("SELECT relay_admission FROM sync_relay_log WHERE origin_id=?")
         .get(HOST_ORIGIN)!.relay_admission,
-    ).toBe("departed");
+    ).toBe(stays ? null : "departed");
     expect(
       f.raw
         .prepare("SELECT blob_sha256 FROM sync_relay_current_files WHERE workspace_id=? AND path=?")

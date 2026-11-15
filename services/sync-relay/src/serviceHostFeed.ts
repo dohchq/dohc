@@ -422,6 +422,8 @@ export function createServiceHostFeed(
         refuseOp(op, { opKind: op.opKind, payloadSha256: received.get(op)!, reason });
       let pushOrigin = "",
         batched = false;
+      // Verified output of a retiring note that stays, kept ordinary until confirmed.
+      const staying = new WeakSet<SyncRelayLogInput>();
       // Whether a retiring note stays in place: its enrollment has no owner Stop and the note is still at its path.
       const staysInPlace = ({ workspaceId, objectId, path }: ServiceActivationRetirement) =>
         storage.readServiceHostEnrollmentByObjectId(workspaceId, objectId)?.ownerStop === null &&
@@ -487,20 +489,21 @@ export function createServiceHostFeed(
             if (decision.kind === "refused") refuse(op, decision.reason);
             else if (decision.kind === "retiring") {
               // Verified retirement output keeps its history. A note that stays, as when its Edit access
-              // ended, also moves its file and history to it, so the stored note holds its last save.
-              // A Stop's, moved or deleted note's moves none.
+              // ended, takes it as ordinary output, so the stored note holds its last save. A Stop's,
+              // moved or deleted note's departs.
               const refusal = storage.admitRetirementPublication(decision.retirement, op, batch);
               if (refusal !== null) refuse(op, refusal);
-              else {
-                op.relayAdmission = "departed";
-                if (staysInPlace(decision.retirement)) op.departedInPlace = true;
-              }
+              else if (staysInPlace(decision.retirement)) staying.add(op);
+              else op.relayAdmission = "departed";
             } else if (decision.kind === "departed") op.relayAdmission = "departed";
           }
         },
         confirm(ops) {
           for (const op of ops)
-            if (op.relayAdmission === "departed" && !storage.retirementPublicationConfirmed(op))
+            if (
+              (op.relayAdmission === "departed" || staying.has(op)) &&
+              !storage.retirementPublicationConfirmed(op)
+            )
               refuse(op, "unproved-retirement-output");
         },
       };
