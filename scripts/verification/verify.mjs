@@ -183,6 +183,20 @@ export function passedSpecTitles(suites = []) {
 /** The PR checks a selection needs a passing CI run of, because no local run performs them. */
 export const ciEvidence = (gates) => (gates.android ? ["Android Kotlin compile"] : []);
 
+/** The PR checks a selection starts that run only in CI and that a merge doesn't need yet. */
+export const ciAdvisory = (gates) => (gates.ios ? ["iOS sample UI tests"] : []);
+
+/** Why a PR run that selects neither Rust nor JavaScript passes without running a gate. */
+export function noLocalGateReason(gates) {
+  const cloudOnly = [
+    gates.android && "Android compiles only in CI.",
+    gates.ios && "The iOS UI tests run only in CI.",
+  ].filter(Boolean);
+  return cloudOnly.length
+    ? `No local code gate applies to the changed files. ${cloudOnly.join(" ")}`
+    : "No code gate applies to the changed files.";
+}
+
 export function changedFiles(baseCommit, includeUncommitted = false, root = repoRoot) {
   const paths = (args) => readGit(args, root).split("\0").filter(Boolean);
   return [
@@ -411,7 +425,7 @@ export async function verify(args) {
     const files = base ? changedFiles(baseCommit, mode === "plan") : [];
     const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
     const requiredGates = selectedGates(files, workflow);
-    if (full) Object.assign(requiredGates, { rust: true, js: true, android: true });
+    if (full) Object.assign(requiredGates, { rust: true, js: true, android: true, ios: true });
     if (job) requiredGates[job] = true;
     const gates = Object.fromEntries(
       Object.entries(requiredGates).map(([name, needed]) => [
@@ -447,7 +461,16 @@ export async function verify(args) {
       : null;
     console.log(
       JSON.stringify(
-        { base, baseCommit, files, gates, ciEvidence: ciEvidence(gates), javascript, linux },
+        {
+          base,
+          baseCommit,
+          files,
+          gates,
+          ciEvidence: ciEvidence(gates),
+          ciAdvisory: ciAdvisory(gates),
+          javascript,
+          linux,
+        },
         null,
         2,
       ),
@@ -568,6 +591,7 @@ export async function verify(args) {
         requiredGates: selected.requiredGates,
         gates: selected.gates,
         ciEvidence: ciEvidence(selected.gates),
+        ciAdvisory: ciAdvisory(selected.gates),
         repositoryTests: selected.repositoryTests,
         ...(selected.linux ? { linux: { distro: selected.linux } } : {}),
         commit: git(["rev-parse", "HEAD"]),
@@ -609,9 +633,7 @@ export async function verify(args) {
     if (reuseRust && !gates.rust)
       throw new Error("--reuse-rust requires a selected Rust job. Use --job rust when needed.");
     if (mode === "pr" && !gates.js && !gates.rust) {
-      report.reason = gates.android
-        ? "No local code gate applies to the changed files. Android compiles only in CI."
-        : "No code gate applies to the changed files.";
+      report.reason = noLocalGateReason(gates);
       await checkTree("finish");
       report.verdict = "PASS";
       return report;
@@ -1226,6 +1248,10 @@ export async function verify(args) {
       for (const check of report.ciEvidence ?? [])
         console.log(
           `[verification] ${check} runs only in CI. A merge needs its passing PR checks run for ${report.commit}.`,
+        );
+      for (const check of report.ciAdvisory ?? [])
+        console.log(
+          `[verification] ${check} runs only in CI and is advisory: this run did not perform it, and a merge does not need it.`,
         );
       if (report.repositoryTests === "test:repo:tree")
         console.log(

@@ -464,6 +464,9 @@ function workflowExpression(
   );
 }
 
+// The iOS job runs on its one free macOS label; every other job follows the runner switch.
+const switchedJobs = (jobs) => Object.entries(jobs).filter(([name]) => name !== "ios");
+
 function workflowContext({
   enabled = "",
   event = "pull_request",
@@ -472,12 +475,14 @@ function workflowContext({
   gate = "all",
   size = "4",
   provider = "github",
+  privateRepository = false,
 } = {}) {
   return {
     github: {
       event_name: event,
       repository: "dohchq/dohc",
       event: {
+        repository: { private: privateRepository },
         pull_request: {
           draft,
           head: { repo: { full_name: fork ? "contributor/dohc" : "dohchq/dohc" } },
@@ -507,7 +512,7 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
       for (const fork of [false, true]) {
         const context = workflowContext({ enabled, draft, fork });
         assert.equal(workflowExpression(document.jobs.changes.if, context), !draft && !fork);
-        for (const [name, job] of Object.entries(document.jobs)) {
+        for (const [name, job] of switchedJobs(document.jobs)) {
           assert.deepEqual(workflowExpression(job["runs-on"], context), ["ubuntu-24.04"], name);
         }
       }
@@ -520,7 +525,7 @@ test("ready same-repository PRs and manual runs use GitHub Ubuntu unless Blacksm
     );
     const manual = workflowContext({ enabled, event: "workflow_dispatch", size: "8" });
     assert.equal(workflowExpression(document.jobs.changes.if, manual), true);
-    for (const [name, job] of Object.entries(document.jobs)) {
+    for (const [name, job] of switchedJobs(document.jobs)) {
       assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"], name);
     }
   }
@@ -551,7 +556,7 @@ test("manual Blacksmith selection leaves automatic and default runs unchanged", 
         event: "workflow_dispatch",
         provider: "unknown",
       });
-      for (const [name, job] of Object.entries(document.jobs)) {
+      for (const [name, job] of switchedJobs(document.jobs)) {
         if (name === "javascript-prepare") {
           assert.deepEqual(workflowExpression(job["runs-on"], manual), ["ubuntu-24.04"]);
           continue;
@@ -578,7 +583,7 @@ test("runner selection keeps shared preparation on GitHub in every mode", () => 
           const all =
             enabled === "true" || (event === "workflow_dispatch" && provider === "blacksmith");
           const selectedSize = event === "workflow_dispatch" && size === "8" ? "8" : "4";
-          for (const [name, job] of Object.entries(jobs)) {
+          for (const [name, job] of switchedJobs(jobs)) {
             let expected = "ubuntu-24.04";
             if (name !== "javascript-prepare" && all)
               expected = `blacksmith-${["changes", "verification"].includes(name) ? "2" : selectedSize}vcpu-ubuntu-2404`;
@@ -634,32 +639,38 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
   for (const name of ["rust-tests", "rust"]) assert.equal(jobs[name].needs, "changes");
   for (const js of ["true", "false"])
     for (const rust of ["true", "false"])
-      for (const android of ["true", "false"]) {
-        const context = {
-          ...workflowContext({ enabled: "true" }),
-          needs: { changes: { result: "success", outputs: { js, rust, android } } },
-        };
-        assert.equal(workflowExpression(jobs.javascript.if, context), js === "true");
-        for (const name of ["rust", "rust-tests", "rust-policy"])
-          assert.equal(workflowExpression(jobs[name].if, context), rust === "true");
-        assert.equal(
-          workflowExpression(jobs["javascript-prepare"].if, context),
-          js === "true" || rust === "true",
-        );
-        assert.equal(workflowExpression(jobs.android.if, context), android === "true");
-      }
-  for (const gate of ["all", "js", "rust", "android"]) {
+      for (const android of ["true", "false"])
+        for (const ios of ["true", "false"]) {
+          const context = {
+            ...workflowContext({ enabled: "true" }),
+            needs: { changes: { result: "success", outputs: { js, rust, android, ios } } },
+          };
+          assert.equal(workflowExpression(jobs.javascript.if, context), js === "true");
+          for (const name of ["rust", "rust-tests", "rust-policy"])
+            assert.equal(workflowExpression(jobs[name].if, context), rust === "true");
+          assert.equal(
+            workflowExpression(jobs["javascript-prepare"].if, context),
+            js === "true" || rust === "true",
+          );
+          assert.equal(workflowExpression(jobs.android.if, context), android === "true");
+          assert.equal(workflowExpression(jobs.ios.if, context), ios === "true");
+        }
+  for (const gate of ["all", "js", "rust", "android", "ios"]) {
     const context = {
       ...workflowContext({ event: "workflow_dispatch", gate }),
       needs: { changes: { result: "success", outputs: {} } },
     };
     assert.equal(workflowExpression(jobs.javascript.if, context), gate === "all" || gate === "js");
     assert.equal(workflowExpression(jobs.rust.if, context), gate === "all" || gate === "rust");
-    assert.equal(workflowExpression(jobs["javascript-prepare"].if, context), gate !== "android");
+    assert.equal(
+      workflowExpression(jobs["javascript-prepare"].if, context),
+      ["all", "js", "rust"].includes(gate),
+    );
     assert.equal(
       workflowExpression(jobs.android.if, context),
       gate === "all" || gate === "android",
     );
+    assert.equal(workflowExpression(jobs.ios.if, context), gate === "all" || gate === "ios");
     for (const result of ["success", "failure", "skipped"]) {
       const selected = {
         ...context,
@@ -796,11 +807,11 @@ test("prepared artifact consumers share preparation's fingerprint environment", 
 
 test("job names match the workflow graph and timeout backstops", () => {
   const { jobs } = load(workflow);
-  // The graph times the distributed gates. Android is one job outside them.
+  // The graph times the distributed gates. Android and iOS are each one job outside them.
   assert.deepEqual(
     Object.keys(CLOUD_JOB_GRAPH).sort(),
     Object.keys(jobs)
-      .filter((name) => !["verification", "android"].includes(name))
+      .filter((name) => !["verification", "android", "ios"].includes(name))
       .sort(),
   );
   for (const [id, node] of Object.entries(CLOUD_JOB_GRAPH)) {
@@ -829,6 +840,7 @@ test("job names match the workflow graph and timeout backstops", () => {
       "rust-policy": 25,
       rust: 55,
       android: 20,
+      ios: 90,
       verification: 10,
     },
   );
@@ -914,7 +926,7 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
     names = Object.keys(jobs);
   assert.equal(
     names.reduce((total, name) => total + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0),
-    24,
+    25,
   );
   const ancestors = (name) => {
     const needs = jobs[name].needs ?? [];
@@ -931,6 +943,7 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
     "javascript-prepare",
     "rust-policy",
     "android",
+    "ios",
   ];
   const concurrent = (simultaneous) => {
     assert.ok(
@@ -951,9 +964,9 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
       simultaneous.reduce((n, name) => n + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0),
     );
   }
-  assert.equal(concurrent(initial), JS_SHARDS + RUST_SHARDS + 3);
+  assert.equal(concurrent(initial), JS_SHARDS + RUST_SHARDS + 4);
   assert.equal(peak, concurrent(initial));
-  assert.equal(peak, 22);
+  assert.equal(peak, 23);
   assert.ok(peak <= 60, "one combined gate fits the plan limit");
 });
 
@@ -1208,6 +1221,16 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     run({ ...androidOnly, android: { result: "failure" } }, "workflow_dispatch", "android").status,
     1,
   );
+  // The iOS job is advisory, so the verdict doesn't need it. An iOS-only dispatch starts no gate the verdict reads.
+  assert.ok(!job.needs.includes("ios"));
+  const iosOnly = jobs(undefined, undefined, "skipped", "skipped", "skipped");
+  assert.equal(run(iosOnly, "workflow_dispatch", "ios").status, 0);
+  for (const name of ["javascript", "rust", "javascript-prepare", "android"])
+    assert.equal(
+      run({ ...iosOnly, [name]: { result: "success" } }, "workflow_dispatch", "ios").status,
+      1,
+      name,
+    );
   const failedJavascript = run(
     jobs("true", "true", "failure", "success", "success"),
     "pull_request",
@@ -1275,6 +1298,99 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
       "unselected job timestamps are unnecessary",
     );
   }
+});
+
+test("the iOS job runs the sample UI tests on the free standard macOS runner, without secrets", () => {
+  const { jobs } = load(workflow);
+  const job = jobs.ios;
+  assert.equal(job.name, "iOS sample UI tests");
+  assert.equal(job.needs, "changes");
+  assert.equal(job["runs-on"], "xcode-27", "a larger, Blacksmith, or custom runner bills");
+  assert.equal(job["timeout-minutes"], 90);
+  assert.equal(job.defaults.run.shell, "bash", "bash runs without the profile");
+  assert.equal(job.env.DEVELOPER_DIR, "/Applications/Xcode_27.2.app/Contents/Developer");
+  for (const privateRepository of [false, true]) {
+    const automatic = {
+      ...workflowContext({ privateRepository }),
+      needs: { changes: { result: "success", outputs: { ios: "true" } } },
+    };
+    const manual = {
+      ...workflowContext({ privateRepository, event: "workflow_dispatch", gate: "ios" }),
+      needs: { changes: { result: "success", outputs: {} } },
+    };
+    assert.equal(workflowExpression(job.if, automatic), !privateRepository);
+    assert.equal(workflowExpression(job.if, manual), !privateRepository);
+  }
+  const text = JSON.stringify(job);
+  assert.doesNotMatch(text, /secrets\./u);
+  for (const env of [job.env, ...job.steps.map((step) => step.env)])
+    assert.equal(Object.hasOwn(env ?? {}, "EXPO_PUBLIC_DOHC_PHONE_WRITES"), false);
+  for (const step of job.steps.filter((step) => step.uses))
+    assert.match(step.uses, /^[\w./-]+@[0-9a-f]{40}(?: |$)/u, step.uses);
+  const step = (name) => job.steps.find((candidate) => candidate.name === name);
+  for (const [name, minutes] of [
+    ["Generate the iOS project and its UI test target", 15],
+    ["Build the sample app and its UI tests", 30],
+    ["Run the UI tests in light, then dark", 40],
+  ])
+    assert.equal(step(name)["timeout-minutes"], minutes, name);
+  assert.match(
+    step("Build the sample app and its UI tests").run,
+    /EXPO_PUBLIC_DOHC_SAMPLE=1 xcodebuild build-for-testing/u,
+  );
+  const tests = step("Run the UI tests in light, then dark").run;
+  assert.match(tests, /for appearance in light dark/u);
+  assert.match(tests, /node scripts\/verification\/ios-ui\.mjs check /u);
+  // setup-node's cache saves on every run; this job saves only by its own rules.
+  assert.equal(
+    job.steps.find((candidate) => candidate.uses?.startsWith("actions/setup-node@")).with.cache,
+    undefined,
+  );
+  const restores = job.steps.filter((candidate) =>
+    candidate.uses?.startsWith("actions/cache/restore@"),
+  );
+  const saves = job.steps.filter((candidate) => candidate.uses?.startsWith("actions/cache/save@"));
+  assert.equal(restores.length, 2);
+  assert.equal(saves.length, 2);
+  for (const cache of [...restores, ...saves])
+    assert.doesNotMatch(
+      cache.with.path,
+      /apps\/mobile\/ios/u,
+      "the generated project is never cached",
+    );
+  for (const restore of restores) assert.equal(restore.if, "inputs.cache != 'cold'");
+  for (const save of saves) assert.match(save.if, /^steps\.cache-size\.outputs\./u);
+  const sizes = job.steps.find((candidate) => candidate.id === "cache-size");
+  for (const event of ["pull_request", "workflow_dispatch"])
+    for (const ref of ["main", "feature"])
+      for (const cache of ["warm", "cold"])
+        for (const enabled of ["true", ""]) {
+          const context = workflowContext({ event });
+          context.github.ref_name = ref;
+          context.github.event.repository.default_branch = "main";
+          context.inputs = { ...context.inputs, cache };
+          context.vars = { IOS_CACHE_SAVES_ENABLED: enabled };
+          assert.equal(
+            workflowExpression(sizes.if, context),
+            event === "workflow_dispatch" &&
+              ref === "main" &&
+              cache === "warm" &&
+              enabled === "true",
+            JSON.stringify({ event, ref, cache, enabled }),
+          );
+        }
+  assert.ok(
+    job.steps.indexOf(sizes) > job.steps.indexOf(step("Run the UI tests in light, then dark")),
+  );
+  const upload = job.steps.find((candidate) =>
+    candidate.uses?.startsWith("actions/upload-artifact@"),
+  );
+  assert.equal(upload.if, "always()");
+  assert.equal(upload.with["retention-days"], 7);
+  assert.equal(upload.with.path, "${{ runner.temp }}/dohc-ios");
+  assert.ok(job.steps.indexOf(upload) > job.steps.indexOf(saves.at(-1)));
+  assert.equal(job.steps.at(-1).name, "Delete the simulator");
+  assert.match(job.steps.at(-1).if, /^always\(\)/u);
 });
 
 // A run's readings: the tree before the first step, then after each step. A

@@ -151,9 +151,9 @@ function gatesFromFilters(files, filters, names) {
   return Object.fromEntries(names.map((name) => [name, matchesFilter(files, filters[name])]));
 }
 
-/** The gates a change selects. Rust and JavaScript also run locally; Android compiles only in CI. */
+/** The gates a change selects. Rust and JavaScript also run locally; Android and iOS run only in CI. */
 export function selectedGates(files, workflow) {
-  return gatesFromFilters(files, workflowFilters(workflow), ["rust", "js", "android"]);
+  return gatesFromFilters(files, workflowFilters(workflow), ["rust", "js", "android", "ios"]);
 }
 
 /** Whether a change reaches a file that the repository tests read, so the JavaScript gate runs every one of them. */
