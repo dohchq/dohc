@@ -30,7 +30,8 @@ export function createDirectStore(api: Api) {
   let sessionKey: string | null | undefined;
   let reading = false;
   let again = false;
-  let stopEvents: (() => void) | null = null;
+  let stopChanged: (() => void) | null = null;
+  let followingSession = false;
   // The newest seq this computer told the server it read, per conversation.
   const readSent = new Map<string, number>();
   // Unsent typing and each failed send's id, so Try again never sends twice.
@@ -79,9 +80,12 @@ export function createDirectStore(api: Api) {
     }
   }
 
-  function startEvents() {
-    const offChanged = api.onDirectChanged(() => void refresh());
-    const offSession = api.onCloudSessionChanged(({ sessionKey: key, phase }) => {
+  // Account changes are followed for the store's whole life, not only while a view shows it.
+  // Otherwise a switch made with Chats closed would leave the last account's list and words here.
+  function followSession() {
+    if (followingSession) return;
+    followingSession = true;
+    api.onCloudSessionChanged(({ sessionKey: key, phase }) => {
       // The first event counts too: a read started before it may be for the account signed in before.
       if (key !== sessionKey) {
         sessionKey = key;
@@ -91,12 +95,8 @@ export function createDirectStore(api: Api) {
         unsent.clear();
         set({ status: "loading" });
       }
-      if (phase === "ready") void refresh();
+      if (phase === "ready" && listeners.size > 0) void refresh();
     });
-    stopEvents = () => {
-      offChanged();
-      offSession();
-    };
   }
 
   return {
@@ -104,15 +104,16 @@ export function createDirectStore(api: Api) {
     session: () => session,
     subscribe(listener: () => void): () => void {
       listeners.add(listener);
-      if (!stopEvents) {
-        startEvents();
+      followSession();
+      if (!stopChanged) {
+        stopChanged = api.onDirectChanged(() => void refresh());
         void refresh();
       }
       return () => {
         listeners.delete(listener);
         if (listeners.size === 0) {
-          stopEvents?.();
-          stopEvents = null;
+          stopChanged?.();
+          stopChanged = null;
         }
       };
     },
