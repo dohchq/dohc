@@ -207,7 +207,9 @@ describe("direct message routes", () => {
     // The blocker can still write, and the earlier message stays.
     expect(await sent(h, "ana", { conversationId }, "from ana")).toBe(conversationId);
     expect(await bodies(h, "ana", conversationId)).toEqual(["before the block", "from ana"]);
-    expect((await post(h, "ana", `/sync/direct/conversations/${conversationId}/block`, { personId: OWNER, blocked: false })).status).toBe(200);
+    // A block belongs to the account, so a group the two share undoes it too.
+    const group = await sent(h, "ana", { people: [pick("owner"), pick(bea)] }, "group from ana");
+    expect((await post(h, "ana", `/sync/direct/conversations/${group}/block`, { personId: OWNER, blocked: false })).status).toBe(200);
     expect(await sent(h, OWNER, { conversationId }, "after")).toBe(conversationId);
   });
 
