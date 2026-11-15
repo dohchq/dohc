@@ -338,6 +338,62 @@ describe("merge materialization order", () => {
 
   // The engine places each text merge on disk before the next one starts.
 
+  // Members see a folder through its rule, so Main never journals a file
+  // before its folder's rule, or after that rule's delete.
+  it("merges rules before the files they cover and their deletes after them", async () => {
+    const root = await createTestScratch("dohc-rule-merge-order-");
+    const loopback = new VersionedLoopbackEngine();
+    const send = loopback.sendRequest.bind(loopback);
+    const merged: string[] = [];
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async (request) => {
+      if (request.method === "conflicts.list") {
+        return { id: request.id, result: { conflicts: [], nextAfterConflictId: null } };
+      }
+      if (request.method === VERSIONED_METHOD.versionsMerge) {
+        merged.push((request.params as { path: string }).path);
+      }
+      return await send(request);
+    });
+    const removed = ["crew/access.yaml", "crew/a.md", "crew/sub/access.yaml"];
+    for (const path of removed) {
+      loopback.seedTextFile({ workspace: WORKSPACE_ID, path, text: "old\n" });
+      await write(root, path, "old\n");
+    }
+    const sessions = mockLiveSessions(loopback);
+    const stores = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    );
+    const engine = capture(root, { store: stores.store, rustEngineSessions: sessions });
+    try {
+      const draftId = (await engine.createVersion("Draft")).activeVersionId;
+      for (const path of removed) {
+        await stores.store.deleteTextFile({
+          workspaceId: WORKSPACE_ID,
+          versionId: draftId,
+          path,
+          metadata: { origin: "api" },
+        });
+      }
+      for (const path of ["team/Z.md", "team/sub/ACCESS.yaml", "team/access.yaml"]) {
+        loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: draftId, path, text: "new\n" });
+      }
+      await engine.switchVersion("main");
+
+      await engine.mergeVersionIntoMain(draftId);
+      expect(merged).toEqual([
+        "team/access.yaml",
+        "team/sub/ACCESS.yaml",
+        "crew/a.md",
+        "team/Z.md",
+        "crew/sub/access.yaml",
+        "crew/access.yaml",
+      ]);
+    } finally {
+      await engine.stop();
+    }
+  });
+
   it.each([
     ["names a failure after a file reached Main as stopped partway", 2, true],
     ["passes on a failure before any file reached Main", 1, false],

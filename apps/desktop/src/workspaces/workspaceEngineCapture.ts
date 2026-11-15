@@ -39,6 +39,7 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 // The path floor is a cross-process security contract with a Rust twin, not
 // engine state — the same reason workspaceFiles/workspaceSearch
 // and the relay's shareFilter already read it from here.
+import { isAccessRulePath } from "@dohc/security-contract/access-rules";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
   VersionedTextStoreError,
@@ -7664,7 +7665,25 @@ export function createWorkspaceEngineCapture(
         const respelled = new Set(
           deletedPaths.filter((path) => writtenKeys.has(pathCollisionKey(path))),
         );
-        const mergeOrder = [...respelled, ...changedPaths.filter((path) => !respelled.has(path))];
+        // A folder's rule merges before the files it covers, outer folders
+        // first, and its delete after them, inner folders first, so Main
+        // never journals a file its rule does not cover yet. A respelled
+        // rule's old spelling goes with the deletes: the engine keeps a file
+        // on disk that another head still reaches.
+        const depth = (path: string) => path.split("/").length;
+        const ruleWrites = changedPaths
+          .filter((path) => isAccessRulePath(path) && !deleted.has(path))
+          .sort((a, b) => depth(a) - depth(b));
+        const ruleDeletes = deletedPaths
+          .filter(isAccessRulePath)
+          .sort((a, b) => depth(b) - depth(a));
+        const mergeOrder = [
+          ...ruleWrites,
+          ...[...respelled, ...changedPaths.filter((path) => !respelled.has(path))].filter(
+            (path) => !isAccessRulePath(path),
+          ),
+          ...ruleDeletes,
+        ];
         // Re-running the merge resumes: a path that already has an open
         // conflict for this version pair re-surfaces that conflict instead of
         // recording a duplicate. Only the paths are retained from the walk.
