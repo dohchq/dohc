@@ -85,6 +85,7 @@ it("keeps Notices open on a step that runs in place, with focus on its row and t
   const opens = (id: string) =>
     screen.getByTestId(`notice-${id}`).querySelector("[data-notice-open]");
   expect(document.activeElement).toBe(opens("held"));
+  expect(within(screen.getByTestId("notice-held")).getByRole("status").textContent).toBe("");
 
   // Working: the row stays in Notices, its steps wait, and focus stays on it.
   const busy = { ...held, additionalActionLabels: ["Allowing…"], actionBusy: 1 };
@@ -100,6 +101,10 @@ it("keeps Notices open on a step that runs in place, with focus on its row and t
       .hasAttribute("disabled"),
   ).toBe(true);
   expect(document.activeElement).toBe(opens("held"));
+  // A screen reader hears the step start, from a region that was there before it.
+  expect(within(screen.getByTestId("notice-held")).getByRole("status").textContent).toBe(
+    "Allowing…",
+  );
 
   // Done: the outcome files while the row still waits, then the row goes.
   const done: WorkspaceErrorNotice = {

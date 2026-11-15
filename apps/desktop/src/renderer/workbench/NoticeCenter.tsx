@@ -1316,6 +1316,10 @@ export function LocalNoticeRow(props: {
                   ))}
                   {text.copy.action}
                 </div>
+                {/* A step that runs in place, such as Restoring…, is read out as it starts. */}
+                <span role="status" data-testid={`notice-${notice.id}-running`} className="sr-only">
+                  {notice.actions?.find((action) => action.busy)?.label ?? ""}
+                </span>
                 {notice.actions?.map((action, index) =>
                   action.reason === undefined ? null : (
                     <p
