@@ -1,0 +1,369 @@
+//! A folder's access rule, read from the `access.yaml` inside it.
+//!
+//! The twin of `packages/security-contract/src/accessRules.ts`. Both read
+//! `accessRules.vectors.json` in their tests, so a rule means the same thing
+//! to the engine that publishes it and the relay that enforces it. The engine
+//! needs the parser and the narrowing check to order rule changes before the
+//! files they cover; the relay owns evaluation.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::floor::path_collision_key;
+
+pub const ACCESS_RULE_FILE: &str = "access.yaml";
+pub const ACCESS_RULE_MAX_BYTES: usize = 64 * 1024;
+pub const ACCESS_RULE_MAX_PEOPLE: usize = 1_000;
+const MAX_EMAIL_UTF16_UNITS: usize = 320;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    View,
+    Comment,
+    Edit,
+}
+
+impl Level {
+    fn parse(word: &str) -> Option<Self> {
+        match word {
+            "view" => Some(Self::View),
+            "comment" => Some(Self::Comment),
+            "edit" => Some(Self::Edit),
+            _ => None,
+        }
+    }
+}
+
+/// `members` is the level for a member no person entry names; `None` leaves
+/// them out, which hides the folder. `people` is keyed by normalized email.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct AccessRule {
+    pub members: Option<Level>,
+    pub people: BTreeMap<String, Level>,
+}
+
+fn last_segment_key(path: &str) -> String {
+    path_collision_key(path.rsplit('/').next().unwrap_or(path))
+}
+
+/// Whether this file is a folder's rule, however the filesystem spells it.
+pub fn is_access_rule_path(path: &str) -> bool {
+    last_segment_key(path) == ACCESS_RULE_FILE
+}
+
+/// Whether this file is a rule or an editor's copy of one.
+pub fn is_access_rule_related_path(path: &str) -> bool {
+    last_segment_key(path).contains(ACCESS_RULE_FILE)
+}
+
+/// The folder a rule file belongs to: "" for the workspace root.
+pub fn access_rule_folder(path: &str) -> &str {
+    path.rfind('/').map_or("", |slash| &path[..slash])
+}
+
+// JavaScript's `\s` and `trim()` set, so both twins split the same way.
+const JS_SPACES: &[char] = &[
+    '\t', '\n', '\u{0B}', '\u{0C}', '\r', ' ', '\u{A0}', '\u{1680}', '\u{2028}', '\u{2029}',
+    '\u{202F}', '\u{205F}', '\u{3000}', '\u{FEFF}',
+];
+
+fn is_js_space(c: char) -> bool {
+    JS_SPACES.contains(&c) || ('\u{2000}'..='\u{200A}').contains(&c)
+}
+
+fn js_trim(text: &str) -> &str {
+    text.trim_matches(is_js_space)
+}
+
+// YAML separates tokens with spaces and tabs only; any other space belongs to
+// the scalar it sits in, so a no-break space can't pass for one.
+fn is_yaml_space(c: char) -> bool {
+    c == ' ' || c == '\t'
+}
+
+/// A line holding only a comment, or nothing.
+fn line_skipped(raw: &str) -> bool {
+    let rest = raw.trim_start_matches(is_yaml_space);
+    rest.is_empty() || rest.starts_with('#')
+}
+
+/// What may follow a value: nothing, or a comment after at least one space.
+fn line_end(rest: &str) -> bool {
+    let after = rest.trim_start_matches(is_yaml_space);
+    after.is_empty() || (after.starts_with('#') && after.len() < rest.len())
+}
+
+/// The one form rule keys and account emails are compared in.
+pub fn normalize_rule_email(email: &str) -> String {
+    js_trim(email).to_lowercase()
+}
+
+fn looks_like_email(value: &str) -> bool {
+    let Some(at) = value.find('@') else {
+        return false;
+    };
+    value.encode_utf16().count() <= MAX_EMAIL_UTF16_UNITS
+        && at > 0
+        && value.rfind('@') == Some(at)
+        && at + 1 < value.len()
+        && !value.chars().any(is_js_space)
+}
+
+/// A scalar: plain, or quoted with no escapes. The scalar and the rest of the line.
+fn read_scalar(text: &str, stop_at_colon: bool) -> Option<(&str, &str)> {
+    if let Some(quote) = text.chars().next().filter(|c| *c == '"' || *c == '\'') {
+        let end = text[1..].find(quote)? + 1;
+        let value = &text[1..end];
+        if quote == '"' && value.contains('\\') {
+            return None;
+        }
+        return Some((value, &text[end + 1..]));
+    }
+    let mut end = text.len();
+    let mut previous: Option<char> = None;
+    for (index, c) in text.char_indices() {
+        if (stop_at_colon && c == ':') || (c == '#' && previous.is_none_or(is_yaml_space)) {
+            end = index;
+            break;
+        }
+        previous = Some(c);
+    }
+    let value = text[..end].trim_end_matches(is_yaml_space);
+    let first = value.chars().next()?;
+    if "&*!|>%@`{[]},?-".contains(first) {
+        return None;
+    }
+    Some((value, &text[value.len()..]))
+}
+
+enum Line<'a> {
+    Skip,
+    Entry {
+        indent: usize,
+        key: &'a str,
+        value: Option<&'a str>,
+    },
+}
+
+fn read_line(raw: &str) -> Option<Line<'_>> {
+    if line_skipped(raw) {
+        return Some(Line::Skip);
+    }
+    let body = raw.trim_start_matches(is_yaml_space);
+    let indentation = &raw[..raw.len() - body.len()];
+    if indentation.contains('\t') {
+        return None;
+    }
+    let (key, rest) = read_scalar(body, true)?;
+    let after_colon = rest.strip_prefix(':')?;
+    if after_colon
+        .chars()
+        .next()
+        .is_some_and(|c| !is_yaml_space(c))
+    {
+        return None;
+    }
+    let indent = indentation.len();
+    if line_end(after_colon) {
+        return Some(Line::Entry {
+            indent,
+            key,
+            value: None,
+        });
+    }
+    let (value, rest) = read_scalar(after_colon.trim_start_matches(is_yaml_space), false)?;
+    if !line_end(rest) {
+        return None;
+    }
+    Some(Line::Entry {
+        indent,
+        key,
+        value: Some(value),
+    })
+}
+
+/// Reads a rule, or `None` when it can't be read. An unreadable rule hides its
+/// folder, so anything outside this small format is refused, not guessed at.
+pub fn parse_access_rule(text: &str) -> Option<AccessRule> {
+    if text.len() > ACCESS_RULE_MAX_BYTES || text.contains('\0') {
+        return None;
+    }
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    let mut rule = AccessRule::default();
+    let (mut saw_members, mut saw_people, mut in_people) = (false, false, false);
+    let mut people_indent = None;
+    for raw in text.split('\n') {
+        let raw = raw.strip_suffix('\r').unwrap_or(raw);
+        let Line::Entry { indent, key, value } = read_line(raw)? else {
+            continue;
+        };
+        if indent == 0 {
+            in_people = false;
+            match (key, value) {
+                ("members", Some(word)) if !saw_members => {
+                    rule.members = Some(Level::parse(word)?);
+                    saw_members = true;
+                }
+                ("people", None) if !saw_people => {
+                    saw_people = true;
+                    in_people = true;
+                }
+                _ => return None,
+            }
+            continue;
+        }
+        if !in_people || *people_indent.get_or_insert(indent) != indent {
+            return None;
+        }
+        let level = Level::parse(value?)?;
+        if !looks_like_email(key) {
+            return None;
+        }
+        let email = normalize_rule_email(key);
+        if rule.people.contains_key(&email) || rule.people.len() >= ACCESS_RULE_MAX_PEOPLE {
+            return None;
+        }
+        rule.people.insert(email, level);
+    }
+    Some(rule)
+}
+
+fn lower(a: Option<Level>, b: Option<Level>) -> Option<Level> {
+    Some(a?.min(b?))
+}
+
+fn level_for_email(rule: &AccessRule, email: &str) -> Option<Level> {
+    rule.people.get(email).copied().or(rule.members)
+}
+
+fn emails<'a>(a: &'a AccessRule, b: &'a AccessRule) -> BTreeSet<&'a str> {
+    a.people
+        .keys()
+        .chain(b.people.keys())
+        .map(String::as_str)
+        .collect()
+}
+
+/// The rule that gives everyone the lower of what `a` and `b` give them.
+pub fn lower_rule(a: &AccessRule, b: &AccessRule) -> AccessRule {
+    let members = lower(a.members, b.members);
+    let people = emails(a, b)
+        .into_iter()
+        .filter_map(|email| {
+            let level = lower(level_for_email(a, email), level_for_email(b, email))?;
+            (Some(level) != members).then(|| (email.to_owned(), level))
+        })
+        .collect();
+    AccessRule { members, people }
+}
+
+/// Whether `next` gives nobody more than `previous` does.
+pub fn rule_only_narrows(previous: &AccessRule, next: &AccessRule) -> bool {
+    lower(previous.members, next.members) == next.members
+        && emails(previous, next).into_iter().all(|email| {
+            let after = level_for_email(next, email);
+            lower(level_for_email(previous, email), after) == after
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(serde::Deserialize)]
+    struct VectorRule {
+        members: Option<String>,
+        people: BTreeMap<String, String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Parsed {
+        name: String,
+        text: String,
+        rule: Option<VectorRule>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Narrowing {
+        name: String,
+        before: String,
+        after: String,
+        narrows: bool,
+        lower: VectorRule,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Vectors {
+        parsed: Vec<Parsed>,
+        narrowing: Vec<Narrowing>,
+    }
+
+    fn level(word: &str) -> Level {
+        Level::parse(word).expect("a level word")
+    }
+
+    fn expected(rule: VectorRule) -> AccessRule {
+        AccessRule {
+            members: rule.members.as_deref().map(level),
+            people: rule
+                .people
+                .into_iter()
+                .map(|(email, word)| (email, level(&word)))
+                .collect(),
+        }
+    }
+
+    fn vectors() -> Vectors {
+        serde_json::from_str(include_str!(
+            "../../../packages/security-contract/src/accessRules.vectors.json"
+        ))
+        .expect("shared access rule vectors")
+    }
+
+    #[test]
+    fn parses_the_shared_vectors_as_the_relay_does() {
+        for case in vectors().parsed {
+            assert_eq!(
+                parse_access_rule(&case.text),
+                case.rule.map(expected),
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn narrows_and_lowers_the_shared_vectors_as_the_relay_does() {
+        for case in vectors().narrowing {
+            let before = parse_access_rule(&case.before).expect("readable before");
+            let after = parse_access_rule(&case.after).expect("readable after");
+            assert_eq!(
+                rule_only_narrows(&before, &after),
+                case.narrows,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                lower_rule(&before, &after),
+                expected(case.lower),
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_rule_over_the_size_cap() {
+        let text = format!("members: view\n#{}\n", "x".repeat(ACCESS_RULE_MAX_BYTES));
+        assert_eq!(parse_access_rule(&text), None);
+    }
+
+    #[test]
+    fn knows_a_rule_however_it_is_spelled_and_its_copies() {
+        assert!(is_access_rule_path("a/ACCESS.yaml"));
+        assert!(!is_access_rule_path("a/access.yaml~"));
+        assert!(is_access_rule_related_path("a/#access.yaml#"));
+        assert!(!is_access_rule_related_path("a/access.yml"));
+        assert_eq!(access_rule_folder("a/b/access.yaml"), "a/b");
+        assert_eq!(access_rule_folder("access.yaml"), "");
+    }
+}
