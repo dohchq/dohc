@@ -213,6 +213,28 @@ pub fn install_moment_order_check(check: std::rc::Rc<MomentOrderCheck>) {
     MOMENT_ORDER_CHECK.with(|slot| *slot.borrow_mut() = Some(check));
 }
 
+thread_local! {
+    static REPLAYING_HISTORY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this thread is journaling history committed before the workspace
+/// replicated. Enrolment orders those moments itself, rules first, so the
+/// check needs only to stop a rule on disk the store has not committed.
+pub fn replaying_history() -> bool {
+    REPLAYING_HISTORY.with(std::cell::Cell::get)
+}
+
+pub(crate) fn replay_history<R>(work: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REPLAYING_HISTORY.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(REPLAYING_HISTORY.with(|cell| cell.replace(true)));
+    work()
+}
+
 fn check_moment_order(
     tx: &Transaction<'_>,
     workspace_id: &str,

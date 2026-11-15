@@ -529,10 +529,10 @@ fn backfill_moments_between(
     // still exists while first-position backfill runs. Exclude only a matching
     // coordinate with no refusal. Retained CRDT state supersedes file history,
     // so covered heads have their own strict projection proof.
-    let moment_ids: Vec<String> = {
+    let moments: Vec<Backfilled> = {
         let mut statement = tx
             .prepare(concat!(
-                "SELECT m.moment_id FROM moments m \
+                "SELECT m.moment_id, m.version_id, m.object_id, m.path FROM moments m \
                  WHERE m.workspace_id=?1 AND ",
                 dohc_engine_domain::exclude_capture_recovery_sql!("m"),
                 " \
@@ -567,16 +567,169 @@ fn backfill_moments_between(
         statement
             .query_map(
                 params![workspace_id, after_moment_order, through_moment_order],
-                |row| row.get(0),
+                |row| {
+                    Ok(Backfilled {
+                        moment_id: row.get(0)?,
+                        version_id: row.get(1)?,
+                        object_id: row.get(2)?,
+                        path: row.get(3)?,
+                    })
+                },
             )
             .map_err(SyncError::corrupt)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(SyncError::corrupt)?
     };
-    for moment_id in moment_ids {
-        journal_moment_append_in_tx(tx, workspace_id, &moment_id)?;
+    let moment_ids = rules_first(tx, workspace_id, moments)?;
+    crate::journal::replay_history(|| {
+        for moment_id in moment_ids {
+            journal_moment_append_in_tx(tx, workspace_id, &moment_id)?;
+        }
+        Ok(())
+    })
+}
+
+struct Backfilled {
+    moment_id: String,
+    version_id: String,
+    object_id: String,
+    path: String,
+}
+
+/// A rule file's history, as one object.
+struct RuleObject {
+    version_id: String,
+    folder: String,
+    /// The moment that deleted it, when nothing at its path stands now.
+    removed_by: Option<(i64, String)>,
+}
+
+/// Order backfilled moments so members, who pull between push batches,
+/// never see a file before the rule over it, nor after a rule that covered
+/// it was removed. Each rule object's moments go first, in their own order.
+/// The last delete of a rule whose folder has no rule now goes last, after
+/// the files it covered. Everything else keeps its order.
+///
+/// A file moved into or out of a rule's name keeps its place: rules never
+/// rename now, and only such old history has one.
+fn rules_first(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moments: Vec<Backfilled>,
+) -> Result<Vec<String>, SyncError> {
+    use dohc_engine_files::access_rules::{is_access_rule_path, is_rule_of};
+    use std::collections::{HashMap, HashSet};
+    let mut rules: HashMap<(&str, &str), RuleObject> = HashMap::new();
+    for moment in moments.iter().filter(|m| is_access_rule_path(&m.path)) {
+        let key = (moment.version_id.as_str(), moment.object_id.as_str());
+        if rules.contains_key(&key) {
+            continue;
+        }
+        if let Some(rule) = rule_object(tx, workspace_id, key.0, key.1)? {
+            rules.insert(key, rule);
+        }
     }
-    Ok(())
+    let mut removals: HashMap<(&str, &str), &(i64, String)> = HashMap::new();
+    for rule in rules.values() {
+        if let Some(removed) = &rule.removed_by {
+            let last = removals
+                .entry((rule.version_id.as_str(), rule.folder.as_str()))
+                .or_insert(removed);
+            if removed.0 > last.0 {
+                *last = removed;
+            }
+        }
+    }
+    let mut last = HashSet::new();
+    for ((version, folder), (_, moment_id)) in removals {
+        let (low, high) = if folder.is_empty() {
+            (String::new(), "\u{10FFFF}".to_owned())
+        } else {
+            (format!("{folder}/"), format!("{folder}0"))
+        };
+        let standing = query_rows(
+            tx,
+            "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
+             AND path>=?3 AND path<?4",
+            params![workspace_id, version, low, high],
+            |row| row.get::<_, String>(0),
+        )?;
+        if !standing.iter().any(|path| is_rule_of(path, folder)) {
+            last.insert(moment_id.as_str());
+        }
+    }
+    let (mut first, mut middle, mut after) = (Vec::new(), Vec::new(), Vec::new());
+    for moment in &moments {
+        let key = (moment.version_id.as_str(), moment.object_id.as_str());
+        if last.contains(moment.moment_id.as_str()) {
+            after.push(moment.moment_id.clone());
+        } else if rules.contains_key(&key) {
+            first.push(moment.moment_id.clone());
+        } else {
+            middle.push(moment.moment_id.clone());
+        }
+    }
+    first.extend(middle);
+    first.extend(after);
+    Ok(first)
+}
+
+/// The object's history when every moment of it is a rule file's, or `None`.
+fn rule_object(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<Option<RuleObject>, SyncError> {
+    use dohc_engine_files::access_rules::{access_rule_folder, is_access_rule_path};
+    let history = query_rows(
+        tx,
+        "SELECT moment_id, moment_order, path, before_path, operation FROM moments \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY moment_order",
+        params![workspace_id, version_id, object_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        },
+    )?;
+    let rule_only = history.iter().all(|(_, _, path, before, _)| {
+        is_access_rule_path(path) && before.as_deref().is_none_or(is_access_rule_path)
+    });
+    let Some((moment_id, order, path, _, operation)) = history.last().filter(|_| rule_only) else {
+        return Ok(None);
+    };
+    let standing: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
+             AND object_id=?3)",
+            params![workspace_id, version_id, object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(Some(RuleObject {
+        version_id: version_id.to_owned(),
+        folder: access_rule_folder(path).to_owned(),
+        removed_by: (!standing && operation == "delete").then(|| (*order, moment_id.clone())),
+    }))
+}
+
+fn query_rows<T>(
+    tx: &Transaction<'_>,
+    sql: &str,
+    params: impl rusqlite::Params,
+    map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+) -> Result<Vec<T>, SyncError> {
+    let mut statement = tx.prepare_cached(sql).map_err(SyncError::corrupt)?;
+    statement
+        .query_map(params, map)
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)
 }
 
 pub(crate) fn file_version_is_publishable_in_tx(

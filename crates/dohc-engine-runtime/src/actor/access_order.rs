@@ -444,6 +444,20 @@ fn admit(
     deletes: bool,
 ) -> Result<(), SyncError> {
     let own_rule = is_access_rule_path(path).then(|| access_rule_folder(path));
+    if dohc_engine_sync::replaying_history() {
+        // Enrolment puts committed history in order itself, rules first.
+        // Only a rule on disk the store has not committed stops a file.
+        if own_rule.is_none() {
+            for folder in folders_of(path) {
+                if clearance(workspace, version, folder).is_none() {
+                    let clearance =
+                        judge_in_tx(tx, root, workspace, version, folder, false, deletes)?;
+                    set(workspace, version, folder, clearance);
+                }
+            }
+        }
+        return Ok(());
+    }
     // Deleting one of several files that spell a folder's rule changes the
     // rule rather than removing it.
     let deletes = match own_rule {
@@ -1658,6 +1672,136 @@ impl ActorHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Enrolment backfills history recorded before the workspace replicated.
+    /// Rules go before the files they cover, and the last delete of a rule
+    /// since removed goes after them. A rule removed and written again in one
+    /// folder replays as it happened, which the in-command order would refuse.
+    #[test]
+    fn enrolment_backfills_rules_before_their_files() {
+        use dohc_engine_domain::{DeleteTextFile, VersionedTextStore, WriteText};
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let db = dohc_engine_testkit::engine_db_path(&scratch).unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        let (view, nobody) = ("members: view\n", "people: {}\n");
+        let history: [(&str, Option<&str>); 14] = [
+            ("team/a.md", Some("alpha")),
+            ("team/access.yaml", Some(view)),
+            ("crew/access.yaml", Some(nobody)),
+            ("crew/b.md", Some("beta")),
+            ("crew/b.md", None),
+            ("crew/access.yaml", None),
+            ("ops/access.yaml", Some(view)),
+            ("ops/access.yaml", None),
+            ("ops/access.yaml", Some(nobody)),
+            ("ops/c.md", Some("gamma")),
+            ("dev/access.yaml", Some(view)),
+            ("dev/access.yaml", None),
+            ("dev/access.yaml", Some(nobody)),
+            ("dev/access.yaml", None),
+        ];
+        for (index, (path, text)) in history.into_iter().enumerate() {
+            let moment_id = format!("m-{index}");
+            let mut versioned = VersionedTextStore::new(&mut store);
+            match text {
+                Some(text) => drop(
+                    versioned
+                        .write_text(
+                            &WriteText {
+                                workspace_id: "ws".to_owned(),
+                                version_id: "main".to_owned(),
+                                object_id: format!("object-{index}"),
+                                path: path.to_owned(),
+                                text: text.to_owned(),
+                                moment_id,
+                                metadata_origin: "cli".to_owned(),
+                                metadata_summary: None,
+                                metadata_correlation_id: None,
+                                author_json: None,
+                                now_ms: 10,
+                                request_id: None,
+                            },
+                            &NoFaults,
+                        )
+                        .unwrap(),
+                ),
+                None => drop(
+                    versioned
+                        .delete_text_file(
+                            &DeleteTextFile {
+                                workspace_id: "ws".to_owned(),
+                                version_id: "main".to_owned(),
+                                path: path.to_owned(),
+                                moment_id,
+                                request_id: None,
+                                metadata_origin: "cli".to_owned(),
+                                metadata_summary: None,
+                                metadata_correlation_id: None,
+                                author_json: None,
+                                now_ms: 10,
+                            },
+                            &NoFaults,
+                        )
+                        .unwrap(),
+                ),
+            }
+        }
+        install(&db, Arc::new(AccessRuleSignals::default()));
+        begin_command();
+        dohc_engine_sync::adopt_join_identity(
+            &mut store, "ws", "local", "epoch", "stream", 20, &NoFaults,
+        )
+        .unwrap();
+        dohc_engine_sync::commit_relay_cursor(
+            &mut store,
+            "ws",
+            &dohc_engine_sync::RelayCursor {
+                cursor: 1,
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                bootstrap_complete: true,
+                settlement_report_id: None,
+                ordinary_pull: None,
+            },
+            &NoFaults,
+            &dohc_engine_sync::NoLiveLeases,
+            30,
+        )
+        .expect("enrol");
+        let journal: Vec<String> = store
+            .read_with(|conn| {
+                conn.prepare(
+                    "SELECT json_extract(payload_json,'$.operation') || ' ' || \
+                     json_extract(payload_json,'$.path') FROM replication_log \
+                     WHERE workspace_id='ws' AND op_kind='moment.append' ORDER BY origin_seq",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()
+            })
+            .unwrap();
+        assert_eq!(
+            journal,
+            [
+                "write team/access.yaml",
+                "write crew/access.yaml",
+                "write ops/access.yaml",
+                "delete ops/access.yaml",
+                "write ops/access.yaml",
+                "write dev/access.yaml",
+                "delete dev/access.yaml",
+                "write dev/access.yaml",
+                "write team/a.md",
+                "write crew/b.md",
+                "delete crew/b.md",
+                "write ops/c.md",
+                "delete crew/access.yaml",
+                "delete dev/access.yaml",
+            ]
+        );
+    }
 
     fn committed(files: &[(&str, &str)]) -> Committed {
         Committed {
