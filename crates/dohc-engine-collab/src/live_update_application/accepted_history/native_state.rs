@@ -495,13 +495,15 @@ fn parse(
     // ingress. Stream them too: no universal smaller after-acceptance range cap.
     // The stored byte length bounds count and the canonical 76-byte range bound
     // bounds raw metadata; no range-count-sized allocation is made.
+    // A checkpointed save carries an author snapshot and coverage authors,
+    // each up to 128 KiB.
     let limit = count
         .checked_add(usize::try_from(extra_ranges).map_err(|_| ApplicationError::Corrupt)?)
         .and_then(|n| n.checked_mul(76))
         .and_then(|n| {
             n.checked_add(
                 NativeHistoryReconstruction::HEADER_BYTES * (if application { 2 } else { 1 })
-                    + 128 * 1024
+                    + 2 * 128 * 1024
                     + 32,
             )
         })

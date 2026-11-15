@@ -236,6 +236,15 @@ pub fn clear_in_tx(
 ) -> Result<Option<OwnerLiveStop>, OwnerOutboxError> {
     let cleared = read_in(tx, key).ok().flatten();
     let copy = copy_digest_in(tx, key)?;
+    // Until the copy is on disk, its blob is the only place that text lives.
+    if copy.is_some()
+        && cleared
+            .as_ref()
+            .and_then(|stop| stop.paused.as_ref())
+            .is_some_and(|paused| !paused.copy_written)
+    {
+        return Err(OwnerOutboxError::StopConflict);
+    }
     tx.execute("DELETE FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id]).map_err(write_sql)?;
     if let Some(digest) = copy {
         delete_binary_blob_if_unreferenced(tx, &digest)?;
@@ -471,7 +480,8 @@ pub struct OwnerPauseInput {
     pub binding: LiveObjectBinding,
     /// A: the last applied frame the route sent.
     pub applied_cursor: i64,
-    /// N: the last committed row it sent; A when it sent none.
+    /// N: the last committed row it sent; A when it sent none. A save can
+    /// cover rows the layer still holds, so N can be below A.
     pub row_cursor: i64,
     /// A free name next to the note, chosen by the desktop.
     pub copy_path: String,
@@ -520,7 +530,8 @@ fn pause_in_tx(
     binding
         .validate_canonical()
         .map_err(OwnerOutboxError::InvalidInput)?;
-    if !(0..=input.row_cursor).contains(&input.applied_cursor)
+    if input.applied_cursor < 0
+        || input.row_cursor < 0
         || input.copy_path.is_empty()
         || !(0..=9_007_199_254_740_991).contains(&input.now_ms)
     {
@@ -545,7 +556,7 @@ fn pause_in_tx(
         .map_err(|_| OwnerOutboxError::Corrupt)?;
     // The route reconnects and sends again until the note holds A and the
     // rows through N are here.
-    let rows_through_n = input.row_cursor == input.applied_cursor
+    let rows_through_n = input.row_cursor <= input.applied_cursor
         || layer.is_some_and(|layer| layer.holds_row(binding, input.row_cursor));
     if observed.accepted_cursor != input.applied_cursor || !rows_through_n {
         return Err(OwnerOutboxError::AcceptedStateIncomplete);
@@ -566,6 +577,24 @@ fn pause_in_tx(
         )
         .map_err(read_sql)?;
     if held {
+        return Err(OwnerOutboxError::StopConflict);
+    }
+    // The copy holds only the current draft, and the pause frees every outbox
+    // of this generation. Refused edits there must be kept edits first.
+    let refused: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outboxes o WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND (o.state='quarantined' OR EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e WHERE e.outbox_id=o.outbox_id AND e.terminal_blob_digest IS NOT NULL)))",
+            params![
+                binding.workspace_id,
+                binding.main_version_id,
+                binding.object_id,
+                binding.lineage_claim_id,
+                binding.restore_fence_generation
+            ],
+            |r| r.get(0),
+        )
+        .map_err(read_sql)?;
+    if refused && input.kept_snapshot.is_none() {
         return Err(OwnerOutboxError::StopConflict);
     }
     let parts = super::draft::layered_parts_in(tx, binding, observed.revision, layer)?;

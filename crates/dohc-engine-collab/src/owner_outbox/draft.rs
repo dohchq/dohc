@@ -3449,6 +3449,20 @@ mod tests {
         assert_eq!(put(&store, &mut cache, 6, &second), OwnerRowOutcome::Added);
         let text = shown(&store, &mut cache);
         assert!(text.contains("Saved row") && text.contains("Unsaved row"));
+
+        // A pause here names the note's cursor, 7, above its last row, 6.
+        let mut input = pause_input(&observed);
+        (input.applied_cursor, input.row_cursor) = (7, 6);
+        super::super::release::pause_cached(
+            &mut store,
+            &mut cache,
+            &input,
+            &NoFaults,
+            |tx, pause| pause(tx),
+        )
+        .unwrap();
+        let copy = copy_text(&store).unwrap();
+        assert!(copy.contains("Saved row") && copy.contains("Unsaved row"));
     }
 
     #[test]
@@ -3659,6 +3673,59 @@ mod tests {
     }
 
     #[test]
+    fn a_pause_keeps_refused_edits_only_after_they_are_recorded() {
+        use super::super::release;
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let mut cache = crate::WriterDocCache::default();
+        held_note(&mut store, &mut cache, &observed, &checkpoint);
+        let shown = open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap();
+        let editor = Ydoc::wire();
+        editor.apply(&shown.initial_update).unwrap();
+        let appended = append_draft_cached(
+            &mut store,
+            &mut cache,
+            "workspace",
+            owner_edit(
+                &observed,
+                "refused",
+                editor.richdoc_append_paragraph("Refused paragraph"),
+            ),
+            &NoFaults,
+        )
+        .unwrap();
+        let refusal = OwnerOutboxRefuseInput {
+            outbox_id: appended.outbox_id.clone(),
+            delivery_id: appended.delivery_id.clone(),
+            update_digest: appended.update_digest.clone(),
+            reason: "The presser no longer has edit access.".into(),
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                refuse_entry_in_tx(tx, "workspace", &refusal, 12)
+            })
+            .unwrap();
+
+        // The pause frees the refused bytes, so they must be kept edits first.
+        let mut input = pause_input(&observed);
+        assert!(matches!(
+            release::pause_cached(&mut store, &mut cache, &input, &NoFaults, |tx, pause| {
+                pause(tx)
+            }),
+            Err(OwnerOutboxError::StopConflict)
+        ));
+        assert!(entry_count(&store) > 0);
+
+        input.kept_snapshot = Some("kept-edits".into());
+        let stop = release::pause_cached(&mut store, &mut cache, &input, &NoFaults, |tx, pause| {
+            pause(tx)
+        })
+        .unwrap();
+        assert_eq!(stop.kept_snapshot.as_deref(), Some("kept-edits"));
+        assert_eq!(entry_count(&store), 0);
+    }
+
+    #[test]
     fn owner_unapplied_entries_are_in_copy_not_note() {
         use super::super::release;
         let (_dir, mut store, observed, checkpoint) = fixture();
@@ -3764,6 +3831,11 @@ mod tests {
             .read_with(|conn| release::list_requested_in(conn, "workspace"))
             .unwrap();
         assert_eq!(listed.len(), 1);
+        // Resume cannot free the only copy before it is on disk.
+        assert!(matches!(
+            store.write_with(&NoFaults, |tx| release::clear_in_tx(tx, &key)),
+            Err(OwnerOutboxError::StopConflict)
+        ));
         let written = committed(
             store
                 .write_with(&NoFaults, |tx| {

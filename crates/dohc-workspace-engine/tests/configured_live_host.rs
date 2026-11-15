@@ -955,3 +955,55 @@ fn hardlink_reopen_refuses_orphaned_wal_and_original_root_recovers_acknowledged_
     };
     assert_eq!(read.result["text"], "acknowledged before crash");
 }
+
+#[test]
+fn production_entrypoint_answers_a_committed_row_and_keeps_the_connection() {
+    let scratch = ScratchDir::new().unwrap();
+    let root = scratch.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let database = root.join(".dohc/engine/engine.db");
+    std::fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let mut seeded = dohc_engine_storage::EngineStore::open(&database, 0).unwrap();
+    let root_token = dohc_workspace_engine::root_binding::write_new_root_binding(&root).unwrap();
+    seeded
+        .bind_root_token(&root_token, &dohc_engine_storage::NoFaults)
+        .unwrap();
+    dohc_engine_domain::VersionedTextStore::new(&mut seeded)
+        .ensure_main_version("workspace", "main", 0, &dohc_engine_storage::NoFaults)
+        .unwrap();
+    drop(seeded);
+    let path = scratch.path().join("host.json");
+    std::fs::write(&path, configuration(&root).to_string()).unwrap();
+    let mut daemon = Daemon(command(Some(&path)).spawn().unwrap());
+    daemon.send(Envelope::Hello(Hello {
+        protocol_version: PROTOCOL_VERSION,
+        auth_token: "configured-test-secret".into(),
+        capabilities: vec!["blobs".into()],
+        last_session_generation: None,
+        max_frame_bytes: None,
+    }));
+    assert!(matches!(daemon.read(), Envelope::HelloAck(_)));
+    let Envelope::Response(hosts) = daemon.request(1, "liveApplication.hosts", None, json!({}))
+    else {
+        panic!("discovery")
+    };
+    let workspace: dohc_engine_protocol::wire::WorkspaceHandle =
+        serde_json::from_value(hosts.result["workspaces"][0]["workspaceHandle"].clone()).unwrap();
+    // A row for a note this engine does not hold: the method refuses it, and
+    // the connection stays open rather than closing on an unknown upload.
+    let row = [0u8, 0];
+    let binding = json!({"workspaceId":"workspace","mainVersionId":"main","objectId":"object","lineageClaimId":"a".repeat(64),"currentPath":"note.md","selectorPaths":["note.md"],"restoreFenceGeneration":0});
+    let reply = daemon.streamed(
+        2,
+        "ydoc.ownerDelivery.putCommittedRow",
+        workspace,
+        json!({"binding":binding,"cursor":1,"streamId":1,"byteLength":row.len(),"digest":dohc_engine_storage::hex_sha256(&row)}),
+        &[(1, &row)],
+    );
+    assert!(matches!(reply, Envelope::Error(_)), "{reply:?}");
+    assert!(matches!(
+        daemon.request(3, "liveApplication.hosts", None, json!({})),
+        Envelope::Response(_)
+    ));
+    daemon.close_cleanly();
+}
