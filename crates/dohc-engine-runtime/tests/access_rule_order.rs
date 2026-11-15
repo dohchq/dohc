@@ -186,6 +186,18 @@ impl Fixture {
         seen: Option<String>,
         reason: &str,
     ) -> Result<dohc_engine_runtime::AccessRuleDecided, RuntimeError> {
+        self.decided_at(folder, decision, seen, reason, 30, Arc::new(NoFaults))
+    }
+
+    fn decided_at(
+        &self,
+        folder: &str,
+        decision: AccessRuleDecision,
+        seen: Option<String>,
+        reason: &str,
+        now_ms: i64,
+        faults: Arc<dyn dohc_engine_storage::FaultInjector>,
+    ) -> Result<dohc_engine_runtime::AccessRuleDecided, RuntimeError> {
         self.runtime.block_on(self.actor.decide_access_rule(
             WS.to_owned(),
             "main".to_owned(),
@@ -195,8 +207,8 @@ impl Fixture {
             reason.to_owned(),
             self.root().to_path_buf(),
             Arc::new(()),
-            30,
-            Arc::new(NoFaults),
+            now_ms,
+            faults,
         ))
     }
 
@@ -770,6 +782,65 @@ fn restoring_a_widened_rule_puts_the_committed_bytes_back() {
     );
     assert!(f.holds().is_empty());
     assert_eq!(f.journal(), before);
+}
+
+/// A Restore whose placement waits and is tried again keeps the rule from
+/// outside dohc once.
+#[test]
+fn a_restore_tried_again_keeps_one_copy_of_the_outside_rule() {
+    struct SaveOverOnce {
+        path: PathBuf,
+        fired: std::sync::atomic::AtomicBool,
+    }
+    impl dohc_engine_storage::FaultInjector for SaveOverOnce {
+        fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+            if point == dohc_engine_storage::FaultPoint::MaterializeBeforePreimageRevalidate
+                && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                std::fs::write(&self.path, "members: comment\n").unwrap();
+            }
+            dohc_engine_storage::FaultAction::Continue
+        }
+    }
+    let f = ruled_team();
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    let seen = Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes()));
+    let first = f.decided_at(
+        "team",
+        AccessRuleDecision::Restore,
+        seen.clone(),
+        "widened",
+        30,
+        Arc::new(SaveOverOnce {
+            path: f.root().join("team/access.yaml"),
+            fired: false.into(),
+        }),
+    );
+    assert!(
+        matches!(&first, Err(RuntimeError::Sync(SyncError::RetryableState { reason })) if *reason == ACCESS_RULE_WAITS),
+        "{first:?}"
+    );
+    // The editor saves the outside rule again, and the owner tries again.
+    f.put("team/access.yaml", EDIT);
+    f.decided_at(
+        "team",
+        AccessRuleDecision::Restore,
+        seen,
+        "widened",
+        31,
+        Arc::new(NoFaults),
+    )
+    .expect("restore");
+    assert_eq!(
+        std::fs::read_to_string(f.root().join("team/access.yaml")).unwrap(),
+        VIEW
+    );
+    assert_eq!(
+        f.kept_copies(),
+        vec![("team/access.yaml".to_owned(), EDIT.to_owned())]
+    );
 }
 
 /// Restoring a folder whose new rule nothing committed removes that rule

@@ -1979,13 +1979,27 @@ fn decide_on_store(
 }
 
 /// Keep the rule from outside dohc at `path` as a kept copy before Restore
-/// replaces or removes it, so the owner can still save it.
+/// replaces or removes it, so the owner can still save it. A Restore tried
+/// again after its placement waited finds the copy it kept already.
 fn keep_outside_rule(
     store: &EngineStore,
     order: &Order<'_>,
     path: &str,
     bytes: &[u8],
 ) -> Result<(), RuntimeError> {
+    let sha256 = dohc_engine_storage::hex_sha256(bytes);
+    let kept = store.list_kept_displacements(order.workspace_id)?;
+    if kept.iter().any(|copy| {
+        copy.job_id.starts_with("access-rule-kept_")
+            && copy.target_path == path
+            && copy
+                .displaced_sha256
+                .as_deref()
+                .unwrap_or(&copy.expected_sha256)
+                == sha256
+    }) {
+        return Ok(());
+    }
     let job_id = format!(
         "access-rule-kept_{}_{}",
         dohc_engine_storage::hex_sha256(path.as_bytes()),
@@ -2221,7 +2235,7 @@ mod tests {
             "CREATE TABLE path_aliases (workspace_id TEXT, version_id TEXT, path TEXT, \
              object_id TEXT, PRIMARY KEY (workspace_id, version_id, path)); \
              CREATE TABLE materialization_jobs (workspace_id TEXT, target_path TEXT, \
-             content_sha256 TEXT, status TEXT, PRIMARY KEY (workspace_id, target_path))",
+             content_sha256 TEXT, status TEXT, operation TEXT, PRIMARY KEY (workspace_id, target_path))",
         )
         .unwrap();
         let names = [
@@ -2265,7 +2279,7 @@ mod tests {
                 "pending"
             };
             conn.execute(
-                "INSERT INTO materialization_jobs VALUES ('ws',?1,'sha',?2)",
+                "INSERT INTO materialization_jobs VALUES ('ws',?1,'sha',?2,'write')",
                 [path.as_str(), status],
             )
             .unwrap();
