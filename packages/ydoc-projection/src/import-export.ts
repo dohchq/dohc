@@ -1070,6 +1070,7 @@ export function serializeRichdocBody(root: JSONContent): string {
       }
       content = renderInlineCodeRuns(content, characterSentinels, () => reserveToken("CHARACTER"));
       content = protectMarkdownSyntax(content, characterSentinels, () => reserveToken("CHARACTER"));
+      content = openNoDelimitersAroundWhitespace(content);
     }
 
     return content ? { ...node, content } : { ...node };
@@ -1944,6 +1945,39 @@ function mapRanges(
     cursor = to;
   }
   return output + text.slice(cursor);
+}
+
+const DELIMITER_MARKS = new Set(["bold", "italic", "strike", "underline", "highlight"]);
+
+// Markdown reads no delimiter run around only whitespace, so a mark opened
+// there would read back as literal asterisks. Whitespace keeps the marks the
+// text before it carries, which it continues, and opens no other. The engine
+// writer does the same.
+function openNoDelimitersAroundWhitespace(content: JSONContent[]): JSONContent[] {
+  let previous: JSONContent["marks"] = undefined;
+  return content.map((node) => {
+    if (node.type !== "text") {
+      previous = undefined;
+      return node;
+    }
+    if (/^\s*$/u.test(node.text ?? "") && node.marks?.length) {
+      const before = previous ?? [];
+      const marks = node.marks.filter(
+        (mark) =>
+          !DELIMITER_MARKS.has(mark.type) ||
+          before.some(
+            (kept) =>
+              kept.type === mark.type &&
+              JSON.stringify(kept.attrs ?? {}) === JSON.stringify(mark.attrs ?? {}),
+          ),
+      );
+      if (marks.length !== node.marks.length) {
+        node = marks.length ? { ...node, marks } : { type: node.type, text: node.text };
+      }
+    }
+    previous = node.marks;
+    return node;
+  });
 }
 
 function protectMarkdownSyntax(

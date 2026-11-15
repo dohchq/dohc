@@ -8874,6 +8874,7 @@ fn render_inline(
     let mut modes: BTreeMap<MarkKind, OpeningMode> = BTreeMap::new();
     let mut reopen_html = BTreeSet::new();
     let mut held_characters = held.iter().copied();
+    let mut previous: Option<Vec<MarkdownMark>> = None;
 
     for (index, part) in parts.iter().enumerate() {
         let next_marks = parts.get(index + 1).and_then(|next| match next {
@@ -8894,6 +8895,7 @@ fn render_inline(
                 }
                 active.clear();
                 modes.clear();
+                previous = None;
                 let rendered = if let Some(rendered) = rendered_nodes.remove(&index) {
                     rendered
                 } else {
@@ -8944,7 +8946,27 @@ fn render_inline(
                     }
                     text = written.into_string();
                 }
-                let current = &run.marks;
+                // Markdown reads no delimiter run around only whitespace, so
+                // whitespace keeps the marks the text before it carries and
+                // opens no other, as the TypeScript writer does.
+                let kept: Vec<MarkdownMark>;
+                let current: &[MarkdownMark] = if text.chars().all(is_js_whitespace) {
+                    kept = run
+                        .marks
+                        .iter()
+                        .filter(|mark| {
+                            matches!(mark.kind, MarkKind::Link | MarkKind::Code)
+                                || previous
+                                    .as_deref()
+                                    .is_some_and(|before| contains_same_mark(before, mark))
+                        })
+                        .cloned()
+                        .collect();
+                    &kept
+                } else {
+                    &run.marks
+                };
+                previous = Some(current.to_vec());
                 let mut to_open: Vec<MarkdownMark> = current
                     .iter()
                     .filter(|mark| !contains_same_mark(&active, mark))
@@ -10052,6 +10074,69 @@ mod projection_tests {
                 .content,
             SETTLED
         );
+    }
+
+    // Markdown reads no mark around only whitespace, so its delimiters would
+    // read back as literal asterisks. The TypeScript writer's test has the
+    // same cases.
+    #[test]
+    fn a_marked_run_of_only_whitespace_is_written_as_its_text() {
+        let bold = || Attrs::from([("bold".into(), json_to_any(&json!({})))]);
+        let bold_italic = || {
+            Attrs::from([
+                ("bold".into(), json_to_any(&json!({}))),
+                ("italic".into(), json_to_any(&json!({}))),
+            ])
+        };
+        let strike = || Attrs::from([("strike".into(), json_to_any(&json!({})))]);
+        let cases: Vec<(Vec<(&str, Attrs)>, &str)> = vec![
+            (
+                vec![("a", Attrs::new()), (" ", bold()), ("b", Attrs::new())],
+                "a b\n",
+            ),
+            // Unlike the TypeScript writer, this one drops a paragraph's
+            // trailing space, marked or not, which Markdown reads as nothing.
+            (vec![("a", Attrs::new()), (" ", bold())], "a\n"),
+            (
+                vec![("x", bold()), (" ", bold_italic()), ("y", bold())],
+                "**x y**\n",
+            ),
+            (
+                vec![("x", bold()), (" ", bold_italic()), ("y", Attrs::new())],
+                "**x** y\n",
+            ),
+            (
+                vec![("x", Attrs::new()), (" ", bold_italic()), ("y", bold())],
+                "x **y**\n",
+            ),
+            (
+                vec![("a", Attrs::new()), (" ", strike()), ("b", Attrs::new())],
+                "a b\n",
+            ),
+        ];
+        for (runs, expected) in cases {
+            let source = Ydoc::wire();
+            let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+            {
+                let mut txn = source.doc.transact_mut();
+                let paragraph = body.push_back(
+                    &mut txn,
+                    XmlElementPrelim::new("paragraph", std::iter::empty::<XmlIn>()),
+                );
+                let text = paragraph.push_back(&mut txn, XmlTextPrelim::new(""));
+                for (value, attrs) in runs {
+                    let at = text.len(&txn);
+                    text.insert_with_attributes(&mut txn, at, value, attrs);
+                }
+            }
+            assert_eq!(
+                source
+                    .project(ContentKind::Richdoc)
+                    .expect("projection")
+                    .content,
+                expected
+            );
+        }
     }
 
     #[test]

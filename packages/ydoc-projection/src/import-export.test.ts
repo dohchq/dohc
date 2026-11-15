@@ -29,6 +29,14 @@ import { setFrontmatterValue } from "./frontmatter-map.js";
 
 type ExpectedMarkdownFragment = string | RegExp;
 
+const plain = (text: string): JSONContent => ({ type: "text", text });
+const bold = (text: string): JSONContent => ({ type: "text", text, marks: [{ type: "bold" }] });
+const boldItalic = (text: string): JSONContent => ({
+  type: "text",
+  text,
+  marks: [{ type: "bold" }, { type: "italic" }],
+});
+
 function textWork(run: () => void): { split: number; replace: number } {
   const { split, replace } = String.prototype;
   const work = { split: 0, replace: 0 };
@@ -542,6 +550,29 @@ it.each([
     expect(
       serializeRichdocBody({ type: "doc", content: [{ type: "paragraph", content }] }),
     ).not.toContain("\\");
+  },
+);
+
+// Markdown reads no mark around only whitespace, so its delimiters would read
+// back as literal asterisks. The whitespace is written without the marks it
+// would open, and keeps those it continues.
+it.each([
+  ["between plain text", [plain("a"), bold(" "), plain("b")], "a b"],
+  ["at the end", [plain("a"), bold(" ")], "a "],
+  ["inside bold", [bold("x"), boldItalic(" "), bold("y")], "**x y**"],
+  ["after bold", [bold("x"), boldItalic(" "), plain("y")], "**x** y"],
+  ["before bold", [plain("x"), boldItalic(" "), bold("y")], "x **y**"],
+  [
+    "struck through",
+    [plain("a"), { type: "text", text: " ", marks: [{ type: "strike" }] }, plain("b")],
+    "a b",
+  ],
+] satisfies Array<[string, JSONContent[], string]>)(
+  "writes a marked run of only whitespace %s as its text",
+  (_name, content, saved) => {
+    const document = { type: "doc", content: [{ type: "paragraph", content }] };
+    expect(serializeRichdocBody(document)).toBe(saved);
+    expect(serializeRichdocBody(parseRichdocMarkdown(saved))).toBe(saved);
   },
 );
 
