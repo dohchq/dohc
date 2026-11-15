@@ -34,8 +34,10 @@ export const RELAY_FETCH_TIMEOUT_MS = 15_000;
 // uses the kept copy. A read waits `timeoutMs`. A POST can change records, so
 // it waits until just past the server's own 30 s deadline: a slow change is
 // never reported as failed while the server still commits it. Only the wait
-// for the answer is limited: an import, export, or file can take longer to
-// arrive. Other requests with their own signal, such as long-polls, keep waiting.
+// for the answer is limited: a file can take longer to arrive. A recovery export
+// or import is answered only once it is prepared or installed, under the server's
+// own longer deadline, so it keeps waiting, as do long-polls and other requests
+// with their own signal.
 export const COLLECTION_CHANGE_ANSWER_MS = 35_000;
 
 export function relayFetchWithTimeout(
@@ -46,7 +48,8 @@ export function relayFetchWithTimeout(
   const request = relayApiFetch(baseFetch);
   return async (input, init) => {
     if (!init?.signal) return request(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
-    if (!COLLECTION_PATH.test(requestPath(input))) return request(input, init);
+    const path = requestPath(input);
+    if (!COLLECTION_PATH.test(path) || RECOVERY_PATH.test(path)) return request(input, init);
     const deadline = new AbortController();
     const timer = setTimeout(
       () => deadline.abort(new TypeError("The server did not answer in time.")),
@@ -64,6 +67,7 @@ export function relayFetchWithTimeout(
 }
 
 const COLLECTION_PATH = /^\/sync\/(?:shares\/)?[^/]+\/datasets(?:[/?]|$)/;
+const RECOVERY_PATH = /\/datasets\/[^/]+\/(?:export|imports\/[^/]+)$/;
 
 function requestPath(input: string | URL | Request): string {
   return new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url)

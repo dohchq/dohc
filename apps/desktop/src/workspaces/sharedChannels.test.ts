@@ -744,16 +744,29 @@ describe("relayFetchWithTimeout", () => {
     expect(await response.json()).toEqual({ rows: [1, 2] });
   });
 
-  it("leaves a long-poll with its own signal waiting past the limit", async () => {
+  // The server answers a recovery export once it has prepared the file, and an
+  // import once it has received and installed it. Each has its own deadline there.
+  it.each([
+    ["a long-poll", "GET", "/sync/ws-1/presses?waitMs=25000"],
+    ["a recovery export", "GET", `/sync/ws-1/datasets/${crypto.randomUUID()}/export`],
+    [
+      "a recovery import",
+      "POST",
+      `/sync/ws-1/datasets/${crypto.randomUUID()}/imports/${crypto.randomUUID()}`,
+    ],
+  ])("leaves %s with its own signal waiting past the limit", async (_kind, method, path) => {
     await using server = await silentServer((_path, response) => {
       setTimeout(() => response.end("{}"), 250);
     });
-    const response = await relayFetchWithTimeout(100)(
-      server.url("/sync/ws-1/presses?waitMs=25000"),
-      {
-        signal: new AbortController().signal,
-      },
-    );
+    const response = await relayFetchWithTimeout(
+      100,
+      fetch,
+      100,
+    )(server.url(path), {
+      method,
+      ...(method === "POST" ? { body: "{}" } : {}),
+      signal: new AbortController().signal,
+    });
     expect(response.status).toBe(200);
   });
 
