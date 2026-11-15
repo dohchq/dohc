@@ -63,6 +63,10 @@ interface Engine {
   endFeed?: () => void;
   /** How many times a capture was opened. */
   opens?: number;
+  /** The owner's capture can't be opened, as when the note's hosting ended. */
+  unopened?: boolean;
+  /** How many times opening one failed. */
+  tries?: number;
 }
 
 /**
@@ -168,7 +172,11 @@ function rooms(
     ...(limits.saveTimeoutMs ? { saveTimeoutMs: limits.saveTimeoutMs } : {}),
     ...(limits.pauseAfterMs === undefined ? {} : { pauseAfterMs: limits.pauseAfterMs }),
     log() {},
-    openSaver: async () => ownerCapture(f, engine),
+    openSaver: async () => {
+      if (!engine.unopened) return ownerCapture(f, engine);
+      engine.tries = (engine.tries ?? 0) + 1;
+      throw new Error("The owner's binding is not current.");
+    },
   });
   rooms_.push(created);
   return created;
@@ -1076,6 +1084,57 @@ it("gives the next page every taken edit before they are saved, and saves them w
   rooms(f);
   await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
   expect(savedAuthors(f)).toEqual([ana, ben, ben]);
+});
+
+it("puts a stopped relay's leftover edits in a copy once their note has failed to open for long enough", async () => {
+  const f = note();
+  const first = rooms(f, {}, { answers: ["retry", "retry"] });
+  const a = editor(f, first, ana);
+  await a.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await first.close();
+  expect(unsaved(f)).toHaveLength(1);
+
+  // The note's capture can't open. One failure leaves the edits where they are.
+  const waiting: Engine = { unopened: true };
+  rooms(f, {}, waiting);
+  await vi.waitFor(() => expect(waiting.tries).toBe(1));
+  expect(pauses(f)).toEqual([]);
+  expect(unsaved(f)).toHaveLength(1);
+
+  // Once it has failed for as long as saves may, they go into the copy.
+  rooms(f, { pauseAfterMs: 0 }, { unopened: true });
+  await vi.waitFor(() => expect(pauses(f)).toHaveLength(1));
+  expect(unsaved(f)).toEqual([]);
+  const [paused] = pauses(f);
+  expect(paused).toMatchObject({ cause: "failing", refusal: null, named: [ana] });
+  const copy = new Y.Doc();
+  Y.applyUpdate(copy, liveRoomCopy(f, paused!.pauseId));
+  expect(copy.getMap("frontmatter").get("title")).toBe("Lisbon");
+});
+
+it("saves a note's taken edits before a step while a lineage it ended is paused", async () => {
+  const f = note();
+  const document = f.input.evidence.document;
+  const room = rooms(f);
+  const a = editor(f, room, ana);
+  await a.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  pauseLiveRoom(f.storage as StorageContext, {
+    document: { ...document, lineageClaimId: "ended-lineage" },
+    cause: "failing",
+    refusal: null,
+    named: [],
+    copy: Y.encodeStateAsUpdate(new Y.Doc()),
+    pausedAtMs: 1,
+  });
+  const left = await room.saveFirst(
+    document,
+    () => unsaved(f).length,
+    new AbortController().signal,
+  );
+  expect(left).toBe(0);
+  expect(savedAuthors(f)).toEqual([ana]);
 });
 
 it("refuses a room save that leaves out someone whose edit it holds", () => {

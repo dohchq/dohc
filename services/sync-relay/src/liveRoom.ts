@@ -292,6 +292,8 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
   const log = (room: Room, line: string, detail: Record<string, unknown> = {}) =>
     write(line, { objectId: room.document.objectId, unsaved: room.unsaved.length, ...detail });
   const rooms = new Map<string, Room>();
+  // When each note with leftover edits first failed to open, by room key.
+  const unopened = new Map<string, number>();
   // Notes whose rooms take no edits while a step that closes them runs, by workspace and object.
   const holding = new Map<string, number>();
   const noteKey = (note: { readonly workspaceId: string; readonly objectId: string }) =>
@@ -587,7 +589,22 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     };
     rooms.set(key, room);
     room.opened = (async () => {
-      await ensureSaver(room);
+      try {
+        await ensureSaver(room);
+        unopened.delete(key);
+      } catch (error) {
+        // Edits a stopped relay left go into a copy once their note has failed to open for as
+        // long as saves may fail, as they would in a room that opened.
+        const left = liveRoomEdits(storage, document);
+        if (!left.length) throw error;
+        const since = unopened.get(key) ?? Date.now();
+        unopened.set(key, since);
+        if (Date.now() - since < pauseAfterMs) throw error;
+        const copy = Y.mergeUpdates(left.map((row) => row.updateBytes));
+        if (!pause(room, "failing", null, senders(left), copy)) throw error;
+        unopened.delete(key);
+        return;
+      }
       // Edits a stopped relay had taken and not saved are in the note a page is given, and are
       // saved first, in the order they were taken. New edits follow them in the list.
       const left = liveRoomEdits(storage, document);
@@ -943,25 +960,30 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       const key = noteKey(note);
       holding.set(key, (holding.get(key) ?? 0) + 1);
       try {
-        // The note's current lineage, if it has a room or taken edits. A paused note's edits are in
-        // its copy, and an ended lineage's can't be saved, so neither holds the step up.
+        // The note's current lineage, if it has a room or taken edits. A pause took its own
+        // lineage's edits into the copy, and an ended lineage's can't be saved, so neither holds
+        // the step up.
         const held = new Map<string, LiveDocumentKey>();
         for (const document of [
           ...[...rooms.values()].map((room) => room.document),
           ...liveRoomDocuments(storage),
         ])
-          if (
-            noteKey(document) === key &&
-            !liveRoomPaused(storage, document) &&
-            liveRoomLineageIsCurrent(storage, document)
-          )
+          if (noteKey(document) === key && liveRoomLineageIsCurrent(storage, document))
             held.set(JSON.stringify(documentParams(document)), document);
-        const saving = [...held.values()].map(openRoom);
-        // A room that could not open holds edits it could not save.
-        await Promise.all(saving.map((room) => drain(room, signal))).catch(() => {
+        let saving: Room[];
+        try {
+          saving = await Promise.all(
+            [...held.values()].map(async (document) => {
+              const room = openRoom(document);
+              await drain(room, signal);
+              return room;
+            }),
+          );
+        } catch {
+          // A room that could not open, such as one a pause keeps shut, holds edits it can't save.
           signal.throwIfAborted();
           throw new LiveRoomUnsavedError();
-        });
+        }
         if (saving.some((room) => room.unsaved.length)) throw new LiveRoomUnsavedError();
         const result = await then();
         for (const room of [...rooms.values()])
