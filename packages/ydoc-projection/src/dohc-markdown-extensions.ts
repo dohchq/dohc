@@ -1121,6 +1121,21 @@ export const dohcMarkdownExtensions = [
 // GFM forbids block nodes inside table cells but permits inline raw HTML, so a
 // multi-block ProseMirror cell uses a visible hard break instead of U+001F.
 export const GFM_TABLE_CELL_BLOCK_SEPARATOR = "<br>";
+
+// The projector holds some written text as tokens until it has serialized the
+// document. A table pads its columns to the widths it measures, so each cell
+// writes its tokens' text first.
+let writeTableCellTokens: ((markdown: string) => string) | undefined;
+export function writingTableCellTokens<T>(write: (markdown: string) => string, render: () => T): T {
+  const previous = writeTableCellTokens;
+  writeTableCellTokens = write;
+  try {
+    return render();
+  } finally {
+    writeTableCellTokens = previous;
+  }
+}
+
 function prepareRenderedTableCell(markdown: string): string {
   // Raw inline HTML is the canonical representation of cell block boundaries.
   // The importer represents those tags as text, so normalize them before the
@@ -1139,7 +1154,8 @@ function prepareRenderedTableCell(markdown: string): string {
     precedingBackslashes = character === "\\" ? precedingBackslashes + 1 : 0;
   }
 
-  return output;
+  // After the pipes, which a token's text must not change.
+  return writeTableCellTokens ? writeTableCellTokens(output) : output;
 }
 
 const tableTokenizer = Table.config.markdownTokenizer!;

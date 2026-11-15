@@ -954,6 +954,25 @@ const RICHDOC_PROJECTION_CASES = [
         ]),
       ]),
   },
+  {
+    // #4110: a table pads its columns to the text a cell writes, references
+    // and empty links included.
+    name: "table-cell-references",
+    makeDoc: () =>
+      directRichdoc([
+        table([
+          tableRow([tableCell("tableHeader", "head")]),
+          tableRow([tableCell("tableCell", "a\u00a0b")]),
+          tableRow([tableCell("tableCell", "x\ry")]),
+          tableRow([
+            tableCell("tableCell", [xmlText("a"), xmlElement("hardBreak"), xmlText("\tb")]),
+          ]),
+          tableRow([tableCell("tableCell", "[](a&b)")]),
+          tableRow([tableCell("tableCell", "[](a\u00a0b)")]),
+          tableRow([tableCell("tableCell", "a&b <c>")]),
+        ]),
+      ]),
+  },
 ];
 
 function makeRichdocProjection(index, fixture) {

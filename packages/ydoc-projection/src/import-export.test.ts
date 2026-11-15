@@ -3668,6 +3668,30 @@ describe("Y.Doc markdown import/export", () => {
     );
   });
 
+  it("pads table columns to the references and empty links a cell writes", () => {
+    const row = (type: string, text: string) => ({
+      type: "tableRow",
+      content: [{ type, content: [{ type: "paragraph", content: [{ type: "text", text }] }] }],
+    });
+    const doc = yDocFromBody([
+      {
+        type: "table",
+        content: [
+          row("tableHeader", "head"),
+          row("tableCell", "a b"),
+          row("tableCell", "x\ry"),
+          row("tableCell", "[](a&b)"),
+        ],
+      },
+    ]);
+
+    expect(yDocToMarkdown(doc)).toBe(
+      ["| head     |", "| -------- |", "| a&#160;b |", "| x&#13;y  |", "| [](a&b)  |", ""].join(
+        "\n",
+      ),
+    );
+  });
+
   it("promotes a headerless table first row instead of inserting a blank row", () => {
     const doc = yDocFromBody([
       {
