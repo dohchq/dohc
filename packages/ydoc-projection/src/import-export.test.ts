@@ -451,7 +451,11 @@ it("keeps a hard break that starts a line", () => {
       breakThen("after a leading break"),
       {
         type: "paragraph",
-        content: [{ type: "hardBreak" }, { type: "hardBreak" }, { type: "text", text: "after two" }],
+        content: [
+          { type: "hardBreak" },
+          { type: "hardBreak" },
+          { type: "text", text: "after two" },
+        ],
       },
       {
         type: "paragraph",
@@ -482,6 +486,28 @@ it("keeps a hard break that starts a line", () => {
   );
   expectSavedAsTheSameDocument(document);
 });
+
+// A backslash that ends a paragraph reads back as a literal backslash.
+it.each([
+  ["another break", [{ type: "hardBreak" }, { type: "hardBreak" }]],
+  [
+    "more breaks",
+    [
+      { type: "text", text: "a" },
+      { type: "hardBreak" },
+      { type: "hardBreak" },
+      { type: "hardBreak" },
+    ],
+  ],
+  ["a space", [{ type: "hardBreak" }, { type: "text", text: " " }]],
+] satisfies Array<[string, JSONContent[]]>)(
+  "writes no backslash for a hard break followed by %s only",
+  (_name, content) => {
+    expect(
+      serializeRichdocBody({ type: "doc", content: [{ type: "paragraph", content }] }),
+    ).not.toContain("\\");
+  },
+);
 
 it.each([
   ["a backslash escape", "<b>\\*</b>"],

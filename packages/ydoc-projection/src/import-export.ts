@@ -1290,12 +1290,19 @@ function escapeLeadingMarkdownBlockSyntax(
     }
 
     // A hard break's two spaces on a line with nothing else read back as a
-    // blank line, which ends the paragraph. A backslash keeps the break.
+    // blank line, which ends the paragraph. A backslash keeps the break, but
+    // only before visible text: a backslash that ends a paragraph is literal.
     if (
       encodeBackslash &&
       node.type === "hardBreak" &&
       lineStart &&
-      index < preparedContent.length - 1
+      preparedContent
+        .slice(index + 1)
+        .some(
+          (later) =>
+            later.type !== "hardBreak" &&
+            !(typeof later.text === "string" && /^[ \t\n]*$/u.test(later.text)),
+        )
     ) {
       output.push({ type: "text", text: `${encodeBackslash()}\n` });
       index += 1;

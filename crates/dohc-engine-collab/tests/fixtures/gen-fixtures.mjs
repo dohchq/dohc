@@ -698,6 +698,25 @@ const RICHDOC_PROJECTION_CASES = [
           xmlText("after a blank line"),
         ]),
         paragraph([xmlText("ends with a break"), xmlElement("hardBreak")]),
+        // A backslash that ends a paragraph would read back as literal text.
+        paragraph([xmlElement("hardBreak"), xmlElement("hardBreak")]),
+        paragraph([
+          xmlText("ends with breaks"),
+          xmlElement("hardBreak"),
+          xmlElement("hardBreak"),
+          xmlElement("hardBreak"),
+        ]),
+        paragraph([xmlElement("hardBreak"), xmlText(" ")]),
+        xmlElement("bulletList", {}, [
+          xmlElement("listItem", {}, [
+            paragraph([
+              xmlText("item"),
+              xmlElement("hardBreak"),
+              xmlElement("hardBreak"),
+              xmlElement("hardBreak"),
+            ]),
+          ]),
+        ]),
         table([
           tableRow([tableCell("tableHeader", "head")]),
           tableRow([

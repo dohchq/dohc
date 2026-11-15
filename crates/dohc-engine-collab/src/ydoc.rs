@@ -7139,8 +7139,14 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionRes
                     }
                 } else {
                     let rendered = render_inline(children, false, true, table_cell)?;
+                    // The TypeScript writer escapes a leading space of text,
+                    // not a hard break's two spaces.
                     if matches!(context.parent_tag, "doc" | "listItem" | "taskItem")
                         && rendered.starts_with(' ')
+                        && !matches!(
+                            children.first(),
+                            Some(MarkdownNode::Element { tag, .. }) if tag == "hardBreak"
+                        )
                     {
                         let mut output = ProjectionBuffer::new();
                         output.push_str("&#32;")?;
@@ -8698,12 +8704,19 @@ fn render_inline(
         starts_line = match &parts[part_index] {
             // A hard break's two spaces on a line with nothing else read back
             // as a blank line, which ends the paragraph. A backslash keeps the
-            // break. A table cell writes it as <br>.
+            // break, but only before visible text: a backslash that ends a
+            // paragraph is literal. A table cell writes it as <br>.
             InlinePart::Node(MarkdownNode::Element { tag, .. })
                 if tag == "hardBreak"
                     && starts_line
                     && !table_cell
-                    && part_index + 1 < parts.len() =>
+                    && parts[part_index + 1..].iter().any(|later| match later {
+                        InlinePart::Node(MarkdownNode::Element { tag, .. }) => tag != "hardBreak",
+                        InlinePart::Node(_) => true,
+                        InlinePart::Text { run, .. } => {
+                            !run.text.chars().all(|c| matches!(c, ' ' | '\t' | '\n'))
+                        }
+                    }) =>
             {
                 rendered_nodes.insert(part_index, "\\\n".to_string());
                 true
