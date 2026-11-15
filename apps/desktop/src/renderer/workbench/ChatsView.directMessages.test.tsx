@@ -1,1585 +1,404 @@
+import "../../testing/legendListMock";
 // @vitest-environment jsdom
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
-import type { ChatMessageRecord, DmRecord } from "../../ipc/bridgeContract";
-import { withholdDmsInRequestLanes } from "../../workspaces/dmRequests";
-import { inputCount } from "../ui/inputCount";
-import {
-  ChatsView,
-  channel,
-  message,
-  dm,
-  bridgeMock,
-  emitWorkspaceActivity,
-  emitCloudSessionChanged,
-  renderView,
-} from "./ChatsView.testHarness";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { DirectConversation, DirectMessage } from "@dohc/security-contract/direct-messages";
+import { bridgeMock, emitCloudSessionChanged, renderView } from "./ChatsView.testHarness";
+
+// Direct messages live on the account's server, so every workspace lists the
+// same People. The relay holds the conversation; this computer keeps a saved
+// copy for when the server is away.
+
+const VIEWER = "me";
+const sam = { personId: "sam", name: "Sam Rivera", blocked: false };
+const ana = { personId: "ana", name: "Ana Diaz", blocked: false };
+
+function sent(seq: number, authorId: string, body: string): DirectMessage {
+  return {
+    seq,
+    messageId: `message-${seq}`,
+    authorId,
+    authorName: authorId === VIEWER ? null : authorId === "sam" ? sam.name : ana.name,
+    body,
+    createdAtMs: 1_000 + seq,
+  };
+}
+
+function conversation(overrides: Partial<DirectConversation> = {}): DirectConversation {
+  return {
+    conversationId: "conversation-sam",
+    people: [sam],
+    last: sent(2, "sam", "See you at nine"),
+    unread: 0,
+    blocked: false,
+    ...overrides,
+  };
+}
+
+function signedIn(conversations: DirectConversation[], saved = false) {
+  bridgeMock.directConversations.mockResolvedValue({
+    available: true,
+    viewerId: VIEWER,
+    saved,
+    conversations,
+  });
+}
+
+function history(messages: DirectMessage[], saved = false) {
+  bridgeMock.directHistory.mockResolvedValue({ messages, more: false, saved });
+}
+
+function members(
+  people: Array<{
+    memberId: string;
+    name: string | null;
+    state?: "active" | "invited" | "removed";
+  }>,
+) {
+  bridgeMock.workspaceMembers.mockResolvedValue({
+    status: "ready",
+    view: {
+      workspaceId: "workspace-a",
+      workspaceName: "Work",
+      viewer: { memberId: VIEWER, role: "owner" },
+      memberLevel: "edit",
+      inviteLink: null,
+      people: [
+        {
+          memberId: VIEWER,
+          role: "owner",
+          state: "active",
+          name: "Me",
+          email: "me@example.com",
+          invitedAtMs: null,
+          joinedAtMs: 1,
+          removedAtMs: null,
+        },
+        ...people.map((person) => ({
+          memberId: person.memberId,
+          role: "member" as const,
+          state: person.state ?? "active",
+          name: person.name,
+          email: `${person.memberId}@example.com`,
+          invitedAtMs: null,
+          joinedAtMs: 1,
+          removedAtMs: null,
+        })),
+      ],
+    },
+  });
+}
+
+async function openSam() {
+  fireEvent.click(await screen.findByTestId("chats-dm-item"));
+  return screen.findByTestId("chats-dm-view");
+}
 
 describe("ChatsView direct messages", () => {
-  it("marks the message request a notice's Open names and focuses its Accept, until the next click", async () => {
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [],
-      pending: [{ shareId: "share-dm-request", granterEmail: "bob@example.com" }],
-      declined: [],
-    });
-    const onInvitationRevealed = vi.fn();
-    renderView(vi.fn(), vi.fn(), {
-      variant: "panel",
-      revealInvitation: { shareId: "share-dm-request", inputs: inputCount() },
-      onInvitationRevealed,
-    });
-    await waitFor(() => expect(onInvitationRevealed).toHaveBeenCalledTimes(1));
-    const accept = screen.getByTestId("chats-dm-request-accept");
-    expect(document.activeElement).toBe(accept);
-    const row = screen.getByTestId("chats-dm-request-item");
-    // The view reports the reveal as it sets the mark, which shows a render later.
-    await waitFor(() => expect(row.getAttribute("aria-current")).toBe("true"));
-    expect(row.className).toContain("bg-selected");
-    act(() => {
-      fireEvent.pointerDown(window);
-    });
-    // The view may start listening for the click a render after it marks the
-    // row. A click before that clears the mark once the view sees the count.
-    await waitFor(() => expect(row.getAttribute("aria-current")).toBeNull());
-    expect(row.className).not.toContain("bg-selected");
+  beforeEach(() => {
+    bridgeMock.directMarkRead.mockResolvedValue(undefined);
   });
 
-  it("pulls message requests for a request a notice's Open names that arrived while a conversation tab held the polls", async () => {
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [], pending: [], declined: [] });
-    const props = {
-      workspaceId: "workspace-a",
-      workspaces: [{ workspaceId: "workspace-a", label: "Work" }],
-      onOpenFileChat: vi.fn(),
-      onError: vi.fn(),
-      variant: "panel" as const,
-      suspendPolling: true,
-    };
-    const { rerender } = render(<ChatsView {...props} />);
-    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalled());
-    await act(async () => undefined);
-    bridgeMock.syncDms.mockClear();
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [],
-      pending: [{ shareId: "share-dm-request", granterEmail: "bob@example.com" }],
-      declined: [],
-    });
-    const onInvitationRevealed = vi.fn();
-    rerender(
-      <ChatsView
-        {...props}
-        revealInvitation={{ shareId: "share-dm-request", inputs: inputCount() }}
-        onInvitationRevealed={onInvitationRevealed}
-      />,
-    );
-    await waitFor(() => expect(onInvitationRevealed).toHaveBeenCalledTimes(1));
-    expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({
-      workspaceId: "workspace-a",
-      poll: true,
-    });
-    expect(document.activeElement).toBe(screen.getByTestId("chats-dm-request-accept"));
-  });
-
-  it("accepts a message request elsewhere without navigating this workspace", async () => {
-    const user = userEvent.setup();
-    const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };
-    const accepted = dm({
-      role: "participant",
-      shareId: request.shareId,
-      peerLabel: "bob@example.com",
-    });
-    const onNavCommand = vi.fn();
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [],
-      pending: [request],
-      declined: [],
-    });
-    bridgeMock.acceptDm.mockResolvedValue({ dm: accepted });
-    bridgeMock.listChatMessages.mockImplementation(({ workspaceId, threadId }) =>
-      threadId === accepted.threadId && workspaceId !== "workspace-b"
-        ? Promise.reject(new Error("channel not found"))
-        : Promise.resolve({ messages: [] }),
-    );
-
-    renderView(vi.fn(), vi.fn(), { variant: "panel", onNavCommand });
-    expect(await screen.findByText("Message requests")).toBeTruthy();
-    expect(screen.getByText("Wants to message you")).toBeTruthy();
-    await user.click(screen.getByTestId("chats-dm-request-accept"));
-
-    expect(await screen.findByTestId("chats-accept-dm-dialog")).toBeTruthy();
-    expect(screen.getByText("The conversation stays in the workspace you pick.")).toBeTruthy();
-    const options = screen.getAllByTestId("chats-accept-dm-workspace-option");
-    const currentOption = options.find(
-      (option) => option.getAttribute("data-workspace-id") === "workspace-a",
-    );
-    const personalOption = options.find(
-      (option) => option.getAttribute("data-workspace-id") === "workspace-b",
-    );
-    expect(currentOption?.querySelector("input")?.checked).toBe(true);
-    await user.click(personalOption!);
-    expect(screen.getByTestId("chats-accept-dm-confirm").textContent).toBe("Add to Personal");
-    await user.click(screen.getByTestId("chats-accept-dm-confirm"));
-
-    await waitFor(() => {
-      expect(bridgeMock.acceptDm).toHaveBeenCalledWith({
-        workspaceId: "workspace-b",
-        shareId: request.shareId,
-      });
-    });
-    expect(onNavCommand).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
-    expect((await screen.findByTestId("chats-dm-accepted-elsewhere")).textContent).toContain(
-      "Added your conversation with bob@example.com to Personal.",
-    );
-    expect(bridgeMock.listChatMessages).not.toHaveBeenCalled();
-
-    await user.click(screen.getByTestId("chats-dm-accepted-elsewhere-dismiss"));
-    expect(screen.queryByTestId("chats-dm-accepted-elsewhere")).toBeNull();
-  });
-
-  it("keeps the cross-workspace confirmation when accept queues behind a DM refresh", async () => {
-    const user = userEvent.setup();
-    const request = { shareId: "share-dm-race", granterEmail: "bob@example.com" };
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [],
-      pending: [request],
-      declined: [],
-    });
-    bridgeMock.acceptDm.mockResolvedValue({
-      dm: dm({ role: "participant", shareId: request.shareId }),
-    });
-
-    renderView();
-    await screen.findByTestId("chats-dm-request-item");
-    const syncsBefore = bridgeMock.syncDms.mock.calls.length;
-    let resolvePoll!: (result: {
-      available: boolean;
-      dms: DmRecord[];
-      pending: (typeof request)[];
-      declined: (typeof request)[];
-    }) => void;
-    const pendingPoll = new Promise<{
-      available: boolean;
-      dms: DmRecord[];
-      pending: (typeof request)[];
-      declined: (typeof request)[];
-    }>((resolve) => {
-      resolvePoll = resolve;
-    });
-    bridgeMock.syncDms
-      .mockImplementationOnce(() => pendingPoll)
-      .mockImplementation(() => new Promise<never>(() => undefined));
-
-    act(() => emitWorkspaceActivity());
-    await waitFor(() => expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 1));
-    await user.click(screen.getByTestId("chats-dm-request-accept"));
-    const personalOption = screen
-      .getAllByTestId("chats-accept-dm-workspace-option")
-      .find((option) => option.dataset.workspaceId === "workspace-b");
-    await user.click(personalOption!);
-    await user.click(screen.getByTestId("chats-accept-dm-confirm"));
-    await screen.findByTestId("chats-dm-accepted-elsewhere");
-
-    await act(async () => {
-      resolvePoll({ available: true, dms: [], pending: [], declined: [] });
-      await pendingPoll;
-    });
-    await waitFor(() => expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 2));
-    expect(screen.getByTestId("chats-dm-accepted-elsewhere")).toBeTruthy();
-  });
-
-  it("refuses an old account's DM response after the session changes", async () => {
-    const oldRequest = {
-      shareId: "share-old-account",
-      granterEmail: "old-account@example.com",
-    };
-    const newRequest = {
-      shareId: "share-new-account",
-      granterEmail: "new-account@example.com",
-    };
-    type SyncResult = {
-      available: boolean;
-      dms: DmRecord[];
-      pending: (typeof oldRequest)[];
-      declined: (typeof oldRequest)[];
-    };
-    let resolveStaleSync!: (result: SyncResult) => void;
-    let resolveNewSync!: (result: SyncResult) => void;
-    const staleSync = new Promise<SyncResult>((resolve) => {
-      resolveStaleSync = resolve;
-    });
-    const newSync = new Promise<SyncResult>((resolve) => {
-      resolveNewSync = resolve;
-    });
-    bridgeMock.syncDms
-      .mockResolvedValueOnce({
-        available: true,
-        dms: [],
-        pending: [oldRequest],
-        declined: [],
-      })
-      .mockImplementationOnce(() => staleSync)
-      .mockImplementationOnce(() => newSync)
-      .mockImplementation(() => new Promise<never>(() => undefined));
-
-    renderView();
-    expect(await screen.findByText("old-account@example.com")).toBeTruthy();
-    act(() => emitWorkspaceActivity());
-    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalledTimes(2));
-    act(() => emitCloudSessionChanged("session-b"));
-    await waitFor(() => {
-      expect(screen.queryByText("old-account@example.com")).toBeNull();
-    });
-
-    await act(async () => {
-      resolveStaleSync({
-        available: true,
-        dms: [],
-        pending: [oldRequest],
-        declined: [],
-      });
-      await staleSync;
-    });
-    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalledTimes(3));
-    expect(screen.queryByText("old-account@example.com")).toBeNull();
-
-    await act(async () => {
-      resolveNewSync({
-        available: true,
-        dms: [],
-        pending: [newRequest],
-        declined: [],
-      });
-      await newSync;
-    });
-    expect(await screen.findByText("new-account@example.com")).toBeTruthy();
-  });
-
-  it("refuses an old account's open-DM response after the session changes", async () => {
-    const user = userEvent.setup();
-    const oldDm = dm({
-      peerLabel: "old-peer@example.com",
-      threadId: null,
-    });
-    const oldRequest = {
-      shareId: "share-old-open-dm",
-      granterEmail: "old-open-dm@example.com",
-    };
-    type SyncResult = {
-      available: boolean;
-      dms: DmRecord[];
-      pending: (typeof oldRequest)[];
-      declined: (typeof oldRequest)[];
-    };
-    let resolveStaleSync!: (result: SyncResult) => void;
-    const staleSync = new Promise<SyncResult>((resolve) => {
-      resolveStaleSync = resolve;
-    });
-    bridgeMock.syncDms
-      .mockResolvedValueOnce({
-        available: true,
-        dms: [oldDm],
-        pending: [],
-        declined: [],
-      })
-      .mockImplementationOnce(() => staleSync)
-      .mockImplementation(() => new Promise<never>(() => undefined));
-
-    renderView();
-    await user.click(await screen.findByTestId("chats-dm-item"));
-    await screen.findByTestId("chats-dm-view");
-    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalledTimes(2));
-    expect(bridgeMock.syncDms.mock.calls[1]?.[0]).toEqual({
-      workspaceId: "workspace-a",
-      openChannelId: oldDm.channelId,
-      poll: true,
-    });
-
-    act(() => emitCloudSessionChanged("session-b"));
-    await waitFor(() => {
-      expect(screen.queryByTestId("chats-dm-view")).toBeNull();
-    });
-    await act(async () => {
-      resolveStaleSync({
-        available: true,
-        dms: [oldDm],
-        pending: [oldRequest],
-        declined: [],
-      });
-      await staleSync;
-    });
-
-    expect(screen.queryByText("old-open-dm@example.com")).toBeNull();
-    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
-  });
-
-  it("closes the open accept-DM dialog when the cloud session changes", async () => {
-    const user = userEvent.setup();
-    const request = {
-      shareId: "share-old-account-dialog",
-      granterEmail: "old-account@example.com",
-    };
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [],
-      pending: [request],
-      declined: [],
-    });
-
-    renderView();
-    await user.click(await screen.findByTestId("chats-dm-request-accept"));
-    expect(await screen.findByTestId("chats-accept-dm-dialog")).toBeTruthy();
-
-    act(() => emitCloudSessionChanged("session-b"));
-
-    await waitFor(() => {
-      expect(screen.queryByTestId("chats-accept-dm-dialog")).toBeNull();
-    });
-  });
-
-  it("accepts a message request in the current workspace and opens it", async () => {
-    const user = userEvent.setup();
-    const request = {
-      shareId: "share-dm-current",
-      granterEmail: "bob@example.com",
-    };
-    const accepted = dm({
-      role: "participant",
-      shareId: request.shareId,
-      peerLabel: "bob@example.com",
-    });
-    const onNavCommand = vi.fn();
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [],
-      pending: [request],
-      declined: [],
-    });
-    bridgeMock.acceptDm.mockResolvedValue({ dm: accepted });
-
-    renderView(vi.fn(), vi.fn(), { variant: "panel", onNavCommand });
-    await user.click(await screen.findByTestId("chats-dm-request-accept"));
-    await user.click(screen.getByTestId("chats-accept-dm-confirm"));
-
-    await waitFor(() =>
-      expect(bridgeMock.acceptDm).toHaveBeenCalledWith({
-        workspaceId: "workspace-a",
-        shareId: request.shareId,
-      }),
-    );
-    expect(onNavCommand).toHaveBeenCalledWith({ level: "dm", dm: accepted });
-    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
-  });
-
-  it("routes a panel-variant accept through the editor tab seam", async () => {
-    const user = userEvent.setup();
-    const request = {
-      shareId: "share-dm-panel-accept",
-      granterEmail: "bob@example.com",
-    };
-    const accepted = dm({
-      role: "participant",
-      shareId: request.shareId,
-      peerLabel: "bob@example.com",
-    });
-    const onOpenInTab = vi.fn();
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [],
-      pending: [request],
-      declined: [],
-    });
-    bridgeMock.acceptDm.mockResolvedValue({ dm: accepted });
-
-    renderView(vi.fn(), vi.fn(), { onOpenInTab });
-    await user.click(await screen.findByTestId("chats-dm-request-accept"));
-    await user.click(screen.getByTestId("chats-accept-dm-confirm"));
-
-    await waitFor(() => expect(onOpenInTab).toHaveBeenCalledWith({ level: "dm", dm: accepted }));
-    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
-  });
-
-  it("clears the cross-workspace confirmation after the next successful DM refresh", async () => {
-    const user = userEvent.setup();
-    const request = { shareId: "share-dm-elsewhere", granterEmail: null };
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [],
-      pending: [request],
-      declined: [],
-    });
-    bridgeMock.acceptDm.mockResolvedValue({
-      dm: dm({ role: "participant", shareId: request.shareId }),
-    });
-
-    renderView();
-    await user.click(await screen.findByTestId("chats-dm-request-accept"));
-    const personalOption = screen
-      .getAllByTestId("chats-accept-dm-workspace-option")
-      .find((option) => option.dataset.workspaceId === "workspace-b");
-    await user.click(personalOption!);
-    await user.click(screen.getByTestId("chats-accept-dm-confirm"));
-
-    expect((await screen.findByTestId("chats-dm-accepted-elsewhere")).textContent).toContain(
-      "Added this conversation to Personal.",
-    );
-    await waitFor(() => expect(bridgeMock.syncDms.mock.calls.length).toBeGreaterThan(1));
-    act(() => emitWorkspaceActivity());
-    await waitFor(() => expect(screen.queryByTestId("chats-dm-accepted-elsewhere")).toBeNull());
-  });
-
-  it("moves a request through declined and back to pending", async () => {
-    const user = userEvent.setup();
-    const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };
-    let state: "pending" | "declined" = "pending";
-    bridgeMock.syncDms.mockImplementation(() =>
-      Promise.resolve({
-        available: true,
-        dms: [],
-        pending: state === "pending" ? [request] : [],
-        declined: state === "declined" ? [request] : [],
-      }),
-    );
-    bridgeMock.declineDm.mockImplementation(() => {
-      state = "declined";
-      return Promise.resolve(undefined);
-    });
-    bridgeMock.requestDmAgain.mockImplementation(() => {
-      state = "pending";
-      return Promise.resolve(undefined);
-    });
-
-    renderView();
-    await user.click(await screen.findByTestId("chats-dm-request-decline"));
-    expect(await screen.findByTestId("chats-dm-declined-item")).toBeTruthy();
-    expect(bridgeMock.declineDm).toHaveBeenCalledWith({ shareId: request.shareId });
-
-    await user.click(screen.getByTestId("chats-dm-request-again"));
-    expect(await screen.findByTestId("chats-dm-request-item")).toBeTruthy();
-    expect(bridgeMock.requestDmAgain).toHaveBeenCalledWith({
-      shareId: request.shareId,
-    });
-  });
-
-  it("frees a request's buttons once the decline's own sync lands, while a sync queued behind it is still out", async () => {
-    const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };
-    const answer = (pending: (typeof request)[], declined: (typeof request)[]) => ({
-      available: true,
-      dms: [],
-      pending,
-      declined,
-    });
-    bridgeMock.syncDms.mockResolvedValue(answer([request], []));
-    renderView();
-    const decline = await screen.findByTestId("chats-dm-request-decline");
-    const held: ((value: ReturnType<typeof answer>) => void)[] = [];
-    bridgeMock.syncDms.mockImplementation(() => new Promise((resolve) => held.push(resolve)));
-    bridgeMock.declineDm.mockResolvedValue(undefined);
-    fireEvent.click(decline);
-    await waitFor(() => expect(held).toHaveLength(1));
-    act(() => emitWorkspaceActivity());
-    await act(async () => held[0]!(answer([], [request])));
-    await waitFor(() => expect(held).toHaveLength(2));
-    const again = await screen.findByTestId("chats-dm-request-again");
-    await waitFor(() => expect((again as HTMLButtonElement).disabled).toBe(false));
-  });
-
-  it("keeps a request's buttons busy until the decline's own sync lands, when another sync was already out", async () => {
-    const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };
-    const answer = (pending: (typeof request)[], declined: (typeof request)[]) => ({
-      available: true,
-      dms: [],
-      pending,
-      declined,
-    });
-    bridgeMock.syncDms.mockResolvedValue(answer([request], []));
-    renderView();
-    const decline = await screen.findByTestId("chats-dm-request-decline");
-    const held: ((value: ReturnType<typeof answer>) => void)[] = [];
-    bridgeMock.syncDms.mockImplementation(() => new Promise((resolve) => held.push(resolve)));
-    bridgeMock.declineDm.mockResolvedValue(undefined);
-    act(() => emitWorkspaceActivity());
-    await waitFor(() => expect(held).toHaveLength(1));
-    fireEvent.click(decline);
-    await waitFor(() => expect(bridgeMock.declineDm).toHaveBeenCalled());
-    await act(async () => undefined);
-    expect((screen.getByTestId("chats-dm-request-decline") as HTMLButtonElement).disabled).toBe(
-      true,
-    );
-    await act(async () => held[0]!(answer([request], [])));
-    await waitFor(() => expect(held).toHaveLength(2));
-    expect((screen.getByTestId("chats-dm-request-decline") as HTMLButtonElement).disabled).toBe(
-      true,
-    );
-    await act(async () => held[1]!(answer([], [request])));
-    const again = await screen.findByTestId("chats-dm-request-again");
-    await waitFor(() => expect((again as HTMLButtonElement).disabled).toBe(false));
-  });
-
-  it("shows no DM surface at all for a solo user", async () => {
-    bridgeMock.listChatChannels.mockResolvedValue({
-      channels: [
-        channel(),
-        channel({
-          id: "channel-dm-1",
-          name: "bob@example.com",
-          slug: "bob-example-com",
-          kind: "dm",
-        }),
-      ],
-      fileThreads: [],
-    });
-    renderView();
-    await screen.findByTestId("chats-channel");
+  it("hides People while signed out of the server", async () => {
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    await screen.findByTestId("chats-view");
+    await waitFor(() => expect(bridgeMock.directConversations).toHaveBeenCalled());
     expect(screen.queryByTestId("chats-dms-section")).toBeNull();
-    expect(screen.queryByTestId("chats-new-dm")).toBeNull();
-    const names = screen.getAllByTestId("chats-channel-name").map((el) => el.textContent);
-    expect(names).toEqual(["general"]);
   });
 
-  it("lists DMs by peer label with unread badges when collaboration is on", async () => {
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [
-        dm({ peerLabel: "bob@example.com", unreadCount: 2 }),
-        dm({
-          channelId: "channel-dm-2",
-          channelWireId: "wire-dm-2",
-          role: "participant",
-          peerLabel: "carol@example.com",
-          connected: false,
-        }),
-      ],
-    });
-    renderView();
-    await screen.findByTestId("chats-dms-section");
-    const names = screen.getAllByTestId("chats-dm-name").map((el) => el.textContent);
-    expect(names).toEqual(["bob@example.com", "carol@example.com"]);
-    expect(screen.getByTestId("chats-dm-unread").textContent).toBe("2");
-    expect(screen.getByTestId("chats-new-dm")).toBeTruthy();
+  it("lists each conversation by name, with unread, preview, and blocked marks, and no email", async () => {
+    signedIn([
+      conversation({ unread: 2 }),
+      conversation({
+        conversationId: "conversation-group",
+        people: [sam, ana],
+        last: sent(5, "ana", "Booked the table"),
+        unread: 0,
+      }),
+      conversation({
+        conversationId: "conversation-blocked",
+        people: [{ personId: "lee", name: null, blocked: true }],
+        last: null,
+        blocked: true,
+      }),
+    ]);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    const rows = await screen.findAllByTestId("chats-dm-item");
+    expect(rows.map((row) => within(row).getByTestId("chats-dm-name").textContent)).toEqual([
+      "Sam Rivera",
+      "Sam Rivera, Ana Diaz",
+      "Someone",
+    ]);
+    // Only the unread row shows its last message and a count.
+    expect(within(rows[0]!).getByTestId("chats-dm-unread").textContent).toBe("2");
+    expect(rows[0]!.textContent).toContain("See you at nine");
+    expect(rows[1]!.textContent).not.toContain("Booked the table");
+    expect(within(rows[1]!).queryByTestId("chats-dm-unread")).toBeNull();
+    expect(rows[2]!.dataset.blocked).toBe("true");
+    expect(within(rows[2]!).getByTestId("chats-dm-blocked")).toBeTruthy();
+    expect(screen.getByTestId("chats-dms-section").textContent).not.toContain("@");
   });
 
-  it("scrolls and highlights a canonical DM backlink's focused message", async () => {
-    const focused = message({
-      id: "message-focus",
-      threadId: "thread-dm-1",
-      body: "Focused DM mention",
+  it("reads the list again when the server says something changed, and when the session settles", async () => {
+    let changed: () => void = () => {};
+    bridgeMock.onDirectChanged.mockImplementation((listener: () => void) => {
+      changed = listener;
+      return () => undefined;
     });
-    bridgeMock.listChatMessages.mockResolvedValue({ messages: [focused] });
-    vi.mocked(Element.prototype.scrollIntoView).mockClear();
-
-    renderView(vi.fn(), vi.fn(), {
-      variant: "page",
-      initialNav: {
-        level: "dm",
-        dm: dm(),
-        focusMessageId: focused.id,
-      },
-    });
-
-    expect(await screen.findByText("Focused DM mention")).toBeTruthy();
-    await waitFor(() => {
-      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
-    });
-    expect(screen.getByTestId("chats-dm-message").className).toContain("dohc-target-flash");
-  });
-
-  it("opens a focused reply's thread and highlights the reply there", async () => {
-    const root = message({
-      id: "message-root",
-      threadId: "thread-dm-1",
-      body: "Where should we eat?",
-    });
-    const reply = message({
-      id: "message-focus",
-      threadId: "thread-dm-1",
-      body: "Prado at 8:30",
-      parentMessageId: root.id,
-    });
-    bridgeMock.listChatMessages.mockResolvedValue({ messages: [root, reply] });
-
-    renderView(vi.fn(), vi.fn(), {
-      variant: "page",
-      initialNav: { level: "dm", dm: dm(), focusMessageId: reply.id },
-    });
-
-    const panel = await screen.findByTestId("chats-dm-thread-panel");
-    await waitFor(() => {
-      const row = within(panel).getByText("Prado at 8:30").closest("[data-message-id]");
-      expect(row?.className).toContain("dohc-target-flash");
-    });
-  });
-
-  it("clears focused-message state and refs when a DM is opened normally", async () => {
-    const user = userEvent.setup();
-    const focused = message({
-      id: "message-focus",
-      threadId: "thread-dm-1",
-      body: "Same id, different navigation",
-    });
-    const pendingRefresh = new Promise<never>(() => undefined);
-    bridgeMock.syncDms
-      .mockResolvedValueOnce({ available: true, dms: [dm()] })
-      .mockImplementation(() => pendingRefresh);
-    bridgeMock.listChatMessages.mockResolvedValue({ messages: [focused] });
-
-    renderView(vi.fn(), vi.fn(), {
-      variant: "panel",
-      initialNav: {
-        level: "dm",
-        dm: dm(),
-        focusMessageId: focused.id,
-      },
-    });
-
-    const initiallyFocused = await screen.findByTestId("chats-dm-message");
-    await waitFor(() => expect(initiallyFocused.className).toContain("dohc-target-flash"));
-
-    await user.click(screen.getByTestId("chats-dm-back"));
-    await user.click(await screen.findByTestId("chats-dm-item"));
-    const normallyOpened = await screen.findByTestId("chats-dm-message");
-    expect(normallyOpened.className).not.toContain("dohc-target-flash");
-  });
-
-  it("names the open DM on its refresh, and nothing on the list poll", async () => {
-    const user = userEvent.setup();
-    // A DM whose thread has not replicated yet refreshes the moment it opens,
-    // which is the same refreshOpenDm path the 4 s poll runs.
-    const pending = dm({ threadId: null });
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [pending] });
-    bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
-    renderView();
+    signedIn([conversation()]);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
     await screen.findByTestId("chats-dm-item");
-    expect(
-      bridgeMock.syncDms.mock.calls.every(([payload]) => payload.openChannelId === undefined),
-    ).toBe(true);
+    signedIn([conversation({ unread: 1, last: sent(3, "sam", "Running late") })]);
+    act(() => changed());
+    expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe("1");
 
-    const listCalls = bridgeMock.syncDms.mock.calls.length;
-    await user.click(await screen.findByTestId("chats-dm-item"));
-    await waitFor(() => expect(bridgeMock.syncDms.mock.calls.length).toBeGreaterThan(listCalls));
-    expect(
-      bridgeMock.syncDms.mock.calls.slice(listCalls).map(([payload]) => payload.openChannelId),
-    ).toContain("channel-dm-1");
+    signedIn([conversation({ unread: 4, last: sent(6, "sam", "Here now") })]);
+    act(() => emitCloudSessionChanged("session-a", "ready"));
+    await waitFor(() => expect(screen.getByTestId("chats-dm-unread").textContent).toBe("4"));
   });
 
-  it("opens a DM into its single running conversation and sends on Enter", async () => {
-    const user = userEvent.setup();
-    const pendingRefresh = new Promise<never>(() => undefined);
-    bridgeMock.syncDms
-      .mockResolvedValueOnce({ available: true, dms: [dm({ unreadCount: 2 })] })
-      .mockImplementation(() => pendingRefresh);
-    bridgeMock.listChatMessages.mockResolvedValue({
-      messages: [
-        message({
-          id: "m-1",
-          threadId: "thread-dm-1",
-          authorDisplayName: "bob@example.com",
-          body: "hey",
-        }),
-      ],
-    });
-    bridgeMock.sendChatMessage.mockResolvedValue({
-      message: message({ id: "m-2", threadId: "thread-dm-1", body: "hi bob" }),
-    });
-    renderView();
-    await user.click(await screen.findByTestId("chats-dm-item"));
-    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
-    expect(screen.getByTestId("chats-dm-title").textContent).toBe("bob@example.com");
-    const bodies = await screen.findAllByTestId("chats-dm-message-body");
-    expect(bodies.map((el) => el.textContent)).toEqual(["hey"]);
+  it("says when the list can't be read, as a notice with Try again", async () => {
+    bridgeMock.directConversations.mockRejectedValue(new Error("relay unreachable"));
+    const onError = vi.fn();
+    renderView(vi.fn(), onError, { variant: "panel" });
+    const retry = await screen.findByTestId("chats-dms-retry");
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    const [, , tryAgain, , options] = onError.mock.calls.at(-1)!;
+    expect(options).toEqual({ identity: expect.stringContaining("direct") });
+    signedIn([conversation()]);
+    act(() => (tryAgain as () => void)());
+    expect(await screen.findByTestId("chats-dm-item")).toBeTruthy();
+    expect(retry.isConnected).toBe(false);
+  });
+
+  it("opens a conversation with its messages and marks it read once the newest is in view", async () => {
+    signedIn([conversation({ unread: 1 })]);
+    history([sent(1, VIEWER, "Dinner Friday?"), sent(2, "sam", "See you at nine")]);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    const view = await openSam();
+    expect(within(view).getByTestId("chats-dm-title").textContent).toBe("Sam Rivera");
+    await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(2));
+    expect(bridgeMock.directHistory).toHaveBeenCalledWith({ conversationId: "conversation-sam" });
     await waitFor(() =>
-      expect(bridgeMock.markChatThreadRead).toHaveBeenCalledWith({
-        workspaceId: "workspace-a",
-        threadId: "thread-dm-1",
-        upToSequence: 1,
+      expect(bridgeMock.directMarkRead).toHaveBeenCalledWith({
+        conversationId: "conversation-sam",
+        seq: 2,
       }),
     );
-    await user.type(screen.getByTestId("chats-dm-composer"), "hi bob{Enter}");
-    await waitFor(() =>
-      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
-        workspaceId: "workspace-a",
-        threadId: "thread-dm-1",
-        body: "hi bob",
-      }),
-    );
-    const updated = await screen.findAllByTestId("chats-dm-message-body");
-    expect(updated[updated.length - 1].textContent).toBe("hi bob");
-
-    await user.click(screen.getByTestId("chats-dm-back"));
-    await screen.findByTestId("chats-dm-item");
     expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
   });
 
-  describe("leaving a conversation", () => {
-    it("shows Leave only for a participant's accepted DM, never the owner's own", async () => {
-      const user = userEvent.setup();
-      bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
-      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
-      renderView();
-      await user.click(await screen.findByTestId("chats-dm-item"));
-      await screen.findByTestId("chats-dm-view");
-      expect(screen.queryByTestId("chats-dm-leave")).toBeNull();
-    });
-
-    it("states the pinned copy and does not end the row on cancel", async () => {
-      const user = userEvent.setup();
-      const participant = dm({
-        role: "participant",
-        shareId: "share-dm-1",
-        peerLabel: "alice@example.com",
-      });
-      bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [participant] });
-      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
-      renderView();
-      await user.click(await screen.findByTestId("chats-dm-item"));
-      await user.click(await screen.findByTestId("chats-dm-leave"));
-
-      const dialog = await screen.findByTestId("chats-leave-dm-dialog");
-      expect(dialog.textContent).toContain("Leave your conversation with alice@example.com?");
-      expect(dialog.textContent).toContain(
-        "The conversation leaves Work. It appears again as a message request, so you can add it to a workspace later. Your messages are kept.",
-      );
-
-      await user.click(screen.getByTestId("chats-leave-dm-cancel"));
-      expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
-      expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
-      expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
-    });
-
-    it("ends the row, drops the conversation from the list, and returns to Chats on confirm", async () => {
-      const user = userEvent.setup();
-      const participant = dm({ role: "participant", shareId: "share-dm-1" });
-      // listDmRecords deliberately keeps an ended participant row
-      // readable (connected:false — the same owner-revoked tombstone rule),
-      // so main's real post-leave syncDms response carries both this row and
-      // the reappeared pending request for the same shareId. Building the
-      // mock through the actual withholdDmsInRequestLanes (not a hand-typed
-      // `dms: []`) is what makes this a real flow: a no-op filter would leave
-      // the ended row in `dms` and this test would go red on "shows only the
-      // request" below.
-      const endedRow = dm({ role: "participant", shareId: "share-dm-1", connected: false });
-      const reappearedRequest = { shareId: "share-dm-1", granterEmail: "alice@example.com" };
-      bridgeMock.syncDms
-        .mockResolvedValueOnce({ available: true, dms: [participant], pending: [], declined: [] })
-        .mockResolvedValue({
-          available: true,
-          dms: withholdDmsInRequestLanes({
-            dms: [endedRow],
-            requestShareIds: new Set(["share-dm-1"]),
-            holdersByShareId: new Map(),
-            holdersByWireId: new Map(),
-            workspaceId: "workspace-a",
-          }),
-          pending: [reappearedRequest],
-          declined: [],
-        });
-      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
-      bridgeMock.leaveDm.mockResolvedValue(undefined);
-      renderView();
-      await user.click(await screen.findByTestId("chats-dm-item"));
-      await user.click(await screen.findByTestId("chats-dm-leave"));
-      await user.click(await screen.findByTestId("chats-leave-dm-confirm"));
-
-      await waitFor(() =>
-        expect(bridgeMock.leaveDm).toHaveBeenCalledWith({
-          workspaceId: "workspace-a",
-          shareId: "share-dm-1",
-        }),
-      );
-      await waitFor(() => expect(screen.queryByTestId("chats-dm-view")).toBeNull());
-      await screen.findByTestId("chats-dm-request-item");
-      expect(screen.queryByTestId("chats-dm-item")).toBeNull();
-    });
-
-    it("clears the composer draft on leave, so the next DM opened starts empty", async () => {
-      const user = userEvent.setup();
-      const leaving = dm({
-        channelId: "channel-dm-1",
-        channelWireId: "wire-dm-1",
-        role: "participant",
-        shareId: "share-dm-1",
-        peerLabel: "alice@example.com",
-      });
-      const other = dm({
-        channelId: "channel-dm-2",
-        channelWireId: "wire-dm-2",
-        threadId: "thread-dm-2",
-        peerLabel: "bob@example.com",
-        name: "bob@example.com",
-      });
-      bridgeMock.syncDms
-        .mockResolvedValueOnce({
-          available: true,
-          dms: [leaving, other],
-          pending: [],
-          declined: [],
-        })
-        .mockResolvedValue({
-          available: true,
-          dms: [other],
-          pending: [{ shareId: "share-dm-1", granterEmail: "alice@example.com" }],
-          declined: [],
-        });
-      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
-      bridgeMock.leaveDm.mockResolvedValue(undefined);
-      renderView();
-
-      const items = await screen.findAllByTestId("chats-dm-item");
-      await user.click(items.find((el) => el.getAttribute("data-channel-id") === "channel-dm-1")!);
-      await screen.findByTestId("chats-dm-view");
-      await user.type(screen.getByTestId("chats-dm-composer"), "unsent draft for alice");
-      expect((screen.getByTestId("chats-dm-composer") as HTMLTextAreaElement).value).toBe(
-        "unsent draft for alice",
-      );
-
-      await user.click(await screen.findByTestId("chats-dm-leave"));
-      await user.click(await screen.findByTestId("chats-leave-dm-confirm"));
-      await waitFor(() => expect(bridgeMock.leaveDm).toHaveBeenCalled());
-      await waitFor(() => expect(screen.queryByTestId("chats-dm-view")).toBeNull());
-
-      await user.click(await screen.findByTestId("chats-dm-item"));
-      await screen.findByTestId("chats-dm-view");
-      expect((screen.getByTestId("chats-dm-composer") as HTMLTextAreaElement).value).toBe("");
-    });
-
-    it("gates Leave on a live placement, not merely a shareId", async () => {
-      const user = userEvent.setup();
-      const live = dm({
-        channelId: "channel-dm-1",
-        channelWireId: "wire-dm-1",
-        role: "participant",
-        shareId: "share-dm-1",
-        connected: true,
-      });
-      // An already-ended participant row (owner revoked, or already left):
-      // confirming Leave here would re-end a tombstone and promise a request
-      // that, for an owner-revoked grant, can never appear.
-      const ended = dm({
-        channelId: "channel-dm-2",
-        channelWireId: "wire-dm-2",
-        role: "participant",
-        shareId: "share-dm-2",
-        connected: false,
-      });
-      bridgeMock.syncDms.mockResolvedValue({
-        available: true,
-        dms: [live, ended],
-        pending: [],
-        declined: [],
-      });
-      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
-      renderView();
-
-      const items = await screen.findAllByTestId("chats-dm-item");
-      await user.click(items.find((el) => el.getAttribute("data-channel-id") === "channel-dm-1")!);
-      await screen.findByTestId("chats-dm-view");
-      expect(await screen.findByTestId("chats-dm-leave")).toBeTruthy();
-
-      await user.click(screen.getByTestId("chats-dm-back"));
-      const itemsAgain = await screen.findAllByTestId("chats-dm-item");
-      await user.click(
-        itemsAgain.find((el) => el.getAttribute("data-channel-id") === "channel-dm-2")!,
-      );
-      await screen.findByTestId("chats-dm-view");
-      expect(screen.queryByTestId("chats-dm-leave")).toBeNull();
-    });
-
-    it("closes on Escape without navigating away or ending the row", async () => {
-      const user = userEvent.setup();
-      const participant = dm({ role: "participant", shareId: "share-dm-1" });
-      bridgeMock.syncDms.mockResolvedValue({
-        available: true,
-        dms: [participant],
-        pending: [],
-        declined: [],
-      });
-      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
-      renderView();
-      await user.click(await screen.findByTestId("chats-dm-item"));
-      await user.click(await screen.findByTestId("chats-dm-leave"));
-      await screen.findByTestId("chats-leave-dm-dialog");
-
-      // The dialog auto-focuses Cancel, so Escape targets an element inside
-      // its own marked subtree — the Chats root's onKeyDownCapture must skip
-      // it (data-chat-escape-local), leaving the dialog's own handler to close it.
-      await user.keyboard("{Escape}");
-
-      expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
-      // Still on the DM: Escape closed the dialog, it did not walk the view
-      // back the way the root's Escape handler otherwise would.
-      expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
-      expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
-    });
-
-    it("clears a stale leave dialog on navigation away, so opening a different DM never shows it", async () => {
-      const user = userEvent.setup();
-      const leaving = dm({
-        channelId: "channel-dm-1",
-        channelWireId: "wire-dm-1",
-        role: "participant",
-        shareId: "share-dm-1",
-      });
-      const other = dm({
-        channelId: "channel-dm-2",
-        channelWireId: "wire-dm-2",
-        threadId: "thread-dm-2",
-      });
-      bridgeMock.syncDms.mockResolvedValue({
-        available: true,
-        dms: [leaving, other],
-        pending: [],
-        declined: [],
-      });
-      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
-      renderView();
-
-      const items = await screen.findAllByTestId("chats-dm-item");
-      await user.click(items.find((el) => el.getAttribute("data-channel-id") === "channel-dm-1")!);
-      await screen.findByTestId("chats-dm-view");
-      await user.click(await screen.findByTestId("chats-dm-leave"));
-      await screen.findByTestId("chats-leave-dm-dialog");
-
-      await user.click(screen.getByTestId("chats-dm-back"));
-      expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
-
-      const itemsAgain = await screen.findAllByTestId("chats-dm-item");
-      await user.click(
-        itemsAgain.find((el) => el.getAttribute("data-channel-id") === "channel-dm-2")!,
-      );
-      await screen.findByTestId("chats-dm-view");
-      expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
-    });
-
-    // An owner revocation mid-dialog leaves the
-    // channelId unchanged, so the round-2 belt (keyed only on nav change)
-    // would leave the confirmation open — confirming would re-end an
-    // already-ended tombstone and promise a request that, for an
-    // owner-revoked grant, can never appear.
-    it("closes the confirmation the moment the record it was opened for loses connected", async () => {
-      vi.useFakeTimers({ shouldAdvanceTime: true });
-      try {
-        const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
-        const participant = dm({ role: "participant", shareId: "share-dm-1" });
-        const revoked = { ...participant, connected: false };
-        const connected = {
-          available: true,
-          dms: [participant],
-          pending: [],
-          declined: [],
-        };
-        bridgeMock.syncDms
-          .mockResolvedValueOnce(connected)
-          .mockResolvedValueOnce(connected)
-          .mockResolvedValue({
-            available: true,
-            dms: [revoked],
-            pending: [],
-            declined: [],
-          });
-        bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
-        renderView();
-        await user.click(await screen.findByTestId("chats-dm-item"));
-        await user.click(await screen.findByTestId("chats-dm-leave"));
-        await screen.findByTestId("chats-leave-dm-dialog");
-
-        // The per-open-DM refresh interval (refreshOpenDm, every 4s) is what
-        // would deliver the owner's revocation while the dialog is open.
-        await act(async () => {
-          await vi.advanceTimersByTimeAsync(4_000);
-        });
-
-        expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
-        expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
-        expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    // Leave during an in-flight send would end the row
-    // before sendChatMessage's revalidation, whose rejection then gets
-    // suppressed by goBack's context change — the message
-    // vanishes with no warning. Confirm is disabled until the send settles,
-    // so the user always sees either the message land or the existing
-    // "Could not send" error, never silence.
-    it("disables the leave confirm while a send is in flight for this DM, so the message can never silently vanish", async () => {
-      const user = userEvent.setup();
-      const participant = dm({ role: "participant", shareId: "share-dm-1" });
-      bridgeMock.syncDms.mockResolvedValue({
-        available: true,
-        dms: [participant],
-        pending: [],
-        declined: [],
-      });
-      bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
-      let resolveSend!: (result: { message: ChatMessageRecord }) => void;
-      const sendGate = new Promise<{ message: ChatMessageRecord }>((resolve) => {
-        resolveSend = resolve;
-      });
-      bridgeMock.sendChatMessage.mockReturnValue(sendGate);
-      renderView();
-      await user.click(await screen.findByTestId("chats-dm-item"));
-      await user.type(screen.getByTestId("chats-dm-composer"), "hello{Enter}");
-      await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalled());
-
-      await user.click(await screen.findByTestId("chats-dm-leave"));
-      await screen.findByTestId("chats-leave-dm-dialog");
-      await waitFor(() =>
-        expect((screen.getByTestId("chats-leave-dm-confirm") as HTMLButtonElement).disabled).toBe(
-          true,
-        ),
-      );
-
-      await user.click(screen.getByTestId("chats-leave-dm-confirm"));
-      expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
-
-      resolveSend({
-        message: message({ id: "m-1", threadId: "thread-dm-1", body: "hello" }),
-      });
-      await waitFor(() =>
-        expect((screen.getByTestId("chats-leave-dm-confirm") as HTMLButtonElement).disabled).toBe(
-          false,
-        ),
-      );
-    });
-  });
-
-  it("keeps syncing an open pending DM until its thread arrives", async () => {
+  it("sends with one message id, and Try again resends that same id", async () => {
     const user = userEvent.setup();
-    const pendingDm = dm({ threadId: null });
-    const hydratedDm = dm();
-    let resolveOpenSync!: (result: { available: boolean; dms: DmRecord[] }) => void;
-    const openSync = new Promise<{ available: boolean; dms: DmRecord[] }>((resolve) => {
-      resolveOpenSync = resolve;
-    });
-    const laterRefresh = new Promise<never>(() => undefined);
-    bridgeMock.syncDms
-      .mockResolvedValueOnce({ available: true, dms: [pendingDm] })
-      .mockImplementationOnce(() => openSync)
-      .mockImplementation(() => laterRefresh);
-    bridgeMock.listChatMessages.mockResolvedValue({
-      messages: [
-        message({
-          id: "message-dm-arrived",
-          threadId: "thread-dm-1",
-          body: "The conversation arrived",
-        }),
-      ],
-    });
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    bridgeMock.directSend.mockRejectedValueOnce(new Error("relay unreachable"));
+    const onError = vi.fn();
+    renderView(vi.fn(), onError, { variant: "panel" });
+    await openSam();
+    const composer = (await screen.findByTestId("chats-dm-composer")) as HTMLTextAreaElement;
+    expect(composer.placeholder).toBe("Message Sam Rivera");
+    await user.type(composer, "On my way{Enter}");
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    const first = bridgeMock.directSend.mock.calls[0]![0] as {
+      conversationId: string;
+      messageId: string;
+      body: string;
+    };
+    expect(first).toMatchObject({ conversationId: "conversation-sam", body: "On my way" });
+    // The words stay, so nothing typed is lost.
+    expect(composer.value).toBe("On my way");
 
-    renderView();
-    await user.click(await screen.findByTestId("chats-dm-item"));
-    expect(await screen.findByTestId("chats-dm-waiting")).toBeTruthy();
-    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalledTimes(2));
+    bridgeMock.directSend.mockResolvedValueOnce({ conversationId: "conversation-sam", seq: 3 });
+    const [, , tryAgain] = onError.mock.calls.at(-1)!;
+    await act(async () => (tryAgain as () => void)());
+    expect(bridgeMock.directSend).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.directSend.mock.calls[1]![0]).toEqual(first);
+    await waitFor(() => expect(composer.value).toBe(""));
+    expect(screen.getAllByTestId("chats-dm-message").at(-1)!.textContent).toContain("On my way");
 
-    await act(async () => {
-      resolveOpenSync({ available: true, dms: [hydratedDm] });
-      await openSync;
-    });
-
-    expect(await screen.findByText("The conversation arrived")).toBeTruthy();
-    expect(screen.queryByTestId("chats-dm-waiting")).toBeNull();
-    expect(bridgeMock.syncDms).toHaveBeenCalledTimes(2);
-  });
-
-  it("toggles reactions against the open DM thread", async () => {
-    const user = userEvent.setup();
-    const pendingRefresh = new Promise<never>(() => undefined);
-    bridgeMock.syncDms
-      .mockResolvedValueOnce({ available: true, dms: [dm()] })
-      .mockImplementation(() => pendingRefresh);
-    bridgeMock.listChatMessages.mockResolvedValue({
-      messages: [
-        message({
-          id: "message-dm-reaction",
-          threadId: "thread-dm-1",
-          body: "React here",
-        }),
-      ],
-    });
-
-    renderView();
-    await user.click(await screen.findByTestId("chats-dm-item"));
-    expect(await screen.findByText("React here")).toBeTruthy();
-    const reactionTrigger = screen.getByTestId("chats-dm-add-reaction");
-    vi.spyOn(reactionTrigger, "getBoundingClientRect").mockReturnValue(
-      new DOMRect(100, 100, 20, 20),
+    // Sending the same words again after they went is a new message.
+    bridgeMock.directSend.mockResolvedValueOnce({ conversationId: "conversation-sam", seq: 4 });
+    await user.type(composer, "On my way{Enter}");
+    await waitFor(() => expect(bridgeMock.directSend).toHaveBeenCalledTimes(3));
+    expect((bridgeMock.directSend.mock.calls[2]![0] as { messageId: string }).messageId).not.toBe(
+      first.messageId,
     );
-    await user.click(reactionTrigger);
-    const thumbsUp = screen
-      .getAllByTestId("chats-dm-reaction-choice")
-      .find((button) => button.getAttribute("data-emoji") === "👍");
-    expect(thumbsUp).toBeTruthy();
-    await user.click(thumbsUp!);
+  });
 
+  it("blocks from the row menu and unblocks from the conversation", async () => {
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    bridgeMock.directBlock.mockResolvedValue(undefined);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    fireEvent.contextMenu(await screen.findByTestId("chats-dm-item"), { clientX: 40, clientY: 60 });
+    // The server lists the block once it holds it.
+    signedIn([conversation({ blocked: true })]);
+    fireEvent.click(await screen.findByTestId("chat-row-menu-block"));
     await waitFor(() =>
-      expect(bridgeMock.setChatReaction).toHaveBeenCalledWith({
-        workspaceId: "workspace-a",
-        threadId: "thread-dm-1",
-        messageId: "message-dm-reaction",
-        emoji: "👍",
-        state: "added",
+      expect(bridgeMock.directBlock).toHaveBeenCalledWith({
+        conversationId: "conversation-sam",
+        personId: "sam",
+        blocked: true,
       }),
     );
-  });
-
-  it("drops older DM refreshes after a newer snapshot and local send", async () => {
-    const user = userEvent.setup();
-    const pendingRefresh = new Promise<never>(() => undefined);
-    bridgeMock.syncDms
-      .mockResolvedValueOnce({ available: true, dms: [dm()] })
-      .mockImplementation(() => pendingRefresh);
-
-    let resolveOlder!: (result: { messages: ChatMessageRecord[] }) => void;
-    let resolveNewer!: (result: { messages: ChatMessageRecord[] }) => void;
-    const older = new Promise<{ messages: ChatMessageRecord[] }>((resolve) => {
-      resolveOlder = resolve;
-    });
-    const newer = new Promise<{ messages: ChatMessageRecord[] }>((resolve) => {
-      resolveNewer = resolve;
-    });
-    bridgeMock.listChatMessages
-      .mockResolvedValueOnce({
-        messages: [
-          message({
-            id: "message-dm-baseline",
-            threadId: "thread-dm-1",
-            body: "Baseline",
-          }),
-        ],
-      })
-      .mockImplementationOnce(() => older)
-      .mockImplementationOnce(() => newer);
-    bridgeMock.sendChatMessage.mockResolvedValue({
-      message: message({
-        id: "message-dm-local",
-        threadId: "thread-dm-1",
-        body: "Local send",
-      }),
-    });
-
-    renderView();
-    await user.click(await screen.findByTestId("chats-dm-item"));
-    expect(await screen.findByText("Baseline")).toBeTruthy();
-
-    act(() => emitWorkspaceActivity());
-    act(() => emitWorkspaceActivity());
-    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(3));
-    await act(async () => {
-      resolveNewer({
-        messages: [
-          message({
-            id: "message-dm-newer",
-            threadId: "thread-dm-1",
-            body: "Newer snapshot",
-          }),
-        ],
-      });
-      await newer;
-    });
-    expect(await screen.findByText("Newer snapshot")).toBeTruthy();
-
-    await user.type(screen.getByTestId("chats-dm-composer"), "Local send{Enter}");
-    await waitFor(() => expect(screen.getByText("Local send")).toBeTruthy());
-
-    await act(async () => {
-      resolveOlder({
-        messages: [
-          message({
-            id: "message-dm-stale",
-            threadId: "thread-dm-1",
-            body: "Stale snapshot",
-          }),
-        ],
-      });
-      await older;
-    });
-
-    expect(screen.queryByText("Stale snapshot")).toBeNull();
-    expect(screen.getAllByTestId("chats-dm-message-body").map((node) => node.textContent)).toEqual([
-      "Newer snapshot",
-      "Local send",
-    ]);
-  });
-
-  it("starts a new DM from the recipient step and opens the conversation", async () => {
-    const user = userEvent.setup();
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [] });
-    bridgeMock.startDm.mockResolvedValue({
-      dm: dm(),
-      message: message({ id: "m-1", threadId: "thread-dm-1", body: "hello there" }),
-    });
-    bridgeMock.listChatMessages.mockResolvedValue({
-      messages: [message({ id: "m-1", threadId: "thread-dm-1", body: "hello there" })],
-    });
-    renderView();
-    await user.click(await screen.findByTestId("chats-new-dm"));
-    await user.type(screen.getByTestId("chats-dm-recipients"), "bob@example.com");
-    const composer = screen.getByTestId("chats-dm-new-composer");
-    fireEvent.change(composer, {
-      target: { value: "hello there @[docs/plan.md#scope]" },
-    });
-    fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
-    await waitFor(() =>
-      expect(bridgeMock.startDm).toHaveBeenCalledWith({
-        workspaceId: "workspace-a",
-        recipients: "bob@example.com",
-        body: "hello there @[docs/plan.md#scope]",
-        fileReferences: [{ path: "docs/plan.md", headingAnchor: "scope" }],
-      }),
-    );
-    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
-    const bodies = await screen.findAllByTestId("chats-dm-message-body");
-    expect(bodies.map((el) => el.textContent)).toEqual(["hello there"]);
-  });
-
-  it("clears a stale recipient/draft when backing out of New message and reopening it", async () => {
-    // Backing out of compose without sending must not leave the old recipients
-    // pre-filled — a user who reopens compose and types + sends could otherwise
-    // misdirect their message to the wrong person.
-    const user = userEvent.setup();
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [] });
-    renderView();
-    await user.click(await screen.findByTestId("chats-new-dm"));
-    await user.type(screen.getByTestId("chats-dm-recipients"), "stale@example.com");
-    expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).value).toBe(
-      "stale@example.com",
-    );
-    await user.click(screen.getByTestId("chats-dm-new-back"));
-    await user.click(await screen.findByTestId("chats-new-dm"));
-    expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).value).toBe("");
-  });
-
-  it("closes the composer for an ended DM but keeps the conversation readable", async () => {
-    const user = userEvent.setup();
-    const pendingRefresh = new Promise<never>(() => undefined);
-    bridgeMock.syncDms
-      .mockResolvedValueOnce({
-        available: true,
-        dms: [
-          dm({
-            role: "participant",
-            peerLabel: "alice@example.com",
-            connected: false,
-            unreadCount: 2,
-          }),
-        ],
-      })
-      .mockImplementation(() => pendingRefresh);
-    bridgeMock.listChatMessages.mockResolvedValue({
-      messages: [message({ id: "m-1", threadId: "thread-dm-1", body: "old message" })],
-    });
-    renderView();
-    await user.click(await screen.findByTestId("chats-dm-item"));
-    expect(await screen.findByTestId("chats-dm-ended")).toBeTruthy();
+    await waitFor(() => expect(screen.getByTestId("chats-dm-item").dataset.blocked).toBe("true"));
+    await openSam();
+    const line = await screen.findByTestId("chats-dm-blocked-line");
+    expect(line.textContent).toContain("You blocked Sam Rivera.");
     expect(screen.queryByTestId("chats-dm-composer")).toBeNull();
-    const bodies = await screen.findAllByTestId("chats-dm-message-body");
-    expect(bodies.map((el) => el.textContent)).toEqual(["old message"]);
-    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
-
-    await user.click(screen.getByTestId("chats-dm-back"));
-    expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe("2");
+    signedIn([conversation()]);
+    fireEvent.click(within(line).getByTestId("chats-dm-blocked-line-action"));
+    await waitFor(() =>
+      expect(bridgeMock.directBlock).toHaveBeenLastCalledWith({
+        conversationId: "conversation-sam",
+        personId: "sam",
+        blocked: false,
+      }),
+    );
+    expect(await screen.findByTestId("chats-dm-composer")).toBeTruthy();
   });
-});
 
-describe("ChatsView DM polling", () => {
-  const idle = { available: true, dms: [], pending: [], declined: [], failed: false };
+  it("lists each blocked person in a group conversation with Unblock", async () => {
+    const group = conversation({
+      conversationId: "conversation-group",
+      people: [sam, { ...ana, blocked: true }],
+      last: sent(5, "sam", "Booked the table"),
+    });
+    signedIn([group]);
+    history([sent(5, "sam", "Booked the table")]);
+    bridgeMock.directBlock.mockResolvedValue(undefined);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    await openSam();
+    fireEvent.click(await screen.findByTestId("chats-dm-options"));
+    expect(await screen.findByRole("menuitem", { name: "Block Sam Rivera" })).toBeTruthy();
+    signedIn([{ ...group, people: [sam, ana] }]);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Unblock Ana Diaz" }));
+    await waitFor(() =>
+      expect(bridgeMock.directBlock).toHaveBeenCalledWith({
+        conversationId: "conversation-group",
+        personId: "ana",
+        blocked: false,
+      }),
+    );
+    fireEvent.click(await screen.findByTestId("chats-dm-options"));
+    expect(await screen.findByRole("menuitem", { name: "Block Ana Diaz" })).toBeTruthy();
+  });
 
-  it("marks its own polls and the first refresh, not a refresh an activity event caused", async () => {
-    vi.useFakeTimers();
-    try {
-      bridgeMock.syncDms.mockResolvedValue(idle);
-      renderView();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledWith({ workspaceId: "workspace-a", poll: true });
+  it("shows the saved copy read-only, with why, while the server is away", async () => {
+    signedIn([conversation()], true);
+    history([sent(2, "sam", "See you at nine")], true);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    expect(await screen.findByTestId("chats-dms-saved")).toBeTruthy();
+    await openSam();
+    const offline = await screen.findByTestId("chats-dm-offline");
+    expect(screen.getAllByTestId("chats-dm-message")).toHaveLength(1);
+    expect(screen.queryByTestId("chats-dm-composer")).toBeNull();
+    expect(screen.queryByTestId("chats-dm-options")).toBeNull();
+    expect(offline.textContent).not.toMatch(/encrypt/i);
 
-      bridgeMock.syncDms.mockClear();
-      act(() => emitWorkspaceActivity());
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a" });
+    // Try again reads both again, and the composer comes back once the server answers.
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    fireEvent.click(within(offline).getByTestId("chats-dm-offline-action"));
+    expect(await screen.findByTestId("chats-dm-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-offline")).toBeNull();
+  });
 
-      bridgeMock.syncDms.mockClear();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(5_000);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({
+  it("starts a new message with people picked from the workspace's members", async () => {
+    const user = userEvent.setup();
+    signedIn([]);
+    members([
+      { memberId: "sam", name: "Sam Rivera" },
+      { memberId: "ana", name: "Ana Diaz" },
+      { memberId: "gone", name: "Gone Person", state: "removed" },
+    ]);
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, people: [sam] });
+    bridgeMock.directStart.mockResolvedValue({ conversationId: "conversation-sam", seq: 1 });
+    history([sent(1, VIEWER, "Lunch?")]);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    fireEvent.click(await screen.findByTestId("chats-new-dm"));
+    await screen.findByTestId("chats-dm-new");
+    const options = await screen.findAllByTestId("chats-dm-new-member");
+    // Active members other than the viewer, by name, never by email.
+    expect(options.map((option) => option.dataset.memberId)).toEqual(["ana", "sam"]);
+    expect(options.map((option) => option.textContent)).toEqual([
+      expect.stringContaining("Ana Diaz"),
+      expect.stringContaining("Sam Rivera"),
+    ]);
+    expect(screen.getByTestId("chats-dm-new").textContent).not.toContain("@");
+
+    // A message without anyone picked asks who it is for.
+    const composer = screen.getByTestId("chats-dm-new-composer") as HTMLTextAreaElement;
+    await user.type(composer, "Lunch?{Enter}");
+    expect(screen.getByText("Choose who to message.")).toBeTruthy();
+    expect(bridgeMock.directStart).not.toHaveBeenCalled();
+
+    // Keyboard: type to filter, Enter picks.
+    await user.type(screen.getByTestId("chats-dm-recipients"), "sam{Enter}");
+    expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
+      ["sam"],
+    );
+    await waitFor(() =>
+      expect(bridgeMock.directResolve).toHaveBeenCalledWith({
         workspaceId: "workspace-a",
-        poll: true,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
+        memberIds: ["sam"],
+      }),
+    );
+    expect(screen.queryByText("Choose who to message.")).toBeNull();
+
+    await user.click(composer);
+    await user.type(composer, "{Enter}");
+    await waitFor(() => expect(bridgeMock.directStart).toHaveBeenCalledTimes(1));
+    expect(bridgeMock.directStart.mock.calls[0]![0]).toMatchObject({
+      workspaceId: "workspace-a",
+      memberIds: ["sam"],
+      body: "Lunch?",
+    });
+    const view = await screen.findByTestId("chats-dm-view");
+    expect(view.dataset.conversationId).toBe("conversation-sam");
   });
 
-  it("holds the polls after a failed sync instead of running the queued one the moment it ends", async () => {
-    vi.useFakeTimers();
-    try {
-      bridgeMock.syncDms.mockResolvedValue(idle);
-      renderView();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      const mounted = bridgeMock.syncDms.mock.calls.length;
-
-      let finishFailure!: () => void;
-      bridgeMock.syncDms.mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishFailure = () => resolve({ ...idle, failed: true });
-          }),
-      );
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(5_000);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(mounted + 1);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(5_000);
-      });
-      await act(async () => {
-        finishFailure();
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(mounted + 1);
-
-      // The polls at 15 s and 20 s fall inside the hold; the one at 25 s runs.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(10_000);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(mounted + 1);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(5_000);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(mounted + 2);
-    } finally {
-      vi.useRealTimers();
-    }
+  it("offers the conversation the picked people already have", async () => {
+    const user = userEvent.setup();
+    signedIn([conversation()]);
+    members([{ memberId: "sam", name: "Sam Rivera" }]);
+    bridgeMock.directResolve.mockResolvedValue({
+      conversationId: "conversation-sam",
+      people: [sam],
+    });
+    history([sent(2, "sam", "See you at nine")]);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
+    await user.click(await screen.findByTestId("chats-dm-new-member"));
+    const existing = await screen.findByTestId("chats-dm-new-existing");
+    expect(existing.textContent).toContain("You already have a conversation with Sam Rivera.");
+    fireEvent.click(within(existing).getByTestId("chats-dm-new-open-existing"));
+    expect((await screen.findByTestId("chats-dm-view")).dataset.conversationId).toBe(
+      "conversation-sam",
+    );
+    expect(bridgeMock.directStart).not.toHaveBeenCalled();
   });
 
-  it("pulls for an open DM waiting for its thread only on open and on its timer, not on activity", async () => {
-    vi.useFakeTimers();
-    try {
-      const waiting = dm({ threadId: null });
-      bridgeMock.syncDms.mockResolvedValue({ ...idle, dms: [waiting] });
-      renderView();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      fireEvent.click(screen.getByTestId("chats-dm-item"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenLastCalledWith({
-        workspaceId: "workspace-a",
-        openChannelId: waiting.channelId,
-        poll: true,
-      });
-
-      // Each pull can end in an activity event. A refresh for that event
-      // must not pull, or it would queue the next pull itself.
-      bridgeMock.syncDms.mockClear();
-      for (let event = 0; event < 3; event += 1) {
-        act(() => emitWorkspaceActivity());
-        await act(async () => {
-          await vi.advanceTimersByTimeAsync(0);
-        });
-      }
-      expect(bridgeMock.syncDms.mock.calls).toEqual(
-        Array.from({ length: 3 }, () => [
-          { workspaceId: "workspace-a", openChannelId: waiting.channelId },
-        ]),
-      );
-
-      bridgeMock.syncDms.mockClear();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(4_000);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({
-        workspaceId: "workspace-a",
-        openChannelId: waiting.channelId,
-        poll: true,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("holds the polls and activity refreshes, but not a refresh a person asked for", async () => {
-    vi.useFakeTimers();
-    try {
-      const request = { shareId: "share-dm-request", granterEmail: "bob@example.com" };
-      bridgeMock.syncDms.mockResolvedValue({ ...idle, pending: [request], failed: true });
-      renderView();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-
-      bridgeMock.syncDms.mockClear();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(5_000);
-      });
-      act(() => emitWorkspaceActivity());
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(bridgeMock.syncDms).not.toHaveBeenCalled();
-
-      fireEvent.click(screen.getByTestId("chats-dm-request-decline"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(bridgeMock.declineDm).toHaveBeenCalledWith({ shareId: request.shareId });
-      expect(bridgeMock.syncDms).toHaveBeenCalledExactlyOnceWith({ workspaceId: "workspace-a" });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("syncs a conversation once when a person opens it during a hold, not again when its fields update", async () => {
-    vi.useFakeTimers();
-    try {
-      const open = dm();
-      bridgeMock.syncDms.mockResolvedValue({ ...idle, dms: [open], failed: true });
-      bridgeMock.listChatMessages.mockResolvedValue({
-        messages: [message({ id: "m-local", threadId: open.threadId!, body: "Already here" })],
-      });
-      renderView();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      const listed = bridgeMock.syncDms.mock.calls.length;
-
-      // Opening paints the local conversation first, then syncs it although
-      // the failed list sync holds the polls. The sync brings new fields for
-      // the same DM, which changes nav but is not another opening.
-      bridgeMock.syncDms.mockResolvedValue({
-        ...idle,
-        dms: [{ ...open, unreadCount: 3 }],
-        failed: true,
-      });
-      fireEvent.click(screen.getByTestId("chats-dm-item"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(screen.getByText("Already here")).toBeTruthy();
-      expect(bridgeMock.syncDms.mock.calls.slice(listed)).toEqual([
-        [{ workspaceId: "workspace-a", openChannelId: open.channelId, poll: true }],
-      ]);
-
-      // The ticks at 4 s and 8 s fall inside the renewed hold.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(8_000);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(listed + 1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("keeps one conversation sync in flight and holds the queued one after it fails", async () => {
-    vi.useFakeTimers();
-    try {
-      const open = dm();
-      bridgeMock.syncDms.mockResolvedValue({ ...idle, dms: [open] });
-      renderView();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      fireEvent.click(screen.getByTestId("chats-dm-item"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      const opened = bridgeMock.syncDms.mock.calls.length;
-
-      // The tick at 4 s fails slowly. The ticks at 8 s and 12 s queue one
-      // pass behind it instead of stacking two more syncs in main.
-      let finishFailure!: () => void;
-      bridgeMock.syncDms.mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishFailure = () => resolve({ ...idle, dms: [open], failed: true });
-          }),
-      );
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(4_000);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(opened + 1);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(8_000);
-      });
-      await act(async () => {
-        finishFailure();
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(opened + 1);
-
-      // The failure at 12 s holds until 27 s: the ticks at 16, 20 and 24 s
-      // wait, and the one at 28 s runs.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(12_000);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(opened + 1);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(4_000);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(opened + 2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("ignores an older failure that lands after a newer success", async () => {
-    vi.useFakeTimers();
-    try {
-      const waiting = dm({ threadId: null });
-      const synced = { ...idle, dms: [waiting] };
-      let finishOlder!: () => void;
-      bridgeMock.syncDms
-        .mockResolvedValueOnce(synced)
-        .mockImplementationOnce(
-          () =>
-            new Promise((resolve) => {
-              finishOlder = () => resolve({ ...synced, failed: true });
-            }),
-        )
-        .mockResolvedValue(synced);
-      const props = { workspaceId: "workspace-a", onOpenFileChat: vi.fn(), onError: vi.fn() };
-      const view = render(<ChatsView {...props} dmReadRevision={0} />);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      fireEvent.click(screen.getByTestId("chats-dm-item"));
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      view.rerender(<ChatsView {...props} dmReadRevision={1} />);
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(3);
-      await act(async () => {
-        finishOlder();
-        await vi.advanceTimersByTimeAsync(0);
-      });
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(4_000);
-      });
-      expect(bridgeMock.syncDms).toHaveBeenCalledTimes(4);
-      expect(bridgeMock.syncDms).toHaveBeenLastCalledWith({
-        workspaceId: "workspace-a",
-        openChannelId: waiting.channelId,
-        poll: true,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
+  it("opens New message with a member already picked, as Members' Message does", async () => {
+    signedIn([]);
+    members([
+      { memberId: "sam", name: "Sam Rivera" },
+      { memberId: "ana", name: "Ana Diaz" },
+    ]);
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, people: [ana] });
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "direct-new", memberIds: ["ana"] },
+    });
+    await waitFor(() =>
+      expect(
+        screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId),
+      ).toEqual(["ana"]),
+    );
+    expect((screen.getByTestId("chats-dm-new-composer") as HTMLTextAreaElement).placeholder).toBe(
+      "Message Ana Diaz",
+    );
   });
 });

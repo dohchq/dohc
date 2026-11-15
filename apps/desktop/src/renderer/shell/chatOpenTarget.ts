@@ -2,16 +2,8 @@ import type { GraphNode } from "../workbench/graphData";
 import type { ChatFileMentionRecord, ChatThreadRecord } from "../../ipc/bridgeContract";
 import type { ChatsNav } from "../workbench/ChatsView";
 
-export interface DmChatLocator {
-  channelId?: string;
-  channelWireId?: string;
-  threadId: string;
-  focusMessageId?: string;
-}
-
 type ChatOpenTarget =
   | { surface: "channel"; nav: Extract<ChatsNav, { level: "thread" }> }
-  | ({ surface: "dm" } & DmChatLocator)
   | {
       surface: "file";
       thread: Pick<ChatThreadRecord, "id" | "title" | "createdAtMs" | "updatedAtMs">;
@@ -20,15 +12,8 @@ type ChatOpenTarget =
   | { surface: "overview" };
 
 export function chatMentionOpenTarget(mention: ChatFileMentionRecord): ChatOpenTarget {
-  if (mention.channelKind === "dm") {
-    return {
-      surface: "dm",
-      channelId: mention.channelId,
-      channelWireId: mention.channelWireId,
-      threadId: mention.thread.id,
-      focusMessageId: mention.message.id,
-    };
-  }
+  // A workspace's older person-to-person chats no longer open.
+  if (mention.channelKind === "dm") return { surface: "overview" };
   if (!mention.channelId || !mention.channelName) {
     return {
       surface: "file",
@@ -71,14 +56,7 @@ export function graphChatOpenTarget(node: GraphNode): ChatOpenTarget {
     createdAtMs: 0,
     updatedAtMs: 0,
   };
-  if (node.channelKind === "dm") {
-    return {
-      surface: "dm",
-      channelId: node.channelId,
-      channelWireId: node.channelWireId,
-      threadId: node.threadId,
-    };
-  }
+  if (node.channelKind === "dm") return { surface: "overview" };
   if (!node.channelId || !node.channelName) return { surface: "file", thread };
   return {
     surface: "channel",

@@ -217,10 +217,7 @@ import { readWorkspaceEnginePolicy } from "./workspaces/workspaceEnginePolicyFil
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
 import { collectionAutomationAuthor } from "./ipc/engineHistoryIpc";
 import { createSettingsIpc } from "./ipc/settingsIpc";
-import {
-  registerDirectMessagesIpcHandlers,
-  peekReceivedGrantKindForShare,
-} from "./ipc/directMessagesIpc";
+import { peekReceivedGrantKindForShare } from "./workspaces/dmChats";
 import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
 import { protectedCopyHandlers, workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
@@ -282,7 +279,10 @@ import { createShareLinkAgentActions } from "./ipc/shareLinkAgentActions";
 import {
   createJoinedWorkspaceGroupAction,
   createWorkspaceMembersActions,
+  membersPlace,
 } from "./ipc/workspaceMembersActions";
+import { createDirectMessages, DirectMessageError } from "./workspaces/directMessages";
+import { directMessageOperations } from "./ipc/directMessageOperations";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "./ipc/joinedAccountWords";
 import { createJoinedGroup } from "./workspaces/joinedGroupCreate";
 import { sharedViewHistory } from "./workspaces/sharedViewHistory";
@@ -635,7 +635,6 @@ import { createAgentThreadChanges } from "./agentThreads/threadChanges";
 import { createT3CodeCodeMaker } from "./agentThreads/t3CodeCli";
 import { createT3CodeConnection, type T3CodeConnection } from "./agentThreads/t3CodeConnection";
 import { createT3CodeSignInStore, encryptsWithSystemKey } from "./agentThreads/t3CodeSignInStore";
-import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
 import { createLocalAuthorship } from "./workspaces/localAuthorship";
 import {
@@ -1401,6 +1400,7 @@ function notifyCloudSessionChangedWithKey(
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(CHANNELS.cloudSessionChanged, { sessionKey, phase });
   }
+  if (phase === "ready") directMessages.accountChanged();
 }
 
 function workspaceSummaries(): WorkspaceSummary[] {
@@ -1482,6 +1482,20 @@ const ownerDatasetCopies = createOwnerDatasetCopyRegistry({
 });
 const namedDatasetPages = createNamedDatasetCacheRegistry({
   directory: () => join(stateDir(), "named-dataset-pages"),
+});
+// Direct messages follow the signed-in account, not a workspace. Main follows
+// the account's activity for as long as the app runs and tells every window.
+const directMessages = createDirectMessages<CloudSessionCredentials>({
+  credentials: async () => {
+    await warmCredentialCache();
+    return cachedCredentials;
+  },
+  relayResponse: (credentials, path, init) =>
+    relayShareResponseWithCredentials(credentials, path, init),
+  stateDir,
+  changed: () => {
+    for (const window of BrowserWindow.getAllWindows()) sendIfOpen(window, CHANNELS.directChanged);
+  },
 });
 let credentialCacheGeneration = 0;
 let receivedShareCredentialsChanged:
@@ -1820,20 +1834,6 @@ function clearCachedCredentials(): void {
     .credentialsChanged(null)
     .catch((error) => console.error("Saved Collection page cleanup failed", error));
   peekedReceivedGrantKinds.clear();
-  // Security: every credential-cache clear is a session transition (login
-  // adoption, logout, or a current-session 401; all three call this one
-  // function). Clearing here, not at each call site, makes sure a new
-  // account's first failed poll can never be served the previous account's
-  // cached request rows, sender emails included, whichever of the three
-  // paths ended the session.
-  for (const workspaceId of workspaceAuthorities.workspaceIds()) {
-    const lease = workspaceAuthorities.acquire(workspaceId);
-    try {
-      lease.state.lastKnownDmRequestLanes.clear();
-    } finally {
-      lease.release();
-    }
-  }
 }
 
 // Notices sent to the signed-in person, and this computer's own. The store
@@ -2694,7 +2694,6 @@ interface DesktopWorkspaceAuthorityState extends DesktopChatBookmarkProjectionSt
   shareViewFiles: ShareViewFilesState;
   operationLanes: Map<string, Promise<void>>;
   sharedChannelSyncCursor: string | null;
-  lastKnownDmRequestLanes: ReturnType<typeof createLastKnownDmRequestLanesCache>;
   agentIntegration: AgentIntegrationState;
   linkedChatStore: DesktopLinkedChatStore | null;
   agentDispatchStoreHandle: LiveAgentDispatchStoreHandle | null;
@@ -2747,7 +2746,6 @@ function createDesktopWorkspaceAuthorityState(
     shareViewFiles: new ShareViewFilesState(),
     operationLanes: new Map(),
     sharedChannelSyncCursor: null,
-    lastKnownDmRequestLanes: createLastKnownDmRequestLanesCache(),
     bookmarkProjectionPending: false,
     bookmarkProjectionRunning: false,
     agentIntegration: new AgentIntegrationState(),
@@ -3096,7 +3094,6 @@ const {
   runWorkspaceSharedChannelPass,
   syncWorkspaceSharedChannels,
   syncSharedChannelsForChatTarget,
-  syncRendererSharedChannelsForChatTarget,
   syncRendererWorkspaceSharedChannels,
 } = createDesktopSharedChannelSync<
   DesktopWorkspaceAuthorityState,
@@ -9060,6 +9057,54 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, memberOperations, {
     workspaceMembers: ({ request }, { operation }) => workspaceMembers(operation, request),
   });
+  directMessages.listen();
+  // A member list names people by its workspace's member ids. The relay checks
+  // both accounts are in that workspace; here main only checks the window's
+  // workspace belongs to the signed-in account.
+  const directPicks = async (workspace: RegistryEntry, memberIds: readonly string[]) => {
+    const place = membersPlace(workspace);
+    if (place === null || place === "joined-unknown")
+      throw new DirectMessageError(
+        "refused",
+        "Open the workspace you share with this person to message them.",
+      );
+    if (shareViewIsPresent(workspace.shareView)) {
+      await warmCredentialCache();
+      if (!cachedCredentials || !joinedByAccount(workspace.shareView, cachedCredentials))
+        throw new DirectMessageError("refused", JOINED_BY_ANOTHER_ACCOUNT);
+    } else {
+      await remoteForWorkspace(workspace);
+    }
+    return memberIds.map((memberId) => ({ workspaceId: place.workspaceId, memberId }));
+  };
+  registerOperations(operationBoundary, directMessageOperations, {
+    directConversations: async () => {
+      await warmCredentialCache();
+      const viewerId = cachedCredentials?.relayUrl ? cachedCredentials.userId : null;
+      if (!viewerId) return { available: false as const };
+      const listed = await directMessages.list();
+      return {
+        available: true as const,
+        viewerId,
+        saved: listed.saved,
+        conversations: listed.conversations,
+      };
+    },
+    directHistory: ({ conversationId, before }) => directMessages.history(conversationId, before),
+    directResolve: async ({ memberIds }, { operation }) =>
+      directMessages.resolve(await directPicks(operation.workspace, memberIds)),
+    directStart: async ({ memberIds, messageId, body }, { operation }) =>
+      directMessages.send({
+        messageId,
+        body,
+        people: await directPicks(operation.workspace, memberIds),
+      }),
+    directSend: ({ conversationId, messageId, body }) =>
+      directMessages.send({ conversationId, messageId, body }),
+    directMarkRead: ({ conversationId, seq }) => directMessages.read(conversationId, seq),
+    directBlock: ({ conversationId, personId, blocked }) =>
+      directMessages.block(conversationId, personId, blocked),
+  });
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
     listSharingAccess: (input, { operation }) => accessOwner.sharing(operation!, input),
@@ -10196,12 +10241,7 @@ function registerIpcHandlers(): void {
     },
   });
   ownerAppResponsesForCli = (input) => cliOwnerResponses(input.workspaceId, input);
-  const {
-    handlers: sharedChannelHandlers,
-    assertShareNotHeldElsewhere,
-    reserveAndPullSharedChannelForWorkspace,
-    endWorkspaceJoinedChannel,
-  } = createSharedChannelsIpc<
+  const { handlers: sharedChannelHandlers } = createSharedChannelsIpc<
     DesktopRendererWorkspaceOperation["workspace"],
     DesktopRendererWorkspaceOperation
   >({
@@ -10930,37 +10970,6 @@ function registerIpcHandlers(): void {
   });
 
   agentRunsIpc.registerChatRunRecords();
-
-  registerDirectMessagesIpcHandlers<
-    WebContents,
-    IpcMainInvokeEvent,
-    DesktopRendererWorkspaceOperation
-  >({
-    registerHandler: handleIpc,
-    assertTrustedSender,
-    withRendererWorkspaceOperation,
-    requireEngineCapture,
-    assertWritableWorkspace,
-    linkedChatStoreFor,
-    warmCredentialCache,
-    currentCredentials: () => cachedCredentials,
-    currentCredentialGeneration: () => credentialCacheGeneration,
-    remoteForWorkspace,
-    relayShareJsonWithCredentials,
-    normalizeServerUrl,
-    listWorkspaces,
-    stateDir,
-    peekedReceivedGrantKinds,
-    syncRendererSharedChannelsForChatTarget,
-    assertShareNotHeldElsewhere,
-    reserveAndPullSharedChannelForWorkspace,
-    endWorkspaceJoinedChannel,
-    chatScope,
-    localUserDisplayName,
-    localInstallationId,
-    activity,
-    chatDispatchService,
-  });
 
   registerPresenceIpcHandlers<IpcMainInvokeEvent>({
     registerHandler: handleIpc,

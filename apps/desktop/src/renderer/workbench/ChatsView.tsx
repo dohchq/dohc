@@ -19,7 +19,6 @@ import {
 } from "./PostCard";
 import { AgentName, ChatAvatar, LinkHolderMark } from "./ChatAvatar";
 import { neutralPresentation } from "./actorPresentation";
-import { ThreadedChat } from "./ThreadedChat";
 import { showChat } from "./chatsOnScreen";
 import { NewGroupDialog, type GroupType } from "./NewGroupDialog";
 import { ChatMembersDialog } from "./ChatMembersDialog";
@@ -44,12 +43,7 @@ import {
   dispatchAnnouncement,
   type ShareReadFailure,
 } from "./ChatsControls";
-import {
-  AcceptDmDialog,
-  DmRequestListItem,
-  LeaveDmDialog,
-  type DmWorkspaceOption,
-} from "./DmPlacement";
+import { DirectConversationView, DirectPeopleSection, NewDirectMessage } from "./DirectMessages";
 import {
   answerCreatedChannel,
   answerLocally,
@@ -75,6 +69,7 @@ import { inputCount, onNextInput } from "../ui/inputCount";
 import {
   Archive,
   AtSign,
+  ArchiveRestore,
   ChevronDown,
   ChevronRight,
   Hash,
@@ -86,7 +81,6 @@ import {
   Square,
   UserPlus,
   Users,
-  X,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -101,8 +95,6 @@ import type {
   ChatBookmarkRecord,
   ChatReactionRecord,
   ChatRunRecord,
-  DmRequestRow,
-  DmRecord,
   FileChatThreadRecord,
   JoinedChannelAnswer,
   JoinedSharedChannelRow,
@@ -135,7 +127,7 @@ import {
 } from "../../settings/userSettings";
 import { archivedChatsFor, hiddenChatsFor } from "../../settings/archivedChats";
 import { Menu } from "../ui/Menu";
-import { isContextMenuKey } from "../ui/keys";
+import { NavRow, SectionActionButton } from "./ChatNavRow";
 import { chatRowMenuItems, type ChatRowMenuTarget } from "./chatRowMenu";
 import { removeAgentWithUndo } from "../settings/agentRemoval";
 import { HideAgentChatDialog, RemoveAgentDialog } from "../settings/agentDialogs";
@@ -218,10 +210,11 @@ export type ChatsNav =
       thread: ChannelThreadRecord;
       focusMessageId?: string;
     }
-  // Direct messages: one running conversation per DM, plus a one-step
-  // "new message" composer.
-  | { level: "dm"; dm: DmRecord; focusMessageId?: string }
-  | { level: "dm-new" };
+  // A direct conversation on the account's server. `title` is its people's
+  // names once known, for the tab.
+  | { level: "direct"; conversationId: string; title?: string }
+  // New message, with the members it starts with.
+  | { level: "direct-new"; memberIds?: readonly string[] };
 
 // Unsent input, one field per composer surface, plus the composer's MODE
 // (replying to a message / resolving a decision) — without the mode a reply
@@ -232,8 +225,6 @@ export type ChatsNav =
 export interface ChatsDrafts {
   composer: string;
   newThreadBody: string;
-  dmRecipients: string;
-  dmDraft: string;
   replyTarget: ChatsComposerReplyTarget | null;
   resolveTargetMessageId: string | null;
   resolveChosenOption?: string | null;
@@ -280,31 +271,6 @@ export function reconcileResolvedChatDecision(
   };
 }
 
-// DM polls resolve fresh IPC arrays every tick whether or not anything
-// changed. Committing an equal-but-new array re-renders the whole open
-// conversation and invalidates every memo keyed on it, so poll commits keep
-// the current state when the data is unchanged — the same discipline
-// refreshOpenDm applies to setNav. Exported for its unit test.
-export function keepIfUnchanged<T>(next: T): (current: T) => T {
-  return (current) => (samePollData(current, next) ? current : next);
-}
-
-// Structural equality over plain IPC data (primitives, arrays, objects) —
-// exactly what a structured-clone bridge response can contain.
-function samePollData(a: unknown, b: unknown): boolean {
-  if (Object.is(a, b)) return true;
-  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) {
-    return false;
-  }
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
-  const keysA = Object.keys(a);
-  const keysB = Object.keys(b);
-  if (keysA.length !== keysB.length) return false;
-  return keysA.every((key) =>
-    samePollData((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]),
-  );
-}
-
 interface ChannelSnapshot {
   threads: ChannelThreadRecord[];
   feedPosts: Record<string, PostData>;
@@ -312,70 +278,6 @@ interface ChannelSnapshot {
 
 const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
 const EMPTY_SHARE_MOUNTS: readonly { shareId: string; label: string }[] = [];
-
-// How long a failed DM sync holds the DM syncs nobody asked for. The relay is
-// down or slow, and a sync that queued behind a slow failure would otherwise
-// run again the moment it ends.
-const DM_SYNC_HOLD_MS = 15_000;
-
-const DM_SYNC_CAUSES = {
-  open: { pull: true, asked: true },
-  tick: { pull: true, asked: false },
-  activity: { pull: false, asked: false },
-  person: { pull: false, asked: true },
-} as const;
-type DmSyncCause = keyof typeof DM_SYNC_CAUSES;
-
-interface DmSyncRequest {
-  pull: boolean;
-  asked: boolean;
-}
-
-// The sync that holds the slot: the pass queued behind it, and the calls
-// waiting for that pass.
-interface DmSyncDrain {
-  token: number;
-  queued: DmSyncRequest | null;
-  waiting: (() => void)[];
-}
-
-interface OpenDmSyncRequest extends DmSyncRequest {
-  dm: DmRecord;
-}
-
-// A call that lands mid-sync joins the pass queued behind it.
-function queueDmSync(queued: DmSyncRequest | null, cause: DmSyncCause): DmSyncRequest {
-  const next = DM_SYNC_CAUSES[cause];
-  return {
-    pull: next.pull || queued?.pull === true,
-    asked: next.asked || queued?.asked === true,
-  };
-}
-
-// The list and the open conversation share one hold. The newest sync to
-// settle decides it: a failure holds, a success clears. A sync that settles
-// after a newer one changes nothing, and a workspace or session change
-// settles every sync still in flight.
-interface DmSyncHold {
-  issued: number;
-  settled: number;
-  until: number;
-}
-
-function settleDmSync(hold: DmSyncHold, sync: number, failed: boolean): void {
-  if (sync <= hold.settled) return;
-  hold.settled = sync;
-  hold.until = failed ? Date.now() + DM_SYNC_HOLD_MS : 0;
-}
-
-function resetDmSyncHold(hold: DmSyncHold): void {
-  hold.settled = hold.issued;
-  hold.until = 0;
-}
-
-function dmSyncHeld(hold: DmSyncHold, request: DmSyncRequest): boolean {
-  return !request.asked && Date.now() < hold.until;
-}
 
 interface ChatsComposerReplyTarget {
   messageId: string;
@@ -414,118 +316,6 @@ function AgentMark(props: { presentation: ActorPresentation; name: string }) {
   );
 }
 
-// One row of the chat nav: an icon, a name, and what is waiting on the right.
-// The active row is the one the panel currently shows.
-function NavRow(props: {
-  testId: string;
-  label: string;
-  icon: React.ReactNode;
-  onClick: () => void;
-  active?: boolean;
-  muted?: boolean;
-  // Any unread message: the name goes bold on every row. A count beside it
-  // means the user was addressed.
-  unread?: boolean;
-  labelTestId?: string;
-  trailing?: React.ReactNode;
-  data?: Record<`data-${string}`, string>;
-  className?: string;
-  // A right-click, the Menu key or Shift+F10 opens the row's menu.
-  onMenu?: (at: { x: number; y: number }, fromKeyboard: boolean) => void;
-  // The row whose menu is open keeps its hover fill.
-  menuOpen?: boolean;
-}) {
-  const { onMenu } = props;
-  // Set when a key opened the menu. The browser may follow the key with its
-  // own contextmenu event, which must not open the menu again at the pointer.
-  const keyedMenu = useRef(false);
-  return (
-    <button
-      type="button"
-      data-testid={props.testId}
-      data-active={props.active ? "true" : "false"}
-      aria-current={props.active ? "page" : undefined}
-      aria-haspopup={onMenu ? "menu" : undefined}
-      onClick={props.onClick}
-      onKeyDown={
-        onMenu
-          ? (event) => {
-              if (!isContextMenuKey(event)) return;
-              event.preventDefault();
-              if (!keyedMenu.current) {
-                keyedMenu.current = true;
-                window.addEventListener(
-                  "pointerdown",
-                  () => {
-                    keyedMenu.current = false;
-                  },
-                  { capture: true, once: true },
-                );
-              }
-              const box = event.currentTarget.getBoundingClientRect();
-              onMenu({ x: box.left, y: box.bottom }, true);
-            }
-          : undefined
-      }
-      onContextMenu={
-        onMenu
-          ? (event) => {
-              event.preventDefault();
-              if (keyedMenu.current) {
-                keyedMenu.current = false;
-                return;
-              }
-              onMenu({ x: event.clientX, y: event.clientY }, false);
-            }
-          : undefined
-      }
-      {...props.data}
-      className={`dohc-focus-row mx-1 flex h-8 w-[calc(100%-0.5rem)] cursor-pointer items-center gap-2 rounded-md px-2 text-left transition-colors duration-75 ${
-        props.active ? "bg-selected font-medium" : props.menuOpen ? "bg-hover" : "hover:bg-hover"
-      } ${props.className ?? ""}`}
-    >
-      {props.icon}
-      <span
-        data-testid={props.labelTestId}
-        className={`min-w-0 flex-1 truncate text-[13px] ${
-          props.active || props.unread
-            ? "font-medium text-ink"
-            : props.muted
-              ? "text-muted"
-              : "text-ink"
-        }`}
-      >
-        {props.label}
-      </span>
-      {props.trailing}
-    </button>
-  );
-}
-
-// The action a section label offers on the right, always visible like the
-// explorer's section actions so a new user can find it.
-function SectionActionButton(props: {
-  testId?: string;
-  label: string;
-  disabled?: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      data-testid={props.testId}
-      aria-label={props.label}
-      title={props.label}
-      disabled={props.disabled}
-      onClick={props.onClick}
-      className="grid size-6 shrink-0 cursor-pointer place-items-center rounded text-subtle transition-colors hover:bg-hover hover:text-ink disabled:cursor-default disabled:opacity-40"
-    >
-      {props.children}
-    </button>
-  );
-}
-
 // The strip names the program a runner command starts, not its whole
 // command line: a quoted path to a script is a path, and the strip is a
 // sentence. The full command sits in the title.
@@ -556,7 +346,6 @@ export type ChatErrorNotice = Pick<ShellError, "action" | "title" | "identity">;
 
 export function ChatsView(props: {
   workspaceId: string;
-  workspaces: readonly DmWorkspaceOption[];
   // Jump a file-linked Chat to where it lives: the file's side rail.
   onOpenFileChat: (thread: FileChatThreadRecord, focusMessageId?: string) => void;
   // The shell's normal file navigation path. Attachment chips use it when
@@ -654,8 +443,6 @@ export function ChatsView(props: {
   // that write to the shell, which tells the persistent navigator to refetch.
   onThreadStarted?: () => void;
   threadRevision?: number;
-  onDmRead?: () => void;
-  dmReadRevision?: number;
   // The persistent panel navigator sets this while a Chats editor tab is
   // live: the page instance runs the same polls against the same store, so a
   // second poller doubles every chat read for nothing. Suspends the DM list
@@ -677,7 +464,7 @@ export function ChatsView(props: {
   // id when it mounts, and again for each newer reveal.
   onShareRowMounted?: (shareId: string) => void;
 }) {
-  const { workspaceId, onNavChange, onDraftsChange, onThreadRead, onDmRead } = props;
+  const { workspaceId, onNavChange, onDraftsChange, onThreadRead } = props;
   const inJoinedWorkspace = props.joinedWorkspace !== undefined;
   const postingClosed = props.joinedWorkspace?.postingClosed;
   const createsGroups = !inJoinedWorkspace || props.joinedWorkspace?.createsGroups === true;
@@ -707,7 +494,6 @@ export function ChatsView(props: {
   const pageColumn = variant === "page" ? "mx-auto w-full max-w-[640px]" : "";
   // Feed posts by personal agents name them from the roster.
   const personalNames = usePersonalAgentNames();
-  const [dmRestoreReady, setDmRestoreReady] = useState(false);
   const [overview, setOverview] = useState<OverviewState>({ status: "loading" });
   const [nav, setNav] = useState<ChatsNav>({ level: "channels" });
   // For openChannel and openThread: an agent's chat opened without its agent
@@ -769,26 +555,8 @@ export function ChatsView(props: {
     setCreatingGroup(false);
   }, []);
   const [addingAgent, setAddingAgent] = useState(false);
-  // Direct messages. The section renders only when collaboration is on
-  // (signed in + relay) or a DM already exists locally. A solo user sees
-  // none of it.
-  const [dms, setDms] = useState<DmRecord[]>([]);
-  const [dmAvailable, setDmAvailable] = useState(false);
-  const [pendingDmRequests, setPendingDmRequests] = useState<DmRequestRow[]>([]);
-  const [declinedDmRequests, setDeclinedDmRequests] = useState<DmRequestRow[]>([]);
-  const [acceptingDmRequest, setAcceptingDmRequest] = useState<DmRequestRow | null>(null);
-  const [dmAcceptedElsewhere, setDmAcceptedElsewhere] = useState<{
-    granterEmail: string | null;
-    workspaceLabel: string;
-  } | null>(null);
-  const [dmRequestBusy, setDmRequestBusy] = useState<string | null>(null);
-  const [leavingDm, setLeavingDm] = useState<DmRecord | null>(null);
-  const [dmRecipients, setDmRecipients] = useState("");
-  const [dmDraft, setDmDraft] = useState("");
-  const [startingDm, setStartingDm] = useState(false);
-  const startingDmRef = useRef(false);
-  // Shared channels. null means the sharing surface is unavailable (signed
-  // out or listing failed) and every sharing affordance stays hidden, so the
+  // MU-C4 shared channels. null = the sharing surface is unavailable (signed
+  // out / listing failed) and every sharing affordance stays hidden — the
   // solo view is unchanged.
   const [channelShares, setChannelShares] = useState<ShareListing | null>(null);
   // Why the last committed share read did not produce rows, or null when it
@@ -839,17 +607,17 @@ export function ChatsView(props: {
     prepareOpen,
     invalidate,
   } = usePersonalChatFeed({ workspaceId, liveToken, reactions, onError: props.onError });
+  // Direct messages moved to the account's server. A workspace's older
+  // person-to-person chats have no place to open any more, so Home leaves them out.
+  const homeFeed = useMemo(
+    () => personalFeed.filter((item) => item.channel?.kind !== "dm"),
+    [personalFeed],
+  );
   // A live thread can refresh repeatedly without changing navigation. Keep a
   // request sequence separate from the workspace/navigation liveness token so
   // an older activity response can never overwrite a newer one.
   const threadRefreshSeq = useRef(0);
   const channelRefreshSeq = useRef(0);
-  const dmRefreshSeq = useRef(0);
-  const paintedDmRevision = useRef<{
-    workspaceId: string;
-    threadId: string;
-    revision: number;
-  } | null>(null);
   // Each Home item's Add reaction trigger, by message id: where focus goes
   // when the activated pill was the viewer's only row and unmounts.
   const homeLikeTriggers = useRef(new Map<string, HTMLButtonElement>());
@@ -879,12 +647,12 @@ export function ChatsView(props: {
         ? `thread:${nav.thread.id}`
         : nav.level === "channel"
           ? `channel:${nav.channel.id}`
-          : nav.level === "dm"
-            ? `dm:${nav.dm.channelId}`
+          : nav.level === "direct"
+            ? `direct:${nav.conversationId}`
             : nav.level
     }`,
     setup: props.agentSetup,
-    dispatch: nav.level === "thread" ? dispatchState : nav.level === "dm" ? null : NEW_CONVERSATION,
+    dispatch: nav.level === "thread" ? dispatchState : NEW_CONVERSATION,
     reach: props.workspacePath,
   });
 
@@ -893,9 +661,7 @@ export function ChatsView(props: {
       ? `${workspaceId}:thread:${nav.thread.id}`
       : nav.level === "channel"
         ? `${workspaceId}:channel:${nav.channel.id}`
-        : nav.level === "dm"
-          ? `${workspaceId}:dm:${nav.dm.threadId ?? nav.dm.channelId}`
-          : `${workspaceId}:${nav.level}`;
+        : `${workspaceId}:${nav.level}`;
   const activeSendContext = useRef(sendContextKey);
   activeSendContext.current = sendContextKey;
   const latestComposerState = useRef({
@@ -951,16 +717,15 @@ export function ChatsView(props: {
   });
   const takeCommitTicket = useCallback(() => ++commitTicket.current, []);
   // The newest reveal (a notice's Open), and what Chats has seen of its
-  // invitation since. Every share listing and message sync that started after
-  // the reveal records whether it answered; nothing waits on a particular
-  // read. `owedFrom` holds the share ticket and message pass the reveal began
-  // at, so a read already running before it counts for nothing.
+  // invitation since. Every share listing that started after the reveal
+  // records whether it answered; nothing waits on a particular read.
+  // `owedFrom` holds the share ticket the reveal began at, so a read already
+  // running before it counts for nothing.
   const [owed, setOwed] = useState<({ reveal: ChatsInvitation } & InvitationLists) | null>(null);
-  const owedFrom = useRef<{ shareTicket: number; dmPass: number } | null>(null);
-  const dmPassClock = useRef(0);
-  const noteListing = useCallback((list: "shares" | "dms", startedAt: number, listed: boolean) => {
+  const owedFrom = useRef<{ shareTicket: number } | null>(null);
+  const noteListing = useCallback((list: "shares", startedAt: number, listed: boolean) => {
     const from = owedFrom.current;
-    if (from === null || startedAt <= (list === "shares" ? from.shareTicket : from.dmPass)) return;
+    if (from === null || startedAt <= from.shareTicket) return;
     setOwed((current) => {
       if (current === null) return current;
       const next = nextInvitationList(current[list], listed);
@@ -1432,120 +1197,10 @@ export function ChatsView(props: {
     }
   }, [inJoinedWorkspace, workspaceId]);
 
-  // DM sync: refresh received requests, push the member's local ops, pull the
-  // peers' ops, and refresh the established DM list. Best-effort —
-  // offline keeps the current list and the next pass retries. A late response
-  // for a stale workspace/nav is dropped by the token guard.
-  //
-  // One sync in flight, as with badgeRead. The activity signal below
-  // fires for every settled file batch and run update, and this is a relay
-  // sync, not a local read — a burst must not fan out into a sync per event.
-  // A call landing mid-sync is not dropped: it runs exactly one more pass when
-  // the sync settles. A drain whose token era ended can commit nothing, so the
-  // next caller takes the slot instead of queueing onto it.
-  //
-  // The cause decides whether main may pull and whether a failed sync holds
-  // the pass (DM_SYNC_CAUSES). The queued pass checks the hold again, so a
-  // sync that queued behind a slow failure waits it out unless a person
-  // asked for it.
-  //
-  // Each call resolves once the pass that covers it ends, the call that
-  // starts the drain included: polls can keep queueing passes behind a slow
-  // sync, so the drain itself may not end for a long time.
-  const dmSync = useRef<DmSyncDrain | null>(null);
-  const dmSyncHold = useRef<DmSyncHold>({ issued: 0, settled: 0, until: 0 });
-  const keepAcceptedNoticeRef = useRef(false);
-  const drainDms = useCallback(
-    async (mine: DmSyncDrain) => {
-      // The calls the running pass covers.
-      let covering: (() => void)[] = [];
-      const settle = () => {
-        for (const waiter of covering) waiter();
-        covering = [];
-      };
-      try {
-        while (
-          mine.queued !== null &&
-          mine.token === liveToken.current &&
-          dmSync.current === mine
-        ) {
-          settle();
-          const request = mine.queued;
-          mine.queued = null;
-          covering = mine.waiting;
-          mine.waiting = [];
-          if (dmSyncHeld(dmSyncHold.current, request)) break;
-          const pass = ++dmPassClock.current;
-          const token = mine.token;
-          const session = sessionGeneration.current;
-          const sync = ++dmSyncHold.current.issued;
-          try {
-            const result = await bridge().syncDms({
-              workspaceId,
-              ...(request.pull ? { poll: true } : {}),
-            });
-            settleDmSync(dmSyncHold.current, sync, result.failed);
-            if (token !== liveToken.current) break;
-            if (session !== sessionGeneration.current) continue;
-            noteListing("dms", pass, result.available && !result.failed);
-            setDmAvailable(result.available);
-            setDms(keepIfUnchanged(result.dms));
-            setPendingDmRequests(keepIfUnchanged(result.pending));
-            setDeclinedDmRequests(keepIfUnchanged(result.declined));
-            setDmRestoreReady(true);
-            if (keepAcceptedNoticeRef.current) {
-              keepAcceptedNoticeRef.current = false;
-            } else {
-              setDmAcceptedElsewhere(null);
-            }
-          } catch {
-            // DMs are optional: Chats stays fully usable without them.
-            if (session === sessionGeneration.current) noteListing("dms", pass, false);
-          }
-        }
-      } finally {
-        if (dmSync.current === mine) dmSync.current = null;
-        settle();
-        for (const waiter of mine.waiting) waiter();
-        mine.waiting = [];
-      }
-    },
-    [noteListing, workspaceId],
-  );
-  // A joined workspace has no direct messages yet, and its relay would
-  // refuse each pass.
-  const refreshDms = useCallback(
-    (cause: DmSyncCause) =>
-      new Promise<void>((resolve) => {
-        if (inJoinedWorkspace) {
-          resolve();
-          return;
-        }
-        const active = dmSync.current;
-        if (active !== null && active.token === liveToken.current) {
-          active.queued = queueDmSync(active.queued, cause);
-          active.waiting.push(resolve);
-          return;
-        }
-        const mine: DmSyncDrain = {
-          token: liveToken.current,
-          queued: queueDmSync(null, cause),
-          waiting: [resolve],
-        };
-        dmSync.current = mine;
-        void drainDms(mine);
-      }),
-    [drainDms, inJoinedWorkspace],
-  );
-
   // Workspace switch: drop everything stale and reload from the top.
   useEffect(() => {
     liveToken.current += 1;
-    dmRefreshSeq.current += 1;
-    resetDmSyncHold(dmSyncHold.current);
-    paintedDmRevision.current = null;
     resetForWorkspace();
-    setDmRestoreReady(false);
     bookmarkWorkspaceGeneration.current += 1;
     bookmarkListGeneration.current += 1;
     bookmarkMutationGeneration.current += 1;
@@ -1585,20 +1240,10 @@ export function ChatsView(props: {
     };
     setSharePanelOpen(false);
     setJoiningShareId(null);
-    setDms([]);
-    setDmAvailable(false);
-    setPendingDmRequests([]);
-    setDeclinedDmRequests([]);
-    setAcceptingDmRequest(null);
-    setDmAcceptedElsewhere(null);
-    setDmRequestBusy(null);
-    setDmRecipients("");
-    setDmDraft("");
     setBookmarks([]);
     setBookmarkBusy(new Set());
     setOverview({ status: "loading" });
     void refreshOverview();
-    void refreshDms("open");
     void refreshBookmarks();
     return () => {
       liveToken.current += 1;
@@ -1608,14 +1253,7 @@ export function ChatsView(props: {
       bookmarkMutationGeneration.current += 1;
       bookmarkMutationByKey.current.clear();
     };
-  }, [
-    invalidate,
-    refreshBookmarks,
-    refreshDms,
-    refreshOverview,
-    resetForWorkspace,
-    resetGroupForm,
-  ]);
+  }, [invalidate, refreshBookmarks, refreshOverview, resetForWorkspace, resetGroupForm]);
 
   const bookmarkFor = useCallback(
     (targetKind: "message" | "thread", targetId: string) =>
@@ -1697,17 +1335,6 @@ export function ChatsView(props: {
     [bookmarkBusy, bookmarkFor, props.onBookmarkArchived, props.onError, workspaceId],
   );
 
-  // Gentle DM poll while the view is open: the other side's messages arrive
-  // by relay pull, and the sync is cursor-based (no changes = no work). While a
-  // DM conversation is open the inner 4s poll already runs a full syncDms pass,
-  // so pause this outer poll then — otherwise viewing a DM doubles the
-  // relay/sync cadence for no benefit.
-  useEffect(() => {
-    if (props.suspendPolling || nav.level === "dm") return;
-    const interval = setInterval(() => void refreshDms("tick"), 5_000);
-    return () => clearInterval(interval);
-  }, [refreshDms, nav.level, props.suspendPolling]);
-
   // The panel navigator hands every conversation to the page instance, so it
   // never reaches the mark-read above and its channel, file-thread, and DM
   // badges would keep the counts fetched at mount until it remounted. The
@@ -1731,17 +1358,6 @@ export function ChatsView(props: {
     seenOverviewRevisions.current = revisions;
     void refreshOverview({ background: true });
   }, [props.readRevision, props.threadRevision, refreshOverview]);
-
-  // A landed DM read moves the cursor syncDms reads from. While the navigator
-  // is suspended, this DM-specific signal is the only path that clears its
-  // pill; channel and file-thread reads must never pay for a relay sync.
-  const seenDmReadRevision = useRef(props.dmReadRevision);
-  useEffect(() => {
-    const revision = props.dmReadRevision;
-    if (revision === seenDmReadRevision.current) return;
-    seenDmReadRevision.current = revision;
-    void refreshDms("person");
-  }, [props.dmReadRevision, refreshDms]);
 
   const loadChannelSnapshot = useCallback(
     async (channelId: string): Promise<ChannelSnapshot> => {
@@ -1867,165 +1483,7 @@ export function ChatsView(props: {
     [reactions, workspaceId],
   );
 
-  const loadDmConversation = useCallback(
-    async (
-      dm: DmRecord,
-      token: number,
-      request = ++dmRefreshSeq.current,
-      knownRevision?: number,
-    ) => {
-      if (!dm.threadId) return;
-      const session = sessionGeneration.current;
-      const revision =
-        knownRevision ??
-        (
-          await bridge().getChatThreadRevision({
-            workspaceId,
-            threadId: dm.threadId,
-          })
-        ).revision;
-      const ticket = reactions.ticket();
-      const [result, reactionResult] = await Promise.all([
-        bridge().listChatMessages({ workspaceId, threadId: dm.threadId }),
-        bridge().listChatReactions({ workspaceId, threadId: dm.threadId }),
-      ]);
-      reactions.ingest([{ threadId: dm.threadId, ...reactionResult, ticket }]);
-      if (
-        token !== liveToken.current ||
-        request !== dmRefreshSeq.current ||
-        session !== sessionGeneration.current
-      ) {
-        return;
-      }
-      setMessages(keepIfUnchanged(result.messages));
-      paintedDmRevision.current = {
-        workspaceId,
-        threadId: dm.threadId,
-        revision,
-      };
-      if (dm.connected) {
-        const clearedUnread = dm.unreadCount > 0;
-        void bridge()
-          .markChatThreadRead({
-            workspaceId,
-            threadId: dm.threadId,
-            upToSequence: result.messages.length,
-          })
-          .then(
-            // Only once the cursor write landed (the thread-view precedent),
-            // and only when this load actually cleared something: the open-DM
-            // poll re-marks on every pass, and reporting those would make the
-            // shell's DM revision re-poll the suspended navigator at the
-            // very cadence the suspension exists to stop.
-            () => {
-              if (clearedUnread) onDmRead?.();
-            },
-            () => {
-              // Best-effort, like the thread view.
-            },
-          );
-      }
-    },
-    [onDmRead, reactions, workspaceId],
-  );
-
-  const syncOpenDm = useCallback(
-    async (dm: DmRecord, token: number, pull: boolean) => {
-      const session = sessionGeneration.current;
-      const request = ++dmRefreshSeq.current;
-      const sync = ++dmSyncHold.current.issued;
-      try {
-        // Name the open DM: the main-side shared-channel pass is bounded, so an
-        // unnamed poll can refresh 16 other channels and leave this one stale.
-        const result = await bridge().syncDms({
-          workspaceId,
-          openChannelId: dm.channelId,
-          ...(pull ? { poll: true } : {}),
-        });
-        settleDmSync(dmSyncHold.current, sync, result.failed);
-        if (
-          token !== liveToken.current ||
-          request !== dmRefreshSeq.current ||
-          session !== sessionGeneration.current
-        ) {
-          return;
-        }
-        setDmAvailable(result.available);
-        setDms(keepIfUnchanged(result.dms));
-        setPendingDmRequests(keepIfUnchanged(result.pending));
-        setDeclinedDmRequests(keepIfUnchanged(result.declined));
-        const syncedDm = result.dms.find((entry) => entry.channelId === dm.channelId);
-        if (!syncedDm) return;
-        setNav((current) => {
-          if (current.level !== "dm" || current.dm.channelId !== dm.channelId) {
-            return current;
-          }
-          return samePollData(current.dm, syncedDm) ? current : { ...current, dm: syncedDm };
-        });
-        if (!syncedDm.threadId) return;
-        const { revision } = await bridge().getChatThreadRevision({
-          workspaceId,
-          threadId: syncedDm.threadId,
-        });
-        if (
-          token !== liveToken.current ||
-          request !== dmRefreshSeq.current ||
-          session !== sessionGeneration.current
-        ) {
-          return;
-        }
-        const painted = paintedDmRevision.current;
-        if (
-          painted?.workspaceId === workspaceId &&
-          painted.threadId === syncedDm.threadId &&
-          painted.revision === revision
-        ) {
-          return;
-        }
-        await loadDmConversation(syncedDm, token, request, revision);
-      } catch {
-        // Offline: keep the conversation as-is; the next tick retries.
-      } finally {
-        if (token === liveToken.current && request === dmRefreshSeq.current) {
-          setMessagesLoading(false);
-        }
-      }
-    },
-    [loadDmConversation, workspaceId],
-  );
-
-  // One conversation sync in flight, like refreshDms. A slow relay would
-  // otherwise stack a sync per tick in main, and they would all run the
-  // moment the first one failed. A call that lands mid-sync queues one more
-  // pass for the DM it names, and that pass checks the hold again first.
-  const openDmSync = useRef<{ token: number; queued: OpenDmSyncRequest | null } | null>(null);
-  const refreshOpenDm = useCallback(
-    async (dm: DmRecord, token: number, cause: DmSyncCause) => {
-      const active = openDmSync.current;
-      if (active !== null && active.token === token) {
-        active.queued = { dm, ...queueDmSync(active.queued, cause) };
-        return;
-      }
-      const mine: { token: number; queued: OpenDmSyncRequest | null } = {
-        token,
-        queued: { dm, ...queueDmSync(null, cause) },
-      };
-      openDmSync.current = mine;
-      try {
-        while (mine.queued !== null && token === liveToken.current && openDmSync.current === mine) {
-          const request = mine.queued;
-          mine.queued = null;
-          if (dmSyncHeld(dmSyncHold.current, request)) return;
-          await syncOpenDm(request.dm, token, request.pull);
-        }
-      } finally {
-        if (openDmSync.current === mine) openDmSync.current = null;
-      }
-    },
-    [syncOpenDm],
-  );
-
-  // Derived lookups: a channel matches a grant by its wire id. A key
+  // MU-C4 derived lookups: a channel matches a grant by its WIRE id. A key
   // that is present with a null value means "asked, and this workspace holds
   // no grant" — an absent key means nobody asked, which is unknown.
   const joinedByWire = useMemo(() => {
@@ -2145,41 +1603,12 @@ export function ChatsView(props: {
       // The roll-up unread badge lives on this list, so a write to a chat
       // the user does not have open is only visible here.
       void refreshChannelBadges();
-      // The DM roll-up lives on the same list, so it refreshes on the same
-      // signal instead of waiting for the 5s poll beside a live channel
-      // badge. refreshDms coalesces the burst itself. The activity cause
-      // never pulls: a sync event caused this, and a pull would fire another.
-      void refreshDms("activity");
       return;
     }
     if (nav.level === "feed") {
       void loadPersonalFeed();
       return;
     }
-    if (nav.level === "dm") {
-      const token = liveToken.current;
-      if (nav.dm.threadId) {
-        const refreshSeq = ++dmRefreshSeq.current;
-        void loadDmConversation(nav.dm, token, refreshSeq)
-          .then(() => {
-            if (token === liveToken.current && refreshSeq === dmRefreshSeq.current) {
-              setMessagesLoading(false);
-            }
-          })
-          .catch(() => {
-            if (token === liveToken.current && refreshSeq === dmRefreshSeq.current) {
-              setMessagesLoading(false);
-            }
-          });
-      } else {
-        // Not a poll, for the same reason as the list above.
-        void refreshOpenDm(nav.dm, token, "activity");
-      }
-      return;
-    }
-    // An open Group's composer offers files by the rule in the channel list,
-    // which a change to the Group's shares moves.
-    if (nav.level === "thread" || nav.level === "channel") void refreshChannelBadges();
     if (nav.level === "thread") {
       const threadId = nav.thread.id;
       const token = liveToken.current;
@@ -2222,13 +1651,10 @@ export function ChatsView(props: {
     applyThreadSnapshot,
     channelIsLocked,
     loadChannelSnapshot,
-    loadDmConversation,
     loadPersonalFeed,
     loadThreadSnapshot,
     nav,
-    refreshOpenDm,
     refreshChannelBadges,
-    refreshDms,
   ]);
   const latestRefresh = useRef(refreshForActivity);
   latestRefresh.current = refreshForActivity;
@@ -2586,8 +2012,7 @@ export function ChatsView(props: {
   // Reactions write and paint through the workspace's reaction
   // store. Errors reach the user only while this view is still where the
   // toggle happened.
-  const reactionThreadId =
-    nav.level === "thread" ? nav.thread.id : nav.level === "dm" ? (nav.dm.threadId ?? null) : null;
+  const reactionThreadId = nav.level === "thread" ? nav.thread.id : null;
   const threadReactions = reactionThreadId ? reactions.view(reactionThreadId) : NO_REACTIONS;
   const toggleInView = useCallback(
     (input: {
@@ -2610,7 +2035,7 @@ export function ChatsView(props: {
   );
   const toggleReaction = useCallback(
     (input: { messageId: string; emoji: string; nextState: "added" | "removed" }) => {
-      const threadId = nav.level === "dm" && !nav.dm.connected ? null : reactionThreadId;
+      const threadId = reactionThreadId;
       if (!threadId || !threadReactions.viewerAuthorId) return;
       toggleInView({ ...input, threadId, viewerAuthorId: threadReactions.viewerAuthorId });
     },
@@ -2654,57 +2079,22 @@ export function ChatsView(props: {
     [nav.level, toggleInView],
   );
 
-  // --- Direct messages ----------------------------------------------------
-
-  const openDm = useCallback(
-    async (dm: DmRecord, focusMessageId?: string) => {
-      const token = ++liveToken.current;
-      const request = ++dmRefreshSeq.current;
-      paintedDmRevision.current = null;
-      setNav({
-        level: "dm",
-        dm,
-        ...(focusMessageId ? { focusMessageId } : {}),
-      });
+  // Direct messages live on the account's server, so opening one only
+  // navigates: DirectConversationView and NewDirectMessage read what they show.
+  const openDirect = useCallback(
+    (target: Extract<ChatsNav, { level: "direct" | "direct-new" }>) => {
+      liveToken.current += 1;
       focusedMessageJump.current = null;
-      setMessages([]);
-      setDecisions([]);
-      setAttachments([]);
-      setRunRecords({});
-      setReplyTarget(null);
-      setResolveTargetMessageId(null);
-      setFlashMessageId(null);
-      messageNodes.current.clear();
-      setMessagesLoading(true);
-      try {
-        await loadDmConversation(dm, token, request);
-        if (token !== liveToken.current || request !== dmRefreshSeq.current) {
-          return;
-        }
-        if (dm.connected) {
-          setDms((current) =>
-            current.map((entry) =>
-              entry.channelId === dm.channelId ? { ...entry, unreadCount: 0 } : entry,
-            ),
-          );
-        }
-      } catch (error) {
-        if (token !== liveToken.current || request !== dmRefreshSeq.current) {
-          return;
-        }
-        props.onError(ipcErrorMessage(error, "Could not load this conversation."), error);
-      } finally {
-        if (token === liveToken.current) {
-          if (request === dmRefreshSeq.current) setMessagesLoading(false);
-          // A person opened this conversation, so its first sync runs during
-          // a hold. It starts after the local paint, because it would
-          // otherwise supersede that paint and wait on the relay.
-          void refreshOpenDm(dm, token, "open");
-        }
-      }
+      setNav(target);
     },
-    [loadDmConversation, props.onError, refreshOpenDm],
+    [],
   );
+  // The tab shows the people's names once the conversation list knows them.
+  const setDirectTitle = useCallback((title: string) => {
+    setNav((current) =>
+      current.level === "direct" && current.title !== title ? { ...current, title } : current,
+    );
+  }, []);
 
   const openFeed = useCallback(() => {
     const target: ChatsNav = { level: "feed" };
@@ -2722,7 +2112,9 @@ export function ChatsView(props: {
   }, [loadPersonalFeed, nav.level]);
 
   const openConversation = useCallback(
-    (target: Extract<ChatsNav, { level: "channel" | "thread" | "dm" | "feed" }>) => {
+    (
+      target: Extract<ChatsNav, { level: "channel" | "thread" | "direct" | "direct-new" | "feed" }>,
+    ) => {
       if (
         props.onOpenInTab &&
         (variant === "panel" ||
@@ -2740,11 +2132,11 @@ export function ChatsView(props: {
         void openChannel(target.channel, target.lane, target.focusMessageId);
       else if (target.level === "thread") {
         void openThread(target.channel, target.thread, target.focusMessageId);
-      } else void openDm(target.dm, target.focusMessageId);
+      } else openDirect(target);
     },
     [
       openChannel,
-      openDm,
+      openDirect,
       openFeed,
       openThread,
       props.onNavCommand,
@@ -2771,8 +2163,6 @@ export function ChatsView(props: {
     onDraftsChange?.({
       composer,
       newThreadBody,
-      dmRecipients,
-      dmDraft,
       replyTarget,
       resolveTargetMessageId,
       resolveChosenOption,
@@ -2781,8 +2171,6 @@ export function ChatsView(props: {
     });
   }, [
     composer,
-    dmDraft,
-    dmRecipients,
     newThreadBody,
     newThreadPoll,
     onDraftsChange,
@@ -2809,11 +2197,9 @@ export function ChatsView(props: {
       const channel = overview.channels.find((entry) => entry.id === target.id);
       seed = channel ? { level: "channel", channel } : { level: "channels" };
     } else if (!seed && target?.kind === "dm") {
-      if (!dmRestoreReady) return;
-      const dm = dms.find((entry) => entry.channelId === target.id);
-      seed = dm ? { level: "dm", dm } : { level: "channels" };
+      seed = { level: "direct", conversationId: target.id };
     } else if (!seed && target?.kind === "new") {
-      seed = { level: "dm-new" };
+      seed = { level: "direct-new" };
     }
     seed ??= variant === "page" ? { level: "feed" } : undefined;
     seededRef.current = true;
@@ -2824,15 +2210,12 @@ export function ChatsView(props: {
         void openChannel(seed.channel, seed.lane, seed.focusMessageId);
       else if (seed.level === "thread") {
         void openThread(seed.channel, seed.thread, seed.focusMessageId);
-      } else if (seed.level === "dm") void openDm(seed.dm, seed.focusMessageId);
-      else if (seed.level === "dm-new") setNav({ level: "dm-new" });
+      } else if (seed.level === "direct" || seed.level === "direct-new") openDirect(seed);
     }
     const drafts = props.initialDrafts;
     if (drafts) {
       setComposer(drafts.composer);
       setNewThreadBody(drafts.newThreadBody);
-      setDmRecipients(drafts.dmRecipients);
-      setDmDraft(drafts.dmDraft);
       // After the open* call above: navigation resets these, and restoring
       // the composer text without its mode would post a drafted reply (or
       // decision resolution) as a plain top-level comment.
@@ -2844,7 +2227,7 @@ export function ChatsView(props: {
     }
   }, [
     openChannel,
-    openDm,
+    openDirect,
     openFeed,
     openThread,
     overview.status,
@@ -2852,281 +2235,8 @@ export function ChatsView(props: {
     props.initialNav,
     props.editorTabPath,
     overview,
-    dms,
-    dmRestoreReady,
     variant,
   ]);
-
-  // While a DM is open, poll: sync (push the member's ops, pull the peers'),
-  // then reload only when its content revision changed. openDm runs the first
-  // sync, once per opening; a refresh that updates this DM's fields changes
-  // nav but is not an opening. Token and request guards prevent an older pass
-  // from repainting a newer snapshot or a local send.
-  useEffect(() => {
-    if (props.suspendPolling || nav.level !== "dm") return;
-    const dm = nav.dm;
-    const token = liveToken.current;
-    const interval = setInterval(() => void refreshOpenDm(dm, token, "tick"), 4_000);
-    return () => clearInterval(interval);
-  }, [nav, refreshOpenDm, props.suspendPolling]);
-
-  // LeaveDmDialog owns Escape itself, but this clears leavingDm on any
-  // navigation away from the DM it was opened for (leaving this DM, opening
-  // a different one, or leaving Chats entirely), so a stale confirmation can
-  // never reappear over a conversation it wasn't opened for.
-  // Also clears it the moment a field-level refresh of the same open DM
-  // (refreshOpenDm) reports connected:false: an owner revocation
-  // mid-dialog leaves the channelId unchanged, so the nav-change check alone
-  // would leave the dialog open — confirming would re-end an already-ended
-  // tombstone and promise a request that, for an owner-revoked grant, can
-  // never appear.
-  useEffect(() => {
-    setLeavingDm((current) => {
-      if (current === null) return current;
-      if (nav.level === "dm" && nav.dm.channelId === current.channelId && nav.dm.connected) {
-        return current;
-      }
-      return null;
-    });
-  }, [nav]);
-
-  const sendDmMessage = useCallback(async () => {
-    if (nav.level !== "dm" || !nav.dm.threadId || !nav.dm.connected) return;
-    const body = composer.trim();
-    if (
-      body.length === 0 ||
-      sending ||
-      sendingRef.current ||
-      inFlightSendByContext.current.has(sendContextKey)
-    ) {
-      return;
-    }
-    const threadId = nav.dm.threadId;
-    const request = ++sendRequestGeneration.current;
-    inFlightSendByContext.current.set(sendContextKey, request);
-    const requestOwnsActiveContext = () =>
-      inFlightSendByContext.current.get(sendContextKey) === request &&
-      activeSendContext.current === sendContextKey;
-    sendingRef.current = true;
-    setSending(true);
-    try {
-      const result = await bridge().sendChatMessage({
-        workspaceId,
-        threadId,
-        body,
-        ...(extractChatFileReferences(body).length > 0
-          ? { fileReferences: extractChatFileReferences(body) }
-          : {}),
-      });
-      if (!requestOwnsActiveContext()) return;
-      if ("failure" in result) {
-        reportUnshown(
-          "Sent your message. dohc could not show it yet.",
-          result.failure,
-          sendContextKey,
-        );
-      } else {
-        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-        dmRefreshSeq.current += 1;
-        setMessages((current) =>
-          current.some((message) => message.id === result.message.id)
-            ? current
-            : [...current, result.message],
-        );
-      }
-      if (latestComposerState.current.composer === composer) {
-        latestComposerState.current = {
-          ...latestComposerState.current,
-          composer: "",
-        };
-        setComposer("");
-      }
-      flatChatListRef.current?.scrollToEnd();
-    } catch (error) {
-      if (!requestOwnsActiveContext()) return;
-      props.onError(ipcErrorMessage(error, "Could not send that message."), error);
-    } finally {
-      const ownsContext = inFlightSendByContext.current.get(sendContextKey) === request;
-      if (ownsContext) {
-        inFlightSendByContext.current.delete(sendContextKey);
-      }
-      if (ownsContext && activeSendContext.current === sendContextKey) {
-        sendingRef.current = false;
-        setSending(false);
-      }
-    }
-  }, [
-    composer,
-    nav,
-    props.onAgentWaitsForTrust,
-    props.onError,
-    reportUnshown,
-    sendContextKey,
-    sending,
-    workspaceId,
-  ]);
-
-  // A reply in one of the DM's threads.
-  const sendDmReply = useCallback(
-    async (rootId: string, body: string) => {
-      if (nav.level !== "dm" || !nav.dm.threadId || !nav.dm.connected) return false;
-      const context = sendContextKey;
-      try {
-        const references = extractChatFileReferences(body);
-        const result = await bridge().sendChatMessage({
-          workspaceId,
-          threadId: nav.dm.threadId,
-          body,
-          parentMessageId: rootId,
-          ...(references.length > 0 ? { fileReferences: references } : {}),
-        });
-        if (activeSendContext.current !== context) return false;
-        if ("failure" in result) {
-          // The reply saved, so it is not sent again.
-          reportUnshown("Sent your reply. dohc could not show it yet.", result.failure, context);
-          return true;
-        }
-        if (result.waitsForTrust) props.onAgentWaitsForTrust?.(workspaceId);
-        dmRefreshSeq.current += 1;
-        setMessages((current) =>
-          current.some((message) => message.id === result.message.id)
-            ? current
-            : [...current, result.message],
-        );
-        return true;
-      } catch (error) {
-        if (activeSendContext.current === context)
-          props.onError(ipcErrorMessage(error, "Could not send that reply."), error);
-        return false;
-      }
-    },
-    [nav, props.onAgentWaitsForTrust, props.onError, reportUnshown, sendContextKey, workspaceId],
-  );
-
-  // Starting a DM = pick who + say something, one step. Starting one with
-  // someone you already message opens the existing conversation.
-  const startDm = useCallback(async () => {
-    const body = dmDraft.trim();
-    const recipients = dmRecipients.trim();
-    if (body.length === 0 || recipients.length === 0) return;
-    if (startingDm || startingDmRef.current) return;
-    const token = liveToken.current;
-    startingDmRef.current = true;
-    setStartingDm(true);
-    try {
-      const fileReferences = extractChatFileReferences(body);
-      const result = await bridge().startDm({
-        workspaceId,
-        recipients,
-        body,
-        ...(fileReferences.length > 0 ? { fileReferences } : {}),
-      });
-      if (token !== liveToken.current) return;
-      setDmDraft("");
-      setDmRecipients("");
-      setDms((current) => [
-        result.dm,
-        ...current.filter((dm) => dm.channelId !== result.dm.channelId),
-      ]);
-      // The completion is the user's command landing (see openConversation).
-      if (props.editorTabPath && props.onOpenInTab) {
-        onDraftsChange?.({
-          composer: "",
-          newThreadBody: "",
-          dmRecipients: "",
-          dmDraft: "",
-          replyTarget: null,
-          resolveTargetMessageId: null,
-          poll: null,
-          newThreadPoll: null,
-        });
-        props.onOpenInTab({ level: "dm", dm: result.dm });
-      } else {
-        props.onNavCommand?.({ level: "dm", dm: result.dm });
-        void openDm(result.dm);
-      }
-    } catch (error) {
-      if (token !== liveToken.current) return;
-      props.onError(ipcErrorMessage(error, "Could not start that conversation."), error);
-    } finally {
-      startingDmRef.current = false;
-      setStartingDm(false);
-    }
-  }, [
-    dmDraft,
-    dmRecipients,
-    openDm,
-    props.onError,
-    props.onNavCommand,
-    props.onOpenInTab,
-    props.editorTabPath,
-    onDraftsChange,
-    startingDm,
-    workspaceId,
-  ]);
-
-  const acceptDmRequest = useCallback(
-    async (request: DmRequestRow, chosenWorkspaceId: string) => {
-      const token = liveToken.current;
-      try {
-        const result = await bridge().acceptDm({
-          workspaceId: chosenWorkspaceId,
-          shareId: request.shareId,
-        });
-        if (token !== liveToken.current) return;
-        setAcceptingDmRequest(null);
-        if (chosenWorkspaceId === workspaceId) {
-          openConversation({ level: "dm", dm: result.dm });
-          void refreshDms("person");
-        } else {
-          const label =
-            props.workspaces.find((candidate) => candidate.workspaceId === chosenWorkspaceId)
-              ?.label ?? chosenWorkspaceId;
-          setDmAcceptedElsewhere({
-            granterEmail: request.granterEmail,
-            workspaceLabel: label,
-          });
-          keepAcceptedNoticeRef.current = true;
-          void refreshDms("person");
-        }
-      } catch (error) {
-        if (token !== liveToken.current) return;
-        props.onError(
-          ipcErrorMessage(error, "dohc could not add that conversation to a workspace."),
-          error,
-        );
-      }
-    },
-    [openConversation, props.onError, props.workspaces, refreshDms, workspaceId],
-  );
-
-  const setDmRequestDeclined = useCallback(
-    async (request: DmRequestRow, declined: boolean) => {
-      if (dmRequestBusy !== null) return;
-      const token = liveToken.current;
-      setDmRequestBusy(request.shareId);
-      try {
-        const updateRequest = declined ? bridge().declineDm : bridge().requestDmAgain;
-        await updateRequest({ shareId: request.shareId });
-        if (token !== liveToken.current) return;
-        await refreshDms("person");
-      } catch (error) {
-        if (token !== liveToken.current) return;
-        props.onError(
-          ipcErrorMessage(
-            error,
-            declined
-              ? "dohc could not decline that message request."
-              : "dohc could not move that message request back to requests.",
-          ),
-          error,
-        );
-      } finally {
-        if (token === liveToken.current) setDmRequestBusy(null);
-      }
-    },
-    [dmRequestBusy, props.onError, refreshDms],
-  );
 
   const grantedByWire = useMemo(() => {
     const map = new Map<string, ChatChannelShareGrantRow[]>();
@@ -3137,7 +2247,7 @@ export function ChatsView(props: {
     return map;
   }, [channelShares]);
   // The people Add people suggests: everyone this account shares a group
-  // with, was invited by, or messages directly.
+  // with or was invited by.
   const knownPeople = useMemo(() => {
     const people = new Map<string, string>();
     const note = (email: string | null | undefined) => {
@@ -3147,10 +2257,8 @@ export function ChatsView(props: {
     };
     for (const row of channelShares?.granted ?? []) note(row.recipientEmail);
     for (const row of channelShares?.received ?? []) note(row.granterEmail);
-    for (const request of [...pendingDmRequests, ...declinedDmRequests]) note(request.granterEmail);
-    for (const dm of dms) for (const part of dm.peerLabel.split(/[,;\s]+/)) note(part);
     return [...people.values()];
-  }, [channelShares, declinedDmRequests, dms, pendingDmRequests]);
+  }, [channelShares]);
   const viewRef = useRef<HTMLDivElement | null>(null);
   const { revealInvitation, onInvitationRevealed } = props;
   const receivedNotJoined = useMemo(() => {
@@ -3191,13 +2299,7 @@ export function ChatsView(props: {
     if (document.activeElement !== action) return;
     setMarkedInvitation({ shareId: revealInvitation.shareId, inputs: inputCount() });
     onInvitationRevealed?.();
-  }, [
-    joiningShareId,
-    onInvitationRevealed,
-    pendingDmRequests,
-    receivedNotJoined,
-    revealInvitation,
-  ]);
+  }, [joiningShareId, onInvitationRevealed, receivedNotJoined, revealInvitation]);
   // The revealed row stays marked until the person's next click or key press,
   // which joins it or acts elsewhere.
   useEffect(() => {
@@ -3402,11 +2504,8 @@ export function ChatsView(props: {
   //    id, which is already cross-machine, so typing in one thread never
   //    shows in a sibling thread.
   //
-  // A direct message is a kind:"dm" chat channel backed by a chat grant, so
-  // it uses the same derivation. Its topic is the DM channel's wireId, because
-  // a DM has one running thread. Its scope is the grant's share scope for the
-  // participant and the plain workspace scope for the owner.
-  const activeDm = nav.level === "dm" ? nav.dm : null;
+  // A direct conversation lives on the account's server, not in a workspace,
+  // so it has no workspace presence.
   const activeChannel = nav.level === "channel" || nav.level === "thread" ? nav.channel : null;
   const activeJoined = activeChannel ? joinedFor(activeChannel) : null;
   const activeWireId = activeChannel ? (activeChannel.wireId ?? activeChannel.id) : null;
@@ -3415,18 +2514,13 @@ export function ChatsView(props: {
       ? (activeWireId ?? "")
       : nav.level === "thread"
         ? `chat:thread:${nav.thread.id}`
-        : nav.level === "dm"
-          ? nav.dm.channelWireId
-          : "";
+        : "";
   // The scope's stable identity for memoization: a joined channel pins to its
-  // grant's shareId, a DM the viewer PARTICIPATES in pins to that DM grant's
-  // shareId (both fan into the granter's workspace scope so both sides meet),
-  // and everything the viewer owns — plain channels and owned DMs — pins to the
-  // workspace. The transport is rebuilt only when this changes, so usePresence
+  // grant's shareId (which fans into the granter's workspace scope so both
+  // sides meet), and every channel the viewer owns pins to the workspace. The transport is rebuilt only when this changes, so usePresence
   // re-creates its channel on a real scope switch (aborting the old poll — the
   // no-repaint invariant) and never churns on an unrelated re-render.
-  const scopeShareId =
-    activeJoined?.shareId ?? (activeDm?.role === "participant" ? activeDm.shareId : null);
+  const scopeShareId = activeJoined?.shareId ?? null;
   const workspacePresenceTransport = useMemo(() => {
     if (!collaboration) return null;
     return collaboration.transportForScope({ kind: "workspace", workspaceId });
@@ -3513,15 +2607,8 @@ export function ChatsView(props: {
   // it came through someone else's share. Only a tab's own page publishes.
   const aboutConversation = useMemo<AboutConversationEntry | null>(() => {
     if (!props.editorTabPath) return null;
-    if (activeDm) {
-      return {
-        kind: "person",
-        name: activeDm.peerLabel,
-        channelWireId: activeDm.channelWireId,
-        received: activeDm.role === "participant",
-        present: presence.others,
-      };
-    }
+    // A direct conversation has no workspace history or presence to show.
+    if (nav.level === "direct" || nav.level === "direct-new") return "none";
     // A channel always has a wire id here, the same one presence keys on.
     if (!activeChannel || activeWireId === null) {
       // The tab's conversation is gone, or Chats could not list it: About
@@ -3532,9 +2619,6 @@ export function ChatsView(props: {
       if (overview.status !== "ready") return null;
       if (target?.kind === "channel") {
         return overview.channels.some((channel) => channel.id === target.id) ? null : "none";
-      }
-      if (target?.kind === "dm") {
-        return dmRestoreReady && !dms.some((dm) => dm.channelId === target.id) ? "none" : null;
       }
       return "none";
     }
@@ -3559,11 +2643,8 @@ export function ChatsView(props: {
     };
   }, [
     activeChannel,
-    activeDm,
     activeWireId,
     settingsAgents,
-    dmRestoreReady,
-    dms,
     joinedByWire,
     nav,
     overview,
@@ -3620,7 +2701,6 @@ export function ChatsView(props: {
         // clear below. A failure under the previous account says nothing
         // about this one, so its hold goes too.
         sessionGeneration.current += 1;
-        resetDmSyncHold(dmSyncHold.current);
         // And the previous session's rows leave the screen now, not when
         // the next listing resolves — a stalled relay would otherwise keep
         // showing another account's invitations and emails indefinitely.
@@ -3636,24 +2716,13 @@ export function ChatsView(props: {
         // good, if that listing stalls. It goes with the rows it explains.
         setShareReadFailure(null);
         // What the reveal's lists said was about the previous account.
-        setOwed((current) =>
-          current === null ? current : { ...current, shares: "waiting", dms: "waiting" },
-        );
+        setOwed((current) => (current === null ? current : { ...current, shares: "waiting" }));
         // The members dialog holds the previous account's picks and contacts.
         setSharePanelOpen(false);
-        setDms([]);
-        setDmAvailable(false);
-        setPendingDmRequests([]);
-        setDeclinedDmRequests([]);
-        setAcceptingDmRequest(null);
-        setDmRequestBusy(null);
-        setDmAcceptedElsewhere(null);
-        setNav((state) => (state.level === "dm" ? { level: "channels" } : state));
         setMessages([]);
         setMessagesLoading(false);
         setComposer("");
         setPoll(null);
-        void refreshDms("person");
         void refreshShares();
         return;
       }
@@ -3666,7 +2735,7 @@ export function ChatsView(props: {
       // land.
       if (phase === "ready") void refreshShares();
     });
-  }, [refreshDms, refreshShares]);
+  }, [refreshShares]);
 
   const submitShare = useCallback(
     async (channelId: string, input: { email: string; viewOnly: boolean }): Promise<boolean> => {
@@ -3852,16 +2921,14 @@ export function ChatsView(props: {
   const [archiveOpen, setArchiveOpen] = useState(false);
 
   // A notice's Open can name an invitation that arrived after Chats last
-  // listed it. Each reveal reads the shares again and pulls message requests,
-  // whose poll stops while a conversation tab is open. Those reads, and any
-  // poll or activity pass after them, record into `owed`.
+  // listed it. Each reveal reads the shares again. That read, and any poll or
+  // activity pass after it, records into `owed`.
   useEffect(() => {
     if (revealInvitation === undefined) return;
-    owedFrom.current = { shareTicket: commitTicket.current, dmPass: dmPassClock.current };
-    setOwed({ reveal: revealInvitation, shares: "waiting", dms: "waiting" });
+    owedFrom.current = { shareTicket: commitTicket.current };
+    setOwed({ reveal: revealInvitation, shares: "waiting" });
     void refreshShares();
-    void refreshDms("open");
-  }, [refreshDms, refreshShares, revealInvitation]);
+  }, [refreshShares, revealInvitation]);
   const { onInvitationProgress, onShareRowMounted } = props;
   const owedReveal = owed?.reveal ?? null;
   // A row reports itself (ShareRowMark), so a report means the row is in the
@@ -3879,23 +2946,21 @@ export function ChatsView(props: {
   useEffect(() => {
     if (owed === null || onInvitationProgress === undefined) return;
     const { shareId } = owed.reveal;
-    onInvitationProgress(shareId, { shares: owed.shares, dms: owed.dms });
+    onInvitationProgress(shareId, { shares: owed.shares });
     return () => onInvitationProgress(shareId, null);
   }, [onInvitationProgress, owed]);
-  // An archived Group or conversation mounts its row only while Archived is
-  // open, so a reveal of one opens Archived, in this render so the row mounts
-  // in the same commit.
+  // An archived Group mounts its row only while Archived is open, so a reveal
+  // of one opens Archived, in this render so the row mounts in the same commit.
   const revealArchived = useMemo(() => {
     if (owedReveal === null) return false;
     const { shareId } = owedReveal;
-    if (dms.some((dm) => dm.shareId === shareId && archivedIds.has(dm.channelId))) return true;
     return (
       overview.status === "ready" &&
       overview.channels.some(
         (channel) => archivedIds.has(channel.id) && groupShareId(channel) === shareId,
       )
     );
-  }, [archivedIds, dms, groupShareId, overview, owedReveal]);
+  }, [archivedIds, groupShareId, overview, owedReveal]);
   const [archiveOpenedFor, setArchiveOpenedFor] = useState<ChatsInvitation | null>(null);
   if (revealArchived && archiveOpenedFor !== owedReveal) {
     setArchiveOpenedFor(owedReveal);
@@ -3928,53 +2993,42 @@ export function ChatsView(props: {
     },
     [props.onError, props.onNotice, workspaceId],
   );
-  // Marks every thread in a chat read, as opening each one would. A DM is one
-  // thread; the store stops its cursor at the last message.
+  // Marks every thread in a chat read, as opening each one would.
   const markChatRead = useCallback(
-    async (channelId: string, label: string, dmThreadId?: string): Promise<void> => {
+    async (channelId: string, label: string): Promise<void> => {
       const token = liveToken.current;
       try {
-        if (dmThreadId !== undefined) {
-          await bridge().markChatThreadRead({
-            workspaceId,
-            threadId: dmThreadId,
-            upToSequence: Number.MAX_SAFE_INTEGER,
-          });
-        } else {
-          const lanes = await Promise.all(
-            (["posts", "chat"] as const).map((lane) =>
-              bridge().listChannelThreads({ workspaceId, channelId, lane }),
+        const lanes = await Promise.all(
+          (["posts", "chat"] as const).map((lane) =>
+            bridge().listChannelThreads({ workspaceId, channelId, lane }),
+          ),
+        );
+        await Promise.all(
+          lanes
+            .flatMap(({ threads }) => threads)
+            .filter((thread) => thread.unreadCount > 0)
+            .map((thread) =>
+              bridge().markChatThreadRead({
+                workspaceId,
+                threadId: thread.id,
+                upToSequence: thread.messageCount,
+              }),
             ),
-          );
-          await Promise.all(
-            lanes
-              .flatMap(({ threads }) => threads)
-              .filter((thread) => thread.unreadCount > 0)
-              .map((thread) =>
-                bridge().markChatThreadRead({
-                  workspaceId,
-                  threadId: thread.id,
-                  upToSequence: thread.messageCount,
-                }),
-              ),
-          );
-        }
+        );
         // After a workspace switch these refreshes would repaint the new workspace with this one's chats.
         if (token !== liveToken.current) return;
         props.onThreadRead?.();
-        props.onDmRead?.();
         void refreshOverview({ background: true });
-        void refreshDms("person");
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(
           ipcErrorMessage(error, `dohc could not mark ${label} as read.`),
           error,
-          () => void markChatRead(channelId, label, dmThreadId),
+          () => void markChatRead(channelId, label),
         );
       }
     },
-    [props.onDmRead, props.onError, props.onThreadRead, refreshDms, refreshOverview, workspaceId],
+    [props.onError, props.onThreadRead, refreshOverview, workspaceId],
   );
   const setAgentEnabled = useCallback(
     async (agentId: string, enabled: boolean): Promise<void> => {
@@ -4068,7 +3122,6 @@ export function ChatsView(props: {
     target: ChatRowMenuTarget;
     label: string;
     channelId: string;
-    dmThreadId?: string;
     channel?: ChatChannelRecord;
     shareId?: string;
     agentId?: string;
@@ -4088,7 +3141,7 @@ export function ChatsView(props: {
   if (agentDialog && agentDialog.workspaceId !== workspaceId) setAgentDialog(null);
   const rowMenuItems = rowMenu
     ? chatRowMenuItems(rowMenu.target, {
-        markRead: () => void markChatRead(rowMenu.channelId, rowMenu.label, rowMenu.dmThreadId),
+        markRead: () => void markChatRead(rowMenu.channelId, rowMenu.label),
         setArchived: (archived) => void setChatArchived(rowMenu.channelId, rowMenu.label, archived),
         addPeople: () => {
           if (rowMenu.channel)
@@ -4217,9 +3270,9 @@ export function ChatsView(props: {
 
   const goBack = useCallback(() => {
     // Back is an explicit command like any conversation click: report it
-    // synchronously through the same seam, so a DM answer queued in this
-    // tick cannot pass its isCurrent() check and remount over the place the
-    // user just went back to. Every ChatHeader (and the keyboard shortcut)
+    // synchronously through the same seam, so an answer queued in this tick
+    // cannot pass its isCurrent() check and remount over the place the user
+    // just went back to. Every ChatHeader (and the keyboard shortcut)
     // routes through here.
     props.onNavCommand?.(
       nav.level === "thread" ? { level: "channel", channel: nav.channel } : { level: "channels" },
@@ -4236,65 +3289,10 @@ export function ChatsView(props: {
       // Home's rows stay: the nav lists agents shared by other people from them, and
       // opening Home again reloads them before it paints.
       void refreshOverview();
-    } else if (nav.level === "dm" || nav.level === "dm-new") {
+    } else if (nav.level === "direct" || nav.level === "direct-new") {
       setNav({ level: "channels" });
-      setMessages([]);
-      setComposer("");
-      setPoll(null);
-      // Drop the compose draft/recipients so reopening "New message" never
-      // shows a stale, unrelated "To:" that could misdirect the next send.
-      setDmRecipients("");
-      setDmDraft("");
-      void refreshDms("person");
     }
-  }, [nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
-
-  // Ends the DM's registry row through the exact leaveSharedChannel mechanism.
-  // The conversation drops out of `dms` immediately; the next
-  // syncDms poll's classifyDmRequests puts it back in the request lane
-  // because no workspace holds a live row for its shareId anymore. Routes
-  // through goBack for its nav + composer-draft cleanup: without
-  // it, the next DM opened after leaving could show this one's unsent draft,
-  // and Send could reach the wrong person.
-  const leaveDmConversation = useCallback(
-    async (dm: DmRecord) => {
-      const shareId = dm.shareId;
-      // The belt effect above already closes the dialog the moment the
-      // record it was opened for loses connected; this
-      // is the same guard at the one call site that can reach here, closing
-      // the last sliver of a click/effect race. sendingRef mirrors this
-      // DM's own send state the same way the confirm button's disabled prop
-      // does — the dialog only ever opens for the
-      // currently-viewed DM, so it IS this DM's in-flight state.
-      if (!shareId || !dm.connected || sendingRef.current) return;
-      const token = liveToken.current;
-      try {
-        // Presence leave before the row ends: once leaveDm ends
-        // the share, this DM's presence scope rejects further publish/leave
-        // calls (the same ended-grant gate messages use), so the effect
-        // cleanup's later best-effort leave would be rejected and peers would
-        // read this client as present until the relay's presence TTL.
-        await presence.leave();
-        await bridge().leaveDm({ workspaceId, shareId });
-        if (token !== liveToken.current) return;
-        setLeavingDm(null);
-        setDms((current) => current.filter((candidate) => candidate.channelId !== dm.channelId));
-        goBack();
-      } catch (error) {
-        if (token !== liveToken.current) return;
-        // Re-arm presence: if leaveDm rejected, the row
-        // never ended and this conversation stays open, but presence.leave()
-        // already stopped the channel — without this the client goes
-        // invisible to peers until it navigates away and back.
-        presence.restart();
-        props.onError(
-          ipcErrorMessage(error, "dohc could not leave that conversation. Try again."),
-          error,
-        );
-      }
-    },
-    [goBack, presence.leave, presence.restart, props.onError, workspaceId],
-  );
+  }, [nav, openChannel, props.onNavCommand, refreshOverview]);
 
   const reactionsByMessage = useMemo(() => {
     const result = new Map<string, ChatReactionRecord[]>();
@@ -4308,11 +3306,10 @@ export function ChatsView(props: {
 
   // Memoized reaction controls: an inline object literal would change
   // identity on every keystroke and defeat the message-list memo boundaries.
-  // The DM and thread surfaces render mutually exclusively, so one object
-  // serves both; readOnly is derived first so the memo keys on a boolean,
-  // not the whole nav object.
+  // readOnly is derived first so the memo keys on a boolean, not the whole
+  // nav object.
   const threadLocked = nav.level === "thread" && channelIsLocked(nav.channel);
-  const reactionReadOnly = nav.level === "dm" ? !nav.dm.connected : threadLocked;
+  const reactionReadOnly = threadLocked;
   const reactionControls = useMemo<ChatReactionControls>(
     () => ({
       reactions: threadReactions.reactions,
@@ -4366,10 +3363,8 @@ export function ChatsView(props: {
   }, []);
 
   useEffect(() => {
-    const focusMessageId =
-      nav.level === "thread" || nav.level === "dm" ? nav.focusMessageId : undefined;
-    const conversationId =
-      nav.level === "thread" ? nav.thread.id : nav.level === "dm" ? nav.dm.threadId : undefined;
+    const focusMessageId = nav.level === "thread" ? nav.focusMessageId : undefined;
+    const conversationId = nav.level === "thread" ? nav.thread.id : undefined;
     if (
       !focusMessageId ||
       !conversationId ||
@@ -4560,16 +3555,7 @@ export function ChatsView(props: {
     [postThreadId],
   );
 
-  const editorTab = parseTab(props.editorTabPath ?? null);
-  if (
-    overview.status === "loading" ||
-    (overview.status === "ready" &&
-      variant === "page" &&
-      !props.initialNav &&
-      editorTab?.kind === "chat" &&
-      editorTab.target.kind === "dm" &&
-      !dmRestoreReady)
-  ) {
+  if (overview.status === "loading") {
     return <SkeletonRows inSlot layout="panel" label="Loading Chats..." />;
   }
 
@@ -4605,7 +3591,7 @@ export function ChatsView(props: {
         />
         <PostFeedList
           key={`${workspaceId}:home`}
-          items={personalFeed}
+          items={homeFeed}
           itemKey={(item) => item.message.id}
           columnClassName={pageColumn}
           empty={
@@ -4645,10 +3631,6 @@ export function ChatsView(props: {
                   ...item.thread,
                   path: null,
                 });
-            const feedDm =
-              item.channel?.kind === "dm"
-                ? dms.find((dm) => dm.channelId === item.channel?.id)
-                : undefined;
             const isComment = item.openingMessage
               ? item.openingMessage.id !== item.message.id
               : item.message.parentMessageId !== undefined;
@@ -4684,28 +3666,18 @@ export function ChatsView(props: {
             const itemViewer = itemView.viewerAuthorId;
             const reactionPending = reactions.pending(item.thread.id, item.message.id);
             const where = item.channel
-              ? item.channel.kind === "dm"
-                ? (feedDm?.peerLabel ?? item.channel.name)
-                : item.channel.kind === "agent"
-                  ? agentChatIdentity(
-                      withListedAgent(item.channel, overview.channels),
-                      settingsAgents,
-                    ).label
-                  : `#${item.channel.name}`
+              ? item.channel.kind === "agent"
+                ? agentChatIdentity(
+                    withListedAgent(item.channel, overview.channels),
+                    settingsAgents,
+                  ).label
+                : `#${item.channel.name}`
               : fileThread?.path
                 ? basenameOf(fileThread.path)
                 : item.thread.title;
             const open = () => {
               if (!item.channel) {
                 props.onOpenFileChat(fileThread!, item.message.id);
-                return;
-              }
-              if (feedDm) {
-                openConversation({
-                  level: "dm",
-                  dm: feedDm,
-                  focusMessageId: item.message.id,
-                });
                 return;
               }
               openConversation({
@@ -4895,204 +3867,38 @@ export function ChatsView(props: {
     );
   }
 
-  if (nav.level === "dm-new") {
+  if (nav.level === "direct-new") {
     return (
-      <div
-        data-testid="chats-dm-new"
-        data-variant={variant}
-        className="flex min-h-0 flex-1 flex-col"
-        onKeyDownCapture={onKeyDownCapture}
-      >
-        <ChatHeader
-          label="New message"
-          testId="chats-dm-new"
-          onBack={variant === "panel" ? goBack : undefined}
-          icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
-        />
-        <div className={`flex min-h-0 flex-1 flex-col ${pageColumn}`}>
-          <div className="flex flex-col gap-1 border-b border-line p-2">
-            <label className="sr-only" htmlFor="chats-dm-recipients">
-              To
-            </label>
-            <input
-              id="chats-dm-recipients"
-              data-testid="chats-dm-recipients"
-              autoFocus
-              value={dmRecipients}
-              placeholder="To: email@example.com"
-              onChange={(event) => setDmRecipients(event.target.value)}
-              className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
-            />
-            <p className="m-0 px-1 text-[10px] leading-4 text-subtle">
-              Separate several people with commas. They&apos;ll see the conversation on their next
-              sync.
-            </p>
-          </div>
-          <div className="min-h-0 flex-1" />
-          <MentionComposer
-            testIdPrefix="chats-dm-new"
-            composerId="chats-dm-new-composer"
-            pinned
-            value={dmDraft}
-            sending={startingDm}
-            placeholder="Write the first message…"
-            sendLabel="Start conversation"
-            candidates={mentionCandidates}
-            fileCandidates={DM_FILE_CANDIDATES}
-            loadFileHeadings={loadFileHeadings}
-            onChange={setDmDraft}
-            onSend={() => void startDm()}
-            onRosterPick={agentOffer.onRosterPick}
-            rosterScope={agentOffer.scope}
-            agentOffer={agentOffer.offer}
-          />
-        </div>
-      </div>
+      <NewDirectMessage
+        workspaceId={workspaceId}
+        memberIds={nav.memberIds}
+        variant={variant}
+        onBack={variant === "panel" ? goBack : undefined}
+        mentionCandidates={mentionCandidates}
+        onError={props.onError}
+        onClearError={props.onClearError}
+        onNotice={props.onNotice}
+        onOpenConversation={(conversationId, title) =>
+          openConversation({ level: "direct", conversationId, title })
+        }
+      />
     );
   }
 
-  if (nav.level === "dm") {
-    const dm = nav.dm;
-    const dmHeader = (
-      <ChatHeader
-        label={dm.peerLabel}
-        testId="chats-dm"
-        large={variant === "page"}
-        onBack={variant === "panel" ? goBack : undefined}
-        icon={
-          <ChatAvatar
-            presentation={neutralPresentation}
-            name={dm.peerLabel}
-            kind="human"
-            size="strip"
-          />
-        }
-        // A connected participant (shareId set, not already ended) has a
-        // live placement to reverse; the owner side (shareId null)
-        // never accepted a grant here, and an already-ended row (owner
-        // revoked, or already left) has nothing live to end — confirming
-        // would re-end a tombstone and promise a request that, for an
-        // owner-revoked grant, can never appear (its grant is gone from
-        // the relay's received listing).
-        action={
-          dm.shareId && dm.connected ? (
-            <button
-              type="button"
-              data-testid="chats-dm-leave"
-              onClick={() => setLeavingDm(dm)}
-              className="h-6 shrink-0 cursor-pointer rounded border border-line px-1.5 text-[10px] text-muted hover:bg-hover hover:text-ink"
-            >
-              Leave
-            </button>
-          ) : undefined
-        }
-        trailing={<PresenceFaces others={presence.others} />}
-      />
-    );
-    const dmTop = archivedIds.has(dm.channelId) ? (
-      <>
-        {dmHeader}
-        <ArchivedLine onUnarchive={() => void setChatArchived(dm.channelId, dm.peerLabel, false)} />
-      </>
-    ) : (
-      dmHeader
-    );
+  if (nav.level === "direct") {
     return (
-      <div
-        data-testid="chats-dm-view"
-        data-variant={variant}
-        className="flex min-h-0 flex-1 flex-col"
-        onKeyDownCapture={onKeyDownCapture}
-      >
-        {/* Presence: "viewing" faces + "typing…" for this DM, keyed by
-            its channelWireId and fanned out through the same shareForRecipient
-            grant gate. Dormant (calm header, no fake liveness) when solo. */}
-        {dm.threadId ? (
-          <ThreadedChat
-            key={`${workspaceId}:${dm.threadId}`}
-            testIdPrefix="chats-dm"
-            messages={messages}
-            loading={messagesLoading}
-            emptyLabel="No messages yet."
-            place={dm.peerLabel}
-            header={dmTop}
-            belowList={<TypingIndicator names={presence.typingNames} className="px-5" />}
-            composer={(inset) =>
-              dm.connected ? (
-                <MentionComposer
-                  pinned
-                  testIdPrefix="chats-dm"
-                  composerId="chats-dm-composer"
-                  value={composer}
-                  sending={sending}
-                  placeholder={`Message ${dm.peerLabel}`}
-                  sendLabel="Send message"
-                  candidates={mentionCandidates}
-                  fileCandidates={DM_FILE_CANDIDATES}
-                  loadFileHeadings={loadFileHeadings}
-                  onChange={(value) => {
-                    setComposer(value);
-                    presence.setTyping(value.trim().length > 0);
-                  }}
-                  onSend={() => {
-                    presence.setTyping(false);
-                    void sendDmMessage();
-                  }}
-                  onRosterPick={agentOffer.onRosterPick}
-                  rosterScope={agentOffer.scope}
-                  agentOffer={agentOffer.offer}
-                  inset={inset}
-                />
-              ) : (
-                <ComposerNotice testId="chats-dm-ended">
-                  This conversation has ended. You can still read it.
-                </ComposerNotice>
-              )
-            }
-            replyNotice={
-              dm.connected ? undefined : (
-                <ComposerNotice testId="chats-dm-thread-ended">
-                  This conversation has ended. You can still read it.
-                </ComposerNotice>
-              )
-            }
-            onSendReply={sendDmReply}
-            mentionCandidates={mentionCandidates}
-            fileCandidates={DM_FILE_CANDIDATES}
-            loadFileHeadings={loadFileHeadings}
-            onOpenPath={props.onOpenPath}
-            reactionControls={reactionControls}
-            listRef={flatChatListRef}
-            flashMessageId={flashMessageId}
-          />
-        ) : (
-          <>
-            {dmTop}
-            <div
-              data-testid="chats-dm-waiting"
-              className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[11px] text-subtle"
-            >
-              Waiting for this conversation to sync…
-            </div>
-          </>
-        )}
-        {leavingDm ? (
-          <LeaveDmDialog
-            key={leavingDm.channelId}
-            dm={leavingDm}
-            workspaceLabel={
-              props.workspaces.find((candidate) => candidate.workspaceId === workspaceId)?.label ??
-              workspaceId
-            }
-            // The dialog only ever opens for the currently-viewed DM (the
-            // leavingDm effect enforces this), so `sending`, already scoped
-            // to the active send context, is this DM's own in-flight state.
-            sendInFlight={sending}
-            onConfirm={() => leaveDmConversation(leavingDm)}
-            onClose={() => setLeavingDm(null)}
-          />
-        ) : null}
-      </div>
+      <DirectConversationView
+        key={nav.conversationId}
+        conversationId={nav.conversationId}
+        variant={variant}
+        onBack={variant === "panel" ? goBack : undefined}
+        mentionCandidates={mentionCandidates}
+        onOpenPath={props.onOpenPath}
+        onTitle={setDirectTitle}
+        onError={props.onError}
+        onClearError={props.onClearError}
+        onNotice={props.onNotice}
+      />
     );
   }
 
@@ -5788,22 +4594,8 @@ export function ChatsView(props: {
     props.selectedNav?.level === "channel" || props.selectedNav?.level === "thread"
       ? props.selectedNav.channel.id
       : null;
-  const selectedDmId = props.selectedNav?.level === "dm" ? props.selectedNav.dm.channelId : null;
-  const beginNewDm = () => {
-    // Always start compose from a clean slate — never inherit a
-    // recipient/draft left over from a previous compose.
-    setDmRecipients("");
-    setDmDraft("");
-    if (variant === "panel" && props.onOpenInTab) {
-      props.onOpenInTab({ level: "dm-new" });
-      return;
-    }
-    // A command like any conversation click (see openConversation): report
-    // it synchronously, or a DM answer queued in this tick remounts over the
-    // compose.
-    props.onNavCommand?.({ level: "dm-new" });
-    setNav({ level: "dm-new" });
-  };
+  const selectedConversationId =
+    props.selectedNav?.level === "direct" ? props.selectedNav.conversationId : null;
 
   // Archived chats leave their sections for Archived at the bottom. A new
   // message never brings one back; Archived goes bold and counts it instead.
@@ -5814,7 +4606,6 @@ export function ChatsView(props: {
   });
   const groupChannels = overview.channels.filter((channel) => channel.kind === "channel");
   const activeGroups = groupChannels.filter((channel) => !archivedIds.has(channel.id));
-  const activeDms = dms.filter((dm) => !archivedIds.has(dm.channelId));
   const activeAgentChats = agentChats.filter(
     (channel) => !archivedIds.has(channel.id) && !agentRemoved(channel),
   );
@@ -5826,9 +4617,6 @@ export function ChatsView(props: {
         unread: groupUnread(channel),
         row: groupRow(channel, true),
       })),
-    ...dms
-      .filter((dm) => archivedIds.has(dm.channelId))
-      .map((dm) => ({ key: dm.channelId, unread: dm.unreadCount, row: dmRow(dm, true) })),
     ...agentChats
       .filter((channel) =>
         agentRemoved(channel) ? !hiddenIds.has(channel.id) : archivedIds.has(channel.id),
@@ -5906,56 +4694,6 @@ export function ChatsView(props: {
                   {unreadCount} unread
                 </span>
               ) : null}
-            </>
-          }
-        />
-      </li>
-    );
-  }
-
-  function dmRow(dm: DmRecord, archived: boolean) {
-    return (
-      <li key={dm.channelId}>
-        <ShareRowMark shareId={dm.shareId} report={reportRow} />
-        <NavRow
-          testId="chats-dm-item"
-          data={{
-            "data-channel-id": dm.channelId,
-            ...(archived ? { "data-archived": "true" } : {}),
-          }}
-          active={selectedDmId === dm.channelId}
-          unread={dm.unreadCount > 0}
-          onClick={() => openConversation({ level: "dm", dm })}
-          icon={
-            <ChatAvatar
-              presentation={neutralPresentation}
-              name={dm.peerLabel}
-              kind="human"
-              size="strip"
-            />
-          }
-          label={dm.peerLabel}
-          labelTestId="chats-dm-name"
-          muted={!dm.connected || (archived && dm.unreadCount === 0)}
-          {...menuFor({
-            key: dm.channelId,
-            label: dm.peerLabel,
-            channelId: dm.channelId,
-            ...(dm.threadId ? { dmThreadId: dm.threadId } : {}),
-            target: {
-              kind: "person",
-              unread: dm.unreadCount > 0 && dm.threadId !== null,
-              archived,
-            },
-          })}
-          trailing={
-            <>
-              {dm.connected ? null : <span className="shrink-0 text-[10px] text-muted">ended</span>}
-              <UnreadPill
-                count={dm.unreadCount}
-                tone={archived ? "quiet" : "ink"}
-                testId="chats-dm-unread"
-              />
             </>
           }
         />
@@ -6122,93 +4860,17 @@ export function ChatsView(props: {
               </ul>
             </div>
           ) : null}
-          {dmAvailable || activeDms.length > 0 ? (
-            <div data-testid="chats-dms-section">
-              <div className="group mt-4 flex h-6 items-center pl-3 pr-2">
-                <SectionLabel as="p" className="min-w-0 flex-1">
-                  People
-                </SectionLabel>
-                {dmAvailable ? (
-                  <SectionActionButton label="New message" onClick={beginNewDm}>
-                    <Plus size={12} aria-hidden />
-                  </SectionActionButton>
-                ) : null}
-              </div>
-              <ul className="m-0 list-none p-0">{activeDms.map((dm) => dmRow(dm, false))}</ul>
-              {dmAvailable ? (
-                <NavRow
-                  testId="chats-new-dm"
-                  onClick={beginNewDm}
-                  icon={
-                    <Plus size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />
-                  }
-                  label="New message"
-                  muted
-                />
-              ) : null}
-            </div>
-          ) : null}
-          {dmAcceptedElsewhere ? (
-            <div
-              data-testid="chats-dm-accepted-elsewhere"
-              className="mx-3 mt-3 flex min-h-7 items-center gap-2 rounded border border-line bg-panel-2 px-2 text-[11px] text-muted"
-            >
-              <span className="min-w-0 flex-1 truncate">
-                {dmAcceptedElsewhere.granterEmail
-                  ? `Added your conversation with ${dmAcceptedElsewhere.granterEmail} to ${dmAcceptedElsewhere.workspaceLabel}.`
-                  : `Added this conversation to ${dmAcceptedElsewhere.workspaceLabel}.`}
-              </span>
-              <button
-                type="button"
-                data-testid="chats-dm-accepted-elsewhere-dismiss"
-                aria-label="Dismiss notice"
-                onClick={() => setDmAcceptedElsewhere(null)}
-                className="grid size-6 shrink-0 place-items-center rounded hover:bg-hover hover:text-ink"
-              >
-                <X size={12} aria-hidden />
-              </button>
-            </div>
-          ) : null}
-          {pendingDmRequests.length > 0 || declinedDmRequests.length > 0 ? (
-            <div data-testid="chats-dm-requests-section">
-              <SectionLabel as="p" className="mt-4 flex h-6 items-center px-3">
-                Message requests
-              </SectionLabel>
-              <ul className="m-0 list-none p-0">
-                {pendingDmRequests.map((request) => (
-                  <DmRequestListItem
-                    key={request.shareId}
-                    request={request}
-                    state="pending"
-                    marked={markedInvitation?.shareId === request.shareId}
-                    report={reportRow}
-                    busy={dmRequestBusy !== null}
-                    onAccept={() => setAcceptingDmRequest(request)}
-                    onDecline={() => void setDmRequestDeclined(request, true)}
-                  />
-                ))}
-              </ul>
-              {declinedDmRequests.length > 0 ? (
-                <div className="border-t border-line/60 bg-panel-2/40">
-                  <SectionLabel as="p" className="m-0 flex h-6 items-center px-3">
-                    Declined
-                  </SectionLabel>
-                  <ul className="m-0 list-none p-0">
-                    {declinedDmRequests.map((request) => (
-                      <DmRequestListItem
-                        key={request.shareId}
-                        request={request}
-                        state="declined"
-                        report={reportRow}
-                        busy={dmRequestBusy !== null}
-                        onRequestAgain={() => void setDmRequestDeclined(request, false)}
-                      />
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
+          {/* Direct messages belong to the account, so every workspace lists them. */}
+          <DirectPeopleSection
+            selectedConversationId={selectedConversationId}
+            onOpen={(conversationId, title) =>
+              openConversation({ level: "direct", conversationId, title })
+            }
+            onNew={() => openConversation({ level: "direct-new" })}
+            onError={props.onError}
+            onClearError={props.onClearError}
+            onNotice={props.onNotice}
+          />
           {/* Agents cannot run in a joined workspace yet, so it lists none. */}
           {!inJoinedWorkspace &&
           (agentChats.length > 0 || props.userSettings || otherAgents.length > 0) ? (
@@ -6390,16 +5052,6 @@ export function ChatsView(props: {
       ) : null}
       {creatingGroup ? (
         <NewGroupDialog onCreate={createChannel} onClose={closeGroupDialog} />
-      ) : null}
-      {acceptingDmRequest ? (
-        <AcceptDmDialog
-          key={acceptingDmRequest.shareId}
-          request={acceptingDmRequest}
-          currentWorkspaceId={workspaceId}
-          workspaces={props.workspaces}
-          onAccept={(chosenWorkspaceId) => acceptDmRequest(acceptingDmRequest, chosenWorkspaceId)}
-          onClose={() => setAcceptingDmRequest(null)}
-        />
       ) : null}
     </div>
   );

@@ -1335,7 +1335,6 @@ describe("Home and a file's chat share one reaction store", () => {
       <ReactionStoreProvider workspaceId="workspace-a">
         <ProductionChatsView
           workspaceId="workspace-a"
-          workspaces={[{ workspaceId: "workspace-a", label: "Work" }]}
           onOpenFileChat={vi.fn()}
           onError={onError}
         />

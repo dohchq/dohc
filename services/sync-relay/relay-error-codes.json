@@ -67,6 +67,9 @@
   { "code": "member_exists", "status": 409 },
   { "code": "member_removed", "status": 409 },
   { "code": "members_forbidden", "status": 403 },
+  { "code": "direct_blocked", "status": 403 },
+  { "code": "direct_alone", "status": 409 },
+  { "code": "direct_message_id_taken", "status": 409 },
   { "code": "workspace_full", "status": 409 },
   { "code": "workspace_name_required", "status": 400 },
   { "code": "workspace_share_managed", "status": 409 }

@@ -28,6 +28,7 @@
     "./share-proposal-bound": "./src/shareProposalBound.ts",
     "./wire-patterns": "./src/wirePatterns.ts",
     "./workspace-members": "./src/workspaceMembers.ts",
+    "./direct-messages": "./src/directMessages.ts",
     "./app-collection-checks": "./src/appCollectionChecks.ts"
   },
   "scripts": {

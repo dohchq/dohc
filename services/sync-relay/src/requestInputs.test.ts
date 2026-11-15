@@ -40,6 +40,7 @@ it("uses the same reserved-ID object as desktop manifest admission", () => {
     "personal-agents",
     "account",
     "wakes",
+    "direct",
   ]);
   for (const workspaceId of RESERVED_WORKSPACE_IDS) {
     expect(

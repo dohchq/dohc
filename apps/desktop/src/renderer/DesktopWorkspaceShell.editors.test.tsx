@@ -9,7 +9,6 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type {
   RefreshSharedViewResult,
-  SyncDmsResult,
   WriteWorkspaceTextPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
@@ -26,8 +25,6 @@ import {
   storedStateWithTabs,
   storedTabs,
   DM_GRAPH_NODE,
-  CANONICAL_DM,
-  dmSyncResult,
   makeBridge,
   renderShell,
   enterMarkdownSource,
@@ -836,63 +833,6 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
   });
 
-  // Cancelling on every workbench write would make this seam hostile: a user
-  // who clicks a DM and then adjusts the sidebar would lose the click when the
-  // final width commits — and the syncDms failure branch is isCurrent-gated
-  // too, so nothing would surface. Only a destination change cancels.
-  it("keeps an in-flight DM navigation through a sidebar width drag", async () => {
-    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
-      configurable: true,
-      value: vi.fn(),
-    });
-    const sync = deferred<SyncDmsResult>();
-    const user = userEvent.setup();
-    const bridge = makeBridge(Promise.resolve(null));
-    installGraphFixture(bridge, {
-      nodes: [DM_GRAPH_NODE],
-      edges: [],
-      unresolvedLinks: 0,
-      scannedFileCount: 1,
-      omittedFileCount: 0,
-      truncatedFileCount: 0,
-    });
-    bridge.syncDms = vi.fn(() => sync.promise);
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-graph"));
-    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
-    await waitFor(() =>
-      expect(
-        screen
-          .getAllByTestId("graph-file-row")
-          .some((row) => row.dataset.path?.startsWith("chat-thread:")),
-      ).toBe(true),
-    );
-    const rows = await screen.findAllByTestId("graph-file-row");
-    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
-    await waitFor(() => expect(bridge.syncDms).toHaveBeenCalled());
-
-    const panel = screen.getByTestId("side-panel");
-    expect(panel.style.width).toBe("240px");
-    const handle = screen.getByTestId("sidebar-resize");
-    fireEvent.pointerDown(handle, { button: 0, buttons: 1, pointerId: 1 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientX: 300, pointerId: 1 });
-    fireEvent.pointerMove(handle, { buttons: 1, clientX: 420, pointerId: 1 });
-    fireEvent.pointerUp(handle, { button: 0, pointerId: 1 });
-    await waitFor(() => expect(panel.style.width).toBe("420px"));
-
-    await act(async () => {
-      sync.resolve(dmSyncResult([CANONICAL_DM]));
-      await sync.promise;
-    });
-
-    expect(
-      await screen.findByTestId(
-        `tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`,
-      ),
-    ).toBeTruthy();
-  });
-
   // The session signal reaches the SHELL: cloudStatus derives the presence
   // collaboration, so a sign-out must tear the old account's presence down
   // (abort its long poll) and re-query the status immediately — not when
@@ -984,13 +924,6 @@ describe("ui-state merge-on-load", () => {
   // engine bridge only stubs the navigator's overview surface.
   function chatsPageBridge(uiState: WorkspaceUiState) {
     const bridge = makeBridge(Promise.resolve(uiState));
-    const syncAnswers: Array<(value: SyncDmsResult) => void> = [];
-    bridge.syncDms = vi.fn(
-      () =>
-        new Promise<SyncDmsResult>((resolve) => {
-          syncAnswers.push(resolve);
-        }),
-    );
     bridge.listChatChannels = vi.fn(async () => ({
       channels: [
         {
@@ -1015,7 +948,6 @@ describe("ui-state merge-on-load", () => {
       truncatedFileCount: 0,
     });
     return Object.assign(bridge, {
-      syncAnswers,
       listPersonalChatFeed: vi.fn(async () => ({
         items: [
           {
@@ -1081,54 +1013,6 @@ describe("ui-state merge-on-load", () => {
     aboutVisible: false,
   };
 
-  // The Chats PAGE's feed/backlink click is a COMMAND. It must cancel a
-  // pending DM lookup synchronously in the click — the passive nav report is
-  // an effect that flushes after the microtask queue, so a DM answer landing
-  // in the same tick as the click would pass its isCurrent() check first and
-  // remount the page over the message the user just jumped to.
-  it("discards a DM answer that lands in the same tick as a page feed click", async () => {
-    const user = userEvent.setup();
-    const bridge = chatsPageBridge(CHATS_PAGE_STATE);
-    renderShell(bridge);
-
-    await screen.findByTestId("chats-personal-feed");
-    const post = await screen.findByText("Feed update worth revisiting");
-    const postButton = post.closest("button")!;
-
-    await user.click(screen.getByTestId("activity-graph"));
-    await user.click(await screen.findByTestId("graph-chat-mentions-toggle"));
-    await waitFor(() =>
-      expect(
-        screen
-          .getAllByTestId("graph-file-row")
-          .some((row) => row.dataset.path?.startsWith("chat-thread:")),
-      ).toBe(true),
-    );
-    const rows = await screen.findAllByTestId("graph-file-row");
-    const dmCallsBefore = bridge.syncDms.mock.calls.length;
-    await user.click(rows.find((row) => row.dataset.path === DM_GRAPH_NODE.path)!);
-    await waitFor(() => expect(bridge.syncDms.mock.calls.length).toBe(dmCallsBefore + 1));
-    // Collapse the sidebar so only the Chats page answers the queries below.
-    await user.click(screen.getByTestId("activity-graph"));
-
-    // The DM answers in the same tick the user clicks the feed item: the
-    // answer's continuation is queued first, and the click handler runs
-    // before it does. Only a cancellation issued before the next macrotask
-    // wins this race — the passive nav report flushes too late.
-    const overviewLoadsBefore = bridge.listChatChannels.mock.calls.length;
-    await act(async () => {
-      bridge.syncAnswers.at(-1)!(dmSyncResult([CANONICAL_DM]));
-      postButton.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-      await Promise.resolve();
-    });
-
-    expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
-    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
-    expect(bridge.listChatChannels.mock.calls.length).toBe(overviewLoadsBefore + 1);
-    expect(
-      screen.queryByTestId(`tab-dohc://chats/dm/${encodeURIComponent(CANONICAL_DM.channelId)}`),
-    ).toBeNull();
-  });
 
   it("stored state applies when the user touched nothing before the load", async () => {
     const stored = deferred<WorkspaceUiState | null>();

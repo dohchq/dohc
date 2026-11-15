@@ -9,6 +9,7 @@ import { CHAT_WAKE_RETRIES } from "./chatWakes";
 import { ACCOUNT_OPERATIONS } from "./operationRecords";
 import { revokeShareInTransaction } from "./shares";
 import { dropEndedWorkspaceInvitesInTransaction } from "./workspaceMembers";
+import { dropUnheldDirectConversations } from "./directMessages";
 import {
   retireUncoveredServiceActivations,
   serviceHostEnrollmentsCoveredByShare,
@@ -252,6 +253,8 @@ export const RETAINED_ACCOUNT_HISTORY = new Set([
   "sync_relay_live_update_struct_provenance",
   "sync_relay_live_author_clients",
   "sync_relay_share_discussion_messages",
+  // What a deleted account said stays with the people it said it to.
+  "sync_relay_direct_messages",
 ]);
 const identifier = (value: string) => '"' + value.replaceAll('"', '""') + '"';
 export function purgeAccountRows(
@@ -409,5 +412,6 @@ export function purgeAccountRows(
           .prepare("DELETE FROM " + identifier(table) + " WHERE lower(principal_email)=?")
           .run(normalizeEmail(email));
     }
+    dropUnheldDirectConversations(storage);
   });
 }

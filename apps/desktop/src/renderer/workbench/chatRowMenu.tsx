@@ -1,6 +1,7 @@
 import {
   Archive,
   ArchiveRestore,
+  Ban,
   CheckCheck,
   LogOut,
   Power,
@@ -15,7 +16,8 @@ import { MENU_SEPARATOR, type MenuEntry } from "../ui/Menu";
 // Mark as read, and a group shared with you cannot add people.
 export type ChatRowMenuTarget =
   | { kind: "group"; unread: boolean; archived: boolean; canAddPeople: boolean; canLeave: boolean }
-  | { kind: "person"; unread: boolean; archived: boolean }
+  // A direct conversation. Block names the one other person; a group has none.
+  | { kind: "person"; unread: boolean; block: { name: string; blocked: boolean } | null }
   | {
       kind: "agent";
       unread: boolean;
@@ -37,6 +39,7 @@ export type ChatRowMenuActions = {
   setAgentEnabled: (enabled: boolean) => void;
   removeAgent: () => void;
   hideChat: () => void;
+  setBlocked?: (blocked: boolean) => void;
 };
 
 const ICON = 14;
@@ -55,6 +58,33 @@ export function chatRowMenuItems(
       onSelect: actions.markRead,
       testId: "chat-row-menu-mark-read",
     });
+  }
+  if (target.kind === "person") {
+    const block = target.block;
+    if (block && actions.setBlocked) {
+      const setBlocked = actions.setBlocked;
+      bottom.push(
+        block.blocked
+          ? {
+              id: "unblock",
+              label: `Unblock ${block.name}`,
+              icon: <Ban size={ICON} aria-hidden />,
+              onSelect: () => setBlocked(false),
+              testId: "chat-row-menu-unblock",
+            }
+          : {
+              id: "block",
+              label: `Block ${block.name}`,
+              icon: <Ban size={ICON} aria-hidden />,
+              danger: true,
+              onSelect: () => setBlocked(true),
+              testId: "chat-row-menu-block",
+            },
+      );
+    }
+    return top.length > 0 && bottom.length > 0
+      ? [...top, MENU_SEPARATOR, ...bottom]
+      : [...top, ...bottom];
   }
   const archive: MenuEntry = target.archived
     ? {
@@ -92,8 +122,6 @@ export function chatRowMenuItems(
         testId: "chat-row-menu-leave",
       });
     }
-  } else if (target.kind === "person") {
-    bottom.push(archive);
   } else if (target.removed) {
     // Its agent is gone, so the chat cannot come back from Archived. Agents
     // in Settings is where an agent is added again.

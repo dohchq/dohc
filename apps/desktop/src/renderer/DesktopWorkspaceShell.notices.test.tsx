@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 import {
-  dmSyncResult,
   DesktopWorkspaceShell,
   WORKSPACE,
   OTHER_WORKSPACE,
   SYNC_STATUS,
+  SHARE_VIEW,
+  READY_UPDATE_STATE,
+  STORED_STATE,
   storedStateWithTabs,
   makeBridge,
   renderShell,
@@ -15,7 +17,7 @@ import { editorTabTestId } from "../testPins";
 import type {
   OwnerLiveDocumentsResult,
   ShareHandoffStatus,
-  SyncDmsResult,
+  ChatChannelRecord,
   JoinedChannelAnswer,
   WorkspaceUiState,
   DohcDesktopBridge,
@@ -43,6 +45,12 @@ import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
+import { useEngineDoc } from "./collab/useEngineDoc";
+import { useReopenKey } from "./documentVersionKey";
+import { inputCount } from "./ui/inputCount";
+import { COPY_FAILURE } from "./ui/CopyButton";
+import { INVITATION_WAIT_MS } from "./workbench/invitationOutcome";
+
 
 import type { Workspace } from "./DesktopWorkspaceShell";
 
@@ -806,20 +814,14 @@ describe("notices sent to you", () => {
     // mount's reads come first; the reveal's own come after them.
     function heldBridge(uiState?: Promise<WorkspaceUiState | null>) {
       const shares: Deferred<typeof INVITATION_LISTING>[] = [];
-      const syncs: Deferred<SyncDmsResult>[] = [];
       const bridge = Object.assign(handoffBridge(uiState), {
         listChatChannelShares: vi.fn(() => {
           const read = deferred<typeof INVITATION_LISTING>();
           shares.push(read);
           return read.promise;
         }),
-        syncDms: vi.fn(() => {
-          const sync = deferred<SyncDmsResult>();
-          syncs.push(sync);
-          return sync.promise;
-        }),
       });
-      return { bridge, shares, syncs };
+      return { bridge, shares };
     }
     const answerEvery = async (reads: Deferred<any>[], value: unknown) => {
       await act(async () => {
@@ -829,7 +831,7 @@ describe("notices sent to you", () => {
     const opening = () => screen.findByText("Opening share…");
 
     it("doesn't end the handoff when a notice's Open shows another invitation while it waits", async () => {
-      const { bridge, shares, syncs } = heldBridge();
+      const { bridge, shares } = heldBridge();
       const OTHER: NoticeRow = {
         ...MENTION,
         noticeId: "share:3",
@@ -863,11 +865,7 @@ describe("notices sent to you", () => {
           ],
         },
       };
-      const synced = syncs.length;
-      await answerEvery(syncs, dmSyncResult());
       await answerEvery(shares, third);
-      await waitFor(() => expect(syncs.length).toBeGreaterThan(synced));
-      await answerEvery(syncs, dmSyncResult());
       await waitFor(() =>
         expect(screen.getByTestId("chats-join-shared").getAttribute("data-invitation")).toBe(
           "share-3",

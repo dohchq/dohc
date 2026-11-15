@@ -7,24 +7,18 @@ import type {
   ChannelThreadRecord,
   ChatChannelRecord,
   ChatMessageRecord,
-  DmRecord,
   FileChatThreadRecord,
 } from "../../ipc/bridgeContract";
 import { ChatsView as ProductionChatsView } from "./ChatsView";
 import { ReactionStoreProvider } from "./reactionStore";
 
-type TestChatsViewProps = Omit<Parameters<typeof ProductionChatsView>[0], "workspaces"> & {
-  workspaces?: Parameters<typeof ProductionChatsView>[0]["workspaces"];
-};
+type TestChatsViewProps = Parameters<typeof ProductionChatsView>[0];
 
 // The workspace shell provides the reaction store in production.
 export function ChatsView(props: TestChatsViewProps) {
   return (
     <ReactionStoreProvider workspaceId={props.workspaceId}>
-      <ProductionChatsView
-        workspaces={[{ workspaceId: props.workspaceId, label: "Work" }]}
-        {...props}
-      />
+      <ProductionChatsView {...props} />
     </ReactionStoreProvider>
   );
 }
@@ -120,21 +114,6 @@ export const fileThread: FileChatThreadRecord = {
   path: "notes/topic.md",
 };
 
-export function dm(overrides: Partial<DmRecord> = {}): DmRecord {
-  return {
-    channelId: "channel-dm-1",
-    channelWireId: "wire-dm-1",
-    name: "bob@example.com",
-    peerLabel: "bob@example.com",
-    role: "owner",
-    shareId: null,
-    threadId: "thread-dm-1",
-    unreadCount: 0,
-    connected: true,
-    ...overrides,
-  };
-}
-
 export const bridgeMock = {
   detectAgentTools: vi.fn(),
   listChatChannels: vi.fn(),
@@ -161,12 +140,15 @@ export const bridgeMock = {
   orderAgents: vi.fn(),
   listChatReactions: vi.fn(),
   setChatReaction: vi.fn(),
-  syncDms: vi.fn(),
-  acceptDm: vi.fn(),
-  declineDm: vi.fn(),
-  requestDmAgain: vi.fn(),
-  startDm: vi.fn(),
-  leaveDm: vi.fn(),
+  directConversations: vi.fn(),
+  directHistory: vi.fn(),
+  directResolve: vi.fn(),
+  directStart: vi.fn(),
+  directSend: vi.fn(),
+  directMarkRead: vi.fn(),
+  directBlock: vi.fn(),
+  onDirectChanged: vi.fn(),
+  workspaceMembers: vi.fn(),
   chatDispatchStateForThread: vi.fn(),
   stopAgentRun: vi.fn(),
   resumeThreadDispatch: vi.fn(),
@@ -420,26 +402,14 @@ beforeEach(() => {
     },
     viewerAuthorId: "you@example.com",
   });
-  // Solo default (collaboration off): the DM surface stays invisible.
-  bridgeMock.syncDms.mockResolvedValue({
-    available: false,
-    dms: [],
-    pending: [],
-    declined: [],
-  });
-  bridgeMock.declineDm.mockResolvedValue(undefined);
-  bridgeMock.requestDmAgain.mockResolvedValue(undefined);
+  // Signed out by default: Chats shows no People section.
+  bridgeMock.directConversations.mockResolvedValue({ available: false });
+  bridgeMock.onDirectChanged.mockImplementation(() => () => undefined);
   // main scopes the joined lane to what the caller named; so does this. The
   // underlying mocks still record every call, so payload assertions and
   // mockImplementation stay exactly as they were.
   vi.stubGlobal("dohcDesktop", {
     ...bridgeMock,
-    syncDms: async (payload: { workspaceId: string; openChannelId?: string; poll?: boolean }) => ({
-      pending: [],
-      declined: [],
-      failed: false,
-      ...(await bridgeMock.syncDms(payload)),
-    }),
     listChatChannelShares: async (payload: { workspaceId: string; channelWireIds: string[] }) => {
       const listing = await bridgeMock.listChatChannelShares(payload);
       if (!listing || !Array.isArray(listing.joined)) return listing;
@@ -499,10 +469,6 @@ export function renderView(
   const { unmount } = render(
     <ChatsView
       workspaceId="workspace-a"
-      workspaces={[
-        { workspaceId: "workspace-a", label: "Work" },
-        { workspaceId: "workspace-b", label: "Personal" },
-      ]}
       onOpenFileChat={onOpenFileChat}
       onError={onError}
       {...extra}

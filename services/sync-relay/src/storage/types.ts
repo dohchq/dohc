@@ -1965,6 +1965,16 @@ export interface SyncRelayStorage {
   previewWorkspaceJoin: WorkspaceMembersMethod<"previewWorkspaceJoin">;
   joinWorkspace: WorkspaceMembersMethod<"joinWorkspace">;
   createWorkspaceGroup: WorkspaceMembersMethod<"createWorkspaceGroup">;
+  // Direct messages (storage/directMessages.ts).
+  resolveDirectPicks: DirectMessagesMethod<"resolveDirectPicks">;
+  findDirectConversation: DirectMessagesMethod<"findDirectConversation">;
+  directPeople: DirectMessagesMethod<"directPeople">;
+  sendDirectMessage: DirectMessagesMethod<"sendDirectMessage">;
+  listDirectConversations: DirectMessagesMethod<"listDirectConversations">;
+  readDirectMessages: DirectMessagesMethod<"readDirectMessages">;
+  markDirectRead: DirectMessagesMethod<"markDirectRead">;
+  setDirectBlock: DirectMessagesMethod<"setDirectBlock">;
+  directRevision: DirectMessagesMethod<"directRevision">;
   shareHasActiveGrants(shareId: string): boolean;
   getShareLabels(shareId: string, reader: ShareLabelReader): ShareLabels;
   setShareLabels(shareId: string, labels: ShareLabels, updatedAtMs: number): void;
@@ -2228,6 +2238,9 @@ export interface LiveTicketStoragePolicy {
 }
 
 type WorkspaceMembersModule = typeof import("./workspaceMembers");
+type DirectMessagesModule = typeof import("./directMessages");
+type DirectMessagesMethod<K extends keyof DirectMessagesModule> =
+  DirectMessagesModule[K] extends (storage: never, ...args: infer A) => infer R ? (...args: A) => R : never;
 type WorkspaceMembersMethod<K extends keyof WorkspaceMembersModule> =
   WorkspaceMembersModule[K] extends (storage: never, ...args: infer A) => infer R
     ? (...args: A) => R

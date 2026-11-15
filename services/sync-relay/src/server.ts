@@ -137,6 +137,7 @@ import {
 } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { createWorkspaceMemberRoutes, isWorkspaceMemberRoute } from "./workspaceMemberRoutes";
+import { createDirectMessageRoutes, isDirectMessageRoute } from "./directMessageRoutes";
 import { PresenceHub } from "./presence";
 import { ReplicaWatches } from "./replicaWatches";
 import type { DevelopmentReplicaReads } from "./replicaLinkReadService";
@@ -765,6 +766,7 @@ export function createSyncRelayHandler({
     shareWebOrigin,
     discussionActivity,
   });
+  const respondToDirectMessages = createDirectMessageRoutes({ storage, activity: discussionActivity, nowMs, newId, lookupUserDisplayName });
   const respondToNamedShareTransport = createNamedShareTransportRoutes(
     storage,
     nowMs,
@@ -1756,6 +1758,11 @@ export function createSyncRelayHandler({
       // the ownership check below, which stays owner-only.
       if (isWorkspaceMemberRoute(route)) {
         return await respondToWorkspaceMembers(request, route, actor);
+      }
+
+      // A conversation belongs to its people, not to a workspace. Storage checks the caller is one of them.
+      if (isDirectMessageRoute(route)) {
+        return await respondToDirectMessages(request, route, actor);
       }
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();

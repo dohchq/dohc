@@ -3,6 +3,7 @@ import { accountIsFenced, workspaceIsDeleted } from "./storage/accountDeletion";
 import { reusePreparedStatements } from "./storage/preparedStatements";
 import * as workReferenceStorage from "./storage/workReferences";
 import * as workspaceMembersStorage from "./storage/workspaceMembers";
+import * as directMessagesStorage from "./storage/directMessages";
 import * as replicaCurrentViews from "./storage/replicaCurrentViews";
 import * as replicaCurrentViewReads from "./replicaCurrentViewReads";
 import * as replicaHistoryReads from "./replicaHistoryReads";
@@ -1956,6 +1957,33 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
   createWorkspaceGroup(...args: Parameters<SyncRelayStorage["createWorkspaceGroup"]>) {
     return workspaceMembersStorage.createWorkspaceGroup(this, ...args);
+  }
+  resolveDirectPicks(...args: Parameters<SyncRelayStorage["resolveDirectPicks"]>) {
+    return directMessagesStorage.resolveDirectPicks(this, ...args);
+  }
+  findDirectConversation(...args: Parameters<SyncRelayStorage["findDirectConversation"]>) {
+    return directMessagesStorage.findDirectConversation(this, ...args);
+  }
+  directPeople(...args: Parameters<SyncRelayStorage["directPeople"]>) {
+    return directMessagesStorage.directPeople(this, ...args);
+  }
+  sendDirectMessage(...args: Parameters<SyncRelayStorage["sendDirectMessage"]>) {
+    return directMessagesStorage.sendDirectMessage(this, ...args);
+  }
+  listDirectConversations(...args: Parameters<SyncRelayStorage["listDirectConversations"]>) {
+    return directMessagesStorage.listDirectConversations(this, ...args);
+  }
+  readDirectMessages(...args: Parameters<SyncRelayStorage["readDirectMessages"]>) {
+    return directMessagesStorage.readDirectMessages(this, ...args);
+  }
+  markDirectRead(...args: Parameters<SyncRelayStorage["markDirectRead"]>) {
+    return directMessagesStorage.markDirectRead(this, ...args);
+  }
+  setDirectBlock(...args: Parameters<SyncRelayStorage["setDirectBlock"]>) {
+    return directMessagesStorage.setDirectBlock(this, ...args);
+  }
+  directRevision(...args: Parameters<SyncRelayStorage["directRevision"]>) {
+    return directMessagesStorage.directRevision(this, ...args);
   }
   readWorkspaceMembers(...args: Parameters<SyncRelayStorage["readWorkspaceMembers"]>) {
     return workspaceMembersStorage.readWorkspaceMembers(this, ...args);

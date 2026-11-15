@@ -3,6 +3,7 @@ import { bridge } from "../bridge";
 import { parseTab } from "../workbench/workbenchState";
 import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
 import type { SettingsAgent } from "../workbench/agentChat";
+import { directStore, directTitle } from "../workbench/directConversations";
 import {
   chatEditorPath,
   chatEditorTitle,
@@ -30,7 +31,6 @@ type ChatEditor = {
 export function useChatEditorTabs(input: {
   workspaceId: string;
   onOpen: (path: string) => void;
-  onNavigate: () => void;
   paths: readonly string[];
   activePaths?: readonly string[];
   enabled: boolean;
@@ -103,7 +103,6 @@ export function useChatEditorTabs(input: {
       },
       onNavCommand(nav) {
         if (store.current !== owner || owner.entries.get(path) !== entry) return;
-        callbacks.current.onNavigate();
         entry.onNavChange(nav);
       },
       onDraftsChange(drafts) {
@@ -116,7 +115,6 @@ export function useChatEditorTabs(input: {
   }, []);
   const open = useCallback(
     (nav: ChatsNav): void => {
-      callbacks.current.onNavigate();
       const path = chatEditorPath(nav);
       const entry = get(path);
       // A sidebar channel click focuses its tab, including its current thread.
@@ -126,16 +124,18 @@ export function useChatEditorTabs(input: {
         entry.nav.level !== "channels" &&
         chatEditorPath(entry.nav) === path &&
         (nav.level === "feed" ||
-          (nav.level === "dm" && !nav.focusMessageId) ||
+          nav.level === "direct" ||
+          (nav.level === "direct-new" && !nav.memberIds?.length) ||
           (nav.level === "channel" && !nav.focusMessageId && !nav.lane));
       if (
         focusOnly &&
-        nav.level === "dm" &&
-        entry.nav?.level === "dm" &&
-        JSON.stringify(entry.nav.dm) !== JSON.stringify(nav.dm)
+        nav.level === "direct" &&
+        entry.nav?.level === "direct" &&
+        nav.title !== undefined &&
+        entry.nav.title !== nav.title
       ) {
-        entry.nav = { ...entry.nav, dm: nav.dm };
-        entry.revision += 1;
+        // The tab takes the names the click knew.
+        entry.nav = { ...entry.nav, title: nav.title };
         render((value) => value + 1);
       } else if (!focusOnly) {
         if (chatsNavigationLeavesConversation(entry.nav ?? null, nav)) entry.drafts = undefined;
@@ -188,17 +188,21 @@ export function useChatEditorTabs(input: {
         })
         .catch(() => undefined);
     }
-    if (targets.some(({ target }) => target?.kind === "dm")) {
-      void bridge()
-        .syncDms({ workspaceId: input.workspaceId })
-        .then(({ dms }) => {
-          for (const { path, entry, target } of targets) {
-            if (target?.kind !== "dm") continue;
-            const dm = dms.find((entry) => entry.channelId === target.id);
-            remember(path, entry, dm ? { level: "dm", dm } : undefined);
-          }
-        })
-        .catch(() => undefined);
+    // A direct conversation's tab needs no read: its path names it. The tab
+    // takes the people's names when this window already knows them.
+    const direct = directStore().snapshot();
+    for (const { path, entry, target } of targets) {
+      if (target?.kind === "new") remember(path, entry, { level: "direct-new" });
+      if (target?.kind !== "dm") continue;
+      const conversation =
+        direct.status === "ready"
+          ? direct.conversations.find((candidate) => candidate.conversationId === target.id)
+          : undefined;
+      remember(path, entry, {
+        level: "direct",
+        conversationId: target.id,
+        ...(conversation ? { title: directTitle(conversation.people) } : {}),
+      });
     }
   }, [get, input.enabled, pathsKey, input.workspaceId, sessionRevision]);
   // A hidden conversation's tab counts its unread messages, as Chats does.
@@ -214,7 +218,7 @@ export function useChatEditorTabs(input: {
     const byChannel = new Map<string, string>();
     for (const path of JSON.parse(pathsKey) as string[]) {
       const tab = parseTab(path);
-      if (tab.kind === "chat" && (tab.target.kind === "channel" || tab.target.kind === "dm")) {
+      if (tab.kind === "chat" && tab.target.kind === "channel") {
         byChannel.set(tab.target.id, path);
       }
     }

@@ -156,11 +156,6 @@ import {
   SendChatMessageResult,
   SetChatReactionPayload,
   ShowWorkbenchMenuPayload,
-  AcceptDmPayload,
-  DeclineDmPayload,
-  RequestDmAgainPayload,
-  StartDmPayload,
-  SyncDmsResult,
   SyncStatusResult,
   OwnerLiveDocument,
   engineStoreRefusalCopy,
@@ -1711,30 +1706,6 @@ describe("workspace text IPC contract", () => {
 });
 
 describe("chat IPC contract", () => {
-  it("validates DM request lanes and their account/workspace mutations", () => {
-    const request = { shareId: "share-1", granterEmail: "sender@example.com" };
-    expect(
-      SyncDmsResult.parse({
-        available: true,
-        dms: [],
-        pending: [request],
-        declined: [{ shareId: "share-2", granterEmail: null }],
-        failed: false,
-      }),
-    ).toMatchObject({ pending: [request], failed: false });
-    expect(AcceptDmPayload.parse({ workspaceId: "workspace-a", shareId: "share-1" })).toEqual({
-      workspaceId: "workspace-a",
-      shareId: "share-1",
-    });
-    expect(DeclineDmPayload.parse({ shareId: "share-1" })).toEqual({
-      shareId: "share-1",
-    });
-    expect(RequestDmAgainPayload.parse({ shareId: "share-1" })).toEqual({
-      shareId: "share-1",
-    });
-    expect(SyncDmsResult.safeParse({ available: true, dms: [] }).success).toBe(false);
-  });
-
   it("accepts an opaque shared attachment without local object metadata", () => {
     expect(
       ChatAttachmentRecord.parse({
@@ -1753,16 +1724,7 @@ describe("chat IPC contract", () => {
     });
   });
 
-  it("keeps DM file references and stored heading metadata on the same bounds", () => {
-    expect(
-      StartDmPayload.parse({
-        workspaceId: "workspace-a",
-        recipients: "bob@example.com",
-        body: "Read @[docs/plan.md#scope]",
-        fileReferences: [{ path: "docs/plan.md", headingAnchor: "scope" }],
-      }).fileReferences,
-    ).toEqual([{ path: "docs/plan.md", headingAnchor: "scope" }]);
-
+  it("bounds stored heading metadata", () => {
     const attachment = {
       attachmentId: "attachment-1",
       threadId: "thread-1",

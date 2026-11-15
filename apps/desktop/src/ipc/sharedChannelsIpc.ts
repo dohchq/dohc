@@ -41,7 +41,7 @@ import {
   otherLiveSharedChannelHolder,
   otherLiveSharedChannelHolderByWireId,
   reserveAndPullSharedChannel,
-} from "../workspaces/dmRequests";
+} from "../workspaces/sharedChannelHolders";
 import { fetchSharedChannelInfo, type SharedChannelInfo } from "../workspaces/sharedChannelInfo";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
 import { shareMountRecordsForId } from "../workspaces/shareMounts";
@@ -410,7 +410,7 @@ export function createSharedChannelsIpc<
             })
           : [];
         // This adds bounded relay reads only for uncached grants. The one-time
-        // cost closes the request-gate window before the first syncDms poll.
+        // cost keeps a workspace-channel DM out of the invitations from the first listing.
         await resolveDmKinds({
           shareIds: receivedShareIds,
           cache: peekedReceivedGrantKinds,
@@ -567,10 +567,7 @@ export function createSharedChannelsIpc<
 
   // Member-initiated leave: purely local — the channel stops syncing and its
   // rows stay readable. Keep an ended tombstone so participant provenance and
-  // the read-only write gate survive after live grant data is gone. Shared by
-  // leaveSharedChannel and leaveDm — a DM's accepted row IS a
-  // JoinedSharedChannel row in the same registry, so ending it is the same
-  // operation regardless of which surface asked.
+  // the read-only write gate survive after live grant data is gone.
   async function endWorkspaceJoinedChannel(operation: Operation, shareId: string): Promise<void> {
     const workspaceId = operation.workspace.workspaceId;
     await updateWorkspaceSharedChannels(workspaceId, (channels) => {

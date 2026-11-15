@@ -448,6 +448,20 @@ const LISTED_CAPABILITIES = {
   "members.leave": capability("Leave a workspace you are a member or an admin of.", {
     ipc: ["workspaceMembers"],
   }),
+  "direct.list": capability("List the signed-in account's direct conversations on its server.", {
+    ipc: ["directConversations"],
+  }),
+  "direct.read": capability(
+    "Read a direct conversation the signed-in account is in, or find the one it has with people picked from a member list.",
+    { ipc: ["directHistory", "directResolve", "directMarkRead"] },
+  ),
+  "direct.send": capability("Send a direct message as the signed-in account.", {
+    ipc: ["directStart", "directSend"],
+  }),
+  "direct.block": capability(
+    "Block or unblock a person in one of the signed-in account's direct conversations.",
+    { ipc: ["directBlock"] },
+  ),
   "share.copy.read": capability(
     "Read one owned grant's share code and named-account invite link.",
     {

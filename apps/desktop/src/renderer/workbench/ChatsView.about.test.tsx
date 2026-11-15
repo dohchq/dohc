@@ -5,7 +5,7 @@ import type { PresencePeer, PresenceSnapshot, PresenceTransport } from "../colla
 import { useAboutConversation } from "./aboutConversation";
 import type { ChatPresenceCollaboration } from "./ChatsView";
 import { chatTabPath } from "./workbenchState";
-import { ChatsView, bridgeMock, channel, dm } from "./ChatsView.testHarness";
+import { ChatsView, bridgeMock, channel } from "./ChatsView.testHarness";
 import type { DesktopUserSettings } from "../../settings/userSettings";
 import { settingsWithAgent, testAgent } from "../../testing/agentSettings";
 
@@ -84,24 +84,6 @@ describe("a conversation tab tells About what it shows", () => {
         name: "general",
         channelWireId: "channel-1",
         received: false,
-        present: [],
-      }),
-    );
-  });
-
-  it("publishes a person's direct message, read through their share", async () => {
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [dm({ role: "participant", shareId: "share-dm", peerLabel: "Sam Rivera" })],
-    });
-    const tabPath = chatTabPath({ kind: "dm", id: dm().channelId });
-    renderTab(tabPath);
-    await waitFor(() =>
-      expect(published()).toEqual({
-        kind: "person",
-        name: "Sam Rivera",
-        channelWireId: "wire-dm-1",
-        received: true,
         present: [],
       }),
     );

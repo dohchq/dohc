@@ -31,7 +31,6 @@ import type {
   DismissShareSkipsPayload,
   MountShareResult,
   GetRelayReceivedShareResult,
-  DmRecord,
   FileChatThreadRecord,
   ImportWorkspaceFilesResult,
   ListEngineMomentsResponse,
@@ -74,8 +73,6 @@ import type {
   UsageRecordResult,
   StartAgentRunResult,
   SwitchWorkspaceVersionResult,
-  SyncDmsPayload,
-  SyncDmsResult,
   SyncStatusResult,
   ExplorerMenuEntry,
   ShowWorkbenchMenuResult,
@@ -229,8 +226,7 @@ export function isFileOpenStartMark(name: string): boolean {
   return name.startsWith("file-open-start:");
 }
 
-// One canonical DM, as the graph node a click starts a navigation from and as
-// the record syncDms answers with.
+// A direct message's thread as the link graph lists it.
 export const DM_GRAPH_NODE = {
   path: "chat-thread:dm-thread",
   kind: "chat-thread" as const,
@@ -243,22 +239,6 @@ export const DM_GRAPH_NODE = {
   incoming: 1,
   outgoing: 0,
 };
-
-export const CANONICAL_DM: DmRecord = {
-  channelId: "dm-local",
-  channelWireId: "dm-wire",
-  name: "alice@example.com",
-  peerLabel: "Alice",
-  role: "owner",
-  shareId: null,
-  threadId: "dm-thread",
-  unreadCount: 1,
-  connected: true,
-};
-
-export function dmSyncResult(dms: DmRecord[] = [], available = true): SyncDmsResult {
-  return { available, dms, pending: [], declined: [], failed: false };
-}
 
 Element.prototype.scrollIntoView = vi.fn();
 
@@ -1154,9 +1134,15 @@ export function makeBridge(
       // Sharing is optional; ChatsView downgrades a rejection to "none".
       throw new Error("sharing unavailable in shell tests");
     }),
-    syncDms: vi.fn(async (_payload: SyncDmsPayload): Promise<SyncDmsResult> =>
-      dmSyncResult([], false),
-    ),
+    // Signed out of direct messages unless a test signs in.
+    directConversations: vi.fn(async () => ({ available: false as const })),
+    directHistory: vi.fn(),
+    directResolve: vi.fn(),
+    directStart: vi.fn(),
+    directSend: vi.fn(),
+    directMarkRead: vi.fn(),
+    directBlock: vi.fn(),
+    onDirectChanged: vi.fn(() => () => {}),
     // A fresh revision per read preserves the pre-gating contract for this
     // suite: every open-DM tick reloads. A test exercising the revision gate
     // itself overrides this with a stable value.
@@ -1309,12 +1295,7 @@ export function makeShareBridge(uiState: Promise<WorkspaceUiState | null> = Prom
   // refuses it for a share view. A fake that answered it would model more
   // than main can do, and the no-call pin below would pass after a revert.
   bridge.listShareProposals.mockRejectedValue(new Error("A shared view cannot review changes."));
-  for (const call of [
-    "listChatChannels",
-    "listChannelThreads",
-    "chatFileMentionsPage",
-    "syncDms",
-  ] as const) {
+  for (const call of ["listChatChannels", "listChannelThreads", "chatFileMentionsPage"] as const) {
     bridge[call].mockRejectedValue(new Error("Chats are not enabled for this workspace."));
   }
   bridge.listFileChats.mockResolvedValue({
