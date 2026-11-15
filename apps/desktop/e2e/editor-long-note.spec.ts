@@ -3,6 +3,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
+import { LARGE_NOTE_SECTIONS, largeNote } from "./helpers/largeNotes";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -125,4 +126,80 @@ test("find and the outline show a block of a long note that was never drawn", as
       await expect.poll(() => shown(block(editor, "h2", new RegExp(`^${part}$`)))).toBe(true);
     }
   });
+});
+
+/** The median time from a key going down to the second frame after its text shows, over 20 keys. */
+async function keyTime(page: Page, editor: Locator): Promise<number> {
+  const times: number[] = [];
+  for (let key = 0; key < 25; key += 1) {
+    await editor.evaluate((element) => {
+      (window as Window & { keyShown?: Promise<number> }).keyShown = new Promise((resolve) => {
+        let down = 0;
+        element.addEventListener("keydown", () => (down = performance.now()), {
+          once: true,
+          capture: true,
+        });
+        element.addEventListener(
+          "input",
+          () =>
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => resolve(performance.now() - down)),
+            ),
+          { once: true },
+        );
+      });
+    });
+    await page.keyboard.press("x");
+    const shown = await page.evaluate(
+      () => (window as Window & { keyShown?: Promise<number> }).keyShown!,
+    );
+    // The first keys after a note opens pay for work the rest do not.
+    if (key >= 5) times.push(shown);
+  }
+  return times.sort((a, b) => a - b)[Math.floor(times.length / 2)]!;
+}
+
+test("a key in a note with 400 code blocks, callouts and tables costs little more than in a short note", async () => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await writeWorkspaceFiles(temp, [
+      { path: "small.md", contents: largeNote("small") },
+      { path: "rich.md", contents: largeNote("rich") },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const editor = page.getByTestId("markdown-editor");
+    const typeIn = async (path: string, headings: number) => {
+      await waitForWorkspaceFile(page, workspace.workspaceId, path);
+      await explorerRow(page, path).click({ timeout: 120_000 });
+      await expect(editor.locator("h2")).toHaveCount(headings, { timeout: 120_000 });
+      await expect(editor).toHaveAttribute("contenteditable", "true");
+      await editor
+        .locator("h2")
+        .nth(Math.floor(headings / 2))
+        .locator("xpath=following-sibling::p[1]")
+        .click({ timeout: 120_000 });
+      await page.keyboard.press(LINE_END);
+      return keyTime(page, editor);
+    };
+    const small = await typeIn("small.md", 12);
+    const rich = await typeIn("rich.md", LARGE_NOTE_SECTIONS);
+    await test.info().attach("key-times.json", {
+      body: JSON.stringify({ smallMs: small, richMs: rich }),
+      contentType: "application/json",
+    });
+    // With controls on every block and every block laid out, a key in this
+    // note took ten times as long as in the short one: 138 ms against 13 ms.
+    // It now takes 25 to 47 ms against 14 ms. The limit sits between the two, and
+    // both notes are timed in one run, so a slower computer moves both.
+    expect(rich).toBeLessThan(3 * small + 40);
+  } finally {
+    // The debug engine took up to 50 s to save this note. The close does not
+    // wait for it: the quit reaches its time limit and reports a failed close.
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
 });

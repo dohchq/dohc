@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { launchDesktopApp } from "../helpers/desktopApp";
+import { LARGE_NOTE_SECTIONS, largeNote, type LargeNoteKind } from "../helpers/largeNotes";
 import { startCdpCapture } from "./cdpCapture";
 import {
   cleanupDesktopWorkspace,
@@ -18,7 +19,6 @@ import {
 } from "../helpers/workspace";
 
 const exec = promisify(execFile);
-const SECTIONS = 400;
 const SAMPLES = Number(process.env.DOHC_LARGE_NOTE_SAMPLES ?? 60);
 const WARMUPS = 5;
 const KEY_INTERVAL_MS = Number(process.env.DOHC_LARGE_NOTE_KEY_INTERVAL_MS ?? 100);
@@ -29,55 +29,22 @@ const TIMELINE = process.env.DOHC_LARGE_NOTE_TRACE === "timeline";
 const OPEN_TRACE = process.env.DOHC_LARGE_NOTE_TRACE === "open";
 // "0" turns the spellchecker off for the run, to measure what it costs.
 const SPELLCHECK = process.env.DOHC_LARGE_NOTE_SPELLCHECK !== "0";
-// Extra Chromium switches for a controlled comparison, separated by spaces.
 // CSS added to the page for a controlled comparison, such as hiding one kind of widget.
 const EXTRA_CSS = process.env.DOHC_LARGE_NOTE_CSS ?? "";
 // Chromium features to turn off for a controlled comparison, separated by commas.
 const DISABLED_FEATURES = (process.env.DOHC_LARGE_NOTE_DISABLE_FEATURES ?? "")
   .split(",")
   .filter(Boolean);
+// Extra Chromium switches for a controlled comparison, separated by spaces.
 const SWITCHES = (process.env.DOHC_LARGE_NOTE_SWITCHES ?? "").split(" ").filter(Boolean);
 // Alternate order to expose host drift instead of favoring one note.
 const ORDER = (process.env.DOHC_LARGE_NOTE_ORDER ?? "small,plain,rich,rich,plain,small").split(
   ",",
 ) as Kind[];
 
-type Kind = "small" | "plain" | "rich";
+type Kind = LargeNoteKind;
 type InputTiming = { totalMs: number; inputMs: number; frameMs: number; queuedMs: number };
 type ProcessRow = { pid: number; name: string; commandLine: string | null; cpuMs: number };
-
-const sentence = (i: number) =>
-  `Section ${i} keeps a paragraph of ordinary prose with a [[note-${i % 37}]] link, some **bold** text and a value of ${i * 17}.`;
-
-// The #2260 note: every section has a heading, a code block, a callout and a
-// table, and every fifth has a diagram. `plain` has the same size in headings
-// and paragraphs only, so the two separate the block plugins from note size.
-function note(kind: Kind): string {
-  if (kind === "small")
-    return Array.from({ length: 12 }, (_, i) => `## Heading ${i}\n\n${sentence(i)}\n`).join("\n");
-  const sections: string[] = [];
-  for (let i = 0; i < SECTIONS; i++) {
-    if (kind === "plain") {
-      sections.push(
-        `## Heading ${i}\n\n${[0, 1, 2, 3].map((n) => sentence(i * 4 + n)).join("\n\n")}\n`,
-      );
-      continue;
-    }
-    sections.push(
-      [
-        `## Heading ${i}`,
-        sentence(i),
-        "```ts\n" +
-          `export function compute${i}(input: number): number {\n  return input * ${i} + 1;\n}\n` +
-          "```",
-        `> [!note] Callout ${i}\n> A callout body for section ${i}.`,
-        `| Name | Value | Note |\n| --- | --- | --- |\n| row ${i} | ${i * 3} | first |\n| next ${i} | ${i * 5} | second |`,
-        ...(i % 5 === 0 ? ["```mermaid\ngraph TD\n  A" + i + " --> B" + i + "\n```"] : []),
-      ].join("\n\n") + "\n",
-    );
-  }
-  return sections.join("\n");
-}
 
 type KeyWindow = Window & {
   largeNoteKeys?: {
@@ -254,10 +221,12 @@ test("@large-note-typing times keystrokes in small, plain and block-heavy notes"
   let sampling = true;
   try {
     const kinds = (["small", "plain", "rich"] as const).filter((kind) => ORDER.includes(kind));
-    const bytes = Object.fromEntries(kinds.map((kind) => [kind, Buffer.byteLength(note(kind))]));
+    const bytes = Object.fromEntries(
+      kinds.map((kind) => [kind, Buffer.byteLength(largeNote(kind))]),
+    );
     await writeWorkspaceFiles(
       workspace,
-      kinds.map((kind) => ({ path: `${kind}.md`, contents: note(kind) })),
+      kinds.map((kind) => ({ path: `${kind}.md`, contents: largeNote(kind) })),
     );
     desktop = await launchDesktopApp({
       workspace,
@@ -321,7 +290,7 @@ test("@large-note-typing times keystrokes in small, plain and block-heavy notes"
     for (const kind of ORDER) {
       step(`round ${rounds.length + 1}: open ${kind}.md`);
       await waitForWorkspaceFile(page, opened.workspaceId, `${kind}.md`);
-      const headings = kind === "small" ? 12 : SECTIONS;
+      const headings = kind === "small" ? 12 : LARGE_NOTE_SECTIONS;
       // From before the open: main keeps working long after the note is editable.
       const stopMainProfile = TRACE ? await startMainProfile(desktop.app) : null;
       if (OPEN_TRACE)
@@ -433,7 +402,7 @@ test("@large-note-typing times keystrokes in small, plain and block-heavy notes"
       ),
     ).toEqual([]);
     const result = {
-      sections: SECTIONS,
+      sections: LARGE_NOTE_SECTIONS,
       bytes,
       warmupsPerRound: WARMUPS,
       samplesPerRound: SAMPLES,
