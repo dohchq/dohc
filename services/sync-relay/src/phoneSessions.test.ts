@@ -54,7 +54,16 @@ const unreachableDatasetHost = new Proxy(
   },
 ) as unknown as RelayDatasetHost;
 
-const sessions: AccountSessions = { list: async () => [], revoke: async () => true };
+// Each account's three sign-ins, so the session list finds the caller's own session.
+const sessions: AccountSessions = {
+  list: async (userId) =>
+    ["user", "phone", "browser"].map((kind) => ({
+      sessionId: `${kind}-session-${userId}`,
+      createdAtMs: 0,
+      userAgent: null,
+    })),
+  revoke: async () => true,
+};
 
 async function relay() {
   const storage = await testStorage();
