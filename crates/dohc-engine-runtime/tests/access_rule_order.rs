@@ -76,6 +76,20 @@ impl Fixture {
         self.scratch.path()
     }
 
+    /// Close the engine and open it again, replaying pending placements as
+    /// the desktop does when it opens a workspace.
+    fn restart(&mut self) {
+        self.supervisor.close(&self.db).expect("close");
+        self.actor = self.supervisor.open(&self.db, 1).expect("reopen").actor;
+        self.runtime
+            .block_on(self.actor.materialize_replay_pending(
+                self.root().to_path_buf(),
+                WS.to_owned(),
+                50,
+            ))
+            .expect("replay");
+    }
+
     /// Write `text` at `path` on disk, as an outside editor would.
     fn put(&self, path: &str, text: &str) {
         let absolute = self.root().join(path);
@@ -459,7 +473,18 @@ fn ignores_case(root: &Path) -> bool {
 /// its new spelling with no conflict copy beside it.
 #[test]
 fn a_rule_respelled_with_new_contents_merges_onto_a_disk_that_ignores_case() {
-    let f = Fixture::new();
+    merge_a_respelled_rule(false);
+}
+
+/// The new spelling's merge still waits for the old one's delete when the
+/// engine restarts between them and replays its pending placements.
+#[test]
+fn a_respelled_rule_merged_across_a_restart_waits_for_its_old_spelling() {
+    merge_a_respelled_rule(true);
+}
+
+fn merge_a_respelled_rule(restart_between: bool) {
+    let mut f = Fixture::new();
     if !ignores_case(f.root()) {
         return;
     }
@@ -533,6 +558,9 @@ fn a_rule_respelled_with_new_contents_merges_onto_a_disk_that_ignores_case() {
                 CancellationToken::new(),
             ))
             .unwrap_or_else(|error| panic!("merge {path}: {error}"));
+        if restart_between && now_ms == 43 {
+            f.restart();
+        }
     }
     assert_eq!(
         f.journal()[before.len()..],
