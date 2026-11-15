@@ -523,6 +523,7 @@ it("rechecks app access after the account sender lookup", async () => {
   f.addHelper();
   const route = createDatasetAppRoutes(f.host, f.storage, {
     nowMs: () => 10,
+    publications: true,
     shareSenderLabel: async () => {
       f.storage.revokeShareGrant({ shareId: "s", grantId: "helper-grant", revokedAtMs: 11 });
       return "Ana (owner@dohc.test)";

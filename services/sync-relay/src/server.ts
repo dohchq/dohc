@@ -389,6 +389,7 @@ export function createSyncRelayHandler({
         limits: appBackendAdmissionLimits,
         nowMs,
         shareSenderLabel,
+        publications: appPublicationLimits !== undefined,
       })
     : undefined;
   if (
@@ -1310,9 +1311,9 @@ export function createSyncRelayHandler({
         return await respondToOwnerAppPublication(request, route, actor.userId);
       }
       if (route.route === "app-backend") {
-        if (!appPublicationLimits || !respondToDatasetApp) throw notFound();
+        if (!respondToDatasetApp) throw notFound();
         if (!route.workspaceId) {
-          if (!linkKey || request.headers.has("cookie")) throw notFound();
+          if (!appPublicationLimits || !linkKey || request.headers.has("cookie")) throw notFound();
           const { capability } = requireLinkCapability(request);
           const secret = request.headers.get("x-dohc-link-profile-secret");
           if (!secret || !LINK_SECRET_PATTERN.test(secret)) throw notFound();

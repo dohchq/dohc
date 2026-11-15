@@ -49,7 +49,7 @@ import {
   parseStoredAnyShareSelectorJson,
   targetVersionId,
 } from "./shareFilter";
-import { notFound, relayError } from "./errors";
+import { badRequest, notFound, relayError } from "./errors";
 import { createDatasetFiles } from "./storage/datasetFiles";
 import { createDatasetRecoveryFiles } from "./storage/datasetRecoveryFiles";
 import { collectionFilePresent } from "./storage/collectionFilePresence";
@@ -124,6 +124,11 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
   CREATE TABLE IF NOT EXISTS sync_relay_dataset_participants(
     workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,grant_id TEXT NOT NULL,principal_key TEXT NOT NULL,
     PRIMARY KEY(workspace_id,dataset_id,grant_id,principal_key),
+    FOREIGN KEY(workspace_id,dataset_id) REFERENCES sync_relay_dataset_usage(workspace_id,dataset_id) ON DELETE CASCADE) STRICT;
+  CREATE TABLE IF NOT EXISTS sync_relay_local_dataset_apps(
+    workspace_id TEXT NOT NULL,app_id TEXT NOT NULL,dataset_id TEXT NOT NULL,owner_user_id TEXT NOT NULL,
+    candidate TEXT NOT NULL,authority_revision INTEGER NOT NULL CHECK(authority_revision>=1),
+    PRIMARY KEY(workspace_id,app_id),
     FOREIGN KEY(workspace_id,dataset_id) REFERENCES sync_relay_dataset_usage(workspace_id,dataset_id) ON DELETE CASCADE) STRICT;`),
   );
   // The relay's own private folder, which it keeps at the path it was given.
@@ -362,6 +367,31 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       },
     };
   }
+  // An app the owner approved on their own computer, over a Collection this
+  // server holds. It runs as itself here, for the owner alone. Null for an id
+  // that names no such app.
+  function localApp(auth: Extract<AppBackendAuth, { kind: "named" }>, appId: string) {
+    const row = storage.db
+      .prepare(
+        "SELECT candidate,authority_revision,owner_user_id FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND app_id=?",
+      )
+      .get(auth.workspaceId, appId);
+    if (!row) return null;
+    if (auth.grantId || row.owner_user_id !== auth.userId) throw notFound();
+    const authority = owner(auth, auth.workspaceId);
+    return {
+      candidate: parseAppPublicationCandidate(JSON.parse(String(row.candidate)), limits),
+      authorityRevision: Number(row.authority_revision),
+      authority: {
+        ...authority,
+        // The key the owner's computer gave the app's changes, so a retry of one made there before its Collection
+        // came here finds it.
+        principalKey: `${authority.principalKey}:app:${appId}`,
+        authorityToken: `local:${String(row.authority_revision)}`,
+        ...(auth.agent ? { agent: auth.agent } : {}),
+      },
+    };
+  }
   // In memory, on this server's clock: a restart allows one more grace period.
   const missingSince = new Map<string, number>();
   function requireCollectionFile(workspaceId: string, datasetId: string): void {
@@ -429,7 +459,7 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       };
     } else {
       if (auth.workspaceId !== workspaceId) throw notFound();
-      ({ candidate, authority } = namedPublication(auth, appId));
+      ({ candidate, authority } = localApp(auth, appId) ?? namedPublication(auth, appId));
     }
     const verified = capability(candidate, workspaceId, datasetId);
     requireCollectionFile(workspaceId, datasetId);
@@ -448,13 +478,16 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
     }
     if (auth.kind !== "named" || auth.workspaceId !== request.workspaceId) throw notFound();
     if (storage.workspaceIsOwnedBy(auth.workspaceId, auth.userId))
-      return owner(auth, auth.workspaceId);
-    if (!auth.grantId) throw notFound();
+      return auth.agent
+        ? { ...owner(auth, auth.workspaceId), agent: auth.agent }
+        : owner(auth, auth.workspaceId);
+    if (!auth.grantId || auth.agent) throw notFound();
     return named(auth.workspaceId, auth.grantId, auth.userId);
   }
   function publication(auth: AppBackendAuth, publicationId: string) {
     current();
     let candidate: AppPublicationCandidate, workspaceId: string, authorityRevision: number;
+    let local = false;
     if (auth.kind === "link") {
       const published = requireLinkAppPublication(storage, {
         ...auth,
@@ -467,7 +500,9 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       workspaceId = published.workspaceId;
       authorityRevision = published.result.descriptor.authorityRevision;
     } else {
-      const published = namedPublication(auth, publicationId);
+      const own = localApp(auth, publicationId);
+      local = own !== null;
+      const published = own ?? namedPublication(auth, publicationId);
       candidate = published.candidate;
       workspaceId = auth.workspaceId;
       authorityRevision = published.authorityRevision;
@@ -482,6 +517,8 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
       capability: verified.capability,
       authority: verified.authority,
       candidate,
+      /** An app the owner approved on their own computer. */
+      local,
     };
   }
   try {
@@ -1244,7 +1281,77 @@ export async function createRelayDatasetHost(options: RelayDatasetHostOptions) {
         auth: AppBackendAuth,
         input: { workspaceId: string; datasetId: string; publicationId: string },
       ): void {
-        host.setBinding(auth, { ...input, appId: input.publicationId, binding: null });
+        host.setBinding(auth, { ...input, appId: input.publicationId, binding: null }, () =>
+          storage.db
+            .prepare(
+              "DELETE FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND dataset_id=? AND app_id=?",
+            )
+            .run(input.workspaceId, input.datasetId, input.publicationId),
+        );
+      },
+      /** Approves, or approves again, an app on the owner's computer over this Collection. */
+      approveLocalApp(
+        auth: AppBackendAuth,
+        input: { workspaceId: string; datasetId: string; candidate: unknown },
+      ): { publicationId: string; authorityRevision: number } {
+        owner(auth, input.workspaceId);
+        if (auth.kind !== "named" || auth.grantId) throw notFound();
+        let candidate: AppPublicationCandidate;
+        try {
+          candidate = parseAppPublicationCandidate(input.candidate, limits);
+        } catch {
+          throw badRequest("Invalid app approval.");
+        }
+        if (
+          candidate.capabilities.length !== 1 ||
+          candidate.capabilities[0]!.kind !== "dataset" ||
+          candidate.capabilities[0]!.datasetId !== input.datasetId
+        )
+          throw badRequest("Invalid app approval.");
+        const {
+          operations: _operations,
+          name: _name,
+          ...binding
+        } = capability(candidate, input.workspaceId, input.datasetId);
+        // The same id the owner's computer gives the app.
+        const appId = hash(
+          JSON.stringify(["dohc-local-dataset-app-v1", input.workspaceId, candidate]),
+        );
+        // The same app approved again, as by another of the owner's computers, keeps its revision and binding, so
+        // the requests each computer sends stay current.
+        const approved = storage.db
+          .prepare(
+            "SELECT app.authority_revision FROM sync_relay_local_dataset_apps app JOIN dohc_dataset_bindings binding ON binding.workspace_id=app.workspace_id AND binding.dataset_id=app.dataset_id AND binding.app_id=app.app_id WHERE app.workspace_id=? AND app.dataset_id=? AND app.app_id=? AND app.owner_user_id=?",
+          )
+          .get(input.workspaceId, input.datasetId, appId, auth.userId);
+        if (approved)
+          return { publicationId: appId, authorityRevision: Number(approved.authority_revision) };
+        let authorityRevision = 1;
+        host.setBinding(
+          auth,
+          { workspaceId: input.workspaceId, datasetId: input.datasetId, appId, binding },
+          () => {
+            const row = storage.db
+              .prepare(
+                "SELECT authority_revision FROM sync_relay_local_dataset_apps WHERE workspace_id=? AND app_id=?",
+              )
+              .get(input.workspaceId, appId);
+            authorityRevision = row ? Number(row.authority_revision) + 1 : 1;
+            storage.db
+              .prepare(
+                "INSERT INTO sync_relay_local_dataset_apps VALUES(?,?,?,?,?,?) ON CONFLICT(workspace_id,app_id) DO UPDATE SET candidate=excluded.candidate,authority_revision=excluded.authority_revision",
+              )
+              .run(
+                input.workspaceId,
+                appId,
+                input.datasetId,
+                auth.userId,
+                JSON.stringify(candidate),
+                authorityRevision,
+              );
+          },
+        );
+        return { publicationId: appId, authorityRevision };
       },
       setDataGrant(
         auth: AppBackendAuth,
