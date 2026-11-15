@@ -457,19 +457,33 @@ describe("ChatsView direct messages", () => {
     expect(view.dataset.conversationId).toBe("conversation-sam");
   });
 
-  it("marks a member the viewer blocks, in the list and on their chip", async () => {
+  it("says when a picked person is someone the viewer blocks, by their account, not their membership", async () => {
     const user = userEvent.setup();
-    signedIn([conversation({ conversationId: "conversation-ana", people: [{ ...ana, blocked: true }], blocked: true })]);
-    members([{ memberId: "sam", name: "Sam Rivera" }, { memberId: "ana", name: "Ana Diaz" }]);
-    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, people: [ana, sam] });
+    signedIn([]);
+    // Membership ids differ from account ids; only the resolution knows who is blocked.
+    members([{ memberId: "membership-sam", name: "Sam Rivera" }, { memberId: "membership-ana", name: "Ana Diaz" }]);
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, people: [{ ...ana, personId: "account-ana", blocked: true }] });
     renderView(vi.fn(), vi.fn(), { variant: "panel" });
     fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
-    const [anaOption, samOption] = await screen.findAllByTestId("chats-dm-new-member");
-    expect(within(anaOption!).getByTestId("chats-dm-new-blocked").title).toBe("You blocked Ana Diaz");
-    expect(anaOption!.textContent).toContain("Blocked");
-    expect(within(samOption!).queryByTestId("chats-dm-new-blocked")).toBeNull();
+    const [anaOption] = await screen.findAllByTestId("chats-dm-new-member");
+    expect(screen.queryByTestId("chats-dm-new-blocked")).toBeNull();
     await user.click(anaOption!);
-    expect(within(screen.getByTestId("chats-dm-new-pick")).getByTestId("chats-dm-new-pick-blocked")).toBeTruthy();
+    expect((await screen.findByTestId("chats-dm-new-blocked")).textContent).toBe("You blocked Ana Diaz. They can't message you.");
+  });
+
+  it("stays in New message when the person starts typing a name before Members' pick resolves", async () => {
+    const user = userEvent.setup();
+    signedIn([conversation()]);
+    members([{ memberId: "sam", name: "Sam Rivera" }, { memberId: "ana", name: "Ana Diaz" }]);
+    let resolveSam: (value: unknown) => void = () => {};
+    bridgeMock.directResolve.mockReturnValueOnce(new Promise((resolve) => { resolveSam = resolve; }));
+    history([sent(2, "sam", "See you at nine")]);
+    renderView(vi.fn(), vi.fn(), { variant: "page", initialNav: { level: "direct-new", memberIds: ["sam"] } });
+    await waitFor(() => expect(bridgeMock.directResolve).toHaveBeenCalled());
+    await user.type(screen.getByTestId("chats-dm-recipients"), "Ana");
+    await act(async () => resolveSam({ conversationId: "conversation-sam", people: [sam] }));
+    expect(screen.getByTestId("chats-dm-new")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
   });
 
   it("asks to sync a workspace that is only on this computer, without a failure notice", async () => {

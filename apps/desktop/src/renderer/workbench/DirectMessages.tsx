@@ -360,16 +360,12 @@ function ConversationForAccount(props: ConversationProps) {
   // The server says something new arrived: read the newest page again.
   const lastSeq = conversation?.last?.seq ?? 0;
   const shownSeq = shown.status === "ready" ? shown.messages.at(-1)?.seq ?? 0 : null;
-  useEffect(() => {
-    if (shownSeq !== null && lastSeq > shownSeq) void load();
-  }, [lastSeq, shownSeq, load]);
-
   // The saved copy is shown until the history reads again. When the list reads from the server, read it too.
   const shownSaved = shown.status === "ready" && shown.saved;
   const listFromServer = ready !== null && !ready.saved ? ready : null;
   useEffect(() => {
-    if (shownSaved && listFromServer) void load();
-  }, [shownSaved, listFromServer, load]);
+    if ((shownSeq !== null && lastSeq > shownSeq) || (shownSaved && listFromServer)) void load();
+  }, [lastSeq, shownSeq, shownSaved, listFromServer, load]);
 
   const records = useMemo(
     () => shown.status === "ready" ? shown.messages.map((message) => directMessageRecord(conversationId, message, viewerId)) : [],
@@ -671,12 +667,6 @@ function NewMessageForAccount(props: NewMessageProps) {
   }, [members, query]);
   const active = matches[Math.min(highlight, matches.length - 1)] ?? null;
   const full = shownPicks.length >= MAX_PICKS;
-  // A block holds for every conversation, so any conversation that lists someone as blocked says so.
-  const blockedIds = useMemo(
-    () => new Set(state.status === "ready" ? state.conversations.flatMap((entry) => entry.people.filter((person) => person.blocked).map((person) => person.personId)) : []),
-    [state],
-  );
-
   const toggle = (memberId: string) => {
     goStraight.current = false;
     setPickError(false);
@@ -704,7 +694,8 @@ function NewMessageForAccount(props: NewMessageProps) {
 
   // Whether these people already have a conversation, so the first message lands there.
   const pickKey = [...shownPicks].sort().join(",");
-  const [existing, setExisting] = useState<{ key: string; conversationId: string | null; title: string } | null>(null);
+  // Member ids are not account ids, so who the viewer blocks is known only once the picks resolve.
+  const [existing, setExisting] = useState<{ key: string; conversationId: string | null; title: string; blocked: string } | null>(null);
   useEffect(() => {
     if (!pickKey || members.status !== "ready" || state.status !== "ready") return;
     let current = true;
@@ -717,7 +708,8 @@ function NewMessageForAccount(props: NewMessageProps) {
           openConversation.current(resolution.conversationId, title);
           return;
         }
-        setExisting({ key: pickKey, conversationId: resolution.conversationId, title });
+        const blocked = resolution.people.filter((person) => person.blocked);
+        setExisting({ key: pickKey, conversationId: resolution.conversationId, title, blocked: blocked.length > 0 ? directTitle(blocked) : "" });
       },
       // Sending says why, if this person can't be messaged.
       () => undefined,
@@ -830,7 +822,6 @@ function NewMessageForAccount(props: NewMessageProps) {
             >
               <ChatAvatar presentation={directPresentation(member.memberId, null)} name={member.name} kind="human" size="strip" />
               <span className="min-w-0 flex-1 truncate">{member.name}</span>
-              {blockedIds.has(member.memberId) ? <BlockedMark testId="chats-dm-new-blocked" name={member.name} /> : null}
               {selected ? <Check size={14} aria-hidden className="shrink-0 text-accent" /> : null}
             </li>
           );
@@ -860,7 +851,6 @@ function NewMessageForAccount(props: NewMessageProps) {
                 <span key={id} data-testid="chats-dm-new-pick" data-member-id={id} className="inline-flex h-6 items-center gap-1 rounded-full border border-line bg-panel-2 pl-1 pr-0.5 text-[12px] text-ink">
                   <ChatAvatar presentation={directPresentation(id, null)} name={names[index]!} kind="human" size="strip" className="size-4 text-[8px]" />
                   <span className="max-w-40 truncate">{names[index]}</span>
-                  {blockedIds.has(id) ? <BlockedMark testId="chats-dm-new-pick-blocked" name={names[index]!} /> : null}
                   <button
                     type="button"
                     aria-label={`Remove ${names[index]}`}
@@ -885,6 +875,7 @@ function NewMessageForAccount(props: NewMessageProps) {
                 autoFocus={shownPicks.length === 0}
                 value={query}
                 onChange={(event) => {
+                  goStraight.current = false;
                   setQuery(event.target.value);
                   setHighlight(0);
                 }}
@@ -893,6 +884,12 @@ function NewMessageForAccount(props: NewMessageProps) {
               />
             </div>
             {pickError ? <FieldError id={errorId} className="mt-1">Choose who to message.</FieldError> : null}
+            {resolved?.blocked ? (
+              <p data-testid="chats-dm-new-blocked" className="m-0 mt-1.5 flex items-center gap-2 text-[12px] text-muted">
+                <Ban size={12} aria-hidden className="shrink-0 text-subtle" />
+                <span className="min-w-0 flex-1 truncate">{`You blocked ${resolved.blocked}. They can't message you.`}</span>
+              </p>
+            ) : null}
             {resolved?.conversationId ? (
               <p data-testid="chats-dm-new-existing" className="m-0 mt-1.5 flex items-center gap-2 text-[12px] text-muted">
                 <span className="min-w-0 flex-1 truncate">{`You already have a conversation with ${resolved.title}.`}</span>
