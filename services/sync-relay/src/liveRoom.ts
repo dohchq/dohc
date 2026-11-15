@@ -22,6 +22,7 @@ import {
   parseLiveUpdateDigest,
   parseLiveUpdateIdentifier,
   type LiveDocumentKey,
+  type LiveUpdateRefusal,
 } from "@dohc/live-session-contract/live-update-admission";
 import type { NamedFrameRoomHost } from "./namedLiveFrameHost.js";
 import type {
@@ -41,6 +42,11 @@ import {
   liveRoomEdits,
   liveRoomPosition,
 } from "./storage/liveRoomEdits.js";
+import {
+  liveRoomPaused,
+  pauseLiveRoom,
+  type LiveRoomPauseCause,
+} from "./storage/liveRoomPauses.js";
 import { documentParams, liveJournalSeedClientId } from "./storage/liveUpdateJournal.js";
 
 const EMPTY_VECTOR = Y.encodeStateVector(new Y.Doc());
@@ -60,6 +66,8 @@ export interface LiveRoomsOptions {
   readonly saveEveryMs?: number;
   /** How long one save, or opening the owner's capture, may take before it is tried again. */
   readonly saveTimeoutMs?: number;
+  /** How long saves may keep failing before the note pauses. */
+  readonly pauseAfterMs?: number;
   readonly log?: (line: string, detail: Record<string, unknown>) => void;
 }
 export interface LiveRooms {
@@ -125,6 +133,34 @@ interface Room {
   savedThrough: number;
   /** Recent saves' journal cursors, each with the last position it holds. */
   readonly saves: Map<number, number>;
+  /** When saves started failing, until one is taken. */
+  failingSince?: number;
+}
+
+/** Why a note that paused takes no edits. Its owner's Resume lifts it. */
+export class LiveRoomPausedError extends Error {
+  constructor() {
+    super("Live editing of this note is paused.");
+  }
+}
+/**
+ * What one save came to. A refusal that will not clear by itself pauses the note; the engine
+ * busy or restarting, a capture gone stale, or a save that failed, is tried again.
+ */
+type SaveOutcome =
+  | "saved"
+  | "retry"
+  | { readonly refusal: LiveUpdateRefusal; readonly named: LiveAuthorSnapshot[] };
+// A capture that went stale is replaced, and the next save goes through the new one.
+const STALE_CAPTURE: ReadonlySet<LiveUpdateRefusal> = new Set(["stale-session", "stale-binding"]);
+/** Each sender in some edits, once, up to the most one save can name. */
+function senders(edits: readonly { readonly sender: LiveAuthorSnapshot }[]): LiveAuthorSnapshot[] {
+  const named = new Map<string, LiveAuthorSnapshot>();
+  for (const { sender } of edits) {
+    if (named.size >= MAX_LIVE_AUTHOR_IDENTITIES) break;
+    named.set(JSON.stringify(sender), sender);
+  }
+  return [...named.values()];
 }
 
 const refused = (reason: Extract<NamedFrameSubmissionResult, { result: "refused" }>["reason"]) =>
@@ -225,6 +261,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
   const storage = options.storage as StorageContext;
   const saveEveryMs = options.saveEveryMs ?? 5_000;
   const saveTimeoutMs = options.saveTimeoutMs ?? 30_000;
+  const pauseAfterMs = options.pauseAfterMs ?? 10 * 60_000;
   const everySender = options.namesEverySender === true;
   const write = options.log ?? ((line, detail) => console.error(`[live-room] ${line}`, detail));
   const log = (room: Room, line: string, detail: Record<string, unknown> = {}) =>
@@ -315,10 +352,10 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     }
   }
 
-  /** One save of the oldest unsaved edits. True when the journal took it. */
-  async function saveOnce(room: Room): Promise<boolean> {
+  /** One save of the oldest unsaved edits. */
+  async function saveOnce(room: Room): Promise<SaveOutcome> {
     const { count, authors } = nextSave(room.unsaved, everySender, options.maxAppliedBytes);
-    if (!count) return true;
+    if (!count) return "saved";
     const batch = room.unsaved.slice(0, count);
     const merged = count === 1 ? batch[0]!.bytes : Y.mergeUpdates(batch.map((edit) => edit.bytes));
     const through = batch.at(-1)!.position;
@@ -353,16 +390,49 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       if (deadline.aborted && !room.lifetime.signal.aborted && room.saver) dropSaver(room);
       if (!committed) {
         log(room, "save failed", { edits: count, error: String(error).slice(0, 200) });
-        return false;
+        return "retry";
       }
     }
     if (!committed) {
       log(room, "save not taken", { edits: count, answer });
-      return false;
+      if (answer?.result !== "refused") return "retry";
+      if (!STALE_CAPTURE.has(answer.reason))
+        return { refusal: answer.reason, named: senders(batch) };
+      if (room.saver) dropSaver(room);
+      return "retry";
     }
     room.unsaved.splice(0, count);
     room.bytes = Y.encodeStateAsUpdate(room.doc).byteLength;
-    return true;
+    return "saved";
+  }
+  /**
+   * Pauses the note: its whole live state goes into a copy, stored in the transaction that deletes
+   * its rows, and every session in the room ends. Tickets for it are refused until its owner
+   * resumes it. If the copy can't be stored, the rows stay and saves go on being tried.
+   */
+  function pause(
+    room: Room,
+    cause: LiveRoomPauseCause,
+    refusal: LiveUpdateRefusal | null,
+    named: LiveAuthorSnapshot[],
+  ) {
+    try {
+      pauseLiveRoom(storage, {
+        document: room.document,
+        cause,
+        refusal,
+        named,
+        copy: Y.encodeStateAsUpdate(room.doc),
+        pausedAtMs: Date.now(),
+      });
+    } catch (error) {
+      log(room, "pause failed", { cause, refusal, error: String(error).slice(0, 200) });
+      scheduleSave(room, saveEveryMs);
+      return;
+    }
+    log(room, "paused", { cause, refusal, named: named.length });
+    room.unsaved.length = 0;
+    dispose(room, new LiveRoomPausedError());
   }
   function scheduleSave(room: Room, wait: number) {
     if (room.timer || room.saving || room.lifetime.signal.aborted) return;
@@ -377,14 +447,18 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     clearTimeout(room.timer);
     room.timer = undefined;
     room.saving = saveOnce(room)
-      .catch((error: unknown) => {
+      .catch((error: unknown): SaveOutcome => {
         log(room, "save failed", { error: String(error).slice(0, 200) });
-        return false;
+        return "retry";
       })
-      .then((saved) => {
+      .then((outcome) => {
         room.saving = undefined;
         if (room.lifetime.signal.aborted) return;
-        if (room.unsaved.length) scheduleSave(room, saved ? 0 : saveEveryMs);
+        if (outcome === "saved") room.failingSince = undefined;
+        else if (outcome !== "retry") return pause(room, "refused", outcome.refusal, outcome.named);
+        else if (Date.now() - (room.failingSince ??= Date.now()) >= pauseAfterMs)
+          return pause(room, "failing", null, senders(room.unsaved));
+        if (room.unsaved.length) scheduleSave(room, outcome === "saved" ? 0 : saveEveryMs);
         else disposeIfIdle(room);
       });
   }
@@ -392,10 +466,10 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     if (room.members || room.unsaved.length || room.saving) return;
     dispose(room);
   }
-  function dispose(room: Room) {
+  function dispose(room: Room, reason: Error = new Error("Live room closed.")) {
     clearTimeout(room.timer);
     room.timer = undefined;
-    room.lifetime.abort(new Error("Live room closed."));
+    room.lifetime.abort(reason);
     if (room.saver) dropSaver(room);
     for (const subscriber of room.subscribers) subscriber.wake?.();
     room.subscribers.clear();
@@ -408,6 +482,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     const existing = rooms.get(key);
     if (existing) return existing;
     if (closed) throw new Error("Live rooms are closed.");
+    if (liveRoomPaused(storage, document)) throw new LiveRoomPausedError();
     const room: Room = {
       key,
       document,
@@ -453,7 +528,8 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
   function recover() {
     if (closed) return;
     try {
-      for (const document of liveRoomDocuments(storage)) openRoom(document);
+      for (const document of liveRoomDocuments(storage))
+        if (!liveRoomPaused(storage, document)) openRoom(document);
     } catch (error) {
       write("recovery failed", { error: String(error).slice(0, 200) });
     }
@@ -589,6 +665,8 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       let room: Room | undefined;
       let subscriber: Subscriber | undefined;
       let left = false;
+      /** The owner of a paused note, which reads every save the room made and sends nothing. */
+      let paused = false;
       const current = accessBetweenEdits(host);
       return {
         hostEpoch: host.hostEpoch,
@@ -605,7 +683,13 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
         },
         async openSync(clientVector, signal): Promise<NamedFrameSync> {
           host.assertCurrent();
-          if (room || left) throw new Error("Live room sync is unavailable.");
+          if (room || paused || left) throw new Error("Live room sync is unavailable.");
+          // A paused note's owner still catches up on every save the room made before it paused,
+          // so the owner's file holds all that anyone was told was saved. Only its edits wait.
+          if (owner && liveRoomPaused(storage, host.room.document)) {
+            paused = true;
+            return host.openSync(clientVector, signal);
+          }
           const held = openRoom(host.room.document);
           room = held;
           held.members += 1;
@@ -673,6 +757,8 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           signal.throwIfAborted();
           // `sender` below reads this editor's access in full for each edit.
           current();
+          // Until the owner resumes, the note is fenced as for a restore.
+          if (paused) return refused("restore-fenced");
           const held = room;
           if (!held || !subscriber || held.lifetime.signal.aborted)
             throw new Error("Live room is not open.");

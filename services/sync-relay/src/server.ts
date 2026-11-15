@@ -37,6 +37,7 @@ import {
 } from "./collectionWriteRoutes";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { createHeldDocumentRoutes, type HeldDocumentHost } from "./heldDocumentRoutes";
+import { createLiveRoomPauseRoutes } from "./liveRoomPauseRoutes";
 import { randomUUID } from "node:crypto";
 import {
   createNamedLiveBrowserHttp,
@@ -1041,6 +1042,7 @@ export function createSyncRelayHandler({
     lookupUserEmail,
   });
   const respondToHeldDocuments = createHeldDocumentRoutes({ storage, host: heldDocumentHost });
+  const respondToLivePauses = createLiveRoomPauseRoutes(storage);
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({
     storage,
     limits: appPublicationLimits,
@@ -1385,6 +1387,21 @@ export function createSyncRelayHandler({
         );
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         return await respondToHeldDocuments(request, route, actor.userId);
+      }
+      if (route.route === "live-pauses") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? ""))
+          throw notFound();
+        const actor = await resolveActor(
+          new Request(request.url, {
+            headers: { authorization: authorization! },
+            signal: request.signal,
+          }),
+          route.workspaceId,
+        );
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToLivePauses(request, route, actor.userId);
       }
       if (route.route === "automation-host") {
         // Desktop and agent credentials only, never ambient browser cookies.

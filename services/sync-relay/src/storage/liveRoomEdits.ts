@@ -36,15 +36,20 @@ const normalize = (sql: string) => sql.trim().replace(/;$/, "").replace(/\s+/g, 
 function require(value: unknown): asserts value {
   if (!value) throw new Error("live room schema is missing or damaged");
 }
-function assertSchema(db: SqliteDb): void {
+function assertSchema(db: SqliteDb, objects: Readonly<Record<string, string>>): void {
   for (const [name, sql] of Object.entries(objects)) {
     const rows = db.prepare("SELECT sql FROM sqlite_schema WHERE name=?").all(name);
     require(rows.length === 1 && normalize(String(rows[0]!.sql)) === normalize(sql));
   }
 }
-export function initializeLiveRoomSchema(db: SqliteDb): void {
-  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(MIGRATION)) {
-    assertSchema(db);
+/** Creates a migration's objects once, and checks them each time the store opens after. */
+export function initializeRoomMigration(
+  db: SqliteDb,
+  migration: string,
+  objects: Readonly<Record<string, string>>,
+): void {
+  if (db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(migration)) {
+    assertSchema(db, objects);
     return;
   }
   const names = Object.keys(objects);
@@ -54,11 +59,14 @@ export function initializeLiveRoomSchema(db: SqliteDb): void {
       .all(...names).length === 0,
   );
   for (const sql of Object.values(objects)) db.exec(sql);
-  assertSchema(db);
+  assertSchema(db, objects);
   db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(
-    MIGRATION,
+    migration,
     Date.now(),
   );
+}
+export function initializeLiveRoomSchema(db: SqliteDb): void {
+  initializeRoomMigration(db, MIGRATION, objects);
 }
 
 export interface LiveRoomEdit {

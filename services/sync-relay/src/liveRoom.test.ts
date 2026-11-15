@@ -3,11 +3,13 @@ import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
+import type { LiveUpdateRefusal } from "@dohc/live-session-contract/live-update-admission";
 import {
   cleanupLiveDeliveryFixtures,
   registered,
 } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
-import { createLiveRooms, nextSave, roomAdmissible } from "./liveRoom.js";
+import { createLiveRooms, LiveRoomPausedError, nextSave, roomAdmissible } from "./liveRoom.js";
+import { createLiveRoomPauseRoutes } from "./liveRoomPauseRoutes.js";
 import type { NamedFrameRoomHost } from "./namedLiveFrameHost.js";
 import type {
   NamedFrameAppliedUpdate,
@@ -17,6 +19,7 @@ import type {
 import type { StorageContext } from "./storage/context.js";
 import { observeRelayWrites } from "./relayWriteChanges.js";
 import { appendLiveRoomEdit, liveRoomEdits } from "./storage/liveRoomEdits.js";
+import { liveRoomPaused, liveRoomPauses, pauseLiveRoom } from "./storage/liveRoomPauses.js";
 import { liveJournalSeedClientId } from "./storage/liveUpdateJournal.js";
 
 const open: Fixture[] = [];
@@ -44,6 +47,10 @@ interface Engine {
   hold?: Promise<void>;
   /** The engine never answers a committed save. */
   silent?: boolean;
+  /** The engine's next answers, each given instead of committing; then it commits. */
+  answers?: (LiveUpdateRefusal | "retry")[];
+  /** How many saves reached the engine. */
+  saves?: number;
 }
 
 /** The owner's capture of the note, saving through the real journal. Its feed stays quiet. */
@@ -78,6 +85,10 @@ function ownerCapture(f: Fixture, engine: Engine = {}): NamedFrameHostSession {
     },
     async submit(input, signal) {
       await engine.hold;
+      engine.saves = (engine.saves ?? 0) + 1;
+      const next = engine.answers?.shift();
+      if (next === "retry") return { result: "retry", reason: "host-unavailable" } as never;
+      if (next) return { result: "refused", reason: next } as never;
       const { result } = f.storage.commitLiveUpdateJournal({
         ...f.capture(input.updateBytes, input.deliveryId),
         ...(input.room ? { room: input.room } : {}),
@@ -109,6 +120,7 @@ function rooms(
     names?: boolean;
     saveTimeoutMs?: number;
     saveEveryMs?: number;
+    pauseAfterMs?: number;
   } = {},
   engine: Engine = {},
 ) {
@@ -121,6 +133,7 @@ function rooms(
     // Tests save by leaving unless they set the timer.
     saveEveryMs: limits.saveEveryMs ?? 3_600_000,
     ...(limits.saveTimeoutMs ? { saveTimeoutMs: limits.saveTimeoutMs } : {}),
+    ...(limits.pauseAfterMs === undefined ? {} : { pauseAfterMs: limits.pauseAfterMs }),
     log() {},
     openSaver: async () => ownerCapture(f, engine),
   });
@@ -274,6 +287,12 @@ function ownerDesktop(f: Fixture, room: ReturnType<typeof rooms>) {
 const position = (answer: Awaited<ReturnType<NamedFrameHostSession["submit"]>>) =>
   answer.result === "success" ? answer.ack.journalCursor : 0;
 
+const liveRoomCopy = (f: Fixture, pauseId: string) =>
+  new Uint8Array(
+    (f.storage as StorageContext).db
+      .prepare("SELECT copy_bytes FROM sync_relay_live_room_pauses WHERE pause_id=?")
+      .get(pauseId)!.copy_bytes as Uint8Array,
+  );
 const unsaved = (f: Fixture) =>
   liveRoomEdits(f.storage as StorageContext, f.input.evidence.document);
 const savedAuthors = (f: Fixture) =>
@@ -527,6 +546,167 @@ it("wakes no live host when it takes an edit, and wakes them when it saves", asy
   } finally {
     stop();
   }
+});
+
+const pauses = (f: Fixture) => liveRoomPauses(f.storage as StorageContext, "workspace");
+const usage = (f: Fixture) =>
+  Number(
+    (f.storage as StorageContext).db
+      .prepare("SELECT usage_bytes FROM sync_relay_workspace_usage WHERE workspace_id=?")
+      .get("workspace")?.usage_bytes ?? 0,
+  );
+
+it("pauses a note whose save is refused for good: its copy holds every taken edit, its rows go, and every session ends", async () => {
+  const f = note();
+  const room = rooms(f, { names: true, saveEveryMs: 10 }, { answers: ["invalid-update"] });
+  const a = editor(f, room, ana),
+    b = editor(f, room, ben);
+  await a.open();
+  await b.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await b.next();
+  expect((await b.submit(b.change("place", "Porto"))).result).toBe("success");
+  await vi.waitFor(() => expect(pauses(f)).toHaveLength(1));
+  const [paused] = pauses(f);
+  expect(paused).toMatchObject({ cause: "refused", refusal: "invalid-update", named: [ana, ben] });
+  expect(unsaved(f)).toEqual([]);
+  expect(f.journalRows().journal).toEqual([]);
+  // The copy is the room's whole note as it was, with both edits.
+  const copy = new Y.Doc();
+  Y.applyUpdate(copy, liveRoomCopy(f, paused!.pauseId));
+  expect(copy.getMap("frontmatter").toJSON()).toMatchObject({ title: "Lisbon", place: "Porto" });
+  await expect(b.next()).rejects.toThrow(LiveRoomPausedError);
+  await expect(a.submit(a.change("note", "late"))).rejects.toThrow();
+  await expect(editor(f, room, olu).open()).rejects.toThrow(LiveRoomPausedError);
+  expect(liveRoomPaused(f.storage as StorageContext, f.input.evidence.document)).toBe(true);
+});
+
+it("still gives a paused note's owner every save made before the pause, and takes none of its edits", async () => {
+  const f = note();
+  const engine: Engine = {};
+  const room = rooms(f, { saveEveryMs: 5 }, engine);
+  const a = editor(f, room, ana);
+  await a.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  const saved = Number(f.journalRows().journal.at(-1)!.journal_cursor);
+  engine.answers = ["invalid-update"];
+  expect((await a.submit(a.change("place", "Porto"))).result).toBe("success");
+  await vi.waitFor(() => expect(pauses(f)).toHaveLength(1));
+  expect(pauses(f)[0]!.savedCursor).toBe(saved);
+
+  // An owner who missed the last save while away gets it, and not the edit that never saved.
+  const owner = ownerDesktop(f, room);
+  const sync = await owner.open();
+  expect(sync.appliedThroughJournalCursor).toBe(saved);
+  expect(owner.doc.getMap("frontmatter").get("title")).toBe("Lisbon");
+  expect(owner.doc.getMap("frontmatter").get("place")).toBeUndefined();
+  expect(await owner.submit(owner.change("note", "mine"))).toEqual({
+    result: "refused",
+    reason: "restore-fenced",
+  });
+  expect(unsaved(f)).toEqual([]);
+});
+
+it("tries a busy engine again without pausing, and pauses once saves have failed for the whole window", async () => {
+  const f = note();
+  const busy: Engine = { answers: Array<"retry">(100).fill("retry") };
+  const room = rooms(f, { saveEveryMs: 5, pauseAfterMs: 3_600_000 }, busy);
+  const a = editor(f, room, ana);
+  await a.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await vi.waitFor(() => expect(busy.saves).toBeGreaterThanOrEqual(3));
+  expect(pauses(f)).toEqual([]);
+  expect(unsaved(f)).toHaveLength(1);
+
+  const g = note();
+  const failing = rooms(
+    g,
+    { saveEveryMs: 5, pauseAfterMs: 40 },
+    { answers: Array<"retry">(100).fill("retry") },
+  );
+  const c = editor(g, failing, ana);
+  await c.open();
+  expect((await c.submit(c.change("title", "Porto"))).result).toBe("success");
+  await vi.waitFor(() => expect(pauses(g)).toHaveLength(1));
+  expect(pauses(g)[0]).toMatchObject({ cause: "failing", refusal: null, named: [ana] });
+  expect(unsaved(g)).toEqual([]);
+});
+
+it("saves through a new capture when the old one went stale, without pausing", async () => {
+  const f = note();
+  const engine: Engine = { answers: ["stale-binding"] };
+  const room = rooms(f, { saveEveryMs: 5 }, engine);
+  const a = editor(f, room, ana);
+  await a.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  expect(engine.saves).toBe(2);
+  expect(pauses(f)).toEqual([]);
+  expect(savedAuthors(f)).toEqual([ana]);
+});
+
+it("keeps a pause's copy until the owner's desktop records it written, and resumes only then", async () => {
+  const f = note();
+  const storage = f.storage as StorageContext;
+  const before = usage(f);
+  const copy = new Uint8Array([1, 2, 3, 4]);
+  pauseLiveRoom(storage, {
+    document: f.input.evidence.document,
+    cause: "refused",
+    refusal: "provenance-refused",
+    named: [ben],
+    copy,
+    pausedAtMs: 1,
+  });
+  expect(usage(f)).toBeGreaterThan(before + copy.byteLength);
+  const respond = createLiveRoomPauseRoutes(f.storage);
+  const call = (
+    method: string,
+    pauseId?: string,
+    action?: "copy" | "copy-written" | "resume",
+    body?: unknown,
+    owner = "owner",
+  ) =>
+    respond(
+      new Request("https://relay.invalid/", {
+        method,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+      {
+        route: "live-pauses",
+        workspaceId: "workspace",
+        ...(pauseId ? { pauseId } : {}),
+        ...(action ? { action } : {}),
+      },
+      owner,
+    );
+  await expect(call("GET", undefined, undefined, undefined, "someone")).rejects.toMatchObject({
+    code: "not_found",
+  });
+  const listed = (await (await call("GET")).json()) as {
+    pauses: { pauseId: string; copy: unknown }[];
+  };
+  const sha256 = hash(copy);
+  expect(listed.pauses).toMatchObject([
+    { cause: "refused", named: [ben], copy: { sha256, byteLength: 4 } },
+  ]);
+  const { pauseId } = listed.pauses[0]!;
+  expect(new Uint8Array(await (await call("GET", pauseId, "copy")).arrayBuffer())).toEqual(copy);
+  await expect(call("POST", pauseId, "resume")).rejects.toMatchObject({
+    code: "conflict",
+    message: expect.stringContaining("copy"),
+  });
+  await expect(
+    call("POST", pauseId, "copy-written", { sha256: "0".repeat(64) }),
+  ).rejects.toMatchObject({ code: "conflict" });
+  expect((await call("POST", pauseId, "copy-written", { sha256 })).status).toBe(200);
+  await expect(call("GET", pauseId, "copy")).rejects.toMatchObject({ code: "not_found" });
+  expect(liveRoomPaused(storage, f.input.evidence.document)).toBe(true);
+  expect((await call("POST", pauseId, "resume")).status).toBe(200);
+  expect(liveRoomPaused(storage, f.input.evidence.document)).toBe(false);
+  expect(pauses(f)).toEqual([]);
+  expect(usage(f)).toBe(before);
 });
 
 it("refuses an edit under an editor id tied to someone else and writes nothing", async () => {

@@ -105,6 +105,7 @@ import { createNamedDesktopLive } from "./namedDesktopLive";
 import { parseNamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { captureOwnerLiveFrameHost, type NamedFrameNativeHost } from "./namedLiveFrameHost";
 import { createLiveRooms } from "./liveRoom";
+import { liveRoomPaused } from "./storage/liveRoomPauses";
 import { workspaceOwner } from "./storage/workspaces";
 import { createAutomationRecordHost } from "./automationRecordHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -1247,6 +1248,13 @@ if (namedLiveConfig) {
         })
       : undefined;
   if (rooms) server.once("close", () => rooms.close());
+  // A paused note is refused to editors as a held one is: only its owner can start it again.
+  const editorsBlocked = rooms
+    ? (document: { workspaceId: string; objectId: string }) =>
+        liveRoomPaused(storage as StorageContext, document)
+          ? "held"
+          : sessionHostBlocked?.(document)
+    : sessionHostBlocked;
   namedLive = createNamedLiveRoutes({
     rooms,
     kind: "named",
@@ -1264,7 +1272,7 @@ if (namedLiveConfig) {
     captureNative,
     membership,
     admission,
-    sessionHostBlocked,
+    sessionHostBlocked: editorsBlocked,
   });
   if (linkLiveEnabled && publicEditRelease) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
@@ -1289,7 +1297,7 @@ if (namedLiveConfig) {
       membership,
       rooms,
       admission,
-      sessionHostBlocked,
+      sessionHostBlocked: editorsBlocked,
     });
     linkLiveHttp = createLinkLiveHttp({
       storage,
@@ -1299,7 +1307,7 @@ if (namedLiveConfig) {
       limits: namedLiveConfig.transport,
       linkKey: linkKey!,
       publicEditRelease,
-      sessionHostBlocked,
+      sessionHostBlocked: editorsBlocked,
       linkAuthority: relayApplication.linkAuthority,
       readAwakeState,
       frames: namedLiveConfig.frames.receive,

@@ -15,6 +15,7 @@ import type { OwnerAppResponseRoute } from "./ownerAppResponseRoutes";
 import type { OwnerRestoreRoute } from "./ownerRestoreRoutes";
 import type { PersonalAgentToolRoute } from "./personalAgentRoutes";
 import { MAX_HELD_OBJECT_ID_CHARS, type HeldDocumentRoute } from "./heldDocumentRoutes";
+import { LIVE_PAUSE_ID, type LiveRoomPauseRoute } from "./liveRoomPauseRoutes";
 import type { LinkChatRoute } from "./linkChatRoutes";
 import type { LinkReadRoute } from "./linkReadRoutes";
 import type { NoticeRoute } from "./noticeRoutes";
@@ -66,6 +67,7 @@ export type SyncRelayRoute =
   | OwnerAppResponseRoute
   | OwnerRestoreRoute
   | HeldDocumentRoute
+  | LiveRoomPauseRoute
   | { route: "link-exchange" }
   | { route: "link-refresh" }
   | { route: "link-handoff" }
@@ -460,6 +462,16 @@ export function parseRoute(request: Pick<Request, "url">): SyncRelayRoute {
     ) {
       return { route: "app-backend", workspaceId, publicationId, action: "blob", sha256: parts[6] };
     }
+    throw notFound();
+  }
+  if (parts[2] === "live-pauses") {
+    if (parts.length === 3) return { route: "live-pauses", workspaceId };
+    if (
+      parts.length === 5 &&
+      LIVE_PAUSE_ID.test(parts[3]!) &&
+      (parts[4] === "copy" || parts[4] === "copy-written" || parts[4] === "resume")
+    )
+      return { route: "live-pauses", workspaceId, pauseId: parts[3], action: parts[4] };
     throw notFound();
   }
   if (parts[2] === "held-documents") {
