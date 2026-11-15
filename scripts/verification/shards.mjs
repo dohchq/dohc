@@ -6,7 +6,7 @@ import { desktopProofTags } from "./verify.mjs";
 
 const slash = (path) => path.replaceAll("\\", "/");
 const fileId = (path) => slash(relative(repoRoot, path));
-export const JS_SHARDS = 14;
+export const JS_SHARDS = 13;
 // Median worker inventory plus artifact restoration in the recorded cloud run.
 export const JS_NATIVE_READY_SECONDS = 100;
 const splitNativeFile = "services/share-web/src/selfHostedLiveNative.integration.ts";
