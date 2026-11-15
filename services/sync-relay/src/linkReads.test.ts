@@ -500,6 +500,48 @@ describe("LinkEgressRateLimiter", () => {
 });
 
 describe("relay capability reads", () => {
+  it.each(["view", "comment"] as const)(
+    "keeps a folder's rule file out of a %s link's listing, blobs and current feed",
+    async (access) => {
+      const storage = await newStorage();
+      const h = handler(storage);
+      const seeded = await seed(h, access);
+      const rule = "people:\n  sam@example.com: edit\n";
+      const ruleSha = await putBlob(h, rule);
+      // A draft renamed into place: its earlier moment is in the share, and the
+      // current feed must not name what the object became.
+      await appendMoments(h, [
+        moment(3, "docs/draft.md", rule, 1_300, { objectId: "object-rule" }),
+        moment(4, "docs/access.yaml", rule, 1_400, {
+          objectId: "object-rule",
+          operation: "rename",
+          beforePath: "docs/draft.md",
+          beforeContent: rule,
+        }),
+      ]);
+
+      const current = await h(linkRequest(seeded.capability, "/sync/link/current"));
+      expect(current.status).toBe(200);
+      expect(
+        ((await json(current)).files as Array<{ path: string }>).map((file) => file.path),
+      ).toEqual(["docs/shared.md"]);
+      expect(
+        await denialBytes(await h(linkRequest(seeded.capability, `/sync/link/blobs/${ruleSha}`))),
+      ).toBe(`404:${LINK_REFUSAL_BODY}`);
+      const feed = await json(
+        await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=500&current=true")),
+      );
+      const served = JSON.stringify(feed);
+      for (const secret of ["access.yaml", ruleSha, "sam@example.com"])
+        expect(served).not.toContain(secret);
+      expect(
+        (feed.ops as RelayOp[]).some(
+          (op) => op.opKind === "file.current" && (op.payload as { file: unknown }).file === null,
+        ),
+      ).toBe(true);
+    },
+  );
+
   it("keeps exact object results at the 32-moment boundary and above the epoch floor", async () => {
     const storage = await newStorage();
     const h = handler(storage);

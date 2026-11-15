@@ -510,7 +510,7 @@ export function currentFileBlobByteLengthQuery(selectorPaths: readonly string[])
 } {
   const selector = currentFileSelectorClause(selectorPaths);
   return {
-    sql: `SELECT CAST(blob.byte_length AS TEXT) AS byte_length
+    sql: `SELECT sync_relay_current_files.path, CAST(blob.byte_length AS TEXT) AS byte_length
        FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_blob
        JOIN sync_relay_blobs AS blob
          ON blob.workspace_id = sync_relay_current_files.workspace_id
@@ -518,8 +518,7 @@ export function currentFileBlobByteLengthQuery(selectorPaths: readonly string[])
        WHERE sync_relay_current_files.workspace_id = ?
          AND sync_relay_current_files.version_id = ?
          AND sync_relay_current_files.blob_sha256 = ?
-         AND sync_relay_current_files.state_relay_seq > ?${selector.sql}
-       LIMIT 1`,
+         AND sync_relay_current_files.state_relay_seq > ?${selector.sql}`,
     selectorParams: selector.params,
   };
 }
@@ -765,19 +764,25 @@ export function currentFileBlobByteLength(
     selectorPaths: readonly string[];
     sha256: string;
     epochLogFloor: number;
+    /** Admits the bytes only through a file at a path this passes. */
+    visible?: (path: string) => boolean;
   },
 ): number | null {
   const query = currentFileBlobByteLengthQuery(input.selectorPaths);
-  const row = storage.db
+  const rows = storage.db
     .prepare(query.sql)
-    .get(
+    .iterate(
       input.workspaceId,
       input.versionId,
       input.sha256,
       input.epochLogFloor,
       ...query.selectorParams,
     );
-  return row && typeof row.byte_length === "string" ? Number(row.byte_length) : null;
+  for (const row of rows) {
+    if (input.visible && !input.visible(String(row.path))) continue;
+    return typeof row.byte_length === "string" ? Number(row.byte_length) : null;
+  }
+  return null;
 }
 
 export function currentObjectPath(

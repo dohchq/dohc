@@ -1,6 +1,7 @@
 import { createReceivedIdentity } from "./receivedIdentity";
 import { accountDisplayName, type LookupUserDisplayName } from "./accountDisplayName";
 import type { TokenBucketLimiter } from "@dohc/service-http";
+import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import {
   DiscussionActivityCapacityError,
@@ -182,40 +183,43 @@ export function createLinkReadRoutes(
             observed.push({ recipient, workspaceId, objectId, objectToken, sourceHandle });
         },
       );
-      const files = snapshot.files.map((file) => {
-        const path = presentation.projectPath(file.path);
-        if (path === null) throw notFound();
-        return {
-          path,
-          objectId: identity.object(
-            ["link", fresh.grantId],
-            share.workspaceId,
-            storage.currentFileObjectId({
-              workspaceId: share.workspaceId,
-              versionId: targetVersionId(fresh.effectiveSelector),
-              path: file.path,
-            }),
-          ),
-          blobSha256: file.blobSha256,
-          contentKind: file.contentKind,
-          ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml`
-            ? {
-                automationSwitchable:
-                  fresh.access === "edit" &&
-                  fresh.effectiveSelector.versionId === null &&
-                  fresh.effectiveSelector.paths.some(
-                    (root) =>
-                      file.path.slice(0, -"/automations.yaml".length) === root ||
-                      file.path.startsWith(`${root}/`),
-                  ) &&
-                  storage.automationSwitchableFolder(
-                    share.workspaceId,
-                    file.path.slice(0, -"/automations.yaml".length),
-                  ),
-              }
-            : {}),
-        };
-      });
+      // The listing selects by path prefix; a rule file under it stays hidden.
+      const files = snapshot.files
+        .filter((file) => visibleSharePath(fresh.effectiveSelector, file.path) !== null)
+        .map((file) => {
+          const path = presentation.projectPath(file.path);
+          if (path === null) throw notFound();
+          return {
+            path,
+            objectId: identity.object(
+              ["link", fresh.grantId],
+              share.workspaceId,
+              storage.currentFileObjectId({
+                workspaceId: share.workspaceId,
+                versionId: targetVersionId(fresh.effectiveSelector),
+                path: file.path,
+              }),
+            ),
+            blobSha256: file.blobSha256,
+            contentKind: file.contentKind,
+            ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml`
+              ? {
+                  automationSwitchable:
+                    fresh.access === "edit" &&
+                    fresh.effectiveSelector.versionId === null &&
+                    fresh.effectiveSelector.paths.some(
+                      (root) =>
+                        file.path.slice(0, -"/automations.yaml".length) === root ||
+                        file.path.startsWith(`${root}/`),
+                    ) &&
+                    storage.automationSwitchableFolder(
+                      share.workspaceId,
+                      file.path.slice(0, -"/automations.yaml".length),
+                    ),
+                }
+              : {}),
+          };
+        });
       storage.indexReceivedWorkTargets(observed);
       return linkJsonResponse(
         fresh,
@@ -473,6 +477,7 @@ export function createLinkReadRoutes(
           selectorPaths: capability.effectiveSelector.paths,
           sha256: route.sha256,
           epochLogFloor,
+          visible: (path) => visibleSharePath(capability.effectiveSelector, path) !== null,
         });
     const byteLength = currentByteLength ?? historicalLength();
     if (
