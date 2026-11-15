@@ -17,8 +17,10 @@ import {
 } from "./shareAuthorization";
 import {
   effectiveShareSelector,
+  fileSideOf,
   isWorkspaceSelector,
   parseStoredAnyShareSelectorJson,
+  type AnyShareSelector,
 } from "./shareFilter";
 import { showsGranterEmail, type createShareSummaries } from "./shareSummaries";
 import type {
@@ -35,6 +37,14 @@ export type ShareInventoryRoute =
   | { route: "shares-list" }
   | { route: "share-access"; shareId: string }
   | { route: "share"; shareId: string };
+
+// The file level a share's access answer names. A Group's chat level becomes
+// its file level; a membership names its members' level.
+function fileAccessOf(selector: AnyShareSelector) {
+  if (isWorkspaceSelector(selector)) return selector.access;
+  const files = fileSideOf(selector);
+  return files && "access" in files ? files.access : "view";
+}
 
 export function createShareInventoryRoutes(
   storage: Pick<
@@ -213,8 +223,7 @@ export function createShareInventoryRoutes(
       return jsonResponse(
         {
           status: "current",
-          access:
-            "access" in authorized.effectiveSelector ? authorized.effectiveSelector.access : "view",
+          access: fileAccessOf(authorized.effectiveSelector),
           ...(role === undefined ? {} : { role }),
           ...(levelChangedBy === null ? {} : { levelChangedBy }),
         },
