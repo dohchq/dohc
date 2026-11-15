@@ -495,13 +495,29 @@ function WritableThread({
   // so: a cached list from before a new post doesn't name it. Null while that isn't known.
   const { state: chatsState, retry: retryChats } = useView(views.chats);
   const chats = chatsState.value;
-  const listCurrent = !chatsState.loading && chatsState.problem === null;
+  const group = chats?.find((each) => each.threadIds.includes(threadId)) ?? null;
+  // A list that doesn't name the thread may be a cached one from before it, and a cached list can stay idle without
+  // reading again. So the screen asks for a read of its own, and the thread is no post only once that read succeeds.
+  const [listRead, setListRead] = useState<{
+    readonly threadId: string;
+    readonly phase: "asked" | "reading" | "read";
+  } | null>(null);
+  const phase = listRead?.threadId === threadId ? listRead.phase : null;
+  useEffect(() => {
+    if (chats === null || group !== null || phase === "read") return;
+    if (phase === null) {
+      setListRead({ threadId, phase: "asked" });
+      retryChats();
+    } else if (chatsState.loading) {
+      if (phase !== "reading") setListRead({ threadId, phase: "reading" });
+    } else if (phase === "reading" && chatsState.problem === null) {
+      setListRead({ threadId, phase: "read" });
+    }
+  }, [chats, group, phase, threadId, chatsState.loading, chatsState.problem, retryChats]);
   const post = useMemo(() => {
-    if (!chats) return null;
-    const group = chats.find((each) => each.threadIds.includes(threadId));
     if (group) return group.postThreadIds?.includes(threadId) === true;
-    return listCurrent ? false : null;
-  }, [chats, threadId, listCurrent]);
+    return chats !== null && phase === "read" ? false : null;
+  }, [chats, group, phase, threadId]);
   // The message a reply goes under, or the question it answers, never both.
   const [chosen, setChosen] = useState<string | null>(answerId === null ? replyId : null);
   const [answering, setAnswering] = useState<string | null>(answerId);
