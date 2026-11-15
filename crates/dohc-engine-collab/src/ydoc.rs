@@ -8112,9 +8112,10 @@ fn render_inline(
     //
     // The importer keeps a link with no text as the text the file holds, so
     // its `<` and `>` bound no span. Outside the span the projector writes its
-    // `&`, `<`, and `>` as they are, and each line its title starts, which no
-    // block opener or indent escape then reads. A part's links, with the text
-    // between two of them that holds no newline, `&`, `<`, or `>`, are one
+    // `&`, `<`, `>`, and NBSP as they are, and each line its title starts,
+    // which no block opener or indent escape then reads. A part's links, with
+    // the text between two of them that holds no newline, `&`, `<`, `>`, or
+    // NBSP, are one
     // literal part, written as the later passes write the rest: a `\r` as a
     // reference where they escape block syntax, a highlight's `=` as `\=`.
     // Inside the span a link's `[` is a reference, so it reads back as the
