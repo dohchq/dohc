@@ -350,7 +350,7 @@ export interface SampleWakes {
   retries(): ReadonlyMap<string, WakeRetry>;
   subscribe(listener: () => void): () => void;
   retry(wake: PhoneChatWake, gate: RetryGate): void;
-  /** Leaving the chat: a Try again on its way never answers. */
+  /** Leaving the chat: a Try again on its way, or an alert still showing, never answers. */
   stop(): void;
 }
 
@@ -362,6 +362,8 @@ export function createSampleWakes(demo: string | null): SampleWakes {
   let wakes = sampleWakesFor(demo);
   let retries: ReadonlyMap<string, WakeRetry> = new Map();
   let next = 100;
+  /** Raised by each stop: an alert shown before it sends nothing. */
+  let life = 0;
   const confirming = new Set<string>();
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const listeners = new Set<() => void>();
@@ -378,7 +380,7 @@ export function createSampleWakes(demo: string | null): SampleWakes {
           each.state === wake.state &&
           retryable(each),
       ) ?? false;
-  const send = (wake: PhoneChatWake) => {
+  const send = (wake: PhoneChatWake, gate: RetryGate) => {
     retries = new Map<string, WakeRetry>([
       ...retries,
       [wake.wakeId, { generation: wake.generation, phase: "sending" }],
@@ -386,6 +388,9 @@ export function createSampleWakes(demo: string | null): SampleWakes {
     changed();
     const timer = setTimeout(() => {
       timers.delete(timer);
+      retries = new Map([...retries].filter(([wakeId]) => wakeId !== wake.wakeId));
+      // The screen moved on, or writes became blocked: the answer is dropped, as a server conversation's is.
+      if (!gate.allowed()) return changed();
       const successor: PhoneChatWake = {
         ...wake,
         wakeId: `wake-${String(next).padStart(32, "0")}`,
@@ -403,7 +408,6 @@ export function createSampleWakes(demo: string | null): SampleWakes {
         ),
       );
       wakes = map;
-      retries = new Map([...retries].filter(([wakeId]) => wakeId !== wake.wakeId));
       changed();
     }, SAMPLE_RETRY_MS);
     timers.add(timer);
@@ -418,16 +422,21 @@ export function createSampleWakes(demo: string | null): SampleWakes {
     retry(wake, gate) {
       if (retries.has(wake.wakeId) || confirming.has(wake.wakeId)) return;
       if (!shows(wake) || !gate.allowed()) return;
-      if (wake.state === "unclaimed") return send(wake);
+      if (wake.state === "unclaimed") return send(wake, gate);
       confirming.add(wake.wakeId);
+      const asked = life;
       void gate.confirm(wake).then((yes) => {
         confirming.delete(wake.wakeId);
-        if (yes && shows(wake) && gate.allowed()) send(wake);
+        if (asked === life && yes && shows(wake) && gate.allowed()) send(wake, gate);
       });
     },
     stop() {
+      life += 1;
       for (const timer of timers) clearTimeout(timer);
       timers.clear();
+      if (retries.size === 0) return;
+      retries = new Map();
+      changed();
     },
   };
 }

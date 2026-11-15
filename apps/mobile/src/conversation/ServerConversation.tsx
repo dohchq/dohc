@@ -7,17 +7,9 @@ import {
   type OnViewableItemsChangedInfo,
   type ViewabilityConfig,
 } from "@legendapp/list/react-native";
-import { Stack, useIsFocused, useLocalSearchParams, useRouter } from "expo-router";
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useState,
-  useSyncExternalStore,
-  type ReactNode,
-} from "react";
-import { AppState, StyleSheet, Text, View } from "react-native";
+import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import { StyleSheet, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { ProblemLine } from "../account/ProblemLine";
 import { chatTitle } from "../chats/chatLabels";
@@ -75,6 +67,7 @@ import {
 } from "./serverMessages";
 import type { Author, Message } from "./types";
 import { useChatWakes } from "./useChatWakes";
+import { useVisible } from "./useVisible";
 import {
   useChoose,
   useConversationWrites,
@@ -185,6 +178,8 @@ interface ScreenWrites {
   readonly composer:
     | ((onLayoutHeight: (height: number) => void, title: string) => ReactNode)
     | null;
+  /** Writes aren't blocked, and the screen still shows its activation, as they are when it's called. */
+  writable(): boolean;
 }
 
 /**
@@ -207,6 +202,11 @@ function useScreenWrites(target: string) {
   );
   const writes = useConversationWrites(outbox, phoneWrites, isCurrent);
   const blocked = state ? blockedBy(state, phoneWrites) : "loading";
+  // Read when called, for a step that runs after an alert or an answer: the outbox may have changed before a render.
+  const writable = useCallback(
+    () => isCurrent() && blockedBy(outbox.state(), phoneWrites) === null,
+    [isCurrent, outbox],
+  );
   const actions = useLocalActions(writes, blocked !== null);
   const workspaceId = data?.workspaceId ?? null;
   const rowScope = useMemo(
@@ -278,6 +278,7 @@ function useScreenWrites(target: string) {
     problem,
     answersByQuestion,
     chooser,
+    writable,
   };
 }
 
@@ -328,6 +329,7 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
     message,
     problem: outboxProblemNow,
     chooser,
+    writable,
   } = useScreenWrites(groupId);
   const [replyTo, setReplyTo] = useState<StreamReply | null>(null);
   const local = useCallback(
@@ -457,8 +459,8 @@ function WritableStream({ groupId, name }: { groupId: string; name: string }) {
     [lanes, blocked, problem, replyTo, cancelReply, submit, lanesProblem],
   );
   const streamWrites = useMemo<ScreenWrites>(
-    () => ({ local, message, actions, react, answers, reply, composer }),
-    [local, message, actions, react, answers, reply, composer],
+    () => ({ local, message, actions, react, answers, reply, composer, writable }),
+    [local, message, actions, react, answers, reply, composer, writable],
   );
   return <Stream groupId={groupId} name={name} writes={streamWrites} />;
 }
@@ -491,6 +493,7 @@ function WritableThread({
     problem: outboxProblemNow,
     answersByQuestion,
     chooser,
+    writable,
   } = useScreenWrites(threadId);
   const problemText = useProblemText();
   const view = useMemo(() => views.thread(threadId), [threadId]);
@@ -657,8 +660,8 @@ function WritableThread({
     [blocked, problem, question, replyTarget, parent, cancelReply, submit],
   );
   const threadWrites = useMemo<ScreenWrites>(
-    () => ({ local, message, actions, react, answers, reply, composer }),
-    [local, message, actions, react, answers, reply, composer],
+    () => ({ local, message, actions, react, answers, reply, composer, writable }),
+    [local, message, actions, react, answers, reply, composer, writable],
   );
   return <Thread threadId={threadId} messageId={messageId} writes={threadWrites} />;
 }
@@ -740,9 +743,9 @@ function Stream({
     () => (stream ? new Set(stream.items.map((item) => item.message.threadId)) : null),
     [stream],
   );
-  // A line's Try again is a write: only where writes are on and not blocked.
+  // A line's Try again is a write: offered only where writes are on and not blocked, and checked again as it runs.
   const writable = writes !== undefined && !writes.actions.blocked;
-  const wakes = useChatWakes(wakeTarget, wakeThreads, visible, stream, writable);
+  const wakes = useChatWakes(wakeTarget, wakeThreads, visible, stream, writes?.writable ?? null);
   return (
     <Conversation
       title={chatTitle(kindOf(stream?.groupKind ?? "group"), stream?.name ?? name)}
@@ -821,7 +824,7 @@ function Thread({
   const wakeTarget = useMemo<WakeTarget>(() => ({ kind: "thread", threadId }), [threadId]);
   const wakeThreads = useMemo(() => (thread ? new Set([threadId]) : null), [thread, threadId]);
   const writable = writes !== undefined && !writes.actions.blocked;
-  const wakes = useChatWakes(wakeTarget, wakeThreads, visible, thread, writable);
+  const wakes = useChatWakes(wakeTarget, wakeThreads, visible, thread, writes?.writable ?? null);
   return (
     <Conversation
       title={thread?.title || workspaceWords.thread}
@@ -1065,18 +1068,6 @@ function Conversation({
 const onScreenConfig: ViewabilityConfig = { viewAreaCoveragePercentThreshold: 1 };
 
 const kindOf = (kind: ChatGroupKind): ChatKind => (kind === "dm" ? "person" : kind);
-
-const subscribeAppState = (listener: () => void) => {
-  const subscription = AppState.addEventListener("change", listener);
-  return () => subscription.remove();
-};
-const appActive = () => AppState.currentState === "active";
-
-function useVisible(): boolean {
-  const focused = useIsFocused();
-  const active = useSyncExternalStore(subscribeAppState, appActive);
-  return focused && active;
-}
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },

@@ -5,7 +5,7 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { SymbolView } from "expo-symbols";
 import { documentWords } from "@dohc/interface-words/documents";
 import type { PhoneChatWake } from "@dohc/workspace-contracts/chat-wakes";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Composer } from "./Composer";
 import {
@@ -41,6 +41,7 @@ import {
 import { confirmTryElsewhere } from "./wakeRetryAlert";
 import { localMessage } from "./serverMessages";
 import type { Message } from "./types";
+import { useShowing, useVisible } from "./useVisible";
 import {
   useChoose,
   useConversationWrites,
@@ -117,17 +118,18 @@ export function SampleConversation() {
   const wakes = useSyncExternalStore(sampleWakes.subscribe, sampleWakes.byMessage);
   const wakeRetries = useSyncExternalStore(sampleWakes.subscribe, sampleWakes.retries);
   const writable = blocked === null;
-  const writableNow = useRef(writable);
-  useEffect(() => {
-    writableNow.current = writable;
-  }, [writable]);
+  // As a server conversation's: the screen still shows the chat it was pressed in, and the outbox, read when called,
+  // isn't blocked.
+  const showing = useShowing(useVisible());
   const retryWake = useCallback(
-    (wake: PhoneChatWake) =>
+    (wake: PhoneChatWake) => {
+      const shown = showing();
       sampleWakes.retry(wake, {
-        allowed: () => writableNow.current,
+        allowed: () => shown() && blockedBy(outbox.state(), true) === null,
         confirm: confirmTryElsewhere,
-      }),
-    [sampleWakes],
+      });
+    },
+    [sampleWakes, showing, outbox],
   );
   const wakesFor = (message: Message) => {
     const own = message.local === undefined ? wakes?.get(message.id) : undefined;

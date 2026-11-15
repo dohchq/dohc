@@ -21,11 +21,12 @@ import { shownProblem, type ServerClient } from "../server/client";
 //
 // Try again on a line that didn't start, or wasn't confirmed, sends one request the person asked for, while they watch.
 // Its operation ID is minted once, on the press, after the alert for one that wasn't confirmed. A second press, or Try
-// again after a lost answer, sends that ID for that exact wake again. Each step first checks that the screen still
-// wants the conversation, that its latest read still shows the wake at that generation, in that state, with a computer
-// to try, and that writes aren't blocked. The answer shows nothing of its own: the line stays busy until the read it
-// starts lands. Background, leaving the conversation, a sign-in change and stop abort it and forget it, so another
-// press needs a fresh read first. Nothing of it is stored, and nothing sends it later.
+// again after a lost answer, sends that ID for that exact wake again. Each step, the answer's included, first checks
+// that the screen still shows the conversation with writes unblocked, and that its latest read still shows the wake at
+// that generation, in that state, with a computer to try; an answer that fails the check is dropped, unused. An answer
+// shows nothing of its own: the line stays busy, and Try again waits, until the read it starts lands. Background,
+// leaving the conversation, a sign-in change and stop abort it and forget it, so another press needs a fresh read
+// first. Nothing of it is stored, and nothing sends it later.
 
 /** A conversation's wakes as its latest read gave them, by message, with each message's wakes kept apart. */
 export interface WakeView {
@@ -48,7 +49,7 @@ export interface WakeRetry {
 
 /** What a Try again asks of the screen it was pressed on. */
 export interface RetryGate {
-  /** The screen still shows the conversation, and writes aren't blocked. Checked before each step. */
+  /** The screen still shows the conversation, and writes aren't blocked, as they are when it's called. */
   allowed(): boolean;
   /** Asks the person before a wake that wasn't confirmed tries another computer. Resolves true only on confirm. */
   confirm(wake: PhoneChatWake): Promise<boolean>;
@@ -75,8 +76,16 @@ export interface ChatWakes {
   refresh(workspaceId: string): void;
   /** The conversation's lines' Try again states, by wake ID. The same object until one changes. */
   retries(workspaceId: string, target: WakeTarget): ReadonlyMap<string, WakeRetry>;
-  /** Try again on a line of a wanted conversation, from the person's press. */
-  retry(workspaceId: string, target: WakeTarget, wake: PhoneChatWake, gate: RetryGate): void;
+  /**
+   * Try again on a line of a wanted conversation, from the person's press. Settles once the press is done: it sent
+   * nothing, or its answer landed or was dropped. The read the answer starts lands apart.
+   */
+  retry(
+    workspaceId: string,
+    target: WakeTarget,
+    wake: PhoneChatWake,
+    gate: RetryGate,
+  ): Promise<void>;
   /** In the background: aborts every read and wait. */
   pause(): void;
   /** Back from the background: reads every wanted context again. */
@@ -87,6 +96,26 @@ export interface ChatWakes {
 
 export const wakeKey = (target: WakeTarget) =>
   target.kind === "stream" ? `stream:${target.groupId}` : `thread:${target.threadId}`;
+
+/**
+ * A screen's one want of its conversation's wakes. Each `want` takes the new want before it lets the last go, so a new
+ * content read of the same conversation reads the wakes again without leaving them unwanted, and a Try again on its
+ * way survives. `release` lets go, as when the screen hides or closes.
+ */
+export function screenWant() {
+  let held: (() => void) | null = null;
+  return {
+    want(wakes: ChatWakes, workspaceId: string, target: WakeTarget, threads: ReadonlySet<string>) {
+      const last = held;
+      held = wakes.want(workspaceId, target, threads);
+      last?.();
+    },
+    release() {
+      held?.();
+      held = null;
+    },
+  };
+}
 
 interface Entry {
   readonly target: WakeTarget;
@@ -106,9 +135,11 @@ interface Intent {
   readonly source: PhoneChatWake;
   /** Minted on the press, or after the alert's confirm; null while the alert shows. */
   operationId: string | null;
-  /** `rereading`: answered `retried`, until the read after it lands. */
-  phase: "confirming" | "sending" | "rereading" | "failed" | "missing";
+  /** `retried`: the server took it, and it's done once the read after it lands. */
+  phase: "confirming" | "sending" | "retried" | "failed" | "missing";
   send: AbortController | null;
+  /** The read its answer started hasn't landed: the line stays busy, and Try again waits for it. */
+  reading: boolean;
 }
 
 /** The latest read still shows the wake as it was pressed on, at that generation, in that state, with a computer to try. */
@@ -178,7 +209,10 @@ export function createChatWakes(options: {
     const next = new Map<string, WakeRetry>();
     for (const [wakeId, intent] of entry.intents) {
       if (intent.phase === "confirming") continue;
-      const phase = intent.phase === "rereading" ? "sending" : intent.phase;
+      const phase: WakeRetry["phase"] =
+        (intent.phase === "failed" || intent.phase === "missing") && !intent.reading
+          ? intent.phase
+          : "sending";
       next.set(wakeId, { generation: intent.source.generation, phase });
     }
     if (next.size === 0 && entry.retries.size === 0) return;
@@ -194,20 +228,26 @@ export function createChatWakes(options: {
   };
 
   /**
-   * A read landed: a request answered `retried` is done, and one whose wake the read no longer shows goes with its line.
-   * A failed or missing one stays while its line does.
+   * A read landed, or failed: a request that answered `retried` is done, and one waiting for the read stops waiting. A
+   * failed one stays only while a read that worked still shows its wake as it was pressed on, and a missing one while
+   * its line shows. After a failed read, a failed one stays, and its Try again waits for a read that works.
    */
   const settle = (entry: Entry) => {
     let changedAny = false;
+    const worked = entry.view?.failed === false;
     for (const [wakeId, intent] of entry.intents) {
       const shown = entry.view?.byMessage
         .get(intent.source.messageId)
         ?.some((each) => each.wakeId === wakeId);
       if (
-        intent.phase === "rereading" ||
-        ((intent.phase === "failed" || intent.phase === "missing") && !shown)
+        intent.phase === "retried" ||
+        (intent.phase === "failed" && worked && !stillShows(entry, intent.source)) ||
+        (intent.phase === "missing" && !shown)
       ) {
         entry.intents.delete(wakeId);
+        changedAny = true;
+      } else if (intent.reading) {
+        intent.reading = false;
         changedAny = true;
       }
     }
@@ -300,39 +340,65 @@ export function createChatWakes(options: {
   };
 
   /**
-   * Sends a Try again with its own operation ID and wake, through this sign-in's client, and reads the conversation
-   * again once it answers. The answer lands only while the request is still the one current.
+   * Whether a Try again may still act: this sign-in's controller runs, the screen wants the conversation, the intent is
+   * still the line's, its gate allows it now, and the latest read still shows its wake as it was pressed on.
    */
-  function send(workspaceId: string, entry: Entry, intent: Intent, operationId: string) {
+  const mayAct = (entry: Entry, intent: Intent, gate: RetryGate) =>
+    live() &&
+    entry.wanted > 0 &&
+    entry.intents.get(intent.source.wakeId) === intent &&
+    gate.allowed() &&
+    stillShows(entry, intent.source);
+
+  /**
+   * Sends a Try again with its own operation ID and wake, through this sign-in's client, and reads the conversation
+   * again once it answers. An answer lands only while the request is the one current and `mayAct` still holds; one
+   * that fails the check ends the Try again without its answer, and reads nothing.
+   */
+  function send(
+    workspaceId: string,
+    entry: Entry,
+    intent: Intent,
+    operationId: string,
+    gate: RetryGate,
+  ): Promise<void> {
     const { client } = signIn;
     const controller = new AbortController();
     intent.send = controller;
     intent.phase = "sending";
     publish(entry);
-    const current = () =>
-      live() && entry.intents.get(intent.source.wakeId) === intent && intent.send === controller;
-    const answered = (phase: Intent["phase"]) => {
+    const answered = (phase: "retried" | "failed" | "missing") => {
+      if (entry.intents.get(intent.source.wakeId) !== intent || intent.send !== controller) return;
       intent.send = null;
+      if (!mayAct(entry, intent, gate)) {
+        entry.intents.delete(intent.source.wakeId);
+        publish(entry);
+        return;
+      }
       intent.phase = phase;
+      intent.reading = true;
       publish(entry);
       read(workspaceId, entry);
     };
-    retryWake(client, workspaceId, operationId, intent.source.wakeId, controller.signal).then(
+    return retryWake(
+      client,
+      workspaceId,
+      operationId,
+      intent.source.wakeId,
+      controller.signal,
+    ).then(
       (answer) => {
-        if (!current()) return;
         if (answer.kind === "missing") return answered("missing");
         if (answer.kind === "refused") return answered("failed");
         // A generation of another message or thread isn't this wake's.
         const { messageId, threadId } = answer.wake;
         answered(
           messageId === intent.source.messageId && threadId === intent.source.threadId
-            ? "rereading"
+            ? "retried"
             : "failed",
         );
       },
-      () => {
-        if (current()) answered("failed");
-      },
+      () => answered("failed"),
     );
   }
 
@@ -394,38 +460,47 @@ export function createChatWakes(options: {
       workspaces.get(workspaceId)?.entries.get(wakeKey(target))?.retries ?? NO_RETRIES,
     retry(workspaceId, target, wake, gate) {
       const entry = workspaces.get(workspaceId)?.entries.get(wakeKey(target));
-      if (!entry) return;
-      const allowed = (source: PhoneChatWake) =>
-        live() && entry.wanted > 0 && gate.allowed() && stillShows(entry, source);
+      if (!entry) return Promise.resolve();
       const known = entry.intents.get(wake.wakeId);
       if (known) {
-        // A second press while it sends or asks does nothing. After a failure it sends the same request again.
-        if (known.phase === "failed" && known.operationId !== null && allowed(known.source))
-          send(workspaceId, entry, known, known.operationId);
-        return;
+        // A second press while it asks, sends, or waits for the read after its answer does nothing. After a failure,
+        // once that read landed, it sends the same request again.
+        return known.phase === "failed" &&
+          !known.reading &&
+          known.operationId !== null &&
+          mayAct(entry, known, gate)
+          ? send(workspaceId, entry, known, known.operationId, gate)
+          : Promise.resolve();
       }
-      if (!allowed(wake)) return;
-      const intent: Intent = { source: wake, operationId: null, phase: "confirming", send: null };
+      const intent: Intent = {
+        source: wake,
+        operationId: null,
+        phase: "confirming",
+        send: null,
+        reading: false,
+      };
       entry.intents.set(wake.wakeId, intent);
+      if (!mayAct(entry, intent, gate)) {
+        entry.intents.delete(wake.wakeId);
+        return Promise.resolve();
+      }
       if (wake.state === "unclaimed") {
         intent.operationId = crypto.randomUUID();
-        send(workspaceId, entry, intent, intent.operationId);
-        return;
+        return send(workspaceId, entry, intent, intent.operationId, gate);
       }
       // It may have started: the person says to try another computer first. Cancel sends nothing.
-      const asked = () => entry.intents.get(wake.wakeId) === intent;
-      gate.confirm(wake).then(
+      return gate.confirm(wake).then(
         (yes) => {
-          if (!asked()) return;
-          if (!yes || !allowed(wake)) {
+          if (entry.intents.get(wake.wakeId) !== intent) return;
+          if (!yes || !mayAct(entry, intent, gate)) {
             entry.intents.delete(wake.wakeId);
             return;
           }
           intent.operationId = crypto.randomUUID();
-          send(workspaceId, entry, intent, intent.operationId);
+          return send(workspaceId, entry, intent, intent.operationId, gate);
         },
         () => {
-          if (asked()) entry.intents.delete(wake.wakeId);
+          if (entry.intents.get(wake.wakeId) === intent) entry.intents.delete(wake.wakeId);
         },
       );
     },
