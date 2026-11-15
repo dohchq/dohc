@@ -3,7 +3,14 @@ import * as Haptics from "expo-haptics";
 import { CheckCircle2, Mail, X } from "lucide-react-native";
 import { memo, useEffect, useRef, useState } from "react";
 import { demoMode } from "../demo";
-import { StyleSheet, Text, View, type AccessibilityActionEvent } from "react-native";
+import {
+  AccessibilityInfo,
+  StyleSheet,
+  Text,
+  View,
+  type AccessibilityActionEvent,
+  type ViewInstance,
+} from "react-native";
 import ReanimatedSwipeable, {
   SwipeDirection,
   type SwipeableMethods,
@@ -13,9 +20,11 @@ import { useTheme } from "../theme";
 import type { PhoneNotice } from "./phoneNotice";
 import { copyText } from "../copy";
 import { ActionPill } from "./ActionPill";
+import { AnswerStatus, NoticeAnswer } from "./NoticeAnswer";
 import {
   ageMinutes,
   dismissLabel,
+  isExpanded,
   marksRead,
   noticeDetails,
   noticeMeta,
@@ -67,9 +76,26 @@ export const NoticeRow = memo(function NoticeRow({
   };
   const router = useRouter();
   const { label, actions } = noticeRowAccessibility(notice);
-  // Open goes where the phone can go, Reply opens a mention's thread with its message chosen, and Try again does what
-  // the notice says failed. In the dev-only sample, Try again and an Open with nowhere to go need the server, so they do
-  // nothing.
+  // While the row's answer is open, its pill is Open. While it's open, or this phone has an answer on it that isn't
+  // saved, it has no Done and no swipe, so Done never hides an answer that still needs the person. Closing it puts
+  // VoiceOver back on the row, after layout.
+  const answer = notice.answer;
+  const editing = answer !== undefined && answer.editing !== null;
+  const expanded = isExpanded(notice);
+  const rowRef = useRef<ViewInstance>(null);
+  const wasEditing = useRef(editing);
+  useEffect(() => {
+    const was = wasEditing.current;
+    wasEditing.current = editing;
+    if (!was || editing) return;
+    const frame = requestAnimationFrame(() => {
+      if (rowRef.current) AccessibilityInfo.sendAccessibilityEvent(rowRef.current, "focus");
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [editing]);
+  // Open goes where the phone can go, Reply opens a mention's thread with its message chosen, Answer opens the row's
+  // answer, and Try again does what the notice says failed. In the dev-only sample, Try again and an Open with nowhere
+  // to go need the server, so they do nothing.
   const handlers = noticeRowHandlers(notice, {
     open:
       notice.onOpen ??
@@ -83,7 +109,8 @@ export const NoticeRow = memo(function NoticeRow({
     dismiss,
   });
   const readToggle = marksRead(notice) && onSetRead !== undefined;
-  const worded = wordedLabel(notice);
+  const worded = editing ? (answer.open ? noticesWords.open : null) : wordedLabel(notice);
+  const onWorded = editing ? answer.open : handlers.worded;
   const pills = worded !== null || readToggle;
   const done = notice.relayId !== undefined;
   const onAction = (event: AccessibilityActionEvent) => handlers[event.nativeEvent.actionName]?.();
@@ -91,7 +118,7 @@ export const NoticeRow = memo(function NoticeRow({
     <TitleControls
       copyLabel={notice.failed ? noticesWords.copyErrorDetails : noticesWords.copyNoticeDetails}
       onCopy={handlers.copy}
-      dismissLabel={notice.dismissible ? dismissLabel(notice) : undefined}
+      dismissLabel={notice.dismissible && !expanded ? dismissLabel(notice) : undefined}
       onDismiss={dismiss}
       done={done}
       demoCopied={demoMode === "notice-copied" && notice.id === "n1"}
@@ -99,13 +126,16 @@ export const NoticeRow = memo(function NoticeRow({
       style={roomy && pills ? styles.actionControls : undefined}
     />
   );
+  // Collapsed, the row is one element with its actions in the rotor. Expanded, it's a group: each text and control is
+  // reached on its own, and none sits under an accessible parent.
   const row = (
     <View
+      ref={rowRef}
       style={[styles.row, { backgroundColor: theme.bg }]}
-      accessible
       accessibilityLabel={label}
-      accessibilityActions={actions}
-      onAccessibilityAction={onAction}
+      {...(expanded
+        ? { accessible: false }
+        : { accessible: true, accessibilityActions: actions, onAccessibilityAction: onAction })}
     >
       {notice.read ? null : <View style={[styles.dot, { backgroundColor: theme.accent }]} />}
       <SenderMark kind={notice.senderKind} failed={notice.failed === true} />
@@ -137,6 +167,13 @@ export const NoticeRow = memo(function NoticeRow({
             {notice.body}
           </Text>
         ) : null}
+        {answer ? (
+          expanded ? (
+            <NoticeAnswer answer={answer} />
+          ) : (
+            <AnswerStatus answer={answer} />
+          )
+        ) : null}
         {notice.retryTarget ? (
           <Text style={[styles.body, { color: theme.danger }]}>
             {noticesWords.targetReadFailed}
@@ -144,7 +181,7 @@ export const NoticeRow = memo(function NoticeRow({
         ) : null}
         {pills || roomy ? (
           <View style={styles.actions}>
-            {worded !== null ? <ActionPill label={worded} onPress={handlers.worded} /> : null}
+            {worded !== null ? <ActionPill label={worded} onPress={onWorded} /> : null}
             {notice.retryTarget ? (
               <ActionPill label={noticesWords.tryAgain} onPress={handlers.retryTarget} />
             ) : null}
@@ -164,7 +201,7 @@ export const NoticeRow = memo(function NoticeRow({
       </View>
     </View>
   );
-  if (!notice.dismissible) return row;
+  if (!notice.dismissible || expanded) return row;
   // Swiping left is Done, or Dismiss for a failure held on this phone. Swiping right marks a read Notice from the
   // server unread, then springs back; an unread one offers no swipe right. A wake, which the phone's scope leaves out,
   // isn't dismissible, so it has no swipe at all.

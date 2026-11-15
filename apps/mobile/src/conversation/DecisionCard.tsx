@@ -4,6 +4,7 @@ import { SymbolView, type SymbolViewProps } from "expo-symbols";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { ActionPill } from "../notices/ActionPill";
 import { useTheme, type Theme } from "../theme";
+import { decisionWord } from "./decisionAnswers";
 import type { Decision, Message } from "./types";
 import type { AnswerActions } from "./useOutbox";
 
@@ -127,24 +128,20 @@ export function DecisionCard({
 }
 
 /** The card's status line. A lost answer whose winner a read doesn't show says only Answered, naming nobody. */
-function statusOf(
-  { state }: Decision,
+export function statusOf(
+  decision: Decision,
   theme: Theme,
 ): { label: string; symbol: SymbolViewProps["name"]; color: string } {
-  switch (state.kind) {
+  const label = decisionWord(decision);
+  switch (decision.state.kind) {
     case "open":
     case "held":
-      return { label: chatWords.unanswered, symbol: "questionmark.circle", color: theme.warning };
+      return { label, symbol: "questionmark.circle", color: theme.warning };
     case "answering":
-      return { label: chatWords.answering, symbol: "ellipsis.circle", color: theme.muted };
+      return { label, symbol: "ellipsis.circle", color: theme.muted };
     case "answered":
-      return { label: chatWords.answered, symbol: "checkmark.circle", color: theme.success };
     case "lost":
-      return {
-        label: state.winner ? chatWords.alreadyAnswered : chatWords.answered,
-        symbol: "checkmark.circle",
-        color: theme.success,
-      };
+      return { label, symbol: "checkmark.circle", color: theme.success };
   }
 }
 

@@ -1,11 +1,14 @@
 import { NOTICE_KINDS, type NoticeKind } from "@dohc/workspace-contracts/relay";
 import { describe, expect, it } from "vitest";
+import type { OutboxRecord } from "../conversation/conversationWrites";
 import type { AccountWorkspace } from "../server/api";
 import type { NoticeRecord } from "../server/notices";
 import type { WorkspaceList } from "../server/workspaceList";
 import type { ChatMessage, ChatThread, MissingChat, Read } from "../server/workspaceReads";
 import {
+  answerCandidate,
   createNoticeTargets,
+  isPost,
   noticeAction,
   replyCandidate,
   targetKey,
@@ -237,7 +240,7 @@ describe("the reads behind Reply", () => {
     // A failed read isn't read again just by showing the row again; Try again does it.
     targets.want([T1]);
     expect(calls).toHaveLength(1);
-    targets.retry(T1);
+    expect(targets.retry(T1)).toBe(true);
     expect(calls).toHaveLength(2);
     expect(calls[0]?.signal.aborted).toBe(false);
     calls[1]?.answer.resolve(answer(thread([message()])));
@@ -266,6 +269,7 @@ describe("the reads behind Reply", () => {
     expect(targets.state().get(KEY)).toEqual({ kind: "reading" });
     // A sign-in that has ended asks nothing more.
     targets.want([{ ...T1, threadId: "t3" }]);
+    expect(targets.retry(T1)).toBe(false);
     expect(calls).toHaveLength(2);
 
     const second = harness();
@@ -324,9 +328,9 @@ describe("the reads behind Reply", () => {
     calls[1]?.answer.resolve(answer(thread([message({ threadId: "t2" })])));
     await settle();
     expect(targets.state().size).toBe(0);
-    // Refresh and Try again read nothing nobody wants.
+    // Refresh and Try again read nothing nobody wants, and Try again says it started nothing.
     targets.refresh();
-    targets.retry(T1);
+    expect(targets.retry(T1)).toBe(false);
     expect(calls).toHaveLength(2);
     // Wanted again, it's read again, never answered from the dropped read.
     targets.want([T1]);
@@ -366,5 +370,255 @@ describe("the reads behind Reply", () => {
     expect(changes).toBe(2);
     expect(targets.state()).not.toBe(before);
     unsubscribe();
+  });
+});
+
+// An agent-run Notice from Nova whose target names an agent's open question.
+const asked: NoticeRecord = {
+  ...mention,
+  noticeId: "n2",
+  kind: "agent-run",
+  senderKind: "agent",
+  senderLabel: "Nova",
+  title: "Nova is waiting for your answer",
+  body: "Which return train?",
+  target: { thread: "t1", run: "r1", message: "m1" },
+};
+const question = (fields: Partial<ChatMessage> = {}) =>
+  message({
+    authorKind: "agent",
+    authorName: "Nova",
+    body: "Which return train?",
+    needsDecision: true,
+    decisionState: "open",
+    ...fields,
+  });
+const listedRead = (messages: readonly ChatMessage[], post = false): TargetRead => ({
+  kind: "read",
+  thread: thread(messages),
+  post,
+});
+
+describe("which Notice offers Answer", () => {
+  const open = listedRead([question()]);
+
+  it("offers Answer on an agent-run Notice whose exact message a read shows as an agent's open question", () => {
+    expect(actionFor(asked, open)).toMatchObject({
+      kind: "answer",
+      question: {
+        target: { workspaceId: "w1", threadId: "t1", messageId: "m1", answer: true },
+        question: { id: "m1", authorName: "Nova" },
+        post: false,
+      },
+    });
+  });
+
+  it("offers Answer on no other kind of Notice, and a mention's question stays a Reply", () => {
+    for (const kind of Object.keys(NOTICE_KINDS) as NoticeKind[]) {
+      const action = actionFor({ ...asked, kind }, open);
+      expect(action.kind, kind).toBe(
+        kind === "agent-run" ? "answer" : kind === "mention" ? "reply" : "open",
+      );
+    }
+  });
+
+  it("checks the exact message, its thread, its author's kind and the decision, never a name or the prose", () => {
+    for (const read of [
+      listedRead([question({ id: "m2" })]),
+      listedRead([question({ threadId: "t2" })]),
+      { kind: "read", thread: thread([question()], "t2"), post: false } as const,
+      listedRead([question({ authorKind: "human" })]),
+      listedRead([question({ authorKind: "automation" })]),
+      listedRead([question({ needsDecision: false, decisionState: null })]),
+      listedRead([question({ decisionState: "resolved" })]),
+      // A message that reads like a question, but asks no decision.
+      listedRead([message({ authorKind: "agent", body: "Which return train should I use?" })]),
+    ])
+      expect(actionFor(asked, read).kind).toBe("open");
+    // The Notice's sender doesn't have to be the question's author: the exact target decides, not a name.
+    expect(actionFor({ ...asked, senderLabel: "Scout" }, open).kind).toBe("answer");
+  });
+
+  it("waits for the chat list before it offers Answer, so the answer's place is known", () => {
+    expect(actionFor(asked, { kind: "read", thread: thread([question()]) })).toMatchObject({
+      kind: "open",
+      readFailed: false,
+    });
+    expect(actionFor(asked, { kind: "failed" })).toMatchObject({ kind: "open", readFailed: true });
+  });
+
+  it("keeps Open once this phone has an answer on its way, held, saved or lost", () => {
+    const kept = (fields: Partial<OutboxRecord>): OutboxRecord => ({
+      origin: "o",
+      accountId: "u",
+      workspaceId: "w1",
+      operationId: "op",
+      messageId: "mo",
+      sequence: 1,
+      dependsOn: null,
+      target: { kind: "thread", id: "t1" },
+      write: {
+        operation: "reply",
+        args: { threadId: "t1", body: "x", resolves: { messageId: "m1" } },
+      },
+      stage: "queued",
+      attempted: false,
+      withheld: false,
+      pendingSinceMs: null,
+      result: null,
+      ...fields,
+    });
+    for (const fields of [
+      {},
+      { withheld: true },
+      { stage: "saved", result: { kind: "saved", threadId: "t1", messageId: "mo" } },
+      {
+        stage: "refused",
+        result: {
+          kind: "refused",
+          reason: "already answered",
+          threadId: "t1",
+          winnerMessageId: null,
+        },
+      },
+    ] as const)
+      expect(actionFor(asked, open, { answers: () => [kept(fields)] }).kind).toBe("open");
+  });
+
+  it("answers in the Notice's own workspace, whichever is open", () => {
+    const fundraiser: AccountWorkspace = { ...trip, workspaceId: "w2", name: "Fundraiser" };
+    const action = noticeAction(
+      { ...asked, workspaceId: "w2" },
+      {
+        list: listed([trip, fundraiser]),
+        writes: true,
+        signIn: current,
+        reads: new Map([[targetKey({ workspaceId: "w2", threadId: "t1" }), open]]),
+      },
+    );
+    expect(action).toMatchObject({ kind: "answer", question: { target: { workspaceId: "w2" } } });
+    // Hidden, it isn't a candidate at all, so its read is dropped.
+    expect(
+      answerCandidate(
+        { ...asked, workspaceId: "w2" },
+        listed([trip, { ...fundraiser, showOnPhone: false }]),
+        true,
+      ),
+    ).toBeNull();
+  });
+
+  it("tells a post's thread from its list, and an unlisted thread is no post", () => {
+    const group = (postThreadIds?: readonly string[]) => ({
+      id: "g1",
+      name: "planning",
+      kind: "group" as const,
+      threadIds: ["t1", "t2"],
+      ...(postThreadIds ? { postThreadIds } : {}),
+      unreadCount: 0,
+      unreadThreadIds: [],
+    });
+    expect(isPost([group(["t1"])], "t1")).toBe(true);
+    expect(isPost([group(["t2"])], "t1")).toBe(false);
+    expect(isPost([group()], "t1")).toBe(false);
+    expect(isPost([], "t1")).toBe(false);
+  });
+});
+
+describe("the reads behind Answer", () => {
+  const ANSWER = { ...T1, answer: true as const };
+
+  function answerHarness(isCurrent = () => true) {
+    const threads: ReturnType<typeof deferred<Read<ChatThread | MissingChat>>>[] = [];
+    const lists: ReturnType<typeof deferred<boolean>>[] = [];
+    const handed: { workspaceId: string; messages: readonly ChatMessage[] }[] = [];
+    const targets = createNoticeTargets({
+      signIn: { isCurrent },
+      read: () => {
+        const next = deferred<Read<ChatThread | MissingChat>>();
+        threads.push(next);
+        return next.promise;
+      },
+      readPost: () => {
+        const next = deferred<boolean>();
+        lists.push(next);
+        return next.promise;
+      },
+      onThread: (workspaceId, shown) => void handed.push({ workspaceId, messages: shown.messages }),
+    });
+    return { targets, threads, lists, handed };
+  }
+
+  it("reads the chat list with an answer's thread, and offers Answer only once both answer", async () => {
+    const { targets, threads, lists } = answerHarness();
+    targets.want([ANSWER]);
+    expect(lists).toHaveLength(1);
+    threads[0]?.resolve(answer(thread([question()])));
+    await settle();
+    expect(targets.state().get(KEY)).toEqual({ kind: "reading" });
+    lists[0]?.resolve(true);
+    await settle();
+    expect(targets.state().get(KEY)).toMatchObject({ kind: "read", post: true });
+    expect(actionFor(asked, targets.state().get(KEY))).toMatchObject({
+      kind: "answer",
+      question: { post: true },
+    });
+  });
+
+  it("counts a failed chat list as a failed read, with Try again", async () => {
+    const { targets, threads, lists } = answerHarness();
+    targets.want([ANSWER]);
+    threads[0]?.resolve(answer(thread([question()])));
+    lists[0]?.reject(new Error("offline"));
+    await settle();
+    expect(targets.state().get(KEY)).toEqual({ kind: "failed" });
+  });
+
+  it("reads a mention's thread again with its list once an answer needs it too", async () => {
+    const { targets, threads, lists } = answerHarness();
+    targets.want([T1]);
+    expect(lists).toHaveLength(0);
+    threads[0]?.resolve(answer(thread([question()])));
+    await settle();
+    targets.want([T1, ANSWER]);
+    expect(threads).toHaveLength(2);
+    expect(lists).toHaveLength(1);
+    // Once read with its list, the same rows read nothing more.
+    targets.want([ANSWER, T1]);
+    expect(threads).toHaveLength(2);
+  });
+
+  it("hands each current read's messages to the outbox, for its own workspace, and drops a late one", async () => {
+    let signedIn = true;
+    const { targets, threads, lists, handed } = answerHarness(() => signedIn);
+    targets.want([ANSWER, { ...ANSWER, workspaceId: "w2" }]);
+    threads[0]?.resolve(answer(thread([question()])));
+    lists[0]?.resolve(false);
+    await settle();
+    expect(handed).toEqual([{ workspaceId: "w1", messages: [question()] }]);
+    signedIn = false;
+    threads[1]?.resolve(answer(thread([question()])));
+    lists[1]?.resolve(false);
+    await settle();
+    expect(handed).toHaveLength(1);
+  });
+
+  it("drops a workspace's threads once it stops showing, and every thread at a sign-in change", async () => {
+    const { targets, threads, lists } = answerHarness();
+    targets.want([ANSWER]);
+    threads[0]?.resolve(answer(thread([question()])));
+    lists[0]?.resolve(false);
+    await settle();
+    expect(targets.state().size).toBe(1);
+    // Show on phone turned off, here or elsewhere: the screen's next want names no target in that workspace.
+    const hidden = listed([{ ...trip, showOnPhone: false }]);
+    targets.want(answerCandidate(asked, hidden, true) ? [ANSWER] : []);
+    expect(targets.state().size).toBe(0);
+    // Wanted again once it shows, it reads again from nothing.
+    targets.want([ANSWER]);
+    expect(targets.state().get(KEY)).toEqual({ kind: "reading" });
+    // A sign-in change stops this sign-in's reads, and the next sign-in's start empty.
+    targets.stop();
+    expect(targets.state().size).toBe(0);
+    expect(answerHarness().targets.state().size).toBe(0);
   });
 });

@@ -12,6 +12,7 @@ import { NoticesFrameProbe } from "../firstScreenProbe";
 import { NoticeRow } from "./NoticeRow";
 import { useNotices } from "./NoticesState";
 import type { PhoneNotice } from "./phoneNotice";
+import { freeAnswer, useAnswerReveal } from "./useAnswerReveal";
 import { useSyncBandHost, type BandRecord } from "./useSyncBandHost";
 import { useTheme } from "../theme";
 
@@ -118,11 +119,24 @@ export function SampleNotices() {
   const items: Item[] = band.spacer
     ? [{ kind: "band" as const }, ...notices.map((notice) => ({ kind: "notice" as const, notice }))]
     : notices.map((notice) => ({ kind: "notice" as const, notice }));
+  // The open free answer's row, counted in the list's items, band space included, so it can rise above the keyboard.
+  const answering = freeAnswer(notices);
+  const { keyboardHeight, onItemSizeChanged } = useAnswerReveal({
+    list,
+    visit: answering?.visit ?? null,
+    index: answering
+      ? items.findIndex((item) => item.kind === "notice" && item.notice.id === answering.noticeId)
+      : -1,
+    focused: opened,
+  });
   const rows = (
     <LegendList
       ref={list}
       data={items}
       {...band.scrollHandlers}
+      onItemSizeChanged={onItemSizeChanged}
+      // Room for the keyboard under an open free answer, so even the last row's field and Send can rise above it.
+      contentInset={{ bottom: answering ? keyboardHeight : 0 }}
       onScrollBeginDrag={() => {
         openFrozen.current = true;
         band.scrollHandlers.onScrollBeginDrag();
@@ -133,6 +147,8 @@ export function SampleNotices() {
       getFixedItemSize={(item) => (item.kind === "band" ? bandHeight : undefined)}
       estimatedItemSize={128}
       style={{ backgroundColor: theme.bg }}
+      // A tap on a row's Send or a choice reaches it while its answer field holds the keyboard.
+      keyboardShouldPersistTaps="handled"
       // Room for the bar and the tab bar, so the last row ends at the tab bar, with or without the band.
       contentInsetAdjustmentBehavior="automatic"
       // Design review only: lets the partway-fold demo scroll to a resting offset above zero, or below the top for a

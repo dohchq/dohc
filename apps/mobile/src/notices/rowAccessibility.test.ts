@@ -1,12 +1,38 @@
 import { describe, expect, it } from "vitest";
+import type { DecisionState, LocalMark } from "../conversation/types";
 import {
+  isExpanded,
   noticeRowAccessibility,
   noticeRowHandlers,
   shortAgo,
   spokenAgo,
   swipesUnread,
 } from "./rowAccessibility";
-import type { PhoneNotice } from "./phoneNotice";
+import type { NoticeAnswerView, PhoneNotice } from "./phoneNotice";
+
+/** A row's answer, collapsed, at `state`. */
+const view = (state: DecisionState): NoticeAnswerView => ({
+  question: { id: "q1", authorName: "Nova", body: "Which return train?" },
+  decision: { options: [], state },
+  marks: [],
+  editing: null,
+  current: true,
+  answerable: state.kind === "open",
+  sendable: true,
+  cancel: () => undefined,
+  submit: async () => ({ kind: "kept" }),
+  draft: () => "",
+  keepDraft: () => undefined,
+  actions: {
+    blocked: false,
+    problems: new Map(),
+    send: () => undefined,
+    discard: () => undefined,
+    discardReaction: () => undefined,
+    discardUnreadable: () => undefined,
+    copy: () => undefined,
+  },
+});
 
 const base: PhoneNotice = {
   id: "n",
@@ -63,6 +89,47 @@ describe("a Notices row's actions", () => {
         retryTarget: () => {},
       }).actions.map((action) => action.label),
     ).toEqual(["Open", "Try again", "Mark unread", "Copy notice details", "Done"]);
+  });
+
+  it("puts Answer first on an agent's verified question, and says where the question stands", () => {
+    const asked = { ...base, relayId: "n", senderKind: "agent" as const, open: "answer" as const };
+    expect(noticeRowAccessibility(asked).actions.map((action) => action.label)).toEqual([
+      "Answer",
+      "Mark read",
+      "Copy notice details",
+      "Done",
+    ]);
+    const answered = {
+      ...asked,
+      open: "open" as const,
+      answer: view({ kind: "answered", chosen: null }),
+    };
+    expect(noticeRowAccessibility(answered).label).toContain(", Answered, ");
+    expect(isExpanded(answered)).toBe(false);
+  });
+
+  it("is one element until its answer opens, or this phone keeps an answer to it that isn't saved", () => {
+    const open = view({ kind: "open" });
+    expect(isExpanded({ ...base, answer: open })).toBe(false);
+    expect(isExpanded({ ...base, answer: { ...open, editing: 1 } })).toBe(true);
+    const mark = (state: LocalMark["state"]): LocalMark => ({
+      operationId: "op",
+      state,
+      attempted: false,
+      body: "Yes",
+    });
+    // Waiting and sending too, so an answer for a workspace the phone can no longer open keeps Discard in reach.
+    for (const kind of ["waiting", "sending", "withheld", "stalled", "missing"] as const)
+      expect(isExpanded({ ...base, answer: { ...open, marks: [mark({ kind })] } }), kind).toBe(
+        true,
+      );
+    expect(
+      isExpanded({ ...base, answer: { ...open, marks: [mark({ kind: "refused", reason: "x" })] } }),
+    ).toBe(true);
+    expect(isExpanded({ ...base, answer: { ...open, marks: [mark({ kind: "saved" })] } })).toBe(
+      false,
+    );
+    expect(isExpanded(base)).toBe(false);
   });
 
   it("swipes right only to mark a read Notice from the server unread", () => {
@@ -137,6 +204,7 @@ describe("a Notices row's handlers", () => {
     base,
     { ...base, relayId: "n", open: "open" },
     { ...base, relayId: "n", open: "reply" },
+    { ...base, relayId: "n", senderKind: "agent", open: "answer", answer: view({ kind: "open" }) },
     { ...base, relayId: "n", open: "open", retryTarget: () => {} },
     { ...base, relayId: "n", read: true, elsewhere: true },
     { ...base, relayId: "n", dismissible: false },
@@ -152,12 +220,13 @@ describe("a Notices row's handlers", () => {
     }
   });
 
-  it("offers only the row's own actions: no Run now, Answer, or other automation or agent action", () => {
+  it("offers only the row's own actions: no Run now, or other automation or agent action", () => {
     const known = new Set(["worded", "retryTarget", "read", "copy", "dismiss"]);
     const words = new Set([
       "Open",
       "Open note",
       "Reply",
+      "Answer",
       "Try again",
       "Mark read",
       "Mark unread",

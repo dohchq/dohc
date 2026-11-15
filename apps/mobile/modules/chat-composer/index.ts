@@ -28,6 +28,11 @@ type ChatComposerFieldProps = {
   textColor: string;
   placeholderColor: string;
   clearIf: ClearRequest;
+  /**
+   * Text kept elsewhere, as a draft, that the field shows once, only while it's still empty and unedited. It reports it
+   * as an edit, with a new revision, so the screen's text matches. "" shows nothing.
+   */
+  initialText: string;
   onChangeText: (event: { nativeEvent: FieldChange }) => void;
   /** The height the text needs at the field's width, in points, sent when it changes. */
   onContentHeight: (event: { nativeEvent: { height: number } }) => void;

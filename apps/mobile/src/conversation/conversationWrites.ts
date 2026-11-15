@@ -188,6 +188,13 @@ export function clearStatus(
 }
 
 /**
+ * Whether `change` is the field's clear for `request`: it cleared the body the outbox kept. An edit, a refusal, or a
+ * clear for an earlier request isn't.
+ */
+export const clearedBy = (change: FieldChange, request: ClearRequest) =>
+  change.cleared !== 0 && change.cleared === request.token;
+
+/**
  * The draft once the field reports `change`. Only its clear for `request` closes New post, by `closePost`, and only
  * when `sent` is a post or message: a reply's clear, null here, leaves New post as it was.
  */
@@ -198,9 +205,7 @@ export function fieldChanged(
   sent: Draft | null,
 ): Draft {
   const typed = { ...current, text: change.text, textRevision: change.revision };
-  return sent !== null && change.cleared !== 0 && change.cleared === request.token
-    ? closePost(typed, sent)
-    : typed;
+  return sent !== null && clearedBy(change, request) ? closePost(typed, sent) : typed;
 }
 
 /** One showing of a workspace store and chat. Showing the same ones again is another activation. */

@@ -1,3 +1,4 @@
+import { chatWords } from "@dohc/interface-words/notices";
 import type { ChatWrite } from "../server/chatWrites";
 import type { OutboxState } from "../server/outbox";
 import type { ChatMessage } from "../server/workspaceReads";
@@ -97,6 +98,21 @@ export function decisionOf(
   if (answers.some((record) => unfinished(record) && record.withheld))
     return { options, state: { kind: "held" } };
   return { options, state: { kind: "open" } };
+}
+
+/** The card's status, in the desktop's words. A lost answer whose winner a read doesn't show says only Answered. */
+export function decisionWord({ state }: Decision): string {
+  switch (state.kind) {
+    case "open":
+    case "held":
+      return chatWords.unanswered;
+    case "answering":
+      return chatWords.answering;
+    case "answered":
+      return chatWords.answered;
+    case "lost":
+      return state.winner ? chatWords.alreadyAnswered : chatWords.answered;
+  }
 }
 
 /** Where an answer goes: always the question's own thread, under `parentMessageId` when there is one. */

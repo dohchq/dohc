@@ -4,6 +4,8 @@ import {
   relativeTime,
   spokenRelativeTime,
 } from "@dohc/interface-words/notices";
+import { decisionWord } from "../conversation/decisionAnswers";
+import { needsPerson } from "./noticeAnswers";
 import type { PhoneNotice } from "./phoneNotice";
 
 /** A notice's arrival time from how long ago it came, in the desktop's words: "2m ago". */
@@ -24,7 +26,7 @@ export const noticeDetails = (notice: PhoneNotice) =>
   [notice.title, notice.body].filter(Boolean).join("\n");
 
 export interface RowHandlers {
-  /** Open, Open note, or Reply. */
+  /** Open, Open note, Reply, or Answer. */
   open?(): void;
   retry?(): void;
   /** Try again on a failed read of a mention's message. */
@@ -68,7 +70,7 @@ export function noticeMeta(notice: PhoneNotice, time: string): string {
     .join(" · ");
 }
 
-/** The row's worded action, on its pill and first in the rotor: Try again, Open, Open note or Reply. */
+/** The row's worded action, on its pill and first in the rotor: Try again, Open, Open note, Reply or Answer. */
 export function wordedLabel(notice: PhoneNotice): string | null {
   if (notice.retry) return noticesWords.tryAgain;
   switch (notice.open) {
@@ -76,12 +78,27 @@ export function wordedLabel(notice: PhoneNotice): string | null {
       return noticesWords.openNote;
     case "reply":
       return chatWords.reply;
+    case "answer":
+      return chatWords.answer;
     case "open":
       return noticesWords.open;
     default:
       return null;
   }
 }
+
+/**
+ * Whether the row is a group whose controls VoiceOver reaches one by one, not one element: while its answer is open,
+ * or while this phone keeps an answer to its question that isn't saved, with Discard, and Send or Copy. It then has no
+ * Done and no swipe.
+ */
+export const isExpanded = (notice: PhoneNotice) =>
+  notice.answer !== undefined &&
+  (notice.answer.editing !== null || notice.answer.marks.some(needsPerson));
+
+/** The question's status a row shows, as its card says it, or null when the row shows none. */
+export const answerStatus = (notice: PhoneNotice) =>
+  notice.answer ? decisionWord(notice.answer.decision) : null;
 
 /**
  * What VoiceOver hears for a row, and its actions in rotor order: the worded action, Try again when the read that
@@ -110,6 +127,7 @@ export function noticeRowAccessibility(notice: PhoneNotice): {
     notice.senderKind ? noticesWords.fromSender[notice.senderKind] : null,
     notice.title,
     notice.body,
+    answerStatus(notice),
     notice.retryTarget ? noticesWords.targetReadFailed : null,
     noticeMeta(notice, time),
   ]
