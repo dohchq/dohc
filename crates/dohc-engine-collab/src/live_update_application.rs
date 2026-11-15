@@ -781,34 +781,7 @@ impl AdmittedLiveUpdateMetadata {
                 for author in authors {
                     author.validate()?;
                 }
-                if !one_author(authors) {
-                    // Only a room's save, made under the owner's authority,
-                    // names everyone whose edits it holds. Automations commit
-                    // outside the room, so it never names one.
-                    if !matches!(
-                        self.accepted.authority,
-                        ServerDerivedLiveUpdateAuthority::Owner { .. }
-                    ) || authors.iter().any(|author| {
-                        matches!(
-                            author,
-                            LiveAuthorEntry::Automation { .. } | LiveAuthorEntry::Unattributed {}
-                        )
-                    }) {
-                        return Err(invalid("noncanonical author snapshot"));
-                    }
-                    let mut identities = std::collections::BTreeSet::new();
-                    if authors.len() > crate::author_coverage::MAX_INTERVAL_AUTHORS
-                        || !authors
-                            .iter()
-                            .all(|author| identities.insert(author.identity()))
-                        || serde_json::to_vec(authors)
-                            .map_err(|_| invalid("author snapshot JSON"))?
-                            .len()
-                            > crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES
-                    {
-                        return Err(invalid("noncanonical author snapshot"));
-                    }
-                }
+                admissible_authors(&self.accepted.authority, authors)?;
                 canonical_ranges(deletes)?;
                 if let Some(coverage) = &self.checkpoint_coverage {
                     validate_checkpoint_coverage(coverage)?;
@@ -876,6 +849,38 @@ impl LiveUpdateHostApplicationAck {
             application_replayed: replayed,
         }
     }
+}
+
+/// Several authors share one admitted update only in a room's save, made under
+/// the owner's authority, which names everyone whose edits it holds.
+/// Automations commit outside the room, so it never names one.
+pub(crate) fn admissible_authors(
+    authority: &ServerDerivedLiveUpdateAuthority,
+    authors: &[LiveAuthorEntry],
+) -> Result<(), ApplicationError> {
+    if one_author(authors) {
+        return Ok(());
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    if !matches!(authority, ServerDerivedLiveUpdateAuthority::Owner { .. })
+        || authors.len() > crate::author_coverage::MAX_INTERVAL_AUTHORS
+        || authors.iter().any(|author| {
+            matches!(
+                author,
+                LiveAuthorEntry::Automation { .. } | LiveAuthorEntry::Unattributed {}
+            )
+        })
+        || !authors
+            .iter()
+            .all(|author| identities.insert(author.identity()))
+        || serde_json::to_vec(authors)
+            .map_err(|_| invalid("author snapshot JSON"))?
+            .len()
+            > crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES
+    {
+        return Err(invalid("noncanonical author snapshot"));
+    }
+    Ok(())
 }
 
 /// One author, or a person and the agent acting for them: every admitted
