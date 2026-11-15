@@ -603,7 +603,10 @@ export function createSyncRelayHandler({
       account = email ? { email, verified: verified !== null } : null;
     }
     storage.refreshAccountEmail(userId, account, startedAt);
+    // Kept in refresh order and capped: forgetting the oldest only costs a lookup.
+    refreshedAt.delete(userId);
     refreshedAt.set(userId, startedAt);
+    if (refreshedAt.size > 10_000) refreshedAt.delete(refreshedAt.keys().next().value!);
     const email = account?.verified ? account.email : null;
     if (email) storage.claimPendingSharesForEmail(email, userId);
   };

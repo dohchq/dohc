@@ -31,17 +31,19 @@ export function assertMemberChanges(
         throw relayError("share_access_rate_limited");
       throw relayError("share_op_rejected", message);
     };
-    if (typeof before === "string" && typeof after === "string" && before !== after) {
+    const moves = typeof before === "string" && typeof after === "string" && before !== after;
+    const creates = before == null && typeof after === "string";
+    // With the bucket empty, every create and move waits, so a 429 can't say
+    // whether a path is hidden.
+    if (charge && (moves || creates) && !limiter(owner).has(userId, nowMs))
+      throw relayError("share_access_rate_limited");
+    if (moves) {
       if (!reach || reach.levelAt(before) === null || reach.levelAt(after) === null) refuse();
       // Both ends are visible, so naming the rule boundary shows nothing hidden.
       else if (reach.nearestRule(before) !== reach.nearestRule(after))
         refuse("Ask an admin to move this.");
     }
-    if (
-      before == null &&
-      typeof after === "string" &&
-      (!reach || reach.folderLevel(accessRuleFolder(after)) === null)
-    )
+    if (creates && (!reach || reach.folderLevel(accessRuleFolder(after)) === null))
       refuse("can't create here");
   }
 }

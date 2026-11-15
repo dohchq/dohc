@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { SqliteDb } from "./types";
-import { memberReach } from "./memberReach";
+import type { AccessRuleSet } from "@dohc/security-contract/access-rules";
+import { currentAccessRuleSet } from "./accessRules";
+import { memberReach, nearestRuleFolder } from "./memberReach";
 import { isShareAccessValue } from "@dohc/security-contract/share-selector";
 
 export function initializeMemberRevisions(db: SqliteDb): void {
@@ -17,7 +19,8 @@ export function initializeMemberRevisions(db: SqliteDb): void {
  */
 export function watchMemberReachWrites(db: SqliteDb): void {
   db.exec("CREATE TEMP TABLE member_reach_dirty(workspace_id TEXT PRIMARY KEY) STRICT");
-  // A main-Version rename this transaction made, judged per member at settle.
+  // A main-Version rename this transaction made. Settle judges it per member
+  // only when it crosses a rule boundary.
   db.exec(
     "CREATE TEMP TABLE member_reach_moves(workspace_id TEXT NOT NULL, before_path TEXT NOT NULL, after_path TEXT NOT NULL) STRICT",
   );
@@ -48,7 +51,6 @@ export function watchMemberReachWrites(db: SqliteDb): void {
     BEGIN
       INSERT INTO member_reach_moves VALUES (NEW.workspace_id,
         json_extract(NEW.payload_json, '$.payloadBeforePath'), json_extract(NEW.payload_json, '$.payloadAfterPath'));
-      INSERT OR IGNORE INTO member_reach_dirty VALUES (NEW.workspace_id);
     END`);
   db.exec(
     "INSERT OR IGNORE INTO member_reach_dirty SELECT workspace_id FROM sync_relay_workspace_memberships",
@@ -57,43 +59,50 @@ export function watchMemberReachWrites(db: SqliteDb): void {
 
 /**
  * A member's revision advances when their evaluated folder levels change, or
- * when a rename this transaction made crossed rules and changed its level for
- * them. Costs grow with members and rules, never with History.
+ * when a rename this transaction made crossed a rule boundary and changed its
+ * level for them. A rename that crosses no boundary costs one lookup per path.
+ * Other costs grow with members and rules, never with History.
  */
 export function settleMemberRevisions(db: SqliteDb): void {
+  const rulesByWorkspace = new Map<string, AccessRuleSet>();
+  const rulesOf = (workspaceId: string) => {
+    let rules = rulesByWorkspace.get(workspaceId);
+    if (!rules) {
+      rules = currentAccessRuleSet(db, workspaceId, "main");
+      rulesByWorkspace.set(workspaceId, rules);
+    }
+    return rules;
+  };
+  const crossedByWorkspace = new Map<string, { before: string; after: string }[]>();
+  for (const row of db.prepare("SELECT workspace_id, before_path, after_path FROM temp.member_reach_moves").all()) {
+    const workspaceId = String(row.workspace_id);
+    const move = { before: String(row.before_path), after: String(row.after_path) };
+    const rules = rulesOf(workspaceId);
+    if (nearestRuleFolder(rules, move.before) === nearestRuleFolder(rules, move.after)) continue;
+    crossedByWorkspace.set(workspaceId, [...(crossedByWorkspace.get(workspaceId) ?? []), move]);
+  }
+  const workspaces = new Set([
+    ...db.prepare("SELECT workspace_id FROM temp.member_reach_dirty").all().map((row) => String(row.workspace_id)),
+    ...crossedByWorkspace.keys(),
+  ]);
   const members =
-    db.prepare(`SELECT m.workspace_id, m.user_id, m.role, ms.member_level, s.signature FROM sync_relay_workspace_members m
+    db.prepare(`SELECT m.user_id, m.role, ms.member_level, s.signature FROM sync_relay_workspace_members m
     JOIN sync_relay_workspace_memberships ms ON ms.workspace_id = m.workspace_id
-    JOIN temp.member_reach_dirty d ON d.workspace_id = m.workspace_id
     LEFT JOIN sync_relay_member_revisions s ON s.workspace_id = m.workspace_id AND s.user_id = m.user_id
-    WHERE m.state = 'active'`);
-  const moves = db.prepare(
-    "SELECT before_path, after_path FROM temp.member_reach_moves WHERE workspace_id = ?",
-  );
+    WHERE m.workspace_id = ? AND m.state = 'active'`);
   const save =
     db.prepare(`INSERT INTO sync_relay_member_revisions(workspace_id, user_id, signature, revision) VALUES (?, ?, ?, ?)
     ON CONFLICT(workspace_id, user_id) DO UPDATE SET signature = excluded.signature, revision = excluded.revision`);
-  const movesByWorkspace = new Map<string, { before: string; after: string }[]>();
-  for (const m of members.all()) {
-    if ((m.role !== "admin" && m.role !== "member") || !isShareAccessValue(m.member_level))
-      continue;
-    const workspaceId = String(m.workspace_id);
-    const reach = memberReach(db, workspaceId, String(m.user_id), m.role, m.member_level);
-    const signature = reach.signature();
-    let moved = movesByWorkspace.get(workspaceId);
-    if (!moved) {
-      moved = moves
-        .all(workspaceId)
-        .map((row) => ({ before: String(row.before_path), after: String(row.after_path) }));
-      movesByWorkspace.set(workspaceId, moved);
+  for (const workspaceId of workspaces) {
+    const crossed = crossedByWorkspace.get(workspaceId) ?? [];
+    for (const m of members.all(workspaceId)) {
+      if ((m.role !== "admin" && m.role !== "member") || !isShareAccessValue(m.member_level)) continue;
+      const reach = memberReach(db, workspaceId, String(m.user_id), m.role, m.member_level, rulesOf(workspaceId));
+      const signature = reach.signature();
+      const moved = crossed.some(({ before, after }) => reach.levelAt(before) !== reach.levelAt(after));
+      if (m.signature === signature && !moved) continue;
+      save.run(workspaceId, m.user_id, signature, randomUUID());
     }
-    const crossed = moved.some(
-      ({ before, after }) =>
-        reach.nearestRule(before) !== reach.nearestRule(after) &&
-        reach.levelAt(before) !== reach.levelAt(after),
-    );
-    if (m.signature === signature && !crossed) continue;
-    save.run(workspaceId, m.user_id, signature, randomUUID());
   }
   db.exec("DELETE FROM temp.member_reach_dirty");
   db.exec("DELETE FROM temp.member_reach_moves");

@@ -10,6 +10,7 @@ import {
   type ReachViewer,
 } from "@dohc/security-contract/access-rules";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
+import { pathCollisionKey } from "../pathCollisionKey";
 import { accountEmail } from "./accountEmails";
 import { accessRuleHistoryFloor, accessRuleSetBefore, currentAccessRuleSet } from "./accessRules";
 import type { SqliteDb } from "./types";
@@ -34,13 +35,31 @@ export interface MemberReach {
   nearestRule(path: string): string;
 }
 
-/** Build once inside the caller's read or committing transaction. */
+/**
+ * The folded name of the nearest folder with a rule over `path`, or "" for the
+ * root. It depends only on where rules are, so it's the same for every member.
+ * Case twins count, as they do for levels.
+ */
+export function nearestRuleFolder(rules: AccessRuleSet, path: string): string {
+  let folder = accessRuleFolder(path);
+  for (;;) {
+    const key = pathCollisionKey(folder);
+    if (rules.folded.has(key) || !folder) return key;
+    folder = accessRuleFolder(folder);
+  }
+}
+
+/**
+ * Build once inside the caller's read or committing transaction. `current`
+ * passes rules already read in that transaction, so many members share a parse.
+ */
 export function memberReach(
   db: SqliteDb,
   workspaceId: string,
   userId: string,
   role: "admin" | "member",
   level: ShareAccess,
+  current?: AccessRuleSet,
 ): MemberReach {
   const email = accountEmail(db, userId);
   const viewer: ReachViewer =
@@ -60,7 +79,7 @@ export function memberReach(
             ([folder, rule]) => [folder, rule && rule.people.size === 0 ? rule : null] as const,
           ),
         );
-  const rules = knownRules(currentAccessRuleSet(db, workspaceId, "main"));
+  const rules = knownRules(current ?? currentAccessRuleSet(db, workspaceId, "main"));
   const levelAt = (path: string) => fileLevel(rules, viewer, path);
   const atFolder = (folder: string) => folderLevel(rules, viewer, folder);
   const floor = accessRuleHistoryFloor(db, workspaceId);
@@ -94,14 +113,6 @@ export function memberReach(
     const result = { visible, path };
     objects.set(id, result);
     return result;
-  };
-  const nearestRule = (path: string) => {
-    let folder = accessRuleFolder(path);
-    for (;;) {
-      if (rules.exact.has(folder)) return folder;
-      if (!folder) return "";
-      folder = accessRuleFolder(folder);
-    }
   };
   // Settle compares this to decide whether reach changed. It names hidden
   // folders, so it stays a function: it never serializes into a selector or
@@ -147,7 +158,7 @@ export function memberReach(
     signature,
     levelAt,
     folderLevel: atFolder,
-    nearestRule,
+    nearestRule: (path) => nearestRuleFolder(rules, path),
     refresh: () => memberReach(db, workspaceId, userId, role, level),
     objectVisible: (id) => object(id).visible,
     objectPath: (id) => object(id).path,

@@ -528,6 +528,9 @@ describe("what a member reaches", () => {
     await ownerWrite(h, "docs/a.md", "a");
     await ownerWrite(h, "docs/b.md", "b");
     await ownerWrite(h, "docs/c.md", "c");
+    // A rule on a case twin hides `hide/` too.
+    await ownerWrite(h, "Hide/access.yaml", "");
+    await ownerWrite(h, "hide/d.md", "d");
     const revision = async () => {
       const response = await h(request("ana", `/sync/shares/${shareId}/reach`));
       expect(response.status, await response.clone().text()).toBe(200);
@@ -548,6 +551,8 @@ describe("what a member reaches", () => {
     await expectRevision(false, "move across rules at the same level");
     await ownerRename(h, "docs/c.md", "view/c.md");
     await expectRevision(true, "move across rules to another level");
+    await ownerRename(h, "hide/d.md", "docs/d.md");
+    await expectRevision(true, "move out of a case twin's hidden folder");
     // A rename in another Version leaves main's reach alone.
     const context = storage as StorageContext;
     context.tx(() =>
@@ -763,6 +768,13 @@ describe("what a member reaches", () => {
     });
     expect(limited.status).toBe(429);
     expect(await limited.json()).toMatchObject({ code: "share_access_rate_limited" });
+    // A visible create waits too, so the 429 says nothing about which paths are hidden.
+    const visible = await post(h, "ana", `/sync/shares/${shareId}/proposals`, {
+      submitId: "visible",
+      ops: changes("docs/after.md"),
+    });
+    expect(visible.status).toBe(429);
+    expect(await visible.json()).toMatchObject({ code: "share_access_rate_limited" });
   });
 
   it("scrubs a workspace notice and downgrades file presence after folder access changes", async () => {
