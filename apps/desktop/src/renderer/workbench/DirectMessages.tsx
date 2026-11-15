@@ -60,6 +60,16 @@ export function DirectAvatar(props: { people: readonly DirectPerson[]; viewerId:
   );
 }
 
+/** The mark beside someone the viewer blocks. */
+function BlockedMark(props: { testId: string; name: string | null }) {
+  return (
+    <span data-testid={props.testId} title={props.name ? `You blocked ${props.name}` : "Blocked"} className="inline-flex shrink-0 text-subtle">
+      <Ban size={12} aria-hidden />
+      <span className="sr-only">Blocked</span>
+    </span>
+  );
+}
+
 function preview(conversation: DirectConversation, viewerId: string): string | null {
   const last = conversation.last;
   if (!last) return null;
@@ -150,12 +160,7 @@ export function DirectPeopleSection(props: Reporting & {
                   onMenu={(at, fromKeyboard) => setMenu({ conversationId: conversation.conversationId, at, fromKeyboard })}
                   trailing={
                     <>
-                      {conversation.blocked ? (
-                        <span data-testid="chats-dm-blocked" title={single ? `You blocked ${directPersonName(single)}` : "Blocked"} className="inline-flex shrink-0 text-subtle">
-                          <Ban size={12} aria-hidden />
-                          <span className="sr-only">Blocked</span>
-                        </span>
-                      ) : null}
+                      {conversation.blocked ? <BlockedMark testId="chats-dm-blocked" name={single ? directPersonName(single) : null} /> : null}
                       <UnreadPill count={conversation.unread} testId="chats-dm-unread" />
                     </>
                   }
@@ -355,6 +360,13 @@ function ConversationForAccount(props: ConversationProps) {
   useEffect(() => {
     if (shownSeq !== null && lastSeq > shownSeq) void load();
   }, [lastSeq, shownSeq, load]);
+
+  // The saved copy is shown until the history reads again. When the list reads from the server, read it too.
+  const shownSaved = shown.status === "ready" && shown.saved;
+  const listFromServer = ready !== null && !ready.saved ? ready : null;
+  useEffect(() => {
+    if (shownSaved && listFromServer) void load();
+  }, [shownSaved, listFromServer, load]);
 
   const records = useMemo(
     () => shown.status === "ready" ? shown.messages.map((message) => directMessageRecord(conversationId, message, viewerId)) : [],
@@ -645,6 +657,11 @@ function NewMessageForAccount(props: NewMessageProps) {
   }, [members, query]);
   const active = matches[Math.min(highlight, matches.length - 1)] ?? null;
   const full = shownPicks.length >= MAX_PICKS;
+  // A block holds for every conversation, so any conversation that lists someone as blocked says so.
+  const blockedIds = useMemo(
+    () => new Set(state.status === "ready" ? state.conversations.flatMap((entry) => entry.people.filter((person) => person.blocked).map((person) => person.personId)) : []),
+    [state],
+  );
 
   const toggle = (memberId: string) => {
     setPickError(false);
@@ -783,6 +800,7 @@ function NewMessageForAccount(props: NewMessageProps) {
             >
               <ChatAvatar presentation={directPresentation(member.memberId, null)} name={member.name} kind="human" size="strip" />
               <span className="min-w-0 flex-1 truncate">{member.name}</span>
+              {blockedIds.has(member.memberId) ? <BlockedMark testId="chats-dm-new-blocked" name={member.name} /> : null}
               {selected ? <Check size={14} aria-hidden className="shrink-0 text-accent" /> : null}
             </li>
           );
@@ -812,6 +830,7 @@ function NewMessageForAccount(props: NewMessageProps) {
                 <span key={id} data-testid="chats-dm-new-pick" data-member-id={id} className="inline-flex h-6 items-center gap-1 rounded-full border border-line bg-panel-2 pl-1 pr-0.5 text-[12px] text-ink">
                   <ChatAvatar presentation={directPresentation(id, null)} name={names[index]!} kind="human" size="strip" className="size-4 text-[8px]" />
                   <span className="max-w-40 truncate">{names[index]}</span>
+                  {blockedIds.has(id) ? <BlockedMark testId="chats-dm-new-pick-blocked" name={names[index]!} /> : null}
                   <button
                     type="button"
                     aria-label={`Remove ${names[index]}`}

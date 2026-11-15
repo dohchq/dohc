@@ -65,7 +65,8 @@ export function NavRow(props: {
       {props.icon}
       <span
         data-testid={props.labelTestId}
-        className={`min-w-0 flex-1 truncate text-[13px] ${
+        // With a detail, the name keeps its width and the detail truncates first.
+        className={`min-w-0 truncate text-[13px] ${props.detail ? "shrink" : "flex-1"} ${
           props.active || props.unread
             ? "font-medium text-ink"
             : props.muted
@@ -76,7 +77,7 @@ export function NavRow(props: {
         {props.label}
       </span>
       {props.detail ? (
-        <span className="min-w-0 max-w-[50%] shrink truncate text-[11px] text-subtle">{props.detail}</span>
+        <span className="min-w-0 flex-1 truncate text-[11px] text-subtle">{props.detail}</span>
       ) : null}
       {props.trailing}
     </button>

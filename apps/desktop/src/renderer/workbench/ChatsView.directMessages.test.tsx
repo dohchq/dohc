@@ -372,6 +372,25 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dm-offline")).toBeNull();
   });
 
+  it("brings the composer back on its own once the server answers again", async () => {
+    let changed: () => void = () => {};
+    bridgeMock.onDirectChanged.mockImplementation((listener: () => void) => {
+      changed = listener;
+      return () => undefined;
+    });
+    signedIn([conversation()], true);
+    history([sent(2, "sam", "See you at nine")], true);
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    await openSam();
+    await screen.findByTestId("chats-dm-offline");
+
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    act(() => changed());
+    expect(await screen.findByTestId("chats-dm-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-offline")).toBeNull();
+  });
+
   it("starts a new message with people picked from the workspace's members", async () => {
     const user = userEvent.setup();
     signedIn([]);
@@ -424,6 +443,21 @@ describe("ChatsView direct messages", () => {
     });
     const view = await screen.findByTestId("chats-dm-view");
     expect(view.dataset.conversationId).toBe("conversation-sam");
+  });
+
+  it("marks a member the viewer blocks, in the list and on their chip", async () => {
+    const user = userEvent.setup();
+    signedIn([conversation({ conversationId: "conversation-ana", people: [{ ...ana, blocked: true }], blocked: true })]);
+    members([{ memberId: "sam", name: "Sam Rivera" }, { memberId: "ana", name: "Ana Diaz" }]);
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, people: [ana, sam] });
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
+    const [anaOption, samOption] = await screen.findAllByTestId("chats-dm-new-member");
+    expect(within(anaOption!).getByTestId("chats-dm-new-blocked").title).toBe("You blocked Ana Diaz");
+    expect(anaOption!.textContent).toContain("Blocked");
+    expect(within(samOption!).queryByTestId("chats-dm-new-blocked")).toBeNull();
+    await user.click(anaOption!);
+    expect(within(screen.getByTestId("chats-dm-new-pick")).getByTestId("chats-dm-new-pick-blocked")).toBeTruthy();
   });
 
   it("offers the conversation the picked people already have", async () => {
