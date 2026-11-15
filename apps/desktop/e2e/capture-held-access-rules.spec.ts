@@ -22,6 +22,8 @@ const VIEW = "members: view\n";
 const EDIT = "members: edit\n";
 
 async function shoot(page: Page, name: string): Promise<void> {
+  // Rows show their time at rest; a pointer over one shows its dismiss button.
+  await page.mouse.move(0, 0);
   for (const theme of ["light", "dark"] as const) {
     await page.evaluate(
       (value) => document.documentElement.setAttribute("data-theme", value),
@@ -84,10 +86,39 @@ const releaseDecisions = (app: ElectronApplication) =>
     (globalThis as { __dohcHeldDecisions?: { release(): void } }).__dohcHeldDecisions?.release(),
   );
 
+// Answers the Members page's list as the relay would for a workspace whose
+// members get `memberLevel`. No relay runs here, so without this the level
+// can't be read.
+async function supplyMembers(
+  app: ElectronApplication,
+  memberLevel: "view" | "comment" | "edit",
+): Promise<void> {
+  await app.evaluate(({ ipcMain }, level) => {
+    type Handler = (...args: unknown[]) => unknown;
+    const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, Handler> })
+      ._invokeHandlers;
+    if (!handlers.has("desktop:workspace-members")) throw new Error("main has no Members handler");
+    handlers.set("desktop:workspace-members", async (_event, input) => ({
+      status: "ready",
+      view: {
+        workspaceId: (input as { workspaceId: string }).workspaceId,
+        workspaceName: "Workspace",
+        viewer: { memberId: "owner", role: "owner" },
+        memberLevel: level,
+        inviteLink: null,
+        people: [],
+      },
+    }));
+  }, memberLevel);
+}
+
 const buttonNames = (scope: Locator) =>
   scope
     .getByRole("button")
-    .filter({ hasText: /Restore rule|Restoring…|Allow new access|Allowing…|Remove rule|Removing…/ })
+    .filter({
+      hasText:
+        /Restore rule|Restoring…|Allow new access|Allowing…|Remove rule|Removing…|Open Members/,
+    })
     .allTextContents();
 
 test("an access rule changed outside dohc waits for its owner in Notices until they decide @capture-holds", async () => {
@@ -153,23 +184,25 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
       "Until you choose, dohc doesn't record or share changes in team. Members keep their earlier access.",
     );
     await expect(widened).toContainText("Restoring keeps the rule from outside dohc as a copy.");
-    await expect(widened).toContainText("members: View → Edit");
+    await expect(widened).toContainText("Members: View → Edit");
     expect(await buttonNames(widened)).toEqual(["Restore rule", "Allow new access"]);
     await shoot(page, "widened-toast");
 
-    // The workspace's own rule is named as the workspace's, and its removal
-    // shows each level it falls back to.
+    // The workspace's own rule is named as the workspace's. Without it,
+    // members get the level set in Members settings, which dohc can't read
+    // with no relay, so the notice says where it is set.
     await rm(join(temp.rootPath, "access.yaml"));
     const removed = toasts.filter({
       hasText: "The workspace's access rule was removed outside dohc",
     });
     await expect(removed).toHaveCount(1, { timeout: 30_000 });
     await expect(removed).toContainText(
-      "Without it, this workspace follows each member's workspace access.",
+      "Without it, members get the level set in Members settings. dohc can't read that level now.",
     );
-    await expect(removed).toContainText("members: View → workspace access");
-    expect(await buttonNames(removed)).toEqual(["Restore rule", "Remove rule"]);
-    await shoot(page, "removed-root-toast");
+    await expect(removed).toContainText("Members: View → set in Members settings");
+    await expect(removed).not.toContainText("workspace access");
+    expect(await buttonNames(removed)).toEqual(["Restore rule", "Remove rule", "Open Members"]);
+    await shoot(page, "removed-root-unread-toast");
 
     const toggle = page.getByTestId("notice-center-toggle");
     const openNotices = async () => {
@@ -186,17 +219,27 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await expect(held.first()).toContainText(
       "The workspace's access rule was removed outside dohc",
     );
-    await expect(widenedRow).toContainText("members: View → Edit");
-    await expect(removedRow).toContainText("members: View → workspace access");
+    await expect(widenedRow).toContainText("Members: View → Edit");
+    await expect(removedRow).toContainText("Members: View → set in Members settings");
     await shoot(page, "notices-rows");
 
-    // Details shows the rule dohc recorded and when dohc noticed the change.
+    // Details leads with the rule dohc recorded and when dohc noticed the
+    // change, before the notice's own words and each change.
     await removedRow.getByRole("button", { name: "Details" }).click();
     const details = removedRow.locator("pre");
-    await expect(details).toContainText("Recorded rule: members: view");
-    await expect(details).toContainText(/Noticed: \S/);
+    await expect(details).toHaveText(
+      /^Recorded rule: members: view\nNoticed: \S[^\n]*\n[\s\S]*\nChange: Members: View → set in Members settings\n/,
+    );
     await shoot(page, "details");
     await removedRow.getByRole("button", { name: "Hide details" }).click();
+
+    // Open Members goes where the level is set.
+    await removedRow.getByRole("button", { name: "Open Members" }).click();
+    await expect(page.getByTestId("settings-members")).toBeVisible();
+    await shoot(page, "open-members");
+    await page.getByRole("button", { name: "Close settings" }).click();
+    await expect(page.getByTestId("settings-members")).toHaveCount(0);
+    await openNotices();
 
     // A choice on team waits for the workspace's own rule. Notices stays
     // open on it, and its row says so with nothing to retry.
@@ -205,7 +248,7 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await expect(waits).toHaveCount(1, { timeout: 30_000 });
     await expect(toggle).toHaveAttribute("aria-expanded", "true");
     await expect(waits).toContainText(
-      "Your choice for team wasn't applied. The workspace's access rule also changed outside dohc.",
+      "dohc didn't apply your choice for team. The workspace's access rule also changed outside dohc.",
     );
     await expect(waits.getByRole("button", { name: "Try again" })).toHaveCount(0);
     await shoot(page, "nested-refusal");
@@ -236,6 +279,9 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     // for the workspace's rule waits for nothing now, so its row goes.
     const restored = rows.filter({ hasText: "Restored the workspace's access rule." });
     await expect(restored).toHaveCount(1, { timeout: 30_000 });
+    await expect(restored).toContainText(
+      "Restored the workspace's access rule. Members can view this workspace.",
+    );
     await expect(restored.getByRole("button", { name: "Undo" })).toBeVisible();
     await expect
       .poll(async () => readFile(join(temp.rootPath, "access.yaml"), "utf8"), { timeout: 30_000 })
@@ -264,9 +310,9 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await shoot(page, "success-undo");
     expect(await readFile(join(temp.rootPath, "team/access.yaml"), "utf8")).toBe(EDIT);
     await allowed.getByRole("button", { name: "Undo" }).click();
-    await expect(
-      toasts.filter({ hasText: "The access rule for team is back as it was." }),
-    ).toHaveCount(1, { timeout: 30_000 });
+    const undone = toasts.filter({ hasText: "team follows its earlier access rule again." });
+    await expect(undone).toHaveCount(1, { timeout: 30_000 });
+    await shoot(page, "undone");
     await expect
       .poll(async () => readFile(join(temp.rootPath, "team/access.yaml"), "utf8"), {
         timeout: 30_000,
@@ -308,6 +354,32 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     );
     await openNotices();
     await expect(held).toHaveCount(0);
+
+    // With the level readable, a root removal names it, and Remove rule says
+    // what members can now do. The test supplies the Members answer.
+    await supplyMembers(app, "comment");
+    await rm(join(temp.rootPath, "access.yaml"));
+    const resolvedRow = rows.filter({
+      hasText: "The workspace's access rule was removed outside dohc",
+    });
+    await expect(resolvedRow).toHaveCount(1, { timeout: 30_000 });
+    await expect(resolvedRow).toContainText("Members: View → Comment", { timeout: 30_000 });
+    await expect(resolvedRow).toContainText(
+      "Without it, members get the level set in Members settings.",
+    );
+    await expect(resolvedRow).not.toContainText("can't read that level");
+    expect(await buttonNames(resolvedRow)).toEqual(["Restore rule", "Remove rule"]);
+    await shoot(page, "removed-root-resolved");
+    await resolvedRow.getByRole("button", { name: "Remove rule" }).click();
+    const removedDone = rows.filter({
+      hasText: "Removed the workspace's access rule. Members can now comment on this workspace.",
+    });
+    await expect(removedDone).toHaveCount(1, { timeout: 30_000 });
+    await expect
+      .poll(async () => (await status()).heldAccessRules, { timeout: 30_000 })
+      .toEqual([]);
+    await expect(resolvedRow).toHaveCount(0);
+    await shoot(page, "removed-root-resolved-done");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
