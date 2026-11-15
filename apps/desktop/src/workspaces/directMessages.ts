@@ -184,6 +184,8 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
         if (unchanged) await pause(dependencies.retryMs ?? 1_000);
       } catch {
         if (stop.aborted) return;
+        // The first failure is a change, so a window falls back to the saved copy instead of waiting to fail a send.
+        if (since >= 0) dependencies.changed();
         // The answer after a failure counts as a change too: a window may have fallen back to the saved copy meanwhile.
         since = -1;
         await pause(dependencies.retryMs ?? 15_000);

@@ -277,16 +277,20 @@ ${cat.userId}`).digest("hex").slice(0, 32);
     stop();
   });
 
-  it("tells listeners when the server answers again after an outage, with nothing new", async () => {
+  it("tells listeners once when the server goes away, and again when it answers with nothing new", async () => {
     const h = harness();
     h.routes.set("/sync/direct/activity", () => Response.json({ revision: 7 }));
     const stop = h.service.listen();
     await expect.poll(() => h.changes()).toBe(1);
     h.goOffline();
+    // Losing the server is a change too, so an open conversation shows the saved copy.
+    await expect.poll(() => h.changes()).toBe(2);
     const failedFrom = h.requests.length;
     await expect.poll(() => h.requests.length).toBeGreaterThan(failedFrom + 1);
+    // Failing again is not another change.
+    expect(h.changes()).toBe(2);
     h.goOnline();
-    await expect.poll(() => h.changes()).toBe(2);
+    await expect.poll(() => h.changes()).toBe(3);
     stop();
   });
 

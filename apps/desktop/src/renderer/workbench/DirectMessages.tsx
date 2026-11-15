@@ -45,19 +45,17 @@ const NO_CANDIDATES: readonly MentionCandidate[] = [];
 const LIST_IDENTITY = "direct-list";
 const OFFLINE_LINE = "dohc could not reach your server. This is the copy saved on this computer.";
 
-/** A person's round face, or two faces for a group. */
+/** A person's round face, or a group's people mark. */
 export function DirectAvatar(props: { people: readonly DirectPerson[]; viewerId: string | null }) {
   const [first, second] = props.people;
   if (!first) return <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />;
   if (!second) {
     return <ChatAvatar presentation={directPresentation(first.personId, props.viewerId)} name={directPersonName(first)} kind="human" size="strip" />;
   }
+  // Two faces small enough to fit a row are too small to read, so a group shows one mark.
   return (
-    <span aria-hidden className="relative inline-block size-[18px] shrink-0">
-      <ChatAvatar presentation={directPresentation(first.personId, props.viewerId)} name={directPersonName(first)} kind="human" size="strip"
-        className="absolute left-0 top-0 size-3 text-[7px]" />
-      <ChatAvatar presentation={directPresentation(second.personId, props.viewerId)} name={directPersonName(second)} kind="human" size="strip"
-        className="absolute bottom-0 right-0 size-3 text-[7px] ring-1 ring-panel" />
+    <span data-testid="chats-dm-group-avatar" aria-hidden className="grid size-[18px] shrink-0 place-items-center rounded-full bg-panel-2 text-muted">
+      <Users size={11} strokeWidth={2} />
     </span>
   );
 }
@@ -437,6 +435,8 @@ function ConversationForAccount(props: ConversationProps) {
         undefined,
         { identity: sendIdentity, title: `Your message to ${to} wasn't sent` },
       );
+      // A send that could not reach the server shows the saved copy at once.
+      void store.refresh();
     } finally {
       sendingRef.current = false;
       setSending(false);
@@ -835,7 +835,7 @@ function NewMessageForAccount(props: NewMessageProps) {
               aria-disabled={disabled || undefined}
               data-testid="chats-dm-new-member"
               data-member-id={member.memberId}
-              title={disabled ? `A conversation holds up to ${MAX_DIRECT_PEOPLE} people.` : undefined}
+              title={disabled ? `A conversation holds up to ${MAX_DIRECT_PEOPLE} people, you included.` : undefined}
               onMouseDown={(event) => event.preventDefault()}
               onMouseEnter={() => setHighlight(index)}
               onClick={() => {
@@ -909,6 +909,9 @@ function NewMessageForAccount(props: NewMessageProps) {
               />
             </div>
             {pickError ? <FieldError id={errorId} className="mt-1">Choose who to message.</FieldError> : null}
+            {full ? (
+              <p data-testid="chats-dm-new-full" className="m-0 mt-1.5 text-[12px] text-muted">{`A conversation holds up to ${MAX_DIRECT_PEOPLE} people, you included.`}</p>
+            ) : null}
             {resolved && resolved.blocked.length > 0 && !blockedChat ? (
               <p data-testid="chats-dm-new-blocked" className="m-0 mt-1.5 flex items-center gap-2 text-[12px] text-muted">
                 <Ban size={12} aria-hidden className="shrink-0 text-subtle" />

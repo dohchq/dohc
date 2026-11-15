@@ -521,6 +521,44 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dm-offline")).toBeNull();
   });
 
+  it("falls back to the saved copy when a send can't reach the server, and keeps the words for later", async () => {
+    const user = userEvent.setup();
+    let changed: () => void = () => {};
+    bridgeMock.onDirectChanged.mockImplementation((listener: () => void) => {
+      changed = listener;
+      return () => undefined;
+    });
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    bridgeMock.directSend.mockRejectedValueOnce(new Error("Error invoking remote method 'desktop:direct-send': DirectMessageError [direct-retry]: dohc could not reach your server."));
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    await openSam();
+    const composer = await screen.findByTestId("chats-dm-composer");
+    signedIn([conversation()], true);
+    await user.type(composer, "On my way{Enter}");
+    expect(await screen.findByTestId("chats-dm-offline")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-composer")).toBeNull();
+
+    signedIn([conversation()]);
+    act(() => changed());
+    expect(((await screen.findByTestId("chats-dm-composer")) as HTMLTextAreaElement).value).toBe("On my way");
+  });
+
+  it("says why no one else can be picked once a conversation is full", async () => {
+    const user = userEvent.setup();
+    signedIn([]);
+    members(Array.from({ length: 8 }, (_, index) => ({ memberId: `member-${index}`, name: `Person ${index}` })));
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, people: [] });
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
+    const options = await screen.findAllByTestId("chats-dm-new-member");
+    for (const option of options.slice(0, 6)) await user.click(option);
+    expect(screen.queryByTestId("chats-dm-new-full")).toBeNull();
+    await user.click(options[6]!);
+    expect(screen.getByTestId("chats-dm-new-full").textContent).toBe("A conversation holds up to 8 people, you included.");
+    expect(options[7]!.getAttribute("aria-disabled")).toBe("true");
+  });
+
   it("starts a new message with people picked from the workspace's members", async () => {
     const user = userEvent.setup();
     signedIn([]);
