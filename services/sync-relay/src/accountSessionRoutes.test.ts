@@ -54,7 +54,11 @@ function sessionTable(rows: StoredSession[]): HandlerOverrides {
       return true;
     },
   };
-  return { resolvePhoneCapableAccountSession: resolveAccountSession, accountSessions };
+  return {
+    resolveAccountSession,
+    resolvePhoneCapableAccountSession: resolveAccountSession,
+    accountSessions,
+  };
 }
 
 async function relay() {

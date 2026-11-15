@@ -216,6 +216,7 @@ async function relay(
   const run = await serverCopies(storage, engine);
   const activity = options.activity ?? new DiscussionActivityHub();
   const h = testHandler(storage, {
+    resolveAccountSession: options.resolve ?? resolveAccountSession,
     resolvePhoneCapableAccountSession: options.resolve ?? resolveAccountSession,
     serverCopies: () => (options.copies === false ? undefined : run.copies),
     ...(options.limiter ? { accountOperationRateLimiter: options.limiter } : {}),
@@ -765,6 +766,7 @@ describe("pages the relay hosts live", () => {
     seed(engine);
     const run = await serverCopies(f.storage, engine);
     const h = testHandler(f.storage, {
+      resolveAccountSession,
       resolvePhoneCapableAccountSession: resolveAccountSession,
       serverCopies: () => run.copies,
     });
@@ -1015,6 +1017,7 @@ describe("an account's change feed", () => {
     });
     const run = await serverCopies(f.storage, engine);
     const h = testHandler(f.storage, {
+      resolveAccountSession,
       resolvePhoneCapableAccountSession: resolveAccountSession,
       serverCopies: () => run.copies,
     });

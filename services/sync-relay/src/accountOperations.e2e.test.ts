@@ -230,6 +230,7 @@ async function relayAndOwner(lookupUserDisplayName?: (userId: string) => string 
   const relay = createSyncRelayHandler({
     storage,
     resolveActor: testActor,
+    resolveAccountSession,
     resolvePhoneCapableAccountSession: resolveAccountSession,
     serverCopies: () => copies,
     relayPublicOrigin: RELAY_ORIGIN,
