@@ -86,7 +86,7 @@ export function liveRoomPosition(storage: StorageContext): number {
 
 /** Takes the next position for a change the room passes on that has no row, such as a journal row. */
 export function advanceLiveRoomPosition(storage: StorageContext): number {
-  return storage.tx(() => {
+  return storage.quietTx(() => {
     const position = highestPosition(storage) + 1;
     const moved = storage.db
       .prepare("UPDATE sqlite_sequence SET seq=? WHERE name=?")
@@ -117,7 +117,9 @@ export function appendLiveRoomEdit(
   const params = documentParams(input.document);
   const sender = JSON.stringify(input.sender);
   const identities = input.sender.map(liveAuthorIdentity);
-  return storage.tx(() => {
+  // Nothing outside the room reads its edits before a save, which wakes everyone, so taking one
+  // wakes no live host. A wake on every edit had each capture read its access again.
+  return storage.quietTx(() => {
     const bindings: number[] = [];
     for (const { clientId, inNote } of input.clients) {
       const prior = storage.db

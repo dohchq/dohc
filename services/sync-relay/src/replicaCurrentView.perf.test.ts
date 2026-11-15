@@ -653,8 +653,8 @@ it.skipIf(process.env.DOHC_REPLICA_MEASURE !== "1")(
       );
       let transactionMs = 0;
       const context = storage as unknown as StorageContext,
-        transaction = context.replicaViewTx.bind(context);
-      context.replicaViewTx = (run) => {
+        transaction = context.quietTx.bind(context);
+      context.quietTx = (run) => {
         const started = performance.now();
         try {
           return transaction(run);

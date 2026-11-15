@@ -79,6 +79,25 @@ interface Subscriber {
 }
 /** How many recent saves the owner's feed can still look up. A later save lets go of more. */
 const REMEMBERED_SAVES = 64;
+/** How often frames handed to a reader read its access again, for access that ends with time. */
+const ACCESS_READ_EVERY_MS = 1_000;
+
+/**
+ * A room session's access between the edits it sends. Each edit reads access in full when it is
+ * taken (`sender`), and a write that changes access ends the capture at once (`invalidated`). The
+ * frames a reader is handed read it again at most once a second, so a link session that expires
+ * stops them too. A read on every frame grew with readers times edits.
+ */
+function accessBetweenEdits(host: NamedFrameRoomHost): () => void {
+  let readAt = -Infinity;
+  return () => {
+    host.invalidated.throwIfAborted();
+    const now = Date.now();
+    if (now >= readAt && now - readAt < ACCESS_READ_EVERY_MS) return;
+    host.assertCurrent();
+    readAt = now;
+  };
+}
 interface Unsaved {
   readonly position: number;
   readonly sender: LiveAuthorSnapshot;
@@ -458,13 +477,13 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
   async function nextFor(
     room: Room,
     subscriber: Subscriber,
-    host: NamedFrameRoomHost,
+    current: () => void,
     signal: AbortSignal,
   ): Promise<LiveFrameLease<NamedFrameAppliedUpdate>> {
     for (;;) {
       signal.throwIfAborted();
       room.lifetime.signal.throwIfAborted();
-      host.assertCurrent();
+      current();
       if (subscriber.queue.length) {
         // Everything waiting leaves as one update, up to the applied-update bound.
         let take = 0,
@@ -502,7 +521,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
   function ownerFeed(
     room: Room,
     subscriber: Subscriber,
-    host: NamedFrameRoomHost,
+    current: () => void,
     sync: NamedFrameSync,
     lifetime: AbortSignal,
   ) {
@@ -536,7 +555,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       for (;;) {
         signal.throwIfAborted();
         room.lifetime.signal.throwIfAborted();
-        host.assertCurrent();
+        current();
         const row = subscriber.queue.shift();
         if (row) return { value: row, release() {} };
         if (read) {
@@ -570,10 +589,11 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       let room: Room | undefined;
       let subscriber: Subscriber | undefined;
       let left = false;
+      const current = accessBetweenEdits(host);
       return {
         hostEpoch: host.hostEpoch,
         invalidated: host.invalidated,
-        assertCurrent: () => host.assertCurrent(),
+        assertCurrent: current,
         close() {
           if (left) return;
           left = true;
@@ -629,7 +649,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
               nextApplied: ownerFeed(
                 held,
                 own,
-                host,
+                current,
                 sync,
                 AbortSignal.any([feed.signal, held.lifetime.signal]),
               ),
@@ -646,12 +666,13 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
             close() {
               held.subscribers.delete(own);
             },
-            nextApplied: (waitSignal) => nextFor(held, own, host, waitSignal),
+            nextApplied: (waitSignal) => nextFor(held, own, current, waitSignal),
           };
         },
         async submit(input, signal): Promise<NamedFrameSubmissionResult> {
           signal.throwIfAborted();
-          host.assertCurrent();
+          // `sender` below reads this editor's access in full for each edit.
+          current();
           const held = room;
           if (!held || !subscriber || held.lifetime.signal.aborted)
             throw new Error("Live room is not open.");

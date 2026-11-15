@@ -2092,8 +2092,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   // One write transaction, so a caller states what it writes rather than the
   // BEGIN/COMMIT/ROLLBACK frame around it.
-  // Current view persistence does not wake the replication observer.
-  replicaViewTx<T>(run: () => T): T {
+  // A write no live host needs to hear about, such as current view persistence or a room's
+  // taken edit, wakes no relay-write observer.
+  quietTx<T>(run: () => T): T {
     return this.owner.write(run);
   }
 

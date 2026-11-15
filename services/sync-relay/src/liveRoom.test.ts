@@ -15,6 +15,7 @@ import type {
   NamedFrameSync,
 } from "./namedLiveFrameSession.js";
 import type { StorageContext } from "./storage/context.js";
+import { observeRelayWrites } from "./relayWriteChanges.js";
 import { appendLiveRoomEdit, liveRoomEdits } from "./storage/liveRoomEdits.js";
 import { liveJournalSeedClientId } from "./storage/liveUpdateJournal.js";
 
@@ -135,17 +136,26 @@ function editor(f: Fixture, room: ReturnType<typeof rooms>, sender: LiveAuthorSn
     actor: f.actor,
   });
   if (binding.kind !== "current") throw new Error("Binding is not current.");
+  /** Full reads of this editor's access, and whether it has ended, as a link session expiring. */
+  const access = { reads: 0, ended: false };
   const inner = {
     hostEpoch,
     invalidated: lifetime.signal,
-    assertCurrent: () => lifetime.signal.throwIfAborted(),
+    assertCurrent() {
+      lifetime.signal.throwIfAborted();
+      access.reads += 1;
+      if (!access.ended) return;
+      // As the capture does: a failed read closes it.
+      lifetime.abort(new Error("Access ended."));
+      lifetime.signal.throwIfAborted();
+    },
     close: () => lifetime.abort(),
     openSync: () => Promise.reject(new Error("The room opens no inner sync.")),
     submit: () => Promise.reject(new Error("The room submits nothing inner.")),
     room: {
       document: f.input.evidence.document,
       view: () => binding.binding,
-      sender: () => sender,
+      sender: () => (access.ended ? null : sender),
     },
   } as unknown as NamedFrameRoomHost;
   const session = room.join(inner);
@@ -155,6 +165,7 @@ function editor(f: Fixture, room: ReturnType<typeof rooms>, sender: LiveAuthorSn
   return {
     session,
     doc,
+    access,
     async open() {
       sync = await session.openSync(Y.encodeStateVector(doc), signal);
       Y.applyUpdate(doc, sync.missingStateUpdate);
@@ -452,6 +463,70 @@ it("takes an owner's edit built on a change the owner's own feed brought first",
   expect((await owner.next()).roomRow).toBeUndefined();
   // Overwriting the key builds on the change the room had not seen until the owner's feed did.
   expect((await owner.submit(owner.change("status", "checked"))).result).toBe("success");
+});
+
+it("reads a reader's access at most once a second while others' edits reach it, not once a frame", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    const f = note();
+    const room = rooms(f);
+    const a = editor(f, room, ana);
+    const readers = [editor(f, room, ben), editor(f, room, ben), editor(f, room, ben)];
+    await a.open();
+    for (const reader of readers) await reader.open();
+    const before = readers.map((reader) => reader.access.reads);
+    for (let index = 0; index < 20; index++) {
+      expect((await a.submit(a.change("title", `v${index}`))).result).toBe("success");
+      for (const reader of readers) await reader.next();
+    }
+    expect(readers.map((reader, index) => reader.access.reads - before[index]!)).toEqual([1, 1, 1]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("stops handing others' edits to a reader whose access ended with time, within a second", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  try {
+    const f = note();
+    const room = rooms(f);
+    const a = editor(f, room, ana),
+      b = editor(f, room, ben);
+    await a.open();
+    await b.open();
+    await a.submit(a.change("title", "Lisbon"));
+    await b.next();
+    b.access.ended = true;
+    // Its own edits are refused at once.
+    expect((await b.submit(b.change("note", "late"))).result).toBe("refused");
+    vi.setSystemTime(Date.now() + 1_000);
+    await a.submit(a.change("place", "Porto"));
+    await expect(b.next()).rejects.toThrow("Access ended.");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("wakes no live host when it takes an edit, and wakes them when it saves", async () => {
+  const f = note();
+  const room = rooms(f);
+  const a = editor(f, room, ana);
+  await a.open();
+  let wakes = 0;
+  const stop = observeRelayWrites(f.storage, () => {
+    wakes += 1;
+  });
+  try {
+    for (const value of ["Lisbon", "Porto"])
+      expect((await a.submit(a.change("title", value))).result).toBe("success");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(wakes).toBe(0);
+    a.session.close();
+    await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+    await vi.waitFor(() => expect(wakes).toBeGreaterThan(0));
+  } finally {
+    stop();
+  }
 });
 
 it("refuses an edit under an editor id tied to someone else and writes nothing", async () => {
