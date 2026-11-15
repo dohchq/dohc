@@ -840,6 +840,39 @@ fn a_rule_removed_beside_another_spellings_pending_placement_holds() {
     assert_eq!(f.holds(), vec![("team".to_owned(), "removed".to_owned())]);
 }
 
+/// A rule removed from disk while dohc still writes a narrower one there is
+/// a removal outside dohc: only dohc's own pending delete of the path makes
+/// the delete its own.
+#[test]
+fn a_rule_removed_while_a_narrowing_write_is_pending_holds() {
+    let f = ruled_team();
+    let before = f.journal();
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    let narrower = dohc_engine_storage::hex_sha256(NOBODY.as_bytes());
+    conn.execute(
+        "INSERT INTO binary_blobs (sha256, byte_length, bytes) VALUES (?1, ?2, ?3)",
+        rusqlite::params![narrower, NOBODY.len() as i64, NOBODY.as_bytes()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO materialization_jobs (job_id, target_path, content_sha256, \
+         preimage_present, preimage_sha256, target_generation, created_at_ms, workspace_id) \
+         VALUES ('job-narrow', 'team/access.yaml', ?1, 1, ?2, 1, 1, ?3)",
+        [
+            narrower,
+            dohc_engine_storage::hex_sha256(VIEW.as_bytes()),
+            WS.to_owned(),
+        ],
+    )
+    .unwrap();
+    std::fs::remove_file(f.root().join("team/access.yaml")).unwrap();
+    f.settle();
+    let retired = f.retire("team/access.yaml");
+    assert!(held(&retired, "team"), "{retired:?}");
+    assert_eq!(f.journal(), before);
+    assert_eq!(f.holds(), vec![("team".to_owned(), "removed".to_owned())]);
+}
+
 #[test]
 fn an_editor_save_inside_the_settle_period_journals_no_widening() {
     let f = ruled_team();

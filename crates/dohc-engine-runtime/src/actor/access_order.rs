@@ -1030,13 +1030,20 @@ fn folder_holds_files(
     Ok((!files.is_empty(), on_disk))
 }
 
-/// The rule files dohc is still placing in `folder`, with the bytes each
-/// placement writes.
+/// A rule file dohc is still placing in a folder.
+struct PendingRuleJob {
+    path: String,
+    /// The bytes a write places.
+    content_sha256: String,
+    deletes: bool,
+}
+
+/// The rule files dohc is still placing in `folder`.
 fn pending_rule_jobs(
     conn: &Connection,
     workspace: &str,
     folder: &str,
-) -> Result<Vec<(String, String)>, RuntimeError> {
+) -> Result<Vec<PendingRuleJob>, RuntimeError> {
     let mut probe = conn
         .prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') \
@@ -1045,7 +1052,7 @@ fn pending_rule_jobs(
         .map_err(StorageError::corrupt_public)?;
     let mut scan = conn
         .prepare_cached(
-            "SELECT target_path, content_sha256 FROM materialization_jobs \
+            "SELECT target_path, content_sha256, operation='delete' FROM materialization_jobs \
              WHERE workspace_id IN (?1,'') AND status='pending' AND target_path>=?2 \
              AND target_path<?3 AND instr(substr(target_path, ?4), '/')=0",
         )
@@ -1061,12 +1068,16 @@ fn pending_rule_jobs(
         |low, high, name_start| {
             let paths = scan
                 .query_map(params![workspace, low, high, name_start], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok(PendingRuleJob {
+                        path: row.get(0)?,
+                        content_sha256: row.get(1)?,
+                        deletes: row.get(2)?,
+                    })
                 })
                 .map_err(StorageError::corrupt_public)?;
             for job in paths {
                 let job = job.map_err(StorageError::corrupt_public)?;
-                if is_rule_of(&job.0, folder) {
+                if is_rule_of(&job.path, folder) {
                     pending.push(job);
                 }
             }
@@ -1156,16 +1167,19 @@ fn judge_folder(
     let pending = pending_rule_jobs(conn, workspace, folder)?;
     // dohc wrote this rule and its file is on the way to disk, unless capture
     // read other bytes there: those are judged like any rule on disk. A delete
-    // is dohc's own only when a job of its own path is still pending.
+    // is dohc's own only while dohc's own delete of that path is pending; a
+    // pending write there leaves the file, so its loss came from outside.
     let placing = |touch: &Touch<'_>| {
         if touch.deletes {
-            return pending.iter().any(|(path, _)| path == touch.path);
+            return pending
+                .iter()
+                .any(|job| job.deletes && job.path == touch.path);
         }
         touch.observed.is_none_or(|bytes| {
             let sha256 = dohc_engine_storage::hex_sha256(bytes);
             pending
                 .iter()
-                .any(|(path, content)| path == touch.path && *content == sha256)
+                .any(|job| !job.deletes && job.path == touch.path && job.content_sha256 == sha256)
         })
     };
     if !pending.is_empty() && rule_touches.iter().all(placing) {
