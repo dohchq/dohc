@@ -26,6 +26,10 @@ import { badRequest, errorResponse, notFound, RelayError, relayError } from "./e
 import type { JsonValue } from "@dohc/workspace-engine-client";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {
+  parseLiveUpdateDigest,
+  parseLiveUpdateIdentifier,
+} from "@dohc/live-session-contract/live-update-admission";
+import {
   RecoveryCopyRefusal,
   sameKeptEditsIdentity,
   type ServiceKeptEdits,
@@ -117,6 +121,9 @@ export function discoverServiceHostDocuments(
   return page.nextCursor;
 }
 
+const JOURNAL_QUERY = ["objectId", "lineageClaimId", "restoreFenceGeneration", "after"];
+// A journal page's update bytes, past its first row. Rows can each be 20 MiB.
+const JOURNAL_PAGE_BYTES = 4 * 1024 * 1024;
 export function serviceHostEnrollmentRefusals(
   storage: SyncRelayStorage,
   workspaceId: string,
@@ -543,11 +550,17 @@ export function createServiceHostEnrollmentRoutes(options: {
       if ([retiredPage, refusalPage, keptPage].filter(Boolean).length > 1) throw notFound();
       const keptPath =
         parts.length === 5 && parts[4] === "kept-edits" && request.method === "POST" && !url.search;
+      const journalPath =
+        parts.length === 5 &&
+        parts[4] === "journal" &&
+        request.method === "GET" &&
+        [...url.searchParams.keys()].length === 4 &&
+        JOURNAL_QUERY.every((key) => url.searchParams.getAll(key).length === 1);
       if (
-        (parts.length !== 4 && !keptPath) ||
+        (parts.length !== 4 && !keptPath && !journalPath) ||
         parts[1] !== "sync" ||
         parts[3] !== "live-host" ||
-        (url.search && !retiredPage && !refusalPage && !keptPage) ||
+        (url.search && !retiredPage && !refusalPage && !keptPage && !journalPath) ||
         request.headers.has("cookie") ||
         !/^Bearer [^\s]+$/.test(request.headers.get("authorization") ?? "") ||
         !["GET", "POST", "DELETE"].includes(request.method)
@@ -577,6 +590,42 @@ export function createServiceHostEnrollmentRoutes(options: {
               : undefined,
           ),
         });
+      // A retired note's journal through its retirement's F, for the owner's desktop to catch up on
+      // what it saved there before it lets go of the note.
+      if (journalPath) {
+        const count = (key: string) => {
+          const value = url.searchParams.get(key)!;
+          if (!/^(0|[1-9][0-9]*)$/.test(value) || !Number.isSafeInteger(Number(value)))
+            throw badRequest("Invalid journal page.");
+          return Number(value);
+        };
+        const text = (parse: () => string) => {
+          try {
+            return parse();
+          } catch {
+            throw badRequest("Invalid journal page.");
+          }
+        };
+        const page = storage.readRetiredJournalPage({
+          workspaceId,
+          objectId: text(() => parseLiveUpdateIdentifier(url.searchParams.get("objectId"))),
+          lineageClaimId: text(() => parseLiveUpdateDigest(url.searchParams.get("lineageClaimId"))),
+          restoreFenceGeneration: count("restoreFenceGeneration"),
+          after: count("after"),
+          budgetBytes: JOURNAL_PAGE_BYTES,
+        });
+        if (!page) return response({ ok: false, code: "retirement-not-found" }, 409);
+        return response({
+          ok: true,
+          acceptedCursor: page.acceptedCursor,
+          rows: page.rows.map((row) => ({
+            journalCursor: row.journalCursor,
+            ...(row.rowsThrough === undefined ? {} : { rowsThrough: row.rowsThrough }),
+            update: Buffer.from(row.updateBytes).toString("base64"),
+          })),
+          nextAfter: page.nextAfter,
+        });
+      }
       if (retiredPage) {
         const page = storage.listRetiredServiceHostEnrollments(
           workspaceId,
@@ -590,6 +639,10 @@ export function createServiceHostEnrollmentRoutes(options: {
             objectId: row.objectId,
             status: "retired",
             stopped: row.ownerStop !== null,
+            // F once the retirement finished, the journal cursor the owner's desktop lets go at.
+            ...((cursor) => (cursor === null ? {} : { acceptedCursor: cursor }))(
+              storage.retiredAcceptedCursor(workspaceId, row.objectId),
+            ),
             ...(diverged(row)
               ? { reason: "session-host-diverged" }
               : !changed(row) && storage.hasServiceHostConflictEffect(row)

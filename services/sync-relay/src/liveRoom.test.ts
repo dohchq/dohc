@@ -27,6 +27,7 @@ import { observeRelayWrites } from "./relayWriteChanges.js";
 import { appendLiveRoomEdit, liveRoomEdits } from "./storage/liveRoomEdits.js";
 import { liveRoomPaused, liveRoomPauses, pauseLiveRoom } from "./storage/liveRoomPauses.js";
 import { liveJournalSeedClientId } from "./storage/liveUpdateJournal.js";
+import { readRetiredJournalPage } from "./storage/serviceActivationRetirement.js";
 
 const open: Fixture[] = [];
 const rooms_: { close(): Promise<void> }[] = [];
@@ -474,6 +475,66 @@ it("gives the owner others' edits as rows, and each save the last row it holds, 
   expect(savedAuthors(f)).toEqual([ana, olu]);
   expect(unsaved(f)).toEqual([]);
   expect(owner.doc.getMap("frontmatter").toJSON()).toEqual({ title: "Lisbon", place: "Porto" });
+});
+
+// Proves: each save's last room row outlives the room, so an owner who catches up on a retired
+// note's journal once its room is gone still lets go of the room rows each save holds.
+it("keeps each save's last row with its journal row, for a retired note's journal pages", async () => {
+  const f = note();
+  const room = rooms(f, { saveEveryMs: 20 });
+  const owner = ownerDesktop(f, room),
+    a = editor(f, room, ana);
+  await owner.open();
+  await a.open();
+  const first = position(await a.submit(a.change("title", "Lisbon")));
+  await owner.next();
+  const own = position(await owner.submit(owner.change("place", "Porto")));
+  const saved = [await owner.next(), await owner.next()];
+  const storage = f.storage as StorageContext,
+    document = f.input.evidence.document;
+  const page = (input: { restoreFenceGeneration?: number; after?: number; budgetBytes?: number }) =>
+    readRetiredJournalPage(storage, {
+      workspaceId: document.workspaceId,
+      objectId: document.objectId,
+      lineageClaimId: document.lineageClaimId,
+      restoreFenceGeneration: 0,
+      after: 0,
+      budgetBytes: 1 << 20,
+      ...input,
+    });
+  expect(page({})).toBeNull();
+  // The note's activation retired at F, the last of its journal rows.
+  const journal = storage.db
+    .prepare("SELECT journal_cursor FROM sync_relay_live_update_journal ORDER BY journal_cursor")
+    .all()
+    .map((row) => Number(row.journal_cursor));
+  const acceptedCursor = journal.at(-1)!;
+  expect(acceptedCursor).toBe(saved[1]!.journalCursor);
+  storage.db
+    .prepare(`INSERT INTO sync_relay_service_activations(relay_database_namespace,activation_id,workspace_id,main_version_id,
+      object_id,lineage_claim_id,source_json,binding_json,state_digest,owner_user_id,completion_json,accounted_bytes,
+      retire_requested_at_ms,retire_restore_generation,retire_accepted_cursor,retired_at_ms,retired_boundary_json)
+      VALUES ('namespace','activation','workspace','main',?,?,'{}','{}',?,'owner','{}',1,1,0,?,2,'{}')`)
+    .run(document.objectId, document.lineageClaimId, "a".repeat(64), acceptedCursor);
+  const all = page({})!;
+  expect(all.acceptedCursor).toBe(acceptedCursor);
+  expect(all.nextAfter).toBeNull();
+  expect(all.rows.map((row) => row.journalCursor)).toEqual(journal);
+  expect(all.rows.filter((row) => row.rowsThrough !== undefined)).toEqual(
+    saved.map((frame, index) => ({
+      journalCursor: frame.journalCursor,
+      rowsThrough: [first, own][index],
+      updateBytes: expect.any(Uint8Array),
+    })),
+  );
+  // A small budget still takes one row a page, and the last page ends at F.
+  const pages = [page({ budgetBytes: 1 })!];
+  while (pages.at(-1)!.nextAfter !== null)
+    pages.push(page({ budgetBytes: 1, after: pages.at(-1)!.nextAfter! })!);
+  expect(pages.map((next) => next.rows.map((row) => row.journalCursor))).toEqual(
+    journal.map((cursor) => [cursor]),
+  );
+  expect(page({ restoreFenceGeneration: 1 })).toBeNull();
 });
 
 // Proves: a save whose transaction rolls back after the room was told of it leaves the room's edits

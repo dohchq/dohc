@@ -743,9 +743,10 @@ it.each(["access ended", "stopped"] as const)(
       });
     } else {
       f.setGrant(scope.shareId, "status='revoked',revoked_at_ms=20");
-      f.storage.tx(() =>
+      const storage = f.storage as unknown as StorageContext;
+      storage.tx(() =>
         retireUncoveredServiceActivations(
-          f.storage as unknown as StorageContext,
+          storage,
           [f.storage.readServiceHostEnrollment(ws, "docs/a.md")!],
           20,
         ),

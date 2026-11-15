@@ -508,6 +508,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string) {
     return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
   }
+  retiredAcceptedCursor(workspaceId: string, objectId: string) {
+    return this.readTx(() =>
+      serviceActivationRetirementStorage.retiredAcceptedCursor(this, workspaceId, objectId),
+    );
+  }
+  readRetiredJournalPage(
+    input: Parameters<typeof serviceActivationRetirementStorage.readRetiredJournalPage>[1],
+  ) {
+    return serviceActivationRetirementStorage.readRetiredJournalPage(this, input);
+  }
   currentServiceHostWorkspace(workspaceId: string, includeUndrained = false) {
     const row = serviceHostEnrollmentStorage.currentServiceHostWorkspace(
       this,
