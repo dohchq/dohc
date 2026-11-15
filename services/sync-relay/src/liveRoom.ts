@@ -76,7 +76,15 @@ export interface LiveRooms {
    * owner's connection keeps its capture's feed and is sent the room's unsaved edits as rows.
    */
   join(host: NamedFrameRoomHost, options?: { readonly owner?: boolean }): NamedFrameHostSession;
-  close(): void;
+  /**
+   * Saves every edit the note's room holds, taking no new ones meanwhile, then runs `then` with
+   * nothing taken in between and ends the room: for a step that closes the note to them, such as
+   * a restore's fence. A refused save pauses the note, which keeps its edits in the copy, and
+   * `then` still runs. Throws without running `then` if the edits could not be saved yet.
+   */
+  saveFirst<T>(document: LiveDocumentKey, then: () => T, signal: AbortSignal): Promise<T>;
+  /** Takes no new edits, saves what each room holds, and ends every room. */
+  close(): Promise<void>;
 }
 
 interface Subscriber {
@@ -139,6 +147,8 @@ interface Room {
   readonly saves: Map<number, number>;
   /** When saves started failing, until one is taken. */
   failingSince?: number;
+  /** How many callers are saving everything first; while any is, the room takes no edits. */
+  closing: number;
 }
 
 /** Why a note that paused takes no edits. Its owner's Resume lifts it. */
@@ -429,24 +439,41 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     cause: LiveRoomPauseCause,
     refusal: LiveUpdateRefusal | null,
     named: LiveAuthorSnapshot[],
-  ) {
+    copy = Y.encodeStateAsUpdate(room.doc),
+  ): boolean {
     try {
       pauseLiveRoom(storage, {
         document: room.document,
         cause,
         refusal,
         named,
-        copy: Y.encodeStateAsUpdate(room.doc),
+        copy,
         pausedAtMs: Date.now(),
       });
     } catch (error) {
       log(room, "pause failed", { cause, refusal, error: String(error).slice(0, 200) });
       scheduleSave(room, saveEveryMs);
-      return;
+      return false;
     }
     log(room, "paused", { cause, refusal, named: named.length });
     room.unsaved.length = 0;
     dispose(room, new LiveRoomPausedError());
+    return true;
+  }
+  /** Saves until the room holds nothing, it ends, or two saves in a row take nothing. */
+  async function drain(room: Room, signal: AbortSignal) {
+    room.closing += 1;
+    try {
+      await raceAbort(room.opened, signal);
+      for (let failed = 0; room.unsaved.length && !room.lifetime.signal.aborted && failed < 2;) {
+        const before = room.unsaved.length;
+        if (!room.saving) runSave(room);
+        await raceAbort(Promise.resolve(room.saving), signal);
+        failed = room.unsaved.length < before ? 0 : failed + 1;
+      }
+    } finally {
+      room.closing -= 1;
+    }
   }
   function scheduleSave(room: Room, wait: number) {
     if (room.timer || room.saving || room.lifetime.signal.aborted) return;
@@ -513,15 +540,26 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       members: 0,
       savedThrough: 0,
       saves: new Map(),
+      closing: 0,
     };
     rooms.set(key, room);
     room.opened = (async () => {
       await ensureSaver(room);
       // Edits a stopped relay had taken and not saved are in the note a page is given, and are
       // saved first, in the order they were taken. New edits follow them in the list.
-      for (const edit of liveRoomEdits(storage, document)) {
-        if (!roomAdmissible(room.doc, edit.updateBytes))
-          throw new Error("A taken edit no longer applies to its note.");
+      const left = liveRoomEdits(storage, document);
+      for (const [index, edit] of left.entries()) {
+        if (!roomAdmissible(room.doc, edit.updateBytes)) {
+          // A taken edit is never skipped. The note pauses with every one left in its copy.
+          const copy = Y.mergeUpdates([
+            Y.encodeStateAsUpdate(room.doc),
+            ...left.slice(index).map((row) => row.updateBytes),
+          ]);
+          if (pause(room, "refused", "invalid-update", senders(left), copy)) return;
+          throw new Error(
+            "A taken edit no longer applies to its note, and the note did not pause.",
+          );
+        }
         Y.applyUpdate(room.doc, edit.updateBytes, FEED);
         room.unsaved.push({
           position: edit.position,
@@ -788,6 +826,8 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           const held = room;
           if (!held || !subscriber || held.lifetime.signal.aborted)
             throw new Error("Live room is not open.");
+          // The room is saving everything before the note closes; this edit waits on its page.
+          if (held.closing) return { result: "retry", reason: "admission-unavailable" };
           if (
             input.trustedAutomation ||
             input.trustedAutomationPress ||
@@ -854,11 +894,36 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
         },
       };
     },
-    close() {
+    async saveFirst(document, then, signal) {
+      if (closed) throw new Error("Live rooms are closed.");
+      const key = JSON.stringify(documentParams(document));
+      // A paused note's edits are in its copy, and a note with no room has none taken.
+      if (
+        liveRoomPaused(storage, document) ||
+        (!rooms.has(key) && !liveRoomEdits(storage, document).length)
+      )
+        return then();
+      const room = openRoom(document);
+      await drain(room, signal);
+      if (room.unsaved.length) throw new Error("The note's live edits are not saved yet.");
+      const result = then();
+      if (!room.lifetime.signal.aborted) dispose(room);
+      return result;
+    },
+    async close() {
       closed = true;
       clearInterval(sweep);
-      // Taken edits stay in their table and are saved when the note next opens.
-      for (const room of [...rooms.values()]) dispose(room);
+      // Whatever does not save in time stays in its table and is saved when the note next opens.
+      const deadline = AbortSignal.timeout(saveTimeoutMs);
+      await Promise.all(
+        [...rooms.values()].map((room) =>
+          drain(room, deadline)
+            .catch(() => {})
+            .finally(() => {
+              if (!room.lifetime.signal.aborted) dispose(room);
+            }),
+        ),
+      );
     },
   };
 }

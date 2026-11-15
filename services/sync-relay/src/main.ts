@@ -104,7 +104,7 @@ import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { createNamedDesktopLive } from "./namedDesktopLive";
 import { parseNamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { captureOwnerLiveFrameHost, type NamedFrameNativeHost } from "./namedLiveFrameHost";
-import { createLiveRooms } from "./liveRoom";
+import { createLiveRooms, type LiveRooms } from "./liveRoom";
 import { liveRoomPaused } from "./storage/liveRoomPauses";
 import { workspaceOwner } from "./storage/workspaces";
 import { createAutomationRecordHost } from "./automationRecordHost";
@@ -630,10 +630,12 @@ if (testAuthSeam) {
 const presence = new PresenceHub();
 
 let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
+let liveRooms: LiveRooms | undefined;
 let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
   discussionActivity,
   ownerRestoreHost: () => ownerRestoreHost?.(),
+  liveRooms: () => liveRooms,
   heldDocumentHost: () => heldDocumentHost?.(),
   storage,
   resolveActor,
@@ -1247,7 +1249,7 @@ if (namedLiveConfig) {
           },
         })
       : undefined;
-  if (rooms) server.once("close", () => rooms.close());
+  liveRooms = rooms;
   // A paused note is refused to editors as a held one is: only its owner can start it again.
   const editorsBlocked = rooms
     ? (document: { workspaceId: string; objectId: string }) =>
@@ -1569,6 +1571,8 @@ server.listen(requestedPort, host, () => {
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    // The rooms save through the hosts closed below, so they save what they hold first.
+    await liveRooms?.close();
     stopJournalCheck();
     await pushSender.close();
     await publicationOperator.close();

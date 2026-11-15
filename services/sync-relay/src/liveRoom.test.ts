@@ -23,9 +23,9 @@ import { liveRoomPaused, liveRoomPauses, pauseLiveRoom } from "./storage/liveRoo
 import { liveJournalSeedClientId } from "./storage/liveUpdateJournal.js";
 
 const open: Fixture[] = [];
-const rooms_: { close(): void }[] = [];
-afterEach(() => {
-  for (const room of rooms_.splice(0)) room.close();
+const rooms_: { close(): Promise<void> }[] = [];
+afterEach(async () => {
+  await Promise.all(rooms_.splice(0).map((room) => room.close()));
   for (const f of open.splice(0)) f.close();
   cleanupLiveDeliveryFixtures();
 });
@@ -806,13 +806,125 @@ it("refuses an edit that builds on something the room does not have, or is too l
   expect(unsaved(f)).toEqual([]);
 });
 
+it("saves every taken edit before a step that closes the note, taking none meanwhile, then ends the room", async () => {
+  const f = note();
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const room = rooms(f, {}, { hold });
+  const a = editor(f, room, ana),
+    b = editor(f, room, ben);
+  await a.open();
+  await b.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await b.next();
+  const done = room.saveFirst(
+    f.input.evidence.document,
+    () => ({ unsaved: unsaved(f).length, saved: savedAuthors(f) }),
+    new AbortController().signal,
+  );
+  // While the room saves, a new edit waits on its page.
+  expect(await b.submit(b.change("place", "Porto"))).toEqual({
+    result: "retry",
+    reason: "admission-unavailable",
+  });
+  release();
+  expect(await done).toEqual({ unsaved: 0, saved: [ana] });
+  await expect(a.next()).rejects.toThrow();
+});
+
+it("runs no step while a room's edits can't be saved, and runs it once a refused save pauses the note", async () => {
+  const f = note();
+  const room = rooms(f, {}, { answers: ["retry", "retry"] });
+  const a = editor(f, room, ana);
+  await a.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  let ran = 0;
+  const step = () => (ran += 1);
+  const signal = new AbortController().signal;
+  await expect(room.saveFirst(f.input.evidence.document, step, signal)).rejects.toThrow(
+    "not saved yet",
+  );
+  expect(ran).toBe(0);
+  expect(unsaved(f)).toHaveLength(1);
+  expect((await a.submit(a.change("place", "Porto"))).result).toBe("success");
+
+  const g = note();
+  const refusing = rooms(g, {}, { answers: ["invalid-update"] });
+  const b = editor(g, refusing, ben);
+  await b.open();
+  expect((await b.submit(b.change("title", "Lisbon"))).result).toBe("success");
+  await refusing.saveFirst(g.input.evidence.document, step, signal);
+  expect(ran).toBe(1);
+  expect(pauses(g)).toMatchObject([{ cause: "refused", named: [ben] }]);
+  // A paused note holds no taken edits, so the step runs at once.
+  await refusing.saveFirst(g.input.evidence.document, step, signal);
+  expect(ran).toBe(2);
+});
+
+it("saves what each room holds when the relay shuts down", async () => {
+  const f = note();
+  const room = rooms(f);
+  const a = editor(f, room, ana);
+  await a.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await room.close();
+  expect(unsaved(f)).toEqual([]);
+  expect(savedAuthors(f)).toEqual([ana]);
+  await expect(a.submit(a.change("place", "Porto"))).rejects.toThrow();
+});
+
+it("pauses a note whose leftover edit no longer applies, keeping every leftover edit in the copy", async () => {
+  const f = note();
+  const storage = f.storage as StorageContext;
+  const document = f.input.evidence.document;
+  const step = (page: Y.Doc, key: string) => {
+    const before = Y.encodeStateVector(page);
+    page.getMap("frontmatter").set(key, key);
+    return Y.encodeStateAsUpdate(page, before);
+  };
+  const benPage = new Y.Doc(),
+    anaPage = new Y.Doc();
+  // Ana's edit builds on one of hers the note never got.
+  const first = step(anaPage, "title");
+  const rows = [
+    { sender: ben, page: benPage, bytes: step(benPage, "note") },
+    { sender: ana, page: anaPage, bytes: step(anaPage, "place") },
+  ];
+  for (const row of rows)
+    expect(
+      appendLiveRoomEdit(storage, {
+        document,
+        sender: row.sender,
+        clients: [{ clientId: row.page.clientID, inNote: false }],
+        updateBytes: row.bytes,
+        receivedAtMs: 1,
+      }).kind,
+    ).toBe("written");
+  const room = rooms(f);
+  await expect(editor(f, room, olu).open()).rejects.toThrow(LiveRoomPausedError);
+  expect(unsaved(f)).toEqual([]);
+  expect(f.journalRows().journal).toEqual([]);
+  const [paused] = pauses(f);
+  expect(paused).toMatchObject({ cause: "refused", refusal: "invalid-update", named: [ben, ana] });
+  const copy = new Y.Doc();
+  Y.applyUpdate(copy, liveRoomCopy(f, paused!.pauseId));
+  Y.applyUpdate(copy, first);
+  expect(copy.getMap("frontmatter").toJSON()).toEqual({
+    title: "title",
+    place: "place",
+    note: "note",
+  });
+});
+
 it("saves edits a stopped relay took before it takes a new one", async () => {
   const f = note();
-  const first = rooms(f);
+  const first = rooms(f, {}, { answers: ["retry", "retry"] });
   const a = editor(f, first, ana);
   await a.open();
   expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
-  first.close();
+  await first.close();
   expect(unsaved(f)).toHaveLength(1);
   expect(f.journalRows().journal).toEqual([]);
 
@@ -825,11 +937,11 @@ it("saves edits a stopped relay took before it takes a new one", async () => {
 
 it("gives the next page every taken edit before they are saved, and saves them with nobody there", async () => {
   const f = note();
-  const first = rooms(f);
+  const first = rooms(f, {}, { answers: ["retry", "retry"] });
   const a = editor(f, first, ana);
   await a.open();
   expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
-  first.close();
+  await first.close();
 
   let release!: () => void;
   const hold = new Promise<void>((resolve) => {
@@ -848,11 +960,11 @@ it("gives the next page every taken edit before they are saved, and saves them w
   expect(savedAuthors(f)).toEqual([ana, ben]);
 
   // Taken edits a stopped relay left are saved when it starts, with nobody connected.
-  const later = rooms(f);
+  const later = rooms(f, {}, { answers: ["retry", "retry"] });
   const b = editor(f, later, ben);
   await b.open();
   expect((await b.submit(b.change("note", "x"))).result).toBe("success");
-  later.close();
+  await later.close();
   rooms(f);
   await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
   expect(savedAuthors(f)).toEqual([ana, ben, ben]);

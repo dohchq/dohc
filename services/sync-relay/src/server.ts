@@ -37,6 +37,7 @@ import {
 } from "./collectionWriteRoutes";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { createHeldDocumentRoutes, type HeldDocumentHost } from "./heldDocumentRoutes";
+import type { LiveRooms } from "./liveRoom";
 import { createLiveRoomPauseRoutes } from "./liveRoomPauseRoutes";
 import { randomUUID } from "node:crypto";
 import {
@@ -159,6 +160,8 @@ export interface CreateSyncRelayHandlerOptions {
   appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
   datasetHost?: RelayDatasetHost;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
+  // The live rooms, which save a note's taken edits before a restore closes it.
+  liveRooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
   // The session host's read of what its hosted replicas hold for released retained work.
   heldDocumentHost?: () => HeldDocumentHost | undefined;
   storage: SyncRelayStorage;
@@ -253,6 +256,7 @@ export function createSyncRelayHandler({
   appBackendAdmissionLimits,
   datasetHost,
   ownerRestoreHost = () => undefined,
+  liveRooms = () => undefined,
   heldDocumentHost = () => undefined,
   storage,
   resolveActor,
@@ -1037,6 +1041,7 @@ export function createSyncRelayHandler({
   const respondToOwnerRestore = createOwnerRestoreRoutes({
     storage,
     host: ownerRestoreHost,
+    rooms: liveRooms,
     nowMs,
     newId,
     lookupUserEmail,
