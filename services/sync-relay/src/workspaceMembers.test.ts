@@ -1,5 +1,6 @@
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
+import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import { afterEach, describe, expect, it } from "vitest";
 import { DiscussionActivityHub } from "./discussionActivity";
 import {
@@ -810,6 +811,18 @@ describe("who may change members", () => {
       member.people.every((person) => person.email === null && person.state === "active"),
     ).toBe(true);
     expect(JSON.stringify(member)).not.toContain("elsewhere.example");
+    // Each person keeps the colour their account has in presence and direct messages.
+    const anaEntry = member.people[1]!;
+    expect(anaEntry.memberId).not.toBe("ana");
+    expect(member.people.map((person) => person.paletteSlot)).toEqual([
+      actorHueSlot(OWNER),
+      actorHueSlot("ana"),
+    ]);
+    // An invite has no account yet, so its colour comes from its entry.
+    const pendingEntry = (await membersView(h, OWNER)).people.find(
+      (person) => person.state === "invited",
+    )!;
+    expect(pendingEntry.paletteSlot).toBe(actorHueSlot(pendingEntry.memberId));
 
     for (const [path, body] of [
       [`/sync/${WORKSPACE}/members/invites`, { email: "carl@dohc.test" }],

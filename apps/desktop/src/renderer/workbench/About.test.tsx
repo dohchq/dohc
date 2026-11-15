@@ -250,6 +250,7 @@ describe("About Access", () => {
       role,
       state,
       name,
+      paletteSlot: 0,
       email,
       invitedAtMs: null,
       joinedAtMs: 1,

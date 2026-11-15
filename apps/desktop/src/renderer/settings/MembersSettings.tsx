@@ -22,7 +22,6 @@ import {
   UserMinus,
   UserX,
 } from "lucide-react";
-import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import {
   memberMay,
   type MemberLevel,
@@ -462,7 +461,13 @@ function MembersLoadState(props: Parameters<typeof MembersLoadView>[0]) {
       );
     case "ready":
       return (
-        <MembersPage view={load.view} running={props.running} ended={props.ended} run={props.run} onMessage={props.onMessage} />
+        <MembersPage
+          view={load.view}
+          running={props.running}
+          ended={props.ended}
+          run={props.run}
+          onMessage={props.onMessage}
+        />
       );
   }
 }
@@ -1184,7 +1189,7 @@ function PersonRow(props: {
           name={title}
           kind="human"
           size="row"
-          presentation={relayPresentation(actorHueSlot(person.memberId), self)}
+          presentation={relayPresentation(person.paletteSlot, self)}
           className={removed ? "opacity-60" : undefined}
         />
       )}

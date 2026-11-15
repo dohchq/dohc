@@ -10,6 +10,7 @@ import { EmptyState, FieldError, RetryRow, SecondaryButton, SectionLabel } from 
 import { Menu } from "../ui/Menu";
 import { MoreMenu, type MoreMenuItem } from "../ui/MoreMenu";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import { relayPresentation } from "./actorPresentation";
 import { ChatAvatar } from "./ChatAvatar";
 import { ChatHeader, UnreadPill } from "./ChatsControls";
 import { NavRow, SectionActionButton } from "./ChatNavRow";
@@ -401,8 +402,10 @@ function ConversationForAccount(props: ConversationProps) {
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const sendIdentity = `direct-send:${conversationId}`;
+  // Who a failed send was for, so its notice names them.
+  const recipients = useRef("");
   // A send and its Try again belong to the account that wrote it. After a change of account, Try again only clears its notice.
-  const send = useCallback(async (body: string, messageId: string, session = store.session()) => {
+  const send = useCallback(async (body: string, messageId: string, session = store.session(), to = recipients.current) => {
     if (session !== store.session()) {
       reporting.current.onClearError?.(sendIdentity);
       return;
@@ -430,9 +433,9 @@ function ConversationForAccount(props: ConversationProps) {
       reportDirect(reporting.current,
         ipcErrorMessage(cause, "dohc could not send your message."),
         cause,
-        () => void send(body, messageId, session),
+        () => void send(body, messageId, session, to),
         undefined,
-        { identity: sendIdentity },
+        { identity: sendIdentity, title: `Your message to ${to} wasn't sent` },
       );
     } finally {
       sendingRef.current = false;
@@ -447,6 +450,7 @@ function ConversationForAccount(props: ConversationProps) {
 
   // Signed out, or as another account, the names stay hidden with the rest of the conversation.
   const title = conversation ? directTitle(conversation.people) : "Direct message";
+  recipients.current = title;
   const known = conversation !== null;
   useEffect(() => {
     if (known) onTitle?.(title);
@@ -583,7 +587,7 @@ function DirectComposerLine(props: { testId: string; icon: ReactNode; children: 
   );
 }
 
-type Member = { memberId: string; name: string };
+type Member = { memberId: string; name: string; paletteSlot: number };
 type MemberList =
   | { workspaceId: string; status: "loading" }
   | { workspaceId: string; status: "failed"; message: string }
@@ -597,7 +601,7 @@ function messageableMembers(result: MembersResult): Member[] {
   const viewer = result.view.viewer.memberId;
   return result.view.people
     .filter((person) => person.state === "active" && person.memberId !== viewer)
-    .map((person) => ({ memberId: person.memberId, name: person.name?.trim() || "Unnamed member" }))
+    .map((person) => ({ memberId: person.memberId, name: person.name?.trim() || "Unnamed member", paletteSlot: person.paletteSlot }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -704,7 +708,7 @@ function NewMessageForAccount(props: NewMessageProps) {
   // Whether these people already have a conversation, so the first message lands there.
   const pickKey = [...shownPicks].sort().join(",");
   // Member ids are not account ids, so who the viewer blocks is known only once the picks resolve.
-  const [existing, setExisting] = useState<{ key: string; conversationId: string | null; title: string; blocked: readonly DirectPerson[] } | null>(null);
+  const [existing, setExisting] = useState<{ key: string; conversationId: string | null; title: string; group: boolean; blocked: readonly DirectPerson[] } | null>(null);
   // Moves after an Unblock here, so the picks resolve again.
   const [resolveAgain, setResolveAgain] = useState(0);
   useEffect(() => {
@@ -719,7 +723,10 @@ function NewMessageForAccount(props: NewMessageProps) {
           openConversation.current(resolution.conversationId, title);
           return;
         }
-        setExisting({ key: pickKey, conversationId: resolution.conversationId, title, blocked: resolution.people.filter((person) => person.blocked) });
+        setExisting({
+          key: pickKey, conversationId: resolution.conversationId, title, group: resolution.people.length > 1,
+          blocked: resolution.people.filter((person) => person.blocked),
+        });
       },
       // Sending says why, if this person can't be messaged.
       () => undefined,
@@ -729,6 +736,14 @@ function NewMessageForAccount(props: NewMessageProps) {
     };
   }, [pickKey, members.status, state.status, workspaceId, resolveAgain]);
   const resolved = existing?.key === pickKey ? existing : null;
+  // A two-person conversation the viewer blocked shows no composer, here as in the conversation.
+  const blockedChat = resolved && !resolved.group && resolved.conversationId && resolved.blocked.length === 1
+    ? { conversationId: resolved.conversationId, person: resolved.blocked[0]! }
+    : null;
+  const unblock = (conversationId: string, person: DirectPerson) => void blockPerson({
+    store, conversationId, person, blocked: false, reporting: props,
+    onDone: () => setResolveAgain((count) => count + 1),
+  });
 
   const [draft, setDraftState] = useState(() => store.draft("new"));
   const draftRef = useRef(draft);
@@ -766,7 +781,7 @@ function NewMessageForAccount(props: NewMessageProps) {
         cause,
         () => void start(memberIds, body, messageId, title, session),
         undefined,
-        { identity: sendIdentity },
+        { identity: sendIdentity, title: `Your message to ${title} wasn't sent` },
       );
     } finally {
       sendingRef.current = false;
@@ -830,7 +845,7 @@ function NewMessageForAccount(props: NewMessageProps) {
                 active?.memberId === member.memberId ? "bg-hover" : ""
               } ${disabled ? "cursor-default text-subtle" : "text-ink"}`}
             >
-              <ChatAvatar presentation={directPresentation(member.memberId, null)} name={member.name} kind="human" size="strip" />
+              <ChatAvatar presentation={relayPresentation(member.paletteSlot)} name={member.name} kind="human" size="strip" />
               <span className="min-w-0 flex-1 truncate">{member.name}</span>
               {selected ? <Check size={14} aria-hidden className="shrink-0 text-accent" /> : null}
             </li>
@@ -859,7 +874,7 @@ function NewMessageForAccount(props: NewMessageProps) {
               </label>
               {shownPicks.map((id, index) => (
                 <span key={id} data-testid="chats-dm-new-pick" data-member-id={id} className="inline-flex h-6 items-center gap-1 rounded-full border border-line bg-panel-2 pl-1 pr-0.5 text-[12px] text-ink">
-                  <ChatAvatar presentation={directPresentation(id, null)} name={names[index]!} kind="human" size="strip" className="size-4 text-[8px]" />
+                  <ChatAvatar presentation={relayPresentation(byId.get(id)?.paletteSlot ?? -1)} name={names[index]!} kind="human" size="strip" className="size-4 text-[8px]" />
                   <span className="max-w-40 truncate">{names[index]}</span>
                   <button
                     type="button"
@@ -894,20 +909,17 @@ function NewMessageForAccount(props: NewMessageProps) {
               />
             </div>
             {pickError ? <FieldError id={errorId} className="mt-1">Choose who to message.</FieldError> : null}
-            {resolved && resolved.blocked.length > 0 ? (
+            {resolved && resolved.blocked.length > 0 && !blockedChat ? (
               <p data-testid="chats-dm-new-blocked" className="m-0 mt-1.5 flex items-center gap-2 text-[12px] text-muted">
                 <Ban size={12} aria-hidden className="shrink-0 text-subtle" />
-                <span className="min-w-0 flex-1 truncate">{`You blocked ${directTitle(resolved.blocked)}. They can't message you.`}</span>
+                <span className="min-w-0 flex-1 truncate">
+                  {resolved.group
+                    ? `You blocked ${directTitle(resolved.blocked)}. You won't see their new messages.`
+                    : `You blocked ${directTitle(resolved.blocked)}. They can't message you.`}
+                </span>
                 {/* A block is set from a conversation, so it is undone from one. */}
                 {resolved.conversationId && resolved.blocked.length === 1 ? (
-                  <SecondaryButton
-                    size="compact"
-                    data-testid="chats-dm-new-unblock"
-                    onClick={() => void blockPerson({
-                      store, conversationId: resolved.conversationId!, person: resolved.blocked[0]!, blocked: false, reporting: props,
-                      onDone: () => setResolveAgain((count) => count + 1),
-                    })}
-                  >
+                  <SecondaryButton size="compact" data-testid="chats-dm-new-unblock" onClick={() => unblock(resolved.conversationId!, resolved.blocked[0]!)}>
                     Unblock
                   </SecondaryButton>
                 ) : null}
@@ -924,7 +936,15 @@ function NewMessageForAccount(props: NewMessageProps) {
           </div>
         ) : null}
         {content}
-        {canPick ? (
+        {canPick && blockedChat ? (
+          <DirectComposerLine
+            testId="chats-dm-new-blocked-line"
+            icon={<Ban size={13} aria-hidden />}
+            action={{ label: "Unblock", run: () => unblock(blockedChat.conversationId, blockedChat.person) }}
+          >
+            {`You blocked ${directPersonName(blockedChat.person)}. They can't message you.`}
+          </DirectComposerLine>
+        ) : canPick ? (
           <MentionComposer
             pinned
             testIdPrefix="chats-dm-new"
