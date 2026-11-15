@@ -7,6 +7,7 @@ import {
   namedLiveEditable,
   type NamedLiveBrowserState,
 } from "@dohc/ydoc-projection/named-live-browser-transport";
+import type { UnsentText } from "@dohc/ydoc-projection/removed-text";
 import { LinkDocumentEditor } from "./LinkDocumentEditor";
 import { openLinkDocument } from "./linkLive";
 import { settle } from "./testing";
@@ -29,6 +30,7 @@ function fixture() {
     typingAhead: false,
     typingStopped: false,
   };
+  let unsent: UnsentText | null = { text: " typed here", deletes: false };
   const notify = () => {
     for (const listener of listeners) listener(state);
   };
@@ -43,6 +45,7 @@ function fixture() {
       };
     },
     onRemovedText: () => () => {},
+    unsentText: () => unsent,
     close: vi.fn(() => {
       state = { ...state, status: "closed" };
       notify();
@@ -58,6 +61,10 @@ function fixture() {
   };
   return {
     session,
+    unsent(value: UnsentText | null) {
+      unsent = value;
+      notify();
+    },
     update(value: Partial<NamedLiveBrowserState>) {
       state = { ...state, ...value };
       notify();
@@ -177,6 +184,33 @@ it.each(stopped)(
     expect(panel()?.textContent).toContain("Open current file");
   },
 );
+it("quotes the words a stopped draft typed and copies them (#3982)", async () => {
+  const writeText = vi.fn(async () => {});
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  const f = await opened();
+  await act(async () => f.update({ status: "quarantined", reason: "provenance-refused" }));
+  expect(panel()?.querySelector("blockquote")?.textContent).toBe(" typed here");
+  await click("Copy text");
+  expect(writeText).toHaveBeenCalledWith(" typed here");
+  expect(panel()?.textContent).toContain("Copied");
+  // A later read shows the newer words and lets them be copied again.
+  await act(async () => f.unsent({ text: " typed here and more", deletes: false }));
+  expect(panel()?.querySelector("blockquote")?.textContent).toBe(" typed here and more");
+  expect(panel()?.textContent).toContain("Copy text");
+});
+it("says when a stopped draft deletes text, and when it has no words to copy", async () => {
+  const f = await opened();
+  await act(async () => f.update({ status: "quarantined", reason: "provenance-refused" }));
+  await act(async () => f.unsent({ text: "", deletes: true }));
+  expect(panel()?.textContent).toContain("They also delete text.");
+  expect(panel()?.querySelector("blockquote")).toBeNull();
+  expect(panel()?.textContent).not.toContain("Copy text");
+  await act(async () => f.unsent({ text: "", deletes: false }));
+  expect(panel()?.textContent).toContain("They add no text you can copy.");
+  await act(async () => f.unsent(null));
+  expect(panel()?.textContent).toContain("Nothing you typed is waiting to be saved.");
+  expect(panel()?.textContent).toContain("Open current file");
+});
 it("shows the draft panel when access ends while a change is still saving", async () => {
   const f = await opened();
   await act(async () => f.update({ pendingUpdates: 1 }));

@@ -18,7 +18,9 @@ import type { LiveUpdateHostApplicationAck } from "@dohc/live-session-contract/l
 import { parseLiveAuthorContext, type LiveAuthorContext } from "@dohc/live-session-contract";
 import {
   applyUpdateFindingRemovedText,
+  findUnsentText,
   type RemovedText,
+  type UnsentText,
 } from "@dohc/ydoc-projection/removed-text";
 
 export interface NamedLiveProviderLimits {
@@ -525,14 +527,20 @@ export function createNamedLiveProvider(
     await work;
   }
 
+  // Edits the page refused and never queued, so its review still shows them.
+  const refused: Uint8Array[] = [];
+  function refuse(why: string, bytes: Uint8Array) {
+    refused.push(bytes.slice());
+    quarantine(why);
+  }
   function localUpdate(bytes: Uint8Array, origin: unknown) {
     if (origin === REMOTE || status === "closed" || status === "quarantined") return;
     if (status !== "live" && !typingAhead()) {
-      quarantine("edit-while-unavailable");
+      refuse("edit-while-unavailable", bytes);
       return;
     }
     if (bytes.length > limits.frames.receive.maxUpdateBytes) {
-      quarantine("pending-update-limit");
+      refuse("pending-update-limit", bytes);
       return;
     }
     let authorContext: LiveAuthorContext | undefined;
@@ -542,7 +550,7 @@ export function createNamedLiveProvider(
       } catch {
         // A link page learns its identity with its first ticket, which can come after the edits it took ahead.
         if (status === "live") {
-          quarantine("invalid-recording-context");
+          refuse("invalid-recording-context", bytes);
           return;
         }
       }
@@ -570,7 +578,7 @@ export function createNamedLiveProvider(
         bytes.length > limits.maxPendingUpdateBytes - pendingBytes ||
         pending.length >= limits.maxPendingUpdates
       ) {
-        quarantine("pending-update-limit");
+        refuse("pending-update-limit", bytes);
         return;
       }
       pending.push({
@@ -634,6 +642,11 @@ export function createNamedLiveProvider(
       }
       notify();
       return true;
+    },
+    /** What this page's unsaved changes typed that the note still shows; null with none. */
+    unsentText(): UnsentText | null {
+      const unsent = [...pending.map(({ bytes }) => bytes), ...refused];
+      return unsent.length ? findUnsentText(doc, Y.mergeUpdates(unsent)) : null;
     },
     /** This page's own text that someone else's change removed without having seen it. */
     onRemovedText(listener: (removed: RemovedText) => void) {

@@ -662,6 +662,8 @@ describe("named live browser provider", () => {
       pendingUpdates: 1,
     });
     expect(value.body.toString()).toContain("second");
+    // The review shows the refused edit beside the one still waiting.
+    expect(value.unsentText()).toEqual({ text: " first second", deletes: false });
   });
   it("rejects a tampered initial sync without mutating the draft", async () => {
     const value = provider(),
@@ -1241,6 +1243,7 @@ describe("named live browser provider", () => {
       });
       expect(value.body.toString()).toContain("larger than one byte");
       expect(host.submissions()).toHaveLength(0);
+      expect(value.unsentText()).toEqual({ text: " larger than one byte", deletes: false });
     } else {
       const { value, host } = await live();
       const before = value.body.toString();

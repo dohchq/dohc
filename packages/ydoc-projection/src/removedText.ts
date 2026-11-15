@@ -85,6 +85,55 @@ function findRemovedText(
     .map((piece) => ({ piece, shown: render(piece) }))
     .filter(({ shown }) => shown !== "");
   if (pieces.length === 0) return null;
+  return {
+    text: inNoteOrder(pieces),
+    clients: new Set(pieces.map(({ piece }) => piece.item.id.client)),
+  };
+}
+
+/** What a page's unsent changes typed that the note still shows. */
+export interface UnsentText {
+  /** In note order, as `RemovedText.text` is. Empty when none of it is left in the note. */
+  readonly text: string;
+  /** The changes also delete text that was there before them, which `text` can't carry. */
+  readonly deletes: boolean;
+}
+
+/** Read `unsent`, the page's changes it has not had saved, against `doc`, which holds them. */
+export function findUnsentText(doc: Y.Doc, unsent: Uint8Array): UnsentText {
+  const { from, to } = Y.parseUpdateMeta(unsent);
+  const { ds } = Y.decodeUpdate(unsent);
+  let deletes = false;
+  // Deleting typing these changes also made cancels out; any other delete removed earlier text.
+  ds.clients.forEach((ranges, client) => {
+    const start = from.get(client);
+    const end = to.get(client);
+    if (ranges.some(({ clock, len }) => start === undefined || clock < start || clock + len > end!))
+      deletes = true;
+  });
+  const pieces: { piece: Piece; shown: string }[] = [];
+  to.forEach((end, client) => {
+    const start = from.get(client)!;
+    const structs = doc.store.clients.get(client) ?? [];
+    if (structs.length === 0) return;
+    for (let at = Y.findIndexSS(structs, start); at < structs.length; at++) {
+      const item = structs[at]!;
+      if (item.id.clock >= end) break;
+      if (!(item instanceof Y.Item) || item.deleted || !holdsText(item)) continue;
+      const piece = {
+        item,
+        start: Math.max(start - item.id.clock, 0),
+        end: Math.min(end - item.id.clock, item.length),
+      };
+      const shown = render(piece);
+      if (shown !== "") pieces.push({ piece, shown });
+    }
+  });
+  return { text: pieces.length ? inNoteOrder(pieces) : "", deletes };
+}
+
+/** Pieces joined as the note shows them, a line break between lines. */
+function inNoteOrder(pieces: readonly { piece: Piece; shown: string }[]): string {
   const places = new Places();
   const sorted = pieces
     .map((entry) => ({ ...entry, line: lineOf(entry.piece.item), at: places.of(entry.piece) }))
@@ -96,7 +145,7 @@ function findRemovedText(
     line = entry.line;
     text += entry.shown;
   }
-  return { text, clients: new Set(pieces.map(({ piece }) => piece.item.id.client)) };
+  return text;
 }
 
 /** Characters, and inline items such as an image, a link or a line break. */
