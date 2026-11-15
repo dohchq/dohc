@@ -404,11 +404,10 @@ fn publication_source_before_in_tx(
             concat!("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
              FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
              WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4
-               AND m.moment_id=?5 AND m.after_content_kind='text' AND m.after_blob_sha256=?6
-               AND t.byte_length=?7 AND m.recorded_at_ms=?8 AND m.metadata_origin='sync'"),
+               AND m.moment_id=?5 AND m.after_content_kind='text'
+               AND m.recorded_at_ms=?6 AND m.metadata_origin='sync'"),
             params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,
-                source.bootstrap_moment_id,source.projected_markdown_digest,
-                source.projected_markdown_byte_length,source.baseline_registered_at_ms],
+                source.bootstrap_moment_id,source.baseline_registered_at_ms],
             portable_before_from_row,
         ).map(Some).map_err(SyncError::corrupt);
     }

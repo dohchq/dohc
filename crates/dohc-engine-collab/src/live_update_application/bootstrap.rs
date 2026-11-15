@@ -136,9 +136,9 @@ where
             let retained = get_binary_blob(tx, &input.baseline_digest).map_err(E::from)?.ok_or_else(|| E::from(ApplicationError::Corrupt))?;
             if retained != bytes { return Err(E::from(ApplicationError::Corrupt)); }
             let retained_domain: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND moment_id=?4 AND path=?5 AND after_blob_sha256=?6 AND after_content_kind='text' AND before_present=1 AND metadata_origin='sync' AND recorded_at_ms=?7)
+                "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND moment_id=?4 AND path=?5 AND after_content_kind='text' AND before_present=1 AND metadata_origin='sync' AND recorded_at_ms=?6)
                     AND EXISTS(SELECT 1 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path=?5)",
-                params![binding.workspace_id,binding.main_version_id,binding.object_id,input.bootstrap_moment_id,binding.current_path,input.projected_markdown_digest,input.baseline_registered_at_ms], |row| row.get(0)
+                params![binding.workspace_id,binding.main_version_id,binding.object_id,input.bootstrap_moment_id,binding.current_path,input.baseline_registered_at_ms], |row| row.get(0)
             ).map_err(read_sql).map_err(E::from)?;
             if !retained_domain { return Err(E::from(ApplicationError::Corrupt)); }
             return Ok(BootstrapResult::Bootstrapped(LiveApplicationBootstrapAck::new(&input, sequence, true)));
@@ -208,14 +208,12 @@ where
             doc.validate_public_baseline(bytes).map_err(ApplicationError::from).map_err(E::from)?;
             None
         };
+        // The relay's digest is another writer's spelling of this state, so the
+        // engine writes its own projection. The baseline digest proved the state.
         let mut projection = doc.project(ContentKind::Richdoc).map_err(ApplicationError::from).map_err(E::from)?;
         projection.content = if let Some(source) = reader_source { source } else {
             doc.preserved_markdown_source(&projection.content).unwrap_or(projection.content)
         };
-        if projection.content.len() as i64 != input.projected_markdown_byte_length
-            || hex_sha256(projection.content.as_bytes()) != input.projected_markdown_digest {
-            return Err(E::from(invalid("bootstrap Markdown projection mismatch")));
-        }
         attempted = true;
         let written = write_text_in_tx(tx, &WriteText {
             workspace_id: binding.workspace_id.clone(), version_id: binding.main_version_id.clone(),
@@ -270,6 +268,25 @@ pub(super) fn read_bootstrap(
             let decode=|index, error:serde_json::Error|rusqlite::Error::FromSqlConversionFailure(index,rusqlite::types::Type::Text,Box::new(error));
             Ok((LiveApplicationBootstrap {bootstrap_id:row.get(0)?,bootstrap_moment_id:row.get(1)?,baseline_moment_relay_sequence:row.get(2)?,baseline_registered_at_ms:row.get(3)?,baseline_digest:row.get(4)?,baseline_byte_length:row.get(5)?,projected_markdown_digest:row.get(6)?,projected_markdown_byte_length:row.get(7)?},serde_json::from_str(&binding).map_err(|e|decode(8,e))?,serde_json::from_str(&coordinate).map_err(|e|decode(9,e))?,row.get(10)?))
         }).optional().map_err(read_sql)
+}
+
+/// The digest of the Markdown this engine wrote at bootstrap. The relay's
+/// `projected_markdown_digest` is another writer's spelling of the same state,
+/// so later checks of this engine's own files compare with this one.
+pub(super) fn written_markdown_digest(
+    conn: &Connection,
+    held: &Registration,
+) -> Result<String, ApplicationError> {
+    let (bootstrap, _, _, _) = read_bootstrap(conn, held)?.ok_or(ApplicationError::Corrupt)?;
+    let b = &held.binding;
+    conn.query_row(
+        "SELECT after_blob_sha256 FROM moments WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND moment_id=?4 AND after_content_kind='text'",
+        params![b.workspace_id, b.main_version_id, b.object_id, bootstrap.bootstrap_moment_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(read_sql)?
+    .ok_or(ApplicationError::Corrupt)
 }
 
 fn insert_bootstrap(
@@ -1225,23 +1242,61 @@ mod tests {
         assert_eq!(counts(&store), (n, n, n, n));
         drop(owner);
     }
+    /// The relay's digest comes from the TypeScript writer, which can spell
+    /// the same state differently, for example a list item holding only
+    /// spaces. The engine writes its own projection, and what later checks
+    /// compare with is the digest it wrote.
     #[test]
-    fn projection_mismatch_and_follow_up_failure_leave_no_partial_bootstrap() {
+    fn another_writers_markdown_digest_still_bootstraps_the_engines_projection() {
         let vector = vectors().remove(1);
         let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
-        let mut bad = input(&vector);
-        bad.projected_markdown_digest = "f".repeat(64);
-        let result: Result<_, Error> = bootstrap_committed(
-            &mut store,
-            &mut cache,
-            &handle,
-            bad,
-            vector.bytes.clone(),
-            &NoFaults,
-            |_, _, _, _| Ok(()),
+        let other = format!("{}  \n", vector.markdown);
+        let mut relay = input(&vector);
+        relay.projected_markdown_digest = hex_sha256(other.as_bytes());
+        relay.projected_markdown_byte_length = other.len() as i64;
+        let bootstrap = |store: &mut EngineStore, cache: &mut WriterDocCache| {
+            bootstrap_committed(
+                store,
+                cache,
+                &handle,
+                relay.clone(),
+                vector.bytes.clone(),
+                &NoFaults,
+                |_, _, _, _| Ok::<_, Error>(()),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            bootstrap(&mut store, &mut cache),
+            BootstrapResult::Bootstrapped(LiveApplicationBootstrapAck::new(&relay, 0, false))
         );
-        assert!(result.is_err());
-        assert_eq!(counts(&store), (0, 0, 0, 0));
+        let (file, written) = {
+            let held = handle.registration.lock().unwrap();
+            store
+                .read_with(|conn| {
+                    let file: String = conn
+                        .query_row(
+                            "SELECT blob_sha256 FROM snapshots WHERE object_id='object'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .map_err(read_sql)?;
+                    Ok::<_, ApplicationError>((file, written_markdown_digest(conn, &held)?))
+                })
+                .unwrap()
+        };
+        assert_eq!(file, hex_sha256(vector.markdown.as_bytes()));
+        assert_eq!(written, file);
+        assert_eq!(
+            bootstrap(&mut store, &mut cache),
+            BootstrapResult::Bootstrapped(LiveApplicationBootstrapAck::new(&relay, 0, true))
+        );
+        assert_eq!(counts(&store), (1, 1, 1, 1));
+    }
+    #[test]
+    fn follow_up_failure_leaves_no_partial_bootstrap() {
+        let vector = vectors().remove(1);
+        let (_dir, mut store, mut cache, _owner, handle) = fixture(&vector);
         let result: Result<_, Error> = bootstrap_committed(
             &mut store,
             &mut cache,

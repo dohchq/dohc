@@ -69,6 +69,9 @@ function publication(
   update?: Uint8Array,
   agentId = "trip",
   owner = false,
+  // The owner engine's writer, which may spell the proven state differently
+  // from the relay's.
+  engine = (markdown: string) => markdown,
 ) {
   f.doc.gc = false;
   const baselineBytes = new TextEncoder().encode(f.input.evidence.projectedMarkdown);
@@ -121,7 +124,7 @@ function publication(
     checkpoint: bytes,
   });
   if (projected.kind !== "accepted") throw new Error(JSON.stringify(projected));
-  const markdown = new TextEncoder().encode(projected.evidence.projectedMarkdown),
+  const markdown = new TextEncoder().encode(engine(projected.evidence.projectedMarkdown)),
     markdownSha = hash(markdown);
   for (const [sha, content] of [
     [stateSha, bytes],
@@ -468,6 +471,7 @@ it.each([true])(
 it.each([
   ["scope", "record-namespace"],
   ["authors", "client-authors"],
+  ["length", "markdown-length"],
 ])("consumes forged %s proof without changing current content", async (field, check) => {
   const f = registered({ deployment: true });
   try {
@@ -479,6 +483,8 @@ it.each([
       };
     if (field === "scope") reference.record.relayDatabaseNamespace = "other";
     if (field === "authors") payload.authors = [{ kind: "agent", agentId: "forged" }];
+    if (field === "length")
+      payload.payloadAfterByteLength = Number(payload.payloadAfterByteLength) + 1;
     // Each forgery names its own settlement, so only the proof it changes refuses it.
     reference.record.settlementId = nativeSettlementId(reference.record);
     reference.recordDigest = settlementRecordDigest(reference.record);
@@ -749,6 +755,74 @@ it.each([true])("anchors a projection-neutral accepted gap with same-push=%s", a
     expect(
       f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_settlement_bindings").get()!.n,
     ).toBe(2);
+  } finally {
+    f.close();
+  }
+});
+
+// The relay's writer and the owner engine's can spell one state differently,
+// as Rust writes a list item holding only spaces as `&#32;`. The relay proves
+// the state, and each settlement continues from the file the engine wrote.
+it("accepts an owner engine's own spelling of the proven state and continues from that file", async () => {
+  const f = registered({ deployment: true });
+  try {
+    const engine = (markdown: string) => markdown.replace(/\n$/u, " \n");
+    const first = publication(
+      f,
+      "first",
+      0,
+      undefined,
+      0,
+      undefined,
+      undefined,
+      "trip",
+      false,
+      engine,
+    );
+    const cut = f.raw
+      .prepare("SELECT markdown_sha256 FROM sync_relay_live_settlement_cuts WHERE journal_cursor=?")
+      .get(first.receipt.journalCursor);
+    expect(cut!.markdown_sha256).not.toBe(first.markdownSha);
+    await prepare(f, [first.op]);
+    expect(first.op).toMatchObject({ settlementAdmission: { status: "accepted" } });
+    expect(append(f, [first.op]).inserted).toBe(1);
+    f.doc.clientID = 7654321;
+    const neutral = publication(
+      f,
+      "neutral",
+      first.receipt.journalCursor,
+      first.markdownSha,
+      1,
+      undefined,
+      f.update("title", "first"),
+      "neutral-author",
+      false,
+      engine,
+    );
+    f.doc.clientID = 7654322;
+    const next = publication(
+      f,
+      "visible",
+      neutral.receipt.journalCursor,
+      first.markdownSha,
+      1,
+      undefined,
+      undefined,
+      "trip",
+      false,
+      engine,
+    );
+    await prepare(f, [next.op]);
+    expect(append(f, [next.op]).settlementRefusals).toBeUndefined();
+    expect(refusedChecks()).toEqual([]);
+    expect(
+      f.raw
+        .prepare(
+          "SELECT markdown_sha256 FROM sync_relay_live_settlement_bindings ORDER BY terminal_cursor",
+        )
+        .all()
+        .map((row) => row.markdown_sha256),
+    ).toEqual([first.markdownSha, next.markdownSha]);
   } finally {
     f.close();
   }

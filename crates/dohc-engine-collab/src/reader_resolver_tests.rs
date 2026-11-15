@@ -231,7 +231,9 @@ fn real_reader_proves_frontmatter_source_without_rewriting_live_state() {
 }
 
 #[test]
-fn expired_proofs_must_match_the_engine_projection() {
+fn an_expired_proof_leaves_the_engine_its_own_projection() {
+    // The reader writes Markdown its own way, so its projection digest is not
+    // this engine's. Expiry still hands the engine its own projection.
     use std::{fs, process::Command};
     let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
     let node = std::env::var_os("DOHC_READER_TEST_NODE").unwrap_or_else(|| "node".into());
@@ -283,16 +285,13 @@ fn expired_proofs_must_match_the_engine_projection() {
     let proof = pending(lookup(&conn, &key, &doc, &resolver));
     run(proof.resolve());
     assert!(
-        matches!(proof.result.get(), Some(Err(Failure::Unavailable))),
+        matches!(proof.result.get(), Some(Ok(false))),
         "{:?}",
         proof.result.get()
     );
     drop(proof);
     for _ in 0..2 {
-        assert!(matches!(
-            lookup(&conn, &key, &doc, &resolver),
-            Err(CollabError::MarkdownReaderUnavailable)
-        ));
+        assert!(matches!(lookup(&conn, &key, &doc, &resolver), Ok(None)));
     }
 }
 fn lookup(

@@ -937,7 +937,7 @@ function provedSettlementSource(
   );
   // The terminal's cut and accepted binding.
   const cut = storage.db
-    .prepare(`SELECT c.state_sha256,c.markdown_sha256,c.markdown_byte_length,j.relay_database_namespace,j.current_path,j.selector_paths_json,
+    .prepare(`SELECT c.state_sha256,j.relay_database_namespace,j.current_path,j.selector_paths_json,
       j.restore_fence_generation FROM ${SETTLEMENT_CUTS} c JOIN sync_relay_live_update_journal j USING(journal_cursor)
     WHERE c.journal_cursor=? AND j.workspace_id=? AND j.main_version_id=? AND j.object_id=? AND j.lineage_claim_id=?`)
     .get(
@@ -950,8 +950,6 @@ function provedSettlementSource(
   proved(
     cut &&
       cut.state_sha256 === settled.state_sha256 &&
-      cut.markdown_sha256 === settled.markdown_sha256 &&
-      cut.markdown_byte_length === source.sourceByteLength &&
       cut.relay_database_namespace === settled.namespace &&
       stableJsonStringify({
         ...binding,

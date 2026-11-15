@@ -623,10 +623,12 @@ function requirePublicationPredecessor(
   if (prior.terminal === p.previous) return;
   const b = p.initialBinding;
   // No-change settlements consume their interval without another moment.
-  // Only relay-computed cuts can advance that unchanged artifact's anchor.
+  // Only relay-computed cuts can advance that unchanged artifact's anchor:
+  // the relay's own Markdown at both ends, compared with itself.
   const cut = storage.db
     .prepare(
       `SELECT j.relay_database_namespace,j.current_path,j.selector_paths_json,j.restore_fence_generation,c.markdown_sha256,
+      (SELECT prior.markdown_sha256 FROM ${SETTLEMENT_CUTS} prior WHERE prior.journal_cursor=?) AS prior_markdown,
       EXISTS(SELECT 1 FROM sync_relay_live_update_journal gap
         WHERE gap.workspace_id=j.workspace_id AND gap.main_version_id=j.main_version_id
           AND gap.object_id=j.object_id AND gap.lineage_claim_id=j.lineage_claim_id
@@ -637,6 +639,7 @@ function requirePublicationPredecessor(
       WHERE j.workspace_id=? AND j.main_version_id=? AND j.object_id=? AND j.lineage_claim_id=? AND j.journal_cursor=?`,
     )
     .get(
+      prior.terminal,
       prior.terminal,
       p.namespace,
       b.currentPath,
@@ -651,7 +654,8 @@ function requirePublicationPredecessor(
     cut.current_path === b.currentPath &&
     cut.restore_fence_generation === b.restoreFenceGeneration &&
     isDeepStrictEqual(JSON.parse(String(cut.selector_paths_json)), b.selectorPaths) &&
-    cut.markdown_sha256 === prior.markdown, "predecessor-unchanged-gap");
+    cut.prior_markdown != null &&
+    cut.markdown_sha256 === cut.prior_markdown, "predecessor-unchanged-gap");
 }
 function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBudget) {
   const prior = storage.db
@@ -673,7 +677,6 @@ function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBud
       .get(...documentParams(p.binding));
     require(!prior, "first-already-published");
     require(baseline, "first-live-document");
-    require(baseline.baseline_projected_sha256 === p.before, "first-baseline-markdown");
     return;
   }
   if (budget) prepareBindingBase(storage, p, budget);
@@ -684,7 +687,6 @@ function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBud
     .get(...documentParams(p.binding), p.previous);
   require(p.baseBindingJson && base, "base-cut");
   require(base.relay_database_namespace === p.namespace, "base-namespace");
-  require(base.markdown_sha256 === p.before, "base-markdown");
   require(!prior ||
     integer(prior.terminal_cursor, "published-terminal-cursor") <=
       p.previous, "base-published-past");
@@ -696,7 +698,6 @@ function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBud
   }) === p.baseBindingJson, "base-binding");
 }
 type ProvedSettlement = Omit<Prepared, "before"> & {
-  markdownByteLength: number;
   events: ReturnType<typeof readAcceptedHistoryInterval>;
 };
 /**
@@ -798,7 +799,6 @@ async function proveSettlementRecord(
   require(normalized.kind === "accepted", "state-normalized");
   require(normalized.evidence.stateUpdateSha256 === cut.state_sha256, "state-digest");
   require(normalized.evidence.projectedMarkdownSha256 === cut.markdown_sha256, "state-markdown");
-  require(record.markdownDigest === cut.markdown_sha256, "record-markdown");
   return {
     ...transitions,
     binding,
@@ -809,9 +809,10 @@ async function proveSettlementRecord(
     momentId: String(record.momentId),
     recordDigest: String(ref.recordDigest),
     state: String(cut.state_sha256),
-    markdown: String(cut.markdown_sha256),
+    // The owner engine's file. The state digest proved what it holds; only
+    // that writer's own digests are compared with it.
+    markdown: String(record.markdownDigest),
     terminalDigest: accepted.evidenceDigest,
-    markdownByteLength: integer(cut.markdown_byte_length, "markdown-length"),
     events,
   };
 }
@@ -934,9 +935,14 @@ export async function prepareHostedSettlements(
             payload.payloadBeforeContentKind === "text" &&
             payload.payloadAfterBlobSha256 === record.markdownDigest, "moment-payload"),
       );
-      require(payload.payloadAfterByteLength === proved.markdownByteLength, "markdown-length");
-      const { markdownByteLength: _length, ...settled } = proved;
-      const p: Prepared = { ...settled, before: String(payload.payloadBeforeBlobSha256) };
+      // The declared length must be the owner's own blob's, which activation later reads.
+      const after = storage.db
+        .prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?")
+        .get(input.workspaceId, proved.markdown);
+      if (!after) throw relayError("blob_missing");
+      require(payload.payloadAfterByteLength ===
+        integer(after.byte_length, "markdown-length"), "markdown-length");
+      const p: Prepared = { ...proved, before: String(payload.payloadBeforeBlobSha256) };
       const document = p.binding;
       const key = JSON.stringify(documentParams(document)),
         prior = provisional.get(key);

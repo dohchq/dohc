@@ -2801,6 +2801,34 @@ fn owner_settlement_lookup_accepts_both_binding_key_orders() {
     }
 }
 
+/// The relay declares its own writer's digest at bootstrap, which can spell
+/// the note differently. The first settlement starts at the file the engine
+/// wrote then.
+#[test]
+fn first_settlement_starts_at_the_engines_bootstrap_file_not_the_relays_digest() {
+    let mut f = fixture(true);
+    let engine = f.input.projected_markdown_digest.clone();
+    let engine_bytes = f.input.projected_markdown_byte_length;
+    let other = "Another writer's spelling.\n";
+    f.input.projected_markdown_digest = hex_sha256(other.as_bytes());
+    f.input.projected_markdown_byte_length = other.len() as i64;
+    bootstrap(&mut f, false).unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&f.bytes).unwrap();
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Accepted first edit.")
+        .unwrap();
+    f.bytes = doc.encode_full_state();
+    accept_enrollment_event(&mut f, 1);
+    settle_bootstrap_publication(&mut f, 1, "first-settlement").unwrap();
+    let first = operations(&f.store)
+        .into_iter()
+        .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == "first-settlement")
+        .unwrap();
+    assert_eq!(first.payload["payloadBeforeBlobSha256"], engine);
+    assert_eq!(first.payload["payloadBeforeByteLength"], engine_bytes);
+    assert_eq!(first.payload["beforeLatestMomentId"], "bootstrap-moment");
+}
+
 #[test]
 fn first_bootstrap_settlement_publishes_admitted_baseline_then_chains() {
     let mut f = fixture(true);
