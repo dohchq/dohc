@@ -1150,8 +1150,12 @@ fn judge_folder(
     }
     let pending = pending_rule_jobs(conn, workspace, folder)?;
     // dohc wrote this rule and its file is on the way to disk, unless capture
-    // read other bytes there: those are judged like any rule on disk.
+    // read other bytes there: those are judged like any rule on disk. A delete
+    // is dohc's own only when a job of its own path is still pending.
     let placing = |touch: &Touch<'_>| {
+        if touch.deletes {
+            return pending.iter().any(|(path, _)| path == touch.path);
+        }
         touch.observed.is_none_or(|bytes| {
             let sha256 = dohc_engine_storage::hex_sha256(bytes);
             pending
