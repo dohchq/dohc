@@ -296,6 +296,23 @@ it("shows a change whose journal the copy did not apply, in the read just after 
   release();
   await earlier;
   await shows("e");
+
+  // An earlier change reaches the server after a later one has committed and confirmed.
+  let entered!: () => void, send!: () => void;
+  const waiting = new Promise<void>((resolve) => (entered = resolve)),
+    sent = new Promise<void>((resolve) => (send = resolve));
+  owner.intercept(async (headers, go) => {
+    headers.delete(APP_BACKEND_CATCH_UP_HEADER);
+    entered();
+    await sent;
+    return go();
+  });
+  const late = rename("f");
+  await waiting;
+  await rename("g");
+  send();
+  await late;
+  await shows("f");
 }, 60_000);
 
 it.runIf(roundTripMs > 0)(

@@ -48,7 +48,8 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
   let denied = false,
     closing = false,
     confirmed: { cursor: DatasetCursor; atMs: number } | null = null,
-    changes = 0;
+    changes = 0,
+    pending = 0;
   const confirmations = new Set<Promise<unknown>>();
   const trackConfirmation = <T>(work: () => Promise<T>): Promise<T> => {
     const result = work();
@@ -257,33 +258,39 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
         after: DatasetCursor,
       ) => {
         // Until this change's own journal reaches the head, a read asks the server.
-        // A change sent later takes over, so an earlier one's journal cannot vouch for it.
-        const mine = ++changes;
+        // Changes in flight together can commit in any order, so only a change that
+        // overlapped no other can vouch for the head its journal reached.
+        const alone = pending++ === 0,
+          mine = ++changes;
         confirmed = null;
-        let result: Awaited<ReturnType<OwnerDatasetData["invoke"]>>;
         try {
-          result = await remote.invoke({ ...input, after });
-        } catch (error) {
+          let result: Awaited<ReturnType<OwnerDatasetData["invoke"]>>;
+          try {
+            result = await remote.invoke({ ...input, after });
+          } catch (error) {
+            authorize();
+            if (neverSent(error))
+              throw Error(
+                `dohc didn't save this change. This Collection is read-only until ${host} is reachable.`,
+                { cause: error },
+              );
+            if (error instanceof TypeError) throw unreachable();
+            throw error;
+          }
           authorize();
-          if (neverSent(error))
-            throw Error(
-              `dohc didn't save this change. This Collection is read-only until ${host} is reachable.`,
-              { cause: error },
-            );
-          if (error instanceof TypeError) throw unreachable();
-          throw error;
+          const { catchUp, ...committed } = result;
+          const head = catchUp
+            ? await applyCatchUp(catchUp).catch(() => {
+                // The change is saved on the server; the next read catches the copy up.
+                return null;
+              })
+            : null;
+          if (head && alone && mine === changes) confirmed = { cursor: head, atMs: Date.now() };
+          authorize();
+          return committed;
+        } finally {
+          pending--;
         }
-        authorize();
-        const { catchUp, ...committed } = result;
-        const head = catchUp
-          ? await applyCatchUp(catchUp).catch(() => {
-              // The change is saved on the server; the next read catches the copy up.
-              return null;
-            })
-          : null;
-        if (head && mine === changes) confirmed = { cursor: head, atMs: Date.now() };
-        authorize();
-        return committed;
       };
       return {
         ...remote,
