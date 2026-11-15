@@ -1,6 +1,6 @@
 import { noticesWords } from "@dohc/interface-words/notices";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
-import type { OnViewableItemsChangedInfo } from "@legendapp/list/react-native";
+import type { LegendListRef, OnViewableItemsChangedInfo } from "@legendapp/list/react-native";
 import { Stack, useIsFocused } from "expo-router";
 import { Check } from "lucide-react-native";
 import { useCallback, useEffect, useRef } from "react";
@@ -10,6 +10,7 @@ import { HoldRow } from "../workspace/ListStates";
 import { NoticeRow } from "./NoticeRow";
 import { useNotices } from "./NoticesState";
 import type { PhoneNotice } from "./phoneNotice";
+import { freeAnswer, useAnswerReveal } from "./useAnswerReveal";
 
 // The account's Notices, and failures held on this phone. The header shows at once. Until the whole list is known,
 // from the server or from the copy saved at the last launch, an empty list holds its place, so it never says All
@@ -35,6 +36,15 @@ export function ServerNotices() {
     },
     [see],
   );
+  // The list's keyboard view keeps the keyboard's room under the rows; this brings the open free answer's row above it.
+  const list = useRef<LegendListRef>(null);
+  const answering = freeAnswer(notices);
+  const { onItemSizeChanged } = useAnswerReveal({
+    list,
+    visit: answering?.visit ?? null,
+    index: answering ? notices.findIndex((notice) => notice.id === answering.noticeId) : -1,
+    focused,
+  });
   return (
     <>
       <Stack.Screen options={{ title: noticesWords.heading }} />
@@ -45,9 +55,11 @@ export function ServerNotices() {
           </Stack.Toolbar.Button>
         </Stack.Toolbar>
       ) : null}
-      {/* A row's answer field rides above the keyboard, and a tap on Send or a choice reaches it with the keyboard up. */}
+      {/* A tap on Send or a choice reaches a row's answer with the keyboard up. */}
       <KeyboardAwareLegendList
+        ref={list}
         data={notices}
+        onItemSizeChanged={onItemSizeChanged}
         keyExtractor={(notice) => notice.id}
         estimatedItemSize={128}
         style={{ backgroundColor: theme.bg }}

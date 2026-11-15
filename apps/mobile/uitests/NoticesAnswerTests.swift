@@ -66,13 +66,35 @@ final class NoticesAnswerTests: XCTestCase {
     let field = app.textViews["Answer Nova"]
     XCTAssertTrue(field.waitForExistence(timeout: 10), "The answer's field didn't open in the row")
     field.tap()
-    field.typeText("Lisbon and Porto, 2026")
+    let typed = "Lisbon and Porto, 2026"
+    field.typeText(typed)
+    let keyboard = app.keyboards.firstMatch
+    XCTAssertTrue(keyboard.waitForExistence(timeout: 5), "The keyboard didn't show for the field")
+    let holds = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", typed), object: field)
+    XCTAssertEqual(XCTWaiter().wait(for: [holds], timeout: 5), .completed, "The field doesn't hold the typed answer")
+
+    // The row rises until its field and Send sit above the keyboard, so the tap reaches Send, not the keyboard.
     let send = app.buttons["Send message"]
-    XCTAssertTrue(send.waitForExistence(timeout: 5))
+    let clear = XCTNSPredicateExpectation(
+      predicate: NSPredicate { _, _ in
+        guard send.exists, send.isEnabled, send.isHittable, keyboard.exists else { return false }
+        let top = keyboard.frame.minY + 0.5
+        return send.frame.maxY <= top && field.frame.maxY <= top
+      },
+      object: nil)
+    guard XCTWaiter().wait(for: [clear], timeout: 5) == .completed else {
+      XCTFail(
+        "Send isn't above the keyboard: field \(field.frame), value \(String(describing: field.value)), Send \(send.frame), "
+          + "keyboard \(keyboard.frame)\n\(app.debugDescription)")
+      let shot = XCTAttachment(screenshot: app.screenshot())
+      shot.lifetime = .keepAlways
+      add(shot)
+      return
+    }
     send.tap()
 
-    XCTAssertTrue(row(app, question, ", Answered,").waitForExistence(timeout: 10), "The row never reached Answered")
     XCTAssertTrue(waitGone(field), "The field stayed open after the answer was kept")
+    XCTAssertTrue(row(app, question, ", Answered,").waitForExistence(timeout: 10), "The row never reached Answered")
   }
 
   @MainActor
