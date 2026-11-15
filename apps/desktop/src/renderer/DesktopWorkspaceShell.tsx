@@ -7603,11 +7603,14 @@ export function DesktopWorkspaceShell(props: {
             : {
                 copy: {
                   report: errorDetails([
+                    // A notice with change rows leads with its facts, which the
+                    // lines it repeats from the row would otherwise push down.
+                    ...(error.rows ? (error.details ?? []) : []),
                     [error.tone ? "Notice" : "Error", error.message],
                     ...(error.title ? [["Title", error.title] as const] : []),
                     ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
-                    ...(error.rows ?? []).map((row) => ["Row", row] as const),
-                    ...(error.details ?? []),
+                    ...(error.rows ?? []).map((row) => ["Change", row] as const),
+                    ...(error.rows ? [] : (error.details ?? [])),
                     ...reportFacts(error.atMs),
                   ]),
                 },
@@ -7997,6 +8000,7 @@ export function DesktopWorkspaceShell(props: {
     showSuccessNotice,
     showNotice: showNoticeRow,
     openHistory: openHistoryView,
+    openMembers: () => openSettings("members"),
   });
   const keptFilesNotice = useKeptFilesNotice({
     workspaceId,

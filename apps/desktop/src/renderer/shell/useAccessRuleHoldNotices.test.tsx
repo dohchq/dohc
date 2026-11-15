@@ -49,7 +49,19 @@ const ROOT_REMOVED: AccessRuleHold = {
 
 type Decided = { heldAccessRules: AccessRuleHold[]; kept: string[]; undo: AccessRuleUndo | null };
 
-function harness(holds: readonly AccessRuleHold[]) {
+// The members' level from Members settings, or a failed read.
+const membersAt = (memberLevel: "view" | "comment" | "edit") => async (_input: object) => ({
+  status: "ready",
+  view: { memberLevel },
+});
+const membersUnread = async (_input: object): Promise<never> => {
+  throw new Error("Not signed in");
+};
+
+function harness(
+  holds: readonly AccessRuleHold[],
+  members: (input: object) => Promise<unknown> = membersAt("edit"),
+) {
   const bridge = {
     // Undo goes through the engine too, so the bridge offers no file write.
     decideAccessRule: vi.fn(async (_input: object): Promise<Decided> => ({
@@ -57,10 +69,12 @@ function harness(holds: readonly AccessRuleHold[]) {
       kept: [],
       undo: null,
     })),
+    workspaceMembers: vi.fn(members),
   };
   vi.stubGlobal("dohcDesktop", bridge);
   const showNotice = vi.fn((_identity: string) => undefined);
   const openHistory = vi.fn();
+  const openMembers = vi.fn();
   let errors!: ReturnType<typeof useShellError>;
   function Shell(props: { holds: readonly AccessRuleHold[] }) {
     errors = useShellError("ws-a");
@@ -69,6 +83,7 @@ function harness(holds: readonly AccessRuleHold[]) {
       holds: props.holds,
       showNotice,
       openHistory,
+      openMembers,
       reportShellFailure: errors.reportShellFailure,
       clearIdentity: errors.clearIdentity,
       showSuccessNotice: errors.showSuccessNotice,
@@ -82,6 +97,7 @@ function harness(holds: readonly AccessRuleHold[]) {
     bridge,
     showNotice,
     openHistory,
+    openMembers,
     row,
     errors: () => errors,
     list: (next: readonly AccessRuleHold[]) => view.rerender(<Shell holds={next} />),
@@ -109,7 +125,9 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.row("")).toMatchObject({
       title: "The workspace's access rule was removed outside dohc",
       message:
-        "Until you choose, dohc doesn't record or share changes in this workspace. Members keep their earlier access. Without it, this workspace follows each member's workspace access.",
+        "Until you choose, dohc doesn't record or share changes in this workspace. Members keep their earlier access. Without it, members get the level set in Members settings.",
+      rows: ["Members: View → Edit"],
+      action: { additional: [{ label: "Remove rule" }] },
     });
 
     act(() => h.errors().runShellErrorAction(h.row("team")!.id));
@@ -143,7 +161,7 @@ describe("useAccessRuleHoldNotices", () => {
     const h = harness([WIDENED, REMOVED]);
     await waitFor(() => expect(h.errors().shellErrors).toHaveLength(2));
     expect(h.row("team")).toMatchObject({
-      rows: ["members: View → Edit", "sam@example.com: none → Edit"],
+      rows: ["Members: View → Edit", "sam@example.com: No access → Edit"],
       target: { to: "file", path: "team/access.yaml" },
     });
     expect(h.row("team")!.details).toEqual([
@@ -151,7 +169,7 @@ describe("useAccessRuleHoldNotices", () => {
       ["Noticed", new Date(1).toLocaleString()],
     ]);
     expect(h.row("team/sub")).toMatchObject({
-      rows: ["members: View → Edit"],
+      rows: ["Members: View → Edit"],
       target: { to: "folder", path: "team/sub" },
     });
   });
@@ -163,6 +181,7 @@ describe("useAccessRuleHoldNotices", () => {
       "Until you choose, dohc doesn't record or share changes in team. Members keep their earlier access. Restoring keeps the rule from outside dohc as a copy. dohc can't read the access rule now on disk. Allowing it hides team from members.",
     );
     expect(h.row("team")!.rows).toBeUndefined();
+    expect(h.row("team")!.action).toMatchObject({ additional: [{ label: "Hide from members" }] });
   });
 
   it("reads as working while a decision runs, then says what took effect with Undo", async () => {
@@ -216,7 +235,7 @@ describe("useAccessRuleHoldNotices", () => {
           .errors()
           .shellErrors.filter((error) => error.tone === "success")
           .at(-1),
-      ).toMatchObject({ message: "The access rule for team is back as it was." }),
+      ).toMatchObject({ message: "team follows its earlier access rule again." }),
     );
   });
 
@@ -287,7 +306,7 @@ describe("useAccessRuleHoldNotices", () => {
     await waitFor(() =>
       expect(success().at(-1)).toMatchObject({
         message:
-          "Restored the access rule for team/sub. The rule from outside dohc is saved as a copy of team/sub/access.yaml.",
+          "Restored the access rule for team/sub. Members can view team/sub. The rule from outside dohc is saved as a copy of team/sub/access.yaml.",
       }),
     );
     const restored = success().at(-1)!.id;
@@ -340,7 +359,7 @@ describe("useAccessRuleHoldNotices", () => {
         tone: "warning",
         title: "Choose for team's access rule first",
         message:
-          "Your choice for team/sub wasn't applied. The access rule for team also changed outside dohc.",
+          "dohc didn't apply your choice for team/sub. The access rule for team also changed outside dohc.",
         retry: null,
         action: { label: "Show its notice" },
       }),
@@ -371,7 +390,7 @@ describe("useAccessRuleHoldNotices", () => {
       expect(waits()).toMatchObject({
         title: "Choose for the workspace's access rule first",
         message:
-          "Your choice for team wasn't applied. The workspace's access rule also changed outside dohc.",
+          "dohc didn't apply your choice for team. The workspace's access rule also changed outside dohc.",
       }),
     );
     // The owner decides the workspace's rule from its own row, without Show.
@@ -386,7 +405,7 @@ describe("useAccessRuleHoldNotices", () => {
     const first = h.row("team")!;
     act(() => h.errors().hideShellError(first.id));
     h.list([{ ...WIDENED, changes: [{ who: "members", before: "comment", after: "edit" }] }]);
-    await waitFor(() => expect(h.row("team")!.rows).toEqual(["members: Comment → Edit"]));
+    await waitFor(() => expect(h.row("team")!.rows).toEqual(["Members: Comment → Edit"]));
     expect(h.row("team")!.id).toBe(first.id);
     expect(h.errors().shellErrors).toHaveLength(1);
     // The person hid its toast; the update brings none back.
@@ -447,5 +466,114 @@ describe("useAccessRuleHoldNotices", () => {
       retry: expect.any(Function),
     });
     expect(h.row("team")!.action?.busy).toBeUndefined();
+  });
+
+  it("names the level members get from Members settings, in the rows and what Remove rule did", async () => {
+    const h = harness([ROOT_REMOVED], membersAt("comment"));
+    await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View → Comment"] }));
+    expect(h.bridge.workspaceMembers).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-a",
+      request: { action: "list" },
+    });
+    // The level is known, so the row offers only the choices.
+    expect(h.row("")!.action!.additional).toHaveLength(1);
+    act(() => h.errors().runShellErrorAction(h.row("")!.id, 1));
+    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
+    await waitFor(() =>
+      expect(done()).toMatchObject({
+        message: "Removed the workspace's access rule. Members can now comment on this workspace.",
+      }),
+    );
+  });
+
+  it("says where the level is set, with Open Members, when dohc can't read it", async () => {
+    const h = harness([ROOT_REMOVED], membersUnread);
+    await waitFor(() => expect(h.row("")).toBeDefined());
+    expect(h.row("")).toMatchObject({
+      rows: ["Members: View → set in Members settings"],
+      message:
+        "Until you choose, dohc doesn't record or share changes in this workspace. Members keep their earlier access. Without it, members get the level set in Members settings. dohc can't read that level now.",
+      action: { additional: [{ label: "Remove rule" }, { label: "Open Members" }] },
+    });
+    expect(JSON.stringify(h.row(""))).not.toContain("workspace access");
+    act(() => h.errors().runShellErrorAction(h.row("")!.id, 2));
+    expect(h.openMembers).toHaveBeenCalledOnce();
+    expect(h.bridge.decideAccessRule).not.toHaveBeenCalled();
+    act(() => h.errors().runShellErrorAction(h.row("")!.id, 1));
+    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
+    await waitFor(() =>
+      expect(done()).toMatchObject({
+        message:
+          "Removed the workspace's access rule. Members now get the level set in Members settings.",
+      }),
+    );
+  });
+
+  it("says what members can now do after an Undo that puts a widening back", async () => {
+    const h = harness([{ ...WIDENED, changes: [WIDENED.changes[0]!] }]);
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    const undo = {
+      path: "team/access.yaml",
+      text: "members: edit\n",
+      expectedSha256: "b".repeat(64),
+    };
+    h.bridge.decideAccessRule.mockResolvedValueOnce({
+      heldAccessRules: [],
+      kept: ["team/access.yaml"],
+      undo,
+    });
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+    const success = () => h.errors().shellErrors.filter((error) => error.tone === "success");
+    await waitFor(() =>
+      expect(success()[0]).toMatchObject({
+        message:
+          "Restored the access rule for team. Members can view team. The rule from outside dohc is saved as a copy of team/access.yaml.",
+      }),
+    );
+    act(() => h.errors().runShellErrorAction(success()[0]!.id));
+    await waitFor(() =>
+      expect(success().at(-1)).toMatchObject({ message: "Members can now edit team." }),
+    );
+  });
+
+  it("puts back the hold as the engine lists it now after a refused choice, or clears a hold it no longer lists", async () => {
+    const h = harness([WIDENED]);
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    let refuse!: (error: Error) => void;
+    h.bridge.decideAccessRule.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          refuse = reject;
+        }),
+    );
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+    // The list refreshes while the choice runs.
+    const newer = {
+      ...WIDENED,
+      changes: [{ who: "members", before: "comment", after: "edit" } as const],
+    };
+    h.list([newer]);
+    await waitFor(() => expect(h.row("team")!.rows).toEqual(["Members: Comment → Edit"]));
+    await act(async () => refuse(new Error("engine stopped")));
+    await waitFor(() => expect(h.row("team")!.action?.busy).toBeUndefined());
+    expect(h.row("team")!.rows).toEqual(["Members: Comment → Edit"]);
+    // A choice whose hold left the list while it ran leaves no row behind.
+    h.bridge.decideAccessRule.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          refuse = reject;
+        }),
+    );
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
+    h.list([]);
+    await act(async () =>
+      refuse(
+        new Error(
+          "Error invoking remote method 'desktop:decide-access-rule': DaemonRefusalError [INVALID_PARAMS]: access-rule-not-held",
+        ),
+      ),
+    );
+    await waitFor(() => expect(h.row("team")).toBeUndefined());
+    expect(h.errors().shellErrors.filter((error) => error.noDismiss)).toEqual([]);
   });
 });
