@@ -24,6 +24,12 @@ const row = (id: string, patch: object = {}) =>
 const listing = (grants = [grant("g")]) =>
   readStoredRoster({ grants, links: [], formerGrants: [], endedGrants: [] })!;
 const ref = { kind: "path" as const, path: "Notes/a.md", versionId: null };
+const reach = (role: "admin" | "member", level: "view" | "comment" | "edit") => ({
+  revision: "r1",
+  role,
+  level,
+  rules: [],
+});
 const input = (source = listing()) => ({
   observation: { listing: source, checkedAtMs: 100, freshness: "fresh" as const },
   recipientUserId: "owner",
@@ -382,6 +388,7 @@ it("answers a tracked file on main with each workspace member, and leaves member
   const member = grant("member", {
     selector: { kind: "workspace", role: "admin" },
     access: "edit",
+    memberReach: reach("admin", "edit"),
   });
   const source = readStoredRoster({
     grants: [
@@ -392,6 +399,7 @@ it("answers a tracked file on main with each workspace member, and leaves member
         recipientEmail: "ana@test.dev",
         access: "comment",
         selector: { kind: "workspace", role: "member" },
+        memberReach: reach("member", "comment"),
       }),
     ],
     formerGrants: [
@@ -455,12 +463,14 @@ it("answers an ordinary Group with each workspace member only when the caller sa
     grantId: "ana",
     access: "comment",
     selector: { kind: "workspace" },
+    memberReach: reach("member", "comment"),
   });
   const gone = grant("member", {
     grantId: "gone",
     access: "edit",
     status: "revoked",
     selector: { kind: "workspace" },
+    memberReach: reach("member", "edit"),
   });
   const source = readStoredRoster({
     grants: [
