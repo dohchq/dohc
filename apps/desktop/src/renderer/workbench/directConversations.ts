@@ -82,16 +82,14 @@ export function createDirectStore(api: Api) {
   function startEvents() {
     const offChanged = api.onDirectChanged(() => void refresh());
     const offSession = api.onCloudSessionChanged(({ sessionKey: key, phase }) => {
+      // The first event counts too: a read started before it may be for the account signed in before.
       if (key !== sessionKey) {
-        const first = sessionKey === undefined;
         sessionKey = key;
-        if (!first) {
-          session += 1;
-          readSent.clear();
-          drafts.clear();
-          unsent.clear();
-          set({ status: "loading" });
-        }
+        session += 1;
+        readSent.clear();
+        drafts.clear();
+        unsent.clear();
+        set({ status: "loading" });
       }
       if (phase === "ready") void refresh();
     });
@@ -123,7 +121,8 @@ export function createDirectStore(api: Api) {
     markRead(conversationId: string, seq: number): void {
       if ((readSent.get(conversationId) ?? -1) >= seq) return;
       readSent.set(conversationId, seq);
-      patch(conversationId, (conversation) => conversation.unread === 0 ? conversation : { ...conversation, unread: 0 });
+      patch(conversationId, (conversation) =>
+        conversation.unread === 0 || (conversation.last !== null && conversation.last.seq > seq) ? conversation : { ...conversation, unread: 0 });
       const mine = session;
       api.directMarkRead({ conversationId, seq }).catch(() => {
         if (mine !== session) return;

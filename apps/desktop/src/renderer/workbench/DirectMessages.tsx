@@ -358,7 +358,7 @@ export function DirectConversationView(props: Reporting & {
   const newestSeq = shownSeq ?? 0;
   useEffect(() => {
     if (!conversation || conversation.unread === 0 || !newestInView || newestSeq === 0) return;
-    store.markRead(conversationId, Math.max(newestSeq, conversation.last?.seq ?? 0));
+    store.markRead(conversationId, newestSeq);
   }, [conversation, conversationId, newestInView, newestSeq, store]);
 
   const [draft, setDraftState] = useState(() => store.draft(conversationId));
@@ -374,11 +374,15 @@ export function DirectConversationView(props: Reporting & {
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const sendIdentity = `direct-send:${conversationId}`;
-  const send = useCallback(async (body: string, messageId: string) => {
+  // A send and its Try again belong to the account that wrote it. After a change of account, Try again only clears its notice.
+  const send = useCallback(async (body: string, messageId: string, session = store.session()) => {
+    if (session !== store.session()) {
+      reporting.current.onClearError?.(sendIdentity);
+      return;
+    }
     if (sendingRef.current) return;
     sendingRef.current = true;
     setSending(true);
-    const session = store.session();
     try {
       const result = await bridge().directSend({ conversationId, messageId, body });
       if (session !== store.session()) return;
@@ -399,7 +403,7 @@ export function DirectConversationView(props: Reporting & {
       reporting.current.onError(
         ipcErrorMessage(cause, "dohc could not send your message."),
         cause,
-        () => void send(body, messageId),
+        () => void send(body, messageId, session),
         undefined,
         { identity: sendIdentity },
       );
@@ -674,11 +678,14 @@ export function NewDirectMessage(props: Reporting & {
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const sendIdentity = `direct-start:${workspaceId}`;
-  const start = useCallback(async (memberIds: readonly string[], body: string, messageId: string, title: string) => {
+  const start = useCallback(async (memberIds: readonly string[], body: string, messageId: string, title: string, session = store.session()) => {
+    if (session !== store.session()) {
+      reporting.current.onClearError?.(sendIdentity);
+      return;
+    }
     if (sendingRef.current) return;
     sendingRef.current = true;
     setSending(true);
-    const session = store.session();
     try {
       const result = await bridge().directStart({ workspaceId, memberIds: [...memberIds], messageId, body });
       if (session !== store.session()) return;
@@ -692,7 +699,7 @@ export function NewDirectMessage(props: Reporting & {
       reporting.current.onError(
         ipcErrorMessage(cause, "dohc could not send your message."),
         cause,
-        () => void start(memberIds, body, messageId, title),
+        () => void start(memberIds, body, messageId, title, session),
         undefined,
         { identity: sendIdentity },
       );

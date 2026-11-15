@@ -144,15 +144,23 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
 
   const pause = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref?.(); });
 
-  async function follow(credentials: Credentials, stop: AbortSignal): Promise<void> {
+  async function follow(key: string, stop: AbortSignal): Promise<void> {
     let since = -1;
     while (!stop.aborted) {
+      // Each request reads the session again, so a new token for the same account is used at once.
+      const credentials = await dependencies.credentials().catch(() => null);
+      if (stop.aborted) return;
+      if (!credentials?.relayUrl || accountKey(credentials) !== key) {
+        void ensureFollowing();
+        return;
+      }
       try {
         const answer = await call(credentials, `${DIRECT_ROUTES.activity}?since=${Math.max(since, 0)}&waitMs=${since < 0 ? 0 : DIRECT_ACTIVITY_MAX_WAIT_MS}`, { signal: stop });
         const revision = (answer as { revision?: unknown } | null)?.revision;
         if (!Number.isSafeInteger(revision)) throw new DirectMessageError("refused", "unreadable activity");
         const unchanged = since >= 0 && revision === since;
-        if (since >= 0 && !unchanged) dependencies.changed();
+        // The first answer counts as a change: a window may be showing the copy saved while the server was away.
+        if (!unchanged) dependencies.changed();
         since = revision as number;
         // A server that answers before its wait with nothing new would otherwise make this loop spin.
         if (unchanged) await pause(dependencies.retryMs ?? 1_000);
@@ -173,7 +181,7 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
     if (!credentials || key === null) return;
     const stop = new AbortController();
     following = { key, stop };
-    void follow(credentials, stop.signal);
+    void follow(key, stop.signal);
   }
 
   return {

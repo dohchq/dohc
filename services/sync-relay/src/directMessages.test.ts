@@ -12,7 +12,8 @@ import type { SyncRelayHandler } from "./server";
 import { fenceAccount, initializeAccountDeletion, purgeAccountRows } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
 import {
-  DIRECT_NEW_CONVERSATION_LIMIT, DIRECT_NEW_CONVERSATION_WINDOW_MS, DIRECT_SEND_RATE_LIMIT, DIRECT_SEND_RATE_WINDOW_MS, DIRECT_STORED_BYTES_LIMIT,
+  DIRECT_MESSAGE_ROW_BYTES, DIRECT_NEW_CONVERSATION_LIMIT, DIRECT_NEW_CONVERSATION_WINDOW_MS, DIRECT_SEND_RATE_LIMIT, DIRECT_SEND_RATE_WINDOW_MS,
+  DIRECT_STORED_BYTES_LIMIT,
 } from "./storage/directMessages";
 import { closeTestStorages, json, jsonBody, request, testHandler, testStorage } from "./testing";
 
@@ -323,7 +324,9 @@ describe("direct message routes", () => {
     const ana = await member(h, "ana");
     const conversationId = await sent(h, OWNER, { people: [pick(ana)] }, "1234567890");
     const context = storage as unknown as StorageContext;
-    context.db.prepare("UPDATE sync_relay_direct_usage SET stored_bytes = ? WHERE user_id = ?").run(DIRECT_STORED_BYTES_LIMIT - 10, OWNER);
+    // A message costs its words and its row.
+    expect(context.db.prepare("SELECT stored_bytes FROM sync_relay_direct_usage WHERE user_id = ?").get(OWNER)!.stored_bytes).toBe(10 + DIRECT_MESSAGE_ROW_BYTES);
+    context.db.prepare("UPDATE sync_relay_direct_usage SET stored_bytes = ? WHERE user_id = ?").run(DIRECT_STORED_BYTES_LIMIT - 10 - DIRECT_MESSAGE_ROW_BYTES, OWNER);
     const refused = await send(h, OWNER, { conversationId }, "12345678901");
     expect(refused.status).toBe(413);
     expect(await code(refused)).toBe("direct_limit_reached");

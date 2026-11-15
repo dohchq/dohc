@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DirectConversation, DirectMessage } from "@dohc/security-contract/direct-messages";
 import { createDirectMessages, DirectMessageError } from "./directMessages";
 
-interface Account { relayUrl?: string; userId: string }
+interface Account { relayUrl?: string; userId: string; token?: string }
 
 const message = (seq: number, body = `m${seq}`): DirectMessage => ({
   seq, messageId: `id-${seq}`, authorId: "bob", authorName: "Bob", body, createdAtMs: seq * 1000,
@@ -23,11 +23,13 @@ function harness(options: { account?: Account | null; retryMs?: number } = {}) {
   let offline = false;
   const routes = new Map<string, () => Response>();
   const requests: string[] = [];
+  const tokens: string[] = [];
   let changes = 0;
   const service = createDirectMessages<Account>({
     credentials: async () => account,
-    relayResponse: async (_credentials, path, init) => {
+    relayResponse: async (credentials, path, init) => {
       requests.push(`${init.method ?? "GET"} ${path}`);
+      tokens.push(credentials.token ?? "");
       if (offline) throw new TypeError("fetch failed");
       // Like a server, answer on a later turn so a follow loop yields.
       await new Promise((resolve) => setTimeout(resolve, 1));
@@ -40,9 +42,10 @@ function harness(options: { account?: Account | null; retryMs?: number } = {}) {
     retryMs: options.retryMs ?? 1,
   });
   return {
-    service, routes, requests,
+    service, routes, requests, tokens,
     changes: () => changes,
     goOffline: () => { offline = true; },
+    goOnline: () => { offline = false; },
     signInAs: (next: Account | null) => { account = next; },
   };
 }
@@ -117,7 +120,8 @@ describe("direct messages on this computer", () => {
       return Response.json({ revision });
     });
     const stop = h.service.listen();
-    await expect.poll(() => h.changes()).toBe(1);
+    // The first answer, then the move to revision 2.
+    await expect.poll(() => h.changes()).toBe(2);
     stop();
     const after = polls;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -134,7 +138,7 @@ describe("direct messages on this computer", () => {
     stop();
     expect(polls).toBeGreaterThanOrEqual(2);
     expect(polls).toBeLessThanOrEqual(5);
-    expect(h.changes()).toBe(0);
+    expect(h.changes()).toBe(1);
   });
 
   it("keeps only the signed-in account's saved copy, and none once signed out", async () => {
@@ -157,5 +161,29 @@ describe("direct messages on this computer", () => {
     h.signInAs({ relayUrl: "https://relay.test", userId: "ann" });
     await expect(h.service.list()).rejects.toMatchObject({ failure: "unreachable" });
     expect(await folders()).toEqual([]);
+  });
+
+  it("tells listeners once the server answers after starting offline", async () => {
+    const h = harness();
+    h.routes.set("/sync/direct/activity", () => Response.json({ revision: 42 }));
+    h.goOffline();
+    const stop = h.service.listen();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(h.changes()).toBe(0);
+    h.goOnline();
+    await expect.poll(() => h.changes()).toBe(1);
+    stop();
+  });
+
+  it("follows with the newest token when the same account signs in again", async () => {
+    const h = harness({ account: { relayUrl: "https://relay.test", userId: "ann", token: "old" } });
+    h.routes.set("/sync/direct/activity", () => Response.json({ revision: 1 }));
+    const stop = h.service.listen();
+    await expect.poll(() => h.tokens.length).toBeGreaterThan(0);
+    h.signInAs({ relayUrl: "https://relay.test", userId: "ann", token: "new" });
+    const at = h.tokens.length;
+    await expect.poll(() => h.tokens.slice(at).includes("new")).toBe(true);
+    stop();
+    expect(h.tokens.slice(at + 1).every((token) => token === "new")).toBe(true);
   });
 });

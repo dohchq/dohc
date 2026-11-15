@@ -34,6 +34,8 @@ export const DIRECT_SEND_RATE_WINDOW_MS = 60_000;
 export const DIRECT_NEW_CONVERSATION_LIMIT = 50;
 export const DIRECT_NEW_CONVERSATION_WINDOW_MS = 24 * 60 * 60_000;
 export const DIRECT_STORED_BYTES_LIMIT = 64 * 1024 * 1024;
+/** What one message costs beyond its words: its row and index entries. */
+export const DIRECT_MESSAGE_ROW_BYTES = 256;
 
 const SCHEMA = {
   [CONVERSATIONS]: `CREATE TABLE ${CONVERSATIONS} (
@@ -60,6 +62,7 @@ const SCHEMA = {
   UNIQUE (conversation_id, message_id)
 ) STRICT`,
   idx_sync_relay_direct_messages_author: `CREATE INDEX idx_sync_relay_direct_messages_author ON ${MESSAGES}(author_user_id, created_at_ms)`,
+  idx_sync_relay_direct_messages_started: `CREATE INDEX idx_sync_relay_direct_messages_started ON ${MESSAGES}(author_user_id, created_at_ms) WHERE seq = 1`,
   [HIDDEN]: `CREATE TABLE ${HIDDEN} (
   conversation_id TEXT NOT NULL,
   seq INTEGER NOT NULL,
@@ -232,7 +235,7 @@ export function sendDirectMessage(storage: StorageContext, input: {
     ).get(caller, input.nowMs - windowMs)!.n);
     if (sentSince(DIRECT_SEND_RATE_WINDOW_MS, false) >= DIRECT_SEND_RATE_LIMIT) return { ok: false, reason: "rate_limited" };
     if (create && sentSince(DIRECT_NEW_CONVERSATION_WINDOW_MS, true) >= DIRECT_NEW_CONVERSATION_LIMIT) return { ok: false, reason: "rate_limited" };
-    const bytes = Buffer.byteLength(input.body);
+    const bytes = Buffer.byteLength(input.body) + DIRECT_MESSAGE_ROW_BYTES;
     const stored = Number(storage.db.prepare(`SELECT stored_bytes FROM ${USAGE} WHERE user_id = ?`).get(caller)?.stored_bytes ?? 0);
     if (stored + bytes > DIRECT_STORED_BYTES_LIMIT) return { ok: false, reason: "limit_reached" };
 

@@ -189,6 +189,47 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
   });
 
+  it("drops a list read for the account signed in before, even on the first session event", async () => {
+    let resolveBefore: (value: unknown) => void = () => {};
+    bridgeMock.directConversations.mockReturnValueOnce(new Promise((resolve) => { resolveBefore = resolve; }));
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    await waitFor(() => expect(bridgeMock.directConversations).toHaveBeenCalled());
+    act(() => emitCloudSessionChanged("session-b", "changing"));
+    await act(async () => resolveBefore({ available: true, viewerId: VIEWER, saved: false, conversations: [conversation()] }));
+    expect(screen.queryByTestId("chats-dm-item")).toBeNull();
+    signedIn([conversation({ conversationId: "conversation-ana", people: [ana], last: sent(4, "ana", "Hi") })]);
+    act(() => emitCloudSessionChanged("session-b", "ready"));
+    const row = await screen.findByTestId("chats-dm-item");
+    expect(within(row).getByTestId("chats-dm-name").textContent).toBe("Ana Diaz");
+  });
+
+  it("marks read only through the newest message on screen", async () => {
+    signedIn([conversation({ unread: 1, last: sent(3, "sam", "Running late") })]);
+    bridgeMock.directHistory
+      .mockResolvedValueOnce({ messages: [sent(2, "sam", "See you at nine")], more: false, saved: false })
+      .mockReturnValue(new Promise(() => {}));
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    await openSam();
+    await waitFor(() => expect(bridgeMock.directMarkRead).toHaveBeenCalledWith({ conversationId: "conversation-sam", seq: 2 }));
+    expect(bridgeMock.directMarkRead).not.toHaveBeenCalledWith({ conversationId: "conversation-sam", seq: 3 });
+  });
+
+  it("sends nothing when Try again outlives a change of account", async () => {
+    const user = userEvent.setup();
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    bridgeMock.directSend.mockRejectedValueOnce(new Error("relay unreachable"));
+    const onError = vi.fn();
+    renderView(vi.fn(), onError, { variant: "panel" });
+    await openSam();
+    await user.type(await screen.findByTestId("chats-dm-composer"), "From the first account{Enter}");
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    const [, , tryAgain] = onError.mock.calls.at(-1)!;
+    act(() => emitCloudSessionChanged("session-other", "ready"));
+    await act(async () => (tryAgain as () => void)());
+    expect(bridgeMock.directSend).toHaveBeenCalledTimes(1);
+  });
+
   it("sends with one message id, and Try again resends that same id", async () => {
     const user = userEvent.setup();
     signedIn([conversation()]);
