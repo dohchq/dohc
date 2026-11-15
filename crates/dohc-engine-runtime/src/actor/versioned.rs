@@ -2096,6 +2096,8 @@ pub(super) fn delete_owned_scene_assets_in_tx(
         &drawing_delete.before.version_id,
         &drawing_delete.object.object_id,
     )?;
+    // Each asset is named `<sha256>.<extension>` (`scene_asset_ref_is_owned`),
+    // so no access rule is among them and their order needs no sorting.
     let candidates = dohc_engine_collab::freeze_scene_asset_delete_authority_in_tx(
         tx,
         &key,
@@ -2835,6 +2837,8 @@ fn restore_deleted_scene_assets_in_tx(
     if !has_authority {
         return Ok(Vec::new());
     }
+    // Asset names are content hashes, so, as in the delete cascade, no access
+    // rule is among them.
     let deleted_assets = scene_asset_delete_moments(
         tx,
         workspace_id,

@@ -527,21 +527,23 @@ impl ActorHandle {
                     let mut originals = preflight_undo_operation_in(conn, &w, &version, &o)?;
                     // Restored access rules go before the files they cover, and
                     // removed ones after; undoing a creation deletes.
-                    let mut ranks = std::collections::HashMap::new();
+                    let mut deletes = std::collections::HashSet::new();
                     for m in &originals {
-                        let deletes = m.operation == "write"
+                        if m.operation == "write"
                             && !conn
                                 .query_row(
                                     "SELECT before_present FROM moments WHERE workspace_id=?1 AND moment_id=?2",
                                     params![w, m.moment_id],
                                     |r| r.get::<_, bool>(0),
                                 )
-                                .map_err(StorageError::corrupt_public)?;
-                        ranks.insert(m.moment_id.clone(), dohc_engine_files::access_rules::access_rule_rank(&m.path, deletes));
+                                .map_err(StorageError::corrupt_public)?
+                        {
+                            deletes.insert(m.moment_id.clone());
+                        }
                     }
-                    originals.sort_by_key(|m| {
-                        let (rank, depth) = ranks[&m.moment_id];
-                        (rank, m.operation != "rename", depth)
+                    originals.sort_by_key(|m| m.operation != "rename");
+                    dohc_engine_files::access_rules::sort_rule_changes(&mut originals, |m| {
+                        (m.path.as_str(), deletes.contains(&m.moment_id))
                     });
                     originals
                         .into_iter()

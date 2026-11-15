@@ -318,6 +318,24 @@ pub fn access_rule_rank(path: &str, deletes: bool) -> (u8, i64) {
     if deletes { (2, -depth) } else { (0, depth) }
 }
 
+/// Put the changes of an operation that changes many paths in the order
+/// [`access_rule_rank`] gives. The sort is stable, so changes of one rank keep
+/// the order they came in. `change` names a change's path and whether it
+/// deletes that path.
+pub fn sort_rule_changes<T>(changes: &mut [T], change: impl Fn(&T) -> (&str, bool)) {
+    changes.sort_by_key(|item| {
+        let (path, deletes) = change(item);
+        access_rule_rank(path, deletes)
+    });
+}
+
+/// Whether `path` is one of `folder`'s rule files, as the relay reads them:
+/// a file in exactly that folder whose name folds to `access.yaml`. Two such
+/// files are one unreadable rule.
+pub fn is_rule_of(path: &str, folder: &str) -> bool {
+    is_access_rule_path(path) && access_rule_folder(path) == folder
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,18 +520,35 @@ mod tests {
 
     #[test]
     fn sorts_rule_writes_first_and_rule_deletes_last() {
-        let mut writes = vec!["a/Z.md", "a/b/access.yaml", "a/access.yaml", "access.yaml"];
-        writes.sort_by_key(|path| (access_rule_rank(path, false), *path));
+        let mut writes = vec!["a/Z.md", "a/b/access.yaml", "a/ACCESS.yaml", "access.yaml"];
+        sort_rule_changes(&mut writes, |path| (path, false));
         assert_eq!(
             writes,
-            ["access.yaml", "a/access.yaml", "a/b/access.yaml", "a/Z.md"]
+            ["access.yaml", "a/ACCESS.yaml", "a/b/access.yaml", "a/Z.md"]
         );
-        let mut deletes = vec!["access.yaml", "a/access.yaml", "a/b/access.yaml", "a/Z.md"];
-        deletes.sort_by_key(|path| (access_rule_rank(path, true), *path));
+        let mut deletes = vec!["access.yaml", "a/access.yaml", "a/b/Access.YAML", "a/Z.md"];
+        sort_rule_changes(&mut deletes, |path| (path, true));
         assert_eq!(
             deletes,
-            ["a/Z.md", "a/b/access.yaml", "a/access.yaml", "access.yaml"]
+            ["a/Z.md", "a/b/Access.YAML", "a/access.yaml", "access.yaml"]
         );
+        // Other changes keep the order they came in.
+        let mut mixed = vec![("b.md", true), ("a/access.yaml", false), ("a.md", false)];
+        sort_rule_changes(&mut mixed, |(path, deletes)| (path, *deletes));
+        assert_eq!(
+            mixed,
+            [("a/access.yaml", false), ("b.md", true), ("a.md", false)]
+        );
+    }
+
+    #[test]
+    fn finds_a_folders_rule_by_its_folded_name_in_exactly_that_folder() {
+        assert!(is_rule_of("T/ACCESS.yaml", "T"));
+        assert!(is_rule_of("T/Access.YAML", "T"));
+        assert!(is_rule_of("ACCESS.yaml", ""));
+        assert!(!is_rule_of("T/sub/access.yaml", "T"));
+        assert!(!is_rule_of("t/access.yaml", "T"));
+        assert!(!is_rule_of("T/access.yaml.tmp", "T"));
     }
 
     #[test]

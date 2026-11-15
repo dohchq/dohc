@@ -167,12 +167,9 @@ impl ReconcilePlan {
         }
         // Rule writes come first and rule deletes last, so the engine never
         // holds a folder's files without its rule.
-        ops.sort_by(|a, b| {
-            let rank = |op: &CaptureOp| {
-                let deletes = matches!(op, CaptureOp::Retire { .. });
-                crate::access_rules::access_rule_rank(op.path(), deletes)
-            };
-            rank(a).cmp(&rank(b)).then_with(|| a.path().cmp(b.path()))
+        ops.sort_by(|a, b| a.path().cmp(b.path()));
+        crate::access_rules::sort_rule_changes(&mut ops, |op| {
+            (op.path(), matches!(op, CaptureOp::Retire { .. }))
         });
         // A rename that changes only case or Unicode normalization retires the
         // old spelling first. A peer on a disk that ignores case then deletes

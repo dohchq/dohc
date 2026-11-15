@@ -24,7 +24,7 @@ use dohc_engine_domain::{
     capture_manifest_seed, capture_retire_in_tx, capture_retire_respelled_in_tx,
     capture_secret_retire_with, ensure_main_version_in_tx,
 };
-use dohc_engine_files::access_rules::access_rule_rank;
+use dohc_engine_files::access_rules::sort_rule_changes;
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_storage::capture_file_holds::{self, CaptureFileHold};
 use dohc_engine_storage::capture_first_imports;
@@ -2681,8 +2681,13 @@ fn capture_ingest_batch_with_reader_on_store(
     }
     validate_workspace_root(root_dir, Some(root_guard))?;
     // Rules go first, and only the inputs whose folders admit them run.
-    let mut sequence: Vec<usize> = (0..inputs.len()).collect();
-    sequence.sort_by_key(|&index| access_rule_rank(&inputs[index].path, false));
+    let mut paths: Vec<(usize, &str)> = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| (index, input.path.as_str()))
+        .collect();
+    sort_rule_changes(&mut paths, |(_, path)| (path, false));
+    let sequence: Vec<usize> = paths.into_iter().map(|(index, _)| index).collect();
     let touches: Vec<_> = sequence
         .iter()
         .map(|&index| {
