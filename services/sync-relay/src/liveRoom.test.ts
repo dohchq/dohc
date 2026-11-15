@@ -57,9 +57,18 @@ interface Engine {
   answers?: (LiveUpdateRefusal | "retry")[];
   /** How many saves reached the engine. */
   saves?: number;
+  /** Changes other writers made to the note, which the capture's feed brings in turn. */
+  outside?: Uint8Array[];
+  /** Ends the capture's current feed, as a capture that closes. */
+  endFeed?: () => void;
+  /** How many times a capture was opened. */
+  opens?: number;
 }
 
-/** The owner's capture of the note, saving through the real journal. Its feed stays quiet. */
+/**
+ * The owner's capture of the note, saving through the real journal. As the real one, its feed
+ * ends with the signal it was opened with. It stays quiet unless the test gives outside changes.
+ */
 function ownerCapture(f: Fixture, engine: Engine = {}): NamedFrameHostSession {
   const lifetime = new AbortController();
   const binding = f.storage.resolveCurrentLiveDocumentBinding({
@@ -72,7 +81,11 @@ function ownerCapture(f: Fixture, engine: Engine = {}): NamedFrameHostSession {
     invalidated: lifetime.signal,
     assertCurrent() {},
     close: () => lifetime.abort(),
-    async openSync(): Promise<NamedFrameSync> {
+    async openSync(_vector, opening): Promise<NamedFrameSync> {
+      engine.opens = (engine.opens ?? 0) + 1;
+      const feed = new AbortController();
+      engine.endFeed = () => feed.abort(new Error("Capture closed."));
+      const ends = AbortSignal.any([opening, feed.signal]);
       return {
         binding: binding.binding,
         hostVector: Y.encodeStateVector(f.doc),
@@ -83,10 +96,23 @@ function ownerCapture(f: Fixture, engine: Engine = {}): NamedFrameHostSession {
         ]),
         appliedThroughJournalCursor: 0,
         close() {},
-        nextApplied: (signal) =>
-          new Promise((_, reject) =>
-            signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
-          ),
+        async nextApplied(signal) {
+          const both = AbortSignal.any([ends, signal]);
+          for (;;) {
+            both.throwIfAborted();
+            const next = engine.outside?.shift();
+            if (next) return { value: { journalCursor: 0, updateBytes: next }, release() {} };
+            await new Promise<void>((resolve) => {
+              const done = () => {
+                clearTimeout(timer);
+                both.removeEventListener("abort", done);
+                resolve();
+              };
+              const timer = engine.outside ? setTimeout(done, 5) : undefined;
+              both.addEventListener("abort", done);
+            });
+          }
+        },
       };
     },
     async submit(input, signal) {
@@ -553,6 +579,35 @@ it("wakes no live host when it takes an edit, and wakes them when it saves", asy
   } finally {
     stop();
   }
+});
+
+it("keeps bringing a page other writers' changes past the capture's opening time and after it closes", async () => {
+  const f = note();
+  const outside: Uint8Array[] = [];
+  const engine: Engine = { outside };
+  const room = rooms(f, { saveTimeoutMs: 20, saveEveryMs: 10 }, engine);
+  const reader = editor(f, room, ana);
+  await reader.open();
+  const elsewhere = (key: string) => {
+    const other = new Y.Doc();
+    other.getMap("frontmatter").set(key, "owner");
+    return Y.encodeStateAsUpdate(other);
+  };
+  const has = (key: string) => reader.doc.getMap("frontmatter").has(key);
+
+  // Well past the time the capture had to open.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  outside.push(elsewhere("first"));
+  await reader.next();
+  expect(has("first")).toBe(true);
+  expect(engine.opens).toBe(1);
+
+  // The capture closes while nobody has an edit waiting; the room opens another.
+  engine.endFeed!();
+  outside.push(elsewhere("second"));
+  await reader.next();
+  expect(has("second")).toBe(true);
+  expect(engine.opens).toBe(2);
 });
 
 const pauses = (f: Fixture) => liveRoomPauses(f.storage as StorageContext, "workspace");

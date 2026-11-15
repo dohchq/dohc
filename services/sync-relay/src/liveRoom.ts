@@ -348,14 +348,26 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     if (room.saver) dropSaver(room);
     room.connecting ??= (async () => {
       const signal = room.lifetime.signal;
-      const opening = AbortSignal.any([signal, AbortSignal.timeout(saveTimeoutMs)]);
-      const host = await options.openSaver(room.document, opening);
+      // The time limit is for opening only. The capture's feed lasts as long as the signal it
+      // was opened with, so the limit is cleared once it is open.
+      const limit = new AbortController();
+      const timer = setTimeout(
+        () => limit.abort(new Error("Opening the capture timed out.")),
+        saveTimeoutMs,
+      );
+      const opening = AbortSignal.any([signal, limit.signal]);
+      let host: NamedFrameHostSession;
       let sync: NamedFrameSync;
       try {
-        sync = await host.openSync(EMPTY_VECTOR, opening);
-      } catch (error) {
-        host.close();
-        throw error;
+        host = await options.openSaver(room.document, opening);
+        try {
+          sync = await host.openSync(EMPTY_VECTOR, opening);
+        } catch (error) {
+          host.close();
+          throw error;
+        }
+      } finally {
+        clearTimeout(timer);
       }
       const saver = { host, sync };
       room.saver = saver;
@@ -370,16 +382,28 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           }
         }
       })().catch(() => {
-        // The capture ended. The next save opens another, which brings the room up to date.
+        // The capture ended. Another one brings the room up to date.
         if (room.saver === saver) dropSaver(room);
-        if (!room.lifetime.signal.aborted && !room.timer && !room.saving && room.members)
-          scheduleSave(room, saveEveryMs);
+        rejoin(room);
       });
       return saver;
     })().finally(() => {
       room.connecting = undefined;
     });
     return room.connecting;
+  }
+  /** Opens another capture for a room people are in, so their pages keep getting outside edits. */
+  function rejoin(room: Room) {
+    if (room.lifetime.signal.aborted || !room.members || room.saver || room.timer || room.saving)
+      return;
+    // A save opens one itself.
+    if (room.unsaved.length) return scheduleSave(room, saveEveryMs);
+    room.timer = setTimeout(() => {
+      room.timer = undefined;
+      if (room.unsaved.length) runSave(room);
+      else ensureSaver(room).catch(() => rejoin(room));
+    }, saveEveryMs);
+    room.timer.unref?.();
   }
   function dropSaver(room: Room) {
     const saver = room.saver;
@@ -518,7 +542,11 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
         else if (Date.now() - (room.failingSince ??= Date.now()) >= pauseAfterMs)
           return pause(room, "failing", null, senders(room.unsaved));
         if (room.unsaved.length) scheduleSave(room, outcome === "saved" || first ? 0 : saveEveryMs);
-        else disposeIfIdle(room);
+        else {
+          disposeIfIdle(room);
+          // The capture may have ended during the save.
+          rejoin(room);
+        }
       });
   }
   function disposeIfIdle(room: Room) {
