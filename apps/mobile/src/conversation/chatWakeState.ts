@@ -121,7 +121,7 @@ export function createChatWakes(options: {
       (answer) => {
         if (!current()) return;
         entry.read = null;
-        if (answer.kind === "missing") {
+        if ("kind" in answer) {
           entry.cursor = null;
           setView(entry, NO_WAKES);
           return;
