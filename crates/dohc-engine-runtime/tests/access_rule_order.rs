@@ -430,6 +430,59 @@ fn an_unpublished_rule_is_not_read_as_removed() {
     assert!(f.holds().is_empty());
 }
 
+/// A writer with no step of its own, such as Undo, meets the commit-point
+/// check: it is refused once, the rule commits, and its retry follows it.
+#[test]
+fn a_writer_without_its_own_step_waits_for_the_rule() {
+    let f = Fixture::new();
+    f.runtime
+        .block_on(f.actor.versioned_text_write_indexed(
+            write("team/a.md", "alpha", "m-alpha"),
+            f.root().to_path_buf(),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        ))
+        .expect("write");
+    f.runtime
+        .block_on(f.actor.versioned_text_delete(
+            delete("team/a.md", "d-alpha"),
+            f.root().to_path_buf(),
+            Arc::new(()),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        ))
+        .expect("delete");
+    f.put("team/access.yaml", VIEW);
+    f.settle();
+    let undo = || {
+        f.runtime.block_on(f.actor.history_undo_in_turns(
+            WS.to_owned(),
+            OP.to_owned(),
+            "undo-delete".to_owned(),
+            None,
+            f.root().to_path_buf(),
+            Arc::new(NoFaults),
+            60,
+            [Arc::default(), Arc::default()],
+            Arc::new(()),
+            None,
+            CancellationToken::new(),
+        ))
+    };
+    if undo().is_err() {
+        undo().expect("undo after the rule committed");
+    }
+    assert_eq!(
+        f.journal(),
+        lines(&[
+            "write team/a.md",
+            "delete team/a.md",
+            "write team/access.yaml",
+            "write team/a.md",
+        ])
+    );
+}
+
 const OP: &str = "dohc-operation:remove-team";
 
 fn delete(path: &str, moment: &str) -> DeleteTextFile {
