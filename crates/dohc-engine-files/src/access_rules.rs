@@ -294,9 +294,9 @@ pub fn rule_change_narrows(before: ReachBefore<'_>, next: Option<&AccessRule>) -
                 before.is_none() || lower(before, after) == after
             };
             fits(above.members, next.members)
-                && emails(above, next).into_iter().all(|email| {
-                    fits(level_for_email(above, email), level_for_email(next, email))
-                })
+                && emails(above, next)
+                    .into_iter()
+                    .all(|email| fits(level_for_email(above, email), level_for_email(next, email)))
         }
         ReachBefore::WorkspaceLevel => next
             .members
@@ -421,12 +421,42 @@ mod tests {
         let sam_edit = rule("people:\n  sam@example.com: edit\n");
         let nobody = rule("");
         let cases = [
-            ("unreadable hides", ReachBefore::Own(Some(&view)), None, true),
-            ("own narrows", ReachBefore::Own(Some(&edit)), Some(&view), true),
-            ("own widens", ReachBefore::Own(Some(&view)), Some(&edit), false),
-            ("readable after unreadable", ReachBefore::Own(None), Some(&nobody), false),
-            ("under a view rule", ReachBefore::Inherited(Some(&view)), Some(&edit), false),
-            ("under an edit rule", ReachBefore::Inherited(Some(&edit)), Some(&view), true),
+            (
+                "unreadable hides",
+                ReachBefore::Own(Some(&view)),
+                None,
+                true,
+            ),
+            (
+                "own narrows",
+                ReachBefore::Own(Some(&edit)),
+                Some(&view),
+                true,
+            ),
+            (
+                "own widens",
+                ReachBefore::Own(Some(&view)),
+                Some(&edit),
+                false,
+            ),
+            (
+                "readable after unreadable",
+                ReachBefore::Own(None),
+                Some(&nobody),
+                false,
+            ),
+            (
+                "under a view rule",
+                ReachBefore::Inherited(Some(&view)),
+                Some(&edit),
+                false,
+            ),
+            (
+                "under an edit rule",
+                ReachBefore::Inherited(Some(&edit)),
+                Some(&view),
+                true,
+            ),
             // Sam alone could reach the ancestor; the rest were hidden there.
             (
                 "under a rule that hides members",
@@ -434,11 +464,36 @@ mod tests {
                 Some(&edit),
                 true,
             ),
-            ("under an unreadable rule", ReachBefore::Inherited(None), Some(&edit), true),
-            ("view for all", ReachBefore::WorkspaceLevel, Some(&view), true),
-            ("names nobody", ReachBefore::WorkspaceLevel, Some(&nobody), true),
-            ("edit for members", ReachBefore::WorkspaceLevel, Some(&edit), false),
-            ("edit for sam", ReachBefore::WorkspaceLevel, Some(&sam_edit), false),
+            (
+                "under an unreadable rule",
+                ReachBefore::Inherited(None),
+                Some(&edit),
+                true,
+            ),
+            (
+                "view for all",
+                ReachBefore::WorkspaceLevel,
+                Some(&view),
+                true,
+            ),
+            (
+                "names nobody",
+                ReachBefore::WorkspaceLevel,
+                Some(&nobody),
+                true,
+            ),
+            (
+                "edit for members",
+                ReachBefore::WorkspaceLevel,
+                Some(&edit),
+                false,
+            ),
+            (
+                "edit for sam",
+                ReachBefore::WorkspaceLevel,
+                Some(&sam_edit),
+                false,
+            ),
         ];
         for (name, before, next, narrows) in cases {
             assert_eq!(rule_change_narrows(before, next), narrows, "{name}");
@@ -449,10 +504,16 @@ mod tests {
     fn sorts_rule_writes_first_and_rule_deletes_last() {
         let mut writes = vec!["a/Z.md", "a/b/access.yaml", "a/access.yaml", "access.yaml"];
         writes.sort_by_key(|path| (access_rule_rank(path, false), *path));
-        assert_eq!(writes, ["access.yaml", "a/access.yaml", "a/b/access.yaml", "a/Z.md"]);
+        assert_eq!(
+            writes,
+            ["access.yaml", "a/access.yaml", "a/b/access.yaml", "a/Z.md"]
+        );
         let mut deletes = vec!["access.yaml", "a/access.yaml", "a/b/access.yaml", "a/Z.md"];
         deletes.sort_by_key(|path| (access_rule_rank(path, true), *path));
-        assert_eq!(deletes, ["a/Z.md", "a/b/access.yaml", "a/access.yaml", "access.yaml"]);
+        assert_eq!(
+            deletes,
+            ["a/Z.md", "a/b/access.yaml", "a/access.yaml", "access.yaml"]
+        );
     }
 
     #[test]
