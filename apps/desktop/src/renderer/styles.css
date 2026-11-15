@@ -609,6 +609,21 @@ body {
   max-width: var(--dohc-editor-measure);
   margin-left: auto;
   margin-right: auto;
+  /* A block away from the viewport skips its layout and paint, so opening a
+   * long note and typing in it cost what is near the screen. A block keeps
+   * the size it was last drawn at; one never drawn takes the estimate.
+   * offscreenBlocks.ts covers what follows from that.
+   * The clip margin lets a block paint the marks it hangs into the gutter:
+   * a list's markers, a quote's bar, a selected block's outline. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 2em;
+  overflow-clip-margin: 3em;
+}
+
+/* A block that holds the caret is laid out from the frame it appears in
+ * (offscreenBlocks.ts): the browser cannot place a caret in a skipped block. */
+.dohc-notion-editor > .dohc-caret-block {
+  content-visibility: visible;
 }
 
 /* The document ends flush to its bottom padding, whichever block trails. Its
