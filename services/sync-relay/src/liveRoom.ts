@@ -757,8 +757,9 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           signal.throwIfAborted();
           // `sender` below reads this editor's access in full for each edit.
           current();
-          // Until the owner resumes, the note is fenced as for a restore.
-          if (paused) return refused("restore-fenced");
+          // Until the owner resumes, its edits wait. A retry keeps them pending on its computer,
+          // which puts them in the copy; a refusal would set them aside as a restore does.
+          if (paused) return { result: "retry", reason: "admission-unavailable" };
           const held = room;
           if (!held || !subscriber || held.lifetime.signal.aborted)
             throw new Error("Live room is not open.");

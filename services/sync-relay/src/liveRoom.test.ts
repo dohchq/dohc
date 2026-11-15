@@ -602,8 +602,8 @@ it("still gives a paused note's owner every save made before the pause, and take
   expect(owner.doc.getMap("frontmatter").get("title")).toBe("Lisbon");
   expect(owner.doc.getMap("frontmatter").get("place")).toBeUndefined();
   expect(await owner.submit(owner.change("note", "mine"))).toEqual({
-    result: "refused",
-    reason: "restore-fenced",
+    result: "retry",
+    reason: "admission-unavailable",
   });
   expect(unsaved(f)).toEqual([]);
 });
