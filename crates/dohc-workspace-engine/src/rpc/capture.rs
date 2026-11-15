@@ -39,6 +39,9 @@ struct RetryHeldParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AccessRuleDecisionParams {
     folder: String,
+    /// The hold's `observedSha256` the owner decided on: required, and null
+    /// when the rule is gone.
+    expected_sha256: Value,
 }
 
 fn access_rule_holds_json(
@@ -547,6 +550,16 @@ impl EngineService {
         decision: dohc_engine_runtime::AccessRuleDecision,
     ) -> Result<Value, WireError> {
         let input: AccessRuleDecisionParams = parse(params)?;
+        let expected_sha256 = match input.expected_sha256 {
+            Value::Null => None,
+            Value::String(sha256) if !sha256.is_empty() => Some(sha256),
+            _ => {
+                return Err(WireError::new(
+                    ErrorCode::InvalidParams,
+                    "expectedSha256 must be a sha256 or null",
+                ));
+            }
+        };
         let open = self.open(handle.as_ref())?;
         if !open.is_local_owner() {
             return Err(WireError::new(
@@ -576,6 +589,7 @@ impl EngineService {
                 hold.version_id,
                 hold.folder,
                 decision,
+                expected_sha256,
                 open.root.clone(),
                 Arc::new(self.self_writes.scoped(&open.root)),
                 now_ms()?,

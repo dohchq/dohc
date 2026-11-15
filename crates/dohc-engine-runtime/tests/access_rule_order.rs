@@ -157,12 +157,30 @@ impl Fixture {
             .map(drop)
     }
 
+    /// Decide on the rule the folder's hold shows.
     fn decide(&self, folder: &str, decision: AccessRuleDecision) -> Result<(), RuntimeError> {
+        let seen = self
+            .runtime
+            .block_on(self.actor.access_rule_holds(WS.to_owned()))
+            .expect("holds")
+            .into_iter()
+            .find(|hold| hold.folder == folder)
+            .and_then(|hold| hold.observed_sha256);
+        self.decide_on(folder, decision, seen)
+    }
+
+    fn decide_on(
+        &self,
+        folder: &str,
+        decision: AccessRuleDecision,
+        seen: Option<String>,
+    ) -> Result<(), RuntimeError> {
         self.runtime.block_on(self.actor.decide_access_rule(
             WS.to_owned(),
             "main".to_owned(),
             folder.to_owned(),
             decision,
+            seen,
             self.root().to_path_buf(),
             Arc::new(()),
             30,
@@ -375,6 +393,30 @@ fn a_widened_rule_holds_its_folder_until_the_owner_accepts_it() {
     let mut expected = before;
     expected.extend(lines(&["write team/access.yaml", "write team/a.md"]));
     assert_eq!(f.journal(), expected);
+}
+
+/// The owner decides on the rule they saw. One changed on disk since is
+/// refused, and the folder's hold shows the rule there now.
+#[test]
+fn a_decision_on_a_rule_changed_since_is_refused() {
+    let f = ruled_team();
+    let before = f.journal();
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    let seen = Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes()));
+    std::fs::remove_file(f.root().join("team/access.yaml")).unwrap();
+    f.settle();
+    for decision in [AccessRuleDecision::Accept, AccessRuleDecision::Restore] {
+        let decided = f.decide_on("team", decision, seen.clone());
+        assert!(
+            matches!(&decided, Err(RuntimeError::AccessRuleChanged { folder }) if folder == "team"),
+            "{decided:?}"
+        );
+    }
+    assert!(!f.root().join("team/access.yaml").exists());
+    assert_eq!(f.journal(), before);
+    assert_eq!(f.holds(), vec![("team".to_owned(), "removed".to_owned())]);
 }
 
 #[test]

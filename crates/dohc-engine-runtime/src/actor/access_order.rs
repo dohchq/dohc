@@ -1556,11 +1556,26 @@ pub enum AccessRuleDecision {
     Restore,
 }
 
+/// What a hold records of the rule on disk: the bytes of its one file, or
+/// `None` when it is gone or spelled more than once.
+fn observed_sha256(disk: &OnDisk) -> Option<String> {
+    match disk.len() {
+        1 => disk
+            .values()
+            .next()
+            .map(|bytes| dohc_engine_storage::hex_sha256(bytes)),
+        _ => None,
+    }
+}
+
+/// Settle `folder` as its owner chose, if its rule on disk is still the one
+/// they saw: `expected_sha256` as its hold recorded it.
 fn decide_on_store(
     store: &mut EngineStore,
     order: &Order<'_>,
     folder: &str,
     decision: AccessRuleDecision,
+    expected_sha256: Option<&str>,
     self_writes: &dyn super::materialization::SelfWriteRecorder,
 ) -> Result<(), RuntimeError> {
     // The folders above settle first: their own holds answer for them.
@@ -1580,6 +1595,13 @@ fn decide_on_store(
         }
     }
     let disk = read_disk_rule(order.root, folder).map_err(|()| waits())?;
+    if observed_sha256(&disk).as_deref() != expected_sha256 {
+        // Judge what is there now, so the hold the owner sees next is current.
+        judge_one(store, order, folder, &[], false, &[])?;
+        return Err(RuntimeError::AccessRuleChanged {
+            folder: folder.to_owned(),
+        });
+    }
     let committed = store
         .read_with(|conn| committed_rule(conn, order.workspace_id, order.version_id, folder))?;
     match decision {
@@ -1645,13 +1667,9 @@ fn judge_one(
             release_hold(store, order, folder)?;
         }
         Verdict::Held { reason } => {
-            let observed = match read_disk_rule(order.root, folder) {
-                Ok(disk) if disk.len() == 1 => disk
-                    .values()
-                    .next()
-                    .map(|bytes| dohc_engine_storage::hex_sha256(bytes)),
-                _ => None,
-            };
+            let observed = read_disk_rule(order.root, folder)
+                .ok()
+                .and_then(|disk| observed_sha256(&disk));
             record_hold(store, order, folder, reason, observed)?;
         }
         Verdict::Waits | Verdict::Refused { .. } => {}
@@ -1758,7 +1776,8 @@ impl ActorHandle {
 
     /// Settle a held folder: accept what is on disk, or restore the rule
     /// last committed. Either takes effect at once; the files under the
-    /// folder follow on the next capture pass.
+    /// folder follow on the next capture pass. A rule on disk other than
+    /// `expected_sha256` refuses with [`RuntimeError::AccessRuleChanged`].
     #[allow(clippy::too_many_arguments)]
     pub async fn decide_access_rule(
         &self,
@@ -1766,6 +1785,7 @@ impl ActorHandle {
         version_id: String,
         folder: String,
         decision: AccessRuleDecision,
+        expected_sha256: Option<String>,
         root: std::path::PathBuf,
         self_writes: std::sync::Arc<dyn super::materialization::SelfWriteRecorder>,
         now_ms: i64,
@@ -1783,7 +1803,14 @@ impl ActorHandle {
                 leases: &leases,
                 faults: faults.as_ref(),
             };
-            decide_on_store(store, &order, &folder, decision, self_writes.as_ref())
+            decide_on_store(
+                store,
+                &order,
+                &folder,
+                decision,
+                expected_sha256.as_deref(),
+                self_writes.as_ref(),
+            )
         })
         .await
     }

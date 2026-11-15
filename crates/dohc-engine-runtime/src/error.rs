@@ -29,6 +29,9 @@ pub enum RuntimeError {
         folder: String,
         reason: &'static str,
     },
+    /// The owner decided on a rule that has changed on disk since.
+    #[error("access-rule-changed: {folder}")]
+    AccessRuleChanged { folder: String },
     #[error("capture-file-held: {path}")]
     CaptureFileHeld { path: String },
     #[error("capture-not-owned: {path}")]
@@ -186,6 +189,7 @@ impl RuntimeError {
             RuntimeError::ChatConversationLinksChanged => "chat-conversation-links-changed",
             RuntimeError::LinksEdgesSourceChanged => "links-edges-source-changed",
             RuntimeError::AccessRuleHeld { .. } => "access-rule-held",
+            RuntimeError::AccessRuleChanged { .. } => "access-rule-changed",
             RuntimeError::CaptureFileHeld { .. } => "capture-file-held",
             RuntimeError::CaptureNotOwnedAfterHold { .. } => "capture-not-owned",
             RuntimeError::Identity { .. } => "identity-unresolved",

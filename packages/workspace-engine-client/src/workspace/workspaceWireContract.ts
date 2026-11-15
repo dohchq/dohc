@@ -488,6 +488,16 @@ type CaptureSetAuthorParams = WorkspaceJsonObject & {
     | null;
 };
 
+/**
+ * The owner's decision on a held folder. `expectedSha256` is the hold's
+ * `observedSha256`; the engine refuses with a conflict when the rule on disk
+ * changed since.
+ */
+export type AccessRuleDecisionParams = WorkspaceJsonObject & {
+  folder: string;
+  expectedSha256: string | null;
+};
+
 export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.replicaCut]: WorkspaceJsonObject & {
     selectors: Array<{ versionId: string | null; paths: string[] }>;
@@ -529,8 +539,8 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureRetry]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureRetryHeld]: WorkspaceJsonObject & { path: string };
   [WORKSPACE_METHOD.captureOutsideChanges]: WorkspaceEmptyParams;
-  [WORKSPACE_METHOD.captureAcceptAccessRule]: WorkspaceJsonObject & { folder: string };
-  [WORKSPACE_METHOD.captureRestoreAccessRule]: WorkspaceJsonObject & { folder: string };
+  [WORKSPACE_METHOD.captureAcceptAccessRule]: AccessRuleDecisionParams;
+  [WORKSPACE_METHOD.captureRestoreAccessRule]: AccessRuleDecisionParams;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
   [WORKSPACE_METHOD.captureHold]: WorkspaceJsonObject & { operationId?: string };
   [WORKSPACE_METHOD.captureRenew]: WorkspaceJsonObject & { holdId: string };
