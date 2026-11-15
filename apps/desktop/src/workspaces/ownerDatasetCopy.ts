@@ -1,4 +1,11 @@
-import { createDatasetReplica, type DatasetReplicaSource } from "@dohc/app-backend-runtime/replica";
+import {
+  createDatasetReplica,
+  equalRecoveryCursor,
+  parseRecoveryCursor,
+  parseRecoveryJournalRecord,
+  type DatasetReplicaSource,
+} from "@dohc/app-backend-runtime/replica";
+import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import {
   describeApprovedDataset,
   parseDatasetRevision,
@@ -11,15 +18,36 @@ import { open, rename, rm } from "node:fs/promises";
 import { readOwnedFile } from "@dohc/workspace-core/owned-file";
 import { join } from "node:path";
 import { z } from "zod";
-import type { OwnerDatasetData } from "./remoteDataset";
+import type { DatasetCatchUp, OwnerDatasetData } from "./remoteDataset";
 import { DatasetCopyOfflineError } from "./remoteDatasetReplica";
 import { CollectionServerUnreachableError } from "../ipc/errorWords";
+
+// A read this soon after this computer's own change brought the copy to the
+// server's head shows that change without asking the server again.
+const FRESH_AFTER_CHANGE_MS = 1000;
+
+// The connection never opened, so the server cannot have the change.
+const NEVER_SENT = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+]);
+function neverSent(error: unknown): boolean {
+  if (!(error instanceof TypeError)) return false;
+  const cause: unknown = error.cause;
+  const code = (value: unknown) =>
+    value instanceof Error && NEVER_SENT.has(String(Reflect.get(value, "code")));
+  return cause instanceof AggregateError ? cause.errors.every(code) : code(cause);
+}
 
 /** An owner-bound copy retains committed reads only. It never becomes a second writer. */
 export async function createOwnerDatasetCopy(options: Parameters<typeof createDatasetReplica>[0]) {
   const replica = await createDatasetReplica(options);
   let denied = false,
-    closing = false;
+    closing = false,
+    confirmed: { cursor: DatasetCursor; atMs: number } | null = null;
   const confirmations = new Set<Promise<unknown>>();
   const trackConfirmation = <T>(work: () => Promise<T>): Promise<T> => {
     const result = work();
@@ -164,7 +192,15 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
         let offline = false;
         const priorArchived = archived;
         try {
-          await replica.catchUp(source, signal);
+          const saved = replica.state();
+          if (
+            priorArchived ||
+            !saved ||
+            !confirmed ||
+            !equalRecoveryCursor(saved.cursor, confirmed.cursor) ||
+            Date.now() - confirmed.atMs >= FRESH_AFTER_CHANGE_MS
+          )
+            await replica.catchUp(source, signal);
           // The host refuses replica capture while archived; a successful capture confirms restoration.
           if (priorArchived)
             await enqueueMetadata(async () => {
@@ -188,6 +224,58 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
           dataset: describe(state.checkpoint.definitionJson),
           copy: { offline, savedAtMs: state.savedAtMs, host },
         };
+      };
+      // The change's response carries the journal after the copy's cursor, which the
+      // copy checks and applies as if it had asked for it. Anything else waits for
+      // the next read's catch-up.
+      const applyCatchUp = async (catchUp: DatasetCatchUp) => {
+        const saved = replica.state();
+        if (!saved || catchUp.records.length !== catchUp.changesets.length) return;
+        const head = parseRecoveryCursor(catchUp.head),
+          records = catchUp.records.map((raw) => parseRecoveryJournalRecord(raw)),
+          bytes = catchUp.changesets.map((value) => Buffer.from(value, "base64"));
+        const inline: DatasetReplicaSource = {
+          capture: async () => ({ head, checkpoint: saved.checkpoint }),
+          page: async ({ through, after }) => ({
+            through,
+            after,
+            records: records.filter((record) => record.cursor.revision > after.revision),
+          }),
+          blob: async ({ record, offset, length }) => {
+            const value =
+              bytes[records.findIndex((item) => item.cursor.revision === record.cursor.revision)];
+            if (!value) throw Error("The change's response is missing a record.");
+            return value.subarray(offset, offset + length);
+          },
+        };
+        const state = await replica.catchUp(inline, signal);
+        if (equalRecoveryCursor(state.cursor, head)) confirmed = { cursor: head, atMs: Date.now() };
+      };
+      const change = async (
+        input: Parameters<OwnerDatasetData["invoke"]>[0],
+        after: DatasetCursor,
+      ) => {
+        let result: Awaited<ReturnType<OwnerDatasetData["invoke"]>>;
+        try {
+          result = await remote.invoke({ ...input, after });
+        } catch (error) {
+          authorize();
+          if (neverSent(error))
+            throw Error(
+              `dohc didn't save this change. This Collection is read-only until ${host} is reachable.`,
+              { cause: error },
+            );
+          if (error instanceof TypeError) throw unreachable();
+          throw error;
+        }
+        authorize();
+        const { catchUp, ...committed } = result;
+        if (catchUp)
+          await applyCatchUp(catchUp).catch(() => {
+            // The change is saved on the server; the next read catches the copy up.
+          });
+        authorize();
+        return committed;
       };
       return {
         ...remote,
@@ -282,6 +370,16 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
         },
         async invoke(input) {
           selected(input.datasetId);
+          // A change takes its rules from the saved copy, so it needs no request first.
+          // The server refuses a change made under rules it no longer has.
+          const saved = archived ? null : replica.state();
+          if (
+            saved &&
+            describe(saved.checkpoint.definitionJson).operations.some(
+              (operation) => operation.operationId === input.operationId && !operation.readOnly,
+            )
+          )
+            return change(input, saved.cursor);
           const state = await capture();
           if ("archived" in state.dataset && state.dataset.archived === true)
             throw Error(
@@ -295,9 +393,7 @@ export async function createOwnerDatasetCopy(options: Parameters<typeof createDa
               throw Error(
                 `dohc didn't save this change. This Collection is read-only until ${host} is reachable.`,
               );
-            const result = await remote.invoke(input);
-            authorize();
-            return result;
+            return change(input, replica.state()!.cursor);
           }
           const result = await replica.read(input);
           authorize();

@@ -1,6 +1,7 @@
 import { readBoundedJson } from "@dohc/service-http";
 import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import {
+  APP_BACKEND_CATCH_UP_BYTES,
   APP_BACKEND_RESULT_BYTES,
   APP_BACKEND_UPLOAD_BYTES,
 } from "@dohc/security-contract/app-backend";
@@ -23,7 +24,9 @@ export async function readDatasetResponse(
             action === "lifecycle" ||
             action === "delete-preview"
           ? 2 * 1024 * 1024
-          : APP_BACKEND_RESULT_BYTES + 4096;
+          : action === "invoke"
+            ? APP_BACKEND_RESULT_BYTES + APP_BACKEND_CATCH_UP_BYTES + 4096
+            : APP_BACKEND_RESULT_BYTES + 4096;
   const value: unknown = await readBoundedJson(response, limit, signal);
   if (
     response.status === 409 &&

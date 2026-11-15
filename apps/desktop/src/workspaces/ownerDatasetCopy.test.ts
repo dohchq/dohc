@@ -114,8 +114,20 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     blob,
   };
   const pinned = { ...scope, revision: 1, revisionSha256: revision.revisionSha256 };
-  const invoke = vi.fn(async (input: Parameters<OwnerDatasetData["invoke"]>[0]) =>
-    host.invoke(actor, { ...input, workspaceId: "w", access: { kind: "data" } }),
+  const sent = vi.fn();
+  let dropped = false;
+  const invoke = vi.fn(
+    async ({ after: _after, ...input }: Parameters<OwnerDatasetData["invoke"]>[0]) => {
+      // As fetch fails when the connection never opens.
+      if (offline)
+        throw new TypeError("fetch failed", {
+          cause: Object.assign(new Error("connect"), { code: "ECONNREFUSED" }),
+        });
+      sent();
+      // As fetch fails when the connection drops after the request went out.
+      if (dropped) throw new TypeError("fetch failed");
+      return host.invoke(actor, { ...input, workspaceId: "w", access: { kind: "data" } });
+    },
   );
   const remote = {
     invoke,
@@ -191,8 +203,16 @@ it("persists real owner reads across restart, catches up, and refuses offline wr
     ).rejects.toThrow(
       "dohc didn't save this change. This Collection is read-only until relay is reachable.",
     );
-    expect(invoke).toHaveBeenCalledOnce();
+    expect(sent).toHaveBeenCalledOnce();
     offline = false;
+    // The server may have the change, so the words do not say it was not saved.
+    dropped = true;
+    await expect(
+      copy
+        .data(remote, source, signal)
+        .invoke({ ...read, operationId: id(5), input: { name: "Maybe" } }),
+    ).rejects.toThrow("This Collection needs relay, which dohc can't reach.");
+    dropped = false;
     await invoke({
       ...pinned,
       operationId: id(5),
