@@ -1,0 +1,31 @@
+{
+ "seed": -131,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-non-breaking-space",
+ "updates": [
+  "AS3Z3qDJBAAHAQRib2R5AwlwYXJhZ3JhcGgHANneoMkEAAYEANneoMkEAQRhwqBih9neoMkEAAMJcGFyYWdyYXBoBwDZ3qDJBAUGBADZ3qDJBAYUwqBzdGFydHMgYSBwYXJhZ3JhcGiH2d6gyQQFAwlwYXJhZ3JhcGgHANneoMkEGgYGANneoMkEGwRib2xkAnt9hNneoMkEHApib2xkwqB0ZXh0htneoMkEJQRib2xkBG51bGyH2d6gyQQaAwlwYXJhZ3JhcGgHANneoMkEJwYGANneoMkEKARjb2RlAnt9hNneoMkEKQpjb2RlwqBzcGFuhtneoMkEMgRjb2RlBG51bGyH2d6gyQQnAwlwYXJhZ3JhcGgHANneoMkENAMJaGFyZEJyZWFrh9neoMkENQYEANneoMkENgLCoIfZ3qDJBDQDCXBhcmFncmFwaAcA2d6gyQQ4BgQA2d6gyQQ5AXiH2d6gyQQ5AwloYXJkQnJlYWuH2d6gyQQ7AwloYXJkQnJlYWuH2d6gyQQ8BgQA2d6gyQQ9AsKgh9neoMkEOAMJcGFyYWdyYXBoBwDZ3qDJBD8GBADZ3qDJBEAYbGluZQrCoC0gYWZ0ZXIgYSBuZXdsaW5lh9neoMkEPwMHaGVhZGluZwcA2d6gyQRYBgQA2d6gyQRZDWhlYWRpbmfCoHRleHQoANneoMkEWAVsZXZlbAF9AofZ3qDJBFgDCmJ1bGxldExpc3QHANneoMkEZwMIbGlzdEl0ZW0HANneoMkEaAMJcGFyYWdyYXBoBwDZ3qDJBGkGBADZ3qDJBGoQwqBpbiBhIGxpc3QgaXRlbYfZ3qDJBGcDCHRhc2tMaXN0BwDZ3qDJBHoDCHRhc2tJdGVtBwDZ3qDJBHsDCXBhcmFncmFwaAcA2d6gyQR8BgQA2d6gyQR9EMKgaW4gYSB0YXNrIGl0ZW0oANneoMkEewdjaGVja2VkAXkA",
+  "AQHZ3qDJBI4BKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3Em5vbi1icmVha2luZy1zcGFjZQA="
+ ],
+ "mergedUpdateB64": "AS7Z3qDJBAAHAQRib2R5AwlwYXJhZ3JhcGgHANneoMkEAAYEANneoMkEAQRhwqBih9neoMkEAAMJcGFyYWdyYXBoBwDZ3qDJBAUGBADZ3qDJBAYUwqBzdGFydHMgYSBwYXJhZ3JhcGiH2d6gyQQFAwlwYXJhZ3JhcGgHANneoMkEGgYGANneoMkEGwRib2xkAnt9hNneoMkEHApib2xkwqB0ZXh0htneoMkEJQRib2xkBG51bGyH2d6gyQQaAwlwYXJhZ3JhcGgHANneoMkEJwYGANneoMkEKARjb2RlAnt9hNneoMkEKQpjb2RlwqBzcGFuhtneoMkEMgRjb2RlBG51bGyH2d6gyQQnAwlwYXJhZ3JhcGgHANneoMkENAMJaGFyZEJyZWFrh9neoMkENQYEANneoMkENgLCoIfZ3qDJBDQDCXBhcmFncmFwaAcA2d6gyQQ4BgQA2d6gyQQ5AXiH2d6gyQQ5AwloYXJkQnJlYWuH2d6gyQQ7AwloYXJkQnJlYWuH2d6gyQQ8BgQA2d6gyQQ9AsKgh9neoMkEOAMJcGFyYWdyYXBoBwDZ3qDJBD8GBADZ3qDJBEAYbGluZQrCoC0gYWZ0ZXIgYSBuZXdsaW5lh9neoMkEPwMHaGVhZGluZwcA2d6gyQRYBgQA2d6gyQRZDWhlYWRpbmfCoHRleHQoANneoMkEWAVsZXZlbAF9AofZ3qDJBFgDCmJ1bGxldExpc3QHANneoMkEZwMIbGlzdEl0ZW0HANneoMkEaAMJcGFyYWdyYXBoBwDZ3qDJBGkGBADZ3qDJBGoQwqBpbiBhIGxpc3QgaXRlbYfZ3qDJBGcDCHRhc2tMaXN0BwDZ3qDJBHoDCHRhc2tJdGVtBwDZ3qDJBHsDCXBhcmFncmFwaAcA2d6gyQR8BgQA2d6gyQR9EMKgaW4gYSB0YXNrIGl0ZW0oANneoMkEewdjaGVja2VkAXkoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcSbm9uLWJyZWFraW5nLXNwYWNlAA==",
+ "stateVectorB64": "AdneoMkEjwE=",
+ "coverage": {
+  "nodes": [
+   "bulletList",
+   "doc",
+   "hardBreak",
+   "heading",
+   "listItem",
+   "paragraph",
+   "taskItem",
+   "taskList",
+   "text"
+  ],
+  "marks": [
+   "bold",
+   "code"
+  ]
+ },
+ "expected": {
+  "markdown": "a&#160;b\n\n&#160;starts a paragraph\n\n**bold&#160;text**\n\n`code span`\n\n\\\n&#160;\n\nx  \n\\\n&#160;\n\nline\n&#160;- after a newline\n\n## heading text\n\n- &#160;in a list item\n\n- [ ] &#160;in a task item\n"
+ }
+}

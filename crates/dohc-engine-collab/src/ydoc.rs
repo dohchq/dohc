@@ -8531,6 +8531,18 @@ fn render_inline(
                 continue;
             };
             for (offset, byte) in run.text.bytes().enumerate() {
+                // Task-list parsing reads a literal NBSP as indentation, so it
+                // is written as a reference, as a `\r` is.
+                if run.text.as_bytes()[offset..].starts_with("\u{a0}".as_bytes()) {
+                    replacements.entry(part_index).or_default().insert(
+                        offset,
+                        InlineReplacement {
+                            text: "&#160;".into(),
+                            preserve_marks: true,
+                            width: "\u{a0}".len(),
+                        },
+                    );
+                }
                 if byte == b'\r' {
                     replacements.entry(part_index).or_default().insert(
                         offset,

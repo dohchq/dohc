@@ -917,6 +917,28 @@ const RICHDOC_PROJECTION_CASES = [
         ]),
       ]),
   },
+  {
+    // #4110: a non-breaking space in paragraph text is written as a
+    // reference, as task-list parsing reads a literal one as indentation.
+    name: "non-breaking-space",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph("a\u00a0b"),
+        paragraph("\u00a0starts a paragraph"),
+        paragraph([xmlText("bold\u00a0text", { bold: {} })]),
+        paragraph([xmlText("code\u00a0span", { code: {} })]),
+        paragraph([xmlElement("hardBreak"), xmlText("\u00a0")]),
+        paragraph([xmlText("x"), xmlElement("hardBreak"), xmlElement("hardBreak"), xmlText("\u00a0")]),
+        paragraph("line\n\u00a0- after a newline"),
+        xmlElement("heading", { level: 2 }, [xmlText("heading\u00a0text")]),
+        xmlElement("bulletList", {}, [
+          xmlElement("listItem", {}, [paragraph("\u00a0in a list item")]),
+        ]),
+        xmlElement("taskList", {}, [
+          xmlElement("taskItem", { checked: false }, [paragraph("\u00a0in a task item")]),
+        ]),
+      ]),
+  },
 ];
 
 function makeRichdocProjection(index, fixture) {
