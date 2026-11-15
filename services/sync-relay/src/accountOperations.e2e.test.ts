@@ -84,7 +84,12 @@ const testActor: ResolveActor = (request, workspaceId) => {
 const resolveAccountSession: ResolveAccountSession = async (request) => {
   const match = /^Bearer session:([\w-]+)$/u.exec(request.headers.get("authorization") ?? "");
   if (!match) throw new UnauthorizedError();
-  return { userId: match[1]!, sessionId: "phone", expiresAtMs: Number.MAX_SAFE_INTEGER };
+  return {
+    userId: match[1]!,
+    sessionId: "phone",
+    expiresAtMs: Number.MAX_SAFE_INTEGER,
+    clientKind: "phone",
+  };
 };
 
 async function computer(input: {
@@ -225,7 +230,7 @@ async function relayAndOwner(lookupUserDisplayName?: (userId: string) => string 
   const relay = createSyncRelayHandler({
     storage,
     resolveActor: testActor,
-    resolveAccountSession,
+    resolvePhoneCapableAccountSession: resolveAccountSession,
     serverCopies: () => copies,
     relayPublicOrigin: RELAY_ORIGIN,
     ...(lookupUserDisplayName ? { lookupUserDisplayName } : {}),

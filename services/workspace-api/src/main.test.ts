@@ -62,15 +62,16 @@ describe.skipIf(!(await postgresReachable()))("startup", () => {
     await client.connect();
     await client.query(`create schema "${schema}"`);
     await client.query(`set search_path to "${schema}"`);
-    await client.query(
-      await readFile(
-        new URL(
-          "../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql",
-          import.meta.url,
+    for (const migration of ["0001_better_auth.sql", "0007_session_client_kind.sql"])
+      await client.query(
+        await readFile(
+          new URL(
+            `../../../packages/workspace-postgres/src/db/migrations/${migration}`,
+            import.meta.url,
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-    );
+      );
     pool = new pg.Pool({ connectionString: schemaUrl });
   });
 

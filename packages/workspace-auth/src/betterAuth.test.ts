@@ -1,8 +1,11 @@
+import { createHmac } from "node:crypto";
 import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createWorkspaceAuth, type WorkspaceAuth } from "./betterAuth";
 import { createPostgresCredentialFence } from "./credentialFence";
 import {
+  createAccountSessionResolver,
+  createPhoneCapableAccountSessionResolver,
   createPostgresAccountSessions,
   createSessionActorResolver,
   UnauthorizedError,
@@ -63,6 +66,7 @@ try {
 const describeWithPostgres = describe.skipIf(!pgAvailable);
 
 const PASSWORD = "a-real-password-123";
+const SECRET = "test-secret-0123456789abcdef0123456789abcdef";
 const unique = () => `ba-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
 async function signUp(email: string) {
@@ -110,6 +114,7 @@ if (pgAvailable) {
       "0004_account_deletion.sql",
       "0005_credential_fences.sql",
       "0006_session_created_on_database_clock.sql",
+      "0007_session_client_kind.sql",
     ]) {
       await pool.query(
         await readFile(
@@ -121,7 +126,7 @@ if (pgAvailable) {
     auth = createWorkspaceAuth({
       pool,
       baseURL: "http://localhost:1786",
-      secret: "test-secret-0123456789abcdef0123456789abcdef",
+      secret: SECRET,
       sendEmail: async (message) => {
         sent.push(message);
       },
@@ -653,5 +658,188 @@ describeWithPostgres("browser cookie sessions (web client)", () => {
       new Request("http://localhost:1786/workspaces/ws-cookie/files"),
     );
     expect(anonymous.status).toBe(401);
+  });
+});
+
+const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
+
+/** Signs in through the device flow as `clientId`, approved from a browser session. */
+async function deviceSignIn(clientId: string, email: string): Promise<string> {
+  const cookie = await sessionCookieFor(email);
+  const device = await auth.api.deviceCode({ body: { client_id: clientId } });
+  await auth.api.deviceVerify({ query: { user_code: device.user_code }, headers: { cookie } });
+  await auth.api.deviceApprove({ body: { userCode: device.user_code }, headers: { cookie } });
+  const token = await auth.api.deviceToken({
+    body: { grant_type: DEVICE_GRANT, device_code: device.device_code, client_id: clientId },
+  });
+  return token.access_token;
+}
+
+async function kindOf(token: string): Promise<string | undefined> {
+  const result = await pool.query<{ clientKind: string }>(
+    'select "clientKind" from "session" where "token" = $1',
+    [token],
+  );
+  return result.rows[0]?.clientKind;
+}
+
+/** The session cookie a browser would hold for `token`, signed as Better Auth signs it. */
+async function signedCookieFor(token: string, email: string): Promise<string> {
+  const name = (await sessionCookieFor(email)).split("=")[0];
+  const signature = createHmac("sha256", SECRET).update(token).digest("base64");
+  return `${name}=${encodeURIComponent(`${token}.${signature}`)}`;
+}
+
+describeWithPostgres("session kinds", () => {
+  it("records phone, desktop and browser in the insert that creates each session", async () => {
+    const email = `${unique()}@dohc.test`;
+    const { token: browser } = await signUp(email);
+    const phone = await deviceSignIn("dohc-phone", email);
+    const desktop = await deviceSignIn("dohc-desktop", email);
+    expect(await kindOf(browser!)).toBe("browser");
+    expect(await kindOf(phone)).toBe("phone");
+    expect(await kindOf(desktop)).toBe("desktop");
+    expect(
+      (await auth.api.getSession({ headers: { authorization: `Bearer ${phone}` } }))?.session
+        .clientKind,
+    ).toBe("phone");
+  });
+
+  it("lets a phone sign in, read its session and sign out, and nothing more", async () => {
+    const email = `${unique()}@dohc.test`;
+    const { user } = await signUp(email);
+    const phone = await deviceSignIn("dohc-phone", email);
+    const get = await auth.handler(
+      new Request("http://localhost:1786/api/auth/get-session", {
+        headers: { authorization: `Bearer ${phone}` },
+      }),
+    );
+    expect(get.status).toBe(200);
+    expect(((await get.json()) as { user: { id: string } }).user.id).toBe(user.id);
+    const headers = { authorization: `Bearer ${phone}` };
+    await expect(
+      auth.api.updateUser({ body: { name: "Changed by a phone" }, headers }),
+    ).rejects.toMatchObject({ body: { code: "PHONE_SESSION_REFUSED" } });
+    await auth.api.signOut({ headers });
+    expect(await kindOf(phone)).toBeUndefined();
+  });
+
+  it("refuses a phone session at device approval, whichever way the credential arrives", async () => {
+    const email = `${unique()}@dohc.test`;
+    await signUp(email);
+    const phone = await deviceSignIn("dohc-phone", email);
+    const browserCookie = await sessionCookieFor(email);
+    const signature = createHmac("sha256", SECRET).update(phone).digest("base64");
+    const shapes: Record<string, Record<string, string>> = {
+      bearer: { authorization: `Bearer ${phone}` },
+      "lowercase scheme": { authorization: `bearer ${phone}` },
+      "signed bearer": { authorization: `Bearer ${encodeURIComponent(`${phone}.${signature}`)}` },
+      cookie: { cookie: await signedCookieFor(phone, email) },
+      "phone bearer beside a browser cookie": {
+        authorization: `Bearer ${phone}`,
+        cookie: browserCookie,
+      },
+    };
+    for (const [shape, headers] of Object.entries(shapes)) {
+      // A stolen phone token starts a desktop sign-in and tries to approve it itself.
+      const device = await auth.api.deviceCode({ body: { client_id: "dohc-desktop" } });
+      await expect(
+        auth.api.deviceVerify({ query: { user_code: device.user_code }, headers }),
+        shape,
+      ).rejects.toMatchObject({ body: { code: "PHONE_SESSION_REFUSED" } });
+      await expect(
+        auth.api.deviceApprove({ body: { userCode: device.user_code }, headers }),
+        shape,
+      ).rejects.toMatchObject({ body: { code: "PHONE_SESSION_REFUSED" } });
+      await expect(
+        auth.api.deviceToken({
+          body: {
+            grant_type: DEVICE_GRANT,
+            device_code: device.device_code,
+            client_id: "dohc-desktop",
+          },
+        }),
+        shape,
+      ).rejects.toMatchObject({ body: { error: "authorization_pending" } });
+    }
+  });
+
+  it("never changes a session's kind", async () => {
+    const email = `${unique()}@dohc.test`;
+    await signUp(email);
+    const phone = await deviceSignIn("dohc-phone", email);
+    const { internalAdapter } = await auth.$context;
+    await expect(
+      internalAdapter.updateSession(phone, { clientKind: "desktop" }),
+    ).rejects.toMatchObject({ body: { code: "SESSION_KIND_FIXED" } });
+    const { token: browser } = await auth.api.signInEmail({ body: { email, password: PASSWORD } });
+    const update = await auth.handler(
+      new Request("http://localhost:1786/api/auth/update-session", {
+        method: "POST",
+        headers: { authorization: `Bearer ${browser}`, "content-type": "application/json" },
+        body: JSON.stringify({ clientKind: "desktop" }),
+      }),
+    );
+    expect(update.status).toBeGreaterThanOrEqual(400);
+    expect(await kindOf(phone)).toBe("phone");
+    expect(await kindOf(browser)).toBe("browser");
+  });
+
+  it("accepts only the phone and desktop clients, and keeps a code to the client it was issued to", async () => {
+    const email = `${unique()}@dohc.test`;
+    await signUp(email);
+    for (const clientId of ["desktop", "dohc-browser"])
+      await expect(
+        auth.api.deviceCode({ body: { client_id: clientId } }),
+        clientId,
+      ).rejects.toMatchObject({ body: { error: "invalid_client" } });
+    const cookie = await sessionCookieFor(email);
+    const device = await auth.api.deviceCode({ body: { client_id: "dohc-phone" } });
+    await auth.api.deviceVerify({ query: { user_code: device.user_code }, headers: { cookie } });
+    await auth.api.deviceApprove({ body: { userCode: device.user_code }, headers: { cookie } });
+    // A phone's code can't be exchanged for a desktop session.
+    await expect(
+      auth.api.deviceToken({
+        body: {
+          grant_type: DEVICE_GRANT,
+          device_code: device.device_code,
+          client_id: "dohc-desktop",
+        },
+      }),
+    ).rejects.toMatchObject({ body: { error: "invalid_grant" } });
+    const token = await auth.api.deviceToken({
+      body: { grant_type: DEVICE_GRANT, device_code: device.device_code, client_id: "dohc-phone" },
+    });
+    expect(await kindOf(token.access_token)).toBe("phone");
+  });
+
+  it("gives the phone's session only to the phone-capable account resolver", async () => {
+    const email = `${unique()}@dohc.test`;
+    const { user } = await signUp(email);
+    const phone = await deviceSignIn("dohc-phone", email);
+    const desktop = await deviceSignIn("dohc-desktop", email);
+    const request = (token: string) =>
+      new Request("http://localhost/sync/ws-1/files", {
+        headers: { authorization: `Bearer ${token}` },
+      });
+    await expect(createSessionActorResolver(auth)(request(phone), "ws-1")).rejects.toBeInstanceOf(
+      UnauthorizedError,
+    );
+    await expect(createAccountSessionResolver(auth)(request(phone))).rejects.toBeInstanceOf(
+      UnauthorizedError,
+    );
+    await expect(
+      createPhoneCapableAccountSessionResolver(auth)(request(phone)),
+    ).resolves.toMatchObject({
+      userId: user.id,
+      clientKind: "phone",
+    });
+    await expect(createSessionActorResolver(auth)(request(desktop), "ws-1")).resolves.toEqual({
+      userId: user.id,
+      workspaceId: "ws-1",
+    });
+    await expect(createAccountSessionResolver(auth)(request(desktop))).resolves.toMatchObject({
+      clientKind: "desktop",
+    });
   });
 });

@@ -76,7 +76,7 @@ import {
 import { createChatWakeRoutes, createChatWakeWaits } from "./chatWakeRoutes";
 import type { ServerCopies } from "./serverCopies";
 import { createAccountSessionRoutes } from "./accountSessionRoutes";
-import { createAccountWorkspaceRoutes } from "./accountWorkspaceRoutes";
+import { bearerAccountSession, createAccountWorkspaceRoutes } from "./accountWorkspaceRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
@@ -163,8 +163,11 @@ export interface CreateSyncRelayHandlerOptions {
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
   // The browser sign-in behind a cookie, for state bound to it such as push subscriptions,
-  // and the Bearer sign-in of the account routes. Without it the server serves no account routes.
+  // and an agent's sign-in approval. It refuses phone sessions.
   resolveAccountSession?: ResolveAccountSession;
+  // The Bearer sign-in of the account routes the phone uses, a phone's included.
+  // Only those routes take it. Without it the server serves no account routes.
+  resolvePhoneCapableAccountSession?: ResolveAccountSession;
   // The accounts' sign-ins in Better Auth's session table, which the account routes list and revoke.
   accountSessions?: AccountSessions;
   // The accounts' password fences in Postgres. Absent means personal agents can't sign in here.
@@ -256,6 +259,7 @@ export function createSyncRelayHandler({
   storage,
   resolveActor,
   resolveAccountSession,
+  resolvePhoneCapableAccountSession,
   accountSessions,
   credentialFence,
   pushVapidPublicKey,
@@ -580,7 +584,11 @@ export function createSyncRelayHandler({
     claimPendingShares,
     deliverPendingShareNotices,
     noticePostRateLimiter,
-    { resolveAccountSession, limiter: accountOperationRateLimiter, waits: noticeWaits },
+    {
+      resolveAccountSession: resolvePhoneCapableAccountSession,
+      limiter: accountOperationRateLimiter,
+      waits: noticeWaits,
+    },
   );
   const respondToAutomationHost = createAutomationHostRoutes(
     storage,
@@ -594,8 +602,11 @@ export function createSyncRelayHandler({
     nowMs,
     automationHostRateLimiter,
   );
-  const respondToAccountWorkspaces = resolveAccountSession
-    ? createAccountWorkspaceRoutes({ storage, resolveAccountSession })
+  const respondToAccountWorkspaces = resolvePhoneCapableAccountSession
+    ? createAccountWorkspaceRoutes({
+        storage,
+        resolveAccountSession: resolvePhoneCapableAccountSession,
+      })
     : undefined;
   const accountFeedWaits = createAccountFeedWaits(storage, discussionActivity);
   const chatWakeWaits = createChatWakeWaits(storage, discussionActivity);
@@ -606,18 +617,18 @@ export function createSyncRelayHandler({
     noticeWaits.wakeAccount(userId);
   };
   const respondToAccountSessions =
-    resolveAccountSession && accountSessions
+    resolvePhoneCapableAccountSession && accountSessions
       ? createAccountSessionRoutes({
           storage,
-          resolveAccountSession,
+          resolveAccountSession: resolvePhoneCapableAccountSession,
           sessions: accountSessions,
           feedWaits: { wakeAccount: wakeAccountWaits },
         })
       : undefined;
-  const respondToAccountOperation = resolveAccountSession
+  const respondToAccountOperation = resolvePhoneCapableAccountSession
     ? createAccountOperationRoute({
         storage,
-        resolveAccountSession,
+        resolveAccountSession: resolvePhoneCapableAccountSession,
         copies: serverCopies,
         nowMs,
         limiter: accountOperationRateLimiter,
@@ -627,10 +638,10 @@ export function createSyncRelayHandler({
         serverUrl: relayPublicOrigin,
       })
     : undefined;
-  const respondToChatWakes = resolveAccountSession
+  const respondToChatWakes = resolvePhoneCapableAccountSession
     ? createChatWakeRoutes({
         storage,
-        resolveAccountSession,
+        resolveAccountSession: resolvePhoneCapableAccountSession,
         waits: chatWakeWaits,
         nowMs,
         limiter: accountOperationRateLimiter,
@@ -1453,11 +1464,24 @@ export function createSyncRelayHandler({
           return actor.userId;
         });
       }
-      if (
-        route.route === "personal-agents" ||
-        route.route === "personal-agent" ||
-        route.route === "workspace-name"
-      ) {
+      if (route.route === "personal-agents" || route.route === "personal-agent") {
+        // The account's own Bearer sign-in, never ambient browser cookies. A phone may list,
+        // sign out, remove and restore agents, but never change what one reaches or how it shows.
+        if (!resolvePhoneCapableAccountSession) throw notFound();
+        const session = await bearerAccountSession(
+          storage,
+          resolvePhoneCapableAccountSession,
+          request,
+        );
+        if (
+          session.clientKind === "phone" &&
+          route.route === "personal-agent" &&
+          (route.action === "reach" || route.action === "name" || route.action === "hue")
+        )
+          throw notFound();
+        return await personalAgents.respondToOwner(request, route, session.userId);
+      }
+      if (route.route === "workspace-name") {
         // The account's own credential only, never ambient browser cookies.
         const authorization = request.headers.get("authorization");
         if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? ""))
@@ -1467,11 +1491,9 @@ export function createSyncRelayHandler({
             headers: { authorization: authorization! },
             signal: request.signal,
           }),
-          route.route === "workspace-name" ? route.workspaceId : "",
+          route.workspaceId,
         );
-        if (route.route === "workspace-name")
-          return await respondToWorkspaceName(storage, request, route.workspaceId, actor.userId);
-        return await personalAgents.respondToOwner(request, route, actor.userId);
+        return await respondToWorkspaceName(storage, request, route.workspaceId, actor.userId);
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (

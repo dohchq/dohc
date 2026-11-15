@@ -28,6 +28,7 @@ const resolveAccountSession: ResolveAccountSession = async (request) => {
     userId: match[1]!,
     sessionId: match[2]!,
     expiresAtMs: Number.MAX_SAFE_INTEGER,
+    clientKind: "desktop",
   } satisfies AccountSession;
 };
 
@@ -51,7 +52,7 @@ const patch = (workspaceId: string, init: RequestInit, body: unknown = { showOnP
 async function relay(options: { resolve?: ResolveAccountSession } = {}) {
   const storage = (await testStorage()) as StorageContext;
   const h = testHandler(storage, {
-    resolveAccountSession: options.resolve ?? resolveAccountSession,
+    resolvePhoneCapableAccountSession: options.resolve ?? resolveAccountSession,
   });
   await claimWorkspace(h, "ana", "trip");
   await claimWorkspace(h, "ana", "notes");

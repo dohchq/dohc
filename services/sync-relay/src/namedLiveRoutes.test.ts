@@ -9,7 +9,8 @@ import { createHash } from "node:crypto";
 import { WebSocket } from "ws";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { serveFetchHandler } from "@dohc/service-http";
-import { UnauthorizedError } from "@dohc/workspace-auth/session";
+import type { WorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
+import { createSessionActorResolver, UnauthorizedError } from "@dohc/workspace-auth/session";
 import {
   LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
   createLiveFrameSession,
@@ -46,6 +47,16 @@ import type { LiveUpdateJournalCut } from "./storage/types.js";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { NAMED_LIVE_STOPPED, linkRefusalBody } from "@dohc/security-contract/link-refusal";
 import type { SessionHostBlock } from "./linkRefusal";
+
+// The production resolver over the owner's own phone sign-in.
+const ownerPhone = createSessionActorResolver({
+  api: {
+    getSession: async () => ({
+      user: { id: "owner-1" },
+      session: { id: "phone-session", userId: "owner-1", expiresAt: 8e12, clientKind: "phone" },
+    }),
+  },
+} as unknown as WorkspaceAuth);
 
 const exchangeKey = "test-exchange-key-".repeat(3),
   relayHost = "relay.example.test";
@@ -356,6 +367,7 @@ async function fixture(
     if (owner || desktop) {
       const bearer = request.headers.get("authorization");
       if (!bearer) throw new UnauthorizedError();
+      if (bearer === "Bearer owner-phone-token") return await ownerPhone(request, workspaceId);
       return {
         userId:
           bearer === "Bearer owner-token"
@@ -1350,13 +1362,17 @@ it("opens the owner bearer route without a recipient, browser cookie, ticket, or
 it.each<Record<string, string>>([
   { authorization: "" },
   { authorization: "Bearer reader-token" },
+  { authorization: "Bearer owner-phone-token" },
   { origin: "https://foreign.example" },
   { host: "foreign.example" },
-])("refuses unauthenticated, non-owner and foreign owner upgrades %j", async (headers) => {
-  const f = await fixture(limits, false, undefined, true);
-  expect(await f.connect("", "", headers).status).toBe(404);
-  expect(f.captureNative).not.toHaveBeenCalled();
-});
+])(
+  "refuses unauthenticated, non-owner, owner phone and foreign owner upgrades %j",
+  async (headers) => {
+    const f = await fixture(limits, false, undefined, true);
+    expect(await f.connect("", "", headers).status).toBe(404);
+    expect(f.captureNative).not.toHaveBeenCalled();
+  },
+);
 
 it.each(["owner", "fence"])(
   "rechecks owner %s standing after native capture awaits",

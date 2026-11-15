@@ -48,6 +48,7 @@ async function fixture() {
       expiresAt: new Date(Date.now() + context.sessionConfig.expiresIn * 1000),
       createdAt: new Date(Date.now() - 86_400_000),
       updatedAt: now,
+      clientKind: "desktop",
     },
   });
   const accounts = vi.spyOn(context.internalAdapter, "findAccounts").mockResolvedValue([

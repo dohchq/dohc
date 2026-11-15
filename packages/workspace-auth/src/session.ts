@@ -19,15 +19,30 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/**
+ * What kind of sign-in created a session. The server records it in the same
+ * insert that creates the session, and nothing changes it afterwards. It names
+ * what the owner approved, not the hardware that holds the token.
+ */
+export type SessionKind = "phone" | "desktop" | "browser";
+
+/** The session's recorded kind. A session without a known kind is refused. */
+export function sessionKindOf(session: { session: { clientKind?: unknown } }): SessionKind {
+  const kind = session.session.clientKind;
+  if (kind === "phone" || kind === "desktop" || kind === "browser") return kind;
+  throw new UnauthorizedError();
+}
+
 // The production ResolveActor: identity comes only from a validated Better
 // Auth session (Bearer token from the desktop's device-flow login, or a
 // browser cookie) — never from client-supplied ids. Workspace MEMBERSHIP is
 // enforced downstream by the backend's authz (assertWorkspaceMember), which
-// consumes the Actor this returns.
+// consumes the Actor this returns. A phone session reaches no workspace route:
+// the phone works only through the account routes.
 export function createSessionActorResolver(auth: WorkspaceAuth): ResolveActor {
   return async (request, workspaceId) => {
     const session = await auth.api.getSession({ headers: request.headers });
-    if (!session) throw new UnauthorizedError();
+    if (!session || sessionKindOf(session) === "phone") throw new UnauthorizedError();
     return actorFromSession(session, workspaceId);
   };
 }
@@ -37,6 +52,7 @@ export interface AccountSession {
   userId: string;
   sessionId: string;
   expiresAtMs: number;
+  clientKind: SessionKind;
   displayName?: string;
 }
 
@@ -46,7 +62,7 @@ export type ResolveAccountSession = (request: Request) => Promise<AccountSession
 // it: signing out or in again gives a different session id.
 export function accountSessionFrom(session: {
   user: { id: string; name?: string };
-  session: { id: string; userId: string; expiresAt: Date | string | number };
+  session: { id: string; userId: string; expiresAt: Date | string | number; clientKind?: unknown };
 }): AccountSession {
   const expiresAtMs = new Date(session.session.expiresAt).getTime();
   if (
@@ -60,11 +76,28 @@ export function accountSessionFrom(session: {
     userId: session.user.id,
     sessionId: session.session.id,
     expiresAtMs,
+    clientKind: sessionKindOf(session),
     ...(typeof session.user.name === "string" ? { displayName: session.user.name } : {}),
   };
 }
 
+/** Refuses a phone session, like every resolver a route gets by default. */
 export function createAccountSessionResolver(auth: WorkspaceAuth): ResolveAccountSession {
+  const resolve = createPhoneCapableAccountSessionResolver(auth);
+  return async (request) => {
+    const session = await resolve(request);
+    if (session.clientKind === "phone") throw new UnauthorizedError();
+    return session;
+  };
+}
+
+/**
+ * Also accepts a phone session. Only the account routes the phone uses take
+ * this resolver; every other route gets one that refuses phones.
+ */
+export function createPhoneCapableAccountSessionResolver(
+  auth: WorkspaceAuth,
+): ResolveAccountSession {
   return async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });
     if (!session) throw new UnauthorizedError();

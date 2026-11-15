@@ -31,7 +31,10 @@ async function listen(handler: AuthGateway["handler"]): Promise<string> {
   const router = createRouter({
     auth: {
       handler,
-      api: { getSession: async () => null, deviceVerify: async () => ({ status: "pending" }) },
+      api: {
+        getSession: async () => null,
+        deviceVerify: async () => ({ status: "pending", deviceKind: "desktop" }),
+      },
     },
     readiness: async () => ({ ok: true, database: "ok", schema: "ok", missingTables: [] }),
     descriptor: {

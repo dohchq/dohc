@@ -7,6 +7,7 @@ import {
 } from "@dohc/security-contract/app-publication";
 import {
   createAccountSessionResolver,
+  createPhoneCapableAccountSessionResolver,
   createPostgresAccountSessions,
   createSessionActorResolver,
   UnauthorizedError,
@@ -439,14 +440,15 @@ let lookupUserEmail: (userId: string) => Promise<string | null> | string | null;
 let lookupVerifiedUserEmail: (userId: string) => Promise<string | null> | string | null;
 let lookupUserDisplayName: (userId: string) => Promise<string | null> | string | null;
 // The test seam has no browser sign-ins, so it serves no push subscriptions
-// and no personal agent sign-in.
+// and no personal agent sign-in. Its Bearer identities are desktop sign-ins.
 const accountResolvers: {
   actor: ResolveActor;
   session?: ResolveAccountSession;
+  phoneCapableSession?: ResolveAccountSession;
   sessions?: AccountSessions;
   credentialFence?: CredentialFence;
 } = testAuthSeam
-  ? { actor: createTestActorResolver() }
+  ? { actor: createTestActorResolver(), phoneCapableSession: createTestAccountSessionResolver() }
   : await (async () => {
       const { createWorkspaceAuth } = await import("@dohc/workspace-auth/betterAuth");
       pool = new Pool({
@@ -471,12 +473,14 @@ const accountResolvers: {
       return {
         actor: createSessionActorResolver(auth),
         session: createAccountSessionResolver(auth),
+        phoneCapableSession: createPhoneCapableAccountSessionResolver(auth),
         sessions: createPostgresAccountSessions(pool),
         credentialFence,
       };
     })();
 const resolveAccountActor = accountResolvers.actor;
 const resolveAccountSession = accountResolvers.session;
+const resolvePhoneCapableAccountSession = accountResolvers.phoneCapableSession;
 const credentialFence = accountResolvers.credentialFence;
 const pushConfig = (() => {
   try {
@@ -594,6 +598,19 @@ function createTestActorResolver(): ResolveActor {
   };
 }
 
+function createTestAccountSessionResolver(): ResolveAccountSession {
+  const resolveActor = createTestActorResolver();
+  return async (request) => {
+    const { userId } = await resolveActor(request, "");
+    return {
+      userId,
+      sessionId: `test:${userId}`,
+      expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind: "desktop",
+    };
+  };
+}
+
 if (testAuthSeam) {
   resolveUserIdByEmail = (email) =>
     email.endsWith(TEST_EMAIL_SUFFIX) && email.length > TEST_EMAIL_SUFFIX.length
@@ -635,6 +652,7 @@ const relayApplication = createSyncRelayHandler({
   storage,
   resolveActor,
   ...(resolveAccountSession ? { resolveAccountSession } : {}),
+  ...(resolvePhoneCapableAccountSession ? { resolvePhoneCapableAccountSession } : {}),
   ...(accountResolvers.sessions ? { accountSessions: accountResolvers.sessions } : {}),
   ...(credentialFence ? { credentialFence } : {}),
   ...(pushVapidPublicKey ? { pushVapidPublicKey } : {}),

@@ -34,7 +34,12 @@ function sessionTable(rows: StoredSession[]): HandlerOverrides {
       (stored) => `Bearer ${stored.token}` === request.headers.get("authorization"),
     );
     if (!row) throw new UnauthorizedError();
-    return { userId: row.userId, sessionId: row.sessionId, expiresAtMs: Number.MAX_SAFE_INTEGER };
+    return {
+      userId: row.userId,
+      sessionId: row.sessionId,
+      expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind: "desktop",
+    };
   };
   const accountSessions: AccountSessions = {
     list: async (userId) => rows.filter((row) => row.userId === userId),
@@ -49,7 +54,7 @@ function sessionTable(rows: StoredSession[]): HandlerOverrides {
       return true;
     },
   };
-  return { resolveAccountSession, accountSessions };
+  return { resolvePhoneCapableAccountSession: resolveAccountSession, accountSessions };
 }
 
 async function relay() {

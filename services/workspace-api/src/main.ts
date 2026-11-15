@@ -1,4 +1,8 @@
-import { createWorkspaceAuth, signOutUnverifiedAccounts } from "@dohc/workspace-auth/betterAuth";
+import {
+  createWorkspaceAuth,
+  deviceCodeKind,
+  signOutUnverifiedAccounts,
+} from "@dohc/workspace-auth/betterAuth";
 import { signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import {
   createSmtpSender,
@@ -99,7 +103,10 @@ const gateway: AuthGateway = {
     ),
   api: {
     getSession: ({ headers }) => auth.api.getSession({ headers }),
-    deviceVerify: ({ query, headers }) => auth.api.deviceVerify({ query, headers }),
+    deviceVerify: async ({ query, headers }) => {
+      const { status } = await auth.api.deviceVerify({ query, headers });
+      return { status, deviceKind: await deviceCodeKind(auth, query.user_code) };
+    },
   },
 };
 

@@ -171,21 +171,23 @@ ${STATUS}`,
 
 export type DeviceState =
   | { kind: "prompt"; userCode?: string; notFound?: boolean }
-  | { kind: "review"; userCode: string; email: string }
+  | { kind: "review"; userCode: string; email: string; deviceKind: "phone" | "desktop" }
   | { kind: "expired" }
   | { kind: "invalid" }
   | { kind: "handled"; status: string };
 
 export function devicePage(state: DeviceState): string {
   if (state.kind === "review") {
+    const phone = state.deviceKind === "phone";
+    const device = phone ? "phone" : "computer";
     return shell({
       title: "Connect your device",
       page: "device",
-      data: { "user-code": state.userCode },
-      main: `<h1>Connect this device to dohc?</h1>
+      data: { "user-code": state.userCode, "device-kind": state.deviceKind },
+      main: `<h1>Connect this ${device} to dohc?</h1>
 <p class="code">${escapeHtml(state.userCode)}</p>
-<p>Connect the device showing this code as <span class="meta">${escapeHtml(state.email)}</span>. It will read and change your workspaces.</p>
-<p>Only approve this if you just started signing in on your phone.</p>
+<p>Connect the ${device} showing this code as <span class="meta">${escapeHtml(state.email)}</span>. ${phone ? "It can read the workspaces you show on your phone, write in their chats, and sign out your other devices and agents." : "It can read and change your workspaces."}</p>
+<p>Only approve this if you just started signing in on your ${device}.</p>
 <div class="actions" id="actions">
 <button type="button" id="approve">Approve</button>
 <button type="button" id="deny" class="secondary">Deny</button>

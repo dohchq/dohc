@@ -125,6 +125,15 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
         `insert into "user" ("id", "name", "email", "emailVerified", "createdAt", "updatedAt")
          values ('kept-user', 'Kept User', 'kept@example.test', true, now(), now())`,
       );
+      // A sign-in and a pending device code from before sessions recorded their kind.
+      await upgradeClient.query(
+        `insert into "session" ("id", "expiresAt", "token", "updatedAt", "userId")
+         values ('untyped-session', now() + interval '1 day', 'untyped-token', now(), 'kept-user')`,
+      );
+      await upgradeClient.query(
+        `insert into "deviceCode" ("id", "deviceCode", "userCode", "expiresAt", "status")
+         values ('untyped-code', 'untyped-code', 'UNTYPED', now() + interval '10 minutes', 'pending')`,
+      );
 
       for (const table of RETIRED_TABLES) {
         await upgradeClient.query(`create table "${table}" (id text primary key)`);
@@ -149,6 +158,7 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
         "0004_account_deletion",
         "0005_credential_fences",
         "0006_session_created_on_database_clock",
+        "0007_session_client_kind",
       ]);
 
       for (const table of RETIRED_TABLES) {
@@ -162,6 +172,21 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
         `select "email" from "user" where "id" = 'kept-user'`,
       );
       expect(keptUser.rows).toEqual([{ email: "kept@example.test" }]);
+      // Every account signs in again, and a session without a known kind can't be created.
+      const left = await upgradeClient.query<{ sessions: number; codes: number }>(
+        `select (select count(*) from "session")::int as sessions,
+                (select count(*) from "deviceCode")::int as codes`,
+      );
+      expect(left.rows).toEqual([{ sessions: 0, codes: 0 }]);
+      const insertSession = (kind: string | null) =>
+        upgradeClient.query(
+          `insert into "session" ("id", "expiresAt", "token", "updatedAt", "userId", "clientKind")
+           values ($1, now() + interval '1 day', $1, now(), 'kept-user', $2)`,
+          [`session-${kind}`, kind],
+        );
+      await expect(insertSession(null)).rejects.toMatchObject({ code: "23502" });
+      await expect(insertSession("agent")).rejects.toMatchObject({ code: "23514" });
+      await insertSession("phone");
     } finally {
       await upgradeClient
         .query(`drop schema if exists "${upgradeSchema}" cascade`)

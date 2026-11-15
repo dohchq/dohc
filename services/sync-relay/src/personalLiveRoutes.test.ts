@@ -41,7 +41,14 @@ import type { PersonalRunningEntry } from "./personalAgents.js";
 import type { StorageContext } from "./storage/context.js";
 import { SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment.js";
 import type { LiveUpdateJournalCut } from "./storage/types.js";
-import { LINK_KEY, RELAY_EXCHANGE_KEY, request, SHARE_WEB_ORIGIN, testHandler } from "./testing";
+import {
+  LINK_KEY,
+  RELAY_EXCHANGE_KEY,
+  request,
+  resolveTestAccountSession,
+  SHARE_WEB_ORIGIN,
+  testHandler,
+} from "./testing";
 
 const relayHost = "relay.example.test",
   OWNER = "owner-1";
@@ -247,6 +254,7 @@ async function fixture() {
   const h = testHandler(storage, {
     credentialFence: fence,
     relayExchangeKey: RELAY_EXCHANGE_KEY,
+    resolvePhoneCapableAccountSession: resolveTestAccountSession,
     nowMs: () => clock,
   });
   cleanups.push(() => h.dispose());
