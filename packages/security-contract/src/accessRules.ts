@@ -62,31 +62,32 @@ function readScalar(text: string, stopAtColon: boolean): { value: string; rest: 
   while (end < text.length) {
     const char = text[end]!;
     if (stopAtColon && char === ":") break;
-    if (char === "#" && (end === 0 || /\s/.test(text[end - 1]!))) break;
+    if (char === "#" && (end === 0 || text[end - 1] === " " || text[end - 1] === "\t")) break;
     end += 1;
   }
-  const value = text.slice(0, end).trim();
+  const value = text.slice(0, end).replace(/[ \t]+$/, "");
   if (!value || /^[&*!|>%@`{[\]},?-]/.test(value)) return null;
-  return { value, rest: text.slice(end) };
+  return { value, rest: text.slice(value.length) };
 }
 
-function isCommentOrBlank(text: string): boolean {
-  const trimmed = text.trim();
-  return trimmed === "" || trimmed.startsWith("#");
-}
+// YAML separates tokens with spaces and tabs only; any other space belongs to
+// the scalar it sits in, so a no-break space can't pass for one.
+const LINE_SKIPPED = /^[ \t]*(?:#|$)/;
+// What may follow a value: nothing, or a comment after at least one space.
+const LINE_END = /^(?:[ \t]*|[ \t]+#[\s\S]*)$/;
 
 function readLine(raw: string): Line | null | "skip" {
-  if (isCommentOrBlank(raw)) return "skip";
-  const indent = raw.length - raw.trimStart().length;
-  if (raw.slice(0, indent).includes("\t")) return null;
-  const key = readScalar(raw.slice(indent), true);
+  if (LINE_SKIPPED.test(raw)) return "skip";
+  const indent = /^[ \t]*/.exec(raw)![0];
+  if (indent.includes("\t")) return null;
+  const key = readScalar(raw.slice(indent.length), true);
   if (!key || !key.rest.startsWith(":")) return null;
   const afterColon = key.rest.slice(1);
-  if (afterColon !== "" && !/^\s/.test(afterColon)) return null;
-  if (isCommentOrBlank(afterColon)) return { indent, key: key.value, value: null };
-  const value = readScalar(afterColon.trimStart(), false);
-  if (!value || !isCommentOrBlank(value.rest)) return null;
-  return { indent, key: key.value, value: value.value };
+  if (afterColon !== "" && !/^[ \t]/.test(afterColon)) return null;
+  if (LINE_END.test(afterColon)) return { indent: indent.length, key: key.value, value: null };
+  const value = readScalar(afterColon.replace(/^[ \t]+/, ""), false);
+  if (!value || !LINE_END.test(value.rest)) return null;
+  return { indent: indent.length, key: key.value, value: value.value };
 }
 
 function readLevel(value: string | null): ShareAccess | null {
@@ -140,16 +141,41 @@ export function parseAccessRule(text: string): AccessRule | null {
   return { members, people };
 }
 
-/** The canonical text of a rule, which `parseAccessRule` reads back to the same rule. */
-export function formatAccessRule(rule: AccessRule): string {
+// An email as a key that reads back as itself: plain when it can be, else quoted.
+function formatKey(email: string): string | null {
+  for (const spelling of [email, `'${email}'`, `"${email}"`]) {
+    const line = readLine(`  ${spelling}: view`);
+    if (line && line !== "skip" && line.key === email) return spelling;
+  }
+  return null;
+}
+
+function sameRule(a: AccessRule, b: AccessRule): boolean {
+  return (
+    a.members === b.members &&
+    a.people.size === b.people.size &&
+    [...a.people].every(([email, level]) => b.people.get(email) === level)
+  );
+}
+
+/**
+ * The canonical text of a rule, or null when no text reads back as this rule.
+ * Callers treat null as unreadable, which hides the folder.
+ */
+export function formatAccessRule(rule: AccessRule): string | null {
   const lines: string[] = [];
   if (rule.members) lines.push(`members: ${rule.members}`);
   if (rule.people.size > 0) {
     lines.push("people:");
-    for (const email of [...rule.people.keys()].sort())
-      lines.push(`  ${email}: ${rule.people.get(email)}`);
+    for (const email of [...rule.people.keys()].sort()) {
+      const key = formatKey(email);
+      if (key === null) return null;
+      lines.push(`  ${key}: ${rule.people.get(email)}`);
+    }
   }
-  return lines.length ? `${lines.join("\n")}\n` : "";
+  const text = lines.length ? `${lines.join("\n")}\n` : "";
+  const reread = parseAccessRule(text);
+  return reread && sameRule(reread, rule) ? text : null;
 }
 
 function lower(a: ShareAccess | null, b: ShareAccess | null): ShareAccess | null {

@@ -13,6 +13,28 @@ import {
   parseAccessRule,
   ruleOnlyNarrows,
 } from "./accessRules";
+import vectors from "./accessRules.vectors.json";
+
+type VectorRule = {
+  members: AccessRule["members"];
+  people: Record<string, NonNullable<AccessRule["members"]>>;
+} | null;
+const plain = (parsed: AccessRule | null): VectorRule =>
+  parsed && {
+    members: parsed.members,
+    people: Object.fromEntries([...parsed.people].sort(([a], [b]) => (a < b ? -1 : 1))),
+  };
+
+// The engine's twin (crates/dohc-engine-files/src/access_rules.rs) reads the same vectors.
+describe("shared vectors", () => {
+  it.each(vectors.parsed)("parses $name", ({ text, rule: expected }) => {
+    expect(plain(parseAccessRule(text))).toEqual(expected);
+  });
+  it.each(vectors.narrowing)("narrows or widens: $name", ({ before, after, narrows, lower }) => {
+    expect(ruleOnlyNarrows(rule(before), rule(after))).toBe(narrows);
+    expect(plain(lowerRule(rule(before), rule(after)))).toEqual(lower);
+  });
+});
 
 const rule = (text: string): AccessRule => {
   const parsed = parseAccessRule(text);
@@ -74,10 +96,30 @@ describe("parseAccessRule", () => {
     expect(parseAccessRule(`members: view\n#${"x".repeat(64 * 1024)}\n`)).toBeNull();
   });
 
-  it("reads back what it formats", () => {
+  it("reads back what it formats, quoting a key that would read as something else", () => {
     const parsed = rule("people:\n  sam@example.com: edit\nmembers: comment\n");
-    expect(parseAccessRule(formatAccessRule(parsed))).toEqual(parsed);
+    expect(parseAccessRule(formatAccessRule(parsed)!)).toEqual(parsed);
     expect(formatAccessRule(rule(""))).toBe("");
+    // Written plain, the first would be a comment and the rest unreadable.
+    const tricky = rule(
+      "members: edit\npeople:\n  \"#sam@example.com\": view\n  'a:b@example.com': view\n  '&x@example.com': view\n" +
+        '  "o\'neil@example.com": view\n  a\'b"c@example.com: view\n',
+    );
+    expect(parseAccessRule(formatAccessRule(tricky)!)).toEqual(tricky);
+    for (const text of vectors.parsed
+      .map(({ text }) => parseAccessRule(text))
+      .filter((r): r is AccessRule => r !== null)) {
+      expect(parseAccessRule(formatAccessRule(text)!)).toEqual(text);
+    }
+  });
+
+  it("formats nothing for a rule no text can hold", () => {
+    expect(
+      formatAccessRule({ members: null, people: new Map([["sam: x@example.com", "view"]]) }),
+    ).toBeNull();
+    expect(
+      formatAccessRule({ members: null, people: new Map([["'\"@example.com", "view"]]) }),
+    ).toBeNull();
   });
 });
 

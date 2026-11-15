@@ -17,6 +17,8 @@ export function isAccessRulePath(path: string): boolean {
 /**
  * Whether this file is a rule or a copy of one: an editor's backup, swap or
  * temp file keeps the rule's emails, so members never see or write these either.
+ * Any name containing `access.yaml` counts, so `Guide to access.yaml.md` is
+ * hidden too: editors name copies too many ways to list, and hiding errs safe.
  */
 export function isAccessRuleRelatedPath(path: string): boolean {
   return lastSegmentKey(path).includes(ACCESS_RULE_FILE);
