@@ -50,6 +50,7 @@ mod frontmatter_yaml;
 mod nested_markdown_contract_tests;
 #[cfg(test)]
 mod outside_save_fold_tests;
+mod read_markdown;
 mod reference_links;
 mod removed_text;
 mod restore_copy;
@@ -1622,16 +1623,17 @@ impl Ydoc {
                     Some(prefix) => frontmatter_yaml::source(prefix, &frontmatter, uses_crlf)?,
                     None => None,
                 };
+                let _ = reading;
                 let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
-                let normalized_body =
-                    normalize_list_tabs(normalized_body.as_deref().unwrap_or(body), reading);
-                let (blocks, refused) = parse_markdown_blocks_checked(&normalized_body, reading);
-                if refused || (fold == FileFold::Strict && refused_fold_item_bodies(&blocks)) {
-                    return Err(CollabError::MarkdownNotRepresentable);
-                }
-                if file_fold && quote_fold_overflows(&blocks, 0) {
-                    return Err(CollabError::MarkdownQuoteDepthExceeded);
-                }
+                let blocks = read_markdown::read_markdown(
+                    normalized_body.as_deref().unwrap_or(body),
+                )
+                .map_err(|unreadable| match unreadable {
+                    read_markdown::Unreadable::QuoteTooDeep if file_fold => {
+                        CollabError::MarkdownQuoteDepthExceeded
+                    }
+                    _ => CollabError::MarkdownNotRepresentable,
+                })?;
                 let edit = |txn: &mut yrs::TransactionMut<'_>| {
                     if WIRE_SEED && missing_schema_version {
                         meta.insert(txn, "schemaVersion", Any::Number(1.0));
@@ -1663,7 +1665,7 @@ impl Ydoc {
                     // save keeps the blocks it left alone at either end and
                     // adds only what changed.
                     let (start, end) = if file_fold {
-                        unchanged_ends::<_, WIRE_SEED>(&*txn, &frag, &blocks)
+                        unchanged_ends(&*txn, &frag, &blocks)
                     } else {
                         (0, 0)
                     };
@@ -1675,7 +1677,7 @@ impl Ydoc {
                         .iter()
                         .rev()
                     {
-                        insert_md_block::<_, WIRE_SEED>(txn, &frag, start, block);
+                        read_markdown::insert_element(txn, &frag, start, block);
                     }
                 };
                 if WIRE_SEED {
@@ -5130,10 +5132,10 @@ macro_rules! count_fold_work {
 
 /// How many of `body`'s blocks at the start and at the end are already what
 /// `blocks` would insert there, compared without overlapping.
-fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
+fn unchanged_ends<T: ReadTxn>(
     txn: &T,
     body: &yrs::XmlFragmentRef,
-    blocks: &[MdBlock<'_>],
+    blocks: &[read_markdown::Element],
 ) -> (u32, u32) {
     let len = body.len(txn);
     if len == 0 || blocks.is_empty() {
@@ -5149,10 +5151,10 @@ fn unchanged_ends<T: ReadTxn, const WIRE_DEFAULTS: bool>(
     let scratch = yrs::Doc::new();
     let fresh = scratch.get_or_insert_xml_fragment(ROOT_BODY);
     let mut scratch_txn = scratch.transact_mut();
-    let mut kept = |old: &XmlOut, block: &MdBlock<'_>| {
+    let mut kept = |old: &XmlOut, block: &read_markdown::Element| {
         let before = fresh.len(&scratch_txn);
         count_fold_work!(built);
-        insert_md_block::<_, WIRE_DEFAULTS>(&mut scratch_txn, &fresh, 0, block);
+        read_markdown::insert_element(&mut scratch_txn, &fresh, 0, block);
         if fresh.len(&scratch_txn) != before + 1 {
             return false;
         }
