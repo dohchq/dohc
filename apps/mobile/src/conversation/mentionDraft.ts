@@ -10,10 +10,18 @@ export type FieldSnapshot = Pick<
   "text" | "revision" | "sequence" | "selectionStart" | "selectionEnd" | "composing"
 >;
 
-/** `next` when it is newer than `current`, by its report's sequence; otherwise `current`, so a stale report is dropped. */
-export function latestSnapshot(current: FieldSnapshot | null, next: FieldChange): FieldSnapshot {
-  if (current !== null && next.sequence <= current.sequence) return current;
-  const { text, revision, sequence, selectionStart, selectionEnd, composing } = next;
+/**
+ * Whether the composer takes `change`: only when it is newer, by sequence, than the last report it took, numbered
+ * `accepted`, or 0 before any. A stale report changes nothing: not the text Send and a kept draft use, nor the field's
+ * state, nor a clear or refusal. Only its answer to a replacement still counts, matched by token
+ * (`replacementAnswered`).
+ */
+export const acceptsReport = (accepted: number, change: Pick<FieldChange, "sequence">) =>
+  change.sequence > accepted;
+
+/** The field as `change` saw it, without its answers. */
+export function snapshotOf(change: FieldChange): FieldSnapshot {
+  const { text, revision, sequence, selectionStart, selectionEnd, composing } = change;
   return {
     text,
     revision,
@@ -22,6 +30,11 @@ export function latestSnapshot(current: FieldSnapshot | null, next: FieldChange)
     selectionEnd,
     ...(composing === undefined ? {} : { composing }),
   };
+}
+
+/** `next` when it is newer than `current`, by its report's sequence; otherwise `current`, so a stale report is dropped. */
+export function latestSnapshot(current: FieldSnapshot | null, next: FieldChange): FieldSnapshot {
+  return current !== null && !acceptsReport(current.sequence, next) ? current : snapshotOf(next);
 }
 
 /** Whether an input method is still composing text the field shows, which isn't text yet, so nothing sends it. */

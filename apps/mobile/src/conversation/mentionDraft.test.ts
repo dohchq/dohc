@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { FieldChange } from "../../modules/chat-composer";
+import type { ClearRequest, FieldChange } from "../../modules/chat-composer";
+import { clearedBy, EMPTY_DRAFT, fieldChanged, type Draft } from "./conversationWrites";
 import {
+  acceptsReport,
   askReplacement,
   composing,
   latestSnapshot,
@@ -8,6 +10,7 @@ import {
   replacementAnswered,
   replacePending,
   replaceRequest,
+  snapshotOf,
   type FieldSnapshot,
   type Replacing,
 } from "./mentionDraft";
@@ -70,6 +73,73 @@ describe("the field's latest report", () => {
     const committed = latestSnapshot(marked, report("にほ", 2, 4));
     expect(composing(committed)).toBe(false);
     expect(composing(null)).toBe(false);
+  });
+});
+
+describe("a report that comes late", () => {
+  /** What the composer holds once it has taken `changes` in order, as its field handler takes them. */
+  function take(changes: readonly FieldChange[], request: ClearRequest, start: Replacing) {
+    let accepted = 0;
+    let field: FieldSnapshot | null = null;
+    let draft: Draft = EMPTY_DRAFT;
+    let replacing = start;
+    let refused = 0;
+    const texts: string[] = [];
+    let clears = 0;
+    for (const change of changes) {
+      if (change.replaced !== undefined) replacing = replacementAnswered(replacing, change);
+      if (!acceptsReport(accepted, change)) continue;
+      accepted = change.sequence;
+      field = snapshotOf(change);
+      if (change.refused !== 0) refused = change.refused;
+      draft = fieldChanged(draft, change, request, null);
+      texts.push(change.text);
+      if (clearedBy(change, request)) clears += 1;
+    }
+    return { accepted, field, draft, replacing, refused, texts, clears };
+  }
+
+  it("takes only a report newer than the last it took", () => {
+    expect(acceptsReport(0, report("A", 1, 1))).toBe(true);
+    expect(acceptsReport(11, report("AB", 6, 12))).toBe(true);
+    expect(acceptsReport(11, report("A", 5, 10))).toBe(false);
+    expect(acceptsReport(11, report("AB", 6, 11))).toBe(false);
+  });
+
+  it("changes nothing when sequence 10 comes after 11, even a clear already answered", () => {
+    const request = { revision: 4, token: 1 };
+    const cleared = report("", 5, 10, { cleared: 1 });
+    const typed = report("AB", 6, 11, { selectionStart: 1, selectionEnd: 1 });
+    const taken = take(
+      [cleared, typed, report("A", 5, 10, { refused: 2 }), cleared],
+      request,
+      NO_REPLACING,
+    );
+    expect(taken.accepted).toBe(11);
+    expect(taken.field).toEqual(snapshotOf(typed));
+    expect(taken.draft).toMatchObject({ text: "AB", textRevision: 6 });
+    expect(taken.texts).toEqual(["", "AB"]);
+    expect(taken.refused).toBe(0);
+    expect(taken.clears).toBe(1);
+  });
+
+  it("still settles a replacement by its token, without taking the late report's text", () => {
+    const asked = askReplacement(NO_REPLACING, snap("Hi @sa"), {
+      start: 3,
+      end: 6,
+      replacement: "@sam ",
+      caret: 8,
+    });
+    if (asked.kind !== "asked") throw new Error(`refused: ${asked.reason}`);
+    const late = report("Hi @sam ", 5, 10, { replaced: { token: 1, applied: true } });
+    const taken = take(
+      [report("Hi @sam x", 6, 11), late],
+      { revision: 0, token: 0 },
+      asked.replacing,
+    );
+    expect(taken.replacing.answer).toEqual({ token: 1, applied: true });
+    expect(taken.draft).toMatchObject({ text: "Hi @sam x", textRevision: 6 });
+    expect(taken.texts).toEqual(["Hi @sam x"]);
   });
 });
 

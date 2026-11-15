@@ -12,7 +12,8 @@ export interface ClearRequest {
  * Asks the field to replace `start` until `end`, in UTF-16 code units, with `replacement`, and put its caret at `caret`,
  * an offset in the text that results. The field does it only while it is just as the report numbered `sequence` saw it:
  * its text at `revision`, `expected` in that range, the caret alone at `end`, nothing being composed, and the field
- * editable. Each new `token` asks once, and the field answers each once, in `replaced`.
+ * editable. Tokens are increasing positive integers. The field answers each once, in `replaced`, and ignores a token no
+ * greater than the last it answered, so 0 asks nothing and a replayed request isn't answered again.
  */
 export interface ReplaceRequest {
   readonly token: number;
@@ -43,7 +44,10 @@ export interface FieldRange {
  */
 export interface FieldChange {
   readonly text: string;
-  /** Counts every change to the text, the field's own clears included, so an edit away and back still counts. */
+  /**
+   * Counts every change to the text, the field's own clears included, so an edit away and back still counts. A report's
+   * `text` is always the text at its revision.
+   */
   readonly revision: number;
   /** Counts every report. A selection or composition alone raises it, and leaves `revision` as it was. */
   readonly sequence: number;

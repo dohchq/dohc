@@ -8,7 +8,8 @@ struct ClearRequest: Record {
 }
 
 /// A request to replace `start..<end`, in UTF-16 code units, with `replacement`, and put the caret at `caret`, only
-/// while the field is just as its report numbered `sequence` saw it. Each new `token` asks once.
+/// while the field is just as its report numbered `sequence` saw it. Tokens only increase: one no greater than the last
+/// answered asks nothing, so 0 never asks.
 struct ReplaceRequest: Record {
   @Field var token: Int = 0
   @Field var revision: Int = 0
@@ -88,6 +89,8 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
   private var replaceToken = 0
   /// Counts every change to the text, the field's own clears included, so an edit away and back still counts.
   private var revision = 0
+  /// The text `revision` counts, so each change counts once, whichever callback hears of it first.
+  private var counted = ""
   /// Counts every report.
   private var sequence = 0
   /// What the last report said, so a selection or composition that didn't move reports nothing.
@@ -136,6 +139,7 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
   func clear(if request: ClearRequest) {
     guard request.token != clearToken else { return }
     clearToken = request.token
+    recount()
     guard textView.markedTextRange == nil, revision == request.revision else {
       report(refused: request.token)
       return
@@ -149,8 +153,9 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
   /// Replaces a range as one edit the person can undo, only if the field is just as the request saw it, and answers
   /// once either way. A refusal changes nothing and reports the field as it is.
   func replace(if request: ReplaceRequest) {
-    guard request.token != replaceToken else { return }
+    guard request.token > replaceToken else { return }
     replaceToken = request.token
+    recount()
     let text = (textView.text ?? "") as NSString
     let selection = textView.selectedRange
     guard textView.isEditable, textView.markedTextRange == nil,
@@ -211,9 +216,11 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
     if previous?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory { setNeedsLayout() }
   }
 
+  // A selection callback can come before the text callback for the same edit; whichever comes first counts the text.
   func textViewDidChange(_ textView: UITextView) {
     guard !quiet else { return }
-    changed()
+    report()
+    reportHeight()
   }
 
   func textViewDidChangeSelection(_ textView: UITextView) {
@@ -221,12 +228,22 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
     report()
   }
 
-  /// `cleared` is the token of the request whose clear made this change, or 0 for an edit.
+  /// The field's own change to its text, which counts as one revision, even when the text comes out the same.
+  /// `cleared` is the token of the request whose clear made this change, or 0 for a seed or replacement.
   private func changed(cleared: Int = 0, replaced: (token: Int, applied: Bool)? = nil) {
+    counted = textView.text ?? ""
     revision += 1
-    placeholder.isHidden = !textView.text.isEmpty
     report(cleared: cleared, replaced: replaced)
     reportHeight()
+  }
+
+  /// Counts the text as a new revision when it differs, code unit for code unit, from the text last counted.
+  private func recount() {
+    let text = textView.text ?? ""
+    placeholder.isHidden = !text.isEmpty
+    guard !text.utf16.elementsEqual(counted.utf16) else { return }
+    counted = text
+    revision += 1
   }
 
   /// The field's state, in UTF-16 offsets, as NSString and UITextInput count them.
@@ -245,8 +262,10 @@ final class ChatComposerView: ExpoView, UITextViewDelegate {
     return FieldState(revision: revision, selection: selection, composing: composing)
   }
 
-  /// Reports the field. An answer to a request always reports; otherwise only a change since the last report does.
+  /// Reports the field, its text counted first, so a report's text is always the text at its revision. An answer to a
+  /// request always reports; otherwise only a change since the last report does.
   private func report(cleared: Int = 0, refused: Int = 0, replaced: (token: Int, applied: Bool)? = nil) {
+    recount()
     let now = state()
     guard cleared != 0 || refused != 0 || replaced != nil || now != reported else { return }
     reported = now

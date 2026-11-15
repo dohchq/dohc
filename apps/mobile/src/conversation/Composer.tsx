@@ -4,7 +4,7 @@ import { chatWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
 import { ArrowUp, SquarePen, X } from "lucide-react-native";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { AccessibilityInfo, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { KeyboardStickyView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -27,10 +27,11 @@ import {
   type SubmitOutcome,
 } from "./conversationWrites";
 import {
+  acceptsReport,
   composing,
-  latestSnapshot,
   NO_REPLACING,
   replacementAnswered,
+  snapshotOf,
   type FieldSnapshot,
   type Replacing,
 } from "./mentionDraft";
@@ -139,8 +140,10 @@ export function Composer({
   });
   // The token of the last clear the field refused, keeping the body sent.
   const [refused, setRefused] = useState(0);
-  // The field's latest report, and the last replacement asked of it, with its answer once it came.
+  // The field's latest report, and the last replacement asked of it, with its answer once it came. `accepted` is the
+  // sequence of the last report taken, read as each report arrives, so a stale one is dropped whole (`acceptsReport`).
   const [field, setField] = useState<FieldSnapshot | null>(null);
+  const accepted = useRef(0);
   const [replacing, setReplacing] = useState<Replacing>(NO_REPLACING);
   const [submitting, setSubmitting] = useState(false);
   // Why the outbox kept nothing: Try again submits the same text, and a reply whose message wasn't sent can't wait, so
@@ -271,9 +274,11 @@ export function Composer({
             replaceIf={replacing.request}
             initialText={initialText}
             onChangeText={({ nativeEvent: change }) => {
-              setField((current) => latestSnapshot(current, change));
               if (change.replaced !== undefined)
                 setReplacing((current) => replacementAnswered(current, change));
+              if (!acceptsReport(accepted.current, change)) return;
+              accepted.current = change.sequence;
+              setField(snapshotOf(change));
               if (change.refused !== 0) setRefused(change.refused);
               setDraft((current) => fieldChanged(current, change, clear.request, clear.sent));
               onText?.(change.text);

@@ -31,7 +31,8 @@ class ClearRequest : Record {
 }
 
 /** A request to replace `start` until `end`, in UTF-16 code units, with `replacement`, and put the caret at `caret`, only
- * while the field is just as its report numbered `sequence` saw it. Each new `token` asks once. */
+ * while the field is just as its report numbered `sequence` saw it. Tokens only increase: one no greater than the last
+ * answered asks nothing, so 0 never asks. */
 class ReplaceRequest : Record {
   @Field val token: Int = 0
   @Field val revision: Int = 0
@@ -114,6 +115,8 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
   private var replaceToken = 0
   /** Counts every change to the text, the field's own clears included, so an edit away and back still counts. */
   private var revision = 0
+  /** The text `revision` counts, so each change counts once, whichever callback hears of it first. */
+  private var counted = ""
   /** Counts every report. */
   private var sequence = 0
   /** What the last report said, so a selection or composition that didn't move reports nothing. */
@@ -154,8 +157,8 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
     field.addTextChangedListener(object : TextWatcher {
       override fun beforeTextChanged(text: CharSequence?, start: Int, count: Int, after: Int) = Unit
       override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) = Unit
+      // The selection can move, and report, before this hears of the same edit; whichever comes first counts the text.
       override fun afterTextChanged(text: Editable?) {
-        revision += 1
         if (!quiet) report()
         field.post { reportHeight() }
       }
@@ -173,11 +176,11 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
   fun clearIf(sent: Int, token: Int) {
     if (token == clearToken) return
     clearToken = token
+    recount()
     if (sent != revision || state().composingStart >= 0) {
       report(refused = token)
       return
     }
-    // setText raises the revision through the watcher before it returns.
     quietly { field.setText("") }
     report(cleared = token)
   }
@@ -185,8 +188,9 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
   /** Replaces a range as one edit the person can undo, only if the field is just as the request saw it, and answers
    * once either way. A refusal changes nothing and reports the field as it is. */
   fun replaceIf(request: ReplaceRequest) {
-    if (request.token == replaceToken) return
+    if (request.token <= replaceToken) return
     replaceToken = request.token
+    recount()
     val text = field.text
     val now = state()
     val fits = field.isEnabled && now.composingStart < 0 &&
@@ -229,6 +233,8 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
     if (width != oldWidth) post { reportHeight() }
   }
 
+  /** The field's own change to its text, which counts as one revision, even when the text comes out the same, and
+   * reports nothing until its caller does. */
   private fun quietly(edit: () -> Unit) {
     quiet = true
     try {
@@ -236,6 +242,15 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
     } finally {
       quiet = false
     }
+    counted = field.text.toString()
+    revision += 1
+  }
+
+  /** Counts the text as a new revision when it differs, code unit for code unit, from the text last counted. */
+  private fun recount() {
+    if (field.text.contentEquals(counted)) return
+    counted = field.text.toString()
+    revision += 1
   }
 
   /** The field's state, in UTF-16 offsets, as Java strings count them. */
@@ -258,8 +273,10 @@ class ChatComposerView(context: Context, appContext: AppContext) : ExpoView(cont
     )
   }
 
-  /** Reports the field. An answer to a request always reports; otherwise only a change since the last report does. */
+  /** Reports the field, its text counted first, so a report's text is always the text at its revision. An answer to a
+   * request always reports; otherwise only a change since the last report does. */
   private fun report(cleared: Int = 0, refused: Int = 0, replaced: Map<String, Any>? = null) {
+    recount()
     val now = state()
     if (cleared == 0 && refused == 0 && replaced == null && now == reported) return
     reported = now
