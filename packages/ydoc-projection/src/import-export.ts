@@ -890,6 +890,40 @@ export function getDohcProseMirrorSchema() {
   return schema;
 }
 
+// Once empty, a list or item shows none of its attributes (a tick, a start number), so leaving
+// it out hides nothing. Other blocks the schema refuses empty stay refused: a callout's title
+// is text the Markdown file would keep.
+const SHELL_LISTS = new Set(["bulletList", "orderedList", "taskList"]);
+const SHELL_ITEMS = new Set(["listItem", "taskItem"]);
+
+/**
+ * Two edits can merge into a list or item with nothing in it. The schema can't hold it, so no
+ * reader shows it, and a reading leaves it out instead of refusing the document. An item that
+ * holds an empty list isn't one: the Markdown file would still keep its marker.
+ */
+export function isEmptyShell(element: Y.XmlElement): boolean {
+  if (SHELL_ITEMS.has(element.nodeName)) return element.length === 0;
+  return (
+    SHELL_LISTS.has(element.nodeName) &&
+    element
+      .toArray()
+      .every(
+        (child) =>
+          child instanceof Y.XmlElement && SHELL_ITEMS.has(child.nodeName) && child.length === 0,
+      )
+  );
+}
+
+/** Deletes the empty shells a reading leaves out, for code that pairs blocks with elements. */
+export function deleteEmptyShells(parent: Y.XmlFragment | Y.XmlElement): void {
+  for (let index = parent.length - 1; index >= 0; index--) {
+    const child = parent.get(index);
+    if (!(child instanceof Y.XmlElement)) continue;
+    if (isEmptyShell(child)) parent.delete(index, 1);
+    else deleteEmptyShells(child);
+  }
+}
+
 function yDocBodyToMarkdown(doc: Y.Doc): string {
   const plainText = getDohcYDocPlainText(doc);
   if (plainText) return plainText.toString();

@@ -1,8 +1,48 @@
 diff --git a/dist/y-prosemirror.cjs b/dist/y-prosemirror.cjs
-index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..e2b169f68e003250615344bb5505647a9a9ab2cc 100644
+index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..30a99cdccd8d3b2bdf3c86facb06a04a3e793e8c 100644
 --- a/dist/y-prosemirror.cjs
 +++ b/dist/y-prosemirror.cjs
-@@ -1216,6 +1216,28 @@ const marksToAttributes = (marks, meta) => {
+@@ -826,7 +826,7 @@ const createNodeFromYElement = (
+       // This is a fix for #160 -- duplication of characters when two Y.Text exist next to each
+       // other.
+       const nextytext = /** @type {Y.ContentType} */ (type._item.right?.content)?.type;
+-      if (nextytext instanceof Y__namespace.Text && !nextytext._item.deleted && nextytext._item.id.client === nextytext.doc.clientID) {
++      if (!meta.readOnly && nextytext instanceof Y__namespace.Text && !nextytext._item.deleted && nextytext._item.id.client === nextytext.doc.clientID) {
+         type.applyDelta([
+           { retain: type.length },
+           ...nextytext.toDelta()
+@@ -877,9 +877,12 @@ const createNodeFromYElement = (
+     return node
+   } catch (e) {
+     // an error occured while creating the node. This is probably a result of a concurrent action.
+-    /** @type {Y.Doc} */ (el.doc).transact((transaction) => {
+-      /** @type {Y.Item} */ (el._item).delete(transaction);
+-    }, ySyncPluginKey);
++    // dohc: a read-only read leaves the element out without deleting it.
++    if (!meta.readOnly) {
++      /** @type {Y.Doc} */ (el.doc).transact((transaction) => {
++        /** @type {Y.Item} */ (el._item).delete(transaction);
++      }, ySyncPluginKey);
++    }
+     meta.mapping.delete(el);
+     return null
+   }
+@@ -912,9 +915,11 @@ const createTextNodesFromYText = (
+     }
+   } catch (e) {
+     // an error occured while creating the node. This is probably a result of a concurrent action.
+-    /** @type {Y.Doc} */ (text.doc).transact((transaction) => {
+-      /** @type {Y.Item} */ (text._item).delete(transaction);
+-    }, ySyncPluginKey);
++    if (!_meta.readOnly) {
++      /** @type {Y.Doc} */ (text.doc).transact((transaction) => {
++        /** @type {Y.Item} */ (text._item).delete(transaction);
++      }, ySyncPluginKey);
++    }
+     return null
+   }
+   // @ts-ignore
+@@ -1216,6 +1221,28 @@ const marksToAttributes = (marks, meta) => {
   * @param {any} pNode
   * @param {BindingMetadata} meta
   */
@@ -31,7 +71,7 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..e2b169f68e003250615344bb5505647a
  const updateYFragment = (y, yDomFragment, pNode, meta) => {
    if (
      yDomFragment instanceof Y__namespace.XmlElement &&
-@@ -1247,7 +1269,21 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1247,7 +1274,21 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
    // update children
    const pChildren = normalizePNodeContent(pNode);
    const pChildCnt = pChildren.length;
@@ -54,7 +94,7 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..e2b169f68e003250615344bb5505647a
    const yChildCnt = yChildren.length;
    const minCnt = math__namespace.min(pChildCnt, yChildCnt);
    let left = 0;
-@@ -1340,33 +1376,99 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1340,33 +1381,99 @@ const updateYFragment = (y, yDomFragment, pNode, meta) => {
            );
            right += 1;
          } else {
@@ -171,11 +211,85 @@ index de4d1e6609bba2ffbc2a57048023cdf5bad44b18..e2b169f68e003250615344bb5505647a
      }
    }, ySyncPluginKey);
  };
+@@ -1571,11 +1678,13 @@ const relativePositionToAbsolutePosition = (y, documentType, relPos, mapping) =>
+  * @param {Schema} schema
+  */
+ const yXmlFragmentToProseMirrorFragment = (yXmlFragment, schema) => {
++  // dohc: reading a document must not change it. The editor's own reads still tidy it.
++  const meta = { ...createEmptyMeta(), readOnly: true };
+   const fragmentContent = yXmlFragment.toArray().map((t) =>
+     createNodeFromYElement(
+       /** @type {Y.XmlElement} */ (t),
+       schema,
+-      createEmptyMeta()
++      meta
+     )
+   ).filter((n) => n !== null);
+   return PModel.Fragment.fromArray(fragmentContent)
+diff --git a/src/lib.js b/src/lib.js
+index 3f484971b5daae6d81b17afb01e238b170d0b03b..33faa217f381b3db1686e31b05547d12e93b6c0a 100644
+--- a/src/lib.js
++++ b/src/lib.js
+@@ -199,11 +199,13 @@ export const relativePositionToAbsolutePosition = (y, documentType, relPos, mapp
+  * @param {Schema} schema
+  */
+ export const yXmlFragmentToProseMirrorFragment = (yXmlFragment, schema) => {
++  // dohc: reading a document must not change it. The editor's own reads still tidy it.
++  const meta = { ...createEmptyMeta(), readOnly: true }
+   const fragmentContent = yXmlFragment.toArray().map((t) =>
+     createNodeFromYElement(
+       /** @type {Y.XmlElement} */ (t),
+       schema,
+-      createEmptyMeta()
++      meta
+     )
+   ).filter((n) => n !== null)
+   return Fragment.fromArray(fragmentContent)
 diff --git a/src/plugins/sync-plugin.js b/src/plugins/sync-plugin.js
-index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..662c438caa231509df44e59527efeade7cc898f6 100644
+index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..4ed8c2e2ff6eb198b6bac6397b8f652044f72a6e 100644
 --- a/src/plugins/sync-plugin.js
 +++ b/src/plugins/sync-plugin.js
-@@ -1142,6 +1142,28 @@ const marksToAttributes = (marks, meta) => {
+@@ -752,7 +752,7 @@ export const createNodeFromYElement = (
+       // This is a fix for #160 -- duplication of characters when two Y.Text exist next to each
+       // other.
+       const nextytext = /** @type {Y.ContentType} */ (type._item.right?.content)?.type
+-      if (nextytext instanceof Y.Text && !nextytext._item.deleted && nextytext._item.id.client === nextytext.doc.clientID) {
++      if (!meta.readOnly && nextytext instanceof Y.Text && !nextytext._item.deleted && nextytext._item.id.client === nextytext.doc.clientID) {
+         type.applyDelta([
+           { retain: type.length },
+           ...nextytext.toDelta()
+@@ -803,9 +803,12 @@ export const createNodeFromYElement = (
+     return node
+   } catch (e) {
+     // an error occured while creating the node. This is probably a result of a concurrent action.
+-    /** @type {Y.Doc} */ (el.doc).transact((transaction) => {
+-      /** @type {Y.Item} */ (el._item).delete(transaction)
+-    }, ySyncPluginKey)
++    // dohc: a read-only read leaves the element out without deleting it.
++    if (!meta.readOnly) {
++      /** @type {Y.Doc} */ (el.doc).transact((transaction) => {
++        /** @type {Y.Item} */ (el._item).delete(transaction)
++      }, ySyncPluginKey)
++    }
+     meta.mapping.delete(el)
+     return null
+   }
+@@ -838,9 +841,11 @@ const createTextNodesFromYText = (
+     }
+   } catch (e) {
+     // an error occured while creating the node. This is probably a result of a concurrent action.
+-    /** @type {Y.Doc} */ (text.doc).transact((transaction) => {
+-      /** @type {Y.Item} */ (text._item).delete(transaction)
+-    }, ySyncPluginKey)
++    if (!_meta.readOnly) {
++      /** @type {Y.Doc} */ (text.doc).transact((transaction) => {
++        /** @type {Y.Item} */ (text._item).delete(transaction)
++      }, ySyncPluginKey)
++    }
+     return null
+   }
+   // @ts-ignore
+@@ -1142,6 +1147,28 @@ const marksToAttributes = (marks, meta) => {
   * @param {any} pNode
   * @param {BindingMetadata} meta
   */
@@ -204,7 +318,7 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..662c438caa231509df44e59527efeade
  export const updateYFragment = (y, yDomFragment, pNode, meta) => {
    if (
      yDomFragment instanceof Y.XmlElement &&
-@@ -1173,7 +1195,21 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1173,7 +1200,21 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
    // update children
    const pChildren = normalizePNodeContent(pNode)
    const pChildCnt = pChildren.length
@@ -227,7 +341,7 @@ index dccfb76918c8c70fe5a5b12372cdabcc9d8c58dd..662c438caa231509df44e59527efeade
    const yChildCnt = yChildren.length
    const minCnt = math.min(pChildCnt, yChildCnt)
    let left = 0
-@@ -1266,33 +1302,99 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
+@@ -1266,33 +1307,99 @@ export const updateYFragment = (y, yDomFragment, pNode, meta) => {
            )
            right += 1
          } else {

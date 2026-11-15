@@ -93,6 +93,30 @@ it.each([
   }
 });
 
+// Two edits can merge into a list with nothing in it, which a reading leaves out.
+it.each([true, false])(
+  "constructs an outside edit beside a list a merge left empty, nativeFold %s",
+  (nativeFold) => {
+    const base = markdownToYDoc("alpha\n\nbravo\n\ncharlie"),
+      source = "ALPHA\n\nbravo\n\ncharlie\n";
+    try {
+      base.getXmlFragment("body").insert(2, [new Y.XmlElement("taskList")]);
+      const result = reader.construct({
+        ...context,
+        source,
+        checkpoint: Y.encodeStateAsUpdate(base),
+        nativeFold,
+      });
+      expect(result.kind).toBe("accepted");
+      if (result.kind !== "accepted") throw Error(JSON.stringify(result));
+      Y.applyUpdate(base, result.delta);
+      expect(yDocToMarkdown(base)).toBe(source);
+    } finally {
+      base.destroy();
+    }
+  },
+);
+
 it("leaves reader-built notes out of native outside folds", () => {
   const base = markdownToYDoc("Before");
   try {

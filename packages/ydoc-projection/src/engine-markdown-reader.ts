@@ -11,6 +11,7 @@ import {
 import { recordFrontmatterSourceItems, writeFrontmatterMap } from "./frontmatter-map.js";
 import {
   DOHC_SCHEMA_VERSION,
+  deleteEmptyShells,
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
   MarkdownCapacityError,
@@ -205,6 +206,8 @@ export function createEngineMarkdownReader(policy: OrderedLiveUpdateCutPolicy) {
         const before = Y.encodeStateVector(doc);
         const updates: Uint8Array[] = [];
         doc.on("update", (update: Uint8Array) => updates.push(update));
+        // The blocks pair with the elements, and a reading leaves empty shells out.
+        deleteEmptyShells(doc.getXmlFragment("body"));
         imported = importSource(source, policy);
         const target = root(imported);
         checkRoot(target);

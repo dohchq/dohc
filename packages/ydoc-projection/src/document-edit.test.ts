@@ -295,3 +295,15 @@ describe("an edit while someone has the document open", () => {
     expect(DOCUMENT_OPEN_REFUSAL).toContain("retry after they close the document");
   });
 });
+
+// Two edits can merge into a list with nothing in it, which a reading leaves out.
+test("changes a block's text beside a list a merge left empty, while the document is open", () => {
+  const doc = markdownToYDoc("alpha\n\nbravo\n\ncharlie");
+  try {
+    getDohcYDocBodyFragment(doc).insert(2, [new Y.XmlElement("taskList")]);
+    edited(doc, { find: "bravo", replacement: "BRAVO" });
+    expect(markdownOf(doc)).toBe("alpha\n\nBRAVO\n\ncharlie\n");
+  } finally {
+    doc.destroy();
+  }
+});
