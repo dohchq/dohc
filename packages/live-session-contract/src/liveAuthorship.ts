@@ -198,15 +198,18 @@ export function liveOneAuthor(authors: LiveAuthorSnapshot): boolean {
 /**
  * An admitted update's author snapshot. Besides what `parseLiveAuthorSnapshot` takes, a room's
  * save under the owner's authority names everyone whose edits it holds: people, links and
- * agents, each once. The journal admits that list only for a room's save, and the engine checks
- * the authority again.
+ * agents, each once. Only the owner's authority may carry that list, as in the engine.
  */
-export function parseAdmittedLiveAuthorSnapshot(value: unknown): LiveAuthorSnapshot {
+export function parseAdmittedLiveAuthorSnapshot(
+  value: unknown,
+  authority: { readonly principalKind: string },
+): LiveAuthorSnapshot {
   if (!Array.isArray(value)) throw new TypeError("Invalid live author snapshot.");
   const authors = value.map((entry) => parseLiveAuthorSnapshot([entry])[0]!);
   if (liveOneAuthor(authors)) return authors;
   const identities = new Set(authors.map(liveAuthorIdentity));
   if (
+    authority.principalKind !== "owner" ||
     authors.length > MAX_LIVE_AUTHOR_IDENTITIES ||
     identities.size !== authors.length ||
     authors.some((author) => author.kind === "automation" || author.kind === "unattributed") ||

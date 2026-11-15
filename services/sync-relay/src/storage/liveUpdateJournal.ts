@@ -366,7 +366,7 @@ function journalMetadataWithBinding(
     raw.canonical_version === 2
       ? {
           canonicalVersion: 2 as const,
-          authorSnapshot: journalAuthorSnapshot(raw.author_snapshot_json, snapshots),
+          authorSnapshot: journalAuthorSnapshot(raw.author_snapshot_json, authority, snapshots),
           firstSeenDeletes:
             raw.first_seen_deletes_json === "[]"
               ? []
@@ -396,16 +396,18 @@ function journalMetadataWithBinding(
 }
 function journalAuthorSnapshot(
   value: unknown,
+  authority: { readonly principalKind: string },
   snapshots?: Map<string, LiveAuthorSnapshot>,
 ): LiveAuthorSnapshot {
   journalIntegrity(typeof value === "string");
-  const cached = snapshots?.get(value);
-  // Reuse validation for identical stored bytes only within this SQLite read.
-  // Each row owns its entries so callers cannot change another row's credit.
+  // Reuse validation for identical stored bytes under the same kind of authority only within
+  // this SQLite read. Each row owns its entries so callers cannot change another row's credit.
+  const key = `${authority.principalKind === "owner" ? "owner" : "other"}:${value}`;
+  const cached = snapshots?.get(key);
   if (cached) return cached.map((author) => ({ ...author }));
-  const parsed = parseAdmittedLiveAuthorSnapshot(JSON.parse(value));
+  const parsed = parseAdmittedLiveAuthorSnapshot(JSON.parse(value), authority);
   snapshots?.set(
-    value,
+    key,
     parsed.map((author) => ({ ...author })),
   );
   return parsed;
@@ -1167,6 +1169,7 @@ function snapshotJournalCut(value: unknown): LiveUpdateJournalCut {
               canonicalVersion: 2 as const,
               authorSnapshot: parseAdmittedLiveAuthorSnapshot(
                 copyJournalData(metadata.authorSnapshot),
+                authority,
               ),
               firstSeenDeletes: journalRanges(metadata.firstSeenDeletes),
               ...(metadata.checkpointCoverage === undefined
@@ -1580,7 +1583,13 @@ export function appendValidatedLiveJournal(
       sequence >= maximumCursor &&
       sequence < Number.MAX_SAFE_INTEGER,
   );
-  const nextCursor = sequence + 1;
+  // Live rooms number their taken edits from the same rising count, so a room's save is always
+  // above every edit it holds.
+  const roomSequence = storage.db
+    .prepare("SELECT seq FROM sqlite_sequence WHERE name='sync_relay_live_room_edits'")
+    .get();
+  const nextCursor = Math.max(sequence, roomSequence ? authorityInteger(roomSequence.seq) : 0) + 1;
+  journalIntegrity(nextCursor <= Number.MAX_SAFE_INTEGER);
   const predecessor = storage.db
     .prepare(`SELECT relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes FROM ${LIVE_JOURNAL_TABLE}
     WHERE ${JOURNAL_DOCUMENT_WHERE} ORDER BY journal_cursor DESC LIMIT 1`)
@@ -1692,13 +1701,14 @@ export function appendValidatedLiveJournal(
   assertWorkspaceQuota(storage, document.workspaceId, charge);
   onFirstWrite?.();
   const insert = storage.db
-    .prepare(`INSERT INTO ${LIVE_JOURNAL_TABLE}(delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,
+    .prepare(`INSERT INTO ${LIVE_JOURNAL_TABLE}(journal_cursor,delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,
     current_path,selector_paths_json,restore_fence_generation,principal_kind,principal_id,grant_id,grant_generation,
     accepting_host_epoch,received_at_ms,update_bytes,validation_checkpoint_sha256,validation_checkpoint_bytes,
     relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes,restore_operation_id,
     canonical_version,author_context_json,author_snapshot_json,first_seen_deletes_json,checkpoint_coverage_json,seed_first_seen_json)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(
+      nextCursor,
       ...values,
       updateBytes,
       checkpointDigest,
@@ -1871,8 +1881,8 @@ export function commitLiveUpdateJournal(
           const save = baselineRecord(outer.room, ["authors", "committed"]);
           if (typeof save.committed !== "function") throw new TypeError("Invalid live room save.");
           return {
-            authors: parseAdmittedLiveAuthorSnapshot(save.authors),
-            committed: save.committed as () => void,
+            authors: parseAdmittedLiveAuthorSnapshot(save.authors, expectedAuthority),
+            committed: save.committed as (journalCursor: number) => void,
           };
         })();
   // A room's save is the room's own write under the owner's authority, never an editor's.
@@ -2211,7 +2221,7 @@ export function commitLiveUpdateJournal(
           .prepare(`UPDATE sync_relay_personal_agents SET last_action_at_ms = MAX(COALESCE(last_action_at_ms, 0), ?)
           WHERE agent_id = ?`)
           .run(receivedAtMs, request.actor.agentId);
-      room?.committed();
+      room?.committed(admitted.metadata.accepted.receipt.journalCursor);
       return {
         reply: {
           result: {

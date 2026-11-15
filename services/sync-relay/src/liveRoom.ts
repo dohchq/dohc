@@ -4,6 +4,10 @@
 // saves what it holds every few seconds as one write on the owner's capture, which names every
 // sender in it. The saved rows are deleted in the save's own journal transaction. Everything
 // else that changes the note reaches the room through that capture's feed of applied changes.
+//
+// The note's owner edits in the room too, but keeps the feed of its own capture: the owner's
+// computer holds the note as saved and, on top, the room's unsaved edits at their positions.
+// Each save tells it the last position the save holds, so it can let go of those.
 import { createHash, randomUUID } from "node:crypto";
 import * as Y from "yjs";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
@@ -59,15 +63,22 @@ export interface LiveRoomsOptions {
   readonly log?: (line: string, detail: Record<string, unknown>) => void;
 }
 export interface LiveRooms {
-  /** Puts an editor's connection in its note's room. The capture still decides its access. */
-  join(host: NamedFrameRoomHost): NamedFrameHostSession;
+  /**
+   * Puts an editor's connection in its note's room. The capture still decides its access. The
+   * owner's connection keeps its capture's feed and is sent the room's unsaved edits as rows.
+   */
+  join(host: NamedFrameRoomHost, options?: { readonly owner?: boolean }): NamedFrameHostSession;
   close(): void;
 }
 
 interface Subscriber {
   readonly queue: NamedFrameAppliedUpdate[];
+  /** Gets only the edits the room takes, as rows, and none of the room's feed. */
+  readonly owner?: true;
   wake?: () => void;
 }
+/** How many recent saves the owner's feed can still look up. A later save lets go of more. */
+const REMEMBERED_SAVES = 64;
 interface Unsaved {
   readonly position: number;
   readonly sender: LiveAuthorSnapshot;
@@ -91,6 +102,10 @@ interface Room {
   connecting?: Promise<NonNullable<Room["saver"]>>;
   timer?: ReturnType<typeof setTimeout>;
   saving?: Promise<unknown>;
+  /** The last position a committed save held. */
+  savedThrough: number;
+  /** Recent saves' journal cursors, each with the last position it holds. */
+  readonly saves: Map<number, number>;
 }
 
 const refused = (reason: Extract<NamedFrameSubmissionResult, { result: "refused" }>["reason"]) =>
@@ -198,11 +213,17 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
   const rooms = new Map<string, Room>();
   let closed = false;
 
-  function passOn(room: Room, update: NamedFrameAppliedUpdate, except?: Subscriber) {
+  function passOn(
+    room: Room,
+    update: NamedFrameAppliedUpdate,
+    from: { readonly taken: boolean; readonly except?: Subscriber },
+  ) {
     room.position = update.journalCursor;
     for (const subscriber of room.subscribers) {
-      if (subscriber === except) continue;
-      subscriber.queue.push(update);
+      if (subscriber === from.except) continue;
+      // The owner's own capture already brings it every change the journal took.
+      if (subscriber.owner && !from.taken) continue;
+      subscriber.queue.push(subscriber.owner ? { ...update, roomRow: true } : update);
       subscriber.wake?.();
     }
   }
@@ -220,7 +241,11 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     }
     if (!changed) return;
     room.bytes += changed.byteLength;
-    passOn(room, { journalCursor: advanceLiveRoomPosition(storage), updateBytes: changed });
+    passOn(
+      room,
+      { journalCursor: advanceLiveRoomPosition(storage), updateBytes: changed },
+      { taken: false },
+    );
   }
 
   function ensureSaver(room: Room): Promise<NonNullable<Room["saver"]>> {
@@ -292,8 +317,12 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           updateBytes: merged,
           room: {
             authors,
-            committed() {
+            committed(journalCursor) {
               deleteSavedLiveRoomEdits(storage, room.document, through);
+              room.savedThrough = through;
+              room.saves.set(journalCursor, through);
+              if (room.saves.size > REMEMBERED_SAVES)
+                room.saves.delete(room.saves.keys().next().value!);
               committed = true;
             },
           },
@@ -371,6 +400,8 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       position: liveRoomPosition(storage),
       bytes: 0,
       members: 0,
+      savedThrough: 0,
+      saves: new Map(),
     };
     rooms.set(key, room);
     room.opened = (async () => {
@@ -463,8 +494,79 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     }
   }
 
+  /**
+   * The owner's feed: its capture's applied changes, each save naming the last position it holds,
+   * and between them the room's unsaved edits as rows. A row always leaves before the save that
+   * holds it, because it is queued when taken and a save is cut only from taken edits.
+   */
+  function ownerFeed(
+    room: Room,
+    subscriber: Subscriber,
+    host: NamedFrameRoomHost,
+    sync: NamedFrameSync,
+    lifetime: AbortSignal,
+  ) {
+    let reading = false;
+    let read: LiveFrameLease<NamedFrameAppliedUpdate> | undefined;
+    let failed: { error: unknown } | undefined;
+    function startRead() {
+      if (reading || read || failed) return;
+      reading = true;
+      sync.nextApplied(lifetime).then(
+        (lease) => {
+          reading = false;
+          try {
+            // The room takes the owner's next edits against all the owner has been shown.
+            applyFeed(room, lease.value.updateBytes);
+            read = lease;
+          } catch (error) {
+            lease.release();
+            failed = { error };
+          }
+          subscriber.wake?.();
+        },
+        (error: unknown) => {
+          reading = false;
+          failed = { error };
+          subscriber.wake?.();
+        },
+      );
+    }
+    return async (signal: AbortSignal): Promise<LiveFrameLease<NamedFrameAppliedUpdate>> => {
+      for (;;) {
+        signal.throwIfAborted();
+        room.lifetime.signal.throwIfAborted();
+        host.assertCurrent();
+        const row = subscriber.queue.shift();
+        if (row) return { value: row, release() {} };
+        if (read) {
+          const lease = read;
+          read = undefined;
+          const through = room.saves.get(lease.value.journalCursor);
+          return through === undefined
+            ? lease
+            : { value: { ...lease.value, rowsThrough: through }, release: () => lease.release() };
+        }
+        if (failed) throw failed.error;
+        startRead();
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            subscriber.wake = undefined;
+            signal.removeEventListener("abort", done);
+            room.lifetime.signal.removeEventListener("abort", done);
+            resolve();
+          };
+          subscriber.wake = done;
+          signal.addEventListener("abort", done, { once: true });
+          room.lifetime.signal.addEventListener("abort", done, { once: true });
+        });
+      }
+    };
+  }
+
   return {
-    join(host) {
+    join(host, joinOptions) {
+      const owner = joinOptions?.owner === true;
       let room: Room | undefined;
       let subscriber: Subscriber | undefined;
       let left = false;
@@ -496,6 +598,43 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           });
           held.lifetime.signal.throwIfAborted();
           host.assertCurrent();
+          if (owner) {
+            const feed = new AbortController();
+            const sync = await host.openSync(clientVector, signal);
+            held.lifetime.signal.throwIfAborted();
+            host.assertCurrent();
+            // Every edit the room took and no committed save holds, oldest first.
+            const own: Subscriber = {
+              owner: true,
+              queue: held.unsaved
+                .filter((edit) => edit.position > held.savedThrough)
+                .map((edit) => ({
+                  journalCursor: edit.position,
+                  updateBytes: edit.bytes,
+                  roomRow: true as const,
+                })),
+            };
+            subscriber = own;
+            held.subscribers.add(own);
+            return {
+              binding: sync.binding,
+              hostVector: sync.hostVector,
+              missingStateUpdate: sync.missingStateUpdate,
+              appliedThroughJournalCursor: sync.appliedThroughJournalCursor,
+              close() {
+                held.subscribers.delete(own);
+                feed.abort();
+                sync.close();
+              },
+              nextApplied: ownerFeed(
+                held,
+                own,
+                host,
+                sync,
+                AbortSignal.any([feed.signal, held.lifetime.signal]),
+              ),
+            };
+          }
           const own: Subscriber = { queue: [] };
           subscriber = own;
           held.subscribers.add(own);
@@ -562,7 +701,11 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           Y.applyUpdate(held.doc, bytes, subscriber);
           held.bytes += bytes.byteLength;
           held.unsaved.push({ position: written.position, sender, bytes });
-          passOn(held, { journalCursor: written.position, updateBytes: bytes }, subscriber);
+          passOn(
+            held,
+            { journalCursor: written.position, updateBytes: bytes },
+            { taken: true, except: subscriber },
+          );
           scheduleSave(held, saveEveryMs);
           return {
             result: "success",

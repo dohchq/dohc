@@ -313,7 +313,7 @@ export function captureOwnerLiveFrameHost(options: {
   validate: CapacityLiveAdmissionValidator;
   reserveBytes?: (size: number) => () => void;
   validationBudget?: NamedFrameValidationBudget;
-}): NamedFrameHostSession {
+}): NamedFrameRoomHost {
   const binding = parseLiveObjectBinding(options.native.binding);
   const document = {
     workspaceId: binding.workspaceId,

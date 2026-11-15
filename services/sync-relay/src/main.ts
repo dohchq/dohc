@@ -1372,6 +1372,8 @@ if (namedLiveConfig) {
     process.once("SIGTERM", desktopLive.close);
   }
   ownerLive = createOwnerLiveRoutes({
+    // Off unless DOHC_RELAY_LIVE_ROOM_OWNER=1 too, until the desktop that reads room rows ships.
+    ...(rooms && process.env.DOHC_RELAY_LIVE_ROOM_OWNER === "1" ? { rooms } : {}),
     storage,
     resolveActor,
     lookupUserDisplayName,

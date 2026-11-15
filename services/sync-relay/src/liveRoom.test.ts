@@ -9,7 +9,11 @@ import {
 } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
 import { createLiveRooms, nextSave, roomAdmissible } from "./liveRoom.js";
 import type { NamedFrameRoomHost } from "./namedLiveFrameHost.js";
-import type { NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
+import type {
+  NamedFrameAppliedUpdate,
+  NamedFrameHostSession,
+  NamedFrameSync,
+} from "./namedLiveFrameSession.js";
 import type { StorageContext } from "./storage/context.js";
 import { appendLiveRoomEdit, liveRoomEdits } from "./storage/liveRoomEdits.js";
 import { liveJournalSeedClientId } from "./storage/liveUpdateJournal.js";
@@ -31,6 +35,7 @@ const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("h
 const hostEpoch = parseHostEpoch(1);
 const ana: LiveAuthorSnapshot = [{ kind: "human", humanId: "ana", humanName: "Ana" }];
 const ben: LiveAuthorSnapshot = [{ kind: "human", humanId: "ben", humanName: "Ben" }];
+const olu: LiveAuthorSnapshot = [{ kind: "human", humanId: "olu", humanName: "Olu" }];
 type Fixture = ReturnType<typeof registered>;
 
 interface Engine {
@@ -98,7 +103,12 @@ function ownerCapture(f: Fixture, engine: Engine = {}): NamedFrameHostSession {
 
 function rooms(
   f: Fixture,
-  limits: { maxUpdateBytes?: number; names?: boolean; saveTimeoutMs?: number } = {},
+  limits: {
+    maxUpdateBytes?: number;
+    names?: boolean;
+    saveTimeoutMs?: number;
+    saveEveryMs?: number;
+  } = {},
   engine: Engine = {},
 ) {
   const created = createLiveRooms({
@@ -107,8 +117,8 @@ function rooms(
     maxNoteBytes: 1 << 22,
     maxAppliedBytes: 1 << 20,
     namesEverySender: limits.names ?? false,
-    // Tests save by leaving, never on the timer.
-    saveEveryMs: 3_600_000,
+    // Tests save by leaving unless they set the timer.
+    saveEveryMs: limits.saveEveryMs ?? 3_600_000,
     ...(limits.saveTimeoutMs ? { saveTimeoutMs: limits.saveTimeoutMs } : {}),
     log() {},
     openSaver: async () => ownerCapture(f, engine),
@@ -169,6 +179,89 @@ function editor(f: Fixture, room: ReturnType<typeof rooms>, sender: LiveAuthorSn
     },
   };
 }
+
+const rowBytes = (row: Record<string, unknown>) => new Uint8Array(row.update_bytes as Uint8Array);
+
+/** The owner's computer. Its own capture's feed brings every journal row as it is committed. */
+function ownerDesktop(f: Fixture, room: ReturnType<typeof rooms>) {
+  const lifetime = new AbortController();
+  const binding = f.storage.resolveCurrentLiveDocumentBinding({
+    document: f.input.evidence.document,
+    actor: f.actor,
+  });
+  if (binding.kind !== "current") throw new Error("Binding is not current.");
+  let fed = 0;
+  const inner = {
+    hostEpoch,
+    invalidated: lifetime.signal,
+    assertCurrent: () => lifetime.signal.throwIfAborted(),
+    close: () => lifetime.abort(),
+    async openSync(): Promise<NamedFrameSync> {
+      const journal = f.journalRows().journal;
+      fed = journal.length ? Number(journal.at(-1)!.journal_cursor) : 0;
+      return {
+        binding: binding.binding,
+        hostVector: Y.encodeStateVector(f.doc),
+        missingStateUpdate: Y.mergeUpdates([
+          Y.encodeStateAsUpdate(f.doc),
+          ...journal.map(rowBytes),
+        ]),
+        appliedThroughJournalCursor: fed,
+        close() {},
+        async nextApplied(signal) {
+          for (;;) {
+            signal.throwIfAborted();
+            const row = f.journalRows().journal.find((r) => Number(r.journal_cursor) > fed);
+            if (row) {
+              fed = Number(row.journal_cursor);
+              return { value: { journalCursor: fed, updateBytes: rowBytes(row) }, release() {} };
+            }
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        },
+      };
+    },
+    submit: () => Promise.reject(new Error("The room submits nothing inner.")),
+    room: {
+      document: f.input.evidence.document,
+      view: () => binding.binding,
+      sender: () => olu,
+    },
+  } as unknown as NamedFrameRoomHost;
+  const session = room.join(inner, { owner: true });
+  const doc = new Y.Doc();
+  const signal = new AbortController().signal;
+  let sync: NamedFrameSync | undefined;
+  return {
+    session,
+    doc,
+    async open() {
+      sync = await session.openSync(Y.encodeStateVector(doc), signal);
+      Y.applyUpdate(doc, sync.missingStateUpdate);
+      return sync;
+    },
+    async next(): Promise<Omit<NamedFrameAppliedUpdate, "updateBytes">> {
+      const lease = await sync!.nextApplied(signal);
+      Y.applyUpdate(doc, lease.value.updateBytes);
+      lease.release();
+      const { updateBytes: _, ...frame } = lease.value;
+      return frame;
+    },
+    change(key: string, value: string) {
+      const before = Y.encodeStateVector(doc);
+      doc.getMap("frontmatter").set(key, value);
+      return Y.encodeStateAsUpdate(doc, before);
+    },
+    submit(bytes: Uint8Array) {
+      return session.submit(
+        { deliveryId: randomUUID(), updateDigest: hash(bytes), updateBytes: bytes },
+        signal,
+      );
+    },
+  };
+}
+const position = (answer: Awaited<ReturnType<NamedFrameHostSession["submit"]>>) =>
+  answer.result === "success" ? answer.ack.journalCursor : 0;
 
 const unsaved = (f: Fixture) =>
   liveRoomEdits(f.storage as StorageContext, f.input.evidence.document);
@@ -272,6 +365,93 @@ it("counts a committed save whose engine answer never comes, and goes on saving"
   b.session.close();
   await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
   expect(savedAuthors(f)).toEqual([ana, ben]);
+});
+
+it("gives the owner others' edits as rows, and each save the last row it holds, below its cursor", async () => {
+  const f = note();
+  const room = rooms(f, { saveEveryMs: 20 });
+  const owner = ownerDesktop(f, room),
+    a = editor(f, room, ana);
+  await owner.open();
+  await a.open();
+  const first = position(await a.submit(a.change("title", "Lisbon")));
+  expect(await owner.next()).toEqual({ journalCursor: first, roomRow: true });
+  // The owner's own edit is answered with its room position and not sent back to it.
+  const own = position(await owner.submit(owner.change("place", "Porto")));
+  expect(own).toBeGreaterThan(first);
+  expect(await a.next()).toBe(own);
+  expect(a.doc.getMap("frontmatter").get("place")).toBe("Porto");
+
+  // One save for each sender's run: Ana's, then the owner's.
+  const saved = [await owner.next(), await owner.next()];
+  expect(saved.map((frame) => frame.rowsThrough)).toEqual([first, own]);
+  for (const frame of saved) {
+    expect(frame.roomRow).toBeUndefined();
+    expect(frame.journalCursor).toBeGreaterThan(own);
+  }
+  expect(savedAuthors(f)).toEqual([ana, olu]);
+  expect(unsaved(f)).toEqual([]);
+  expect(owner.doc.getMap("frontmatter").toJSON()).toEqual({ title: "Lisbon", place: "Porto" });
+});
+
+it("sends an owner who reconnects the rows no save holds, oldest first", async () => {
+  const f = note();
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const room = rooms(f, {}, { hold });
+  const a = editor(f, room, ana);
+  await a.open();
+  const rows = [
+    position(await a.submit(a.change("title", "Lisbon"))),
+    position(await a.submit(a.change("place", "Porto"))),
+  ];
+  const first = ownerDesktop(f, room);
+  await first.open();
+  expect([await first.next(), await first.next()]).toEqual(
+    rows.map((journalCursor) => ({ journalCursor, roomRow: true })),
+  );
+  first.session.close();
+  const again = ownerDesktop(f, room);
+  await again.open();
+  expect([await again.next(), await again.next()]).toEqual(
+    rows.map((journalCursor) => ({ journalCursor, roomRow: true })),
+  );
+  expect(again.doc.getMap("frontmatter").toJSON()).toEqual({ title: "Lisbon", place: "Porto" });
+
+  // Once saved, a reconnecting owner has them in the note, and is sent only what comes next.
+  again.session.close();
+  release();
+  a.session.close();
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  const later = ownerDesktop(f, room);
+  await later.open();
+  expect(later.doc.getMap("frontmatter").toJSON()).toEqual({ title: "Lisbon", place: "Porto" });
+  const b = editor(f, room, ben);
+  await b.open();
+  const next = position(await b.submit(b.change("note", "x")));
+  expect(await later.next()).toEqual({ journalCursor: next, roomRow: true });
+});
+
+it("takes an owner's edit built on a change the owner's own feed brought first", async () => {
+  const f = note();
+  const room = rooms(f);
+  const owner = ownerDesktop(f, room);
+  await owner.open();
+  // Another writer commits straight to the journal. The room's own feed stays quiet in these
+  // tests, so only the owner's capture brings it.
+  const other = new Y.Doc();
+  Y.applyUpdate(other, Y.encodeStateAsUpdate(owner.doc));
+  const before = Y.encodeStateVector(other);
+  other.getMap("frontmatter").set("status", "drafted elsewhere");
+  const committed = f.storage.commitLiveUpdateJournal(
+    f.capture(Y.encodeStateAsUpdate(other, before), "elsewhere"),
+  );
+  expect(committed.result.kind).toBe("accepted");
+  expect((await owner.next()).roomRow).toBeUndefined();
+  // Overwriting the key builds on the change the room had not seen until the owner's feed did.
+  expect((await owner.submit(owner.change("status", "checked"))).result).toBe("success");
 });
 
 it("refuses an edit under an editor id tied to someone else and writes nothing", async () => {

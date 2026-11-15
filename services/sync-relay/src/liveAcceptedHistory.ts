@@ -89,7 +89,10 @@ export function canonicalVersionedAcceptedMetadata(
   return {
     ...canonical,
     canonicalVersion: 2,
-    authorSnapshot: parseAdmittedLiveAuthorSnapshot(metadata.authorSnapshot),
+    authorSnapshot: parseAdmittedLiveAuthorSnapshot(
+      metadata.authorSnapshot,
+      canonical.accepted.authority,
+    ),
     firstSeenDeletes: metadata.firstSeenDeletes.map((range) => ({
       clientId: range.clientId,
       startClock: range.startClock,

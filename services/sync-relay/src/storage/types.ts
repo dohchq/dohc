@@ -716,8 +716,8 @@ export interface LiveUpdateJournalCommitInput {
 export interface LiveRoomSave {
   /** Everyone whose taken edits the save holds. */
   readonly authors: import("@dohc/live-session-contract/live-authorship").LiveAuthorSnapshot;
-  /** Runs inside the transaction that commits the save. */
-  readonly committed: () => void;
+  /** Runs inside the transaction that commits the save, with the save's journal cursor. */
+  readonly committed: (journalCursor: number) => void;
 }
 export type RelayLiveUpdateJournalResult =
   | {

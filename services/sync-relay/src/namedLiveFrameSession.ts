@@ -24,8 +24,13 @@ import type { LiveMembershipSession } from "./liveMembership";
 import type { LiveRoomSave } from "./storage/types";
 
 export interface NamedFrameAppliedUpdate {
+  /** The journal cursor, or for a room row its room position. Both come from one rising count. */
   readonly journalCursor: number;
   readonly updateBytes: Uint8Array;
+  /** On a live room's save: the last room position it holds. */
+  readonly rowsThrough?: number;
+  /** An edit a live room took and has not saved, for the note's owner. */
+  readonly roomRow?: true;
 }
 export interface NamedFrameSync extends LiveFrameSync {
   readonly appliedThroughJournalCursor: number;
@@ -170,6 +175,10 @@ export function createNamedLiveFrameSession(options: {
       | Omit<
           Extract<LiveFrameBegin, { purpose: "applied-update" }>,
           "kind" | "transferId" | "totalBytes" | "digest"
+        >
+      | Omit<
+          Extract<LiveFrameBegin, { purpose: "room-row" }>,
+          "kind" | "transferId" | "totalBytes" | "digest"
         >,
     bytes: Uint8Array,
     release: () => void,
@@ -204,7 +213,9 @@ export function createNamedLiveFrameSession(options: {
             transferId: nextTransfer,
             totalBytes: 1,
             digest: "0".repeat(64),
-            journalCursor: 1,
+            // The largest BEGIN this pull can send.
+            journalCursor: 2,
+            rowsThrough: 1,
           },
           maxFrameBytes,
         ).length
@@ -219,8 +230,15 @@ export function createNamedLiveFrameSession(options: {
         check();
         if (sync !== held) throw new Error("Sync capture changed.");
         const lease = update;
+        const { journalCursor, rowsThrough, roomRow } = lease.value;
         outgoing(
-          { purpose: "applied-update", journalCursor: lease.value.journalCursor },
+          roomRow
+            ? { purpose: "room-row", position: journalCursor }
+            : {
+                purpose: "applied-update",
+                journalCursor,
+                ...(rowsThrough === undefined ? {} : { rowsThrough }),
+              },
           lease.value.updateBytes,
           () => lease.release(),
         );

@@ -160,7 +160,12 @@ type BrowserRouteOptions = LiveRouteOptions & {
     objectId: string;
   }) => SessionHostBlock | undefined;
 };
-type OwnerRouteOptions = LiveRouteOptions & { kind: "owner"; resolveActor: ResolveActor };
+type OwnerRouteOptions = LiveRouteOptions & {
+  kind: "owner";
+  resolveActor: ResolveActor;
+  /** When on, the owner edits in the note's room and is sent its unsaved edits. */
+  rooms?: LiveRooms;
+};
 /**
  * A personal agent's routes, which share-web calls over the relay exchange
  * key with the agent's bearer: `POST /sync/live/personal-tickets` and the
@@ -811,7 +816,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         const trustedAccount = await accountSnapshot(actor.userId);
         signal.throwIfAborted();
         check();
-        host = captureOwnerLiveFrameHost({
+        const captured = captureOwnerLiveFrameHost({
           authenticatedUserId: actor.userId,
           trustedAccount,
           storage,
@@ -821,6 +826,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           reserveBytes,
           validationBudget,
         });
+        host = options.rooms ? options.rooms.join(captured, { owner: true }) : captured;
       } else if (options.kind === "personal") {
         // The account's fence, read from Postgres for this open.
         const linkAuthority = options.linkAuthority;
