@@ -2974,7 +2974,7 @@ mod tests {
             .read_with(|c| dohc_engine_domain::merge_removals_in(c, "workspace"))
             .unwrap();
         assert_eq!(removals.len(), 1, "{removals:?}");
-        assert_eq!(removals[0].text, " world");
+        assert_eq!(removals[0].quote, " world");
         assert!(!removals[0].author_known);
         let author: Option<String> = store
             .read_with(|c| {

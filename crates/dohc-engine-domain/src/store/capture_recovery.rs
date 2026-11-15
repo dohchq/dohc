@@ -153,6 +153,13 @@ fn record_kept_text_in(
     Ok(Some(order))
 }
 
+/// The most of a removal's text a status read carries, in UTF-16 units. The
+/// notice quotes less than this; Copy text reads the whole text from History.
+pub const MERGE_REMOVAL_QUOTE_UNITS: usize = 1024;
+/// The most removals one status read lists, oldest first. Dismissing one
+/// brings the next into the list.
+pub const MERGE_REMOVALS_LISTED: i64 = 100;
+
 /// Text a merge removed, kept until the person dismisses its notice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -161,9 +168,24 @@ pub struct MergeRemoval {
     pub version_id: String,
     pub object_id: String,
     pub path: String,
-    pub text: String,
+    /// The text's start, at most [`MERGE_REMOVAL_QUOTE_UNITS`] long.
+    pub quote: String,
+    /// The whole text's length in UTF-16 units.
+    pub length: usize,
     /// The record names the change that deleted the line.
     pub author_known: bool,
+}
+
+fn quote_of(text: &str) -> (String, usize) {
+    let mut units = 0;
+    let mut end = text.len();
+    for (at, character) in text.char_indices() {
+        if units + character.len_utf16() > MERGE_REMOVAL_QUOTE_UNITS {
+            end = end.min(at);
+        }
+        units += character.len_utf16();
+    }
+    (text[..end].to_owned(), units)
 }
 
 pub fn merge_removals_in(
@@ -174,11 +196,11 @@ pub fn merge_removals_in(
     let mut query = conn
         .prepare(
             "SELECT moment_id,version_id,object_id,path,payload_before_blob_sha256,author_json IS NOT NULL
-             FROM moments WHERE workspace_id=?1 AND metadata_origin=?2 ORDER BY moment_order",
+             FROM moments WHERE workspace_id=?1 AND metadata_origin=?2 ORDER BY moment_order LIMIT ?3",
         )
         .map_err(DomainError::sql_corrupt)?;
     let rows = query
-        .query_map(params![workspace_id, MERGE_REMOVAL_ORIGIN], |row| {
+        .query_map(params![workspace_id, MERGE_REMOVAL_ORIGIN, MERGE_REMOVALS_LISTED], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -194,8 +216,11 @@ pub fn merge_removals_in(
     rows.into_iter()
         .map(
             |(moment_id, version_id, object_id, path, text_sha, author_known)| {
+                let (quote, length) =
+                    quote_of(&text::read(conn, &text_sha).map_err(DomainError::sql_corrupt)?);
                 Ok(MergeRemoval {
-                    text: text::read(conn, &text_sha).map_err(DomainError::sql_corrupt)?,
+                    quote,
+                    length,
                     moment_id,
                     version_id,
                     object_id,

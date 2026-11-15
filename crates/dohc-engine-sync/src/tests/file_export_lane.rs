@@ -1365,6 +1365,47 @@ fn lane_first_local_export_uses_the_imported_state_as_its_bootstrap_preimage() {
 }
 
 #[test]
+fn a_status_read_quotes_each_removal_and_lists_at_most_a_hundred() {
+    use dohc_engine_domain::store::{MERGE_REMOVAL_QUOTE_UNITS, MERGE_REMOVALS_LISTED};
+    let (_scratch, _, mut store) = owner();
+    write(&mut store, "note", "saved", "note.md", "Hello\n", "user", 2);
+    // Two UTF-16 units each, so the quote has to stop between characters.
+    let long = format!("a{}", "😀".repeat(MERGE_REMOVAL_QUOTE_UNITS));
+    store
+        .write_with(&NoFaults, |tx| {
+            let saved = dohc_engine_domain::store::recovery_snapshot_in(tx, "ws", "main", "note")
+                .unwrap()
+                .unwrap();
+            for index in 0..=MERGE_REMOVALS_LISTED {
+                let removed = if index == 0 { long.as_str() } else { "x" };
+                dohc_engine_domain::record_merge_removal_in(
+                    tx,
+                    "ws",
+                    &saved,
+                    removed,
+                    &format!("removal-{index}"),
+                    None,
+                    3,
+                )
+                .unwrap();
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let removals = store
+        .read_with(|conn| dohc_engine_domain::merge_removals_in(conn, "ws"))
+        .unwrap();
+    assert_eq!(removals.len() as i64, MERGE_REMOVALS_LISTED);
+    assert_eq!(removals[0].moment_id, "removal-0", "oldest first");
+    assert_eq!(
+        removals[0].quote,
+        format!("a{}", "😀".repeat(MERGE_REMOVAL_QUOTE_UNITS / 2 - 1))
+    );
+    assert_eq!(removals[0].length, 1 + 2 * MERGE_REMOVAL_QUOTE_UNITS);
+    assert_eq!((removals[1].quote.as_str(), removals[1].length), ("x", 1));
+}
+
+#[test]
 fn merge_removal_text_stays_on_the_engine_that_kept_it() {
     let (_scratch, _, mut store) = owner();
     write(&mut store, "note", "saved", "note.md", "Hello\n", "user", 2);
@@ -1404,7 +1445,7 @@ fn merge_removal_text_stays_on_the_engine_that_kept_it() {
         .read_with(|conn| dohc_engine_domain::merge_removals_in(conn, "ws"))
         .unwrap();
     assert_eq!(removals.len(), 1);
-    assert_eq!(removals[0].text, " world");
+    assert_eq!(removals[0].quote, " world");
     assert!(removals[0].author_known);
     store
         .read_with(|conn| dohc_engine_domain::clear_capture_recovery_in(conn, "ws", "removal"))

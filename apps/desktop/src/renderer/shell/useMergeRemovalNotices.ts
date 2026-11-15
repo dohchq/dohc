@@ -11,12 +11,14 @@ type MergeRemoval = CaptureRecoveryStatusResult["mergeRemovals"][number];
 export const MERGE_REMOVAL_TITLE = "Text removed when two changes met";
 
 // The quote keeps the removed text's own lines. A long one is cut, and Copy
-// text still copies all of it.
+// text still copies all of it. The engine sends only the text's start, longer
+// than any quote, and the whole length.
 export function mergeRemovalWords(
-  text: string,
+  removal: { quote: string; length: number },
   author: string | undefined,
 ): { message: string; lastLine?: string } {
-  const { quoted, more } = quoteRemovedText(text);
+  const { quoted, more: unquoted } = quoteRemovedText(removal.quote);
+  const more = unquoted + removal.length - removal.quote.length;
   const message =
     more > 0
       ? `"${quoted}"\nAnd ${more.toLocaleString()} more characters. Copy text copies all of it.`
@@ -61,7 +63,7 @@ export function useMergeRemovalNotices(input: {
           momentId: removal.momentId,
           path: removal.path,
           title: MERGE_REMOVAL_TITLE,
-          ...mergeRemovalWords(removal.text, authors.get(removal.momentId)),
+          ...mergeRemovalWords(removal, authors.get(removal.momentId)),
           raise: removal.momentId === raised,
           copy: () => copy(removal),
           dismiss: () => clear(removal),
@@ -75,8 +77,21 @@ export function useMergeRemovalNotices(input: {
             copy(removal),
           );
       };
-      if (!navigator.clipboard) return failed(new Error("The clipboard is not available."));
-      navigator.clipboard.writeText(removal.text).catch(failed);
+      const clipboard = navigator.clipboard;
+      if (!clipboard) return failed(new Error("The clipboard is not available."));
+      if (removal.quote.length === removal.length) {
+        clipboard.writeText(removal.quote).catch(failed);
+        return;
+      }
+      // The rest of the text is in its History change.
+      bridge()
+        .readEngineMoment({ workspaceId, momentId: removal.momentId })
+        .then(({ moment }) => {
+          if (typeof moment?.beforeText !== "string")
+            throw new Error("The text is too long to copy here. Open its change in History.");
+          return clipboard.writeText(moment.beforeText);
+        })
+        .catch(failed);
     };
 
     const named = async (removal: MergeRemoval): Promise<void> => {

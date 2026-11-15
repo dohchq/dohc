@@ -4881,7 +4881,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(removal.object_id, "object-1");
                 assert_eq!(removal.author_known, author.is_some());
-                (removal.text, author, removal.author_known)
+                (removal.quote, author, removal.author_known)
             })
             .collect()
     }

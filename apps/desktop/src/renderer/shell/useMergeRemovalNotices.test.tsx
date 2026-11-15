@@ -23,12 +23,13 @@ const REMOVAL: Removal = {
   versionId: "main",
   objectId: "object-a",
   path: "notes/trip.md",
-  text: " world",
+  quote: " world",
+  length: 6,
   authorKnown: true,
 };
 
 // The engine's list outlives every hook: a restart reads the same records.
-function engine(initial: Removal[]) {
+function engine(initial: Removal[], kept: Record<string, string> = {}) {
   let listed = initial;
   const bridge = {
     getCaptureRecoveryStatus: vi.fn(
@@ -52,7 +53,7 @@ function engine(initial: Removal[]) {
           operation: "write",
           origin: "merge-removal",
           liveAuthorName: "Ben",
-          beforeText: REMOVAL.text,
+          beforeText: kept[momentId] ?? REMOVAL.quote,
           afterText: "Hello",
         },
       }),
@@ -125,20 +126,44 @@ describe("useMergeRemovalNotices", () => {
     expect(bridge.readEngineMoment).not.toHaveBeenCalled();
   });
 
-  it("copies all of the text, however much the row quotes", async () => {
-    const text = `First line\n${"word ".repeat(80)}end`;
-    engine([{ ...REMOVAL, text }]);
+  it("copies all of the text from History when the engine sent only its start", async () => {
+    const text = `First line\n${"word ".repeat(400)}end`;
+    const removal = {
+      ...REMOVAL,
+      authorKnown: false,
+      quote: text.slice(0, 1024),
+      length: text.length,
+    };
+    const bridge = engine([removal], { [REMOVAL.momentId]: text });
     const copied = vi.fn<(text: string) => Promise<void>>().mockResolvedValue();
     vi.stubGlobal("navigator", { clipboard: { writeText: copied } });
     const shown = open();
     await waitFor(() => expect(rows(shown.result)).toHaveLength(1));
     const row = rows(shown.result)[0]!;
-    expect(row.message).toBe(mergeRemovalWords(text, undefined).message);
+    // The same words as for the whole text.
+    expect(row.message).toBe(
+      mergeRemovalWords({ quote: text, length: text.length }, undefined).message,
+    );
     expect(row.message).toMatch(
-      /^"First line\nword word .*…"\nAnd \d+ more characters\. Copy text copies all of it\.$/s,
+      /^"First line\nword word .*…"\nAnd 1,734 more characters\. Copy text copies all of it\.$/s,
     );
     act(() => shown.result.current.runShellErrorAction(row.id));
-    expect(copied).toHaveBeenCalledExactlyOnceWith(text);
+    await waitFor(() => expect(copied).toHaveBeenCalledExactlyOnceWith(text));
+    expect(bridge.readEngineMoment).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-a",
+      momentId: REMOVAL.momentId,
+    });
+  });
+
+  it("copies a short text as the engine sent it", async () => {
+    const bridge = engine([{ ...REMOVAL, authorKnown: false }]);
+    const copied = vi.fn<(text: string) => Promise<void>>().mockResolvedValue();
+    vi.stubGlobal("navigator", { clipboard: { writeText: copied } });
+    const shown = open();
+    await waitFor(() => expect(rows(shown.result)).toHaveLength(1));
+    act(() => shown.result.current.runShellErrorAction(rows(shown.result)[0]!.id));
+    expect(copied).toHaveBeenCalledExactlyOnceWith(" world");
+    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
   });
 
   it("clears a dismissed removal in the engine, so a restart shows nothing", async () => {
@@ -176,7 +201,7 @@ describe("useMergeRemovalNotices", () => {
 
 it("cuts a long quote at six lines", () => {
   const text = ["1", "2", "3", "4", "5", "6", "7", "8"].join("\n");
-  expect(mergeRemovalWords(text, "Ana")).toEqual({
+  expect(mergeRemovalWords({ quote: text, length: text.length }, "Ana")).toEqual({
     message: `"1\n2\n3\n4\n5\n6…"\nAnd 4 more characters. Copy text copies all of it.`,
     lastLine: "Ana's change deleted the line it was in.",
   });

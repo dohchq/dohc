@@ -1820,14 +1820,16 @@ export const CaptureRecoveryStatusResult = z.object({
     }),
   ),
   // Text a merged change from elsewhere removed without having seen it,
-  // kept until its notice is dismissed.
+  // kept until its notice is dismissed. Each carries the text's start and its whole
+  // length, in UTF-16 units; the History change holds all of it.
   mergeRemovals: z.array(
     z.object({
       momentId: z.string(),
       versionId: z.string(),
       objectId: z.string(),
       path: z.string(),
-      text: z.string().min(1),
+      quote: z.string().min(1),
+      length: z.number().int().positive(),
       authorKnown: z.boolean(),
     }),
   ),
