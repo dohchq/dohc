@@ -574,6 +574,155 @@ fn a_decision_on_a_removal_that_became_two_spellings_is_refused() {
 }
 
 impl Fixture {
+    /// Each hold's change rows as `who: before → after`, with the rest of
+    /// what its notice shows.
+    fn hold_views(&self) -> Vec<dohc_engine_runtime::AccessRuleHoldView> {
+        let holds = self
+            .runtime
+            .block_on(self.actor.access_rule_holds(WS.to_owned()))
+            .expect("holds");
+        self.runtime
+            .block_on(
+                self.actor
+                    .access_rule_hold_views(self.root().to_path_buf(), holds),
+            )
+            .expect("hold views")
+    }
+}
+
+fn rows(view: &dohc_engine_runtime::AccessRuleHoldView) -> Vec<String> {
+    view.changes
+        .iter()
+        .map(|change| format!("{}: {} → {}", change.who, change.before, change.after))
+        .collect()
+}
+
+/// A widened folder's notice lists who reaches it differently, from the
+/// rule dohc recorded to the rule on disk now, and opens that rule.
+#[test]
+fn a_widened_hold_lists_who_reaches_the_folder_differently() {
+    let f = ruled_team();
+    f.put(
+        "team/access.yaml",
+        "members: edit\npeople:\n  sam@example.com: edit\n",
+    );
+    f.settle();
+    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+    let views = f.hold_views();
+    let [view] = views.as_slice() else {
+        panic!("{views:?}")
+    };
+    assert_eq!(
+        rows(view),
+        lines(&["members: view → edit", "sam@example.com: view → edit"])
+    );
+    assert_eq!(view.recorded.as_deref(), Some(VIEW));
+    assert_eq!(view.rule_path.as_deref(), Some("team/access.yaml"));
+    assert_eq!(view.unreadable, None);
+
+    // Two spellings are one unreadable rule.
+    f.put("team/\u{FF41}ccess.yaml", EDIT);
+    assert_eq!(f.hold_views()[0].unreadable, Some("on-disk"));
+    assert!(f.hold_views()[0].changes.is_empty());
+}
+
+/// A removed rule's notice lists each entry it recorded, with the reach the
+/// folder falls back to: the nearest rule above, or the workspace level.
+#[test]
+fn a_removed_hold_lists_what_the_folder_falls_back_to() {
+    for (removed, folder, expected, falls_back_to) in [
+        (
+            "team/sub/access.yaml",
+            "team/sub",
+            lines(&["members: none → view"]),
+            Some("team"),
+        ),
+        (
+            "team/access.yaml",
+            "team",
+            lines(&[
+                "members: view → workspace",
+                "sam@example.com: view → workspace",
+            ]),
+            None,
+        ),
+    ] {
+        let f = Fixture::new();
+        f.put(
+            "team/access.yaml",
+            "members: view\npeople:\n  sam@example.com: view\n",
+        );
+        f.put("team/sub/access.yaml", "people:\n  sam@example.com: view\n");
+        f.put("team/sub/b.md", "beta");
+        f.settle();
+        f.capture_ok(&["team/access.yaml", "team/sub/access.yaml", "team/sub/b.md"]);
+        std::fs::remove_file(f.root().join(removed)).unwrap();
+        f.put("team/sub/b.md", "beta 2");
+        f.settle();
+        assert!(held(&f.capture(&["team/sub/b.md"])[0], folder));
+        let views = f.hold_views();
+        let [view] = views.as_slice() else {
+            panic!("{views:?}")
+        };
+        assert_eq!(view.hold.folder, folder);
+        assert_eq!(rows(view), expected, "{folder}");
+        assert_eq!(view.falls_back_to.as_deref(), falls_back_to, "{folder}");
+    }
+}
+
+/// Each decision on a one-file rule says the ordinary change that reverses
+/// it: the rule it replaced, over the bytes it left.
+#[test]
+fn a_decision_names_the_change_that_reverses_it() {
+    let sha = |text: &str| Some(dohc_engine_storage::hex_sha256(text.as_bytes()));
+    let undo = |path: &str, text: Option<&str>, expected: Option<String>| {
+        Some(dohc_engine_runtime::AccessRuleUndo {
+            path: path.to_owned(),
+            text: text.map(str::to_owned),
+            expected_sha256: expected,
+        })
+    };
+    for (decision, expected) in [
+        (
+            AccessRuleDecision::Accept,
+            undo("team/access.yaml", Some(VIEW), sha(EDIT)),
+        ),
+        (
+            AccessRuleDecision::Restore,
+            undo("team/access.yaml", Some(EDIT), sha(VIEW)),
+        ),
+    ] {
+        let f = ruled_team();
+        f.put("team/access.yaml", EDIT);
+        f.settle();
+        assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+        let decided = f
+            .decided_on("team", decision, sha(EDIT), "widened")
+            .expect("decide");
+        assert_eq!(decided.undo, expected, "{decision:?} on a widening");
+    }
+    for (decision, expected) in [
+        (
+            AccessRuleDecision::Accept,
+            undo("team/access.yaml", Some(VIEW), None),
+        ),
+        (
+            AccessRuleDecision::Restore,
+            undo("team/access.yaml", None, sha(VIEW)),
+        ),
+    ] {
+        let f = ruled_team();
+        std::fs::remove_file(f.root().join("team/access.yaml")).unwrap();
+        f.settle();
+        assert!(held(&f.capture(&["team/a.md"])[0], "team"));
+        let decided = f
+            .decided_on("team", decision, None, "removed")
+            .expect("decide");
+        assert_eq!(decided.undo, expected, "{decision:?} on a removal");
+    }
+}
+
+impl Fixture {
     /// The kept copies the workspace lists, by path, with their bytes.
     fn kept_copies(&self) -> Vec<(String, String)> {
         self.runtime

@@ -24,7 +24,7 @@
 mod access_order;
 pub use access_order::{
     ACCESS_RULE_HELD, ACCESS_RULE_SETTLE, ACCESS_RULE_WAITS, AccessRuleDecided, AccessRuleDecision,
-    AccessRuleSignals,
+    AccessRuleHoldView, AccessRuleLevelChange, AccessRuleSignals, AccessRuleUndo,
 };
 mod automations;
 mod capture;

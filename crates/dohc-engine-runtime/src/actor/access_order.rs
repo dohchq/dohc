@@ -42,8 +42,8 @@ use crate::error::RuntimeError;
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::{CaptureIngest, CaptureIngestBinary, CaptureRetire, DomainError};
 use dohc_engine_files::access_rules::{
-    ACCESS_RULE_FILE, AccessRule, ReachBefore, access_rule_folder, is_access_rule_path, is_rule_of,
-    parse_access_rule, rule_change_narrows,
+    ACCESS_RULE_FILE, AccessRule, Level, ReachBefore, access_rule_folder, is_access_rule_path,
+    is_rule_of, level_for_email, parse_access_rule, rule_change_narrows,
 };
 use dohc_engine_files::floor::path_collision_key;
 use dohc_engine_files::materialize::{PublicationTarget, read_publication_target};
@@ -677,6 +677,8 @@ type OnDisk = BTreeMap<String, Vec<u8>>;
 /// One file of the rule last committed at a folder.
 struct CommittedFile {
     sha256: String,
+    /// `None` when it is binary.
+    text: Option<String>,
     /// `None` when it is binary or does not parse.
     rule: Option<AccessRule>,
     binary: bool,
@@ -825,10 +827,12 @@ fn committed_rule(
             (Some(snapshot), _) => CommittedFile {
                 rule: parse_access_rule(&snapshot.text),
                 sha256: snapshot.blob_sha256,
+                text: Some(snapshot.text),
                 binary: false,
             },
             (None, Some(sha256)) => CommittedFile {
                 sha256,
+                text: None,
                 rule: None,
                 binary: true,
             },
@@ -1627,6 +1631,246 @@ pub struct AccessRuleDecided {
     /// The rule files from outside dohc that Restore replaced or removed,
     /// each kept as a kept copy of its path.
     pub kept: Vec<String>,
+    /// The ordinary file change that reverses the decision, when the rule
+    /// on each side is at most one text file under one spelling.
+    pub undo: Option<AccessRuleUndo>,
+}
+
+/// A file change through dohc that puts a folder's rule back as it was
+/// before a decision. As a change made through dohc, it commits as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessRuleUndo {
+    pub path: String,
+    /// The rule to write; `None` deletes the file.
+    pub text: Option<String>,
+    /// The bytes the decision left at `path`; `None` when it left none, so
+    /// the write creates the file.
+    pub expected_sha256: Option<String>,
+}
+
+/// One entry's reach at a held folder: before the change, and now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessRuleLevelChange {
+    /// `members`, or a person's email.
+    pub who: String,
+    /// `view`, `comment`, `edit`, `none`, or `workspace` for the member's
+    /// workspace level, which no rule above sets.
+    pub before: &'static str,
+    pub after: &'static str,
+}
+
+/// What a held folder's notice shows, read from the store and disk when
+/// the notice is listed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessRuleHoldView {
+    pub hold: AccessRuleHold,
+    /// The rule dohc recorded at the folder, when it is one text file.
+    pub recorded: Option<String>,
+    /// The rule file on disk, when there is exactly one.
+    pub rule_path: Option<String>,
+    /// The entries whose reach changes: for a widening, each one that
+    /// reaches the folder differently; for a removal, each recorded entry,
+    /// with what the folder falls back to.
+    pub changes: Vec<AccessRuleLevelChange>,
+    /// `on-disk` or `recorded`, when that rule cannot be read.
+    pub unreadable: Option<&'static str>,
+    /// For a removal, the folder whose rule then applies; `None` when no
+    /// rule above does, so members hold their workspace level.
+    pub falls_back_to: Option<String>,
+}
+
+/// What reaches a folder through a rule.
+enum Reach<'a> {
+    Rule(&'a AccessRule),
+    /// An unreadable rule hides the folder.
+    Hidden,
+    /// No rule: members hold their workspace level.
+    Workspace,
+}
+
+impl Reach<'_> {
+    fn of(&self, who: Option<&str>) -> &'static str {
+        match self {
+            Reach::Rule(rule) => match who {
+                None => rule.members,
+                Some(email) => level_for_email(rule, email),
+            }
+            .map_or("none", Level::as_str),
+            Reach::Hidden => "none",
+            Reach::Workspace => "workspace",
+        }
+    }
+
+    fn people(&self) -> impl Iterator<Item = &str> {
+        match self {
+            Reach::Rule(rule) => Some(rule.people.keys().map(String::as_str)),
+            Reach::Hidden | Reach::Workspace => None,
+        }
+        .into_iter()
+        .flatten()
+    }
+}
+
+fn reach_of(committed: Option<&Committed>) -> Reach<'_> {
+    match committed {
+        None => Reach::Workspace,
+        Some(committed) => committed.rule().map_or(Reach::Hidden, Reach::Rule),
+    }
+}
+
+/// Members first, then each person `before` names, and `after` too unless
+/// `recorded_only`, with their reach before and after, where it differs.
+fn level_changes(
+    before: &Reach<'_>,
+    after: &Reach<'_>,
+    recorded_only: bool,
+) -> Vec<AccessRuleLevelChange> {
+    let people: std::collections::BTreeSet<&str> = before
+        .people()
+        .chain(
+            (!recorded_only)
+                .then(|| after.people())
+                .into_iter()
+                .flatten(),
+        )
+        .collect();
+    std::iter::once(None)
+        .chain(people.into_iter().map(Some))
+        .map(|who| AccessRuleLevelChange {
+            who: who.unwrap_or("members").to_owned(),
+            before: before.of(who),
+            after: after.of(who),
+        })
+        .filter(|change| change.before != change.after)
+        .collect()
+}
+
+fn hold_view(
+    conn: &Connection,
+    root: &Path,
+    hold: AccessRuleHold,
+) -> Result<AccessRuleHoldView, RuntimeError> {
+    let (workspace, version, folder) = (&hold.workspace_id, &hold.version_id, &hold.folder);
+    let here = committed_rule(conn, workspace, version, folder)?;
+    let mut above = None;
+    let mut at = folder.as_str();
+    while !at.is_empty() {
+        at = access_rule_folder(at);
+        if let Some(committed) = committed_rule(conn, workspace, version, at)? {
+            above = Some((at.to_owned(), committed));
+            break;
+        }
+    }
+    let recorded = here
+        .as_ref()
+        .and_then(|committed| match committed.files.len() {
+            1 => committed
+                .files
+                .values()
+                .next()
+                .and_then(|file| file.text.clone()),
+            _ => None,
+        });
+    let disk = read_disk_rule(root, folder).ok();
+    let rule_path = disk
+        .as_ref()
+        .filter(|disk| disk.len() == 1)
+        .and_then(|disk| disk.keys().next().cloned());
+    let mut view = AccessRuleHoldView {
+        recorded,
+        rule_path,
+        changes: Vec::new(),
+        unreadable: None,
+        falls_back_to: None,
+        hold,
+    };
+    if here
+        .as_ref()
+        .is_some_and(|committed| committed.rule().is_none())
+    {
+        view.unreadable = Some("recorded");
+        return Ok(view);
+    }
+    if view.hold.reason == access_rule_holds::REMOVED {
+        view.falls_back_to = above.as_ref().map(|(at, _)| at.clone());
+        view.changes = level_changes(
+            &reach_of(here.as_ref()),
+            &reach_of(above.as_ref().map(|(_, committed)| committed)),
+            true,
+        );
+        return Ok(view);
+    }
+    let now = disk.as_ref().and_then(|disk| match disk.len() {
+        1 => disk
+            .values()
+            .next()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(parse_access_rule),
+        _ => None,
+    });
+    let Some(now) = now else {
+        view.unreadable = Some("on-disk");
+        return Ok(view);
+    };
+    let before = reach_of(
+        here.as_ref()
+            .or(above.as_ref().map(|(_, committed)| committed)),
+    );
+    view.changes = level_changes(&before, &Reach::Rule(&now), false);
+    Ok(view)
+}
+
+/// The change that reverses `decision` at a folder whose rule dohc
+/// recorded as `committed` and whose rule on disk is `disk`.
+fn undo_of(
+    decision: AccessRuleDecision,
+    committed: Option<&Committed>,
+    disk: &OnDisk,
+) -> Option<AccessRuleUndo> {
+    // The recorded rule: no file, or one text file.
+    let recorded = match committed.map(|committed| &committed.files) {
+        None => None,
+        Some(files) if files.len() == 1 => {
+            let (path, file) = files.iter().next()?;
+            Some((path.clone(), file.text.clone()?, file.sha256.clone()))
+        }
+        Some(_) => return None,
+    };
+    // The rule from outside dohc: no file, or one text file.
+    let outside = match disk.len() {
+        0 => None,
+        1 => {
+            let (path, bytes) = disk.iter().next()?;
+            let text = String::from_utf8(bytes.clone()).ok()?;
+            Some((path.clone(), text, dohc_engine_storage::hex_sha256(bytes)))
+        }
+        _ => return None,
+    };
+    // Undo puts back the side the decision replaced, over the side it kept.
+    let (back, left) = match decision {
+        AccessRuleDecision::Accept => (recorded, outside),
+        AccessRuleDecision::Restore => (outside, recorded),
+    };
+    match (back, left) {
+        (Some((path, text, _)), Some((left_path, _, sha256))) => {
+            (path == left_path).then_some(AccessRuleUndo {
+                path,
+                text: Some(text),
+                expected_sha256: Some(sha256),
+            })
+        }
+        (Some((path, text, _)), None) => Some(AccessRuleUndo {
+            path,
+            text: Some(text),
+            expected_sha256: None,
+        }),
+        (None, Some((path, _, sha256))) => Some(AccessRuleUndo {
+            path,
+            text: None,
+            expected_sha256: Some(sha256),
+        }),
+        (None, None) => None,
+    }
 }
 
 /// What the owner saw in a folder's hold when they decided.
@@ -1679,7 +1923,10 @@ fn decide_on_store(
     }
     let committed = store
         .read_with(|conn| committed_rule(conn, order.workspace_id, order.version_id, folder))?;
-    let mut decided = AccessRuleDecided::default();
+    let mut decided = AccessRuleDecided {
+        kept: Vec::new(),
+        undo: undo_of(decision, committed.as_ref(), &disk),
+    };
     match decision {
         AccessRuleDecision::Accept => {
             let changes = rule_changes(committed.as_ref(), &disk);
@@ -1878,6 +2125,24 @@ impl ActorHandle {
             store
                 .read_with(|conn| access_rule_holds::list_in(conn, &workspace_id))
                 .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
+    /// What each of `holds` shows its owner: who reaches the folder
+    /// differently, read from the store and the rule on disk now.
+    pub async fn access_rule_hold_views(
+        &self,
+        root: std::path::PathBuf,
+        holds: Vec<AccessRuleHold>,
+    ) -> Result<Vec<AccessRuleHoldView>, RuntimeError> {
+        self.run(move |store, _| {
+            store.read_with(|conn| {
+                holds
+                    .into_iter()
+                    .map(|hold| hold_view(conn, &root, hold))
+                    .collect()
+            })
         })
         .await
     }
@@ -2156,6 +2421,7 @@ mod tests {
                     let file = CommittedFile {
                         sha256: dohc_engine_storage::hex_sha256(text.as_bytes()),
                         rule: parse_access_rule(text),
+                        text: Some((*text).to_owned()),
                         binary: false,
                     };
                     ((*path).to_owned(), file)

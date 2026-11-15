@@ -23,6 +23,15 @@ pub enum Level {
 }
 
 impl Level {
+    /// The word a rule file spells this level with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::View => "view",
+            Self::Comment => "comment",
+            Self::Edit => "edit",
+        }
+    }
+
     fn parse(word: &str) -> Option<Self> {
         match word {
             "view" => Some(Self::View),
@@ -231,7 +240,8 @@ fn lower(a: Option<Level>, b: Option<Level>) -> Option<Level> {
     Some(a?.min(b?))
 }
 
-fn level_for_email(rule: &AccessRule, email: &str) -> Option<Level> {
+/// The level `rule` gives the person with this normalized email.
+pub fn level_for_email(rule: &AccessRule, email: &str) -> Option<Level> {
     rule.people.get(email).copied().or(rule.members)
 }
 

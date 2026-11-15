@@ -49,16 +49,22 @@ struct AccessRuleDecisionParams {
     expected_reason: String,
 }
 
-fn access_rule_holds_json(
-    holds: &[dohc_engine_storage::access_rule_holds::AccessRuleHold],
-) -> Value {
+fn access_rule_holds_json(views: &[dohc_engine_runtime::AccessRuleHoldView]) -> Value {
     json!(
-        holds
+        views
             .iter()
-            .map(|hold| json!({
-                "versionId": hold.version_id, "folder": hold.folder, "reason": hold.reason,
-                "observedSha256": hold.observed_sha256, "recordedAtMs": hold.recorded_at_ms,
-            }))
+            .map(|view| {
+                let hold = &view.hold;
+                json!({
+                    "versionId": hold.version_id, "folder": hold.folder, "reason": hold.reason,
+                    "observedSha256": hold.observed_sha256, "recordedAtMs": hold.recorded_at_ms,
+                    "recordedRule": view.recorded, "rulePath": view.rule_path,
+                    "changes": view.changes.iter().map(|change| json!({
+                        "who": change.who, "before": change.before, "after": change.after,
+                    })).collect::<Vec<_>>(),
+                    "unreadable": view.unreadable, "fallsBackTo": view.falls_back_to,
+                })
+            })
             .collect::<Vec<_>>()
     )
 }
@@ -618,7 +624,10 @@ impl EngineService {
             driver.request_manifest_refresh();
         }
         drop(gate);
-        Ok(json!({ "folder": input.folder, "decided": true, "kept": decided.kept }))
+        let undo = decided.undo.map(|undo| {
+            json!({ "path": undo.path, "text": undo.text, "expectedSha256": undo.expected_sha256 })
+        });
+        Ok(json!({ "folder": input.folder, "decided": true, "kept": decided.kept, "undo": undo }))
     }
 
     pub(super) async fn capture_clear_recovery(
@@ -653,16 +662,24 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         // Only the active Version's rules are on disk to decide. Another
-        // Version's hold waits, unlisted, until that Version is active.
-        let active = open
+        // Version's hold waits, unlisted, until that Version is active. A
+        // workspace with no Version yet has no holds to ask about.
+        if !access_holds.is_empty() {
+            let active = open
+                .actor
+                .active_version_id(open.workspace_id.clone())
+                .await
+                .map_err(map_runtime)?;
+            access_holds.retain(|hold| hold.version_id == active);
+        }
+        let access_views = open
             .actor
-            .active_version_id(open.workspace_id.clone())
+            .access_rule_hold_views(open.root.clone(), access_holds)
             .await
             .map_err(map_runtime)?;
-        access_holds.retain(|hold| hold.version_id == active);
         let held_files = held_files_json(&holds);
         let outside_changes = outside_changes_json(&outside_changes);
-        let held_access_rules = access_rule_holds_json(&access_holds);
+        let held_access_rules = access_rule_holds_json(&access_views);
         let retained_copies = crate::rpc::retained_copies::summary_json(
             crate::rpc::retained_copies::retained_summary(&open)
                 .await
