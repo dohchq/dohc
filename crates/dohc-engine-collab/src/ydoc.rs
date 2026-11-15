@@ -8019,8 +8019,19 @@ fn render_inline(
     }
 
     #[derive(Clone)]
+    enum ReplacementText {
+        /// A literal Markdown part of its own.
+        Part(std::borrow::Cow<'static, str>),
+        /// The bytes stay in their run, as [`hold_as_written`] holds them.
+        AsWritten,
+        /// The character stays in its run, held as this decimal reference.
+        Reference(u32),
+    }
+
+    #[derive(Clone)]
     struct InlineReplacement {
-        text: std::borrow::Cow<'static, str>,
+        text: ReplacementText,
+        /// Whether a part of its own keeps the run's marks.
         preserve_marks: bool,
         /// The bytes it replaces.
         width: usize,
@@ -8028,11 +8039,50 @@ fn render_inline(
 
     type InlineReplacements = BTreeMap<usize, BTreeMap<usize, InlineReplacement>>;
 
+    // The output writes each of these back from `held`, in order. One the
+    // text already holds is held as itself. DEL means nothing to Markdown,
+    // and as one byte it never makes a text longer than it will be written.
+    // Held text stays in its run, as the TypeScript writer keeps its tokens,
+    // so block openers and marks read the run as one.
+    const HELD: char = '\u{7f}';
+
+    #[derive(Clone, Copy)]
+    enum Held {
+        Character(char),
+        Reference(u32),
+    }
+
+    // An empty link the importer keeps as the file holds it reads back only
+    // from the same bytes. Its `&`, `<`, `>`, and NBSP, and the first
+    // character of each line it starts, are held, as the TypeScript writer
+    // holds them, so no later pass writes them differently. A highlight
+    // writes a held `=` as the `\=` it reads.
+    fn hold_as_written(link: &str, highlighted: bool, text: &mut String, held: &mut Vec<Held>) {
+        let mut starts_line = false;
+        for character in link.chars() {
+            if matches!(character, '&' | '<' | '>' | '\u{a0}' | HELD)
+                || (starts_line && !matches!(character, '\n' | '\r'))
+            {
+                if highlighted && character == '=' {
+                    text.push(HELD);
+                    held.push(Held::Character('\\'));
+                }
+                text.push(HELD);
+                held.push(Held::Character(character));
+            } else {
+                text.push(character);
+            }
+            starts_line = character == '\n';
+        }
+    }
+
     // Splits each text part at its replaced bytes, which become literal
-    // Markdown parts. A replacement's own text moves into its part.
+    // Markdown parts. A replacement's own text moves into its part. One that
+    // stays in its run is held.
     fn apply_inline_replacements<'a>(
         parts: Vec<InlinePart<'a>>,
         mut replacements: InlineReplacements,
+        held: &mut Vec<Held>,
     ) -> Vec<InlinePart<'a>> {
         // Each part this makes owns a new string.
         fn materialize<'a>(parts: &mut Vec<InlinePart<'a>>, part: InlinePart<'a>) {
@@ -8040,9 +8090,24 @@ fn render_inline(
             INLINE_PARTS_MATERIALIZED.with(|count| count.set(count.get() + 1));
             parts.push(part);
         }
+        let holds = replacements
+            .values()
+            .flat_map(BTreeMap::values)
+            .any(|replacement| !matches!(replacement.text, ReplacementText::Part(_)));
+        let keep = |text: &mut String, kept: &str, held: &mut Vec<Held>| {
+            text.push_str(kept);
+            if holds {
+                held.extend(kept.matches(HELD).map(|_| Held::Character(HELD)));
+            }
+        };
         let mut escaped_parts = Vec::new();
         for (part_index, part) in parts.into_iter().enumerate() {
             let Some(part_replacements) = replacements.remove(&part_index) else {
+                if let InlinePart::Text { run, .. } = &part {
+                    if holds {
+                        held.extend(run.text.matches(HELD).map(|_| Held::Character(HELD)));
+                    }
+                }
                 escaped_parts.push(part);
                 continue;
             };
@@ -8053,26 +8118,41 @@ fn render_inline(
             else {
                 unreachable!();
             };
+            let highlighted = has_mark(&run.marks, MarkKind::Highlight);
+            let mut text = String::new();
             let mut cursor = 0usize;
             for (offset, replacement) in part_replacements {
-                if offset > cursor {
+                keep(&mut text, &run.text[cursor..offset], held);
+                cursor = offset + replacement.width;
+                let written = match replacement.text {
+                    ReplacementText::Part(written) => written,
+                    ReplacementText::AsWritten => {
+                        hold_as_written(&run.text[offset..cursor], highlighted, &mut text, held);
+                        continue;
+                    }
+                    ReplacementText::Reference(code) => {
+                        text.push(HELD);
+                        held.push(Held::Reference(code));
+                        continue;
+                    }
+                };
+                if !text.is_empty() {
                     materialize(
                         &mut escaped_parts,
                         InlinePart::Text {
                             run: TextRun {
-                                text: run.text[cursor..offset].to_string(),
+                                text: std::mem::take(&mut text),
                                 marks: run.marks.clone(),
                             },
                             literal_markdown,
                         },
                     );
                 }
-                cursor = offset + replacement.width;
                 materialize(
                     &mut escaped_parts,
                     InlinePart::Text {
                         run: TextRun {
-                            text: replacement.text.into_owned(),
+                            text: written.into_owned(),
                             marks: if replacement.preserve_marks {
                                 run.marks.clone()
                             } else {
@@ -8083,13 +8163,14 @@ fn render_inline(
                     },
                 );
             }
-            if cursor < run.text.len() {
-                let mut text = run;
-                text.text = text.text[cursor..].to_string();
+            keep(&mut text, &run.text[cursor..], held);
+            if !text.is_empty() {
+                let mut rest = run;
+                rest.text = text;
                 materialize(
                     &mut escaped_parts,
                     InlinePart::Text {
-                        run: text,
+                        run: rest,
                         literal_markdown,
                     },
                 );
@@ -8113,11 +8194,9 @@ fn render_inline(
     // The importer keeps a link with no text as the text the file holds, so
     // its `<` and `>` bound no span. Outside the span the projector writes its
     // `&`, `<`, `>`, and NBSP as they are, and each line its title starts,
-    // which no block opener or indent escape then reads. A part's links, with
-    // the text between two of them that holds no newline, `&`, `<`, `>`, or
-    // NBSP, are one
-    // literal part, written as the later passes write the rest: a `\r` as a
-    // reference where they escape block syntax, a highlight's `=` as `\=`.
+    // which no block opener or indent escape then reads. They stay in their
+    // run; see [`hold_as_written`]. A part's links, with the text between two
+    // of them that holds no newline, `&`, `<`, `>`, or NBSP, are held as one.
     // Inside the span a link's `[` is a reference, so it reads back as the
     // span's other text does.
     //
@@ -8128,7 +8207,6 @@ fn render_inline(
         parts: &[InlinePart<'_>],
         table_cell: bool,
         definition: bool,
-        escape_block_syntax: bool,
     ) -> ProjectionResult<InlineReplacements> {
         let texts: Vec<&str> = parts
             .iter()
@@ -8286,27 +8364,12 @@ fn render_inline(
                     })
                 })
         };
-        // The output holds every byte of the text, and each literal link and
-        // reference writes at least the bytes it replaces, so their encoded
-        // length is admitted before any of them is written. The span writes
-        // no byte of a link written as references.
+        // The output holds every byte of the text, and each reference writes
+        // at least the bytes it replaces, so their encoded length is admitted
+        // before any of them is written. The span writes no byte of a link
+        // written as references.
         let reference_len = |code: u32| if code < 100 { 5 } else { 6 };
         let mut projected = bytes.len();
-        for &(part_index, from, to) in &stretches {
-            let link = &texts[part_index].as_bytes()[from..to];
-            let count = |wanted: u8| link.iter().filter(|&&byte| byte == wanted).count();
-            let returns = if escape_block_syntax {
-                count(b'\r') * 4
-            } else {
-                0
-            };
-            let equals = if highlighted_part(part_index) {
-                count(b'=')
-            } else {
-                0
-            };
-            projected = checked_projection_len(projected, returns + equals)?;
-        }
         for (part_index, (text, ranges)) in texts.iter().zip(text_links).enumerate() {
             let highlighted = highlighted_part(part_index);
             for &(from, to) in ranges {
@@ -8321,22 +8384,10 @@ fn render_inline(
         }
         let mut replacements = InlineReplacements::new();
         for (part_index, from, to) in stretches {
-            let text = texts[part_index];
-            let highlighted = highlighted_part(part_index);
-            let mut written = ProjectionBuffer::with_capacity(to - from)?;
-            for character in text[from..to].chars() {
-                match character {
-                    '\r' if escape_block_syntax => written.push_str("&#13;")?,
-                    '=' if highlighted => written.push_str("\\=")?,
-                    _ => written.push(character)?,
-                }
-            }
-            #[cfg(test)]
-            LITERAL_LINKS_WRITTEN.with(|count| count.set(count.get() + 1));
             replacements.entry(part_index).or_default().insert(
                 from,
                 InlineReplacement {
-                    text: written.into_string().into(),
+                    text: ReplacementText::AsWritten,
                     preserve_marks: true,
                     width: to - from,
                 },
@@ -8360,7 +8411,9 @@ fn render_inline(
                         replacements.entry(part_index).or_default().insert(
                             start,
                             InlineReplacement {
-                                text: written_as_references(text, start, at, highlighted)?.into(),
+                                text: ReplacementText::Part(
+                                    written_as_references(text, start, at, highlighted)?.into(),
+                                ),
                                 preserve_marks: true,
                                 width: at - start,
                             },
@@ -8379,7 +8432,7 @@ fn render_inline(
             replacements.entry(part_index).or_default().insert(
                 at,
                 InlineReplacement {
-                    text: format!("&#{code};").into(),
+                    text: ReplacementText::Reference(code),
                     preserve_marks: true,
                     width,
                 },
@@ -8425,7 +8478,7 @@ fn render_inline(
             replacements.entry(part_index).or_default().insert(
                 offset,
                 InlineReplacement {
-                    text: "\n".into(),
+                    text: ReplacementText::Part("\n".into()),
                     preserve_marks: true,
                     width: 1,
                 },
@@ -8438,7 +8491,7 @@ fn render_inline(
             replacements.entry(part_index).or_default().insert(
                 offset,
                 InlineReplacement {
-                    text: encoded_block_punctuation(byte).into(),
+                    text: ReplacementText::Part(encoded_block_punctuation(byte).into()),
                     preserve_marks: true,
                     width: 1,
                 },
@@ -8464,6 +8517,7 @@ fn render_inline(
             }) && definition_paragraph(&text)
         };
     let mut parts = Vec::with_capacity(source_parts.len());
+    let mut held = Vec::new();
     let mut source_index = 0usize;
     while source_index < source_parts.len() {
         let SourceInlinePart::Text(run) = source_parts[source_index] else {
@@ -8509,9 +8563,9 @@ fn render_inline(
     }
 
     if !code_context {
-        let raw_html = raw_html_replacements(&parts, table_cell, definition, escape_block_syntax)?;
+        let raw_html = raw_html_replacements(&parts, table_cell, definition)?;
         if !raw_html.is_empty() {
-            parts = apply_inline_replacements(parts, raw_html);
+            parts = apply_inline_replacements(parts, raw_html, &mut held);
         }
     }
 
@@ -8619,7 +8673,7 @@ fn render_inline(
                             replacements.entry(index_part).or_default().insert(
                                 index_offset,
                                 InlineReplacement {
-                                    text: replacement.into(),
+                                    text: ReplacementText::Part(replacement.into()),
                                     preserve_marks: false,
                                     width: 1,
                                 },
@@ -8641,7 +8695,7 @@ fn render_inline(
         }
 
         if !replacements.is_empty() {
-            parts = apply_inline_replacements(parts, replacements);
+            parts = apply_inline_replacements(parts, replacements, &mut held);
         }
     }
 
@@ -8778,6 +8832,7 @@ fn render_inline(
     let mut active: Vec<MarkdownMark> = Vec::new();
     let mut modes: BTreeMap<MarkKind, OpeningMode> = BTreeMap::new();
     let mut reopen_html = BTreeSet::new();
+    let mut held_characters = held.iter().copied();
 
     for (index, part) in parts.iter().enumerate() {
         let next_marks = parts.get(index + 1).and_then(|next| match next {
@@ -8831,6 +8886,22 @@ fn render_inline(
                     if escape_block_syntax {
                         text = encode_paragraph_whitespace(&text);
                     }
+                }
+                // Nothing held is whitespace at the text's edge, which marks
+                // read: a held character is inside an empty link.
+                if !held.is_empty() && text.contains(HELD) {
+                    let mut written = ProjectionBuffer::with_capacity(text.len())?;
+                    for character in text.chars() {
+                        if character != HELD {
+                            written.push(character)?;
+                            continue;
+                        }
+                        match held_characters.next().expect("one held entry for each") {
+                            Held::Character(character) => written.push(character)?,
+                            Held::Reference(code) => written.push_str(&format!("&#{code};"))?,
+                        }
+                    }
+                    text = written.into_string();
                 }
                 let current = &run.marks;
                 let mut to_open: Vec<MarkdownMark> = current
@@ -10037,7 +10108,7 @@ mod projection_tests {
     }
 
     #[test]
-    fn empty_links_become_one_literal_part() {
+    fn empty_links_stay_in_their_part() {
         const COUNT: usize = 1 << 16;
         let ampersands = "&".repeat(COUNT);
         let mixed = "&a<b>=\u{a0}".repeat(COUNT);
@@ -10057,11 +10128,19 @@ mod projection_tests {
             ),
             (
                 format!("x [](u \"{ampersands}\") &"),
-                3,
+                1,
                 format!("x [](u \"{ampersands}\") &amp;"),
             ),
             (adjacent.clone(), 1, adjacent.clone()),
-            (format!("{spaced}x"), 2, format!("{spaced}x")),
+            (format!("{spaced}x"), 1, format!("{spaced}x")),
+            // A block opener reads the link as part of its line.
+            ("-[](a&b)".to_owned(), 1, "-[](a&b)".to_owned()),
+            // A DEL in the text is written as itself.
+            (
+                "\u{7f}[](u \"&\u{7f}\") \u{7f}&".to_owned(),
+                1,
+                "\u{7f}[](u \"&\u{7f}\") \u{7f}&amp;".to_owned(),
+            ),
             (plain.clone(), 0, plain.clone()),
             ("[](u \"&\n&\")".to_owned(), 1, "[](u \"&\n&\")".to_owned()),
             // A `\r` sends the link through written references.
@@ -10072,7 +10151,7 @@ mod projection_tests {
             ),
             (
                 "<b>x</b> [](u \"&\")".to_owned(),
-                2,
+                1,
                 "&lt;b&gt;x&lt;/b&gt; [](u \"&\")".to_owned(),
             ),
         ] {

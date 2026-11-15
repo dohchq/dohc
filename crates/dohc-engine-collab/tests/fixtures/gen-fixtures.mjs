@@ -983,6 +983,35 @@ const RICHDOC_PROJECTION_CASES = [
         ]),
       ]),
   },
+  {
+    // #4110: an empty link the parser keeps as written, a link written as
+    // references, a raw HTML reference, and a block opener's reference are
+    // written inside their text, so block openers and marks read the text
+    // around them as one.
+    name: "written-inside-text",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph("-[](a&b)"),
+        paragraph("#[](a<b)"),
+        paragraph("1.[](a>b)"),
+        paragraph("-[](a\u00a0b)"),
+        paragraph("#[](a\nb)"),
+        paragraph("x\n-[](a&b)"),
+        paragraph("-[](a\n# b)"),
+        ...["&", "<", ">", "\u00a0", "\n"].map((character) =>
+          paragraph([
+            xmlText(`a[](x${character}y)`, { bold: {}, strike: {} }),
+            xmlText("c", { strike: {} }),
+          ]),
+        ),
+        paragraph([
+          xmlText("a[](x\n# y)", { bold: {}, strike: {} }),
+          xmlText("c", { strike: {} }),
+        ]),
+        paragraph([xmlText("<a-b>", { bold: {}, strike: {} }), xmlText("c", { strike: {} })]),
+        paragraph([xmlText("x\n# y", { bold: {}, strike: {} }), xmlText("c", { strike: {} })]),
+      ]),
+  },
 ];
 
 function makeRichdocProjection(index, fixture) {
