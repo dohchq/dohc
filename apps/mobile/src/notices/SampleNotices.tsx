@@ -133,6 +133,8 @@ export function SampleNotices() {
       getFixedItemSize={(item) => (item.kind === "band" ? bandHeight : undefined)}
       estimatedItemSize={128}
       style={{ backgroundColor: theme.bg }}
+      // A tap on a row's Send or a choice reaches it while its answer field holds the keyboard.
+      keyboardShouldPersistTaps="handled"
       // Room for the bar and the tab bar, so the last row ends at the tab bar, with or without the band.
       contentInsetAdjustmentBehavior="automatic"
       // Design review only: lets the partway-fold demo scroll to a resting offset above zero, or below the top for a

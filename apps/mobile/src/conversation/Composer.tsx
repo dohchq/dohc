@@ -67,7 +67,7 @@ export function outboxProblem(
 // `replies`: every message is a reply, as in a thread, or in a stream once a message is chosen to reply to. Then there
 // is no New post, and the reply's clear leaves New post as it was. `replyTo` names the chosen message above the field.
 // `closed` says why the chosen message no longer takes the text: Send stays off, and the text stays, until the person
-// cancels it or chooses another.
+// cancels it or chooses another. Undocked, as in a Notice's row, it sits where it's placed, without the bar.
 export function Composer({
   placeholder,
   lanes,
@@ -79,6 +79,7 @@ export function Composer({
   onCancelReply,
   onSubmit,
   onLayoutHeight,
+  docked = true,
 }: {
   placeholder: string;
   lanes: Lanes;
@@ -89,7 +90,8 @@ export function Composer({
   closed?: string | null;
   onCancelReply?(): void;
   onSubmit(kind: "send" | "post" | "reply", body: string, title: string): Promise<SubmitOutcome>;
-  onLayoutHeight(height: number): void;
+  onLayoutHeight?(height: number): void;
+  docked?: boolean;
 }) {
   const theme = useTheme();
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
@@ -156,8 +158,9 @@ export function Composer({
 
   const label = mode === "post" ? chatWords.post : chatWords.sendMessage;
   const fieldLabel = replyTo ? replyLabel(replyTo) : placeholder;
+  const Holder = docked ? Dock : Inline;
   return (
-    <Dock onLayoutHeight={onLayoutHeight}>
+    <Holder onLayoutHeight={onLayoutHeight}>
       {problem ? (
         problem.retry ? (
           <ProblemLine text={problem.text} onRetry={problem.retry} />
@@ -261,7 +264,26 @@ export function Composer({
           />
         </Pressable>
       </View>
-    </Dock>
+    </Holder>
+  );
+}
+
+/** The composer in place, as in a Notice's row, reporting its height as the dock does. */
+function Inline({
+  onLayoutHeight,
+  children,
+}: {
+  onLayoutHeight?(height: number): void;
+  children: ReactNode;
+}) {
+  return (
+    <View
+      onLayout={
+        onLayoutHeight ? (event) => onLayoutHeight(event.nativeEvent.layout.height) : undefined
+      }
+    >
+      {children}
+    </View>
   );
 }
 
@@ -285,7 +307,7 @@ function Dock({
   onLayoutHeight,
   children,
 }: {
-  onLayoutHeight(height: number): void;
+  onLayoutHeight?(height: number): void;
   children: ReactNode;
 }) {
   const theme = useTheme();
@@ -293,7 +315,7 @@ function Dock({
   return (
     <KeyboardStickyView offset={{ closed: 0, opened: insets.bottom - 6 }} style={styles.sticky}>
       <View
-        onLayout={(event) => onLayoutHeight(event.nativeEvent.layout.height)}
+        onLayout={(event) => onLayoutHeight?.(event.nativeEvent.layout.height)}
         style={[
           styles.bar,
           {

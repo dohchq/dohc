@@ -1,5 +1,6 @@
 import { noticesWords } from "@dohc/interface-words/notices";
-import { LegendList, type OnViewableItemsChangedInfo } from "@legendapp/list/react-native";
+import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
+import type { OnViewableItemsChangedInfo } from "@legendapp/list/react-native";
 import { Stack, useIsFocused } from "expo-router";
 import { Check } from "lucide-react-native";
 import { useCallback, useEffect, useRef } from "react";
@@ -13,7 +14,8 @@ import type { PhoneNotice } from "./phoneNotice";
 // The account's Notices, and failures held on this phone. The header shows at once. Until the whole list is known,
 // from the server or from the copy saved at the last launch, an empty list holds its place, so it never says All
 // clear too soon. A read that failed is a row here with its cause and Try again. Pulling down reads the list again.
-// The rows on screen, only while Notices is, go to `see`, so a mention among them can read its message for Reply.
+// The rows on screen, only while Notices is, go to `see`, so a mention or an agent's question among them can read its
+// message for Reply or Answer. Leaving Notices closes a row's answer.
 export function ServerNotices() {
   const theme = useTheme();
   const { notices, unread, known, dismiss, setRead, markAllRead, refresh, see } = useNotices();
@@ -21,7 +23,7 @@ export function ServerNotices() {
   const onScreen = useRef<readonly string[]>([]);
   const isFocused = useRef(focused);
   isFocused.current = focused;
-  useEffect(() => see(focused ? onScreen.current : []), [focused, see]);
+  useEffect(() => see(focused ? onScreen.current : null), [focused, see]);
   const onViewableItemsChanged = useCallback(
     ({ viewableItems }: OnViewableItemsChangedInfo<PhoneNotice>) => {
       onScreen.current = viewableItems.map(({ item }) => item.id);
@@ -39,12 +41,15 @@ export function ServerNotices() {
           </Stack.Toolbar.Button>
         </Stack.Toolbar>
       ) : null}
-      <LegendList
+      {/* A row's answer field rides above the keyboard, and a tap on Send or a choice reaches it with the keyboard up. */}
+      <KeyboardAwareLegendList
         data={notices}
         keyExtractor={(notice) => notice.id}
         estimatedItemSize={128}
         style={{ backgroundColor: theme.bg }}
         contentInsetAdjustmentBehavior="automatic"
+        keyboardDismissMode="interactive"
+        keyboardShouldPersistTaps="handled"
         refreshing={false}
         onRefresh={refresh}
         onViewableItemsChanged={onViewableItemsChanged}

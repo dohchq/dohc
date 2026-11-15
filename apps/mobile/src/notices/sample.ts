@@ -1,6 +1,9 @@
 import { syncProblemSentence } from "@dohc/interface-words/notices";
 import { sharingWords } from "@dohc/interface-words/sharing";
+import { createSampleOutbox, sampleScope } from "../conversation/sample";
 import { demoMode } from "../demo";
+import type { ChatMessage } from "../server/workspaceReads";
+import type { MessageTarget, TargetRead } from "./noticeWrites";
 import type { PhoneNotice } from "./phoneNotice";
 // Sample notices for design review only, shaped like the server's: titles and bodies arrive as data.
 
@@ -125,6 +128,75 @@ export const replySample: PhoneNotice = {
   openChat: { id: "thread-porto", thread: "1", reply: "r2" },
   dismissible: true,
 };
+
+/** Design review only, in notices-answer: Nova's open poll and question in #planning, as a read of its chat shows them. */
+const novaAsks = (id: string, body: string, options: readonly string[]): ChatMessage => ({
+  id,
+  threadId: "t-planning",
+  authorKind: "agent",
+  authorName: "Nova",
+  body,
+  createdAtMs: 0,
+  parentMessageId: null,
+  attachments: [],
+  needsDecision: true,
+  decisionState: "open",
+  options,
+  chosenOption: null,
+  resolvedByMessageId: null,
+  reactions: [],
+});
+const returnTrain = novaAsks("q-return", "Which return train should the itinerary use?", [
+  "17:52",
+  "19:52",
+  "21:07",
+]);
+const albumName = novaAsks("q-album", "What should I call the shared photo album?", []);
+
+/** Whose answers the sample's outbox keeps, and where: the conversation sample's. */
+export const answerScope = { origin: sampleScope.origin, accountId: sampleScope.accountId };
+
+/** The sample's read of #planning's chat, which isn't a post's. */
+export const answerRead: TargetRead = {
+  kind: "read",
+  thread: { kind: "thread", id: "t-planning", title: "", messages: [returnTrain, albumName] },
+  post: false,
+};
+
+/** The sample's outbox for answers, in memory: an answer it takes is saved 1.6 s later. */
+export const answerOutbox = () => createSampleOutbox(null);
+
+const asking = (id: string, title: string, question: ChatMessage) => ({
+  notice: {
+    id,
+    senderKind: "agent" as const,
+    senderLabel: "Nova",
+    title,
+    body: question.body,
+    minutesAgo: 1,
+    read: false,
+    openChat: { id: "g-planning", name: "planning" },
+    dismissible: true,
+  },
+  target: {
+    workspaceId: sampleScope.workspaceId,
+    threadId: question.threadId,
+    messageId: question.id,
+    answer: true as const,
+  },
+});
+
+/**
+ * Design review only, in notices-answer, first in the list: agent-run Notices whose rows answer Nova's open poll and
+ * question in place, each with the question its target names.
+ */
+export const answerSamples: readonly {
+  readonly notice: PhoneNotice;
+  readonly target: MessageTarget;
+}[] = [
+  asking("n-answer-return", "Nova is waiting for your answer in #planning", returnTrain),
+  asking("n-answer-album", "Nova has a question in #planning", albumName),
+];
 
 /** Design review only: the row a failed End share leaves, held on this phone. */
 export const endFailedSample: PhoneNotice = {

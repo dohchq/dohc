@@ -13,20 +13,33 @@ import {
   type ReactNode,
 } from "react";
 import { useAccount, useSignIn } from "../account/AccountProvider";
+import { blockedBy, type OutboxRecord } from "../conversation/conversationWrites";
+import { useLocalActions, useOutboxState } from "../conversation/useOutbox";
 import { demoMode } from "../demo";
 import { sampleBuild } from "../sampleBuild";
 import type { NoticeRecord } from "../server/notices";
 import type { NoticeFailure, NoticeListState } from "../server/noticeStore";
 import { serverName } from "../server/origin";
 import { phoneWrites } from "../server/phoneWrites";
-import { readThread } from "../server/workspaceReads";
+import { readChats, readThread } from "../server/workspaceReads";
 import { failureStep, type Reported } from "../workspace/failureReports";
 import {
+  answerLookup,
+  answerView,
+  createNoticeEditor,
+  namedQuestion,
+  type AnswerVisit,
+} from "./noticeAnswers";
+import {
+  answerCandidate,
+  candidateOf,
   createNoticeTargets,
+  isPost,
   noticeAction,
-  replyCandidate,
+  shownQuestion,
   targetKey,
-  type MentionTarget,
+  verifiedQuestion,
+  type MessageTarget,
   type TargetRead,
 } from "./noticeWrites";
 import { phoneTarget, presentNotice, type PhoneNotice, type PhoneTarget } from "./phoneNotice";
@@ -52,8 +65,11 @@ interface NoticesState {
   markAllRead(): void;
   /** Reads the account's Notices again from the start. */
   refresh(): void;
-  /** The rows on screen, by ID, while Notices is: a mention among them reads its message, to offer Reply. */
-  see(ids: readonly string[]): void;
+  /**
+   * The rows on screen, by ID, while Notices is, or null once it isn't: a mention or an agent's question among them
+   * reads its message, to offer Reply or Answer. Leaving Notices closes a row's answer.
+   */
+  see(ids: readonly string[] | null): void;
 }
 
 const State = createContext<NoticesState | null>(null);
@@ -96,12 +112,15 @@ function SampleNoticesState({ children }: { children: ReactNode }) {
         ? [sample.endFailedSample, ...sample.sampleNotices]
         : demoMode === "notices-reply"
           ? [...sample.sampleNotices, sample.replySample]
-          : sample.sampleNotices,
+          : demoMode === "notices-answer"
+            ? [...sample.answerSamples.map((each) => each.notice), ...sample.sampleNotices]
+            : sample.sampleNotices,
   );
+  const notices = useSampleAnswers(local.notices);
   const value = useMemo<NoticesState>(
     () => ({
-      notices: local.notices,
-      unread: local.notices.filter((notice) => !notice.read).length,
+      notices,
+      unread: notices.filter((notice) => !notice.read).length,
       known: true,
       add: local.add,
       dismiss: local.remove,
@@ -110,9 +129,71 @@ function SampleNoticesState({ children }: { children: ReactNode }) {
       refresh: () => undefined,
       see: () => undefined,
     }),
-    [local],
+    [notices, local],
   );
   return <State value={value}>{children}</State>;
+}
+
+const always = { isCurrent: () => true };
+
+/**
+ * Design review only, in notices-answer: the sample's answer rows, over an outbox in memory that reaches no server, as
+ * the signed-in rows are over the account's.
+ */
+function useSampleAnswers(notices: readonly PhoneNotice[]): readonly PhoneNotice[] {
+  const router = useRouter();
+  const asks = demoMode === "notices-answer" && sample ? sample.answerSamples : null;
+  const [outbox] = useState(() => (asks && sample ? sample.answerOutbox() : null));
+  const state = useOutboxState(outbox);
+  const [editor] = useState(() =>
+    createNoticeEditor({
+      signIn: always,
+      outbox,
+      enabled: outbox !== null,
+      verify: (noticeId) => {
+        const ask = asks?.find((each) => each.notice.id === noticeId);
+        return ask && sample ? verifiedQuestion(ask.target, sample.answerRead) : null;
+      },
+      answers: (target) =>
+        sample
+          ? answerLookup(outbox?.state() ?? null, sample.answerScope)(
+              target.workspaceId,
+              target.messageId,
+            )
+          : [],
+    }),
+  );
+  const visit = useSyncExternalStore(editor.subscribe, editor.state);
+  const actions = useLocalActions(editor.recovery, state ? blockedBy(state, true) !== null : true);
+  return useMemo(() => {
+    if (!asks || !sample) return notices;
+    const answersOf = answerLookup(state, sample.answerScope);
+    const read = sample.answerRead;
+    const openChat = () =>
+      router.push({ pathname: "/chat/[id]", params: { id: "g-planning", name: "planning" } });
+    return notices.map((notice) => {
+      const ask = asks.find((each) => each.notice.id === notice.id);
+      if (!ask) return notice;
+      const view = answerView({
+        noticeId: notice.id,
+        shown: shownQuestion(ask.target, read),
+        verified: verifiedQuestion(ask.target, read),
+        named: ask.target,
+        answers: answersOf(ask.target.workspaceId, ask.target.messageId),
+        editor,
+        visit,
+        actions,
+        open: openChat,
+      });
+      const answerable = view?.answerable === true;
+      return {
+        ...notice,
+        open: answerable ? ("answer" as const) : ("open" as const),
+        onOpen: answerable ? () => void editor.open(notice.id) : openChat,
+        ...(view ? { answer: view } : {}),
+      };
+    });
+  }, [asks, notices, state, editor, visit, actions, router]);
 }
 
 const NO_NOTICES: NoticeListState = {
@@ -125,6 +206,7 @@ const noSubscribe = () => () => undefined;
 const noState = () => NO_NOTICES;
 const NO_READS: ReadonlyMap<string, TargetRead> = new Map();
 const noReads = () => NO_READS;
+const NO_ANSWERS: readonly OutboxRecord[] = [];
 
 // The account's Notices from the server, with failures held on this phone on top.
 function ServerNoticesState({ children }: { children: ReactNode }) {
@@ -134,15 +216,19 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
     currentWorkspaceId,
     chooseWorkspace,
     reloadWorkspaces,
+    outbox,
   } = useAccount();
   const relay = useSyncExternalStore(store?.subscribe ?? noSubscribe, store?.state ?? noState);
   const local = useLocalNotices([]);
   const router = useRouter();
   const showToast = useShowToast();
   const signIn = useSignIn();
+  const outboxState = useOutboxState(phoneWrites ? outbox : null);
 
-  // The reads behind Reply, one sign-in's, made only where phone writes are on. Making one starts nothing: rows on
-  // screen ask for theirs through `see`.
+  // The reads behind Reply and Answer, one sign-in's, made only where phone writes are on. Making one starts nothing:
+  // rows on screen ask for theirs through `see`. An agent's question also reads its workspace's chat list, so its answer
+  // goes where the open thread would put it. A read that shows a saved answer's reply hands it off, as the open
+  // workspace's reads do. Nothing here marks a thread read.
   const targets = useMemo(
     () =>
       phoneWrites
@@ -150,15 +236,55 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
             signIn,
             read: (workspaceId, threadId, signal) =>
               readThread(signIn.client, workspaceId, threadId, signal),
+            readPost: async (workspaceId, threadId, signal) =>
+              isPost((await readChats(signIn.client, workspaceId, signal)).value, threadId),
+            onThread: (workspaceId, thread) => outbox.handoff(signIn, workspaceId, thread.messages),
           })
         : null,
-    [signIn],
+    [signIn, outbox],
   );
   useEffect(() => () => targets?.stop(), [targets]);
   const reads = useSyncExternalStore(targets?.subscribe ?? noSubscribe, targets?.state ?? noReads);
   // The handlers check the latest list and records through these when the person acts.
   const latest = useRef({ workspaces, records: relay.notices });
   latest.current = { workspaces, records: relay.notices };
+
+  // This phone's answers in the account's outbox, whatever the list shows now.
+  const scope = useMemo(() => ({ origin: signIn.origin, accountId: signIn.userId }), [signIn]);
+  const answersOf = useMemo(() => answerLookup(outboxState, scope), [outboxState, scope]);
+  const answersFor = useCallback(
+    (target: MessageTarget) => answersOf(target.workspaceId, target.messageId),
+    [answersOf],
+  );
+
+  // The in-row answer, one sign-in's, so a change of sign-in closes it and its field. Each write goes to the Notice's
+  // own workspace, once the latest list and read still verify its question.
+  const editor = useMemo(
+    () =>
+      createNoticeEditor({
+        signIn,
+        outbox: phoneWrites ? outbox : null,
+        enabled: phoneWrites,
+        verify: (noticeId) => {
+          const { workspaces: list, records } = latest.current;
+          const record = records.find((each) => `relay:${each.noticeId}` === noticeId);
+          const candidate =
+            record && signIn.isCurrent() ? answerCandidate(record, list, phoneWrites) : null;
+          return candidate && targets
+            ? verifiedQuestion(candidate, targets.state().get(targetKey(candidate)))
+            : null;
+        },
+        answers: (target) =>
+          answerLookup(outbox.state(), scope)(target.workspaceId, target.messageId),
+      }),
+    [signIn, outbox, targets, scope],
+  );
+  useEffect(() => () => editor.stop(), [editor]);
+  const visit = useSyncExternalStore(editor.subscribe, editor.state);
+  const answerActions = useLocalActions(
+    editor.recovery,
+    outboxState ? blockedBy(outboxState, phoneWrites) !== null : true,
+  );
 
   // Opening reads the Notice, and opens its target in its own workspace. It never runs anything.
   const open = useCallback(
@@ -215,35 +341,60 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
     },
     [signIn, targets, open, store, chooseWorkspace, router],
   );
+  // Answer opens the row's own answer, once the latest list, sign-in and read still verify the question, and reads the
+  // Notice. It never opens or switches a workspace. When they no longer verify it, it opens the target as Open does.
+  const answer = useCallback(
+    (record: NoticeRecord) => {
+      if (editor.open(`relay:${record.noticeId}`)) {
+        if (record.readAtMs === null) store?.mark(record.noticeId, "read");
+        return;
+      }
+      const target = phoneTarget(record, latest.current.workspaces);
+      if (target) open(record, target);
+    },
+    [editor, store, open],
+  );
   const retryTarget = useCallback(
     (record: NoticeRecord) => {
-      const target = replyCandidate(record, latest.current.workspaces, phoneWrites);
+      const target = candidateOf(record, latest.current.workspaces, phoneWrites);
       if (target) targets?.retry(target);
     },
     [targets],
   );
 
-  // A row the store didn't change, whose read didn't change, keeps its object, so its NoticeRow doesn't draw again.
+  // A row the store didn't change, whose read, answers and visit didn't change, keeps its object, so its NoticeRow
+  // doesn't draw again.
   const presented = useMemo(
     () =>
       new WeakMap<
         NoticeRecord,
-        { readonly read: TargetRead | undefined; readonly notice: PhoneNotice }
+        {
+          readonly read: TargetRead | undefined;
+          readonly answers: readonly OutboxRecord[];
+          readonly visit: AnswerVisit | null;
+          readonly notice: PhoneNotice;
+        }
       >(),
-    [workspaces, currentWorkspaceId, open, reply, retryTarget],
+    [workspaces, currentWorkspaceId, open, reply, answer, retryTarget, editor, answerActions],
   );
   const relayNotices = useMemo(
     () =>
       relay.notices.map((record) => {
-        const candidate = replyCandidate(record, workspaces, phoneWrites);
+        const candidate = candidateOf(record, workspaces, phoneWrites);
         const read = candidate ? reads.get(targetKey(candidate)) : undefined;
+        // The answers this phone keeps show whatever the list says now, so one for a hidden workspace keeps Discard.
+        const named = phoneWrites ? namedQuestion(record) : null;
+        const answers = named ? answersOf(named.workspaceId, named.messageId) : NO_ANSWERS;
+        const editing = visit?.noticeId === `relay:${record.noticeId}` ? visit : null;
         const known = presented.get(record);
-        if (known && known.read === read) return known.notice;
+        if (known && known.read === read && known.answers === answers && known.visit === editing)
+          return known.notice;
         const action = noticeAction(record, {
           list: workspaces,
           writes: phoneWrites,
           signIn,
           reads,
+          answers: answersFor,
         });
         const notice = presentNotice(record, {
           list: workspaces,
@@ -251,10 +402,27 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
           action,
           open,
           reply,
+          answer,
           retryTarget,
         });
-        presented.set(record, { read, notice });
-        return notice;
+        const target = phoneTarget(record, workspaces);
+        const asked = candidate?.answer === true && signIn.isCurrent() ? candidate : null;
+        const view = named
+          ? answerView({
+              noticeId: notice.id,
+              shown: asked ? shownQuestion(asked, read) : null,
+              verified: asked ? verifiedQuestion(asked, read) : null,
+              named,
+              answers,
+              editor,
+              visit: editing,
+              actions: answerActions,
+              ...(target ? { open: () => open(record, target) } : {}),
+            })
+          : null;
+        const row = view ? { ...notice, answer: view } : notice;
+        presented.set(record, { read, answers, visit: editing, notice: row });
+        return row;
       }),
     [
       relay.notices,
@@ -263,35 +431,68 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
       currentWorkspaceId,
       open,
       reply,
+      answer,
       retryTarget,
       reads,
       signIn,
+      answersOf,
+      answersFor,
+      visit,
+      editor,
+      answerActions,
     ],
   );
 
-  // Only the mentions on screen read their messages, one read per workspace and thread.
+  // Only the rows on screen read their messages, one read per workspace and thread, and the row whose answer is open
+  // keeps its read while it scrolls away. A row's answer closes when its Notice leaves the list or its workspace stops
+  // showing on the phone, which also drops its read.
   const visible = useRef<readonly string[]>([]);
   const wantVisible = useCallback(() => {
     if (!targets) return;
     const ids = new Set(visible.current);
     const { workspaces: list, records } = latest.current;
-    const wanted: MentionTarget[] = [];
+    const editing = editor.state();
+    if (editing) {
+      const record = records.find((each) => `relay:${each.noticeId}` === editing.noticeId);
+      if (record && answerCandidate(record, list, phoneWrites)) ids.add(editing.noticeId);
+      else editor.close(editing.noticeId);
+    }
+    const wanted: MessageTarget[] = [];
     for (const record of records) {
       if (!ids.has(`relay:${record.noticeId}`)) continue;
-      const candidate = replyCandidate(record, list, phoneWrites);
+      const candidate = candidateOf(record, list, phoneWrites);
       if (candidate) wanted.push(candidate);
     }
     targets.want(wanted);
-  }, [targets]);
+  }, [targets, editor]);
   const see = useCallback(
-    (ids: readonly string[]) => {
-      visible.current = ids;
+    (ids: readonly string[] | null) => {
+      if (ids === null) editor.close();
+      visible.current = ids ?? [];
       wantVisible();
     },
-    [wantVisible],
+    [wantVisible, editor],
   );
-  // A list that became ready, or a row that changed, while on screen.
-  useEffect(() => wantVisible(), [wantVisible, workspaces, relay.notices]);
+  // A list that became ready, or a row that changed, while on screen, and an answer opened or closed.
+  useEffect(() => wantVisible(), [wantVisible, workspaces, relay.notices, visit]);
+
+  // Once the outbox saves an answer, its question's thread is read again, so the reply shows, the outbox hands the
+  // record off, and the server's state takes over from the phone's.
+  const reread = useMemo(() => new Set<string>(), [targets]);
+  useEffect(() => {
+    if (!targets) return;
+    const { workspaces: list, records } = latest.current;
+    for (const record of records) {
+      const candidate = answerCandidate(record, list, phoneWrites);
+      if (!candidate) continue;
+      for (const saved of answersFor(candidate)) {
+        if (saved.stage !== "saved" || reread.has(saved.operationId)) continue;
+        reread.add(saved.operationId);
+        targets.retry(candidate);
+      }
+    }
+  }, [targets, answersFor, reread]);
+
   const notices = useMemo(() => [...local.notices, ...relayNotices], [local.notices, relayNotices]);
   // The handlers read the list through this, so they keep their identity: a failure report takes itself back when its
   // `dismiss` changes.
@@ -319,7 +520,7 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
     local.readAll();
   }, [store, local.readAll]);
   // A refresh reads the workspace list too, for a Show on phone change made on another device, and the mentions'
-  // messages.
+  // messages and agents' questions.
   const refresh = useCallback(() => {
     store?.refresh();
     reloadWorkspaces();

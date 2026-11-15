@@ -1,5 +1,8 @@
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { workspaceName } from "../chats/workspaceName";
+import type { SubmitOutcome } from "../conversation/conversationWrites";
+import type { Decision, LocalMark } from "../conversation/types";
+import type { LocalActions } from "../conversation/useOutbox";
 import type { NoticeRecord } from "../server/notices";
 import type { WorkspaceList } from "../server/workspaceList";
 import type { NoticeAction } from "./noticeWrites";
@@ -25,8 +28,11 @@ export interface PhoneNotice {
   readonly read: boolean;
   /** Another workspace's name, shown beside the time. */
   readonly folder?: string;
-  /** The row's worded action, other than Try again: Open, Open note, or Reply to the message a mention names. */
-  readonly open?: "open" | "openNote" | "reply";
+  /**
+   * The row's worded action, other than Try again: Open, Open note, Reply to the message a mention names, or Answer the
+   * agent's question an agent-run Notice names, in the row.
+   */
+  readonly open?: "open" | "openNote" | "reply" | "answer";
   /** Where Open or Reply goes, in a sample build: a chat, or a thread with a message chosen to reply to. */
   readonly openChat?: {
     readonly id: string;
@@ -46,6 +52,38 @@ export interface PhoneNotice {
   /** A wake from the server waits for a computer; dismissing it would cancel it. */
   readonly dismissible: boolean;
   readonly failed?: boolean;
+  /** The agent's question the Notice names, and this phone's answers to it, in the row (NoticeAnswer.tsx). */
+  readonly answer?: NoticeAnswerView;
+}
+
+/**
+ * What a row shows of the question an agent-run Notice names. It shows while a read shows the question or this phone
+ * keeps an answer to it, so an answer queued for a workspace that later hides stays in sight, with Discard.
+ */
+export interface NoticeAnswerView {
+  /** The question as a current read shows it, or null when none does. */
+  readonly question: {
+    readonly id: string;
+    readonly authorName: string;
+    readonly body: string;
+  } | null;
+  readonly decision: Decision;
+  /** This phone's answers that aren't saved, oldest first: Send on a withheld one, Copy and Discard. */
+  readonly marks: readonly LocalMark[];
+  /** The open visit's number, which keys its field, or null while the row's answer isn't open. */
+  readonly editing: number | null;
+  /** Whether a new answer may go now: the latest list and read verify the question, open. */
+  readonly answerable: boolean;
+  /** Whether Send may go on a withheld answer: the latest list and read still show the question. */
+  readonly sendable: boolean;
+  /** Closes the row's answer. */
+  cancel(): void;
+  /** Opens the question's thread, as Open does, when the phone shows it. */
+  open?(): void;
+  /** Answers with `body`, or with a poll's `option`. */
+  submit(body: string, option?: string): Promise<SubmitOutcome>;
+  /** Send, Copy and Discard on this phone's answers. */
+  readonly actions: LocalActions;
 }
 
 /** Where a Notice's Open goes on the phone. */
@@ -106,13 +144,18 @@ export function presentNotice(
     open(record: NoticeRecord, target: PhoneTarget): void;
     /** Reply on a mention whose message a read showed. The handler checks again before it goes. */
     reply?(record: NoticeRecord): void;
-    /** Try again on the read that would offer Reply. */
+    /** Answer on an agent's question a read verified, which opens the row's answer. It checks again too. */
+    answer?(record: NoticeRecord): void;
+    /** Try again on the read that would offer Reply or Answer. */
     retryTarget?(record: NoticeRecord): void;
   },
 ): PhoneNotice {
-  const { reply, retryTarget } = context;
+  const { reply, answer, retryTarget } = context;
   const given = context.action ?? openAction(record, context.list);
-  const action = given.kind === "reply" && !reply ? openAction(record, context.list) : given;
+  const action =
+    (given.kind === "reply" && !reply) || (given.kind === "answer" && !answer)
+      ? openAction(record, context.list)
+      : given;
   const workspace =
     context.list.status === "ready" && record.workspaceId !== context.currentWorkspaceId
       ? context.list.workspaces.find((item) => item.workspaceId === record.workspaceId)
@@ -130,13 +173,17 @@ export function presentNotice(
     ...(workspace ? { folder: workspaceName(workspace) } : {}),
     ...(action.kind === "reply" && reply
       ? { open: "reply" as const, onOpen: () => reply(record) }
-      : action.kind === "open"
-        ? {
-            open: openWord(action.target),
-            onOpen: () => context.open(record, action.target),
-            ...(action.readFailed && retryTarget ? { retryTarget: () => retryTarget(record) } : {}),
-          }
-        : { elsewhere: true }),
+      : action.kind === "answer" && answer
+        ? { open: "answer" as const, onOpen: () => answer(record) }
+        : action.kind === "open"
+          ? {
+              open: openWord(action.target),
+              onOpen: () => context.open(record, action.target),
+              ...(action.readFailed && retryTarget
+                ? { retryTarget: () => retryTarget(record) }
+                : {}),
+            }
+          : { elsewhere: true }),
     // A wake waits for a computer: the phone offers it no swipe and no Done, though its scope leaves wakes out.
     dismissible: record.kind !== "automation-wake",
     ...(record.kind === "automation-failed" ? { failed: true } : {}),

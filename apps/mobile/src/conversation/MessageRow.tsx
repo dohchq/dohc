@@ -174,16 +174,19 @@ function LocalStateText({ mark, theme }: { mark: LocalMark; theme: Theme }) {
 /**
  * Under a message only this phone has: why it wasn't sent, and what can be done. A withheld message has Send and
  * Discard. One still sending for a long time, or one the server refused, has Copy beside it and Discard; neither is
- * sent again as another message.
+ * sent again as another message. Without `sendable`, as for an answer whose Notice's workspace no longer shows on the
+ * phone, a withheld one has only Discard.
  */
-function LocalFooter({
+export function LocalFooter({
   mark,
   actions,
   theme,
+  sendable = true,
 }: {
   mark: LocalMark;
   actions: LocalActions;
   theme: Theme;
+  sendable?: boolean;
 }) {
   const { state } = mark;
   const problem = actions.problems.get(mark.operationId);
@@ -206,7 +209,7 @@ function LocalFooter({
         </Text>
       ) : null}
       <View style={styles.localActions}>
-        {state.kind === "withheld" ? (
+        {state.kind === "withheld" && sendable ? (
           <ActionPill
             label={chatWords.send}
             disabled={actions.blocked}
