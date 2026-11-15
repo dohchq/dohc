@@ -235,6 +235,37 @@ describe("named recipient History by access level", () => {
     });
   });
 
+  it("serves a current file to a view recipient behind other current files the share refuses", async () => {
+    const { h } = await seedHistory();
+    await putBlob(h, GRANTER, WORKSPACE, "template");
+    const ops = [];
+    // More current files than one candidate page, ahead in path order, that
+    // arrived by a rename from outside the share, which the share filter refuses.
+    for (let index = 0; index < 65; index += 1) {
+      const name = `a${String(index).padStart(2, "0")}.md`;
+      ops.push(
+        moment(`outside/${name}`, "template", { objectId: `object-a${index}` }),
+        moment(`docs/${name}`, "template", {
+          objectId: `object-a${index}`,
+          operation: "rename",
+          beforeContent: "template",
+          beforePath: `outside/${name}`,
+        }),
+      );
+    }
+    ops.push(moment("docs/z.md", "template", { objectId: "object-z" }));
+    await appendLog(h, GRANTER, WORKSPACE, ops);
+    const shareId = await createShare(h, GRANTER, WORKSPACE, {
+      recipientEmail: "reader@dohc.test",
+      paths: ["docs"],
+      access: "view",
+    });
+    expect(await blobStatus(h, "reader", shareId, "template")).toEqual({
+      status: 200,
+      text: "template",
+    });
+  });
+
   it("gives an edit recipient the retained history, including what came before the share", async () => {
     const { h } = await seedHistory();
     const shareId = await createShare(h, GRANTER, WORKSPACE, {

@@ -1729,6 +1729,7 @@ export interface SyncRelayStorage {
     versionId: string;
     selectorPaths: readonly string[];
     sha256: string;
+    afterPath?: string;
   }): Array<{ path: string; row: SyncRelayLogRow }>;
   isCurrentFileState(input: {
     workspaceId: string;

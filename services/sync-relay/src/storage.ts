@@ -2218,6 +2218,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     versionId: string;
     selectorPaths: readonly string[];
     sha256: string;
+    afterPath?: string;
   }): Array<{ path: string; row: SyncRelayLogRow }> {
     return currentFilesStorage.listCurrentFileLogRowsByBlob(this, input);
   }

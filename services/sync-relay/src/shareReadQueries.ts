@@ -506,13 +506,8 @@ export function createShareReadQueries(
     const versionId = targetVersionId(selector);
     const chatResolver = chatResolverFor(workspaceId);
     if (selector.access !== "edit") {
-      const current = storage.listCurrentFileLogRowsByBlob({
-        workspaceId,
-        versionId,
-        selectorPaths: selector.paths,
-        sha256,
-      });
-      const produced = current.some(({ path, row }) => {
+      // Page past rows the share filter refuses, so they cannot hide an admitted file.
+      const produced = ({ path, row }: { path: string; row: SyncRelayLogRow }) => {
         const decision = filterOpForShare(selector, row.opKind, row.payloadJson, chatResolver);
         if (!decision.allowed || !decision.blobSha256s.includes(sha256)) return false;
         const served = decision.payload as Record<string, unknown>;
@@ -522,8 +517,19 @@ export function createShareReadQueries(
               snapshot.path === path && snapshot.blobSha256 === sha256,
           );
         return (served.payloadAfterPath ?? served.path) === path;
-      });
-      return produced ? storage.getBlob(workspaceId, sha256) : null;
+      };
+      for (let afterPath: string | undefined; ;) {
+        const page = storage.listCurrentFileLogRowsByBlob({
+          workspaceId,
+          versionId,
+          selectorPaths: selector.paths,
+          sha256,
+          ...(afterPath === undefined ? {} : { afterPath }),
+        });
+        if (page.some(produced)) return storage.getBlob(workspaceId, sha256);
+        if (page.length < SHARED_BLOB_CANDIDATE_LIMIT) return null;
+        afterPath = page.at(-1)!.path;
+      }
     }
     const candidates = [
       ...storage.listObjectMomentLogRowsByBlob({
