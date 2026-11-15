@@ -3678,8 +3678,17 @@ mod tests {
         let (_dir, mut store, observed, checkpoint) = fixture();
         install(&mut store, &observed, &checkpoint);
         let mut cache = crate::WriterDocCache::default();
-        held_note(&mut store, &mut cache, &observed, &checkpoint);
-        let shown = open_draft_cached(&store, &mut cache, &observed.binding, 1).unwrap();
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&checkpoint).unwrap();
+        let row = collaborator.richdoc_append_paragraph("Committed by a collaborator");
+        put_committed_row(&store, &mut cache, &observed.binding, 5, row).unwrap();
+        let shown = open_draft_cached(
+            &store,
+            &mut cache,
+            &observed.binding,
+            revision(&store, &observed),
+        )
+        .unwrap();
         let editor = Ydoc::wire();
         editor.apply(&shown.initial_update).unwrap();
         let appended = append_draft_cached(

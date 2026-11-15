@@ -690,14 +690,13 @@ fn pause_in_tx(
 
 /// The copy's Markdown, and whether it leaves edits out. The pause must not
 /// depend on the owner's screen becoming Markdown: a collaborator's row can
-/// be too deep or too large to render. Then the copy keeps the longest run of
-/// rows that renders and, on top, the longest run of the owner's entries.
+/// be too deep or too large to render. Then the copy leaves out each edit
+/// that cannot render, and every edit that builds on one.
 fn copy_text(parts: super::draft::LayeredParts) -> Result<(String, bool), OwnerOutboxError> {
     let base = parts.checkpoint;
-    let rows = parts.rows.len();
-    let mut kept = parts.rows;
-    kept.extend(parts.pending);
-    if let Some((markdown, waits)) = render(&base, &kept) {
+    let mut waiting = parts.rows;
+    waiting.extend(parts.pending);
+    if let Some((markdown, waits)) = render(&base, &waiting) {
         // An owner entry waits for a row the route has not sent yet.
         if waits {
             return Err(OwnerOutboxError::AcceptedStateIncomplete);
@@ -707,29 +706,23 @@ fn copy_text(parts: super::draft::LayeredParts) -> Result<(String, bool), OwnerO
     if render(&base, &[]).is_none() {
         return Ok((String::new(), true));
     }
-    let pending = kept.split_off(rows);
-    keep_longest(&base, &mut kept, 0);
-    let from = kept.len();
-    kept.extend(pending);
-    keep_longest(&base, &mut kept, from);
-    // `keep_longest` keeps only a run that rendered.
-    let (markdown, _) = render(&base, &kept).ok_or(OwnerOutboxError::Corrupt)?;
-    Ok((markdown, true))
-}
-
-/// Shorten `updates` to the longest run past `from` that renders on `base`.
-/// `updates[..from]` renders already.
-fn keep_longest(base: &[u8], updates: &mut Vec<Vec<u8>>, from: usize) {
-    let (mut renders, mut fails) = (from, updates.len() + 1);
-    while fails - renders > 1 {
-        let mid = renders + (fails - renders) / 2;
-        if render(base, &updates[..mid]).is_some() {
-            renders = mid;
-        } else {
-            fails = mid;
+    // Keep each edit, in order, whose state still renders with nothing left
+    // waiting. An edit that waits on one kept later is tried again then.
+    let mut kept = Vec::new();
+    loop {
+        let before = waiting.len();
+        for update in std::mem::take(&mut waiting) {
+            kept.push(update);
+            if !matches!(render(&base, &kept), Some((_, false))) {
+                waiting.extend(kept.pop());
+            }
+        }
+        if waiting.len() == before {
+            break;
         }
     }
-    updates.truncate(renders);
+    let (markdown, _) = render(&base, &kept).ok_or(OwnerOutboxError::Corrupt)?;
+    Ok((markdown, true))
 }
 
 /// The Markdown of `base` with `updates` applied in order, and whether an
