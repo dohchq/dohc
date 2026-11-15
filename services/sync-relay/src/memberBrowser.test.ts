@@ -124,7 +124,10 @@ function resolveActor(incoming: Request, workspaceId: string) {
   return resolveTestActor(incoming, workspaceId);
 }
 
-async function seed(activity = new DiscussionActivityHub()) {
+async function seed(
+  activity = new DiscussionActivityHub(),
+  overrides: Partial<Parameters<typeof testHandler>[1]> = {},
+) {
   resetOpSeq();
   ownerSeq = 0;
   const storage = await testStorage();
@@ -134,6 +137,7 @@ async function seed(activity = new DiscussionActivityHub()) {
     namedBrowserSessionLimits: limits,
     relayExchangeKey: RELAY_EXCHANGE_KEY,
     resolveActor,
+    ...overrides,
   });
   expect(
     (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
@@ -248,6 +252,41 @@ describe("a member reads the workspace through the link read routes", () => {
     expect(await share()).not.toHaveProperty("levelChangedBy");
     await setLevel(h, "view");
     expect(await share()).toMatchObject({ access: "view", levelChangedBy: `Name ${OWNER}` });
+  });
+
+  // A rule's folder names stay on the relay, and a new account email reaches
+  // browser reads within a minute, as it does the feed.
+  it("never names a hidden folder in a share's answer, and follows the member's account email", async () => {
+    let email = "ana@dohc.test",
+      now = 10_000;
+    const { h, storage } = await seed(undefined, {
+      nowMs: () => now,
+      lookupAccountEmail: async (userId: string) => ({
+        email: userId === "ana" ? email : `${userId}@dohc.test`,
+        verified: true,
+      }),
+    });
+    const ana = await member(h, storage, "ana");
+    await ownerWrite(h, "Hidden Plans/access.yaml", "people:\n  ben@dohc.test: edit\n");
+    await ownerWrite(h, "docs/access.yaml", "people:\n  ana@dohc.test: edit\n");
+    const paths = async () =>
+      (
+        (await json(await memberRead(h, "/sync/link/current", ana.grantId, "ana"))).files as Array<{
+          path: string;
+        }>
+      ).map((file) => file.path);
+    for (const route of ["/sync/link/share", "/sync/link/current"]) {
+      const body = await memberRead(h, route, ana.grantId, "ana");
+      expect(body.status).toBe(200);
+      const text = await body.text();
+      expect(text).not.toContain("Hidden Plans");
+      expect(JSON.parse(text).effectiveSelector).not.toHaveProperty("reach");
+    }
+    expect(await paths()).toEqual(["docs/plan.md"]);
+    email = "another@dohc.test";
+    expect(await paths()).toEqual(["docs/plan.md"]);
+    now += 60_000;
+    expect(await paths()).toEqual([]);
   });
 
   it("serves files the owner adds after the member joined", async () => {

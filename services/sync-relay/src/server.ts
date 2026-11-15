@@ -54,7 +54,10 @@ import type {
   ResolveAccountSession,
   ResolveActor,
 } from "@dohc/workspace-auth/session";
-import { createNamedShareTransportRoutes } from "./namedShareTransportRoutes";
+import {
+  MEMBER_IDENTITY_MAX_AGE_MS,
+  createNamedShareTransportRoutes,
+} from "./namedShareTransportRoutes";
 import { createKeyEnvelopeRoutes } from "./keyEnvelopeRoutes";
 import {
   createNoticeRoutes,
@@ -1051,7 +1054,14 @@ export function createSyncRelayHandler({
     nowMs,
     requireLinkCapability,
     requireFreshLinkRead,
-    resolveActor,
+    // A member's browser reads refresh their account email as the feed does,
+    // so a rule that named their old address stops reaching them.
+    resolveActor: async (request, workspaceId) => {
+      const actor = await resolveActor(request, workspaceId);
+      if (actor.workspaceId === workspaceId)
+        await claimPendingShares(actor.userId, request.signal, MEMBER_IDENTITY_MAX_AGE_MS);
+      return actor;
+    },
     publicOrigin: shareWebOrigin,
   });
   const respondToLinkCollectionWrites = linkKey

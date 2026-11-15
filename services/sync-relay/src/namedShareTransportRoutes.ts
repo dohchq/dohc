@@ -40,7 +40,8 @@ import type { createShareReadQueries } from "./shareReadQueries";
 import type { SyncRelayStorage } from "./storage";
 import { MAX_BLOB_BYTES, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
 
-const MEMBER_FEED_IDENTITY_MAX_AGE_MS = 60_000;
+/** How old a member's stored account email may be when their feed or browser reads. */
+export const MEMBER_IDENTITY_MAX_AGE_MS = 60_000;
 
 export type NamedShareTransportRoute =
   | { route: "share-reach"; shareId: string }
@@ -181,7 +182,7 @@ export function createNamedShareTransportRoutes(
       }
       if (!claimed && isWorkspaceSelector(authorized.effectiveSelector)) {
         // A member's feed polls often; an email change applies within a minute.
-        await claimPendingShares(actor.userId, undefined, MEMBER_FEED_IDENTITY_MAX_AGE_MS);
+        await claimPendingShares(actor.userId, undefined, MEMBER_IDENTITY_MAX_AGE_MS);
         authorized = requireShareAction(route.shareId, actor.userId, "read");
       }
       const share = { ...authorized.share, selector: authorized.effectiveSelector };
