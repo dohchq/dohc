@@ -633,27 +633,33 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     assert.equal(jobs[name].env.NEXTEST_PROFILE, "without-confinement");
   for (const name of ["rust-tests", "rust"]) assert.equal(jobs[name].needs, "changes");
   for (const js of ["true", "false"])
-    for (const rust of ["true", "false"]) {
-      const context = {
-        ...workflowContext({ enabled: "true" }),
-        needs: { changes: { result: "success", outputs: { js, rust } } },
-      };
-      assert.equal(workflowExpression(jobs.javascript.if, context), js === "true");
-      for (const name of ["rust", "rust-tests", "rust-policy"])
-        assert.equal(workflowExpression(jobs[name].if, context), rust === "true");
-      assert.equal(
-        workflowExpression(jobs["javascript-prepare"].if, context),
-        js === "true" || rust === "true",
-      );
-    }
-  for (const gate of ["all", "js", "rust"]) {
+    for (const rust of ["true", "false"])
+      for (const android of ["true", "false"]) {
+        const context = {
+          ...workflowContext({ enabled: "true" }),
+          needs: { changes: { result: "success", outputs: { js, rust, android } } },
+        };
+        assert.equal(workflowExpression(jobs.javascript.if, context), js === "true");
+        for (const name of ["rust", "rust-tests", "rust-policy"])
+          assert.equal(workflowExpression(jobs[name].if, context), rust === "true");
+        assert.equal(
+          workflowExpression(jobs["javascript-prepare"].if, context),
+          js === "true" || rust === "true",
+        );
+        assert.equal(workflowExpression(jobs.android.if, context), android === "true");
+      }
+  for (const gate of ["all", "js", "rust", "android"]) {
     const context = {
       ...workflowContext({ event: "workflow_dispatch", gate }),
       needs: { changes: { result: "success", outputs: {} } },
     };
-    assert.equal(workflowExpression(jobs.javascript.if, context), gate !== "rust");
-    assert.equal(workflowExpression(jobs.rust.if, context), gate !== "js");
-    assert.equal(workflowExpression(jobs["javascript-prepare"].if, context), true);
+    assert.equal(workflowExpression(jobs.javascript.if, context), gate === "all" || gate === "js");
+    assert.equal(workflowExpression(jobs.rust.if, context), gate === "all" || gate === "rust");
+    assert.equal(workflowExpression(jobs["javascript-prepare"].if, context), gate !== "android");
+    assert.equal(
+      workflowExpression(jobs.android.if, context),
+      gate === "all" || gate === "android",
+    );
     for (const result of ["success", "failure", "skipped"]) {
       const selected = {
         ...context,
@@ -668,7 +674,10 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
           /^always\(\)/,
           "Rust siblings must retain failure evidence when the build fails",
         );
-        assert.equal(workflowExpression(jobs[name].if, selected), gate !== "js");
+        assert.equal(
+          workflowExpression(jobs[name].if, selected),
+          gate === "all" || gate === "rust",
+        );
       }
     }
     for (const result of ["failure", "skipped", "cancelled"]) {
@@ -787,10 +796,11 @@ test("prepared artifact consumers share preparation's fingerprint environment", 
 
 test("job names match the workflow graph and timeout backstops", () => {
   const { jobs } = load(workflow);
+  // The graph times the distributed gates. Android is one job outside them.
   assert.deepEqual(
     Object.keys(CLOUD_JOB_GRAPH).sort(),
     Object.keys(jobs)
-      .filter((name) => name !== "verification")
+      .filter((name) => !["verification", "android"].includes(name))
       .sort(),
   );
   for (const [id, node] of Object.entries(CLOUD_JOB_GRAPH)) {
@@ -818,6 +828,7 @@ test("job names match the workflow graph and timeout backstops", () => {
       "rust-tests": 35,
       "rust-policy": 25,
       rust: 55,
+      android: 20,
       verification: 10,
     },
   );
@@ -903,7 +914,7 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
     names = Object.keys(jobs);
   assert.equal(
     names.reduce((total, name) => total + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0),
-    23,
+    24,
   );
   const ancestors = (name) => {
     const needs = jobs[name].needs ?? [];
@@ -919,6 +930,7 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
     "javascript",
     "javascript-prepare",
     "rust-policy",
+    "android",
   ];
   const concurrent = (simultaneous) => {
     assert.ok(
@@ -939,9 +951,9 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
       simultaneous.reduce((n, name) => n + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0),
     );
   }
-  assert.equal(concurrent(initial), JS_SHARDS + RUST_SHARDS + 2);
+  assert.equal(concurrent(initial), JS_SHARDS + RUST_SHARDS + 3);
   assert.equal(peak, concurrent(initial));
-  assert.equal(peak, 21);
+  assert.equal(peak, 22);
   assert.ok(peak <= 60, "one combined gate fits the plan limit");
 });
 
@@ -1018,7 +1030,7 @@ test("cloud JavaScript jobs do not inherit the event's base SHA", () => {
 
 test("the final CI check rejects failed, cancelled, missing, and unexpectedly skipped gates", (t) => {
   const job = load(workflow).jobs.verification;
-  assert.deepEqual(job.needs, ["changes", "javascript", "rust", "javascript-prepare"]);
+  assert.deepEqual(job.needs, ["changes", "javascript", "rust", "javascript-prepare", "android"]);
   assert.equal(workflowExpression(job.name, workflowContext()), "PR verification");
   assert.equal(
     workflowExpression(job.name, workflowContext({ event: "workflow_dispatch", gate: "js" })),
@@ -1108,30 +1120,44 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     jsResult,
     rustResult,
     confinementResult = jsResult === "success" || rustResult === "success" ? "success" : "skipped",
+    android = "false",
+    androidResult = android === "true" ? "success" : "skipped",
   ) => ({
-    changes: { result: "success", outputs: { js, rust } },
+    changes: { result: "success", outputs: { js, rust, android } },
     javascript: { result: jsResult },
     rust: { result: rustResult },
     "javascript-prepare": { result: confinementResult },
+    android: { result: androidResult },
   });
   for (const js of ["true", "false"])
-    for (const rust of ["true", "false"]) {
-      const valid = jobs(
-        js,
-        rust,
-        js === "true" ? "success" : "skipped",
-        rust === "true" ? "success" : "skipped",
-      );
-      assert.equal(run(valid).status, 0);
-      for (const name of ["javascript", "rust", "javascript-prepare"])
-        for (const result of ["failure", "cancelled", undefined]) {
-          assert.equal(run({ ...valid, [name]: { result } }).status, 1);
+    for (const rust of ["true", "false"])
+      for (const android of ["true", "false"]) {
+        const valid = jobs(
+          js,
+          rust,
+          js === "true" ? "success" : "skipped",
+          rust === "true" ? "success" : "skipped",
+          undefined,
+          android,
+        );
+        assert.equal(run(valid).status, 0);
+        for (const name of ["javascript", "rust", "javascript-prepare", "android"])
+          for (const result of ["failure", "cancelled", undefined]) {
+            assert.equal(run({ ...valid, [name]: { result } }).status, 1);
+          }
+        for (const name of ["javascript", "rust", "javascript-prepare", "android"]) {
+          const opposite = valid[name].result === "success" ? "skipped" : "success";
+          assert.equal(run({ ...valid, [name]: { result: opposite } }).status, 1);
         }
-      for (const name of ["javascript", "rust", "javascript-prepare"]) {
-        const opposite = valid[name].result === "success" ? "skipped" : "success";
-        assert.equal(run({ ...valid, [name]: { result: opposite } }).status, 1);
       }
-    }
+  assert.equal(
+    run({
+      ...jobs("false", "false", "skipped", "skipped"),
+      changes: { result: "success", outputs: { js: "false", rust: "false" } },
+    }).status,
+    1,
+    "a missing Android selection fails",
+  );
   for (const result of ["failure", "cancelled", "skipped", undefined]) {
     assert.equal(
       run({ ...jobs("true", "true", "success", "success"), changes: { result } }).status,
@@ -1146,6 +1172,8 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
       gate === "rust" ? "skipped" : "success",
       gate === "js" ? "skipped" : "success",
       "success",
+      undefined,
+      gate === "all" ? "success" : "skipped",
     );
     assert.equal(run(manual, "workflow_dispatch", gate).status, 0);
     assert.equal(
@@ -1153,7 +1181,33 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
         .status,
       1,
     );
+    const androidOpposite = manual.android.result === "success" ? "skipped" : "success";
+    assert.equal(
+      run({ ...manual, android: { result: androidOpposite } }, "workflow_dispatch", gate).status,
+      1,
+    );
   }
+  // An Android-only dispatch starts no JavaScript, Rust, or shared preparation job.
+  const androidOnly = jobs(
+    undefined,
+    undefined,
+    "skipped",
+    "skipped",
+    "skipped",
+    undefined,
+    "success",
+  );
+  assert.equal(run(androidOnly, "workflow_dispatch", "android").status, 0);
+  for (const name of ["javascript", "rust", "javascript-prepare"])
+    assert.equal(
+      run({ ...androidOnly, [name]: { result: "success" } }, "workflow_dispatch", "android").status,
+      1,
+      name,
+    );
+  assert.equal(
+    run({ ...androidOnly, android: { result: "failure" } }, "workflow_dispatch", "android").status,
+    1,
+  );
   const failedJavascript = run(
     jobs("true", "true", "failure", "success", "success"),
     "pull_request",

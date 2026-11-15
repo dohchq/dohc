@@ -116,6 +116,10 @@ Cloud jobs retry failing Vitest group cases, desktop and account browser proofs,
 A test that passes on retry stays in the receipts under `flaky`, and the job logs name its task and test.
 If confinement fails, select **Re-run all jobs**. Artifacts belong to a run attempt, so **Re-run failed jobs** cannot recreate preparation artifacts for the new attempt.
 
+Android compiles only in CI. The **Android Kotlin compile** job runs when a change reaches a file in the workflow's `android` filter: the phone's native modules, its Expo config, or the install inputs.
+It generates the Expo Android project and compiles the Kotlin of both native modules for debug. A Kotlin error fails the job with its file and line.
+Nothing Android runs locally. When `pnpm verify:plan` or `pnpm verify:pr` selects `android`, the report lists the job under `ciEvidence`, and a merge needs a passing run of it for the head.
+
 The timing targets are 300 s for JavaScript and 600 s for Rust. The failure ceilings are 400 s and 700 s.
 A gate's `seconds` runs from the start of `what changed` to the finish of the gate's last job.
 Receipts record the target as `targetSeconds` and the ceiling as `budgetSeconds`. Read the receipt's `timing`:
@@ -128,7 +132,7 @@ Receipts record the target as `targetSeconds` and the ceiling as `budgetSeconds`
 
 `"unmeasured"` excuses time only. Failed tests, incomplete inventory or coverage, wrong commits, and missing, duplicated, cancelled, or failed jobs still fail.
 The organisation's Team plan permits 60 concurrent standard-runner jobs.
-A combined run peaks at 21 jobs, so two combined runs fit and a third can queue.
+A combined run peaks at 22 jobs, so two combined runs fit and a third can queue.
 The workflow holds the job graph, wait caps, and job timeouts.
 [`cloud.mjs`](../../scripts/verification/cloud.mjs) and [`cloud-rust.mjs`](../../scripts/verification/cloud-rust.mjs) run each job's tests. [`cloud-aggregate.mjs`](../../scripts/verification/cloud-aggregate.mjs) checks the receipts and computes the timing verdict.
 

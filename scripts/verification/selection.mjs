@@ -147,14 +147,13 @@ function workflowFilters(workflow) {
 const matchesFilter = (files, patterns) =>
   files.some((file) => patterns.some((pattern) => matchesGlob(file, pattern)));
 
-function gatesFromFilters(files, filters) {
-  return Object.fromEntries(
-    ["rust", "js"].map((name) => [name, matchesFilter(files, filters[name])]),
-  );
+function gatesFromFilters(files, filters, names) {
+  return Object.fromEntries(names.map((name) => [name, matchesFilter(files, filters[name])]));
 }
 
+/** The gates a change selects. Rust and JavaScript also run locally; Android compiles only in CI. */
 export function selectedGates(files, workflow) {
-  return gatesFromFilters(files, workflowFilters(workflow));
+  return gatesFromFilters(files, workflowFilters(workflow), ["rust", "js", "android"]);
 }
 
 /** Whether a change reaches a file that the repository tests read, so the JavaScript gate runs every one of them. */
@@ -333,7 +332,9 @@ export function uncoveredGateInputs(files, trackedPaths, workflow) {
   const filters = workflowFilters(workflow);
   const selections = new Map();
   const gatesFor = (path) => {
-    if (!selections.has(path)) selections.set(path, gatesFromFilters([path], filters));
+    // The guard reads Rust and JavaScript sources; the Android filter lists its inputs by hand.
+    if (!selections.has(path))
+      selections.set(path, gatesFromFilters([path], filters, ["rust", "js"]));
     return selections.get(path);
   };
   const findings = new Map();
