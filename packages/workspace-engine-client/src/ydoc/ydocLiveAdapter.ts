@@ -840,7 +840,7 @@ export class YdocAdapterSession {
       this.assertRecordable();
       if (record.refusal !== undefined) throw record.refusal;
       try {
-        return await this.requestRecordUpdate(record);
+        return await this.requestRecordUpdateInOrder(record);
       } catch (refusal) {
         // Recovery cannot repair a definite refusal of this original input,
         // nor return it to a lineage that has already changed.
@@ -1084,6 +1084,22 @@ export class YdocAdapterSession {
 
   private async recoverCanonicalState(record: LocalUpdateRecord): Promise<YdocRecordUpdateResult> {
     await this.mergeRecoveryState(record.generation);
+    return this.requestRecordUpdateInOrder(record);
+  }
+
+  /**
+   * Send the edits a transient refusal left unsent before this one. An edit
+   * can build on them, and an owner's engine refuses for good an edit whose
+   * neighbour it lacks.
+   */
+  private async requestRecordUpdateInOrder(
+    record: LocalUpdateRecord,
+  ): Promise<YdocRecordUpdateResult> {
+    for (const earlier of [...this.pendingRecords]) {
+      if (earlier === record) break;
+      await this.requestRecordUpdate(earlier);
+    }
+    if (record.refusal !== undefined) throw record.refusal;
     return this.requestRecordUpdate(record);
   }
 

@@ -4226,6 +4226,52 @@ describe("YdocLiveAdapter", () => {
     }
   });
 
+  // An owner's engine refuses for good an edit that builds on one it lacks.
+  it("sends an edit a busy engine left unsent before the edit typed after it", async () => {
+    const engine = seedPlaintextEngine();
+    const refusal = new DaemonRefusalError(
+      { code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff" },
+      new Error("daemon response"),
+    );
+    let busy = true;
+    const sent: string[] = [];
+    const transport: EngineTransport = {
+      ...forwardYdocBlobEgress(engine),
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) {
+          if (busy) throw refusal;
+          sent.push(request.idempotencyKey ?? "");
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      scheduleSettle: settleScheduler().schedule,
+    });
+    await expect(
+      provider.applyLocalUpdate(
+        plaintextUpdate(provider.initialUpdate, (text) => text.insert(0, "first ")),
+        { idempotencyKey: "first" },
+      ),
+    ).rejects.toBe(refusal);
+    busy = false;
+    await provider.applyLocalUpdate(
+      plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), (text) =>
+        text.insert(text.length, "second"),
+      ),
+      { idempotencyKey: "second" },
+    );
+    expect(sent).toEqual(["first", "second"]);
+    await provider.close({ settle: false });
+  });
+
   it("surfaces a persistent store refusal when its total budget expires", async () => {
     vi.useFakeTimers();
     try {
@@ -7886,15 +7932,17 @@ describe("immutable original-record recovery", () => {
     await expect(second).rejects.toBeInstanceOf(DaemonRefusalError);
     busy = false;
     await session.resendMissingState();
+    // Bob's edit waits behind Alice's, so only Alice's was ever refused.
+    expect(new Set(refused.map((request) => request.idempotencyKey))).toEqual(
+      new Set([refused[0]?.idempotencyKey]),
+    );
     expect(accepted).toHaveLength(2);
-    expect(accepted.map((request) => request.params)).toEqual([
-      refused[0]?.params,
-      refused[2]?.params,
-    ]);
-    expect(accepted.map((request) => request.idempotencyKey)).toEqual([
-      refused[0]?.idempotencyKey,
-      refused[2]?.idempotencyKey,
-    ]);
+    expect(accepted[0]?.params).toEqual(refused[0]?.params);
+    expect(accepted[0]?.idempotencyKey).toBe(refused[0]?.idempotencyKey);
+    expect(accepted[1]?.params).toMatchObject({
+      actorOriginId: "bob-agent",
+      attribution: { actorKind: "agent", onBehalfOf: "bob", depth: 3 },
+    });
     const deletion = Y.decodeUpdate(
       Buffer.from((accepted[0]?.params as { updateBase64: string }).updateBase64, "base64"),
     );
