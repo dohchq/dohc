@@ -1296,13 +1296,16 @@ function escapeLeadingMarkdownBlockSyntax(
       encodeBackslash &&
       node.type === "hardBreak" &&
       lineStart &&
-      preparedContent
-        .slice(index + 1)
-        .some(
-          (later) =>
-            later.type !== "hardBreak" &&
-            !(typeof later.text === "string" && /^[ \t\n]*$/u.test(later.text)),
-        )
+      preparedContent.slice(index + 1).some(
+        (later) =>
+          later.type !== "hardBreak" &&
+          // A code span of blank space is written in backticks, so it shows.
+          !(
+            typeof later.text === "string" &&
+            !later.marks?.some((mark) => mark.type === "code") &&
+            /^[ \t\n]*$/u.test(later.text)
+          ),
+      )
     ) {
       output.push({ type: "text", text: `${encodeBackslash()}\n` });
       index += 1;

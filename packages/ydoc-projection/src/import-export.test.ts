@@ -438,7 +438,7 @@ function expectSavedAsTheSameDocument(document: JSONContent): void {
   expect(serializeRichdocBody(parseRichdocMarkdown(saved))).toBe(saved);
 }
 
-// #4093: a hard break's two spaces on a line with nothing else read back as a
+// #4110: a hard break's two spaces on a line with nothing else read back as a
 // blank line, so a hard break that starts a line is written as a backslash.
 it("keeps a hard break that starts a line", () => {
   const breakThen = (text: string): JSONContent => ({
@@ -479,10 +479,14 @@ it("keeps a hard break that starts a line", () => {
           },
         ],
       },
+      {
+        type: "paragraph",
+        content: [{ type: "hardBreak" }, { type: "text", text: " ", marks: [{ type: "code" }] }],
+      },
     ],
   };
   expect(serializeRichdocBody(document)).toBe(
-    "\\\nafter a leading break\n\n\\\n\\\nafter two\n\na  \n\\\nb\n\n- [ ] first\n\n  \\\n   in a task item",
+    "\\\nafter a leading break\n\n\\\n\\\nafter two\n\na  \n\\\nb\n\n- [ ] first\n\n  \\\n   in a task item\n\n\\\n` `",
   );
   expectSavedAsTheSameDocument(document);
 });

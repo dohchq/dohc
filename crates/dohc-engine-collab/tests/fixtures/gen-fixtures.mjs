@@ -707,6 +707,8 @@ const RICHDOC_PROJECTION_CASES = [
           xmlElement("hardBreak"),
         ]),
         paragraph([xmlElement("hardBreak"), xmlText(" ")]),
+        // A code span of a space is visible, so the break keeps its backslash.
+        paragraph([xmlElement("hardBreak"), xmlText(" ", { code: {} })]),
         xmlElement("bulletList", {}, [
           xmlElement("listItem", {}, [
             paragraph([
