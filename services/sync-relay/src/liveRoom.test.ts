@@ -7,7 +7,7 @@ import {
   cleanupLiveDeliveryFixtures,
   registered,
 } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
-import { createLiveRooms, roomAdmissible } from "./liveRoom.js";
+import { createLiveRooms, nextSave, roomAdmissible } from "./liveRoom.js";
 import type { NamedFrameRoomHost } from "./namedLiveFrameHost.js";
 import type { NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { StorageContext } from "./storage/context.js";
@@ -33,8 +33,15 @@ const ana: LiveAuthorSnapshot = [{ kind: "human", humanId: "ana", humanName: "An
 const ben: LiveAuthorSnapshot = [{ kind: "human", humanId: "ben", humanName: "Ben" }];
 type Fixture = ReturnType<typeof registered>;
 
+interface Engine {
+  /** Waited on before each save is committed. */
+  hold?: Promise<void>;
+  /** The engine never answers a committed save. */
+  silent?: boolean;
+}
+
 /** The owner's capture of the note, saving through the real journal. Its feed stays quiet. */
-function ownerCapture(f: Fixture): NamedFrameHostSession {
+function ownerCapture(f: Fixture, engine: Engine = {}): NamedFrameHostSession {
   const lifetime = new AbortController();
   const binding = f.storage.resolveCurrentLiveDocumentBinding({
     document: f.input.evidence.document,
@@ -50,7 +57,11 @@ function ownerCapture(f: Fixture): NamedFrameHostSession {
       return {
         binding: binding.binding,
         hostVector: Y.encodeStateVector(f.doc),
-        missingStateUpdate: Y.encodeStateAsUpdate(f.doc),
+        // The note as saved: its baseline and every journal row.
+        missingStateUpdate: Y.mergeUpdates([
+          Y.encodeStateAsUpdate(f.doc),
+          ...f.journalRows().journal.map((row) => new Uint8Array(row.update_bytes as Uint8Array)),
+        ]),
         appliedThroughJournalCursor: 0,
         close() {},
         nextApplied: (signal) =>
@@ -59,12 +70,17 @@ function ownerCapture(f: Fixture): NamedFrameHostSession {
           ),
       };
     },
-    async submit(input) {
+    async submit(input, signal) {
+      await engine.hold;
       const { result } = f.storage.commitLiveUpdateJournal({
         ...f.capture(input.updateBytes, input.deliveryId),
         ...(input.room ? { room: input.room } : {}),
       });
       if (result.kind !== "accepted") return { result: "refused", reason: result.reason } as never;
+      if (engine.silent)
+        await new Promise((_, reject) =>
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+        );
       return {
         result: "success",
         ack: {
@@ -80,16 +96,22 @@ function ownerCapture(f: Fixture): NamedFrameHostSession {
   };
 }
 
-function rooms(f: Fixture, limits: { maxUpdateBytes?: number } = {}) {
+function rooms(
+  f: Fixture,
+  limits: { maxUpdateBytes?: number; names?: boolean; saveTimeoutMs?: number } = {},
+  engine: Engine = {},
+) {
   const created = createLiveRooms({
     storage: f.storage,
     maxUpdateBytes: limits.maxUpdateBytes ?? 1 << 20,
     maxNoteBytes: 1 << 22,
     maxAppliedBytes: 1 << 20,
+    namesEverySender: limits.names ?? false,
     // Tests save by leaving, never on the timer.
     saveEveryMs: 3_600_000,
+    ...(limits.saveTimeoutMs ? { saveTimeoutMs: limits.saveTimeoutMs } : {}),
     log() {},
-    openSaver: async () => ownerCapture(f),
+    openSaver: async () => ownerCapture(f, engine),
   });
   rooms_.push(created);
   return created;
@@ -195,6 +217,63 @@ it("saves each sender's run of edits under that sender alone", async () => {
   expect(savedAuthors(f)).toEqual([ana, ben]);
 });
 
+it("with names on, saves everyone's edits at once and names each person once", async () => {
+  const f = note();
+  const room = rooms(f, { names: true });
+  const a = editor(f, room, ana),
+    b = editor(f, room, ben);
+  await a.open();
+  await b.open();
+  for (const [person, other, key] of [
+    [b, a, "title"],
+    [a, b, "subtitle"],
+    [b, a, "place"],
+  ] as const) {
+    expect((await person.submit(person.change(key, "v"))).result).toBe("success");
+    await other.next();
+  }
+  a.session.close();
+  b.session.close();
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  expect(savedAuthors(f)).toEqual([[...ana, ...ben]]);
+});
+
+it("keeps one sender's own snapshot, and saves an automation or unattributed edit alone", () => {
+  const edit = (sender: LiveAuthorSnapshot, size = 1) => ({ sender, bytes: new Uint8Array(size) });
+  const pair: LiveAuthorSnapshot = [
+    ...ben,
+    { kind: "agent", agentId: "helper", agentName: "Helper", onBehalfOf: "ben" },
+  ] as LiveAuthorSnapshot;
+  expect(nextSave([edit(pair), edit(pair)], true, 100)).toEqual({ count: 2, authors: pair });
+  expect(nextSave([edit(pair), edit(ana)], true, 100).authors).toHaveLength(3);
+  const nobody: LiveAuthorSnapshot = [{ kind: "unattributed" }];
+  expect(nextSave([edit(ana), edit(nobody), edit(ana)], true, 100)).toEqual({
+    count: 1,
+    authors: ana,
+  });
+  expect(nextSave([edit(nobody), edit(ana)], true, 100)).toEqual({ count: 1, authors: nobody });
+  // A save stays under the largest update the engine passes on, whatever its first edit.
+  expect(nextSave([edit(ana, 60), edit(ben, 60)], true, 100).count).toBe(1);
+  expect(nextSave([edit(ana, 60), edit(ana, 60)], false, 100).count).toBe(1);
+  expect(nextSave([edit(ana, 160)], true, 100).count).toBe(1);
+});
+
+it("counts a committed save whose engine answer never comes, and goes on saving", async () => {
+  const f = note();
+  const room = rooms(f, { saveTimeoutMs: 50 }, { silent: true });
+  const a = editor(f, room, ana),
+    b = editor(f, room, ben);
+  await a.open();
+  await b.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  await b.next();
+  expect((await b.submit(b.change("place", "Porto"))).result).toBe("success");
+  a.session.close();
+  b.session.close();
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  expect(savedAuthors(f)).toEqual([ana, ben]);
+});
+
 it("refuses an edit under an editor id tied to someone else and writes nothing", async () => {
   const f = note();
   const room = rooms(f);
@@ -262,6 +341,41 @@ it("saves edits a stopped relay took before it takes a new one", async () => {
   expect(unsaved(f)).toEqual([]);
   expect(savedAuthors(f)).toEqual([ana]);
   expect(again.doc.getMap("frontmatter").get("title")).toBe("Lisbon");
+});
+
+it("gives the next page every taken edit before they are saved, and saves them with nobody there", async () => {
+  const f = note();
+  const first = rooms(f);
+  const a = editor(f, first, ana);
+  await a.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  first.close();
+
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const again = rooms(f, {}, { hold });
+  const page = editor(f, again, ben);
+  await page.open();
+  expect(page.doc.getMap("frontmatter").get("title")).toBe("Lisbon");
+  expect(unsaved(f)).toHaveLength(1);
+  // The page edits on top while the taken edit is still saving.
+  expect((await page.submit(page.change("place", "Porto"))).result).toBe("success");
+  release();
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  page.session.close();
+  expect(savedAuthors(f)).toEqual([ana, ben]);
+
+  // Taken edits a stopped relay left are saved when it starts, with nobody connected.
+  const later = rooms(f);
+  const b = editor(f, later, ben);
+  await b.open();
+  expect((await b.submit(b.change("note", "x"))).result).toBe("success");
+  later.close();
+  rooms(f);
+  await vi.waitFor(() => expect(unsaved(f)).toEqual([]));
+  expect(savedAuthors(f)).toEqual([ana, ben, ben]);
 });
 
 it("refuses a room save that leaves out someone whose edit it holds", () => {

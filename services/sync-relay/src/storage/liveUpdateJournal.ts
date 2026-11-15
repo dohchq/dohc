@@ -37,6 +37,7 @@ import { LIVE_AUTHOR_CLIENTS } from "./liveAuthorshipSchema";
 import { captureSqliteReadRevisionMatches } from "./readRevision";
 import {
   liveAuthorIdentity,
+  parseAdmittedLiveAuthorSnapshot,
   parseLiveAuthorSnapshot,
   type LiveAuthorSnapshot,
 } from "@dohc/live-session-contract";
@@ -402,7 +403,7 @@ function journalAuthorSnapshot(
   // Reuse validation for identical stored bytes only within this SQLite read.
   // Each row owns its entries so callers cannot change another row's credit.
   if (cached) return cached.map((author) => ({ ...author }));
-  const parsed = parseLiveAuthorSnapshot(JSON.parse(value));
+  const parsed = parseAdmittedLiveAuthorSnapshot(JSON.parse(value));
   snapshots?.set(
     value,
     parsed.map((author) => ({ ...author })),
@@ -1164,7 +1165,9 @@ function snapshotJournalCut(value: unknown): LiveUpdateJournalCut {
         ...(metadata.canonicalVersion === 2
           ? {
               canonicalVersion: 2 as const,
-              authorSnapshot: parseLiveAuthorSnapshot(copyJournalData(metadata.authorSnapshot)),
+              authorSnapshot: parseAdmittedLiveAuthorSnapshot(
+                copyJournalData(metadata.authorSnapshot),
+              ),
               firstSeenDeletes: journalRanges(metadata.firstSeenDeletes),
               ...(metadata.checkpointCoverage === undefined
                 ? {}
@@ -1868,7 +1871,7 @@ export function commitLiveUpdateJournal(
           const save = baselineRecord(outer.room, ["authors", "committed"]);
           if (typeof save.committed !== "function") throw new TypeError("Invalid live room save.");
           return {
-            authors: parseLiveAuthorSnapshot(save.authors),
+            authors: parseAdmittedLiveAuthorSnapshot(save.authors),
             committed: save.committed as () => void,
           };
         })();

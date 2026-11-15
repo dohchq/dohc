@@ -4,7 +4,7 @@ import type {
   LiveDocumentKey,
 } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveCheckpointCoverage } from "@dohc/live-session-contract/live-update-admission";
-import { parseLiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
+import { parseAdmittedLiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -89,7 +89,7 @@ export function canonicalVersionedAcceptedMetadata(
   return {
     ...canonical,
     canonicalVersion: 2,
-    authorSnapshot: parseLiveAuthorSnapshot(metadata.authorSnapshot),
+    authorSnapshot: parseAdmittedLiveAuthorSnapshot(metadata.authorSnapshot),
     firstSeenDeletes: metadata.firstSeenDeletes.map((range) => ({
       clientId: range.clientId,
       startClock: range.startClock,

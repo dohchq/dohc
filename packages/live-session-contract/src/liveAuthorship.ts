@@ -184,6 +184,37 @@ export function parseLiveAuthorSnapshot(value: unknown): LiveAuthorSnapshot {
     throw new TypeError("Noncanonical author snapshot.");
   return result;
 }
+/** One author, or a person and the agent acting for them: every admitted update but a room's save. */
+export function liveOneAuthor(authors: LiveAuthorSnapshot): boolean {
+  if (authors.length < 2) return true;
+  const [person, agent] = authors;
+  return (
+    authors.length === 2 &&
+    person!.kind !== "agent" &&
+    person!.kind !== "automation" &&
+    agent!.kind === "agent"
+  );
+}
+/**
+ * An admitted update's author snapshot. Besides what `parseLiveAuthorSnapshot` takes, a room's
+ * save under the owner's authority names everyone whose edits it holds: people, links and
+ * agents, each once. The journal admits that list only for a room's save, and the engine checks
+ * the authority again.
+ */
+export function parseAdmittedLiveAuthorSnapshot(value: unknown): LiveAuthorSnapshot {
+  if (!Array.isArray(value)) throw new TypeError("Invalid live author snapshot.");
+  const authors = value.map((entry) => parseLiveAuthorSnapshot([entry])[0]!);
+  if (liveOneAuthor(authors)) return authors;
+  const identities = new Set(authors.map(liveAuthorIdentity));
+  if (
+    authors.length > MAX_LIVE_AUTHOR_IDENTITIES ||
+    identities.size !== authors.length ||
+    authors.some((author) => author.kind === "automation" || author.kind === "unattributed") ||
+    new TextEncoder().encode(JSON.stringify(authors)).byteLength > MAX_LIVE_AUTHOR_BYTES
+  )
+    throw new TypeError("Noncanonical author snapshot.");
+  return authors;
+}
 export function liveAuthorIdentity(entry: LiveAuthorEntry): string {
   if (entry.kind === "unattributed") return JSON.stringify([entry.kind, null, ""]);
   if (entry.kind === "automation")

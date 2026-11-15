@@ -186,3 +186,21 @@ export function deleteSavedLiveRoomEdits(
     .prepare(`DELETE FROM ${LIVE_ROOM_EDITS} WHERE ${DOCUMENT} AND position<=?`)
     .run(...documentParams(document), throughPosition);
 }
+
+/** The notes with edits taken and not saved. */
+export function liveRoomDocuments(storage: StorageContext): LiveDocumentKey[] {
+  return storage
+    .readTx(() =>
+      storage.db
+        .prepare(
+          `SELECT DISTINCT workspace_id,main_version_id,object_id,lineage_claim_id FROM ${LIVE_ROOM_EDITS}`,
+        )
+        .all(),
+    )
+    .map((row) => ({
+      workspaceId: String(row.workspace_id),
+      mainVersionId: String(row.main_version_id),
+      objectId: String(row.object_id),
+      lineageClaimId: String(row.lineage_claim_id),
+    }));
+}

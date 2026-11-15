@@ -5,10 +5,15 @@
 // sender in it. The saved rows are deleted in the save's own journal transaction. Everything
 // else that changes the note reaches the room through that capture's feed of applied changes.
 import { createHash, randomUUID } from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
 import * as Y from "yjs";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
-import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
+import {
+  liveAuthorIdentity,
+  MAX_LIVE_AUTHOR_BYTES,
+  MAX_LIVE_AUTHOR_IDENTITIES,
+  type LiveAuthorEntry,
+  type LiveAuthorSnapshot,
+} from "@dohc/live-session-contract/live-authorship";
 import {
   parseLiveUpdateDigest,
   parseLiveUpdateIdentifier,
@@ -28,6 +33,7 @@ import {
   advanceLiveRoomPosition,
   appendLiveRoomEdit,
   deleteSavedLiveRoomEdits,
+  liveRoomDocuments,
   liveRoomEdits,
   liveRoomPosition,
 } from "./storage/liveRoomEdits.js";
@@ -40,10 +46,16 @@ export interface LiveRoomsOptions {
   readonly storage: SyncRelayStorage;
   /** The owner's capture of a note. It carries the room's saves and its feed of other changes. */
   openSaver(document: LiveDocumentKey, signal: AbortSignal): Promise<NamedFrameHostSession>;
+  /** The largest edit taken. Each must fit in one save. */
   readonly maxUpdateBytes: number;
   readonly maxNoteBytes: number;
+  /** The largest update passed on, and the largest save. */
   readonly maxAppliedBytes: number;
+  /** Whether one save names every sender in it, which needs an engine that credits the list. */
+  readonly namesEverySender?: boolean;
   readonly saveEveryMs?: number;
+  /** How long one save, or opening the owner's capture, may take before it is tried again. */
+  readonly saveTimeoutMs?: number;
   readonly log?: (line: string, detail: Record<string, unknown>) => void;
 }
 export interface LiveRooms {
@@ -84,6 +96,13 @@ interface Room {
 const refused = (reason: Extract<NamedFrameSubmissionResult, { result: "refused" }>["reason"]) =>
   ({ result: "refused", reason }) as const;
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+const raceAbort = <T>(promise: Promise<T>, signal: AbortSignal) =>
+  new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    if (signal.aborted) abort();
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
 
 /**
  * Whether an update builds only on what `doc` has, and which editor ids it adds content under.
@@ -120,23 +139,62 @@ export function roomAdmissible(doc: Y.Doc, update: Uint8Array): { clients: numbe
   return { clients: [...clients] };
 }
 
+const sameSender = (a: LiveAuthorSnapshot, b: LiveAuthorSnapshot) =>
+  JSON.stringify(a) === JSON.stringify(b);
+// An automation commits outside the room, and an unattributed edit names nobody, so neither
+// shares a save with anyone else.
+const savesAlone = (sender: LiveAuthorSnapshot) =>
+  sender.some((author) => author.kind === "automation" || author.kind === "unattributed");
+
 /**
- * How many of the oldest unsaved edits one save holds, and who it names. A saved snapshot names
- * one person, with the agent acting for them, until the engine credits a longer list; so one
- * save holds one sender's run of edits.
+ * How many of the oldest unsaved edits one save holds, and who it names. With `everySender`
+ * a save names everyone whose edits it holds, each once. Without it, a save holds one sender's
+ * run of edits, as the engine credits only one person per save.
  */
-function nextSave(unsaved: readonly Unsaved[]): { count: number; authors: LiveAuthorSnapshot } {
-  const authors = unsaved[0]?.sender ?? [];
-  const sender = JSON.stringify(authors);
-  let count = 0;
-  while (count < unsaved.length && JSON.stringify(unsaved[count]!.sender) === sender) count += 1;
+export function nextSave(
+  unsaved: readonly { readonly sender: LiveAuthorSnapshot; readonly bytes: Uint8Array }[],
+  everySender: boolean,
+  maxBytes: number,
+): { count: number; authors: LiveAuthorSnapshot } {
+  const first = unsaved[0];
+  if (!first) return { count: 0, authors: [] };
+  const named = new Map<string, LiveAuthorEntry>();
+  let count = 0,
+    bytes = 0,
+    authorBytes = 2,
+    one = true;
+  for (const edit of unsaved) {
+    const same = sameSender(edit.sender, first.sender);
+    if (count && !same && (!everySender || savesAlone(first.sender) || savesAlone(edit.sender)))
+      break;
+    const added = edit.sender.filter((author) => !named.has(liveAuthorIdentity(author)));
+    const addedBytes = added.reduce((sum, a) => sum + Buffer.byteLength(JSON.stringify(a)) + 1, 0);
+    if (
+      count &&
+      (bytes + edit.bytes.byteLength > maxBytes ||
+        named.size + added.length > MAX_LIVE_AUTHOR_IDENTITIES ||
+        authorBytes + addedBytes > MAX_LIVE_AUTHOR_BYTES)
+    )
+      break;
+    for (const author of added) named.set(liveAuthorIdentity(author), author);
+    bytes += edit.bytes.byteLength;
+    authorBytes += addedBytes;
+    one &&= same;
+    count += 1;
+  }
+  if (one) return { count, authors: first.sender };
+  const authors = [...named].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, a]) => a);
   return { count, authors };
 }
 
 export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
   const storage = options.storage as StorageContext;
   const saveEveryMs = options.saveEveryMs ?? 5_000;
-  const log = options.log ?? ((line, detail) => console.error(`[live-room] ${line}`, detail));
+  const saveTimeoutMs = options.saveTimeoutMs ?? 30_000;
+  const everySender = options.namesEverySender === true;
+  const write = options.log ?? ((line, detail) => console.error(`[live-room] ${line}`, detail));
+  const log = (room: Room, line: string, detail: Record<string, unknown> = {}) =>
+    write(line, { objectId: room.document.objectId, unsaved: room.unsaved.length, ...detail });
   const rooms = new Map<string, Room>();
   let closed = false;
 
@@ -170,10 +228,11 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     if (room.saver) dropSaver(room);
     room.connecting ??= (async () => {
       const signal = room.lifetime.signal;
-      const host = await options.openSaver(room.document, signal);
+      const opening = AbortSignal.any([signal, AbortSignal.timeout(saveTimeoutMs)]);
+      const host = await options.openSaver(room.document, opening);
       let sync: NamedFrameSync;
       try {
-        sync = await host.openSync(EMPTY_VECTOR, signal);
+        sync = await host.openSync(EMPTY_VECTOR, opening);
       } catch (error) {
         host.close();
         throw error;
@@ -214,15 +273,18 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
 
   /** One save of the oldest unsaved edits. True when the journal took it. */
   async function saveOnce(room: Room): Promise<boolean> {
-    const { count, authors } = nextSave(room.unsaved);
+    const { count, authors } = nextSave(room.unsaved, everySender, options.maxAppliedBytes);
     if (!count) return true;
     const batch = room.unsaved.slice(0, count);
     const merged = count === 1 ? batch[0]!.bytes : Y.mergeUpdates(batch.map((edit) => edit.bytes));
     const through = batch.at(-1)!.position;
+    // The journal's commit makes the save durable. Waiting past it is only for the engine's
+    // answer, so a save that commits and then runs out of time still counts as saved.
+    const deadline = AbortSignal.any([room.lifetime.signal, AbortSignal.timeout(saveTimeoutMs)]);
     let committed = false;
     let answer: NamedFrameSubmissionResult | undefined;
     try {
-      const saver = await ensureSaver(room);
+      const saver = await raceAbort(ensureSaver(room), deadline);
       answer = await saver.host.submit(
         {
           deliveryId: randomUUID(),
@@ -236,16 +298,18 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
             },
           },
         },
-        room.lifetime.signal,
+        deadline,
       );
     } catch (error) {
+      // A capture that ran out of time is not trusted with the next save.
+      if (deadline.aborted && !room.lifetime.signal.aborted && room.saver) dropSaver(room);
       if (!committed) {
-        log("save failed", { edits: count, error: String(error).slice(0, 200) });
+        log(room, "save failed", { edits: count, error: String(error).slice(0, 200) });
         return false;
       }
     }
     if (!committed) {
-      log("save not taken", { edits: count, answer });
+      log(room, "save not taken", { edits: count, answer });
       return false;
     }
     room.unsaved.splice(0, count);
@@ -264,12 +328,17 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     if (room.saving || room.lifetime.signal.aborted) return;
     clearTimeout(room.timer);
     room.timer = undefined;
-    room.saving = saveOnce(room).then((saved) => {
-      room.saving = undefined;
-      if (room.lifetime.signal.aborted) return;
-      if (room.unsaved.length) scheduleSave(room, saved ? 0 : saveEveryMs);
-      else disposeIfIdle(room);
-    });
+    room.saving = saveOnce(room)
+      .catch((error: unknown) => {
+        log(room, "save failed", { error: String(error).slice(0, 200) });
+        return false;
+      })
+      .then((saved) => {
+        room.saving = undefined;
+        if (room.lifetime.signal.aborted) return;
+        if (room.unsaved.length) scheduleSave(room, saved ? 0 : saveEveryMs);
+        else disposeIfIdle(room);
+      });
   }
   function disposeIfIdle(room: Room) {
     if (room.members || room.unsaved.length || room.saving) return;
@@ -306,8 +375,8 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     rooms.set(key, room);
     room.opened = (async () => {
       await ensureSaver(room);
-      room.bytes = Y.encodeStateAsUpdate(room.doc).byteLength;
-      // Edits a stopped relay had taken and not saved are saved before any new edit is taken.
+      // Edits a stopped relay had taken and not saved are in the note a page is given, and are
+      // saved first, in the order they were taken. New edits follow them in the list.
       for (const edit of liveRoomEdits(storage, document)) {
         if (!roomAdmissible(room.doc, edit.updateBytes))
           throw new Error("A taken edit no longer applies to its note.");
@@ -318,16 +387,30 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           bytes: edit.updateBytes,
         });
       }
-      while (room.unsaved.length)
-        if (!(await saveOnce(room))) await delay(saveEveryMs, undefined, room.lifetime);
       room.bytes = Y.encodeStateAsUpdate(room.doc).byteLength;
+      if (room.unsaved.length) runSave(room);
+      else disposeIfIdle(room);
     })();
     room.opened.catch((error: unknown) => {
-      log("room did not open", { error: String(error).slice(0, 200) });
+      log(room, "room did not open", { error: String(error).slice(0, 200) });
       dispose(room);
     });
     return room;
   }
+
+  // A note whose taken edits outlived their room, because the relay stopped or the room could
+  // not open, gets a room that saves them, whoever is connected.
+  function recover() {
+    if (closed) return;
+    try {
+      for (const document of liveRoomDocuments(storage)) openRoom(document);
+    } catch (error) {
+      write("recovery failed", { error: String(error).slice(0, 200) });
+    }
+  }
+  const sweep = setInterval(recover, Math.max(saveEveryMs, 60_000));
+  sweep.unref?.();
+  setImmediate(recover);
 
   function leave(room: Room, subscriber: Subscriber | undefined) {
     if (subscriber) {
@@ -497,6 +580,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
     },
     close() {
       closed = true;
+      clearInterval(sweep);
       // Taken edits stay in their table and are saved when the note next opens.
       for (const room of [...rooms.values()]) dispose(room);
     },

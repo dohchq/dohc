@@ -1,6 +1,7 @@
 import {
   liveAuthorIdentity,
   parseLiveAuthorContext,
+  parseAdmittedLiveAuthorSnapshot,
   parseLiveAuthorSnapshot,
   type LiveAuthorContext,
   type LiveAuthorSnapshot,
@@ -524,7 +525,7 @@ function admittedMetadata(
     ...(record.canonicalVersion === 2
       ? {
           canonicalVersion: 2 as const,
-          authorSnapshot: parseLiveAuthorSnapshot(record.authorSnapshot),
+          authorSnapshot: parseAdmittedLiveAuthorSnapshot(record.authorSnapshot),
           firstSeenDeletes: parseRanges(record.firstSeenDeletes),
           ...(Object.hasOwn(record, "checkpointCoverage")
             ? { checkpointCoverage: checkpointCoverage(record.checkpointCoverage, parseRanges) }
