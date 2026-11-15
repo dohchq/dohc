@@ -99,16 +99,51 @@ export interface UnsentText {
   readonly deletes: boolean;
 }
 
-/** Read `unsent`, the page's changes it has not had saved, against `doc`, which holds them. */
-export function findUnsentText(doc: Y.Doc, unsent: Uint8Array): UnsentText {
+/**
+ * The deleted items that held text, noted from each transaction before gc empties them. A
+ * delete set alone can't tell removed words from removed formatting or a replaced attribute.
+ */
+export class DeletedText {
+  private readonly ranges = new Map<number, { clock: number; end: number }[]>();
+
+  /** Call from `afterTransaction`, while the deleted content is still there. */
+  note(transaction: Y.Transaction): void {
+    Y.iterateDeletedStructs(transaction, transaction.deleteSet, (struct) => {
+      if (!(struct instanceof Y.Item) || !holdsText(struct)) return;
+      const list = this.ranges.get(struct.id.client) ?? [];
+      list.push({ clock: struct.id.clock, end: struct.id.clock + struct.length });
+      this.ranges.set(struct.id.client, list);
+    });
+  }
+
+  /** Whether text in `clock` to `end` was deleted, leaving out `keep`, a range not to count. */
+  within(client: number, clock: number, end: number, keep?: { start: number; end: number }) {
+    return (this.ranges.get(client) ?? []).some((range) => {
+      const low = Math.max(range.clock, clock);
+      const high = Math.min(range.end, end);
+      return low < high && (!keep || low < keep.start || high > keep.end);
+    });
+  }
+
+  clear(): void {
+    this.ranges.clear();
+  }
+}
+
+/**
+ * Read `unsent`, the page's changes it has not had saved, against `doc`, which holds them.
+ * `deleted` is what the page's own transactions deleted.
+ */
+export function findUnsentText(doc: Y.Doc, unsent: Uint8Array, deleted: DeletedText): UnsentText {
   const { from, to } = Y.parseUpdateMeta(unsent);
   const { ds } = Y.decodeUpdate(unsent);
   let deletes = false;
-  // Deleting typing these changes also made cancels out; any other delete removed earlier text.
+  // Deleting typing these changes also made cancels out; deleting any other text removed
+  // earlier text.
   ds.clients.forEach((ranges, client) => {
     const start = from.get(client);
-    const end = to.get(client);
-    if (ranges.some(({ clock, len }) => start === undefined || clock < start || clock + len > end!))
+    const keep = start === undefined ? undefined : { start, end: to.get(client)! };
+    if (ranges.some(({ clock, len }) => deleted.within(client, clock, clock + len, keep)))
       deletes = true;
   });
   const pieces: { piece: Piece; shown: string }[] = [];

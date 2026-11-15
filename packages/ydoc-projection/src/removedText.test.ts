@@ -5,6 +5,7 @@ import { getDohcYDocBodyFragment } from "./body-fragment.js";
 import { getDohcProseMirrorSchema } from "./import-export.js";
 import {
   applyUpdateFindingRemovedText,
+  DeletedText,
   findUnsentText,
   INLINE_NODES,
   quoteRemovedText,
@@ -249,59 +250,97 @@ it("knows every inline node the editor can write", () => {
 });
 
 describe("what a page's unsaved changes typed", () => {
+  /** Reads a page's unsaved changes, noting its own deletes as the provider does. */
+  function page(doc: Y.Doc) {
+    const deleted = new DeletedText();
+    doc.on("afterTransaction", (transaction: Y.Transaction) => {
+      if (transaction.origin !== REMOTE) deleted.note(transaction);
+    });
+    return (...changes: Uint8Array[]) => findUnsentText(doc, Y.mergeUpdates(changes), deleted);
+  }
+
   it("reads the words in note order, a line break between lines", () => {
     const [ana] = pair("Hello", "Next");
-    const unsent = Y.mergeUpdates([
-      change(ana, (body) => piece(body, 1).insert(4, " line")),
-      change(ana, (body) => piece(body, 0).insert(5, " there")),
-      change(ana, (body) => body.insert(2, [paragraph("A new one")])),
-    ]);
+    const unsent = page(ana);
 
-    expect(findUnsentText(ana, unsent)).toEqual({
-      text: " there\n line\nA new one",
-      deletes: false,
-    });
+    expect(
+      unsent(
+        change(ana, (body) => piece(body, 1).insert(4, " line")),
+        change(ana, (body) => piece(body, 0).insert(5, " there")),
+        change(ana, (body) => body.insert(2, [paragraph("A new one")])),
+      ),
+    ).toEqual({ text: " there\n line\nA new one", deletes: false });
   });
 
   it("leaves out typing the page erased, and typing someone else's change removed", () => {
     // A doc that keeps deleted content still holds the erased words.
     const [ana, ben] = pairKeepingDeleted("Hello", "Next");
-    const unsent = Y.mergeUpdates([
+    const unsent = page(ana);
+    const changes = [
       change(ana, (body) => piece(body, 0).insert(5, " gone")),
       change(ana, (body) => piece(body, 1).insert(4, " kept typo")),
       change(ana, (body) => piece(body, 1).delete(9, 5)),
-    ]);
+    ];
     receive(
       ana,
       change(ben, (body) => body.delete(0, 1)),
     );
 
-    expect(findUnsentText(ana, unsent)).toEqual({ text: " kept", deletes: false });
+    expect(unsent(...changes)).toEqual({ text: " kept", deletes: false });
   });
 
   it("says when the changes delete text that was there before them", () => {
     const [ana] = pair("Hello", "Next");
-    const unsent = Y.mergeUpdates([
-      change(ana, (body) => piece(body, 1).insert(4, " more")),
-      change(ana, (body) => piece(body, 0).delete(0, 2)),
-    ]);
+    const unsent = page(ana);
 
-    expect(findUnsentText(ana, unsent)).toEqual({ text: " more", deletes: true });
+    expect(
+      unsent(
+        change(ana, (body) => piece(body, 1).insert(4, " more")),
+        change(ana, (body) => piece(body, 0).delete(0, 2)),
+      ),
+    ).toEqual({ text: " more", deletes: true });
   });
 
   it("counts a delete of the page's own earlier, saved typing as deleting earlier text", () => {
     const [ana] = pair("Hello");
+    const unsent = page(ana);
     change(ana, (body) => piece(body, 0).insert(5, " saved"));
-    const unsent = change(ana, (body) => piece(body, 0).delete(5, 6));
 
-    expect(findUnsentText(ana, unsent)).toEqual({ text: "", deletes: true });
+    expect(unsent(change(ana, (body) => piece(body, 0).delete(5, 6)))).toEqual({
+      text: "",
+      deletes: true,
+    });
   });
 
-  it("reads formatting alone as no words and no deletes", () => {
-    const [ana] = pair("Hello");
-    const unsent = change(ana, (body) => piece(body, 0).format(0, 5, { bold: true }));
+  it("counts a deleted line's words as deleted text", () => {
+    const [ana] = pair("Hello", "Next");
+    const unsent = page(ana);
 
-    expect(findUnsentText(ana, unsent)).toEqual({ text: "", deletes: false });
+    expect(unsent(change(ana, (body) => body.delete(0, 1)))).toEqual({ text: "", deletes: true });
+  });
+
+  it("reads formatting alone as no words and no deletes, adding it or removing it", () => {
+    const [ana] = pair("Hello");
+    const unsent = page(ana);
+    const bold = change(ana, (body) => piece(body, 0).format(0, 5, { bold: true }));
+
+    expect(unsent(bold)).toEqual({ text: "", deletes: false });
+    expect(unsent(change(ana, (body) => piece(body, 0).format(0, 5, { bold: null })))).toEqual({
+      text: "",
+      deletes: false,
+    });
+  });
+
+  it("reads a replaced attribute as no words and no deletes", () => {
+    const [ana] = pair("Hello");
+    const unsent = page(ana);
+    const line = (body: Y.XmlFragment) => body.get(0) as Y.XmlElement;
+    change(ana, (body) => line(body).setAttribute("checked", "false"));
+
+    expect(unsent(change(ana, (body) => line(body).setAttribute("checked", "true")))).toEqual({
+      text: "",
+      deletes: false,
+    });
   });
 });
 

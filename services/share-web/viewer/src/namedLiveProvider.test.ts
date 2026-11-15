@@ -665,6 +665,17 @@ describe("named live browser provider", () => {
     // The review shows the refused edit beside the one still waiting.
     expect(value.unsentText()).toEqual({ text: " first second", deletes: false });
   });
+  it("tells deleted words from removed formatting in a stopped draft", async () => {
+    const { value, host } = await live(provider({ ...limits(), maxPendingUpdates: 1 }));
+    const content = () => (value.body.get(0) as Y.XmlElement).get(0) as Y.XmlText;
+    content().format(0, 4, { bold: true });
+    await host.ack(await host.submitted(), 1, 1);
+    content().format(0, 4, { bold: null });
+    expect(value.unsentText()).toEqual({ text: "", deletes: false });
+    content().delete(0, 2);
+    expect(value.state()).toMatchObject({ status: "quarantined", reason: "pending-update-limit" });
+    expect(value.unsentText()).toEqual({ text: "", deletes: true });
+  });
   it("rejects a tampered initial sync without mutating the draft", async () => {
     const value = provider(),
       host = peer(value);

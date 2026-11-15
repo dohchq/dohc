@@ -18,6 +18,7 @@ import type { LiveUpdateHostApplicationAck } from "@dohc/live-session-contract/l
 import { parseLiveAuthorContext, type LiveAuthorContext } from "@dohc/live-session-contract";
 import {
   applyUpdateFindingRemovedText,
+  DeletedText,
   findUnsentText,
   type RemovedText,
   type UnsentText,
@@ -407,6 +408,7 @@ export function createNamedLiveProvider(
               }
               pending.shift();
               pendingBytes -= update.bytes.length;
+              if (pending.length === 0 && refused.length === 0) deletedText.clear();
               held.awaitingAck = false;
               held.retryDelayMs = 250;
               reason = null;
@@ -529,6 +531,11 @@ export function createNamedLiveProvider(
 
   // Edits the page refused and never queued, so its review still shows them.
   const refused: Uint8Array[] = [];
+  // Which of this page's deletes removed text, so formatting it removed doesn't count.
+  const deletedText = new DeletedText();
+  function noteDeletes(transaction: Y.Transaction) {
+    if (transaction.origin !== REMOTE) deletedText.note(transaction);
+  }
   function refuse(why: string, bytes: Uint8Array) {
     refused.push(bytes.slice());
     quarantine(why);
@@ -592,6 +599,7 @@ export function createNamedLiveProvider(
     notify();
     if (route) void pump(route);
   }
+  doc.on("afterTransaction", noteDeletes);
   doc.on("update", localUpdate);
 
   return {
@@ -646,7 +654,7 @@ export function createNamedLiveProvider(
     /** What this page's unsaved changes typed that the note still shows; null with none. */
     unsentText(): UnsentText | null {
       const unsent = [...pending.map(({ bytes }) => bytes), ...refused];
-      return unsent.length ? findUnsentText(doc, Y.mergeUpdates(unsent)) : null;
+      return unsent.length ? findUnsentText(doc, Y.mergeUpdates(unsent), deletedText) : null;
     },
     /** This page's own text that someone else's change removed without having seen it. */
     onRemovedText(listener: (removed: RemovedText) => void) {
@@ -693,6 +701,7 @@ export function createNamedLiveProvider(
     },
     close() {
       retire("closed", null);
+      doc.off("afterTransaction", noteDeletes);
       doc.off("update", localUpdate);
       listeners.clear();
       removedListeners.clear();
