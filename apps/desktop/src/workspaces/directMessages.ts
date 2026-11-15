@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DIRECT_ACTIVITY_MAX_WAIT_MS,
@@ -73,6 +73,7 @@ const conversationFile = (conversationId: string) => `${conversationId}.json`;
 function refusal(status: number, code: string | null, message: string | null): DirectMessageError {
   if (code === "direct_blocked") return new DirectMessageError("refused", "You can't message this person.", status, code);
   if (code === "direct_alone") return new DirectMessageError("refused", "Nobody else is in this conversation any more.", status, code);
+  if (code === "direct_limit_reached") return new DirectMessageError("refused", "Your account has stored as many direct messages as your server keeps. Ask whoever runs it for more room.", status, code);
   if (status === 404) return new DirectMessageError("refused", "dohc could not find this conversation or person. They may have left the workspace.", status, code);
   if (status === 429) return new DirectMessageError("refused", "You have sent a lot of messages. Wait a minute, then try again.", status, code);
   return new DirectMessageError("refused", message ?? `Your server refused the request (${status}). Try again.`, status, code);
@@ -81,6 +82,8 @@ function refusal(status: number, code: string | null, message: string | null): D
 export function createDirectMessages<Credentials extends DirectAccount>(dependencies: Dependencies<Credentials>) {
   let following: { key: string; stop: AbortController } | null = null;
   let listeners = 0;
+  // The account whose copy may stay on this computer: undefined until main knows, null once signed out.
+  let keeping: string | null | undefined;
 
   const account = async (): Promise<Credentials> => {
     const credentials = await dependencies.credentials();
@@ -114,6 +117,7 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
   }
 
   async function save(credentials: DirectAccount, file: string, value: unknown): Promise<void> {
+    if (keeping !== undefined && keeping !== accountKey(credentials)) return;
     try {
       await mkdir(folder(credentials), { recursive: true });
       await atomicWriteFile(join(folder(credentials), file), JSON.stringify(value));
@@ -191,6 +195,17 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
     /** The account changed: follow the new one, if anything listens. */
     accountChanged(): void {
       void ensureFollowing();
+    },
+    /**
+     * Keeps only this account's saved copy, or none when signed out. Call it
+     * once the account is known, not on a credential load's temporary null.
+     */
+    async credentialsChanged(credentials: DirectAccount | null): Promise<void> {
+      const keep = credentials?.relayUrl ? accountKey(credentials) : null;
+      keeping = keep;
+      const root = join(dependencies.stateDir(), "direct-messages");
+      const folders = await readdir(root).catch(() => [] as string[]);
+      await Promise.all(folders.filter((name) => name !== keep).map((name) => rm(join(root, name), { recursive: true, force: true })));
     },
 
     async list(): Promise<DirectList> {

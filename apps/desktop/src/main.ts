@@ -1809,6 +1809,10 @@ const credentialSessionCache = new CredentialSessionCache<CloudSessionCredential
       void namedDatasetPages
         .credentialsChanged(datasetCopyOwnerKey(snapshot.credentials))
         .catch((error) => console.error("Saved Collection page cleanup failed", error));
+    if (snapshot.credentials)
+      void directMessages
+        .credentialsChanged(snapshot.credentials)
+        .catch((error) => console.error("Saved direct message cleanup failed", error));
     shareHandoffRedemption.credentialsChanged();
     // The notice list shows the signed-in account's notices.
     notifyNoticesChanged();
@@ -1821,18 +1825,27 @@ async function refreshCredentialCache(): Promise<void> {
   try {
     await credentialSessionCache.refresh(() => cloudLogin().credentials());
   } finally {
-    if (!cachedCredentials) await namedDatasetPages.credentialsChanged(null);
+    if (!cachedCredentials) {
+      await namedDatasetPages.credentialsChanged(null);
+      await directMessages.credentialsChanged(null);
+    }
   }
 }
 async function warmCredentialCache(): Promise<void> {
   await credentialSessionCache.warm(() => cloudLogin().credentials());
-  if (!cachedCredentials) await namedDatasetPages.credentialsChanged(null);
+  if (!cachedCredentials) {
+    await namedDatasetPages.credentialsChanged(null);
+    await directMessages.credentialsChanged(null);
+  }
 }
 function clearCachedCredentials(): void {
   credentialSessionCache.clear();
   void namedDatasetPages
     .credentialsChanged(null)
     .catch((error) => console.error("Saved Collection page cleanup failed", error));
+  void directMessages
+    .credentialsChanged(null)
+    .catch((error) => console.error("Saved direct message cleanup failed", error));
   peekedReceivedGrantKinds.clear();
 }
 

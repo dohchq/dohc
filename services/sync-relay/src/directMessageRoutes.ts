@@ -98,8 +98,6 @@ export function createDirectMessageRoutes(options: {
   activity: Pick<DiscussionActivityHub, "wait" | "wake">;
   nowMs: () => number;
   newId: () => string;
-  /** Answers false when the account has sent as many messages as it may for now. */
-  admitSend?: (userId: string) => boolean;
   lookupUserDisplayName?: LookupUserDisplayName;
 }) {
   const { storage, activity } = options;
@@ -167,7 +165,6 @@ export function createDirectMessageRoutes(options: {
         } else {
           target = { userIds: resolve(userId, input) };
         }
-        if (options.admitSend && !options.admitSend(userId)) throw relayError("discussion_rate_limited");
         const result = storage.sendDirectMessage({ callerUserId: userId, target, messageId: input.messageId, body: input.body, nowMs: options.nowMs(), newId: options.newId });
         if (!result.ok) {
           switch (result.reason) {
@@ -175,6 +172,8 @@ export function createDirectMessageRoutes(options: {
             case "blocked": throw relayError("direct_blocked");
             case "alone": throw relayError("direct_alone");
             case "message_id_taken": throw relayError("direct_message_id_taken");
+            case "rate_limited": throw relayError("direct_rate_limited");
+            case "limit_reached": throw relayError("direct_limit_reached");
           }
         }
         wake(result.wake);

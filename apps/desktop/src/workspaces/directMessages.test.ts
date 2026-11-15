@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -135,5 +135,27 @@ describe("direct messages on this computer", () => {
     expect(polls).toBeGreaterThanOrEqual(2);
     expect(polls).toBeLessThanOrEqual(5);
     expect(h.changes()).toBe(0);
+  });
+
+  it("keeps only the signed-in account's saved copy, and none once signed out", async () => {
+    const h = harness();
+    h.routes.set("/sync/direct/conversations", () => Response.json({ revision: 1, conversations: [conversation(message(1))] }));
+    await h.service.list();
+    h.signInAs({ relayUrl: "https://relay.test", userId: "cat" });
+    await h.service.list();
+    const folders = () => readdir(join(stateDir, "direct-messages")).catch(() => [] as string[]);
+    expect(await folders()).toHaveLength(2);
+
+    await h.service.credentialsChanged({ relayUrl: "https://relay.test", userId: "cat" });
+    expect(await folders()).toHaveLength(1);
+    h.goOffline();
+    expect(await h.service.list()).toMatchObject({ saved: true });
+
+    await h.service.credentialsChanged(null);
+    expect(await folders()).toEqual([]);
+    // A read that lands after sign-out saves nothing.
+    h.signInAs({ relayUrl: "https://relay.test", userId: "ann" });
+    await expect(h.service.list()).rejects.toMatchObject({ failure: "unreachable" });
+    expect(await folders()).toEqual([]);
   });
 });

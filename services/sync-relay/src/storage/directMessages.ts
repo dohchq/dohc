@@ -25,6 +25,15 @@ const MESSAGES = "sync_relay_direct_messages";
 const HIDDEN = "sync_relay_direct_hidden";
 const BLOCKS = "sync_relay_direct_blocks";
 const REVISIONS = "sync_relay_direct_revisions";
+const USAGE = "sync_relay_direct_usage";
+
+// Direct messages belong to no workspace, so no workspace quota bounds them.
+// These bound one account instead, inside the send's transaction.
+export const DIRECT_SEND_RATE_LIMIT = 30;
+export const DIRECT_SEND_RATE_WINDOW_MS = 60_000;
+export const DIRECT_NEW_CONVERSATION_LIMIT = 50;
+export const DIRECT_NEW_CONVERSATION_WINDOW_MS = 24 * 60 * 60_000;
+export const DIRECT_STORED_BYTES_LIMIT = 64 * 1024 * 1024;
 
 const SCHEMA = {
   [CONVERSATIONS]: `CREATE TABLE ${CONVERSATIONS} (
@@ -50,6 +59,7 @@ const SCHEMA = {
   PRIMARY KEY (conversation_id, seq),
   UNIQUE (conversation_id, message_id)
 ) STRICT`,
+  idx_sync_relay_direct_messages_author: `CREATE INDEX idx_sync_relay_direct_messages_author ON ${MESSAGES}(author_user_id, created_at_ms)`,
   [HIDDEN]: `CREATE TABLE ${HIDDEN} (
   conversation_id TEXT NOT NULL,
   seq INTEGER NOT NULL,
@@ -66,6 +76,10 @@ const SCHEMA = {
   [REVISIONS]: `CREATE TABLE ${REVISIONS} (
   user_id TEXT PRIMARY KEY,
   revision INTEGER NOT NULL CHECK (revision >= 1)
+) STRICT, WITHOUT ROWID`,
+  [USAGE]: `CREATE TABLE ${USAGE} (
+  user_id TEXT PRIMARY KEY,
+  stored_bytes INTEGER NOT NULL CHECK (stored_bytes >= 0)
 ) STRICT, WITHOUT ROWID`,
 } as const;
 
@@ -97,7 +111,7 @@ export interface DirectConversationRow { conversationId: string; people: DirectP
 
 export type DirectSendOutcome =
   | { ok: true; conversationId: string; seq: number; wake: string[] }
-  | { ok: false; reason: "not_found" | "blocked" | "alone" | "message_id_taken" };
+  | { ok: false; reason: "not_found" | "blocked" | "alone" | "message_id_taken" | "rate_limited" | "limit_reached" };
 
 const peopleKey = (userIds: readonly string[]) => JSON.stringify([...new Set(userIds)].sort());
 
@@ -180,13 +194,14 @@ export function sendDirectMessage(storage: StorageContext, input: {
   nowMs: number;
   newId: () => string;
 }): DirectSendOutcome {
-  return storage.tx(() => {
+  return storage.tx((): DirectSendOutcome => {
     const caller = input.callerUserId;
     if (accountIsFenced(storage, caller)) return { ok: false, reason: "not_found" };
-    let conversationId: string | null;
+    let conversationId: string | null = null;
+    let create: { key: string; userIds: string[] } | null = null;
     if ("conversationId" in input.target) {
-      conversationId = isPerson(storage, input.target.conversationId, caller) ? input.target.conversationId : null;
-      if (!conversationId) return { ok: false, reason: "not_found" };
+      if (!isPerson(storage, input.target.conversationId, caller)) return { ok: false, reason: "not_found" };
+      conversationId = input.target.conversationId;
     } else {
       const userIds = [...new Set(input.target.userIds)].sort();
       if (!userIds.includes(caller) || userIds.length < 2 || userIds.length > MAX_DIRECT_PEOPLE) return { ok: false, reason: "not_found" };
@@ -199,35 +214,53 @@ export function sendDirectMessage(storage: StorageContext, input: {
         if (userIds.some((userId) => userId !== caller && (blocks(storage, userId, caller) || accountIsFenced(storage, userId)))) {
           return { ok: false, reason: "blocked" };
         }
-        conversationId = input.newId();
-        storage.db.prepare(`INSERT INTO ${CONVERSATIONS} (conversation_id, people_key, created_at_ms) VALUES (?, ?, ?)`).run(conversationId, key, input.nowMs);
-        const person = storage.db.prepare(`INSERT INTO ${PEOPLE} (conversation_id, user_id) VALUES (?, ?)`);
-        for (const userId of userIds) person.run(conversationId, userId);
+        create = { key, userIds };
       }
     }
-    const retried = storage.db.prepare(`SELECT seq, author_user_id, body FROM ${MESSAGES} WHERE conversation_id = ? AND message_id = ?`)
-      .get(conversationId, input.messageId);
-    if (retried) {
-      return retried.author_user_id === caller && retried.body === input.body
-        ? { ok: true, conversationId, seq: Number(retried.seq), wake: [] }
-        : { ok: false, reason: "message_id_taken" };
+    if (conversationId) {
+      const retried = storage.db.prepare(`SELECT seq, author_user_id, body FROM ${MESSAGES} WHERE conversation_id = ? AND message_id = ?`)
+        .get(conversationId, input.messageId);
+      if (retried) {
+        return retried.author_user_id === caller && retried.body === input.body
+          ? { ok: true, conversationId, seq: Number(retried.seq), wake: [] }
+          : { ok: false, reason: "message_id_taken" };
+      }
     }
+    // Every limit is checked before anything is written, so a refusal leaves no empty conversation.
+    const sentSince = (windowMs: number, firstOnly: boolean) => Number(storage.db.prepare(
+      `SELECT count(*) AS n FROM ${MESSAGES} WHERE author_user_id = ? AND created_at_ms > ?${firstOnly ? " AND seq = 1" : ""}`,
+    ).get(caller, input.nowMs - windowMs)!.n);
+    if (sentSince(DIRECT_SEND_RATE_WINDOW_MS, false) >= DIRECT_SEND_RATE_LIMIT) return { ok: false, reason: "rate_limited" };
+    if (create && sentSince(DIRECT_NEW_CONVERSATION_WINDOW_MS, true) >= DIRECT_NEW_CONVERSATION_LIMIT) return { ok: false, reason: "rate_limited" };
+    const bytes = Buffer.byteLength(input.body);
+    const stored = Number(storage.db.prepare(`SELECT stored_bytes FROM ${USAGE} WHERE user_id = ?`).get(caller)?.stored_bytes ?? 0);
+    if (stored + bytes > DIRECT_STORED_BYTES_LIMIT) return { ok: false, reason: "limit_reached" };
+
+    if (create) {
+      conversationId = input.newId();
+      storage.db.prepare(`INSERT INTO ${CONVERSATIONS} (conversation_id, people_key, created_at_ms) VALUES (?, ?, ?)`).run(conversationId, create.key, input.nowMs);
+      const person = storage.db.prepare(`INSERT INTO ${PEOPLE} (conversation_id, user_id) VALUES (?, ?)`);
+      for (const userId of create.userIds) person.run(conversationId, userId);
+    }
+    const id = conversationId!;
     const others = storage.db.prepare(`SELECT user_id FROM ${PEOPLE} WHERE conversation_id = ? AND user_id <> ?`)
-      .all(conversationId, caller).map((row) => String(row.user_id));
+      .all(id, caller).map((row) => String(row.user_id));
     if (others.length === 0) return { ok: false, reason: "alone" };
     const blockers = others.filter((userId) => blocks(storage, userId, caller));
     // Two people: a block refuses. The original set decides, so a deleted account's place still counts.
-    if (blockers.length > 0 && peopleOf(storage, conversationId).length === 2) return { ok: false, reason: "blocked" };
+    if (blockers.length > 0 && peopleOf(storage, id).length === 2) return { ok: false, reason: "blocked" };
     const seq = Number(storage.db.prepare(`UPDATE ${CONVERSATIONS} SET last_seq = last_seq + 1 WHERE conversation_id = ? RETURNING last_seq`)
-      .get(conversationId)!.last_seq);
+      .get(id)!.last_seq);
     storage.db.prepare(`INSERT INTO ${MESSAGES} (conversation_id, seq, message_id, author_user_id, body, created_at_ms) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(conversationId, seq, input.messageId, caller, input.body, input.nowMs);
+      .run(id, seq, input.messageId, caller, input.body, input.nowMs);
+    storage.db.prepare(`INSERT INTO ${USAGE} (user_id, stored_bytes) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET stored_bytes = stored_bytes + excluded.stored_bytes`)
+      .run(caller, bytes);
     const hide = storage.db.prepare(`INSERT INTO ${HIDDEN} (conversation_id, seq, user_id) VALUES (?, ?, ?)`);
-    for (const userId of blockers) hide.run(conversationId, seq, userId);
-    storage.db.prepare(`UPDATE ${PEOPLE} SET read_seq = ? WHERE conversation_id = ? AND user_id = ?`).run(seq, conversationId, caller);
+    for (const userId of blockers) hide.run(id, seq, userId);
+    storage.db.prepare(`UPDATE ${PEOPLE} SET read_seq = ? WHERE conversation_id = ? AND user_id = ?`).run(seq, id, caller);
     const wake = [caller, ...others.filter((userId) => !blockers.includes(userId))];
     bump(storage, wake);
-    return { ok: true, conversationId, seq, wake };
+    return { ok: true, conversationId: id, seq, wake };
   });
 }
 

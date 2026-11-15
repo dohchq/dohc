@@ -11,6 +11,9 @@ import { parseRoute } from "./relayRoute";
 import type { SyncRelayHandler } from "./server";
 import { fenceAccount, initializeAccountDeletion, purgeAccountRows } from "./storage/accountDeletion";
 import type { StorageContext } from "./storage/context";
+import {
+  DIRECT_NEW_CONVERSATION_LIMIT, DIRECT_NEW_CONVERSATION_WINDOW_MS, DIRECT_SEND_RATE_LIMIT, DIRECT_SEND_RATE_WINDOW_MS, DIRECT_STORED_BYTES_LIMIT,
+} from "./storage/directMessages";
 import { closeTestStorages, json, jsonBody, request, testHandler, testStorage } from "./testing";
 
 afterEach(closeTestStorages);
@@ -22,11 +25,12 @@ const OTHER_WORKSPACE = "workspace-elsewhere";
 const deletedAccounts = new Set<string>();
 afterEach(() => deletedAccounts.clear());
 
-async function seed(options: { activity?: DiscussionActivityHub } = {}) {
+async function seed(options: { activity?: DiscussionActivityHub; nowMs?: () => number } = {}) {
   const storage = await testStorage();
   const h = testHandler(storage, {
     lookupUserDisplayName: (userId: string) => deletedAccounts.has(userId) ? null : `Name ${userId}`,
     ...(options.activity ? { discussionActivity: options.activity } : {}),
+    ...(options.nowMs ? { nowMs: options.nowMs } : {}),
   });
   for (const [owner, workspaceId] of [[OWNER, WORKSPACE], ["stranger", OTHER_WORKSPACE]] as const) {
     expect((await h(request(owner, "/sync/workspaces", jsonBody({ workspaceId })))).status).toBe(200);
@@ -272,5 +276,59 @@ describe("direct message routes", () => {
     const ownerDeletion = fenceAccount(context, key, OWNER, `${OWNER}@dohc.test`);
     purgeAccountRows(context, OWNER, `${OWNER}@dohc.test`, ownerDeletion.manifest!);
     expect(context.db.prepare("SELECT count(*) AS n FROM sync_relay_direct_messages").get()!.n).toBe(0);
+  });
+
+  it("limits how fast one account sends, and still answers a retry", async () => {
+    let now = 1_000_000;
+    const { h } = await seed({ nowMs: () => now });
+    const ana = await member(h, "ana");
+    const conversationId = await sent(h, OWNER, { people: [pick(ana)] });
+    for (let index = 1; index < DIRECT_SEND_RATE_LIMIT; index += 1) await sent(h, OWNER, { conversationId });
+    const refused = await send(h, OWNER, { conversationId }, "one more", "over-the-rate");
+    expect(refused.status).toBe(429);
+    expect(await code(refused)).toBe("direct_rate_limited");
+    // A retry of a message already stored is not a new send.
+    expect((await send(h, OWNER, { conversationId }, "hello", `m-${messageSeq}`)).status).toBe(200);
+    // Ana's own sends are counted apart.
+    expect((await send(h, "ana", { conversationId })).status).toBe(200);
+    now += DIRECT_SEND_RATE_WINDOW_MS + 1;
+    expect((await send(h, OWNER, { conversationId }, "one more", "over-the-rate")).status).toBe(200);
+  });
+
+  it("limits new conversations a day, without leaving an empty one behind", async () => {
+    let now = 1_000_000;
+    const { h } = await seed({ nowMs: () => now });
+    const members: string[] = [];
+    for (const name of ["a1", "a2", "a3", "a4", "a5", "a6", "a7"]) members.push(await member(h, name));
+    // Distinct sets of people, each a new conversation.
+    const sets = Array.from({ length: 2 ** members.length - 1 }, (_, mask) => members.filter((_, bit) => ((mask + 1) >> bit) & 1));
+    for (const people of sets.slice(0, DIRECT_NEW_CONVERSATION_LIMIT)) {
+      now += 3_000;
+      await sent(h, OWNER, { people: people.map((memberId) => pick(memberId)) });
+    }
+    now += DIRECT_SEND_RATE_WINDOW_MS;
+    const next = sets[DIRECT_NEW_CONVERSATION_LIMIT]!.map((memberId) => pick(memberId));
+    const refused = await send(h, OWNER, { people: next });
+    expect(refused.status).toBe(429);
+    expect(await code(refused)).toBe("direct_rate_limited");
+    expect((await list(h, OWNER)).conversations).toHaveLength(DIRECT_NEW_CONVERSATION_LIMIT);
+    // Writing to a conversation that exists is still fine.
+    expect((await send(h, OWNER, { people: sets[0]!.map((memberId) => pick(memberId)) })).status).toBe(200);
+    now += DIRECT_NEW_CONVERSATION_WINDOW_MS;
+    expect((await send(h, OWNER, { people: next })).status).toBe(200);
+  });
+
+  it("stops an account at the most this server stores for it", async () => {
+    const { h, storage } = await seed();
+    const ana = await member(h, "ana");
+    const conversationId = await sent(h, OWNER, { people: [pick(ana)] }, "1234567890");
+    const context = storage as unknown as StorageContext;
+    context.db.prepare("UPDATE sync_relay_direct_usage SET stored_bytes = ? WHERE user_id = ?").run(DIRECT_STORED_BYTES_LIMIT - 10, OWNER);
+    const refused = await send(h, OWNER, { conversationId }, "12345678901");
+    expect(refused.status).toBe(413);
+    expect(await code(refused)).toBe("direct_limit_reached");
+    expect((await send(h, OWNER, { conversationId }, "1234567890")).status).toBe(200);
+    expect(context.db.prepare("SELECT stored_bytes FROM sync_relay_direct_usage WHERE user_id = ?").get(OWNER)!.stored_bytes).toBe(DIRECT_STORED_BYTES_LIMIT);
+    expect(await bodies(h, OWNER, conversationId)).toEqual(["1234567890", "1234567890"]);
   });
 });
