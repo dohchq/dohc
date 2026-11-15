@@ -8683,8 +8683,15 @@ fn render_inline(
 
     let mut rendered_nodes = BTreeMap::new();
     let mut starts_line = true;
+    // Every break in a run looks ahead to the same line, so keep the answer
+    // for the run rather than rescanning it at each break.
+    let mut line_after_breaks = None;
     let mut part_index = 0usize;
     while escape_block_syntax && part_index < parts.len() {
+        if !matches!(&parts[part_index], InlinePart::Node(MarkdownNode::Element { tag, .. }) if tag == "hardBreak")
+        {
+            line_after_breaks = None;
+        }
         let is_plain_text = matches!(
             &parts[part_index],
             InlinePart::Text {
@@ -8742,7 +8749,8 @@ fn render_inline(
                 if tag == "hardBreak"
                     && starts_line
                     && !table_cell
-                    && shows_line_after(&parts, part_index) =>
+                    && *line_after_breaks
+                        .get_or_insert_with(|| shows_line_after(&parts, part_index)) =>
             {
                 rendered_nodes.insert(part_index, "\\\n".to_string());
                 true

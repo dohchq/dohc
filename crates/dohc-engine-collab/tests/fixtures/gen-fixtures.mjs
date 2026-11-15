@@ -667,106 +667,6 @@ const RICHDOC_PROJECTION_CASES = [
       ]),
   },
   {
-    // #4093: a paragraph that starts with a hard break, at the top level and
-    // in list and task items.
-    name: "leading-hard-break",
-    makeDoc: () =>
-      directRichdoc([
-        paragraph([xmlElement("hardBreak"), xmlText("after a leading break")]),
-        paragraph([xmlElement("hardBreak"), xmlText(" spaced after a leading break")]),
-        xmlElement("bulletList", {}, [
-          xmlElement("listItem", {}, [
-            paragraph("first"),
-            paragraph([xmlElement("hardBreak"), xmlText(" in a list item")]),
-          ]),
-        ]),
-        xmlElement("taskList", {}, [
-          xmlElement("taskItem", { checked: false }, [
-            paragraph("first"),
-            paragraph([xmlElement("hardBreak"), xmlText(" in a task item")]),
-          ]),
-        ]),
-        paragraph([
-          xmlElement("hardBreak"),
-          xmlElement("hardBreak"),
-          xmlText("after two leading breaks"),
-        ]),
-        paragraph([
-          xmlText("before"),
-          xmlElement("hardBreak"),
-          xmlElement("hardBreak"),
-          xmlText("after a blank line"),
-        ]),
-        paragraph([xmlText("ends with a break"), xmlElement("hardBreak")]),
-        // A backslash that ends a paragraph would read back as literal text.
-        paragraph([xmlElement("hardBreak"), xmlElement("hardBreak")]),
-        paragraph([
-          xmlText("ends with breaks"),
-          xmlElement("hardBreak"),
-          xmlElement("hardBreak"),
-          xmlElement("hardBreak"),
-        ]),
-        paragraph([xmlElement("hardBreak"), xmlText(" ")]),
-        paragraph([
-          xmlElement("hardBreak"),
-          xmlText(" "),
-          xmlElement("hardBreak"),
-          xmlText("after a line of a space"),
-        ]),
-        paragraph([
-          xmlText("a"),
-          xmlElement("hardBreak"),
-          xmlElement("hardBreak"),
-          xmlText(" "),
-          xmlElement("hardBreak"),
-          xmlText("after a break and a line of a space"),
-        ]),
-        paragraph([xmlElement("hardBreak"), xmlText(" \nafter a line of a space in the text")]),
-        // Other Unicode spaces are blank only on a paragraph's last line.
-        paragraph([xmlElement("hardBreak"), xmlText("　")]),
-        paragraph([
-          xmlElement("hardBreak"),
-          xmlText(" "),
-          xmlElement("hardBreak"),
-          xmlText("after a line of an em space"),
-        ]),
-        // A code span of a space is visible, so the break keeps its backslash.
-        paragraph([xmlElement("hardBreak"), xmlText(" ", { code: {} })]),
-        xmlElement("bulletList", {}, [
-          xmlElement("listItem", {}, [
-            paragraph([
-              xmlText("item"),
-              xmlElement("hardBreak"),
-              xmlElement("hardBreak"),
-              xmlElement("hardBreak"),
-            ]),
-          ]),
-        ]),
-        table([
-          tableRow([tableCell("tableHeader", "head")]),
-          tableRow([
-            tableCell("tableCell", [xmlElement("hardBreak"), xmlText("in a cell")]),
-          ]),
-          tableRow([
-            tableCell("tableCell", [xmlText("a"), xmlElement("hardBreak"), xmlText("b")]),
-          ]),
-          tableRow([tableCell("tableCell", [xmlText("ends"), xmlElement("hardBreak")])]),
-          tableRow([
-            tableCell("tableCell", [xmlElement("hardBreak"), xmlText(" spaced in a cell")]),
-          ]),
-          tableRow([
-            tableCell("tableCell", [xmlText("a  "), xmlElement("hardBreak"), xmlText("  b")]),
-          ]),
-          tableRow([
-            xmlElement("tableCell", { colspan: 1, rowspan: 1 }, [
-              paragraph("first block "),
-              paragraph(" second block"),
-            ]),
-          ]),
-        ]),
-      ]),
-  },
-  {
     name: "plain-text-mark-delimiters",
     makeDoc: () =>
       directRichdoc([
@@ -916,6 +816,106 @@ const RICHDOC_PROJECTION_CASES = [
         ]),
       ]),
     ]),
+  },
+  {
+    // #4093: a paragraph that starts with a hard break, at the top level and
+    // in list and task items.
+    name: "leading-hard-break",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph([xmlElement("hardBreak"), xmlText("after a leading break")]),
+        paragraph([xmlElement("hardBreak"), xmlText(" spaced after a leading break")]),
+        xmlElement("bulletList", {}, [
+          xmlElement("listItem", {}, [
+            paragraph("first"),
+            paragraph([xmlElement("hardBreak"), xmlText(" in a list item")]),
+          ]),
+        ]),
+        xmlElement("taskList", {}, [
+          xmlElement("taskItem", { checked: false }, [
+            paragraph("first"),
+            paragraph([xmlElement("hardBreak"), xmlText(" in a task item")]),
+          ]),
+        ]),
+        paragraph([
+          xmlElement("hardBreak"),
+          xmlElement("hardBreak"),
+          xmlText("after two leading breaks"),
+        ]),
+        paragraph([
+          xmlText("before"),
+          xmlElement("hardBreak"),
+          xmlElement("hardBreak"),
+          xmlText("after a blank line"),
+        ]),
+        paragraph([xmlText("ends with a break"), xmlElement("hardBreak")]),
+        // A backslash that ends a paragraph would read back as literal text.
+        paragraph([xmlElement("hardBreak"), xmlElement("hardBreak")]),
+        paragraph([
+          xmlText("ends with breaks"),
+          xmlElement("hardBreak"),
+          xmlElement("hardBreak"),
+          xmlElement("hardBreak"),
+        ]),
+        paragraph([xmlElement("hardBreak"), xmlText(" ")]),
+        paragraph([
+          xmlElement("hardBreak"),
+          xmlText(" "),
+          xmlElement("hardBreak"),
+          xmlText("after a line of a space"),
+        ]),
+        paragraph([
+          xmlText("a"),
+          xmlElement("hardBreak"),
+          xmlElement("hardBreak"),
+          xmlText(" "),
+          xmlElement("hardBreak"),
+          xmlText("after a break and a line of a space"),
+        ]),
+        paragraph([xmlElement("hardBreak"), xmlText(" \nafter a line of a space in the text")]),
+        // Other Unicode spaces are blank only on a paragraph's last line.
+        paragraph([xmlElement("hardBreak"), xmlText("　")]),
+        paragraph([
+          xmlElement("hardBreak"),
+          xmlText(" "),
+          xmlElement("hardBreak"),
+          xmlText("after a line of an em space"),
+        ]),
+        // A code span of a space is visible, so the break keeps its backslash.
+        paragraph([xmlElement("hardBreak"), xmlText(" ", { code: {} })]),
+        xmlElement("bulletList", {}, [
+          xmlElement("listItem", {}, [
+            paragraph([
+              xmlText("item"),
+              xmlElement("hardBreak"),
+              xmlElement("hardBreak"),
+              xmlElement("hardBreak"),
+            ]),
+          ]),
+        ]),
+        table([
+          tableRow([tableCell("tableHeader", "head")]),
+          tableRow([
+            tableCell("tableCell", [xmlElement("hardBreak"), xmlText("in a cell")]),
+          ]),
+          tableRow([
+            tableCell("tableCell", [xmlText("a"), xmlElement("hardBreak"), xmlText("b")]),
+          ]),
+          tableRow([tableCell("tableCell", [xmlText("ends"), xmlElement("hardBreak")])]),
+          tableRow([
+            tableCell("tableCell", [xmlElement("hardBreak"), xmlText(" spaced in a cell")]),
+          ]),
+          tableRow([
+            tableCell("tableCell", [xmlText("a  "), xmlElement("hardBreak"), xmlText("  b")]),
+          ]),
+          tableRow([
+            xmlElement("tableCell", { colspan: 1, rowspan: 1 }, [
+              paragraph("first block "),
+              paragraph(" second block"),
+            ]),
+          ]),
+        ]),
+      ]),
   },
 ];
 

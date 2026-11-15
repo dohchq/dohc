@@ -1263,9 +1263,13 @@ function escapeLeadingMarkdownBlockSyntax(
     encodeBlockEscape,
   );
   const preparedContent = escapeLeadingIndentedCode(escapedContent, encodeLeadingWhitespace);
+  // Every break in a run looks ahead to the same line, so keep the answer
+  // for the run rather than rescanning it at each break.
+  let lineAfterBreaks: boolean | undefined;
 
   for (let index = 0; index < preparedContent.length;) {
     const node = preparedContent[index];
+    if (node.type !== "hardBreak") lineAfterBreaks = undefined;
     if (typeof node.text === "string" && !node.marks?.length) {
       const run: JSONContent[] = [];
       while (
@@ -1296,7 +1300,7 @@ function escapeLeadingMarkdownBlockSyntax(
       encodeBackslash &&
       node.type === "hardBreak" &&
       lineStart &&
-      showsLineAfter(preparedContent, index)
+      (lineAfterBreaks ??= showsLineAfter(preparedContent, index))
     ) {
       output.push({ type: "text", text: `${encodeBackslash()}\n` });
       index += 1;
