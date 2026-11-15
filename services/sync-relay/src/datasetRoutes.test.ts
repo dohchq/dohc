@@ -7,6 +7,12 @@ import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
+import {
+  APP_PUBLICATION_MAX_BUNDLE_BYTES,
+  APP_PUBLICATION_MAX_FILES,
+  APP_PUBLICATION_MAX_METADATA_BYTES,
+  type AppPublicationLimits,
+} from "@dohc/security-contract/app-publication";
 import { fixture, limits, pushFile } from "./datasetTestFixture";
 import { createSyncRelayHandler, streamsRequestBody } from "./server";
 import { hashLinkBearer } from "./linkSecurity";
@@ -192,7 +198,11 @@ const schemaSql =
 const operationSource = `globalThis.operations={submit(ctx,input){if(input.fileId)ctx.files.attach(input.fileId);if(!input.name)ctx.refuse('missing_name','A name is required.');ctx.db.execute('INSERT INTO requests VALUES(?,?,?)',[ctx.requestId,input.name,input.fileId??null]);return {accepted:true};},read(ctx){return ctx.db.query('SELECT * FROM requests ORDER BY id');},receipt(ctx,input){const row=ctx.db.query('SELECT receipt FROM requests WHERE receipt=?',[input.fileId])[0];if(!row)ctx.refuse('missing_receipt','Receipt unavailable.');return {fileId:row.receipt};}};`;
 const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
 
-async function httpFixture(maxParticipantsPerGrant?: number, publications = true) {
+async function httpFixture(
+  maxParticipantsPerGrant?: number,
+  publications = true,
+  hostLimits: AppPublicationLimits = limits,
+) {
   const f = fixture(),
     directory = await mkdtemp(join(tmpdir(), "relay-dataset-routes-"));
   pushFile(f.storage, "dataset-file", null, {
@@ -203,7 +213,7 @@ async function httpFixture(maxParticipantsPerGrant?: number, publications = true
   const host = await f.storage.createDatasetHost({
     publicEditRelease: undefined,
     directory,
-    limits,
+    limits: hostLimits,
     maxParticipantsPerGrant,
     nowMs: () => now,
     onShutdownError(error) {
@@ -229,7 +239,7 @@ async function httpFixture(maxParticipantsPerGrant?: number, publications = true
   const handler = createSyncRelayHandler({
     storage: f.storage,
     datasetHost: host,
-    ...(publications ? { appPublicationLimits: limits } : {}),
+    ...(publications ? { appPublicationLimits: hostLimits } : {}),
     linkKey,
     nowMs: () => 10,
     resolveActor(request, workspaceId) {
@@ -383,6 +393,48 @@ it("takes the owner's agent on a change it makes, and refuses an agent for anyon
       })
     ).status,
   ).toBe(404);
+});
+
+it("approves an app on the owner's computer whose candidate is up to the publication metadata bound", async () => {
+  const f = await httpFixture(undefined, true, {
+    maxFiles: APP_PUBLICATION_MAX_FILES,
+    maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES,
+    maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
+  });
+  await f.activate();
+  const { candidate: published } = f.storage.readAppPublication({
+    workspaceId: "w",
+    publicationId: f.publicationId,
+    ownerUserId: "owner",
+    limits,
+  });
+  const capability = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      datasetId: id(1),
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationIds: [id(5), id(6)],
+    },
+    revision,
+  );
+  // A candidate of exactly `bytes` serialized bytes, padded through its compiler version.
+  const sized = (bytes: number) => {
+    const base = { ...published, capabilities: [capability] };
+    const version = "v".repeat(
+      bytes - Buffer.byteLength(JSON.stringify(base)) + published.compilerIdentity.version.length,
+    );
+    const candidate = { ...base, compilerIdentity: { ...base.compilerIdentity, version } };
+    expect(Buffer.byteLength(JSON.stringify(candidate))).toBe(bytes);
+    return candidate;
+  };
+  const approve = async (bytes: number) =>
+    (await f.http(`${f.path}/binding`, { localApp: sized(bytes) })).status;
+  expect(await approve(200 * 1024)).toBe(200);
+  expect(await approve(APP_PUBLICATION_MAX_METADATA_BYTES)).toBe(200);
+  // Over the bound the candidate is refused, by its parser and then by the body limit.
+  expect(await approve(APP_PUBLICATION_MAX_METADATA_BYTES + 1)).toBe(400);
+  expect(await approve(APP_PUBLICATION_MAX_METADATA_BYTES + 2 * 1024)).toBe(413);
 });
 
 it("runs an app on the owner's computer as that app, within its approval, for the owner alone", async () => {

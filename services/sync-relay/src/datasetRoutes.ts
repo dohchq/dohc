@@ -11,6 +11,7 @@ import {
   isDatasetReopenWaitError,
   isDatasetWorkerFailure,
 } from "@dohc/app-backend-runtime/supervisor";
+import { APP_PUBLICATION_MAX_METADATA_BYTES } from "@dohc/security-contract/app-publication";
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import {
@@ -38,7 +39,10 @@ export function datasetRequestBytes(action: DatasetRoute["action"]): number {
     ? APP_BACKEND_UPLOAD_REQUEST_BYTES
     : action === "activate" || action === "prepare-migration"
       ? 1024 * 1024
-      : 128 * 1024;
+      : // An app candidate up to its bound, inside the `localApp` wrapper.
+        action === "binding"
+        ? APP_PUBLICATION_MAX_METADATA_BYTES + 1024
+        : 128 * 1024;
 }
 
 /**
