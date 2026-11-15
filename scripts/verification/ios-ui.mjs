@@ -91,7 +91,8 @@ export function checkClass({ name, source, results, status }) {
 /** How the plain JS bundle sets an exported build flag: `on`, `off`, or `undetermined`. */
 export function flagReading(text, name) {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  const hits = [...text.matchAll(new RegExp(`${escaped}\\s*=(?!=)[^;\\n]{0,120}`, "gu"))].map(
+  // The assignment ends at a semicolon, a comma, or the module wrapper's closing brace or parenthesis.
+  const hits = [...text.matchAll(new RegExp(`${escaped}\\s*=(?!=)[^;,})\\n]{0,120}`, "gu"))].map(
     ([hit]) => hit.trim(),
   );
   const on = hits.filter((hit) => /["']1["']\s*===\s*["']1["']|=\s*(?:true|!0)\s*$/u.test(hit));

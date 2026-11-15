@@ -1632,6 +1632,10 @@ test("the iOS job reads build flags from the plain JS bundle", () => {
   assert.equal(flagReading("var sampleBuild=!0;", "sampleBuild").state, "on");
   assert.equal(flagReading('const phoneWrites = undefined === "1";', "phoneWrites").state, "off");
   assert.equal(flagReading("var phoneWrites=!1;", "phoneWrites").state, "off");
+  // A minified module whose last statement sets the flag ends at the module wrapper, not a semicolon.
+  assert.equal(flagReading("e.sampleBuild=!0},123,[]);", "sampleBuild").state, "on");
+  assert.equal(flagReading("e.phoneWrites=!1},123,[]);", "phoneWrites").state, "off");
+  assert.equal(flagReading('a.phoneWrites=void 0==="1",b=2;', "phoneWrites").state, "off");
   assert.equal(
     flagReading('var phoneWrites=!1;var phoneWrites="1"==="1";', "phoneWrites").state,
     "undetermined",
