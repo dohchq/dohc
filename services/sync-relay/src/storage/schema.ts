@@ -44,6 +44,7 @@ import { initializeAccountWorkspaceSchema } from "./accountWorkspaces";
 import { initializeOperationRecordSchema } from "./operationRecords";
 import { initializeChatWakeSchema } from "./chatWakes";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
+import { initializeAccessRuleSchema } from "./accessRules";
 import {
   initializePushDeviceSchema,
   initializePushRevokedSessionSchema,
@@ -1674,6 +1675,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeAutomationServerScheduleSchema(db);
   initializeAutomationServerUnsentRunSchema(db);
   initializeCurrentFileKeySchema(db);
+  initializeAccessRuleSchema(db);
   initializeWorkReferenceSchema(db);
   initializeCollectionWriteSchema(db);
   initializeAutomationPressSchema(db);

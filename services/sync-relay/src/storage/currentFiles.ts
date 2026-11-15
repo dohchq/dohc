@@ -11,6 +11,8 @@ import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floo
 import type { StorageContext } from "./context";
 import { pathCollisionKey } from "../pathCollisionKey";
 import { parseCollectionRecordIdentity } from "@dohc/workspace-contracts/collection-values";
+import { accessRuleFolder, isAccessRulePath } from "@dohc/security-contract/access-rules";
+import { accessRuleStatements, refreshAccessRule, type AccessRuleStatements } from "./accessRules";
 
 const RECORD_IDENTITIES_MIGRATION_ID = "current-record-identities-v1";
 const RECORD_IDENTITY_INSERT_SQL = `INSERT INTO sync_relay_current_record_ids (workspace_id, version_id, path, record_id)
@@ -231,9 +233,11 @@ interface CurrentFileStatements {
   put: ReturnType<SqliteDb["prepare"]>;
   key: ReturnType<SqliteDb["prepare"]>;
   remove: ReturnType<SqliteDb["prepare"]>;
+  rules: AccessRuleStatements;
 }
 
 // A current file and its collision key. Removing the file removes the key.
+// A rule file also moves its folder's rule row.
 function putCurrentFile(
   statements: CurrentFileStatements,
   row: {
@@ -263,6 +267,15 @@ function putCurrentFile(
       : null;
   if (id) statements.recordId.run(row.workspaceId, row.versionId, row.path, id);
   else statements.removeRecordId.run(row.workspaceId, row.versionId, row.path);
+  if (isAccessRulePath(row.path)) {
+    refreshAccessRule(
+      statements.rules,
+      row.workspaceId,
+      row.versionId,
+      accessRuleFolder(row.path),
+      row.relaySeq,
+    );
+  }
   if (row.path.endsWith("/collection.yaml")) {
     const folder = row.path.slice(0, -"collection.yaml".length);
     // A manifest may arrive after its records. Read their bounded prefixes
@@ -281,8 +294,21 @@ function putCurrentFile(
   }
 }
 
+function removeCurrentFile(
+  statements: CurrentFileStatements,
+  workspaceId: string,
+  versionId: string,
+  path: string,
+  relaySeq: number,
+): void {
+  statements.remove.run(workspaceId, versionId, path);
+  if (isAccessRulePath(path))
+    refreshAccessRule(statements.rules, workspaceId, versionId, accessRuleFolder(path), relaySeq);
+}
+
 export function currentFileStatements(db: SqliteDb): CurrentFileStatements {
   return {
+    rules: accessRuleStatements(db),
     records:
       db.prepare(`SELECT f.path, substr(b.content, 1, 65536) AS frontmatter FROM sync_relay_current_files f
       JOIN sync_relay_blobs b ON b.workspace_id=f.workspace_id AND b.sha256=f.blob_sha256
@@ -402,7 +428,7 @@ export function applyCurrentFileOp(
     }
     const current = statements.get.get(workspaceId, versionId, before.path);
     if (current?.blob_sha256 !== before.blobSha256) return;
-    statements.remove.run(workspaceId, versionId, before.path);
+    removeCurrentFile(statements, workspaceId, versionId, before.path, relaySeq);
     return;
   }
 
@@ -425,7 +451,7 @@ export function applyCurrentFileOp(
         return;
       }
       if (before.path !== afterPath) {
-        statements.remove.run(workspaceId, versionId, before.path);
+        removeCurrentFile(statements, workspaceId, versionId, before.path, relaySeq);
       }
     } else if (statements.get.get(workspaceId, versionId, afterPath) !== undefined) {
       return;

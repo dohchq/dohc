@@ -297,6 +297,10 @@ export function rotateWorkspaceIdentity(
            WHERE workspace_id = ?`,
       )
       .run(input.workspaceId);
+    // Rule rows follow the current files the new stream rebuilds.
+    storage.db
+      .prepare("DELETE FROM sync_relay_access_rules WHERE workspace_id = ?")
+      .run(input.workspaceId);
     // Enrollments belong to the old identity, so the workspace is no longer hosted.
     storage.db
       .prepare(
