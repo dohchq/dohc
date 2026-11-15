@@ -685,6 +685,10 @@ impl AdmittedLiveUpdateMetadata {
                 .then(|| (agent.agent_id.clone(), agent.attribution()));
         }
         let authors = self.author_snapshot.as_ref()?;
+        // A field a save of several people changed has no one actor.
+        if !one_author(authors) {
+            return None;
+        }
         let (_, principal, _, _) = self.accepted.authority.fields();
         let person = authors.iter().find_map(|author| match author {
             LiveAuthorEntry::Human { human_id, .. } if human_id == principal => Some(human_id),
@@ -713,22 +717,24 @@ impl AdmittedLiveUpdateMetadata {
     }
 
     pub fn admitted_declaration(&self) -> Option<AgentDeclaration> {
-        self.author_snapshot
-            .as_ref()?
-            .iter()
-            .find_map(|author| match author {
-                LiveAuthorEntry::Agent {
-                    agent_id,
-                    on_behalf_of,
-                    depth,
-                    ..
-                } => Some(AgentDeclaration {
-                    agent_id: agent_id.clone(),
-                    on_behalf_of: on_behalf_of.clone(),
-                    depth: u32::from(depth.unwrap_or(0)),
-                }),
-                _ => None,
-            })
+        let authors = self.author_snapshot.as_ref()?;
+        // A save that names several people declares no one agent.
+        if !one_author(authors) {
+            return None;
+        }
+        authors.iter().find_map(|author| match author {
+            LiveAuthorEntry::Agent {
+                agent_id,
+                on_behalf_of,
+                depth,
+                ..
+            } => Some(AgentDeclaration {
+                agent_id: agent_id.clone(),
+                on_behalf_of: on_behalf_of.clone(),
+                depth: u32::from(depth.unwrap_or(0)),
+            }),
+            _ => None,
+        })
     }
 
     pub fn matches_draft_declaration(&self, declaration: Option<&AgentDeclaration>) -> bool {
@@ -772,17 +778,30 @@ impl AdmittedLiveUpdateMetadata {
         ) {
             (None, None, None) if self.checkpoint_coverage.is_none() => Ok(()),
             (Some(2), Some(authors), Some(deletes)) => {
-                if authors.len() > 2
-                    || (authors.len() == 2
-                        && (matches!(
-                            authors[0],
-                            LiveAuthorEntry::Agent { .. } | LiveAuthorEntry::Automation { .. }
-                        ) || !matches!(authors[1], LiveAuthorEntry::Agent { .. })))
-                {
-                    return Err(invalid("noncanonical author snapshot"));
-                }
                 for author in authors {
                     author.validate()?;
+                }
+                if !one_author(authors) {
+                    // Only a room's save, made under the owner's authority,
+                    // names everyone whose edits it holds.
+                    if !matches!(
+                        self.accepted.authority,
+                        ServerDerivedLiveUpdateAuthority::Owner { .. }
+                    ) {
+                        return Err(invalid("noncanonical author snapshot"));
+                    }
+                    let mut identities = std::collections::BTreeSet::new();
+                    if authors.len() > crate::author_coverage::MAX_INTERVAL_AUTHORS
+                        || !authors
+                            .iter()
+                            .all(|author| identities.insert(author.identity()))
+                        || serde_json::to_vec(authors)
+                            .map_err(|_| invalid("author snapshot JSON"))?
+                            .len()
+                            > crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES
+                    {
+                        return Err(invalid("noncanonical author snapshot"));
+                    }
                 }
                 canonical_ranges(deletes)?;
                 if let Some(coverage) = &self.checkpoint_coverage {
@@ -850,6 +869,19 @@ impl LiveUpdateHostApplicationAck {
             local_ydoc_sequence: seq,
             application_replayed: replayed,
         }
+    }
+}
+
+/// One author, or a person and the agent acting for them: every admitted
+/// update but a room's save.
+pub fn one_author(authors: &[LiveAuthorEntry]) -> bool {
+    match authors {
+        [] | [_] => true,
+        [person, LiveAuthorEntry::Agent { .. }] => !matches!(
+            person,
+            LiveAuthorEntry::Agent { .. } | LiveAuthorEntry::Automation { .. }
+        ),
+        _ => false,
     }
 }
 
@@ -4313,6 +4345,62 @@ mod tests {
                 agent,
                 {"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"},
                 {"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1}
+            ])
+        );
+    }
+
+    /// A room's save, under the owner's authority, names everyone whose edits
+    /// it holds, including someone who only deleted. No other authority may
+    /// name several people, and no save names one person twice.
+    #[test]
+    fn a_room_save_names_everyone_it_holds() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        // The owner typed too, so a field change is not the owner's alone.
+        let people: Vec<LiveAuthorEntry> = [
+            serde_json::json!({"kind":"human","humanId":"owner-1","humanName":"Owner"}),
+            serde_json::json!({"kind":"human","humanId":"alice","humanName":"Alice"}),
+            serde_json::json!({"kind":"human","humanId":"bob","humanName":"Bob"}),
+            serde_json::json!({"kind":"link","publicPrincipalId":"public-holder-1","label":"Anonymous"}),
+        ]
+        .into_iter()
+        .map(|entry| serde_json::from_value(entry).unwrap())
+        .collect();
+        let source = Ydoc::wire();
+        let mut save = event("room-save", 1, source.plaintext_insert(0, "ab"));
+        save.metadata.canonical_version = Some(2);
+        save.metadata.author_snapshot = Some(people.clone());
+        sees(&mut save, &Ydoc::wire());
+
+        let mut shared = save.metadata.clone();
+        shared.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+            principal_id: "alice".into(),
+            grant_id: "grant-1".into(),
+            grant_generation: 1,
+        };
+        assert!(shared.validate_extensions().is_err());
+        let mut twice = save.metadata.clone();
+        twice.author_snapshot = Some(vec![
+            people[1].clone(),
+            people[2].clone(),
+            people[1].clone(),
+        ]);
+        assert!(twice.validate_extensions().is_err());
+        assert!(save.metadata.admitted_declaration().is_none());
+        assert!(save.metadata.field_history_actor().is_none());
+
+        ack(apply(&mut store, &mut cache, &handle, save.clone()));
+        assert!(ack(apply(&mut store, &mut cache, &handle, save)).application_replayed);
+        let interval = store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+            .unwrap()
+            .json();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&interval).unwrap(),
+            serde_json::json!([
+                {"kind":"human","humanId":"alice","humanName":"Alice"},
+                {"kind":"human","humanId":"bob","humanName":"Bob"},
+                {"kind":"human","humanId":"owner-1","humanName":"Owner"},
+                {"kind":"link","publicPrincipalId":"public-holder-1","label":"Anonymous"}
             ])
         );
     }
