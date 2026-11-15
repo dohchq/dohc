@@ -609,7 +609,9 @@ export async function verify(args) {
     if (reuseRust && !gates.rust)
       throw new Error("--reuse-rust requires a selected Rust job. Use --job rust when needed.");
     if (mode === "pr" && !gates.js && !gates.rust) {
-      report.reason = "No code gate applies to the changed files.";
+      report.reason = gates.android
+        ? "No local code gate applies to the changed files. Android compiles only in CI."
+        : "No code gate applies to the changed files.";
       await checkTree("finish");
       report.verdict = "PASS";
       return report;

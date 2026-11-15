@@ -722,15 +722,12 @@ jobs:
           cache: ${{ inputs.cache != 'cold' && 'gradle' || '' }}
       - name: Install dependencies
         run: pnpm --filter @dohc/mobile... install --frozen-lockfile
-      # The versions are compileSdk, buildTools, and ndkVersion in react-native/gradle/libs.versions.toml.
-      - name: Install the Android SDK components
-        run: >-
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          'platforms;android-37' 'build-tools;37.0.0' 'ndk;27.1.12297006'
       # apps/mobile ignores the generated android/ folder. The bundled template avoids a template download.
       - name: Generate the Android project
         working-directory: apps/mobile
         run: pnpm exec expo prebuild --platform android --no-install --template ./node_modules/expo/template.tgz
+      # Gradle installs the SDK platform, build tools, and NDK that React Native's version catalog names; the runner's
+      # SDK licenses are already accepted.
       - name: Compile the native modules' Kotlin
         working-directory: apps/mobile/android
         run: ./gradlew :chat-composer:compileDebugKotlin :durable-file:compileDebugKotlin --no-daemon --console=plain --stacktrace
