@@ -567,6 +567,10 @@ it.each([
     [plain("a"), { type: "text", text: " ", marks: [{ type: "strike" }] }, plain("b")],
     "a b",
   ],
+  ["of a tab", [plain("a"), bold("\t"), plain("b")], "a\tb"],
+  ["starting a paragraph", [bold(" "), plain("b")], "&#32;b"],
+  // Written as a reference, it is no longer whitespace, so it keeps its mark.
+  ["of a non-breaking space", [plain("a"), bold(" "), plain("b")], "a**&#160;**b"],
 ] satisfies Array<[string, JSONContent[], string]>)(
   "writes a marked run of only whitespace %s as its text",
   (_name, content, saved) => {

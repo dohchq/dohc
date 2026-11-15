@@ -10113,6 +10113,17 @@ mod projection_tests {
                 vec![("a", Attrs::new()), (" ", strike()), ("b", Attrs::new())],
                 "a b\n",
             ),
+            (
+                vec![("a", Attrs::new()), ("\t", bold()), ("b", Attrs::new())],
+                "a\tb\n",
+            ),
+            (vec![(" ", bold()), ("b", Attrs::new())], "&#32;b\n"),
+            // Written as a reference, it is no longer whitespace, so it keeps
+            // its mark.
+            (
+                vec![("a", Attrs::new()), ("\u{a0}", bold()), ("b", Attrs::new())],
+                "a**&#160;**b\n",
+            ),
         ];
         for (runs, expected) in cases {
             let source = Ydoc::wire();
