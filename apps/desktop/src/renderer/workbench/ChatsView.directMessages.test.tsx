@@ -534,6 +534,26 @@ describe("ChatsView direct messages", () => {
     await waitFor(() => expect(screen.queryByTestId("chats-dm-new-blocked")).toBeNull());
   });
 
+  it("clears New message's blocked line when Unblock works on Try again", async () => {
+    const user = userEvent.setup();
+    signedIn([conversation({ conversationId: "conversation-ana", people: [{ ...ana, blocked: true }], blocked: true })]);
+    members([{ memberId: "membership-ana", name: "Ana Diaz" }]);
+    let unblocked = false;
+    bridgeMock.directResolve.mockImplementation(async () => ({ conversationId: "conversation-ana", people: [{ ...ana, blocked: !unblocked }] }));
+    bridgeMock.directBlock
+      .mockRejectedValueOnce(new Error("Error invoking remote method 'desktop:direct-block': DirectMessageError [direct-retry]: dohc could not reach your server."))
+      .mockImplementation(async () => { unblocked = true; });
+    const onError = vi.fn();
+    renderView(vi.fn(), onError, { variant: "panel" });
+    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
+    await user.click(await screen.findByTestId("chats-dm-new-member"));
+    await user.click(await screen.findByTestId("chats-dm-new-unblock"));
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    expect(screen.getByTestId("chats-dm-new-blocked")).toBeTruthy();
+    await act(async () => (onError.mock.calls.at(-1)![2] as () => void)());
+    await waitFor(() => expect(screen.queryByTestId("chats-dm-new-blocked")).toBeNull());
+  });
+
   it("stays in New message when the person starts typing a name before Members' pick resolves", async () => {
     const user = userEvent.setup();
     signedIn([conversation()]);

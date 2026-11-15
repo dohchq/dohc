@@ -8927,7 +8927,12 @@ export function DesktopWorkspaceShell(props: {
                                                               }
                                                               editorTabPath={groupTab.path}
                                                               onOpenInTab={openChatsNavInTab}
- onCloseTab={() => { if (tabPath) closeFileTab(editorGroup.id, tabPath); }}
+                                                              onCloseTab={() => {
+                                                              if (tab)
+                                                                void closeTabsAfterFlush([
+                                                                  { groupId: editorGroup.id, tab },
+                                                                ]);
+                                                            }}
                                                               variant="page"
                                                             />
                                                           </Suspense>

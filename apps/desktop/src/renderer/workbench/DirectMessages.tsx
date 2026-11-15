@@ -230,6 +230,8 @@ async function blockPerson(input: {
   reporting: Reporting;
   // In a group, the notice holds Undo: nothing else on screen shows the block.
   withUndo?: boolean;
+  /** Runs once the change is made, by the first try or by the notice's Try again. */
+  onDone?: () => void;
 }): Promise<void> {
   const { store, conversationId, person, blocked, reporting } = input;
   const name = directPersonName(person);
@@ -237,10 +239,11 @@ async function blockPerson(input: {
   try {
     await store.setBlocked(conversationId, person.personId, blocked);
     reporting.onClearError?.(identity);
+    input.onDone?.();
     if (input.withUndo) {
       reporting.onNotice?.(
         blocked ? `Blocked ${name}. You won't see their new messages.` : `Unblocked ${name}`,
-        () => void blockPerson({ ...input, blocked: !blocked, withUndo: false }),
+        () => void blockPerson({ ...input, blocked: !blocked, withUndo: false, onDone: undefined }),
       );
     }
   } catch (cause) {
@@ -900,8 +903,10 @@ function NewMessageForAccount(props: NewMessageProps) {
                   <SecondaryButton
                     size="compact"
                     data-testid="chats-dm-new-unblock"
-                    onClick={() => void blockPerson({ store, conversationId: resolved.conversationId!, person: resolved.blocked[0]!, blocked: false, reporting: props })
-                      .then(() => setResolveAgain((count) => count + 1))}
+                    onClick={() => void blockPerson({
+                      store, conversationId: resolved.conversationId!, person: resolved.blocked[0]!, blocked: false, reporting: props,
+                      onDone: () => setResolveAgain((count) => count + 1),
+                    })}
                   >
                     Unblock
                   </SecondaryButton>
