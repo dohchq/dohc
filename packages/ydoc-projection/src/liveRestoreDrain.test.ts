@@ -2049,14 +2049,10 @@ it("reports a refused restore publication as needing repair", async () => {
   try {
     f.complete();
     const restored = f.admitted.admitted.accepted.receipt.journalCursor;
-    const publication = restorePublication(
-      f,
-      restoredState(f, f.admitted),
-      restored,
-      "refused-restore-publication",
-      0,
-      hash(Buffer.from("not the baseline")),
-    );
+    // The baseline's state is not what the restore journaled, so the state digest refuses it.
+    const baseline = f.raw.prepare("SELECT baseline_bytes FROM sync_relay_live_documents").get()!
+      .baseline_bytes as Uint8Array;
+    const publication = restorePublication(f, baseline, restored, "refused-restore-publication");
     await prepareHostedSettlements(f.context, {
       workspaceId: "workspace",
       originId: "proof",
