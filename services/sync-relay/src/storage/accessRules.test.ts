@@ -116,17 +116,18 @@ function relay() {
 }
 
 describe("the relay's access rule index", () => {
-  it("fails closed on unknown identity and lets an unverified identity only narrow", () => {
+  it("fails closed on unknown identity and matches a person entry only through a verified email", () => {
     const r = relay();
     try {
-      r.write("People/access.yaml", "members: view\npeople:\n  sam@example.com: edit\n");
+      r.write("People/access.yaml", "members: edit\npeople:\n  sam@example.com: view\n");
       const reach = () => memberReach(r.storageDb, "ws", "sam", "member", "comment");
       expect(reach().levelAt("People/note.md")).toBeNull();
       expect(reach().levelAt("Public/note.md")).toBe("comment");
-      refreshAccountEmail(r.storageDb, "sam", { email: "sam@example.com", verified: true }, 1);
-      expect(reach().levelAt("People/note.md")).toBe("edit");
-      refreshAccountEmail(r.storageDb, "sam", { email: "sam@example.com", verified: false }, 2);
+      refreshAccountEmail(r.storageDb, "sam", { verifiedEmail: "sam@example.com" }, 1);
       expect(reach().levelAt("People/note.md")).toBe("view");
+      // An unverified address that an entry names lowers nothing (decision 17A).
+      refreshAccountEmail(r.storageDb, "sam", { verifiedEmail: null }, 2);
+      expect(reach().levelAt("People/note.md")).toBe("edit");
       expect(
         memberReach(r.storageDb, "ws", "admin", "admin", "view").levelAt("People/access.yaml"),
       ).toBe("edit");
@@ -224,7 +225,7 @@ describe("the relay's access rule index", () => {
       r.write("Private/access.yaml", "people:\n  sam@example.com: edit\n");
       const hidden = revision();
       expect(hidden).not.toBe(first);
-      refreshAccountEmail(r.storageDb, "sam", { email: "sam@example.com", verified: true }, 1);
+      refreshAccountEmail(r.storageDb, "sam", { verifiedEmail: "sam@example.com" }, 1);
       expect(revision()).not.toBe(hidden);
       expect(revision("member", "view")).not.toBe(revision());
       expect(revision("admin")).not.toBe(revision());
@@ -287,12 +288,7 @@ describe("the relay's access rule index", () => {
         { folder: "Team", rule_text: "", from_seq: back, to_seq: null },
       ]);
       // The case twin "team" can't widen the hidden "Team".
-      const viewer = {
-        role: "member" as const,
-        level: "edit" as const,
-        verifiedEmail: null,
-        unverifiedEmail: null,
-      };
+      const viewer = { role: "member" as const, level: "edit" as const, verifiedEmail: null };
       expect(folderLevel(currentAccessRuleSet(r.storageDb, "ws"), viewer, "team")).toBeNull();
     } finally {
       r.db.close();
@@ -399,12 +395,7 @@ describe("the relay's access rule index", () => {
     try {
       r.write("Drafts/access.yaml", 'members: edit\npeople:\n  "#sam@example.com": view\n');
       const set = currentAccessRuleSet(r.storageDb, "ws");
-      const sam = {
-        role: "member",
-        level: "edit",
-        verifiedEmail: "#sam@example.com",
-        unverifiedEmail: null,
-      } as const;
+      const sam = { role: "member", level: "edit", verifiedEmail: "#sam@example.com" } as const;
       expect(folderLevel(set, sam, "Drafts")).toBe("view");
     } finally {
       r.db.close();

@@ -70,8 +70,7 @@ export function memberReach(
       : {
           role,
           level,
-          verifiedEmail: email?.verified ? email.email : null,
-          unverifiedEmail: email && !email.verified ? email.email : null,
+          verifiedEmail: email?.verifiedEmail ?? null,
         };
   const knownRules = (rules: AccessRuleSet) =>
     email || role === "admin"

@@ -2485,10 +2485,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     // Most refreshes find the same email; skip the write transaction for those.
     const stored = this.readShareTx(() => accountEmail(this.db, userId));
     const normalized = email && {
-      email: normalizeRuleEmail(email.email),
-      verified: email.verified,
+      verifiedEmail: email.verifiedEmail === null ? null : normalizeRuleEmail(email.verifiedEmail),
     };
-    if (stored?.email === normalized?.email && stored?.verified === normalized?.verified) return;
+    if (
+      stored === null
+        ? normalized === null
+        : normalized !== null && stored.verifiedEmail === normalized.verifiedEmail
+    )
+      return;
     this.tx(() => refreshAccountEmail(this.db, userId, email, nowMs));
   }
 

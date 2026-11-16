@@ -289,7 +289,7 @@ function memberLevel(files: FileScope, path: string): ShareAccess | null {
     rules,
     reach.role === "admin"
       ? { role: "admin" }
-      : { role: "member", level: reach.level, verifiedEmail: null, unverifiedEmail: null },
+      : { role: "member", level: reach.level, verifiedEmail: null },
     path,
   );
 }

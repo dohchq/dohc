@@ -38,7 +38,7 @@ export function watchMemberReachWrites(db: SqliteDb): void {
   for (const event of ["INSERT", "UPDATE", "DELETE"]) {
     const row = event === "DELETE" ? "OLD" : "NEW";
     const changed =
-      event === "UPDATE" ? "WHEN OLD.email IS NOT NEW.email OR OLD.verified IS NOT NEW.verified" : "";
+      event === "UPDATE" ? "WHEN OLD.verified_email IS NOT NEW.verified_email" : "";
     db.exec(`CREATE TEMP TRIGGER member_reach_email_${event} AFTER ${event} ON sync_relay_account_emails ${changed}
       BEGIN INSERT OR IGNORE INTO member_reach_dirty SELECT workspace_id FROM sync_relay_workspace_members WHERE user_id = ${row}.user_id; END`);
   }

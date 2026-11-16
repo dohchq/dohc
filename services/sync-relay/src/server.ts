@@ -203,7 +203,6 @@ export interface CreateSyncRelayHandlerOptions {
   resolveUserIdByEmail?: (email: string) => Promise<string | null> | string | null;
   // Returns an address only when the account has verified it server-side.
   lookupVerifiedUserEmail?: (userId: string) => Promise<string | null> | string | null;
-  lookupAccountEmail?: (userId: string) => Promise<{ email: string; verified: boolean } | null>;
   // Display-only reverse lookup for share listings; never used for authz.
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
   lookupUserEmails?: (userIds: readonly string[]) => Promise<ReadonlyMap<string, string>>;
@@ -309,7 +308,6 @@ export function createSyncRelayHandler({
   elapsedMs,
   resolveUserIdByEmail,
   lookupVerifiedUserEmail,
-  lookupAccountEmail,
   lookupUserEmail,
   lookupUserEmails,
   lookupUserDisplayName: lookupAccountDisplayName,
@@ -599,26 +597,19 @@ export function createSyncRelayHandler({
     callers: (AbortSignal | undefined)[],
   ): Promise<void> => {
     const startedAt = nowMs();
-    if (!lookupAccountEmail && !lookupVerifiedUserEmail) {
+    if (!lookupVerifiedUserEmail) {
       storage.refreshAccountEmail(userId, null, startedAt);
       return;
     }
     // A failed lookup throws and keeps the stored email: design §1 makes it an error.
-    let account: { email: string; verified: boolean } | null;
-    if (lookupAccountEmail) account = await lookupAccountEmail(userId);
-    else {
-      const verified = await lookupVerifiedUserEmail!(userId);
-      const email = verified ?? (await lookupUserEmail?.(userId));
-      account = email ? { email, verified: verified !== null } : null;
-    }
+    const email = await lookupVerifiedUserEmail(userId);
     // Once every caller has cancelled, the result is dropped: nothing is stored or claimed.
     if (callers.every((signal) => signal?.aborted)) return;
-    storage.refreshAccountEmail(userId, account, startedAt);
+    storage.refreshAccountEmail(userId, { verifiedEmail: email }, startedAt);
     // Kept in refresh order and capped: forgetting the oldest only costs a lookup.
     refreshedAt.delete(userId);
     refreshedAt.set(userId, startedAt);
     if (refreshedAt.size > 10_000) refreshedAt.delete(refreshedAt.keys().next().value!);
-    const email = account?.verified ? account.email : null;
     if (email) storage.claimPendingSharesForEmail(email, userId);
   };
   // Returns the shared refresh itself, adding no awaits of its own.

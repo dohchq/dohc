@@ -418,11 +418,11 @@ describe("what a member reaches", () => {
     const { h, storage } = await seed({
       overrides: {
         nowMs: () => now,
-        lookupAccountEmail: async (userId) => {
-          if (userId !== "ana") return { email: `${userId}@dohc.test`, verified: true };
+        lookupVerifiedUserEmail: async (userId) => {
+          if (userId !== "ana") return `${userId}@dohc.test`;
           lookups++;
           if (failing) throw new Error("lookup down");
-          return { email, verified: true };
+          return email;
         },
       },
     });
@@ -445,9 +445,9 @@ describe("what a member reaches", () => {
     expect((await pull(h, "ana", shareId)).status).toBe(500);
     expect(
       (storage as StorageContext).db
-        .prepare("SELECT email, verified FROM sync_relay_account_emails WHERE user_id = ?")
+        .prepare("SELECT verified_email FROM sync_relay_account_emails WHERE user_id = ?")
         .get("ana"),
-    ).toMatchObject({ email: "another@dohc.test", verified: 1 });
+    ).toMatchObject({ verified_email: "another@dohc.test" });
   });
 
   // A transaction reads each workspace's rules once, until it writes.

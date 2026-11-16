@@ -261,10 +261,8 @@ describe("a member reads the workspace through the link read routes", () => {
       now = 10_000;
     const { h, storage } = await seed(undefined, {
       nowMs: () => now,
-      lookupAccountEmail: async (userId: string) => ({
-        email: userId === "ana" ? email : `${userId}@dohc.test`,
-        verified: true,
-      }),
+      lookupVerifiedUserEmail: async (userId: string) =>
+        userId === "ana" ? email : `${userId}@dohc.test`,
     });
     const ana = await member(h, storage, "ana");
     await ownerWrite(h, "Hidden Plans/access.yaml", "people:\n  ben@dohc.test: edit\n");
