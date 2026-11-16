@@ -42,7 +42,12 @@ import type {
 import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.js";
 import type { CapacityLiveAdmissionValidator, LiveCheckTiming } from "./ownerOutboxDelivery.js";
 import type { JournalCutReadTiming } from "./storage/types.js";
-import { asRelayWrite, loopHeldBetween, recordLiveSubmit } from "./relayMainThreadTiming.js";
+import {
+  asRelayWrite,
+  loopHeldBetween,
+  recordLiveSubmit,
+  sampleRelayLoop,
+} from "./relayMainThreadTiming.js";
 import type {
   NamedFrameAppliedUpdate,
   NamedFrameHostSession,
@@ -132,15 +137,19 @@ interface SubmitTiming {
   readonly cut: JournalCutReadTiming;
   readonly check: LiveCheckTiming;
 }
-const newSubmitTiming = (startedAt: number): SubmitTiming => ({
-  startedAt,
-  queueMs: 0,
-  waitMs: 0,
-  freshMs: 0,
-  attempts: 0,
-  cut: { queryMs: 0, verifyMs: 0, copyMs: 0 },
-  check: { hopMs: 0, replayMs: 0, projectionMs: 0, workerOtherMs: 0 },
-});
+const newSubmitTiming = (): SubmitTiming => {
+  // A resting loop sampler starts first, so its samples cover this submission from its start.
+  sampleRelayLoop();
+  return {
+    startedAt: performance.now(),
+    queueMs: 0,
+    waitMs: 0,
+    freshMs: 0,
+    attempts: 0,
+    cut: { queryMs: 0, verifyMs: 0, copyMs: 0 },
+    check: { hopMs: 0, replayMs: 0, projectionMs: 0, workerOtherMs: 0 },
+  };
+};
 const SLOW_SUBMIT_MS = 500;
 const RESULT_WORDS: readonly string[] = [
   "success",
@@ -891,7 +900,7 @@ function captureLiveFrameHost(options: {
       };
     },
     async submit(input, caller) {
-      const timing = newSubmitTiming(performance.now());
+      const timing = newSubmitTiming();
       const answer = await admitSubmission(input, caller, timing);
       reportLiveSubmit(document.objectId, actor.kind, timing, answer, performance.now());
       return answer;

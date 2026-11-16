@@ -4,6 +4,12 @@ import { AsyncLocalStorage } from "node:async_hooks";
  * Measures where the relay's main thread waits, for its logs only. Nothing
  * here changes what the relay does. It records only after
  * `startRelayMainThreadTiming`, which the server calls at startup.
+ *
+ * The loop sampler wakes the relay every 25 ms, so it runs only around work
+ * whose loop figures someone reads: a write, a save's start and a save's end
+ * each start it, and it rests at the end of a minute once none of them has
+ * happened for as long as its ring covers. Engine requests are still counted
+ * while it rests, and one timer reports their minute.
  */
 
 /** Which part of the relay a write belongs to, so the summary can tell them apart. */
@@ -18,6 +24,8 @@ const SAMPLE_MS = 25;
 const MINUTE_MS = 60_000;
 // About three and a half minutes of samples, longer than a save may take.
 const RING = 8192;
+// A save still in flight began within the ring, so a sampler that rests after this cuts no save's figures.
+const REST_AFTER_MS = RING * SAMPLE_MS;
 // A minute keeps at most this many values of each kind; the summary counts what it dropped.
 const MAX_VALUES = 5000;
 
@@ -54,8 +62,15 @@ let timing:
       late: Float64Array;
       next: number;
       expected: number;
+      /** When the sampler last started. Nothing earlier in the ring belongs to the time since. */
+      sampledSince: number;
+      /** When a write or a save last asked for samples. */
+      wantedAt: number;
       minute: Minute;
-      timer: ReturnType<typeof setInterval>;
+      /** Undefined while the sampler rests. */
+      timer: ReturnType<typeof setInterval> | undefined;
+      /** While the sampler rests: ends a minute that has something to report. */
+      report: ReturnType<typeof setTimeout> | undefined;
     }
   | undefined;
 
@@ -73,38 +88,89 @@ function keep(minute: Minute, values: Values, value: number) {
   else minute.dropped++;
 }
 
+/** Ends the minute at `at`, and reports it if it holds anything. */
+function endMinute(state: NonNullable<typeof timing>, at: number) {
+  const finished = state.minute;
+  state.minute = newMinute(at);
+  if (finished.writes.size > 0 || finished.saves.size > 0 || finished.engine.size > 0)
+    reportMinute(finished);
+}
+
+/** Starts the sampler at `now`. */
+function sample(state: NonNullable<typeof timing>, now: number) {
+  // A minute that began while the sampler rested goes on, with the samples from here.
+  if (state.report) clearTimeout(state.report);
+  else state.minute = newMinute(now);
+  state.report = undefined;
+  state.expected = now + SAMPLE_MS;
+  state.sampledSince = now;
+  state.timer = setInterval(() => {
+    const at = performance.now();
+    // How long the loop held this timer past its due time.
+    const late = Math.max(0, at - state.expected);
+    state.expected = at + SAMPLE_MS;
+    const slot = state.next++ % RING;
+    state.times[slot] = at;
+    state.late[slot] = late;
+    keep(state.minute, state.minute.loopLateMs, late);
+    if (at - state.minute.startedAt >= MINUTE_MS) {
+      endMinute(state, at);
+      if (at - state.wantedAt >= REST_AFTER_MS) {
+        clearInterval(state.timer);
+        state.timer = undefined;
+      }
+    }
+  }, SAMPLE_MS);
+  state.timer.unref();
+}
+
+/**
+ * Samples the loop from now on, so that work which starts now has its loop figures when it ends. A save calls
+ * this as it starts.
+ */
+export function sampleRelayLoop(): void {
+  if (!timing) return;
+  timing.wantedAt = performance.now();
+  if (!timing.timer) sample(timing, timing.wantedAt);
+}
+
+/** The minute to record in. Undefined when timing is off. A write and a save also ask for samples. */
+function recording(wantsSamples: boolean): Minute | undefined {
+  if (!timing) return undefined;
+  const state = timing;
+  if (wantsSamples) sampleRelayLoop();
+  else if (!state.timer && !state.report) {
+    state.minute = newMinute(performance.now());
+    state.report = setTimeout(() => {
+      state.report = undefined;
+      endMinute(state, performance.now());
+    }, MINUTE_MS);
+    state.report.unref();
+  }
+  return state.minute;
+}
+
 /** Starts the loop sampler and the once-a-minute summary. Calling it again does nothing. */
 export function startRelayMainThreadTiming(): void {
   if (timing) return;
   const now = performance.now();
-  const state = {
+  timing = {
     times: new Float64Array(RING),
     late: new Float64Array(RING),
     next: 0,
-    expected: now + SAMPLE_MS,
+    expected: now,
+    sampledSince: now,
+    wantedAt: now,
     minute: newMinute(now),
-    timer: setInterval(() => {
-      const at = performance.now();
-      // How long the loop held this timer past its due time.
-      const late = Math.max(0, at - state.expected);
-      state.expected = at + SAMPLE_MS;
-      const slot = state.next++ % RING;
-      state.times[slot] = at;
-      state.late[slot] = late;
-      keep(state.minute, state.minute.loopLateMs, late);
-      if (at - state.minute.startedAt >= MINUTE_MS) {
-        const finished = state.minute;
-        state.minute = newMinute(at);
-        reportMinute(finished);
-      }
-    }, SAMPLE_MS),
+    timer: undefined,
+    report: undefined,
   };
-  state.timer.unref();
-  timing = state;
+  sample(timing, now);
 }
 
 export function stopRelayMainThreadTiming(): void {
-  if (timing) clearInterval(timing.timer);
+  clearInterval(timing?.timer);
+  clearTimeout(timing?.report);
   timing = undefined;
 }
 
@@ -115,7 +181,7 @@ export function loopHeldBetween(
   from: number,
   to: number,
 ): { loopMaxMs: number; loopHeldMs: number } | null {
-  if (!timing) return null;
+  if (!timing?.timer || from < timing.sampledSince) return null;
   let loopMaxMs = 0,
     loopHeldMs = 0;
   const count = Math.min(timing.next, RING);
@@ -143,8 +209,8 @@ export function recordRelayWrite(write: {
   confirmMs: number | null;
   checkpoint: boolean;
 }): void {
-  if (!timing) return;
-  const minute = timing.minute;
+  const minute = recording(true);
+  if (!minute) return;
   const kind = writeKinds.getStore() ?? "other";
   let figures = minute.writes.get(kind);
   if (!figures) {
@@ -163,8 +229,8 @@ export function recordRelayWrite(write: {
  * to answer. `serveMs` is null when it left the line without being sent.
  */
 export function recordEngineRequest(method: string, waitMs: number, serveMs: number | null): void {
-  if (!timing) return;
-  const minute = timing.minute;
+  const minute = recording(false);
+  if (!minute) return;
   let figures = minute.engine.get(method);
   if (!figures) {
     figures = { count: 0, waitMs: [], serveMs: [], leftWaiting: 0 };
@@ -184,8 +250,8 @@ export function recordLiveSubmit(
   result: string,
   figures: Readonly<Record<string, number | null>>,
 ): void {
-  if (!timing) return;
-  const minute = timing.minute;
+  const minute = recording(true);
+  if (!minute) return;
   let saves = minute.saves.get(result);
   if (!saves) minute.saves.set(result, (saves = { count: 0, figures: new Map() }));
   saves.count++;
@@ -205,7 +271,6 @@ function spread(values: Values) {
 }
 
 function reportMinute(minute: Minute) {
-  if (minute.writes.size === 0 && minute.saves.size === 0 && minute.engine.size === 0) return;
   try {
     const loop = minute.loopLateMs;
     // One JSON string: the console prints an object only two levels deep, and these figures sit deeper.

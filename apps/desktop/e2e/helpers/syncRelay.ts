@@ -19,6 +19,8 @@ const relayRoot = fileURLToPath(new URL("../../../../services/sync-relay/", impo
 export interface SyncRelayHandle {
   baseUrl: string;
   port: number;
+  /** The relay's process. The engines it starts are its children. */
+  pid: number;
   dbPath: string;
   stop(): Promise<void>;
   /** Ends the relay and every process it started at once, with no shutdown, as a server that loses power. Needs `hardKill`. */
@@ -222,6 +224,7 @@ export async function spawnSyncRelay(input: {
   return {
     baseUrl,
     port,
+    pid: child.pid!,
     dbPath: input.dbPath,
     diagnostics: () => ({ stdout, stderr }),
     stop,
