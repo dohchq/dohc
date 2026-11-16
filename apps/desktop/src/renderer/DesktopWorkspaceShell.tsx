@@ -1796,7 +1796,7 @@ export function DesktopWorkspaceShell(props: {
   }, []);
   const sharing = shareTarget !== null;
   // The name you chose in Settings, or else your account's email.
-  const ownName = props.userSettings?.profile.preferredName || cloudStatus?.email || undefined;
+  const ownName = props.userSettings?.settings.profile.preferredName || cloudStatus?.email || undefined;
   const accessContext = useMemo<AccessContext>(
     () => ({
       facts: {
