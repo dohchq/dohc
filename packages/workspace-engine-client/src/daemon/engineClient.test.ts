@@ -288,8 +288,9 @@ describe("private owner delivery transport", () => {
       if (e.type !== "request") return;
       action = e.method.split(".").at(-1);
       expect(e.method).toBe(`ydoc.ownerStop.${action}`);
+      const release = action === "release" || action === "releaseRetired";
       expect(e.params).toEqual(
-        action === "release"
+        release
           ? { binding: target.binding, acceptedCursor: 0 }
           : action === "list"
             ? {}
@@ -311,7 +312,7 @@ describe("private owner delivery transport", () => {
               : [
                   {
                     ...stopTarget,
-                    ...(action === "release"
+                    ...(release
                       ? { state: "released", materialized: true }
                       : { state: "requested" }),
                   },
@@ -326,6 +327,12 @@ describe("private owner delivery transport", () => {
       expect(
         await transport.ownerYDocRelease(request, target.binding, { acceptedCursor: 0 }),
       ).toMatchObject({ state: "released", materialized: true });
+      expect(action).toBe("release");
+      await transport.ownerYDocRelease(request, target.binding, {
+        acceptedCursor: 0,
+        retired: true,
+      });
+      expect(action).toBe("releaseRetired");
       expect(await transport.ownerYDocStopList(request)).toEqual([
         { ...stopTarget, state: "requested" },
       ]);

@@ -118,11 +118,12 @@ pub fn request_in_tx(
     if main != key.version_id {
         return Err(OwnerOutboxError::MainVersionMismatch);
     }
-    if let Some(saved) = read_in(tx, key)? {
-        if saved.state == "released" {
-            return Ok(saved);
-        }
+    let saved = read_in(tx, key)?;
+    if let Some(saved) = saved.filter(|saved| saved.state == "released") {
+        return Ok(saved);
     }
+    // The first request decides whether the relay still has to retire the note.
+    let retirement_owed = saved.map_or(retirement_owed, |saved| saved.retirement_owed);
     let bindings = {
         let mut stmt=tx.prepare("SELECT binding_json FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2").map_err(read_sql)?;
         let rows = stmt
@@ -176,6 +177,11 @@ pub fn request_in_tx(
                 .map(|draft| draft.binding.current_path.clone())
         })
         .ok_or(OwnerOutboxError::NotFound)?;
+    // A note the relay retired is released from its draft; without one, no
+    // release would ever end this Stop.
+    if !retirement_owed && draft.is_none() {
+        return Err(OwnerOutboxError::StopConflict);
+    }
     // An unenrolled file can have no Y.Doc marker yet. A bare marker records
     // identity only; ordinary open still imports the authoritative file.
     tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms) VALUES(?1,?2,?3,'richdoc','local-only',0,0,'unclaimed',?4) ON CONFLICT DO NOTHING",params![key.workspace_id,key.version_id,key.object_id,now_ms]).map_err(write_sql)?;

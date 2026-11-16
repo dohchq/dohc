@@ -122,8 +122,8 @@ export async function reconcileOwnerLiveStops(options: {
  * Releases each note this computer owns that the server no longer hosts and
  * retired without a Stop, as when its last link ended. Its saves through the
  * server's last one go into the file, and nothing asks the server to Stop it.
- * Once the file holds them, the Stop is cleared, so sharing the note again
- * hosts it. A note that fails is tried again next pass; the rest go on.
+ * The release ends the Stop with it, so sharing the note again hosts it. A
+ * note that fails is tried again next pass; the rest go on.
  */
 export async function releaseRetiredOwnerNotes(options: {
   client: EngineClient;
@@ -137,11 +137,8 @@ export async function releaseRetiredOwnerNotes(options: {
     after: number,
     signal: AbortSignal,
   ): ReturnType<OwnerJournalRead>;
-  release(
-    binding: LiveObjectBinding,
-    acceptedCursor: number,
-    signal: AbortSignal,
-  ): Promise<OwnerLiveStop>;
+  /** Releases the note and ends its Stop, as `ownerYDocRelease` with `retired`. */
+  release(binding: LiveObjectBinding, acceptedCursor: number, signal: AbortSignal): Promise<unknown>;
   assertCurrent(): void;
   onComplete?(row: OwnerLiveStop): void;
 }) {
@@ -204,10 +201,7 @@ export async function releaseRetiredOwnerNotes(options: {
           { retired: true },
         ));
       if (!stop.binding || !sameBinding(stop.binding, binding)) return;
-      const released = await options.release(stop.binding, last, options.signal);
-      // A Stop kept for edits the file still needs keeps their notice and Try again.
-      if (released.materialized === true && !released.deferred)
-        await options.client.ownerYDocStopClear(request(), stop.document, options.signal);
+      await options.release(stop.binding, last, options.signal);
       options.onComplete?.(stop);
     });
   }

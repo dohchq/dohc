@@ -302,11 +302,11 @@ async fn the_last_change_outlives_its_stop_and_its_document() {
 }
 
 #[tokio::test]
-async fn a_stop_the_relay_already_retired_owes_it_nothing() {
+async fn a_stop_the_relay_already_retired_needs_the_owners_draft() {
     let scratch = ScratchDir::new().unwrap();
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open(&transport, &scratch, false).await;
-    for (id, action, owed) in [(2, "request", true), (4, "requestRetired", false)] {
+    for (id, action) in [(2, "request"), (4, "requestRetired")] {
         let path = format!("notes/{action}.md");
         call(
             &transport,
@@ -316,15 +316,29 @@ async fn a_stop_the_relay_already_retired_owes_it_nothing() {
             json!({ "versionId": "main", "path": path, "text": "Plan.", "origin": "api" }),
         )
         .await;
-        let stops = call(
-            &transport,
-            &handle,
-            id + 1,
-            &format!("ydoc.ownerStop.{action}"),
-            json!({ "path": path }),
-        )
-        .await;
-        assert_eq!(stops["stops"][0]["retirementOwed"], owed, "{action}");
+        let method = format!("ydoc.ownerStop.{action}");
+        if action == "request" {
+            let stops = call(
+                &transport,
+                &handle,
+                id + 1,
+                &method,
+                json!({ "path": path }),
+            )
+            .await;
+            assert_eq!(stops["stops"][0]["retirementOwed"], true);
+        } else {
+            // No release would end it, so the note would stay stopped.
+            let error = call_error(
+                &transport,
+                &handle,
+                id + 1,
+                &method,
+                json!({ "path": path }),
+            )
+            .await;
+            assert_eq!(error.message, "owner-stop-conflict");
+        }
     }
 }
 

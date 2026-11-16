@@ -443,7 +443,8 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     binding: LiveObjectBinding,
     acceptedCursor: number,
     signal?: AbortSignal,
-    journal?: OwnerJournalRead,
+    // `retired` releases a note the server already retired, whose Stop then ends.
+    { journal, retired = false }: { journal?: OwnerJournalRead; retired?: boolean } = {},
   ) {
     if (journal) {
       const request = { id: 0, workspace: workspaceHandle, deadlineMs: 30_000 };
@@ -725,7 +726,10 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                               target,
                               acceptedCursor,
                               releaseSignal,
-                              (after, pageSignal) => session.journal(target, after, pageSignal),
+                              {
+                                journal: (after, pageSignal) =>
+                                  session.journal(target, after, pageSignal),
+                              },
                             ),
                           onError: (row, error) => {
                             stopsChanged = true;
@@ -823,6 +827,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                               target,
                               acceptedCursor,
                               releaseSignal,
+                              { retired: true },
                             ),
                           assertCurrent: () => {
                             check();
@@ -1781,7 +1786,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             binding,
             acceptedCursor,
             session?.signal,
-            session ? (after, signal) => session.journal(binding, after, signal) : undefined,
+            session ? { journal: (after, signal) => session.journal(binding, after, signal) } : {},
           ),
         );
       } finally {

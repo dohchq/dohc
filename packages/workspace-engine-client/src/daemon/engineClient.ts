@@ -205,7 +205,7 @@ export interface OwnerYDocPausedStop {
 function ownerStopRow(row: unknown, action: string) {
   // Only a release or a pause says whether settlement wrote the file.
   const optional =
-    action === "release" || action === "pause"
+    action === "release" || action === "releaseRetired" || action === "pause"
       ? ["deferred", "keptSnapshot", "materialized", "paused", "settlementReason"]
       : ["deferred", "keptSnapshot", "paused"];
   if (
@@ -1220,12 +1220,15 @@ export class EngineClient implements EngineTransport {
    * Releases a Stop at the relay's retirement cursor, recording the kept
    * edits it takes when a snapshot is given. With only a snapshot it is a Try
    * again: it settles a release that already took exactly those edits, and
-   * starts none.
+   * starts none. `retired` releases a note the relay already retired and
+   * ends its Stop in the same step, unless the release waits.
    */
   async ownerYDocRelease(
     request: OwnerYDocDeliveryRequest,
     binding: OwnerYDocDeliveryTarget["binding"],
-    release: { acceptedCursor: number; keptSnapshot?: string } | { keptSnapshot: string },
+    release:
+      | { acceptedCursor: number; keptSnapshot?: string; retired?: boolean }
+      | { keptSnapshot: string },
     signal?: AbortSignal,
   ) {
     const acceptedCursor = "acceptedCursor" in release ? release.acceptedCursor : undefined,
@@ -1239,7 +1242,7 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Invalid kept edits snapshot.");
     const rows = await this.ownerLiveStop(
       request,
-      "release",
+      "retired" in release && release.retired ? "releaseRetired" : "release",
       {
         binding,
         ...(acceptedCursor === undefined ? {} : { acceptedCursor }),

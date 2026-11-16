@@ -731,9 +731,9 @@ impl EngineService {
         }
         let params: Params = parse(params)?;
         // A release names its relay cut, a Try again only its kept edits.
-        if (action == "release") != params.binding.is_some()
-            || (action == "release")
-                != (params.accepted_cursor.is_some() || params.kept_snapshot.is_some())
+        let release = matches!(action, "release" | "releaseRetired");
+        if release != params.binding.is_some()
+            || release != (params.accepted_cursor.is_some() || params.kept_snapshot.is_some())
             || params.kept_snapshot.as_deref().is_some_and(|digest| {
                 digest.len() != 64
                     || !digest
@@ -789,7 +789,7 @@ impl EngineService {
         // desktop claims recovered edits only when they reached it.
         let mut materialized = vec![false; rows.len()];
         let mut settlement_reasons = vec![None; rows.len()];
-        if action == "release" {
+        if release {
             for (index, row) in rows.iter().enumerate() {
                 if row.deferred.is_some() {
                     continue;
@@ -805,9 +805,7 @@ impl EngineService {
             }
         }
         let mut stops = json!(rows);
-        if action == "release"
-            && let Some(values) = stops.as_array_mut()
-        {
+        if release && let Some(values) = stops.as_array_mut() {
             for ((value, materialized), reason) in
                 values.iter_mut().zip(materialized).zip(settlement_reasons)
             {

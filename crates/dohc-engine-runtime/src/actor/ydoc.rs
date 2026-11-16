@@ -231,17 +231,21 @@ impl ActorHandle {
                 "request"|"requestRetired"=>release::request_in_tx(tx,&key,action=="request",now_ms).map(|row|vec![row]),
                 "clear"=>release::clear_in_tx(tx,&key).map(|cleared|cleared.into_iter().collect()),
                 "retired"=>release::retired_in_tx(tx,&key,now_ms).map(|()|vec![]),
-                "release"=>{
+                "release"|"releaseRetired"=>{
                     let b=binding.as_ref().ok_or(OwnerOutboxError::StopConflict)?;
                     let path:Option<String>=tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,key.version_id,key.object_id],|r|r.get(0)).optional().map_err(|_|OwnerOutboxError::Corrupt)?;
                     let path=path.as_deref().unwrap_or(&b.current_path);
-                    dohc_engine_sync::unbind_owner_in_tx(tx,&key,owner_hold_error,|tx| release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),now_ms,|tx,update,actor,attribution,outcome| {
+                    let row=dohc_engine_sync::unbind_owner_in_tx(tx,&key,owner_hold_error,|tx| release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),now_ms,|tx,update,actor,attribution,outcome| {
                         journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,&preparations,outcome,now_ms).map(|_|())
-                    })).map(|row|vec![row])
+                    }))?;
+                    // The relay already retired this note, so nothing waits for its Stop:
+                    // a release that finished clears it in the same transaction.
+                    if action=="releaseRetired" && row.deferred.is_none() && row.paused.is_none() {release::clear_in_tx(tx,&key)?;}
+                    Ok(vec![row])
                 },
                 _=>Err(OwnerOutboxError::InvalidInput("invalid Stop action")),
             });
-            if action=="release" && !matches!(&outcome,Ok(TxnOutcome::Committed(rows)) if rows.iter().all(|row|row.deferred.is_some())) {cache.remove(&key);}
+            if matches!(action.as_str(),"release"|"releaseRetired") && !matches!(&outcome,Ok(TxnOutcome::Committed(rows)) if rows.iter().all(|row|row.deferred.is_some())) {cache.remove(&key);}
             Ok(match outcome {Ok(TxnOutcome::Committed(rows))=>Ok(rows),Ok(TxnOutcome::Crashed{..})=>Err(OwnerOutboxError::Corrupt),Err(error)=>Err(error)})
         }).await
     }
