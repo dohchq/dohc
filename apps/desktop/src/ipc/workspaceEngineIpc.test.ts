@@ -302,6 +302,7 @@ async function harness(
       deferredWrites: [],
       keptFiles: [],
       captureRecoveries: [],
+      mergeRemovals: [],
       heldFiles: [],
       outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
@@ -805,12 +806,14 @@ describe("workspace engine IPC registrations", () => {
       deferredWrites: [],
       keptFiles: [],
       captureRecoveries: [recovery],
+      mergeRemovals: [],
       heldFiles: [],
       outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
     });
     expect(await bridge.getCaptureRecoveryStatus({ workspaceId: "workspace" })).toEqual({
       captureRecoveries: [recovery],
+      mergeRemovals: [],
     });
     expect(
       await bridge.clearCaptureRecovery({ workspaceId: "workspace", momentId: "recovery" }),
@@ -931,6 +934,7 @@ describe("workspace engine IPC registrations", () => {
       deferredWrites: [],
       keptFiles: [],
       captureRecoveries: [],
+      mergeRemovals: [],
       heldFiles: [],
       outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },
@@ -958,6 +962,7 @@ describe("workspace engine IPC registrations", () => {
       deferredWrites: [],
       keptFiles: [],
       captureRecoveries: [],
+      mergeRemovals: [],
       heldFiles: [],
       outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },

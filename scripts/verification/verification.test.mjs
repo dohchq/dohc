@@ -1407,7 +1407,7 @@ test("artifact identity includes nested file bytes and names", () => {
   }
 });
 
-// The Rust and JavaScript selection. The Android filter has its own test.
+// The Rust and JavaScript selection. The Android and editing-together filters have their own tests.
 const localGates = (files, workflow) => {
   const { rust, js } = selectedGates(files, workflow);
   return { rust, js };
@@ -1424,7 +1424,7 @@ test("gate selection covers root self-host deployment inputs", () => {
   ]) {
     assert.deepEqual(
       selectedGates([file], workflow),
-      { rust: false, js: true, android: false },
+      { rust: false, js: true, android: false, together: false },
       file,
     );
   }
@@ -1462,6 +1462,7 @@ test("the Android filter in the workflow selects native module, Expo config, and
     rust: false,
     js: true,
     android: true,
+    together: false,
   });
   // The selection reads the filter from the workflow, so a filter change moves it.
   const narrowed = workflow.replace("- 'apps/mobile/app.json'", "- 'apps/mobile/other.json'");
@@ -1475,7 +1476,28 @@ test("a selected Android gate needs CI evidence, because no local run compiles i
     ciEvidence(selectedGates(["apps/mobile/modules/durable-file/android/build.gradle"], workflow)),
     ["Android Kotlin compile"],
   );
-  assert.deepEqual(ciEvidence(selectedGates(["apps/desktop/src/main.ts"], workflow)), []);
+  assert.deepEqual(ciEvidence(selectedGates(["docs/guide.md"], workflow)), []);
+});
+
+test("a selected editing-together check needs CI evidence, because no local run performs it", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+  for (const file of ["services/sync-relay/src/server.ts", "apps/desktop/src/main.ts"])
+    assert.deepEqual(
+      ciEvidence(selectedGates([file], workflow)),
+      ["editing together", "share page"],
+      file,
+    );
+  assert.deepEqual(ciEvidence(selectedGates(["pnpm-lock.yaml"], workflow)), [
+    "Android Kotlin compile",
+    "editing together",
+    "share page",
+  ]);
+  // The selection reads the filter from the workflow, so a filter change moves it.
+  const narrowed = workflow.replace("- 'apps/desktop/e2e/together/**'", "- 'apps/other/**'");
+  assert.notEqual(narrowed, workflow);
+  const spec = "apps/desktop/e2e/together/stack.ts";
+  assert.equal(selectedGates([spec], workflow).together, true);
+  assert.equal(selectedGates([spec], narrowed).together, false);
 });
 
 test("gate selection follows workflow inputs, including shared and gate implementation files", () => {
@@ -1484,6 +1506,7 @@ test("gate selection follows workflow inputs, including shared and gate implemen
     rust: false,
     js: false,
     android: false,
+    together: false,
   });
   assert.deepEqual(localGates(["apps/desktop/src/main.ts"], workflow), {
     rust: false,
@@ -1750,7 +1773,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     assert.equal(report.commit, head);
     assert.equal(report.provenance.status, "PASS");
     assert.equal(report.dirty, false);
-    assert.deepEqual(report.gates, { rust: false, js: false, android: false });
+    assert.deepEqual(report.gates, { rust: false, js: false, android: false, together: false });
     assert.deepEqual(report.ciEvidence, []);
     assert.deepEqual(report.steps, []);
     assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);

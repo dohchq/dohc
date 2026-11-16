@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { NamedLiveBrowserState } from "@dohc/ydoc-projection/named-live-browser-transport";
 import {
   draftNeedsReview,
+  DraftReview,
   NamedDocumentEditor,
   type NamedDocumentSession,
 } from "./NamedDocumentEditor";
@@ -191,19 +192,14 @@ export function LinkDocumentEditor({
           onState={receive}
         />
       )}
-      {review && (
-        <aside className="draft-recovery" aria-label="Draft recovery">
-          <h2>Review your draft</h2>
-          <p>Your unsynced changes exist only in this tab. Closing or reloading loses them.</p>
-          <p>
-            Copy the changes you want to keep. Open the current file, then paste and review them.
-          </p>
+      {review && session && (
+        <DraftReview session={session} className="draft-recovery">
           {available && (
             <button className="handoff-button secondary" onClick={() => leave(open)}>
               Open current file
             </button>
           )}
-        </aside>
+        </DraftReview>
       )}
       {leaving && (
         <DiscardDraft

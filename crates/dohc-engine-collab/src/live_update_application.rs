@@ -685,6 +685,10 @@ impl AdmittedLiveUpdateMetadata {
                 .then(|| (agent.agent_id.clone(), agent.attribution()));
         }
         let authors = self.author_snapshot.as_ref()?;
+        // A field a save of several people changed has no one actor.
+        if !one_author(authors) {
+            return None;
+        }
         let (_, principal, _, _) = self.accepted.authority.fields();
         let person = authors.iter().find_map(|author| match author {
             LiveAuthorEntry::Human { human_id, .. } if human_id == principal => Some(human_id),
@@ -713,22 +717,24 @@ impl AdmittedLiveUpdateMetadata {
     }
 
     pub fn admitted_declaration(&self) -> Option<AgentDeclaration> {
-        self.author_snapshot
-            .as_ref()?
-            .iter()
-            .find_map(|author| match author {
-                LiveAuthorEntry::Agent {
-                    agent_id,
-                    on_behalf_of,
-                    depth,
-                    ..
-                } => Some(AgentDeclaration {
-                    agent_id: agent_id.clone(),
-                    on_behalf_of: on_behalf_of.clone(),
-                    depth: u32::from(depth.unwrap_or(0)),
-                }),
-                _ => None,
-            })
+        let authors = self.author_snapshot.as_ref()?;
+        // A save that names several people declares no one agent.
+        if !one_author(authors) {
+            return None;
+        }
+        authors.iter().find_map(|author| match author {
+            LiveAuthorEntry::Agent {
+                agent_id,
+                on_behalf_of,
+                depth,
+                ..
+            } => Some(AgentDeclaration {
+                agent_id: agent_id.clone(),
+                on_behalf_of: on_behalf_of.clone(),
+                depth: u32::from(depth.unwrap_or(0)),
+            }),
+            _ => None,
+        })
     }
 
     pub fn matches_draft_declaration(&self, declaration: Option<&AgentDeclaration>) -> bool {
@@ -772,18 +778,10 @@ impl AdmittedLiveUpdateMetadata {
         ) {
             (None, None, None) if self.checkpoint_coverage.is_none() => Ok(()),
             (Some(2), Some(authors), Some(deletes)) => {
-                if authors.len() > 2
-                    || (authors.len() == 2
-                        && (matches!(
-                            authors[0],
-                            LiveAuthorEntry::Agent { .. } | LiveAuthorEntry::Automation { .. }
-                        ) || !matches!(authors[1], LiveAuthorEntry::Agent { .. })))
-                {
-                    return Err(invalid("noncanonical author snapshot"));
-                }
                 for author in authors {
                     author.validate()?;
                 }
+                admissible_authors(&self.accepted.authority, authors)?;
                 canonical_ranges(deletes)?;
                 if let Some(coverage) = &self.checkpoint_coverage {
                     validate_checkpoint_coverage(coverage)?;
@@ -850,6 +848,51 @@ impl LiveUpdateHostApplicationAck {
             local_ydoc_sequence: seq,
             application_replayed: replayed,
         }
+    }
+}
+
+/// Several authors share one admitted update only in a room's save, made under
+/// the owner's authority, which names everyone whose edits it holds.
+/// Automations commit outside the room, so it never names one.
+pub(crate) fn admissible_authors(
+    authority: &ServerDerivedLiveUpdateAuthority,
+    authors: &[LiveAuthorEntry],
+) -> Result<(), ApplicationError> {
+    if one_author(authors) {
+        return Ok(());
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    if !matches!(authority, ServerDerivedLiveUpdateAuthority::Owner { .. })
+        || authors.len() > crate::author_coverage::MAX_INTERVAL_AUTHORS
+        || authors.iter().any(|author| {
+            matches!(
+                author,
+                LiveAuthorEntry::Automation { .. } | LiveAuthorEntry::Unattributed {}
+            )
+        })
+        || !authors
+            .iter()
+            .all(|author| identities.insert(author.identity()))
+        || serde_json::to_vec(authors)
+            .map_err(|_| invalid("author snapshot JSON"))?
+            .len()
+            > crate::author_coverage::MAX_INTERVAL_AUTHOR_BYTES
+    {
+        return Err(invalid("noncanonical author snapshot"));
+    }
+    Ok(())
+}
+
+/// One author, or a person and the agent acting for them: every admitted
+/// update but a room's save.
+pub fn one_author(authors: &[LiveAuthorEntry]) -> bool {
+    match authors {
+        [] | [_] => true,
+        [person, LiveAuthorEntry::Agent { .. }] => !matches!(
+            person,
+            LiveAuthorEntry::Agent { .. } | LiveAuthorEntry::Automation { .. }
+        ),
+        _ => false,
     }
 }
 
@@ -2077,7 +2120,28 @@ pub fn apply_committed_with_settlement_limit(
                 result => result?,
             }
             mutation_attempted = true;
-            let append = durable::record_authorized_update_in_tx(
+            // Every accepted frame but this computer's own draft is a change
+            // from elsewhere: a collaborator's, or its owner's on another
+            // computer. The application row below makes a replay return
+            // before this point.
+            let own_draft = crate::owner_outbox::is_own_draft_in(
+                tx,
+                &key,
+                &event.metadata.accepted.receipt.update_digest,
+                crate::owner_outbox::AcceptedAs::Delivery(
+                    &event.metadata.accepted.receipt.delivery_id,
+                ),
+            )?;
+            // Text this change removes unseen names whoever the relay
+            // accepted it from. The record is a notice, so an author it
+            // cannot read leaves it unnamed rather than refusing the change.
+            let sender = (!own_draft).then(|| {
+                let mut sender = crate::author_coverage::Authors::default();
+                let read = authors.iter().all(|author| sender.union_json(author).is_ok());
+                sender.remove_unattributed();
+                read.then(|| sender.moment_json()).flatten()
+            });
+            let append = durable::record_merged_update_in_tx(
                 tx,
                 &key,
                 &event.update_bytes,
@@ -2085,6 +2149,9 @@ pub fn apply_committed_with_settlement_limit(
                 native_actor.and_then(|(actor, _)| actor.as_deref()),
                 native_actor.and_then(|(_, attribution)| attribution.as_ref()),
                 true,
+                sender.as_ref().map(|author_json| durable::FromElsewhere {
+                    author_json: author_json.as_deref(),
+                }),
                 event.metadata.accepted.received_at_ms,
             )?;
             // This update's own row no longer holds an author its admitted
@@ -2135,18 +2202,7 @@ pub fn apply_committed_with_settlement_limit(
             }
             integer(append.seq, 1, SAFE)?;
             insert_application(tx, &held, &event, append.seq)?;
-            // Every accepted frame but this computer's own draft is a change
-            // from elsewhere: a collaborator's, or its owner's on another
-            // computer. The application row above makes a replay return
-            // before this point.
-            if !crate::owner_outbox::is_own_draft_in(
-                tx,
-                &key,
-                &event.metadata.accepted.receipt.update_digest,
-                crate::owner_outbox::AcceptedAs::Delivery(
-                    &event.metadata.accepted.receipt.delivery_id,
-                ),
-            )? {
+            if !own_draft {
                 dohc_engine_storage::count_remote_change_in_tx(tx, &key.workspace_id)?;
             }
             // The session host commits every accepted frame of a live-shared
@@ -4317,6 +4373,62 @@ mod tests {
         );
     }
 
+    /// A room's save, under the owner's authority, names everyone whose edits
+    /// it holds, including someone who only deleted. No other authority may
+    /// name several people, and no save names one person twice.
+    #[test]
+    fn a_room_save_names_everyone_it_holds() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        // The owner typed too, so a field change is not the owner's alone.
+        let people: Vec<LiveAuthorEntry> = [
+            serde_json::json!({"kind":"human","humanId":"owner-1","humanName":"Owner"}),
+            serde_json::json!({"kind":"human","humanId":"alice","humanName":"Alice"}),
+            serde_json::json!({"kind":"human","humanId":"bob","humanName":"Bob"}),
+            serde_json::json!({"kind":"link","publicPrincipalId":"public-holder-1","label":"Anonymous"}),
+        ]
+        .into_iter()
+        .map(|entry| serde_json::from_value(entry).unwrap())
+        .collect();
+        let source = Ydoc::wire();
+        let mut save = event("room-save", 1, source.plaintext_insert(0, "ab"));
+        save.metadata.canonical_version = Some(2);
+        save.metadata.author_snapshot = Some(people.clone());
+        sees(&mut save, &Ydoc::wire());
+
+        let mut shared = save.metadata.clone();
+        shared.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+            principal_id: "alice".into(),
+            grant_id: "grant-1".into(),
+            grant_generation: 1,
+        };
+        assert!(shared.validate_extensions().is_err());
+        let mut twice = save.metadata.clone();
+        twice.author_snapshot = Some(vec![
+            people[1].clone(),
+            people[2].clone(),
+            people[1].clone(),
+        ]);
+        assert!(twice.validate_extensions().is_err());
+        assert!(save.metadata.admitted_declaration().is_none());
+        assert!(save.metadata.field_history_actor().is_none());
+
+        ack(apply(&mut store, &mut cache, &handle, save.clone()));
+        assert!(ack(apply(&mut store, &mut cache, &handle, save)).application_replayed);
+        let interval = store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+            .unwrap()
+            .json();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&interval).unwrap(),
+            serde_json::json!([
+                {"kind":"human","humanId":"alice","humanName":"Alice"},
+                {"kind":"human","humanId":"bob","humanName":"Bob"},
+                {"kind":"human","humanId":"owner-1","humanName":"Owner"},
+                {"kind":"link","publicPrincipalId":"public-holder-1","label":"Anonymous"}
+            ])
+        );
+    }
+
     #[test]
     fn v2_capped_agent_own_draft_keeps_its_automation_author_depth_and_person() {
         host_claims_each_accepted_field_change(Some(2), true);
@@ -4809,6 +4921,90 @@ mod tests {
             label: "Self claimed".into(),
         }]);
         update
+    }
+
+    /// Ana adds "Hello" and types " world" at its end; Ben, who never saw the
+    /// typing, deletes the line. Returns the kept text, its author_json, and
+    /// whether the record names the author, for each merge-removal record.
+    fn removals_after(order: &[&str]) -> Vec<(String, Option<String>, bool)> {
+        let (_dir, mut store, mut cache, _owner, handle) = field_history_fixture();
+        let ana = Ydoc::with_client_id(2);
+        let ben = Ydoc::with_client_id(3);
+        let line = ana.richdoc_append_paragraph("Hello");
+        ben.apply(&line).unwrap();
+        let typed = ana.richdoc_insert_text(0, 5, " world").unwrap();
+        let own = ana.richdoc_remove_block(0);
+        let deleted = ben.richdoc_remove_block(0);
+        let relay = Ydoc::with_client_id(9);
+        let mut frames = vec![("line", line)];
+        for name in order {
+            let bytes = match *name {
+                "typed" => typed.clone(),
+                "own" => own.clone(),
+                "deleted" => deleted.clone(),
+                other => panic!("no frame {other}"),
+            };
+            frames.push((name, bytes));
+        }
+        for (cursor, (name, bytes)) in frames.into_iter().enumerate() {
+            let mut frame = account_frame(name, cursor as i64 + 1, bytes.clone(), false);
+            if name == "deleted" {
+                frame.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
+                    principal_id: "guest-2".into(),
+                    grant_id: "grant-2".into(),
+                    grant_generation: 1,
+                };
+                frame.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+                    human_id: "guest-2".into(),
+                    human_name: "Ben".into(),
+                }]);
+            }
+            sees(&mut frame, &relay);
+            relay.apply(&bytes).unwrap();
+            ack(apply(&mut store, &mut cache, &handle, frame));
+        }
+        let removals = store
+            .read_with(|conn| dohc_engine_domain::merge_removals_in(conn, "workspace-1"))
+            .unwrap();
+        removals
+            .into_iter()
+            .map(|removal| {
+                let author: Option<String> = store
+                    .read_with(|conn| {
+                        conn.query_row(
+                            "SELECT author_json FROM moments WHERE moment_id=?1",
+                            [&removal.moment_id],
+                            |row| row.get(0),
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(removal.object_id, "object-1");
+                assert_eq!(removal.author_known, author.is_some());
+                (removal.quote, author, removal.author_known)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn keeps_typing_a_collaborators_delete_removed_and_names_the_deleter() {
+        let removals = removals_after(&["typed", "deleted"]);
+        assert_eq!(removals.len(), 1, "{removals:?}");
+        let (text, author, _) = &removals[0];
+        assert_eq!(text, " world");
+        let author = author.as_deref().expect("the deleter is named");
+        assert!(author.contains("guest-2"), "{author}");
+        assert!(!author.contains("guest-1"), "{author}");
+    }
+
+    #[test]
+    fn keeps_typing_that_arrives_inside_a_deleted_line_without_naming_anyone() {
+        let removals = removals_after(&["deleted", "typed"]);
+        assert_eq!(removals, vec![(" world".to_owned(), None, false)]);
+    }
+
+    #[test]
+    fn a_persons_own_delete_keeps_nothing() {
+        assert_eq!(removals_after(&["typed", "own"]), vec![]);
     }
 
     #[test]

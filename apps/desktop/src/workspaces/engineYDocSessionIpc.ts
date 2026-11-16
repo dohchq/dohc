@@ -190,6 +190,7 @@ interface SessionEvent {
   saveFailure?: { reason: SaveFailureReason };
   editRefusal?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["editRefusal"];
   changedOutside?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["changedOutside"];
+  textRemoved?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["textRemoved"];
   state: EngineYDocSaveStateName;
   seq: number;
 }
@@ -837,6 +838,17 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             },
             onObjectChanged: () => {
               publish(() => markObjectChanged());
+            },
+            // Each removal is its own notice, so it skips the repeat check
+            // and leaves the last state as it was.
+            onTextRemoved: (text) => {
+              publish(() =>
+                signals.emit({
+                  state: lastEvent?.state ?? "settling",
+                  seq: lastEvent?.seq ?? 0,
+                  textRemoved: { text },
+                }),
+              );
             },
             onChangedOutside: (unsaved) => {
               publish(() =>

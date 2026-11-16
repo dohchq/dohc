@@ -1,6 +1,7 @@
 import {
   liveAuthorIdentity,
   parseLiveAuthorContext,
+  parseAdmittedLiveAuthorSnapshot,
   parseLiveAuthorSnapshot,
   type LiveAuthorContext,
   type LiveAuthorSnapshot,
@@ -518,13 +519,17 @@ function admittedMetadata(
   ]);
   if (Object.hasOwn(record, "canonicalVersion") && record.canonicalVersion !== 2)
     throw new TypeError("Unknown canonical version.");
+  const accepted = parseRelayAcceptedLiveUpdate(record.accepted);
   return {
-    accepted: parseRelayAcceptedLiveUpdate(record.accepted),
+    accepted,
     firstSeen: parseRanges(record.firstSeen),
     ...(record.canonicalVersion === 2
       ? {
           canonicalVersion: 2 as const,
-          authorSnapshot: parseLiveAuthorSnapshot(record.authorSnapshot),
+          authorSnapshot: parseAdmittedLiveAuthorSnapshot(
+            record.authorSnapshot,
+            accepted.authority,
+          ),
           firstSeenDeletes: parseRanges(record.firstSeenDeletes),
           ...(Object.hasOwn(record, "checkpointCoverage")
             ? { checkpointCoverage: checkpointCoverage(record.checkpointCoverage, parseRanges) }

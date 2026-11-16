@@ -22,7 +22,8 @@ const desktopWorkers = configuredWorkers > 0 ? configuredWorkers : 1;
 export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
-  testIgnore: "**/profiling/**",
+  // The editing-together tests start no desktop app and have their own config.
+  testIgnore: ["**/profiling/**", "**/together/**"],
   workers: desktopWorkers,
   timeout: 60_000,
   expect: {

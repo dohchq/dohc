@@ -459,6 +459,29 @@ describe("document save notices", () => {
     expect(screen.queryByText("Couldn't save notes/a.md")).toBeNull();
   });
 
+  it("quotes text someone else's change removed, copies all of it, and keeps a row for each removal", async () => {
+    const user = userEvent.setup();
+    const copied = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    render(<ActionNotices />);
+
+    const long = `First line\n${"word ".repeat(80)}end`;
+    emit({ textRemoved: { text: long } });
+    const toast = screen.getByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("Someone else's change removed your text from notes/a.md");
+    expect(toast.textContent).toContain('It read "First line word word');
+    expect(toast.textContent).toContain("The file's owner keeps a copy in History.");
+    expect(toast.textContent).not.toContain("Couldn't save");
+    await user.click(within(toast).getByRole("button", { name: "Copy text" }));
+    expect(copied).toHaveBeenCalledWith(long);
+
+    emit({ textRemoved: { text: "Second" } });
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = within(screen.getByRole("dialog", { name: "Notices" }));
+    expect(
+      notices.queryAllByText("Someone else's change removed your text from notes/a.md"),
+    ).toHaveLength(2);
+  });
+
   it("settles from Try again, and the next failure files the row again", async () => {
     const user = userEvent.setup();
     render(<Shell />);

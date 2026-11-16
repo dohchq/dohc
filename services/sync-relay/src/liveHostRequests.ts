@@ -63,7 +63,63 @@ function retainedInputCharge(values: unknown[], maximum: number) {
   return bytes;
 }
 
-/** One native RPC at a time. Callers keep borrowed inputs unchanged until completion. */
+type SendRequest = EngineClient["sendRequest"];
+
+/**
+ * Sends a request whose work reports progress, so slow work is told from an engine that stopped. The engine gets no
+ * deadline for it. The request is unanswered once its deadline passes with neither an answer nor a report.
+ */
+async function sendUntilSilent(
+  send: SendRequest,
+  [request, signal, onProgress, ...rest]: Parameters<SendRequest>,
+): ReturnType<SendRequest> {
+  const { deadlineMs, ...unbounded } = request;
+  if (deadlineMs === undefined || deadlineMs === null || !onProgress)
+    return send(request, signal, onProgress, ...rest);
+  let reports = 0,
+    quietHalves = 0,
+    settled = false,
+    expire!: (cause: EngineRequestDeadlineError) => void;
+  const silent = new Promise<never>((_, reject) => {
+    expire = reject;
+  });
+  // Two quiet halves make the deadline. A stall of the relay's own thread ends at most one of them early, and the
+  // other then passes with the thread running, so the engine's frames are read before it counts as silent.
+  const half = setTimeout(() => {
+    const seen = reports;
+    // A report that arrived while the timer waited to run is read first.
+    setImmediate(() => {
+      if (settled || reports !== seen) return;
+      if (++quietHalves < 2) half.refresh();
+      else expire(new EngineRequestDeadlineError(request.id, request.method, deadlineMs));
+    });
+  }, deadlineMs / 2);
+  try {
+    return await Promise.race([
+      send(
+        unbounded,
+        signal,
+        () => {
+          if (settled) return;
+          reports++;
+          quietHalves = 0;
+          half.refresh();
+          onProgress();
+        },
+        ...rest,
+      ),
+      silent,
+    ]);
+  } finally {
+    settled = true;
+    clearTimeout(half);
+  }
+}
+
+/**
+ * One native RPC at a time. Callers keep borrowed inputs unchanged until completion.
+ * A `sendRequest` given a progress callback is unanswered only after its deadline passes in silence.
+ */
 export function queueLiveHostRequests(
   client: EngineClient,
   options: {
@@ -218,7 +274,11 @@ export function queueLiveHostRequests(
                 property === "sendRequest"
                   ? String((args[0] as { method?: unknown } | undefined)?.method)
                   : String(property);
-              return run(kind, name, caller, args.slice(0, index), () => method(...args));
+              return run(kind, name, caller, args.slice(0, index), () =>
+                property === "sendRequest"
+                  ? sendUntilSilent(method as SendRequest, args as Parameters<SendRequest>)
+                  : method(...args),
+              );
             };
       methods.set(property, wrapped);
       return wrapped;

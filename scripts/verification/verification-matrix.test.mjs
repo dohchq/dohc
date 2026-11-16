@@ -532,6 +532,8 @@ test(
             const js = mode === "pr" && job !== "rust";
             // The lockfile is an Android input too. A --job run keeps only its own gate, and Android never runs locally.
             const android = mode === "pr" && !job && (full || changed === "pnpm-lock.yaml");
+            // The lockfile and a package's source both reach the editing-together check, which never runs locally either.
+            const together = mode === "pr" && !job && (full || changed !== undefined);
             // The lockfile is a tooling input; a package's source is not. An empty diff narrows nothing.
             const repositoryTests =
               changed === "packages/fixture/src/index.ts" && !full && !keepGoing
@@ -936,8 +938,11 @@ test(
                 assert.equal(report.provenance.status, "PASS");
                 assert.equal(Boolean(report.build), desktop);
                 assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), js);
-                assert.deepEqual(report.gates, { rust, js, android });
-                assert.deepEqual(report.ciEvidence, android ? ["Android Kotlin compile"] : []);
+                assert.deepEqual(report.gates, { rust, js, android, together });
+                assert.deepEqual(report.ciEvidence, [
+                  ...(android ? ["Android Kotlin compile"] : []),
+                  ...(together ? ["editing together", "share page"] : []),
+                ]);
                 assert.equal(report.full, full);
                 assert.equal(report.repositoryTests, js ? repositoryTests : undefined);
                 assert.equal(

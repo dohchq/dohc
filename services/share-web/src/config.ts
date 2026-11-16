@@ -24,6 +24,7 @@ export interface ShareWebConfig {
   relayUrl: string;
   publicRelayUrl: string;
   relayExchangeKey?: string;
+  sessionSealKey?: string;
   publicHosts: Set<string>;
   internalHosts: Set<string>;
   trustedProxies: Set<string>;
@@ -134,6 +135,16 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
   }
   if (!isDevOrTest && relayExchangeKey === undefined) {
     throw new Error("DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY must be set outside development/test.");
+  }
+  const sessionSealKey = env.DOHC_SHARE_WEB_SESSION_SEAL_KEY || undefined;
+  if (sessionSealKey !== undefined && sessionSealKey.length < 32) {
+    throw new Error("DOHC_SHARE_WEB_SESSION_SEAL_KEY must be at least 32 characters.");
+  }
+  // What a browser holds is made from the seal key, so it must not be a secret the relay trusts.
+  if (sessionSealKey !== undefined && sessionSealKey === relayExchangeKey) {
+    throw new Error(
+      "DOHC_SHARE_WEB_SESSION_SEAL_KEY must differ from DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY.",
+    );
   }
   const devMode = env.DOHC_SHARE_WEB_DEV === "1";
   if (devMode && nodeEnv !== "development" && nodeEnv !== "test") {
@@ -295,6 +306,7 @@ export function loadShareWebConfig(env: NodeJS.ProcessEnv): ShareWebConfig {
     relayUrl: relayUrl.href,
     publicRelayUrl,
     relayExchangeKey,
+    sessionSealKey,
     publicHosts: new Set(hosts),
     internalHosts,
     trustedProxies,

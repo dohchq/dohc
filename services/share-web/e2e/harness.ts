@@ -35,6 +35,8 @@ export interface RunningStack {
   httpsUrl: string | null;
   relayDbPath: string;
   relayUrl: string;
+  /** Stops share-web and starts a new process on the same address, as an upgrade does. */
+  restartShareWeb: () => Promise<void>;
   shareWebUrl: string;
   stop: () => Promise<void>;
 }
@@ -340,6 +342,7 @@ async function startStack(options: { httpsFront: boolean }): Promise<RunningStac
   const shareWebEnv = buildHarnessEnvironment(process.env, {
     NODE_ENV: "test",
     DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: relayExchangeKey,
+    DOHC_SHARE_WEB_SESSION_SEAL_KEY: randomBytes(32).toString("base64url"),
     DOHC_SHARE_WEB_PUBLIC_HOSTS: `${LOOPBACK_HOST}:${String(shareWebPort)}`,
     DOHC_SHARE_WEB_INTERNAL_HOSTS: `${LOOPBACK_HOST}:${String(shareWebPort)}`,
     DOHC_SHARE_WEB_PORT: String(shareWebPort),
@@ -400,28 +403,37 @@ async function startStack(options: { httpsFront: boolean }): Promise<RunningStac
     shareWebEnv.DOHC_SHARE_WEB_RELAY_URL = relayUrl;
     shareWebEnv.DOHC_SHARE_WEB_PUBLIC_RELAY_URL = relayUrl;
 
-    const shareWeb = spawnService(
-      "share-web",
-      new URL("../src/main.ts", import.meta.url),
-      roots.shareWeb,
-      shareWebEnv,
-    );
-    services.push(shareWeb);
-    const shareWebMatch = await waitForListening(
-      shareWeb,
-      /SHARE_WEB_LISTENING host=([^\s]+) port=(\d+)/u,
-      SHARE_WEB_STARTUP_TIMEOUT_MS,
-    );
-    if (Number(shareWebMatch[2]) !== shareWebPort) {
-      throw new Error(
-        `share-web listened on ${shareWebMatch[2]} instead of pre-allocated port ${String(shareWebPort)}`,
+    const startShareWeb = async (): Promise<ServiceProcess> => {
+      const shareWeb = spawnService(
+        "share-web",
+        new URL("../src/main.ts", import.meta.url),
+        roots.shareWeb,
+        shareWebEnv,
       );
-    }
+      services.push(shareWeb);
+      const shareWebMatch = await waitForListening(
+        shareWeb,
+        /SHARE_WEB_LISTENING host=([^\s]+) port=(\d+)/u,
+        SHARE_WEB_STARTUP_TIMEOUT_MS,
+      );
+      if (Number(shareWebMatch[2]) !== shareWebPort) {
+        throw new Error(
+          `share-web listened on ${shareWebMatch[2]} instead of pre-allocated port ${String(shareWebPort)}`,
+        );
+      }
+      return shareWeb;
+    };
+    let shareWeb = await startShareWeb();
 
     return {
       httpsUrl: httpsFront?.url ?? null,
       relayDbPath,
       relayUrl,
+      restartShareWeb: async () => {
+        await stopService(shareWeb);
+        services.splice(services.indexOf(shareWeb), 1);
+        shareWeb = await startShareWeb();
+      },
       shareWebUrl,
       stop,
     };

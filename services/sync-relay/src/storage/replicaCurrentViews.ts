@@ -385,7 +385,7 @@ export function discardReplicaCurrentView(storage: StorageContext, lease: Replic
       "SELECT 1 FROM sync_relay_replica_cut_text_refs WHERE workspace_id=? AND ref_count=0 LIMIT 1",
     ).get(lease.workspaceId)
   ) {
-    storage.replicaViewTx(() => deleteUnreferencedReplicaTexts(storage, lease.workspaceId));
+    storage.quietTx(() => deleteUnreferencedReplicaTexts(storage, lease.workspaceId));
   }
 }
 export function stageReplicaCurrentView(
@@ -412,7 +412,7 @@ export function stageReplicaCurrentView(
       batchBytes = 0;
     const flush = () => {
       if (!batch.length) return;
-      storage.replicaViewTx(() => {
+      storage.quietTx(() => {
         current(storage, lease);
         for (const chunk of batch) {
           insert.run(lease.workspaceId, chunk.sha, chunk.ordinal, chunk.bytes);
@@ -470,7 +470,7 @@ export function flipReplicaCurrentView(
   try {
     if (!state || state.storage !== storage || state.lease !== lease) fail();
     stagedViews.delete(staged);
-    return storage.replicaViewTx(() => {
+    return storage.quietTx(() => {
       const { view, changes, saved } = validateReplicaCurrentView(
         storage,
         lease,
@@ -678,7 +678,7 @@ export function advanceReplicaCurrentView(
   view: ReplicaCurrentView,
   previous: ReplicaCurrentView,
 ) {
-  return storage.replicaViewTx(() => {
+  return storage.quietTx(() => {
     const saved = validateReplicaPosition(storage, lease, view);
     if (
       !saved ||
@@ -692,7 +692,7 @@ export function advanceReplicaCurrentView(
   });
 }
 export function sampleReplicaHistory(storage: StorageContext, lease: ReplicaReadLease) {
-  storage.replicaViewTx(() => {
+  storage.quietTx(() => {
     current(storage, lease);
     const header = statement(
       storage,

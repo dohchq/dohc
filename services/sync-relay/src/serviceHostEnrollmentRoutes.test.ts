@@ -18,6 +18,7 @@ import type { StorageContext } from "./storage/context";
 import { createLiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import {
   createServiceHostEnrollmentRoutes,
+  isServiceHostEnrollmentPath,
   discoverServiceHostDocuments,
 } from "./serviceHostEnrollmentRoutes";
 import { createServiceHostReplication } from "./serviceHostReplication";
@@ -30,6 +31,8 @@ import type { JsonValue } from "@dohc/workspace-engine-client";
 import { heldDocumentFixture } from "./heldDocument.test-helper";
 import type { WorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, type SessionKind } from "@dohc/workspace-auth/session";
+import { LiveRoomUnsavedError, type LiveRooms } from "./liveRoom";
+import { jsonBody, request, testHandler } from "./testing";
 import type { KnownRefusalWord } from "./serverLogWords";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -59,7 +62,7 @@ const serviceReplication = (storage: Parameters<typeof authorizeServiceHostRepli
     hostedFeed: true,
     authorize: (input) => authorizeServiceHostReplication(storage, { key, namespace, ...input }),
   });
-async function fixture() {
+async function fixture(options: { rooms?: Pick<LiveRooms, "saveFirst"> } = {}) {
   const f = await ticketFixture();
   cleanup.push(f.close);
   f.storage.claimWorkspaceIdentity({
@@ -142,6 +145,7 @@ async function fixture() {
     history,
     host,
     resolveActor,
+    ...(options.rooms ? { rooms: () => options.rooms } : {}),
   });
   const input = {
     workspaceId: scope.workspaceId,
@@ -1109,6 +1113,87 @@ it("retires an owner document, lists it separately, and resumes its retained ide
   );
 });
 
+// Proves: once a retirement finishes, its owner reads F on the retired row and the note's journal
+// through F, a page at a time. Before then, for another lineage or generation, or for anyone else,
+// there is no journal to read.
+it("serves a finished retirement's F and journal to the workspace owner alone", async () => {
+  const f = await fixture(),
+    enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+  retainServiceActivation(f.raw, namespace, true);
+  const stop = await f.handle(
+    f.request("DELETE", {
+      path: binding.currentPath,
+      retire: true,
+      restoreFenceGeneration: binding.restoreFenceGeneration,
+    }),
+  );
+  expect(await stop.json()).toMatchObject({ status: "retired", acceptedCursor: 0 });
+  const query = (values: Record<string, string>) =>
+    `/journal?${new URLSearchParams({
+      objectId: enrolled.objectId,
+      lineageClaimId: binding.lineageClaimId,
+      restoreFenceGeneration: String(binding.restoreFenceGeneration),
+      after: "0",
+      ...values,
+    })}`;
+  const journal = (values: Record<string, string> = {}) =>
+    f.handle(f.request("GET", undefined, {}, query(values)));
+  // The relay sends these routes only the paths this matcher accepts.
+  expect(
+    isServiceHostEnrollmentPath(new URL(f.request("GET", undefined, {}, query({})).url).pathname),
+  ).toBe(true);
+  const retired = async () =>
+    (
+      (await (await f.handle(f.request("GET", undefined, {}, "?retired=1"))).json()) as {
+        documents: object[];
+      }
+    ).documents;
+  // Still retiring: the host has not published its last output.
+  expect(await retired()).toEqual([
+    { path: enrolled.path, objectId: enrolled.objectId, status: "retired", stopped: true },
+  ]);
+  const waiting = await journal();
+  expect(waiting.status).toBe(409);
+  expect(await waiting.json()).toEqual({ ok: false, code: "retirement-not-found" });
+  f.raw
+    .prepare(
+      "UPDATE sync_relay_service_activations SET state_bytes=NULL,retired_at_ms=retire_requested_at_ms,retired_boundary_json='{}'",
+    )
+    .run();
+  expect(await retired()).toEqual([
+    {
+      path: enrolled.path,
+      objectId: enrolled.objectId,
+      status: "retired",
+      stopped: true,
+      acceptedCursor: 0,
+    },
+  ]);
+  expect(await (await journal()).json()).toEqual({
+    ok: true,
+    acceptedCursor: 0,
+    rows: [],
+    nextAfter: null,
+  });
+  for (const values of <Record<string, string>[]>[
+    { restoreFenceGeneration: String(binding.restoreFenceGeneration + 1) },
+    { lineageClaimId: "c".repeat(64) },
+    { objectId: "object-2" },
+  ])
+    expect((await journal(values)).status).toBe(409);
+  for (const values of <Record<string, string>[]>[
+    { after: "-1" },
+    { after: "01" },
+    { lineageClaimId: "C".repeat(64) },
+  ])
+    expect((await journal(values)).status).toBe(400);
+  expect((await f.handle(f.request("GET", undefined, {}, `${query({})}&after=0`))).status).toBe(
+    404,
+  );
+  f.setActor({ workspaceId: scope.workspaceId, userId: "editor-1" });
+  expect((await journal()).status).toBe(404);
+});
+
 // Proves: a retired row whose document was deleted leaves Live documents, since
 // Resume has no document to start. Restoring it from History lists it again, and
 // a moved document keeps its row.
@@ -1219,6 +1304,97 @@ it("waits to stop a hosted document until its pending edit is delivered, then re
   });
   expect(retirement()).toMatchObject({ objectId: binding.objectId, acceptedThrough: cursor });
   expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(false);
+});
+
+// Proves: Stop has the note's live room save every edit it took before it retires, and waits,
+// fencing nothing, while the room can't save them yet.
+it("saves a live room's taken edits before Stop retires the note", async () => {
+  const notes: unknown[] = [];
+  let saved = false;
+  const rooms: Pick<LiveRooms, "saveFirst"> = {
+    async saveFirst(note, then) {
+      notes.push(note);
+      if (!saved) throw new LiveRoomUnsavedError();
+      return then();
+    },
+  };
+  const f = await fixture({ rooms }),
+    enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+  retainServiceActivation(f.raw, namespace, true);
+  const stop = () =>
+    f.handle(
+      f.request("DELETE", {
+        path: binding.currentPath,
+        retire: true,
+        restoreFenceGeneration: binding.restoreFenceGeneration,
+      }),
+    );
+  const waiting = await stop();
+  expect(waiting.status).toBe(409);
+  expect(await waiting.json()).toMatchObject({ code: "edits-pending" });
+  expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(true);
+  saved = true;
+  expect(await (await stop()).json()).toMatchObject({ ok: true, status: "retired" });
+  expect(f.storage.serviceHostDocumentEnabled(enrolled)).toBe(false);
+  expect(notes).toEqual([
+    { workspaceId: scope.workspaceId, objectId: binding.objectId },
+    { workspaceId: scope.workspaceId, objectId: binding.objectId },
+  ]);
+});
+
+// Proves: ending the Edit access that hosts a note has its live room save the edits it took first,
+// while the note is still hosted, and ends access whatever becomes of that save or the request.
+it("saves a live room's taken edits before ending the Edit access that hosts the note", async () => {
+  for (const outcome of [
+    "saved",
+    "unsaved",
+    "failed",
+    "fails-after-ending",
+    "request-aborted",
+  ] as const) {
+    const f = await fixture(),
+      enrolled = f.storage.ensureOwnedLiveDocument({ intent: "share", ...f.input });
+    const notes: unknown[] = [];
+    const aborting = new AbortController();
+    let saving!: () => void;
+    const rooms: Pick<LiveRooms, "saveFirst"> = {
+      async saveFirst(note, then, signal) {
+        notes.push({ ...note, hosted: f.storage.serviceHostDocumentEnabled(enrolled) });
+        if (outcome === "unsaved") throw new LiveRoomUnsavedError();
+        if (outcome === "failed") throw new Error("Live rooms are closed.");
+        if (outcome === "request-aborted")
+          // Waits as a save does, and gives up as one does once its signal aborts.
+          await new Promise<void>((resolve, reject) => {
+            saving = resolve;
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        const result = await then();
+        if (outcome === "fails-after-ending") throw new Error("Live rooms are closed.");
+        return result;
+      },
+    };
+    const h = testHandler(f.storage, { liveRooms: () => rooms });
+    const ending = h(
+      request("owner-1", `/sync/shares/${scope.shareId}/grants/${scope.grantId}/revoke`, {
+        ...jsonBody({ workspaceId: scope.workspaceId }),
+        signal: aborting.signal,
+      }),
+    );
+    if (outcome === "request-aborted") {
+      await vi.waitFor(() => expect(notes).toHaveLength(1));
+      aborting.abort();
+      saving();
+      await ending.catch(() => undefined);
+    } else {
+      const ended = await ending;
+      expect(ended.status, await ended.clone().text()).toBe(200);
+    }
+    expect(notes, outcome).toEqual([
+      { workspaceId: scope.workspaceId, objectId: binding.objectId, hosted: true },
+    ]);
+    expect(f.storage.getShareGrant(scope.grantId)?.status, outcome).toBe("revoked");
+    expect(f.storage.serviceHostDocumentEnabled(enrolled), outcome).toBe(false);
+  }
 });
 
 // Proves: a Stop whose reply was lost is done in the relay's durable state.

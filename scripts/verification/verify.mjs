@@ -181,7 +181,10 @@ export function passedSpecTitles(suites = []) {
 }
 
 /** The PR checks a selection needs a passing CI run of, because no local run performs them. */
-export const ciEvidence = (gates) => (gates.android ? ["Android Kotlin compile"] : []);
+export const ciEvidence = (gates) => [
+  ...(gates.android ? ["Android Kotlin compile"] : []),
+  ...(gates.together ? ["editing together", "share page"] : []),
+];
 
 export function changedFiles(baseCommit, includeUncommitted = false, root = repoRoot) {
   const paths = (args) => readGit(args, root).split("\0").filter(Boolean);
@@ -411,7 +414,7 @@ export async function verify(args) {
     const files = base ? changedFiles(baseCommit, mode === "plan") : [];
     const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
     const requiredGates = selectedGates(files, workflow);
-    if (full) Object.assign(requiredGates, { rust: true, js: true, android: true });
+    if (full) Object.assign(requiredGates, { rust: true, js: true, android: true, together: true });
     if (job) requiredGates[job] = true;
     const gates = Object.fromEntries(
       Object.entries(requiredGates).map(([name, needed]) => [
@@ -1225,7 +1228,7 @@ export async function verify(args) {
       console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
       for (const check of report.ciEvidence ?? [])
         console.log(
-          `[verification] ${check} runs only in CI. A merge needs its passing PR checks run for ${report.commit}.`,
+          `[verification] ${check} runs in the PR checks, not here. A merge needs its passing PR checks run for ${report.commit}.`,
         );
       if (report.repositoryTests === "test:repo:tree")
         console.log(

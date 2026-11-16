@@ -27,10 +27,16 @@ const position = { eventCount: 0, journalCursor: 0, evidenceDigest: "a".repeat(6
 function fixture(maxPending = 4, maxRetainedInputBytes = 1_000_000) {
   const lifetime = new AbortController(),
     seen: number[] = [];
-  const invoke = vi.fn(async (input: { id: number }, _signal?: AbortSignal): Promise<unknown> => {
-    seen.push(input.id);
-    return { result: {} };
-  });
+  const invoke = vi.fn(
+    async (
+      input: { id: number },
+      _signal?: AbortSignal,
+      _onProgress?: () => void,
+    ): Promise<unknown> => {
+      seen.push(input.id);
+      return { result: {} };
+    },
+  );
   const native = {
     sendRequest: invoke,
     sendLiveOwnerAdoption: (
@@ -220,6 +226,54 @@ it("fails only a request whose deadline passed before it was sent, then starts t
   expect(f.retire).not.toHaveBeenCalled();
   expect(f.invoke).toHaveBeenCalledTimes(2);
   f.lifetime.abort();
+});
+
+it("waits past the deadline for a request whose work keeps reporting progress", async () => {
+  vi.useFakeTimers();
+  const f = fixture(),
+    answer = deferred<void>();
+  let report!: () => void;
+  f.invoke.mockImplementationOnce(async (_input, _signal, onProgress) => {
+    report = onProgress!;
+    await answer.promise;
+    return { result: {} };
+  });
+  const onProgress = vi.fn();
+  const sent = f.client.sendRequest(request(1), undefined, onProgress);
+  // Four reports, each 900 ms after the last, carry the request to 3.6 times its 1000 ms deadline.
+  for (let reports = 0; reports < 4; reports++) {
+    await vi.advanceTimersByTimeAsync(900);
+    report();
+  }
+  expect(onProgress).toHaveBeenCalledTimes(4);
+  // The engine would end the work at a deadline it was given.
+  expect(f.invoke.mock.calls[0]![0]).not.toHaveProperty("deadlineMs");
+  answer.resolve();
+  await expect(sent).resolves.toEqual({ result: {} });
+  expect(f.retire).not.toHaveBeenCalled();
+  f.lifetime.abort();
+});
+
+it("retires a request that reports progress once its deadline passes with no report", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  let report!: () => void;
+  f.invoke.mockImplementationOnce((_input, _signal, onProgress) => {
+    report = onProgress!;
+    return new Promise(() => {});
+  });
+  const sent = f.client.sendRequest(request(1), undefined, () => {}).catch((error) => error);
+  await vi.advanceTimersByTimeAsync(600);
+  report();
+  // The 1000 ms of silence count from the last report.
+  await vi.advanceTimersByTimeAsync(999);
+  expect(f.retire).not.toHaveBeenCalled();
+  // Fake timers run each of the two deferred checks 1 ms late.
+  await vi.advanceTimersByTimeAsync(3);
+  const error = await sent;
+  expect(error).toBeInstanceOf(EngineRequestDeadlineError);
+  expect(error).toMatchObject({ method: "liveApplication.settle", deadlineMs: 1000 });
+  expect(f.retire).toHaveBeenCalledOnce();
 });
 
 it("does not enqueue the internal RPC of an already queued client method", async () => {

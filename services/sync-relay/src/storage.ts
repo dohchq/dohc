@@ -508,6 +508,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string) {
     return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
   }
+  retiredAcceptedCursor(workspaceId: string, objectId: string) {
+    return this.readTx(() =>
+      serviceActivationRetirementStorage.retiredAcceptedCursor(this, workspaceId, objectId),
+    );
+  }
+  readRetiredJournalPage(
+    input: Parameters<typeof serviceActivationRetirementStorage.readRetiredJournalPage>[1],
+  ) {
+    return serviceActivationRetirementStorage.readRetiredJournalPage(this, input);
+  }
   currentServiceHostWorkspace(workspaceId: string, includeUndrained = false) {
     const row = serviceHostEnrollmentStorage.currentServiceHostWorkspace(
       this,
@@ -637,6 +647,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     if (result)
       notifyDesktopReadiness(this, { workspaceId: result.workspaceId, path: result.path });
     return result;
+  }
+  serviceHostEnrollmentsCoveredByShare(shareId: string) {
+    return serviceHostEnrollmentStorage.serviceHostEnrollmentsCoveredByShare(this, shareId);
   }
   serviceHostEnrollmentCovered(
     enrollment: Pick<
@@ -2092,8 +2105,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   // One write transaction, so a caller states what it writes rather than the
   // BEGIN/COMMIT/ROLLBACK frame around it.
-  // Current view persistence does not wake the replication observer.
-  replicaViewTx<T>(run: () => T): T {
+  // A write no live host needs to hear about, such as current view persistence or a room's
+  // taken edit, wakes no relay-write observer.
+  quietTx<T>(run: () => T): T {
     return this.owner.write(run);
   }
 
@@ -2106,8 +2120,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     try {
       return this.owner.write(run);
     } finally {
-      if (this.unavailable.aborted || JSON.stringify(revision.get()) !== before)
-        notifyRelayWrite(this);
+      // A committed write must not fail because this read did, so a failed read counts as a change.
+      let changed = true;
+      try {
+        changed = this.unavailable.aborted || JSON.stringify(revision.get()) !== before;
+      } catch {}
+      if (changed) notifyRelayWrite(this);
     }
   }
 

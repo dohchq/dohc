@@ -9165,7 +9165,7 @@ it("refuses an edit and retires a note's activation on an idle host at once when
 // The relay's storage writing with no write notice, as another process on the same database does.
 const unannounced = (o: Enrolled) =>
   Object.assign(Object.create(o.f.storage) as typeof o.f.storage, {
-    tx: <T>(run: () => T) => (o.f.storage as StorageContext).replicaViewTx(run),
+    tx: <T>(run: () => T) => (o.f.storage as StorageContext).quietTx(run),
   });
 // Proves: after a Pause, a Stop or a revocation that reaches the relay database with no notice, as from another
 // process, an idle host retires the note's activation at its next fixed pass, within one idle interval. The relay

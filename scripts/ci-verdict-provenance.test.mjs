@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, matchesGlob, resolve } from "node:path";
 import test from "node:test";
 import { load } from "js-yaml";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
@@ -648,7 +648,14 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
         );
         assert.equal(workflowExpression(jobs.android.if, context), android === "true");
       }
-  for (const gate of ["all", "js", "rust", "android"]) {
+  for (const together of ["true", "false"]) {
+    const context = {
+      ...workflowContext({ enabled: "true" }),
+      needs: { changes: { result: "success", outputs: { js: "true", together } } },
+    };
+    assert.equal(workflowExpression(jobs.together.if, context), together === "true");
+  }
+  for (const gate of ["all", "js", "rust", "android", "together"]) {
     const context = {
       ...workflowContext({ event: "workflow_dispatch", gate }),
       needs: { changes: { result: "success", outputs: {} } },
@@ -659,6 +666,11 @@ test("Blacksmith keeps drafts and forks out and bounds manual runner sizes", () 
     assert.equal(
       workflowExpression(jobs.android.if, context),
       gate === "all" || gate === "android",
+    );
+    // The editing-together job starts what shared preparation builds, so its own dispatch runs that too.
+    assert.equal(
+      workflowExpression(jobs.together.if, context),
+      gate === "all" || gate === "together",
     );
     for (const result of ["success", "failure", "skipped"]) {
       const selected = {
@@ -796,11 +808,11 @@ test("prepared artifact consumers share preparation's fingerprint environment", 
 
 test("job names match the workflow graph and timeout backstops", () => {
   const { jobs } = load(workflow);
-  // The graph times the distributed gates. Android is one job outside them.
+  // The graph times the distributed gates. Android and editing together are one job each, outside them.
   assert.deepEqual(
     Object.keys(CLOUD_JOB_GRAPH).sort(),
     Object.keys(jobs)
-      .filter((name) => !["verification", "android"].includes(name))
+      .filter((name) => !["verification", "android", "together"].includes(name))
       .sort(),
   );
   for (const [id, node] of Object.entries(CLOUD_JOB_GRAPH)) {
@@ -829,6 +841,7 @@ test("job names match the workflow graph and timeout backstops", () => {
       "rust-policy": 25,
       rust: 55,
       android: 20,
+      together: 30,
       verification: 10,
     },
   );
@@ -837,6 +850,48 @@ test("job names match the workflow graph and timeout backstops", () => {
   );
   assert.equal(upload.if, "always()");
   assert.equal(upload.with.path, ".agent-artifacts/verification/aggregate/*-completed-result.json");
+});
+
+test("the editing-together check is selected by what it runs and loads, and only with the JavaScript gate", () => {
+  const filters = load(
+    load(workflow).jobs.changes.steps.find((step) => step.id === "filter").with.filters,
+  );
+  const selects = (name, file) => filters[name].some((pattern) => matchesGlob(file, pattern));
+  for (const file of [
+    // The path a shared note's edit takes.
+    "services/sync-relay/src/namedLiveRoutes.ts",
+    "services/share-web/viewer/src/NamedDocumentEditor.tsx",
+    "packages/ydoc-projection/src/browser-editor.ts",
+    "packages/security-contract/src/visibilityPolicy.ts",
+    "crates/dohc-workspace-engine/src/rpc/owner_activation.rs",
+    "Cargo.lock",
+    // The check, and the desktop code that plays the note's owner in it.
+    "apps/desktop/e2e/together/stack.ts",
+    "apps/desktop/e2e/helpers/syncRelay.ts",
+    "apps/desktop/src/workspaces/workspaceEngineCapture.ts",
+    "apps/desktop/src/testing/engineBinary.ts",
+    "apps/desktop/scripts/run-playwright.mjs",
+    "apps/desktop/playwright.together.config.ts",
+    "services/workspace-api/e2e/harness.ts",
+    // The share page's own tests, and an app they publish.
+    "services/share-web/e2e/smoke.spec.ts",
+    "examples/trip-poll/package.json",
+    "tools/single-react.ts",
+    "scripts/verification/wait-preparation.mjs",
+    "pnpm-lock.yaml",
+    ".github/workflows/pr-checks.yml",
+  ]) {
+    assert.ok(selects("together", file), file);
+    // The job starts what shared preparation builds, and that runs only for a gate.
+    assert.ok(selects("js", file), `${file} must select the JavaScript gate too`);
+  }
+  for (const file of [
+    "docs/guide.md",
+    "apps/site/src/pages/index.astro",
+    "apps/mobile/app/index.tsx",
+    "README.md",
+  ])
+    assert.ok(!selects("together", file), file);
 });
 
 test("cloud matrices run every JavaScript and Rust shard with separate evidence", () => {
@@ -909,12 +964,15 @@ test("cloud matrices run every JavaScript and Rust shard with separate evidence"
   }
 });
 
+// One runner per matrix leg: the gates split by shard, the browser job by suite.
+const legs = (job) => (job.strategy?.matrix?.shard ?? job.strategy?.matrix?.suite)?.length ?? 1;
+
 test("the workflow graph pins its total and peak concurrent jobs", () => {
   const { jobs } = load(workflow),
     names = Object.keys(jobs);
   assert.equal(
-    names.reduce((total, name) => total + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0),
-    24,
+    names.reduce((total, name) => total + legs(jobs[name]), 0),
+    26,
   );
   const ancestors = (name) => {
     const needs = jobs[name].needs ?? [];
@@ -931,15 +989,13 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
     "javascript-prepare",
     "rust-policy",
     "android",
+    "together",
   ];
   const concurrent = (simultaneous) => {
     assert.ok(
       simultaneous.every((name) => simultaneous.every((other) => !before.get(name).has(other))),
     );
-    return simultaneous.reduce(
-      (n, name) => n + (jobs[name].strategy?.matrix?.shard?.length ?? 1),
-      0,
-    );
+    return simultaneous.reduce((n, name) => n + legs(jobs[name]), 0);
   };
   let peak = 0;
   for (let mask = 1; mask < 2 ** names.length; mask++) {
@@ -948,12 +1004,12 @@ test("the workflow graph pins its total and peak concurrent jobs", () => {
       continue;
     peak = Math.max(
       peak,
-      simultaneous.reduce((n, name) => n + (jobs[name].strategy?.matrix?.shard?.length ?? 1), 0),
+      simultaneous.reduce((n, name) => n + legs(jobs[name]), 0),
     );
   }
-  assert.equal(concurrent(initial), JS_SHARDS + RUST_SHARDS + 3);
+  assert.equal(concurrent(initial), JS_SHARDS + RUST_SHARDS + 5);
   assert.equal(peak, concurrent(initial));
-  assert.equal(peak, 22);
+  assert.equal(peak, 24);
   assert.ok(peak <= 60, "one combined gate fits the plan limit");
 });
 
@@ -1030,7 +1086,14 @@ test("cloud JavaScript jobs do not inherit the event's base SHA", () => {
 
 test("the final CI check rejects failed, cancelled, missing, and unexpectedly skipped gates", (t) => {
   const job = load(workflow).jobs.verification;
-  assert.deepEqual(job.needs, ["changes", "javascript", "rust", "javascript-prepare", "android"]);
+  assert.deepEqual(job.needs, [
+    "changes",
+    "javascript",
+    "rust",
+    "javascript-prepare",
+    "android",
+    "together",
+  ]);
   assert.equal(workflowExpression(job.name, workflowContext()), "PR verification");
   assert.equal(
     workflowExpression(job.name, workflowContext({ event: "workflow_dispatch", gate: "js" })),
@@ -1123,12 +1186,41 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
     android = "false",
     androidResult = android === "true" ? "success" : "skipped",
   ) => ({
-    changes: { result: "success", outputs: { js, rust, android } },
+    changes: { result: "success", outputs: { js, rust, android, together: "false" } },
     javascript: { result: jsResult },
     rust: { result: rustResult },
     "javascript-prepare": { result: confinementResult },
     android: { result: androidResult },
+    together: { result: "skipped" },
   });
+  // The editing-together check completes as selected, like a gate.
+  {
+    const selected = (choice, result) => {
+      const base = jobs("true", "false", "success", "skipped");
+      return {
+        ...base,
+        changes: { result: "success", outputs: { ...base.changes.outputs, together: choice } },
+        together: { result },
+      };
+    };
+    assert.equal(run(selected("true", "success")).status, 0);
+    for (const result of ["failure", "cancelled", "skipped", undefined])
+      assert.equal(run(selected("true", result)).status, 1);
+    assert.equal(run(selected("false", "success")).status, 1);
+    assert.equal(run(selected(undefined, "skipped")).status, 1, "a missing selection fails");
+    // Its own dispatch runs shared preparation and nothing else.
+    const alone = {
+      ...jobs(undefined, undefined, "skipped", "skipped", "success"),
+      together: { result: "success" },
+    };
+    assert.equal(run(alone, "workflow_dispatch", "together").status, 0);
+    for (const name of ["together", "javascript-prepare"])
+      assert.equal(
+        run({ ...alone, [name]: { result: "skipped" } }, "workflow_dispatch", "together").status,
+        1,
+        name,
+      );
+  }
   for (const js of ["true", "false"])
     for (const rust of ["true", "false"])
       for (const android of ["true", "false"]) {
@@ -1153,7 +1245,7 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   assert.equal(
     run({
       ...jobs("false", "false", "skipped", "skipped"),
-      changes: { result: "success", outputs: { js: "false", rust: "false" } },
+      changes: { result: "success", outputs: { js: "false", rust: "false", together: "false" } },
     }).status,
     1,
     "a missing Android selection fails",
@@ -1166,15 +1258,18 @@ test("the final CI check rejects failed, cancelled, missing, and unexpectedly sk
   }
   assert.equal(run(jobs(undefined, "false", "skipped", "skipped")).status, 1);
   for (const gate of ["all", "js", "rust"]) {
-    const manual = jobs(
-      undefined,
-      undefined,
-      gate === "rust" ? "skipped" : "success",
-      gate === "js" ? "skipped" : "success",
-      "success",
-      undefined,
-      gate === "all" ? "success" : "skipped",
-    );
+    const manual = {
+      ...jobs(
+        undefined,
+        undefined,
+        gate === "rust" ? "skipped" : "success",
+        gate === "js" ? "skipped" : "success",
+        "success",
+        undefined,
+        gate === "all" ? "success" : "skipped",
+      ),
+      together: { result: gate === "all" ? "success" : "skipped" },
+    };
     assert.equal(run(manual, "workflow_dispatch", gate).status, 0);
     assert.equal(
       run({ ...manual, "javascript-prepare": { result: "skipped" } }, "workflow_dispatch", gate)

@@ -104,7 +104,10 @@ import { createLiveMembershipRegistry } from "./liveMembership";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { createNamedDesktopLive } from "./namedDesktopLive";
 import { parseNamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
-import type { NamedFrameNativeHost } from "./namedLiveFrameHost";
+import { captureOwnerLiveFrameHost, type NamedFrameNativeHost } from "./namedLiveFrameHost";
+import { createLiveRooms, type LiveRooms } from "./liveRoom";
+import { liveRoomPaused } from "./storage/liveRoomPauses";
+import { workspaceOwner } from "./storage/workspaces";
 import { createAutomationRecordHost } from "./automationRecordHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
@@ -644,10 +647,12 @@ if (testAuthSeam) {
 const presence = new PresenceHub();
 
 let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
+let liveRooms: LiveRooms | undefined;
 let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
   discussionActivity,
   ownerRestoreHost: () => ownerRestoreHost?.(),
+  liveRooms: () => liveRooms,
   heldDocumentHost: () => heldDocumentHost?.(),
   storage,
   resolveActor,
@@ -1156,6 +1161,7 @@ if (selfHost && deployment)
     history: deployment.history,
     host: selfHost,
     resolveActor: resolveAccountActor,
+    rooms: () => liveRooms,
   });
 // Every relay answers a personal open. Only one running the self-hosted live host hosts it.
 personalLiveDocument = createPersonalLiveDocumentRoute({
@@ -1232,7 +1238,46 @@ if (namedLiveConfig) {
     },
     storage.readLiveAuthority.bind(storage),
   );
+  const bounds = namedLiveConfig.host;
+  // Off unless DOHC_RELAY_LIVE_ROOMS=1 while the room is built and tested in stages.
+  const rooms =
+    process.env.DOHC_RELAY_LIVE_ROOMS === "1"
+      ? createLiveRooms({
+          storage,
+          maxUpdateBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
+          maxNoteBytes: bounds.maxAdmissionBytes,
+          maxAppliedBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
+          // Off until the engine that credits every sender in one save is deployed with it.
+          namesEverySender: process.env.DOHC_RELAY_LIVE_ROOM_NAMES === "1",
+          // A room saves as the workspace's owner, whoever is connected.
+          async openSaver(document, signal) {
+            const ownerUserId = workspaceOwner(storage as StorageContext, document.workspaceId);
+            if (!ownerUserId) throw new Error("The workspace has no owner.");
+            const current = storage.resolveCurrentLiveDocumentBinding({
+              document,
+              actor: { kind: "owner", userId: ownerUserId },
+            });
+            if (current.kind !== "current") throw new Error("The owner's binding is not current.");
+            return captureOwnerLiveFrameHost({
+              authenticatedUserId: ownerUserId,
+              storage,
+              native: await captureNative(current.binding, signal),
+              bounds,
+              validate: namedLiveConfig.validate,
+            });
+          },
+        })
+      : undefined;
+  liveRooms = rooms;
+  // A paused note is refused to editors as a held one is: only its owner can start it again.
+  const editorsBlocked = rooms
+    ? (document: { workspaceId: string; objectId: string }) =>
+        liveRoomPaused(storage as StorageContext, document)
+          ? "held"
+          : sessionHostBlocked?.(document)
+    : sessionHostBlocked;
   namedLive = createNamedLiveRoutes({
+    rooms,
     kind: "named",
     storage,
     lookupUserDisplayName,
@@ -1248,7 +1293,7 @@ if (namedLiveConfig) {
     captureNative,
     membership,
     admission,
-    sessionHostBlocked,
+    sessionHostBlocked: editorsBlocked,
   });
   if (linkLiveEnabled && publicEditRelease) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
@@ -1271,8 +1316,9 @@ if (namedLiveConfig) {
       tickets,
       captureNative,
       membership,
+      rooms,
       admission,
-      sessionHostBlocked,
+      sessionHostBlocked: editorsBlocked,
     });
     linkLiveHttp = createLinkLiveHttp({
       storage,
@@ -1282,7 +1328,7 @@ if (namedLiveConfig) {
       limits: namedLiveConfig.transport,
       linkKey: linkKey!,
       publicEditRelease,
-      sessionHostBlocked,
+      sessionHostBlocked: editorsBlocked,
       linkAuthority: relayApplication.linkAuthority,
       readAwakeState,
       frames: namedLiveConfig.frames.receive,
@@ -1355,6 +1401,8 @@ if (namedLiveConfig) {
     process.once("SIGTERM", desktopLive.close);
   }
   ownerLive = createOwnerLiveRoutes({
+    // Off unless DOHC_RELAY_LIVE_ROOM_OWNER=1 too, until the desktop that reads room rows ships.
+    ...(rooms && process.env.DOHC_RELAY_LIVE_ROOM_OWNER === "1" ? { rooms } : {}),
     storage,
     resolveActor,
     lookupUserDisplayName,
@@ -1542,6 +1590,8 @@ server.listen(requestedPort, host, () => {
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    // The rooms save through the hosts closed below, so they save what they hold first.
+    await liveRooms?.close();
     stopJournalCheck();
     await pushSender.close();
     await publicationOperator.close();

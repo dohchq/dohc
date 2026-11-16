@@ -54,7 +54,14 @@ export type LiveFrameBegin = {
       readonly deliveryId: string;
       readonly authorContext?: LiveAuthorContext;
     }
-  | { readonly purpose: "applied-update"; readonly journalCursor: number }
+  | {
+      readonly purpose: "applied-update";
+      readonly journalCursor: number;
+      /** On a live room's save to the owner: the last room position the save holds, below its cursor. */
+      readonly rowsThrough?: number;
+    }
+  /** An edit a live room took and has not saved yet, sent to the note's owner at its room position. */
+  | { readonly purpose: "room-row"; readonly position: number }
 );
 export type LiveFrame =
   | LiveMembershipFrame
@@ -235,6 +242,7 @@ const purposeCodes = {
   "initial-sync": 2,
   "submit-update": 3,
   "applied-update": 4,
+  "room-row": 5,
 } as const;
 const kindCodes = {
   welcome: 1,
@@ -251,6 +259,16 @@ function fromCode<T extends string>(codes: Record<T, number>, code: number): T {
   const found = (Object.keys(codes) as T[]).find((key) => codes[key] === code);
   requireFrame(found !== undefined);
   return found;
+}
+
+function appliedUpdate(
+  common: Pick<LiveFrameBegin, "kind" | "transferId" | "totalBytes" | "digest">,
+  journalCursor: number,
+  rowsThrough: number | undefined,
+): LiveFrameBegin {
+  if (rowsThrough === undefined) return { ...common, purpose: "applied-update", journalCursor };
+  requireFrame(rowsThrough < journalCursor);
+  return { ...common, purpose: "applied-update", journalCursor, rowsThrough };
 }
 
 function snapshotFrame(value: unknown, maxFrameBytes: number): LiveFrame {
@@ -304,14 +322,17 @@ function snapshotFrame(value: unknown, maxFrameBytes: number): LiveFrame {
       requireFrame(typeof purpose === "string" && Object.hasOwn(purposeCodes, purpose));
       const declared =
         purpose === "submit-update" && Object.hasOwn(value as object, "authorContext");
+      const through = purpose === "applied-update" && Object.hasOwn(value as object, "rowsThrough");
       const extra =
         purpose === "initial-sync"
           ? ["appliedThroughJournalCursor"]
           : purpose === "submit-update"
             ? ["deliveryId", ...(declared ? ["authorContext"] : [])]
             : purpose === "applied-update"
-              ? ["journalCursor"]
-              : [];
+              ? ["journalCursor", ...(through ? ["rowsThrough"] : [])]
+              : purpose === "room-row"
+                ? ["position"]
+                : [];
       const r = record(value, ["kind", "purpose", "transferId", "totalBytes", "digest", ...extra]);
       const common = {
         kind,
@@ -333,7 +354,13 @@ function snapshotFrame(value: unknown, maxFrameBytes: number): LiveFrame {
           ...(declared ? { authorContext: authorContext(r.authorContext) } : {}),
         };
       if (purpose === "applied-update")
-        return { ...common, purpose, journalCursor: integer(r.journalCursor, true) };
+        return appliedUpdate(
+          common,
+          integer(r.journalCursor, true),
+          through ? integer(r.rowsThrough, true) : undefined,
+        );
+      if (purpose === "room-row")
+        return { ...common, purpose, position: integer(r.position, true) };
       return { ...common, purpose: "client-vector" };
     }
     case "chunk": {
@@ -533,7 +560,11 @@ function payload(w: Writer, frame: LiveFrame) {
           }
         }
       }
-      if (frame.purpose === "applied-update") w.number(frame.journalCursor, 8);
+      if (frame.purpose === "applied-update") {
+        w.number(frame.journalCursor, 8);
+        if (frame.rowsThrough !== undefined) w.number(frame.rowsThrough, 8);
+      }
+      if (frame.purpose === "room-row") w.number(frame.position, 8);
       break;
     case "chunk":
       w.number(frame.transferId, 8);
@@ -666,8 +697,15 @@ function decodeFrame(value: Uint8Array, maxFrameBytes: number, copyChunk: boolea
           }
           frame = { ...common, purpose, deliveryId, authorContext: authorContext(context) };
         }
-      } else if (purpose === "applied-update")
-        frame = { ...common, purpose, journalCursor: integer(r.number(8), true) };
+      } else if (purpose === "applied-update") {
+        const journalCursor = integer(r.number(8), true);
+        frame = appliedUpdate(
+          common,
+          journalCursor,
+          r.offset === bytes.length ? undefined : integer(r.number(8), true),
+        );
+      } else if (purpose === "room-row")
+        frame = { ...common, purpose, position: integer(r.number(8), true) };
       else frame = { ...common, purpose };
       break;
     }

@@ -4,7 +4,7 @@ import { chatWords } from "@dohc/interface-words/notices";
 import * as Haptics from "expo-haptics";
 import { SymbolView } from "expo-symbols";
 import { ArrowUp, SquarePen, X } from "lucide-react-native";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { AccessibilityInfo, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { KeyboardStickyView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -26,6 +26,15 @@ import {
   type SubmitFailure,
   type SubmitOutcome,
 } from "./conversationWrites";
+import {
+  acceptsReport,
+  composing,
+  NO_REPLACING,
+  replacementAnswered,
+  snapshotOf,
+  type FieldSnapshot,
+  type Replacing,
+} from "./mentionDraft";
 
 /** The field's height: one line at the least, and about five at the body size before it scrolls inside itself. */
 const FIELD_MIN = 44;
@@ -74,6 +83,11 @@ export function outboxProblem(
 // `initialText` is a draft kept elsewhere, as a Notice's answer keeps its text above its recycled row: the field shows
 // it once, only while it's still empty and unedited, and reports it as an edit. `onText` follows the field's text, and
 // `onCleared` says the field cleared the text the outbox kept.
+//
+// The composer follows the field's latest report of its selection and composition too. While an input method is
+// composing, Send stays off, since the word being composed isn't text yet. A range replacement goes to the field as
+// a request made from that report (`askReplacement`), which the field applies only if nothing moved since, and answers
+// once (`replacementAnswered`).
 export function Composer({
   placeholder,
   lanes,
@@ -126,6 +140,11 @@ export function Composer({
   });
   // The token of the last clear the field refused, keeping the body sent.
   const [refused, setRefused] = useState(0);
+  // The field's latest report, and the last replacement asked of it, with its answer once it came. `accepted` is the
+  // sequence of the last report taken, read as each report arrives, so a stale one is dropped whole (`acceptsReport`).
+  const [field, setField] = useState<FieldSnapshot | null>(null);
+  const accepted = useRef(0);
+  const [replacing, setReplacing] = useState<Replacing>(NO_REPLACING);
   const [submitting, setSubmitting] = useState(false);
   // Why the outbox kept nothing: Try again submits the same text, and a reply whose message wasn't sent can't wait, so
   // Send stays off while that reply is chosen (`replyParentGone`).
@@ -134,6 +153,7 @@ export function Composer({
   const busy = submitting || status === "waiting";
   const ready =
     text.trim().length > 0 &&
+    !composing(field) &&
     blocked === null &&
     !submitting &&
     status === "settled" &&
@@ -251,8 +271,14 @@ export function Composer({
             textColor={theme.ink}
             placeholderColor={theme.subtle}
             clearIf={clear.request}
+            replaceIf={replacing.request}
             initialText={initialText}
             onChangeText={({ nativeEvent: change }) => {
+              if (change.replaced !== undefined)
+                setReplacing((current) => replacementAnswered(current, change));
+              if (!acceptsReport(accepted.current, change)) return;
+              accepted.current = change.sequence;
+              setField(snapshotOf(change));
               if (change.refused !== 0) setRefused(change.refused);
               setDraft((current) => fieldChanged(current, change, clear.request, clear.sent));
               onText?.(change.text);

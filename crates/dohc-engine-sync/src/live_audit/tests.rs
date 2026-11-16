@@ -1786,30 +1786,93 @@ fn the_hosts_audit_record_of_a_personal_agents_work_imports() {
     }
 }
 
-/// Publishes an owner's audit record that declares an agent, then forges it
-/// with the record's digests recomputed: `authority` replaces the owner's,
-/// `snapshot` renames the agent and `coverage` adds a checkpoint author. Says
-/// whether a peer refuses the forged record from `origin`, whose metadata
-/// still decodes as committed history.
+/// A room's save names everyone whose edits it holds, under the owner's
+/// authority. Only the live host's record of that save may credit the owner's
+/// personal agent among them.
+#[test]
+fn a_room_save_credits_the_owners_personal_agent_only_from_the_host() {
+    use dohc_engine_collab::live_update_application::LiveAuthorEntry;
+    let personal = format!("p-{}", "d".repeat(26));
+    let room_save = |agent_id: &str| {
+        vec![
+            LiveAuthorEntry::Human {
+                human_id: "alice".into(),
+                human_name: "Alice".into(),
+            },
+            LiveAuthorEntry::Link {
+                public_principal_id: "public-holder-1".into(),
+                label: "Edit link".into(),
+            },
+            owner_agent(agent_id),
+        ]
+    };
+    assert!(!forged_record_refused(
+        HOST,
+        None,
+        Some(room_save(&personal)),
+        None
+    ));
+    assert!(forged_record_refused(
+        DEVICE,
+        None,
+        Some(room_save(&personal)),
+        None
+    ));
+    let ordinary = format!("q-{}", "d".repeat(26));
+    assert!(!forged_record_refused(
+        DEVICE,
+        None,
+        Some(room_save(&ordinary)),
+        None
+    ));
+    assert!(forged_record_refused(
+        DEVICE,
+        None,
+        Some(room_save(&ordinary)),
+        Some(&personal)
+    ));
+}
+
+fn owner_agent(agent_id: &str) -> dohc_engine_collab::live_update_application::LiveAuthorEntry {
+    dohc_engine_collab::live_update_application::LiveAuthorEntry::Agent {
+        agent_id: agent_id.into(),
+        agent_name: None,
+        on_behalf_of: Some("owner".into()),
+        depth: Some(1),
+    }
+}
+
 fn audit_record_refused(
     origin: &str,
     authority: Option<ServerDerivedLiveUpdateAuthority>,
     snapshot: Option<&str>,
     coverage: Option<&str>,
 ) -> bool {
+    forged_record_refused(
+        origin,
+        authority,
+        snapshot.map(|agent_id| vec![owner_agent(agent_id)]),
+        coverage,
+    )
+}
+
+/// Publishes an owner's audit record that declares an agent, then forges it
+/// with the record's digests recomputed: `authority` replaces the owner's,
+/// `snapshot` replaces its authors and `coverage` adds a checkpoint author.
+/// Says whether a peer refuses the forged record from `origin`, whose metadata
+/// still decodes as committed history.
+fn forged_record_refused(
+    origin: &str,
+    authority: Option<ServerDerivedLiveUpdateAuthority>,
+    snapshot: Option<Vec<dohc_engine_collab::live_update_application::LiveAuthorEntry>>,
+    coverage: Option<&str>,
+) -> bool {
     use dohc_engine_collab::live_update_application::{
-        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationResult, LiveAuthorEntry,
+        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationResult,
         LiveCheckpointAuthorCoverage, LiveUpdateReceipt, RelayAcceptedLiveUpdate, apply_committed,
     };
     use std::io::{Read, Write};
-    fn agent(agent_id: &str) -> LiveAuthorEntry {
-        LiveAuthorEntry::Agent {
-            agent_id: agent_id.into(),
-            agent_name: None,
-            on_behalf_of: Some("owner".into()),
-            depth: Some(1),
-        }
-    }
+    let agent = owner_agent;
     fn evidence(previous: &str, metadata: &AdmittedLiveUpdateMetadata) -> String {
         hex_sha256(&serde_json::to_vec(&("accepted-event-v2", previous, 1, metadata)).unwrap())
     }
@@ -1885,8 +1948,8 @@ fn audit_record_refused(
     let original = evidence(previous, &metadata);
     assert_eq!(record["evidenceDigest"].as_str(), Some(original.as_str()));
     let before = serde_json::to_string(&metadata).unwrap();
-    if let Some(agent_id) = snapshot {
-        metadata.author_snapshot = Some(vec![agent(agent_id)]);
+    if let Some(authors) = snapshot {
+        metadata.author_snapshot = Some(authors);
     }
     metadata.checkpoint_coverage = coverage.map(|agent_id| {
         vec![LiveCheckpointAuthorCoverage {
