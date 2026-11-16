@@ -2532,8 +2532,10 @@ try {
               selectEditedWorkspace: async () => {
                 data.restartVerificationSwitch = await switchTo(restart.page, 0);
               },
-              readEditedText: () =>
-                restart.page.locator('.tiptap[contenteditable="true"]').innerText(),
+              // innerText leaves out the blocks away from the viewport, which
+              // the editor does not lay out.
+              readEditedText: async () =>
+                (await restart.page.locator('.tiptap[contenteditable="true"]').textContent()) ?? "",
               marker: "x".repeat(keystrokes),
             });
             await shutdown(runDir, restart);
