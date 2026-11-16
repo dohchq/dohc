@@ -880,6 +880,8 @@ function NewMessageForAccount(props: NewMessageProps) {
                 aria-invalid={pickError || undefined}
                 aria-describedby={pickError ? errorId : undefined}
                 autoFocus={pick === null}
+                // An example: the first member's first name, which Enter would pick.
+                placeholder={pick === null && members.status === "ready" ? members.members[0]?.name.split(" ")[0] : undefined}
                 value={query}
                 onChange={(event) => {
                   goStraight.current = false;

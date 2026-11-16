@@ -203,15 +203,22 @@ describe("ChatsView direct messages", () => {
 
   it("heads a conversation with the name saved with its tab while the server is away, and the server's name once it answers", async () => {
     bridgeMock.directConversations.mockRejectedValue(UNREACHABLE("direct-conversations"));
-    const savedDirectName = (conversationId: string) => conversationId === "conversation-sam" ? "Sam" : undefined;
-    renderView(vi.fn(), vi.fn(), { variant: "page", savedDirectName, initialNav: { level: "direct", conversationId: "conversation-sam" } });
+    const savedDirectName = (conversationId: string) =>
+      conversationId === "conversation-sam" ? "Sam" : undefined;
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      savedDirectName,
+      initialNav: { level: "direct", conversationId: "conversation-sam" },
+    });
     const failed = await screen.findByTestId("chats-dm-history-retry");
     expect(screen.getByTestId("chats-dm-title").textContent).toBe("Sam");
 
     signedIn([conversation()]);
     history([sent(2, "sam", "See you at nine")]);
     fireEvent.click(within(failed).getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(screen.getByTestId("chats-dm-title").textContent).toBe("Sam Rivera"));
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-dm-title").textContent).toBe("Sam Rivera"),
+    );
   });
 
   it("shows a history read that fails with Try again", async () => {
@@ -542,11 +549,17 @@ describe("ChatsView direct messages", () => {
     await waitFor(() => expect(onError).toHaveBeenCalled());
     const [, , tryAgain] = onError.mock.calls.at(-1)!;
     // Sam signs in on this computer; their list has the same conversation.
-    bridgeMock.directConversations.mockResolvedValue({ available: true, viewerId: "sam", conversations: [conversation()] });
+    bridgeMock.directConversations.mockResolvedValue({
+      available: true,
+      viewerId: "sam",
+      conversations: [conversation()],
+    });
     act(() => emitCloudSessionChanged("session-sam", "ready"));
     await waitFor(() => expect(directStoreViewer()).toBe("sam"));
     await act(async () => (tryAgain as () => void)());
-    expect(bridgeMock.directBlock.mock.calls.map(([input]) => (input as { viewerId: string }).viewerId)).toEqual([VIEWER, VIEWER]);
+    expect(
+      bridgeMock.directBlock.mock.calls.map(([input]) => (input as { viewerId: string }).viewerId),
+    ).toEqual([VIEWER, VIEWER]);
   });
 
   it("starts a new message with one person picked from the workspace's members", async () => {
@@ -577,6 +590,8 @@ describe("ChatsView direct messages", () => {
     expect(
       screen.getByRole("listbox", { name: "Members" }).getAttribute("aria-multiselectable"),
     ).toBeNull();
+    // To shows an example of what to type: the first member's first name, the row Enter would pick.
+    expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).placeholder).toBe("Ana");
 
     // A message without anyone picked asks who it is for.
     const composer = screen.getByTestId("chats-dm-new-composer") as HTMLTextAreaElement;
@@ -601,6 +616,8 @@ describe("ChatsView direct messages", () => {
     expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
       ["ana"],
     );
+    // With a pick, To shows no example beside it.
+    expect((screen.getByTestId("chats-dm-recipients") as HTMLInputElement).placeholder).toBe("");
     // Keyboard: type to filter, Enter picks.
     await user.type(screen.getByTestId("chats-dm-recipients"), "sam{Enter}");
     expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
