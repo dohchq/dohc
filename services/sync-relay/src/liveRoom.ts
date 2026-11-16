@@ -978,17 +978,23 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           // From here to the answer nothing waits, so the room cannot change under the checks.
           const sender = host.room.sender(input.authorContext);
           if (!sender) return refused("provenance-refused");
-          const plan = roomAdmissible(held.doc, bytes);
+          const vector = Y.encodeStateVector(held.doc),
+            have = Y.decodeStateVector(vector);
+          // The room keeps only the part the note doesn't hold yet, and checks those same bytes. The
+          // save would compare a resent part with the note, and Yjs can place a trimmed edit, or
+          // one that lists an editor twice, apart from the bytes as sent.
+          let taken: Uint8Array;
+          try {
+            taken = Y.diffUpdate(bytes, vector);
+          } catch {
+            return refused("invalid-update");
+          }
+          const plan = roomAdmissible(held.doc, taken);
           if (!plan) return refused("invalid-update");
           const seed = liveJournalSeedClientId(storage, held.document);
           if (plan.clients.some((clientId) => clientId === seed))
             return refused("provenance-refused");
-          if (!fitsCopy(held, bytes)) return refused("invalid-update");
-          const vector = Y.encodeStateVector(held.doc),
-            have = Y.decodeStateVector(vector);
-          // Only what Yjs takes is kept. The save compares a resent part with what the note holds
-          // and refuses any difference, which the copy, unchanged by it, never shows.
-          const taken = Y.diffUpdate(bytes, vector);
+          if (!fitsCopy(held, taken)) return refused("invalid-update");
           let written: ReturnType<typeof appendLiveRoomEdit>;
           try {
             written = appendLiveRoomEdit(storage, {
