@@ -6491,16 +6491,28 @@ fn merge_by_origin(ops: Vec<ReplicationEnvelope>) -> Vec<ReplicationEnvelope> {
     merged
 }
 
+/// The origins with operations this store wrote, which a push may send.
+///
+/// Each step seeks the next origin in `replication_log_own_operations` and so
+/// skips that origin's other operations. `SELECT DISTINCT` visits every one
+/// of them, which makes each push cost as much as the store's own history is
+/// long.
+const WORKSPACE_ORIGINS: &str = "\
+WITH RECURSIVE own(origin_id) AS ( \
+  SELECT MIN(origin_id) FROM replication_log WHERE workspace_id=?1 AND imported=0 \
+  UNION ALL \
+  SELECT (SELECT MIN(origin_id) FROM replication_log \
+          WHERE workspace_id=?1 AND imported=0 AND origin_id>own.origin_id) \
+  FROM own WHERE own.origin_id IS NOT NULL) \
+SELECT origin_id FROM own WHERE origin_id IS NOT NULL ORDER BY origin_id";
+
 fn list_workspace_origins(
     store: &EngineStore,
     workspace_id: &str,
 ) -> Result<Vec<String>, SyncError> {
     store.read_with(|conn| {
         let mut statement = conn
-            .prepare(
-                "SELECT DISTINCT origin_id FROM replication_log \
-                 WHERE workspace_id=?1 AND imported=0 ORDER BY origin_id",
-            )
+            .prepare(WORKSPACE_ORIGINS)
             .map_err(SyncError::corrupt)?;
         let rows = statement
             .query_map([workspace_id], |row| row.get(0))
@@ -8603,6 +8615,218 @@ pub fn no_hosted_feed() -> RelayError {
 /// only the session host's scoped feed.
 pub fn hosted_feed_only() -> RelayError {
     RelayError::HostedRefusal("a hosted replica uses only its hosted feed")
+}
+
+#[cfg(test)]
+mod workspace_origins_tests {
+    use super::*;
+
+    #[test]
+    fn a_push_finds_the_origins_this_store_wrote_by_seeking_each_in_their_index() {
+        // The statement a push used before. The new one must answer as it did.
+        const DISTINCT: &str = "SELECT DISTINCT origin_id FROM replication_log \
+            WHERE workspace_id=?1 AND imported=0 ORDER BY origin_id";
+        let (_scratch, _path, mut store) = dohc_engine_testkit::open_store();
+        let origins = |store: &EngineStore, sql: &str, workspace: &str| -> Vec<String> {
+            store
+                .read_with(|conn| {
+                    conn.prepare(sql)?
+                        .query_map([workspace], |row| row.get(0))?
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap()
+        };
+        // A log with no rows at all.
+        assert!(list_workspace_origins(&store, "ws").unwrap().is_empty());
+        store
+            .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                for (workspace, origin, seq, imported) in [
+                    // Only operations that came from the relay.
+                    ("ws", "alpha", 0, 1),
+                    ("ws", "alpha", 1, 1),
+                    // Both kinds, the store's own after the others.
+                    ("ws", "beta", 0, 1),
+                    ("ws", "beta", 1, 0),
+                    // Only the store's own.
+                    ("ws", "delta", 0, 0),
+                    ("ws", "delta", 1, 0),
+                    ("ws", "gamma", 0, 1),
+                    // Names that sort by their bytes: empty, by case, and beyond ASCII.
+                    ("ws", "", 0, 0),
+                    ("ws", "Delta", 0, 0),
+                    ("ws", "\u{e9}cho", 0, 0),
+                    ("ws", "\u{65e5}\u{672c}", 0, 0),
+                    ("other", "omega", 0, 0),
+                    ("received", "alpha", 0, 1),
+                ] {
+                    tx.execute(
+                        "INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,\
+                         payload_json,recorded_at_ms,imported) VALUES (?1,?2,?3,'test','{}',1,?4)",
+                        rusqlite::params![workspace, origin, seq, imported],
+                    )
+                    .map_err(SyncError::persist)?;
+                }
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        assert_eq!(
+            list_workspace_origins(&store, "ws").unwrap(),
+            [
+                "",
+                "Delta",
+                "beta",
+                "delta",
+                "\u{e9}cho",
+                "\u{65e5}\u{672c}"
+            ]
+        );
+        // A workspace with only received operations, and one with no rows.
+        for workspace in ["ws", "other", "received", "none"] {
+            assert_eq!(
+                list_workspace_origins(&store, workspace).unwrap(),
+                origins(&store, DISTINCT, workspace),
+                "{workspace}"
+            );
+        }
+        assert_eq!(list_workspace_origins(&store, "other").unwrap(), ["omega"]);
+        assert!(
+            list_workspace_origins(&store, "received")
+                .unwrap()
+                .is_empty()
+        );
+
+        let plan = |store: &EngineStore| -> Vec<String> {
+            store
+                .read_with(|conn| {
+                    conn.prepare(&format!("EXPLAIN QUERY PLAN {WORKSPACE_ORIGINS}"))?
+                        .query_map(["ws"], |row| row.get(3))?
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap()
+        };
+        // Each read of the log is a search in the index of the store's own
+        // operations, and the seek for the next origin starts after the last
+        // one found. No production code gathers statistics, and the plan must
+        // not depend on their absence.
+        let sought = |plan: &[String]| {
+            let reads: Vec<_> = plan
+                .iter()
+                .filter(|step| step.contains("replication_log"))
+                .collect();
+            !reads.is_empty()
+                && reads.iter().all(|step| {
+                    step.starts_with("SEARCH")
+                        && step.contains("replication_log_own_operations")
+                        && step.contains("workspace_id=?")
+                })
+                && reads.iter().any(|step| step.contains("origin_id>?"))
+        };
+        let before = plan(&store);
+        assert!(sought(&before), "{before:?}");
+        store
+            .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                tx.execute_batch("ANALYZE").map_err(SyncError::persist)
+            })
+            .unwrap();
+        let after = plan(&store);
+        assert!(sought(&after), "{after:?}");
+    }
+
+    #[test]
+    fn a_push_finds_its_origins_without_visiting_each_operation_this_store_wrote() {
+        const OPERATIONS: i64 = 100_000;
+        let (_scratch, _path, mut store) = dohc_engine_testkit::open_store();
+        store
+            .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                tx.execute(
+                    "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i+1<?1) \
+                     INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,\
+                     payload_json,recorded_at_ms,imported) \
+                     SELECT 'ws', 'origin-'||(i%2), i, 'test', '{}', i, 0 FROM n",
+                    [OPERATIONS],
+                )
+                .map_err(SyncError::persist)
+            })
+            .unwrap();
+        // The store counts its connection's SQLite work, one for each thousand steps.
+        let work = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        store
+            .count_work(Some(std::sync::Arc::downgrade(&work)))
+            .unwrap();
+        let origins = list_workspace_origins(&store, "ws").unwrap();
+        store.count_work(None).unwrap();
+        assert_eq!(origins, ["origin-0", "origin-1"]);
+        // Two origins take a few hundred steps, under one count. A statement
+        // that visits each operation takes several steps for each of them.
+        let work = work.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(work <= 1, "{work} thousand steps");
+    }
+
+    /// Not a check. Prints what the lookup costs on a log of
+    /// `DOHC_MEASURE_LOG_ROWS` rows, 500,000 without it, in a server's copy
+    /// and in a desktop's store, for the old statement and the new one.
+    #[test]
+    #[ignore = "a measurement; run it with --ignored --nocapture"]
+    fn workspace_origins_cost_on_a_sized_log() {
+        let rows: i64 = std::env::var("DOHC_MEASURE_LOG_ROWS")
+            .ok()
+            .and_then(|rows| rows.parse().ok())
+            .unwrap_or(500_000);
+        const BEFORE: &str = "SELECT DISTINCT origin_id FROM replication_log \
+            INDEXED BY sqlite_autoindex_replication_log_1 \
+            WHERE workspace_id=?1 AND imported=0 ORDER BY origin_id";
+        const DISTINCT: &str = "SELECT DISTINCT origin_id FROM replication_log \
+            WHERE workspace_id=?1 AND imported=0 ORDER BY origin_id";
+        // A server's copy wrote a few rows of its own. A desktop wrote most of its log.
+        for (shape, own_of_five) in [("a server's copy", 0), ("a desktop", 4)] {
+            let (_scratch, _path, mut store) = dohc_engine_testkit::open_store();
+            store
+                .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                    tx.execute(
+                        "WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i+1<?1) \
+                         INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,\
+                         payload_json,recorded_at_ms,imported) \
+                         SELECT 'ws', CASE WHEN i%5<?2 THEN 'own' ELSE 'origin-'||(i%3) END, i, \
+                         'test', '{\"pad\":\"'||hex(zeroblob(120))||'\"}', i, i%5>=?2 FROM n",
+                        rusqlite::params![rows, own_of_five],
+                    )
+                    .map_err(SyncError::persist)?;
+                    tx.execute(
+                        "INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,\
+                         payload_json,recorded_at_ms,imported) VALUES ('ws','own',?1,'test','{}',1,0)",
+                        [rows],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+            for (label, sql) in [
+                ("as a push asked before", BEFORE),
+                ("the same question on the new index", DISTINCT),
+                ("one seek for each origin", WORKSPACE_ORIGINS),
+            ] {
+                let mut took: Vec<_> = (0..15)
+                    .map(|_| {
+                        let started = std::time::Instant::now();
+                        let found: Vec<String> = store
+                            .read_with(|conn| {
+                                conn.prepare(sql)?
+                                    .query_map(["ws"], |row| row.get(0))?
+                                    .collect::<Result<Vec<_>, _>>()
+                            })
+                            .unwrap();
+                        assert_eq!(found, ["own"]);
+                        started.elapsed()
+                    })
+                    .collect();
+                took.sort();
+                println!(
+                    "{rows} rows, {shape}, {label}: median {:.2} ms",
+                    took[7].as_secs_f64() * 1000.0
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

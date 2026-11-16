@@ -3745,6 +3745,16 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_OWNER_LIVE_STOP_COPY_DDL,
         sets_user_version: None,
     },
+    // The operations this store wrote, by origin. A push asks which origins
+    // have any, and without this index the answer read every row of the
+    // workspace's log, on every push.
+    Migration {
+        ordinal: 104,
+        id: "v2-replication-own-operations-index",
+        sql: "CREATE INDEX replication_log_own_operations \
+              ON replication_log(workspace_id, origin_id, origin_seq) WHERE imported=0;",
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -5720,6 +5730,10 @@ mod tests {
             (
                 "v2-owner-live-stop-copy",
                 "63c04db9b3800555a6486b06f1120336843069694fbb1730a92d27e1fef2f593",
+            ),
+            (
+                "v2-replication-own-operations-index",
+                "ea76da045f98b5a34e4d623b3ad18b1fb96301a331292c67a0e11182c75bd383",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
