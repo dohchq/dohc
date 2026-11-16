@@ -39,6 +39,11 @@ export interface ShareFileScope {
   levelAt?: (path: string) => ShareAccess | null;
 }
 
+/** Whether the scope hides the path as a folder's `access.yaml` or a copy of one. */
+export function hidesRuleFile(selector: ShareFileScope, path: string): boolean {
+  return selector.ruleFiles !== true && isAccessRuleRelatedPath(path);
+}
+
 /** The normalized tracked path selected by a file scope, or null. Versions are checked by the caller. */
 export function visibleSharePath(
   selector: ShareFileScope,
@@ -49,7 +54,7 @@ export function visibleSharePath(
   if (!prepared) return null;
   const normalized = prepared.path;
   if (selector.levelAt && selector.levelAt(normalized) === null) return null;
-  if (selector.ruleFiles !== true && isAccessRuleRelatedPath(normalized)) return null;
+  if (hidesRuleFile(selector, normalized)) return null;
   if (selector.wholeWorkspace === true) {
     return selector.paths.length === 0 && selector.versionId === null ? normalized : null;
   }
