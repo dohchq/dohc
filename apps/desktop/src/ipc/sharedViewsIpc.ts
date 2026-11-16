@@ -20,15 +20,23 @@ import {
   requireCredentials,
 } from "../workspaces/credentialScopedOperation";
 import { parseShareCode, relayUrlsMatch } from "../workspaces/syncCode";
-import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
+import {
+  RelayUnauthorizedError,
+  ShareUnavailableError,
+  type ShareReachRevisions,
+  type SyncRelayConnection,
+} from "@dohc/workspace-contracts/relay";
 import { refreshReceivedReferencePin } from "../workspaces/workspaceFileReferenceScopes";
 import {
   ShareSelectorInvalidError,
   type fetchShareViewInfo,
   type fetchShareViewAccess,
+  type fetchShareViewReach,
   type probeShareViewLog,
   type ShareViewSelector,
 } from "../workspaces/shareViewInfo";
+import { storedShareViewReach } from "../workspaces/shareViewReach";
+import type { ListedReach } from "@dohc/security-contract/listed-reach";
 import type { RendererWorkspaceOperationSession } from "../window/rendererWorkspaceOperation";
 import {
   SHARE_VIEW_REOPEN_MESSAGE,
@@ -49,7 +57,11 @@ import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
 import type { createJoinedWorkspaceRunner } from "../workspaces/createJoinedWorkspace";
 import type { WorkspaceAuthorityBinding } from "../workspaces/workspaceAuthorityOwner";
 import type { ShareViewFiles } from "../workspaces/shareViewFiles";
-import type { ShareViewPullCommitted } from "../workspaces/sharedView";
+import type {
+  RefreshSharedViewOutcome,
+  ShareViewPullCommitted,
+  StandaloneShareViewRefreshOutcome,
+} from "../workspaces/sharedView";
 import type { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspaceAssets";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { setWorkspaceShareView } from "../workspaces/WorkspaceRegistry";
@@ -85,7 +97,13 @@ export function registerSharedViewsIpcHandlers<
   engineDaemonStartup(): Promise<unknown>;
   fetchShareViewInfo: typeof fetchShareViewInfo;
   fetchShareViewAccess: typeof fetchShareViewAccess;
+  fetchShareViewReach: typeof fetchShareViewReach;
   probeShareViewLog: typeof probeShareViewLog;
+  // A membership's relay now selects a different set of items for it. The
+  // store may hold History the relay withholds, or lack History it serves,
+  // so only a fresh join of the view settles it. Until that exists the view
+  // keeps what it has and its pulls apply nothing.
+  onShareViewVisibilityChanged(change: ShareViewVisibilityChange): void;
   usableRoot(path: string): string;
   readdir(path: string): Promise<string[]>;
   mkdir(path: string, options: { recursive: true }): Promise<unknown>;
@@ -208,7 +226,60 @@ export function registerSharedViewsIpcHandlers<
         attachmentId: workspace.attachmentId,
         relay: { baseUrl: credentials.relayUrl, token: credentials.token },
       })
-      .recordShareViewIdentity({ grantedSelector });
+      .recordShareViewIdentity({
+        grantedSelector,
+        reach: storedShareViewReach(workspace.shareView),
+      });
+  }
+
+  // Read a membership's reach again after a pull applied nothing because the
+  // relay selected it under other revisions. Under the same visibility only
+  // the levels moved: writers pause while capture keeps what they made, the
+  // new levels go in, and the next pull continues. A changed visibility
+  // raises the hook and changes nothing.
+  async function followShareViewReach(
+    workspaceId: string,
+    rootPath: string,
+    relay: SyncRelayConnection,
+    assertCurrent: () => void,
+  ): Promise<"installed" | "current" | "visibility-changed"> {
+    const view = requireWorkspace(workspaceId).shareView;
+    if (!view || view.ended || recordedShareSelector(view.grantedSelector)?.wholeWorkspace !== true)
+      return "current";
+    const listed = await dependencies.fetchShareViewReach({ relay, shareId: view.shareId });
+    assertCurrent();
+    // A view with no readable reach takes the listed one: it has no
+    // visibility of its own to compare.
+    const stored = storedShareViewReach(view);
+    if (stored && stored.visibilityRevision !== listed.visibilityRevision) {
+      dependencies.onShareViewVisibilityChanged({
+        workspaceId,
+        shareId: view.shareId,
+        stored,
+        listed,
+      });
+      return "visibility-changed";
+    }
+    if (stored?.revision === listed.revision) return "current";
+    await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+      shareViewFiles.narrow(
+        lease,
+        { kind: "standalone", workspaceId },
+        assertCurrent,
+        async (unsavedPaths, unconfirmedChanges) => {
+          const latest = requireWorkspace(workspaceId).shareView;
+          if (!latest || latest.shareId !== view.shareId || latest.ended) return;
+          await setWorkspaceShareView(workspaceId, {
+            ...latest,
+            reach: listed,
+            unsavedPaths,
+            unconfirmedChanges,
+          });
+        },
+      ),
+    );
+    refreshNativeWorkspaceSurfaces();
+    return "installed";
   }
 
   // Receive side: open a pasted share code as a READ-ONLY shared view.
@@ -240,8 +311,13 @@ export function registerSharedViewsIpcHandlers<
     // Pre-flight against the relay before creating anything locally; also
     // learns who shared it for the honest read-only copy.
     let info: Awaited<ReturnType<typeof fetchShareViewInfo>>;
+    // A membership's levels, which its first pull already gates by.
+    let reach: ListedReach | null = null;
     try {
       info = await fetchShareViewInfo({ relay, shareId: parsed.shareId });
+      if (info.selector?.wholeWorkspace === true) {
+        reach = await dependencies.fetchShareViewReach({ relay, shareId: parsed.shareId });
+      }
     } catch (error) {
       if (error instanceof ShareUnavailableError) {
         throw new Error(
@@ -295,7 +371,7 @@ export function registerSharedViewsIpcHandlers<
     if (kept) {
       await engineDaemonStartup();
       try {
-        await firstPull(kept.rootPath, kept.workspaceId);
+        await firstPull(kept.rootPath, kept.workspaceId, relay);
       } catch (error) {
         if (error instanceof ShareUnavailableError)
           throw new Error(
@@ -337,6 +413,7 @@ export function registerSharedViewsIpcHandlers<
           // Pin the selector the relay just stated, so later pulls enforce it
           // instead of trusting the relay's selection each time.
           grantedSelector,
+          ...(reach ? { reach } : {}),
           receivedIdentity: info.receivedIdentity,
           ...membershipPlace(info),
           // Persist the origin relay so a later refresh signed into a different
@@ -360,7 +437,7 @@ export function registerSharedViewsIpcHandlers<
             console.error("[desktop] share view identity:", error);
           });
         try {
-          await firstPull(created.rootPath, created.workspaceId);
+          await firstPull(created.rootPath, created.workspaceId, relay);
         } catch (error) {
           // A membership keeps what arrived, unless it ended.
           if (!membership || error instanceof ShareUnavailableError) throw error;
@@ -402,20 +479,46 @@ export function registerSharedViewsIpcHandlers<
     return { workspace: summary };
   }
 
-  async function firstPull(rootPath: string, workspaceId: string): Promise<void> {
-    const reconciled = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
-      shareViewFiles.reconcile(lease, { kind: "standalone", workspaceId }, "refresh"),
+  async function firstPull(
+    rootPath: string,
+    workspaceId: string,
+    relay: SyncRelayConnection,
+  ): Promise<void> {
+    // A membership kept from before levels were listed reads them first.
+    if (lacksReach(workspaceId))
+      await followShareViewReach(workspaceId, rootPath, relay, () => undefined);
+    for (let attempt = 0; ; attempt += 1) {
+      const reconciled = await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
+        shareViewFiles.reconcile(lease, { kind: "standalone", workspaceId }, "refresh"),
+      );
+      if (reconciled.kind !== "refresh") {
+        throw new Error("Shared view refresh returned an invalid result.");
+      }
+      const outcome = reconciled.outcome;
+      if ("ok" in outcome && !outcome.ok) {
+        throw new Error(outcome.errorMessage);
+      }
+      if (outcome.status === "ended") {
+        throw new ShareUnavailableError();
+      }
+      if (!outcome.reachChanged) return;
+      if (
+        attempt > 0 ||
+        (await followShareViewReach(workspaceId, rootPath, relay, () => undefined)) !== "installed"
+      ) {
+        throw new Error("the workspace's access changed while it was being read");
+      }
+    }
+  }
+
+  function lacksReach(workspaceId: string): boolean {
+    const view = requireWorkspace(workspaceId).shareView;
+    return (
+      !!view &&
+      !view.ended &&
+      recordedShareSelector(view.grantedSelector)?.wholeWorkspace === true &&
+      storedShareViewReach(view) === null
     );
-    if (reconciled.kind !== "refresh") {
-      throw new Error("Shared view refresh returned an invalid result.");
-    }
-    const outcome = reconciled.outcome;
-    if ("ok" in outcome && !outcome.ok) {
-      throw new Error(outcome.errorMessage);
-    }
-    if (outcome.status === "ended") {
-      throw new ShareUnavailableError();
-    }
   }
 
   const pullCache = new Map<
@@ -431,8 +534,23 @@ export function registerSharedViewsIpcHandlers<
       // A membership's level as this computer knows it, which its held pull
       // names. Cleared once the relay says it differs, until a check moves it.
       level?: ShareViewSelector["access"];
+      reach?: ShareReachRevisions;
     }
   >();
+  // The relay a membership reads its reach from: the signed-in one, when it
+  // is the view's own and its account is the recipient.
+  function membershipRelay(view: RegistryEntry["shareView"]): SyncRelayConnection | null {
+    const credentials = currentCredentials();
+    if (
+      !view ||
+      recordedShareSelector(view.grantedSelector)?.wholeWorkspace !== true ||
+      !credentials?.relayUrl ||
+      view.recipientUserId !== credentials.userId ||
+      (view.relayUrl && !relayUrlsMatch(credentials.relayUrl, view.relayUrl))
+    )
+      return null;
+    return { baseUrl: credentials.relayUrl, token: credentials.token };
+  }
   const cacheClosers = new Map<Sender, () => void>();
   const clearCache = (sender: Sender) => {
     pullCache.delete(sender);
@@ -562,6 +680,7 @@ export function registerSharedViewsIpcHandlers<
             ...(held
               ? { hold: SHARE_VIEW_HOLD_MS, ...(cached.level ? { level: cached.level } : {}) }
               : {}),
+            ...(cached.reach ? { reach: cached.reach } : {}),
           });
           if (probe.levelChanged) delete cached.level;
           controller.signal.throwIfAborted();
@@ -752,27 +871,64 @@ export function registerSharedViewsIpcHandlers<
               console.error("[desktop] share view enrolment:", error);
             });
           }
-          let outcome;
+          let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
           let nextCursor: number | undefined;
           let pulled: ShareViewPullCommitted["changes"] = [];
+          // The reach revisions this view now settles on, which a held probe
+          // compares with each empty page. After a visibility change they are
+          // the served ones, so the probe stops counting the same change as news.
+          let settledReach: ShareReachRevisions | undefined;
           try {
-            const reconciled = await withStaleSensitiveWorkspaceOperation(
-              workspace.rootPath,
-              (lease) =>
-                shareViewFiles.reconcile(
-                  lease,
-                  { kind: "standalone", workspaceId: workspace.workspaceId },
-                  "refresh",
-                  (committed) => {
-                    nextCursor = committed.cursor;
-                    pulled = committed.changes;
-                  },
-                ),
-            );
-            if (reconciled.kind !== "refresh") {
-              throw new Error("Shared view refresh returned an invalid result.");
+            const reconcile = async () => {
+              const reconciled = await withStaleSensitiveWorkspaceOperation(
+                workspace.rootPath,
+                (lease) =>
+                  shareViewFiles.reconcile(
+                    lease,
+                    { kind: "standalone", workspaceId: workspace.workspaceId },
+                    "refresh",
+                    (committed) => {
+                      nextCursor = committed.cursor;
+                      pulled = committed.changes;
+                    },
+                  ),
+              );
+              if (reconciled.kind !== "refresh") {
+                throw new Error("Shared view refresh returned an invalid result.");
+              }
+              return reconciled.outcome;
+            };
+            const reachRelay = membershipRelay(workspace.shareView);
+            if (reachRelay && lacksReach(workspace.workspaceId)) {
+              await followShareViewReach(
+                workspace.workspaceId,
+                workspace.rootPath,
+                reachRelay,
+                () => operation.assertCurrent(),
+              );
             }
-            outcome = reconciled.outcome;
+            outcome = await reconcile();
+            if (!("ok" in outcome && !outcome.ok) && outcome.reachChanged && reachRelay) {
+              const followed = await followShareViewReach(
+                workspace.workspaceId,
+                workspace.rootPath,
+                reachRelay,
+                () => operation.assertCurrent(),
+              );
+              // Pull again under the installed levels. A second change waits for the next refresh.
+              if (followed === "installed") outcome = await reconcile();
+              else if (followed === "visibility-changed") settledReach = outcome.reachChanged;
+            }
+            if (settledReach === undefined) {
+              const stored = storedShareViewReach(
+                requireWorkspace(workspace.workspaceId).shareView,
+              );
+              if (stored)
+                settledReach = {
+                  revision: stored.revision,
+                  visibilityRevision: stored.visibilityRevision,
+                };
+            }
           } catch (error) {
             operation.assertCurrent();
             // A pull that failed on a later page still persisted the refusals its
@@ -810,6 +966,7 @@ export function registerSharedViewsIpcHandlers<
               nextCursor,
               credentialGeneration,
               ...membershipLevel(workspace.shareView.grantedSelector),
+              ...(settledReach ? { reach: settledReach } : {}),
             });
             const clear = () => clearCache(event.sender);
             const stopClose = dependencies.onSenderClosed(event.sender, clear);
@@ -1078,6 +1235,13 @@ function membershipPlace(info: {
     ...(info.role === "admin" || info.role === "member" ? { role: info.role } : {}),
     ...(info.membersWorkspaceId ? { membersWorkspaceId: info.membersWorkspaceId } : {}),
   };
+}
+
+export interface ShareViewVisibilityChange {
+  workspaceId: string;
+  shareId: string;
+  stored: ListedReach;
+  listed: ListedReach;
 }
 
 // A membership's level follows the relay both ways, so its held pull names

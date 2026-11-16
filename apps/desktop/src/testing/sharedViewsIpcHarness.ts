@@ -140,6 +140,11 @@ export async function createSharedViewsIpcHarness(
   const registryRead = vi.fn((id: string) => registry.get(id)!);
   const workspaceOperation = vi.fn(withRendererWorkspaceOperation);
   const fetchAccess = vi.fn<Dependencies["fetchShareViewAccess"]>(async () => ({ access: "edit" }));
+  const fetchReach = vi.fn<Dependencies["fetchShareViewReach"]>(async () => {
+    steps.push("reach");
+    return { revision: "r1", visibilityRevision: "v1", rootLevel: "edit", folders: [] };
+  });
+  const visibilityChanged = vi.fn<Dependencies["onShareViewVisibilityChanged"]>();
   const readDir = vi.fn(async (_root: string) => [] as string[]);
   const mkdir = vi.fn(async () => {
     steps.push("mkdir");
@@ -269,6 +274,8 @@ export async function createSharedViewsIpcHarness(
     },
     fetchShareViewInfo: fetchInfo,
     fetchShareViewAccess: fetchAccess,
+    fetchShareViewReach: fetchReach,
+    onShareViewVisibilityChanged: visibilityChanged,
     usableRoot: roots.usableRoot,
     readdir: readDir,
     mkdir,
@@ -333,6 +340,8 @@ export async function createSharedViewsIpcHarness(
     end,
     narrow,
     fetchAccess,
+    fetchReach,
+    visibilityChanged,
     closed,
     recordRefusal,
     handlers,

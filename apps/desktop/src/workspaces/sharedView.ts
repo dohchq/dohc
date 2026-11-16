@@ -13,6 +13,7 @@ import {
   ShareUnavailableError,
   RelayUnauthorizedError,
   type PullShareViewResult,
+  type ShareReachRevisions,
   type ShareViewChangedPath,
   type ShareViewRefusal,
   type SyncRelayConnection,
@@ -74,6 +75,9 @@ export interface RefreshSharedViewOutcome {
   // The first refusal's message, for the UI. It names the constraint the op
   // broke; the whole list goes to the log.
   refusedDetail: string | null;
+  // Set when the relay now selects this view under other levels or another
+  // visible set. The pull applied nothing and the caller reads the reach.
+  reachChanged?: ShareReachRevisions;
 }
 
 export type StandaloneShareViewRefreshOutcome =
@@ -2688,6 +2692,7 @@ async function refreshSharedViewOnce(
     unjournalablePaths: unjournalablePaths.filter((entry) => !releasedPaths.has(entry.path)),
     refusedOps: pull.refusalCount,
     refusedDetail: pull.refusals[0]?.detail ?? null,
+    ...(pull.reachChanged ? { reachChanged: pull.reachChanged } : {}),
   };
 }
 

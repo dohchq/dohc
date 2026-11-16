@@ -525,7 +525,10 @@ describe("registered received-view handlers", () => {
       subjectName: "Renamed",
       ...(change === "view" ? { grantedSelector: { access: "view" } } : { ended: true }),
     });
-    expect(h.recordIdentity).not.toHaveBeenCalledWith({ grantedSelector: info.selector });
+    expect(h.recordIdentity).not.toHaveBeenCalledWith({
+      grantedSelector: info.selector,
+      reach: null,
+    });
   });
 
   it("tells an old received copy to reopen before capture or pull", async () => {
@@ -684,7 +687,7 @@ describe("registered received-view handlers", () => {
     expect(h.relayFor).toHaveBeenCalledWith(
       expect.objectContaining({ attachmentId: expect.any(Symbol) }),
     );
-    expect(h.recordIdentity).toHaveBeenCalledWith({ grantedSelector: info.selector });
+    expect(h.recordIdentity).toHaveBeenCalledWith({ grantedSelector: info.selector, reach: null });
     expect(h.open).toHaveBeenCalledWith(
       expect.objectContaining({
         shareView: expect.objectContaining({ grantedSelector: info.selector }),
@@ -765,6 +768,87 @@ describe("registered received-view handlers", () => {
         role: "member",
         membersWorkspaceId: "owner-workspace",
       });
+    });
+
+    it("stores the reach the relay lists before its first pull", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
+      await h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
+      const opened = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
+      expect(opened.shareView?.reach).toEqual({
+        revision: "r1",
+        visibilityRevision: "v1",
+        rootLevel: "edit",
+        folders: [],
+      });
+      expect(h.steps.indexOf("reach")).toBeLessThan(h.steps.indexOf("reconcile"));
+    });
+
+    // A pull under other reach revisions applies nothing. The refresh reads
+    // the reach again and settles it before anything else is pulled.
+    const stored = {
+      revision: "r1",
+      visibilityRevision: "v1",
+      rootLevel: "edit" as const,
+      folders: [{ path: "Notes", level: "view" as const }],
+    };
+    const stoppedPull = (reachChanged: { revision: string; visibilityRevision: string }) => ({
+      kind: "refresh" as const,
+      outcome: {
+        ...outcome,
+        status: "unchanged" as const,
+        changedPaths: 0,
+        refusedOps: 0,
+        reachChanged,
+      },
+    });
+
+    it("installs new levels under the same visibility after capture, then pulls again", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
+      Object.assign(h.workspace.shareView!, { grantedSelector: member.selector!, reach: stored });
+      const listed = {
+        ...stored,
+        revision: "r2",
+        folders: [{ path: "Notes", level: "edit" as const }],
+      };
+      h.fetchReach.mockResolvedValue(listed);
+      h.reconcile.mockImplementationOnce(async () =>
+        stoppedPull({ revision: "r2", visibilityRevision: "v1" }),
+      );
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.narrow).toHaveBeenCalledOnce();
+      expect(h.workspace.shareView!.reach).toEqual(listed);
+      expect(h.reconcile).toHaveBeenCalledTimes(2);
+      expect(h.narrow.mock.invocationCallOrder[0]).toBeLessThan(
+        h.reconcile.mock.invocationCallOrder[1]!,
+      );
+      expect(h.visibilityChanged).not.toHaveBeenCalled();
+    });
+
+    it("keeps the copy and its levels as they are when what the member reaches changes", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
+      Object.assign(h.workspace.shareView!, { grantedSelector: member.selector!, reach: stored });
+      const listed = { ...stored, revision: "r2", visibilityRevision: "v2", folders: [] };
+      h.fetchReach.mockResolvedValue(listed);
+      h.reconcile.mockImplementationOnce(async () =>
+        stoppedPull({ revision: "r2", visibilityRevision: "v2" }),
+      );
+      await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
+        workspaceId: "existing",
+      });
+      expect(h.visibilityChanged).toHaveBeenCalledExactlyOnceWith({
+        workspaceId: "existing",
+        shareId: "share",
+        stored,
+        listed,
+      });
+      expect(h.narrow).not.toHaveBeenCalled();
+      expect(h.reconcile).toHaveBeenCalledOnce();
+      expect(h.workspace.shareView!.reach).toEqual(stored);
     });
 
     it("follows the relay's role on refresh, and keeps a path share free of one", async () => {
@@ -940,7 +1024,7 @@ describe("registered received-view handlers", () => {
     expect(h.workspace.shareView!.grantedSelector).toBe(pinned);
     expect(h.workspace.shareView!.genericChatWritable).toBe(true);
     expect(h.workspace.shareView).toMatchObject({ subjectName: "Renamed", sharerName: "Ana" });
-    expect(h.recordIdentity).toHaveBeenCalledWith({ grantedSelector: pinned });
+    expect(h.recordIdentity).toHaveBeenCalledWith({ grantedSelector: pinned, reach: null });
   });
 
   it("fills the sharer's email on refresh for a share reopened after Forget", async () => {

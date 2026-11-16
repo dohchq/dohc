@@ -614,7 +614,7 @@ import {
   workspaceCreateOffers,
   workspaceWriteRefusal,
 } from "./workspaces/shareWriteGate";
-import { shareViewLevels } from "./workspaces/shareViewReach";
+import { shareViewLevels, storedShareViewReach } from "./workspaces/shareViewReach";
 import {
   workspaceSummariesFrom,
   workspaceSummaryFor,
@@ -691,6 +691,7 @@ import { type ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   fetchShareViewInfo,
   fetchShareViewAccess,
+  fetchShareViewReach,
   probeShareViewLog,
   fetchShareAutomationSwitchable,
 } from "./workspaces/shareViewInfo";
@@ -6944,7 +6945,11 @@ function shareViewChatPush(
       ...(workspace.attachmentId ? { attachmentId: workspace.attachmentId } : {}),
       relay,
     })
-    .pushShareViewChat({ shareId: view.shareId, grantedSelector: pin });
+    .pushShareViewChat({
+      shareId: view.shareId,
+      grantedSelector: pin,
+      reach: storedShareViewReach(view),
+    });
 }
 
 async function pushShareViewChat(workspaceId: string): Promise<unknown> {
@@ -7899,6 +7904,9 @@ function createShareViewFilesForOperation(operation: DesktopWorkspaceOperation):
         .pullShareView({
           shareId: target.shareId,
           grantedSelector: input.grantedSelector,
+          // A joined workspace's stored reach. A page under another reach
+          // applies nothing, and the refresh reads the reach again.
+          reach: target.kind === "standalone" ? storedShareViewReach(target) : null,
           recordRefusals: input.recordRefusals,
           recordCollisions: input.recordCollisions,
           recordChangedPaths: input.recordChangedPaths,
@@ -10711,11 +10719,19 @@ function registerIpcHandlers(): void {
     engineDaemonStartup: () => desktopEngine.startup,
     fetchShareViewInfo,
     fetchShareViewAccess,
+    fetchShareViewReach,
     probeShareViewLog,
     usableRoot,
     readdir,
     mkdir,
     createJoinedWorkspace,
+    // The fresh join that settles a visibility change is not built yet, so
+    // the view keeps what it has and says why in the log.
+    onShareViewVisibilityChanged: ({ workspaceId, shareId, stored, listed }) =>
+      console.warn(
+        `[desktop] share ${shareId} in workspace ${workspaceId} now reaches other items ` +
+          `(visibility ${stored.visibilityRevision} to ${listed.visibilityRevision}); its copy keeps what it has until it is joined again.`,
+      ),
     setWorkspaceShareView,
     refreshNativeWorkspaceSurfaces,
     workspaceAuthorities,

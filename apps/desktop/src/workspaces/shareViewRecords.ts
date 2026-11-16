@@ -4,6 +4,7 @@ import {
   isValidShareVersionId,
   type ShareAccess,
 } from "@dohc/security-contract/share-selector";
+import type { ListedReach } from "@dohc/security-contract/listed-reach";
 import type { ShareViewSelector } from "./shareViewInfo";
 import {
   formatSize,
@@ -182,15 +183,31 @@ type EngineGrantedSelector = {
   versionId: string | null;
   access: ShareAccess;
   wholeWorkspace?: true;
+  reach?: {
+    revision: string;
+    visibilityRevision: string;
+    rootLevel: ShareAccess | null;
+    folders: { path: string; level: ShareAccess }[];
+  };
 };
 
-/** The pinned grant a share RPC carries: every dimension, always. */
-export function engineGrantedSelector(selector: GrantedSelector): EngineGrantedSelector {
+/**
+ * The pinned grant a share RPC carries: every dimension, always. A
+ * membership also carries the reach it last stored, which opens its lanes
+ * on the highest level it lists and tells the pull which pages it can apply.
+ */
+export function engineGrantedSelector(
+  selector: GrantedSelector,
+  reach?: ListedReach | null,
+): EngineGrantedSelector {
   return {
     paths: [...selector.paths],
     versionId: selector.versionId,
     access: selector.access,
     ...(selector.wholeWorkspace === true ? { wholeWorkspace: true as const } : {}),
+    ...(selector.wholeWorkspace === true && reach
+      ? { reach: { ...reach, folders: reach.folders.map(({ path, level }) => ({ path, level })) } }
+      : {}),
   };
 }
 

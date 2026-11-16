@@ -300,6 +300,13 @@ export interface ShareViewRefusal {
 // its log.
 export const MAX_REPORTED_REFUSALS = 20;
 
+// The two revisions of a member's reach: `revision` moves whenever its
+// levels change, `visibilityRevision` only when what it reaches does.
+export interface ShareReachRevisions {
+  revision: string;
+  visibilityRevision: string;
+}
+
 export interface PullShareViewResult {
   fetched: number;
   applied: number;
@@ -310,6 +317,9 @@ export interface PullShareViewResult {
   refusalCount: number;
   changedPaths: ShareViewChangedPath[];
   nextCursor: number;
+  // Set when the relay selected a page under another reach than the one the
+  // pull carried. That page applied nothing: read the reach again, then pull on.
+  reachChanged?: ShareReachRevisions;
   // Persist the cursor only after the caller has materialized changedPaths
   // to disk — the same contract as pullWorkspaceFromRelay. A crash before
   // the commit re-fetches (and re-replays) the delta; replay is

@@ -477,6 +477,61 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
+  // A membership's page selected under other reach revisions applied nothing,
+  // so the loop stops there and says so rather than pulling past it.
+  it("stops a membership's pull at a page selected under another reach", async () => {
+    const reach = {
+      revision: "r1",
+      visibilityRevision: "v1",
+      rootLevel: "comment" as const,
+      folders: [{ path: "Plans", level: "edit" as const }],
+    };
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "share.view.pull") return undefined;
+      pulls += 1;
+      const first = pulls === 1;
+      return {
+        fetched: first ? 1 : 0,
+        applied: first ? 1 : 0,
+        skipped: 0,
+        refusals: [],
+        // The engine ends the page there: no more, and the cursor where it was.
+        hasMore: first,
+        nextCursor: 1,
+        changedPaths: first
+          ? [{ path: "Plans/a.md", operation: "write", contentKind: "text" }]
+          : [],
+        pendingCursor: { kind: "shareView", token: "share-cursor-1" },
+        ...(first ? {} : { reachChanged: { revision: "r2", visibilityRevision: "v1" } }),
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+    const pull = await client.pullShareView({
+      shareId: "share-view",
+      grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+      reach,
+    });
+    expect(pulls).toBe(2);
+    expect(pull).toMatchObject({
+      fetched: 1,
+      applied: 1,
+      nextCursor: 1,
+      reachChanged: { revision: "r2", visibilityRevision: "v1" },
+    });
+    expect(pull.changedPaths.map((change) => change.path)).toEqual(["Plans/a.md"]);
+    const sent = daemon.requests.find((request) => request.method === "share.view.pull")!
+      .params as { grantedSelector: unknown };
+    expect(sent.grantedSelector).toEqual({
+      paths: [],
+      versionId: null,
+      access: "comment",
+      wholeWorkspace: true,
+      reach,
+    });
+    await sessions.closeAll();
+  });
+
   // The durable record holds every reason — each page reaches the recorder
   // before its cursor commits — so the in-memory aggregate only has to carry
   // enough to log and to show. A relay that refuses on every page must not be

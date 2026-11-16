@@ -3,6 +3,8 @@ import { recordedShareSelector } from "./shareViewRecords";
 import type { ShareViewSelector } from "./shareViewInfo";
 import { shareViewIdentityIsIntact, shareViewIsPresent } from "./shareViewMarker";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
+import { shareViewLevels, storedShareViewReach } from "./shareViewReach";
+import type { ListedReach } from "@dohc/security-contract/listed-reach";
 
 // The two lanes of share proposals, and the rule that keeps a workspace in
 // exactly one of them.
@@ -33,6 +35,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export interface ShareViewProposalScope {
   shareId: string;
   grant: ShareViewSelector;
+  // A joined workspace's stored reach, which the engine checks each page against.
+  reach: ListedReach | null;
 }
 
 /** Whether two resolved scopes still address the same effective grant. */
@@ -43,6 +47,8 @@ export function sameShareViewProposalScope(
   if (
     left.shareId !== right.shareId ||
     left.grant.access !== right.grant.access ||
+    left.reach?.revision !== right.reach?.revision ||
+    left.reach?.visibilityRevision !== right.reach?.visibilityRevision ||
     left.grant.versionId !== right.grant.versionId ||
     left.grant.paths.length !== right.grant.paths.length
   ) {
@@ -81,7 +87,7 @@ export function requireShareViewMembership(shareView: unknown): ShareViewProposa
   if (!grant) throw new SharedFileReadOnlyError();
   const shareId = typeof marker.shareId === "string" ? marker.shareId : "";
   if (!shareId) throw new SharedFileReadOnlyError();
-  return { shareId, grant };
+  return { shareId, grant, reach: storedShareViewReach(shareView) };
 }
 
 /**
@@ -94,7 +100,9 @@ export function requireShareViewProposalScope(shareView: unknown): ShareViewProp
   if (
     !shareViewIdentityIsIntact(marker) ||
     !shareViewTakesLocalWrites({
-      access: scope.grant.access,
+      // A joined workspace sends while any listed folder takes Edit; the
+      // engine and relay judge each change at its own path.
+      access: shareViewLevels(marker).highest,
       ended: marker.ended === true,
     })
   ) {
