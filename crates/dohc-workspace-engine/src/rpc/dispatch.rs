@@ -233,7 +233,6 @@ impl EngineService {
                 "request"
                     | "requestRetired"
                     | "release"
-                    | "releaseRetired"
                     | "clear"
                     | "list"
                     | "retired"
@@ -1607,7 +1606,6 @@ mod tests {
             "ydoc.ownerStop.request",
             "ydoc.ownerStop.requestRetired",
             "ydoc.ownerStop.release",
-            "ydoc.ownerStop.releaseRetired",
             "ydoc.ownerStop.clear",
             "ydoc.ownerStop.retired",
             "versions.list",

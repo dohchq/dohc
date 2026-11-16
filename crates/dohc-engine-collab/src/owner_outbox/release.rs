@@ -118,12 +118,12 @@ pub fn request_in_tx(
     if main != key.version_id {
         return Err(OwnerOutboxError::MainVersionMismatch);
     }
-    let saved = read_in(tx, key)?;
-    if let Some(saved) = saved.filter(|saved| saved.state == "released") {
-        return Ok(saved);
-    }
-    // The first request decides whether the relay still has to retire the note.
-    let retirement_owed = saved.map_or(retirement_owed, |saved| saved.retirement_owed);
+    let retirement_owed = match read_in(tx, key)? {
+        Some(saved) if saved.state == "released" => return Ok(saved),
+        // The first request decides whether the relay still has to retire the note.
+        Some(saved) => saved.retirement_owed,
+        None => retirement_owed,
+    };
     let bindings = {
         let mut stmt=tx.prepare("SELECT binding_json FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2").map_err(read_sql)?;
         let rows = stmt
@@ -210,6 +210,13 @@ pub fn request_in_tx(
     };
     save_in_tx(tx, key, &stop, now_ms)?;
     Ok(stop)
+}
+
+/// Whether this Stop is one the relay retired on its own, as when the note's
+/// last link ended. Nobody waits to Resume it, so the release that finishes
+/// it also ends it.
+pub fn retired_by_relay_in(conn: &Connection, key: &DocKey) -> Result<bool, OwnerOutboxError> {
+    Ok(read_in(conn, key)?.is_some_and(|stop| stop.state == "requested" && !stop.retirement_owed))
 }
 
 fn save_in_tx(

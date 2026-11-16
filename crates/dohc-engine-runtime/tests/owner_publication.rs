@@ -2205,12 +2205,12 @@ async fn stop_action_at_cursor(
     actor
         .owner_ydoc_stop(
             "workspace".into(),
-            if matches!(action, "release" | "releaseRetired") {
+            if action == "release" {
                 None
             } else {
                 Some(f.binding.current_path.clone())
             },
-            if matches!(action, "release" | "releaseRetired") {
+            if action == "release" {
                 Some(f.binding.clone())
             } else {
                 None
@@ -2635,14 +2635,24 @@ async fn stop_release_with_no_pending_edits_unbinds_without_history() {
 }
 
 #[tokio::test]
-async fn a_retired_release_ends_its_stop_so_the_note_can_be_shared_again() {
+async fn a_release_ends_a_stop_the_relay_retired_on_its_own_and_keeps_an_asked_one() {
     let (f, supervisor, actor) = pending_release_fixture(2).await;
-    let result = stop_action(&actor, &f, "releaseRetired").await.unwrap();
+    stop_action(&actor, &f, "clear").await.unwrap();
+    let stop = stop_action(&actor, &f, "requestRetired").await.unwrap();
+    assert!(!stop[0].retirement_owed);
+    let result = stop_action(&actor, &f, "release").await.unwrap();
     assert_eq!(result[0].state, "released");
     assert!(result[0].deferred.is_none());
     assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 0);
-    assert_eq!(f.store.table_row_count("owner_live_stops").unwrap(), 0);
     assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 1);
+    // No Stop is left to hold the note back when it is shared again.
+    assert_eq!(f.store.table_row_count("owner_live_stops").unwrap(), 0);
+    supervisor.close_all().unwrap();
+
+    // One the owner asked for waits for Resume.
+    let (f, supervisor, actor) = pending_release_fixture(2).await;
+    stop_action(&actor, &f, "release").await.unwrap();
+    assert_eq!(f.store.table_row_count("owner_live_stops").unwrap(), 1);
     supervisor.close_all().unwrap();
 }
 
