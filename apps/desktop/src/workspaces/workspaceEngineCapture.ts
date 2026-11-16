@@ -4492,6 +4492,18 @@ export function createWorkspaceEngineCapture(
     return policy;
   }
 
+  // deleteIfTracked and writeIfChanged record what is on disk, which the
+  // owner did not choose, as a deliberate write. An access rule changed
+  // outside dohc reaches History through capture alone, which holds a
+  // widening until the owner decides in Notices. The engine can't tell these
+  // records from an authored write, so they refuse a rule here.
+  function refuseOutsideRuleChange(path: string): void {
+    if (!isAccessRulePath(path)) return;
+    throw new Error(
+      `History has not recorded the change to ${path} made outside dohc. If Notices lists it, decide on it there, then try again.`,
+    );
+  }
+
   async function deleteIfTracked(
     engine: Pick<VersionedTextStore, "readTextFile" | "deleteTextFile">,
     versionId: string,
@@ -4502,6 +4514,7 @@ export function createWorkspaceEngineCapture(
   ): Promise<boolean> {
     const current = await engine.readTextFile({ workspaceId, versionId, path });
     if (!current) return false;
+    refuseOutsideRuleChange(path);
     await engine.deleteTextFile({
       workspaceId,
       versionId,
@@ -4531,6 +4544,7 @@ export function createWorkspaceEngineCapture(
       if (current?.contentKind === "binary" && current.sha256 === disk.sha256) {
         return false;
       }
+      refuseOutsideRuleChange(path);
       // A tracked text file whose bytes stop round-tripping as UTF-8 keeps its
       // object identity; the moment says so honestly instead of pretending it
       // was an ordinary update.
@@ -4560,6 +4574,7 @@ export function createWorkspaceEngineCapture(
     ) {
       return false;
     }
+    refuseOutsideRuleChange(path);
     // The mirror transition: a binary-tracked path whose content is UTF-8
     // text again continues as the same object with an honest moment.
     const becameText = current?.contentKind === "binary";

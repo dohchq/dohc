@@ -4731,3 +4731,90 @@ it("drops an undone pending-placement receipt through the real guard before a fr
     await engine.stop();
   }
 });
+
+// Saving the latest edits records the disk as a deliberate write. An access
+// rule changed outside dohc reaches History only through capture, which holds
+// a widening for the owner's decision.
+const OUTSIDE_RULE = "History has not recorded the change to team/access.yaml made outside dohc.";
+
+it.each([
+  ["widened", "members: edit\n"],
+  ["removed", null],
+] as const)(
+  "records no access rule %s outside dohc before changing its folder",
+  async (_name, onDisk) => {
+    const root = await createTestScratch("dohc-outside-rule-");
+    const loopback = new VersionedLoopbackEngine();
+    for (const [path, text] of [
+      ["team/access.yaml", "members: view\n"],
+      ["team/a.md", "alpha\n"],
+    ] as const) {
+      loopback.seedTextFile({ workspace: WORKSPACE_ID, path, text });
+      await write(root, path, text);
+    }
+    if (onDisk === null) await rm(join(root, "team/access.yaml"));
+    else await write(root, "team/access.yaml", onDisk);
+    const sessions = mockLiveSessions(loopback);
+    const store = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+      sessions,
+    ).store;
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    try {
+      const files = onDisk === null ? ["team/a.md"] : ["team/access.yaml", "team/a.md"];
+      await expect(
+        engine.changePathsAs(
+          ["team"],
+          {
+            operation: "delete",
+            operationId: "dohc-operation:33333333-3333-4333-8333-333333333333",
+            author: RESTORER,
+            folder: true,
+          },
+          (held) => held.recordDisk("team", files),
+          () => [],
+        ),
+      ).rejects.toThrow(OUTSIDE_RULE);
+      expect(
+        (
+          await store.readTextFile({
+            workspaceId: WORKSPACE_ID,
+            versionId: "main",
+            path: "team/access.yaml",
+          })
+        )?.text,
+      ).toBe("members: view\n");
+    } finally {
+      await engine.stop();
+    }
+  },
+);
+
+it("restores no access rule changed outside dohc before capture records it", async () => {
+  const root = await createTestScratch("dohc-outside-rule-restore-");
+  const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+  const store = createCaptureLiveStores(
+    { workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID },
+    sessions,
+  ).store;
+  const target = {
+    workspaceId: WORKSPACE_ID,
+    versionId: "main",
+    path: "team/access.yaml",
+    metadata: { origin: "api" as const },
+  };
+  await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+  await store.writeTextFile({ ...target, text: "members: comment\n" });
+  const changed = await store.writeTextFile({ ...target, text: "members: view\n" });
+  await write(root, target.path, "members: edit\n");
+  const engine = capture(root, { store, rustEngineSessions: sessions });
+  try {
+    await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER)).rejects.toThrow(
+      OUTSIDE_RULE,
+    );
+    expect((await store.readTextFile(target))?.text).toBe("members: view\n");
+    expect(await readFile(join(root, target.path), "utf8")).toBe("members: edit\n");
+  } finally {
+    await engine.stop();
+  }
+});
