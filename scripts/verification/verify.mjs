@@ -146,11 +146,12 @@ export function electronBinary() {
 /**
  * One Electron launch that ends when its window has painted two frames.
  *
- * Electron's first launch on a computer reads fonts and other system files that are not in memory
- * yet. On a fresh GitHub runner that launch took 0.4 to 10 s to become ready in 30 measured
- * launches, and over 20 s in two PR runs, with the CPU idle and one thread waiting on the disk.
- * Every later launch took about 0.1 s. A desktop test that makes the first launch can run out its
- * own limits there, so a worker makes it here, before those tests start.
+ * Electron's first launch on a computer reads every installed font to write a font cache of its
+ * own. On a fresh GitHub runner that is 35 MiB from a disk nothing has read yet. The launch took
+ * 0.4 to 10 s to become ready in 40 measured launches, and over 20 s in two PR runs, with the CPU
+ * idle and one thread waiting on the disk. Every later launch took about 0.1 s. A desktop test that
+ * makes the first launch can run out its own limits there, so a worker makes it here, before
+ * those tests start.
  */
 export function firstDesktopLaunchCommand(userDataDir, options = {}) {
   const platform = options.platform ?? process.platform;
