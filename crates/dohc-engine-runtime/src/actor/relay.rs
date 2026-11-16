@@ -130,7 +130,9 @@ pub enum RelayOperation {
     /// would invite a later reader to think they matter here.
     RecordShareViewIdentity {
         workspace_id: String,
-        access: dohc_engine_sync::ShareAccess,
+        /// The highest level the grant gives anywhere, `None` when it gives
+        /// none. Edit somewhere needs an identity.
+        access: Option<dohc_engine_sync::ShareAccess>,
         origin_id: String,
         replication_epoch: String,
         stream_identity: String,
@@ -3321,7 +3323,7 @@ fn run_relay_operation(
             // The level gate, and the only place it is read. Only Edit sends
             // workspace replication ops, so View and Comment need no
             // identity and the store is not touched at all.
-            if access != dohc_engine_sync::ShareAccess::Edit {
+            if access != Some(dohc_engine_sync::ShareAccess::Edit) {
                 return Ok(RelayOperationOutcome::ShareViewIdentity(
                     ShareViewIdentityRecord::NotRequired,
                 ));
@@ -3955,7 +3957,7 @@ mod share_view_identity_tests {
             DeferredRelayTransport::default(),
             RelayOperation::RecordShareViewIdentity {
                 workspace_id: "ws".to_owned(),
-                access,
+                access: Some(access),
                 origin_id: "origin_share-view".to_owned(),
                 replication_epoch: "epoch_share-view".to_owned(),
                 stream_identity: "stream_share-view".to_owned(),
@@ -4133,6 +4135,7 @@ mod hosted_refusal_tests {
         .unwrap();
         let ws = || "ws".to_owned();
         let granted = || ShareGrant {
+            reach: None,
             scope: dohc_engine_sync::ShareScope::Paths(Vec::new()),
             version_id: None,
             access: ShareAccess::Edit,
@@ -4202,7 +4205,7 @@ mod hosted_refusal_tests {
             },
             RelayOperation::RecordShareViewIdentity {
                 workspace_id: ws(),
-                access: ShareAccess::Edit,
+                access: Some(ShareAccess::Edit),
                 origin_id: "origin".into(),
                 replication_epoch: "epoch".into(),
                 stream_identity: "stream".into(),

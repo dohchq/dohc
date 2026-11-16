@@ -378,6 +378,16 @@ pub struct ShareViewResponse {
     pub ops: Vec<ShareReplicationEnvelope>,
     pub next_cursor: i64,
     pub has_more: bool,
+    /// The member's reach revisions the relay selected this page under. A
+    /// membership's pages carry them; a path share's carry none.
+    pub reach_revisions: Option<ShareReachRevisions>,
+}
+
+/// The two revisions of a member's reach (`ShareReach`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareReachRevisions {
+    pub revision: String,
+    pub visibility_revision: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -682,6 +692,10 @@ pub struct ShareViewPullOutcome {
     /// it; one that advanced silently would lose the skip. So it advances,
     /// and the skip is recorded.
     pub pending_cursor: crate::ShareCursor,
+    /// The page's reach revisions, when they differ from the reach the grant
+    /// carries. The page then applied nothing and the cursor stays where it
+    /// was: the caller reads the reach again before it pulls on.
+    pub reach_changed: Option<ShareReachRevisions>,
 }
 
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
@@ -4862,10 +4876,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         faults: &dyn FaultInjector,
     ) -> Result<SharedChannelPushOutcome, RelayError> {
         if granted.scope != crate::share::ShareScope::Workspace
-            || granted.access == crate::share::ShareAccess::View
+            || !granted
+                .highest()
+                .is_some_and(crate::share::ShareAccess::takes_comments)
         {
             return Err(local(SyncError::InvalidInput {
-                reason: "only a Comment or Edit membership posts in its Groups",
+                reason: "only a membership with Comment or Edit somewhere posts in its Groups and on its files",
             }));
         }
         let Some(identity) = read_sync_identity(store, workspace_id).map_err(local)? else {
@@ -5115,8 +5131,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         // The PINNED level is read here rather than trusted from the relay's
         // own refusal. A recipient offers nothing it was not granted, so a
-        // View or Comment share never contacts the relay at all.
-        if granted.access != crate::ShareAccess::Edit {
+        // View or Comment share never contacts the relay at all. A membership
+        // offers once it has Edit somewhere.
+        if granted.highest() != Some(crate::ShareAccess::Edit) {
             return Ok(ShareProposalSubmitOutcome::default());
         }
         let identity = read_sync_identity(store, workspace_id)
@@ -5273,6 +5290,32 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             limit: crate::model::MAX_PULL_OPS_PER_PASS,
         })?;
         validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
+        // The relay selected this page under the member's reach at its own
+        // revisions. A page selected under another reach than the one stored
+        // here applies nothing, whether the levels or the visible paths moved.
+        if let Some(known) = &granted.reach {
+            let Some(served) = page.reach_revisions else {
+                return Err(RelayError::InvalidResponse);
+            };
+            if served.revision != known.revision
+                || served.visibility_revision != known.visibility_revision
+            {
+                return Ok(ShareViewPullOutcome {
+                    fetched: 0,
+                    has_more: false,
+                    applied: 0,
+                    skipped: 0,
+                    refusals: Vec::new(),
+                    changed_paths: Vec::new(),
+                    pending_cursor: crate::ShareCursor {
+                        kind: crate::CursorKind::ShareView,
+                        share_id: share_id.to_owned(),
+                        cursor,
+                    },
+                    reach_changed: Some(served),
+                });
+            }
+        }
         let fetched = page.ops.len();
         let ops = page.ops;
         // The cursor this page was fetched at, kept for the ops that carry no
@@ -5421,6 +5464,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 share_id: share_id.to_owned(),
                 cursor,
             },
+            reach_changed: None,
         })
     }
 

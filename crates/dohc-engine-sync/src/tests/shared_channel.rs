@@ -8,6 +8,7 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
         surface: ShareSurface::ShareView,
         channel_wire_id: None,
         granted: Some(ShareGrant {
+            reach: None,
             scope: crate::ShareScope::Paths(vec!["shared/docs".to_owned()]),
             version_id: None,
             access: ShareAccess::View,
@@ -1449,6 +1450,7 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
     let (_scratch, _path, mut engine) = open_store();
     let client = RelaySyncClient::new(PagedShareRelay::new([], []));
     let grant = |access| ShareGrant {
+        reach: None,
         scope: crate::ShareScope::Workspace,
         version_id: None,
         access,
@@ -1573,6 +1575,28 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
             .is_err(),
         "View posts nothing"
     );
+    // A member's lane opens on the highest level its reach lists anywhere.
+    let listed = |level| ShareGrant {
+        reach: Some(crate::ShareReach {
+            revision: "r1".to_owned(),
+            visibility_revision: "v1".to_owned(),
+            root_level: Some(ShareAccess::View),
+            folders: [("Plans".to_owned(), level)].into(),
+        }),
+        ..grant(ShareAccess::View)
+    };
+    assert!(
+        client
+            .push_share_view_groups(
+                &mut engine,
+                "ws",
+                "share",
+                &listed(ShareAccess::View),
+                &NoFaults
+            )
+            .is_err(),
+        "View everywhere posts nothing"
+    );
     assert_eq!(
         client
             .push_share_view_groups(
@@ -1585,6 +1609,20 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
             .expect("Comment sends its Group posts")
             .pushed,
         4
+    );
+    assert_eq!(
+        client
+            .push_share_view_groups(
+                &mut engine,
+                "ws",
+                "share",
+                &listed(ShareAccess::Comment),
+                &NoFaults
+            )
+            .expect("Comment in one folder opens the lane for a View member")
+            .pushed,
+        0,
+        "the posts went already"
     );
     let pushes = client
         .transport()
@@ -1697,6 +1735,7 @@ fn a_membership_view_pushes_its_comments_on_files_by_path() {
         .expect("journal a local chat op");
     }
     let grant = ShareGrant {
+        reach: None,
         scope: crate::ShareScope::Workspace,
         version_id: None,
         access: ShareAccess::Comment,
@@ -1816,6 +1855,7 @@ fn a_membership_view_sets_aside_an_op_the_relay_refuses_and_keeps_pushing() {
         json!({"threadId": "t-owner", "messageId": "m-2"}),
     );
     let grant = ShareGrant {
+        reach: None,
         scope: crate::ShareScope::Workspace,
         version_id: None,
         access: ShareAccess::Comment,

@@ -19,8 +19,8 @@ use dohc_engine_sync::{
     RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareBlobUploadRequest,
     ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
     ShareProposalChange, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
-    ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse, SharedChannelRequest,
-    SharedChannelResponse,
+    ShareReachRevisions, ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse,
+    SharedChannelRequest, SharedChannelResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use ureq::http::{Response, Uri};
@@ -1142,7 +1142,16 @@ impl RelayTransport for HttpRelayTransport {
                 ("includeReferences", req.include_work_references.to_string()),
             ],
         )?;
+        let reach_revisions = match (page.revision, page.visibility_revision) {
+            (Some(revision), Some(visibility_revision)) => Some(ShareReachRevisions {
+                revision,
+                visibility_revision,
+            }),
+            (None, None) => None,
+            _ => return Err(RelayError::InvalidResponse),
+        };
         Ok(ShareViewResponse {
+            reach_revisions,
             work_references: page.work_references,
             next_reference_after: page.next_reference_after,
             reference_has_more: page.reference_has_more,
@@ -1777,6 +1786,11 @@ struct WireLogPage {
     ops: Vec<WireLogRow>,
     next_cursor: i64,
     has_more: bool,
+    // A membership's pages name the reach the relay selected them under.
+    #[serde(default)]
+    revision: Option<String>,
+    #[serde(default)]
+    visibility_revision: Option<String>,
 }
 
 #[derive(Deserialize)]

@@ -325,6 +325,25 @@ struct GrantedSelectorParams {
     // Groups. It carries no paths and no version.
     #[serde(default)]
     whole_workspace: bool,
+    // The levels the relay last listed for a membership (`ListedReach`).
+    #[serde(default)]
+    reach: Option<ReachParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReachParams {
+    revision: String,
+    visibility_revision: String,
+    root_level: Option<String>,
+    folders: Vec<ReachFolderParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReachFolderParams {
+    path: String,
+    level: String,
 }
 
 fn direct_write_json(write: &dohc_engine_sync::DirectWriteReport) -> Value {
@@ -900,6 +919,11 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
                 "shareId": outcome.pending_cursor.share_id,
                 "cursor": outcome.pending_cursor.cursor,
             },
+            // The page was selected under another reach and applied nothing.
+            "reachChanged": outcome.reach_changed.map(|served| json!({
+                "revision": served.revision,
+                "visibilityRevision": served.visibility_revision,
+            })),
         }),
     })
 }
@@ -929,10 +953,57 @@ fn share_grant(selector: GrantedSelectorParams) -> Result<dohc_engine_sync::Shar
     } else {
         dohc_engine_sync::ShareScope::Paths(selector.paths)
     };
+    let reach = match selector.reach {
+        None => None,
+        Some(_) if !selector.whole_workspace => {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "only a whole-workspace grant carries a reach",
+            ));
+        }
+        Some(reach) => Some(share_reach(reach)?),
+    };
     Ok(dohc_engine_sync::ShareGrant {
+        reach,
         scope,
         version_id: selector.version_id,
         access,
+    })
+}
+
+/// Reads a reach as `parseListedReach` does, refusing any part it cannot read.
+fn share_reach(reach: ReachParams) -> Result<dohc_engine_sync::ShareReach, WireError> {
+    const MAX_REVISION_CHARS: usize = 512;
+    const MAX_FOLDERS: usize = 100_000;
+    let invalid = |reason: &'static str| WireError::new(ErrorCode::InvalidParams, reason);
+    let level = |value: &str| {
+        dohc_engine_sync::ShareAccess::parse(value)
+            .ok_or_else(|| invalid(r#"a reach level must be "view", "comment", or "edit""#))
+    };
+    for revision in [&reach.revision, &reach.visibility_revision] {
+        if revision.is_empty() || revision.chars().count() > MAX_REVISION_CHARS {
+            return Err(invalid("a reach revision must be 1 to 512 characters"));
+        }
+    }
+    if reach.folders.len() > MAX_FOLDERS {
+        return Err(invalid("a reach lists at most 100000 folders"));
+    }
+    let root_level = reach.root_level.as_deref().map(level).transpose()?;
+    let mut folders = std::collections::BTreeMap::new();
+    for folder in reach.folders {
+        if folder.path.split('/').any(str::is_empty) {
+            return Err(invalid("a reach folder path has no empty segment"));
+        }
+        let level = level(&folder.level)?;
+        if folders.insert(folder.path, level).is_some() {
+            return Err(invalid("a reach lists each folder once"));
+        }
+    }
+    Ok(dohc_engine_sync::ShareReach {
+        revision: reach.revision,
+        visibility_revision: reach.visibility_revision,
+        root_level,
+        folders,
     })
 }
 
@@ -2430,12 +2501,12 @@ impl EngineService {
                 configuration,
                 // The RPC still parses the whole selector above, because a
                 // caller that sends a malformed one must be refused here. The
-                // operation carries only the access: the level is the entire
-                // decision it makes, and handing it paths would suggest they
-                // matter to it.
+                // operation carries only the highest level: Edit somewhere is the
+                // entire decision it makes, and handing it paths would suggest
+                // they matter to it.
                 RelayOperation::RecordShareViewIdentity {
                     workspace_id: open.workspace_id.clone(),
-                    access: granted.access,
+                    access: granted.highest(),
                     origin_id: sync_identifier("origin")?,
                     replication_epoch: sync_identifier("epoch")?,
                     stream_identity: sync_identifier("stream")?,
@@ -4380,6 +4451,68 @@ mod tests {
             json!({ "paths": [], "versionId": "v1", "access": "view", "wholeWorkspace": true }),
         ] {
             assert!(read(refused.clone()).is_err(), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_membership_grant_reads_its_listed_reach() {
+        let read = |reach: Value, whole_workspace: bool| {
+            serde_json::from_value::<GrantedSelectorParams>(json!({
+                "paths": [], "versionId": null, "access": "view",
+                "wholeWorkspace": whole_workspace, "reach": reach,
+            }))
+            .map_err(|_| ())
+            .and_then(|selector| share_grant(selector).map_err(|_| ()))
+        };
+        let reach = |root: Value, folders: Value| {
+            json!({
+                "revision": "r1", "visibilityRevision": "v1", "rootLevel": root, "folders": folders,
+            })
+        };
+        let grant = read(
+            reach(json!("view"), json!([{ "path": "Plans", "level": "edit" }])),
+            true,
+        )
+        .expect("a membership's reach reads");
+        assert_eq!(
+            grant.level_at("Plans/day-1.md"),
+            Some(dohc_engine_sync::ShareAccess::Edit)
+        );
+        assert_eq!(
+            grant.level_at("notes.md"),
+            Some(dohc_engine_sync::ShareAccess::View)
+        );
+        assert!(
+            read(reach(Value::Null, json!([])), true).is_ok(),
+            "a hidden root reads"
+        );
+        for (refused, whole_workspace) in [
+            (reach(json!("view"), json!([])), false),
+            (reach(json!("owner"), json!([])), true),
+            (
+                reach(
+                    json!("view"),
+                    json!([{ "path": "Plans//Q1", "level": "edit" }]),
+                ),
+                true,
+            ),
+            (
+                reach(json!("view"), json!([{ "path": "", "level": "edit" }])),
+                true,
+            ),
+            (
+                reach(
+                    json!("view"),
+                    json!([{ "path": "Plans", "level": "edit" }, { "path": "Plans", "level": "view" }]),
+                ),
+                true,
+            ),
+            (
+                json!({ "revision": "", "visibilityRevision": "v1", "rootLevel": "view", "folders": [] }),
+                true,
+            ),
+        ] {
+            assert!(read(refused.clone(), whole_workspace).is_err(), "{refused}");
         }
     }
 }
