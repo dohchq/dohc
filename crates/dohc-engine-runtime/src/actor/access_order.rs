@@ -672,6 +672,15 @@ fn judge_in_tx(
         };
         match judge_folder(tx, &scope, folder, &[], !deletes, &[]).map_err(sync_error)? {
             Plan::Verdict(Verdict::Clear(clearance)) => return Ok(clearance),
+            // Until enrolment ends the workspace does not replicate, so
+            // capture commits the rule as it finds it and nothing waits for
+            // the owner. Enrolment waits for that, and records no hold.
+            Plan::Verdict(Verdict::Held { .. } | Verdict::Refused { .. })
+                if dohc_engine_sync::replaying_history() =>
+            {
+                signal(|signals| &signals.waits);
+                return Err(retry(ACCESS_RULE_WAITS));
+            }
             Plan::Verdict(Verdict::Held { .. } | Verdict::Refused { .. }) => ACCESS_RULE_HELD,
             Plan::Verdict(Verdict::Waits) | Plan::CommitRule(_) => ACCESS_RULE_WAITS,
         }
@@ -2534,9 +2543,9 @@ mod tests {
     /// Rules order only once a workspace replicates. A widening captured
     /// before then is committed history: enrolment journals it as it stands,
     /// with no hold, so it reaches members at sharing without a Notice. A
-    /// widening on disk that nothing committed yet is judged when the backfill
-    /// reaches a file under it: enrolment journals nothing and waits for the
-    /// owner's decision.
+    /// widening on disk that nothing committed yet makes enrolment wait, with
+    /// no hold: capture commits it as it would any rule before sharing, and
+    /// the next attempt journals it like the first case.
     #[test]
     fn a_rule_widened_before_enrolment() {
         use dohc_engine_domain::VersionedTextStore;
@@ -2566,22 +2575,48 @@ mod tests {
                 &mut store, "ws", "local", "epoch", "stream", 20, &NoFaults,
             )
             .unwrap();
-            let enrolled = dohc_engine_sync::commit_relay_cursor(
-                &mut store,
-                "ws",
-                &dohc_engine_sync::RelayCursor {
-                    cursor: 1,
-                    replication_epoch: "epoch".into(),
-                    stream_identity: "stream".into(),
-                    bootstrap_complete: true,
-                    settlement_report_id: None,
-                    ordinary_pull: None,
-                },
-                &NoFaults,
-                &dohc_engine_sync::NoLiveLeases,
-                30,
-            );
-            finish_command(&mut store);
+            let enrol = |store: &mut EngineStore| {
+                begin_command();
+                let enrolled = dohc_engine_sync::commit_relay_cursor(
+                    store,
+                    "ws",
+                    &dohc_engine_sync::RelayCursor {
+                        cursor: 1,
+                        replication_epoch: "epoch".into(),
+                        stream_identity: "stream".into(),
+                        bootstrap_complete: true,
+                        settlement_report_id: None,
+                        ordinary_pull: None,
+                    },
+                    &NoFaults,
+                    &dohc_engine_sync::NoLiveLeases,
+                    30,
+                );
+                finish_command(store);
+                enrolled.is_ok()
+            };
+            let mut attempts = vec![enrol(&mut store)];
+            if !attempts[0] {
+                // Capture runs before the next attempt, as the refusal's
+                // signal asks, and finds the rule on disk.
+                begin_command();
+                order_capture(
+                    &mut store,
+                    "ws",
+                    "main",
+                    40,
+                    &LeaseRegistry::new(),
+                    &NoFaults,
+                    &[Touch::observed("team/access.yaml", edit.as_bytes())],
+                )
+                .unwrap()
+                .into_iter()
+                .collect::<Result<(), _>>()
+                .unwrap();
+                ingest_rule(&mut store, edit).unwrap();
+                finish_command(&mut store);
+                attempts.push(enrol(&mut store));
+            }
             let journal: Vec<String> = store
                 .read_with(|conn| {
                     conn.prepare(
@@ -2598,20 +2633,16 @@ mod tests {
                 .into_iter()
                 .map(|hold| (hold.folder, hold.reason))
                 .collect::<Vec<_>>();
-            seen.push((captured, enrolled.is_ok(), journal, holds));
+            seen.push((captured, attempts, journal, holds));
             ROOT.with(|cell| *cell.borrow_mut() = None);
         }
         let (rule, file) = ("team/access.yaml".to_owned(), "team/a.md".to_owned());
+        let journal = vec![rule.clone(), rule, file];
         assert_eq!(
             seen,
             [
-                (true, true, vec![rule.clone(), rule, file], Vec::new()),
-                (
-                    false,
-                    false,
-                    Vec::new(),
-                    vec![("team".to_owned(), access_rule_holds::WIDENED.to_owned())]
-                ),
+                (true, vec![true], journal.clone(), Vec::new()),
+                (false, vec![false, true], journal, Vec::new()),
             ]
         );
     }
