@@ -865,4 +865,30 @@ describeWithPostgres("session kinds", () => {
       clientKind: "desktop",
     });
   });
+
+  it("finds a phone sign-in current only while its row exists, is unexpired and is a phone's", async () => {
+    const email = `${unique()}@dohc.test`;
+    const { user } = await signUp(email);
+    const { user: other } = await signUp(`${unique()}@dohc.test`);
+    const sessionIdOf = async (token: string) =>
+      (await pool.query<{ id: string }>('select "id" from "session" where "token" = $1', [token]))
+        .rows[0]!.id;
+    const sessions = createPostgresAccountSessions(pool);
+    const current = (userId: string, sessionId: string) =>
+      sessions.phoneSessionIsCurrent({ userId, sessionId });
+    const phone = await sessionIdOf(await deviceSignIn("dohc-phone", email));
+    const desktop = await sessionIdOf(await deviceSignIn("dohc-desktop", email));
+    expect(await current(user.id, phone)).toBe(true);
+    expect(await current(other.id, phone)).toBe(false);
+    expect(await current(user.id, desktop)).toBe(false);
+    await pool.query(
+      `update "session" set "expiresAt" = now() - interval '1 second' where "id" = $1`,
+      [phone],
+    );
+    expect(await current(user.id, phone)).toBe(false);
+    const deleted = await sessionIdOf(await deviceSignIn("dohc-phone", email));
+    expect(await current(user.id, deleted)).toBe(true);
+    await pool.query('delete from "session" where "id" = $1', [deleted]);
+    expect(await current(user.id, deleted)).toBe(false);
+  });
 });

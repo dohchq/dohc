@@ -121,6 +121,8 @@ export interface AccountSessions {
    * still current. False when either is missing, expired, or another account's.
    */
   revoke(input: { userId: string; callerSessionId: string; sessionId: string }): Promise<boolean>;
+  /** Whether the account's phone sign-in `sessionId` exists and is unexpired, read afresh on every call. */
+  phoneSessionIsCurrent(input: { userId: string; sessionId: string }): Promise<boolean>;
   /**
    * The sessions among these IDs that still exist, read from the table with no
    * cache, expired ones included. A session missing from the map was deleted.
@@ -155,6 +157,13 @@ export function createPostgresAccountSessions(pool: Pool): AccountSessions {
         `delete from "session" where "id" = $1 and "userId" = $2 and "expiresAt" > now()
           and exists (select 1 from "session" where "id" = $3 and "userId" = $2 and "expiresAt" > now())`,
         [sessionId, userId, callerSessionId],
+      );
+      return result.rowCount === 1;
+    },
+    async phoneSessionIsCurrent({ userId, sessionId }) {
+      const result = await pool.query(
+        `select 1 from "session" where "id" = $1 and "userId" = $2 and "clientKind" = 'phone' and "expiresAt" > now()`,
+        [sessionId, userId],
       );
       return result.rowCount === 1;
     },

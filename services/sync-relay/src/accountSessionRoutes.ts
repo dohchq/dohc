@@ -38,6 +38,8 @@ export function createAccountSessionRoutes(options: {
   sessions: AccountSessions;
   feedWaits: Pick<AccountFeedWaits, "wakeAccount">;
   sockets: Pick<OwnerLiveSockets, "stopSession">;
+  /** Runs once a session is revoked. */
+  revoked?(userId: string, sessionId: string): void;
 }) {
   const { storage, sessions } = options;
 
@@ -61,6 +63,7 @@ export function createAccountSessionRoutes(options: {
       // Its live connections end before the answer. A feed held under it checks it now, instead of at the end of its hold.
       options.sockets.stopSession(caller.userId, route.sessionId);
       options.feedWaits.wakeAccount(caller.userId);
+      options.revoked?.(caller.userId, route.sessionId);
       return jsonResponse({ ok: true, sessionId: route.sessionId });
     }
     const listed = await sessions.list(caller.userId);

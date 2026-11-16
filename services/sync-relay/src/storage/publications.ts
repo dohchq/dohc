@@ -392,7 +392,10 @@ export type AppPublicationListRow = {
   | { manifestUnavailable: true }
 );
 
-function publicationLinkIsCurrent(storage: StorageContext, owner: PublicationOwner): boolean {
+export function publicationLinkIsCurrent(
+  storage: StorageContext,
+  owner: PublicationOwner,
+): boolean {
   try {
     authority(storage, owner);
     return true;

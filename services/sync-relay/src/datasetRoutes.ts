@@ -878,9 +878,16 @@ export function createDatasetAppRoutes(
     request: Request,
     route: AppBackendRoute,
     auth: AppBackendAuth,
+    /** A phone launch: only a publication runs, never an app approved on a computer. */
+    publishedOnly = false,
   ): Promise<Response> => {
     const published = host.publication(auth, route.publicationId);
-    if (!published || (!options.publications && !published.local)) throw notFound();
+    if (
+      !published ||
+      (!options.publications && !published.local) ||
+      (publishedOnly && published.local)
+    )
+      throw notFound();
     const { authority, workspaceId, datasetId, authorityRevision, capability } = published;
     const get =
       route.action === "descriptor" || route.action === "summary" || route.action === "blob";
@@ -898,6 +905,8 @@ export function createDatasetAppRoutes(
             signal,
             route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : 128 * 1024,
           );
+    // A phone launch's reach may have ended while its body arrived.
+    if (raw !== undefined && auth.kind === "named") await auth.launch?.recheck();
     let release: () => void;
     try {
       release = admit(
