@@ -2160,14 +2160,27 @@ const DRAWING: &str = "drawings/d.excalidraw";
 /// A local workspace with a drawing and one asset of it, under an `assets`
 /// folder whose committed rule lets nobody in.
 fn drawing_with_ruled_asset() -> Fixture {
+    drawing_with_asset(false).0
+}
+
+/// A local workspace with a drawing and one asset of it, and the folder whose
+/// committed rule lets nobody in: `assets`, or with `in_owner` the asset's
+/// own folder, where the rule sits beside the asset.
+fn drawing_with_asset(in_owner: bool) -> (Fixture, String) {
     let mut f = Fixture::local();
-    f.put("assets/access.yaml", NOBODY);
+    if !in_owner {
+        f.put("assets/access.yaml", NOBODY);
+    }
     f.put(
         DRAWING,
         r#"{"type":"excalidraw","elements":[],"appState":{},"files":{}}"#,
     );
     f.settle();
-    f.capture_ok(&["assets/access.yaml", DRAWING]);
+    if in_owner {
+        f.capture_ok(&[DRAWING]);
+    } else {
+        f.capture_ok(&["assets/access.yaml", DRAWING]);
+    }
     f.supervisor.close(&f.db).expect("close");
     let drawing: String = rusqlite::Connection::open(&f.db)
         .unwrap()
@@ -2193,6 +2206,16 @@ fn drawing_with_ruled_asset() -> Fixture {
     let bytes = b"asset bytes".to_vec();
     let path = scene_asset_ref(WS, "main", &drawing, &hex_sha256(&bytes), "image/png")
         .expect("asset path");
+    let folder = if in_owner {
+        let owner = path.rsplit_once('/').expect("owner folder").0.to_owned();
+        let rule = format!("{owner}/access.yaml");
+        f.put(&rule, NOBODY);
+        f.settle();
+        f.capture_ok(&[&rule]);
+        owner
+    } else {
+        "assets".to_owned()
+    };
     f.runtime
         .block_on(f.actor.versioned_binary_write(
             WriteBinary {
@@ -2215,7 +2238,7 @@ fn drawing_with_ruled_asset() -> Fixture {
             CancellationToken::new(),
         ))
         .expect("write the asset");
-    f
+    (f, folder)
 }
 
 /// A drawing's assets sit under `assets/excalidraw/`, outside the drawing's
@@ -2266,6 +2289,58 @@ fn a_rule_over_a_drawings_assets_holds_its_delete_and_rollback() {
                 true,
                 true,
                 vec![("assets".to_owned(), "widened".to_owned())],
+            )
+        {
+            wrong.push(format!("{name}: {result:?} {state:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// Deleting a drawing deletes only its own assets, never a rule beside them.
+/// A rule in the asset folder, widened outside dohc, stays held through the
+/// delete, and the delete records nothing.
+#[test]
+fn a_rule_beside_a_drawings_assets_stays_held_through_its_delete() {
+    type Step = fn(&Fixture) -> Result<(), RuntimeError>;
+    let cases: [(&str, Step, Step); 2] = [
+        (
+            "delete",
+            |_| Ok(()),
+            |f| f.versioned_delete(delete(DRAWING, "d-drawing")),
+        ),
+        (
+            "capture retire",
+            |f| {
+                std::fs::remove_file(f.root().join(DRAWING)).expect("remove the drawing");
+                Ok(())
+            },
+            |f| f.retire(DRAWING),
+        ),
+    ];
+    // Every case runs, so one failure shows them all.
+    let mut wrong = Vec::new();
+    for (name, prepare, writer) in cases {
+        let (f, folder) = drawing_with_asset(true);
+        prepare(&f).unwrap_or_else(|error| panic!("{name} setup: {error}"));
+        let rule = format!("{folder}/access.yaml");
+        f.put(&rule, EDIT);
+        f.settle();
+        let before = f.moments();
+        let result = writer(&f);
+        // Held, nothing recorded, the hold, the widened rule on disk.
+        let state = (
+            held(&result, &folder),
+            f.moments() == before,
+            f.holds(),
+            std::fs::read_to_string(f.root().join(&rule)).ok(),
+        );
+        if state
+            != (
+                true,
+                true,
+                vec![(folder.clone(), "widened".to_owned())],
+                Some(EDIT.to_owned()),
             )
         {
             wrong.push(format!("{name}: {result:?} {state:?}"));

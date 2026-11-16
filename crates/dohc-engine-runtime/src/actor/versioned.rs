@@ -3410,9 +3410,9 @@ fn rollback_changes(
     Ok(changes)
 }
 
-/// The assets a delete of the drawing at `path` deletes with it: every file
-/// recorded under the drawing's asset folders. A file that is not a drawing,
-/// by the test [`delete_owned_scene_assets_in_tx`] applies, has none.
+/// The assets a delete of the drawing at `path` deletes with it, chosen as
+/// [`delete_owned_scene_assets_in_tx`] chooses them. A file that is not a
+/// drawing, by the test it applies, has none.
 pub(super) fn scene_asset_paths(
     store: &EngineStore,
     workspace_id: &str,
@@ -3436,25 +3436,9 @@ pub(super) fn scene_asset_paths(
             return Ok(Vec::new());
         };
         let key = DocKey::new(workspace_id, version_id, &object)?;
-        let mut paths = Vec::new();
-        let mut under = conn
-            .prepare_cached(
-                "SELECT path FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 \
-                 AND path GLOB ?3",
-            )
-            .map_err(StorageError::corrupt_public)?;
-        for (_, folder) in dohc_engine_collab::scene_asset_owner_scopes(conn, &key)? {
-            for asset in under
-                .query_map(
-                    params![workspace_id, version_id, format!("{folder}/*")],
-                    |row| row.get(0),
-                )
-                .map_err(StorageError::corrupt_public)?
-            {
-                paths.push(asset.map_err(StorageError::corrupt_public)?);
-            }
-        }
-        Ok(paths)
+        Ok(dohc_engine_collab::scene_asset_delete_candidates(
+            conn, &key,
+        )?)
     })
 }
 
