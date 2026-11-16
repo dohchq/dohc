@@ -37,6 +37,8 @@ export interface KeptDisk {
   locked: boolean;
   /** Every write statement finds a damaged page, as SQLite reports one. */
   damaged: boolean;
+  /** Fails this many TRUNCATE checkpoints, as a failed flush does. */
+  failCheckpoints: number;
   /** Settings this disk's SQLite lacks: setting one does nothing, and reading it back gives no row. */
   readonly ignored: Set<string>;
   /** Holds every COMMIT until the returned function runs or the app crashes. */
@@ -112,6 +114,10 @@ export function keptDisk(): KeptDisk {
         call(() => {
           // SQLite answers a setting its build lacks with no row.
           if (disk.ignored.has(/^PRAGMA (\w+)$/.exec(source)?.[1] ?? "")) return [];
+          if (/wal_checkpoint/.test(source) && disk.failCheckpoints > 0) {
+            disk.failCheckpoints -= 1;
+            throw ioError();
+          }
           write(source);
           return database.prepare(source).all(...params);
         }),
@@ -129,6 +135,7 @@ export function keptDisk(): KeptDisk {
     failCommits: null,
     locked: false,
     damaged: false,
+    failCheckpoints: 0,
     ignored: new Set(),
     holdCommits() {
       let done!: () => void;

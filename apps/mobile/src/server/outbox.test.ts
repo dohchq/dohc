@@ -1667,6 +1667,29 @@ describe("Sign out on disk", () => {
     expect(onFile()).toBe(false);
     stop();
   });
+
+  it("fails Sign out while the WAL still holds the deleted text, and Try again empties it", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", path("post"), PENDING);
+    const { outbox, account, stop, wait } = launch(disk, server);
+    await ready(outbox);
+    const body = "Private words 4b8e21";
+    await outbox.enqueue({ workspaceId: "ws-1", write: post(body) });
+    await vi.waitFor(() => expect(wait.pending).toHaveLength(1));
+    const onFile = () =>
+      [disk.path, `${disk.path}-wal`]
+        .filter((file) => existsSync(file))
+        .some((file) => readFileSync(file).includes(body));
+    disk.failCheckpoints = 1;
+    await expect(account.signOut()).rejects.toEqual(new OutboxError("not-deleted"));
+    expect(records(disk)).toEqual([]);
+    expect(onFile()).toBe(true);
+    await vi.waitFor(() => expect(outbox.state().deletion).toBe("failed"));
+    await account.signOut();
+    expect(onFile()).toBe(false);
+    stop();
+  });
 });
 
 describe("with sending off", () => {

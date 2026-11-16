@@ -665,7 +665,11 @@ export function createOutbox(options: {
     running.set(sequence, own);
     const at = epoch;
     const live = () =>
-      !own.signal.aborted && epoch === at && session === signIn && signIn.isCurrent();
+      !own.signal.aborted &&
+      epoch === at &&
+      session === signIn &&
+      signIn.isCurrent() &&
+      status !== "damaged";
     let failures = 0;
     let notFound = 0;
     /**
@@ -1145,8 +1149,8 @@ export function createOutbox(options: {
               account.userId,
             ]),
           );
-          // The WAL's older frames still hold the deleted text. A failure here leaves it for the next open's checkpoint.
-          await store.checkpoint().catch(() => undefined);
+          // The WAL's older frames still hold the deleted text, so Sign out fails until the checkpoint empties it.
+          await store.checkpoint();
         }
       }).then(
         async () => {

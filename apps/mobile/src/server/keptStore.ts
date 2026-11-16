@@ -157,9 +157,11 @@ export function createKeptStore(file: {
     checkpoint: () =>
       serial(async () => {
         const open = await connect();
-        await open.all(CHECKPOINT, []).catch((error: unknown) => {
+        const [row] = await open.all(CHECKPOINT, []).catch((error: unknown) => {
           throw classify(error);
         });
+        // SQLite reports a checkpoint it couldn't finish in its answer, not as an error.
+        if (row?.busy !== 0) throw new StoreError("failed", "kept.db's WAL wasn't emptied.");
       }),
 
     destroy: () =>
