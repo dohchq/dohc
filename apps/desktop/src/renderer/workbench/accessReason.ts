@@ -31,6 +31,8 @@ export type AccessContext = {
   membershipLevel?: "view" | "comment" | "edit";
   // The joined workspace's membership ended.
   membershipEnded?: boolean;
+  // Your display name, for your avatar's letter where a row reads "You".
+  ownName?: string;
 };
 
 export function serverName(server: string): string {

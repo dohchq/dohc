@@ -1406,7 +1406,7 @@ function grantedCount(answer: AccessAnswer, people = 0): string {
   return `${active}${answer.nextCursor ? "+" : ""}`;
 }
 
-function AccessRowView(props: { row: AccessRow }) {
+function AccessRowView(props: { row: AccessRow; ownName?: string }) {
   const { row } = props;
   if (row.kind === "collection") {
     return (
@@ -1446,9 +1446,10 @@ function AccessRowView(props: { row: AccessRow }) {
       {row.via === "link" ? (
         <LinkMark />
       ) : (
+        // Your own row reads "You", and its avatar takes your name's letter.
         <ChatAvatar
           presentation={row.via === "received" ? ownPresentation : neutralPresentation}
-          name={who}
+          name={row.via === "received" && props.ownName ? props.ownName : who}
           kind="human"
           size="strip"
         />
@@ -1821,6 +1822,7 @@ export function AboutAccess(props: {
       onMore={(answer) => void load({ after: answer })}
       setup={setup}
       noun={noun}
+      {...(props.context.ownName ? { ownName: props.context.ownName } : {})}
       {...(sharePath !== null && share ? { onShare: () => share(sharePath) } : {})}
     />
   );
@@ -1973,6 +1975,8 @@ export function AboutAccessView(props: {
   onShare?: () => void;
   // The workspace's people, in place of the answer's membership rows.
   people?: WorkspaceMembersView;
+  // Your display name, for your own row's avatar.
+  ownName?: string;
 }) {
   const { people } = props;
   const view: AccessView =
@@ -2066,7 +2070,10 @@ export function AboutAccessView(props: {
                             : row.principal
                         }
                       >
-                        <AccessRowView row={row} />
+                        <AccessRowView
+                          row={row}
+                          {...(props.ownName ? { ownName: props.ownName } : {})}
+                        />
                       </li>
                     ))}
                   </ul>

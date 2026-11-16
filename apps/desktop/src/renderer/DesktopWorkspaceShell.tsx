@@ -1795,6 +1795,8 @@ export function DesktopWorkspaceShell(props: {
     setShareTarget({ kind: "paths", paths: [path] });
   }, []);
   const sharing = shareTarget !== null;
+  // The name you chose in Settings, or else your account's email.
+  const ownName = props.userSettings?.profile.preferredName || cloudStatus?.email || undefined;
   const accessContext = useMemo<AccessContext>(
     () => ({
       facts: {
@@ -1815,6 +1817,7 @@ export function DesktopWorkspaceShell(props: {
       connect: openCloud,
       share: onSharePath,
       sharing,
+      ...(ownName ? { ownName } : {}),
     }),
     [
       cloudConnected,
@@ -1826,6 +1829,7 @@ export function DesktopWorkspaceShell(props: {
       onSharePath,
       openCloud,
       openSettings,
+      ownName,
       sharing,
     ],
   );
@@ -8667,7 +8671,12 @@ export function DesktopWorkspaceShell(props: {
                                       // The lists name this workspace's own notes, never a received share's.
                                       levelMark={
                                         membershipView
-                                          ? levelMark(shareAccess, shareViewEnded, shareSenderShort, otherAccountApplies)
+                                          ? levelMark(
+                                              shareAccess,
+                                              shareViewEnded,
+                                              shareSenderShort,
+                                              otherAccountApplies,
+                                            )
                                           : null
                                       }
                                       liveEditingPaused={

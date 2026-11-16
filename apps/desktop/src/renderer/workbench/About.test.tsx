@@ -137,6 +137,7 @@ function Access(props: {
   sharing?: boolean;
   membershipLevel?: "view" | "comment" | "edit";
   membershipEnded?: boolean;
+  ownName?: string;
 }) {
   const [open, setOpen] = useState(props.open ?? true);
   return (
@@ -151,6 +152,7 @@ function Access(props: {
         sharing: props.sharing ?? false,
         ...(props.membershipLevel ? { membershipLevel: props.membershipLevel } : {}),
         ...(props.membershipEnded ? { membershipEnded: true } : {}),
+        ...(props.ownName ? { ownName: props.ownName } : {}),
       }}
     />
   );
@@ -327,6 +329,30 @@ describe("About Access", () => {
     ]);
     expect(screen.queryByTestId("about-access-empty")).toBeNull();
     expect(screen.queryByText("Only you")).toBeNull();
+  });
+
+  // Your own row reads "You", and its avatar takes the letter of your name, not of "You".
+  it("marks your own row with your name's letter", async () => {
+    bridgeMock.getObjectAccess.mockResolvedValue(
+      answer({
+        unknownReason: null,
+        coverage: { kind: "received-own-grant", complete: true, observation: "interval" },
+        rows: [
+          share({
+            via: "received",
+            sharerName: "Sam",
+            subjectName: "Community",
+            access: "comment",
+            selector: { kind: "workspace", role: "member" },
+          }),
+        ],
+      }),
+    );
+    render(<Access ownName="ana" />);
+    const row = await screen.findByTestId("about-access-row");
+    const avatar = row.querySelector<HTMLElement>("span[aria-hidden]")!;
+    expect(avatar.textContent).toBe("A");
+    expect(row.textContent).toBe("AYouCan comment");
   });
 
   it("tells a cause it cannot name apart from no access, and checks again on Try again", async () => {
@@ -647,10 +673,14 @@ describe("About Links", () => {
   // one replaced still fills the lists while they show nothing, so they never
   // stay loading while answers arrive.
   it("shows a replaced first read's rows while nothing is shown, until the newer read lands", async () => {
-    const first = deferred<LinksPage>(), second = deferred<LinksPage>();
-    const firstChats = deferred<NonNullable<ChatFileMentionsPage>>(), secondChats = deferred<NonNullable<ChatFileMentionsPage>>();
+    const first = deferred<LinksPage>(),
+      second = deferred<LinksPage>();
+    const firstChats = deferred<NonNullable<ChatFileMentionsPage>>(),
+      secondChats = deferred<NonNullable<ChatFileMentionsPage>>();
     bridgeMock.linksIn.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-    bridgeMock.chatFileMentionsPage.mockReturnValueOnce(firstChats.promise).mockReturnValueOnce(secondChats.promise);
+    bridgeMock.chatFileMentionsPage
+      .mockReturnValueOnce(firstChats.promise)
+      .mockReturnValueOnce(secondChats.promise);
     const view = render(<Links chats revision={0} />);
     await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(1));
     view.rerender(<Links chats revision={1} />);
@@ -673,7 +703,8 @@ describe("About Links", () => {
   });
 
   it("keeps the newer read's rows when a replaced read answers after it", async () => {
-    const first = deferred<LinksPage>(), second = deferred<LinksPage>();
+    const first = deferred<LinksPage>(),
+      second = deferred<LinksPage>();
     bridgeMock.linksIn.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
     const view = render(<Links revision={0} />);
     await waitFor(() => expect(bridgeMock.linksIn).toHaveBeenCalledTimes(1));
