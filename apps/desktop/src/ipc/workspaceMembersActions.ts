@@ -3,7 +3,7 @@ import { MembersResult, type MembersRequest } from "@dohc/cli/members";
 import { createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { recordedShareSelector } from "../workspaces/shareViewRecords";
-import { relayUrlsMatch } from "../workspaces/syncCode";
+import { joinedByAccount } from "../workspaces/shareWriteGate";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "./joinedAccountWords";
 
 type MembersWorkspace = { workspaceId: string; rootPath: string; shareView?: unknown };
@@ -22,19 +22,6 @@ interface MembersDependencies<Workspace, Credentials> {
   relayResponse(credentials: Credentials, path: string, init: RequestInit): Promise<Response>;
   /** The relay accepted a change, so this computer's grant listings refresh now. */
   sharesChanged(workspaceId: string): void;
-}
-
-/** Whether these credentials are the account that joined this workspace, on the relay it joined through. */
-export function joinedByAccount(
-  view: { relayUrl?: string; recipientUserId?: string } | undefined,
-  credentials: { userId: string; relayUrl?: string } | null | undefined,
-): boolean {
-  return (
-    !!credentials?.relayUrl &&
-    !!view?.relayUrl &&
-    relayUrlsMatch(credentials.relayUrl, view.relayUrl) &&
-    view.recipientUserId === credentials.userId
-  );
 }
 
 export const MEMBERS_UNREACHABLE =
@@ -335,7 +322,7 @@ export function createJoinedWorkspaceGroupAction<
     input: JoinedWorkspaceGroupInput,
   ): Promise<{ channelWireId: string }> {
     const credentials = await dependencies.credentials();
-    if (!view?.shareId || !credentials || !joinedByAccount(view, credentials))
+    if (!view?.shareId || !joinedByAccount(view, credentials))
       throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
     let response: Response;
     try {

@@ -42,6 +42,7 @@ import {
 } from "../workspaces/shareViewRecords";
 import { waitForReceivedShareCaptureReady } from "../workspaces/receivedShareCaptureReady";
 import { workspaceSummaryFor } from "../workspaces/workspaceSummaryProjection";
+import { joinedByAccount } from "../workspaces/shareWriteGate";
 import type { CloudCredentials } from "../workspaces/cloudCredentialStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
@@ -444,18 +445,11 @@ export function registerSharedViewsIpcHandlers<
     credentialGeneration: number,
     share: { recipientUserId?: string; relayUrl?: string } | undefined,
   ) {
-    const isCurrent = () => {
-      const credentials = currentCredentials();
-      return (
-        session.isCurrent() &&
-        !retirement.aborted &&
-        dependencies.currentCredentialGeneration() === credentialGeneration &&
-        !!credentials?.relayUrl &&
-        share?.recipientUserId === credentials.userId &&
-        !!share.relayUrl &&
-        relayUrlsMatch(credentials.relayUrl, share.relayUrl)
-      );
-    };
+    const isCurrent = () =>
+      session.isCurrent() &&
+      !retirement.aborted &&
+      dependencies.currentCredentialGeneration() === credentialGeneration &&
+      joinedByAccount(share, currentCredentials());
     if (!isCurrent()) return;
     void dependencies.syncNotices(isCurrent);
   }
@@ -616,14 +610,24 @@ export function registerSharedViewsIpcHandlers<
         }
       }
     } else {
-      // Another account's refresh would capture disk edits into this share
-      // under the wrong session. Signed out, the local refresh still runs.
+      // Signed in as another account, a refresh asks the relay nothing and
+      // says why. Signed out, the local refresh still runs.
       const view = requireWorkspace(input.workspaceId).shareView;
       const credentials = currentCredentials();
-      if (view && !view.ended && credentials && shareViewIdentityIsIntact(view) &&
-        (!view.relayUrl || !credentials.relayUrl || credentials.userId !== view.recipientUserId ||
-          !relayUrlsMatch(credentials.relayUrl, view.relayUrl))) {
-        return { ok: false, probed: true, changedPaths: 0, errorKind: "unauthorized", errorMessage: "Sign in to the account that received this share." };
+      if (
+        view &&
+        !view.ended &&
+        credentials &&
+        shareViewIdentityIsIntact(view) &&
+        !joinedByAccount(view, credentials)
+      ) {
+        return {
+          ok: false,
+          probed: true,
+          changedPaths: 0,
+          errorKind: "unauthorized",
+          errorMessage: "Sign in to the account that received this share.",
+        };
       }
     }
     clearCache(event.sender);
@@ -927,14 +931,7 @@ export function registerSharedViewsIpcHandlers<
               if (!view || !pin) return { status: "unverified" };
               if (!shareViewIdentityIsIntact(view)) return { status: "needs-reopen" };
               if (view.ended) return { status: "ended" };
-              if (
-                !credentials?.relayUrl ||
-                !view.relayUrl ||
-                !relayUrlsMatch(credentials.relayUrl, view.relayUrl) ||
-                view.recipientUserId !== credentials.userId
-              ) {
-                return { status: "unverified" };
-              }
+              if (!joinedByAccount(view, credentials)) return { status: "unverified" };
               let stated;
               try {
                 stated = await dependencies.fetchShareViewAccess({

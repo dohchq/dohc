@@ -31,8 +31,6 @@ export interface ExplorerMenuScope {
   shareView: ShareViewWriteScope | null;
   // A joined workspace's role, as the relay last named it to main.
   memberRole?: "admin" | "member";
-  // A joined workspace while another account than the one that joined is signed in.
-  otherAccount?: boolean;
 }
 
 // Each platform's own name for its file manager, as its own apps word the
@@ -70,7 +68,7 @@ export function explorerMenuEntries(
     write: canWrite,
     folder: canCreateFolder,
     collection: canCreateCollection,
-  } = workspaceCreateOffers(scope.shareView, scope.memberRole, scope.otherAccount);
+  } = workspaceCreateOffers(scope.shareView, scope.memberRole);
 
   // A selection: only what acts on every row, with the count.
   if (scope.count !== undefined && scope.kind !== "root") {

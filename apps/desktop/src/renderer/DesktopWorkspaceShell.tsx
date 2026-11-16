@@ -174,7 +174,7 @@ import {
 import { importSkipLines } from "./shell/importSkips";
 import { errorDetails, type ErrorDetailField } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
-import { workspaceCreateOffers } from "../workspaces/shareWriteGate";
+import { workspaceCreateOffers, type ShareViewWriter } from "../workspaces/shareWriteGate";
 import { CopyButton } from "./ui/CopyButton";
 import {
   TitlebarUpdateButton,
@@ -2515,6 +2515,15 @@ export function DesktopWorkspaceShell(props: {
   // same cause file that row instead of their own.
   const otherAccountApplies =
     membershipView && !shareViewEnded && cloudStatus?.connected === true && otherAccount;
+  // Who is signed in, for the write gate's create offers, as main reads it.
+  const shareViewWriter: ShareViewWriter | undefined =
+    membershipView && !shareViewEnded
+      ? otherAccountApplies
+        ? "other"
+        : cloudStatus?.connected === true
+          ? "joined"
+          : "signed-out"
+      : undefined;
   // The level belongs to the account that joined, so while another is signed
   // in every editor and create is read-only, as main refuses the write.
   const shareViewWritable = shareLevelWritable && !otherAccountApplies;
@@ -6455,10 +6464,10 @@ export function DesktopWorkspaceShell(props: {
             access: shareViewDamaged ? null : (shareAccess ?? null),
             ended: shareViewEnded,
             membership: membershipView,
+            ...(shareViewWriter ? { writer: shareViewWriter } : {}),
           }
         : null,
       ...(membershipRole ? { memberRole: membershipRole } : {}),
-      ...(otherAccountApplies ? { otherAccount: true } : {}),
       activeDocumentKind: activeDocumentPath
         ? fileKindForPath(activeDocumentPath).displayKind
         : null,
@@ -6473,7 +6482,7 @@ export function DesktopWorkspaceShell(props: {
       shareViewEnded,
       membershipView,
       membershipRole,
-      otherAccountApplies,
+      shareViewWriter,
       activeDocumentPath,
       activeSharePath,
       pinnedApps,
@@ -7415,7 +7424,7 @@ export function DesktopWorkspaceShell(props: {
   const graphKey = shareView ? graphRefreshKey : `${graphRefreshKey}\0${latestMomentOrder}`;
 
   const joinedWorkspaceOffers = commandContext.shareView
-    ? workspaceCreateOffers(commandContext.shareView, membershipRole, commandContext.otherAccount)
+    ? workspaceCreateOffers(commandContext.shareView, membershipRole)
     : null;
   const joinedWorkspaceCreates = useMemo(
     () => ({

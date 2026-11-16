@@ -14,20 +14,12 @@ export function createExplorerMenuIpc<
 >(dependencies: {
   sharedViewOf(workspaceId: string): ExplorerMenuScope["shareView"];
   memberRoleOf(workspaceId: string): ExplorerMenuScope["memberRole"];
-  // A joined workspace while another account is signed in, as the title bar's sync mark says.
-  otherAccountOf(workspaceId: string): boolean;
   ensureOwnedProjectionCurrent(workspace: Workspace, path: string): Promise<void>;
   shell: { showItemInFolder(path: string): void };
   platform: string;
 }) {
-  const {
-    sharedViewOf,
-    memberRoleOf,
-    otherAccountOf,
-    ensureOwnedProjectionCurrent,
-    shell,
-    platform,
-  } = dependencies;
+  const { sharedViewOf, memberRoleOf, ensureOwnedProjectionCurrent, shell, platform } =
+    dependencies;
   return {
     // The scope is read from main's own records: the share view this
     // workspace is, its role, its mounts, and whether it syncs. The renderer
@@ -56,7 +48,6 @@ export function createExplorerMenuIpc<
           canShare: shareView === null && !isMountPath && input.kind !== "root",
           shareView,
           ...(memberRole ? { memberRole } : {}),
-          ...(otherAccountOf(workspace.workspaceId) ? { otherAccount: true } : {}),
         },
         platform,
       );

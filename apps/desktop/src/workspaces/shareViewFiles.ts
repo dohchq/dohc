@@ -60,9 +60,12 @@ import {
   type UnjournalablePath,
 } from "./shareViewRecords";
 import { SHARE_VIEW_REOPEN_MESSAGE, shareViewIdentityIsIntact } from "./shareViewMarker";
-import { shareViewTakesLocalWrites } from "./shareWriteGate";
-import { joinedByAccount } from "../ipc/workspaceMembersActions";
-import { JOINED_BY_ANOTHER_ACCOUNT, SESSION_CHANGED } from "../ipc/joinedAccountWords";
+import {
+  shareViewTakesLocalWrites,
+  shareViewWriterOf,
+  type ShareViewWriter,
+} from "./shareWriteGate";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import type { CredentialSessionCache } from "./credentialSessionCache";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
 import { resolveEngineFileTargets } from "./resolveEngineFiles";
@@ -262,45 +265,30 @@ export interface ShareViewAccount {
   relayUrl?: string;
 }
 
-/** Main's credential session at one moment. */
-export interface ShareViewAccountSession {
-  account: ShareViewAccount | null;
-  /** Changes with every credential change, a clear included. */
-  generation: number;
-  /** A sign-in is replacing the credentials, so a null account is not a sign-out. */
-  changing: boolean;
-}
-
 export type ShareViewSignedInAccount = ShareViewFilesDependencies["signedInAccount"];
 
 /** The signed-in account as main's credential cache holds it, for ShareViewFiles. */
 export function signedInAccountFrom(
-  cache: Pick<CredentialSessionCache<ShareViewAccount>, "snapshot" | "changing" | "changeSettled">,
+  cache: Pick<CredentialSessionCache<ShareViewAccount>, "snapshot">,
   warm: () => Promise<unknown>,
 ): ShareViewSignedInAccount {
   return {
     settle: async () => {
-      await cache.changeSettled();
       await warm();
     },
-    current: () => {
-      const { credentials, generation } = cache.snapshot();
-      return { account: credentials, generation, changing: cache.changing };
-    },
+    current: () => cache.snapshot().credentials,
   };
 }
 
 export interface ShareViewFilesDependencies {
   /**
-   * The credential session now. A joined workspace takes changes only from
-   * the account that joined, so a change or capture asks before it starts and
-   * again before each store write. `settle` waits for the credential cache
-   * and for a sign-in replacing it, so neither a load's passing null nor a
-   * sign-in's cleared interim admits a change.
+   * The account signed in now, or null. A joined workspace's change asks the
+   * write gate with it when it starts and again when it commits. `settle`
+   * waits for the credential cache, so a load's passing null admits nothing.
    */
   signedInAccount: {
     settle(): Promise<void>;
-    current(): ShareViewAccountSession;
+    current(): ShareViewAccount | null;
   };
   stateFor?(target: ResolvedShareViewFilesTarget): ShareViewFilesState;
   /** Synchronous and registry-derived. It is called again after lifecycle wait. */
@@ -431,7 +419,7 @@ function assertActiveTarget(
   }
 }
 
-function writableSelector(target: ActiveShareViewFilesTarget) {
+function writableSelector(target: ActiveShareViewFilesTarget, writer: ShareViewWriter | undefined) {
   const selector = recordedShareSelector(target.grantedSelector);
   if (selector === null) throw new SharePinInvalidError(target.shareId);
   if (target.kind === "standalone" && !shareViewIdentityIsIntact(target)) {
@@ -442,8 +430,10 @@ function writableSelector(target: ActiveShareViewFilesTarget) {
     !shareViewTakesLocalWrites({
       access: selector.access,
       ended: target.ended,
+      writer,
     })
   ) {
+    if (writer === "other") throw new SharedFileReadOnlyError(JOINED_BY_ANOTHER_ACCOUNT);
     const granter = target.granterEmail ?? "the person who shared it";
     throw new SharedFileReadOnlyError(
       `This shared view is read-only for you. Ask ${granter} for changes.`,
@@ -458,38 +448,6 @@ function joinedWorkspace(target: ActiveShareViewFilesTarget): boolean {
     !target.ended &&
     recordedShareSelector(target.grantedSelector)?.wholeWorkspace === true
   );
-}
-
-// A joined workspace's level belongs to the account that joined, so another
-// account signed in changes nothing, as the renderer's other-account state
-// shows. Signed out, a change stays on this computer until that account is
-// back, as the renderer offers. A change is admitted for one session, and a
-// session that changes before a write refuses it, so nothing admitted for one
-// account lands under another.
-function assertJoinedAccount(
-  target: ActiveShareViewFilesTarget,
-  session: ShareViewAccountSession,
-  admittedGeneration: number,
-): void {
-  const joined = {
-    ...(target.relayUrl ? { relayUrl: target.relayUrl } : {}),
-    ...(target.recipientUserId ? { recipientUserId: target.recipientUserId } : {}),
-  };
-  if (session.account !== null && !joinedByAccount(joined, session.account)) {
-    throw new SharedFileReadOnlyError(JOINED_BY_ANOTHER_ACCOUNT);
-  }
-  if (session.changing || session.generation !== admittedGeneration) {
-    throw new SharedFileReadOnlyError(SESSION_CHANGED);
-  }
-}
-
-function admits(assertAdmitted: () => void): boolean {
-  try {
-    assertAdmitted();
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function assertPathWithinGrant(
@@ -808,7 +766,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
     change: ShareViewFileChange,
     selector: NonNullable<ReturnType<typeof recordedShareSelector>>,
     owner: ShareViewFilesOwnerCapability,
-    // Asked again before each commit: an await can pass while the account changes.
+    // Asked again when the change commits: an await can pass while another account signs in.
     assertAdmitted: () => void,
   ): Promise<ShareViewFileChangeOutcome> {
     const lifecycle = createShareViewLifecycle(owner);
@@ -823,24 +781,17 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
     const store = dependencies.openStore(target);
     const divergenceScopes = localDivergenceScopes(change);
     if (target.kind === "standalone" && divergenceScopes.length > 0) {
-      const captured = await lifecycle
-        .captureStandalone({
-          rootDir: target.rootPath,
-          workspaceId: target.storeWorkspaceId,
-          store,
-          pinnedSelector: target.grantedSelector,
-          shareId: target.shareId,
-          ended: target.ended,
-          paths: divergenceScopes,
-          preservedPaths: target.unsavedPaths,
-          workspaceLease: lease,
-          assertWriteAdmitted: assertAdmitted,
-        })
-        .catch((error: unknown) => {
-          // A capture a changed session stopped says that, not how capture failed.
-          assertAdmitted();
-          throw error;
-        });
+      const captured = await lifecycle.captureStandalone({
+        rootDir: target.rootPath,
+        workspaceId: target.storeWorkspaceId,
+        store,
+        pinnedSelector: target.grantedSelector,
+        shareId: target.shareId,
+        ended: target.ended,
+        paths: divergenceScopes,
+        preservedPaths: target.unsavedPaths,
+        workspaceLease: lease,
+      });
       await recordRecoveredPaths(target, captured);
       assertShareChangesJournalable(captured.unjournalablePaths);
       assertHeldSpellingsUnchanged(captured.unjournalablePaths);
@@ -943,15 +894,6 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
     }
   }
 
-  // Fixes the session a joined workspace's change or capture runs under. Any
-  // other target has no account rule.
-  async function joinedAccountAdmission(target: ActiveShareViewFilesTarget): Promise<() => void> {
-    if (!joinedWorkspace(target)) return () => undefined;
-    await dependencies.signedInAccount.settle();
-    const admitted = dependencies.signedInAccount.current().generation;
-    return () => assertJoinedAccount(target, dependencies.signedInAccount.current(), admitted);
-  }
-
   async function withOwnerCapability<T>(
     lease: WorkspaceOperationLease,
     target: ActiveShareViewFilesTarget,
@@ -987,16 +929,6 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
       await dependencies.assertProjectionRoot(target);
     }
     const store = dependencies.openStore(target);
-    // A joined workspace under another account, or while a sign-in replaces
-    // the session, captures and pulls nothing. Its disk edits stay as they
-    // are and are captured once the joined account is back.
-    const assertCaptureAdmitted = await joinedAccountAdmission(target);
-    const captureSkipped = !admits(assertCaptureAdmitted);
-    const skippedCapture: CaptureSharedViewRefreshOutcome = {
-      capturedPaths: 0,
-      repairedPaths: 0,
-      unjournalablePaths: [],
-    };
     const standaloneCaptureInput = () => ({
       rootDir: target.rootPath,
       workspaceId: target.storeWorkspaceId,
@@ -1007,20 +939,17 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
       workspaceLease: lease,
       preservedPaths: target.unsavedPaths,
       bestEffort: target.unsavedPaths === null || (target.unsavedPaths?.length ?? 0) > 0,
-      assertWriteAdmitted: assertCaptureAdmitted,
     });
-    const capture = async () =>
-      captureSkipped
-        ? skippedCapture
-        : target.kind === "standalone"
-          ? lifecycle.captureStandalone(standaloneCaptureInput())
-          : (request === "refresh" ? lifecycle.captureSharedRefresh : lifecycle.captureShared)({
-              rootDir: target.rootPath,
-              workspaceId: target.storeWorkspaceId,
-              store,
-              allowLocalJournaling: false,
-              shareId: target.shareId,
-            });
+    const capture = () =>
+      target.kind === "standalone"
+        ? lifecycle.captureStandalone(standaloneCaptureInput())
+        : (request === "refresh" ? lifecycle.captureSharedRefresh : lifecycle.captureShared)({
+            rootDir: target.rootPath,
+            workspaceId: target.storeWorkspaceId,
+            store,
+            allowLocalJournaling: false,
+            shareId: target.shareId,
+          });
 
     if (request === "settle") {
       if (target.kind !== "standalone") {
@@ -1034,9 +963,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
     }
 
     let recovered: CaptureSharedViewRefreshOutcome;
-    if (captureSkipped) {
-      recovered = skippedCapture;
-    } else if (target.kind === "standalone" && request === "refresh") {
+    if (target.kind === "standalone" && request === "refresh") {
       const captureOutcome = await lifecycle.captureStandaloneRefresh(standaloneCaptureInput());
       if (!captureOutcome.ok) {
         return { kind: "refresh", outcome: captureOutcome };
@@ -1076,8 +1003,6 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
       let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
       if (target.ended) {
         outcome = localOutcome("ended");
-      } else if (captureSkipped) {
-        outcome = localOutcome("unchanged");
       } else {
         const relay = await dependencies.resolveRelay(target);
         if (relay === null) {
@@ -1334,13 +1259,22 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
       return withCurrentTarget(requested, async (target) => {
         assertLease(lease, target);
         assertActiveTarget(target);
-        const selector = writableSelector(target);
-        const assertAdmitted = await joinedAccountAdmission(target);
-        assertAdmitted();
-        return withOwnerCapability(lease, target, (owner) => {
-          assertAdmitted();
-          return applyChange(lease, target, change, selector, owner, assertAdmitted);
-        });
+        // A joined workspace's level belongs to the account that joined, so
+        // the gate hears who is signed in. Signed out, a change stays here
+        // until that account is back.
+        const joined = joinedWorkspace(target);
+        if (joined) await dependencies.signedInAccount.settle();
+        const admitted = () =>
+          writableSelector(
+            target,
+            joined ? shareViewWriterOf(target, dependencies.signedInAccount.current()) : undefined,
+          );
+        const selector = admitted();
+        return withOwnerCapability(lease, target, (owner) =>
+          applyChange(lease, target, change, selector, owner, () => {
+            admitted();
+          }),
+        );
       });
     },
 

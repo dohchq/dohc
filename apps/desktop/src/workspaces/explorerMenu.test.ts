@@ -157,7 +157,7 @@ describe("a joined workspace", () => {
 
   it("offers no create, rename, delete or import while another account is signed in", () => {
     for (const kind of ["root", "folder", "file"] as const) {
-      const offered = commands({ kind, shareView: joined("edit"), memberRole: "admin", otherAccount: true });
+      const offered = commands({ kind, shareView: { ...joined("edit"), writer: "other" }, memberRole: "admin" });
       for (const id of ["new-file", "new-folder", "new-collection", "import-files", "rename", "delete"]) expect(offered).not.toContain(id);
     }
   });

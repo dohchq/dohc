@@ -22,6 +22,7 @@ import {
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
 import { recordedShareSelector } from "./shareViewRecords";
+import { joinedByAccount } from "./shareWriteGate";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
 import { chatFileLinkScope, hasChatFileLink, refuseChatFileLinks } from "./chatFileLinkScope";
@@ -356,10 +357,7 @@ export function createChatWrites(dependencies: {
     });
     // A joined workspace's post reaches the owner only as the account that
     // joined. Without it the post would look sent and never leave.
-    if (
-      workspace.shareView &&
-      (authorUserId === undefined || workspace.shareView.recipientUserId !== authorUserId)
-    ) {
+    if (workspace.shareView && !joinedByAccount(workspace.shareView, credentials)) {
       throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
     }
     if (currentCredentialGeneration() !== generation) throw new Error(SESSION_CHANGED);

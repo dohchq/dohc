@@ -229,14 +229,7 @@ export function shareViewFilesOwner(
       signedInAccount:
         joined && "signedInAccount" in joined
           ? joined.signedInAccount
-          : {
-              settle: async () => undefined,
-              current: () => ({
-                account: joined?.account() ?? null,
-                generation: 0,
-                changing: false,
-              }),
-            },
+          : { settle: async () => undefined, current: joined?.account ?? (() => null) },
       resolveTarget: (candidate) =>
         candidate.kind === requested.kind && candidate.workspaceId === requested.workspaceId
           ? resolved

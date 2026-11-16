@@ -121,7 +121,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
   automationDefinitionsChanged?(workspaceId: string): void;
   /**
    * A joined workspace while another account than the one that joined is
-   * signed in (main's `otherAccountOf`). Asked after the credentials warm.
+   * signed in: the write gate's "other" writer. Asked after the credentials warm.
    */
   joinedByAnotherAccount(workspaceId: string): boolean;
 }) {

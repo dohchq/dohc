@@ -12,8 +12,6 @@ export class CredentialSessionCache<Credentials> {
   private generation = 0;
   // The current load, resolving to why it failed, or null.
   private ready: Promise<{ error: unknown } | null> | null = null;
-  // A sign-in replacing the session, from its clear until its credentials are adopted.
-  private change: Promise<void> | null = null;
 
   // `settled` is false only for the null a load publishes while it reads the
   // store; the load's own answer follows.
@@ -58,30 +56,6 @@ export class CredentialSessionCache<Credentials> {
       this.set(credentials);
     }
     return { current: true, credentials };
-  }
-
-  /**
-   * Marks a sign-in that is replacing the session. Its clear leaves no
-   * credentials while another account's are already saved, so until the
-   * returned release runs, that null is not a sign-out.
-   */
-  holdChange(): () => void {
-    let release!: () => void;
-    const change = new Promise<void>((resolve) => { release = resolve; });
-    this.change = change;
-    return () => {
-      release();
-      if (this.change === change) this.change = null;
-    };
-  }
-
-  get changing(): boolean {
-    return this.change !== null;
-  }
-
-  /** Resolves once no sign-in is replacing the session. */
-  async changeSettled(): Promise<void> {
-    while (this.change) await this.change;
   }
 
   set(credentials: Credentials): void {

@@ -96,9 +96,13 @@ describe("command availability", () => {
   it("offers no creates in a joined workspace while another account is signed in", () => {
     const current = {
       ...context,
-      shareView: { access: "edit" as const, ended: false, membership: true },
+      shareView: {
+        access: "edit" as const,
+        ended: false,
+        membership: true,
+        writer: "other" as const,
+      },
       memberRole: "admin" as const,
-      otherAccount: true,
     };
     expect(CREATE_COMMANDS.filter((id) => isCommandAvailable(id, current))).toEqual([]);
     expect(

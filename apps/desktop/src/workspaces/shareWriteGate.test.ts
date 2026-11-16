@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
+  joinedByAccount,
   SHARE_VIEW_EMPTY_FOLDER_REFUSAL,
   shareViewTakesLocalWrites,
   shareViewWriteScopeOf,
@@ -105,19 +106,43 @@ describe("workspaceCreateOffers in a joined workspace", () => {
     expect(workspaceCreateOffers({ access: "edit", ended: true, membership: true }, "admin").folder).toBe(false);
   });
 
-  it("offers nothing while another account than the one that joined is signed in", () => {
-    expect(workspaceCreateOffers({ access: "edit", ended: false, membership: true }, "admin", true))
-      .toEqual({ write: false, folder: false, collection: false });
-    expect(workspaceCreateOffers(null, undefined, true).write).toBe(true);
-  });
-
   it("keeps a path share at Edit to files and Collections, with no folder", () => {
     expect(workspaceCreateOffers({ access: "edit", ended: false }, "admin")).toEqual({ write: true, folder: false, collection: true });
   });
 
   it("reads a membership from the pinned grant", () => {
     const pinned = { ...marker("edit"), grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true } };
-    expect(shareViewWriteScopeOf(pinned)).toMatchObject({ membership: true });
-    expect(shareViewWriteScopeOf(marker("edit"))).toMatchObject({ membership: false });
+    expect(shareViewWriteScopeOf(pinned, null)).toMatchObject({ membership: true });
+    expect(shareViewWriteScopeOf(marker("edit"), null)).toMatchObject({ membership: false });
+  });
+});
+
+// A joined workspace's level belongs to the account that joined. Signed out, a
+// local change waits for that account, and nothing goes to the relay. Another
+// account gets neither. Each row fails if its writer reads as another.
+describe("the joined-account rule", () => {
+  const joinedView = {
+    ...marker("edit"),
+    recipientUserId: "recipient-a",
+    grantedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+  };
+  const joined = { userId: "recipient-a", relayUrl: "https://relay.test" };
+
+  it.each([
+    ["the account that joined", joined, "joined", true, true],
+    ["another account", { userId: "someone-else", relayUrl: "https://relay.test" }, "other", false, false],
+    ["the same user id on another relay", { userId: "recipient-a", relayUrl: "https://other-relay.test" }, "other", false, false],
+    ["nobody", null, "signed-out", true, false],
+  ] as const)("with %s signed in, takes local writes and relay actions as the writer allows", (_name, credentials, writer, local, relay) => {
+    const scope = shareViewWriteScopeOf(joinedView, credentials)!;
+    expect(scope.writer).toBe(writer);
+    expect(shareViewTakesLocalWrites(scope)).toBe(local);
+    expect(workspaceCreateOffers(scope, "admin")).toEqual({ write: local, folder: local, collection: local });
+    expect(joinedByAccount(joinedView, credentials)).toBe(relay);
+  });
+
+  it("names no writer for a path share or an ended membership", () => {
+    expect(shareViewWriteScopeOf({ ...marker("edit"), recipientUserId: "recipient-a" }, joined)?.writer).toBeUndefined();
+    expect(shareViewWriteScopeOf({ ...joinedView, ended: true }, joined)?.writer).toBeUndefined();
   });
 });

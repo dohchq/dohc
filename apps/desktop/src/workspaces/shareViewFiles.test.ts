@@ -322,7 +322,7 @@ const unusedReconcilePorts: Pick<
   | "removeMount"
   | "signedInAccount"
 > = {
-  signedInAccount: { settle: async () => undefined, current: () => ({ account: null, generation: 0, changing: false }) },
+  signedInAccount: { settle: async () => undefined, current: () => null },
   resolveRelay: async () => null,
   pull: async () => {
     throw new Error("Unexpected pull");

@@ -1,6 +1,6 @@
 import { withWorkspaceSyncTransition } from "../workspaces/stopWorkspaceSync";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
-import { joinedByAccount } from "./workspaceMembersActions";
+import { joinedByAccount } from "../workspaces/shareWriteGate";
 import { ownActorPresentation } from "../workspaces/actorPresentation";
 import { CHANNELS } from "./channels";
 import { registerOperations } from "./operationTable";
@@ -63,7 +63,6 @@ export function registerCloudIpcHandlers<
   registerHandler(channel: string, handler: (event: Event, payload: unknown) => unknown): void;
   assertTrustedSender(event: Event): void;
   cloudLogin(): Pick<CloudLogin, "start" | "poll" | "status" | "logout" | "credentials">;
-  holdCredentialSessionChange(): () => void;
   clearCachedCredentials(): void;
   refreshCredentialCache(): Promise<void>;
   warmCredentialCache(): Promise<void>;
@@ -135,7 +134,6 @@ export function registerCloudIpcHandlers<
     registerHandler,
     assertTrustedSender,
     cloudLogin,
-    holdCredentialSessionChange,
     clearCachedCredentials,
     refreshCredentialCache,
     warmCredentialCache,
@@ -197,7 +195,6 @@ export function registerCloudIpcHandlers<
       // credential snapshot instead of letting an existing engine keep the
       // previous token.
       await adoptCompletedCloudLoginSession({
-        holdSessionChange: () => holdCredentialSessionChange(),
         clearCachedCredentials: () => clearCachedCredentials(),
         stopEngines: async () => await activity.stopEngines(),
         closeRelayTransportWorkspaces: async () =>

@@ -1,5 +1,6 @@
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { isRecord } from "@dohc/workspace-core/records";
+import { relayUrlsMatch } from "@dohc/workspace-contracts/relay-values";
 import {
   readableShareLevel,
   shareViewGranterEmail,
@@ -34,6 +35,43 @@ export interface ShareViewWriteScope {
   ended: boolean;
   // The pinned grant is the whole workspace: a joined workspace.
   membership?: boolean;
+  // Who is signed in, for a joined workspace that has not ended. Absent for
+  // any other share view, which has no account rule.
+  writer?: ShareViewWriter;
+}
+
+/**
+ * Who is signed in, against the account that joined a workspace. Its level
+ * belongs to that account, so "other" takes no local write and sends nothing.
+ * Signed out, a local change waits until that account is back, while a relay
+ * action has no account to go as. Three values, so neither door can borrow
+ * the other's answer.
+ */
+export type ShareViewWriter = "joined" | "other" | "signed-out";
+
+/**
+ * Whether these credentials are the account that received this share, on the
+ * relay it came through. A relay-bound door asks this before it sends.
+ */
+export function joinedByAccount<Credentials extends { userId: string; relayUrl?: string }>(
+  view: { relayUrl?: unknown; recipientUserId?: unknown } | null | undefined,
+  credentials: Credentials | null | undefined,
+): credentials is Credentials & { relayUrl: string } {
+  return (
+    !!credentials?.relayUrl &&
+    typeof view?.relayUrl === "string" &&
+    !!view.relayUrl &&
+    relayUrlsMatch(credentials.relayUrl, view.relayUrl) &&
+    view.recipientUserId === credentials.userId
+  );
+}
+
+export function shareViewWriterOf(
+  view: { relayUrl?: unknown; recipientUserId?: unknown },
+  credentials: { userId: string; relayUrl?: string } | null,
+): ShareViewWriter {
+  if (credentials === null) return "signed-out";
+  return joinedByAccount(view, credentials) ? "joined" : "other";
 }
 
 export const SHARE_VIEW_EMPTY_FOLDER_REFUSAL =
@@ -52,7 +90,7 @@ export const SHARE_VIEW_EMPTY_FOLDER_REFUSAL =
  * same rule main's chat write gate applies to the same state.
  */
 export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
-  if (scope.ended) return false;
+  if (scope.ended || scope.writer === "other") return false;
   return scope.access === "edit";
 }
 
@@ -60,19 +98,18 @@ export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
  * Which create and import actions a workspace offers, given the share view it
  * is, or null for an ordinary workspace. The Explorer menu and the command
  * rows both ask this, so neither offers an action its handler refuses.
- *
- * `otherAccount` marks a joined workspace while another account than the one
- * that joined is signed in. The level belongs to the joined account, so the
- * workspace offers nothing until the person switches back.
  */
-export function workspaceCreateOffers(shareView: ShareViewWriteScope | null, role?: "admin" | "member", otherAccount = false): {
+export function workspaceCreateOffers(
+  shareView: ShareViewWriteScope | null,
+  role?: "admin" | "member",
+): {
   write: boolean;
   folder: boolean;
   collection: boolean;
 } {
   // Create, rename, delete and import: everywhere in an ordinary workspace,
   // and in a share view only at the level `shareViewTakesLocalWrites` names.
-  const write = shareView === null || (shareViewTakesLocalWrites(shareView) && !otherAccount);
+  const write = shareView === null || shareViewTakesLocalWrites(shareView);
   // In a joined workspace only an admin starts a folder; the relay reads the
   // role again. `role` is the relay's last answer, or unknown.
   const startsFolders = shareView?.membership === true && role === "admin";
@@ -96,18 +133,23 @@ export function workspaceCreateOffers(shareView: ShareViewWriteScope | null, rol
  *
  * PRESENCE decides whether it is a share view. The level comes only from an
  * intact marker: one that lost its share id or recipient is damaged, names no
- * level, and so offers and admits no write.
+ * level, and so offers and admits no write. `credentials` are the account
+ * signed in now, or null.
  */
 export function shareViewWriteScopeOf(
   shareView: unknown,
+  credentials: { userId: string; relayUrl?: string } | null,
 ): (ShareViewWriteScope & { granterEmail: string | null }) | null {
   if (!shareViewIsPresent(shareView)) return null;
   const marker = isRecord(shareView) ? shareView : {};
+  const membership = recordedShareSelector(marker.grantedSelector)?.wholeWorkspace === true;
+  const ended = marker.ended === true;
   return {
     granterEmail: shareViewGranterEmail(marker),
     access: shareViewIdentityIsIntact(marker) ? readableShareLevel(marker.grantedSelector) : null,
-    ended: marker.ended === true,
-    membership: recordedShareSelector(marker.grantedSelector)?.wholeWorkspace === true,
+    ended,
+    membership,
+    ...(membership && !ended ? { writer: shareViewWriterOf(marker, credentials) } : {}),
   };
 }
 

@@ -64,10 +64,7 @@ interface ShareViewFileChangeScope {
   rootPath: string;
   shareViewStore: () => CaptureVersionedTextStore;
   assertPathAllowed?: (path: string) => void;
-  /**
-   * Throws when the change may no longer commit, such as after another account
-   * signed in. Asked before every forward store mutation, folder loops included.
-   */
+  /** Throws when the change may no longer commit, such as after another account signed in. */
   assertAdmitted: () => void;
   owner: ShareViewFilesOwnerCapability;
   projection: ReturnType<typeof shareViewFilesProjection>;
@@ -423,7 +420,6 @@ async function applyShareViewPathMove(
   await markMutateMaterializeAndClear(input, { paths, changed }, store, async () => {
     try {
       for (const move of moves) {
-        input.assertAdmitted();
         await mutateWithOwner(input, () =>
           store.renameTextFile({
             workspaceId: input.workspaceId,
@@ -439,7 +435,6 @@ async function applyShareViewPathMove(
       // Rename that entry while the pending record is still held; a refusal
       // enters the same store-compensation branch as a failed file rename.
       if (renamesInPlace && !held.has(from)) {
-        input.assertAdmitted();
         await mutateWithOwner(input, () => movePath(input.rootPath, from, to));
       }
     } catch (error) {
@@ -556,11 +551,8 @@ async function applyShareViewPathDelete(
   ];
   await markMutateMaterializeAndClear(input, { paths: targets, changed }, store, async () => {
     const applied: string[] = [];
-    let started: string | null = null;
     try {
       for (const path of targets) {
-        input.assertAdmitted();
-        started = path;
         await mutateWithOwner(input, () =>
           store.deleteTextFile({
             workspaceId: input.workspaceId,
@@ -570,7 +562,6 @@ async function applyShareViewPathDelete(
           }),
         );
         applied.push(path);
-        started = null;
       }
     } catch (error) {
       // A delete cannot be put back, so the other rule applies: what happened is
@@ -585,14 +576,6 @@ async function applyShareViewPathDelete(
         })),
         store,
       );
-      // The marks this change set describe nothing left to do now: the
-      // projection follows what went, and the rest never started. The one
-      // in flight keeps its mark, since only reconciliation can tell
-      // whether it went.
-      const settled = targets.filter((path) => path !== started);
-      if (settled.length > 0) {
-        await input.projection.clearPending(input.rootPath, settled);
-      }
       throw error;
     }
   });

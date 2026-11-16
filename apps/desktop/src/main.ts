@@ -282,7 +282,6 @@ import { createShareLinkAgentActions } from "./ipc/shareLinkAgentActions";
 import {
   createJoinedWorkspaceGroupAction,
   createWorkspaceMembersActions,
-  joinedByAccount,
 } from "./ipc/workspaceMembersActions";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "./ipc/joinedAccountWords";
 import { createJoinedGroup } from "./workspaces/joinedGroupCreate";
@@ -600,6 +599,7 @@ import {
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
 import {
+  joinedByAccount,
   shareViewWriteScopeOf,
   workspaceCreateOffers,
   workspaceWriteRefusal,
@@ -1092,7 +1092,7 @@ function requireWorkspace(workspaceId: string) {
 // share view?" reads the object's presence, never its level.
 function sharedViewOf(workspaceId: string): ReturnType<typeof shareViewWriteScopeOf> {
   const entry = findWorkspace(workspaceId);
-  return entry ? shareViewWriteScopeOf(entry.shareView) : null;
+  return entry ? shareViewWriteScopeOf(entry.shareView, cachedCredentials) : null;
 }
 
 // The role the relay last named for a joined workspace, which its view keeps.
@@ -1100,14 +1100,6 @@ function memberRoleOf(workspaceId: string): "admin" | "member" | undefined {
   return sharedViewOf(workspaceId)?.membership === true
     ? findWorkspace(workspaceId)?.shareView?.role
     : undefined;
-}
-
-// A joined workspace while another account than the one that joined is signed
-// in: the same answer `cloudStatus` gives the shell as `joinedBySignedInAccount`.
-function otherAccountOf(workspaceId: string): boolean {
-  const view = sharedViewOf(workspaceId);
-  if (view?.membership !== true || view.ended || !cachedCredentials) return false;
-  return !joinedByAccount(findWorkspace(workspaceId)?.shareView, cachedCredentials);
 }
 
 // The workspace write boundary, over the rule in `shareWriteGate.ts`. It
@@ -1440,11 +1432,7 @@ const desktopWindows = createDesktopWindows({
   focusedWindow: () => BrowserWindow.getFocusedWindow(),
   // The same rule the Explorer menu and the write handlers ask.
   createOffersFor: (workspaceId) =>
-    workspaceCreateOffers(
-      sharedViewOf(workspaceId),
-      memberRoleOf(workspaceId),
-      otherAccountOf(workspaceId),
-    ),
+    workspaceCreateOffers(sharedViewOf(workspaceId), memberRoleOf(workspaceId)),
   preloadArguments,
   afterRendererCrashLoop,
   get rendererWorkspaceSessions(): Pick<
@@ -3146,7 +3134,7 @@ const {
 // so a present marker with no readable grant or identity falls to `view`,
 // which registers no write tools at all.
 function mcpShareAccessOf(shareView: unknown): ShareAccess | null {
-  const scope = shareViewWriteScopeOf(shareView);
+  const scope = shareViewWriteScopeOf(shareView, cachedCredentials);
   return scope === null ? null : (scope.access ?? "view");
 }
 
@@ -6947,14 +6935,7 @@ async function pushShareViewChat(workspaceId: string): Promise<unknown> {
     const workspace = canonicalWorkspaceFor(lease);
     const credentials = cachedCredentials;
     const view = workspace.shareView;
-    if (
-      !view ||
-      !credentials?.relayUrl ||
-      !view.relayUrl ||
-      !relayUrlsMatch(credentials.relayUrl, view.relayUrl) ||
-      view.recipientUserId !== credentials.userId
-    )
-      return null;
+    if (!view || !joinedByAccount(view, credentials)) return null;
     return await shareViewChatPush(workspace, {
       baseUrl: credentials.relayUrl,
       token: credentials.token,
@@ -7032,7 +7013,7 @@ const workspaceMembers = createWorkspaceMembersActions<RegistryEntry, CloudSessi
   remoteForJoinedWorkspace: async (workspace) => {
     await warmCredentialCache();
     const credentials = cachedCredentials;
-    if (!credentials || !joinedByAccount(workspace.shareView, credentials))
+    if (!joinedByAccount(workspace.shareView, credentials))
       throw new Error(JOINED_BY_ANOTHER_ACCOUNT);
     return { credentials, credentialGeneration: credentialCacheGeneration };
   },
@@ -9360,7 +9341,6 @@ function registerIpcHandlers(): void {
     >({
       sharedViewOf,
       memberRoleOf,
-      otherAccountOf,
       ensureOwnedProjectionCurrent,
       shell,
       platform: process.platform,
@@ -9397,7 +9377,6 @@ function registerIpcHandlers(): void {
     cloudLogin,
     clearCachedCredentials,
     refreshCredentialCache,
-    holdCredentialSessionChange: () => credentialSessionCache.holdChange(),
     warmCredentialCache,
     currentCredentials: () => cachedCredentials,
     localInstallationId,
@@ -10372,7 +10351,7 @@ function registerIpcHandlers(): void {
       await credentialSessionCache.warm(() => cloudLogin().credentials());
       return chatShareSessionKey(cachedCredentials);
     },
-    joinedByAnotherAccount: otherAccountOf,
+    joinedByAnotherAccount: (workspaceId) => sharedViewOf(workspaceId)?.writer === "other",
     // A shared view's press goes to the relay it came from, for this
     // person's own grant; the relay checks the grant again.
     relayPress: async (operation, input) => {
@@ -10630,7 +10609,7 @@ function registerIpcHandlers(): void {
     withStaleSensitiveWorkspaceOperation,
     shareViewFiles,
     receivedShareEngine,
-    joinedByAnotherAccount: otherAccountOf,
+    joinedByAnotherAccount: (workspaceId) => sharedViewOf(workspaceId)?.writer === "other",
   });
   shareDirectWrites = shareProposalsIpc;
   registerOperations(operationBoundary, shareProposalOperations, shareProposalsIpc.handlers);

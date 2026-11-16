@@ -329,7 +329,6 @@ async function harness() {
     },
     cloudLogin: () => login,
     localInstallationId: () => "device",
-    holdCredentialSessionChange: () => cache.holdChange(),
     clearCachedCredentials: () => {
       steps.push("clear");
       cache.clear();
