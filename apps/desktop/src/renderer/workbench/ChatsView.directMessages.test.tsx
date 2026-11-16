@@ -630,6 +630,12 @@ describe("ChatsView direct messages", () => {
     scrollIntoView.mockRestore();
     fireEvent.keyDown(screen.getByTestId("chats-dm-recipients"), { key: "ArrowUp" });
 
+    // A row that slides under a still pointer doesn't take the active row; moving the pointer does.
+    fireEvent.mouseEnter(options[1]!);
+    expect(screen.getByTestId("chats-dm-recipients").getAttribute("aria-activedescendant")).toMatch(/-ana$/);
+    fireEvent.mouseMove(options[1]!);
+    expect(screen.getByTestId("chats-dm-recipients").getAttribute("aria-activedescendant")).toMatch(/-sam$/);
+
     // Picking another person replaces the pick: a conversation is two people.
     await user.click(options[0]!);
     expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
@@ -782,6 +788,8 @@ describe("ChatsView direct messages", () => {
     await user.click(await screen.findByTestId("chats-dm-new-member"));
     const existing = await screen.findByTestId("chats-dm-new-existing");
     expect(existing.textContent).toContain("You already have a conversation with Sam Rivera.");
+    // The line sits under the list, so the rows don't move when it appears.
+    expect(screen.getByTestId("chats-dm-new-members").compareDocumentPosition(existing) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Mention" })).toBeNull();
     await user.type(screen.getByTestId("chats-dm-new-composer"), "Lunch?");
     fireEvent.click(within(existing).getByTestId("chats-dm-new-open-existing"));

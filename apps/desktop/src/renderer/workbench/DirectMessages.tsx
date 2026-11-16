@@ -825,7 +825,7 @@ function NewMessageForAccount(props: NewMessageProps) {
               data-testid="chats-dm-new-member"
               data-member-id={member.memberId}
               onMouseDown={(event) => event.preventDefault()}
-              onMouseEnter={() => setHighlight(index)}
+              onMouseMove={() => { if (highlight !== index) setHighlight(index); }}
               onClick={() => choose(member.memberId)}
               className={`flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] text-ink ${
                 active?.memberId === member.memberId ? "bg-hover" : ""
@@ -897,17 +897,17 @@ function NewMessageForAccount(props: NewMessageProps) {
               />
             </div>
             {pickError ? <FieldError id={errorId} className="mt-1">Choose who to message.</FieldError> : null}
-            {resolved?.conversationId ? (
-              <p data-testid="chats-dm-new-existing" className="m-0 mt-1.5 flex items-center gap-2 text-[12px] text-muted">
-                <span className="min-w-0 flex-1 truncate">{`You already have a conversation with ${title}.`}</span>
-                <SecondaryButton size="compact" data-testid="chats-dm-new-open-existing" onClick={() => openExisting(resolved.conversationId!)}>
-                  Open conversation
-                </SecondaryButton>
-              </p>
-            ) : null}
           </div>
         ) : null}
         {content}
+        {canPick && resolved?.conversationId ? (
+          <div data-testid="chats-dm-new-existing" className="flex shrink-0 items-center gap-2 border-t border-line px-3 py-2 text-[12px] text-muted">
+            <span className="min-w-0 flex-1 truncate">{`You already have a conversation with ${title}.`}</span>
+            <SecondaryButton size="compact" data-testid="chats-dm-new-open-existing" onClick={() => openExisting(resolved.conversationId!)}>
+              Open conversation
+            </SecondaryButton>
+          </div>
+        ) : null}
         {canPick && blockedIn ? (
           <DirectComposerLine testId="chats-dm-new-blocked-line" icon={<Ban size={13} aria-hidden />} action={{ label: "Unblock", run: unblock }}>
             {`You blocked ${title}. They can't message you.`}
