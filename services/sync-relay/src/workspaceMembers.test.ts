@@ -430,6 +430,26 @@ describe("who may change members", () => {
     expect((await post(h, "ana", `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status).toBe(404);
   });
 
+  // No trigger keeps grants and entries in step, so this check is the only
+  // guard: an active grant its entry does not back gives no access.
+  it.each([
+    ["its entry is gone", `DELETE FROM sync_relay_workspace_members WHERE member_id = :member`],
+    ["its entry was removed", `UPDATE sync_relay_workspace_members SET state = 'removed', ended_at_ms = 1 WHERE member_id = :member`],
+    ["its access is above the role's", `UPDATE sync_relay_share_grants SET access = 'edit' WHERE grant_id = :grant`],
+    ["it is a child grant", `UPDATE sync_relay_share_grants SET parent_grant_id = grant_id WHERE grant_id = :grant`],
+    ["it names another account", `UPDATE sync_relay_share_grants SET principal_user_id = 'ben' WHERE grant_id = :grant`],
+  ])("gives no authority through an active grant when %s", async (_case, sql) => {
+    const { h, storage } = await seed();
+    const ana = await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    expect((await pull(h, "ana", shareId)).status).toBe(200);
+    const db = (storage as unknown as StorageContext).db;
+    const grant = (db.prepare(`SELECT grant_id FROM sync_relay_workspace_members WHERE member_id = ?`).get(ana) as { grant_id: string }).grant_id;
+    db.prepare(sql).run(sql.includes(":member") ? { member: ana } : { grant });
+    expect((await pull(h, "ana", shareId)).status).not.toBe(200);
+    expect((await h(request("ana", `/sync/${WORKSPACE}/members`))).status).toBe(404);
+  });
+
   it("refuses browser cookies from any origin but the share site", async () => {
     const { h } = await seed();
     await invited(h, "ana");
