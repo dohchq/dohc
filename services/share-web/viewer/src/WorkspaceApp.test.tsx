@@ -338,6 +338,8 @@ it("shows a Posts Group's posts with their reply counts, and replies in a post's
   await settle(() => listed().includes("Agreed"));
   expect(listed()).toEqual(["Plans start here", "Agreed"]);
   expect(composer().placeholder).toBe("Reply…");
+  // Focus moves into the thread, onto its back control.
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Back to posts");
   setControlValue(composer(), "I'll book it"); await click("Send");
   await settle(() => posts.length === 2);
   expect(posts[1]).toMatchObject({channelWireId: "wire-plans", threadId: "t-plan", body: "I'll book it"});
@@ -345,6 +347,8 @@ it("shows a Posts Group's posts with their reply counts, and replies in a post's
   await click("Back to posts");
   expect(listed()).toEqual(["Plans start here", "Train or car?", "Who books the hotel?"]);
   expect(button("2 replies")).toBeDefined();
+  // And back to the control that opened the thread.
+  expect(document.activeElement).toBe(button("2 replies"));
   expect(composer().placeholder).toBe("What's happening in #plans?");
 });
 
@@ -402,6 +406,7 @@ it("shows a Chat Group as one conversation, and answers a message in its thread"
   expect(posts[1]).toMatchObject({threadId: "t-chat", parentMessageId: "m3", body: "Same"});
   await click("Back to the conversation");
   expect(composer().placeholder).toBe("Message #plans");
+  expect(document.activeElement).toBe(button("2 replies"));
 });
 
 it("switches a Group with both lanes between Posts and Chat", async () => {

@@ -169,7 +169,7 @@ function threadView(
   messages: readonly NamedChatMessage[],
   lane: Lane,
   open: OpenThread | null,
-  onOpen: (thread: OpenThread) => void,
+  onOpen: (thread: OpenThread, seq: number) => void,
 ) {
   if (open)
     return {
@@ -197,7 +197,7 @@ function threadView(
       shown.push(post);
       replies.set(post.relaySeq, {
         count: thread.length - 1,
-        open: () => onOpen({ threadId, rootId: null }),
+        open: () => onOpen({ threadId, rootId: null }, post.relaySeq),
       });
     }
     shown.sort((left, right) => left.relaySeq - right.relaySeq);
@@ -212,7 +212,8 @@ function threadView(
     shown.push(message);
     replies.set(message.relaySeq, {
       count: counts.get(message.messageId) ?? 0,
-      open: () => onOpen({ threadId: message.threadId, rootId: message.messageId }),
+      open: () =>
+        onOpen({ threadId: message.threadId, rootId: message.messageId }, message.relaySeq),
     });
   }
   return { shown, replies };
@@ -319,6 +320,19 @@ export function ChannelView({
     pinned = useRef(true),
     stick = useRef(false);
   const anchor = useRef<{ seq: string; offset: number } | null>(null);
+  // Opening a thread moves focus to its back control. Going back returns it to the Reply that opened the thread.
+  const backControl = useRef<HTMLButtonElement | null>(null),
+    opener = useRef<number | null>(null),
+    focusNext = useRef<"back" | number | null>(null);
+  useEffect(() => {
+    const target = focusNext.current;
+    focusNext.current = null;
+    if (target === "back") backControl.current?.focus();
+    else if (target !== null)
+      scroller.current
+        ?.querySelector<HTMLElement>(`.chat-message[data-seq="${target}"] .chat-replies`)
+        ?.focus();
+  }, [open]);
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
 
@@ -501,9 +515,11 @@ export function ChannelView({
       : { lane };
   const view =
     threads && messages
-      ? threadView(messages, lane, open, (thread) => {
+      ? threadView(messages, lane, open, (thread, seq) => {
           setOpen(thread);
           stick.current = true;
+          opener.current = seq;
+          focusNext.current = "back";
         })
       : null;
   const shown = view?.shown ?? messages;
@@ -620,6 +636,7 @@ export function ChannelView({
       <button
         type="button"
         className="icon-button"
+        ref={backControl}
         aria-label={lane === "posts" ? "Back to posts" : "Back to the conversation"}
         title={lane === "posts" ? "Back to posts" : "Back to the conversation"}
         onClick={() => {
@@ -627,6 +644,7 @@ export function ChannelView({
           intent.current = null;
           setPostError(null);
           stick.current = true;
+          focusNext.current = opener.current;
         }}
       >
         <svg
