@@ -408,6 +408,13 @@ export const WorkspaceSummary = z.object({
       // closed while it is rebuilt. The shell shows "Updating access"
       // instead of the workspace.
       updatingAccess: z.literal(true).optional(),
+      // Why the update stopped, when it did; Try again starts it again.
+      updatingAccessStopped: z
+        .object({
+          reason: z.enum(["waiting", "ownWork", "failed"]),
+          detail: z.string(),
+        })
+        .optional(),
     })
     .optional(),
   // Share mounts: received shares materialized into this workspace's

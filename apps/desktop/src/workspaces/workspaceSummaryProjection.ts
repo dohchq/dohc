@@ -95,7 +95,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
         : {}),
       ...(raw.ended === true ? { ended: true } : {}),
       ...(isRecord(raw.rebuild) && boundedString(raw.rebuild.rebuildId, 1, 200) !== null
-        ? { updatingAccess: true as const }
+        ? { updatingAccess: true as const, ...rebuildStop(raw.rebuild.stopped) }
         : {}),
       ...(raw.unsavedPaths !== undefined
         ? {
@@ -156,4 +156,17 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
 /** Project the whole registry. */
 export function workspaceSummariesFrom(entries: readonly RegistryEntry[]): WorkspaceSummary[] {
   return entries.map(workspaceSummaryFor);
+}
+
+// Why a joined copy's rebuild stopped, when the record says so readably.
+function rebuildStop(raw: unknown): {
+  updatingAccessStopped?: { reason: "waiting" | "ownWork" | "failed"; detail: string };
+} {
+  if (
+    !isRecord(raw) ||
+    (raw.reason !== "waiting" && raw.reason !== "ownWork" && raw.reason !== "failed")
+  )
+    return {};
+  const detail = boundedString(raw.detail, 0, 2_000);
+  return detail === null ? {} : { updatingAccessStopped: { reason: raw.reason, detail } };
 }

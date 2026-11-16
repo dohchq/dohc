@@ -84,6 +84,22 @@ interface RelayOpenConfiguration {
   allowInsecureLoopbackForTests?: boolean;
 }
 
+/**
+ * The relay configuration an engine request with no open workspace carries,
+ * as the route guard gives `workspace.open`.
+ */
+export function relayOpenConfiguration(
+  relay: Pick<SyncRelayConnection, "baseUrl" | "token">,
+): RelayOpenConfiguration {
+  return {
+    baseUrl: normalizedRelayUrl(relay.baseUrl),
+    bearerToken: relay.token,
+    ...(allowInsecureLoopbackRelayForTests(relay.baseUrl)
+      ? { allowInsecureLoopbackForTests: true }
+      : {}),
+  };
+}
+
 interface RelayRoute {
   readonly baseUrl: string;
   readonly locations: Map<string, RelayOpenConfiguration>;

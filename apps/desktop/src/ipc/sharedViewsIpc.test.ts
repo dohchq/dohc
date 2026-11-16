@@ -24,6 +24,7 @@ import {
 import { SharePinInvalidError } from "../workspaces/shareViewRecords";
 import { workspaceWriteRefusal } from "../workspaces/shareWriteGate";
 import { workspaceSummaryFor } from "../workspaces/workspaceSummaryProjection";
+import { shareViewRebuildStop } from "../workspaces/shareViewRebuild";
 import { buildShareCode } from "../workspaces/syncCode";
 import { deferred } from "../testing/deferred";
 import {
@@ -861,6 +862,33 @@ describe("registered received-view handlers", () => {
         h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" }),
       ).rejects.toThrow("dohc could not refresh this workspace while its access is being updated.");
       expect(h.reconcile).toHaveBeenCalledOnce();
+      // Each refresh of the closed copy asks main to rebuild it.
+      expect(h.rebuild).toHaveBeenCalledTimes(2);
+      expect(h.rebuild).toHaveBeenCalledWith("existing", "rebuild-1");
+    });
+
+    it("tells the window why an update of access stopped", async () => {
+      const h = await harness();
+      Object.assign(h.workspace.shareView!, {
+        grantedSelector: member.selector!,
+        reach: stored,
+        rebuild: {
+          rebuildId: "rebuild-1",
+          stopped: shareViewRebuildStop({ kind: "ownWork", kinds: ["moments"] })!,
+        },
+      });
+      expect(workspaceSummaryFor(h.workspace).shareView).toMatchObject({
+        updatingAccess: true,
+        updatingAccessStopped: {
+          reason: "ownWork",
+          detail:
+            "This copy holds work of your own (moments), so dohc can't update access yet. Nothing in it changed.",
+        },
+      });
+      h.workspace.shareView!.rebuild = { rebuildId: "rebuild-1" };
+      expect(workspaceSummaryFor(h.workspace).shareView).not.toHaveProperty(
+        "updatingAccessStopped",
+      );
     });
 
     // The relay listed another visibility, but the pull was served before it:
@@ -940,7 +968,9 @@ describe("registered received-view handlers", () => {
 
     // The engine closed the copy during the first pull. What arrived stays,
     // and the view waits for its rebuild instead of reading the closed copy.
-    it("keeps a first open whose access changed closed, Try again included", async () => {
+    // Gap 2: the engine closed the copy during the first pull. What arrived
+    // stays, and Try again rebuilds the copy, then finishes the pull from it.
+    it("rebuilds a first open whose access changed when Try again is pressed", async () => {
       const h = await harness();
       h.fetchInfo.mockResolvedValue(member);
       h.reconcile.mockImplementationOnce(async () => ({
@@ -961,10 +991,57 @@ describe("registered received-view handlers", () => {
       expect(h.cleanup).not.toHaveBeenCalled();
       const kept = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
       expect(kept.shareView?.rebuild).toEqual({ rebuildId: "rebuild-1" });
+      expect(h.rebuild).not.toHaveBeenCalled();
+      const rebuiltReach = {
+        revision: "r2",
+        visibilityRevision: "v2",
+        rootLevel: "edit" as const,
+        folders: [],
+      };
+      h.rebuild.mockImplementationOnce(async (workspaceId) => {
+        const { rebuild: _closed, ...view } = h.registry.get(workspaceId)!.shareView!;
+        h.registry.get(workspaceId)!.shareView = { ...view, reach: rebuiltReach };
+        return { kind: "rebuilt", recoveryFolder: null, recovered: 0 };
+      });
+      h.readDir.mockResolvedValue(["notes.md"]);
+      const reopened = (await h.invoke(
+        sharedViewAccessOperations.openSharedView.channel,
+        h.openPayload,
+      )) as { workspace: { workspaceId: string } };
+      expect(reopened.workspace.workspaceId).toBe(kept.workspaceId);
+      expect(h.rebuild).toHaveBeenCalledExactlyOnceWith(kept.workspaceId, "rebuild-1");
+      expect(h.registry.get(kept.workspaceId)!.shareView).toMatchObject({ reach: rebuiltReach });
+      expect(h.registry.get(kept.workspaceId)!.shareView).not.toHaveProperty("rebuild");
+      expect(h.reconcile).toHaveBeenCalledTimes(2);
+    });
+
+    // A copy holding its member's own work is not rebuilt: Try again keeps it
+    // closed and reads nothing from it.
+    it("keeps a first open closed when its copy holds own work", async () => {
+      const h = await harness();
+      h.fetchInfo.mockResolvedValue(member);
+      h.reconcile.mockImplementationOnce(async () => ({
+        kind: "refresh" as const,
+        outcome: {
+          ...outcome,
+          status: "unchanged" as const,
+          changedPaths: 0,
+          refusedOps: 0,
+          reachChanged: { revision: "r2", visibilityRevision: "v2" },
+          rebuildId: "rebuild-1",
+        },
+      }));
+      const updating = `dohc could not finish reading Community while its access is being updated. What arrived stays in ${h.openPayload.rootPath}.`;
+      await expect(
+        h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
+      ).rejects.toThrow(updating);
       h.readDir.mockResolvedValue(["notes.md"]);
       await expect(
         h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload),
       ).rejects.toThrow(updating);
+      const kept = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
+      expect(kept.shareView?.rebuild).toEqual({ rebuildId: "rebuild-1" });
+      expect(h.rebuild).toHaveBeenCalledOnce();
       expect(h.reconcile).toHaveBeenCalledOnce();
     });
 

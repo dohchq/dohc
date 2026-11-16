@@ -66,6 +66,7 @@ import type { withStaleSensitiveWorkspaceOperation } from "../workspaces/workspa
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { setWorkspaceShareView } from "../workspaces/WorkspaceRegistry";
 import type { WorkspaceActivityScope } from "./workspaceActivityBroadcast";
+import type { ShareViewRebuildOutcome } from "../workspaces/shareViewRebuild";
 
 // How long a held pull waits at the relay, under its 30 s limit.
 const SHARE_VIEW_HOLD_MS = 25_000;
@@ -136,6 +137,10 @@ export function registerSharedViewsIpcHandlers<
   // Whether this attachment has the document open in a live session, which
   // shows each change as it lands.
   showsLive(attachmentId: symbol, path: string): boolean;
+  // Rebuild a closed copy under the reach the relay lists now, or join the
+  // rebuild already running for it. Main holds the copy's sessions and
+  // reports what stopped it in Notices.
+  rebuildShareView(workspaceId: string, rebuildId: string): Promise<ShareViewRebuildOutcome>;
 }): void {
   const {
     registerHandler,
@@ -286,6 +291,34 @@ export function registerSharedViewsIpcHandlers<
     return requireWorkspace(workspaceId).shareView?.rebuild !== undefined;
   }
 
+  // Rebuild the copy if it is closed. An ended membership takes today's end
+  // path. The window learns the outcome either way.
+  async function rebuildClosedCopy(workspaceId: string): Promise<ShareViewRebuildOutcome | null> {
+    const view = requireWorkspace(workspaceId).shareView;
+    if (!view?.rebuild || view.ended) return null;
+    try {
+      const outcome = await dependencies.rebuildShareView(workspaceId, view.rebuild.rebuildId);
+      if (outcome.kind === "ended") {
+        const workspace = requireWorkspace(workspaceId);
+        await withStaleSensitiveWorkspaceOperation(workspace.rootPath, (lease) =>
+          shareViewFiles.end(lease, { kind: "standalone", workspaceId }, () => undefined),
+        );
+        refreshNativeWorkspaceSurfaces();
+      }
+      return outcome;
+    } finally {
+      notifyRenderer({ workspaceId, summaryChanged: true });
+    }
+  }
+
+  // Start the rebuild without waiting: a refresh holds the copy, and the
+  // rebuild closes every session on it first.
+  function startRebuild(workspaceId: string): void {
+    void rebuildClosedCopy(workspaceId).catch((error: unknown) => {
+      console.error("[desktop] joined copy rebuild:", error);
+    });
+  }
+
   // Receive side: open a pasted share code as a READ-ONLY shared view.
   // Mirrors the join flow's ordering guarantees: everything is validated
   // before local state exists, the token only ever goes to the signed-in
@@ -377,9 +410,15 @@ export function registerSharedViewsIpcHandlers<
         )
       : undefined;
     if (kept) {
-      // Its copy is closed while its access is updated.
-      if (kept.shareView?.rebuild) throw unfinished(new AccessUpdatingError());
       await engineDaemonStartup();
+      // A copy closed for its access is rebuilt first, and the pull continues
+      // from the rebuilt copy.
+      const rebuilt = await rebuildClosedCopy(kept.workspaceId);
+      if (rebuilt?.kind === "ended")
+        throw new Error(
+          `Your membership of ${membershipName} ended. What arrived stays in ${rootPath}.`,
+        );
+      if (rebuilt && rebuilt.kind !== "rebuilt") throw unfinished(new AccessUpdatingError());
       try {
         await firstPull(kept.rootPath, kept.workspaceId, relay);
       } catch (error) {
@@ -805,8 +844,12 @@ export function registerSharedViewsIpcHandlers<
           if (!shareViewIdentityIsIntact(workspace.shareView)) {
             throw new Error(SHARE_VIEW_REOPEN_MESSAGE);
           }
-          // A closed copy answers only its rebuild.
-          if (workspace.shareView.rebuild) throw new Error(UPDATING_ACCESS_MESSAGE);
+          // A closed copy answers only its rebuild, which this starts again
+          // after a restart or a Try again.
+          if (workspace.shareView.rebuild) {
+            startRebuild(workspace.workspaceId);
+            throw new Error(UPDATING_ACCESS_MESSAGE);
+          }
           // A proven large fresh import can publish its workspace handle before
           // initial capture finishes. Every share.* RPC stays fenced until the
           // phase reaches ready or degraded, including the Edit identity call
@@ -926,6 +969,7 @@ export function registerSharedViewsIpcHandlers<
             outcome = await reconcile();
             if (!("ok" in outcome && !outcome.ok) && outcome.rebuildId !== undefined) {
               await closeForRebuild(workspace.workspaceId, outcome.rebuildId);
+              startRebuild(workspace.workspaceId);
             } else if (!("ok" in outcome && !outcome.ok) && outcome.reachChanged && reachRelay) {
               const followed = await followShareViewReach(
                 workspace.workspaceId,

@@ -367,6 +367,8 @@ export class EngineWorkspaceSessions {
   private readonly captureAuthors = new Map<string | symbol, AgentAuthor | null>();
   private readonly shareMounts = new Set<string | symbol>();
   private readonly rebuildingWorkspaces = new Set<string | symbol>();
+  // Workspaces whose joined copy main is rebuilding, under every session key.
+  private readonly rebuildHolds = new Set<string>();
   private readonly transportRebindAttempts: number;
   private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly now: () => number;
@@ -510,7 +512,7 @@ export class EngineWorkspaceSessions {
     const entry = this.entries.get(key);
     if (
       !this.acceptingRuns ||
-      this.rebuildingWorkspaces.has(key) ||
+      this.isRebuilding(key, workspace.workspaceId) ||
       !entry ||
       entry.closing ||
       entry.retiring ||
@@ -546,7 +548,7 @@ export class EngineWorkspaceSessions {
       entry = this.entries.get(key);
     if (
       !this.acceptingRuns ||
-      this.rebuildingWorkspaces.has(key) ||
+      this.isRebuilding(key, workspace.workspaceId) ||
       !entry ||
       (!entry.opening && entry.openingRuns === 0 && !entry.reopening) ||
       (entry.closing && entry.activeRuns > 0 && insideEngineRun()) ||
@@ -1101,6 +1103,35 @@ export class EngineWorkspaceSessions {
     this.rebuildingWorkspaces.delete(this.sessionKey(workspace));
   }
 
+  /**
+   * Keep every session of a workspace closed while main rebuilds its joined
+   * copy: a run already under way finishes, the binding then closes, and no
+   * run opens it until `releaseRebuildHold`. Runs meanwhile throw
+   * `EngineWorkspaceRebuildingError`.
+   */
+  async holdForRebuild(workspaceId: string): Promise<void> {
+    this.rebuildHolds.add(workspaceId);
+    const keys = [...this.entries]
+      .filter(([, entry]) => entry.workspaceId === workspaceId)
+      .map(([key]) => key);
+    for (const key of keys) {
+      const entry = this.entries.get(key);
+      if (entry) {
+        entry.reopening = false;
+        this.wakeOpenWaiters(entry);
+      }
+    }
+    await Promise.all(keys.map((key) => this.closeWorkspaceEntry(key, false)));
+  }
+
+  releaseRebuildHold(workspaceId: string): void {
+    this.rebuildHolds.delete(workspaceId);
+  }
+
+  private isRebuilding(key: string | symbol, workspaceId: string): boolean {
+    return this.rebuildingWorkspaces.has(key) || this.rebuildHolds.has(workspaceId);
+  }
+
   async closeWorkspace(workspace: string | EngineWorkspace): Promise<void> {
     await this.closeWorkspaceEntry(this.sessionKey(workspace), true);
   }
@@ -1111,7 +1142,7 @@ export class EngineWorkspaceSessions {
       entry = this.entries.get(key);
     if (
       !this.acceptingRuns ||
-      this.rebuildingWorkspaces.has(key) ||
+      this.isRebuilding(key, workspace.workspaceId) ||
       !entry ||
       entry.closing ||
       entry.workspaceId !== workspace.workspaceId ||
@@ -1153,7 +1184,7 @@ export class EngineWorkspaceSessions {
       }
 
       entry.retiring = retire;
-      entry.reopening = !retire && !this.rebuildingWorkspaces.has(key);
+      entry.reopening = !retire && !this.isRebuilding(key, entry.workspaceId);
       const closing = this.closeEntry(entry);
       entry.closing = closing;
       this.wakeOpenWaiters(entry);
@@ -1240,7 +1271,7 @@ export class EngineWorkspaceSessions {
       if (!this.acceptingRuns) {
         throw new EngineWorkspaceSessionsClosedError();
       }
-      if (this.rebuildingWorkspaces.has(this.sessionKey(workspace))) {
+      if (this.isRebuilding(this.sessionKey(workspace), workspace.workspaceId)) {
         throw new EngineWorkspaceRebuildingError(workspace.workspaceId);
       }
       const entry = this.entry(workspace);

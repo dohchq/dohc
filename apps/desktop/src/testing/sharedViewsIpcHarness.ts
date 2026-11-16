@@ -230,6 +230,12 @@ export async function createSharedViewsIpcHarness(
     },
   );
   const showsLive = vi.fn<Dependencies["showsLive"]>(() => false);
+  // Main's rebuild of a closed copy. By default the copy holds work of its
+  // member's own, so it stays closed as it was.
+  const rebuild = vi.fn<Dependencies["rebuildShareView"]>(async () => ({
+    kind: "ownWork",
+    kinds: ["moments"],
+  }));
   const end = vi.fn<Dependencies["shareViewFiles"]["end"]>(
     async (_lease, target, assertCurrent) => {
       assertCurrent();
@@ -299,6 +305,7 @@ export async function createSharedViewsIpcHarness(
     recordShareViewStoreRefusal: recordRefusal,
     syncNotices,
     showsLive,
+    rebuildShareView: rebuild,
   });
   const invoke = (channel: string, payload: unknown, trusted = true) =>
     Promise.resolve().then(() => handlers.get(channel)!({ sender: "window", trusted }, payload));
@@ -331,6 +338,7 @@ export async function createSharedViewsIpcHarness(
     reconcile,
     syncNotices,
     showsLive,
+    rebuild,
     probeLog,
     registryRead,
     workspaceOperation,

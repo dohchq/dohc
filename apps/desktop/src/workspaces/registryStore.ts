@@ -259,8 +259,15 @@ export interface ShareViewIdentity {
   unconfirmedChanges?: ShareUnconfirmedChanges;
   // Set when the relay changed which items this member sees. The engine closed
   // the copy and answers it only for this rebuild; the view shows "Updating
-  // access" until the new copy is swapped in.
-  rebuild?: { rebuildId: string };
+  // access" until the new copy is swapped in. `stopped` says why the rebuild
+  // isn't running: it waits for the server, the copy holds its member's own
+  // work, or a step failed. Try again starts it again.
+  rebuild?: { rebuildId: string; stopped?: ShareViewRebuildStop };
+}
+
+export interface ShareViewRebuildStop {
+  reason: "waiting" | "ownWork" | "failed";
+  detail: string;
 }
 
 // A shared channel this workspace joined through a chat grant:

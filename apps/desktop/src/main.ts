@@ -230,6 +230,12 @@ import { createShareProposalsIpc } from "./ipc/shareProposalsIpc";
 import { createShareDirectWriteDelivery } from "./ipc/shareDirectWriteDelivery";
 import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
 import {
+  classifyShareViewRebuildError,
+  createShareViewRebuilds,
+  parseShareViewRebuildAnswer,
+  shareViewRebuildStop,
+} from "./workspaces/shareViewRebuild";
+import {
   createWorkspaceSyncStop,
   reopenWithoutSync,
   withWorkspaceSyncTransition,
@@ -745,7 +751,12 @@ import {
 } from "./ipc/workspaceActivityBroadcast";
 import { WorkspaceFileListingCache } from "./workspaces/workspaceFileListingCache";
 import { probeRelayWorkspace } from "./workspaces/relayWorkspaceProbe";
-import { type EngineRelayWorkspaceClient } from "./workspaces/engineRelayClient";
+import {
+  relayOpenConfiguration,
+  type EngineRelayWorkspaceClient,
+} from "./workspaces/engineRelayClient";
+import type { JsonValue } from "@dohc/workspace-engine-client";
+import type { ListedReach } from "@dohc/security-contract/listed-reach";
 // The proposal routes that do not go through the engine: reviewing,
 // settling, listing and withdrawing read and write only relay state.
 import {
@@ -10696,6 +10707,99 @@ function registerIpcHandlers(): void {
   shareDirectWrites = shareProposalsIpc;
   registerOperations(operationBoundary, shareProposalOperations, shareProposalsIpc.handlers);
 
+  // A joined copy the engine closed for its access: main holds its sessions,
+  // asks the engine to rebuild it with no workspace open, and reopens it.
+  const shareViewRebuildEngine = async (
+    method: string,
+    params: Record<string, JsonValue>,
+  ): Promise<JsonValue> => {
+    await desktopEngine.startup;
+    const client = desktopEngine.daemon?.currentClient();
+    if (!(client instanceof EngineClient)) throw new Error("the engine is not running");
+    return (await client.sendRequest({ id: 0, method, params })).result;
+  };
+  const shareViewRebuildRelay = (workspaceId: string) => {
+    const view = requireWorkspace(workspaceId).shareView,
+      credentials = cachedCredentials;
+    if (
+      !view ||
+      !credentials?.relayUrl ||
+      credentials.userId !== view.recipientUserId ||
+      (view.relayUrl && !relayUrlsMatch(credentials.relayUrl, view.relayUrl))
+    ) {
+      throw new Error("sign in to the account that joined this workspace");
+    }
+    return { view, relay: { baseUrl: credentials.relayUrl, token: credentials.token } };
+  };
+  const shareViewRebuilds = createShareViewRebuilds<ListedReach>({
+    hold: async (workspaceId) => {
+      const sessions = requireEngineSessions();
+      const reopen = activity.listOpenWorkspaceIds().includes(workspaceId);
+      const holding = sessions.holdForRebuild(workspaceId);
+      try {
+        await closeDispatchRunActivity(requireWorkspace(workspaceId), { notifyRenderer: false });
+        await holding;
+      } catch (error) {
+        sessions.releaseRebuildHold(workspaceId);
+        throw error;
+      }
+      return { reopen };
+    },
+    release: async (workspaceId, reopen) => {
+      requireEngineSessions().releaseRebuildHold(workspaceId);
+      if (reopen) await openWorkspaceActivity(requireWorkspace(workspaceId));
+    },
+    readReach: async (workspaceId) => {
+      await warmCredentialCache();
+      const { view, relay } = shareViewRebuildRelay(workspaceId);
+      return fetchShareViewReach({ relay, shareId: view.shareId });
+    },
+    rebuild: async (workspaceId, rebuildId, reach) => {
+      const { view, relay } = shareViewRebuildRelay(workspaceId);
+      const selector = recordedShareSelector(view.grantedSelector);
+      if (selector?.wholeWorkspace !== true) throw new Error("this workspace's record is damaged");
+      return parseShareViewRebuildAnswer(
+        await shareViewRebuildEngine("share.view.rebuild", {
+          rootDir: requireWorkspace(workspaceId).rootPath,
+          workspaceId,
+          rebuildId,
+          shareId: view.shareId,
+          grantedSelector: engineGrantedSelector(selector, reach) as unknown as JsonValue,
+          relay: relayOpenConfiguration(relay) as JsonValue,
+        }),
+        reach,
+      );
+    },
+    finish: async (workspaceId, rebuildId) => {
+      await shareViewRebuildEngine("share.view.rebuildFinish", {
+        rootDir: requireWorkspace(workspaceId).rootPath,
+        rebuildId,
+      });
+    },
+    install: async (workspaceId, rebuildId, reach) => {
+      const view = findWorkspace(workspaceId)?.shareView;
+      if (view?.rebuild?.rebuildId !== rebuildId) return;
+      const { rebuild: _rebuilt, ...rest } = view;
+      await setWorkspaceShareView(workspaceId, { ...rest, reach });
+    },
+    notice: (workspaceId, notice) => {
+      const view = findWorkspace(workspaceId)?.shareView;
+      if (!view?.rebuild) return;
+      const stopped = shareViewRebuildStop(notice);
+      void setWorkspaceShareView(workspaceId, {
+        ...view,
+        rebuild: { rebuildId: view.rebuild.rebuildId, ...(stopped ? { stopped } : {}) },
+      })
+        .then(() => notifyRenderer({ workspaceId, summaryChanged: true }))
+        .catch((error: unknown) => console.error("[desktop] joined copy rebuild state:", error));
+    },
+    classify: classifyShareViewRebuildError,
+    sleep: (ms) =>
+      new Promise((resolveSleep) => {
+        setTimeout(resolveSleep, ms);
+      }),
+  });
+
   registerSharedViewsIpcHandlers<
     WebContents,
     IpcMainInvokeEvent,
@@ -10740,6 +10844,7 @@ function registerIpcHandlers(): void {
     recordShareViewStoreRefusal: activity.recordShareViewStoreRefusal,
     recheckRemovedShares,
     showsLive: (attachmentId, path) => engineYDocSessionIpc.showsLive(attachmentId, path),
+    rebuildShareView: (workspaceId, rebuildId) => shareViewRebuilds.run(workspaceId, rebuildId),
   });
 
   // ---- Share mounts ----
