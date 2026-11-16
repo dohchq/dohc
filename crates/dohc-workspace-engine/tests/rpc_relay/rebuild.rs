@@ -11,10 +11,10 @@ const B_BYTES: &[u8] = b"hidden file body";
 const C_BYTES: &[u8] = b"file the member deletes";
 const D_BYTES: &[u8] = b"file the member moves";
 
-fn grant(revision: &str, visibility: &str) -> Value {
+fn grant(signature: &str, visibility: &str) -> Value {
     json!({
         "paths": [], "access": "view", "wholeWorkspace": true,
-        "reach": { "revision": revision, "visibilityRevision": visibility, "rootLevel": "view", "folders": [] },
+        "reach": { "signature": signature, "visibilitySignature": visibility, "rootLevel": "view", "folders": [] },
     })
 }
 
@@ -37,7 +37,7 @@ fn moment(seq: i64, moment_id: &str, object_id: &str, path: &str, bytes: &[u8]) 
 
 /// The relay's log for the member under one visibility: `open/a.md`, `c.md`
 /// and `d.md` always, and `hidden/b.md` when the member reaches it.
-fn serve(relay: &FakeRelay, revision: &str, visibility: &str, with_hidden: bool) {
+fn serve(relay: &FakeRelay, signature: &str, visibility: &str, with_hidden: bool) {
     let mut state = relay.state.lock().expect("relay state");
     let mut ops = vec![
         moment(1, "moment-a", "object-a", "open/a.md", A_BYTES),
@@ -53,9 +53,9 @@ fn serve(relay: &FakeRelay, revision: &str, visibility: &str, with_hidden: bool)
             .share_blobs
             .insert((SHARE.to_owned(), hex_sha256(bytes)), bytes.to_vec());
     }
-    state.share_revisions.insert(
+    state.share_signatures.insert(
         SHARE.to_owned(),
-        (revision.to_owned(), visibility.to_owned()),
+        (signature.to_owned(), visibility.to_owned()),
     );
 }
 
@@ -291,7 +291,7 @@ async fn a_narrowed_clean_copy_is_rebuilt_and_the_hidden_file_keeps_only_its_cop
     let copy = closed_copy("rpc-rebuild-narrow", true, false).await;
     let result = rebuild(&copy).await;
     assert_eq!(result["state"], "rebuilt", "{result}");
-    assert_eq!(result["reach"]["visibilityRevision"], "v2");
+    assert_eq!(result["reach"]["visibilitySignature"], "v2");
 
     // The file the member still reaches stays; the hidden one moved, bytes
     // and all, to the recovery folder the result names.
@@ -812,4 +812,92 @@ async fn a_swap_in_an_unknown_state_stops_and_changes_nothing() {
     assert_eq!(manifest(&copy).expect("manifest")["phase"], "swapping");
     assert!(root.join(".dohc/engine").is_dir());
     assert_eq!(std::fs::read(root.join("hidden/b.md")).expect("b"), B_BYTES);
+}
+
+/// An owner's move across the edge of the member's reach, which the relay
+/// marks in the pull, closes a copy that holds earlier pages as a visibility
+/// change does, though both signatures stay the same. Its rebuild applies the
+/// marked page: it pulls from the start, where the move is History the reach
+/// serves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pull_that_marks_a_move_across_the_reach_closes_the_copy_and_its_rebuild_applies_it() {
+    let workspace_id = "rpc-relay-moved-across";
+    let relay = FakeRelay::start(RelayState::default());
+    serve(&relay, "r1", "v1", false);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    let pull = json!({ "workspaceId": workspace_id, "shareId": SHARE, "grantedSelector": grant("r1", "v1") });
+    let pulled = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        pull.clone(),
+    )
+    .await;
+    assert!(pulled.get("rebuildId").is_none(), "{pulled}");
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.commitCursor",
+        json!({ "workspaceId": workspace_id, "pendingCursor": pulled["pendingCursor"] }),
+    )
+    .await;
+    for (path, bytes) in [
+        ("open/a.md", A_BYTES),
+        ("open/c.md", C_BYTES),
+        ("open/d.md", D_BYTES),
+    ] {
+        let target = scratch.path().join(path);
+        std::fs::create_dir_all(target.parent().expect("parent")).expect("folder");
+        std::fs::write(target, bytes).expect("file");
+    }
+
+    // The owner moves a file out of a hidden folder. The relay serves it as a
+    // write and marks it.
+    {
+        let mut state = relay.state.lock().expect("relay state");
+        let mut arrived = moment(5, "moment-e", "object-e", "open/e.md", B_BYTES);
+        arrived["reachMove"] = json!("arrival");
+        state.share_ops.get_mut(SHARE).expect("ops").push(arrived);
+    }
+    let closed = call(&transport, &handle, &mut id, "share.view.pull", pull).await;
+    assert_eq!(
+        closed["reachChanged"],
+        json!({ "signature": "r1", "visibilitySignature": "v1" })
+    );
+    let rebuild_id = closed["rebuildId"]
+        .as_str()
+        .expect("a marked move closes the copy")
+        .to_owned();
+    assert!(closed.get("pendingCursor").is_none(), "{closed}");
+    close(&transport, &handle, &mut id).await;
+
+    let copy = ClosedCopy {
+        relay,
+        scratch,
+        workspace_id: workspace_id.to_owned(),
+        rebuild_id,
+        live_drafts: json!([]),
+    };
+    let mut params = rebuild_params(&copy);
+    params["grantedSelector"] = grant("r1", "v1");
+    let rebuilt = InProcessTransport::new(Arc::new(EngineService::new()))
+        .call(
+            RequestContext::unbounded(),
+            request(90, "share.view.rebuild", None, params),
+        )
+        .await
+        .expect("rebuild")
+        .result;
+    assert_eq!(rebuilt["state"], json!("rebuilt"), "{rebuilt}");
+    finish(&copy).await;
+    assert_eq!(
+        std::fs::read(copy.scratch.path().join("open/e.md")).expect("the moved file"),
+        B_BYTES
+    );
 }

@@ -132,7 +132,7 @@ pub use relay::{
     SettlementPublicationRefusal, ShareBlobRequest, ShareBlobUploadRequest,
     ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
     ShareProposalChange, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,
-    ShareProposalSubmitResponse, ShareReachRevisions, ShareReplicationEnvelope,
+    ShareProposalSubmitResponse, ShareReachSignatures, ShareReplicationEnvelope,
     ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest,
     ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, WorkReferenceMapping,

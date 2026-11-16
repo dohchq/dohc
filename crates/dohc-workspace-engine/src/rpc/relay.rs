@@ -333,8 +333,8 @@ pub(super) struct GrantedSelectorParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReachParams {
-    revision: String,
-    visibility_revision: String,
+    signature: String,
+    visibility_signature: String,
     root_level: Option<String>,
     folders: Vec<ReachFolderParams>,
 }
@@ -921,8 +921,8 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
             },
             // The page was selected under another reach and applied nothing.
             "reachChanged": outcome.reach_changed.map(|served| json!({
-                "revision": served.revision,
-                "visibilityRevision": served.visibility_revision,
+                "signature": served.signature,
+                "visibilitySignature": served.visibility_signature,
             })),
         }),
     })
@@ -975,16 +975,16 @@ pub(super) fn share_grant(
 
 /// Reads a reach as `parseListedReach` does, refusing any part it cannot read.
 fn share_reach(reach: ReachParams) -> Result<dohc_engine_sync::ShareReach, WireError> {
-    const MAX_REVISION_CHARS: usize = 512;
+    const MAX_SIGNATURE_CHARS: usize = 512;
     const MAX_FOLDERS: usize = 100_000;
     let invalid = |reason: &'static str| WireError::new(ErrorCode::InvalidParams, reason);
     let level = |value: &str| {
         dohc_engine_sync::ShareAccess::parse(value)
             .ok_or_else(|| invalid(r#"a reach level must be "view", "comment", or "edit""#))
     };
-    for revision in [&reach.revision, &reach.visibility_revision] {
-        if revision.is_empty() || revision.chars().count() > MAX_REVISION_CHARS {
-            return Err(invalid("a reach revision must be 1 to 512 characters"));
+    for signature in [&reach.signature, &reach.visibility_signature] {
+        if signature.is_empty() || signature.chars().count() > MAX_SIGNATURE_CHARS {
+            return Err(invalid("a reach signature must be 1 to 512 characters"));
         }
     }
     if reach.folders.len() > MAX_FOLDERS {
@@ -1002,8 +1002,8 @@ fn share_reach(reach: ReachParams) -> Result<dohc_engine_sync::ShareReach, WireE
         }
     }
     Ok(dohc_engine_sync::ShareReach {
-        revision: reach.revision,
-        visibility_revision: reach.visibility_revision,
+        signature: reach.signature,
+        visibility_signature: reach.visibility_signature,
         root_level,
         folders,
     })
@@ -2437,7 +2437,7 @@ impl EngineService {
         let stored_visibility = granted
             .reach
             .as_ref()
-            .map(|reach| reach.visibility_revision.clone());
+            .map(|reach| reach.visibility_signature.clone());
         let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let share_id = params.share_id.clone();
@@ -2450,17 +2450,19 @@ impl EngineService {
                     workspace_id: open.workspace_id.clone(),
                     share_id: params.share_id,
                     granted,
+                    rebuild: false,
                 },
                 "share.view.pull",
             )
             .await?;
-        // The relay now selects other items for this member. The copy may
-        // hold History the relay withholds, so it closes before this answers:
-        // from here on only its rebuild reads it.
+        // The relay now selects other items for this member, or moved one
+        // across the edge of their reach. The copy may hold History the relay
+        // withholds, so it closes before this answers: from here on only its
+        // rebuild reads it.
         if let RelayOperationOutcome::ShareViewPulled(pulled) = &outcome
             && let Some(served) = &pulled.reach_changed
             && let Some(stored) = stored_visibility
-            && served.visibility_revision != stored
+            && (served.visibility_signature != stored || served.moved_across)
         {
             let manifest = crate::rebuild_manifest::RebuildManifest {
                 rebuild_id: crate::rebuild_manifest::new_rebuild_id().map_err(|_| {
@@ -2468,8 +2470,8 @@ impl EngineService {
                 })?,
                 phase: crate::rebuild_manifest::RebuildPhase::Closed,
                 share_id,
-                revision: served.revision.clone(),
-                visibility_revision: served.visibility_revision.clone(),
+                signature: served.signature.clone(),
+                visibility_signature: served.visibility_signature.clone(),
                 closed_at_ms: now_ms()?,
                 plan: None,
                 share_refresh_existed: None,
@@ -4502,7 +4504,7 @@ mod tests {
         };
         let reach = |root: Value, folders: Value| {
             json!({
-                "revision": "r1", "visibilityRevision": "v1", "rootLevel": root, "folders": folders,
+                "signature": "r1", "visibilitySignature": "v1", "rootLevel": root, "folders": folders,
             })
         };
         let grant = read(
@@ -4544,7 +4546,7 @@ mod tests {
                 true,
             ),
             (
-                json!({ "revision": "", "visibilityRevision": "v1", "rootLevel": "view", "folders": [] }),
+                json!({ "signature": "", "visibilitySignature": "v1", "rootLevel": "view", "folders": [] }),
                 true,
             ),
         ] {

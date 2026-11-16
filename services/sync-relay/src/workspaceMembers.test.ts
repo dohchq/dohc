@@ -2,6 +2,7 @@ import { authorizeShareAction } from "./shareAuthorization";
 import { filterProposedChangeForShare } from "./shareFilter";
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
+import { parseListedReach } from "@dohc/security-contract/listed-reach";
 import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import { afterEach, describe, expect, it } from "vitest";
 import { DiscussionActivityHub } from "./discussionActivity";
@@ -569,7 +570,9 @@ describe("what a member reaches", () => {
       "visibilitySignature",
     ]);
     expect(reach.rootLevel).toBe("comment");
-    expect(reach.folders).toEqual([{ path: "", level: "comment" }]);
+    expect(reach.folders).toEqual([]);
+    // The member's copy reads the page's reach as it is.
+    expect(parseListedReach(reach)).not.toBeNull();
     const first = reach.signature;
     const body = await pulledText(h, "ana", shareId);
     expect(body).not.toContain("private/");
@@ -585,10 +588,7 @@ describe("what a member reaches", () => {
     const opened = await signature();
     expect(opened).not.toBe(first);
     expect(await pulledText(h, "ana", shareId)).toContain("private/deep/secret.md");
-    expect((await listed()).folders).toEqual([
-      { path: "", level: "comment" },
-      { path: "private", level: "view" },
-    ]);
+    expect((await listed()).folders).toEqual([{ path: "private", level: "view" }]);
     await ownerWrite(h, "private/access.yaml", "");
     // The signature is a function of reach, so the same reach signs the same.
     expect(await signature()).toBe(first);
@@ -791,7 +791,6 @@ describe("what a member reaches", () => {
     const listed = await inventory();
     expect(listed.rootLevel).toBe("comment");
     expect(listed.folders).toEqual([
-      { path: "", level: "comment" },
       { path: "TEAM", level: "edit" },
       { path: "Team", level: "edit" },
       { path: "empty", level: "view" },
@@ -805,7 +804,7 @@ describe("what a member reaches", () => {
     ).toBe(200);
     const admin = await inventory();
     expect(admin.rootLevel).toBe("edit");
-    expect(admin.folders).toEqual([{ path: "", level: "edit" }]);
+    expect(admin.folders).toEqual([]);
   });
 
   it("checks proposals, pages and Comments at the folder target, including hidden and folded ancestors", async () => {

@@ -378,16 +378,22 @@ pub struct ShareViewResponse {
     pub ops: Vec<ShareReplicationEnvelope>,
     pub next_cursor: i64,
     pub has_more: bool,
-    /// The member's reach revisions the relay selected this page under. A
+    /// The member's reach signatures the relay selected this page under. A
     /// membership's pages carry them; a path share's carry none.
-    pub reach_revisions: Option<ShareReachRevisions>,
+    pub reach_signatures: Option<ShareReachSignatures>,
 }
 
-/// The two revisions of a member's reach (`ShareReach`).
+/// The two signatures of a member's reach (`ShareReach`), as one page lists
+/// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShareReachRevisions {
-    pub revision: String,
-    pub visibility_revision: String,
+pub struct ShareReachSignatures {
+    pub signature: String,
+    pub visibility_signature: String,
+    /// Whether the page marks an owner's move across the edge of the reach,
+    /// which it serves as a delete or a write. The copy may hold History of
+    /// the moved file that the relay no longer serves, so it rebuilds as for
+    /// a changed visibility.
+    pub moved_across: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,10 +698,10 @@ pub struct ShareViewPullOutcome {
     /// it; one that advanced silently would lose the skip. So it advances,
     /// and the skip is recorded.
     pub pending_cursor: crate::ShareCursor,
-    /// The page's reach revisions, when they differ from the reach the grant
+    /// The page's reach signatures, when they differ from the reach the grant
     /// carries. The page then applied nothing and the cursor stays where it
     /// was: the caller reads the reach again before it pulls on.
-    pub reach_changed: Option<ShareReachRevisions>,
+    pub reach_changed: Option<ShareReachSignatures>,
 }
 
 /// Runtime-owned relay seam. The core crate contains no HTTP or async runtime
@@ -5268,12 +5274,42 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     /// claiming a version it does not grant — is skipped before replay, so
     /// its blob is never requested. There is no unscoped pull: the grant is
     /// required, and one that selects nothing admits nothing.
+    ///
+    /// A membership's page that marks a move across the edge of its reach
+    /// applies nothing, as one under another reach does, unless it is the
+    /// copy's first page: a new copy starts from what the reach serves now.
     pub fn pull_share_view(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         share_id: &str,
         granted: &crate::ShareGrant,
+        faults: &dyn FaultInjector,
+    ) -> Result<ShareViewPullOutcome, RelayError> {
+        self.pull_share_view_page(store, workspace_id, share_id, granted, true, faults)
+    }
+
+    /// Pull one page of a membership into the store its rebuild fills. It
+    /// pulls from the start, so a marked move is already the History the
+    /// reach serves, and the page applies.
+    pub fn pull_share_view_to_rebuild(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        share_id: &str,
+        granted: &crate::ShareGrant,
+        faults: &dyn FaultInjector,
+    ) -> Result<ShareViewPullOutcome, RelayError> {
+        self.pull_share_view_page(store, workspace_id, share_id, granted, false, faults)
+    }
+
+    fn pull_share_view_page(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        share_id: &str,
+        granted: &crate::ShareGrant,
+        stop_at_moves: bool,
         faults: &dyn FaultInjector,
     ) -> Result<ShareViewPullOutcome, RelayError> {
         let mut cursor =
@@ -5291,14 +5327,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })?;
         validate_share_page(&page.ops, page.next_cursor, page.has_more, cursor)?;
         // The relay selected this page under the member's reach at its own
-        // revisions. A page selected under another reach than the one stored
-        // here applies nothing, whether the levels or the visible paths moved.
+        // signatures. A page selected under another reach than the one stored
+        // here applies nothing, whether the levels or the visible paths moved,
+        // and nor does one that marks a move across the reach's edge.
         if let Some(known) = &granted.reach {
-            let Some(served) = page.reach_revisions else {
+            let Some(served) = page.reach_signatures else {
                 return Err(RelayError::InvalidResponse);
             };
-            if served.revision != known.revision
-                || served.visibility_revision != known.visibility_revision
+            if served.signature != known.signature
+                || served.visibility_signature != known.visibility_signature
+                || (served.moved_across && stop_at_moves && cursor > 0)
             {
                 return Ok(ShareViewPullOutcome {
                     fetched: 0,

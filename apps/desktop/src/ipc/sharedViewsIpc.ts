@@ -24,7 +24,7 @@ import { parseShareCode, relayUrlsMatch } from "../workspaces/syncCode";
 import {
   RelayUnauthorizedError,
   ShareUnavailableError,
-  type ShareReachRevisions,
+  type ShareReachSignatures,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import { refreshReceivedReferencePin } from "../workspaces/workspaceFileReferenceScopes";
@@ -234,7 +234,7 @@ export function registerSharedViewsIpcHandlers<
   }
 
   // Read a membership's reach again after a pull applied nothing because the
-  // relay selected it under other revisions. Under the same visibility only
+  // relay selected it under other signatures. Under the same visibility only
   // the levels moved: writers pause while capture keeps what they made, the
   // new levels go in, and the next pull continues. A changed visibility
   // changes nothing here: the next pull is served under it, and the engine
@@ -253,10 +253,10 @@ export function registerSharedViewsIpcHandlers<
     // A view with no readable reach takes the listed one: it has no
     // visibility of its own to compare.
     const stored = storedShareViewReach(view);
-    if (stored && stored.visibilityRevision !== listed.visibilityRevision) {
+    if (stored && stored.visibilitySignature !== listed.visibilitySignature) {
       return "visibility-changed";
     }
-    if (stored?.revision === listed.revision) return "current";
+    if (stored?.signature === listed.signature) return "current";
     await withStaleSensitiveWorkspaceOperation(rootPath, (lease) =>
       shareViewFiles.narrow(
         lease,
@@ -588,7 +588,7 @@ export function registerSharedViewsIpcHandlers<
       // A membership's level as this computer knows it, which its held pull
       // names. Cleared once the relay says it differs, until a check moves it.
       level?: ShareViewSelector["access"];
-      reach?: ShareReachRevisions;
+      reach?: ShareReachSignatures;
     }
   >();
   // The relay a membership reads its reach from: the signed-in one, when it
@@ -934,10 +934,10 @@ export function registerSharedViewsIpcHandlers<
           let outcome: StandaloneShareViewRefreshOutcome | RefreshSharedViewOutcome;
           let nextCursor: number | undefined;
           let pulled: ShareViewPullCommitted["changes"] = [];
-          // The reach revisions this view now settles on, which a held probe
+          // The reach signatures this view now settles on, which a held probe
           // compares with each empty page. After a visibility change they are
           // the served ones, so the probe stops counting the same change as news.
-          let settledReach: ShareReachRevisions | undefined;
+          let settledReach: ShareReachSignatures | undefined;
           try {
             const reconcile = async () => {
               const reconciled = await withStaleSensitiveWorkspaceOperation(
@@ -988,8 +988,8 @@ export function registerSharedViewsIpcHandlers<
               );
               if (stored)
                 settledReach = {
-                  revision: stored.revision,
-                  visibilityRevision: stored.visibilityRevision,
+                  signature: stored.signature,
+                  visibilitySignature: stored.visibilitySignature,
                 };
             }
           } catch (error) {

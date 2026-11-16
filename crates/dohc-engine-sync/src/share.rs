@@ -160,15 +160,14 @@ pub struct ShareGrant {
     pub reach: Option<ShareReach>,
 }
 
-/// A member's reach as the relay's inventory states it
-/// (`GET /sync/shares/:id/reach`). The Rust twin of `ListedReach` in
-/// `packages/security-contract/src/listedReach.ts`.
+/// A member's reach as each of their share log pages lists it. The Rust twin
+/// of `ListedReach` in `packages/security-contract/src/listedReach.ts`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareReach {
-    /// Moves whenever the member's levels change.
-    pub revision: String,
-    /// Moves only when what the member reaches changes.
-    pub visibility_revision: String,
+    /// Changes whenever the member's levels do. The relay keys it.
+    pub signature: String,
+    /// Changes only when what the member reaches does. The relay keys it.
+    pub visibility_signature: String,
     /// `None` when the root is hidden.
     pub root_level: Option<ShareAccess>,
     /// Each listed folder's exact path and level. The root is never listed.
@@ -1244,8 +1243,8 @@ mod share_view_boundary_tests {
     // The Rust twin of `levelAtPath` (`listedReach.test.ts` holds the same cases).
     fn reach(root: Option<ShareAccess>, folders: &[(&str, ShareAccess)]) -> crate::ShareReach {
         crate::ShareReach {
-            revision: "r1".to_owned(),
-            visibility_revision: "v1".to_owned(),
+            signature: "r1".to_owned(),
+            visibility_signature: "v1".to_owned(),
             root_level: root,
             folders: folders
                 .iter()

@@ -182,7 +182,7 @@ fn record_creation_is_durable_offline_and_retries_the_same_submission_after_rest
     let token = format!("share-object:v1:{}", hex_sha256(b"record-one"));
     let created = hex_sha256(text.as_bytes());
     let relay = PagedShareRelay::new([], [(0, ShareViewResponse {
-        reach_revisions: None,
+        reach_signatures: None,
         work_references: Vec::new(),
         next_reference_after: None,
         reference_has_more: false,
@@ -251,7 +251,7 @@ fn record_creation_is_durable_offline_and_retries_the_same_submission_after_rest
     let repaired = "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n";
     let sha = hex_sha256(repaired.as_bytes());
     let owner = RelaySyncClient::new(PagedShareRelay::new([], [(1, ShareViewResponse {
-        reach_revisions: None,
+        reach_signatures: None,
         work_references: Vec::new(),
         next_reference_after: None,
         reference_has_more: false,

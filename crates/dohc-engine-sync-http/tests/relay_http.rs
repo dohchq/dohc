@@ -13,7 +13,7 @@ use dohc_engine_sync::{
     HostedScopeDocument, KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, LogCoordinateRequest,
     LogCoordinateResponse, NoLiveLeases, ObservedBytes, ProbeRequest, PullRequest, RelayError,
     RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareLogPushRequest,
-    ShareReachRevisions, ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest,
+    ShareReachSignatures, ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest,
     SyncPassOutcome, blob_ceiling, journal_local_replication_op, read_pushed_seq,
     read_relay_cursor,
 };
@@ -1252,28 +1252,36 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     assert!(seen.contains("TARGET /sync/shares/share-1/log?since=1&limit=500&referenceAfter=mapping-tail&includeReferences=false"));
 }
 
-// A membership's share log pages name the reach the relay selected them
-// under, and the pull compares both revisions with the stored reach. A path
-// share's pages name none. A page that names one revision without the other
-// can't be compared, so it is refused rather than read as "no reach".
+// A membership's share log pages list the reach the relay selected them
+// under, and the pull compares both signatures with the stored reach. A path
+// share's pages list none. A reach without both signatures can't be compared,
+// so it is refused rather than read as "no reach". An op a member's page
+// marks as a move across the reach's edge sets `moved_across`; a mark the
+// engine can't read, or one on a page with no reach, is refused.
 #[test]
-fn share_view_pages_carry_both_reach_revisions_or_neither() {
+fn share_view_pages_carry_both_reach_signatures_and_their_moves() {
+    let reach = json!({"signature": "r-2", "visibilitySignature": "v-1", "rootLevel": "view",
+        "folders": [{"path": "docs", "level": "edit"}]});
+    let marked = |mark: &str| {
+        json!({"originId": "owner", "originSeq": 1, "opKind": "moment.append", "recordedAtMs": 1,
+            "payload": {"path": "docs/a.md"}, "reachMove": mark})
+    };
+    let page = |ops: Vec<Value>, reach: Option<Value>| {
+        let mut body = json!({"ok": true, "ops": ops, "nextCursor": 1, "hasMore": false});
+        if let Some(reach) = reach {
+            body["reach"] = reach;
+        }
+        TestResponse::json(200, body)
+    };
     let pages = Arc::new(Mutex::new(VecDeque::from([
-        TestResponse::json(
-            200,
-            json!({"ok": true, "ops": [], "nextCursor": 0, "hasMore": false,
-                "revision": "r-2", "visibilityRevision": "v-1"}),
-        ),
+        page(Vec::new(), Some(reach.clone())),
+        page(vec![marked("departure")], Some(reach.clone())),
+        page(vec![marked("arrival")], Some(reach.clone())),
         log_page(Vec::new(), 0, false),
-        TestResponse::json(
-            200,
-            json!({"ok": true, "ops": [], "nextCursor": 0, "hasMore": false, "revision": "r-2"}),
-        ),
-        TestResponse::json(
-            200,
-            json!({"ok": true, "ops": [], "nextCursor": 0, "hasMore": false,
-                "visibilityRevision": "v-1"}),
-        ),
+        page(Vec::new(), Some(json!({"signature": "r-2"}))),
+        page(Vec::new(), Some(json!({"visibilitySignature": "v-1"}))),
+        page(vec![marked("sideways")], Some(reach.clone())),
+        page(vec![marked("departure")], None),
     ])));
     let served = Arc::clone(&pages);
     let server = FakeServer::start(move |_| {
@@ -1293,22 +1301,32 @@ fn share_view_pages_carry_both_reach_revisions_or_neither() {
             limit: 500,
         })
     };
-    assert_eq!(
-        pull().expect("membership page").reach_revisions,
-        Some(ShareReachRevisions {
-            revision: "r-2".to_owned(),
-            visibility_revision: "v-1".to_owned(),
+    let listed = |moved_across| {
+        Some(ShareReachSignatures {
+            signature: "r-2".to_owned(),
+            visibility_signature: "v-1".to_owned(),
+            moved_across,
         })
-    );
-    assert_eq!(pull().expect("path share page").reach_revisions, None);
+    };
     assert_eq!(
-        pull().expect_err("level revision alone"),
-        RelayError::InvalidResponse
+        pull().expect("membership page").reach_signatures,
+        listed(false)
     );
-    assert_eq!(
-        pull().expect_err("visibility revision alone"),
-        RelayError::InvalidResponse
-    );
+    assert_eq!(pull().expect("departure").reach_signatures, listed(true));
+    assert_eq!(pull().expect("arrival").reach_signatures, listed(true));
+    assert_eq!(pull().expect("path share page").reach_signatures, None);
+    for refused in [
+        "level signature alone",
+        "visibility signature alone",
+        "an unknown mark",
+        "a mark without a reach",
+    ] {
+        assert_eq!(
+            pull().expect_err(refused),
+            RelayError::InvalidResponse,
+            "{refused}"
+        );
+    }
 }
 
 #[test]

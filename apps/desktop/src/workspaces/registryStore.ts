@@ -249,7 +249,7 @@ export interface ShareViewIdentity {
   role?: "admin" | "member";
   membersWorkspaceId?: string;
   // A joined workspace's reach as the relay last listed it: the level of each
-  // folder where a rule changes it, and the two revisions the pull compares.
+  // folder where a rule changes it, and the two signatures the pull compares.
   // Replaced whole, so the gates never see half of an old set
   // (`shareViewLevels`).
   reach?: import("@dohc/security-contract/listed-reach").ListedReach;

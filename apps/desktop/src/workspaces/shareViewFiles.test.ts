@@ -3101,8 +3101,8 @@ describe("ShareViewFiles", () => {
         wholeWorkspace: true as const,
       },
       reach: {
-        revision: "r1",
-        visibilityRevision: "v1",
+        signature: "r1",
+        visibilitySignature: "v1",
         rootLevel: "edit",
         folders: [{ path: "plans", level: "view" }],
       },

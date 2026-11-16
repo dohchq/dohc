@@ -18,7 +18,7 @@ import {
   type ShareViewRebuildSteps,
 } from "./shareViewRebuild";
 
-type Reach = { revision: string; visibilityRevision: string };
+type Reach = { signature: string; visibilitySignature: string };
 
 class Unreachable extends Error {}
 class Removed extends Error {}
@@ -30,13 +30,13 @@ function copy(
   answers: Array<
     ShareViewRebuildAnswer<Reach> | Error | (() => Promise<ShareViewRebuildAnswer<Reach>>)
   >,
-  listed: Reach[] = [{ revision: "r2", visibilityRevision: "v2" }],
+  listed: Reach[] = [{ signature: "r2", visibilitySignature: "v2" }],
 ) {
   const state = {
     open: true,
     held: false,
     view: {
-      reach: { revision: "r1", visibilityRevision: "v1" } as Reach,
+      reach: { signature: "r1", visibilitySignature: "v1" } as Reach,
       rebuild: "rebuild-1" as string | undefined,
     },
     manifest: "closed" as "closed" | "converged" | "gone",
@@ -110,7 +110,7 @@ const rebuilt = (
 
 describe("rebuilding a joined copy", () => {
   it("reopens a clean copy under the reach it was rebuilt for", async () => {
-    const { state, rebuilds } = copy([rebuilt({ revision: "r2", visibilityRevision: "v2" })]);
+    const { state, rebuilds } = copy([rebuilt({ signature: "r2", visibilitySignature: "v2" })]);
     await expect(rebuilds.run("w", "rebuild-1")).resolves.toEqual({
       kind: "rebuilt",
       recoveryFolder: null,
@@ -120,13 +120,13 @@ describe("rebuilding a joined copy", () => {
       open: true,
       held: false,
       manifest: "gone",
-      view: { reach: { revision: "r2", visibilityRevision: "v2" }, rebuild: undefined },
+      view: { reach: { signature: "r2", visibilitySignature: "v2" }, rebuild: undefined },
     });
     expect(state.notices).toEqual([{ kind: "clear" }]);
   });
 
   it("says where files left out of reach were saved", async () => {
-    const { state, rebuilds } = copy([rebuilt({ revision: "r2", visibilityRevision: "v2" }, 2)]);
+    const { state, rebuilds } = copy([rebuilt({ signature: "r2", visibilitySignature: "v2" }, 2)]);
     await rebuilds.run("w", "rebuild-1");
     expect(state.notices).toEqual([
       { kind: "recovered", folder: ".dohc/local/recovery/2026-11-16 10-00 UTC", count: 2 },
@@ -134,8 +134,8 @@ describe("rebuilding a joined copy", () => {
   });
 
   it("builds again under the newer reach when it moved during the build", async () => {
-    const r2 = { revision: "r2", visibilityRevision: "v2" },
-      r3 = { revision: "r3", visibilityRevision: "v3" };
+    const r2 = { signature: "r2", visibilitySignature: "v2" },
+      r3 = { signature: "r3", visibilitySignature: "v3" };
     const { state, rebuilds } = copy([{ state: "reachMoved" }, rebuilt(r3)], [r2, r3]);
     await expect(rebuilds.run("w", "rebuild-1")).resolves.toMatchObject({ kind: "rebuilt" });
     expect(state.builtUnder).toEqual([r2, r3]);
@@ -154,7 +154,7 @@ describe("rebuilding a joined copy", () => {
   // deletes those drafts only once the engine finished.
   it("deletes the live drafts the rebuild saved once it finished", async () => {
     const { state, rebuilds } = copy([
-      rebuilt({ revision: "r2", visibilityRevision: "v2" }, 1, ["draft-1"]),
+      rebuilt({ signature: "r2", visibilitySignature: "v2" }, 1, ["draft-1"]),
     ]);
     await rebuilds.run("w", "rebuild-1");
     expect(state).toMatchObject({ manifest: "gone", draftsRemoved: ["draft-1"] });
@@ -171,7 +171,7 @@ describe("rebuilding a joined copy", () => {
       new Unreachable(),
       new Unreachable(),
       new Unreachable(),
-      rebuilt({ revision: "r2", visibilityRevision: "v2" }),
+      rebuilt({ signature: "r2", visibilitySignature: "v2" }),
     ]);
     await expect(rebuilds.run("w", "rebuild-1")).resolves.toMatchObject({ kind: "rebuilt" });
     expect(state.slept).toEqual([1_000, 2_000, 5_000]);
@@ -214,7 +214,7 @@ describe("rebuilding a joined copy", () => {
     await expect(rebuilds.run("w", "rebuild-1")).resolves.toMatchObject({ kind: "rebuilt" });
     expect(state).toMatchObject({
       open: true,
-      view: { reach: { revision: "r2" }, rebuild: undefined },
+      view: { reach: { signature: "r2" }, rebuild: undefined },
     });
   });
 
@@ -224,7 +224,7 @@ describe("rebuilding a joined copy", () => {
     const first = rebuilds.run("w", "rebuild-1"),
       second = rebuilds.run("w", "rebuild-1");
     expect(rebuilds.running("w")).toBe(true);
-    gate.resolve(rebuilt({ revision: "r2", visibilityRevision: "v2" }));
+    gate.resolve(rebuilt({ signature: "r2", visibilitySignature: "v2" }));
     await expect(Promise.all([first, second])).resolves.toEqual([
       { kind: "rebuilt", recoveryFolder: null, recovered: 0 },
       { kind: "rebuilt", recoveryFolder: null, recovered: 0 },
@@ -261,7 +261,7 @@ describe("rebuilding a joined copy", () => {
   // whose unsent edits could not be kept stops the close: nothing is rebuilt,
   // and Try again closes the pages again.
   it("stops the close with Try again when a live page can't keep its draft", async () => {
-    const { state } = copy([rebuilt({ revision: "r2", visibilityRevision: "v2" })]);
+    const { state } = copy([rebuilt({ signature: "r2", visibilitySignature: "v2" })]);
     const unwritable = new Error("EACCES: the draft folder refused the write");
     let pages: EngineYDocSessionReleaseOutcome[] = [
       { kind: "released" },

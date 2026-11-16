@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { highestListedLevel, levelAtPath, parseListedReach, type ListedReach } from "./listedReach";
 
 const reach: ListedReach = {
-  revision: "r1",
-  visibilityRevision: "v1",
+  signature: "r1",
+  visibilitySignature: "v1",
   rootLevel: "comment",
   folders: [
     { path: "Plans", level: "edit" },
@@ -54,8 +54,8 @@ describe("parseListedReach", () => {
   it("reads the relay's answer and refuses any unreadable part", () => {
     expect(parseListedReach({ ok: true, watermark: 4, ...reach })).toEqual(reach);
     expect(parseListedReach({ ...reach, rootLevel: "owner" })).toBeNull();
-    expect(parseListedReach({ ...reach, revision: "" })).toBeNull();
-    expect(parseListedReach({ ...reach, visibilityRevision: undefined })).toBeNull();
+    expect(parseListedReach({ ...reach, signature: "" })).toBeNull();
+    expect(parseListedReach({ ...reach, visibilitySignature: undefined })).toBeNull();
     expect(parseListedReach({ ...reach, folders: [{ path: "", level: "edit" }] })).toBeNull();
     expect(parseListedReach({ ...reach, folders: [{ path: "a//b", level: "edit" }] })).toBeNull();
     expect(

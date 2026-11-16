@@ -3122,8 +3122,8 @@ describe("a joined workspace through the CLI", () => {
     const shareView = {
       ...f.shareView,
       reach: {
-        revision: "r1",
-        visibilityRevision: "v1",
+        signature: "r1",
+        visibilitySignature: "v1",
         rootLevel: "view" as const,
         folders: [
           { path: "tasks", level: "edit" as const },

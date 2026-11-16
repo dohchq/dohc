@@ -1578,8 +1578,8 @@ fn a_membership_view_pushes_only_its_posts_in_groups() {
     // A member's lane opens on the highest level its reach lists anywhere.
     let listed = |level| ShareGrant {
         reach: Some(crate::ShareReach {
-            revision: "r1".to_owned(),
-            visibility_revision: "v1".to_owned(),
+            signature: "r1".to_owned(),
+            visibility_signature: "v1".to_owned(),
             root_level: Some(ShareAccess::View),
             folders: [("Plans".to_owned(), level)].into(),
         }),

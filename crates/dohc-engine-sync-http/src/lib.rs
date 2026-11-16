@@ -19,7 +19,7 @@ use dohc_engine_sync::{
     RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareBlobUploadRequest,
     ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
     ShareProposalChange, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
-    ShareReachRevisions, ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse,
+    ShareReachSignatures, ShareReplicationEnvelope, ShareViewRequest, ShareViewResponse,
     SharedChannelRequest, SharedChannelResponse,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -1142,16 +1142,26 @@ impl RelayTransport for HttpRelayTransport {
                 ("includeReferences", req.include_work_references.to_string()),
             ],
         )?;
-        let reach_revisions = match (page.revision, page.visibility_revision) {
-            (Some(revision), Some(visibility_revision)) => Some(ShareReachRevisions {
-                revision,
-                visibility_revision,
+        let mut moved_across = false;
+        for op in &page.ops {
+            match op.reach_move.as_deref() {
+                None => {}
+                Some("departure" | "arrival") => moved_across = true,
+                Some(_) => return Err(RelayError::InvalidResponse),
+            }
+        }
+        // Only a membership's pages list a reach, and only theirs mark moves.
+        let reach_signatures = match page.reach {
+            Some(reach) => Some(ShareReachSignatures {
+                signature: reach.signature,
+                visibility_signature: reach.visibility_signature,
+                moved_across,
             }),
-            (None, None) => None,
-            _ => return Err(RelayError::InvalidResponse),
+            None if moved_across => return Err(RelayError::InvalidResponse),
+            None => None,
         };
         Ok(ShareViewResponse {
-            reach_revisions,
+            reach_signatures,
             work_references: page.work_references,
             next_reference_after: page.next_reference_after,
             reference_has_more: page.reference_has_more,
@@ -1786,11 +1796,17 @@ struct WireLogPage {
     ops: Vec<WireLogRow>,
     next_cursor: i64,
     has_more: bool,
-    // A membership's pages name the reach the relay selected them under.
+    // A membership's pages list the reach the relay selected them under. The
+    // desktop reads its levels; the engine needs only the signatures.
     #[serde(default)]
-    revision: Option<String>,
-    #[serde(default)]
-    visibility_revision: Option<String>,
+    reach: Option<WireListedReach>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireListedReach {
+    signature: String,
+    visibility_signature: String,
 }
 
 #[derive(Deserialize)]
@@ -1838,6 +1854,10 @@ struct WireLogRow {
     op_kind: String,
     payload: serde_json::Value,
     recorded_at_ms: i64,
+    // A member's page marks an owner's move across the edge of their reach,
+    // which it serves as a delete or a write.
+    #[serde(default)]
+    reach_move: Option<String>,
 }
 
 impl WireLogRow {

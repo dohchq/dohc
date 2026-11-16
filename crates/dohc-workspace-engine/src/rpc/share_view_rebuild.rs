@@ -430,7 +430,7 @@ impl EngineService {
 
     /// Pull the share from the start into the staging store. Answers its
     /// current files, the disk's hash at each path either store holds and
-    /// which of those the new store holds, or the revisions the relay served
+    /// which of those the new store holds, or the signatures the relay served
     /// when they differ from the grant's.
     async fn rebuild_build(
         &self,
@@ -462,6 +462,7 @@ impl EngineService {
                         workspace_id: params.workspace_id.clone(),
                         share_id: params.share_id.clone(),
                         granted,
+                        rebuild: true,
                     },
                     "share.view.rebuild",
                 )
@@ -474,8 +475,8 @@ impl EngineService {
             };
             if let Some(served) = pulled.reach_changed {
                 return Ok(Err(json!({
-                    "revision": served.revision,
-                    "visibilityRevision": served.visibility_revision,
+                    "signature": served.signature,
+                    "visibilitySignature": served.visibility_signature,
                 })));
             }
             let has_more = pulled.has_more;

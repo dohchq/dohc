@@ -23,9 +23,10 @@ export interface EvaluatedMemberReach {
 
 /**
  * A member's reach as their pages list it. A path takes the level of the
- * nearest listed folder at or above it. The root comes first when the member
- * reaches it, then each ruled folder they reach at a level other than its
- * parent's. The Rust twin is `ShareReach` in dohc-engine-sync.
+ * nearest listed folder at or above it, or the root's. The folders are each
+ * ruled folder the member reaches at a level other than its parent's; the
+ * root is never one. The desktop reads it as `ListedReach`, the engine as
+ * `ShareReach`.
  */
 export interface ListedMemberReach {
   /** Changes whenever the member's levels do. */
@@ -196,16 +197,13 @@ export function memberReach(
         signature: keyedSignature(key),
         visibilitySignature: keyed(key, "dohc/member-visibility/v1", visibilitySignature()),
         rootLevel,
-        folders: [
-          ...(rootLevel === null ? [] : [{ path: "", level: rootLevel }]),
-          // The folders `signature` names, less hidden ones.
-          ...ruled().flatMap((path) => {
-            const level = path === "" ? null : atFolder(path);
-            return level === null || level === atFolder(accessRuleFolder(path))
-              ? []
-              : [{ path, level }];
-          }),
-        ],
+        // The folders `signature` names, less hidden ones.
+        folders: ruled().flatMap((path) => {
+          const level = path === "" ? null : atFolder(path);
+          return level === null || level === atFolder(accessRuleFolder(path))
+            ? []
+            : [{ path, level }];
+        }),
       };
     },
     levelAt,

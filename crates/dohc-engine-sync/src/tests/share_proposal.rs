@@ -1106,7 +1106,7 @@ fn share_proposal_submit_never_offers_a_pulled_granter_change_back() {
             [(
                 0,
                 ShareViewResponse {
-                    reach_revisions: None,
+                    reach_signatures: None,
                     work_references: Vec::new(),
                     next_reference_after: None,
                     reference_has_more: false,

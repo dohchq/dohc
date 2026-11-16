@@ -46,8 +46,8 @@ pub struct RebuildManifest {
     /// The share whose reach changed.
     pub share_id: String,
     /// The reach the relay served when the copy closed.
-    pub revision: String,
-    pub visibility_revision: String,
+    pub signature: String,
+    pub visibility_signature: String,
     pub closed_at_ms: i64,
     /// What the rebuild does to the files on disk, from `planned` on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -216,8 +216,8 @@ mod tests {
             rebuild_id: "r1".to_owned(),
             phase,
             share_id: "share-1".to_owned(),
-            revision: "rev-2".to_owned(),
-            visibility_revision: "vis-2".to_owned(),
+            signature: "rev-2".to_owned(),
+            visibility_signature: "vis-2".to_owned(),
             closed_at_ms: 7,
             plan: None,
             share_refresh_existed: None,

@@ -119,9 +119,9 @@ struct RelayState {
     workspace_log_delay: Option<Duration>,
     workspace_log_started: Option<Arc<AtomicBool>>,
     workspace_page_limit: Option<usize>,
-    // The reach revisions each share's log pages name, as (revision,
-    // visibility revision).
-    share_revisions: HashMap<String, (String, String)>,
+    // The reach signatures each share's log pages name, as (signature,
+    // visibility signature).
+    share_signatures: HashMap<String, (String, String)>,
     refuse_claims: bool,
 }
 
@@ -256,9 +256,10 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
             "nextCursor": next,
             "hasMore": false,
         });
-        if let Some((revision, visibility)) = state.share_revisions.get(share_id) {
-            page["revision"] = json!(revision);
-            page["visibilityRevision"] = json!(visibility);
+        if let Some((signature, visibility)) = state.share_signatures.get(share_id) {
+            page["reach"] = json!({
+                "signature": signature, "visibilitySignature": visibility, "rootLevel": "view", "folders": [],
+            });
         }
         return TestResponse::json(page);
     }
@@ -3099,19 +3100,19 @@ async fn a_pull_under_another_visibility_closes_the_copy_before_it_answers() {
         "shareId": "membership",
         "grantedSelector": {
             "paths": [], "access": "view", "wholeWorkspace": true,
-            "reach": { "revision": "r1", "visibilityRevision": "v1", "rootLevel": "view", "folders": [] },
+            "reach": { "signature": "r1", "visibilitySignature": "v1", "rootLevel": "view", "folders": [] },
         },
     });
     let manifest = scratch.path().join(".dohc/local/rebuild.json");
-    let serve = |revision: &str, visibility: &str| {
+    let serve = |signature: &str, visibility: &str| {
         relay
             .state
             .lock()
             .expect("relay state")
-            .share_revisions
+            .share_signatures
             .insert(
                 "membership".to_owned(),
-                (revision.to_owned(), visibility.to_owned()),
+                (signature.to_owned(), visibility.to_owned()),
             );
     };
 
@@ -3126,7 +3127,7 @@ async fn a_pull_under_another_visibility_closes_the_copy_before_it_answers() {
     .await;
     assert_eq!(
         levels_only["reachChanged"],
-        json!({ "revision": "r2", "visibilityRevision": "v1" })
+        json!({ "signature": "r2", "visibilitySignature": "v1" })
     );
     assert!(levels_only.get("rebuildId").is_none());
     assert!(!manifest.exists());
@@ -3142,7 +3143,7 @@ async fn a_pull_under_another_visibility_closes_the_copy_before_it_answers() {
     .await;
     assert_eq!(
         closed["reachChanged"],
-        json!({ "revision": "r2", "visibilityRevision": "v2" })
+        json!({ "signature": "r2", "visibilitySignature": "v2" })
     );
     let rebuild_id = closed["rebuildId"].as_str().expect("rebuild id").to_owned();
     assert!(
@@ -3156,7 +3157,7 @@ async fn a_pull_under_another_visibility_closes_the_copy_before_it_answers() {
             &written["rebuildId"],
             &written["phase"],
             &written["shareId"],
-            &written["visibilityRevision"]
+            &written["visibilitySignature"]
         ),
         (
             &json!(rebuild_id),

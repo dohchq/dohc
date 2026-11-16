@@ -184,8 +184,8 @@ type EngineGrantedSelector = {
   access: ShareAccess;
   wholeWorkspace?: true;
   reach?: {
-    revision: string;
-    visibilityRevision: string;
+    signature: string;
+    visibilitySignature: string;
     rootLevel: ShareAccess | null;
     folders: { path: string; level: ShareAccess }[];
   };

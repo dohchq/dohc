@@ -109,8 +109,8 @@ describe("received-share record drafts", () => {
       access: "view" as const,
     };
     const reach = (trip: "comment" | "edit") => ({
-      revision: "r1",
-      visibilityRevision: "v1",
+      signature: "r1",
+      visibilitySignature: "v1",
       rootLevel: "view",
       folders: [{ path: "trip", level: trip }],
     });

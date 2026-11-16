@@ -2,17 +2,18 @@ import { accessRuleFolder, isAccessRuleRelatedPath } from "./accessRuleFiles";
 import { SHARE_ACCESS_VALUES, shareAccessRank, type ShareAccess } from "./shareSelector";
 
 /**
- * A member's reach as the relay's inventory states it
- * (`GET /sync/shares/:id/reach`): the root's level and each folder where a
- * rule gives the member a level other than its parent's. A hidden folder is
- * never listed, and the root is always present, null when it is hidden.
+ * A member's reach as each of their share log pages lists it (`reach`): the
+ * root's level and each folder where a rule gives the member a level other
+ * than its parent's. A hidden folder is never listed, and the root is always
+ * present, null when it is hidden.
  *
- * The two revisions say when to read it again. `revision` moves whenever the
- * member's levels change; `visibilityRevision` only when what they reach does.
+ * The relay keys both signatures, so they say only when the reach changed:
+ * `signature` whenever the member's levels do, `visibilitySignature` only when
+ * what they reach does.
  */
 export interface ListedReach {
-  readonly revision: string;
-  readonly visibilityRevision: string;
+  readonly signature: string;
+  readonly visibilitySignature: string;
   readonly rootLevel: ShareAccess | null;
   readonly folders: readonly { readonly path: string; readonly level: ShareAccess }[];
 }
@@ -23,7 +24,7 @@ function isLevel(value: unknown): value is ShareAccess {
   return typeof value === "string" && (SHARE_ACCESS_VALUES as readonly string[]).includes(value);
 }
 
-function isRevision(value: unknown): value is string {
+function isSignature(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 512;
 }
 
@@ -36,7 +37,7 @@ function isRevision(value: unknown): value is string {
 export function parseListedReach(value: unknown): ListedReach | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
-  if (!isRevision(record.revision) || !isRevision(record.visibilityRevision)) return null;
+  if (!isSignature(record.signature) || !isSignature(record.visibilitySignature)) return null;
   if (record.rootLevel !== null && !isLevel(record.rootLevel)) return null;
   if (!Array.isArray(record.folders) || record.folders.length > MAX_LISTED_FOLDERS) return null;
   const folders: { path: string; level: ShareAccess }[] = [];
@@ -55,8 +56,8 @@ export function parseListedReach(value: unknown): ListedReach | null {
     folders.push({ path, level });
   }
   return {
-    revision: record.revision,
-    visibilityRevision: record.visibilityRevision,
+    signature: record.signature,
+    visibilitySignature: record.visibilitySignature,
     rootLevel: record.rootLevel,
     folders,
   };

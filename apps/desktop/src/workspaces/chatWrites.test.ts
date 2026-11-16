@@ -1007,8 +1007,8 @@ describe("chat writes", () => {
     // the file's current path, and a Group the member level.
     it("takes a file comment's level from the folder the file sits in now", async () => {
       const reach = (plans: "view" | "comment") => ({
-        revision: "r1",
-        visibilityRevision: "v1",
+        signature: "r1",
+        visibilitySignature: "v1",
         rootLevel: "comment",
         folders: [{ path: "plans", level: plans }],
       });

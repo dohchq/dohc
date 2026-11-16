@@ -778,23 +778,23 @@ describe("registered received-view handlers", () => {
       await h.invoke(sharedViewAccessOperations.openSharedView.channel, h.openPayload);
       const opened = [...h.registry.values()].find((entry) => entry.workspaceId !== "existing")!;
       expect(opened.shareView?.reach).toEqual({
-        revision: "r1",
-        visibilityRevision: "v1",
+        signature: "r1",
+        visibilitySignature: "v1",
         rootLevel: "edit",
         folders: [],
       });
       expect(h.steps.indexOf("reach")).toBeLessThan(h.steps.indexOf("reconcile"));
     });
 
-    // A pull under other reach revisions applies nothing. The refresh reads
+    // A pull under other reach signatures applies nothing. The refresh reads
     // the reach again and settles it before anything else is pulled.
     const stored = {
-      revision: "r1",
-      visibilityRevision: "v1",
+      signature: "r1",
+      visibilitySignature: "v1",
       rootLevel: "edit" as const,
       folders: [{ path: "Notes", level: "view" as const }],
     };
-    const stoppedPull = (reachChanged: { revision: string; visibilityRevision: string }) => ({
+    const stoppedPull = (reachChanged: { signature: string; visibilitySignature: string }) => ({
       kind: "refresh" as const,
       outcome: {
         ...outcome,
@@ -811,12 +811,12 @@ describe("registered received-view handlers", () => {
       Object.assign(h.workspace.shareView!, { grantedSelector: member.selector!, reach: stored });
       const listed = {
         ...stored,
-        revision: "r2",
+        signature: "r2",
         folders: [{ path: "Notes", level: "edit" as const }],
       };
       h.fetchReach.mockResolvedValue(listed);
       h.reconcile.mockImplementationOnce(async () =>
-        stoppedPull({ revision: "r2", visibilityRevision: "v1" }),
+        stoppedPull({ signature: "r2", visibilitySignature: "v1" }),
       );
       await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
         workspaceId: "existing",
@@ -839,12 +839,12 @@ describe("registered received-view handlers", () => {
       Object.assign(h.workspace.shareView!, { grantedSelector: member.selector!, reach: stored });
       h.fetchReach.mockResolvedValue({
         ...stored,
-        revision: "r2",
-        visibilityRevision: "v2",
+        signature: "r2",
+        visibilitySignature: "v2",
         folders: [],
       });
       h.reconcile.mockImplementationOnce(async () => {
-        const stopped = stoppedPull({ revision: "r2", visibilityRevision: "v2" });
+        const stopped = stoppedPull({ signature: "r2", visibilitySignature: "v2" });
         return { ...stopped, outcome: { ...stopped.outcome, rebuildId: "rebuild-1" } };
       });
       await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
@@ -898,12 +898,12 @@ describe("registered received-view handlers", () => {
       Object.assign(h.workspace.shareView!, { grantedSelector: member.selector!, reach: stored });
       h.fetchReach.mockResolvedValue({
         ...stored,
-        revision: "r2",
-        visibilityRevision: "v2",
+        signature: "r2",
+        visibilitySignature: "v2",
         folders: [],
       });
       h.reconcile.mockImplementationOnce(async () =>
-        stoppedPull({ revision: "r2", visibilityRevision: "v1" }),
+        stoppedPull({ signature: "r2", visibilitySignature: "v1" }),
       );
       await h.invoke(sharedViewAccessOperations.refreshSharedView.channel, {
         workspaceId: "existing",
@@ -979,7 +979,7 @@ describe("registered received-view handlers", () => {
           status: "unchanged" as const,
           changedPaths: 0,
           refusedOps: 0,
-          reachChanged: { revision: "r2", visibilityRevision: "v2" },
+          reachChanged: { signature: "r2", visibilitySignature: "v2" },
           rebuildId: "rebuild-1",
         },
       }));
@@ -992,8 +992,8 @@ describe("registered received-view handlers", () => {
       expect(kept.shareView?.rebuild).toEqual({ rebuildId: "rebuild-1" });
       expect(h.rebuild).not.toHaveBeenCalled();
       const rebuiltReach = {
-        revision: "r2",
-        visibilityRevision: "v2",
+        signature: "r2",
+        visibilitySignature: "v2",
         rootLevel: "edit" as const,
         folders: [],
       };
@@ -1026,7 +1026,7 @@ describe("registered received-view handlers", () => {
           status: "unchanged" as const,
           changedPaths: 0,
           refusedOps: 0,
-          reachChanged: { revision: "r2", visibilityRevision: "v2" },
+          reachChanged: { signature: "r2", visibilitySignature: "v2" },
           rebuildId: "rebuild-1",
         },
       }));

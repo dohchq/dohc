@@ -222,7 +222,7 @@ export function classifyShareViewRebuildError(
 
 /**
  * The engine's `share.view.rebuild` answer. A rebuilt copy keeps the reach
- * main read when the engine built under the same revisions, and otherwise
+ * main read when the engine built under the same signatures, and otherwise
  * takes the reach the engine's plan names.
  */
 export function parseShareViewRebuildAnswer(
@@ -242,7 +242,8 @@ export function parseShareViewRebuildAnswer(
     const planned = isRecord(value.reach) ? value.reach : null;
     const reach =
       planned === null ||
-      (planned.revision === read.revision && planned.visibilityRevision === read.visibilityRevision)
+      (planned.signature === read.signature &&
+        planned.visibilitySignature === read.visibilitySignature)
         ? read
         : parseListedReach(planned);
     return {

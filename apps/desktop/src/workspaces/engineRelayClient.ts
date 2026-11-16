@@ -22,7 +22,7 @@ import {
   MAX_REPORTED_REFUSALS,
   type RecordShareViewIdentityResult,
   type PullShareViewResult,
-  type ShareReachRevisions,
+  type ShareReachSignatures,
   type ShareViewRefusal,
   type SharingDeclined,
   type PullWorkspaceFromRelayResult,
@@ -377,16 +377,16 @@ function booleanField(
   return field;
 }
 
-// The reach revisions a share view page names, or undefined for none.
-function reachRevisions(
+// The reach signatures a share view page names, or undefined for none.
+function reachSignatures(
   value: JsonValue | undefined,
   label: string,
-): ShareReachRevisions | undefined {
+): ShareReachSignatures | undefined {
   if (value === undefined || value === null) return undefined;
   const record = resultRecord(value, `${label}.reachChanged`);
   return {
-    revision: stringField(record, "revision", `${label}.reachChanged`),
-    visibilityRevision: stringField(record, "visibilityRevision", `${label}.reachChanged`),
+    signature: stringField(record, "signature", `${label}.reachChanged`),
+    visibilitySignature: stringField(record, "visibilitySignature", `${label}.reachChanged`),
   };
 }
 
@@ -1155,7 +1155,7 @@ export class EngineRelayClient {
         let nextCursor = 0;
         let previousCursor: number | null = null;
         let finalCursor: Record<string, JsonValue | undefined> | null = null;
-        let reachChanged: ShareReachRevisions | undefined;
+        let reachChanged: ShareReachSignatures | undefined;
         const changed = new Map<
           string,
           {
@@ -1181,7 +1181,7 @@ export class EngineRelayClient {
           // store answers only its rebuild now. Nothing applied and no cursor
           // commits.
           if (result.rebuildId !== undefined) {
-            const closedReach = reachRevisions(result.reachChanged, "share.view.pull");
+            const closedReach = reachSignatures(result.reachChanged, "share.view.pull");
             if (!closedReach) {
               throw new Error("Rust engine share.view.pull closed the copy without a reach.");
             }
@@ -1206,7 +1206,7 @@ export class EngineRelayClient {
           nextCursor = pageCursor;
           // A page the relay selected under another reach applied nothing, and
           // its cursor is where the last page left it.
-          reachChanged = reachRevisions(result.reachChanged, "share.view.pull");
+          reachChanged = reachSignatures(result.reachChanged, "share.view.pull");
           if (reachChanged) {
             finalCursor = cursor;
             break;

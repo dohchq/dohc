@@ -47,8 +47,8 @@ export function sameShareViewProposalScope(
   if (
     left.shareId !== right.shareId ||
     left.grant.access !== right.grant.access ||
-    left.reach?.revision !== right.reach?.revision ||
-    left.reach?.visibilityRevision !== right.reach?.visibilityRevision ||
+    left.reach?.signature !== right.reach?.signature ||
+    left.reach?.visibilitySignature !== right.reach?.visibilitySignature ||
     left.grant.versionId !== right.grant.versionId ||
     left.grant.paths.length !== right.grant.paths.length
   ) {

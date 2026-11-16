@@ -13,7 +13,7 @@ import {
   ShareUnavailableError,
   RelayUnauthorizedError,
   type PullShareViewResult,
-  type ShareReachRevisions,
+  type ShareReachSignatures,
   type ShareViewChangedPath,
   type ShareViewRefusal,
   type SyncRelayConnection,
@@ -77,7 +77,7 @@ export interface RefreshSharedViewOutcome {
   refusedDetail: string | null;
   // Set when the relay now selects this view under other levels or another
   // visible set. The pull applied nothing and the caller reads the reach.
-  reachChanged?: ShareReachRevisions;
+  reachChanged?: ShareReachSignatures;
   // Set when the visible set changed: the engine closed the copy, and only
   // this rebuild reads it until the new copy is swapped in.
   rebuildId?: string;

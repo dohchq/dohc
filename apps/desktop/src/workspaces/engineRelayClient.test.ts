@@ -477,12 +477,12 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  // A membership's page selected under other reach revisions applied nothing,
+  // A membership's page selected under other reach signatures applied nothing,
   // so the loop stops there and says so rather than pulling past it.
   it("stops a membership's pull at a page selected under another reach", async () => {
     const reach = {
-      revision: "r1",
-      visibilityRevision: "v1",
+      signature: "r1",
+      visibilitySignature: "v1",
       rootLevel: "comment" as const,
       folders: [{ path: "Plans", level: "edit" as const }],
     };
@@ -503,7 +503,7 @@ describe("EngineRelayClient", () => {
           ? [{ path: "Plans/a.md", operation: "write", contentKind: "text" }]
           : [],
         pendingCursor: { kind: "shareView", token: "share-cursor-1" },
-        ...(first ? {} : { reachChanged: { revision: "r2", visibilityRevision: "v1" } }),
+        ...(first ? {} : { reachChanged: { signature: "r2", visibilitySignature: "v1" } }),
       };
     });
     const { sessions, client } = await harness(daemon);
@@ -517,7 +517,7 @@ describe("EngineRelayClient", () => {
       fetched: 1,
       applied: 1,
       nextCursor: 1,
-      reachChanged: { revision: "r2", visibilityRevision: "v1" },
+      reachChanged: { signature: "r2", visibilitySignature: "v1" },
     });
     expect(pull.changedPaths.map((change) => change.path)).toEqual(["Plans/a.md"]);
     const sent = daemon.requests.find((request) => request.method === "share.view.pull")!
@@ -536,8 +536,8 @@ describe("EngineRelayClient", () => {
   // the closed answer has no cursor, and nothing may commit one.
   it("returns a closed copy's rebuild id and commits no cursor", async () => {
     const reach = {
-      revision: "r1",
-      visibilityRevision: "v1",
+      signature: "r1",
+      visibilitySignature: "v1",
       rootLevel: "comment" as const,
       folders: [],
     };
@@ -551,7 +551,7 @@ describe("EngineRelayClient", () => {
         hasMore: false,
         nextCursor: 0,
         changedPaths: [],
-        reachChanged: { revision: "r2", visibilityRevision: "v2" },
+        reachChanged: { signature: "r2", visibilitySignature: "v2" },
         rebuildId: "rebuild-1",
       };
     });
@@ -563,7 +563,7 @@ describe("EngineRelayClient", () => {
     });
     expect(pull).toMatchObject({
       applied: 0,
-      reachChanged: { revision: "r2", visibilityRevision: "v2" },
+      reachChanged: { signature: "r2", visibilitySignature: "v2" },
       rebuildId: "rebuild-1",
     });
     await pull.commitCursor();
