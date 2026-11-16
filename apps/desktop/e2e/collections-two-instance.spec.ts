@@ -84,7 +84,7 @@ function frontmatterUpdate(doc: Y.Doc, field: string, value: string): Uint8Array
   }
 }
 
-test("a drag's field write on one device moves the card on the other device's open board", async () => {
+test("@collections-two-instance a drag's field write on one device moves the card on the other device's open board", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "collections-board-sync-e2e";
@@ -267,7 +267,7 @@ test("a drag's field write on one device moves the card on the other device's op
   }
 });
 
-test("an agent's file save on one device opens a conflict against a record the other device edited", async () => {
+test("@collections-two-instance an agent's file save on one device opens a conflict against a record the other device edited", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   const workspaceId = "collections-board-file-save-e2e";
