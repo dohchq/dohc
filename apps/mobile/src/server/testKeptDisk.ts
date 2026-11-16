@@ -28,9 +28,15 @@ export interface KeptDisk {
    * Fails each COMMIT whose transaction ran a statement that matches, as a failed flush does: after rolling back, or,
    * when it `lands`, after committing.
    */
-  failCommits: { readonly match: RegExp; readonly lands: boolean } | null;
+  failCommits: {
+    readonly match: RegExp;
+    readonly lands: boolean;
+    readonly message?: string;
+  } | null;
   /** As the durable-file module on a phone not unlocked since it started: opening rejects. */
   locked: boolean;
+  /** Every write statement finds a damaged page, as SQLite reports one. */
+  damaged: boolean;
   /** Settings this disk's SQLite lacks: setting one does nothing, and reading it back gives no row. */
   readonly ignored: Set<string>;
   /** Holds every COMMIT until the returned function runs or the app crashes. */
@@ -73,6 +79,7 @@ export function keptDisk(): KeptDisk {
       Promise.resolve().then(() => (mine !== run ? never<T>() : body()));
     const write = (source: string) => {
       if (/^\s*(SELECT|PRAGMA)/.test(source)) return;
+      if (disk.damaged) throw new Error("database disk image is malformed");
       if (disk.failWrites?.test(source)) throw ioError();
       statements.push(source);
     };
@@ -94,7 +101,7 @@ export function keptDisk(): KeptDisk {
           const failing = disk.failCommits;
           const fails = failing !== null && statements.some((entry) => failing.match.test(entry));
           database.exec(fails && !failing.lands ? "ROLLBACK" : "COMMIT");
-          if (fails) throw ioError();
+          if (fails) throw failing.message === undefined ? ioError() : new Error(failing.message);
         }),
       run: (source, params) =>
         call(() => {
@@ -121,6 +128,7 @@ export function keptDisk(): KeptDisk {
     failWrites: null,
     failCommits: null,
     locked: false,
+    damaged: false,
     ignored: new Set(),
     holdCommits() {
       let done!: () => void;

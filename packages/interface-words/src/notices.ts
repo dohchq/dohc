@@ -91,11 +91,20 @@ export const chatWords = {
   /** The read of which messages a chat takes failed, so the composer can't show. */
   lanesFailed: "dohc could not read what you can send in this chat.",
   outboxUnreadable: "dohc could not read messages waiting on this phone.",
-  /** kept.db is damaged. Nothing replaces it until the person deletes it. */
+  /** kept.db is damaged. Nothing replaces it until the person deletes it, in Messages on this phone. */
   outboxDamaged: "The file that keeps messages waiting on this phone is damaged.",
+  /** Above the composer, which can't delete it, so it names where the person can. */
+  outboxDamagedHere:
+    "The file that keeps messages waiting on this phone is damaged. Delete it in Settings, under Messages on this phone.",
+  /** Above the composer after a Sign out whose delete failed; Settings has its Try again. */
+  signOutDeleteFailedHere:
+    "dohc could not delete the messages waiting on this phone. Try again in Settings.",
   deleteDamagedTitle: "Delete messages waiting on this phone?",
   deleteDamagedBody:
-    "Messages that haven't been sent are lost. Messages the server has stay in their chats.",
+    "Messages that haven't been sent will be lost. Messages the server has stay in their chats.",
+  deleteDamagedConfirm: "Delete messages",
+  /** The damaged file's delete failed: it stays, still damaged, with Try again. */
+  deleteDamagedFailed: "dohc could not delete the damaged file.",
   /** A record in the outbox that can't be read: nothing of its text, chat or workspace is known. */
   unreadableMessage: "This message could not be read",
   copyMessage: "Copy message",

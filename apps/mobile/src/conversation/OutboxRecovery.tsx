@@ -1,7 +1,7 @@
 import { confirmWords } from "@dohc/interface-words/confirmations";
 import { chatWords, noticesWords } from "@dohc/interface-words/notices";
 import { useRouter } from "expo-router";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 import { useAccount, useSignIn } from "../account/AccountProvider";
 import { workspaceName } from "../chats/workspaceName";
@@ -42,12 +42,14 @@ export function OutboxRecovery() {
     }),
     [signIn],
   );
+  const [deleteFailed, setDeleteFailed] = useState(false);
   if (!phoneWrites) return <NotYet symbol="hammer" />;
 
   const { rows, unreadable } = state
     ? recoveryRows(state, { origin: signIn.origin, accountId: signIn.userId })
     : { rows: [], unreadable: [] };
-  const problem = outboxProblem(state, blocked, () => outbox.wake());
+  const damaged = state?.status === "damaged";
+  const problem = damaged ? null : outboxProblem(state, blocked, () => outbox.wake());
   const nameOf = (workspaceId: string) => {
     const found =
       workspaces.status === "ready"
@@ -75,13 +77,19 @@ export function OutboxRecovery() {
     return null;
   };
   const empty = state?.status === "ready" && rows.length === 0 && unreadable.length === 0;
-  // The file stays until the person deletes it: nothing replaces a damaged file on its own. A failed delete leaves it
-  // damaged, as the problem above still says.
+  // The file stays until the person deletes it: nothing replaces a damaged file on its own. A failed delete says so in
+  // place, with Try again, which repeats the delete already confirmed, unless the sign-in has changed meanwhile.
+  const removeDamaged = () => {
+    setDeleteFailed(false);
+    outbox.deleteDamaged().catch(() => {
+      if (signIn.isCurrent()) setDeleteFailed(true);
+    });
+  };
   const deleteDamaged = async () => {
     const message = chatWords.deleteDamagedBody;
     const title = chatWords.deleteDamagedTitle;
-    if (await confirm({ title, message, confirm: confirmWords.delete, destructive: true }))
-      await outbox.deleteDamaged().catch(() => undefined);
+    const label = chatWords.deleteDamagedConfirm;
+    if (await confirm({ title, message, confirm: label, destructive: true })) removeDamaged();
   };
 
   return (
@@ -97,10 +105,16 @@ export function OutboxRecovery() {
           ) : (
             <Text style={[styles.text, { color: theme.muted }]}>{problem.text}</Text>
           )}
-          {state?.status === "damaged" ? (
-            <View style={[styles.actions, styles.damaged]}>
-              <ActionPill label={confirmWords.delete} onPress={() => void deleteDamaged()} />
-            </View>
+        </View>
+      ) : null}
+      {damaged ? (
+        <View style={styles.inset}>
+          <Text style={[styles.text, { color: theme.muted }]}>{chatWords.outboxDamaged}</Text>
+          <View style={[styles.actions, styles.damaged]}>
+            <ActionPill label={confirmWords.delete} onPress={() => void deleteDamaged()} />
+          </View>
+          {deleteFailed ? (
+            <ProblemLine text={chatWords.deleteDamagedFailed} onRetry={removeDamaged} />
           ) : null}
         </View>
       ) : null}

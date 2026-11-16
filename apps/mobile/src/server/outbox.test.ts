@@ -1,5 +1,5 @@
 import { accountWords } from "@dohc/interface-words/account";
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   createAccount,
@@ -294,8 +294,10 @@ describe("enqueue", () => {
       accountId: "u-1",
       workspaceId: "ws-1",
       sequence: 1,
-      stage: "queued",
-      attempted: false,
+      // It could send at once, so its "sending" mark was the commit that made it sendable.
+      stage: "sending",
+      attempted: true,
+      withheld: false,
       dependsOn: null,
     });
     expect(queued.messageId).toBe(
@@ -347,14 +349,14 @@ describe("enqueue", () => {
   });
 
   it.each([false, true])(
-    "never shows a write as kept when its commit fails (landed: %s), withholds it across a relaunch, and sends it once on retry",
+    "never shows a write as kept when its insert's commit fails (landed: %s), withholds it across a relaunch, and sends it once on retry",
     async (lands) => {
       const disk = keptDisk();
       const server = testServer();
       server.on("POST", path("post"), SAVED("thread-p"));
       const first = launch(disk, server);
       await ready(first.outbox);
-      disk.failCommits = { match: /INSERT/, lands };
+      disk.failCommits = { match: /RETURNING/, lands };
       const error = await first.outbox
         .enqueue({ workspaceId: "ws-1", write: post("Maybe") })
         .catch((reason: unknown) => reason);
@@ -363,7 +365,7 @@ describe("enqueue", () => {
       expect(first.outbox.state().records).toEqual([
         expect.objectContaining({ operationId, withheld: true, stage: "queued" }),
       ]);
-      // A commit that landed is written over withheld; one that didn't leaves nothing.
+      // The insert is withheld, so one that stood can't send; one that didn't leaves nothing.
       expect(onDisk(disk, 1)).toEqual(lands ? expect.objectContaining({ withheld: true }) : null);
       expect(first.outbox.signOutCounts()).toEqual({ unsent: 1, maySend: 0 });
       await settled();
@@ -414,6 +416,127 @@ describe("enqueue", () => {
     await vi.waitFor(() => expect(record(outbox, 1)?.stage).toBe("saved"));
     expect(requests(server, "post")).toHaveLength(1);
     stop();
+  });
+
+  it.each(["its sending mark", "a commit of its own"])(
+    "keeps a write withheld across a relaunch when its insert stands and %s, which would make it sendable, rolls back",
+    async (confirmedBy) => {
+      const disk = keptDisk();
+      const server = testServer();
+      server.on("POST", path("post"), held);
+      const first = launch(disk, server);
+      await ready(first.outbox);
+      // A post already sending holds the stream, so the next one waits its turn and makes itself sendable.
+      if (confirmedBy === "a commit of its own") {
+        await first.outbox.enqueue({ workspaceId: "ws-1", write: post("Ahead") });
+        await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(1));
+      }
+      const sent = requests(server, "post").length;
+      disk.failCommits = { match: /ON CONFLICT/, lands: false };
+      const error = await first.outbox
+        .enqueue({ workspaceId: "ws-1", write: post("Maybe") })
+        .catch((reason: unknown) => reason);
+      const operationId = error instanceof OutboxError ? error.operationId : null;
+      expect(error instanceof OutboxError && error.kind).toBe("indeterminate");
+      const sequence = sent + 1;
+      expect(record(first.outbox, sequence)).toMatchObject({ operationId, withheld: true });
+      expect(onDisk(disk, sequence)).toMatchObject({
+        operationId,
+        withheld: true,
+        attempted: false,
+      });
+      disk.failCommits = null;
+      disk.crash();
+
+      const second = launch(disk, server);
+      await ready(second.outbox);
+      await settled();
+      expect(record(second.outbox, sequence)).toMatchObject({ operationId, withheld: true });
+      expect(requests(server, "post")).not.toContainEqual(expect.objectContaining({ operationId }));
+      second.stop();
+    },
+  );
+
+  it("keeps a write withheld when the app closes between its insert and the commit that makes it sendable", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", path("post"), held);
+    const kept = disk.launch();
+    let transactions = 0;
+    const closing: KeptStore = {
+      ...kept,
+      transaction: (body) => {
+        transactions += 1;
+        if (transactions < 2) return kept.transaction(body);
+        disk.crash();
+        return new Promise(() => undefined);
+      },
+    };
+    const first = launch(disk, server, { store: closing });
+    await ready(first.outbox);
+    void first.outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+    await vi.waitFor(() => expect(transactions).toBe(2));
+
+    const second = launch(disk, server);
+    await ready(second.outbox);
+    await settled();
+    expect(second.outbox.state().records).toEqual([
+      expect.objectContaining({ sequence: 1, withheld: true, attempted: false }),
+    ]);
+    expect(requests(server, "post")).toHaveLength(0);
+    second.stop();
+  });
+
+  it("gives a second write a new sequence while a first, whose insert rolled back, waits for its retry", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", path("post"), SAVED("thread-p"));
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+    disk.failCommits = { match: /RETURNING/, lands: false };
+    const error = await outbox
+      .enqueue({ workspaceId: "ws-1", write: post("First") })
+      .catch((reason: unknown) => reason);
+    const firstId = error instanceof OutboxError ? error.operationId : null;
+    disk.failCommits = null;
+    const next = await outbox.enqueue({ workspaceId: "ws-1", write: post("Second") });
+    expect(next.sequence).toBe(2);
+    expect(record(outbox, 1)).toMatchObject({ operationId: firstId, withheld: true });
+    await expect(outbox.retryEnqueue(firstId ?? "")).resolves.toMatchObject({ sequence: 1 });
+    await vi.waitFor(() => expect(stages(outbox)).toEqual(["saved", "saved"]));
+    expect(requests(server, "post")).toEqual([
+      { operationId: next.operationId, groupId: "group-1", body: "Second" },
+      { operationId: firstId, groupId: "group-1", body: "First" },
+    ]);
+    expect(records(disk)).toEqual([1, 2]);
+    stop();
+  });
+
+  it("never calls a retry kept when its commit rolls back and no row stood before it", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", path("post"), SAVED("thread-p"));
+    const first = launch(disk, server);
+    await ready(first.outbox);
+    disk.failCommits = { match: /RETURNING/, lands: false };
+    const error = await first.outbox
+      .enqueue({ workspaceId: "ws-1", write: post("Maybe") })
+      .catch((reason: unknown) => reason);
+    const operationId = error instanceof OutboxError ? error.operationId : "";
+    disk.failCommits = { match: /ON CONFLICT/, lands: false };
+    await expect(first.outbox.retryEnqueue(operationId ?? "")).rejects.toEqual(
+      new OutboxError("indeterminate", operationId),
+    );
+    expect(record(first.outbox, 1)).toMatchObject({ withheld: true });
+    expect(records(disk)).toEqual([]);
+    disk.failCommits = null;
+    disk.crash();
+
+    const second = launch(disk, server);
+    await ready(second.outbox);
+    expect(second.outbox.state().records).toEqual([]);
+    expect(requests(server, "post")).toHaveLength(0);
+    second.stop();
   });
 
   it("refuses with nothing written when no account is signed in, and a reaction without its thread", async () => {
@@ -1339,6 +1462,82 @@ describe("a damaged kept.db", () => {
     await account.signOut();
     expect(account.state().status).toBe("signed-out");
     expect(outbox.state()).toMatchObject({ status: "ready", deletion: "none", records: [] });
+    stop();
+  });
+
+  it("shows damage found after the first read, and stops sending", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", path("post"), held);
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+    disk.damaged = true;
+    const error = await outbox
+      .enqueue({ workspaceId: "ws-1", write: post("No") })
+      .catch((reason: unknown) => reason);
+    expect(error instanceof StoreError && error.kind).toBe("damaged");
+    expect(outbox.state().status).toBe("damaged");
+    await expect(outbox.enqueue({ workspaceId: "ws-1", write: post("No") })).rejects.toEqual(
+      new OutboxError("closed"),
+    );
+    disk.damaged = false;
+    await outbox.deleteDamaged();
+    await ready(outbox);
+    stop();
+  });
+});
+
+describe("a Sign out that failed", () => {
+  it("deletes on Try again the rows of the account it was for, even after another account signed in", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", path("post"), held);
+    placeRecord(disk, 1, {
+      operationId: "op-b",
+      accountId: "u-2",
+      write: post("Kept by B"),
+      target: { kind: "stream", id: "group-1" },
+    });
+    const { outbox, account, stop } = launch(disk, server);
+    await ready(outbox);
+    await outbox.enqueue({ workspaceId: "ws-1", write: post("From A") });
+    disk.failWrites = /DELETE/;
+    await expect(account.signOut()).rejects.toEqual(new OutboxError("not-deleted"));
+    // B's sign-in, already under way, finishes while A's delete has failed.
+    account.signIn(server, "u-2");
+    await ready(outbox);
+    expect(outbox.state().deletion).toBe("failed");
+    disk.failWrites = null;
+
+    await account.signOut();
+    expect(records(disk)).toEqual([1]);
+    expect(onDisk(disk, 1)).toMatchObject({ operationId: "op-b", accountId: "u-2" });
+    expect(outbox.state().deletion).toBe("none");
+    expect(requests(server, "post")).not.toContainEqual(
+      expect.objectContaining({ operationId: "op-b" }),
+    );
+    stop();
+  });
+});
+
+describe("Sign out on disk", () => {
+  it("leaves none of the deleted messages' text in kept.db or its WAL", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", path("post"), PENDING);
+    const { outbox, account, stop, wait } = launch(disk, server);
+    await ready(outbox);
+    const body = "Private words 7f3a9c";
+    await outbox.enqueue({ workspaceId: "ws-1", write: post(body) });
+    await vi.waitFor(() => expect(wait.pending).toHaveLength(1));
+    const onFile = () =>
+      [disk.path, `${disk.path}-wal`]
+        .filter((file) => existsSync(file))
+        .some((file) => readFileSync(file).includes(body));
+    expect(onFile()).toBe(true);
+    await account.signOut();
+    expect(records(disk)).toEqual([]);
+    expect(onFile()).toBe(false);
     stop();
   });
 });

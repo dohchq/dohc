@@ -85,6 +85,8 @@ describe("kept.db", () => {
     expect(statSync(`${disk.path}-wal`).size).toBeGreaterThan(4000);
     const store = disk.launch();
     await expect(store.read("SELECT sequence FROM outbox", [])).resolves.toEqual([{ sequence: 1 }]);
+    // The open's checkpoint emptied the WAL the killed process left.
+    expect(statSync(`${disk.path}-wal`).size).toBe(0);
     await insert(store);
     expect(disk.rows()).toEqual([1, 2]);
   });
@@ -101,8 +103,16 @@ describe("kept.db", () => {
     disk.failCommits = { match: /INSERT/, lands: true };
     await expect(insert(store)).rejects.toMatchObject({ kind: "uncertain" });
     expect(disk.rows()).toHaveLength(1);
+    // A COMMIT that reports damage says nothing about whether it stood either.
+    disk.failCommits = {
+      match: /INSERT/,
+      lands: true,
+      message: "database disk image is malformed",
+    };
+    await expect(insert(store)).rejects.toMatchObject({ kind: "uncertain" });
+    expect(disk.rows()).toHaveLength(2);
     disk.failCommits = null;
     await insert(store);
-    expect(disk.rows()).toHaveLength(2);
+    expect(disk.rows()).toHaveLength(3);
   });
 });

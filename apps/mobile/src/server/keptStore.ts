@@ -1,14 +1,7 @@
-// kept.db: the phone's one SQLite file for work it must not lose, such as unsent chat writes. There is one per
-// install, never one per sign-in, and each row carries its server and account. It lives in a folder the durable-file
-// module prepares (keptDatabase.ts): never backed up, and closed until the phone's first unlock after a restart.
-//
-// Every statement runs on one connection, through one queue, so no statement can join another's transaction. A write
-// is one `BEGIN IMMEDIATE` … `COMMIT`. expo-sqlite's transaction helpers aren't used: its exclusive one opens another
-// connection with a plain `BEGIN`, and that connection loses `fullfsync` and `secure_delete`.
-//
-// Each open sets the durability settings, which belong to the connection, then reads each back. One that doesn't read
-// back as set refuses the open: a store that can't promise the flush must never say it kept anything. Nothing here
-// replaces a damaged file. Only `destroy`, after the person has seen a warning, deletes it.
+// kept.db, the phone's file for work it must not lose. Every statement runs on one connection through one queue, so
+// none joins another's transaction; don't use expo-sqlite's transaction helpers, which open a connection without the
+// durability settings. Each open sets those settings and refuses to open unless each reads back as set. Nothing here
+// replaces a damaged file.
 
 export type SqlValue = string | number | null;
 export type Row = Readonly<Record<string, unknown>>;
@@ -27,7 +20,7 @@ export type Sql = Pick<SqlConnection, "run" | "all">;
 /**
  * `locked`: the phone hasn't been unlocked since it started, so the file can't open yet. `damaged`: SQLite reports the
  * file corrupt or not a database. `refused`: a durability setting didn't read back as set. `failed`: anything else, and
- * nothing was written. `uncertain`: the commit failed, and what it wrote may still stand.
+ * nothing was written. `uncertain`: the COMMIT itself failed, whatever SQLite said, and what it wrote may still stand.
  */
 export class StoreError extends Error {
   constructor(
@@ -43,13 +36,18 @@ export interface KeptStore {
   read(source: string, params: readonly SqlValue[]): Promise<readonly Row[]>;
   /** Runs `body` in one transaction, after every call made before it, and resolves once its commit is flushed. */
   transaction<T>(body: (sql: Sql) => Promise<T>): Promise<T>;
+  /** Copies every commit into kept.db and empties its WAL, whose older frames still hold deleted rows' text. */
+  checkpoint(): Promise<void>;
   /** Closes the file and deletes it with its journal. Only for a damaged file, once the person has been warned. */
   destroy(): Promise<void>;
 }
 
 export const KEPT_FILE = "kept.db";
 
-/** The outbox's writes, one row each. `sequence` is never reused, so order survives deletes and relaunches. */
+/**
+ * The outbox's writes, one row each. AUTOINCREMENT never gives a committed sequence again, even once its row is
+ * deleted, but a rolled-back insert's sequence comes back: the outbox allocates past any it still holds in memory.
+ */
 export const KEPT_SCHEMA = `CREATE TABLE IF NOT EXISTS outbox (
   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
   origin TEXT NOT NULL,
@@ -70,6 +68,7 @@ const SETTINGS: readonly (readonly [string, string, string | number])[] = [
 /** The durable-file module's code for a phone not unlocked since it started. */
 const LOCKED = "ERR_DURABLE_LOCKED";
 const DAMAGED = /database disk image is malformed|file is not a database/;
+const CHECKPOINT = "PRAGMA wal_checkpoint(TRUNCATE)";
 
 function classify(error: unknown): StoreError {
   if (error instanceof StoreError) return error;
@@ -106,6 +105,8 @@ export function createKeptStore(file: {
           throw new StoreError("refused", `kept.db didn't take ${name} = ${value}.`);
       }
       await opened.exec(KEPT_SCHEMA);
+      // A Sign out whose own checkpoint failed, or the app closing after it, can leave deleted text in the WAL.
+      await opened.all(CHECKPOINT, []).catch(() => undefined);
     } catch (error) {
       await opened?.close().catch(() => undefined);
       throw classify(error);
@@ -148,10 +149,17 @@ export function createKeptStore(file: {
           await open.exec("COMMIT");
         } catch (error) {
           await rollBack(open);
-          const failure = classify(error);
-          throw failure.kind === "failed" ? new StoreError("uncertain", failure.message) : failure;
+          throw new StoreError("uncertain", classify(error).message);
         }
         return result;
+      }),
+
+    checkpoint: () =>
+      serial(async () => {
+        const open = await connect();
+        await open.all(CHECKPOINT, []).catch((error: unknown) => {
+          throw classify(error);
+        });
       }),
 
     destroy: () =>
