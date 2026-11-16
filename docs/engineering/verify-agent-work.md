@@ -120,6 +120,8 @@ Android compiles only in CI. The **Android Kotlin compile** job runs when a chan
 It generates the Expo Android project and compiles the Kotlin of both native modules for debug. A Kotlin error fails the job with its file and line.
 Nothing Android runs locally. When `pnpm verify:plan` or `pnpm verify:pr` selects `android`, the report lists the job under `ciEvidence`, and a merge needs a passing run of it for the head.
 
+The iOS sample UI tests run in their own advisory workflow on GitHub's free `xcode-27` runner. They don't gate merges, and a newer push cancels the running job.
+
 The timing targets are 300 s for JavaScript and 600 s for Rust. The failure ceilings are 400 s and 700 s.
 A gate's `seconds` runs from the start of `what changed` to the finish of the gate's last job.
 Receipts record the target as `targetSeconds` and the ceiling as `budgetSeconds`. Read the receipt's `timing`:
