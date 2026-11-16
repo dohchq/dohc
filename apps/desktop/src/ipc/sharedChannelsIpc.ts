@@ -31,12 +31,6 @@ import {
   scopeJoinedChannels,
 } from "../workspaces/sharedChannels";
 import {
-  requireShareableChatChannel,
-  resolveDmKinds,
-  shareIdsToWithholdFromOrdinaryInvites,
-  type DmPeekResult,
-} from "../workspaces/dmChats";
-import {
   liveSharedChannelHoldersByShareId,
   otherLiveSharedChannelHolder,
   otherLiveSharedChannelHolderByWireId,
@@ -91,8 +85,6 @@ export function createSharedChannelsIpc<
   };
   projectPendingChatBookmarksAfterPull(workspaceId: string): Promise<void>;
   normalizeServerUrl(url: string): string;
-  peekedReceivedGrantKinds: Map<string, "dm" | "not-dm">;
-  peekReceivedGrantKindForShare(relay: SyncRelayConnection, shareId: string): Promise<DmPeekResult>;
   acknowledgeWorkspaceShareSkips(
     workspaceId: string,
     shareId: string | undefined,
@@ -134,8 +126,6 @@ export function createSharedChannelsIpc<
     relayClientForWorkspace,
     projectPendingChatBookmarksAfterPull,
     normalizeServerUrl,
-    peekedReceivedGrantKinds,
-    peekReceivedGrantKindForShare,
     acknowledgeWorkspaceShareSkips,
     notifyRenderer,
     mountShareFolder,
@@ -149,11 +139,12 @@ export function createSharedChannelsIpc<
     operation.assertCurrent();
     assertWritableWorkspace(workspace);
     const store = linkedChatStoreFor(workspace);
-    const channel = await requireShareableChatChannel({
-      workspaceId: workspace.workspaceId,
-      channelId: input.channelId,
-      store,
-    });
+    // The engine says what the channel is: a window's request can't make a person-to-person chat a Group.
+    const channel = (await store.listChannels({ workspaceId: workspace.workspaceId })).find(
+      (candidate) => candidate.id === input.channelId,
+    );
+    if (!channel) throw new Error("This group no longer exists.");
+    if (channel.kind !== "channel") throw new Error("Only groups can be shared.");
     operation.assertCurrent();
     const wireId = await store.getChannelWireId({
       workspaceId: workspace.workspaceId,
@@ -401,40 +392,6 @@ export function createSharedChannelsIpc<
         // resumes answers as live.
         await reconcileReceivedShares(listing);
         assertCurrentShareSession();
-        const receivedShareIds = Array.isArray(listing.received)
-          ? listing.received.flatMap((row) => {
-              const selector = row.selector as { kind?: unknown } | undefined;
-              return selector?.kind === "chat" && typeof row.shareId === "string"
-                ? [row.shareId]
-                : [];
-            })
-          : [];
-        // This adds bounded relay reads only for uncached grants. The one-time
-        // cost keeps a workspace-channel DM out of the invitations from the first listing.
-        await resolveDmKinds({
-          shareIds: receivedShareIds,
-          cache: peekedReceivedGrantKinds,
-          peekKind: async (shareId) => {
-            assertCurrentShareSession();
-            const kind = await peekReceivedGrantKindForShare(
-              {
-                baseUrl: normalizeServerUrl(credentials.relayUrl!),
-                token: credentials.token,
-                fetch: relayFetchWithTimeout(RELAY_FETCH_TIMEOUT_MS),
-              },
-              shareId,
-            );
-            assertCurrentShareSession();
-            return kind;
-          },
-        });
-        assertCurrentShareSession();
-        for (const shareId of shareIdsToWithholdFromOrdinaryInvites({
-          shareIds: receivedShareIds,
-          cache: peekedReceivedGrantKinds,
-        })) {
-          shareIdsClaimedElsewhere.add(shareId);
-        }
         return listing;
       },
       workspaceId: workspace.remote ? workspace.workspaceId : null,

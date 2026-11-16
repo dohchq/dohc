@@ -8,8 +8,8 @@ import { bridgeMock, emitCloudSessionChanged, renderView } from "./ChatsView.tes
 import { chatTabPath } from "./workbenchState";
 
 // Direct messages live on the account's server, so every workspace lists the
-// same People. The relay holds the conversation; this computer keeps a saved
-// copy for when the server is away.
+// same People. Each conversation is between two people. Nothing is kept on
+// this computer: while the server is away, the views say so with Try again.
 
 const VIEWER = "me";
 const sam = { personId: "sam", name: "Sam Rivera", blocked: false };
@@ -29,26 +29,29 @@ function sent(seq: number, authorId: string, body: string): DirectMessage {
 function conversation(overrides: Partial<DirectConversation> = {}): DirectConversation {
   return {
     conversationId: "conversation-sam",
-    people: [sam],
+    person: sam,
     last: sent(2, "sam", "See you at nine"),
     unread: 0,
-    blocked: false,
     ...overrides,
   };
 }
 
-function signedIn(conversations: DirectConversation[], saved = false) {
+function signedIn(conversations: DirectConversation[]) {
   bridgeMock.directConversations.mockResolvedValue({
     available: true,
     viewerId: VIEWER,
-    saved,
     conversations,
   });
 }
 
-function history(messages: DirectMessage[], saved = false) {
-  bridgeMock.directHistory.mockResolvedValue({ messages, more: false, saved });
+function history(messages: DirectMessage[], conversationId = "conversation-sam") {
+  bridgeMock.directHistory.mockResolvedValue({ conversationId, messages, more: false });
 }
+
+const UNREACHABLE = (channel: string) =>
+  new Error(
+    `Error invoking remote method 'desktop:${channel}': DirectMessageError [direct-retry]: dohc could not reach your server. Check your connection.`,
+  );
 
 function members(
   people: Array<{
@@ -110,27 +113,26 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dms-section")).toBeNull();
   });
 
-  it("lists each conversation by name, with unread, preview, and blocked marks, and no email", async () => {
+  it("lists each conversation by the other person's name, with unread, preview, and blocked marks, and no email", async () => {
     signedIn([
       conversation({ unread: 2 }),
       conversation({
-        conversationId: "conversation-group",
-        people: [sam, ana],
+        conversationId: "conversation-ana",
+        person: ana,
         last: sent(5, "ana", "Booked the table"),
         unread: 0,
       }),
       conversation({
-        conversationId: "conversation-blocked",
-        people: [{ personId: "lee", name: null, blocked: true }],
-        last: null,
-        blocked: true,
+        conversationId: "conversation-lee",
+        person: { personId: "lee", name: null, blocked: true },
+        last: sent(1, VIEWER, "Hi"),
       }),
     ]);
     renderView(vi.fn(), vi.fn(), { variant: "panel" });
     const rows = await screen.findAllByTestId("chats-dm-item");
     expect(rows.map((row) => within(row).getByTestId("chats-dm-name").textContent)).toEqual([
       "Sam Rivera",
-      "Sam Rivera, Ana Diaz",
+      "Ana Diaz",
       "Someone",
     ]);
     // Only the unread row shows its last message and a count.
@@ -175,6 +177,37 @@ describe("ChatsView direct messages", () => {
     expect(retry.isConnected).toBe(false);
   });
 
+  it("shows a conversation opened while the server is away as failed, with Try again that reads it once the server answers", async () => {
+    bridgeMock.directConversations.mockRejectedValue(UNREACHABLE("direct-conversations"));
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: { level: "direct", conversationId: "conversation-sam" },
+    });
+    const failed = await screen.findByTestId("chats-dm-history-retry");
+    expect(failed.textContent).toContain("dohc could not reach your server.");
+    expect(screen.queryByTestId("chats-dm-composer")).toBeNull();
+    expect(bridgeMock.directHistory).not.toHaveBeenCalled();
+
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    fireEvent.click(within(failed).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getAllByTestId("chats-dm-message")).toHaveLength(1));
+    expect(await screen.findByTestId("chats-dm-composer")).toBeTruthy();
+  });
+
+  it("shows a history read that fails with Try again", async () => {
+    signedIn([conversation()]);
+    bridgeMock.directHistory.mockRejectedValueOnce(UNREACHABLE("direct-history"));
+    const onError = vi.fn();
+    renderView(vi.fn(), onError, { variant: "panel" });
+    await openSam();
+    const failed = await screen.findByTestId("chats-dm-history-retry");
+    expect(failed.textContent).toContain("dohc could not reach your server.");
+    history([sent(2, "sam", "See you at nine")]);
+    fireEvent.click(within(failed).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getAllByTestId("chats-dm-message")).toHaveLength(1));
+  });
+
   it("opens a conversation with its messages and marks it read once the newest is in view", async () => {
     signedIn([conversation({ unread: 1 })]);
     history([sent(1, VIEWER, "Dinner Friday?"), sent(2, "sam", "See you at nine")]);
@@ -182,9 +215,13 @@ describe("ChatsView direct messages", () => {
     const view = await openSam();
     expect(within(view).getByTestId("chats-dm-title").textContent).toBe("Sam Rivera");
     await waitFor(() => expect(within(view).getAllByTestId("chats-dm-message")).toHaveLength(2));
-    expect(bridgeMock.directHistory).toHaveBeenCalledWith({ conversationId: "conversation-sam" });
+    expect(bridgeMock.directHistory).toHaveBeenCalledWith({
+      viewerId: VIEWER,
+      conversationId: "conversation-sam",
+    });
     await waitFor(() =>
       expect(bridgeMock.directMarkRead).toHaveBeenCalledWith({
+        viewerId: VIEWER,
         conversationId: "conversation-sam",
         seq: 2,
       }),
@@ -203,20 +240,11 @@ describe("ChatsView direct messages", () => {
     await waitFor(() => expect(bridgeMock.directConversations).toHaveBeenCalled());
     act(() => emitCloudSessionChanged("session-b", "changing"));
     await act(async () =>
-      resolveBefore({
-        available: true,
-        viewerId: VIEWER,
-        saved: false,
-        conversations: [conversation()],
-      }),
+      resolveBefore({ available: true, viewerId: VIEWER, conversations: [conversation()] }),
     );
     expect(screen.queryByTestId("chats-dm-item")).toBeNull();
     signedIn([
-      conversation({
-        conversationId: "conversation-ana",
-        people: [ana],
-        last: sent(4, "ana", "Hi"),
-      }),
+      conversation({ conversationId: "conversation-ana", person: ana, last: sent(4, "ana", "Hi") }),
     ]);
     act(() => emitCloudSessionChanged("session-b", "ready"));
     const row = await screen.findByTestId("chats-dm-item");
@@ -227,26 +255,24 @@ describe("ChatsView direct messages", () => {
     signedIn([conversation({ unread: 1, last: sent(3, "sam", "Running late") })]);
     bridgeMock.directHistory
       .mockResolvedValueOnce({
+        conversationId: "conversation-sam",
         messages: [sent(2, "sam", "See you at nine")],
         more: false,
-        saved: false,
       })
       .mockReturnValue(new Promise(() => {}));
     renderView(vi.fn(), vi.fn(), { variant: "panel" });
     await openSam();
     await waitFor(() =>
       expect(bridgeMock.directMarkRead).toHaveBeenCalledWith({
+        viewerId: VIEWER,
         conversationId: "conversation-sam",
         seq: 2,
       }),
     );
-    expect(bridgeMock.directMarkRead).not.toHaveBeenCalledWith({
-      conversationId: "conversation-sam",
-      seq: 3,
-    });
+    expect(bridgeMock.directMarkRead).not.toHaveBeenCalledWith(expect.objectContaining({ seq: 3 }));
   });
 
-  it("sends nothing when Try again outlives a change of account", async () => {
+  it("names the account that wrote a message when Try again outlives a change of account, so main refuses it", async () => {
     const user = userEvent.setup();
     signedIn([conversation()]);
     history([sent(2, "sam", "See you at nine")]);
@@ -260,18 +286,22 @@ describe("ChatsView direct messages", () => {
     );
     await waitFor(() => expect(onError).toHaveBeenCalled());
     const [, , tryAgain] = onError.mock.calls.at(-1)!;
+    bridgeMock.directConversations.mockResolvedValue({
+      available: true,
+      viewerId: "someone-else",
+      conversations: [],
+    });
     act(() => emitCloudSessionChanged("session-other", "ready"));
     await act(async () => (tryAgain as () => void)());
-    expect(bridgeMock.directSend).toHaveBeenCalledTimes(1);
+    expect(
+      bridgeMock.directSend.mock.calls.map(([input]) => (input as { viewerId: string }).viewerId),
+    ).toEqual([VIEWER, VIEWER]);
   });
 
   it("closes the New message tab once its conversation opens in a tab of its own", async () => {
     signedIn([conversation()]);
     members([{ memberId: "sam", name: "Sam Rivera" }]);
-    bridgeMock.directResolve.mockResolvedValue({
-      conversationId: "conversation-sam",
-      people: [sam],
-    });
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: "conversation-sam", person: sam });
     const onOpenInTab = vi.fn();
     const onCloseTab = vi.fn();
     renderView(vi.fn(), vi.fn(), {
@@ -279,7 +309,7 @@ describe("ChatsView direct messages", () => {
       editorTabPath: chatTabPath({ kind: "new" }),
       onOpenInTab,
       onCloseTab,
-      initialNav: { level: "direct-new", memberIds: ["sam"] },
+      initialNav: { level: "direct-new", memberId: "sam" },
     });
     await waitFor(() =>
       expect(onOpenInTab).toHaveBeenCalledWith(
@@ -292,12 +322,7 @@ describe("ChatsView direct messages", () => {
   it("files no notice when a conversation can't be read because nobody is signed in", async () => {
     // The session ended between reading the list and reading the conversation.
     bridgeMock.directConversations
-      .mockResolvedValueOnce({
-        available: true,
-        viewerId: VIEWER,
-        saved: false,
-        conversations: [conversation()],
-      })
+      .mockResolvedValueOnce({ available: true, viewerId: VIEWER, conversations: [conversation()] })
       .mockResolvedValue({ available: false });
     bridgeMock.directHistory.mockRejectedValue(
       new Error(
@@ -311,7 +336,7 @@ describe("ChatsView direct messages", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
-  it("hides the people's names on a conversation after signing out", async () => {
+  it("hides the other person's name on a conversation after signing out", async () => {
     signedIn([conversation()]);
     history([sent(2, "sam", "See you at nine")]);
     renderView(vi.fn(), vi.fn(), { variant: "panel" });
@@ -337,17 +362,17 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryAllByTestId("chats-dm-message")).toHaveLength(0);
   });
 
-  it("clears New message's picks and words when the account changes", async () => {
+  it("clears New message's pick and words when the account changes", async () => {
     const user = userEvent.setup();
     signedIn([]);
     members([
       { memberId: "sam", name: "Sam Rivera" },
       { memberId: "ana", name: "Ana Diaz" },
     ]);
-    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, people: [ana] });
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, person: ana });
     renderView(vi.fn(), vi.fn(), {
       variant: "page",
-      initialNav: { level: "direct-new", memberIds: ["ana"] },
+      initialNav: { level: "direct-new", memberId: "ana" },
     });
     await waitFor(() => expect(screen.getAllByTestId("chats-dm-new-pick")).toHaveLength(1));
     await user.type(screen.getByTestId("chats-dm-new-composer"), "Written as the first account");
@@ -381,11 +406,11 @@ describe("ChatsView direct messages", () => {
     },
   );
 
-  it("sends with one message id, and Try again resends that same id", async () => {
+  it("keeps the words of a send that failed, and Try again resends them with the same message id", async () => {
     const user = userEvent.setup();
     signedIn([conversation()]);
     history([sent(2, "sam", "See you at nine")]);
-    bridgeMock.directSend.mockRejectedValueOnce(new Error("relay unreachable"));
+    bridgeMock.directSend.mockRejectedValueOnce(UNREACHABLE("direct-send"));
     const onError = vi.fn();
     renderView(vi.fn(), onError, { variant: "panel" });
     await openSam();
@@ -402,9 +427,14 @@ describe("ChatsView direct messages", () => {
       messageId: string;
       body: string;
     };
-    expect(first).toMatchObject({ conversationId: "conversation-sam", body: "On my way" });
-    // The words stay, so nothing typed is lost.
+    expect(first).toMatchObject({
+      viewerId: VIEWER,
+      conversationId: "conversation-sam",
+      body: "On my way",
+    });
+    // The words stay, and so does the composer, so nothing typed is lost.
     expect(composer.value).toBe("On my way");
+    expect(screen.getByTestId("chats-dm-composer")).toBe(composer);
 
     bridgeMock.directSend.mockResolvedValueOnce({ conversationId: "conversation-sam", seq: 3 });
     const [, , tryAgain] = onError.mock.calls.at(-1)!;
@@ -427,165 +457,59 @@ describe("ChatsView direct messages", () => {
     signedIn([conversation()]);
     history([sent(2, "sam", "See you at nine")]);
     bridgeMock.directBlock.mockResolvedValue(undefined);
-    renderView(vi.fn(), vi.fn(), { variant: "panel" });
+    const onNotice = vi.fn();
+    renderView(vi.fn(), vi.fn(), { variant: "panel", onNotice });
     fireEvent.contextMenu(await screen.findByTestId("chats-dm-item"), { clientX: 40, clientY: 60 });
     // The server lists the block once it holds it.
-    signedIn([conversation({ blocked: true })]);
+    signedIn([conversation({ person: { ...sam, blocked: true } })]);
     fireEvent.click(await screen.findByTestId("chat-row-menu-block"));
     await waitFor(() =>
       expect(bridgeMock.directBlock).toHaveBeenCalledWith({
+        viewerId: VIEWER,
         conversationId: "conversation-sam",
-        personId: "sam",
         blocked: true,
       }),
     );
     await waitFor(() => expect(screen.getByTestId("chats-dm-item").dataset.blocked).toBe("true"));
     await openSam();
     const line = await screen.findByTestId("chats-dm-blocked-line");
-    expect(line.textContent).toContain("You blocked Sam Rivera.");
+    expect(line.textContent).toContain("You blocked Sam Rivera. They can't message you.");
     expect(screen.queryByTestId("chats-dm-composer")).toBeNull();
+    // The line shows the block where it happened, so no notice repeats it.
+    expect(onNotice).not.toHaveBeenCalled();
     signedIn([conversation()]);
     fireEvent.click(within(line).getByTestId("chats-dm-blocked-line-action"));
     await waitFor(() =>
       expect(bridgeMock.directBlock).toHaveBeenLastCalledWith({
+        viewerId: VIEWER,
         conversationId: "conversation-sam",
-        personId: "sam",
         blocked: false,
       }),
     );
     expect(await screen.findByTestId("chats-dm-composer")).toBeTruthy();
   });
 
-  it("lists each blocked person in a group conversation with Unblock", async () => {
-    const group = conversation({
-      conversationId: "conversation-group",
-      people: [sam, { ...ana, blocked: true }],
-      last: sent(5, "sam", "Booked the table"),
-    });
-    signedIn([group]);
-    history([sent(5, "sam", "Booked the table")]);
+  it("offers Block and Unblock for the other person from the conversation's options", async () => {
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
     bridgeMock.directBlock.mockResolvedValue(undefined);
-    const onNotice = vi.fn();
-    renderView(vi.fn(), vi.fn(), { variant: "panel", onNotice });
+    renderView(vi.fn(), vi.fn(), { variant: "panel" });
     await openSam();
     fireEvent.click(await screen.findByTestId("chats-dm-options"));
-    expect(await screen.findByRole("menuitem", { name: "Block Sam Rivera" })).toBeTruthy();
-    signedIn([{ ...group, people: [sam, ana] }]);
-    fireEvent.click(screen.getByRole("menuitem", { name: "Unblock Ana Diaz" }));
+    signedIn([conversation({ person: { ...sam, blocked: true } })]);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Block Sam Rivera" }));
     await waitFor(() =>
       expect(bridgeMock.directBlock).toHaveBeenCalledWith({
-        conversationId: "conversation-group",
-        personId: "ana",
-        blocked: false,
+        viewerId: VIEWER,
+        conversationId: "conversation-sam",
+        blocked: true,
       }),
     );
     fireEvent.click(await screen.findByTestId("chats-dm-options"));
-    signedIn([group]);
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Block Ana Diaz" }));
-    // The line shows the block where it happened, so no notice repeats it.
-    expect(await screen.findByTestId("chats-dm-group-blocked")).toBeTruthy();
-    expect(onNotice).not.toHaveBeenCalled();
+    expect(await screen.findByRole("menuitem", { name: "Unblock Sam Rivera" })).toBeTruthy();
   });
 
-  it("says in a group conversation who the viewer blocked, keeps the composer, and unblocks from the line", async () => {
-    const group = conversation({ conversationId: "conversation-group", people: [sam, { ...ana, blocked: true }], last: sent(5, "sam", "Booked the table") });
-    signedIn([group]);
-    history([sent(5, "sam", "Booked the table")]);
-    bridgeMock.directBlock.mockResolvedValue(undefined);
-    renderView(vi.fn(), vi.fn(), { variant: "panel" });
-    await openSam();
-    expect((await screen.findByTestId("chats-dm-group-blocked")).textContent).toBe("You blocked Ana Diaz. You won't see their new messages.Unblock");
-    expect(screen.getByTestId("chats-dm-composer")).toBeTruthy();
-    signedIn([{ ...group, people: [sam, ana] }]);
-    fireEvent.click(screen.getByTestId("chats-dm-group-unblock"));
-    await waitFor(() => expect(bridgeMock.directBlock).toHaveBeenCalledWith({ conversationId: "conversation-group", personId: "ana", blocked: false }));
-    await waitFor(() => expect(screen.queryByTestId("chats-dm-group-blocked")).toBeNull());
-  });
-
-  it("shows the saved copy read-only, with why, while the server is away", async () => {
-    signedIn([conversation()], true);
-    history([sent(2, "sam", "See you at nine")], true);
-    renderView(vi.fn(), vi.fn(), { variant: "panel" });
-    expect(await screen.findByTestId("chats-dms-saved")).toBeTruthy();
-    await openSam();
-    const offline = await screen.findByTestId("chats-dm-offline");
-    expect(screen.getAllByTestId("chats-dm-message")).toHaveLength(1);
-    expect(screen.queryByTestId("chats-dm-composer")).toBeNull();
-    expect(screen.queryByTestId("chats-dm-options")).toBeNull();
-    expect(offline.textContent).not.toMatch(/encrypt/i);
-
-    // Try again reads both again, and the composer comes back once the server answers.
-    signedIn([conversation()]);
-    history([sent(2, "sam", "See you at nine")]);
-    fireEvent.click(within(offline).getByTestId("chats-dm-offline-action"));
-    expect(await screen.findByTestId("chats-dm-composer")).toBeTruthy();
-    expect(screen.queryByTestId("chats-dm-offline")).toBeNull();
-  });
-
-  it("brings the composer back on its own once the server answers again", async () => {
-    let changed: () => void = () => {};
-    bridgeMock.onDirectChanged.mockImplementation((listener: () => void) => {
-      changed = listener;
-      return () => undefined;
-    });
-    signedIn([conversation()], true);
-    history([sent(2, "sam", "See you at nine")], true);
-    renderView(vi.fn(), vi.fn(), { variant: "panel" });
-    await openSam();
-    await screen.findByTestId("chats-dm-offline");
-
-    signedIn([conversation()]);
-    history([sent(2, "sam", "See you at nine")]);
-    act(() => changed());
-    expect(await screen.findByTestId("chats-dm-composer")).toBeTruthy();
-    expect(screen.queryByTestId("chats-dm-offline")).toBeNull();
-  });
-
-  it("falls back to the saved copy when a send can't reach the server, and keeps the words for later", async () => {
-    const user = userEvent.setup();
-    let changed: () => void = () => {};
-    bridgeMock.onDirectChanged.mockImplementation((listener: () => void) => {
-      changed = listener;
-      return () => undefined;
-    });
-    signedIn([conversation()]);
-    history([sent(2, "sam", "See you at nine")]);
-    bridgeMock.directSend.mockRejectedValueOnce(new Error("Error invoking remote method 'desktop:direct-send': DirectMessageError [direct-retry]: dohc could not reach your server."));
-    renderView(vi.fn(), vi.fn(), { variant: "panel" });
-    await openSam();
-    const composer = await screen.findByTestId("chats-dm-composer");
-    signedIn([conversation()], true);
-    await user.type(composer, "On my way{Enter}");
-    expect(await screen.findByTestId("chats-dm-offline")).toBeTruthy();
-    expect(screen.queryByTestId("chats-dm-composer")).toBeNull();
-
-    signedIn([conversation()]);
-    act(() => changed());
-    expect(((await screen.findByTestId("chats-dm-composer")) as HTMLTextAreaElement).value).toBe("On my way");
-  });
-
-  it("says why no one else can be picked once a conversation is full", async () => {
-    const user = userEvent.setup();
-    signedIn([]);
-    members(Array.from({ length: 8 }, (_, index) => ({ memberId: `member-${index}`, name: `Person ${index}` })));
-    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, people: [] });
-    renderView(vi.fn(), vi.fn(), { variant: "panel" });
-    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
-    const options = await screen.findAllByTestId("chats-dm-new-member");
-    for (const option of options.slice(0, 6)) await user.click(option);
-    expect(screen.queryByTestId("chats-dm-new-full")).toBeNull();
-    await user.click(options[6]!);
-    expect(screen.getByTestId("chats-dm-new-full").textContent).toBe("A conversation holds up to 8 people, you included.");
-    expect(options[7]!.getAttribute("aria-disabled")).toBe("true");
-    // The highlight passes over the member who can't be added.
-    const recipients = screen.getByTestId("chats-dm-recipients");
-    await user.hover(options[7]!);
-    fireEvent.keyDown(recipients, { key: "ArrowDown" });
-    expect(recipients.getAttribute("aria-activedescendant")).not.toContain("member-7");
-    expect((screen.getByTestId("chats-dm-new-composer") as HTMLTextAreaElement).placeholder).toBe("Message Person 0 and 6 others");
-  });
-
-  it("starts a new message with people picked from the workspace's members", async () => {
+  it("starts a new message with one person picked from the workspace's members", async () => {
     const user = userEvent.setup();
     signedIn([]);
     members([
@@ -593,7 +517,10 @@ describe("ChatsView direct messages", () => {
       { memberId: "ana", name: "Ana Diaz" },
       { memberId: "gone", name: "Gone Person", state: "removed" },
     ]);
-    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, people: [sam] });
+    bridgeMock.directResolve.mockImplementation(async ({ memberId }: { memberId: string }) => ({
+      conversationId: null,
+      person: memberId === "sam" ? sam : ana,
+    }));
     bridgeMock.directStart.mockResolvedValue({ conversationId: "conversation-sam", seq: 1 });
     history([sent(1, VIEWER, "Lunch?")]);
     renderView(vi.fn(), vi.fn(), { variant: "panel" });
@@ -607,6 +534,9 @@ describe("ChatsView direct messages", () => {
       expect.stringContaining("Sam Rivera"),
     ]);
     expect(screen.getByTestId("chats-dm-new").textContent).not.toContain("@");
+    expect(
+      screen.getByRole("listbox", { name: "Members" }).getAttribute("aria-multiselectable"),
+    ).toBeNull();
 
     // A message without anyone picked asks who it is for.
     const composer = screen.getByTestId("chats-dm-new-composer") as HTMLTextAreaElement;
@@ -614,74 +544,52 @@ describe("ChatsView direct messages", () => {
     expect(screen.getByText("Choose who to message.")).toBeTruthy();
     expect(bridgeMock.directStart).not.toHaveBeenCalled();
 
+    // Picking another person replaces the pick: a conversation is two people.
+    await user.click(options[0]!);
+    expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
+      ["ana"],
+    );
     // Keyboard: type to filter, Enter picks.
     await user.type(screen.getByTestId("chats-dm-recipients"), "sam{Enter}");
     expect(screen.getAllByTestId("chats-dm-new-pick").map((pick) => pick.dataset.memberId)).toEqual(
       ["sam"],
     );
     await waitFor(() =>
-      expect(bridgeMock.directResolve).toHaveBeenCalledWith({
+      expect(bridgeMock.directResolve).toHaveBeenLastCalledWith({
+        viewerId: VIEWER,
         workspaceId: "workspace-a",
-        memberIds: ["sam"],
+        memberId: "sam",
       }),
     );
     expect(screen.queryByText("Choose who to message.")).toBeNull();
+    expect(composer.placeholder).toBe("Message Sam Rivera");
 
     await user.click(composer);
     await user.type(composer, "{Enter}");
     await waitFor(() => expect(bridgeMock.directStart).toHaveBeenCalledTimes(1));
     expect(bridgeMock.directStart.mock.calls[0]![0]).toMatchObject({
+      viewerId: VIEWER,
       workspaceId: "workspace-a",
-      memberIds: ["sam"],
+      memberId: "sam",
       body: "Lunch?",
     });
     const view = await screen.findByTestId("chats-dm-view");
     expect(view.dataset.conversationId).toBe("conversation-sam");
   });
 
-  it("says when a picked person is someone the viewer blocks, by their account, not their membership", async () => {
-    const user = userEvent.setup();
-    // Only Sam's conversation is listed, and it can't undo a block on Ana.
-    signedIn([conversation({ conversationId: "conversation-sam", people: [sam] })]);
-    // Membership ids differ from account ids; only the resolution knows who is blocked.
-    members([
-      { memberId: "membership-sam", name: "Sam Rivera" },
-      { memberId: "membership-ana", name: "Ana Diaz" },
-    ]);
-    bridgeMock.directResolve.mockResolvedValue({
-      conversationId: null,
-      people: [{ ...ana, personId: "account-ana", blocked: true }],
-    });
-    renderView(vi.fn(), vi.fn(), { variant: "panel" });
-    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
-    const [anaOption] = await screen.findAllByTestId("chats-dm-new-member");
-    expect(screen.queryByTestId("chats-dm-new-blocked")).toBeNull();
-    await user.click(anaOption!);
-    expect((await screen.findByTestId("chats-dm-new-blocked")).textContent).toBe(
-      "You blocked Ana Diaz. They can't message you.",
-    );
-    // No conversation holds the block here, so there is nothing to unblock it from.
-    expect(screen.queryByTestId("chats-dm-new-unblock")).toBeNull();
-    expect(screen.queryByTestId("chats-dm-new-blocked-line")).toBeNull();
-    expect(screen.getByTestId("chats-dm-new-composer")).toBeTruthy();
-  });
-
   it("offers no composer to a person the viewer blocked, as their conversation does, until Unblock", async () => {
     const user = userEvent.setup();
     signedIn([
-      conversation({
-        conversationId: "conversation-ana",
-        people: [{ ...ana, blocked: true }],
-        blocked: true,
-      }),
+      conversation({ conversationId: "conversation-ana", person: { ...ana, blocked: true } }),
     ]);
     members([{ memberId: "membership-ana", name: "Ana Diaz" }]);
+    // Membership ids differ from account ids; only the resolution knows who is blocked.
     bridgeMock.directResolve
       .mockResolvedValueOnce({
         conversationId: "conversation-ana",
-        people: [{ ...ana, blocked: true }],
+        person: { ...ana, blocked: true },
       })
-      .mockResolvedValue({ conversationId: "conversation-ana", people: [ana] });
+      .mockResolvedValue({ conversationId: "conversation-ana", person: ana });
     bridgeMock.directBlock.mockResolvedValue(undefined);
     renderView(vi.fn(), vi.fn(), { variant: "panel" });
     fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
@@ -690,82 +598,29 @@ describe("ChatsView direct messages", () => {
     const line = await screen.findByTestId("chats-dm-new-blocked-line");
     expect(line.textContent).toContain("You blocked Ana Diaz. They can't message you.");
     expect(screen.queryByTestId("chats-dm-new-composer")).toBeNull();
-    expect(screen.queryByTestId("chats-dm-new-blocked")).toBeNull();
     await user.click(screen.getByTestId("chats-dm-new-blocked-line-action"));
     expect(bridgeMock.directBlock).toHaveBeenCalledWith({
+      viewerId: VIEWER,
       conversationId: "conversation-ana",
-      personId: "ana",
       blocked: false,
     });
     await waitFor(() => expect(screen.queryByTestId("chats-dm-new-blocked-line")).toBeNull());
     expect(screen.getByTestId("chats-dm-new-composer")).toBeTruthy();
   });
 
-  it("treats a person blocked only in a group like one blocked in their own conversation, and unblocks from the group", async () => {
-    const user = userEvent.setup();
-    // The block belongs to the account, so the group the two share can undo it. Sam's own conversation can't.
-    signedIn([
-      conversation({ conversationId: "conversation-sam", people: [sam] }),
-      conversation({ conversationId: "conversation-group", people: [sam, { ...ana, blocked: true }] }),
-    ]);
-    members([{ memberId: "membership-ana", name: "Ana Diaz" }]);
-    bridgeMock.directResolve
-      .mockResolvedValueOnce({ conversationId: null, people: [{ ...ana, blocked: true }] })
-      .mockResolvedValue({ conversationId: null, people: [ana] });
-    bridgeMock.directBlock.mockResolvedValue(undefined);
-    renderView(vi.fn(), vi.fn(), { variant: "panel" });
-    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
-    await user.click(await screen.findByTestId("chats-dm-new-member"));
-    expect((await screen.findByTestId("chats-dm-new-blocked-line")).textContent).toContain("You blocked Ana Diaz. They can't message you.");
-    expect(screen.queryByTestId("chats-dm-new-composer")).toBeNull();
-    await user.click(screen.getByTestId("chats-dm-new-blocked-line-action"));
-    expect(bridgeMock.directBlock).toHaveBeenCalledWith({ conversationId: "conversation-group", personId: "ana", blocked: false });
-    expect(await screen.findByTestId("chats-dm-new-composer")).toBeTruthy();
-  });
-
-  it("says a blocked person in a group can still write there, but the viewer won't see it", async () => {
-    const user = userEvent.setup();
-    signedIn([]);
-    members([
-      { memberId: "membership-ana", name: "Ana Diaz" },
-      { memberId: "membership-sam", name: "Sam Rivera" },
-    ]);
-    bridgeMock.directResolve.mockResolvedValue({
-      conversationId: "conversation-group",
-      people: [{ ...ana, blocked: true }, sam],
-    });
-    renderView(vi.fn(), vi.fn(), { variant: "panel" });
-    fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
-    const [anaOption, samOption] = await screen.findAllByTestId("chats-dm-new-member");
-    await user.click(anaOption!);
-    await user.click(samOption!);
-    expect((await screen.findByTestId("chats-dm-new-blocked")).textContent).toBe(
-      "You blocked Ana Diaz. You won't see their new messages.Unblock",
-    );
-    expect(screen.getByTestId("chats-dm-new-composer")).toBeTruthy();
-  });
-
   it("clears New message's blocked line when Unblock works on Try again", async () => {
     const user = userEvent.setup();
     signedIn([
-      conversation({
-        conversationId: "conversation-ana",
-        people: [{ ...ana, blocked: true }],
-        blocked: true,
-      }),
+      conversation({ conversationId: "conversation-ana", person: { ...ana, blocked: true } }),
     ]);
     members([{ memberId: "membership-ana", name: "Ana Diaz" }]);
     let unblocked = false;
     bridgeMock.directResolve.mockImplementation(async () => ({
       conversationId: "conversation-ana",
-      people: [{ ...ana, blocked: !unblocked }],
+      person: { ...ana, blocked: !unblocked },
     }));
     bridgeMock.directBlock
-      .mockRejectedValueOnce(
-        new Error(
-          "Error invoking remote method 'desktop:direct-block': DirectMessageError [direct-retry]: dohc could not reach your server.",
-        ),
-      )
+      .mockRejectedValueOnce(UNREACHABLE("direct-block"))
       .mockImplementation(async () => {
         unblocked = true;
       });
@@ -796,11 +651,11 @@ describe("ChatsView direct messages", () => {
     history([sent(2, "sam", "See you at nine")]);
     renderView(vi.fn(), vi.fn(), {
       variant: "page",
-      initialNav: { level: "direct-new", memberIds: ["sam"] },
+      initialNav: { level: "direct-new", memberId: "sam" },
     });
     await waitFor(() => expect(bridgeMock.directResolve).toHaveBeenCalled());
     await user.type(screen.getByTestId("chats-dm-recipients"), "Ana");
-    await act(async () => resolveSam({ conversationId: "conversation-sam", people: [sam] }));
+    await act(async () => resolveSam({ conversationId: "conversation-sam", person: sam }));
     expect(screen.getByTestId("chats-dm-new")).toBeTruthy();
     expect(screen.queryByTestId("chats-dm-view")).toBeNull();
   });
@@ -824,14 +679,11 @@ describe("ChatsView direct messages", () => {
     expect(onOpenSettings).toHaveBeenCalledWith("cloud");
   });
 
-  it("offers the conversation the picked people already have", async () => {
+  it("offers the conversation the two of you already have", async () => {
     const user = userEvent.setup();
     signedIn([conversation()]);
     members([{ memberId: "sam", name: "Sam Rivera" }]);
-    bridgeMock.directResolve.mockResolvedValue({
-      conversationId: "conversation-sam",
-      people: [sam],
-    });
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: "conversation-sam", person: sam });
     history([sent(2, "sam", "See you at nine")]);
     renderView(vi.fn(), vi.fn(), { variant: "panel" });
     fireEvent.click(await screen.findByTestId("chats-new-dm-action"));
@@ -848,14 +700,11 @@ describe("ChatsView direct messages", () => {
   it("opens the existing conversation when Members' Message names someone already in one", async () => {
     signedIn([conversation()]);
     members([{ memberId: "sam", name: "Sam Rivera" }]);
-    bridgeMock.directResolve.mockResolvedValue({
-      conversationId: "conversation-sam",
-      people: [sam],
-    });
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: "conversation-sam", person: sam });
     history([sent(2, "sam", "See you at nine")]);
     renderView(vi.fn(), vi.fn(), {
       variant: "page",
-      initialNav: { level: "direct-new", memberIds: ["sam"] },
+      initialNav: { level: "direct-new", memberId: "sam" },
     });
     expect((await screen.findByTestId("chats-dm-view")).dataset.conversationId).toBe(
       "conversation-sam",
@@ -869,10 +718,10 @@ describe("ChatsView direct messages", () => {
       { memberId: "sam", name: "Sam Rivera" },
       { memberId: "ana", name: "Ana Diaz" },
     ]);
-    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, people: [ana] });
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: null, person: ana });
     renderView(vi.fn(), vi.fn(), {
       variant: "page",
-      initialNav: { level: "direct-new", memberIds: ["ana"] },
+      initialNav: { level: "direct-new", memberId: "ana" },
     });
     await waitFor(() =>
       expect(

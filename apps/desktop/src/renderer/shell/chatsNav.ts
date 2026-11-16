@@ -28,7 +28,7 @@ export function chatsNavigationRequiresRemount(current: ChatsNav | null, next: C
   if (next.level === "channel") return Boolean(next.focusMessageId || next.lane);
   if (next.level === "thread") return Boolean(next.focusMessageId);
   // New message from a member's row names who to message.
-  return next.level === "direct-new" && Boolean(next.memberIds?.length);
+  return next.level === "direct-new" && next.memberId !== undefined;
 }
 
 // Thread navigation stays within its channel, so the tab keeps that name.

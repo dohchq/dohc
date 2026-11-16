@@ -1,31 +1,24 @@
-import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
 import {
   DIRECT_ACTIVITY_MAX_WAIT_MS,
   DIRECT_ROUTES,
   parseDirectConversationList,
-  parseDirectMessage,
   parseDirectMessagePage,
   parseDirectResolution,
   parseDirectSendResult,
   type DirectConversation,
   type DirectMemberPick,
-  type DirectMessage,
+  type DirectMessagePage,
   type DirectResolution,
   type DirectSendResult,
 } from "@dohc/security-contract/direct-messages";
-import { atomicWriteFile } from "../atomicReplaceFile";
 import { DIRECT_FINAL, DIRECT_RETRY, DIRECT_SIGNED_OUT } from "../ipc/errorWords";
 
 // Direct messages for the signed-in account. The relay holds each
-// conversation; this computer keeps a copy of what it has read under
-// <stateDir>/direct-messages/<account>/, so a person can read and export
-// their conversations while their server is unreachable.
+// conversation; this computer keeps nothing on disk, so while the server is
+// away the windows show their failed state with Try again.
 //
-// One loop follows the account's direct activity while anyone listens, and
-// tells listeners when it moves. Everything is keyed by account: signing in
-// as someone else starts a fresh loop and reads a different folder.
+// One loop follows the account's direct activity while anyone listens. Each
+// move reads the list once, which the windows and the account's Notices share.
 
 export interface DirectAccount {
   relayUrl?: string;
@@ -50,16 +43,10 @@ export class DirectMessageError extends Error {
   }
 }
 
-export interface DirectList {
+/** The list as the server last gave it, for one account. */
+export interface DirectListed {
+  viewerId: string;
   conversations: DirectConversation[];
-  /** True when the server could not be reached and this is the copy on this computer. */
-  saved: boolean;
-}
-
-export interface DirectHistory {
-  messages: DirectMessage[];
-  more: boolean;
-  saved: boolean;
 }
 
 interface Dependencies<Credentials extends DirectAccount> {
@@ -67,22 +54,24 @@ interface Dependencies<Credentials extends DirectAccount> {
   credentials(): Promise<Credentials | null>;
   /** One relay request with the account's bearer. Rejects when the server is unreachable. */
   relayResponse(credentials: Credentials, path: string, init: RequestInit): Promise<Response>;
-  stateDir(): string;
-  /** The account's direct conversations changed on the server. */
+  /** The account's direct conversations changed on the server, or the server stopped answering. */
   changed(): void;
+  /** The list the Notices come from changed. */
+  listedChanged(): void;
   /** How long to wait after a failed follow, or after the server answered early with nothing new, in ms. */
   retryMs?: number;
 }
 
 const UNREACHABLE = "dohc could not reach your server. Check your connection.";
 const SIGNED_OUT = "Sign in to your server to send direct messages.";
+// A window read the account, then the account changed before its call arrived.
+const OTHER_ACCOUNT = "You signed in as someone else. Open Chats again to see their direct messages.";
 
-const accountKey = (account: DirectAccount) => createHash("sha256").update(`${account.relayUrl}\n${account.userId}`).digest("hex").slice(0, 32);
-const conversationFile = (conversationId: string) => `${conversationId}.json`;
+const accountKey = (account: DirectAccount) => `${account.relayUrl}\n${account.userId}`;
+const conversationPath = (route: string, conversationId: string) => route.replace(":conversationId", encodeURIComponent(conversationId));
 
 function refusal(status: number, code: string | null, message: string | null): DirectMessageError {
   if (code === "direct_blocked") return new DirectMessageError("refused", "You can't message this person.", status, code);
-  if (code === "direct_alone") return new DirectMessageError("refused", "Nobody else is in this conversation any more.", status, code);
   if (code === "direct_limit_reached") return new DirectMessageError("refused", "Your account has stored as many direct messages as your server keeps. Ask whoever runs it for more room.", status, code);
   if (status === 404) return new DirectMessageError("refused", "dohc could not find this conversation or person. They may have left the workspace.", status, code);
   if (status === 429) return new DirectMessageError("refused", "You have sent a lot of messages. Wait a minute, then try again.", status, code, true);
@@ -92,22 +81,26 @@ function refusal(status: number, code: string | null, message: string | null): D
 export function createDirectMessages<Credentials extends DirectAccount>(dependencies: Dependencies<Credentials>) {
   let following: { key: string; stop: AbortController } | null = null;
   let listeners = 0;
-  // The account whose copy may stay on this computer: undefined until main knows, null once signed out.
-  let keeping: string | null | undefined;
-  // Saves and cleanups run one at a time, in order, so a cleanup's deletion is the last word on a folder.
-  let queue: Promise<void> = Promise.resolve();
-  const serial = <T>(work: () => Promise<T>): Promise<T> => {
-    const run = queue.then(work);
-    queue = run.then(() => undefined, () => undefined);
-    return run;
+  // The list for one account. `fresh` while nothing has changed it since the follow loop read it.
+  let listed: (DirectListed & { key: string; fresh: boolean }) | null = null;
+
+  const setListed = (next: typeof listed) => {
+    const before = listed;
+    listed = next;
+    if (before?.key !== next?.key || before?.conversations !== next?.conversations) dependencies.listedChanged();
   };
 
-  const account = async (): Promise<Credentials> => {
+  const signedIn = async (): Promise<Credentials> => {
     const credentials = await dependencies.credentials();
     if (!credentials?.relayUrl) throw new DirectMessageError("signed-out", SIGNED_OUT);
     return credentials;
   };
-  const folder = (credentials: DirectAccount) => join(dependencies.stateDir(), "direct-messages", accountKey(credentials));
+  /** The one door for a window's call: it names the account it read, and acts only while that account is signed in. */
+  const as = async (viewerId: string): Promise<Credentials> => {
+    const credentials = await signedIn();
+    if (credentials.userId !== viewerId) throw new DirectMessageError("refused", OTHER_ACCOUNT);
+    return credentials;
+  };
 
   async function call(credentials: Credentials, path: string, init: RequestInit = {}): Promise<unknown> {
     let response: Response;
@@ -122,43 +115,24 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
     return body;
   }
 
-  const post = (credentials: Credentials, path: string, body: unknown) =>
-    call(credentials, path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-
-  async function readSaved<T>(credentials: DirectAccount, file: string, parse: (value: unknown) => T | null): Promise<T | null> {
+  /** A write changes the list, so the next read goes to the server. */
+  async function post(credentials: Credentials, path: string, body: unknown): Promise<unknown> {
     try {
-      return parse(JSON.parse(await readFile(join(folder(credentials), file), "utf8")));
-    } catch {
-      return null;
+      return await call(credentials, path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    } finally {
+      if (listed?.key === accountKey(credentials)) listed = { ...listed, fresh: false };
     }
   }
 
-  const save = (credentials: DirectAccount, file: string, value: unknown) => serial(() => write(credentials, file, value));
-
-  /** Call only inside `serial`. */
-  async function write(credentials: DirectAccount, file: string, value: unknown): Promise<void> {
-    if (keeping !== undefined && keeping !== accountKey(credentials)) return;
-    try {
-      await mkdir(folder(credentials), { recursive: true });
-      await atomicWriteFile(join(folder(credentials), file), JSON.stringify(value));
-    } catch {
-      // The copy is for reading offline. A failed save leaves the last one.
-    }
+  async function readList(credentials: Credentials, fresh: boolean): Promise<DirectListed> {
+    const answer = parseDirectConversationList(await call(credentials, DIRECT_ROUTES.conversations));
+    if (!answer) throw new DirectMessageError("refused", "Your server sent conversations dohc could not read.", null, null, true);
+    const next = { key: accountKey(credentials), viewerId: credentials.userId, conversations: answer.conversations, fresh };
+    // A read that lands after the account changed does not replace the new account's list.
+    const current = await dependencies.credentials().catch(() => null);
+    if (current && accountKey(current) === next.key) setListed(next);
+    return { viewerId: next.viewerId, conversations: next.conversations };
   }
-
-  const parseSavedMessages = (value: unknown): DirectMessage[] | null => {
-    if (!Array.isArray(value)) return null;
-    const messages = value.map(parseDirectMessage);
-    return messages.every((message): message is DirectMessage => message !== null) ? messages : null;
-  };
-
-  /** Adds a page to the saved copy, by seq. */
-  const keep = (credentials: DirectAccount, conversationId: string, page: readonly DirectMessage[]) => serial(async () => {
-    const saved = await readSaved(credentials, conversationFile(conversationId), parseSavedMessages) ?? [];
-    const bySeq = new Map(saved.map((message) => [message.seq, message]));
-    for (const message of page) bySeq.set(message.seq, message);
-    await write(credentials, conversationFile(conversationId), [...bySeq.values()].sort((a, b) => a.seq - b.seq));
-  });
 
   const pause = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref?.(); });
 
@@ -177,19 +151,22 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
         const revision = (answer as { revision?: unknown } | null)?.revision;
         if (!Number.isSafeInteger(revision)) throw new DirectMessageError("refused", "unreadable activity", null, null, true);
         const unchanged = since >= 0 && revision === since;
-        // The first answer counts as a change: a window may be showing the copy saved while the server was away.
-        if (!unchanged) dependencies.changed();
+        // The first answer counts as a change: a window may be showing a failed read from while the server was away.
+        if (!unchanged) {
+          await readList(credentials, true);
+          if (stop.aborted) return;
+          dependencies.changed();
+        }
         since = revision as number;
         // A server that answers before its wait with nothing new would otherwise make this loop spin.
         if (unchanged) await pause(dependencies.retryMs ?? 1_000);
       } catch {
         if (stop.aborted) return;
-        // Every failure is a change, so a window falls back to the saved copy instead of waiting to fail a send.
+        // Every failure is a change, so a window shows that the server is away instead of waiting to fail a send.
         // Not only the first: a server shutting down can fail this call and still answer the list read it starts.
         dependencies.changed();
         // The first retry comes soon, so that case settles in a second rather than a full wait.
         const first = since >= 0;
-        // The answer after a failure counts as a change too: a window may have fallen back to the saved copy meanwhile.
         since = -1;
         await pause(dependencies.retryMs ?? (first ? 1_000 : 15_000));
       }
@@ -200,6 +177,7 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
     if (listeners === 0) return;
     const credentials = await dependencies.credentials().catch(() => null);
     const key = credentials?.relayUrl ? accountKey(credentials) : null;
+    if (listed && listed.key !== key) setListed(null);
     if (following?.key === key) return;
     following?.stop.abort();
     following = null;
@@ -229,76 +207,49 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
     accountChanged(): void {
       void ensureFollowing();
     },
-    /**
-     * Keeps only this account's saved copy, or none when signed out. Call it
-     * once the account is known, not on a credential load's temporary null.
-     */
-    credentialsChanged(credentials: DirectAccount | null): Promise<void> {
-      const kept = credentials?.relayUrl ? accountKey(credentials) : null;
-      keeping = kept;
-      return serial(async () => {
-        const root = join(dependencies.stateDir(), "direct-messages");
-        const folders = await readdir(root).catch(() => [] as string[]);
-        // Wait for every deletion, even after one fails: one still running could delete a copy saved after this cleanup.
-        const removed = await Promise.allSettled(folders.filter((name) => name !== kept).map((name) => rm(join(root, name), { recursive: true, force: true })));
-        const failed = removed.find((result) => result.status === "rejected");
-        if (failed) throw failed.reason;
-      });
+    /** The list the follow loop read last, for `userId` only. Nothing is read from the server. */
+    listed(userId: string): DirectListed | null {
+      return listed && listed.viewerId === userId && following?.key === listed.key
+        ? { viewerId: listed.viewerId, conversations: listed.conversations }
+        : null;
     },
 
-    async list(): Promise<DirectList> {
-      const credentials = await account();
+    /** The signed-in account's conversations, and who that account is. Windows learn `viewerId` here. */
+    async list(): Promise<DirectListed> {
+      const credentials = await signedIn();
       void ensureFollowing();
-      try {
-        const listed = parseDirectConversationList(await call(credentials, DIRECT_ROUTES.conversations));
-        if (!listed) throw new DirectMessageError("refused", "Your server sent conversations dohc could not read.", null, null, true);
-        await save(credentials, "conversations.json", listed);
-        return { conversations: listed.conversations, saved: false };
-      } catch (error) {
-        if (!(error instanceof DirectMessageError) || error.failure !== "unreachable") throw error;
-        const saved = await readSaved(credentials, "conversations.json", parseDirectConversationList);
-        if (!saved) throw error;
-        return { conversations: saved.conversations, saved: true };
-      }
+      if (listed?.fresh && listed.key === accountKey(credentials)) return { viewerId: listed.viewerId, conversations: listed.conversations };
+      return readList(credentials, false);
     },
 
-    /** The newest page, or the page before `before`. Falls back to the saved copy when the server is unreachable. */
-    async history(conversationId: string, before?: number): Promise<DirectHistory> {
-      const credentials = await account();
+    /** The newest page, or the page before `before`. */
+    async history(viewerId: string, conversationId: string, before?: number): Promise<DirectMessagePage> {
+      const credentials = await as(viewerId);
       const query = before === undefined ? "" : `?before=${before}`;
-      try {
-        const page = parseDirectMessagePage(await call(credentials, `${DIRECT_ROUTES.messages.replace(":conversationId", encodeURIComponent(conversationId))}${query}`));
-        if (!page || page.conversationId !== conversationId) throw new DirectMessageError("refused", "Your server sent messages dohc could not read.", null, null, true);
-        await keep(credentials, conversationId, page.messages);
-        return { messages: page.messages, more: page.more, saved: false };
-      } catch (error) {
-        if (!(error instanceof DirectMessageError) || error.failure !== "unreachable") throw error;
-        const saved = await readSaved(credentials, conversationFile(conversationId), parseSavedMessages);
-        if (!saved) throw error;
-        const shown = before === undefined ? saved : saved.filter((message) => message.seq < before);
-        return { messages: shown, more: false, saved: true };
-      }
+      const page = parseDirectMessagePage(await call(credentials, `${conversationPath(DIRECT_ROUTES.messages, conversationId)}${query}`));
+      if (!page || page.conversationId !== conversationId) throw new DirectMessageError("refused", "Your server sent messages dohc could not read.", null, null, true);
+      return page;
     },
 
-    async resolve(people: DirectMemberPick[]): Promise<DirectResolution> {
-      const resolved = parseDirectResolution(await post(await account(), DIRECT_ROUTES.resolve, { people }));
+    async resolve(viewerId: string, person: DirectMemberPick): Promise<DirectResolution> {
+      const resolved = parseDirectResolution(await post(await as(viewerId), DIRECT_ROUTES.resolve, { person }));
       if (!resolved) throw new DirectMessageError("refused", "Your server sent a person dohc could not read.", null, null, true);
       return resolved;
     },
 
     /** Sends one message. The caller keeps `messageId` for Try again, so a retry never sends twice. */
-    async send(input: { messageId: string; body: string } & ({ conversationId: string } | { people: DirectMemberPick[] })): Promise<DirectSendResult> {
-      const result = parseDirectSendResult(await post(await account(), DIRECT_ROUTES.send, input));
+    async send(viewerId: string, input: { messageId: string; body: string } & ({ conversationId: string } | { person: DirectMemberPick })): Promise<DirectSendResult> {
+      const result = parseDirectSendResult(await post(await as(viewerId), DIRECT_ROUTES.send, input));
       if (!result) throw new DirectMessageError("refused", "Your server answered in a way dohc could not read. Check the conversation before sending again.");
       return result;
     },
 
-    async read(conversationId: string, seq: number): Promise<void> {
-      await post(await account(), DIRECT_ROUTES.read.replace(":conversationId", encodeURIComponent(conversationId)), { seq });
+    async read(viewerId: string, conversationId: string, seq: number): Promise<void> {
+      await post(await as(viewerId), conversationPath(DIRECT_ROUTES.read, conversationId), { seq });
     },
 
-    async block(conversationId: string, personId: string, blocked: boolean): Promise<void> {
-      await post(await account(), DIRECT_ROUTES.block.replace(":conversationId", encodeURIComponent(conversationId)), { personId, blocked });
+    async block(viewerId: string, conversationId: string, blocked: boolean): Promise<void> {
+      await post(await as(viewerId), conversationPath(DIRECT_ROUTES.block, conversationId), { blocked });
     },
   };
 }

@@ -7846,9 +7846,11 @@ export const usageRecordOperations = {
 // Notices sent to a person. "account" rows come from the signed-in account's
 // notice list on the relay and reach all of that person's computers. "local"
 // rows stay on this computer: nobody is signed in, the workspace does not sync
-// through the signed-in server, or the server has no notice list. Dismissed
-// rows are not listed. Lengths count code points, as the relay does.
-export const NoticeStoreName = z.enum(["local", "account"]);
+// through the signed-in server, or the server has no notice list. "direct"
+// rows are the account's direct messages not read yet; reading the
+// conversation takes them away. Dismissed rows are not listed. Lengths count
+// code points, as the relay does.
+export const NoticeStoreName = z.enum(["local", "account", "direct"]);
 const codePoints = (min: number, max: number) =>
   z.string().refine((value) => {
     const length = [...value].length;

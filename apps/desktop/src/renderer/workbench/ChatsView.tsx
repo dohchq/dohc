@@ -214,7 +214,7 @@ export type ChatsNav =
   // names once known, for the tab.
   | { level: "direct"; conversationId: string; title?: string }
   // New message, with the members it starts with.
-  | { level: "direct-new"; memberIds?: readonly string[] };
+  | { level: "direct-new"; memberId?: string };
 
 // Unsent input, one field per composer surface, plus the composer's MODE
 // (replying to a message / resolving a decision) — without the mode a reply
@@ -3875,10 +3875,9 @@ export function ChatsView(props: {
     return (
       <NewDirectMessage
         workspaceId={workspaceId}
-        memberIds={nav.memberIds}
+        memberId={nav.memberId}
         variant={variant}
         onBack={variant === "panel" ? goBack : undefined}
-        mentionCandidates={mentionCandidates}
         onError={props.onError}
         onClearError={props.onClearError}
         onOpenSettings={props.onOpenSettings}
@@ -3898,8 +3897,6 @@ export function ChatsView(props: {
         conversationId={nav.conversationId}
         variant={variant}
         onBack={variant === "panel" ? goBack : undefined}
-        mentionCandidates={mentionCandidates}
-        onOpenPath={props.onOpenPath}
         onTitle={setDirectTitle}
         onOpenSettings={props.onOpenSettings}
         onError={props.onError}

@@ -116,8 +116,6 @@ async function harness(workspaceId = "workspace") {
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const relayListing = vi.fn(async (): Promise<unknown> => ({ granted: [], received: [] }));
   const warm = vi.fn(async () => undefined);
-  const peek = vi.fn(async () => "not-dm" as const);
-  const cache = new Map<string, "dm" | "not-dm">();
   const write = vi.fn(
     async (
       workspaceId: string,
@@ -171,8 +169,6 @@ async function harness(workspaceId = "workspace") {
     relayClientForWorkspace: () => ({ pullSharedChannel: pull, push, claim }),
     projectPendingChatBookmarksAfterPull: async () => undefined,
     normalizeServerUrl: (url) => url,
-    peekedReceivedGrantKinds: cache,
-    peekReceivedGrantKindForShare: peek,
     acknowledgeWorkspaceShareSkips: acknowledge,
     notifyRenderer: notify,
     mountShareFolder: mount,
@@ -206,8 +202,6 @@ async function harness(workspaceId = "workspace") {
     helpers,
     relayListing,
     warm,
-    peek,
-    cache,
     write,
     pull,
     notify,
@@ -224,7 +218,6 @@ async function harness(workspaceId = "workspace") {
     work: [
       warm,
       relayListing,
-      peek,
       write,
       pull,
       notify,
@@ -408,8 +401,6 @@ describe("registered shared-channel handlers", () => {
       });
       await expect(result).rejects.toThrow();
       await drained;
-      expect(h.peek).not.toHaveBeenCalled();
-      expect(h.cache.size).toBe(0);
       expect(h.write).not.toHaveBeenCalled();
       expect(h.notify).not.toHaveBeenCalled();
     },
@@ -478,33 +469,9 @@ describe("registered shared-channel handlers", () => {
     ).rejects.toThrow("Left the group. Its folder is still in shared-with-me/");
   });
 
-  it("does not cache an invitation kind returned after the account changes", async () => {
-    const h = await harness();
-    h.relayListing.mockResolvedValue({
-      received: [
-        {
-          shareId: "late",
-          selector: { kind: "chat", channelWireId: "late-wire" },
-        },
-      ],
-    });
-    const started = deferred();
-    const held = deferred<"not-dm">();
-    h.peek.mockImplementation(() => {
-      started.resolve();
-      return held.promise;
-    });
-    const result = h.invoke(sharedChannelOperations.listChatChannelShares.channel, {
-      workspaceId: "workspace",
-      channelWireIds: [],
-    });
-    await started.promise;
-    h.rotateCredentials();
-    held.resolve("not-dm");
-    await expect(result).rejects.toThrow("session changed");
-    expect(h.cache.size).toBe(0);
-  });
-
+  // The listing is applied to this machine's records before the joined lane
+  // is answered, so a row the owner restored answers as live in the same
+  // read. Its removed lane rides with the relay answer.
   it("applies the listing to the registry before answering the joined lane, and carries the removed lane", async () => {
     const h = await harness();
     h.workspace.sharedChannels = [joined("shown"), { ...joined("gone"), ended: true }];

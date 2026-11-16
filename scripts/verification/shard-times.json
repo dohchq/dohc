@@ -743,7 +743,6 @@
   "apps/desktop/src/workspaces/desktopWorkspaceCallbacks.test.ts": 0.05,
   "apps/desktop/src/workspaces/desktopWorkspaceReads.test.ts": 0.897,
   "apps/desktop/src/workspaces/diskSpelling.test.ts": 0.367,
-  "apps/desktop/src/workspaces/dmChats.test.ts": 0.453,
   "apps/desktop/src/workspaces/durableWorkspaceRecords.test.ts": 0.26,
   "apps/desktop/src/workspaces/engineCaptureGate.test.ts": 0.073,
   "apps/desktop/src/workspaces/engineDaemonWedgeWatch.e2e.test.ts": 27.022,

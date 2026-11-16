@@ -218,7 +218,6 @@ import { readWorkspaceEnginePolicy } from "./workspaces/workspaceEnginePolicyFil
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
 import { collectionAutomationAuthor } from "./ipc/engineHistoryIpc";
 import { createSettingsIpc } from "./ipc/settingsIpc";
-import { peekReceivedGrantKindForShare } from "./workspaces/dmChats";
 import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
 import { protectedCopyHandlers, workspaceVersionHandlers } from "./ipc/workspaceVersionsIpc";
@@ -283,6 +282,7 @@ import {
   membersPlace,
 } from "./ipc/workspaceMembersActions";
 import { createDirectMessages, DirectMessageError } from "./workspaces/directMessages";
+import { directNoticeRead, directNoticeRows } from "./notices/directNotices";
 import { directMessageOperations } from "./ipc/directMessageOperations";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "./ipc/joinedAccountWords";
 import { createJoinedGroup } from "./workspaces/joinedGroupCreate";
@@ -1486,6 +1486,7 @@ const namedDatasetPages = createNamedDatasetCacheRegistry({
 });
 // Direct messages follow the signed-in account, not a workspace. Main follows
 // the account's activity for as long as the app runs and tells every window.
+// A message not read yet shows in Notices, from the same list.
 const directMessages = createDirectMessages<CloudSessionCredentials>({
   credentials: async () => {
     await warmCredentialCache();
@@ -1493,10 +1494,10 @@ const directMessages = createDirectMessages<CloudSessionCredentials>({
   },
   relayResponse: (credentials, path, init) =>
     relayShareResponseWithCredentials(credentials, path, init),
-  stateDir,
   changed: () => {
     for (const window of BrowserWindow.getAllWindows()) sendIfOpen(window, CHANNELS.directChanged);
   },
+  listedChanged: () => notifyNoticesChanged(),
 });
 let credentialCacheGeneration = 0;
 let receivedShareCredentialsChanged:
@@ -1509,10 +1510,6 @@ const localAuthorship = createLocalAuthorship({
   loadCredentials: () => credentialSessionCache.warm(() => cloudLogin().credentials()),
 });
 let ownerDeliveryCredentialLifetime = new AbortController();
-// Share kind is relay/account-scoped, not workspace-scoped. Keep one cache
-// across physical workspaces in the same session, and clear it whenever that
-// credential session ends or changes.
-const peekedReceivedGrantKinds = new Map<string, "dm" | "not-dm">();
 // The signed-in account's personal agents, which Settings › Agents, the @
 // picker, and chat names read. Sign-in, each notice pull, and Settings ›
 // Agents opening refresh it.
@@ -1810,10 +1807,6 @@ const credentialSessionCache = new CredentialSessionCache<CloudSessionCredential
       void namedDatasetPages
         .credentialsChanged(datasetCopyOwnerKey(snapshot.credentials))
         .catch((error) => console.error("Saved Collection page cleanup failed", error));
-    if (snapshot.credentials)
-      void directMessages
-        .credentialsChanged(snapshot.credentials)
-        .catch((error) => console.error("Saved direct message cleanup failed", error));
     shareHandoffRedemption.credentialsChanged();
     // The notice list shows the signed-in account's notices.
     notifyNoticesChanged();
@@ -1822,35 +1815,22 @@ const credentialSessionCache = new CredentialSessionCache<CloudSessionCredential
     if (settled && snapshot.credentials) retryStopAndRestoreReleases?.();
   },
 );
-// dohc stops reading and adding to a saved copy before deleting it. A deletion that fails, such as a file another program holds, must not fail the credential load.
-const forgetDirectMessages = () =>
-  directMessages
-    .credentialsChanged(null)
-    .catch((error) => console.error("Saved direct message cleanup failed", error));
 async function refreshCredentialCache(): Promise<void> {
   try {
     await credentialSessionCache.refresh(() => cloudLogin().credentials());
   } finally {
-    if (!cachedCredentials) {
-      await namedDatasetPages.credentialsChanged(null);
-      await forgetDirectMessages();
-    }
+    if (!cachedCredentials) await namedDatasetPages.credentialsChanged(null);
   }
 }
 async function warmCredentialCache(): Promise<void> {
   await credentialSessionCache.warm(() => cloudLogin().credentials());
-  if (!cachedCredentials) {
-    await namedDatasetPages.credentialsChanged(null);
-    await forgetDirectMessages();
-  }
+  if (!cachedCredentials) await namedDatasetPages.credentialsChanged(null);
 }
 function clearCachedCredentials(): void {
   credentialSessionCache.clear();
   void namedDatasetPages
     .credentialsChanged(null)
     .catch((error) => console.error("Saved Collection page cleanup failed", error));
-  void forgetDirectMessages();
-  peekedReceivedGrantKinds.clear();
 }
 
 // Notices sent to the signed-in person, and this computer's own. The store
@@ -9081,7 +9061,7 @@ function registerIpcHandlers(): void {
   // A member list names people by its workspace's member ids. The relay checks
   // both accounts are in that workspace; here main only checks the window's
   // workspace belongs to the signed-in account.
-  const directPicks = async (workspace: RegistryEntry, memberIds: readonly string[]) => {
+  const directPick = async (workspace: RegistryEntry, memberId: string) => {
     const place = membersPlace(workspace);
     if (place === null || place === "joined-unknown")
       throw new DirectMessageError(
@@ -9095,35 +9075,30 @@ function registerIpcHandlers(): void {
     } else {
       await remoteForWorkspace(workspace);
     }
-    return memberIds.map((memberId) => ({ workspaceId: place.workspaceId, memberId }));
+    return { workspaceId: place.workspaceId, memberId };
   };
   registerOperations(operationBoundary, directMessageOperations, {
     directConversations: async () => {
       await warmCredentialCache();
-      const viewerId = cachedCredentials?.relayUrl ? cachedCredentials.userId : null;
-      if (!viewerId) return { available: false as const };
-      const listed = await directMessages.list();
-      return {
-        available: true as const,
-        viewerId,
-        saved: listed.saved,
-        conversations: listed.conversations,
-      };
+      if (!cachedCredentials?.relayUrl) return { available: false as const };
+      return { available: true as const, ...(await directMessages.list()) };
     },
-    directHistory: ({ conversationId, before }) => directMessages.history(conversationId, before),
-    directResolve: async ({ memberIds }, { operation }) =>
-      directMessages.resolve(await directPicks(operation.workspace, memberIds)),
-    directStart: async ({ memberIds, messageId, body }, { operation }) =>
-      directMessages.send({
+    directHistory: ({ viewerId, conversationId, before }) =>
+      directMessages.history(viewerId, conversationId, before),
+    directResolve: async ({ viewerId, memberId }, { operation }) =>
+      directMessages.resolve(viewerId, await directPick(operation.workspace, memberId)),
+    directStart: async ({ viewerId, memberId, messageId, body }, { operation }) =>
+      directMessages.send(viewerId, {
         messageId,
         body,
-        people: await directPicks(operation.workspace, memberIds),
+        person: await directPick(operation.workspace, memberId),
       }),
-    directSend: ({ conversationId, messageId, body }) =>
-      directMessages.send({ conversationId, messageId, body }),
-    directMarkRead: ({ conversationId, seq }) => directMessages.read(conversationId, seq),
-    directBlock: ({ conversationId, personId, blocked }) =>
-      directMessages.block(conversationId, personId, blocked),
+    directSend: ({ viewerId, conversationId, messageId, body }) =>
+      directMessages.send(viewerId, { conversationId, messageId, body }),
+    directMarkRead: ({ viewerId, conversationId, seq }) =>
+      directMessages.read(viewerId, conversationId, seq),
+    directBlock: ({ viewerId, conversationId, blocked }) =>
+      directMessages.block(viewerId, conversationId, blocked),
   });
   registerOperations(operationBoundary, accessOperations, {
     getObjectAccess: (input, { operation }) => accessOwner.object(operation!, input),
@@ -10278,8 +10253,6 @@ function registerIpcHandlers(): void {
     relayClientForWorkspace,
     projectPendingChatBookmarksAfterPull: projectPendingChatBookmarks,
     normalizeServerUrl,
-    peekedReceivedGrantKinds,
-    peekReceivedGrantKindForShare,
     acknowledgeWorkspaceShareSkips,
     notifyRenderer,
     unmountShareFolder: ({ workspace, shareId, assertCurrent }) =>
@@ -11313,8 +11286,43 @@ function registerIpcHandlers(): void {
         );
         notifyNoticesChanged();
       },
-      listNotices: () => noticeStore().list(),
-      markNotices: (input) => noticeStore().mark(input.notices, input.mark, input.account),
+      listNotices: async () => {
+        const listed = await noticeStore().list();
+        // Direct messages not read yet, for the account this list shows.
+        const viewer =
+          cachedCredentials && chatShareSessionKey(cachedCredentials) === listed.account
+            ? cachedCredentials.userId
+            : null;
+        const direct = viewer === null ? null : directMessages.listed(viewer);
+        if (!direct?.conversations.length) return listed;
+        const notices = [
+          ...listed.notices,
+          ...directNoticeRows(direct.viewerId, direct.conversations),
+        ];
+        return {
+          ...listed,
+          notices: notices.sort((left, right) => right.createdAtMs - left.createdAtMs),
+        };
+      },
+      markNotices: async (input) => {
+        const others = input.notices.filter((ref) => ref.store !== "direct");
+        const direct = input.notices
+          .flatMap((ref) => (ref.store === "direct" ? [directNoticeRead(ref.noticeId)] : []))
+          .filter((read) => read !== null);
+        // Read or dismissed, a direct message's row goes once its conversation is read.
+        const viewer =
+          cachedCredentials && chatShareSessionKey(cachedCredentials) === input.account
+            ? cachedCredentials.userId
+            : null;
+        await Promise.all([
+          others.length > 0 ? noticeStore().mark(others, input.mark, input.account) : undefined,
+          ...(viewer === null
+            ? []
+            : direct.map(({ conversationId, seq }) =>
+                directMessages.read(viewer, conversationId, seq),
+              )),
+        ]);
+      },
       runSkippedScheduleNow: async (input) => ({
         note: await runSkippedScheduleNow(input.notice, input.account),
       }),

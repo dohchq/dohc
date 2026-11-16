@@ -452,7 +452,7 @@ const LISTED_CAPABILITIES = {
     ipc: ["directConversations"],
   }),
   "direct.read": capability(
-    "Read a direct conversation the signed-in account is in, or find the one it has with people picked from a member list.",
+    "Read a direct conversation the signed-in account is in, or find the one it has with a person picked from a member list.",
     { ipc: ["directHistory", "directResolve", "directMarkRead"] },
   ),
   "direct.send": capability("Send a direct message as the signed-in account.", {

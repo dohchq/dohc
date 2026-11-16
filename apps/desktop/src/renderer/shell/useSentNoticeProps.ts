@@ -31,6 +31,8 @@ import {
 } from "../../notices/noticeTarget";
 import { sentNoticeRef, type SentNotices } from "./useSentNotices";
 import { chatOnScreen, messageOnScreen, watchChatsOnScreen } from "../workbench/chatsOnScreen";
+import { directScreenKey } from "../workbench/directConversations";
+import { DIRECT_NOTICE_KIND } from "../../notices/directNotices";
 
 export const NOT_HERE_NOTE =
   "This workspace isn't on this computer. Join it from Manage workspaces, then choose Open again.";
@@ -272,6 +274,11 @@ export function useSentNoticeProps(input: {
   const viewShareId = here?.shareView?.shareId;
   const seenMessage = useCallback(
     (notice: NoticeRow): boolean => {
+      // A direct message's row is about its conversation, wherever it shows.
+      if (notice.kind === DIRECT_NOTICE_KIND)
+        return (
+          notice.target?.thread !== undefined && chatOnScreen(directScreenKey(notice.target.thread))
+        );
       const message = notice.kind === "chat-message" ? notice.target?.message : undefined;
       const placed =
         notice.workspaceId === null
@@ -406,6 +413,8 @@ export function useSentNoticeProps(input: {
             return ACCESS_ENDED_NOTE;
           case "not-here":
             return NOT_HERE_NOTE;
+          case "direct":
+            return await openTarget({ to: "direct", conversationId: place.conversationId }, signal);
           case "agents-settings":
             return await openTarget(
               place.agent === null

@@ -13,9 +13,8 @@ import { ownPresentation, relayPresentation } from "./actorPresentation";
 export type DirectListState =
   | { status: "loading" }
   | { status: "signed-out" }
-  // `saved`: dohc could not reach the server, and this is this computer's copy.
   // `failure`: the latest read failed; the list is the one read before it.
-  | { status: "ready"; viewerId: string; saved: boolean; conversations: readonly DirectConversation[]; failure: string | null }
+  | { status: "ready"; viewerId: string; conversations: readonly DirectConversation[]; failure: string | null }
   | { status: "failed"; message: string };
 
 type Api = Pick<DohcDesktopBridge, "directConversations" | "directMarkRead" | "directBlock" | "onDirectChanged" | "onCloudSessionChanged">;
@@ -65,9 +64,9 @@ export function createDirectStore(api: Api) {
             // A mark read still on its way keeps the row read.
             const conversations = result.conversations.map((conversation) => {
               const sent = readSent.get(conversation.conversationId);
-              return sent !== undefined && conversation.last !== null && sent >= conversation.last.seq ? { ...conversation, unread: 0 } : conversation;
+              return sent !== undefined && sent >= conversation.last.seq ? { ...conversation, unread: 0 } : conversation;
             });
-            set({ status: "ready", viewerId: result.viewerId, saved: result.saved, conversations, failure: null });
+            set({ status: "ready", viewerId: result.viewerId, conversations, failure: null });
           }
         } catch (cause) {
           if (mine !== session) continue;
@@ -99,9 +98,16 @@ export function createDirectStore(api: Api) {
     });
   }
 
+  // The account the list belongs to. Every call names it, so main refuses one made for an account no longer signed in.
+  const viewer = (): string => {
+    if (state.status !== "ready") throw new Error("Direct messages are not loaded yet.");
+    return state.viewerId;
+  };
+
   return {
     snapshot: () => state,
     session: () => session,
+    viewer,
     subscribe(listener: () => void): () => void {
       listeners.add(listener);
       followSession();
@@ -123,23 +129,22 @@ export function createDirectStore(api: Api) {
       if ((readSent.get(conversationId) ?? -1) >= seq) return;
       readSent.set(conversationId, seq);
       patch(conversationId, (conversation) =>
-        conversation.unread === 0 || (conversation.last !== null && conversation.last.seq > seq) ? conversation : { ...conversation, unread: 0 });
+        conversation.unread === 0 || conversation.last.seq > seq ? conversation : { ...conversation, unread: 0 });
       const mine = session;
-      api.directMarkRead({ conversationId, seq }).catch(() => {
+      // A read mark never waits on a list: one made before the list read is dropped with nothing lost.
+      if (state.status !== "ready") return;
+      api.directMarkRead({ viewerId: state.viewerId, conversationId, seq }).catch(() => {
         if (mine !== session) return;
         if (readSent.get(conversationId) === seq) readSent.delete(conversationId);
         void refresh();
       });
     },
-    /** Blocks or unblocks one person. Rejects with the server's reason. */
-    async setBlocked(conversationId: string, personId: string, blocked: boolean): Promise<void> {
+    /** Blocks or unblocks the other person. Rejects with the server's reason. */
+    async setBlocked(conversationId: string, blocked: boolean): Promise<void> {
       const mine = session;
-      await api.directBlock({ conversationId, personId, blocked });
+      await api.directBlock({ viewerId: viewer(), conversationId, blocked });
       if (mine !== session) return;
-      patch(conversationId, (conversation) => {
-        const people = conversation.people.map((person) => person.personId === personId ? { ...person, blocked } : person);
-        return { ...conversation, people, blocked: people.length === 1 && people[0]!.blocked };
-      });
+      patch(conversationId, (conversation) => ({ ...conversation, person: { ...conversation.person, blocked } }));
       void refresh();
     },
     draft: (key: string) => drafts.get(key) ?? "",
@@ -186,10 +191,6 @@ export function directPersonName(person: Pick<DirectPerson, "name">): string {
   return person.name ?? "Someone";
 }
 
-/** Everyone in the conversation but the viewer, by name. */
-export function directTitle(people: readonly Pick<DirectPerson, "name">[]): string {
-  return people.length === 0 ? "Nobody else" : people.map(directPersonName).join(", ");
-}
 
 /** A person's color, the same on every computer. */
 export function directPresentation(personId: string, viewerId: string | null) {
@@ -212,15 +213,20 @@ export function directMessageRecord(conversationId: string, message: DirectMessa
 }
 
 /**
- * Merges a page into what is shown, by seq. A newest page with more before it
- * that starts after the shown messages may leave a gap, so it replaces them.
- * Seqs alone cannot tell: a group hides the messages of people the viewer blocked.
+ * Merges a page into what is shown, by seq. Seqs count every message, so a
+ * newest page that starts past the next seq would leave a gap: it replaces
+ * what is shown instead.
  */
-export function mergeDirectPage(shown: readonly DirectMessage[], page: { messages: readonly DirectMessage[]; more: boolean }, newest: boolean): DirectMessage[] {
+export function mergeDirectPage(shown: readonly DirectMessage[], page: { messages: readonly DirectMessage[] }, newest: boolean): DirectMessage[] {
   if (page.messages.length === 0) return [...shown];
   const lastShown = shown.at(-1)?.seq ?? 0;
-  if (newest && page.more && shown.length > 0 && page.messages[0]!.seq > lastShown) return [...page.messages];
+  if (newest && shown.length > 0 && page.messages[0]!.seq > lastShown + 1) return [...page.messages];
   const bySeq = new Map(shown.map((message) => [message.seq, message]));
   for (const message of page.messages) bySeq.set(message.seq, message);
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+}
+
+/** How a shown conversation is named to chatsOnScreen, so its Notice reads while it shows. */
+export function directScreenKey(conversationId: string): string {
+  return `direct:${conversationId}`;
 }

@@ -3,7 +3,7 @@ import { bridge } from "../bridge";
 import { parseTab } from "../workbench/workbenchState";
 import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
 import type { SettingsAgent } from "../workbench/agentChat";
-import { directStore, directTitle } from "../workbench/directConversations";
+import { directStore, directPersonName } from "../workbench/directConversations";
 import {
   chatEditorPath,
   chatEditorTitle,
@@ -125,7 +125,7 @@ export function useChatEditorTabs(input: {
         chatEditorPath(entry.nav) === path &&
         (nav.level === "feed" ||
           nav.level === "direct" ||
-          (nav.level === "direct-new" && !nav.memberIds?.length) ||
+          (nav.level === "direct-new" && nav.memberId === undefined) ||
           (nav.level === "channel" && !nav.focusMessageId && !nav.lane));
       if (
         focusOnly &&
@@ -201,7 +201,7 @@ export function useChatEditorTabs(input: {
       remember(path, entry, {
         level: "direct",
         conversationId: target.id,
-        ...(conversation ? { title: directTitle(conversation.people) } : {}),
+        ...(conversation ? { title: directPersonName(conversation.person) } : {}),
       });
     }
   }, [get, input.enabled, pathsKey, input.workspaceId, sessionRevision]);

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { Ban, Check, CloudOff, PenSquare, Plus, Users, X } from "lucide-react";
-import { MAX_DIRECT_PEOPLE, type DirectConversation, type DirectMessage, type DirectPerson } from "@dohc/security-contract/direct-messages";
+import type { DirectConversation, DirectMessage, DirectPerson } from "@dohc/security-contract/direct-messages";
 import type { MembersResult } from "@dohc/cli/members";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { bridge } from "../bridge";
@@ -16,6 +16,7 @@ import { ChatHeader, UnreadPill } from "./ChatsControls";
 import { NavRow, SectionActionButton } from "./ChatNavRow";
 import { chatRowMenuItems } from "./chatRowMenu";
 import { ChatMessageList, type ChatMessageListHandle } from "./chatMessages";
+import { showChat } from "./chatsOnScreen";
 import { EMPTY_ART } from "./EmptyArt";
 import { MentionComposer } from "./MentionComposer";
 import type { ChatErrorNotice } from "./ChatsView";
@@ -23,7 +24,7 @@ import {
   directMessageRecord,
   directPersonName,
   directPresentation,
-  directTitle,
+  directScreenKey,
   mergeDirectPage,
   useDirectConversations,
   type DirectListState,
@@ -31,7 +32,9 @@ import {
 } from "./directConversations";
 
 // Direct messages in Chats: the People section, one conversation, and New
-// message. The conversations live on the account's server; see directConversations.ts.
+// message. Each conversation is between two people and lives on the account's
+// server; see directConversations.ts. A direct message belongs to no
+// workspace, so it offers no @ of a workspace's people and opens no files.
 
 type ReportError = (message: string, cause?: unknown, retry?: () => void, refusedPage?: string, notice?: ChatErrorNotice) => void;
 
@@ -42,39 +45,25 @@ interface Reporting {
 
 const NO_CANDIDATES: readonly MentionCandidate[] = [];
 const LIST_IDENTITY = "direct-list";
-const OFFLINE_LINE = "dohc could not reach your server. This is the copy saved on this computer.";
 
-/** A person's round face, or a group's people mark. */
-export function DirectAvatar(props: { people: readonly DirectPerson[]; viewerId: string | null }) {
-  const [first, second] = props.people;
-  if (!first) return <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />;
-  if (!second) {
-    return <ChatAvatar presentation={directPresentation(first.personId, props.viewerId)} name={directPersonName(first)} kind="human" size="strip" />;
-  }
-  // Two faces small enough to fit a row are too small to read, so a group shows one mark.
-  return (
-    <span data-testid="chats-dm-group-avatar" aria-hidden className="grid size-[18px] shrink-0 place-items-center rounded-full bg-panel-2 text-muted">
-      <Users size={11} strokeWidth={2} />
-    </span>
-  );
+/** The other person's round face. */
+export function DirectAvatar(props: { person: DirectPerson; viewerId: string | null }) {
+  return <ChatAvatar presentation={directPresentation(props.person.personId, props.viewerId)} name={directPersonName(props.person)} kind="human" size="strip" />;
 }
 
 /** The mark beside someone the viewer blocks. */
-function BlockedMark(props: { testId: string; name: string | null }) {
+function BlockedMark(props: { testId: string; name: string }) {
   return (
-    <span data-testid={props.testId} title={props.name ? `You blocked ${props.name}` : "Blocked"} className="inline-flex shrink-0 text-subtle">
+    <span data-testid={props.testId} title={`You blocked ${props.name}`} className="inline-flex shrink-0 text-subtle">
       <Ban size={12} aria-hidden />
       <span className="sr-only">Blocked</span>
     </span>
   );
 }
 
-function preview(conversation: DirectConversation, viewerId: string): string | null {
-  const last = conversation.last;
-  if (!last) return null;
-  const words = last.body.replace(/\s+/gu, " ").trim();
-  if (last.authorId === viewerId) return `You: ${words}`;
-  return conversation.people.length > 1 ? `${last.authorName ?? "Someone"}: ${words}` : words;
+function preview(conversation: DirectConversation, viewerId: string): string {
+  const words = conversation.last.body.replace(/\s+/gu, " ").trim();
+  return conversation.last.authorId === viewerId ? `You: ${words}` : words;
 }
 
 /** Reports a failed list read once per message, and takes it back when a read works. */
@@ -103,23 +92,12 @@ export function DirectPeopleSection(props: Reporting & {
   if (state.status === "signed-out") return null;
   const ready = state.status === "ready" ? state : null;
   const menuConversation = menu && ready ? ready.conversations.find((entry) => entry.conversationId === menu.conversationId) ?? null : null;
-  const setBlocked = (conversation: DirectConversation, blocked: boolean) => {
-    const person = conversation.people[0];
-    if (!person || conversation.people.length !== 1) return;
-    void blockPerson({ store, conversationId: conversation.conversationId, person, blocked, reporting: props });
-  };
   return (
     <section data-testid="chats-dms-section" aria-label="People">
       <div className="group mt-4 flex h-6 items-center pl-3 pr-2">
         <SectionLabel as="p" className="min-w-0 flex-1">
           People
         </SectionLabel>
-        {ready?.saved ? (
-          <span data-testid="chats-dms-saved" title={OFFLINE_LINE} className="grid size-6 shrink-0 place-items-center text-subtle">
-            <CloudOff size={12} aria-hidden />
-            <span className="sr-only">{OFFLINE_LINE}</span>
-          </span>
-        ) : null}
         <SectionActionButton testId="chats-new-dm-action" label="New message" onClick={props.onNew}>
           <Plus size={12} aria-hidden />
         </SectionActionButton>
@@ -133,33 +111,33 @@ export function DirectPeopleSection(props: Reporting & {
       ) : ready && ready.conversations.length > 0 ? (
         <ul className="m-0 list-none p-0">
           {ready.conversations.map((conversation) => {
-            const title = directTitle(conversation.people);
+            const title = directPersonName(conversation.person);
             const unread = conversation.unread > 0;
             const line = preview(conversation, ready.viewerId);
-            const single = conversation.people.length === 1 ? conversation.people[0]! : null;
+            const { blocked } = conversation.person;
             return (
               <li key={conversation.conversationId}>
                 <NavRow
                   testId="chats-dm-item"
                   data={{
                     "data-conversation-id": conversation.conversationId,
-                    ...(conversation.blocked ? { "data-blocked": "true" } : {}),
+                    ...(blocked ? { "data-blocked": "true" } : {}),
                   }}
                   active={props.selectedConversationId === conversation.conversationId}
                   unread={unread}
-                  muted={conversation.blocked}
+                  muted={blocked}
                   onClick={() => props.onOpen(conversation.conversationId, title)}
-                  icon={<DirectAvatar people={conversation.people} viewerId={ready.viewerId} />}
+                  icon={<DirectAvatar person={conversation.person} viewerId={ready.viewerId} />}
                   label={title}
                   labelTestId="chats-dm-name"
                   // Only an unread row shows its last message, so the rest stay quiet.
-                  {...(unread && line ? { detail: line } : {})}
-                  {...(line ? { title: `${title}\n${line}` } : {})}
+                  {...(unread ? { detail: line } : {})}
+                  title={`${title}\n${line}`}
                   menuOpen={menu?.conversationId === conversation.conversationId}
                   onMenu={(at, fromKeyboard) => setMenu({ conversationId: conversation.conversationId, at, fromKeyboard })}
                   trailing={
                     <>
-                      {conversation.blocked ? <BlockedMark testId="chats-dm-blocked" name={single ? directPersonName(single) : null} /> : null}
+                      {blocked ? <BlockedMark testId="chats-dm-blocked" name={title} /> : null}
                       <UnreadPill count={conversation.unread} testId="chats-dm-unread" />
                     </>
                   }
@@ -179,21 +157,19 @@ export function DirectPeopleSection(props: Reporting & {
       )}
       {menu && menuConversation && ready ? (
         <Menu
-          label={`${directTitle(menuConversation.people)} options`}
+          label={`${directPersonName(menuConversation.person)} options`}
           menuTestId="chat-row-menu"
           items={chatRowMenuItems(
             {
               kind: "person",
-              unread: menuConversation.unread > 0 && menuConversation.last !== null,
-              block: menuConversation.people.length === 1
-                ? { name: directPersonName(menuConversation.people[0]!), blocked: menuConversation.blocked }
-                : null,
+              unread: menuConversation.unread > 0,
+              block: { name: directPersonName(menuConversation.person), blocked: menuConversation.person.blocked },
             },
             {
-              markRead: () => {
-                if (menuConversation.last) store.markRead(menuConversation.conversationId, menuConversation.last.seq);
-              },
-              setBlocked: (blocked) => setBlocked(menuConversation, blocked),
+              markRead: () => store.markRead(menuConversation.conversationId, menuConversation.last.seq),
+              setBlocked: (blocked) => void blockPerson({
+                store, conversationId: menuConversation.conversationId, person: menuConversation.person, blocked, reporting: props,
+              }),
               setArchived: () => undefined,
               addPeople: () => undefined,
               leave: () => undefined,
@@ -231,9 +207,9 @@ async function blockPerson(input: {
 }): Promise<void> {
   const { store, conversationId, person, blocked, reporting } = input;
   const name = directPersonName(person);
-  const identity = `direct-block:${conversationId}:${person.personId}`;
+  const identity = `direct-block:${conversationId}`;
   try {
-    await store.setBlocked(conversationId, person.personId, blocked);
+    await store.setBlocked(conversationId, blocked);
     reporting.onClearError?.(identity);
     // No notice: the blocked line, with its Unblock, shows the change where it happened.
     input.onDone?.();
@@ -278,7 +254,7 @@ function useNewestInView(list: RefObject<ChatMessageListHandle | null>, ready: b
 type History =
   | { conversationId: string; status: "loading" }
   | { conversationId: string; status: "failed"; message: string }
-  | { conversationId: string; status: "ready"; messages: readonly DirectMessage[]; more: boolean; saved: boolean; olderLoading: boolean };
+  | { conversationId: string; status: "ready"; messages: readonly DirectMessage[]; more: boolean; olderLoading: boolean };
 
 /** Where a state's next step lives, when it lives in Settings. */
 type OpenSettings = (section: "cloud" | "members") => void;
@@ -288,13 +264,11 @@ type ConversationProps = Reporting & {
   onOpenSettings?: OpenSettings;
   variant: "panel" | "page";
   onBack?: () => void;
-  mentionCandidates?: readonly MentionCandidate[];
-  onOpenPath?: (path: string, headingAnchor?: string) => void;
-  /** The people's names, once the list knows them, for the tab. */
+  /** The other person's name, once the list knows it, for the tab. */
   onTitle?: (title: string) => void;
 };
 
-/** One direct conversation, read from the server, or this computer's copy while the server is away. */
+/** One direct conversation, read from the server. */
 export function DirectConversationView(props: ConversationProps) {
   // A change of account starts the view over, so nothing read or typed for the last account stays on screen.
   const { store } = useDirectConversations();
@@ -315,15 +289,16 @@ function ConversationForAccount(props: ConversationProps) {
   const shown = history.conversationId === conversationId ? history : ({ conversationId, status: "loading" } as const);
   const request = useRef(0);
   const historyIdentity = `direct-history:${conversationId}`;
+  // The history is read as the account the list names, once the list has read.
   const load = useCallback(async (before?: number) => {
+    if (viewerId === null) return;
     const mine = ++request.current;
-    const session = store.session();
     if (before !== undefined) {
       setHistory((current) => current.conversationId === conversationId && current.status === "ready" ? { ...current, olderLoading: true } : current);
     }
     try {
-      const page = await bridge().directHistory(before === undefined ? { conversationId } : { conversationId, before });
-      if (mine !== request.current || session !== store.session()) return;
+      const page = await bridge().directHistory({ viewerId, conversationId, ...(before === undefined ? {} : { before }) });
+      if (mine !== request.current) return;
       reporting.current.onClearError?.(historyIdentity);
       setHistory((current) => {
         const previous = current.conversationId === conversationId && current.status === "ready" ? current : null;
@@ -331,17 +306,10 @@ function ConversationForAccount(props: ConversationProps) {
         // An older page, a first page, or a newest page that replaced the rest says what is before it.
         // A newest page that joined what was shown leaves that unchanged.
         const joined = before === undefined && previous !== null && previous.messages.length > 0 && messages[0]?.seq === previous.messages[0]?.seq;
-        return {
-          conversationId,
-          status: "ready",
-          messages,
-          more: joined ? previous.more : page.more,
-          saved: page.saved,
-          olderLoading: false,
-        };
+        return { conversationId, status: "ready", messages, more: joined ? previous.more : page.more, olderLoading: false };
       });
     } catch (cause) {
-      if (mine !== request.current || session !== store.session()) return;
+      if (mine !== request.current) return;
       const message = ipcErrorMessage(cause, "dohc could not read this conversation.");
       // Signed out, the view says to sign in once the list learns it, so a notice would only repeat that.
       if (refusalCode(cause) === DIRECT_SIGNED_OUT) void store.refresh();
@@ -350,25 +318,20 @@ function ConversationForAccount(props: ConversationProps) {
         ? { ...current, olderLoading: false }
         : { conversationId, status: "failed", message });
     }
-  }, [conversationId, historyIdentity, store]);
+  }, [conversationId, historyIdentity, store, viewerId]);
 
-  // A change of account starts over.
-  const session = store.session();
   useEffect(() => {
     void load();
     return () => {
       request.current += 1;
     };
-  }, [load, session]);
+  }, [load]);
   // The server says something new arrived: read the newest page again.
-  const lastSeq = conversation?.last?.seq ?? 0;
+  const lastSeq = conversation?.last.seq ?? 0;
   const shownSeq = shown.status === "ready" ? shown.messages.at(-1)?.seq ?? 0 : null;
-  // The saved copy is shown until the history reads again. When the list reads from the server, read it too.
-  const shownSaved = shown.status === "ready" && shown.saved;
-  const listFromServer = ready !== null && !ready.saved ? ready : null;
   useEffect(() => {
-    if ((shownSeq !== null && lastSeq > shownSeq) || (shownSaved && listFromServer)) void load();
-  }, [lastSeq, shownSeq, shownSaved, listFromServer, load]);
+    if (shownSeq !== null && lastSeq > shownSeq) void load();
+  }, [lastSeq, shownSeq, load]);
 
   const records = useMemo(
     () => shown.status === "ready" ? shown.messages.map((message) => directMessageRecord(conversationId, message, viewerId)) : [],
@@ -382,6 +345,9 @@ function ConversationForAccount(props: ConversationProps) {
     if (!conversation || conversation.unread === 0 || !newestInView || newestSeq === 0) return;
     store.markRead(conversationId, newestSeq);
   }, [conversation, conversationId, newestInView, newestSeq, store]);
+  // Notices reads the conversation's row while the conversation shows.
+  const root = useRef<HTMLDivElement | null>(null);
+  useEffect(() => (root.current ? showChat(directScreenKey(conversationId), root.current) : undefined), [conversationId]);
 
   const [draft, setDraftState] = useState(() => store.draft(conversationId));
   const [draftFor, setDraftFor] = useState(conversationId);
@@ -396,19 +362,15 @@ function ConversationForAccount(props: ConversationProps) {
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const sendIdentity = `direct-send:${conversationId}`;
-  // Who a failed send was for, so its notice names them.
-  const recipients = useRef("");
-  // A send and its Try again belong to the account that wrote it. After a change of account, Try again only clears its notice.
-  const send = useCallback(async (body: string, messageId: string, session = store.session(), to = recipients.current) => {
-    if (session !== store.session()) {
-      reporting.current.onClearError?.(sendIdentity);
-      return;
-    }
+  const name = conversation ? directPersonName(conversation.person) : "Direct message";
+  // A send and its Try again name the account that wrote them, so main refuses them once another account signs in.
+  const send = useCallback(async (sender: string, body: string, messageId: string, to: string) => {
     if (sendingRef.current) return;
     sendingRef.current = true;
     setSending(true);
+    const session = store.session();
     try {
-      const result = await bridge().directSend({ conversationId, messageId, body });
+      const result = await bridge().directSend({ viewerId: sender, conversationId, messageId, body });
       if (session !== store.session()) return;
       store.sent(conversationId, messageId);
       reporting.current.onClearError?.(sendIdentity);
@@ -417,62 +379,55 @@ function ConversationForAccount(props: ConversationProps) {
         setDraftState((current) => current.trim() === body ? "" : current);
       }
       setHistory((current) => {
-        if (current.conversationId !== conversationId || current.status !== "ready" || !viewerId) return current;
-        const mine: DirectMessage = { seq: result.seq, messageId, authorId: viewerId, authorName: null, body, createdAtMs: Date.now() };
-        return { ...current, messages: mergeDirectPage(current.messages, { messages: [mine], more: false }, false) };
+        if (current.conversationId !== conversationId || current.status !== "ready") return current;
+        const mine: DirectMessage = { seq: result.seq, messageId, authorId: sender, authorName: null, body, createdAtMs: Date.now() };
+        return { ...current, messages: mergeDirectPage(current.messages, { messages: [mine] }, false) };
       });
       requestAnimationFrame(() => listRef.current?.scrollToEnd());
     } catch (cause) {
-      if (session !== store.session()) return;
+      // The words stay in the composer. A failure that lands after the account changed only takes its notice back.
+      if (session !== store.session()) {
+        reporting.current.onClearError?.(sendIdentity);
+        return;
+      }
       reportDirect(reporting.current,
         ipcErrorMessage(cause, "dohc could not send your message."),
         cause,
-        () => void send(body, messageId, session, to),
+        () => void send(sender, body, messageId, to),
         undefined,
         { identity: sendIdentity, title: `Your message to ${to} wasn't sent` },
       );
-      // A send that could not reach the server shows the saved copy at once.
-      void store.refresh();
     } finally {
       sendingRef.current = false;
       setSending(false);
     }
-  }, [conversationId, sendIdentity, store, viewerId]);
+  }, [conversationId, sendIdentity, store]);
   const submit = () => {
     const body = draft.trim();
-    if (!body) return;
-    void send(body, store.messageIdFor(conversationId, body));
+    if (!body || viewerId === null) return;
+    void send(viewerId, body, store.messageIdFor(conversationId, body), name);
   };
 
-  // Signed out, or as another account, the names stay hidden with the rest of the conversation.
-  const title = conversation ? directTitle(conversation.people) : "Direct message";
-  recipients.current = title;
+  // Signed out, or as another account, the name stays hidden with the rest of the conversation.
   const known = conversation !== null;
   useEffect(() => {
-    if (known) onTitle?.(title);
-  }, [known, onTitle, title]);
-  const single = conversation?.people.length === 1 ? conversation.people[0]! : null;
-  const saved = (ready?.saved ?? false) || (shown.status === "ready" && shown.saved);
-  const retryOffline = () => {
-    void store.refresh();
-    void load();
+    if (known) onTitle?.(name);
+  }, [known, onTitle, name]);
+  const person = conversation?.person ?? null;
+  const setBlocked = (blocked: boolean) => {
+    if (person) void blockPerson({ store, conversationId, person, blocked, reporting: props });
   };
-  const menuItems: MoreMenuItem[] = !conversation || saved ? [] : single
-    ? [conversation.blocked
-      ? { label: `Unblock ${directPersonName(single)}`, onSelect: () => void blockPerson({ store, conversationId, person: single, blocked: false, reporting: props }) }
-      : { label: `Block ${directPersonName(single)}`, danger: true, onSelect: () => void blockPerson({ store, conversationId, person: single, blocked: true, reporting: props }) }]
-    : conversation.people.map((person) => person.blocked
-      ? { label: `Unblock ${directPersonName(person)}`, onSelect: () => void blockPerson({ store, conversationId, person, blocked: false, reporting: props }) }
-      : { label: `Block ${directPersonName(person)}`, danger: true, onSelect: () => void blockPerson({ store, conversationId, person, blocked: true, reporting: props }) });
+  const menuItems: MoreMenuItem[] = !person ? [] : [person.blocked
+    ? { label: `Unblock ${name}`, onSelect: () => setBlocked(false) }
+    : { label: `Block ${name}`, danger: true, onSelect: () => setBlocked(true) }];
 
   const header = (
     <ChatHeader
-      label={title}
+      label={name}
       testId="chats-dm"
       large={props.variant === "page"}
       onBack={props.onBack}
-      icon={conversation ? <DirectAvatar people={conversation.people} viewerId={viewerId} /> : <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
-      {...(conversation && conversation.people.length > 1 ? { description: `${conversation.people.length + 1} people` } : {})}
+      icon={person ? <DirectAvatar person={person} viewerId={viewerId} /> : <Users size={15} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted" />}
       action={menuItems.length > 0 ? <MoreMenu label="Conversation options" testId="chats-dm-options" items={menuItems} width={220} /> : undefined}
     />
   );
@@ -483,6 +438,15 @@ function ConversationForAccount(props: ConversationProps) {
       <EmptyState data-testid="chats-dm-signed-out" icon={CloudOff} title="Sign in to your server to read your direct messages.">
         <SettingsStep onOpenSettings={props.onOpenSettings} section="cloud" label="Sync and sharing" testId="chats-dm-signed-out-action" />
       </EmptyState>
+    );
+  } else if (state.status === "failed") {
+    // The list never read, so nothing here can either. Try again reads both.
+    body = (
+      <div className="flex flex-1 flex-col items-center justify-center">
+        <RetryRow testId="chats-dm-history-retry" onRetry={() => void store.refresh()}>
+          {state.message}
+        </RetryRow>
+      </div>
     );
   } else if (ready && !conversation && shown.status !== "ready") {
     body = <EmptyState data-testid="chats-dm-missing" icon={Users} title="dohc could not find this conversation." />;
@@ -498,85 +462,52 @@ function ConversationForAccount(props: ConversationProps) {
     );
   } else {
     body = (
-      <>
-        <ChatMessageList
-          testIdPrefix="chats-dm"
-          // At the top of the history, so it scrolls away with the messages and covers none of them.
-          header={shown.more ? (
-            <div className="flex justify-center pb-2 pt-1">
-              <SecondaryButton size="compact" data-testid="chats-dm-older" disabled={shown.olderLoading} onClick={() => void load(shown.messages[0]?.seq)}>
-                {shown.olderLoading ? "Loading…" : "Show earlier messages"}
-              </SecondaryButton>
-            </div>
-          ) : null}
-          messages={records}
-          loading={false}
-          emptyLabel={single ? `This is the start of your conversation with ${directPersonName(single)}.` : "This is the start of your conversation."}
-          emptyPicture={EMPTY_ART.posts}
-          listRef={listRef}
-          mentionCandidates={props.mentionCandidates ?? NO_CANDIDATES}
-          onOpenPath={props.onOpenPath}
-          column={props.variant === "page"}
-        />
-      </>
+      <ChatMessageList
+        testIdPrefix="chats-dm"
+        // At the top of the history, so it scrolls away with the messages and covers none of them.
+        header={shown.more ? (
+          <div className="flex justify-center pb-2 pt-1">
+            <SecondaryButton size="compact" data-testid="chats-dm-older" disabled={shown.olderLoading} onClick={() => void load(shown.messages[0]?.seq)}>
+              {shown.olderLoading ? "Loading…" : "Show earlier messages"}
+            </SecondaryButton>
+          </div>
+        ) : null}
+        messages={records}
+        loading={false}
+        emptyLabel={person ? `This is the start of your conversation with ${name}.` : "This is the start of your conversation."}
+        emptyPicture={EMPTY_ART.posts}
+        listRef={listRef}
+        mentionCandidates={NO_CANDIDATES}
+        column={props.variant === "page"}
+      />
     );
   }
 
   let footer: ReactNode = null;
-  if (conversation && shown.status === "ready") {
-    if (saved) {
-      footer = (
-        <DirectComposerLine testId="chats-dm-offline" icon={<CloudOff size={13} aria-hidden />} action={{ label: "Try again", run: retryOffline }}>
-          {OFFLINE_LINE}
-        </DirectComposerLine>
-      );
-    } else if (conversation.blocked && single) {
-      footer = (
-        <DirectComposerLine
-          testId="chats-dm-blocked-line"
-          icon={<Ban size={13} aria-hidden />}
-          action={{ label: "Unblock", run: () => void blockPerson({ store, conversationId, person: single, blocked: false, reporting: props }) }}
-        >
-          {`You blocked ${directPersonName(single)}. They can't message you.`}
-        </DirectComposerLine>
-      );
-    } else {
-      // A group keeps its composer: a block there hides the person's new messages, so the line says so and offers Unblock.
-      const blockedHere = single ? [] : conversation.people.filter((person) => person.blocked);
-      footer = (
-        <>
-          {blockedHere.length > 0 ? (
-            <BlockedPeopleLine
-              testId="chats-dm-group-blocked"
-              unblockTestId="chats-dm-group-unblock"
-              className="shrink-0 border-t border-line px-3 py-1.5"
-              onUnblock={blockedHere.length === 1
-                ? () => void blockPerson({ store, conversationId, person: blockedHere[0]!, blocked: false, reporting: props })
-                : null}
-            >
-              {groupBlockedWords(blockedHere)}
-            </BlockedPeopleLine>
-          ) : null}
-          <MentionComposer
-            pinned
-            testIdPrefix="chats-dm"
-            composerId={`chats-dm-composer-${conversationId}`}
-            value={draft}
-            sending={sending}
-            placeholder={conversation.people.length > 0 ? messagePlaceholder(conversation.people.map(directPersonName)) : `Message ${title}`}
-            sendLabel="Send message"
-            candidates={props.mentionCandidates ?? NO_CANDIDATES}
-            onChange={setDraft}
-            onSend={submit}
-            inset={props.variant === "page" ? "stream" : "narrow"}
-          />
-        </>
-      );
-    }
+  if (person && shown.status === "ready") {
+    footer = person.blocked ? (
+      <DirectComposerLine testId="chats-dm-blocked-line" icon={<Ban size={13} aria-hidden />} action={{ label: "Unblock", run: () => setBlocked(false) }}>
+        {`You blocked ${name}. They can't message you.`}
+      </DirectComposerLine>
+    ) : (
+      <MentionComposer
+        pinned
+        testIdPrefix="chats-dm"
+        composerId={`chats-dm-composer-${conversationId}`}
+        value={draft}
+        sending={sending}
+        placeholder={`Message ${name}`}
+        sendLabel="Send message"
+        candidates={NO_CANDIDATES}
+        onChange={setDraft}
+        onSend={submit}
+        inset={props.variant === "page" ? "stream" : "narrow"}
+      />
+    );
   }
 
   return (
-    <div data-testid="chats-dm-view" data-variant={props.variant} data-conversation-id={conversationId} className="flex min-h-0 flex-1 flex-col">
+    <div ref={root} data-testid="chats-dm-view" data-variant={props.variant} data-conversation-id={conversationId} className="flex min-h-0 flex-1 flex-col">
       {header}
       <div className={`flex min-h-0 flex-1 flex-col ${props.variant === "page" ? "mx-auto w-full max-w-[720px]" : ""}`}>
         {body}
@@ -591,28 +522,6 @@ function SettingsStep(props: { onOpenSettings: OpenSettings | undefined; section
   if (!onOpenSettings) return null;
   return <SecondaryButton data-testid={props.testId} onClick={() => onOpenSettings(section)}>{props.label}</SecondaryButton>;
 }
-
-/** "Message Sam Rivera", or "Message Sam Rivera and 6 others" once the names would run long. */
-function messagePlaceholder(names: readonly string[]): string {
-  return names.length > 2 ? `Message ${names[0]} and ${names.length - 1} others` : `Message ${names.join(" and ")}`;
-}
-
-/** Who the viewer blocked, in a line above the composer or under To, with Unblock when there is one person to unblock. */
-function BlockedPeopleLine(props: { testId: string; unblockTestId: string; children: string; onUnblock: (() => void) | null; className: string }) {
-  return (
-    <p data-testid={props.testId} className={`m-0 flex items-center gap-2 text-[12px] text-muted ${props.className}`}>
-      <Ban size={12} aria-hidden className="shrink-0 text-subtle" />
-      <span className="min-w-0 flex-1 truncate">{props.children}</span>
-      {props.onUnblock ? (
-        <SecondaryButton size="compact" data-testid={props.unblockTestId} onClick={props.onUnblock}>
-          Unblock
-        </SecondaryButton>
-      ) : null}
-    </p>
-  );
-}
-
-const groupBlockedWords = (blocked: readonly DirectPerson[]) => `You blocked ${directTitle(blocked)}. You won't see their new messages.`;
 
 /** Where the composer would be, when it can't be: why, and what to do. */
 function DirectComposerLine(props: { testId: string; icon: ReactNode; children: string; action: { label: string; run: () => void } }) {
@@ -645,30 +554,28 @@ function messageableMembers(result: MembersResult): Member[] {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-const MAX_PICKS = MAX_DIRECT_PEOPLE - 1;
-
 type NewMessageProps = Reporting & {
   workspaceId: string;
   onOpenSettings?: OpenSettings;
-  memberIds?: readonly string[];
+  memberId?: string;
   variant: "panel" | "page";
   onBack?: () => void;
-  mentionCandidates?: readonly MentionCandidate[];
   onOpenConversation: (conversationId: string, title: string) => void;
 };
 
-/** New message: pick people from this workspace's members, then write the first message. */
+/** New message: pick one of this workspace's members, then write the first message. */
 export function NewDirectMessage(props: NewMessageProps) {
-  // A change of account starts over with no one picked: the picks were made as the last account.
+  // A change of account starts over with no one picked: the pick was made as the last account.
   const { store } = useDirectConversations();
   const session = store.session();
   const opened = useRef(session);
-  return <NewMessageForAccount key={session} {...props} memberIds={session === opened.current ? props.memberIds : undefined} />;
+  return <NewMessageForAccount key={session} {...props} memberId={session === opened.current ? props.memberId : undefined} />;
 }
 
 function NewMessageForAccount(props: NewMessageProps) {
   const { workspaceId } = props;
   const { state, store } = useDirectConversations();
+  const viewerId = state.status === "ready" ? state.viewerId : null;
   const reporting = useRef<Reporting>(props);
   reporting.current = props;
   const [list, setList] = useState<MemberList>({ workspaceId, status: "loading" });
@@ -701,10 +608,10 @@ function NewMessageForAccount(props: NewMessageProps) {
     };
   }, [workspaceId, attempt, membersIdentity]);
 
-  const [picked, setPicked] = useState<readonly string[]>(() => (props.memberIds ?? []).slice(0, MAX_PICKS));
+  const [picked, setPicked] = useState<string | null>(props.memberId ?? null);
   // Opened for someone, such as from Members' Message: their existing conversation opens directly,
-  // until the person changes the picks or writes.
-  const goStraight = useRef((props.memberIds?.length ?? 0) > 0);
+  // until the person changes the pick or writes.
+  const goStraight = useRef(props.memberId !== undefined);
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
   const [pickError, setPickError] = useState(false);
@@ -713,75 +620,54 @@ function NewMessageForAccount(props: NewMessageProps) {
   const errorId = useId();
   const byId = useMemo(() => new Map(members.status === "ready" ? members.members.map((member) => [member.memberId, member]) : []), [members]);
   // A preselected member this workspace doesn't list is dropped once the list reads.
-  const shownPicks = members.status === "ready" ? picked.filter((id) => byId.has(id)) : picked;
+  const pick = members.status === "ready" && picked !== null && !byId.has(picked) ? null : picked;
+  const pickName = pick === null ? null : byId.get(pick)?.name ?? "Unnamed member";
   const matches = useMemo(() => {
     if (members.status !== "ready") return [];
     const words = query.trim().toLocaleLowerCase();
     return words ? members.members.filter((member) => member.name.toLocaleLowerCase().includes(words)) : members.members;
   }, [members, query]);
-  const full = shownPicks.length >= MAX_PICKS;
-  // Once the picks are full, the highlight passes over the members who can't be added.
-  const pickable = (member: Member) => !full || shownPicks.includes(member.memberId);
-  const step = (from: number, by: 1 | -1): number => {
-    for (let index = from + by; index >= 0 && index < matches.length; index += by) if (pickable(matches[index]!)) return index;
-    return from;
-  };
-  const highlighted = Math.min(highlight, matches.length - 1);
-  const nearestPickable = () => {
-    const after = step(highlighted, 1);
-    if (after !== highlighted) return after;
-    const before = step(highlighted, -1);
-    return before !== highlighted ? before : -1;
-  };
-  const activeIndex = highlighted < 0 || pickable(matches[highlighted]!) ? highlighted : nearestPickable();
+  const activeIndex = Math.min(highlight, matches.length - 1);
   const active = activeIndex >= 0 ? matches[activeIndex]! : null;
-  const toggle = (memberId: string) => {
+  const choose = (memberId: string | null) => {
     goStraight.current = false;
     setPickError(false);
-    setPicked((current) => current.includes(memberId)
-      ? current.filter((id) => id !== memberId)
-      : current.length >= MAX_PICKS ? current : [...current, memberId]);
+    setPicked(memberId);
     setQuery("");
     inputRef.current?.focus();
   };
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      setHighlight(step(activeIndex, 1));
+      setHighlight(Math.min(activeIndex + 1, matches.length - 1));
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
-      setHighlight(activeIndex <= 0 ? 0 : step(activeIndex, -1));
+      setHighlight(Math.max(activeIndex - 1, 0));
     } else if (event.key === "Enter" && active) {
       event.preventDefault();
-      if (!full || shownPicks.includes(active.memberId)) toggle(active.memberId);
-    } else if (event.key === "Backspace" && query === "" && shownPicks.length > 0) {
-      goStraight.current = false;
-      setPicked(shownPicks.slice(0, -1));
+      choose(active.memberId);
+    } else if (event.key === "Backspace" && query === "" && pick !== null) {
+      choose(null);
     }
   };
 
-  // Whether these people already have a conversation, so the first message lands there.
-  const pickKey = [...shownPicks].sort().join(",");
-  // Member ids are not account ids, so who the viewer blocks is known only once the picks resolve.
-  const [existing, setExisting] = useState<{ key: string; conversationId: string | null; title: string; group: boolean; blocked: readonly DirectPerson[] } | null>(null);
-  // Moves after an Unblock here, so the picks resolve again.
+  // Whether the two of you already have a conversation, so the first message lands there.
+  // Member ids are not account ids, so whether the viewer blocks this person is known only once the pick resolves.
+  const [resolution, setResolution] = useState<{ memberId: string; conversationId: string | null; person: DirectPerson } | null>(null);
+  // Moves after an Unblock here, so the pick resolves again.
   const [resolveAgain, setResolveAgain] = useState(0);
   useEffect(() => {
-    if (!pickKey || members.status !== "ready" || state.status !== "ready") return;
+    if (pick === null || members.status !== "ready" || viewerId === null) return;
     let current = true;
-    bridge().directResolve({ workspaceId, memberIds: pickKey.split(",") }).then(
-      (resolution) => {
+    bridge().directResolve({ viewerId, workspaceId, memberId: pick }).then(
+      (resolved) => {
         if (!current) return;
-        const title = directTitle(resolution.people);
-        if (goStraight.current && resolution.conversationId && !draftRef.current.trim()) {
+        if (goStraight.current && resolved.conversationId && !draftRef.current.trim()) {
           goStraight.current = false;
-          openConversation.current(resolution.conversationId, title);
+          openConversation.current(resolved.conversationId, directPersonName(resolved.person));
           return;
         }
-        setExisting({
-          key: pickKey, conversationId: resolution.conversationId, title, group: resolution.people.length > 1,
-          blocked: resolution.people.filter((person) => person.blocked),
-        });
+        setResolution({ memberId: pick, ...resolved });
       },
       // Sending says why, if this person can't be messaged.
       () => undefined,
@@ -789,22 +675,16 @@ function NewMessageForAccount(props: NewMessageProps) {
     return () => {
       current = false;
     };
-  }, [pickKey, members.status, state.status, workspaceId, resolveAgain]);
-  const resolved = existing?.key === pickKey ? existing : null;
-  // A block belongs to the account, so it is undone from any conversation the two share, a group included.
-  const sharedWith = (person: DirectPerson): string | null => resolved?.conversationId
-    ?? (state.status === "ready" ? state.conversations.find((entry) => entry.people.some((one) => one.personId === person.personId))?.conversationId : undefined)
-    ?? null;
-  // Writing to one person the viewer blocked shows no composer, here as in their conversation.
-  const blockedPerson = resolved && !resolved.group && resolved.blocked.length === 1 ? resolved.blocked[0]! : null;
-  const blockedFrom = blockedPerson ? sharedWith(blockedPerson) : null;
-  const blockedChat = blockedPerson && blockedFrom ? { conversationId: blockedFrom, person: blockedPerson } : null;
-  const unblockOne = resolved?.blocked.length === 1 ? resolved.blocked[0]! : null;
-  const unblockOneFrom = unblockOne ? sharedWith(unblockOne) : null;
-  const unblock = (conversationId: string, person: DirectPerson) => void blockPerson({
-    store, conversationId, person, blocked: false, reporting: props,
-    onDone: () => setResolveAgain((count) => count + 1),
-  });
+  }, [pick, members.status, viewerId, workspaceId, resolveAgain]);
+  const resolved = resolution?.memberId === pick ? resolution : null;
+  const title = resolved ? directPersonName(resolved.person) : pickName ?? "";
+  // A blocked person has a conversation with the viewer: a block is made from one.
+  const blockedIn = resolved?.person.blocked && resolved.conversationId ? { conversationId: resolved.conversationId, person: resolved.person } : null;
+  const unblock = () => {
+    if (blockedIn) {
+      void blockPerson({ store, ...blockedIn, blocked: false, reporting: props, onDone: () => setResolveAgain((count) => count + 1) });
+    }
+  };
 
   const [draft, setDraftState] = useState(() => store.draft("new"));
   const draftRef = useRef(draft);
@@ -819,47 +699,47 @@ function NewMessageForAccount(props: NewMessageProps) {
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const sendIdentity = `direct-start:${workspaceId}`;
-  const start = useCallback(async (memberIds: readonly string[], body: string, messageId: string, title: string, session = store.session()) => {
-    if (session !== store.session()) {
-      reporting.current.onClearError?.(sendIdentity);
-      return;
-    }
+  // A start and its Try again name the account that wrote them, so main refuses them once another account signs in.
+  const start = useCallback(async (sender: string, memberId: string, body: string, messageId: string, to: string) => {
     if (sendingRef.current) return;
     sendingRef.current = true;
     setSending(true);
+    const session = store.session();
     try {
-      const result = await bridge().directStart({ workspaceId, memberIds: [...memberIds], messageId, body });
+      const result = await bridge().directStart({ viewerId: sender, workspaceId, memberId, messageId, body });
       if (session !== store.session()) return;
-      store.sent(`new:${memberIds.join(",")}`, messageId);
+      store.sent(`new:${memberId}`, messageId);
       store.setDraft("new", "");
       reporting.current.onClearError?.(sendIdentity);
       void store.refresh();
-      props.onOpenConversation(result.conversationId, title);
+      openConversation.current(result.conversationId, to);
     } catch (cause) {
-      if (session !== store.session()) return;
+      // The words stay in the composer. A failure that lands after the account changed only takes its notice back.
+      if (session !== store.session()) {
+        reporting.current.onClearError?.(sendIdentity);
+        return;
+      }
       reportDirect(reporting.current,
         ipcErrorMessage(cause, "dohc could not send your message."),
         cause,
-        () => void start(memberIds, body, messageId, title, session),
+        () => void start(sender, memberId, body, messageId, to),
         undefined,
-        { identity: sendIdentity, title: `Your message to ${title} wasn't sent` },
+        { identity: sendIdentity, title: `Your message to ${to} wasn't sent` },
       );
     } finally {
       sendingRef.current = false;
       setSending(false);
     }
-  }, [props.onOpenConversation, sendIdentity, store, workspaceId]);
-  const names = shownPicks.map((id) => byId.get(id)?.name ?? "Unnamed member");
+  }, [sendIdentity, store, workspaceId]);
   const submit = () => {
     const body = draft.trim();
-    if (!body) return;
-    if (shownPicks.length === 0) {
+    if (!body || viewerId === null) return;
+    if (pick === null) {
       setPickError(true);
       inputRef.current?.focus();
       return;
     }
-    const memberIds = [...shownPicks].sort();
-    void start(memberIds, body, store.messageIdFor(`new:${memberIds.join(",")}`, body), resolved?.title ?? names.join(", "));
+    void start(viewerId, pick, body, store.messageIdFor(`new:${pick}`, body), title);
   };
 
   let content: ReactNode;
@@ -868,6 +748,14 @@ function NewMessageForAccount(props: NewMessageProps) {
       <EmptyState data-testid="chats-dm-new-signed-out" icon={CloudOff} title="Sign in to your server to send direct messages.">
         <SettingsStep onOpenSettings={props.onOpenSettings} section="cloud" label="Sync and sharing" testId="chats-dm-new-signed-out-action" />
       </EmptyState>
+    );
+  } else if (state.status === "failed") {
+    content = (
+      <div className="flex flex-1 flex-col items-center justify-center">
+        <RetryRow testId="chats-dm-new-list-retry" onRetry={() => void store.refresh()}>
+          {state.message}
+        </RetryRow>
+      </div>
     );
   } else if (members.status === "loading") {
     content = <SkeletonRows label="Loading members…" className="pt-3" testId="chats-dm-new-loading" />;
@@ -893,32 +781,25 @@ function NewMessageForAccount(props: NewMessageProps) {
     );
   } else {
     content = (
-      <ul id={listId} role="listbox" aria-label="Members" aria-multiselectable="true" data-testid="chats-dm-new-members" className="m-0 min-h-0 flex-1 list-none overflow-y-auto p-1">
+      <ul id={listId} role="listbox" aria-label="Members" data-testid="chats-dm-new-members" className="m-0 min-h-0 flex-1 list-none overflow-y-auto p-1">
         {matches.length === 0 ? (
           <li className="px-2 py-2 text-[12px] text-muted">{`No members match "${query.trim()}".`}</li>
         ) : matches.map((member, index) => {
-          const selected = shownPicks.includes(member.memberId);
-          const disabled = full && !selected;
+          const selected = pick === member.memberId;
           return (
             <li
               key={member.memberId}
               id={`${listId}-${member.memberId}`}
               role="option"
               aria-selected={selected}
-              aria-disabled={disabled || undefined}
               data-testid="chats-dm-new-member"
               data-member-id={member.memberId}
-              title={disabled ? `A conversation holds up to ${MAX_DIRECT_PEOPLE} people, you included.` : undefined}
               onMouseDown={(event) => event.preventDefault()}
-              onMouseEnter={() => {
-                if (!disabled) setHighlight(index);
-              }}
-              onClick={() => {
-                if (!disabled) toggle(member.memberId);
-              }}
-              className={`flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] ${
+              onMouseEnter={() => setHighlight(index)}
+              onClick={() => choose(member.memberId)}
+              className={`flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-[13px] text-ink ${
                 active?.memberId === member.memberId ? "bg-hover" : ""
-              } ${disabled ? "cursor-default text-subtle" : "text-ink"}`}
+              }`}
             >
               <ChatAvatar presentation={relayPresentation(member.paletteSlot)} name={member.name} kind="human" size="strip" />
               <span className="min-w-0 flex-1 truncate">{member.name}</span>
@@ -930,7 +811,7 @@ function NewMessageForAccount(props: NewMessageProps) {
     );
   }
 
-  const canPick = state.status !== "signed-out" && members.status === "ready" && members.members.length > 0;
+  const canPick = state.status === "ready" && members.status === "ready" && members.members.length > 0;
   return (
     <div data-testid="chats-dm-new" data-variant={props.variant} className="flex min-h-0 flex-1 flex-col">
       <ChatHeader
@@ -947,21 +828,21 @@ function NewMessageForAccount(props: NewMessageProps) {
               <label htmlFor={`${listId}-input`} className="mr-1 text-[12px] text-muted">
                 To
               </label>
-              {shownPicks.map((id, index) => (
-                <span key={id} data-testid="chats-dm-new-pick" data-member-id={id} className="inline-flex h-6 items-center gap-1 rounded-full border border-line bg-panel-2 pl-1 pr-0.5 text-[12px] text-ink">
-                  <ChatAvatar presentation={relayPresentation(byId.get(id)?.paletteSlot ?? -1)} name={names[index]!} kind="human" size="strip" className="size-4 text-[8px]" />
-                  <span className="max-w-40 truncate">{names[index]}</span>
+              {pick !== null && pickName !== null ? (
+                <span data-testid="chats-dm-new-pick" data-member-id={pick} className="inline-flex h-6 items-center gap-1 rounded-full border border-line bg-panel-2 pl-1 pr-0.5 text-[12px] text-ink">
+                  <ChatAvatar presentation={relayPresentation(byId.get(pick)?.paletteSlot ?? -1)} name={pickName} kind="human" size="strip" className="size-4 text-[8px]" />
+                  <span className="max-w-40 truncate">{pickName}</span>
                   <button
                     type="button"
-                    aria-label={`Remove ${names[index]}`}
-                    title={`Remove ${names[index]}`}
-                    onClick={() => toggle(id)}
+                    aria-label={`Remove ${pickName}`}
+                    title={`Remove ${pickName}`}
+                    onClick={() => choose(null)}
                     className="grid size-5 cursor-pointer place-items-center rounded-full text-subtle hover:bg-hover hover:text-ink"
                   >
                     <X size={11} aria-hidden />
                   </button>
                 </span>
-              ))}
+              ) : null}
               <input
                 ref={inputRef}
                 id={`${listId}-input`}
@@ -972,7 +853,7 @@ function NewMessageForAccount(props: NewMessageProps) {
                 aria-activedescendant={active ? `${listId}-${active.memberId}` : undefined}
                 aria-invalid={pickError || undefined}
                 aria-describedby={pickError ? errorId : undefined}
-                autoFocus={shownPicks.length === 0}
+                autoFocus={pick === null}
                 value={query}
                 onChange={(event) => {
                   goStraight.current = false;
@@ -984,23 +865,10 @@ function NewMessageForAccount(props: NewMessageProps) {
               />
             </div>
             {pickError ? <FieldError id={errorId} className="mt-1">Choose who to message.</FieldError> : null}
-            {full ? (
-              <p data-testid="chats-dm-new-full" className="m-0 mt-1.5 text-[12px] text-muted">{`A conversation holds up to ${MAX_DIRECT_PEOPLE} people, you included.`}</p>
-            ) : null}
-            {resolved && resolved.blocked.length > 0 && !blockedChat ? (
-              <BlockedPeopleLine
-                testId="chats-dm-new-blocked"
-                unblockTestId="chats-dm-new-unblock"
-                className="mt-1.5"
-                onUnblock={unblockOne && unblockOneFrom ? () => unblock(unblockOneFrom, unblockOne) : null}
-              >
-                {resolved.group ? groupBlockedWords(resolved.blocked) : `You blocked ${directTitle(resolved.blocked)}. They can't message you.`}
-              </BlockedPeopleLine>
-            ) : null}
             {resolved?.conversationId ? (
               <p data-testid="chats-dm-new-existing" className="m-0 mt-1.5 flex items-center gap-2 text-[12px] text-muted">
-                <span className="min-w-0 flex-1 truncate">{`You already have a conversation with ${resolved.title}.`}</span>
-                <SecondaryButton size="compact" data-testid="chats-dm-new-open-existing" onClick={() => props.onOpenConversation(resolved.conversationId!, resolved.title)}>
+                <span className="min-w-0 flex-1 truncate">{`You already have a conversation with ${title}.`}</span>
+                <SecondaryButton size="compact" data-testid="chats-dm-new-open-existing" onClick={() => props.onOpenConversation(resolved.conversationId!, title)}>
                   Open conversation
                 </SecondaryButton>
               </p>
@@ -1008,13 +876,9 @@ function NewMessageForAccount(props: NewMessageProps) {
           </div>
         ) : null}
         {content}
-        {canPick && blockedChat ? (
-          <DirectComposerLine
-            testId="chats-dm-new-blocked-line"
-            icon={<Ban size={13} aria-hidden />}
-            action={{ label: "Unblock", run: () => unblock(blockedChat.conversationId, blockedChat.person) }}
-          >
-            {`You blocked ${directPersonName(blockedChat.person)}. They can't message you.`}
+        {canPick && blockedIn ? (
+          <DirectComposerLine testId="chats-dm-new-blocked-line" icon={<Ban size={13} aria-hidden />} action={{ label: "Unblock", run: unblock }}>
+            {`You blocked ${title}. They can't message you.`}
           </DirectComposerLine>
         ) : canPick ? (
           <MentionComposer
@@ -1023,9 +887,9 @@ function NewMessageForAccount(props: NewMessageProps) {
             composerId="chats-dm-new-composer"
             value={draft}
             sending={sending}
-            placeholder={names.length > 0 ? messagePlaceholder(names) : "Write a message"}
+            placeholder={pick !== null ? `Message ${title}` : "Write a message"}
             sendLabel="Send message"
-            candidates={props.mentionCandidates ?? NO_CANDIDATES}
+            candidates={NO_CANDIDATES}
             onChange={setDraft}
             onSend={submit}
             inset={props.variant === "page" ? "stream" : "narrow"}

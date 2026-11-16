@@ -7095,6 +7095,9 @@ export function DesktopWorkspaceShell(props: {
         case "chats-invitation":
           openChatsInvitation({ shareId: target.shareId, inputs: target.inputs });
           return null;
+        case "direct":
+          openChatsNavInTab({ level: "direct", conversationId: target.conversationId });
+          return null;
         case "automation":
           return openAutomation(target.automation, target.run ?? null, null, false, signal);
         case "automation-controls":
@@ -8930,11 +8933,14 @@ export function DesktopWorkspaceShell(props: {
                                                               editorTabPath={groupTab.path}
                                                               onOpenInTab={openChatsNavInTab}
                                                               onCloseTab={() => {
-                                                              if (tab)
-                                                                void closeTabsAfterFlush([
-                                                                  { groupId: editorGroup.id, tab },
-                                                                ]);
-                                                            }}
+                                                                if (tab)
+                                                                  void closeTabsAfterFlush([
+                                                                    {
+                                                                      groupId: editorGroup.id,
+                                                                      tab,
+                                                                    },
+                                                                  ]);
+                                                              }}
                                                               variant="page"
                                                             />
                                                           </Suspense>
