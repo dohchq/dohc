@@ -69,6 +69,8 @@ type Slot = {
   auxiliary: boolean;
   heapExhausted: boolean;
   exited: Promise<void>;
+  /** Settles once the child has started and can read work. */
+  ready: Promise<void>;
 };
 /** The validator threw instead of judging the edit, so the edit is tried again. */
 export class LiveValidatorFailure extends Error {
@@ -78,6 +80,32 @@ export class LiveValidatorFailure extends Error {
   }
 }
 const MAX_LOGGED_VALIDATOR_FAILURES = 1024;
+/**
+ * How long one edit or settlement check may run once its child can read it, several times the
+ * slowest ordinary note. A busy host can slow an ordinary check, so an edit's or settlement's
+ * first overrun is tried again, and only a second one started within the retry window refuses
+ * it as too large. Activation and restore read a note's history, which ordinary use can make
+ * long, so they have no limit.
+ */
+export const LIVE_CHECK_TIME_LIMIT_MS = 10_000;
+const LIVE_CHECK_RETRY_WINDOW_MS = 5 * 60_000;
+/**
+ * One edit or settlement: its note, and the edit's own bytes or the settled state. Other edits
+ * accepted between two tries change the journal before an edit, not the edit.
+ */
+function checkedInput(work: Extract<LiveValidationWork, { kind: "journal" | "settlement" }>) {
+  const { document } = work.input;
+  return JSON.stringify([
+    work.kind,
+    document.workspaceId,
+    document.mainVersionId,
+    document.objectId,
+    document.lineageClaimId,
+    createHash("sha256")
+      .update(work.kind === "journal" ? work.input.candidate : work.input.checkpoint)
+      .digest("hex"),
+  ]);
+}
 /** Names each validator failure once per document, candidate edit and error class. */
 export function createValidatorFailureLog(
   log: (message: string) => void = (message) => console.error(message),
@@ -106,15 +134,18 @@ export function createValidatorFailureLog(
 }
 /**
  * Two process-wide validation slots, with no retained waiting inputs. Each job
- * runs in a child process: a V8 heap-limit abort ends that child, not the relay.
+ * runs in a child process: a V8 heap-limit abort or a check past its time limit ends that child, not the relay.
  * Activation and restore together hold at most one slot, so live edits always keep the other.
  */
 export function createLiveValidationExecutor(
   heapLimitMb = 512,
   logValidatorFailure = createValidatorFailureLog(),
+  checkTimeLimitMs = LIVE_CHECK_TIME_LIMIT_MS,
 ) {
   const slots = new Set<Slot>();
   const waiters = new Set<() => void>();
+  // When each checked input last ran out of time.
+  const overran = new Map<string, number>();
   let closed = false;
   const hasCapacity = (auxiliary = false) =>
     !closed &&
@@ -182,7 +213,18 @@ export function createLiveValidationExecutor(
     );
     let exit: () => void = () => {};
     const exited = new Promise<void>((resolve) => (exit = resolve));
-    const slot: Slot = { child, busy: false, auxiliary: false, heapExhausted: false, exited };
+    let started: () => void = () => {};
+    const ready = new Promise<void>((resolve) => (started = resolve));
+    const slot: Slot = {
+      child,
+      busy: false,
+      auxiliary: false,
+      heapExhausted: false,
+      exited,
+      ready,
+    };
+    // The child's first message says it is ready.
+    child.once("message", () => started());
     slots.add(slot);
     const release = () => {
       slots.delete(slot);
@@ -214,7 +256,7 @@ export function createLiveValidationExecutor(
   }
   async function submit<Result>(
     work: LiveValidationWork,
-    heapExhausted: Result,
+    tooLarge: Result,
     signal?: AbortSignal,
   ): Promise<Result | CapacityRetry> {
     signal?.throwIfAborted();
@@ -233,11 +275,15 @@ export function createLiveValidationExecutor(
     slot.busy = true;
     slot.auxiliary = auxiliary;
     hold(slot, true);
+    const startedAt = performance.now();
+    const timed = work.kind === "journal" || work.kind === "settlement" ? work : undefined;
     return new Promise<Result>((resolve, reject) => {
       let done = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const settle = () => {
         if (done) return false;
         done = true;
+        clearTimeout(timer);
         signal?.removeEventListener("abort", abort);
         slot.child.off("message", complete);
         slot.child.off("error", fail);
@@ -251,14 +297,30 @@ export function createLiveValidationExecutor(
         reject(error);
       };
       const abort = () => fail(signal!.reason);
+      // A retried input that overruns again is refused as too large, as a heap-limit abort is.
+      const overrun = (input: string) => {
+        if (!settle()) return;
+        kill(slot);
+        const last = overran.get(input);
+        // A check that started before the last overrun ran beside it, so it leaves that mark in place.
+        if (last !== undefined && startedAt < last)
+          return reject(new LiveValidatorFailure("LiveCheckOverrun"));
+        overran.delete(input);
+        if (last !== undefined && startedAt - last < LIVE_CHECK_RETRY_WINDOW_MS)
+          return resolve(tooLarge);
+        if (overran.size >= MAX_LOGGED_VALIDATOR_FAILURES)
+          overran.delete(overran.keys().next().value!);
+        overran.set(input, performance.now());
+        reject(new LiveValidatorFailure("LiveCheckOverrun"));
+      };
       const ended = (code: number | null, exitSignal: NodeJS.Signals | null) => {
         if (!settle()) return;
         // Node exits 134 on Windows where POSIX reports SIGABRT.
-        if ((code === 134 || exitSignal === "SIGABRT") && slot.heapExhausted)
-          resolve(heapExhausted);
+        if ((code === 134 || exitSignal === "SIGABRT") && slot.heapExhausted) resolve(tooLarge);
         else reject(new Error("Live validation worker exited."));
       };
       const complete = (value: unknown) => {
+        if ((value as { kind?: unknown }).kind === "ready") return;
         if (!settle()) return;
         slot.busy = false;
         slot.auxiliary = false;
@@ -270,7 +332,7 @@ export function createLiveValidationExecutor(
         else resolve(value as Result);
         notify();
       };
-      slot.child.once("message", complete);
+      slot.child.on("message", complete);
       slot.child.once("error", fail);
       slot.child.once("close", ended);
       signal?.addEventListener("abort", abort, { once: true });
@@ -284,6 +346,14 @@ export function createLiveValidationExecutor(
       } catch (error) {
         fail(error);
       }
+      // A malformed input still reaches the child, which fails it.
+      if (timed?.input?.document)
+        void slot.ready.then(() => {
+          if (done) return;
+          timer = setTimeout(() => overrun(checkedInput(timed)), checkTimeLimitMs);
+          // The busy child keeps the relay alive; the timer need not.
+          timer.unref();
+        });
     });
   }
   function validator(policy: OrderedLiveUpdateCutPolicy): CapacityLiveAdmissionValidator {
