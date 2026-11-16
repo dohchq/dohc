@@ -101,6 +101,7 @@ it.skipIf(engine.missing)(
         assertProjectionRoot: async () => undefined,
         createMount: async () => undefined,
         removeMount: async () => ({ folderLeft: false }),
+        signedInAccount: { settle: async () => undefined, current: () => null },
       });
 
       await withStaleSensitiveWorkspaceOperation(view.rootPath, (lease) =>
