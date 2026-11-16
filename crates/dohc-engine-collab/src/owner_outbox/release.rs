@@ -436,6 +436,7 @@ pub fn release_in_tx(
     if held {
         return Err(OwnerOutboxError::StopConflict);
     }
+    super::taken::clear_in(tx, binding)?;
     tx.execute("DELETE FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     tx.execute("DELETE FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     let credited = credited_runs(tx, &key, credited)?;
@@ -644,6 +645,7 @@ fn pause_in_tx(
             .map_err(read_sql)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(read_sql)?
     };
+    super::taken::clear_in(tx, binding)?;
     tx.execute("DELETE FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     tx.execute("DELETE FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4",params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id]).map_err(write_sql)?;
     let mut blobs = BTreeSet::from([observed.checkpoint_digest.clone()]);

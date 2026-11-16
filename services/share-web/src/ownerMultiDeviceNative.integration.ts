@@ -908,8 +908,6 @@ it("preserves and delivers owner drafts across two real native replicas and auth
           taken.receipt = (params[0].params as unknown as { receipt: Receipt }).receipt;
         return nativeSend(...params);
       };
-      const receiptApplied = (receipt: Receipt) =>
-        reopened.client.ownerYDocIsReceiptApplied(reopened.request(), { ...target, receipt });
       let receipt: Receipt;
       try {
         expect(await reopened.pass()).toBe("acknowledged");
@@ -917,7 +915,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         receipt = taken.receipt;
         expect(receipt.deliveryId).toBe(deleted.deliveryId);
         expect((await reopened.outbox.readPending(deleted.outboxId)).entries).toHaveLength(0);
-        expect(await receiptApplied(receipt)).toBe(false);
+        expect((await reopened.descriptor()).acceptedCursor).toBeLessThan(receipt.journalCursor);
         expect(render((await reopened.openDraft()).initialUpdate)).toBe("");
       } finally {
         releaseFeed();
@@ -927,7 +925,9 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       await expectProviderText("", () => first.pass());
       expect(render((await first.openDraft()).initialUpdate)).toBe("");
       expect(await reopened.pass()).toBe("empty");
-      expect(await receiptApplied(receipt)).toBe(true);
+      expect((await reopened.descriptor()).acceptedCursor).toBeGreaterThanOrEqual(
+        receipt.journalCursor,
+      );
       expect(render((await reopened.openDraft()).initialUpdate)).toBe("");
       const beforeEcho = await first.descriptor();
       const ownerRead = new DatabaseSync(join(first.dir, ".dohc", "engine", "engine.db"), {

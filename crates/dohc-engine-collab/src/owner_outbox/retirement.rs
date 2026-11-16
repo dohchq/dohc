@@ -83,6 +83,7 @@ pub fn close_retired_in_tx(
             binding.object_id,
             binding.lineage_claim_id
         ];
+        super::taken::clear_in(tx, &binding)?;
         tx.execute(
             "DELETE FROM ydoc_owner_applied_frames WHERE workspace_id=?1 AND main_version_id=?2 \
              AND object_id=?3 AND lineage_claim_id=?4",

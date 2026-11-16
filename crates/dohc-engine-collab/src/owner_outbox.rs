@@ -25,6 +25,7 @@ pub mod publication;
 mod recovery;
 pub mod release;
 pub mod retirement;
+mod taken;
 pub(crate) use native_source::retain_native_source;
 pub use native_source::{
     OwnerOutboxDraftOrigin, OwnerOutboxDraftSource, OwnerOutboxNativeOrigin,
@@ -2068,9 +2069,9 @@ pub fn acknowledge(
 /// The relay took the queue's first delivery at `receipt.journal_cursor`:
 /// a live room wrote it down unsaved, or the journal committed it and its
 /// frame has not arrived. It leaves the queue at once, so the next one can
-/// go, and the owner's screen keeps it as a row at that cursor until a frame
-/// holds it. A delivery the accepted state already holds is acknowledged as
-/// usual.
+/// go. The owner's disk keeps its bytes and the owner's screen shows it as a
+/// row at that cursor, until the accepted state holds it. A delivery the
+/// accepted state already holds is acknowledged as usual.
 pub fn acknowledge_taken(
     store: &mut EngineStore,
     cache: &mut crate::WriterDocCache,
@@ -2112,7 +2113,9 @@ pub fn acknowledge_taken(
             )?
             .and_then(|found| found.pending)
             .ok_or(OwnerOutboxError::ReceiptMismatch)?;
-            Some((parent.binding.clone(), found.update(tx)?))
+            let bytes = found.update(tx)?;
+            taken::put_in(tx, &parent.binding, receipt.journal_cursor, &bytes)?;
+            Some((parent.binding.clone(), bytes))
         };
         let result = acknowledge_prefix_in(tx, &parent, receipts)?;
         accepted::prune_in(tx, &parent.binding)?;

@@ -247,6 +247,7 @@ fn apply_ordered_in_tx(
     let checkpoint = bounded(&visible)?;
     let checkpoint_digest = hex_sha256(&checkpoint);
     put_binary_blob_with_sha(tx, &checkpoint, &checkpoint_digest)?;
+    super::taken::prune_held_in(tx, b, &checkpoint, input.journal_cursor)?;
     let revision = input.expected_revision + 1;
     tx.execute(&format!("UPDATE ydoc_owner_bindings SET binding_revision=?5,accepted_cursor=?6,native_head_sequence=?7,checkpoint_digest=?8 WHERE {SCOPE}"),
         params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,revision,input.journal_cursor,marker.head_update_seq,checkpoint_digest]).map_err(write_sql)?;

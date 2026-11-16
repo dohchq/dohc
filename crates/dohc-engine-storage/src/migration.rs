@@ -3755,6 +3755,14 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               ON replication_log(workspace_id, origin_id, origin_seq) WHERE imported=0;",
         sets_user_version: None,
     },
+    // The owner's own edits a live room took that no save holds yet, kept on
+    // the owner's disk until the accepted state holds each one.
+    Migration {
+        ordinal: 105,
+        id: "v2-owner-taken-rows",
+        sql: V2_OWNER_TAKEN_ROWS_DDL,
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -4850,6 +4858,19 @@ const V2_OWNER_LIVE_STOP_COPY_DDL: &str = "\
 ALTER TABLE owner_live_stops ADD COLUMN copy_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT;
 ";
 
+const V2_OWNER_TAKEN_ROWS_DDL: &str = "\
+CREATE TABLE ydoc_owner_taken_rows (
+    workspace_id TEXT NOT NULL,
+    main_version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    lineage_claim_id TEXT NOT NULL,
+    restore_fence_generation INTEGER NOT NULL CHECK(restore_fence_generation >= 0),
+    room_position INTEGER NOT NULL CHECK(room_position BETWEEN 1 AND 9007199254740991),
+    update_blob_digest TEXT NOT NULL REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
+    PRIMARY KEY (workspace_id, main_version_id, object_id, lineage_claim_id, room_position)
+) STRICT;
+";
+
 const V2_OWNER_OUTBOX_DELIVERY_GROUP_DDL: &str = "\
 ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN delivery_group INTEGER;
 CREATE INDEX owner_ydoc_outbox_entries_group_receipt ON owner_ydoc_outbox_entries\
@@ -5734,6 +5755,10 @@ mod tests {
             (
                 "v2-replication-own-operations-index",
                 "ea76da045f98b5a34e4d623b3ad18b1fb96301a331292c67a0e11182c75bd383",
+            ),
+            (
+                "v2-owner-taken-rows",
+                "6b4424771e08b0385f39533f888ca71de00459be8518e3dbfb35f59d65051444",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
