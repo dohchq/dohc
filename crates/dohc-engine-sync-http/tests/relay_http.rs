@@ -13,8 +13,9 @@ use dohc_engine_sync::{
     HostedScopeDocument, KeyEnvelopeDownloadRequest, KeyEnvelopeRequest, LogCoordinateRequest,
     LogCoordinateResponse, NoLiveLeases, ObservedBytes, ProbeRequest, PullRequest, RelayError,
     RelaySyncClient, RelayTransport, ReplicationEnvelope, ShareBlobRequest, ShareLogPushRequest,
-    ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest, SyncPassOutcome,
-    blob_ceiling, journal_local_replication_op, read_pushed_seq, read_relay_cursor,
+    ShareReachRevisions, ShareReplicationEnvelope, ShareViewRequest, SharedChannelRequest,
+    SyncPassOutcome, blob_ceiling, journal_local_replication_op, read_pushed_seq,
+    read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use dohc_engine_testkit::open_store;
@@ -1249,6 +1250,65 @@ fn status_classes_and_all_transport_endpoints_preserve_auth_and_wire_shapes() {
     );
     assert!(seen.contains("TARGET /sync/shares/share-1/log?since=1&limit=500&channelWireId=wire-1&originId=member&referenceAfter=mapping-tail&includeReferences=false"));
     assert!(seen.contains("TARGET /sync/shares/share-1/log?since=1&limit=500&referenceAfter=mapping-tail&includeReferences=false"));
+}
+
+// A membership's share log pages name the reach the relay selected them
+// under, and the pull compares both revisions with the stored reach. A path
+// share's pages name none. A page that names one revision without the other
+// can't be compared, so it is refused rather than read as "no reach".
+#[test]
+fn share_view_pages_carry_both_reach_revisions_or_neither() {
+    let pages = Arc::new(Mutex::new(VecDeque::from([
+        TestResponse::json(
+            200,
+            json!({"ok": true, "ops": [], "nextCursor": 0, "hasMore": false,
+                "revision": "r-2", "visibilityRevision": "v-1"}),
+        ),
+        log_page(Vec::new(), 0, false),
+        TestResponse::json(
+            200,
+            json!({"ok": true, "ops": [], "nextCursor": 0, "hasMore": false, "revision": "r-2"}),
+        ),
+        TestResponse::json(
+            200,
+            json!({"ok": true, "ops": [], "nextCursor": 0, "hasMore": false,
+                "visibilityRevision": "v-1"}),
+        ),
+    ])));
+    let served = Arc::clone(&pages);
+    let server = FakeServer::start(move |_| {
+        served
+            .lock()
+            .expect("pages")
+            .pop_front()
+            .expect("planned page")
+    });
+    let transport = transport(&server);
+    let pull = || {
+        transport.share_view_pull(ShareViewRequest {
+            include_work_references: false,
+            reference_after: None,
+            share_id: "share-1".to_owned(),
+            cursor: 0,
+            limit: 500,
+        })
+    };
+    assert_eq!(
+        pull().expect("membership page").reach_revisions,
+        Some(ShareReachRevisions {
+            revision: "r-2".to_owned(),
+            visibility_revision: "v-1".to_owned(),
+        })
+    );
+    assert_eq!(pull().expect("path share page").reach_revisions, None);
+    assert_eq!(
+        pull().expect_err("level revision alone"),
+        RelayError::InvalidResponse
+    );
+    assert_eq!(
+        pull().expect_err("visibility revision alone"),
+        RelayError::InvalidResponse
+    );
 }
 
 #[test]
