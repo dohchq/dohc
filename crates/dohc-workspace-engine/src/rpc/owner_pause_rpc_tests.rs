@@ -223,7 +223,7 @@ async fn committed_row_shows_to_the_owner_and_the_pause_keeps_it_in_a_copy() {
     assert_eq!(stop["state"], "released");
     assert_eq!(
         stop["paused"],
-        json!({"appliedCursor":0,"rowCursor":5,"copyPath":"owner (unsaved edits).md","copyWritten":false})
+        json!({"appliedCursor":0,"rowCursor":5,"copyPath":"owner (unsaved edits).md","copyWritten":false,"leftOut":false})
     );
     assert!(!note().contains("Committed by a collaborator"));
     assert!(!note().contains("Typed by the owner"));

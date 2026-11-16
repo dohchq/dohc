@@ -743,7 +743,7 @@ impl EngineService {
             || params
                 .accepted_cursor
                 .is_some_and(|cursor| !(0..=9_007_199_254_740_991).contains(&cursor))
-            || (matches!(action, "request" | "clear" | "retired"))
+            || (matches!(action, "request" | "requestRetired" | "clear" | "retired"))
                 != (params.path.is_some() || params.document.is_some())
             || (params.path.is_some() && params.document.is_some())
         {
@@ -1869,7 +1869,7 @@ impl EngineService {
                     .as_ref()
                     .is_some_and(|a| a.actor_kind == dohc_engine_domain::ChangeActorKind::Human),
                 binding: draft.binding.clone(),
-                expected_revision: draft.revision,
+                expected_revision: None,
                 append_key,
                 update,
                 now_ms: now_ms()?,

@@ -588,6 +588,7 @@ where
                                     | "ydoc.ownerDelivery.applyInitialSync"
                                     | "ydoc.ownerDelivery.enroll"
                                     | "ydoc.ownerDelivery.appendDraft"
+                                    | "ydoc.ownerDelivery.putCommittedRow"
                                     | "liveApplication.bootstrap"
                                     | "liveApplication.adoptOwner"
                                     | "liveApplication.prepareRestore"

@@ -1024,6 +1024,26 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     return "settled";
   }
 
+  /**
+   * Saves the editor open on a note once this computer let go of its live
+   * editing. Its last save waited for the server, so the editor still reads
+   * unsaved until a save finds the file written.
+   */
+  async settleAfterLiveStop(workspaceId: string, path: string): Promise<void> {
+    const authority = this.#acquireWorkspace(workspaceId);
+    let settle: Promise<unknown> | undefined;
+    try {
+      authority.assertCurrent();
+      if (this.#isSharedView(authority.workspace)) return;
+      const held = this.#owner.documentSession(authority.workspace.attachmentId, path);
+      if (!held || held.session.deleted) return;
+      settle = held.session.provider.settleNow?.();
+    } finally {
+      authority.release();
+    }
+    await settle;
+  }
+
   // Save it again, on a document whose file was deleted outside dohc. Its
   // session can outlive its tab: the close was refused, so the session still
   // holds the text, and saving lets that close finish.

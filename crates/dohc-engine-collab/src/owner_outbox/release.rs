@@ -50,6 +50,9 @@ pub struct PausedOwnerStop {
     /// The copy is on disk. Until then the Stop row's `copy_digest` blob is
     /// the only place the owner's unapplied text lives.
     pub copy_written: bool,
+    /// Some edits could not be shown as text, so the copy leaves them out.
+    #[serde(default)]
+    pub left_out: bool,
 }
 
 pub fn require_not_host_in(conn: &Connection, key: &DocKey) -> Result<(), OwnerOutboxError> {
@@ -96,9 +99,12 @@ fn read_in(conn: &Connection, key: &DocKey) -> Result<Option<OwnerLiveStop>, Own
     .transpose()
 }
 
+/// `retirement_owed` is false when the relay already retired the note, as
+/// when its last link ended, so nothing asks the relay to Stop it.
 pub fn request_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
+    retirement_owed: bool,
     now_ms: i64,
 ) -> Result<OwnerLiveStop, OwnerOutboxError> {
     require_not_host_in(tx, key)?;
@@ -112,11 +118,12 @@ pub fn request_in_tx(
     if main != key.version_id {
         return Err(OwnerOutboxError::MainVersionMismatch);
     }
-    if let Some(saved) = read_in(tx, key)? {
-        if saved.state == "released" {
-            return Ok(saved);
-        }
-    }
+    let retirement_owed = match read_in(tx, key)? {
+        Some(saved) if saved.state == "released" => return Ok(saved),
+        // The first request decides whether the relay still has to retire the note.
+        Some(saved) => saved.retirement_owed,
+        None => retirement_owed,
+    };
     let bindings = {
         let mut stmt=tx.prepare("SELECT binding_json FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2").map_err(read_sql)?;
         let rows = stmt
@@ -170,6 +177,11 @@ pub fn request_in_tx(
                 .map(|draft| draft.binding.current_path.clone())
         })
         .ok_or(OwnerOutboxError::NotFound)?;
+    // A note the relay retired is released from its draft; without one, no
+    // release would ever end this Stop.
+    if !retirement_owed && draft.is_none() {
+        return Err(OwnerOutboxError::StopConflict);
+    }
     // An unenrolled file can have no Y.Doc marker yet. A bare marker records
     // identity only; ordinary open still imports the authoritative file.
     tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms) VALUES(?1,?2,?3,'richdoc','local-only',0,0,'unclaimed',?4) ON CONFLICT DO NOTHING",params![key.workspace_id,key.version_id,key.object_id,now_ms]).map_err(write_sql)?;
@@ -179,7 +191,7 @@ pub fn request_in_tx(
             object_id: key.object_id.clone(),
             current_path,
         },
-        retirement_owed: true,
+        retirement_owed,
         state: if draft.is_some() {
             "requested"
         } else {
@@ -198,6 +210,13 @@ pub fn request_in_tx(
     };
     save_in_tx(tx, key, &stop, now_ms)?;
     Ok(stop)
+}
+
+/// Whether this Stop is one the relay retired on its own, as when the note's
+/// last link ended. Nobody waits to Resume it, so the release that finishes
+/// it also ends it.
+pub fn retired_by_relay_in(conn: &Connection, key: &DocKey) -> Result<bool, OwnerOutboxError> {
+    Ok(read_in(conn, key)?.is_some_and(|stop| stop.state == "requested" && !stop.retirement_owed))
 }
 
 fn save_in_tx(
@@ -233,6 +252,15 @@ pub fn clear_in_tx(
 ) -> Result<Option<OwnerLiveStop>, OwnerOutboxError> {
     let cleared = read_in(tx, key).ok().flatten();
     let copy = copy_digest_in(tx, key)?;
+    // Until the copy is on disk, its blob is the only place that text lives.
+    if copy.is_some()
+        && cleared
+            .as_ref()
+            .and_then(|stop| stop.paused.as_ref())
+            .is_some_and(|paused| !paused.copy_written)
+    {
+        return Err(OwnerOutboxError::StopConflict);
+    }
     tx.execute("DELETE FROM owner_live_stops WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3",params![key.workspace_id,key.version_id,key.object_id]).map_err(write_sql)?;
     if let Some(digest) = copy {
         delete_binary_blob_if_unreferenced(tx, &digest)?;
@@ -468,7 +496,9 @@ pub struct OwnerPauseInput {
     pub binding: LiveObjectBinding,
     /// A: the last applied frame the route sent.
     pub applied_cursor: i64,
-    /// N: the last committed row it sent; A when it sent none.
+    /// N: the last row it sent that no save it sent holds; A when there is
+    /// none. Rows and saves share one count, and a save's cursor can sit above
+    /// a row it does not hold, so N can be below A.
     pub row_cursor: i64,
     /// A free name next to the note, chosen by the desktop.
     pub copy_path: String,
@@ -517,7 +547,8 @@ fn pause_in_tx(
     binding
         .validate_canonical()
         .map_err(OwnerOutboxError::InvalidInput)?;
-    if !(0..=input.row_cursor).contains(&input.applied_cursor)
+    if input.applied_cursor < 0
+        || input.row_cursor < 0
         || input.copy_path.is_empty()
         || !(0..=9_007_199_254_740_991).contains(&input.now_ms)
     {
@@ -542,6 +573,8 @@ fn pause_in_tx(
         .map_err(|_| OwnerOutboxError::Corrupt)?;
     // The route reconnects and sends again until the note holds A and the
     // rows through N are here.
+    // Rows and saves share one count, so N == A means no row was sent. A row
+    // below A may not be in that save; only the layer shows it is here.
     let rows_through_n = input.row_cursor == input.applied_cursor
         || layer.is_some_and(|layer| layer.holds_row(binding, input.row_cursor));
     if observed.accepted_cursor != input.applied_cursor || !rows_through_n {
@@ -565,20 +598,26 @@ fn pause_in_tx(
     if held {
         return Err(OwnerOutboxError::StopConflict);
     }
-    let draft = super::draft::open_layered_draft_in(tx, binding, observed.revision, layer)?;
-    if draft.doc.has_pending_dependencies() {
-        return Err(OwnerOutboxError::AcceptedStateIncomplete);
+    // The copy holds only the current draft, and the pause frees every outbox
+    // of this generation. Refused edits there must be kept edits first.
+    let refused: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outboxes o WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND (o.state='quarantined' OR EXISTS(SELECT 1 FROM owner_ydoc_outbox_entries e WHERE e.outbox_id=o.outbox_id AND e.terminal_blob_digest IS NOT NULL)))",
+            params![
+                binding.workspace_id,
+                binding.main_version_id,
+                binding.object_id,
+                binding.lineage_claim_id,
+                binding.restore_fence_generation
+            ],
+            |r| r.get(0),
+        )
+        .map_err(read_sql)?;
+    if refused && input.kept_snapshot.is_none() {
+        return Err(OwnerOutboxError::StopConflict);
     }
-    let projection = draft
-        .doc
-        .project(crate::ContentKind::Richdoc)
-        .map_err(collab)?
-        .content;
-    let markdown = draft
-        .doc
-        .settled_markdown_source(&projection, || Ok::<_, CollabError>(None))
-        .map_err(collab)?
-        .unwrap_or(projection);
+    let parts = super::draft::layered_parts_in(tx, binding, observed.revision, layer)?;
+    let (markdown, left_out) = copy_text(parts)?;
     // A blob holds at least one byte; an empty note's copy is an empty file.
     let copy_digest = if markdown.is_empty() {
         None
@@ -650,6 +689,7 @@ fn pause_in_tx(
             row_cursor: input.row_cursor,
             copy_path: input.copy_path.clone(),
             copy_written: false,
+            left_out,
         }),
         record_facts: Vec::new(),
     };
@@ -667,8 +707,60 @@ fn pause_in_tx(
     Ok(stop)
 }
 
-/// The paused note's copy bytes, to write or write again. An empty copy has
-/// no blob.
+/// The copy's Markdown, and whether it leaves edits out. The pause must not
+/// depend on the owner's screen becoming Markdown: a collaborator's row can
+/// be too deep or too large to render. Then the copy leaves out each edit
+/// that cannot render, and every edit that builds on one.
+fn copy_text(parts: super::draft::LayeredParts) -> Result<(String, bool), OwnerOutboxError> {
+    let base = parts.checkpoint;
+    let mut waiting = parts.rows;
+    waiting.extend(parts.pending);
+    if let Some((markdown, waits)) = render(&base, &waiting) {
+        // An owner entry waits for a row the route has not sent yet.
+        if waits {
+            return Err(OwnerOutboxError::AcceptedStateIncomplete);
+        }
+        return Ok((markdown, false));
+    }
+    if render(&base, &[]).is_none() {
+        return Ok((String::new(), true));
+    }
+    // Keep each edit, in order, whose state still renders with nothing left
+    // waiting. An edit that waits on one kept later is tried again then.
+    let mut kept = Vec::new();
+    loop {
+        let before = waiting.len();
+        for update in std::mem::take(&mut waiting) {
+            kept.push(update);
+            if !matches!(render(&base, &kept), Some((_, false))) {
+                waiting.extend(kept.pop());
+            }
+        }
+        if waiting.len() == before {
+            break;
+        }
+    }
+    let (markdown, _) = render(&base, &kept).ok_or(OwnerOutboxError::Corrupt)?;
+    Ok((markdown, true))
+}
+
+/// The Markdown of `base` with `updates` applied in order, and whether an
+/// update waits for one that is not there; `None` when it cannot be shown as
+/// text.
+fn render(base: &[u8], updates: &[Vec<u8>]) -> Option<(String, bool)> {
+    let doc = crate::Ydoc::wire();
+    doc.apply(base).ok()?;
+    for update in updates {
+        doc.apply(update).ok()?;
+    }
+    super::draft::bounded(&doc).ok()?;
+    let projection = doc.project(crate::ContentKind::Richdoc).ok()?.content;
+    let markdown = doc
+        .settled_markdown_source(&projection, || Ok::<_, CollabError>(None))
+        .ok()?
+        .unwrap_or(projection);
+    Some((markdown, doc.has_pending_dependencies()))
+}
 pub fn paused_copy_in(
     conn: &Connection,
     key: &DocKey,

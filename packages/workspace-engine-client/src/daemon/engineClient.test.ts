@@ -282,10 +282,11 @@ describe("private owner delivery transport", () => {
     await transport.ready();
     // The first cancellation clears a finished Stop, which no list shows; the second finds none.
     const finished = { ...stopTarget, state: "released", retirementOwed: false };
-    let cleared = 0;
+    let cleared = 0,
+      action: string | undefined;
     peer.onEnvelope = (e) => {
       if (e.type !== "request") return;
-      const action = e.method.split(".").at(-1);
+      action = e.method.split(".").at(-1);
       expect(e.method).toBe(`ydoc.ownerStop.${action}`);
       expect(e.params).toEqual(
         action === "release"
@@ -320,6 +321,8 @@ describe("private owner delivery transport", () => {
     };
     try {
       expect((await transport.ownerYDocStopRequest(request, "a.md")).state).toBe("requested");
+      await transport.ownerYDocStopRequest(request, "a.md", undefined, { retired: true });
+      expect(action).toBe("requestRetired");
       expect(
         await transport.ownerYDocRelease(request, target.binding, { acceptedCursor: 0 }),
       ).toMatchObject({ state: "released", materialized: true });
@@ -664,7 +667,7 @@ describe("private owner delivery transport", () => {
       ...stopTarget,
       state: "released",
       retirementOwed: false,
-      paused: { ...paused, copyWritten },
+      paused: { ...paused, copyWritten, leftOut: false },
     });
     const copy = Buffer.from("Committed by a collaborator\n"),
       copyDigest = createHash("sha256").update(copy).digest("hex");
@@ -758,7 +761,7 @@ describe("private owner delivery transport", () => {
       });
       expect(
         (await transport.ownerYDocPausedCopyWritten(request, document, paused.copyPath)).paused,
-      ).toEqual({ ...paused, copyWritten: true });
+      ).toEqual({ ...paused, copyWritten: true, leftOut: false });
       expect(await transport.ownerYDocPausedCopy(request, document)).toEqual({
         stop: stop(true),
         bytes: null,
@@ -789,6 +792,7 @@ describe("private owner delivery transport", () => {
                   rowCursor: 0,
                   copyPath: "a copy.md",
                   copyWritten: false,
+                  leftOut: false,
                 },
               },
             ],

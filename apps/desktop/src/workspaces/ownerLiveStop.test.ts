@@ -1,7 +1,8 @@
 import { expect, it, vi } from "vitest";
 import { EngineRequestError, type EngineClient } from "@dohc/workspace-engine-client/daemon";
-import { reconcileOwnerLiveStops } from "./ownerLiveStop";
+import { reconcileOwnerLiveStops, releaseRetiredOwnerNotes } from "./ownerLiveStop";
 import { liveStopError } from "../ipc/liveEditingStop";
+import { OwnerJournalPending } from "./ownerJournal";
 import { pendingStopHarness } from "../testing/ownerLiveStop.test-helper";
 const withDocument = <
   T extends { binding: { mainVersionId: string; objectId: string; currentPath: string } },
@@ -419,4 +420,150 @@ it("finishes a Stop the server answered with edits-pending on a later pass, with
   expect(release).toHaveBeenCalledExactlyOnceWith(h.recorded()!.binding, 17, options.signal);
   expect(onComplete).toHaveBeenCalledOnce();
   expect(h.ownerLiveStop.mock.calls.map((call) => call[1])).toEqual(["request"]);
+});
+
+it("brings a note whose hosting ended up to the server's last save, then releases it", async () => {
+  const draft = (objectId: string) => ({
+    binding: {
+      workspaceId: "workspace",
+      mainVersionId: "main",
+      objectId,
+      lineageClaimId: "a".repeat(64),
+      currentPath: `${objectId}.md`,
+      selectorPaths: [`${objectId}.md`],
+      restoreFenceGeneration: 0,
+    },
+    relayDatabaseNamespace: "relay",
+  });
+  const [listed, hosted, ended, stopping] = ["listed", "hosted", "ended", "stopping"].map(draft);
+  const update = (text: string) => Buffer.from(text).toString("base64");
+  const pages: Record<number, unknown> = {
+    10: {
+      ok: true,
+      acceptedCursor: 14,
+      rows: [
+        { journalCursor: 9, update: update("old") },
+        { journalCursor: 12, update: update("twelve") },
+      ],
+      nextAfter: 12,
+    },
+    12: {
+      ok: true,
+      acceptedCursor: 14,
+      rows: [{ journalCursor: 14, rowsThrough: 13, update: update("fourteen") }],
+      nextAfter: null,
+    },
+  };
+  const journal = vi.fn(async (binding: { objectId: string }, after: number) =>
+    binding.objectId === "ended" ? (pages[after] as never) : ("not-retired" as const),
+  );
+  const applied: unknown[] = [];
+  const client = {
+    ownerYDocListDrafts: vi.fn(async () => ({
+      drafts: [listed, hosted, ended, stopping],
+      next: null,
+    })),
+    ownerYDocStopList: vi.fn(async () => [
+      { ...withDocument(stopping!), state: "requested", retirementOwed: true },
+    ]),
+    ownerYDocReadState: vi.fn(async () => ({
+      revision: 3,
+      acceptedCursor: 10,
+      nativeHeadSequence: 4,
+      stateVector: Buffer.of(0),
+    })),
+    ownerYDocApplyAcceptedFrame: vi.fn(async (_request, input) => {
+      applied.push({
+        after: input.previousAcceptedCursor,
+        cursor: input.journalCursor,
+        rowsThrough: input.rowsThrough,
+        text: Buffer.from(input.updateBytes).toString(),
+      });
+      return {
+        revision: input.expectedRevision + 1,
+        acceptedCursor: input.journalCursor,
+        nativeHeadSequence: input.expectedNativeHeadSequence,
+      };
+    }),
+    ownerYDocStopRequest: vi.fn(async (_request, document) => ({
+      ...withDocument(ended!),
+      document,
+      state: "requested",
+      retirementOwed: false,
+    })),
+  } as unknown as EngineClient;
+  const release = vi.fn(async () => ({
+    ...withDocument(ended!),
+    state: "released",
+    retirementOwed: false,
+    materialized: true,
+  }));
+  await releaseRetiredOwnerNotes({
+    client,
+    workspaceHandle: "handle",
+    workspaceId: "workspace",
+    signal: new AbortController().signal,
+    listed: new Set(["listed"]),
+    journal,
+    release,
+    assertCurrent() {},
+  });
+  // Neither the listed note nor one this computer is stopping asks for its saves.
+  expect(journal.mock.calls.map(([binding, after]) => [binding.objectId, after])).toEqual([
+    ["hosted", 10],
+    ["ended", 10],
+    ["ended", 12],
+  ]);
+  expect(applied).toEqual([
+    { after: 10, cursor: 12, rowsThrough: undefined, text: "twelve" },
+    { after: 12, cursor: 14, rowsThrough: 13, text: "fourteen" },
+  ]);
+  // Only the ended note records a Stop, as one the server already retired.
+  expect(client.ownerYDocStopRequest).toHaveBeenCalledTimes(1);
+  expect(vi.mocked(client.ownerYDocStopRequest).mock.calls[0]!.slice(1)).toEqual([
+    { mainVersionId: "main", objectId: "ended", currentPath: "ended.md" },
+    expect.any(AbortSignal),
+    { retired: true },
+  ]);
+  expect(release).toHaveBeenCalledTimes(1);
+  expect(release).toHaveBeenCalledWith(ended!.binding, 14, expect.any(AbortSignal));
+});
+
+it("waits for the next pass while the server is still retiring a stopped note", async () => {
+  const row = {
+    ...withDocument({
+      binding: {
+        workspaceId: "workspace",
+        mainVersionId: "main",
+        objectId: "object",
+        lineageClaimId: "a".repeat(64),
+        currentPath: "a.md",
+        selectorPaths: ["a.md"],
+        restoreFenceGeneration: 0,
+      },
+    }),
+    relayDatabaseNamespace: "relay",
+    state: "requested",
+  };
+  const client = {
+    ownerYDocStopList: vi.fn(async () => [row]),
+    ownerYDocStopRequest: vi.fn(async () => row),
+  } as unknown as EngineClient;
+  const onError = vi.fn(),
+    onComplete = vi.fn();
+  await reconcileOwnerLiveStops({
+    client,
+    workspaceHandle: "handle",
+    workspaceId: "workspace",
+    signal: new AbortController().signal,
+    assertCurrent() {},
+    retire: async () => 14,
+    release: async () => {
+      throw new OwnerJournalPending();
+    },
+    onError,
+    onComplete,
+  });
+  expect(onError).not.toHaveBeenCalled();
+  expect(onComplete).not.toHaveBeenCalled();
 });

@@ -354,7 +354,7 @@ fn first_enrollment_accept_echo_preserves_later_draft_fields_until_refusal() {
     let input = OwnerDraftAppendInput {
         person_edit: false,
         binding: observed.binding.clone(),
-        expected_revision: enrolled.revision,
+        expected_revision: Some(enrolled.revision),
         append_key: "agent-status".into(),
         update: local.frontmatter_set("status", "blocked").unwrap(),
         now_ms: 11,
@@ -1015,7 +1015,7 @@ fn stop_preserves_old_generation_work_and_start_can_enroll_again() {
         })
         .unwrap();
     store
-        .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, 20))
+        .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, true, 20))
         .unwrap();
     let next = next_generation(&observed);
     let restored = successor_input(&store, &next, host);
@@ -1051,7 +1051,7 @@ fn stop_preserves_old_generation_work_and_start_can_enroll_again() {
                 update,
                 21,
             )?;
-            release::request_in_tx(tx, &key, 22)?;
+            release::request_in_tx(tx, &key, true, 22)?;
             release::release_in_tx(tx, &next, Some(0), None, 23, |_, _, _, _, _| Ok(()))
         })
         .unwrap();

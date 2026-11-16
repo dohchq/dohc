@@ -8,6 +8,7 @@ import {
   type LiveStopRefusal,
 } from "./liveEditingStop";
 import type { OperationHandlers } from "./operationTable";
+import { OwnerJournalPending } from "../workspaces/ownerJournal";
 import { withOwnerLiveStopTransition, type OwnerLiveStop } from "../workspaces/ownerLiveStop";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {
@@ -700,10 +701,11 @@ export function createOwnerLiveDocumentActions<
               // sends it again; one that committed left a record that the file still
               // needs the edits. A file deleted outside dohc refuses the release's write.
               operation.assertCurrent();
-              console.error(
-                "[desktop] owner live release failed after the server stopped live editing:",
-                error,
-              );
+              if (!(error instanceof OwnerJournalPending))
+                console.error(
+                  "[desktop] owner live release failed after the server stopped live editing:",
+                  error,
+                );
               return { keptEdits: quarantined || onServer ? "kept" : "none", ...already };
             }
             operation.assertCurrent();

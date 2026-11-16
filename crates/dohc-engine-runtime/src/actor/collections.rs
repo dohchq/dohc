@@ -91,7 +91,7 @@ impl ActorHandle {
                                 dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
                                     person_edit: false,
                                     binding: draft.descriptor.binding.clone(),
-                                    expected_revision: draft.descriptor.revision,
+                                    expected_revision: Some(draft.descriptor.revision),
                                     append_key: format!("collection-adoption:{}:{}", candidate.record_id, hex_sha256(&update)),
                                     update, now_ms, agent_declaration: None, agent_run_id: None, automation_declaration: None,
                                 }, &dohc_engine_storage::NoFaults);

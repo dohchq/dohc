@@ -2245,7 +2245,7 @@ async fn stop_releases_current_owner_edits_with_credit_and_preserves_remote_edit
                 dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
                     person_edit: true,
                     binding: f.binding.clone(),
-                    expected_revision: 1,
+                    expected_revision: Some(1),
                     append_key: "pending".into(),
                     update: pending,
                     now_ms: 10,
@@ -2364,7 +2364,7 @@ async fn stop_waits_for_current_restore_and_refuses_a_desktop_host() {
             dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
                 person_edit: true,
                 binding: f.binding.clone(),
-                expected_revision: 1,
+                expected_revision: Some(1),
                 append_key: "pending".into(),
                 update,
                 now_ms: 10,
@@ -2459,7 +2459,7 @@ async fn stop_release_is_atomic_at_both_commit_faults_and_survives_restart() {
                         dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
                             person_edit: true,
                             binding: f.binding.clone(),
-                            expected_revision: 1,
+                            expected_revision: Some(1),
                             append_key: format!("atomic-{index}"),
                             update,
                             now_ms: 10,
@@ -2593,7 +2593,7 @@ async fn pending_release_fixture_updates(
                 dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
                     person_edit: true,
                     binding: f.binding.clone(),
-                    expected_revision: 1,
+                    expected_revision: Some(1),
                     append_key: "pending-0".into(),
                     update: first.clone(),
                     now_ms: 10,
@@ -2631,6 +2631,36 @@ async fn stop_release_with_no_pending_edits_unbinds_without_history() {
     assert!(result[0].deferred.is_none());
     assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 0);
     assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 0);
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn a_release_ends_a_stop_the_relay_retired_on_its_own_and_keeps_an_asked_one() {
+    let (f, supervisor, actor) = pending_release_fixture(2).await;
+    stop_action(&actor, &f, "clear").await.unwrap();
+    let stop = stop_action(&actor, &f, "requestRetired").await.unwrap();
+    assert!(!stop[0].retirement_owed);
+    let result = stop_action(&actor, &f, "release").await.unwrap();
+    assert_eq!(result[0].state, "released");
+    assert!(result[0].deferred.is_none());
+    assert_eq!(f.store.table_row_count("ydoc_owner_bindings").unwrap(), 0);
+    assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 1);
+    // No Stop is left to hold the note back when it is shared again.
+    assert_eq!(f.store.table_row_count("owner_live_stops").unwrap(), 0);
+    supervisor.close_all().unwrap();
+
+    // One the owner asked for waits for Resume.
+    let (f, supervisor, actor) = pending_release_fixture(2).await;
+    stop_action(&actor, &f, "release").await.unwrap();
+    assert_eq!(f.store.table_row_count("owner_live_stops").unwrap(), 1);
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn the_first_stop_request_decides_whether_the_relay_still_retires_the_note() {
+    let (f, supervisor, actor) = pending_release_fixture(0).await;
+    let again = stop_action(&actor, &f, "requestRetired").await.unwrap();
+    assert!(again[0].retirement_owed);
     supervisor.close_all().unwrap();
 }
 
@@ -3058,7 +3088,7 @@ async fn stop_defers_behind_the_relays_cursor_without_publishing_or_losing_entri
             dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
                 person_edit: true,
                 binding: f.binding.clone(),
-                expected_revision: 1,
+                expected_revision: Some(1),
                 append_key: "after-deferred-stop".into(),
                 update: f.doc.richdoc_append_paragraph("Keep editing after Stop"),
                 now_ms: 45,
@@ -3396,7 +3426,7 @@ async fn stop_records_each_authors_run_as_one_row_with_its_declared_credit() {
                     dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
                         person_edit: *kind == "person",
                         binding: f.binding.clone(),
-                        expected_revision: 1,
+                        expected_revision: Some(1),
                         append_key: format!("credit-{index}-{repetition}"),
                         update,
                         now_ms: 10 + index as i64,

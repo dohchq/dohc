@@ -230,7 +230,14 @@ impl EngineService {
         if let Some(action) = request.method.strip_prefix("ydoc.ownerStop.") {
             if !matches!(
                 action,
-                "request" | "release" | "clear" | "list" | "retired" | "pause" | "copyWritten"
+                "request"
+                    | "requestRetired"
+                    | "release"
+                    | "clear"
+                    | "list"
+                    | "retired"
+                    | "pause"
+                    | "copyWritten"
             ) {
                 return Err(WireError::new(
                     ErrorCode::InvalidParams,
@@ -1597,6 +1604,7 @@ mod tests {
             "workReferences.make",
             "workReferences.resolve",
             "ydoc.ownerStop.request",
+            "ydoc.ownerStop.requestRetired",
             "ydoc.ownerStop.release",
             "ydoc.ownerStop.clear",
             "ydoc.ownerStop.retired",

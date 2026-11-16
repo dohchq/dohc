@@ -277,7 +277,7 @@ impl EngineService {
                 dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
                     person_edit: false,
                     binding: params.binding,
-                    expected_revision: params.expected_revision,
+                    expected_revision: Some(params.expected_revision),
                     append_key: params.append_key,
                     update: bytes,
                     now_ms: now_ms()?,
