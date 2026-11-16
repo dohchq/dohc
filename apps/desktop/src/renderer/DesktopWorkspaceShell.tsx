@@ -6430,6 +6430,7 @@ export function DesktopWorkspaceShell(props: {
           }
         : null,
       ...(membershipRole ? { memberRole: membershipRole } : {}),
+      ...(otherAccountApplies ? { otherAccount: true } : {}),
       activeDocumentKind: activeDocumentPath
         ? fileKindForPath(activeDocumentPath).displayKind
         : null,
@@ -6444,6 +6445,7 @@ export function DesktopWorkspaceShell(props: {
       shareViewEnded,
       membershipView,
       membershipRole,
+      otherAccountApplies,
       activeDocumentPath,
       activeSharePath,
       pinnedApps,
@@ -7384,7 +7386,7 @@ export function DesktopWorkspaceShell(props: {
   const graphKey = shareView ? graphRefreshKey : `${graphRefreshKey}\0${latestMomentOrder}`;
 
   const joinedWorkspaceOffers = commandContext.shareView
-    ? workspaceCreateOffers(commandContext.shareView, membershipRole)
+    ? workspaceCreateOffers(commandContext.shareView, membershipRole, commandContext.otherAccount)
     : null;
   const joinedWorkspaceCreates = useMemo(
     () => ({
@@ -8200,7 +8202,7 @@ export function DesktopWorkspaceShell(props: {
                           setQuickOpenOpen={setQuickOpenOpen}
                           syncStatus={syncStatus}
                           failedSaves={failedSaves}
-                        otherAccount={otherAccountApplies}
+                          otherAccount={otherAccountApplies}
                           showWorkbenchMenu={showWorkbenchMenu}
                           agentActive={agentActive}
                           restrictedMode={
@@ -8663,7 +8665,11 @@ export function DesktopWorkspaceShell(props: {
                                         isMountedSharePath(path)
                                       }
                                       // The lists name this workspace's own notes, never a received share's.
-                                      levelMark={membershipView ? levelMark(shareAccess, shareViewEnded, shareSenderShort) : null}
+                                      levelMark={
+                                        membershipView
+                                          ? levelMark(shareAccess, shareViewEnded, shareSenderShort, otherAccountApplies)
+                                          : null
+                                      }
                                       liveEditingPaused={
                                         shareView || isMountedSharePath(path)
                                           ? undefined

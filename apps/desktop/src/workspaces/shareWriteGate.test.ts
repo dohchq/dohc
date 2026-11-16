@@ -105,6 +105,12 @@ describe("workspaceCreateOffers in a joined workspace", () => {
     expect(workspaceCreateOffers({ access: "edit", ended: true, membership: true }, "admin").folder).toBe(false);
   });
 
+  it("offers nothing while another account than the one that joined is signed in", () => {
+    expect(workspaceCreateOffers({ access: "edit", ended: false, membership: true }, "admin", true))
+      .toEqual({ write: false, folder: false, collection: false });
+    expect(workspaceCreateOffers(null, undefined, true).write).toBe(true);
+  });
+
   it("keeps a path share at Edit to files and Collections, with no folder", () => {
     expect(workspaceCreateOffers({ access: "edit", ended: false }, "admin")).toEqual({ write: true, folder: false, collection: true });
   });

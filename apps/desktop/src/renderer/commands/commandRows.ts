@@ -8,6 +8,8 @@ export interface CommandContext {
   shareView: ShareViewWriteScope | null;
   // A joined workspace's role, as the relay last named it.
   memberRole?: "admin" | "member";
+  // A joined workspace while another account is signed in. It offers no writes.
+  otherAccount?: boolean;
   activeDocumentKind: string | null;
   activeDocumentShareable: boolean;
   pinnedApps: readonly { root: string; label: string }[];
@@ -17,11 +19,11 @@ export interface CommandContext {
 export const COMMAND_AVAILABILITY = {
   always: (_context: CommandContext) => true,
   workspaceWritable: (context: CommandContext) =>
-    workspaceCreateOffers(context.shareView, context.memberRole).write,
+    workspaceCreateOffers(context.shareView, context.memberRole, context.otherAccount).write,
   folderCreatable: (context: CommandContext) =>
-    workspaceCreateOffers(context.shareView, context.memberRole).folder,
+    workspaceCreateOffers(context.shareView, context.memberRole, context.otherAccount).folder,
   collectionCreatable: (context: CommandContext) =>
-    workspaceCreateOffers(context.shareView, context.memberRole).collection,
+    workspaceCreateOffers(context.shareView, context.memberRole, context.otherAccount).collection,
   activeMarkdown: (context: CommandContext) => context.activeDocumentKind === "markdown",
   activeShareable: (context: CommandContext) => context.activeDocumentShareable,
   localWorkspace: (context: CommandContext) => context.shareView === null,

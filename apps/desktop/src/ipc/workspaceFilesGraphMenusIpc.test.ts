@@ -231,6 +231,7 @@ async function harness(history?: OperationHistory) {
   }));
   let sharedScope: ShareViewWriteScope | null = null;
   let memberRole: "admin" | "member" | undefined;
+  let otherAccount = false;
   let canInstall = false;
   registerNativeMenusIpcHandlers<Sender, Event, Workspace, Operation>({
     registerHandler,
@@ -252,6 +253,7 @@ async function harness(history?: OperationHistory) {
     createExplorerMenuIpc<Event, Workspace, Operation>({
       sharedViewOf: () => sharedScope,
       memberRoleOf: () => memberRole,
+      otherAccountOf: () => otherAccount,
       ensureOwnedProjectionCurrent: repair,
       shell: { showItemInFolder: reveal },
       platform: "linux",
@@ -299,6 +301,9 @@ async function harness(history?: OperationHistory) {
     },
     setMemberRole: (role: "admin" | "member" | undefined) => {
       memberRole = role;
+    },
+    setOtherAccount: (value: boolean) => {
+      otherAccount = value;
     },
     setCanInstall: (value: boolean) => {
       canInstall = value;
@@ -1110,6 +1115,16 @@ describe("registered native menu handlers", () => {
     expect(await offersFolder()).toBe(false);
     h.setMemberRole("admin");
     expect(await offersFolder()).toBe(true);
+    // Another account's level is not this one's: no New page or New folder until Switch account succeeds.
+    h.setOtherAccount(true);
+    const offered = ExplorerMenuEntries.parse(
+      await h.invoke(explorerMenuOperations.readExplorerMenu.channel, {
+        workspaceId: "workspace",
+        kind: "root",
+        pinned: false,
+      }),
+    ).flatMap((entry) => (entry.kind === "item" ? [entry.id] : []));
+    expect(offered).toEqual(["export-zip"]);
   });
 
   it("reads the menu inside the sender's own workspace", async () => {

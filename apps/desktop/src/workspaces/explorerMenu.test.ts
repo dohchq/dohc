@@ -154,6 +154,13 @@ describe("a joined workspace", () => {
       .flatMap((entry) => (entry.kind === "item" ? [entry.label] : []));
     expect(labels.slice(0, 2)).toEqual(["New page", "New folder"]);
   });
+
+  it("offers no create, rename, delete or import while another account is signed in", () => {
+    for (const kind of ["root", "folder", "file"] as const) {
+      const offered = commands({ kind, shareView: joined("edit"), memberRole: "admin", otherAccount: true });
+      for (const id of ["new-file", "new-folder", "new-collection", "import-files", "rename", "delete"]) expect(offered).not.toContain(id);
+    }
+  });
 });
 
 describe("a share mount inside an ordinary workspace", () => {

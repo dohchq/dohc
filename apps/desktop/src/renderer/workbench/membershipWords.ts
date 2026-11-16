@@ -16,10 +16,12 @@ export function levelChangedWords(access: ShareAccess, by: string | null | undef
 
 // What a page says where its Edit toggle would be, when the level allows no
 // editing: the browser's badge words, and who set the level in the tooltip.
-// An ended membership leaves a copy that only reads.
+// An ended membership leaves a copy that only reads, and so does a joined
+// workspace while another account is signed in, whatever its level.
 export type LevelMark = { label: string; title: string };
-export function levelMark(access: ShareAccess | null | undefined, ended: boolean, sender: string): LevelMark | null {
+export function levelMark(access: ShareAccess | null | undefined, ended: boolean, sender: string, otherAccount = false): LevelMark | null {
   if (ended) return { label: "Read-only", title: "Your membership ended. This copy stays on this computer." };
+  if (otherAccount) return { label: "Read-only", title: "Signed in as another account" };
   if (access === "view") return { label: "View only", title: `${sender} lets members view only` };
   if (access === "comment") return { label: "Can comment", title: `${sender} lets members comment` };
   return null;

@@ -60,15 +60,19 @@ export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
  * Which create and import actions a workspace offers, given the share view it
  * is, or null for an ordinary workspace. The Explorer menu and the command
  * rows both ask this, so neither offers an action its handler refuses.
+ *
+ * `otherAccount` marks a joined workspace while another account than the one
+ * that joined is signed in. The level belongs to the joined account, so the
+ * workspace offers nothing until the person switches back.
  */
-export function workspaceCreateOffers(shareView: ShareViewWriteScope | null, role?: "admin" | "member"): {
+export function workspaceCreateOffers(shareView: ShareViewWriteScope | null, role?: "admin" | "member", otherAccount = false): {
   write: boolean;
   folder: boolean;
   collection: boolean;
 } {
   // Create, rename, delete and import: everywhere in an ordinary workspace,
   // and in a share view only at the level `shareViewTakesLocalWrites` names.
-  const write = shareView === null || shareViewTakesLocalWrites(shareView);
+  const write = shareView === null || (shareViewTakesLocalWrites(shareView) && !otherAccount);
   // In a joined workspace only an admin starts a folder; the relay reads the
   // role again. `role` is the relay's last answer, or unknown.
   const startsFolders = shareView?.membership === true && role === "admin";

@@ -83,6 +83,24 @@ describe("a joined workspace", () => {
     expect(screen.queryByTestId("level-mark")).toBeNull();
   });
 
+  // The level belongs to the account that joined. While another one is signed in, a page reads
+  // Read-only where its Edit toggle would be, and Files offers no New page or New folder.
+  it("shows Read-only and offers no New page at Edit while another account is signed in", async () => {
+    const bridge = makeShareBridge(Promise.resolve(storedStateWithTabs(["a.md"])));
+    bridge.cloudStatus.mockResolvedValue({ connected: true, email: "lee@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: true,
+      joinedBySignedInAccount: false });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access: "edit", role: "admin" } }));
+    await waitFor(() => expect(screen.getByTestId("sync-status").textContent).toBe("Another account signed in"));
+    const mark = await screen.findByTestId("level-mark");
+    expect(mark.textContent).toBe("Read-only");
+    expect(mark.getAttribute("title")).toBe("Signed in as another account");
+    expect(screen.queryByTestId("markdown-edit-toggle")).toBeNull();
+    expect(screen.queryByRole("button", { name: "New page" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "New folder" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Refresh explorer" })).toBeTruthy();
+  });
+
   function withGroup(access: "view" | "comment" | "edit", checked: Awaited<ReturnType<ReturnType<typeof makeShareBridge>["checkSharedViewAccess"]>>,
     uiState: Parameters<typeof makeShareBridge>[0] = undefined) {
     const bridge = makeShareBridge(uiState);

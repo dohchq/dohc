@@ -1097,6 +1097,14 @@ function memberRoleOf(workspaceId: string): "admin" | "member" | undefined {
     : undefined;
 }
 
+// A joined workspace while another account than the one that joined is signed
+// in: the same answer `cloudStatus` gives the shell as `joinedBySignedInAccount`.
+function otherAccountOf(workspaceId: string): boolean {
+  const view = sharedViewOf(workspaceId);
+  if (view?.membership !== true || view.ended || !cachedCredentials) return false;
+  return !joinedByAccount(findWorkspace(workspaceId)?.shareView, cachedCredentials);
+}
+
 // The workspace write boundary, over the rule in `shareWriteGate.ts`. It
 // refuses on the PRESENCE of a share view at every level, which is what the
 // 27 handlers behind it need: they write the workspace FOLDER, and a share
@@ -9331,6 +9339,7 @@ function registerIpcHandlers(): void {
     >({
       sharedViewOf,
       memberRoleOf,
+      otherAccountOf,
       ensureOwnedProjectionCurrent,
       shell,
       platform: process.platform,

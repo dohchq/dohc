@@ -92,6 +92,22 @@ describe("command availability", () => {
     },
   );
 
+  // Another account's level is not this one's, so nothing is offered until Switch account succeeds.
+  it("offers no creates in a joined workspace while another account is signed in", () => {
+    const current = {
+      ...context,
+      shareView: { access: "edit" as const, ended: false, membership: true },
+      memberRole: "admin" as const,
+      otherAccount: true,
+    };
+    expect(CREATE_COMMANDS.filter((id) => isCommandAvailable(id, current))).toEqual([]);
+    expect(
+      paletteCommandRows(current)
+        .map((row) => row.id)
+        .filter((id) => CREATE_COMMANDS.includes(id)),
+    ).toEqual([]);
+  });
+
   it.each([null, "code", "drawing", "markdown"])(
     "source toggle with active kind %s",
     (activeDocumentKind) => {
