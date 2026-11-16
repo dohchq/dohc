@@ -875,6 +875,9 @@ fn replay_materializations(
             hard_errors: Vec::new(),
         });
     }
+    // Once the workspace folder no longer holds the store, every job stays
+    // pending for a replay made once it does again.
+    super::access_order::check_root()?;
     let loaded_holds;
     let holds = match scope.holds {
         Some(holds) => holds,

@@ -2381,7 +2381,8 @@ impl Fixture {
 
 /// History Undo commits its inverse moments, then places their files in
 /// later turns. A store that left the workspace folder between the two
-/// places nothing: the jobs stay pending, and place once the store is back.
+/// places nothing, through the Undo or through a Version fence's replay: the
+/// jobs stay pending, and place once the store is back.
 #[test]
 fn an_undo_placed_after_the_store_moved_places_nothing() {
     let f = Fixture::movable();
@@ -2410,15 +2411,39 @@ fn an_undo_placed_after_the_store_moved_places_nothing() {
     assert!(!f.root().join("team/a.md").exists());
     f.move_store_away();
     let placed = f.place(undo.clone());
+    let fence = |selected: Option<Vec<String>>| {
+        let (root, ws) = (f.root().to_path_buf(), WS.to_owned());
+        f.runtime.block_on(async {
+            match selected {
+                None => {
+                    f.actor
+                        .materialize_replay_pending_for_fence(root, ws, Arc::new(()), 61)
+                        .await
+                }
+                Some(jobs) => {
+                    f.actor
+                        .materialize_replay_selected_for_fence(root, ws, Arc::new(()), jobs, 61)
+                        .await
+                }
+            }
+        })
+    };
+    let fenced = [fence(None), fence(Some(pending.clone()))];
     let stray = f.move_store_back();
-    // Placed, written where the store was, the file, the jobs still pending.
+    // Placed, each fence refused as moved, written where the store was, the
+    // file, the jobs still pending.
     let state = (
         placed.materialized,
+        fenced.iter().map(moved).collect::<Vec<_>>(),
         stray,
         f.root().join("team/a.md").exists(),
         f.pending_jobs() == pending,
     );
-    assert_eq!(state, (false, Vec::new(), false, true));
+    assert_eq!(
+        state,
+        (false, vec![true, true], Vec::new(), false, true),
+        "{fenced:?}"
+    );
     assert!(f.place(undo).materialized, "placed once the store is back");
     assert_eq!(
         std::fs::read_to_string(f.root().join("team/a.md")).unwrap(),
