@@ -4,7 +4,7 @@ import {createPortal} from "react-dom";
 import {DohcMark, Icon} from "./icons";
 import {MemberChats, MemberComments, useMemberListing, LISTING_FAILED} from "./MemberChats";
 import {Toast} from "./Toast";
-import {CopyWork} from "./CopyWork";
+import {UnsentEditsRow} from "./UnsentEdits";
 import {readDraft, writeDraft} from "./drafts";
 import {memberSession} from "./memberWorkspace";
 import {filesFromAccumulator, isMarkdown, type FileAccumulator, type ShareAccess, type SharedFile, type ViewMeta} from "./model";
@@ -86,23 +86,13 @@ function shownPath(path: string, all: readonly Unsent[]): string {
  */
 function UnsentEdits({unsent, onDiscard, onUndo, onForget}: {unsent: readonly Unsent[]; onDiscard(id: number): void; onUndo(id: number): void; onForget(id: number): void}) {
   return <div className="workspace-kept">{unsent.map(item => {
-    const name = shownPath(item.path, unsent), base = item.path.slice(item.path.lastIndexOf("/") + 1), dot = base.lastIndexOf(".");
-    const file = dot > 0 ? `${base.slice(0, dot)} (unsent edits)${base.slice(dot)}` : `${base} (unsent edits)`;
+    const name = shownPath(item.path, unsent);
     if (item.discarded) return <aside key={item.id} className="unsent-discarded" aria-label="Discarded edits">
       <p>Discarded your unsent edits to {name}.</p>
       <button type="button" className="handoff-button secondary" onClick={() => onUndo(item.id)}>Undo</button>
       <button className="icon-button" type="button" aria-label="Dismiss" title="Dismiss" onClick={() => onForget(item.id)}><Icon name="x"/></button>
     </aside>;
-    return <details key={item.id} className="unsent-edits" aria-label="Unsent edits">
-      <summary><Icon name="triangle-alert" size={14}/><span className="unsent-name">Unsent edits to {name}</span><Icon name="chevron-down" size={14}/></summary>
-      <p>Only this tab has them. Copy or download them before you close it.</p>
-      <textarea readOnly value={item.text} aria-label={`Unsent edits to ${name}`}/>
-      <div className="unsent-actions">
-        <CopyWork text={item.text} label="Copy unsent edits" failure="dohc could not copy the edits. Download them instead."/>
-        <a className="handoff-button secondary" download={file} href={`data:text/markdown;charset=utf-8,${encodeURIComponent(item.text)}`}>Download</a>
-        <button type="button" className="handoff-button secondary" onClick={() => onDiscard(item.id)}>Discard</button>
-      </div>
-    </details>;
+    return <UnsentEditsRow key={item.id} name={name} path={item.path} text={item.text} onDiscard={() => onDiscard(item.id)}/>;
   })}</div>;
 }
 
@@ -320,6 +310,8 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
   const [tab, setTab] = useState<Tab>("page"), [side, setSide] = useState<Side>("chats"), [unread, setUnread] = useState(0);
   const [statusSlot, setStatusSlot] = useState<HTMLElement | null>(null);
   const [bandSlot, setBandSlot] = useState<HTMLElement | null>(null);
+  // The open page's unsent edits, while dohc cannot send them, sit under the kept ones, just above the page.
+  const [draftSlot, setDraftSlot] = useState<HTMLElement | null>(null);
   const leave = useRef<((action: () => void) => void) | null>(null), tabs = useRef(new Map<Tab, HTMLButtonElement>());
   const narrow = useNarrow();
   const [sideNode, setSideNode] = useState<HTMLDivElement | null>(null);
@@ -435,6 +427,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
       </header>
       <div className="page-band" ref={setBandSlot}/>
       {kept}
+      <div className="workspace-kept" ref={setDraftSlot}/>
       <div className="layout">
         <div className="scroller">
           <div className="column">
@@ -443,7 +436,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
               <main className="content">
                 {live ? <Suspense fallback={readView}>
                   <MemberLivePage key={selected.path} grantId={grantId} accountId={account.id} path={selected.path} readView={readView}
-                    statusSlot={statusSlot} bandSlot={bandSlot} toastSlot={toastSlot} leave={leave}
+                    statusSlot={statusSlot} bandSlot={bandSlot} draftSlot={draftSlot} toastSlot={toastSlot} leave={leave}
                     onUnsent={text => onUnsent(selected.path, text)}/>
                 </Suspense> : readView}
               </main>

@@ -3,7 +3,8 @@ import {createPortal} from "react-dom";
 import type {NamedLiveBrowserState} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {yDocToMarkdown} from "@dohc/ydoc-projection/browser-editor";
 import {NamedDocumentEditor} from "./NamedDocumentEditor";
-import {DiscardDraft} from "./DiscardDraft";
+import {DiscardDraft, UNSENT_EDITS} from "./DiscardDraft";
+import {UnsentEditsRow} from "./UnsentEdits";
 import {Toast} from "./Toast";
 import {memberDocument, memberPageReady, openMemberPage, type MemberDocument} from "./memberLive";
 
@@ -35,13 +36,14 @@ function wait(ms: number, signal: AbortSignal): Promise<void> {
  * page waiting for its owner's dohc shows a ring in that band, raises
  * its toast after LIVE_HOST_WAIT_REPORT_MS, and opens by itself once ready.
  * `leave` runs an action that would close the page, asking first when an
- * unsynced draft would go with it. When the page closes or opens again for any
+ * unsent edits would go with them. While dohc cannot send them, they show in
+ * `draftSlot`, above the page, with Copy, Download and Discard. When the page closes or opens again for any
  * other reason, such as Try again, a lower level, an ended membership or an
  * ended session, `onUnsent` gets the text that has not reached the workspace.
  */
-export default function MemberLivePage({grantId, accountId, path, readView, statusSlot, bandSlot, toastSlot, leave, onUnsent}: {
+export default function MemberLivePage({grantId, accountId, path, readView, statusSlot, bandSlot, draftSlot, toastSlot, leave, onUnsent}: {
   grantId: string; accountId: string; path: string; readView: ReactNode; statusSlot: HTMLElement | null; bandSlot: HTMLElement | null;
-  toastSlot: HTMLElement | null;
+  draftSlot: HTMLElement | null; toastSlot: HTMLElement | null;
   leave: MutableRefObject<((action: () => void) => void) | null>;
   onUnsent(text: string): void;
 }) {
@@ -123,7 +125,6 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
 
   const reason = phase.kind === "refused" ? phase.reason : phase.kind === "waiting" ? HOST_REFUSAL_REASONS[WAITS_FOR_HOST]! : null;
   const toast = !dismissed && (phase.kind === "refused" || (phase.kind === "waiting" && phase.reported));
-  const readable = phase.kind === "refused" || phase.kind === "waiting";
   // Waiting for the owner's dohc is a state dohc is fixing, not a failure. The desktop titles it the same.
   const toastTitle = phase.kind === "waiting" ? `Waiting to edit "${name}"` : `dohc could not open "${name}" for editing`;
   const toastBody = reason ? `${reason} You can still read it.` : "You can still read it.";
@@ -131,18 +132,17 @@ export default function MemberLivePage({grantId, accountId, path, readView, stat
   const band = phase.kind === "waiting" ? HOST_REFUSAL_REASONS[WAITS_FOR_HOST]! : reason ? toastBody : `dohc could not open this page for editing. ${toastBody}`;
   return <>
     {statusSlot && !editing && phase.kind === "opening" && createPortal(<p className="named-document-status" role="status">Opening the file…</p>, statusSlot)}
-    {bandSlot && !live && readable && createPortal(<>
+    {/* A refusal shows here even after the page went live. A stopped session puts its own state in the band. */}
+    {bandSlot && (phase.kind === "refused" || phase.kind === "waiting" && !live) && createPortal(<>
       <p role="status">{phase.kind === "waiting" && <span className="live-ring" aria-hidden="true"/>}{band}</p>
       {phase.kind === "refused" && <button type="button" onClick={open}>Try again</button>}
     </>, bandSlot)}
     {!live && readView}
     {editing && <NamedDocumentEditor key={editing.session.doc.guid} session={editing.session} path={path} link statusSlot={statusSlot} quietWhenSaved
-      bodyHidden={!live} onState={receive}/>}
-    {pending && <aside className="draft-recovery" aria-label="Draft recovery"><h2>Review your draft</h2>
-      <p>Your unsynced changes exist only in this tab. Closing or reloading loses them.</p>
-      <p>Copy the changes you want to keep. Open the current file, then paste and review them.</p>
-      <button className="handoff-button secondary" onClick={() => leave.current?.(open)}>Open current file</button></aside>}
+      bandSlot={bandSlot} bodyHidden={!live} onState={receive}/>}
+    {pending && editing && draftSlot && createPortal(<UnsentEditsRow name={name} path={path} text={yDocToMarkdown(editing.session.doc)}
+      onDiscard={() => leave.current?.(open)}/>, draftSlot)}
     {toast && toastSlot && createPortal(<Toast title={toastTitle} body={toastBody} {...(phase.kind === "waiting" ? {tone: "warning" as const} : {})} onRetry={open} onDismiss={() => setDismissed(true)}/>, toastSlot)}
-    {leaving && <DiscardDraft cancel={() => setLeaving(null)} confirm={() => {const action = leaving; setLeaving(null); discarded.current = current.current; action();}}/>}
+    {leaving && <DiscardDraft words={UNSENT_EDITS} cancel={() => setLeaving(null)} confirm={() => {const action = leaving; setLeaving(null); discarded.current = current.current; action();}}/>}
   </>;
 }

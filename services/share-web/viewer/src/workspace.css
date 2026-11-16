@@ -47,6 +47,7 @@
 /* Unsent live text sits in the page's flow, under the band, one compact row per page that opens in place. */
 .workspace-kept { display: flex; flex: none; flex-direction: column; gap: 8px; width: 100%; max-width: 720px; box-sizing: border-box; margin: 0 auto; padding: 8px 16px 0; text-align: start; }
 .state-page .workspace-kept { margin-top: 16px; padding: 0; }
+.workspace-kept:empty { display: none; }
 .unsent-edits { border: 1px solid var(--viewer-line); border-radius: 8px; background: var(--viewer-panel); color: var(--viewer-muted); font-size: 12px; text-wrap: pretty; }
 .unsent-edits summary { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 0 12px; color: var(--viewer-ink); cursor: pointer; font-size: 13px; font-weight: 500; list-style: none; }
 .unsent-edits summary::-webkit-details-marker { display: none; }

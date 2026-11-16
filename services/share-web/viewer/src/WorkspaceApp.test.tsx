@@ -566,17 +566,36 @@ it("opens a page in the live editor at Edit, as the signed-in account", async ()
   await act(async () => session.type("Leave at ten."));
   expect(container.querySelector("header .named-document-status")?.textContent).toBe("Saving changes…");
   // Saving on a healthy connection is not a draft to recover.
-  expect(container.querySelector('[aria-label="Draft recovery"]')).toBeNull();
-  expect(button("Open current file")).toBeUndefined();
+  expect(container.querySelector('[aria-label="Unsent edits"]')).toBeNull();
 });
 
-// The draft needs the person only once dohc cannot send it.
-it.each(["quarantined", "disconnected"] as const)("offers the draft to review once a %s session still holds unsent edits", async status => {
+// The unsent edits need the person only once dohc cannot send them.
+it.each([
+  ["quarantined", "Editing stopped. dohc could not send your unsent edits.", null],
+  ["disconnected", "Editing paused. Check your connection, then retry.", "Retry connection"],
+] as const)("shows a %s session's unsent edits above the page, with the state in the band", async (status, sentence, retry) => {
   const session = await editing({level: "edit"});
-  expect(container.querySelector('[aria-label="Draft recovery"]')).toBeNull();
+  expect(container.querySelector('[aria-label="Unsent edits"]')).toBeNull();
   await act(async () => session.drop(status));
-  await settle(() => container.querySelector('[aria-label="Draft recovery"]') !== null);
-  expect(button("Open current file")).not.toBeUndefined();
+  await settle(() => container.querySelector('[aria-label="Unsent edits"]') !== null);
+  // The same row as kept edits, between the band and the page, with Copy, Download and Discard.
+  const row = container.querySelector('header + .page-band ~ .workspace-kept > [aria-label="Unsent edits"]')!;
+  expect(row.querySelector(".unsent-name")?.textContent).toBe("Unsent edits to plan.md");
+  expect(row.querySelector(".icon")).not.toBeNull();
+  expect(row.querySelector("textarea")?.value).toContain("Leave at ten.");
+  expect([...row.querySelectorAll(".unsent-actions > :is(button, a)")].map(node => node.getAttribute("aria-label") ?? node.textContent)).toEqual(["Copy unsent edits", "Download", "Discard"]);
+  // The state sits in the band, with the warning mark, as waiting and refusals do.
+  const band = container.querySelector("header + .page-band")!;
+  expect(band.querySelector("[role=status]")?.textContent).toBe(sentence);
+  expect(band.querySelector("[role=status] .icon")).not.toBeNull();
+  expect(band.querySelector("button")?.textContent ?? null).toBe(retry);
+  expect(container.querySelector("main .named-document-status")).toBeNull();
+  expect(text()).not.toContain("Review your draft");
+  expect(button("Open current file")).toBeUndefined();
+  if (retry) {
+    await act(async () => band.querySelector<HTMLButtonElement>("button")!.click());
+    expect(session.reconnect).toHaveBeenCalledTimes(2);
+  }
 });
 
 it("waits for the owner's dohc with the page readable, raises a toast after 15 seconds, and opens by itself once ready", async () => {
@@ -644,8 +663,11 @@ it("keeps a later draft's unsent text after the person discarded an earlier one"
   const next = liveSession();
   vi.mocked(memberDocument).mockReturnValueOnce({session: next as never, close: vi.fn()});
   await act(async () => first.drop("disconnected"));
-  await settle(() => button("Open current file") !== undefined);
-  await click("Open current file"); await click("Discard draft and continue");
+  await settle(() => recovery() !== null);
+  // Discard asks first, in the same words, then opens the current file.
+  await act(async () => [...recovery()!.querySelectorAll("button")].find(node => node.textContent === "Discard")!.click());
+  expect(container.querySelector("dialog h2")?.textContent).toBe("Discard your unsent edits?");
+  await act(async () => container.querySelector<HTMLButtonElement>("dialog .handoff-button.primary")!.click());
   await settle(() => next.reconnect.mock.calls.length === 1);
   await act(async () => next.type("Leave at eleven."));
   options.level = "comment";
