@@ -26,6 +26,32 @@ export class TextNotSavedError extends Error {
   }
 }
 
+/**
+ * The facts Copy details lists for a shell notice, before the facts about
+ * this computer. A notice with change rows shows its facts beside the
+ * row's own words, so it leaves out the lines that repeat them.
+ */
+export function shellNoticeFields(notice: {
+  tone?: string;
+  message: string;
+  title?: string;
+  paths?: readonly string[];
+  rows?: readonly string[];
+  details?: ReadonlyArray<ErrorDetailField>;
+}): ErrorDetailField[] {
+  return [
+    ...(notice.rows
+      ? (notice.details ?? [])
+      : [
+          [notice.tone ? "Notice" : "Error", notice.message] as const,
+          ...(notice.title ? [["Title", notice.title] as const] : []),
+        ]),
+    ...(notice.paths ?? []).map((path) => ["Path", path, path.length] as const),
+    ...(notice.rows ?? []).map((row) => ["Change", row] as const),
+    ...(notice.rows ? [] : (notice.details ?? [])),
+  ];
+}
+
 export function errorDetails(fields: ReadonlyArray<ErrorDetailField>): string {
   return fields
     .filter((field): field is readonly [string, string, number?] => Boolean(field[1]))

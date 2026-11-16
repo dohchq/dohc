@@ -116,19 +116,19 @@ describe("useAccessRuleHoldNotices", () => {
       noDismiss: true,
       title: "Access to team was widened outside dohc",
       message:
-        "Until you choose, dohc doesn't record or share changes in team. Members keep their earlier access. Restoring keeps the rule from outside dohc as a copy. Allowing the new rule gives:",
+        "Until you choose, dohc doesn't record or share changes in team. Restoring keeps the rule from outside dohc as a copy. Allowing the new rule gives:",
       action: { label: "Restore rule", additional: [{ label: "Allow new access" }] },
     });
     expect(h.row("team/sub")).toMatchObject({
       title: "The access rule for team/sub was removed outside dohc",
       message:
-        "Until you choose, dohc doesn't record or share changes in team/sub. Members keep their earlier access. Without it, team/sub follows the access rule for team.",
+        "Until you choose, dohc doesn't record or share changes in team/sub. Without it, team/sub follows the access rule for team.",
       action: { label: "Restore rule", additional: [{ label: "Remove rule" }] },
     });
     expect(h.row("")).toMatchObject({
       title: "The workspace's access rule was removed outside dohc",
       message:
-        "Until you choose, dohc doesn't record or share changes in this workspace. Members keep their earlier access. Without it, members get the level set in Members settings.",
+        "Until you choose, dohc doesn't record or share changes in this workspace. Without it, members get the level set in Members settings.",
       rows: ["Members: View → Edit"],
       action: { additional: [{ label: "Remove rule" }] },
     });
@@ -170,6 +170,7 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.row("team")!.details).toEqual([
       ["Recorded rule", "members: view\n"],
       ["Noticed", new Date(1).toLocaleString()],
+      ["Until you choose", "Members keep their earlier access."],
     ]);
     expect(h.row("team/sub")).toMatchObject({
       rows: ["Members: View → Edit"],
@@ -181,7 +182,7 @@ describe("useAccessRuleHoldNotices", () => {
     const h = harness([{ ...WIDENED, changes: [], unreadable: "on-disk" }]);
     await waitFor(() => expect(h.row("team")).toBeDefined());
     expect(h.row("team")!.message).toBe(
-      "Until you choose, dohc doesn't record or share changes in team. Members keep their earlier access. Restoring keeps the rule from outside dohc as a copy. dohc can't read the access rule now on disk. Allowing it hides team from members.",
+      "Until you choose, dohc doesn't record or share changes in team. Restoring keeps the rule from outside dohc as a copy. dohc can't read the access rule now on disk. Allowing it hides team from members.",
     );
     expect(h.row("team")!.rows).toBeUndefined();
     expect(h.row("team")!.action).toMatchObject({ additional: [{ label: "Hide from members" }] });
@@ -546,7 +547,7 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.row("")).toMatchObject({
       rows: ["Members: View → set in Members settings"],
       message:
-        "Until you choose, dohc doesn't record or share changes in this workspace. Members keep their earlier access. Without it, members get the level set in Members settings. dohc can't read that level now.",
+        "Until you choose, dohc doesn't record or share changes in this workspace. Without it, members get the level set in Members settings. dohc can't read that level now.",
       action: { additional: [{ label: "Remove rule" }, { label: "Open Members" }] },
     });
     expect(JSON.stringify(h.row(""))).not.toContain("workspace access");

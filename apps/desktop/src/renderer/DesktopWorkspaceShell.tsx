@@ -169,7 +169,7 @@ import {
   namedPaths,
 } from "./shell/importStop";
 import { importSkipLines } from "./shell/importSkips";
-import { errorDetails, type ErrorDetailField } from "./shell/copyDetails";
+import { errorDetails, shellNoticeFields, type ErrorDetailField } from "./shell/copyDetails";
 import { shareCaptureNoticeState } from "../workspaces/shareCaptureNotice";
 import { workspaceCreateOffers, type ShareViewWriter } from "../workspaces/shareWriteGate";
 import { CopyButton } from "./ui/CopyButton";
@@ -7604,17 +7604,7 @@ export function DesktopWorkspaceShell(props: {
             ? shareCaptureCopy(error.details?.map((detail) => String(detail[1])) ?? [])
             : {
                 copy: {
-                  report: errorDetails([
-                    // A notice with change rows leads with its facts, which the
-                    // lines it repeats from the row would otherwise push down.
-                    ...(error.rows ? (error.details ?? []) : []),
-                    [error.tone ? "Notice" : "Error", error.message],
-                    ...(error.title ? [["Title", error.title] as const] : []),
-                    ...(error.paths ?? []).map((path) => ["Path", path, path.length] as const),
-                    ...(error.rows ?? []).map((row) => ["Change", row] as const),
-                    ...(error.rows ? [] : (error.details ?? [])),
-                    ...reportFacts(error.atMs),
-                  ]),
+                  report: errorDetails([...shellNoticeFields(error), ...reportFacts(error.atMs)]),
                 },
               }),
         atMs: error.atMs,

@@ -181,7 +181,7 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     const widened = toasts.filter({ hasText: "Access to team was widened outside dohc" });
     await expect(widened).toHaveCount(1, { timeout: 30_000 });
     await expect(widened).toContainText(
-      "Until you choose, dohc doesn't record or share changes in team. Members keep their earlier access.",
+      "Until you choose, dohc doesn't record or share changes in team.",
     );
     await expect(widened).toContainText("Restoring keeps the rule from outside dohc as a copy.");
     await expect(widened).toContainText("Members: View → Edit");
@@ -228,7 +228,7 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await removedRow.getByRole("button", { name: "Details" }).click();
     const details = removedRow.locator("pre");
     await expect(details).toHaveText(
-      /^Recorded rule: members: view\nNoticed: \S[^\n]*\n[\s\S]*\nChange: Members: View → set in Members settings\n/,
+      /^Recorded rule: members: view\nNoticed: \S[^\n]*\nUntil you choose: Members keep their earlier access\.\nChange: Members: View → set in Members settings\n/,
     );
     await shoot(page, "details");
     await removedRow.getByRole("button", { name: "Hide details" }).click();

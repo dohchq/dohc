@@ -100,7 +100,7 @@ export function accessRuleHoldWords(
   openMembers: boolean;
 } {
   const place = placeOf(hold.folder);
-  const until = `Until you choose, dohc doesn't record or share changes in ${place}. Members keep their earlier access.`;
+  const until = `Until you choose, dohc doesn't record or share changes in ${place}.`;
   const rows = hold.changes.map(
     (change) =>
       `${whoOf(change.who)}: ${reachWords(change.before, level)} → ${reachWords(change.after, level)}`,
@@ -319,6 +319,7 @@ export function useAccessRuleHoldNotices(
           hold.recordedRule ?? (hold.unreadable === "recorded" ? "unreadable" : "none"),
         ],
         ["Noticed", new Date(hold.recordedAtMs).toLocaleString()],
+        ["Until you choose", "Members keep their earlier access."],
       ],
       target: targetOf(hold),
       action,
