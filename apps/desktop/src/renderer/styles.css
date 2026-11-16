@@ -630,8 +630,8 @@ body {
  * where they used to join its own. The last thing nested in a list shared the
  * list's space-after, so here it gives its own up. This reaches down through
  * plain lists only: a quote, a callout and a task item keep their children's
- * margins in already. Each line is one more level of nesting, to six levels;
- * a list that ends nested deeper sits 12px higher than its space-after. */
+ * margins in already. Each selector is one more level of nesting, to six
+ * levels: what follows a list that ends nested deeper sits 12px lower. */
 .dohc-notion-editor
   > :is(ul, ol)
   > li:not([data-type="taskItem"], [data-checked]):last-child

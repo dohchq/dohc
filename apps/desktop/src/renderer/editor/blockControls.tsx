@@ -242,6 +242,12 @@ function blockControl(doc: ProseMirrorNode, pos: number, refs: BlockControlRefs)
         onOpenMenuRef.current(currentPos, handle);
       });
 
+      // Enter and Space press the button that has focus. Left to reach the
+      // editor, Enter is typed into the note at the caret.
+      wrap.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+      });
+
       wrap.append(plus, handle);
       live.set(wrap, getPos);
       return wrap;

@@ -751,6 +751,18 @@ describe("blockControls gutter coverage", () => {
     expect(hover(editor, second).map(blockAfter)).toEqual([second]);
   });
 
+  it("leaves Enter and Space on a focused control to the control", () => {
+    const editor = track(paragraphs(3));
+    editor.commands.setTextSelection(topLevelBlocks(editor)[1]!.pos + 3);
+    const before = editor.getJSON();
+    const handle = blockHandle(editor, 1);
+    for (const key of ["Enter", " "]) {
+      handle.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    }
+    // The editor did not split the paragraph the caret is in.
+    expect(editor.getJSON()).toEqual(before);
+  });
+
   it("hides the controls when a held button is let go outside the editor", () => {
     const editor = track(paragraphs(3));
     blockControls(editor, 0);
