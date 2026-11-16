@@ -750,7 +750,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
             document: ListedOwnerDeliveryDocument,
             documents: ListedOwnerDeliveryDocument[],
           ) => {
-            const withOperation = workspaceAuthorities.withOperation;
+            const withOperation = workspaceAuthorities.withOperation?.bind(workspaceAuthorities);
             if (!withOperation) return;
             const objectId = document.binding.objectId,
               end = new AbortController(),

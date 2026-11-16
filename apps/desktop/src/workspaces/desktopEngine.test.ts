@@ -1492,6 +1492,45 @@ describe("server owner peer lifecycle", () => {
     }
   });
 
+  it("keeps one connection for a shared note its owner has open, and passes leave that note to it", async () => {
+    const { f, credentials } = await quarantinedOwner([
+      { path: "notes/plan.md", objectId: "object" },
+      { path: "notes/other.md", objectId: "other" },
+    ]);
+    quarantineMock.read.mockResolvedValue([]);
+    f.dependencies.ownerHasOpen = (_workspaceId, path) => path === "notes/plan.md";
+    ownerDeliveryMock.pass.mockImplementation(async (options) => {
+      if (!options.lasting) return "empty";
+      // The room stays open until something ends it.
+      return new Promise((_, reject) =>
+        options.signal.addEventListener("abort", () => reject(options.signal.reason), {
+          once: true,
+        }),
+      );
+    });
+    const calls = (path: string) =>
+      ownerDeliveryMock.pass.mock.calls
+        .map(([options]) => options)
+        .filter((options) => options.document.binding.currentPath === path);
+    try {
+      expect(await f.engine.start()).toBe(true);
+      await vi.waitFor(() => expect(calls("notes/plan.md")).toHaveLength(1));
+      for (let pass = 0; pass < 2; pass++) {
+        const before = calls("notes/other.md").length;
+        f.engine.retryOwnerDelivery("owner");
+        await vi.waitFor(() => expect(calls("notes/other.md").length).toBeGreaterThan(before));
+      }
+      expect(calls("notes/plan.md")).toHaveLength(1);
+      expect(calls("notes/plan.md")[0].lasting).toBeDefined();
+      expect(calls("notes/other.md").every((options) => !options.lasting)).toBe(true);
+    } finally {
+      credentials.abort();
+      await f.close();
+      ownerDeliveryMock.pass.mockReset();
+      quarantineMock.read.mockReset();
+    }
+  });
+
   it.each([true, false])(
     "follows background Stop recovery in the notices when the release writes the file: %s",
     async (materialized) => {

@@ -136,7 +136,7 @@ async fn committed_row_shows_to_the_owner_and_the_pause_keeps_it_in_a_copy() {
     let sid = opened["sessionId"].as_str().unwrap().to_owned();
     let claim = opened["lineageClaimId"].as_str().unwrap().to_owned();
     let typed = doc.richdoc_append_paragraph("Typed by the owner");
-    service
+    let recorded = service
         .ydoc_record_update(
             &RequestContext::unbounded(),
             Some(handle.clone()),
@@ -151,6 +151,24 @@ async fn committed_row_shows_to_the_owner_and_the_pause_keeps_it_in_a_copy() {
         )
         .await
         .unwrap();
+
+    // Only the owner's delivery connection may say the relay took an edit.
+    let draft = &recorded["ownerDraft"];
+    let taken = json!({"outboxId":draft["outboxId"],"receipt":{
+        "deliveryId":draft["deliveryId"],"updateDigest":draft["updateDigest"],
+        "journalCursor":7,"acceptingHostEpoch":1}});
+    let mut elsewhere = RequestContext::unbounded();
+    for connection in [
+        None,
+        Some(dohc_engine_protocol::transport::ConnectionOwner::authenticated()),
+    ] {
+        elsewhere.connection = connection.as_ref().map(|owner| owner.handle());
+        let refused = service
+            .owner_ydoc_outbox_acknowledge_taken(&elsewhere, Some(handle.clone()), taken.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(refused.message, workspace_unavailable().message);
+    }
 
     // The row reaches the editor through a resync, and the editor shows it.
     let mut events = service.events.subscribe();

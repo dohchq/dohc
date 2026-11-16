@@ -1333,6 +1333,10 @@ impl EngineService {
         let params: OwnerYDocOutboxAcknowledgeTakenParams = parse(params)?;
         let receipt = owner_delivery_receipt(params.receipt)?;
         let handle = handle.ok_or_else(workspace_unavailable)?;
+        // Nothing in the engine proves the relay took it, so only the
+        // connection that delivers the owner's edits may say so.
+        let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
+        self.owner_delivery_connection(connection, Some(&handle))?;
         let open = self.open(Some(&handle))?;
         let cancellation = OperationCancellation::new(ctx);
         let _serial = self
