@@ -874,6 +874,31 @@ it.each([
   },
 );
 
+// Moving a note's file ends its binding, and the room pauses the note. Only the owner can start it again.
+it("tells a link holder a held note whose file moved stopped, not to try again", async () => {
+  const f = await fixture(limits, true);
+  f.raw
+    .prepare("UPDATE sync_relay_shares SET selector_json=?")
+    .run(JSON.stringify({ paths: ["docs"], versionId: null }));
+  f.raw
+    .prepare(
+      `INSERT INTO sync_relay_object_moments (workspace_id, object_id, relay_seq, moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms)
+      VALUES (?, ?, 99, 'moved', 'main', 'docs/moved.md', ?, 'text', 1, 2)`,
+    )
+    .run(binding.workspaceId, binding.objectId, "b".repeat(64));
+  const ask = async () => {
+    const response = await f.post("/sync/live/link-tickets", {
+      discriminator: f.discriminator,
+      objectId: binding.objectId,
+    });
+    return [response.status, await response.json()];
+  };
+  // Before the pause, the holder may try again: the owner's desktop can host the note at its new path.
+  expect(await ask()).toEqual([503, linkRefusalBody("link_live_unavailable")]);
+  f.sessionHostBlocked.mockReturnValue("held");
+  expect(await ask()).toEqual([503, linkRefusalBody("link_live_stopped")]);
+});
+
 it.each([false, true])(
   "asks a link holder or agent to try again while its share of tickets is full; link=%s",
   async (link) => {
