@@ -17,9 +17,13 @@ harm inline-math/1/tight/formula>tag/heading keeps-changing
 # doc-changes: the second reading differs from the first.
 # second-save-changes: the second save writes other bytes, then settles.
 # container-changes-text: a container reads its text unlike a paragraph.
+# punctuation-changes: a save moves a literal `*`, `=` or `$`, or makes it a
+# mark, as a literal `==` that reads as a highlight once written.
 sample container-changes-text 215
-sample doc-changes 603
-sample second-save-changes 49
+sample doc-changes 594
+sample punctuation-changes 60
+sample second-save-changes 45
 full container-changes-text 8369
-full doc-changes 22475
-full second-save-changes 1773
+full doc-changes 22252
+full punctuation-changes 2383
+full second-save-changes 1656

@@ -639,9 +639,19 @@ impl<'a> Reader<'a> {
     }
 
     fn push_piece(&mut self, piece: Piece, source: &Range<usize>) {
-        // A node can't keep a mark or a link around it.
-        let unsure = matches!(&piece, Piece::Node(node)
-            if holds_no_marks(node) && !self.marks.writes_as(&Marks::default()));
+        // A node can't keep a mark or a link around it. The writer moves
+        // italic, bold and strike into a link's text and keeps a `*` or `~`
+        // there as it is, where it can close the mark early and move.
+        let unsure = match &piece {
+            Piece::Node(node) => holds_no_marks(node) && !self.marks.writes_as(&Marks::default()),
+            Piece::Text { text, marks, .. } => {
+                marks.link.is_some()
+                    && !marks.code
+                    && (((marks.italic || marks.bold) && text.contains('*'))
+                        || (marks.strike && text.contains('~')))
+            }
+            _ => false,
+        };
         let frame = self.top();
         frame.sealed |= unsure;
         frame.pieces.push(piece);

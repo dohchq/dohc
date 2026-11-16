@@ -269,6 +269,125 @@ mod generated {
         found
     }
 
+    /// What a reading shows.
+    #[derive(Default)]
+    struct Shown {
+        /// Its text in order. Runs of a block join as they show, and a node
+        /// stands apart with its values.
+        text: String,
+        /// Its marks' values, such as a link's address.
+        marks: String,
+        /// Each run of code.
+        code: Vec<String>,
+    }
+
+    impl Shown {
+        fn of(body: &Value) -> Self {
+            let mut shown = Self::default();
+            shown.add(body);
+            shown
+        }
+
+        fn add(&mut self, value: &Value) {
+            match value {
+                Value::Array(items) => items.iter().for_each(|item| self.add(item)),
+                Value::Object(fields) => {
+                    if let Some(Value::String(text)) = fields.get("insert") {
+                        self.text.push_str(text);
+                        if let Some(attrs) = fields.get("attrs") {
+                            if attrs.get("code").is_some() {
+                                self.code.push(text.clone());
+                            }
+                            strings(attrs, &mut self.marks);
+                        }
+                        return;
+                    }
+                    let node = fields.contains_key("tag");
+                    if node {
+                        self.text.push('\n');
+                        if let Some(Value::Object(attrs)) = fields.get("attrs") {
+                            attrs
+                                .values()
+                                .for_each(|value| strings(value, &mut self.text));
+                        }
+                    }
+                    for key in ["children", "delta"] {
+                        if let Some(items) = fields.get(key) {
+                            self.add(items);
+                        }
+                    }
+                    if node {
+                        self.text.push('\n');
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn words(&self) -> Vec<String> {
+            let mut words = tokens(&self.text);
+            words.extend(tokens(&self.marks));
+            words
+        }
+    }
+
+    /// Each string in `value`, each on a line of its own.
+    fn strings(value: &Value, out: &mut String) {
+        match value {
+            Value::String(text) => {
+                out.push_str(text);
+                out.push('\n');
+            }
+            Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+            Value::Object(fields) => fields.values().for_each(|field| strings(field, out)),
+            _ => {}
+        }
+    }
+
+    /// Whether `found` shows each character of `wanted` outside white space,
+    /// in the same order.
+    fn in_order(found: &str, wanted: &str) -> bool {
+        let mut found = found.chars().filter(|c| !c.is_whitespace());
+        wanted
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .all(|c| found.any(|f| f == c))
+    }
+
+    #[test]
+    fn a_dropped_repeat_or_joined_words_count_as_lost() {
+        let wanted = tokens("qa qa qb");
+        assert!(keeps(&tokens("**qa** qa [qb](qu)"), &wanted));
+        assert!(!keeps(&tokens("qa qb"), &wanted));
+        assert!(!keeps(&tokens("qa qaqb"), &wanted));
+        // Two runs show as one word; a node and its neighbour don't.
+        let shown = Shown::of(&serde_json::json!([
+            {"delta": [{"attrs": {"italic": {}, "link": {"href": "qu"}}, "insert": "q2"},
+                {"attrs": {"code": {}}, "insert": "q3  q4"}]},
+            {"tag": "mathInline", "attrs": {"tex": "qx"}, "children": []},
+            {"delta": [{"insert": "qy"}]}
+        ]));
+        assert_eq!(shown.words(), ["q2q3", "q4", "qx", "qy", "qu"]);
+        assert_eq!(shown.code, ["q3  q4"]);
+        assert!(in_order("**q2*q3**", "q2*q3") && !in_order("q2q3*", "q2*q3"));
+    }
+
+    /// Whether `found` holds each word of `wanted` as often as `wanted` does,
+    /// so a dropped repeat or two words joined into one count as lost.
+    fn keeps(found: &[String], wanted: &[String]) -> bool {
+        let mut left: HashMap<&str, usize> = HashMap::new();
+        for word in found {
+            *left.entry(word.as_str()).or_default() += 1;
+        }
+        wanted.iter().all(|word| match left.get_mut(word.as_str()) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                true
+            }
+            _ => false,
+        })
+    }
+
     pub(super) fn check(
         case: &Case,
         plain: &mut HashMap<String, Option<Vec<Value>>>,
@@ -305,19 +424,33 @@ mod generated {
         if grows {
             fails.push("keeps-changing");
         }
-        let json = first.to_string();
-        if tokens(&case.inline)
-            .iter()
-            .any(|token| !json.contains(token.as_str()))
-        {
+        let wanted = tokens(&case.inline);
+        let in_runs = |body: &Value| {
+            let mut found = String::new();
+            strings(body, &mut found);
+            tokens(&found)
+        };
+        if !keeps(&in_runs(&first), &wanted) {
             fails.push("text-lost");
         }
-        let settled = second.to_string();
-        if tokens(&case.inline)
-            .iter()
-            .any(|token| !settled.contains(token.as_str()) || !written.contains(token.as_str()))
+        // A save keeps the words as the first reading shows them, so two
+        // words it joins count as lost, and code keeps its white space:
+        // `a  b` and `a b` are different code.
+        let (before, after) = (Shown::of(&first), Shown::of(&second));
+        if !keeps(&in_runs(&second), &wanted)
+            || !keeps(&tokens(&written), &wanted)
+            || !keeps(&after.words(), &before.words())
+            || before
+                .code
+                .iter()
+                .any(|run| !after.text.contains(run.as_str()))
         {
             fails.push("text-lost-after-save");
+        }
+        // Punctuation that moves or becomes a mark, as a literal `==` that
+        // reads as a highlight once written.
+        if !in_order(&after.text, &before.text) {
+            fails.push("punctuation-changes");
         }
         let reference = plain
             .entry(case.inline.clone())
