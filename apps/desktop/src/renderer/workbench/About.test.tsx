@@ -357,17 +357,11 @@ describe("About Access", () => {
     expect(row.textContent).toBe("AYouCan comment");
   });
 
-  // Members answers only the account that joined. The band says why once, so Access says it in
-  // the same words and offers no Try again that could not succeed.
-  it.each([
-    [
-      "lee@dohc.test",
-      "This computer is signed in as lee@dohc.test, not the account the owner invited.",
-    ],
-    [null, "This computer is signed in to a different account than the one the owner invited."],
-  ] as const)(
+  // Members answers only the account that joined. The band says why, with Switch account, so Access
+  // says only why it lists no one, and offers no Try again that could not succeed.
+  it.each(["lee@dohc.test", null] as const)(
     "says another account is signed in, in place of Members, for %s",
-    async (email, words) => {
+    async (email) => {
       bridgeMock.workspaceMembers.mockRejectedValue(
         new Error(
           "This computer is signed in to a different account than the one the owner invited.",
@@ -390,12 +384,10 @@ describe("About Access", () => {
       );
       render(<Access membershipLevel="edit" otherAccount={{ email }} />);
       const note = await screen.findByTestId("about-access-other-account");
-      expect(note.textContent).toBe(`${words}Switch account`);
+      expect(note.textContent).toBe("Signed in as another account");
       expect(screen.queryByTestId("about-access-failed")).toBeNull();
-      expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+      expect(within(note).queryByRole("button")).toBeNull();
       expect(screen.queryByTestId("about-access-count")).toBeNull();
-      act(() => within(note).getByRole("button", { name: "Switch account" }).click());
-      expect(openSyncSettings).toHaveBeenCalled();
       expect(bridgeMock.workspaceMembers).not.toHaveBeenCalled();
       expect(notices.report).not.toHaveBeenCalled();
     },

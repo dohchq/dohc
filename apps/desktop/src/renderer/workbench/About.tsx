@@ -38,7 +38,6 @@ import type {
   EngineMomentRecord,
 } from "../../ipc/bridgeContract";
 import { isChatMentionPageChanged, isWorkspaceUpdatingError } from "../../ipc/errorWords";
-import { joinedByAnother } from "../../ipc/joinedAccountWords";
 import { bridge } from "../bridge";
 import { SYNC_UNCONFIRMED_ACCOUNT } from "../cloudSyncWords";
 import { ipcErrorMessage } from "../ipcError";
@@ -1806,13 +1805,9 @@ export function AboutAccess(props: {
   if (otherAccount && !membershipEnded) {
     return (
       <AboutSection id="access" label="Access" expanded={props.expanded} onToggle={props.onToggle}>
-        <AboutNote
-          testId="about-access-other-account"
-          reason="other-account"
-          icon={User}
-          action={{ label: "Switch account", run: openSyncSettings }}
-        >
-          {joinedByAnother(otherAccount.email)}
+        {/* The band says why, with Switch account. Access only says why it lists no one. */}
+        <AboutNote testId="about-access-other-account" reason="other-account" icon={User}>
+          Signed in as another account
         </AboutNote>
       </AboutSection>
     );

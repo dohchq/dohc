@@ -191,7 +191,7 @@ describe("a joined workspace", () => {
     vi.stubGlobal("dohcDesktop", bridge);
     render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access: "edit" } }));
     const note = await screen.findByTestId("about-access-other-account");
-    expect(note.textContent).toBe("This computer is signed in as lee@dohc.test, not the account the owner invited.Switch account");
+    expect(note.textContent).toBe("Signed in as another account");
     expect(screen.queryByTestId("about-access-failed")).toBeNull();
     // A Members read started before the account check answered reports nothing of its own.
     expect(document.body.textContent).not.toContain("dohc could not load Members.");
