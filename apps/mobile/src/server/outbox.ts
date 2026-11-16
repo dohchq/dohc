@@ -11,7 +11,7 @@ import {
 } from "./chatWrites";
 import { ServerError } from "./client";
 import { sleep as timerSleep } from "./deviceFlow";
-import { StoreError, type KeptStore, type Row, type Sql } from "./keptStore";
+import { deleteAccountRows, StoreError, type KeptStore, type Row, type Sql } from "./keptStore";
 import type { ChatMessage } from "./workspaceReads";
 
 // The phone's outbox: chat writes the person made, kept on disk until the server has them and a read shows them.
@@ -41,8 +41,8 @@ import type { ChatMessage } from "./workspaceReads";
 // same operation ID and arguments until it's saved or refused, so it is written at most once. A 401 pauses sending and
 // keeps every record.
 //
-// Sign out, through `signOut`, stops sending and deletes the rows of the account last signed in, in one commit, then
-// empties the WAL, whose older frames still hold their text. Only then does the account end the sign-in and delete
+// Sign out, through `signOut`, stops sending and deletes the rows of the account last signed in, its Notice marks and
+// list too (deleteAccountRows), in one commit, then empties the WAL, whose older frames still hold their text. Only then does the account end the sign-in and delete
 // its token. If the commit fails, Sign out fails, a phone still signed in stays signed in, and `state()` shows the
 // failure, so Connect can say so after a 401 has already signed the phone out. The next Sign out deletes the rows of
 // every account whose Sign out failed, whoever has signed in since. From the moment Sign out starts until one finishes,
@@ -222,10 +222,13 @@ export interface Outbox {
     messages: readonly ChatMessage[],
   ): void;
   /**
-   * Stops sending and deletes the last signed-in account's rows, or a damaged kept.db, in one commit, then calls
-   * `leave` and resolves once it has. Rejects as `not-deleted`, without calling `leave`, when the commit fails.
+   * Stops sending and deletes the last signed-in account's rows, its Notice marks and list included, or a damaged
+   * kept.db, in one commit, then calls `leave` and resolves once it has. Rejects as `not-deleted`, without calling
+   * `leave`, when the commit fails.
    */
   signOut(leave: () => Promise<void>): Promise<void>;
+  /** Whether Sign out holds kept.db: one under way, or one whose delete failed. Nothing else writes to it meanwhile. */
+  holding(): boolean;
   /** Tries again what failed: reading, and dependency changes. Cuts every retry wait short. */
   wake(): void;
   /** Reads the records, then sends with each sign-in. A 401 only pauses. Returns a stop. */
@@ -1160,12 +1163,7 @@ export function createOutbox(options: {
         if (damaged) await store.destroy();
         else if (accounts.some((account) => account !== null)) {
           await transact(async (sql) => {
-            for (const account of accounts)
-              if (account)
-                await sql.run("DELETE FROM outbox WHERE origin = ? AND account_id = ?", [
-                  account.origin,
-                  account.userId,
-                ]);
+            for (const account of accounts) if (account) await deleteAccountRows(sql, account);
           });
           // The WAL's older frames still hold the deleted text, so Sign out fails until the checkpoint empties it.
           await store.checkpoint();
@@ -1197,6 +1195,8 @@ export function createOutbox(options: {
         },
       );
     },
+
+    holding: () => held,
 
     wake() {
       nudge.abort();

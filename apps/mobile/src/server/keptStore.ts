@@ -1,7 +1,8 @@
-// kept.db, the phone's file for work it must not lose. Every statement runs on one connection through one queue, so
-// none joins another's transaction; don't use expo-sqlite's transaction helpers, which open a connection without the
-// durability settings. Each open sets those settings and refuses to open unless each reads back as set. Nothing here
-// replaces a damaged file.
+// The phone's two SQLite files. kept.db holds work it must not lose; cache.db, in Caches, holds read copies it may
+// throw away. Each file's statements run on one connection through its own queue, so none joins another's transaction
+// and a cache save never waits on a Send; don't use expo-sqlite's transaction helpers, which open a connection without
+// the settings. Each open sets those settings and refuses to open unless each reads back as set. Nothing here replaces
+// a damaged kept.db. A damaged cache.db, or one of another format, is deleted and starts empty.
 
 export type SqlValue = string | number | null;
 export type Row = Readonly<Record<string, unknown>>;
@@ -42,26 +43,77 @@ export interface KeptStore {
   destroy(): Promise<void>;
 }
 
+/** cache.db's store: it needs no checkpoint, since deleting it is how its rows go. */
+export type CacheStore = Omit<KeptStore, "checkpoint">;
+
 export const KEPT_FILE = "kept.db";
+export const CACHE_FILE = "cache.db";
 
 /**
- * The outbox's writes, one row each. AUTOINCREMENT never gives a committed sequence again, even once its row is
- * deleted, but a rolled-back insert's sequence comes back: the outbox allocates past any it still holds in memory.
+ * `outbox`: the outbox's writes, one row each. AUTOINCREMENT never gives a committed sequence again, even once its row
+ * is deleted, but a rolled-back insert's sequence comes back: the outbox allocates past any it still holds in memory.
+ * `notice_lists`: each account's last whole Notice list, as JSON. `notice_marks`: its marks the server hasn't taken,
+ * in the order they were made, each with the key the phone made for it, so a retried insert finds its row.
  */
 export const KEPT_SCHEMA = `CREATE TABLE IF NOT EXISTS outbox (
   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
   origin TEXT NOT NULL,
   account_id TEXT NOT NULL,
   record TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS notice_lists (
+  origin TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  rows TEXT NOT NULL,
+  PRIMARY KEY (origin, account_id)
+) STRICT;
+CREATE TABLE IF NOT EXISTS notice_marks (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT NOT NULL UNIQUE,
+  origin TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  notice_id TEXT NOT NULL,
+  mark TEXT NOT NULL,
+  at_ms INTEGER NOT NULL
 ) STRICT`;
 
+/** Raise it when a table's layout, or the shape of a view's value, changes: an older cache.db is then deleted unread. */
+export const CACHE_FORMAT = 1;
+
+/** `views`: each workspace's saved views, as JSON, and their size. `lists`: each account's workspace list. */
+export const CACHE_SCHEMA = `CREATE TABLE IF NOT EXISTS views (
+  scope TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  used_at INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS lists (scope TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT`;
+
+/** Deletes every row kept.db holds for the account, in the caller's transaction. Sign out runs it in one commit. */
+export async function deleteAccountRows(sql: Sql, account: { origin: string; userId: string }) {
+  for (const table of ["outbox", "notice_lists", "notice_marks"])
+    await sql.run(`DELETE FROM ${table} WHERE origin = ? AND account_id = ?`, [
+      account.origin,
+      account.userId,
+    ]);
+}
+
+type Setting = readonly [name: string, value: string, readBack: string | number];
+
 /** Each setting, the value it's set to, and what reading it back must give. */
-const SETTINGS: readonly (readonly [string, string, string | number])[] = [
+const KEPT_SETTINGS: readonly Setting[] = [
   ["journal_mode", "WAL", "wal"],
   ["synchronous", "FULL", 2],
   ["fullfsync", "ON", 1],
   ["checkpoint_fullfsync", "ON", 1],
   ["secure_delete", "ON", 1],
+  ["busy_timeout", "5000", 5000],
+];
+
+/** The cache needs no flush per commit: a close may lose its last saves, never its file. */
+const CACHE_SETTINGS: readonly Setting[] = [
+  ["journal_mode", "WAL", "wal"],
+  ["synchronous", "NORMAL", 1],
   ["busy_timeout", "5000", 5000],
 ];
 
@@ -78,12 +130,28 @@ function classify(error: unknown): StoreError {
   return new StoreError(DAMAGED.test(message) ? "damaged" : "failed", message);
 }
 
-export function createKeptStore(file: {
+export interface StoreFile {
   /** Prepares the folder and opens the file, rejecting with the durable-file module's code while locked. */
   open(): Promise<SqlConnection>;
   /** Deletes the closed file and its journal. */
   remove(): Promise<void>;
-}): KeptStore {
+}
+
+export const createKeptStore = (file: StoreFile): KeptStore =>
+  createStore(file, KEPT_FILE, KEPT_SETTINGS, KEPT_SCHEMA, null);
+
+/** cache.db: a damaged file, or one of another format, is deleted, and the next call starts it empty. */
+export const createCacheStore = (file: StoreFile): CacheStore =>
+  createStore(file, CACHE_FILE, CACHE_SETTINGS, CACHE_SCHEMA, CACHE_FORMAT);
+
+function createStore(
+  file: StoreFile,
+  name: string,
+  settings: readonly Setting[],
+  schema: string,
+  /** The disposable file's format, or null for a file nothing replaces. */
+  format: number | null,
+): KeptStore {
   let connection: SqlConnection | null = null;
   let queue: Promise<unknown> = Promise.resolve();
   function serial<T>(run: () => Promise<T>): Promise<T> {
@@ -92,27 +160,56 @@ export function createKeptStore(file: {
     return result;
   }
 
-  /** The open connection, or a new one, set up. A failed open is tried again by the next call. */
-  async function connect(): Promise<SqlConnection> {
-    if (connection) return connection;
+  async function setUp(): Promise<SqlConnection> {
     let opened: SqlConnection | null = null;
     try {
       opened = await file.open();
-      for (const [name, value] of SETTINGS) await opened.exec(`PRAGMA ${name} = ${value}`);
-      for (const [name, value, expected] of SETTINGS) {
-        const [row] = await opened.all(`PRAGMA ${name}`, []);
+      for (const [setting, value] of settings) await opened.exec(`PRAGMA ${setting} = ${value}`);
+      for (const [setting, value, expected] of settings) {
+        const [row] = await opened.all(`PRAGMA ${setting}`, []);
         if (!row || Object.values(row)[0] !== expected)
-          throw new StoreError("refused", `kept.db didn't take ${name} = ${value}.`);
+          throw new StoreError("refused", `${name} didn't take ${setting} = ${value}.`);
       }
-      await opened.exec(KEPT_SCHEMA);
+      if (format !== null) {
+        const [row] = await opened.all("PRAGMA user_version", []);
+        const found = row?.user_version;
+        if (found !== 0 && found !== format)
+          throw new StoreError("damaged", `${name} is of another format.`);
+        await opened.exec(`PRAGMA user_version = ${format}`);
+      }
+      await opened.exec(schema);
       // A Sign out whose own checkpoint failed, or the app closing after it, can leave deleted text in the WAL.
       await opened.all(CHECKPOINT, []).catch(() => undefined);
     } catch (error) {
       await opened?.close().catch(() => undefined);
       throw classify(error);
     }
-    connection = opened;
     return opened;
+  }
+
+  /** The open connection, or a new one, set up. A failed open is tried again by the next call. */
+  async function connect(): Promise<SqlConnection> {
+    if (connection) return connection;
+    try {
+      connection = await setUp();
+    } catch (error) {
+      if (format === null || classify(error).kind !== "damaged") throw error;
+      await file.remove().catch(() => undefined);
+      connection = await setUp();
+    }
+    return connection;
+  }
+
+  /** The error to report. A damaged disposable file is closed and deleted, so the next call starts it empty. */
+  async function failure(error: unknown): Promise<StoreError> {
+    const failed = classify(error);
+    if (format !== null && failed.kind === "damaged") {
+      const open = connection;
+      connection = null;
+      await open?.close().catch(() => undefined);
+      await file.remove().catch(() => undefined);
+    }
+    return failed;
   }
 
   /** Ends a failed transaction. A connection that can't roll back is closed, so the next call opens a fresh one. */
@@ -129,8 +226,8 @@ export function createKeptStore(file: {
     read: (source, params) =>
       serial(async () => {
         const open = await connect();
-        return open.all(source, params).catch((error: unknown) => {
-          throw classify(error);
+        return open.all(source, params).catch(async (error: unknown) => {
+          throw await failure(error);
         });
       }),
 
@@ -143,7 +240,7 @@ export function createKeptStore(file: {
           result = await body(open);
         } catch (error) {
           await rollBack(open);
-          throw classify(error);
+          throw await failure(error);
         }
         try {
           await open.exec("COMMIT");
@@ -161,7 +258,7 @@ export function createKeptStore(file: {
           throw classify(error);
         });
         // SQLite reports a checkpoint it couldn't finish in its answer, not as an error.
-        if (row?.busy !== 0) throw new StoreError("failed", "kept.db's WAL wasn't emptied.");
+        if (row?.busy !== 0) throw new StoreError("failed", `${name}'s WAL wasn't emptied.`);
       }),
 
     destroy: () =>

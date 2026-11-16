@@ -1,6 +1,37 @@
+import type { NoticeMark } from "@dohc/workspace-contracts/relay";
 import { describe, expect, it, vi } from "vitest";
 import type { ToastMessage } from "./Toast";
-import { closeToast, doneToast, hideToast, NO_TOASTS, showToast } from "./toastSlots";
+import { closeToast, doneToast, hideToast, markDone, NO_TOASTS, showToast } from "./toastSlots";
+
+describe("Done on a Notice from the server", () => {
+  it("offers its Undo only once the phone keeps the dismissal, and Undo restores after it", async () => {
+    const made: NoticeMark[] = [];
+    let keep!: (kept: boolean) => void;
+    const mark = (_: string, next: NoticeMark) => {
+      made.push(next);
+      return next === "dismissed"
+        ? new Promise<boolean>((done) => (keep = done))
+        : Promise.resolve(true);
+    };
+    const show = vi.fn<(message: ToastMessage) => void>();
+    const done = markDone(mark, "n1", show);
+    await Promise.resolve();
+    expect(show).not.toHaveBeenCalled();
+    keep(true);
+    await done;
+    expect(show).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Marked done", holdsUndo: true }),
+    );
+    show.mock.calls[0]?.[0].action?.onPress?.();
+    expect(made).toEqual(["dismissed", "restore"]);
+  });
+
+  it("shows nothing when the dismissal isn't kept, so the store's report stands alone", async () => {
+    const show = vi.fn<(message: ToastMessage) => void>();
+    await markDone(async () => false, "n1", show);
+    expect(show).not.toHaveBeenCalled();
+  });
+});
 
 const failure: ToastMessage = {
   id: "notices:marks",

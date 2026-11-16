@@ -1,5 +1,5 @@
 import { accountWords } from "@dohc/interface-words/account";
-import { noticesWords } from "@dohc/interface-words/notices";
+import { noticeStorageWords, noticesWords } from "@dohc/interface-words/notices";
 import { useRouter } from "expo-router";
 import {
   createContext,
@@ -18,7 +18,7 @@ import { useLocalActions, useOutboxState } from "../conversation/useOutbox";
 import { demoMode } from "../demo";
 import { sampleBuild } from "../sampleBuild";
 import type { NoticeRecord } from "../server/notices";
-import type { NoticeFailure, NoticeListState } from "../server/noticeStore";
+import { isStorageProblem, type NoticeFailure, type NoticeListState } from "../server/noticeStore";
 import { serverName } from "../server/origin";
 import { phoneWrites } from "../server/phoneWrites";
 import { readChats, readThread } from "../server/workspaceReads";
@@ -47,7 +47,7 @@ import {
 } from "./noticeWrites";
 import { phoneTarget, presentNotice, type PhoneNotice, type PhoneTarget } from "./phoneNotice";
 import { useHideToast, useShowToast } from "./Toast";
-import { doneToast } from "./toastSlots";
+import { markDone } from "./toastSlots";
 
 // The sample's notices, in a sample build only (src/sampleBuild.ts).
 // src/routes.test.ts reads the next statement as text, on one line.
@@ -297,7 +297,7 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
   // Opening reads the Notice, and opens its target in its own workspace. It never runs anything.
   const open = useCallback(
     (record: NoticeRecord, target: PhoneTarget) => {
-      if (record.readAtMs === null) store?.mark(record.noticeId, "read");
+      if (record.readAtMs === null) void store?.mark(record.noticeId, "read");
       if (target.kind === "agents") return router.push("/settings");
       chooseWorkspace(target.workspaceId);
       if (target.kind === "page")
@@ -334,7 +334,7 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
         return target ? open(record, target) : undefined;
       }
       const { workspaceId, threadId, messageId } = action.target;
-      if (record.readAtMs === null) store?.mark(record.noticeId, "read");
+      if (record.readAtMs === null) void store?.mark(record.noticeId, "read");
       chooseWorkspace(workspaceId);
       router.push({
         pathname: "/chat/[id]",
@@ -354,7 +354,7 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
   const answer = useCallback(
     (record: NoticeRecord) => {
       if (editor.open(`relay:${record.noticeId}`)) {
-        if (record.readAtMs === null) store?.mark(record.noticeId, "read");
+        if (record.readAtMs === null) void store?.mark(record.noticeId, "read");
         return;
       }
       const target = phoneTarget(record, latest.current.workspaces);
@@ -600,15 +600,14 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
     (id: string) => {
       const relayId = shown.current.find((notice) => notice.id === id)?.relayId;
       if (relayId === undefined) return local.remove(id);
-      store?.mark(relayId, "dismissed");
-      showToast(doneToast(relayId, () => store?.mark(relayId, "restore")));
+      if (store) void markDone(store.mark, relayId, showToast);
     },
     [store, local.remove, showToast],
   );
   const setRead = useCallback(
     (id: string, read: boolean) => {
       const relayId = shown.current.find((entry) => entry.id === id)?.relayId;
-      if (relayId !== undefined) store?.mark(relayId, read ? "read" : "unread");
+      if (relayId !== undefined) void store?.mark(relayId, read ? "read" : "unread");
     },
     [store],
   );
@@ -648,7 +647,8 @@ function ServerNoticesState({ children }: { children: ReactNode }) {
 
 /**
  * Reports a failing read or send of the account's Notices once, as a toast on the other tabs and a row here, both with
- * Try again. Its next success takes both back.
+ * Try again. Its next success takes both back. A failure of this phone's storage takes its own words, which say what
+ * it means for the person's changes. A Sign out that hasn't finished gets no Try again, since trying again can't help.
  */
 function useReport(
   id: string,
@@ -671,28 +671,29 @@ function useReport(
       remove(id);
     }
     if (!step.show || state.problem === null) return;
-    const body =
-      state.problem === "storage"
-        ? noticesWords.marksNotStored
-        : accountWords.problem(state.problem, server);
+    const problem = state.problem;
+    const words = isStorageProblem(problem)
+      ? noticeStorageWords[problem]
+      : { title, body: accountWords.problem(problem, server) };
+    const retries = problem !== "held";
     showToast({
       id,
       tone: "failure",
-      title,
-      body,
-      action: { label: noticesWords.tryAgain, onPress: retry },
+      title: words.title,
+      body: words.body,
+      ...(retries ? { action: { label: noticesWords.tryAgain, onPress: retry } } : {}),
     });
     add({
       id,
       senderKind: null,
       senderLabel: "",
-      title,
-      body,
+      title: words.title,
+      body: words.body,
       minutesAgo: 0,
       atMs: Date.now(),
       read: false,
-      retry: true,
-      onRetry: retry,
+      retry: retries,
+      onRetry: retries ? retry : undefined,
       dismissible: true,
       failed: true,
     });
