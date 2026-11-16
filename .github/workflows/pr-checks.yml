@@ -224,6 +224,8 @@ jobs:
               - 'examples/trip-poll/**'
               - 'examples/fundraiser/**'
               - 'examples/stock-orders/**'
+              # The viewer's build reads this, and one share page test builds the viewer itself.
+              - 'tools/single-react.ts'
               - 'scripts/verification/**'
               - 'scripts/lib/**'
               - 'tools/rust-engine-program/**'

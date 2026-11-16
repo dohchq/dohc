@@ -876,6 +876,7 @@ test("the editing-together check is selected by what it runs and loads, and only
     // The share page's own tests, and an app they publish.
     "services/share-web/e2e/smoke.spec.ts",
     "examples/trip-poll/package.json",
+    "tools/single-react.ts",
     "scripts/verification/wait-preparation.mjs",
     "pnpm-lock.yaml",
     ".github/workflows/pr-checks.yml",
