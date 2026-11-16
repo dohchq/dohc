@@ -134,7 +134,8 @@ describe("a joined workspace", () => {
     const note = await screen.findByTestId("about-access-other-account");
     expect(note.textContent).toBe("This computer is signed in as lee@dohc.test, not the account the owner invited.Switch account");
     expect(screen.queryByTestId("about-access-failed")).toBeNull();
-    expect(bridge.workspaceMembers).not.toHaveBeenCalled();
+    // A Members read started before the account check answered reports nothing of its own.
+    expect(document.body.textContent).not.toContain("dohc could not load Members.");
   });
 
   it("shows no Group composer at Comment while another account is signed in", async () => {
