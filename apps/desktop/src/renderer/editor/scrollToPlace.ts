@@ -7,8 +7,9 @@
  * time and moves what is below it. */
 const SETTLE_MS = 1500;
 
-/** The far jump that is still keeping its target in place. A later jump ends it. */
-let settling: object | null = null;
+/** The far jump that is still keeping its target in place. A later jump ends
+ * it, and so does anything else that scrolls the view. */
+let settling: AbortController | null = null;
 
 /**
  * Scrolls `target` into view, to the top of its scroller or, with `nearest`,
@@ -18,17 +19,18 @@ let settling: object | null = null;
  * takes its real height and moves it, so each frame looks where the target's
  * block is and scrolls by as much as it moved, until it has been still.
  *
- * The block is what is followed: the editor draws a find match again as
- * another element, and takes a reveal's flash away, while the jump settles.
- * A scroll that is not this jump's ends it: the person, or another part of
- * the app, took the view elsewhere.
+ * The target is followed while it is in the note, and its block after that:
+ * the editor draws a find match again as another element, and takes a
+ * reveal's flash away, while the jump settles. The jump ends when the person
+ * turns the wheel or presses, and when anything else scrolls the pane, as the
+ * editor does to show its caret.
  */
 export function scrollToPlace(
   target: HTMLElement,
   smooth: boolean,
   block: "start" | "nearest" = "start",
 ): void {
-  settling = null;
+  settling?.abort();
   const { top } = target.getBoundingClientRect();
   const near = top > -window.innerHeight && top < 2 * window.innerHeight;
   if (near) {
@@ -44,21 +46,35 @@ export function scrollToPlace(
   target.scrollIntoView({ behavior: "auto", block });
   const pane = ancestors.find((ancestor, index) => ancestor.scrollTop !== before[index]);
   if (!pane) return;
-  const jump = {};
+  const jump = new AbortController();
   settling = jump;
-  const held = target.closest<HTMLElement>(".dohc-notion-editor > *") ?? target;
+  for (const move of ["wheel", "pointerdown"] as const) {
+    window.addEventListener(move, () => jump.abort(), {
+      capture: true,
+      passive: true,
+      signal: jump.signal,
+    });
+  }
+  const around = target.closest<HTMLElement>(".dohc-notion-editor > *") ?? target;
+  let held = target;
   let stillSince = performance.now();
   let heldTop = held.getBoundingClientRect().top;
+  let aroundTop = around.getBoundingClientRect().top;
   let paneTop = pane.scrollTop;
   const settle = () => {
-    if (settling !== jump) return;
+    if (jump.signal.aborted) return;
+    if (!held.isConnected && held !== around) {
+      // From here its block stands for it, from where the block last was.
+      held = around;
+      heldTop = aroundTop;
+    }
     const moved = held.getBoundingClientRect().top - heldTop;
     const scrolled = pane.scrollTop - paneTop;
-    // A scroll moves the block by as much the other way. A scroll the browser
-    // makes to keep the view still through a change above it does not.
+    // A scroll moves what is held by as much the other way. A scroll the
+    // browser makes to keep the view still through a change above it does not.
     const tookElsewhere = Math.abs(scrolled) >= 1 && Math.abs(moved + scrolled) < 1;
     if (!held.isConnected || tookElsewhere) {
-      settling = null;
+      jump.abort();
       return;
     }
     // Where it is comes before how long it has been: a frame that waited
@@ -67,10 +83,11 @@ export function scrollToPlace(
       pane.scrollTop += moved;
       stillSince = performance.now();
     } else if (performance.now() - stillSince > SETTLE_MS) {
-      settling = null;
+      jump.abort();
       return;
     }
     heldTop = held.getBoundingClientRect().top;
+    aroundTop = around.getBoundingClientRect().top;
     paneTop = pane.scrollTop;
     requestAnimationFrame(settle);
   };

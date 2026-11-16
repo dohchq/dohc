@@ -21,18 +21,19 @@ function note() {
   pane.append(body);
   document.body.append(pane);
   const block = (at: number) => {
-    const place = { at };
+    // `within` is how far down its block the target is.
+    const place = { at, within: 0 };
     const element = document.createElement("p");
     const target = document.createElement("span");
     element.append(target);
     body.append(element);
     const scrolls: ScrollIntoViewOptions[] = [];
-    const rect = () => ({ top: place.at - pane.scrollTop }) as DOMRect;
-    element.getBoundingClientRect = rect;
+    element.getBoundingClientRect = () => ({ top: place.at - pane.scrollTop }) as DOMRect;
+    const rect = () => ({ top: place.at + place.within - pane.scrollTop }) as DOMRect;
     target.getBoundingClientRect = rect;
     target.scrollIntoView = (options) => {
       scrolls.push(options as ScrollIntoViewOptions);
-      pane.scrollTop = place.at;
+      pane.scrollTop = place.at + place.within;
     };
     return { element, target, scrolls, place, top: () => rect().top };
   };
@@ -103,6 +104,18 @@ describe("a scroll to a place in the note", () => {
     expect(queue).toHaveLength(1);
   });
 
+  it("follows the target as what is above it in its own block grows", () => {
+    const run = frames();
+    const { block } = note();
+    const { target, place, top } = block(FAR);
+    place.within = 40;
+    scrollToPlace(target, false);
+    // A diagram in the same quote draws: the block stays, the target moves.
+    place.within += 500;
+    run();
+    expect(top()).toBe(0);
+  });
+
   it("follows the block when the element it scrolled to is gone", () => {
     const run = frames();
     const { block } = note();
@@ -140,6 +153,23 @@ describe("a scroll to a place in the note", () => {
     place.at += 300;
     run();
     expect(top()).toBe(5_300);
+  });
+
+  it("lets go at once when the person turns the wheel or presses", () => {
+    for (const move of [new WheelEvent("wheel"), new Event("pointerdown")]) {
+      const run = frames();
+      const { pane, block } = note();
+      const { target, place, top } = block(FAR);
+      scrollToPlace(target, false);
+      window.dispatchEvent(move);
+      // The wheel moved the view while a block above grew, in one frame.
+      pane.scrollTop += 100;
+      place.at += 200;
+      expect(run()).toBe(false);
+      expect(top()).toBe(100);
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("keeps hold through a scroll the browser makes to keep the view still", () => {
