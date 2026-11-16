@@ -305,7 +305,9 @@ fn nested_contract_file_fold_keeps_the_source_witness() {
         assert_eq!(
             doc.preserved_markdown_source(&projection).as_deref(),
             Some(source).filter(|_| {
-                projection != source && !written_unlike_the_source(case["name"].as_str().unwrap())
+                projection != source
+                    && case["witnessRefuse"] != true
+                    && !written_unlike_the_source(case["name"].as_str().unwrap())
             }),
             "{source:?}"
         );

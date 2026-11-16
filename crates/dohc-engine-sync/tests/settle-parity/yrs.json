@@ -62,7 +62,7 @@
       "AQHNwI6ekaN/DaiU4o+Nr57mDygBd0BjN2Y4OTkxY2VmNGJiMzc0OTMxZDAzNjQ2MzJmYjM4MDdmMGU1ZDcxNmNkZWZlNTc0NWNlZTNlZjE3ZjMxNDhiApTij42vnuYPASgBzcCOnpGjfwEADQ==",
       "AQONicmsBQColOKPja+e5g8mAXckU29tZSAqZW1waGFzaXMqIGFuZCBfX3N0cm9uZ19fIHRleHQuqJTij42vnuYPJwF3QDViMTU2ODlhMTY5ZmU2MzRlMWQwMGUxZTViYmQyY2NlZDRjNTFiNDIxZTg1Y2IxMzg2ZDJlMTg4ZTlkNDQ4ZDGozcCOnpGjfw0Bd0BjN2Y4OTkxY2VmNGJiMzc0OTMxZDAzNjQ2MzJmYjM4MDdmMGU1ZDcxNmNkZWZlNTc0NWNlZTNlZjE3ZjMxNDhiApTij42vnuYPASYDzcCOnpGjfwEADg=="
     ],
-    "markdown": "Some *emphasis* and __strong__ text."
+    "markdown": "Some *emphasis* and __strong__ text.\n"
   },
   {
     "name": "rewrite-preserves-block-spacing",

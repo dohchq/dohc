@@ -59,6 +59,21 @@ pub(super) struct Marks {
 fn renders_markup(text: &str) -> bool {
     text.match_indices('<')
         .any(|(at, _)| super::inline_syntax(&text[at..]).is_some())
+        || text.match_indices('&').any(|(at, _)| {
+            let rest = &text.as_bytes()[at + 1..];
+            // No reference name is longer than 32 bytes.
+            rest.iter()
+                .take(33)
+                .position(|&byte| byte == b';')
+                .is_some_and(|end| {
+                    let name = &rest[..end];
+                    name.iter().any(u8::is_ascii_alphanumeric)
+                        && name
+                            .iter()
+                            .all(|&byte| byte.is_ascii_alphanumeric() || byte == b'#')
+                        && super::rendered_reference(&text[at + 1..at + 1 + end])
+                })
+        })
 }
 
 impl Marks {
@@ -251,6 +266,7 @@ fn read_blocks(
         spans,
         next_span: 0,
         frames: vec![Frame::new(Kind::Body, 0)],
+        callouts: Vec::new(),
         marks: Marks::default(),
         saved: Vec::new(),
         links: Vec::new(),
@@ -363,15 +379,19 @@ struct Reader<'a> {
     spans: Vec<Range<usize>>,
     next_span: usize,
     frames: Vec<Frame>,
+    /// Whether each open quote is a callout.
+    callouts: Vec<bool>,
     marks: Marks,
     saved: Vec<Marks>,
     /// Each open link's piece count and source.
     links: Vec<(usize, Range<usize>)>,
     image: Option<Image>,
-    /// A row-height annotation just read: its frame depth, block index,
-    /// heights, and source end.
-    annotation: Option<(usize, usize, Vec<(usize, i64)>, usize)>,
+    annotation: Option<Annotation>,
 }
+
+/// A row-height annotation just read: its frame depth, block index,
+/// heights, and source end.
+type Annotation = (usize, usize, Vec<(usize, i64)>, usize);
 
 fn element(tag: &'static str, attrs: Vec<(&'static str, Any)>, children: Vec<Child>) -> Element {
     Element {
@@ -538,7 +558,12 @@ impl<'a> Reader<'a> {
                 .collect::<Vec<_>>()
                 .join("\n");
             self.blank_paragraphs(span.start);
-            self.push_block(text_paragraph(text));
+            // A renderer hides a definition, which the document holds as text.
+            let mut block = text_paragraph(text);
+            if let Some(Child::Text(runs)) = block.children.first_mut() {
+                runs[0].1.raw = true;
+            }
+            self.push_block(block);
             self.block_ends(span.end);
         }
     }
@@ -639,6 +664,7 @@ impl<'a> Reader<'a> {
                 Event::Text(text) | Event::Code(text) | Event::InlineMath(text) => {
                     image.alt.push_str(&text);
                 }
+                Event::DisplayMath(_) => image.alt.push_str(&self.src[range]),
                 Event::SoftBreak | Event::HardBreak => image.alt.push('\n'),
                 _ => {}
             }
@@ -680,6 +706,12 @@ impl<'a> Reader<'a> {
             }
             Event::DisplayMath(_) => {
                 self.text_block(range.start)?;
+                // A block can't keep a link or a mark around it.
+                if self.marks != Marks::default() {
+                    let source = &self.src[range.clone()];
+                    self.push_text(source, Some(range.start), &range);
+                    return Ok(());
+                }
                 // Each later line drops what its containers put before it.
                 let mut lines = self.src[range.start + 2..range.end - 2].split('\n');
                 let mut tex = lines.next().unwrap_or_default().to_owned();
@@ -831,13 +863,24 @@ impl<'a> Reader<'a> {
             // spaces come before on its line, reads as its character. The
             // writer spells leading white space that way.
             let leading = || {
+                // Containers put only spaces, tabs and `>` before a line, so
+                // any other byte back to the line's start rules it out first,
+                // without reading the whole line for each reference.
+                let indented = || {
+                    self.src[..range.start]
+                        .bytes()
+                        .rev()
+                        .take_while(|&byte| byte != b'\n')
+                        .all(|byte| matches!(byte, b' ' | b'\t' | b'>'))
+                };
                 self.frames
                     .last()
                     .is_some_and(|frame| frame.pieces.is_empty())
-                    || self
-                        .kept_indent(self.line_start(range.start), range.start)
-                        .bytes()
-                        .all(|byte| byte == b' ')
+                    || indented()
+                        && self
+                            .kept_indent(self.line_start(range.start), range.start)
+                            .bytes()
+                            .all(|byte| byte == b' ')
             };
             let decoded = match name {
                 "#9" if leading() => Some("\t"),
@@ -897,11 +940,27 @@ impl<'a> Reader<'a> {
                 .position(|(open, ..)| open.eq_ignore_ascii_case(name))
             {
                 let (_, pieces, start, mut marks) = frame.tags[at].clone();
+                // A renderer reads the links, marks and nodes inside the run,
+                // which the document holds as its text.
+                let plain = Marks {
+                    raw: false,
+                    ..marks.clone()
+                };
+                let read_inside = frame.pieces[pieces..].iter().any(|piece| match piece {
+                    Piece::Text { marks: inner, .. } => {
+                        inner.raw
+                            || Marks {
+                                raw: false,
+                                ..inner.clone()
+                            } != plain
+                    }
+                    _ => true,
+                });
                 frame.tags.truncate(at);
                 frame.pieces.truncate(pieces);
                 frame.brackets.retain(|&index| index < pieces);
                 let run = self.src[start..range.end].trim_end().to_owned();
-                marks.raw = renders_markup(&run);
+                marks.raw = read_inside || renders_markup(&run);
                 self.push_piece(
                     Piece::Text {
                         text: run,
@@ -913,8 +972,12 @@ impl<'a> Reader<'a> {
                 return;
             }
         } else if let Some(name) = opening_tag_name(raw) {
-            if !raw.ends_with("/>") {
-                let frame = self.top();
+            let frame = self.top();
+            // Each run that closes reads its text again, so a frame holds at
+            // most this many open tags and a deeper tag stays text inside the
+            // runs around it. Runs nest, so a note is read at most this many
+            // times over.
+            if !raw.ends_with("/>") && frame.tags.len() < 32 {
                 let pieces = frame.pieces.len();
                 frame
                     .tags
@@ -946,7 +1009,12 @@ impl<'a> Reader<'a> {
             Tag::Heading { level, .. } => {
                 self.start_block(Kind::Heading(level as i64), range.start)?
             }
-            Tag::BlockQuote(_) => self.start_block(Kind::Quote, range.start)?,
+            Tag::BlockQuote(_) => {
+                let first = self.src[range.clone()].split('\n').next().unwrap_or("");
+                self.callouts
+                    .push(callout_header(strip_quote_marker(first)).is_some());
+                self.start_block(Kind::Quote, range.start)?
+            }
             Tag::CodeBlock(kind) => {
                 let language = match kind {
                     // The editor keeps references in the language as written.
@@ -1100,7 +1168,8 @@ impl<'a> Reader<'a> {
                     Kind::Heading(level) => {
                         let mut pieces = frame.pieces;
                         tag_span_references(&mut pieces, &frame.brackets);
-                        let children = children(merge(pieces));
+                        let pieces = inline_syntax(merge(pieces), self.src);
+                        let children = children(self.math_as_text(pieces));
                         vec![element(
                             "heading",
                             vec![("level", Any::from(level))],
@@ -1121,7 +1190,8 @@ impl<'a> Reader<'a> {
                 let frame = self.frames.pop().expect("a cell");
                 let mut pieces = frame.pieces;
                 tag_span_references(&mut pieces, &frame.brackets);
-                let children = children(inline_syntax(merge(pieces), self.src));
+                let pieces = inline_syntax(merge(pieces), self.src);
+                let children = children(self.math_as_text(pieces));
                 self.push_block(paragraph(children));
             }
             TagEnd::TableHead | TagEnd::TableRow => {
@@ -1184,7 +1254,15 @@ impl<'a> Reader<'a> {
                 self.flush_definitions(range.end);
                 let frame = self.frames.pop().expect("a quote");
                 let end = frame.last_end;
-                let block = self.quote(frame, &range)?;
+                let callout = self.callouts.pop().expect("a quote");
+                // A callout around this one reads its body again, this callout
+                // with it, so reading it now would take time that doubles
+                // with each level.
+                let block = if callout && self.callouts.contains(&true) {
+                    element("blockquote", Vec::new(), Vec::new())
+                } else {
+                    self.quote(frame, &range)?
+                };
                 self.push_block(block);
                 self.block_ends(end.unwrap_or(range.end));
             }
@@ -1324,8 +1402,11 @@ impl<'a> Reader<'a> {
             let children = frame.blocks.into_iter().map(Child::Element).collect();
             return Ok(element("blockquote", Vec::new(), children));
         };
+        // Each line drops what the containers around the quote put before
+        // it, then the quote's own marker.
         let body = lines
             .map(|line| {
+                let line = self.strip_containers(line);
                 if line.trim_start_matches(' ').starts_with('>') {
                     strip_quote_marker(line)
                 } else {
@@ -1361,6 +1442,22 @@ impl<'a> Reader<'a> {
             attrs,
             blocks.into_iter().map(Child::Element).collect(),
         ))
+    }
+
+    /// `$$` spans where no math block can stand, such as in a heading or a
+    /// cell, as their source text.
+    fn math_as_text(&self, pieces: Vec<Piece>) -> Vec<Piece> {
+        pieces
+            .into_iter()
+            .map(|piece| match piece {
+                Piece::DisplayMath { source, .. } => Piece::Text {
+                    text: self.src[source.clone()].to_owned(),
+                    marks: Marks::default(),
+                    at: Some(source.start),
+                },
+                piece => piece,
+            })
+            .collect()
     }
 
     /// A paragraph's elements. A `$$` span alone on its lines is a math
@@ -1702,7 +1799,7 @@ fn children(pieces: Vec<Piece>) -> Vec<Child> {
                 }
                 children.push(Child::Element(node));
             }
-            Piece::DisplayMath { .. } => {}
+            Piece::DisplayMath { .. } => unreachable!("math is a block or text by now"),
         }
     }
     if !runs.is_empty() {
@@ -1879,108 +1976,140 @@ enum Pair {
     Underline,
 }
 
-/// Split the source text piece that holds source offset `offset`, so a piece
-/// starts there.
-fn split_at(pieces: &mut Vec<Piece>, offset: usize) {
-    let Some(index) = pieces.iter().position(|piece| {
-        matches!(piece, Piece::Text { text, at: Some(at), .. } if *at < offset && offset < at + text.len())
-    }) else {
-        return;
-    };
-    let Piece::Text { text, marks, at } = &mut pieces[index] else {
-        unreachable!("a text piece");
-    };
-    let rest = text.split_off(offset - at.expect("source text"));
-    let marks = marks.clone();
-    pieces.insert(
-        index + 1,
-        Piece::Text {
-            text: rest,
-            marks,
-            at: Some(offset),
-        },
-    );
-}
-
-fn starting_at(pieces: &[Piece], offset: usize) -> Option<usize> {
-    pieces
-        .iter()
-        .position(|piece| matches!(piece, Piece::Text { at: Some(at), .. } if *at == offset))
-}
-
 /// `==highlight==` or `++underline++`, read on the source as the editor's
 /// tokenizers do, applied to the pieces between the delimiters.
-fn paired(mut pieces: Vec<Piece>, src: &str, pair: Pair) -> Vec<Piece> {
+fn paired(pieces: Vec<Piece>, src: &str, pair: Pair) -> Vec<Piece> {
     let delimiter = match pair {
         Pair::Highlight => "==",
         Pair::Underline => "++",
     };
-    let mut search = 0;
-    while let Some((open, close)) = next_pair(&pieces, src, delimiter, pair, search) {
-        search = close + 2;
-        for offset in [open, open + 2, close, close + 2] {
-            split_at(&mut pieces, offset);
-        }
-        let (Some(open), Some(close)) = (starting_at(&pieces, open), starting_at(&pieces, close))
-        else {
-            continue;
-        };
-        for piece in &mut pieces[open + 1..close] {
-            match piece {
-                Piece::Text { text, marks, at } => match pair {
-                    Pair::Highlight => {
-                        marks.highlight = true;
-                        // The editor reads every `\=` in a highlight's source as
-                        // `=`, also inside code and raw HTML.
-                        // An inline HTML run is source with no offset kept.
-                        let raw = match at {
-                            Some(at) => src.get(*at..*at + text.len()) == Some(text.as_str()),
-                            None => text.starts_with('<') && src.contains(text.as_str()),
-                        };
-                        if raw && text.contains("\\=") {
-                            *text = text.replace("\\=", "=");
-                            *at = None;
-                        }
-                    }
-                    Pair::Underline => marks.underline = true,
-                },
-                // The editor's highlight keeps `\=` inside it as `=`.
-                Piece::Node(node)
-                    if pair == Pair::Highlight
-                        && node.tag == "escapedPunctuation"
-                        && node.attrs.iter().any(|(_, value)| *value == Any::from("=")) =>
-                {
-                    *piece = Piece::Text {
-                        text: "=".to_owned(),
-                        marks: Marks {
-                            highlight: true,
-                            ..Marks::default()
-                        },
-                        at: None,
-                    };
+    let pairs = pairs(&pieces, src, delimiter, pair);
+    if pairs.is_empty() {
+        return pieces;
+    }
+    let mut cuts: Vec<usize> = pairs
+        .iter()
+        .flat_map(|&(open, close)| [open, open + 2, close, close + 2])
+        .collect();
+    cuts.dedup();
+    let mut out = Vec::with_capacity(pieces.len() + cuts.len());
+    let mut next = 0;
+    let mut inside = false;
+    for piece in pieces {
+        for piece in split(piece, &cuts) {
+            let at = match &piece {
+                Piece::Text { at: Some(at), .. } => Some(*at),
+                _ => None,
+            };
+            match pairs.get(next) {
+                Some(&(open, _)) if !inside && at == Some(open) => inside = true,
+                Some(&(_, close)) if inside && at == Some(close) => {
+                    inside = false;
+                    next += 1;
                 }
-                _ => {}
+                _ if inside => out.push(mark(piece, src, pair)),
+                _ => out.push(piece),
             }
         }
-        pieces.remove(close);
-        pieces.remove(open);
     }
+    out
+}
+
+/// A source text piece cut at each of `cuts` that falls inside it.
+fn split(piece: Piece, cuts: &[usize]) -> Vec<Piece> {
+    let Piece::Text {
+        mut text,
+        marks,
+        at: Some(at),
+    } = piece
+    else {
+        return vec![piece];
+    };
+    let first = cuts.partition_point(|&cut| cut <= at);
+    let last = cuts.partition_point(|&cut| cut < at + text.len());
+    let mut pieces = Vec::with_capacity(last - first + 1);
+    for &cut in cuts[first..last].iter().rev() {
+        let rest = text.split_off(cut - at);
+        pieces.push(Piece::Text {
+            text: rest,
+            marks: marks.clone(),
+            at: Some(cut),
+        });
+    }
+    pieces.push(Piece::Text {
+        text,
+        marks,
+        at: Some(at),
+    });
+    pieces.reverse();
     pieces
 }
-/// The source offsets of the next delimiter pair at or after `search`.
-fn next_pair(
-    pieces: &[Piece],
-    src: &str,
-    delimiter: &str,
-    pair: Pair,
-    search: usize,
-) -> Option<(usize, usize)> {
-    let end = pieces.iter().rev().find_map(|piece| match piece {
+
+/// A piece between a pair's delimiters, with the pair's mark.
+fn mark(mut piece: Piece, src: &str, pair: Pair) -> Piece {
+    match &mut piece {
+        Piece::Text { text, marks, at } => match pair {
+            Pair::Highlight => {
+                marks.highlight = true;
+                // The editor reads every `\=` in a highlight's source as
+                // `=`, also inside code and raw HTML.
+                // An inline HTML run is source with no offset kept.
+                let raw = match at {
+                    Some(at) => src.get(*at..*at + text.len()) == Some(text.as_str()),
+                    None => text.starts_with('<') && src.contains(text.as_str()),
+                };
+                if raw && text.contains("\\=") {
+                    *text = text.replace("\\=", "=");
+                    *at = None;
+                }
+            }
+            Pair::Underline => marks.underline = true,
+        },
+        // The editor's highlight keeps `\=` inside it as `=`.
+        Piece::Node(node)
+            if pair == Pair::Highlight
+                && node.tag == "escapedPunctuation"
+                && node.attrs.iter().any(|(_, value)| *value == Any::from("=")) =>
+        {
+            piece = Piece::Text {
+                text: "=".to_owned(),
+                marks: Marks {
+                    highlight: true,
+                    ..Marks::default()
+                },
+                at: None,
+            };
+        }
+        _ => {}
+    }
+    piece
+}
+
+/// The source offsets of each delimiter pair, in order. Each pair is found
+/// after the one before it closes.
+fn pairs(pieces: &[Piece], src: &str, delimiter: &str, pair: Pair) -> Vec<(usize, usize)> {
+    let mut pairs = Vec::new();
+    let Some(end) = pieces.iter().rev().find_map(|piece| match piece {
         Piece::Text {
             text, at: Some(at), ..
         } => Some(at + text.len()),
         _ => None,
-    })?;
+    }) else {
+        return pairs;
+    };
+    // The source spans of plain text, in source order.
+    let mut spans: Vec<(usize, usize)> = pieces
+        .iter()
+        .filter_map(plain_source)
+        .map(|(text, at, _)| (at, at + text.len()))
+        .collect();
+    spans.sort_unstable();
+    // Whether one plain text span holds the delimiter at `offset`.
+    let inside = |offset: usize| {
+        let index = spans.partition_point(|&(start, _)| start <= offset);
+        index > 0 && offset + 2 <= spans[index - 1].1
+    };
+    let mut search = 0;
     for piece in pieces {
         let Some((text, at, _)) = plain_source(piece) else {
             continue;
@@ -2009,18 +2138,13 @@ fn next_pair(
             let Some(close) = closing(src, offset, end, delimiter, pair) else {
                 continue;
             };
-            let inside = |offset: usize| {
-                pieces.iter().any(|piece| {
-                    plain_source(piece)
-                        .is_some_and(|(text, at, _)| at <= offset && offset + 2 <= at + text.len())
-                })
-            };
             if inside(close) {
-                return Some((offset, close));
+                pairs.push((offset, close));
+                search = close + 2;
             }
         }
     }
-    None
+    pairs
 }
 
 fn closing(src: &str, open: usize, end: usize, delimiter: &str, pair: Pair) -> Option<usize> {
@@ -2032,7 +2156,7 @@ fn closing(src: &str, open: usize, end: usize, delimiter: &str, pair: Pair) -> O
     }
     while index + 2 <= end {
         if pair == Pair::Highlight && bytes[index] == b'\\' {
-            index += 2;
+            index += 1 + src[index + 1..].chars().next().map_or(1, char::len_utf8);
             continue;
         }
         if src[index..].starts_with(delimiter) {

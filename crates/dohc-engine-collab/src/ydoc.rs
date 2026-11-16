@@ -1265,7 +1265,7 @@ impl Ydoc {
                     body_markdown.len() - body_markdown.trim_start_matches('\n').len(),
                 );
                 let mut preserved = ProjectionBuffer::new();
-                preserved.push_str(&kept)?;
+                preserved.push_str(kept)?;
                 // A closing delimiter at the end of the file needs a line
                 // break before the body a person adds under it.
                 if !kept.is_empty() && !body_markdown.is_empty() && !kept.ends_with('\n') {
@@ -2354,16 +2354,141 @@ fn rendered_reference(name: &str) -> bool {
 /// renderer hides a comment and may load what an element points at, so a
 /// source may not spell either where its projection holds text. A `<` before
 /// any other name, as in `Vec<T>`, is text to the importer and stays so.
-const HTML_ELEMENTS: &str =
-    "a abbr address applet area article aside audio b base basefont bdi bdo big blink \
-     blockquote body br button canvas caption center cite code col colgroup data datalist dd \
-     del details dfn dialog dir div dl dt em embed fieldset figcaption figure font footer \
-     form frame frameset h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe image img \
-     input ins kbd label legend li link main map mark marquee math menu meta meter nav nobr \
-     noembed noframes noscript object ol optgroup option output p param picture plaintext pre \
-     progress q rp rt ruby s samp script search section select slot small source span strike \
-     strong style sub summary sup svg table tbody td template textarea tfoot th thead time \
-     title tr track tt u ul var video wbr xmp";
+const HTML_ELEMENTS: &[&str] = &[
+    "a",
+    "abbr",
+    "address",
+    "applet",
+    "area",
+    "article",
+    "aside",
+    "audio",
+    "b",
+    "base",
+    "basefont",
+    "bdi",
+    "bdo",
+    "big",
+    "blink",
+    "blockquote",
+    "body",
+    "br",
+    "button",
+    "canvas",
+    "caption",
+    "center",
+    "cite",
+    "code",
+    "col",
+    "colgroup",
+    "data",
+    "datalist",
+    "dd",
+    "del",
+    "details",
+    "dfn",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "em",
+    "embed",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "font",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hgroup",
+    "hr",
+    "html",
+    "i",
+    "iframe",
+    "image",
+    "img",
+    "input",
+    "ins",
+    "kbd",
+    "label",
+    "legend",
+    "li",
+    "link",
+    "main",
+    "map",
+    "mark",
+    "marquee",
+    "math",
+    "menu",
+    "meta",
+    "meter",
+    "nav",
+    "nobr",
+    "noembed",
+    "noframes",
+    "noscript",
+    "object",
+    "ol",
+    "optgroup",
+    "option",
+    "output",
+    "p",
+    "param",
+    "picture",
+    "plaintext",
+    "pre",
+    "progress",
+    "q",
+    "rp",
+    "rt",
+    "ruby",
+    "s",
+    "samp",
+    "script",
+    "search",
+    "section",
+    "select",
+    "slot",
+    "small",
+    "source",
+    "span",
+    "strike",
+    "strong",
+    "style",
+    "sub",
+    "summary",
+    "sup",
+    "svg",
+    "table",
+    "tbody",
+    "td",
+    "template",
+    "textarea",
+    "tfoot",
+    "th",
+    "thead",
+    "time",
+    "title",
+    "tr",
+    "track",
+    "tt",
+    "u",
+    "ul",
+    "var",
+    "video",
+    "wbr",
+    "xmp",
+];
 
 /// The raw HTML or autolink that `text`, which starts with `<`, opens: a
 /// comment, a processing instruction, a declaration, CDATA, a tag whose name
@@ -2387,16 +2512,16 @@ fn inline_syntax(text: &str) -> Option<String> {
     let name_end = tag
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
         .unwrap_or(tag.len());
-    let name = tag[..name_end].to_ascii_lowercase();
+    let name = &tag[..name_end];
     let element = HTML_ELEMENTS
-        .split_ascii_whitespace()
-        .any(|element| element == name)
+        .iter()
+        .any(|element| element.eq_ignore_ascii_case(name))
         && tag[name_end..]
             .chars()
             .next()
             .is_none_or(|next| next.is_whitespace() || next == '>' || next == '/');
     if element || html_tag_end(text, true).is_some() {
-        return Some(format!("element {name}"));
+        return Some(format!("element {}", name.to_ascii_lowercase()));
     }
     let close = text[1..].find(|c: char| c == '>' || c == '<' || c.is_whitespace())? + 1;
     if !text[close..].starts_with('>') {
@@ -8637,6 +8762,32 @@ mod projection_tests {
             );
             assert_eq!(doc.project_richdoc().unwrap(), canonical, "{forged:?}");
         }
+    }
+
+    /// A renderer reads markup inside a tag that the document holds as text:
+    /// a reference it decodes, a link, an image. It hides a link reference
+    /// definition, which the document shows. None of these sources is kept.
+    #[test]
+    fn a_source_a_renderer_shows_unlike_its_document_is_not_kept() {
+        let kept: Vec<_> = [
+            "<x>invoice&#x202E;fdp.exe</x>",
+            "<x>\ninvoice&#x202E;fdp.exe",
+            "<x>[Pay](https://evil.example)</x>",
+            "<x>![](https://tracker.example/p)</x>",
+            "[x]: https://e.example \"Approve wire 4471\"",
+            "See [x].\n\n[x]: https://e.example \"Approve wire 4471\"",
+        ]
+        .into_iter()
+        .filter(|source| {
+            let source = &format!("{source}\n");
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+                .expect("richdoc rewrite");
+            let canonical = witness_source(&doc, source);
+            doc.preserved_markdown_source(&canonical).is_some()
+        })
+        .collect();
+        assert!(kept.is_empty(), "{kept:?}");
     }
 
     /// A renderer decodes these references to characters a reader does not

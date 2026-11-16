@@ -40,6 +40,98 @@ fn a_formula_in_a_container_reads_without_the_container_prefix() {
     }
 }
 
+/// A formula in a link, a mark or an image's alt stays text, so the link,
+/// the mark and the formula are all kept. The editor's reader drops the
+/// formula from an alt and a link from a formula on its own line.
+#[test]
+fn a_formula_in_a_link_a_mark_or_an_alt_keeps_its_text() {
+    for (source, kept) in [
+        ("[$$x$$](u)\n", [r#""insert":"$$x$$""#, r#""href":"u""#]),
+        ("**$$x$$**\n", [r#""insert":"$$x$$""#, r#""bold""#]),
+        ("![$$x$$](u)\n", [r#""alt":"$$x$$""#, r#""src":"u""#]),
+    ] {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+            .unwrap();
+        let body = doc.canonical_content()["body"].to_string();
+        for kept in kept {
+            assert!(body.contains(kept), "{source:?}: {kept} in {body}");
+        }
+    }
+}
+
+/// A heading, a cell and a callout in a quote read as the editor reads
+/// them, and no text they hold is dropped.
+#[test]
+fn headings_cells_and_nested_callouts_read_as_the_editor_reads_them() {
+    let body = |source: &str| {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, source)
+            .unwrap();
+        (
+            doc.canonical_content()["body"].to_string(),
+            doc.project_richdoc().unwrap(),
+        )
+    };
+    let failures: Vec<_> = [
+        ("# Formula $$x$$\n", r#""insert":"Formula $$x$$""#),
+        ("| a |\n|---|\n| $$x$$ |\n", r#""insert":"$$x$$""#),
+        ("# ==important== and [[Note]]\n", r#""highlight""#),
+        ("# ==important== and [[Note]]\n", r#""tag":"wikilink""#),
+        ("==a\\é==\n", r#""highlight""#),
+    ]
+    .into_iter()
+    .filter(|(source, holds)| {
+        !std::panic::catch_unwind(|| body(source).0.contains(holds)).unwrap_or(false)
+    })
+    .collect();
+    assert!(failures.is_empty(), "{failures:?}");
+    // The callout holds its body once, not inside another quote.
+    let source = "> > [!note]\n> > body\n";
+    let (body, projection) = body(source);
+    assert_eq!(body.matches(r#""tag":"blockquote""#).count(), 1, "{body}");
+    assert_eq!(projection, source);
+}
+
+/// A callout reads its body again, so a callout inside it must not read
+/// its own body too: that doubles the work at each level.
+#[test]
+fn nested_callouts_read_in_time() {
+    let source: String = (1..=22)
+        .map(|level| format!("{} [!note]\n", ">".repeat(level)))
+        .collect();
+    let started = std::time::Instant::now();
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, &source)
+        .unwrap();
+    // Each level read once takes milliseconds; reading each level's body
+    // at every level above it takes minutes.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn nested_html_tags_read_in_time() {
+    let depth = 4096;
+    let open: String = (0..depth).map(|i| format!("<t{i}>")).collect();
+    let close: String = (0..depth).rev().map(|i| format!("</t{i}>")).collect();
+    let source = format!("{open}a{close}\n");
+    let started = std::time::Instant::now();
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(ContentKind::Richdoc, &source)
+        .unwrap();
+    // Reading each tag's run once takes milliseconds; reading every run
+    // inside it again at each tag takes minutes.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
 #[test]
 fn a_frontmatter_fold_repairs_a_missing_schema_version() {
     let doc = Ydoc::wire();
@@ -278,8 +370,14 @@ fn every_source_seeds_both_builders_and_folds_stably() {
         };
         changes_marker || ["- a\n  b\n  ===\n  - c\n", "- a\n  b\n  --\n  - c"].contains(&source)
     };
-    // A renderer reads these lines as HTML, which the document holds as
-    // text, so the source is not kept and a relation does not seed it.
+    // A renderer reads these lines as HTML, or hides a link definition, which
+    // the document holds as text, so the source is not kept and a relation
+    // does not seed it.
+    let defines_a_link = |source: &str| {
+        source.lines().any(|line| {
+            line.trim_start_matches([' ', '>']).starts_with('[') && line.contains("]: ")
+        })
+    };
     let html = [
         "- parent\n\n  <div\n  - child",
         "- parent\n\n  <div \n  - child",
@@ -296,7 +394,8 @@ fn every_source_seeds_both_builders_and_folds_stably() {
         read.rewrite_content_to_markdown(ContentKind::Richdoc, &source)
             .unwrap_or_else(|error| panic!("read {source:?}: {error}"));
         let body = read.canonical_content()["body"].clone();
-        if writer_gap(&source) || html.contains(&source.as_str()) {
+        let shown_unlike = html.contains(&source.as_str()) || defines_a_link(&source);
+        if writer_gap(&source) || shown_unlike {
             assert!(
                 matches!(
                     Ydoc::wire().seed_collection_relation_markdown(&source),
@@ -308,7 +407,7 @@ fn every_source_seeds_both_builders_and_folds_stably() {
         if writer_gap(&source) {
             continue;
         }
-        if html.contains(&source.as_str()) {
+        if shown_unlike {
             let doc = Ydoc::wire();
             doc.apply(&successor(&source).unwrap().update).unwrap();
             assert_eq!(doc.canonical_content()["body"], body, "{source:?}");

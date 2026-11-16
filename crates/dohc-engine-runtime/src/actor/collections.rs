@@ -580,7 +580,7 @@ mod collection_adoption_update_tests {
     }
 
     #[test]
-    fn a_never_replicated_empty_seed_retires_and_adopts_a_nested_list_exactly() {
+    fn a_never_replicated_empty_seed_retires_and_adopts_the_file_exactly() {
         for settled_empty in [false, true] {
             assert_never_replicated_completion_adopts(settled_empty);
         }
@@ -623,7 +623,9 @@ mod collection_adoption_update_tests {
                 })
                 .unwrap();
         }
-        let completed = "---\nTitle: Completed\n---\n- parent\n  - child\n";
+        // A renderer shows the HTML, which the document holds as text, so the
+        // file cannot fold into the seed.
+        let completed = "---\nTitle: Completed\n---\n<div>html</div>\n";
         std::fs::write(scratch.path().join(path), completed).unwrap();
         store
             .write_with(&dohc_engine_storage::NoFaults, |tx| {
@@ -691,7 +693,7 @@ mod collection_adoption_update_tests {
                     reconcile_collections_in_tx(tx, "workspace", "main")
                 })
                 .unwrap();
-            let completed = "---\nTitle: Completed\n---\n- parent\n  - child\n";
+            let completed = "---\nTitle: Completed\n---\n<div>html</div>\n";
             std::fs::write(scratch.path().join(path), completed).unwrap();
             let result = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
                 capture_ingest_fixture_in_tx(tx, &key, path, completed)
@@ -778,7 +780,7 @@ mod collection_adoption_update_tests {
                 })
                 .unwrap();
             let result = store.write_with(&dohc_engine_storage::NoFaults, |tx| {
-                capture_ingest_fixture_in_tx(tx, &key, path, "- parent\n  - child\n")
+                capture_ingest_fixture_in_tx(tx, &key, path, "<div>html</div>\n")
             });
             assert!(
                 matches!(
@@ -829,7 +831,7 @@ mod collection_adoption_update_tests {
                 "main",
                 &key.object_id,
                 path,
-                "- parent\n  - child\n",
+                "<div>html</div>\n",
                 6,
             )
         });
@@ -1141,7 +1143,7 @@ mod collection_adoption_update_tests {
     }
 
     #[test]
-    fn relation_cleanup_skips_a_never_opened_indented_code_referrer() {
+    fn relation_cleanup_skips_a_never_opened_referrer_it_cannot_keep() {
         let (scratch, mut store, mut cache) = fixture();
         capture(
             &mut store,
@@ -1149,7 +1151,8 @@ mod collection_adoption_update_tests {
             "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n",
             3,
         );
-        let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\nInstall:\n\n    npm i foo";
+        // A renderer shows the HTML, which the document holds as text.
+        let text = "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nrelated: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\nInstall:\n\n<div>npm i foo</div>";
         capture(&mut store, "tasks/a.md", text, 4);
         std::fs::write(scratch.path().join("tasks/a.md"), text).unwrap();
         let snapshot = VersionedTextStore::new(&mut store)
@@ -1189,8 +1192,12 @@ mod collection_adoption_update_tests {
     }
 
     #[test]
-    fn relation_cleanup_keeps_a_nested_body_as_written() {
-        for body in ["* parent\n\n    * child\n", "- a\n  ---"] {
+    fn relation_cleanup_keeps_a_body_as_written() {
+        for body in [
+            "* parent\n\n    * child\n",
+            "- a\n  ---",
+            "Install:\n\n    npm i foo",
+        ] {
             let (scratch, mut store, mut cache) = fixture();
             capture(
                 &mut store,

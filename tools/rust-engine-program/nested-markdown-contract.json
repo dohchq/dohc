@@ -1287,7 +1287,8 @@
       "canonical": "- See [docs]\n- Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com\n",
       "sourceCanonical": "- See [docs](https://example.com)\n- Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com\n",
       "rustBase64": "ARDz4+7d17jqBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpidWxsZXRMaXN0BwDz4+7d17jqBgEDCGxpc3RJdGVtBwDz4+7d17jqBgIDCXBhcmFncmFwaAcA8+Pu3de46gYDBgQA8+Pu3de46gYEClNlZSBbZG9jc12H8+Pu3de46gYCAwhsaXN0SXRlbQcA8+Pu3de46gYPAwlwYXJhZ3JhcGgHAPPj7t3XuOoGEAYEAPPj7t3XuOoGEQROZXh0h/Pj7t3XuOoGAQMJcGFyYWdyYXBoBwDz4+7d17jqBhYGBADz4+7d17jqBhcKTW9yZSB0ZXh0Lofz4+7d17jqBhYDCXBhcmFncmFwaAcA8+Pu3de46gYiBgQA8+Pu3de46gYjG1tkb2NzXTogaHR0cHM6Ly9leGFtcGxlLmNvbQA=",
-      "fileFold": true
+      "fileFold": true,
+      "witnessRefuse": true
     },
     {
       "name": "r23-reference-nested-0",
@@ -1302,7 +1303,8 @@
       "canonical": "> - See [docs]\n> - Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com\n",
       "sourceCanonical": "> - See [docs](https://example.com)\n> - Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com\n",
       "rustBase64": "AQ7xxbbAwa+vCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwDxxbbAwa+vCQEDCmJ1bGxldExpc3QHAPHFtsDBr68JAgMIbGlzdEl0ZW0HAPHFtsDBr68JAwMJcGFyYWdyYXBoBwDxxbbAwa+vCQQGBADxxbbAwa+vCQUKU2VlIFtkb2NzXYfxxbbAwa+vCQMDCGxpc3RJdGVtBwDxxbbAwa+vCRADCXBhcmFncmFwaAcA8cW2wMGvrwkRBgQA8cW2wMGvrwkSBE5leHSH8cW2wMGvrwkBAwlwYXJhZ3JhcGgHAPHFtsDBr68JFwYEAPHFtsDBr68JGBtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
-      "fileFold": true
+      "fileFold": true,
+      "witnessRefuse": true
     },
     {
       "name": "r23-reference-flat-1",
@@ -1310,7 +1312,8 @@
       "canonical": "1. See [docs]\n2. Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com\n",
       "sourceCanonical": "1. See [docs](https://example.com)\n2. Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com\n",
       "rustBase64": "ARGj3YHl4cToCwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwtvcmRlcmVkTGlzdCgAo92B5eHE6AsBBXN0YXJ0AX0BBwCj3YHl4cToCwEDCGxpc3RJdGVtBwCj3YHl4cToCwMDCXBhcmFncmFwaAcAo92B5eHE6AsEBgQAo92B5eHE6AsFClNlZSBbZG9jc12Ho92B5eHE6AsDAwhsaXN0SXRlbQcAo92B5eHE6AsQAwlwYXJhZ3JhcGgHAKPdgeXhxOgLEQYEAKPdgeXhxOgLEgROZXh0h6PdgeXhxOgLAQMJcGFyYWdyYXBoBwCj3YHl4cToCxcGBACj3YHl4cToCxgKTW9yZSB0ZXh0Loej3YHl4cToCxcDCXBhcmFncmFwaAcAo92B5eHE6AsjBgQAo92B5eHE6AskG1tkb2NzXTogaHR0cHM6Ly9leGFtcGxlLmNvbQA=",
-      "fileFold": true
+      "fileFold": true,
+      "witnessRefuse": true
     },
     {
       "name": "r23-reference-nested-1",
@@ -1325,7 +1328,8 @@
       "canonical": "> 1. See [docs]\n> 2. Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com\n",
       "sourceCanonical": "> 1. See [docs](https://example.com)\n> 2. Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com\n",
       "rustBase64": "AQ+ciJ7erZOzCQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwCciJ7erZOzCQEDC29yZGVyZWRMaXN0KACciJ7erZOzCQIFc3RhcnQBfQEHAJyInt6tk7MJAgMIbGlzdEl0ZW0HAJyInt6tk7MJBAMJcGFyYWdyYXBoBwCciJ7erZOzCQUGBACciJ7erZOzCQYKU2VlIFtkb2NzXYeciJ7erZOzCQQDCGxpc3RJdGVtBwCciJ7erZOzCREDCXBhcmFncmFwaAcAnIie3q2TswkSBgQAnIie3q2TswkTBE5leHSHnIie3q2TswkBAwlwYXJhZ3JhcGgHAJyInt6tk7MJGAYEAJyInt6tk7MJGRtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
-      "fileFold": true
+      "fileFold": true,
+      "witnessRefuse": true
     },
     {
       "name": "r23-reference-flat-2",
@@ -1333,7 +1337,8 @@
       "canonical": "- [ ] See [docs]\n- [ ] Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com\n",
       "sourceCanonical": "- [ ] See [docs](https://example.com)\n- [ ] Next\n\nMore text.\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com\n",
       "rustBase64": "ARLYn4S0/PifAgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA2J+EtPz4nwIBAwh0YXNrSXRlbSgA2J+EtPz4nwICB2NoZWNrZWQBeQcA2J+EtPz4nwICAwlwYXJhZ3JhcGgHANifhLT8+J8CBAYEANifhLT8+J8CBQpTZWUgW2RvY3Ndh9ifhLT8+J8CAgMIdGFza0l0ZW0oANifhLT8+J8CEAdjaGVja2VkAXkHANifhLT8+J8CEAMJcGFyYWdyYXBoBwDYn4S0/PifAhIGBADYn4S0/PifAhMETmV4dIfYn4S0/PifAgEDCXBhcmFncmFwaAcA2J+EtPz4nwIYBgQA2J+EtPz4nwIZCk1vcmUgdGV4dC6H2J+EtPz4nwIYAwlwYXJhZ3JhcGgHANifhLT8+J8CJAYEANifhLT8+J8CJRtbZG9jc106IGh0dHBzOi8vZXhhbXBsZS5jb20A",
-      "fileFold": true
+      "fileFold": true,
+      "witnessRefuse": true
     },
     {
       "name": "r23-reference-nested-2",
@@ -1348,7 +1353,8 @@
       "canonical": "> - [ ] See [docs]\n> - [ ] Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com\n",
       "sourceCanonical": "> - [ ] See [docs](https://example.com)\n> - [ ] Next\n\n&#91;docs&#93;&#58; https&#58;//example&#46;com\n",
       "rustBase64": "ARCX++G/wJuCCgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwpibG9ja3F1b3RlBwCX++G/wJuCCgEDCHRhc2tMaXN0BwCX++G/wJuCCgIDCHRhc2tJdGVtKACX++G/wJuCCgMHY2hlY2tlZAF5BwCX++G/wJuCCgMDCXBhcmFncmFwaAcAl/vhv8CbggoFBgQAl/vhv8CbggoGClNlZSBbZG9jc12Hl/vhv8CbggoDAwh0YXNrSXRlbSgAl/vhv8CbggoRB2NoZWNrZWQBeQcAl/vhv8CbggoRAwlwYXJhZ3JhcGgHAJf74b/Am4IKEwYEAJf74b/Am4IKFAROZXh0h5f74b/Am4IKAQMJcGFyYWdyYXBoBwCX++G/wJuCChkGBACX++G/wJuCChobW2RvY3NdOiBodHRwczovL2V4YW1wbGUuY29tAA==",
-      "fileFold": true
+      "fileFold": true,
+      "witnessRefuse": true
     },
     {
       "name": "r23-outer-0",
