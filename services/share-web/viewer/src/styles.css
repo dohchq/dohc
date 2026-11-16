@@ -137,6 +137,7 @@ nav { padding: 24px 16px; border-right: 1px solid var(--viewer-line); background
 .handoff-button:disabled { cursor: default; opacity: .5; }
 .launch-failure { display: flex; align-items: flex-start; gap: 8px; color: var(--viewer-danger); line-height: 1.5; }
 .launch-failure-mark { flex: none; width: 1em; height: 1em; margin-top: .25em; }
+.state-page .state p.launch-failure { color: var(--viewer-danger); text-align: start; }
 
 @media (max-width: 720px) {
   header { align-items: flex-start; flex-direction: column; padding: 20px; }

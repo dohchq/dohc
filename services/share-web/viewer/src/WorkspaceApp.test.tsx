@@ -871,7 +871,11 @@ it("says so when Switch account cannot sign out, and keeps the button to try aga
   await settle(() => text().includes("dohc could not open this workspace with this account."));
   await click("Switch account");
   await settle(() => container.querySelector('.state-message [role="alert"]') !== null);
-  expect(container.querySelector('.state-message [role="alert"]')?.textContent).toBe("dohc could not sign you out. Retry sign-out.");
+  // It names the control on this page, with the error mark and tone.
+  const alert = container.querySelector('.state-message [role="alert"]')!;
+  expect(alert.textContent).toBe("dohc could not sign you out. Choose Switch account to try again.");
+  expect(alert.classList.contains("launch-failure")).toBe(true);
+  expect(alert.querySelector(".launch-failure-mark")).not.toBeNull();
   const button = [...container.querySelectorAll<HTMLButtonElement>(".state-message button")].find(node => node.textContent === "Switch account");
   expect(button?.disabled).toBe(false);
 });

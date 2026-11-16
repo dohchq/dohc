@@ -5,6 +5,7 @@ import {DohcMark, Icon} from "./icons";
 import {MemberChats, MemberComments, useMemberListing, LISTING_FAILED} from "./MemberChats";
 import {Toast} from "./Toast";
 import {UnsentEditsRow} from "./UnsentEdits";
+import {LaunchFailure} from "./OpenSharedApp";
 import {readDraft, writeDraft} from "./drafts";
 import {memberSession} from "./memberWorkspace";
 import {filesFromAccumulator, isMarkdown, type FileAccumulator, type ShareAccess, type SharedFile, type ViewMeta} from "./model";
@@ -42,6 +43,8 @@ function levelChangedWords(access: ShareAccess, by: string | null | undefined): 
 const SESSION_ENDED = "Your session ended. Sign in again to keep reading.";
 const CHECK_FAILED = "dohc could not open this workspace. Check your connection.";
 const SIGN_OUT_FAILED = "dohc could not sign you out. Retry sign-out.";
+// On the page for another account, the control that signs out is Switch account.
+const SWITCH_FAILED = "dohc could not sign you out. Choose Switch account to try again.";
 const CHECK_CONNECTION = "Check your connection.";
 // While the held read of the files fails, what shows is the last version that arrived. The desktop's words for an old list.
 const DATED = "May be out of date", DATED_TITLE = "These are the last files dohc received.";
@@ -360,7 +363,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
   if (view.status === "refused") return <StatePage icon="unlink" title="dohc could not open this workspace with this account.">
     <p>This browser is signed in as {account.name}, not the account the owner invited.</p>
     <button className="handoff-button secondary" type="button" disabled={signingOut} onClick={onSignOut}>{signingOut ? "Signing out…" : "Switch account"}</button>
-    {signOutError && <p role="alert">{signOutError}</p>}{kept}
+    {signOutError && <LaunchFailure role="alert" message={SWITCH_FAILED}/>}{kept}
   </StatePage>;
   if (view.status === "load-failed") return <StatePage icon="alert" failed title="dohc could not open this workspace.">
     <p>Check your connection, then choose Try again.</p>
