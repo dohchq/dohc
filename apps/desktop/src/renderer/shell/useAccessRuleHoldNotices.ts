@@ -130,7 +130,7 @@ export function accessRuleHoldWords(
   }
   return {
     title: `Access to ${place} was widened outside dohc`,
-    message: `${until} Restoring keeps the rule from outside dohc as a copy.${unreadable || (rows.length ? " Allowing the new rule gives:" : "")}`,
+    message: `${until} Restoring keeps the rule from outside dohc as a copy.${unreadable}`,
     rows,
     openMembers,
     ...(accept ?? { accept: "Allow new access", accepting: "Allowing…" }),

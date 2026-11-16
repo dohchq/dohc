@@ -116,7 +116,7 @@ describe("useAccessRuleHoldNotices", () => {
       noDismiss: true,
       title: "Access to team was widened outside dohc",
       message:
-        "Until you choose, dohc doesn't record or share changes in team. Restoring keeps the rule from outside dohc as a copy. Allowing the new rule gives:",
+        "Until you choose, dohc doesn't record or share changes in team. Restoring keeps the rule from outside dohc as a copy.",
       action: { label: "Restore rule", additional: [{ label: "Allow new access" }] },
     });
     expect(h.row("team/sub")).toMatchObject({
