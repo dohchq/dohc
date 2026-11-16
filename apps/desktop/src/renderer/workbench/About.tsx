@@ -2075,7 +2075,8 @@ export function AboutAccessView(props: {
                 <OnlyYouRow />
               ) : (
                 // An old listing can't say nobody else has access now: someone may have joined since.
-                <AboutNote testId="about-access-empty">No one else when last checked</AboutNote>
+                // The time line above says when it was checked.
+                <AboutNote testId="about-access-empty">No one else</AboutNote>
               )}
               {view.answer.rows.length === 0 ? null : (
                 <>
