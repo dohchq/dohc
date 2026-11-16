@@ -420,10 +420,11 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         check();
         if (!context || context.kind !== kind) return refusal();
         vouched = true;
-        const block = sessionHostBlocked?.({
-          workspaceId: context.workspaceId,
-          objectId: objectId as string,
-        });
+        const blocked = () =>
+          sessionHostBlocked?.({
+            workspaceId: context.workspaceId,
+            objectId: objectId as string,
+          });
         if (context.kind === "link") {
           const authority = authorizeLinkShareAction({
             storage,
@@ -454,9 +455,10 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           // A note paused after its file moved has no binding, and only its owner can start it again.
           if (binding.kind === "refused")
             return binding.reason === "host-unavailable" || binding.reason === "stale-document"
-              ? sessionHostRefusal(block ?? "stopped")
+              ? sessionHostRefusal(blocked() ?? "stopped")
               : refusal();
         }
+        const block = blocked();
         // A link holder's reach was checked above. An invited editor learns why only for a document they reach.
         if (block)
           return context.kind === "link"
