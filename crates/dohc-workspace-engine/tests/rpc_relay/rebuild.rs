@@ -229,7 +229,7 @@ async fn rebuild(copy: &ClosedCopy) -> Value {
         .expect("rebuild")
 }
 
-async fn finish(copy: &ClosedCopy) {
+async fn finish(copy: &ClosedCopy) -> Value {
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     transport
         .call(
@@ -242,7 +242,8 @@ async fn finish(copy: &ClosedCopy) {
             ),
         )
         .await
-        .expect("finish");
+        .expect("finish")
+        .result
 }
 
 fn manifest(copy: &ClosedCopy) -> Option<Value> {
@@ -678,6 +679,75 @@ async fn an_unsent_restore_of_an_older_version_is_saved() {
     finish(&copy).await;
 }
 
+/// The member restores an older version, then moves the file, and sends
+/// neither. The source comes back with the owner's newer version, so the move
+/// isn't undone: the restored bytes at the destination go to the recovery
+/// folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsent_restore_then_move_is_saved() {
+    const A2_BYTES: &[u8] = b"open file body, edited by the owner";
+    let copy = closed_copy_serving(
+        "rpc-rebuild-unsent-restore-move",
+        true,
+        false,
+        &[(
+            moment(5, "moment-a2", "object-a", "open/a.md", A2_BYTES),
+            A2_BYTES,
+        )],
+        |transport, handle, scratch| {
+            Box::pin(async move {
+                let mut id = 50;
+                let root = scratch.path();
+                call(
+                    transport,
+                    handle,
+                    &mut id,
+                    "versionedText.write",
+                    json!({
+                        "versionId": "main", "objectId": "object-a", "path": "open/a.md",
+                        "text": "open file body", "momentId": "restore-a", "origin": "api", "nowMs": 3_000,
+                    }),
+                )
+                .await;
+                call(
+                    transport,
+                    handle,
+                    &mut id,
+                    "versionedText.rename",
+                    json!({
+                        "versionId": "main", "fromPath": "open/a.md", "toPath": "open/moved.md",
+                        "origin": "api",
+                    }),
+                )
+                .await;
+                std::fs::rename(root.join("open/a.md"), root.join("open/moved.md")).expect("move");
+            })
+        },
+    )
+    .await;
+    let result = rebuild(&copy).await;
+    assert_eq!(result["state"], "rebuilt", "{result}");
+    let root = copy.scratch.path();
+    assert_eq!(std::fs::read(root.join("open/a.md")).expect("a"), A2_BYTES);
+    assert!(!root.join("open/moved.md").exists());
+    let recovery = root.join(result["recoveryFolder"].as_str().expect("recovery"));
+    assert_eq!(
+        names_in(&recovery),
+        ["0001 b.md", "0002 moved.md", "contents.md"]
+    );
+    assert_eq!(
+        std::fs::read(recovery.join("0002 moved.md")).expect("restore"),
+        A_BYTES
+    );
+    let contents = std::fs::read_to_string(recovery.join("contents.md")).expect("contents");
+    assert!(
+        contents.contains("| 0002 moved.md | open/moved.md | Not sent. |"),
+        "{contents}"
+    );
+    assert!(!contents.contains("moved back"), "{contents}");
+    finish(&copy).await;
+}
+
 /// A file on disk whose bytes the new store holds is replaced in place, with
 /// those bytes as its preimage, and nothing goes to the recovery folder.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -829,7 +899,8 @@ async fn a_live_draft_and_the_displaced_folder_are_saved() {
         assert_eq!(std::fs::metadata(&kept).expect("kept").ino(), inode);
     }
     assert!(!root.join(".dohc/engine/displaced").exists());
-    finish(&copy).await;
+    // A finish main retries after losing the answer still names the drafts.
+    assert_eq!(finish(&copy).await["savedDrafts"], json!(["draft-1"]));
 }
 
 /// Stop the rebuild at `point` as a crash would, then run it again on a new

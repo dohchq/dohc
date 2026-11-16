@@ -277,7 +277,13 @@ impl EngineService {
         std::fs::remove_file(rebuild_manifest::manifest_path(&root))
             .map_err(|_| failed("share-view-rebuild-manifest-unwritable"))?;
         lock(&self.rebuilding_roots).remove(&root);
-        Ok(json!({ "finished": true }))
+        // Main deletes these drafts now, including on a finish it retries
+        // after the rebuild's answer is gone.
+        let saved_drafts = manifest
+            .plan
+            .map(|plan| plan.saved_drafts)
+            .unwrap_or_default();
+        Ok(json!({ "finished": true, "savedDrafts": saved_drafts }))
     }
 
     /// The rebuild a root's manifest names, and its phase, or nulls. The
@@ -800,10 +806,19 @@ fn plan(
         .iter()
         .map(|version| version.path.as_str())
         .collect();
-    // An unsent move the plan undoes: its source comes back from the new
-    // store, so its destination is replaced like any file the store holds.
+    // An unsent delete or move the plan undoes: its source comes back from
+    // the new store. A move counts only when the source comes back with the
+    // destination's bytes; then the destination is replaced like any file the
+    // store holds. Other bytes there are the member's own and go to recovery.
     let undoes = |removal: &&RebuildRemoval| {
-        new_heads.contains_key(removal.path.as_str()) && !new.disk.contains_key(&removal.path)
+        let Some(restored) = new_heads.get(removal.path.as_str()) else {
+            return false;
+        };
+        !new.disk.contains_key(&removal.path)
+            && removal
+                .moved_to
+                .as_ref()
+                .is_none_or(|to| new.disk.get(to) == Some(&restored.sha256))
     };
     let moved_back: HashSet<&str> = old
         .unsent

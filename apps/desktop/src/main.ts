@@ -10889,11 +10889,19 @@ function registerIpcHandlers(): void {
         ? { rebuildId, phase }
         : null;
     },
+    // A retried finish has lost the rebuild's answer, so it takes the saved
+    // drafts to delete from the engine's.
     finishShareViewRebuild: async (workspaceId, rebuildId) => {
-      await shareViewRebuildEngine("share.view.rebuildFinish", {
+      const finished = await shareViewRebuildEngine("share.view.rebuildFinish", {
         rootDir: requireWorkspace(workspaceId).rootPath,
         rebuildId,
       });
+      const savedDrafts =
+        isRecordValue(finished) && Array.isArray(finished.savedDrafts) ? finished.savedDrafts : [];
+      for (const recordId of savedDrafts) {
+        if (typeof recordId === "string")
+          await removeKeptTyping(join(stateDir(), "live-draft-recovery"), workspaceId, recordId);
+      }
     },
   });
   // Rebuilds a restart stopped, and any whose id never reached the record.
