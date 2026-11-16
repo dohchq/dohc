@@ -82,6 +82,7 @@ async function relay(options: { seedFull?: boolean } = {}) {
       userId: match[1]!,
       sessionId: rename ?? match[2]!,
       expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind: "desktop",
     } satisfies AccountSession;
   };
   const holdSession = (nth: number) => {
@@ -102,12 +103,14 @@ async function relay(options: { seedFull?: boolean } = {}) {
     list: async () => [],
     revoke: async ({ sessionId }) => {
       revoked.add(sessionId);
-      return true;
+      return Number.MAX_SAFE_INTEGER;
     },
+    phoneSessionIsCurrent: async ({ sessionId }) => !revoked.has(sessionId),
+    read: async () => new Map(),
   };
   const hub = new DiscussionActivityHub();
   const h = testHandler(storage, {
-    resolveAccountSession,
+    resolvePhoneCapableAccountSession: resolveAccountSession,
     accountSessions,
     discussionActivity: hub,
     nowMs: () => NOW,

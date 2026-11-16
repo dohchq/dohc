@@ -76,6 +76,7 @@ import {
 } from "@dohc/live-session-contract/live-ticket";
 import type { LiveTicketScope } from "../liveBrowserContext";
 import { authorizeNamedLiveEditShareGrant } from "../shareAuthorization";
+import { showsOnPhone } from "./accountWorkspaces";
 import { readLiveHostControl, parseHostControlTimestamp } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
 import { SyncRelayQuotaExceededError } from "./errors";
@@ -774,13 +775,11 @@ export function resolveLiveObjectHostBinding(
       objectId,
       lineageClaimId: parseLiveUpdateDigest(row.lineage_claim_id),
     };
-    if (!serviceHostDocumentEnabled(storage, document))
+    const actor = liveBrowserActor(scope);
+    if (!serviceHostDocumentEnabled(storage, document, actor.kind === "owner" ? actor : undefined))
       return { kind: "refused", reason: "host-unavailable" };
-    if (scope.kind === "named" || scope.kind === "personal") {
-      const current = currentLiveDocumentBinding(storage, {
-        document,
-        actor: liveBrowserActor(scope),
-      });
+    if (scope.kind !== "link") {
+      const current = currentLiveDocumentBinding(storage, { document, actor });
       return current.kind === "current"
         ? { kind: "current", binding: current.binding, view: current.view, host: current.host }
         : current;
@@ -789,14 +788,14 @@ export function resolveLiveObjectHostBinding(
     if (host !== null) assertCurrentAuthorityHost(storage.db, host);
     if (host === null || host.admissionState !== "open" || host.transition !== null)
       return { kind: "refused", reason: "host-unavailable" };
-    const actor = liveBrowserActor(scope),
-      link = currentLinkEdit(storage, actor);
+    const linkActor = liveBrowserActor(scope),
+      link = currentLinkEdit(storage, linkActor);
     if (!link) return { kind: "refused", reason: "not-authorized" };
     const bound = bindLiveDocument(
       storage,
       document,
       readLiveDocumentAuthority(storage.db, document),
-      actor,
+      linkActor,
       link.share,
       link.effectiveSelector,
     );
@@ -873,22 +872,26 @@ function parseStoredLiveTicket(row: Record<string, unknown>): {
       } else if (typeof value !== "string") throw new Error();
     }
     parseTicketHash(row.token_hash);
+    // Each kind names only its own connection. The authority parser below checks its grant.
+    const connections: Record<"personal" | "named" | "link" | "owner", readonly string[]> = {
+      personal: ["personal_connection_id"],
+      named: [],
+      link: [row.agent_connection_id === null ? "link_session_id" : "agent_connection_id"],
+      owner: ["owner_session_id"],
+    };
     if (
-      (row.principal_kind !== "personal" &&
-        row.principal_kind !== "named" &&
-        row.principal_kind !== "link") ||
+      !Object.hasOwn(connections, String(row.principal_kind)) ||
       row.main_version_id !== "main" ||
       Number(row.restore_fence_generation) < 1
     )
       throw new Error();
-    // Each kind names only its own connection. The authority parser below checks its grant.
-    const connections: Record<"personal" | "named" | "link", readonly string[]> = {
-      personal: ["personal_connection_id"],
-      named: [],
-      link: [row.agent_connection_id === null ? "link_session_id" : "agent_connection_id"],
-    };
     const connection = connections[row.principal_kind as keyof typeof connections];
-    for (const column of ["link_session_id", "agent_connection_id", "personal_connection_id"]) {
+    for (const column of [
+      "link_session_id",
+      "agent_connection_id",
+      "personal_connection_id",
+      "owner_session_id",
+    ]) {
       if (
         connection.includes(column)
           ? parseLiveUpdateIdentifier(row[column], column) !== row[column]
@@ -985,6 +988,12 @@ function currentPersonalEdit(
 }
 
 export function ticketScopeIsCurrent(storage: StorageContext, scope: LiveTicketScope): boolean {
+  // The route checks the phone's sign-in itself. Here the workspace must be the account's and show on its phone.
+  if (scope.kind === "owner")
+    return (
+      storage.workspaceIsOwnedBy(scope.workspaceId, scope.userId) &&
+      showsOnPhone(storage, scope.userId, scope.workspaceId)
+    );
   if (scope.kind === "personal")
     return currentPersonalEdit(storage, liveBrowserActor(scope)) !== null;
   const grant = storage.getShareGrant(scope.grantId);
@@ -1070,14 +1079,21 @@ export function matchingTicket(
     (input.scope.kind === "personal"
       ? claims.authority.principalId !== input.scope.agentId ||
         row.personal_connection_id !== input.scope.connectionId
-      : input.scope.kind === "named"
-        ? claims.authority.principalId !== input.scope.userId
-        : ("agentConnectionId" in input.scope
-            ? row.agent_connection_id !== input.scope.agentConnectionId
-            : row.link_session_id !== input.scope.sessionId) ||
-          currentLinkEdit(storage, liveBrowserActor(input.scope))?.enrollment.principal
-            ?.principalId !== claims.authority.principalId) ||
-    claims.authority.grantId !== (input.scope.kind === "personal" ? null : input.scope.grantId) ||
+      : input.scope.kind === "owner"
+        ? // An owner's ticket opens only for the sign-in it was minted for.
+          claims.authority.principalId !== input.scope.userId ||
+          row.owner_session_id !== input.scope.sessionId
+        : input.scope.kind === "named"
+          ? claims.authority.principalId !== input.scope.userId
+          : ("agentConnectionId" in input.scope
+              ? row.agent_connection_id !== input.scope.agentConnectionId
+              : row.link_session_id !== input.scope.sessionId) ||
+            currentLinkEdit(storage, liveBrowserActor(input.scope))?.enrollment.principal
+              ?.principalId !== claims.authority.principalId) ||
+    claims.authority.grantId !==
+      (input.scope.kind === "personal" || input.scope.kind === "owner"
+        ? null
+        : input.scope.grantId) ||
     !ticketScopeIsCurrent(storage, input.scope)
   )
     throw LIVE_TICKET_REFUSED;
@@ -1160,6 +1176,12 @@ export function mintLiveTicket(
         });
       }
     }
+    // An owner's phone ticket ends no later than the sign-in it is for.
+    const expiresAtMs =
+      owned.scope.kind === "owner"
+        ? Math.min(now + LIVE_TICKET_LIFETIME_MS, owned.scope.sessionExpiresAtMs)
+        : now + LIVE_TICKET_LIFETIME_MS;
+    if (expiresAtMs <= now) throw LIVE_TICKET_REFUSED;
     const current = currentTicketAuthority(storage, owned.scope, objectId, report);
     const claims = parseLiveTicketClaims({
       ticketId,
@@ -1168,17 +1190,19 @@ export function mintLiveTicket(
       binding: current.binding,
       hostEpoch: current.host.hostEpoch,
       mintedAtMs: now,
-      expiresAtMs: now + LIVE_TICKET_LIFETIME_MS,
+      expiresAtMs,
     });
     storeLiveTicketInTransaction(
       storage,
       {
         claims,
         tokenHash: owned.tokenHash,
-        linkSessionId: "sessionId" in owned.scope ? owned.scope.sessionId : null,
+        linkSessionId:
+          owned.scope.kind === "link" && "sessionId" in owned.scope ? owned.scope.sessionId : null,
         agentConnectionId:
           "agentConnectionId" in owned.scope ? owned.scope.agentConnectionId : null,
         personalConnectionId: owned.scope.kind === "personal" ? owned.scope.connectionId : null,
+        ownerSessionId: owned.scope.kind === "owner" ? owned.scope.sessionId : null,
       },
       now,
       policy,
@@ -1195,7 +1219,7 @@ export function mintLiveTicket(
 /**
  * A ticket to store, with the connection that may redeem it. A personal
  * agent's ticket names its connection; a link ticket names a session or an
- * agent connection.
+ * agent connection; an owner's ticket names the phone's sign-in.
  */
 export interface StoredLiveTicketInput {
   readonly claims: LiveTicketClaims;
@@ -1203,6 +1227,7 @@ export interface StoredLiveTicketInput {
   readonly linkSessionId: string | null;
   readonly agentConnectionId: string | null;
   readonly personalConnectionId: string | null;
+  readonly ownerSessionId: string | null;
 }
 
 /**
@@ -1247,7 +1272,7 @@ export function storeLiveTicketInTransaction(
     throw new LiveTicketsRetained();
   storage.db
     .prepare(`INSERT INTO ${LIVE_TICKET_TABLE} (${LIVE_TICKET_COLUMNS.join(", ")})
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`)
     .run(
       claims.ticketId,
       ticket.tokenHash,
@@ -1269,13 +1294,14 @@ export function storeLiveTicketInTransaction(
       ticket.linkSessionId,
       ticket.agentConnectionId,
       ticket.personalConnectionId,
+      ticket.ownerSessionId,
     );
 }
 
 /**
  * Consumes a matched ticket inside a ticket transaction and returns the
- * stored ticket's claims. Only the personal connection the ticket names, or
- * none for a browser ticket, can consume it.
+ * stored ticket's claims. Only the personal connection or owner's sign-in the
+ * ticket names, or neither for a browser ticket, can consume it.
  */
 export function consumeLiveTicketInTransaction(
   storage: StorageContext,
@@ -1283,14 +1309,24 @@ export function consumeLiveTicketInTransaction(
     readonly ticketId: string;
     readonly tokenHash: string;
     readonly personalConnectionId: string | null;
+    readonly ownerSessionId: string | null;
   },
   now: number,
 ): RedeemedLiveTicket {
   const row = storage.db
     .prepare(`UPDATE ${LIVE_TICKET_TABLE} SET redeemed_at_ms = ?
-    WHERE ticket_id = ? AND token_hash = ? AND personal_connection_id IS ? AND redeemed_at_ms IS NULL AND minted_at_ms <= ? AND expires_at_ms > ?
+    WHERE ticket_id = ? AND token_hash = ? AND personal_connection_id IS ? AND owner_session_id IS ?
+      AND redeemed_at_ms IS NULL AND minted_at_ms <= ? AND expires_at_ms > ?
     RETURNING *`)
-    .get(now, ticket.ticketId, ticket.tokenHash, ticket.personalConnectionId, now, now);
+    .get(
+      now,
+      ticket.ticketId,
+      ticket.tokenHash,
+      ticket.personalConnectionId,
+      ticket.ownerSessionId,
+      now,
+      now,
+    );
   if (!row) throw LIVE_TICKET_REFUSED;
   return parseRedeemedLiveTicket({ ...parseStoredLiveTicket(row).claims, redeemedAtMs: now });
 }
@@ -1318,6 +1354,7 @@ export function redeemLiveTicket(
         ticketId: claims.ticketId,
         tokenHash: owned.tokenHash,
         personalConnectionId: owned.scope.kind === "personal" ? owned.scope.connectionId : null,
+        ownerSessionId: owned.scope.kind === "owner" ? owned.scope.sessionId : null,
       },
       now,
     );

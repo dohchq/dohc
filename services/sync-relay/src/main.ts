@@ -7,6 +7,7 @@ import {
 } from "@dohc/security-contract/app-publication";
 import {
   createAccountSessionResolver,
+  createPhoneCapableAccountSessionResolver,
   createPostgresAccountSessions,
   createSessionActorResolver,
   UnauthorizedError,
@@ -18,7 +19,7 @@ import {
   createPostgresCredentialFence,
   type CredentialFence,
 } from "@dohc/workspace-auth/credentialFence";
-import { readPushConfig } from "./pushConfig";
+import { readApnsConfig, readPushConfig } from "./pushConfig";
 import { createPushSender } from "./pushSender";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { tmpdir } from "node:os";
@@ -40,6 +41,12 @@ import {
   accountDeletionKey,
   accountDeletionFenceKey,
 } from "@dohc/workspace-auth/accountDeletion";
+import {
+  APP_LAUNCH_PURGE_BATCH,
+  APP_LAUNCH_PURGE_KEY_HEADER,
+  APP_LAUNCH_PURGE_PATH,
+  appLaunchPurgeKey,
+} from "@dohc/security-contract/account-deletion";
 import { createAccountDeletionRoute, fencePendingAccountDeletions } from "./accountDeletionRoute";
 import type { StorageContext } from "./storage/context";
 import { startLiveJournalCheck } from "./storage/liveJournalCheck";
@@ -93,6 +100,7 @@ import {
   createPersonalLiveRoutes,
 } from "./namedLiveRoutes";
 import { createLiveTickets } from "./liveTickets";
+import { createPhonePages, type PhonePages } from "./phonePages";
 import { createLiveHostReports } from "./namedLiveHostReports";
 import { createLinkLiveResolver } from "./linkLiveBrowserAuth";
 import { normalizeLinkRefusal, opaqueLinkRefusal } from "./linkRefusal";
@@ -103,7 +111,10 @@ import { createLiveMembershipRegistry } from "./liveMembership";
 import { createLiveConnectionAdmission } from "./liveConnectionAdmission";
 import { createNamedDesktopLive } from "./namedDesktopLive";
 import { parseNamedLiveBrowserLimits } from "@dohc/ydoc-projection/named-live-browser-transport";
-import type { NamedFrameNativeHost } from "./namedLiveFrameHost";
+import { captureOwnerLiveFrameHost, type NamedFrameNativeHost } from "./namedLiveFrameHost";
+import { createLiveRooms, LiveRoomBindingEndedError, type LiveRooms } from "./liveRoom";
+import { liveRoomPaused } from "./storage/liveRoomPauses";
+import { workspaceOwner } from "./storage/workspaces";
 import { createAutomationRecordHost } from "./automationRecordHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { selfHostLiveProfile } from "./selfHostLiveProfile";
@@ -439,14 +450,15 @@ let lookupUserEmail: (userId: string) => Promise<string | null> | string | null;
 let lookupVerifiedUserEmail: (userId: string) => Promise<string | null> | string | null;
 let lookupUserDisplayName: (userId: string) => Promise<string | null> | string | null;
 // The test seam has no browser sign-ins, so it serves no push subscriptions
-// and no personal agent sign-in.
+// and no personal agent sign-in. Its Bearer identities are desktop sign-ins.
 const accountResolvers: {
   actor: ResolveActor;
   session?: ResolveAccountSession;
+  phoneCapableSession?: ResolveAccountSession;
   sessions?: AccountSessions;
   credentialFence?: CredentialFence;
 } = testAuthSeam
-  ? { actor: createTestActorResolver() }
+  ? { actor: createTestActorResolver(), phoneCapableSession: createTestAccountSessionResolver() }
   : await (async () => {
       const { createWorkspaceAuth } = await import("@dohc/workspace-auth/betterAuth");
       pool = new Pool({
@@ -471,12 +483,14 @@ const accountResolvers: {
       return {
         actor: createSessionActorResolver(auth),
         session: createAccountSessionResolver(auth),
+        phoneCapableSession: createPhoneCapableAccountSessionResolver(auth),
         sessions: createPostgresAccountSessions(pool),
         credentialFence,
       };
     })();
 const resolveAccountActor = accountResolvers.actor;
 const resolveAccountSession = accountResolvers.session;
+const resolvePhoneCapableAccountSession = accountResolvers.phoneCapableSession;
 const credentialFence = accountResolvers.credentialFence;
 const pushConfig = (() => {
   try {
@@ -488,6 +502,13 @@ const pushConfig = (() => {
   }
 })();
 const pushVapidPublicKey = pushConfig?.publicKey;
+const apnsConfig = (() => {
+  try {
+    return readApnsConfig(process.env);
+  } catch (error) {
+    fatal(`FATAL: ${error instanceof Error ? error.message : "Invalid APNs configuration."}`);
+  }
+})();
 
 const documentProjection = projectionExecutable
   ? await startEngineProjection({
@@ -594,6 +615,19 @@ function createTestActorResolver(): ResolveActor {
   };
 }
 
+function createTestAccountSessionResolver(): ResolveAccountSession {
+  const resolveActor = createTestActorResolver();
+  return async (request) => {
+    const { userId } = await resolveActor(request, "");
+    return {
+      userId,
+      sessionId: `test:${userId}`,
+      expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind: "desktop",
+    };
+  };
+}
+
 if (testAuthSeam) {
   resolveUserIdByEmail = (email) =>
     email.endsWith(TEST_EMAIL_SUFFIX) && email.length > TEST_EMAIL_SUFFIX.length
@@ -627,18 +661,24 @@ if (testAuthSeam) {
 const presence = new PresenceHub();
 
 let ownerRestoreHost: (() => OwnerRestoreHost | undefined) | undefined;
+let liveRooms: LiveRooms | undefined;
+let phonePages: PhonePages | undefined;
 let heldDocumentHost: (() => HeldDocumentHost | undefined) | undefined;
 const relayApplication = createSyncRelayHandler({
   discussionActivity,
   ownerRestoreHost: () => ownerRestoreHost?.(),
+  liveRooms: () => liveRooms,
   heldDocumentHost: () => heldDocumentHost?.(),
   storage,
   resolveActor,
   ...(resolveAccountSession ? { resolveAccountSession } : {}),
+  ...(resolvePhoneCapableAccountSession ? { resolvePhoneCapableAccountSession } : {}),
   ...(accountResolvers.sessions ? { accountSessions: accountResolvers.sessions } : {}),
+  ownerLiveSockets: () => ownerLive,
   ...(credentialFence ? { credentialFence } : {}),
   ...(pushVapidPublicKey ? { pushVapidPublicKey } : {}),
   ...(pushConfig ? { pushHosts: pushConfig.hosts } : {}),
+  ...(apnsConfig ? { apnsConfig } : {}),
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
   lookupUserEmail: (userId) => lookupUserEmail(userId),
   lookupUserEmails: async (userIds) => {
@@ -656,6 +696,32 @@ const relayApplication = createSyncRelayHandler({
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
+  // The relay has already ended these launches, so every later call share-web makes for them is refused.
+  // This ends share-web's own state without waiting for that call.
+  // Share-web ends only these launches, so a purge that arrives late can't end a newer one.
+  endShareWebAppLaunches: (launchHashes) => {
+    const origin = process.env.DOHC_RELAY_SHARE_WEB_URL;
+    if (!shareWebOrigin || !origin || !relayExchangeKey) return;
+    for (let start = 0; start < launchHashes.length; start += APP_LAUNCH_PURGE_BATCH)
+      fetch(new URL(APP_LAUNCH_PURGE_PATH, origin), {
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
+        headers: {
+          "content-type": "application/json",
+          [APP_LAUNCH_PURGE_KEY_HEADER]: appLaunchPurgeKey(relayExchangeKey),
+        },
+        body: JSON.stringify({
+          launchHashes: launchHashes.slice(start, start + APP_LAUNCH_PURGE_BATCH),
+        }),
+      })
+        .then(async (response) => {
+          await response.body?.cancel();
+          if (!response.ok)
+            console.error(`Share-web refused the end of phone app sessions: ${response.status}.`);
+        })
+        .catch(() => console.error("Share-web did not confirm the end of phone app sessions."));
+  },
   namedBrowserSessionLimits,
   publicEditRelease,
   appPublicationLimits,
@@ -668,6 +734,7 @@ const relayApplication = createSyncRelayHandler({
   appCollectionPolicy,
   noticePostRateLimiter,
   serverCopies: () => copies,
+  phonePages: () => phonePages,
   relayPublicOrigin: process.env.DOHC_RELAY_PUBLIC_ORIGIN,
   ...(automationServer ? { automationServer } : {}),
 });
@@ -916,7 +983,7 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 
 // Presses from shared views go when their retention ends, whether or not
 // more arrive or any host lists them. Settled phone writes become tombstones,
-// and chat wakes end and go, on the same schedule.
+// chat wakes end and go, and expired phone sign-ins' alerts end, on the same schedule.
 const AUTOMATION_PRESS_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 startRelayMainThreadTiming();
 setInterval(() => {
@@ -924,6 +991,11 @@ setInterval(() => {
     storage.purgeExpiredShareRemovals(Date.now());
   } catch (error) {
     console.error("[sync-relay] share removal prune failed:", serverLogLine(error));
+  }
+  try {
+    storage.sweepExpiredPushDevices(Date.now());
+  } catch (error) {
+    console.error("[sync-relay] phone alert sweep failed:", serverLogLine(error));
   }
   pruneAutomationPresses(storage, Date.now()).catch((error: unknown) => {
     console.error("[sync-relay] automation press prune failed:", serverLogLine(error));
@@ -1138,6 +1210,7 @@ if (selfHost && deployment)
     history: deployment.history,
     host: selfHost,
     resolveActor: resolveAccountActor,
+    rooms: () => liveRooms,
   });
 // Every relay answers a personal open. Only one running the self-hosted live host hosts it.
 personalLiveDocument = createPersonalLiveDocumentRoute({
@@ -1214,7 +1287,50 @@ if (namedLiveConfig) {
     },
     storage.readLiveAuthority.bind(storage),
   );
+  const bounds = namedLiveConfig.host;
+  // Off unless DOHC_RELAY_LIVE_ROOMS=1 while the room is built and tested in stages.
+  const rooms =
+    process.env.DOHC_RELAY_LIVE_ROOMS === "1"
+      ? createLiveRooms({
+          storage,
+          maxUpdateBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
+          maxNoteBytes: bounds.maxAdmissionBytes,
+          maxAppliedBytes: Math.min(bounds.maxSubmissionBytes, bounds.maxAppliedUpdateBytes),
+          // Off until the engine that credits every sender in one save is deployed with it.
+          namesEverySender: process.env.DOHC_RELAY_LIVE_ROOM_NAMES === "1",
+          // A room saves as the workspace's owner, whoever is connected.
+          async openSaver(document, signal) {
+            const ownerUserId = workspaceOwner(storage as StorageContext, document.workspaceId);
+            if (!ownerUserId) throw new Error("The workspace has no owner.");
+            const current = storage.resolveCurrentLiveDocumentBinding({
+              document,
+              actor: { kind: "owner", userId: ownerUserId },
+            });
+            // A moved, deleted or replaced file, or an ended lineage, doesn't come back by itself.
+            if (current.kind !== "current")
+              throw current.reason === "stale-document"
+                ? new LiveRoomBindingEndedError()
+                : new Error("The owner's binding is not current.");
+            return captureOwnerLiveFrameHost({
+              authenticatedUserId: ownerUserId,
+              storage,
+              native: await captureNative(current.binding, signal),
+              bounds,
+              validate: namedLiveConfig.validate,
+            });
+          },
+        })
+      : undefined;
+  liveRooms = rooms;
+  // A paused note is refused to editors as a held one is: only its owner can start it again.
+  const editorsBlocked = rooms
+    ? (document: { workspaceId: string; objectId: string }) =>
+        liveRoomPaused(storage as StorageContext, document)
+          ? "held"
+          : sessionHostBlocked?.(document)
+    : sessionHostBlocked;
   namedLive = createNamedLiveRoutes({
+    rooms,
     kind: "named",
     storage,
     lookupUserDisplayName,
@@ -1230,7 +1346,7 @@ if (namedLiveConfig) {
     captureNative,
     membership,
     admission,
-    sessionHostBlocked,
+    sessionHostBlocked: editorsBlocked,
   });
   if (linkLiveEnabled && publicEditRelease) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
@@ -1253,8 +1369,9 @@ if (namedLiveConfig) {
       tickets,
       captureNative,
       membership,
+      rooms,
       admission,
-      sessionHostBlocked,
+      sessionHostBlocked: editorsBlocked,
     });
     linkLiveHttp = createLinkLiveHttp({
       storage,
@@ -1264,7 +1381,7 @@ if (namedLiveConfig) {
       limits: namedLiveConfig.transport,
       linkKey: linkKey!,
       publicEditRelease,
-      sessionHostBlocked,
+      sessionHostBlocked: editorsBlocked,
       linkAuthority: relayApplication.linkAuthority,
       readAwakeState,
       frames: namedLiveConfig.frames.receive,
@@ -1337,8 +1454,12 @@ if (namedLiveConfig) {
     process.once("SIGTERM", desktopLive.close);
   }
   ownerLive = createOwnerLiveRoutes({
+    // Off unless DOHC_RELAY_LIVE_ROOM_OWNER=1 too, until the desktop that reads room rows ships.
+    ...(rooms && process.env.DOHC_RELAY_LIVE_ROOM_OWNER === "1" ? { rooms } : {}),
     storage,
-    resolveActor,
+    // The Bearer sign-in, a phone's included. A phone also needs a ticket, which only an uncached sign-in read admits.
+    resolveAccountSession: resolvePhoneCapableAccountSession!,
+    ...(accountResolvers.sessions ? { accountSessions: accountResolvers.sessions, tickets } : {}),
     lookupUserDisplayName,
     hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!,
@@ -1353,6 +1474,22 @@ if (namedLiveConfig) {
   server.once("close", ownerLive.close);
   process.once("SIGINT", ownerLive.close);
   process.once("SIGTERM", ownerLive.close);
+  // A phone opens its pages only through the self-hosted live host, with a ticket only its sign-in redeems.
+  if (selfHost && deployment && accountResolvers.sessions) {
+    const hostId = selfHostedLiveHostId(deployment.history.namespace);
+    phonePages = createPhonePages({
+      storage,
+      history: deployment.history,
+      host: selfHost,
+      supported: () => {
+        const control = storage.getLiveHostControl();
+        return control?.configuredMode === "service" && control.configuredHostId === hostId;
+      },
+      tickets,
+      sessions: accountResolvers.sessions,
+      nowMs: () => Date.now(),
+    });
+  }
   server.on("upgrade", (request, socket, head) => {
     if (/^\/sync\/workspaces\/[^/]+\/live\/owner(?:\?|$)/.test(request.url ?? ""))
       void ownerLive!.handleUpgrade(request, socket, head).catch(() => socket.destroy());
@@ -1380,6 +1517,8 @@ const publicationOperator = await startPublicationOperator(
   storage,
   operatorSocketPath(),
   operatorSecretPath(),
+  ({ ownerUserId, workspaceId, publicationId }) =>
+    relayApplication.endPhoneAppLaunches({ userId: ownerUserId, workspaceId, publicationId }),
 );
 
 // A server that keeps no copies removes them at start. One that runs no automations ends that reason for every copy.
@@ -1524,6 +1663,8 @@ server.listen(requestedPort, host, () => {
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    // The rooms save through the hosts closed below, so they save what they hold first.
+    await liveRooms?.close();
     stopJournalCheck();
     await pushSender.close();
     await publicationOperator.close();

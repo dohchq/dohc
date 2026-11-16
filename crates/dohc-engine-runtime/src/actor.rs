@@ -464,6 +464,7 @@ impl WorkspaceActor {
         let worker_tails = released_tails.clone();
         let markdown_recovery = Arc::new(MarkdownRecoverySignal::default());
         let worker_markdown_recovery = markdown_recovery.clone();
+        let wake = tx.downgrade();
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
             .spawn(move || {
@@ -473,6 +474,7 @@ impl WorkspaceActor {
                     mode,
                     root_token,
                     rx,
+                    wake,
                     worker_state,
                     worker_metrics,
                     worker_link_drain_holds,
@@ -1220,6 +1222,7 @@ fn worker_main(
     mode: ActorOpenMode,
     root_token: Option<String>,
     mut rx: mpsc::Receiver<Command>,
+    wake: mpsc::WeakSender<Command>,
     state: Arc<AtomicU8>,
     link_metrics: SharedMetrics,
     link_drain_holds: Arc<AtomicU64>,
@@ -1244,9 +1247,21 @@ fn worker_main(
     // Drop SQLite first, then its owner lock, then publish Closed, including unwind.
     let _writer_lock = writer_lock;
 
-    let mut store = match if matches!(mode, ActorOpenMode::Passive) {
-        EngineStore::open_passive(&db_path, now_ms, root_token.as_deref(), work_count.clone())
-    } else if matches!(mode, ActorOpenMode::ReadOnly) {
+    // The store serves before its pages are checked, since that check reads
+    // the whole file. If the check then finds damage, this actor stops: the
+    // flag ends the loop before its next command, and the wake reaches a loop
+    // that waits for one. A full channel needs no wake.
+    let store_damaged = Arc::new(AtomicBool::new(false));
+    let damaged: dohc_engine_storage::PagesDamaged = {
+        let store_damaged = Arc::clone(&store_damaged);
+        Box::new(move || {
+            store_damaged.store(true, Ordering::Release);
+            if let Some(wake) = wake.upgrade() {
+                let _ = wake.try_send(Command::WakeLinks);
+            }
+        })
+    };
+    let mut store = match if matches!(mode, ActorOpenMode::ReadOnly) {
         EngineStore::open_read_only_counting(&db_path, work_count.clone()).and_then(|store| {
             if store.is_passive() {
                 Err(dohc_engine_storage::StorageError::InvalidInput {
@@ -1257,7 +1272,14 @@ fn worker_main(
             }
         })
     } else {
-        EngineStore::open_for_actor(&db_path, now_ms, root_token.as_deref(), work_count.clone())
+        EngineStore::open_serving_first(
+            &db_path,
+            now_ms,
+            root_token.as_deref(),
+            work_count.clone(),
+            matches!(mode, ActorOpenMode::Passive),
+            damaged,
+        )
     } {
         Ok(store) => store,
         Err(err) => {
@@ -1328,6 +1350,10 @@ fn worker_main(
     let mut links = None;
     let mut timer = None;
     loop {
+        // A damaged store gets no background slice either.
+        if store_damaged.load(Ordering::Acquire) {
+            break;
+        }
         // Serve a queued foreground command before each background slice.
         // The timer runtime ends before synchronous commands execute.
         let cmd = match rx.try_recv() {
@@ -1446,6 +1472,11 @@ fn worker_main(
             }
             continue;
         };
+        // A damaged store serves nothing more. Dropping the command tells
+        // its caller that the actor is unavailable.
+        if store_damaged.load(Ordering::Acquire) {
+            break;
+        }
         // Counted as each command starts, so its caller sees the count by the
         // time its reply arrives.
         if let Some(work) = &work_count {
@@ -1491,6 +1522,9 @@ fn worker_main(
         }
     }
 
+    if store_damaged.load(Ordering::Acquire) {
+        eprintln!("engine: the workspace store is damaged; its actor stops");
+    }
     // Normal exit: drop the connection explicitly, then the `_closed_guard`
     // publishes Closed as it falls out of scope (same ordering the guard
     // guarantees on a panic unwind).
@@ -1627,6 +1661,10 @@ fn acquire_writer_lock(db_path: &std::path::Path) -> Result<WriterLock, RuntimeE
 mod reader_tests;
 
 #[cfg(test)]
+#[path = "actor/page_check_tests.rs"]
+mod page_check_tests;
+
+#[cfg(test)]
 #[path = "actor/owner_retirement_tests.rs"]
 mod owner_retirement_tests;
 
@@ -1717,9 +1755,10 @@ mod held_reader_tests {
         assert!(read.await.unwrap().unwrap(), "the reader could not read");
     }
 
-    /// The writer's open checked the pages, so a reader opened while it holds
-    /// the store does not read every page again. Damage made since is found
-    /// by a query that reads it, or by the next open once the writer closes.
+    /// The writer's page check covers the store, so a reader opened while the
+    /// writer holds it does not read every page again. Damage made after that
+    /// check is found by a query that reads it, or by the next open once the
+    /// writer closes.
     #[test]
     fn a_reader_skips_the_page_check_while_the_actor_holds_the_store() {
         let scratch = ScratchDir::new().unwrap();
@@ -1750,6 +1789,14 @@ mod held_reader_tests {
         };
         let actor = supervisor.open(&db, 2).unwrap().actor;
         let location = actor.location();
+        // The open left the store's pages to its check. A check still running
+        // would read the damage below, mark the store and stop the actor.
+        actor
+            .run_blocking(|store, _| {
+                store.wait_for_page_check_for_test();
+                Ok(())
+            })
+            .unwrap();
         {
             use std::io::{Seek, SeekFrom, Write};
             let mut file = std::fs::OpenOptions::new().write(true).open(&db).unwrap();
@@ -1835,6 +1882,7 @@ pub(crate) mod test_support {
         let metrics = Arc::clone(&actor.link_metrics);
         let holds = Arc::clone(&actor.link_drain_holds);
         let markdown_recovery = actor.markdown_recovery.clone();
+        let wake = actor.tx.downgrade();
         actor.worker = Some(std::thread::spawn(move || {
             worker_main(
                 db,
@@ -1842,6 +1890,7 @@ pub(crate) mod test_support {
                 ActorOpenMode::ReadWrite,
                 None,
                 rx,
+                wake,
                 state,
                 metrics,
                 holds,

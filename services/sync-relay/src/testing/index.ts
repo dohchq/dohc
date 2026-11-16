@@ -6,7 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { UnauthorizedError } from "@dohc/workspace-auth/session";
+import { UnauthorizedError, type AccountSession } from "@dohc/workspace-auth/session";
 import { NOTICE_LIST_ROW_LIMIT, NOTICE_UNREAD_RETENTION_MS } from "@dohc/workspace-contracts/relay";
 import { expect } from "vitest";
 import { openEmptyRelayTestStorage } from "./emptyRelayStorage";
@@ -228,6 +228,22 @@ export function resolveTestActor(
   const match = /^Bearer user:([^ ]+)$/u.exec(request.headers.get("authorization") ?? "");
   if (!match) throw new UnauthorizedError();
   return { userId: match[1]!, workspaceId };
+}
+
+/**
+ * The account-session seam beside it: `Bearer user:<id>` is a desktop sign-in,
+ * `Bearer phone:<id>` the account's phone. Only the account routes take it.
+ */
+export async function resolveTestAccountSession(request: Request): Promise<AccountSession> {
+  const match = /^Bearer (user|phone):([^ ]+)$/u.exec(request.headers.get("authorization") ?? "");
+  if (!match) throw new UnauthorizedError();
+  const kind = match[1] === "phone" ? "phone" : "desktop";
+  return {
+    userId: match[2]!,
+    sessionId: `${kind}-session-${match[2]!}`,
+    expiresAtMs: Number.MAX_SAFE_INTEGER,
+    clientKind: kind,
+  };
 }
 
 // Minted ids (credentials, sessions, proposals) are unique across handlers so two

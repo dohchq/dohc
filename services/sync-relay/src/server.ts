@@ -19,11 +19,16 @@ import type { RelayDatasetHost } from "./datasetHost";
 import { hashLinkProfileSecret } from "./linkSecurity";
 import { LINK_SECRET_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { createOwnerAppPublicationRoutes } from "./ownerAppPublicationRoutes";
+import { createPhoneApps } from "./phoneApps";
+import type { PhoneAppLaunchScope } from "./storage/phoneApps";
 import { readOwnerAppResponses } from "./ownerAppResponseRoutes";
 import { createLinkAppPublicationRoutes } from "./linkAppPublicationRoutes";
 import { createLinkAppCollectionRoutes, type AppCollectionPolicy } from "./appCollectionRoutes";
 import { createNamedRecipientChat } from "./namedRecipientChat";
 import { createPushRoutes } from "./pushRoutes";
+import { createPushDeviceRoutes } from "./pushDeviceRoutes";
+import { PUSH_DEVICES_PATH } from "@dohc/workspace-contracts/push-subscriptions";
+import type { ApnsConfig } from "./pushConfig";
 import { createNamedRecipientDocuments } from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
@@ -37,6 +42,8 @@ import {
 } from "./collectionWriteRoutes";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { createHeldDocumentRoutes, type HeldDocumentHost } from "./heldDocumentRoutes";
+import type { LiveRooms } from "./liveRoom";
+import { createLiveRoomPauseRoutes } from "./liveRoomPauseRoutes";
 import { randomUUID } from "node:crypto";
 import {
   createNamedLiveBrowserHttp,
@@ -75,8 +82,10 @@ import {
 } from "./accountOperationRoutes";
 import { createChatWakeRoutes, createChatWakeWaits } from "./chatWakeRoutes";
 import type { ServerCopies } from "./serverCopies";
+import type { PhonePages } from "./phonePages";
 import { createAccountSessionRoutes } from "./accountSessionRoutes";
-import { createAccountWorkspaceRoutes } from "./accountWorkspaceRoutes";
+import type { OwnerLiveSockets } from "./namedLiveRoutes";
+import { bearerAccountSession, createAccountWorkspaceRoutes } from "./accountWorkspaceRoutes";
 import { createWorkspaceReplicationRoutes } from "./workspaceReplicationRoutes";
 import { createLinkResponseStreams } from "./linkResponseStreams";
 import { createLinkCredentialRoutes } from "./linkCredentialRoutes";
@@ -158,20 +167,29 @@ export interface CreateSyncRelayHandlerOptions {
   appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
   datasetHost?: RelayDatasetHost;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
+  // The live rooms, which save a note's taken edits before a restore closes it.
+  liveRooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
   // The session host's read of what its hosted replicas hold for released retained work.
   heldDocumentHost?: () => HeldDocumentHost | undefined;
   storage: SyncRelayStorage;
   resolveActor: ResolveActor;
   // The browser sign-in behind a cookie, for state bound to it such as push subscriptions,
-  // and the Bearer sign-in of the account routes. Without it the server serves no account routes.
+  // and an agent's sign-in approval. It refuses phone sessions.
   resolveAccountSession?: ResolveAccountSession;
+  // The Bearer sign-in of the account routes the phone uses, a phone's included.
+  // Only those routes take it. Without it the server serves no account routes.
+  resolvePhoneCapableAccountSession?: ResolveAccountSession;
   // The accounts' sign-ins in Better Auth's session table, which the account routes list and revoke.
   accountSessions?: AccountSessions;
+  // The owner's live connections, which a revoke or Show on phone turned off ends before it answers.
+  ownerLiveSockets?: () => OwnerLiveSockets | undefined;
   // The accounts' password fences in Postgres. Absent means personal agents can't sign in here.
   credentialFence?: CredentialFence;
   // This server's VAPID public key. Absent means alerts are unavailable here.
   pushVapidPublicKey?: string;
   pushHosts?: ReadonlySet<string>;
+  // The phone's APNs topic and environments. Absent means phone alerts are unavailable here.
+  apnsConfig?: ApnsConfig;
   nowMs?: () => number;
   // A clock that only moves forward, for idle windows. Defaults to performance.now().
   elapsedMs?: () => number;
@@ -207,6 +225,8 @@ export interface CreateSyncRelayHandlerOptions {
   linkKey?: string | Uint8Array;
   shareWebOrigin?: string;
   relayExchangeKey?: string;
+  // Ends share-web's phone app sessions for these launch IDs' hashes once the relay has deleted them.
+  endShareWebAppLaunches?: (launchHashes: readonly string[]) => void;
   namedBrowserSessionLimits?: NamedLiveBrowserHttpLimits;
   publicEditRelease?: PublicEditRelease;
   // Rate limit for direct writes to a Collection's own files under Edit.
@@ -232,6 +252,8 @@ export interface CreateSyncRelayHandlerOptions {
   // This server's runs, for their owners; undefined while it runs no automations.
   serverRuns?: () => ServerRuns | undefined;
   serverCopies?: () => ServerCopies | undefined;
+  // A phone's page opens for live editing; undefined while this server hosts no live pages for the phone.
+  phonePages?: () => PhonePages | undefined;
   // An account's reads and writes through those copies, keyed by sign-in.
   accountOperationRateLimiter?: TokenBucketLimiter;
   // This server's public HTTPS origin, which issues its accounts' actor keys. The phone's chat writes need it.
@@ -252,14 +274,18 @@ export function createSyncRelayHandler({
   appBackendAdmissionLimits,
   datasetHost,
   ownerRestoreHost = () => undefined,
+  liveRooms = () => undefined,
   heldDocumentHost = () => undefined,
   storage,
   resolveActor,
   resolveAccountSession,
+  resolvePhoneCapableAccountSession,
   accountSessions,
+  ownerLiveSockets = () => undefined,
   credentialFence,
   pushVapidPublicKey,
   pushHosts,
+  apnsConfig,
   nowMs = () => Date.now(),
   elapsedMs,
   resolveUserIdByEmail,
@@ -277,6 +303,7 @@ export function createSyncRelayHandler({
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
+  endShareWebAppLaunches,
   namedBrowserSessionLimits,
   publicEditRelease: releaseInput,
   collectionWriteRateLimiter = createCollectionWriteRateLimiter(),
@@ -341,6 +368,7 @@ export function createSyncRelayHandler({
   pressDataset,
   serverRuns = () => undefined,
   serverCopies = () => undefined,
+  phonePages,
   accountOperationRateLimiter = createAccountOperationRateLimiter(),
   relayPublicOrigin,
 }: CreateSyncRelayHandlerOptions): SyncRelayHandler & {
@@ -353,6 +381,8 @@ export function createSyncRelayHandler({
   personalLimiter: TokenBucketLimiter;
   /** Stops the fence listener. The Postgres pool can end once it settles. */
   dispose(): Promise<void>;
+  /** Ends phone app launches in `scope`, on the relay and then in share-web. */
+  endPhoneAppLaunches(scope: PhoneAppLaunchScope): void;
   deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]): void;
   readOwnerShares(ownerUserId: string, path: string): Promise<{ status: number; body: unknown }>;
 } {
@@ -446,6 +476,30 @@ export function createSyncRelayHandler({
     const presented = request.headers.get("x-dohc-relay-exchange-key");
     return verifyRelayExchangeKey(presented, relayExchangeKeyHash);
   };
+  const phoneApps = createPhoneApps({
+    storage,
+    limits: appPublicationLimits,
+    sessions: accountSessions,
+    launchable: !!shareWebOrigin && !!relayExchangeKeyHash && !!respondToDatasetApp,
+    nowMs,
+    endShareWebLaunches: endShareWebAppLaunches,
+    // The app backend's own check, as it runs on every launch call: never an app approved only on a computer.
+    servable(userId, workspaceId, publicationId) {
+      const published = datasetHost?.publication(
+        { kind: "named", workspaceId, userId },
+        publicationId,
+      );
+      if (!published || published.local) throw notFound();
+    },
+  });
+  // Share-web, with the exchange key and no person's credential, redeeming a grant or acting under a launch ID.
+  const fromShareWeb = (request: Request) =>
+    !request.headers.has("cookie") &&
+    !request.headers.has("authorization") &&
+    !!shareWebOrigin &&
+    !!relayExchangeKeyHash &&
+    request.headers.get("origin") === shareWebOrigin &&
+    hasValidRelayExchangeKey(request);
 
   const {
     admitLinkBlobBytes,
@@ -580,7 +634,11 @@ export function createSyncRelayHandler({
     claimPendingShares,
     deliverPendingShareNotices,
     noticePostRateLimiter,
-    { resolveAccountSession, limiter: accountOperationRateLimiter, waits: noticeWaits },
+    {
+      resolveAccountSession: resolvePhoneCapableAccountSession,
+      limiter: accountOperationRateLimiter,
+      waits: noticeWaits,
+    },
   );
   const respondToAutomationHost = createAutomationHostRoutes(
     storage,
@@ -594,8 +652,18 @@ export function createSyncRelayHandler({
     nowMs,
     automationHostRateLimiter,
   );
-  const respondToAccountWorkspaces = resolveAccountSession
-    ? createAccountWorkspaceRoutes({ storage, resolveAccountSession })
+  const ownerSockets: OwnerLiveSockets = {
+    stopSession: (userId, sessionId) => ownerLiveSockets()?.stopSession(userId, sessionId),
+    stopPhoneWorkspace: (userId, workspaceId) =>
+      ownerLiveSockets()?.stopPhoneWorkspace(userId, workspaceId),
+  };
+  const respondToAccountWorkspaces = resolvePhoneCapableAccountSession
+    ? createAccountWorkspaceRoutes({
+        storage,
+        resolveAccountSession: resolvePhoneCapableAccountSession,
+        sockets: ownerSockets,
+        hidden: (userId, workspaceId) => phoneApps.end({ userId, workspaceId }),
+      })
     : undefined;
   const accountFeedWaits = createAccountFeedWaits(storage, discussionActivity);
   const chatWakeWaits = createChatWakeWaits(storage, discussionActivity);
@@ -606,18 +674,21 @@ export function createSyncRelayHandler({
     noticeWaits.wakeAccount(userId);
   };
   const respondToAccountSessions =
-    resolveAccountSession && accountSessions
+    resolvePhoneCapableAccountSession && accountSessions
       ? createAccountSessionRoutes({
           storage,
-          resolveAccountSession,
+          resolveAccountSession: resolvePhoneCapableAccountSession,
           sessions: accountSessions,
           feedWaits: { wakeAccount: wakeAccountWaits },
+          nowMs,
+          sockets: ownerSockets,
+          revoked: (userId, sessionId) => phoneApps.end({ userId, sessionId }),
         })
       : undefined;
-  const respondToAccountOperation = resolveAccountSession
+  const respondToAccountOperation = resolvePhoneCapableAccountSession
     ? createAccountOperationRoute({
         storage,
-        resolveAccountSession,
+        resolveAccountSession: resolvePhoneCapableAccountSession,
         copies: serverCopies,
         nowMs,
         limiter: accountOperationRateLimiter,
@@ -625,8 +696,11 @@ export function createSyncRelayHandler({
         wakeWaits: chatWakeWaits,
         lookupUserDisplayName,
         serverUrl: relayPublicOrigin,
+        phoneApps,
+        ...(phonePages ? { phonePages } : {}),
       })
     : undefined;
+  // The owner's computers claim wakes here; the phone reads wakes through its operations route.
   const respondToChatWakes = resolveAccountSession
     ? createChatWakeRoutes({
         storage,
@@ -692,6 +766,15 @@ export function createSyncRelayHandler({
           },
         })
       : undefined;
+  // The phone's own route, outside share-web: a Bearer phone session only.
+  const pushDevices = resolvePhoneCapableAccountSession
+    ? createPushDeviceRoutes({
+        storage,
+        resolveAccountSession: resolvePhoneCapableAccountSession,
+        apns: apnsConfig,
+        nowMs,
+      })
+    : undefined;
 
   const { respondToShareProposals, respondToWorkspaceProposals } = createProposalRoutes(
     storage,
@@ -776,6 +859,7 @@ export function createSyncRelayHandler({
     dependentGrantSummary,
     namedBrowserInvitation,
     publicEditRelease,
+    liveRooms,
   );
 
   const requireLinkCapability = (request: Request) => {
@@ -1037,11 +1121,13 @@ export function createSyncRelayHandler({
   const respondToOwnerRestore = createOwnerRestoreRoutes({
     storage,
     host: ownerRestoreHost,
+    rooms: liveRooms,
     nowMs,
     newId,
     lookupUserEmail,
   });
   const respondToHeldDocuments = createHeldDocumentRoutes({ storage, host: heldDocumentHost });
+  const respondToLivePauses = createLiveRoomPauseRoutes(storage);
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({
     storage,
     limits: appPublicationLimits,
@@ -1089,6 +1175,9 @@ export function createSyncRelayHandler({
       }
       if (pathname.startsWith("/sync/named-chat/")) {
         return namedChat ? await namedChat(request) : errorResponse(notFound());
+      }
+      if (pathname === `/sync${PUSH_DEVICES_PATH}`) {
+        return pushDevices ? await pushDevices(request) : errorResponse(notFound());
       }
       if (pathname.startsWith("/sync/push/")) {
         return push ? await push(request) : errorResponse(notFound());
@@ -1308,7 +1397,15 @@ export function createSyncRelayHandler({
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         if (route.route === "owner-app-responses")
           return readOwnerAppResponses(request, route, actor.userId, storage);
-        return await respondToOwnerAppPublication(request, route, actor.userId);
+        const answer = await respondToOwnerAppPublication(request, route, actor.userId);
+        // Withdrawing, reactivating, and changing Collection approval each move the authority revision.
+        if (answer.ok && "publicationId" in route && route.action !== "read")
+          phoneApps.end({
+            userId: actor.userId,
+            workspaceId: route.workspaceId,
+            publicationId: route.publicationId,
+          });
+        return answer;
       }
       if (route.route === "app-backend") {
         if (!respondToDatasetApp) throw notFound();
@@ -1323,6 +1420,33 @@ export function createSyncRelayHandler({
             profileTokenHash: hashLinkProfileSecret(secret, linkKey),
           };
           return await respondToDatasetApp(request, route, auth);
+        }
+        const launchId = request.headers.get("x-dohc-app-launch");
+        if (route.action === "redeem" || launchId !== null) {
+          if (!fromShareWeb(request)) throw notFound();
+          const scope = { workspaceId: route.workspaceId, publicationId: route.publicationId };
+          if (route.action === "redeem") {
+            if (launchId !== null) throw notFound();
+            return await phoneApps.redeem(request, scope);
+          }
+          // A phone launch reaches its own app's bundle and backend, never activation or the share summary.
+          if (route.action === "activate" || route.action === "summary") throw notFound();
+          const { userId, guard } = await phoneApps.authorizeLaunch(launchId!, scope);
+          // The guard goes with the request: rechecked after its body, and inside each commit.
+          const answer = await respondToDatasetApp(
+            request,
+            route,
+            { kind: "named", workspaceId: route.workspaceId, userId, launch: guard },
+            true,
+          );
+          // The backend's work may have waited, so its answer goes back only while the launch still holds.
+          try {
+            await guard.recheck();
+          } catch (error) {
+            await answer.body?.cancel().catch(() => {});
+            throw error;
+          }
+          return answer;
         }
         const authorization = request.headers.get("authorization");
         let actorRequest: Request;
@@ -1386,6 +1510,21 @@ export function createSyncRelayHandler({
         );
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         return await respondToHeldDocuments(request, route, actor.userId);
+      }
+      if (route.route === "live-pauses") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? ""))
+          throw notFound();
+        const actor = await resolveActor(
+          new Request(request.url, {
+            headers: { authorization: authorization! },
+            signal: request.signal,
+          }),
+          route.workspaceId,
+        );
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToLivePauses(request, route, actor.userId);
       }
       if (route.route === "automation-host") {
         // Desktop and agent credentials only, never ambient browser cookies.
@@ -1453,11 +1592,24 @@ export function createSyncRelayHandler({
           return actor.userId;
         });
       }
-      if (
-        route.route === "personal-agents" ||
-        route.route === "personal-agent" ||
-        route.route === "workspace-name"
-      ) {
+      if (route.route === "personal-agents" || route.route === "personal-agent") {
+        // The account's own Bearer sign-in, never ambient browser cookies. A phone may list,
+        // sign out, remove and restore agents, but never change what one reaches or how it shows.
+        if (!resolvePhoneCapableAccountSession) throw notFound();
+        const session = await bearerAccountSession(
+          storage,
+          resolvePhoneCapableAccountSession,
+          request,
+        );
+        if (
+          session.clientKind === "phone" &&
+          route.route === "personal-agent" &&
+          (route.action === "reach" || route.action === "name" || route.action === "hue")
+        )
+          throw notFound();
+        return await personalAgents.respondToOwner(request, route, session.userId);
+      }
+      if (route.route === "workspace-name") {
         // The account's own credential only, never ambient browser cookies.
         const authorization = request.headers.get("authorization");
         if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? ""))
@@ -1467,11 +1619,9 @@ export function createSyncRelayHandler({
             headers: { authorization: authorization! },
             signal: request.signal,
           }),
-          route.route === "workspace-name" ? route.workspaceId : "",
+          route.workspaceId,
         );
-        if (route.route === "workspace-name")
-          return await respondToWorkspaceName(storage, request, route.workspaceId, actor.userId);
-        return await personalAgents.respondToOwner(request, route, actor.userId);
+        return await respondToWorkspaceName(storage, request, route.workspaceId, actor.userId);
       }
       const actor = await resolveActor(request, "workspaceId" in route ? route.workspaceId : "");
       if (
@@ -1613,6 +1763,7 @@ export function createSyncRelayHandler({
       noticeWaits.close();
       return personalAgents.dispose();
     },
+    endPhoneAppLaunches: (scope: PhoneAppLaunchScope) => phoneApps.end(scope),
     deleteAccount(userId: string, workspaceIds: readonly string[], shareIds: readonly string[]) {
       // Held reads check the fenced account now.
       wakeAccountWaits(userId);

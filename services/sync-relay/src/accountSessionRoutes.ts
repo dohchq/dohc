@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { jsonResponse } from "@dohc/service-http";
 import {
   UnauthorizedError,
@@ -9,10 +10,18 @@ import { bearerAccountSession } from "./accountWorkspaceRoutes";
 import { notFound, relayError } from "./errors";
 import { accountIsFenced } from "./storage/accountDeletion";
 import type { SyncRelayStorage } from "./storage";
+import type { OwnerLiveSockets } from "./namedLiveRoutes";
 
 export type AccountSessionRoute =
   | { route: "account-sessions" }
   | { route: "account-session-revoke"; sessionId: string };
+
+/**
+ * How long a revoke's fence holds before the account server answers. The
+ * answer replaces it with the session's own expiry, or removes it. A revoke
+ * that throws, or a relay that stops mid-revoke, leaves it until then.
+ */
+const REVOKE_FENCE_MS = 10 * 60_000;
 
 /** A client sends its user agent with no length limit, so the list shows this many characters of it. */
 export const ACCOUNT_SESSION_CLIENT_MAX_CHARS = 256;
@@ -36,6 +45,10 @@ export function createAccountSessionRoutes(options: {
   resolveAccountSession: ResolveAccountSession;
   sessions: AccountSessions;
   feedWaits: Pick<AccountFeedWaits, "wakeAccount">;
+  nowMs: () => number;
+  sockets: Pick<OwnerLiveSockets, "stopSession">;
+  /** Runs once a session is revoked. */
+  revoked?(userId: string, sessionId: string): void;
 }) {
   const { storage, sessions } = options;
 
@@ -47,17 +60,31 @@ export function createAccountSessionRoutes(options: {
       throw relayError("method_not_allowed");
     const caller = await bearerAccountSession(storage, options.resolveAccountSession, request);
     if (route.route === "account-session-revoke") {
+      // Registrations stop before the session goes, so a lookup already in flight can't bind after it.
+      const fence = {
+        userId: caller.userId,
+        sessionId: route.sessionId,
+        attemptId: randomBytes(16).toString("base64url"),
+      };
+      storage.fencePushSession({ ...fence, expiresAtMs: options.nowMs() + REVOKE_FENCE_MS });
       // The store deletes the row only while the caller's own session is current. Revoking that session signs it out.
-      if (
-        !(await sessions.revoke({
-          userId: caller.userId,
-          callerSessionId: caller.sessionId,
-          sessionId: route.sessionId,
-        }))
-      )
+      // If this throws, the delete may still have landed, so the fence stays until its own expiry.
+      const revokedExpiresAtMs = await sessions.revoke({
+        userId: caller.userId,
+        callerSessionId: caller.sessionId,
+        sessionId: route.sessionId,
+      });
+      if (revokedExpiresAtMs === null) {
+        storage.settlePushSessionFence({ ...fence, revokedExpiresAtMs });
         throw notFound();
-      // A feed held under the revoked session checks it now, instead of at the end of its hold.
+      }
+      // Its live connections end before the answer, first, since nothing here can fail. A feed held under it checks
+      // it now, instead of at the end of its hold.
+      options.sockets.stopSession(caller.userId, route.sessionId);
       options.feedWaits.wakeAccount(caller.userId);
+      // A revoked session's alerts end before the answer, with every delivery queued for them.
+      storage.settlePushSessionFence({ ...fence, revokedExpiresAtMs });
+      options.revoked?.(caller.userId, route.sessionId);
       return jsonResponse({ ok: true, sessionId: route.sessionId });
     }
     const listed = await sessions.list(caller.userId);

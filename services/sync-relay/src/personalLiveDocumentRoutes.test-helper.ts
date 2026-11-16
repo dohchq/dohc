@@ -22,7 +22,14 @@ import type { ServiceActivationBlock } from "./serviceActivationDriver";
 import type { ServiceHostedHold } from "./serviceHostedReplication";
 import { createLiveJournalHistoryAuthority } from "./storage/liveJournalHistory";
 import { SERVICE_HOST_ENROLLMENTS } from "./storage/serviceHostEnrollment";
-import { LINK_KEY, RELAY_EXCHANGE_KEY, request, SHARE_WEB_ORIGIN, testHandler } from "./testing";
+import {
+  LINK_KEY,
+  RELAY_EXCHANGE_KEY,
+  request,
+  resolveTestAccountSession,
+  SHARE_WEB_ORIGIN,
+  testHandler,
+} from "./testing";
 import type { KnownRefusalWord } from "./serverLogWords";
 
 const namespace = "personal-live-route-test";
@@ -133,6 +140,7 @@ export async function personalRouteFixture(
   const h = testHandler(f.storage, {
     credentialFence: fence,
     relayExchangeKey: RELAY_EXCHANGE_KEY,
+    resolvePhoneCapableAccountSession: resolveTestAccountSession,
   });
   defer(() => h.dispose());
   /** The fence listener is up and has caught up, so running work can register. */

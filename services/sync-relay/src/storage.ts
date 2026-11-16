@@ -148,6 +148,7 @@ import * as publicationStorage from "./storage/publications";
 import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
 import * as pushStorage from "./storage/pushSubscriptions";
+import * as pushDeviceStorage from "./storage/pushDevices";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
 import * as accountWorkspaceStorage from "./storage/accountWorkspaces";
@@ -508,6 +509,16 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   listRetiredServiceHostEnrollments(workspaceId: string, after?: string) {
     return serviceHostEnrollmentStorage.listRetiredServiceHostEnrollments(this, workspaceId, after);
   }
+  retiredAcceptedCursor(workspaceId: string, objectId: string) {
+    return this.readTx(() =>
+      serviceActivationRetirementStorage.retiredAcceptedCursor(this, workspaceId, objectId),
+    );
+  }
+  readRetiredJournalPage(
+    input: Parameters<typeof serviceActivationRetirementStorage.readRetiredJournalPage>[1],
+  ) {
+    return serviceActivationRetirementStorage.readRetiredJournalPage(this, input);
+  }
   currentServiceHostWorkspace(workspaceId: string, includeUndrained = false) {
     const row = serviceHostEnrollmentStorage.currentServiceHostWorkspace(
       this,
@@ -528,6 +539,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     input: Parameters<typeof serviceHostFeedStorage.latestServiceHostDocumentUpdate>[1],
   ) {
     return serviceHostFeedStorage.latestServiceHostDocumentUpdate(this, input);
+  }
+  mainLiveLineageExists(document: { workspaceId: string; objectId: string }) {
+    return serviceHostFeedStorage.mainLiveLineageExists(this, document);
   }
   hasServiceHostConflictEffect(
     input: Parameters<typeof serviceHostFeedStorage.hasServiceHostConflictEffect>[1],
@@ -637,6 +651,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     if (result)
       notifyDesktopReadiness(this, { workspaceId: result.workspaceId, path: result.path });
     return result;
+  }
+  serviceHostEnrollmentsCoveredByShare(shareId: string) {
+    return serviceHostEnrollmentStorage.serviceHostEnrollmentsCoveredByShare(this, shareId);
   }
   serviceHostEnrollmentCovered(
     enrollment: Pick<
@@ -1089,6 +1106,36 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   removePushSubscription(input: { installationId: string; userId: string }): void {
     pushStorage.removePushSubscription(this, input);
+  }
+
+  readPushDevice(input: {
+    userId: string;
+    sessionId: string;
+    nowMs: number;
+  }): pushDeviceStorage.PushDeviceRow | null {
+    return this.readTx(() => pushDeviceStorage.readPushDevice(this, input));
+  }
+
+  bindPushDevice(input: pushDeviceStorage.BindPushDeviceInput): pushDeviceStorage.PushDeviceRow {
+    return pushDeviceStorage.bindPushDevice(this, input);
+  }
+
+  removePushDevice(input: { userId: string; sessionId: string; generation: number }): void {
+    pushDeviceStorage.removePushDevice(this, input);
+  }
+
+  fencePushSession(input: pushDeviceStorage.PushSessionFence & { expiresAtMs: number }): void {
+    pushDeviceStorage.fencePushSession(this, input);
+  }
+
+  settlePushSessionFence(
+    input: pushDeviceStorage.PushSessionFence & { revokedExpiresAtMs: number | null },
+  ): void {
+    pushDeviceStorage.settlePushSessionFence(this, input);
+  }
+
+  sweepExpiredPushDevices(nowMs: number): void {
+    pushDeviceStorage.sweepExpiredPushDevices(this, nowMs);
   }
 
   postNotice(input: noticeStorage.PostNoticeInput): void {
@@ -2092,8 +2139,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   // One write transaction, so a caller states what it writes rather than the
   // BEGIN/COMMIT/ROLLBACK frame around it.
-  // Current view persistence does not wake the replication observer.
-  replicaViewTx<T>(run: () => T): T {
+  // A write no live host needs to hear about, such as current view persistence or a room's
+  // taken edit, wakes no relay-write observer.
+  quietTx<T>(run: () => T): T {
     return this.owner.write(run);
   }
 
@@ -2106,8 +2154,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     try {
       return this.owner.write(run);
     } finally {
-      if (this.unavailable.aborted || JSON.stringify(revision.get()) !== before)
-        notifyRelayWrite(this);
+      // A committed write must not fail because this read did, so a failed read counts as a change.
+      let changed = true;
+      try {
+        changed = this.unavailable.aborted || JSON.stringify(revision.get()) !== before;
+      } catch {}
+      if (changed) notifyRelayWrite(this);
     }
   }
 

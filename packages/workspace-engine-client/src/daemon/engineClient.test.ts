@@ -282,10 +282,11 @@ describe("private owner delivery transport", () => {
     await transport.ready();
     // The first cancellation clears a finished Stop, which no list shows; the second finds none.
     const finished = { ...stopTarget, state: "released", retirementOwed: false };
-    let cleared = 0;
+    let cleared = 0,
+      action: string | undefined;
     peer.onEnvelope = (e) => {
       if (e.type !== "request") return;
-      const action = e.method.split(".").at(-1);
+      action = e.method.split(".").at(-1);
       expect(e.method).toBe(`ydoc.ownerStop.${action}`);
       expect(e.params).toEqual(
         action === "release"
@@ -320,6 +321,8 @@ describe("private owner delivery transport", () => {
     };
     try {
       expect((await transport.ownerYDocStopRequest(request, "a.md")).state).toBe("requested");
+      await transport.ownerYDocStopRequest(request, "a.md", undefined, { retired: true });
+      expect(action).toBe("requestRetired");
       expect(
         await transport.ownerYDocRelease(request, target.binding, { acceptedCursor: 0 }),
       ).toMatchObject({ state: "released", materialized: true });
@@ -652,6 +655,157 @@ describe("private owner delivery transport", () => {
     }
   });
 
+  it("carries a committed row, pauses the note and reads its copy", async () => {
+    const peer = new FakePeerConnection(),
+      transport = client(peer, {
+        privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 },
+      });
+    peer.acknowledge();
+    await transport.ready();
+    const paused = { appliedCursor: 0, rowCursor: 5, copyPath: "a (unsaved edits).md" };
+    const stop = (copyWritten: boolean) => ({
+      ...stopTarget,
+      state: "released",
+      retirementOwed: false,
+      paused: { ...paused, copyWritten, leftOut: false },
+    });
+    const copy = Buffer.from("Committed by a collaborator\n"),
+      copyDigest = createHash("sha256").update(copy).digest("hex");
+    let rowWire = 0,
+      rowDigest = "",
+      copies = 0;
+    peer.onEnvelope = (e) => {
+      if (e.type !== "request") return;
+      const params = e.params as Record<string, unknown>;
+      if (e.method === "ydoc.ownerDelivery.putCommittedRow") {
+        expect(Object.keys(params).sort()).toEqual([
+          "binding",
+          "byteLength",
+          "cursor",
+          "digest",
+          "streamId",
+        ]);
+        expect(params).toMatchObject({ binding: target.binding, cursor: 5, byteLength: 2 });
+        rowWire = e.id;
+        rowDigest = params.digest as string;
+      } else if (e.method === "ydoc.ownerStop.pause") {
+        expect(params).toEqual({ binding: target.binding, ...paused });
+        peer.send({
+          type: "response",
+          id: e.id,
+          result: { stops: [{ ...stop(false), materialized: true }] },
+        });
+      } else if (e.method === "ydoc.ownerStop.copyWritten") {
+        expect(params).toEqual({
+          mainVersionId: "main",
+          objectId: "object",
+          copyPath: paused.copyPath,
+        });
+        peer.send({ type: "response", id: e.id, result: { stops: [stop(true)] } });
+      } else {
+        expect(e.method).toBe("ydoc.ownerDelivery.pausedCopy");
+        expect(params).toEqual({ mainVersionId: "main", objectId: "object" });
+        if (copies++ === 0) {
+          peer.send({
+            type: "blobStart",
+            requestId: e.id,
+            streamId: e.id,
+            totalBytes: copy.length,
+            sha256: copyDigest,
+          });
+          peer.sendRaw(blobChunkFrame(e.id, copy, true));
+          peer.send({
+            type: "response",
+            id: e.id,
+            result: {
+              status: "copy",
+              stop: stop(false),
+              streamId: e.id,
+              byteLength: copy.length,
+              digest: copyDigest,
+            },
+          });
+        } else
+          peer.send({
+            type: "response",
+            id: e.id,
+            result: { status: "empty", stop: copies === 2 ? stop(true) : null },
+          });
+      }
+    };
+    peer.onBlobChunk = (frame) => {
+      if (frame.fin) {
+        expect(rowDigest).toBe(
+          createHash("sha256")
+            .update(Buffer.from([0, 0]))
+            .digest("hex"),
+        );
+        peer.send({ type: "response", id: rowWire, result: { outcome: "added" } });
+      }
+    };
+    try {
+      expect(
+        await transport.ownerYDocPutCommittedRow(request, {
+          binding: target.binding,
+          cursor: 5,
+          updateBytes: Uint8Array.of(0, 0),
+        }),
+      ).toBe("added");
+      expect(
+        await transport.ownerYDocPause(request, { binding: target.binding, ...paused }),
+      ).toMatchObject({ state: "released", materialized: true, paused: { copyWritten: false } });
+      const document = { mainVersionId: "main", objectId: "object" };
+      expect(await transport.ownerYDocPausedCopy(request, document)).toEqual({
+        stop: stop(false),
+        bytes: copy,
+      });
+      expect(
+        (await transport.ownerYDocPausedCopyWritten(request, document, paused.copyPath)).paused,
+      ).toEqual({ ...paused, copyWritten: true, leftOut: false });
+      expect(await transport.ownerYDocPausedCopy(request, document)).toEqual({
+        stop: stop(true),
+        bytes: null,
+      });
+      expect(await transport.ownerYDocPausedCopy(request, document)).toBeNull();
+    } finally {
+      transport.close();
+    }
+  });
+
+  it("refuses a paused Stop that is not released", async () => {
+    const peer = new FakePeerConnection(),
+      transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    peer.onEnvelope = (e) => {
+      if (e.type === "request")
+        peer.send({
+          type: "response",
+          id: e.id,
+          result: {
+            stops: [
+              {
+                ...stopTarget,
+                state: "requested",
+                paused: {
+                  appliedCursor: 0,
+                  rowCursor: 0,
+                  copyPath: "a copy.md",
+                  copyWritten: false,
+                  leftOut: false,
+                },
+              },
+            ],
+          },
+        });
+    };
+    try {
+      await expect(transport.ownerYDocStopList(request)).rejects.toThrow("Invalid paused Stop.");
+    } finally {
+      transport.close();
+    }
+  });
+
   it("discovers durable drafts, opens their binary state and appends without a caller base", async () => {
     const peer = new FakePeerConnection(),
       transport = client(peer, {
@@ -885,6 +1039,57 @@ describe("private owner delivery transport", () => {
           },
         ),
       ).rejects.toThrow("differs from request");
+    } finally {
+      transport.close();
+    }
+  });
+
+  it("sends a room save's rows-through and refuses one at or above its journal cursor", async () => {
+    const peer = new FakePeerConnection(),
+      transport = client(peer, {
+        privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 },
+      });
+    peer.acknowledge();
+    await transport.ready();
+    let wireId = 0,
+      params: unknown;
+    peer.onEnvelope = (e) => {
+      if (e.type !== "request") return;
+      wireId = e.id;
+      params = e.params;
+    };
+    peer.onBlobChunk = (frame) => {
+      if (frame.fin)
+        peer.send({
+          type: "response",
+          id: wireId,
+          result: { revision: 2, acceptedCursor: 19, nativeHeadSequence: 2 },
+        });
+    };
+    const frame = {
+      ...target,
+      expectedRevision: 1,
+      expectedNativeHeadSequence: 2,
+      previousAcceptedCursor: 0,
+      journalCursor: 19,
+      updateBytes: Uint8Array.of(0, 0),
+    };
+    try {
+      await transport.ownerYDocApplyAcceptedFrame(
+        { ...request, id: 972 },
+        { ...frame, rowsThrough: 17 },
+      );
+      expect(params).toMatchObject({ journalCursor: 19, rowsThrough: 17 });
+      for (const rowsThrough of [0, 19])
+        await expect(
+          transport.ownerYDocApplyAcceptedFrame({ ...request, id: 973 }, { ...frame, rowsThrough }),
+        ).rejects.toThrow("Invalid owner accepted input.");
+      await expect(
+        transport.ownerYDocApplyInitialSync(
+          { ...request, id: 974 },
+          { ...frame, rowsThrough: 17, hostVector: Uint8Array.of(0) },
+        ),
+      ).rejects.toThrow("Invalid owner accepted input.");
     } finally {
       transport.close();
     }

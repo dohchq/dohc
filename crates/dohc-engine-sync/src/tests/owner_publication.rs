@@ -103,7 +103,7 @@ async fn released_owner_accepts_an_ordinary_peer_update_through_replication() {
     let key = DocKey::new("ws", "main", "owner").unwrap();
     store
         .write_with(&NoFaults, |tx| {
-            release::request_in_tx(tx, &key, 20)?;
+            release::request_in_tx(tx, &key, true, 20)?;
             release::release_in_tx(
                 tx,
                 &observed.binding,
@@ -164,7 +164,7 @@ fn pending_server_draft_does_not_enter_or_block_the_ordinary_publication_prefix(
         dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
             person_edit: false,
             binding: observed.binding.clone(),
-            expected_revision: 1,
+            expected_revision: Some(1),
             append_key: "offline-button".into(),
             update: doc.richdoc_append_paragraph("waiting for an offline owner"),
             now_ms: 3,
@@ -1201,7 +1201,7 @@ fn a_released_owned_page_moves() {
     let key = DocKey::new("ws", "main", "owner").unwrap();
     store
         .write_with(&NoFaults, |tx| {
-            release::request_in_tx(tx, &key, 20)?;
+            release::request_in_tx(tx, &key, true, 20)?;
             release::release_in_tx(
                 tx,
                 &observed.binding,

@@ -171,21 +171,24 @@ ${STATUS}`,
 
 export type DeviceState =
   | { kind: "prompt"; userCode?: string; notFound?: boolean }
-  | { kind: "review"; userCode: string; email: string }
+  | { kind: "review"; userCode: string; email: string; deviceKind: "phone" | "desktop" }
   | { kind: "expired" }
   | { kind: "invalid" }
+  | { kind: "phone"; userCode: string }
   | { kind: "handled"; status: string };
 
 export function devicePage(state: DeviceState): string {
   if (state.kind === "review") {
+    const phone = state.deviceKind === "phone";
+    const device = phone ? "phone" : "computer";
     return shell({
       title: "Connect your device",
       page: "device",
-      data: { "user-code": state.userCode },
-      main: `<h1>Connect this device to dohc?</h1>
+      data: { "user-code": state.userCode, "device-kind": state.deviceKind },
+      main: `<h1>Connect this ${device} to dohc?</h1>
 <p class="code">${escapeHtml(state.userCode)}</p>
-<p>Connect the device showing this code as <span class="meta">${escapeHtml(state.email)}</span>. It will read and change your workspaces.</p>
-<p>Only approve this if you just started signing in on your phone.</p>
+<p>Connect the ${device} showing this code as <span class="meta">${escapeHtml(state.email)}</span>. ${phone ? "It can read the workspaces you show on your phone, write in their chats, and sign out your other devices and agents." : "It can read and change your workspaces."}</p>
+<p>Only approve this if you just started signing in on your ${device}.</p>
 <div class="actions" id="actions">
 <button type="button" id="approve">Approve</button>
 <button type="button" id="deny" class="secondary">Deny</button>
@@ -221,6 +224,19 @@ ${field("user_code", "Device code", `type="text" name="user_code" autocomplete="
       main: `<h1>dohc does not know that code</h1>
 <p>Check the code on your device, or start the sign-in again to get a new one.</p>
 <p class="links"><a href="/device">Enter another code</a></p>`,
+    });
+  }
+  if (state.kind === "phone") {
+    const next = `/device?user_code=${encodeURIComponent(state.userCode)}`;
+    // A phone's session may only read and end itself, so signing in with a password here starts by ending it.
+    return shell({
+      title: "Connect your device",
+      page: "device-phone",
+      data: { next: `/account/sign-in?next=${encodeURIComponent(next)}` },
+      main: `<h1>Approve this on a computer</h1>
+<p>A phone's sign-in can't connect another device. Open this page on a computer, or sign out of the phone's sign-in here and sign in with your email and password.</p>
+<div class="actions"><button type="button" id="sign-out-sign-in" class="secondary">Sign out and sign in</button></div>
+${STATUS}`,
     });
   }
   const connected = state.status === "approved";

@@ -179,6 +179,9 @@ export function startServerOwnerDelivery(options: {
       const workspaceId = workspaces[nextWorkspace % workspaces.length]!;
       nextWorkspace = (nextWorkspace + 1) % workspaces.length;
       const index = nextDocument.get(workspaceId) ?? 0;
+      // A note whose pass fails must not hold back the others: the next pass
+      // takes the next note. runPass reads the index modulo its note count.
+      nextDocument.set(workspaceId, index + 1);
       const result = await options.runPass(
         workspaceId,
         index,

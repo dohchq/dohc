@@ -228,16 +228,20 @@ impl ActorHandle {
             };
             let preparations=cache.retirement_preparations();
             let outcome=store.write_with(faults.as_ref(),|tx|match action.as_str() {
-                "request"=>release::request_in_tx(tx,&key,now_ms).map(|row|vec![row]),
+                "request"|"requestRetired"=>release::request_in_tx(tx,&key,action=="request",now_ms).map(|row|vec![row]),
                 "clear"=>release::clear_in_tx(tx,&key).map(|cleared|cleared.into_iter().collect()),
                 "retired"=>release::retired_in_tx(tx,&key,now_ms).map(|()|vec![]),
                 "release"=>{
                     let b=binding.as_ref().ok_or(OwnerOutboxError::StopConflict)?;
+                    let ends=release::retired_by_relay_in(tx,&key)?;
                     let path:Option<String>=tx.query_row("SELECT path FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![workspace,key.version_id,key.object_id],|r|r.get(0)).optional().map_err(|_|OwnerOutboxError::Corrupt)?;
                     let path=path.as_deref().unwrap_or(&b.current_path);
-                    dohc_engine_sync::unbind_owner_in_tx(tx,&key,owner_hold_error,|tx| release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),now_ms,|tx,update,actor,attribution,outcome| {
+                    let row=dohc_engine_sync::unbind_owner_in_tx(tx,&key,owner_hold_error,|tx| release::release_in_tx(tx,b,accepted_cursor,kept_snapshot.as_deref(),now_ms,|tx,update,actor,attribution,outcome| {
                         journal_recovery_append_in_tx(tx,&key,path,ContentKind::Richdoc,update,actor,attribution,&preparations,outcome,now_ms).map(|_|())
-                    })).map(|row|vec![row])
+                    }))?;
+                    // A release that waits keeps its Stop and notice.
+                    if ends && row.deferred.is_none() {release::clear_in_tx(tx,&key)?;}
+                    Ok(vec![row])
                 },
                 _=>Err(OwnerOutboxError::InvalidInput("invalid Stop action")),
             });
@@ -504,10 +508,14 @@ impl ActorHandle {
     }
 
     /// Main-owned authenticated feed only. A delivery ACK never calls this method.
+    /// A room's save names `rows_through`, the last room position it holds;
+    /// the owner's screen then drops the room's rows through it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn owner_ydoc_apply_accepted(
         &self,
         workspace_id: String,
         input: dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput,
+        rows_through: Option<i64>,
         now_ms: i64,
         token: CancellationToken,
         reservation: Arc<dyn Send + Sync>,
@@ -518,8 +526,16 @@ impl ActorHandle {
         >,
         RuntimeError,
     > {
-        self.owner_ydoc_apply_ordered(workspace_id, input, None, now_ms, token, reservation)
-            .await
+        self.owner_ydoc_apply_ordered(
+            workspace_id,
+            input,
+            None,
+            rows_through,
+            now_ms,
+            token,
+            reservation,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -542,6 +558,7 @@ impl ActorHandle {
             workspace_id,
             input,
             Some(host_vector),
+            None,
             now_ms,
             token,
             reservation,
@@ -555,6 +572,7 @@ impl ActorHandle {
         workspace_id: String,
         input: dohc_engine_collab::owner_outbox::accepted::OwnerAcceptedFrameInput,
         host_vector: Option<Vec<u8>>,
+        rows_through: Option<i64>,
         now_ms: i64,
         token: CancellationToken,
         reservation: Arc<dyn Send + Sync>,
@@ -600,10 +618,145 @@ impl ActorHandle {
                 Err(error) => Err(error),
             };
             if result.is_ok() {
+                if let Some(through) = rows_through {
+                    cache.drop_owner_rows_through(&key, through);
+                }
                 dohc_engine_collab::compact_after_commit(store, &key, &NoFaults, now_ms);
                 decide_owner_holds_after_commit(store, cache, &key);
             }
             Ok(result)
+        })
+        .await
+    }
+
+    /// A row the relay committed above the accepted cursor, for the owner's
+    /// screen only. It never reaches the store.
+    pub async fn owner_ydoc_put_committed_row(
+        &self,
+        binding: dohc_engine_collab::LiveObjectBinding,
+        cursor: i64,
+        bytes: Vec<u8>,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::draft::OwnerRowOutcome, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(dohc_engine_collab::owner_outbox::draft::put_committed_row(
+                store, cache, &binding, cursor, bytes,
+            ))
+        })
+        .await
+    }
+
+    /// The owner route reopened and sends its rows again from its cursor.
+    pub async fn owner_ydoc_restart_committed_rows(
+        &self,
+        key: DocKey,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<(), RuntimeError> {
+        self.run(move |_store, cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            dohc_engine_collab::owner_outbox::draft::restart_committed_rows(cache, &key);
+            Ok(())
+        })
+        .await
+    }
+
+    /// The relay's safety stop held the note: keep what the owner's screen
+    /// showed as a copy's blob and unbind the note at its applied cursor.
+    pub async fn owner_ydoc_pause(
+        &self,
+        input: dohc_engine_collab::owner_outbox::release::OwnerPauseInput,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::release::OwnerLiveStop, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let key = DocKey::new(
+                &input.binding.workspace_id,
+                &input.binding.main_version_id,
+                &input.binding.object_id,
+            )?;
+            Ok(dohc_engine_collab::owner_outbox::release::pause_cached(
+                store,
+                cache,
+                &input,
+                faults.as_ref(),
+                |tx, pause| dohc_engine_sync::unbind_owner_in_tx(tx, &key, owner_hold_error, pause),
+            ))
+        })
+        .await
+    }
+
+    /// A paused note's Stop and the copy's bytes, while Resume has not
+    /// cleared it.
+    pub async fn owner_ydoc_paused_copy(
+        &self,
+        key: DocKey,
+        token: CancellationToken,
+    ) -> Result<
+        Result<
+            Option<(
+                dohc_engine_collab::owner_outbox::release::OwnerLiveStop,
+                Vec<u8>,
+            )>,
+            OwnerOutboxError,
+        >,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::release::paused_copy_in(conn, &key)
+            }))
+        })
+        .await
+    }
+
+    /// The copy is on disk at `copy_path`.
+    pub async fn owner_ydoc_copy_written(
+        &self,
+        key: DocKey,
+        copy_path: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<
+        Result<dohc_engine_collab::owner_outbox::release::OwnerLiveStop, OwnerOutboxError>,
+        RuntimeError,
+    > {
+        self.run(move |store, _cache| {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(
+                match store.write_with(faults.as_ref(), |tx| {
+                    dohc_engine_collab::owner_outbox::release::copy_written_in_tx(
+                        tx, &key, &copy_path, now_ms,
+                    )
+                }) {
+                    Ok(TxnOutcome::Committed(stop)) => Ok(stop),
+                    Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
+                    Err(error) => Err(error),
+                },
+            )
         })
         .await
     }

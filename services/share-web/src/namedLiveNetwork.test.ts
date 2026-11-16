@@ -92,6 +92,7 @@ beforeEach(() => {
   vi.spyOn(Date, "now").mockReturnValue(1000);
 });
 afterEach(async () => {
+  vi.useRealTimers();
   try {
     for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   } finally {
@@ -547,6 +548,10 @@ it("keeps an open editor's session through 20 minutes of checks, and releases it
   const f = await fixture({ idleTimeoutMs: 200, retentionMs: 12 * 60 * 60 * 1000 }),
     minted = await f.mint();
   const { token } = (await minted.json()) as { token: string };
+  // idleTimeoutMs is this small only so that the gateway checks every second. Its idle timer would
+  // count real time, and a 100 ms pause in this process would close the page between two checks.
+  // No test time passes on this clock, so only a failed check or a closed socket ends the page.
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const browser = f.connect(token);
   expect(await browser.status).toBe(101);
   const provider = browser.attach();

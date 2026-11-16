@@ -1,4 +1,4 @@
-import { betterAuth } from "better-auth";
+import { betterAuth, type BetterAuthPlugin } from "better-auth";
 import {
   normalizeShareDiscussionDisplayName,
   SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT,
@@ -11,11 +11,21 @@ import {
 } from "better-auth/api";
 import { bearer, deviceAuthorization, organization } from "better-auth/plugins";
 import type { Pool } from "pg";
+import type { SessionKind } from "./session";
 import type { SignUpAdmission } from "./signUp";
 import type { SendEmail } from "./smtp";
 
 /** Verification and reset links expire one hour after dohc sends them. */
 export const EMAIL_LINK_TTL_SECONDS = 3600;
+
+/** The device sign-in clients this server accepts, and the kind of session each one gets. */
+const DEVICE_CLIENT_KINDS: ReadonlyMap<string, "phone" | "desktop"> = new Map([
+  ["dohc-phone", "phone"],
+  ["dohc-desktop", "desktop"],
+]);
+
+/** The only Better Auth endpoints a phone session may use: reading its own session and ending it. */
+const PHONE_AUTH_PATHS: ReadonlySet<string> = new Set(["/get-session", "/sign-out"]);
 
 /**
  * The only address header this auth surface trusts. The host sets it from the
@@ -93,7 +103,11 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
               setupNames.set(ctx.request, chosenName(body.name));
             }),
           },
-          databaseHooks: {
+        }
+      : {}),
+    databaseHooks: {
+      ...(admitAccount
+        ? {
             user: {
               create: {
                 before: async (user: { email: string }) => {
@@ -101,9 +115,30 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
                 },
               },
             },
+          }
+        : {}),
+      session: {
+        // The kind goes into the same insert that creates the session, so no
+        // token exists without one.
+        create: {
+          before: async (_session, context) => ({
+            data: { clientKind: kindOfNewSession(context) },
+          }),
+        },
+        update: {
+          before: async (session) => {
+            if (Object.hasOwn(session, "clientKind"))
+              throw new APIError("FORBIDDEN", {
+                code: "SESSION_KIND_FIXED",
+                message: "A sign-in keeps the kind it was created with.",
+              });
           },
-        }
-      : {}),
+        },
+      },
+    },
+    session: {
+      additionalFields: { clientKind: { type: "string", required: true, input: false } },
+    },
     baseURL: options.baseURL,
     secret: options.secret,
     basePath: "/api/auth",
@@ -291,11 +326,15 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
       // The desktop authenticates API calls with `Authorization: Bearer
       // <session token>` (the device flow's access_token IS a session token).
       bearer(),
+      phoneSessionGuard(),
       organization(),
       deviceAuthorization({
         // Desktop polls every few seconds; keep the code lifetime short.
         expiresIn: "10m",
         interval: "3s",
+        // Checked when a code is issued and again when it is exchanged, which
+        // also requires the same ID the code was issued to.
+        validateClient: (clientId) => DEVICE_CLIENT_KINDS.has(clientId),
         // better-auth 1.6.16 quirk: the options validator marks `schema` as
         // required (z.custom without .optional()); an empty object means
         // "no table overrides".
@@ -317,6 +356,101 @@ export async function signOutUnverifiedAccounts(pool: Pool): Promise<void> {
     with unverified as (select "id" from "user" where not "emailVerified"),
       signed_out as (delete from "session" where "userId" in (select "id" from unverified))
     delete from "deviceCode" where "userId" in (select "id" from unverified)`);
+}
+
+/**
+ * The kind of session a device code would create once approved, or null for a
+ * code this server doesn't know. The approval page shows it before anyone approves.
+ */
+export async function deviceCodeKind(
+  auth: WorkspaceAuth,
+  userCode: string,
+): Promise<"phone" | "desktop" | null> {
+  const { adapter } = await auth.$context;
+  const code = await adapter.findOne<{ clientId: string | null }>({
+    model: "deviceCode",
+    // Better Auth stores user codes without their dashes.
+    where: [{ field: "userCode", value: userCode.replace(/-/g, "") }],
+  });
+  const clientId = code?.clientId;
+  return (clientId ? DEVICE_CLIENT_KINDS.get(clientId) : undefined) ?? null;
+}
+
+/**
+ * The kind of the session the current endpoint is creating. The device token
+ * endpoint has already consumed the approved code and checked that the poll's
+ * client ID is one of ours and the one the code was issued to. Every other way
+ * of creating a session is refused.
+ */
+function kindOfNewSession(context: { path?: string; body?: unknown } | null): SessionKind {
+  if (context?.path === "/device/token") {
+    const body = context.body;
+    const clientId =
+      body && typeof body === "object" && "client_id" in body ? body.client_id : undefined;
+    const kind = typeof clientId === "string" ? DEVICE_CLIENT_KINDS.get(clientId) : undefined;
+    if (kind) return kind;
+  } else if (context?.path === "/sign-in/email" || context?.path === "/sign-up/email") {
+    return "browser";
+  }
+  throw new APIError("FORBIDDEN", {
+    code: "SIGN_IN_KIND_UNKNOWN",
+    message: "dohc can't start a sign-in this way.",
+  });
+}
+
+/**
+ * Refuses a phone session on every Better Auth endpoint except reading and
+ * ending it, so a phone's token can't approve a device sign-in, change the
+ * password, or reach any plugin added later. Before hooks all see the request
+ * as it arrived, so this reads both credentials the endpoint could use: the
+ * signed session cookie, and the Bearer token `bearer()` turns into one.
+ * Either one being a phone session refuses the request.
+ */
+function phoneSessionGuard() {
+  return {
+    id: "dohc-phone-session-guard",
+    hooks: {
+      before: [
+        {
+          matcher: (context) => !PHONE_AUTH_PATHS.has(context.path ?? ""),
+          handler: createAuthMiddleware(async (ctx) => {
+            const tokens = new Set<string>();
+            const cookie = await ctx.getSignedCookie(
+              ctx.context.authCookies.sessionToken.name,
+              ctx.context.secret,
+            );
+            if (cookie) tokens.add(cookie);
+            for (const header of [
+              ctx.request?.headers.get("authorization"),
+              ctx.headers?.get("authorization"),
+            ]) {
+              if (!header || header.slice(0, 7).toLowerCase() !== "bearer ") continue;
+              // A signed token is `<token>.<signature>`, possibly URL-encoded.
+              const token = decoded(header.slice(7).trim()).split(".")[0];
+              if (token) tokens.add(token);
+            }
+            for (const token of tokens) {
+              const found = await ctx.context.internalAdapter.findSession(token);
+              const kind: unknown = found?.session.clientKind;
+              if (found && kind !== "desktop" && kind !== "browser")
+                throw new APIError("FORBIDDEN", {
+                  code: "PHONE_SESSION_REFUSED",
+                  message: "A phone sign-in can't do this. Use dohc on a computer.",
+                });
+            }
+          }),
+        },
+      ],
+    },
+  } satisfies BetterAuthPlugin;
+}
+
+function decoded(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 /** The device sign-in an emailed link should continue, if Better Auth's link carries one. */

@@ -1160,7 +1160,7 @@ fn a_group_accepted_before_its_receipt_was_saved_restores_row_by_row() {
                 OwnerDraftAppendInput {
                     person_edit: false,
                     binding: f.binding.clone(),
-                    expected_revision: 1,
+                    expected_revision: Some(1),
                     append_key: format!("typed-{text}"),
                     update,
                     now_ms: 10,

@@ -1,6 +1,9 @@
 import { COLLECTION_WRITES_PATH } from "./collectionWrites";
 import { MCP_ROUTE_PATTERNS } from "./mcpSignIn";
-import { ACCOUNT_DELETION_PATH } from "@dohc/security-contract/account-deletion";
+import {
+  ACCOUNT_DELETION_PATH,
+  APP_LAUNCH_PURGE_PATH,
+} from "@dohc/security-contract/account-deletion";
 import { createRequestLog } from "@dohc/service-http";
 
 /**
@@ -11,9 +14,11 @@ import { createRequestLog } from "@dohc/service-http";
  */
 export const SHARE_WEB_REQUEST_LOG = createRequestLog("share-web", [
   ACCOUNT_DELETION_PATH,
+  APP_LAUNCH_PURGE_PATH,
   "app",
   "/api/apps/launch",
   "/api/apps/summary",
+  "/api/apps/phone-launch",
   "/api/mcp",
   ...MCP_ROUTE_PATTERNS,
   "/api/apps",

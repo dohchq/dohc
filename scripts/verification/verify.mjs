@@ -121,11 +121,52 @@ export function takeGrant(env = process.env) {
 }
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
-export function desktopProofCommand(args, { platform = process.platform, env = process.env } = {}) {
-  const command = [process.execPath, ["apps/desktop/scripts/run-playwright.mjs", ...args]];
+function withDisplay(command, { platform = process.platform, env = process.env } = {}) {
   return platform === "linux" && !env.DISPLAY && !env.WAYLAND_DISPLAY
     ? ["xvfb-run", ["-a", command[0], ...command[1]]]
     : command;
+}
+
+export function desktopProofCommand(args, options) {
+  return withDisplay(
+    [process.execPath, ["apps/desktop/scripts/run-playwright.mjs", ...args]],
+    options,
+  );
+}
+
+/**
+ * Where Electron's binary is. Electron downloads it the first time something asks, so a worker
+ * asks once before its tests start. Two test processes asking at once would both unpack it into
+ * the same folder.
+ */
+export function electronBinary() {
+  return require("electron");
+}
+
+/**
+ * One Electron launch that ends when its window has painted two frames.
+ *
+ * Electron's first launch on a computer reads every installed font to write a font cache of its
+ * own. On a fresh GitHub runner that is 35 MiB from a disk nothing has read yet. The launch took
+ * 0.4 to 10 s to become ready in 40 measured launches, and over 20 s in two PR runs, with the CPU
+ * idle and one thread waiting on the disk. Every later launch took about 0.1 s. A desktop test that
+ * makes the first launch can run out its own limits there, so a worker makes it here, before
+ * those tests start.
+ */
+export function firstDesktopLaunchCommand(userDataDir, options = {}) {
+  const platform = options.platform ?? process.platform;
+  return withDisplay(
+    [
+      electronBinary(),
+      [
+        `--user-data-dir=${userDataDir}`,
+        // Chromium's sandbox needs privileges the CI containers do not grant.
+        ...(platform === "linux" ? ["--no-sandbox"] : []),
+        join(import.meta.dirname, "first-desktop-launch.cjs"),
+      ],
+    ],
+    options,
+  );
 }
 
 export function desktopProofTags({ platform = process.platform } = {}) {
@@ -144,6 +185,8 @@ export function desktopProofTags({ platform = process.platform } = {}) {
       "@share-link-agent-sign-in",
       "@live-owner-open",
       "@new-page-edit-link",
+      "@two-computer-drag",
+      "@two-computer-conflict",
       ...(gallery ? ["@states-page"] : []),
     ],
     required: [
@@ -153,6 +196,8 @@ export function desktopProofTags({ platform = process.platform } = {}) {
       "@share-link-agent-sign-in",
       "@live-owner-open",
       "@new-page-edit-link",
+      "@two-computer-drag",
+      "@two-computer-conflict",
       ...(gallery ? ["@states-baselines"] : []),
     ],
   };
@@ -181,7 +226,11 @@ export function passedSpecTitles(suites = []) {
 }
 
 /** The PR checks a selection needs a passing CI run of, because no local run performs them. */
-export const ciEvidence = (gates) => (gates.android ? ["Android Kotlin compile"] : []);
+export const ciEvidence = (gates) => [
+  ...(gates.android ? ["Android Kotlin compile"] : []),
+  ...(gates.together ? ["editing together", "share page"] : []),
+  ...(gates.windows ? ["Windows package"] : []),
+];
 
 export function changedFiles(baseCommit, includeUncommitted = false, root = repoRoot) {
   const paths = (args) => readGit(args, root).split("\0").filter(Boolean);
@@ -411,7 +460,14 @@ export async function verify(args) {
     const files = base ? changedFiles(baseCommit, mode === "plan") : [];
     const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
     const requiredGates = selectedGates(files, workflow);
-    if (full) Object.assign(requiredGates, { rust: true, js: true, android: true });
+    if (full)
+      Object.assign(requiredGates, {
+        rust: true,
+        js: true,
+        android: true,
+        together: true,
+        windows: true,
+      });
     if (job) requiredGates[job] = true;
     const gates = Object.fromEntries(
       Object.entries(requiredGates).map(([name, needed]) => [
@@ -1225,7 +1281,7 @@ export async function verify(args) {
       console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
       for (const check of report.ciEvidence ?? [])
         console.log(
-          `[verification] ${check} runs only in CI. A merge needs its passing PR checks run for ${report.commit}.`,
+          `[verification] ${check} runs in the PR checks, not here. A merge needs its passing PR checks run for ${report.commit}.`,
         );
       if (report.repositoryTests === "test:repo:tree")
         console.log(

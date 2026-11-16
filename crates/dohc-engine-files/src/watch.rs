@@ -527,6 +527,22 @@ fn engine_storage_event(root: &Path, event: &notify::Event) -> bool {
     })
 }
 
+/// Whether an event says only that something was opened or read.
+///
+/// Linux reports every open, and a scan opens each folder it walks. If an
+/// open counted as a change, every scan would ask for the next one, for as
+/// long as the workspace stays open. A write, a new name and a removal each
+/// arrive as their own event.
+fn reads_only(event: &notify::Event) -> bool {
+    !event.need_rescan()
+        && matches!(
+            event.kind,
+            EventKind::Access(
+                AccessKind::Open(_) | AccessKind::Read | AccessKind::Close(AccessMode::Read)
+            )
+        )
+}
+
 fn event_callback(
     root: PathBuf,
     dirty: Arc<dyn Fn() + Send + Sync>,
@@ -537,7 +553,7 @@ fn event_callback(
     move |event| {
         if event
             .as_ref()
-            .is_ok_and(|event| engine_storage_event(&root, event))
+            .is_ok_and(|event| reads_only(event) || engine_storage_event(&root, event))
         {
             return;
         }
@@ -645,7 +661,7 @@ fn watcher_thread(
             && !unavailable.load(Ordering::Acquire)
         {
             watched_root = WatchedRoot::bind(&root);
-            attempt_reattach(&mut watcher, &root, unavailable);
+            attempt_reattach(&mut watcher, &root, unavailable, &*dirty);
         }
         let message = match debounce.next_deadline() {
             Some(next) => match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
@@ -676,7 +692,7 @@ fn watcher_thread(
                         // exhaustion `unavailable` is set and this branch stops
                         // running entirely.
                         watched_root = WatchedRoot::bind(&root);
-                        attempt_reattach(&mut watcher, &root, unavailable);
+                        attempt_reattach(&mut watcher, &root, unavailable, &*dirty);
                     }
                     None
                 }
@@ -710,6 +726,7 @@ fn attempt_reattach(
     watcher: &mut notify::RecommendedWatcher,
     root: &Path,
     unavailable: &AtomicBool,
+    dirty: &dyn Fn(),
 ) {
     // Drop any stale watch first. On a delete-then-recreate the backend may
     // still hold a path-keyed watch bound to the DELETED directory object, so
@@ -717,15 +734,19 @@ fn attempt_reattach(
     // an explicit unwatch (ignored if there is nothing to drop) forces a
     // genuine rebind. Harmless on the backend-error path too.
     let _ = watcher.unwatch(root);
-    for attempt in 0..WATCH_REATTACH_ATTEMPTS {
-        if watcher.watch(root, RecursiveMode::Recursive).is_ok() {
-            return;
-        }
-        if attempt + 1 < WATCH_REATTACH_ATTEMPTS {
+    let attached = (0..WATCH_REATTACH_ATTEMPTS).any(|attempt| {
+        if attempt > 0 {
             std::thread::sleep(WATCH_REATTACH_BACKOFF);
         }
+        watcher.watch(root, RecursiveMode::Recursive).is_ok()
+    });
+    if !attached {
+        unavailable.store(true, Ordering::Release);
     }
-    unavailable.store(true, Ordering::Release);
+    // Reported last, in both cases. A change made while no watch was attached
+    // raised no event, so a scan must follow the new watch. And whoever waits
+    // on this watcher must look again to find a lost watch unavailable.
+    dirty();
 }
 
 /// The directory object the OS watch is bound to: its file identity, plus --
@@ -885,6 +906,33 @@ mod callback_tests {
     }
 
     #[test]
+    fn an_open_or_a_read_never_queues_and_a_finished_write_does() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 1);
+        for path in ["notes", "notes/a.md", ".dohc/engine/secret.key"] {
+            for kind in [
+                EventKind::Access(AccessKind::Open(AccessMode::Any)),
+                EventKind::Access(AccessKind::Open(AccessMode::Read)),
+                EventKind::Access(AccessKind::Read),
+                EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            ] {
+                (callback.send)(Ok(notify::Event::new(kind).add_path(root.join(path))));
+                callback.expect_quiet();
+            }
+        }
+        callback.expect_queued(
+            notify::Event::new(EventKind::Access(AccessKind::Close(AccessMode::Write)))
+                .add_path(root.join("notes/a.md")),
+        );
+        // An open that carries the backend's own doubt still asks for a scan.
+        callback.expect_queued(
+            notify::Event::new(EventKind::Access(AccessKind::Open(AccessMode::Any)))
+                .add_path(root.join("notes"))
+                .set_flag(notify::event::Flag::Rescan),
+        );
+    }
+
+    #[test]
     fn secret_key_restores_and_permission_repairs_still_queue() {
         let root = ScratchDir::new_named("watch-callback").unwrap();
         let mut callback = Callback::new(root.path(), 1);
@@ -915,6 +963,30 @@ mod callback_tests {
                 notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join(path))
             ));
             callback.expect_quiet();
+        }
+    }
+
+    #[test]
+    fn a_reattach_reports_once_after_the_watch_is_back_or_given_up() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut watcher = notify::RecommendedWatcher::new(
+            |_: Result<notify::Event, notify::Error>| {},
+            notify::Config::default(),
+        )
+        .unwrap();
+        // The report's hearer finds the watch attached again, or unavailable.
+        for (watched, gives_up) in [
+            (root.path().to_path_buf(), false),
+            (root.join("gone"), true),
+        ] {
+            let unavailable = AtomicBool::new(false);
+            let reports = AtomicU64::new(0);
+            attempt_reattach(&mut watcher, &watched, &unavailable, &|| {
+                assert_eq!(unavailable.load(Ordering::Acquire), gives_up);
+                reports.fetch_add(1, Ordering::AcqRel);
+            });
+            assert_eq!(reports.load(Ordering::Acquire), 1);
+            assert_eq!(unavailable.load(Ordering::Acquire), gives_up);
         }
     }
 

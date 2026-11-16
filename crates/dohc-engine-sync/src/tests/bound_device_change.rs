@@ -190,7 +190,7 @@ fn a_device_file_change_pairs_only_with_text_the_relay_accepted() {
         dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
             person_edit: true,
             binding: observed.binding.clone(),
-            expected_revision: 1,
+            expected_revision: Some(1),
             append_key: "waiting-edit".into(),
             update: local.richdoc_append_paragraph("not accepted yet"),
             now_ms: 3,

@@ -45,8 +45,9 @@ it("refuses corrupted stored snapshots, nonempty seed coverage and deletion rang
       ],
       [
         "author_snapshot_json",
+        // The owner's rows may name several people, but each only once.
         JSON.stringify([
-          { kind: "agent", agentId: "agent" },
+          { kind: "human", humanId: "owner", humanName: "Owner" },
           { kind: "human", humanId: "owner", humanName: "Owner" },
         ]),
       ],

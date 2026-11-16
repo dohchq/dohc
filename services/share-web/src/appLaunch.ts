@@ -87,6 +87,8 @@ export type AppNamedBrowserMaterial =
       userId?: string;
       admissionKey: string;
       setCookie: string | null;
+      /** A phone's launch, held as the relay's launch ID. The relay ends launches by the ID's sha256 hex. */
+      phone?: { launchHash: string };
       fetchRelay(request: Request): Promise<Response>;
     }
   | { ok: false; status: 401 | 403 | 404 | 503 };
@@ -154,6 +156,13 @@ export function createAppLaunchHandler(options: {
     workspaceId: string,
     publicationId: string,
     cookie: string | null,
+    signal: AbortSignal,
+  ): Promise<AppNamedBrowserMaterial>;
+  redeemPhoneGrant?(
+    workspaceId: string,
+    publicationId: string,
+    grant: string,
+    launchHost: string,
     signal: AbortSignal,
   ): Promise<AppNamedBrowserMaterial>;
 }) {
@@ -321,27 +330,54 @@ export function createAppLaunchHandler(options: {
       }
     }
   }
+  function end(matches: (publicationId: string, material?: LaunchMaterial) => boolean) {
+    for (const request of requests)
+      if (matches(request.publicationId, request.material)) request.abort.abort();
+    for (const [host, launch] of launches)
+      if (matches(launch.publicationId, launch.material)) {
+        launch.staged = undefined;
+        stagedSlots.delete(launch);
+        launches.delete(host);
+      }
+  }
+  // Like any launch, a phone's never outlives its handoff and one session; the relay ends its launch ID then too.
+  const phoneLaunch = (launch: Launch) =>
+    namedMaterial(launch.material) && launch.material.phone !== undefined;
+  // A phone launch's limits follow its account across launches; every other launch's follow its host.
+  const rateKey = (launch: Launch, host: string) => {
+    const material = launch.material;
+    return namedMaterial(material) && material.phone ? `phone:${material.admissionKey}` : host;
+  };
   return {
     deleteAccount(userId: string, grantIds: readonly string[], publicationIds: readonly string[]) {
-      const matches = (publicationId: string, material?: LaunchMaterial) =>
-        publicationIds.includes(publicationId) ||
-        (material &&
-          (namedMaterial(material)
-            ? material.userId === userId
-            : !!material.grantId && grantIds.includes(material.grantId)));
-      for (const request of requests)
-        if (matches(request.publicationId, request.material)) request.abort.abort();
-      for (const [host, launch] of launches)
-        if (matches(launch.publicationId, launch.material)) {
-          launch.staged = undefined;
-          stagedSlots.delete(launch);
-          launches.delete(host);
-        }
+      end(
+        (publicationId, material) =>
+          publicationIds.includes(publicationId) ||
+          (!!material &&
+            (namedMaterial(material)
+              ? material.userId === userId
+              : !!material.grantId && grantIds.includes(material.grantId))),
+      );
+    },
+    /**
+     * Ends now the phone launches the relay has ended, named by their launch IDs' hashes. A launch opened
+     * after the relay ended these has another ID, so a late purge leaves it running.
+     */
+    endPhoneLaunches(launchHashes: readonly string[]) {
+      end(
+        (_publicationId, material) =>
+          !!material &&
+          namedMaterial(material) &&
+          material.phone !== undefined &&
+          launchHashes.includes(material.phone.launchHash),
+      );
     },
     matches(request: Request) {
       return (
         appHost(request.headers.get("host") ?? "") ||
-        ["/api/apps/launch", "/api/apps/summary"].includes(new URL(request.url).pathname)
+        ["/api/apps/launch", "/api/apps/summary", "/api/apps/phone-launch"].includes(
+          new URL(request.url).pathname,
+        )
       );
     },
     async handle(request: Request): Promise<Response> {
@@ -361,7 +397,10 @@ export function createAppLaunchHandler(options: {
       )
         return refusal();
       const summaryRequest = url.pathname === "/api/apps/summary";
-      const issue = host === viewerHost && (url.pathname === "/api/apps/launch" || summaryRequest);
+      const phoneIssue = host === viewerHost && url.pathname === "/api/apps/phone-launch";
+      const issue =
+        phoneIssue ||
+        (host === viewerHost && (url.pathname === "/api/apps/launch" || summaryRequest));
       if (!issue && !appHost(host)) return refusal();
       const address = request.headers.get("x-dohc-share-web-client-ip") ?? "unknown";
       if (issue) {
@@ -397,7 +436,10 @@ export function createAppLaunchHandler(options: {
       try {
         if (issue) {
           if (
-            request.headers.get("origin") !== config.viewerOrigin ||
+            // The phone's native code sends no Origin, and a page always does.
+            (phoneIssue
+              ? request.headers.has("origin")
+              : request.headers.get("origin") !== config.viewerOrigin) ||
             request.headers.get("content-type") !== "application/json" ||
             launches.size >= MAX_LAUNCHES
           )
@@ -417,7 +459,26 @@ export function createAppLaunchHandler(options: {
           requests.add(scope);
           const issueBody = body as Record<string, unknown>;
           let material: LinkBrowserMaterial | AppNamedBrowserMaterial;
-          if (
+          // The grant binds to this host when it is redeemed.
+          const launchHost = `${randomBytes(24).toString("hex")}.${config.appDomain}`;
+          if (phoneIssue) {
+            if (
+              !exact(issueBody, "grant,publicationId,workspaceId") ||
+              typeof issueBody.grant !== "string" ||
+              !TOKEN.test(issueBody.grant) ||
+              typeof issueBody.workspaceId !== "string" ||
+              !options.redeemPhoneGrant
+            )
+              return refusal();
+            namedIssue = true;
+            material = await options.redeemPhoneGrant(
+              issueBody.workspaceId,
+              body.publicationId,
+              issueBody.grant,
+              launchHost,
+              signal,
+            );
+          } else if (
             exact(issueBody, "discriminator,publicationId") &&
             typeof issueBody.discriminator === "string" &&
             isSessionDiscriminator(issueBody.discriminator)
@@ -486,8 +547,7 @@ export function createAppLaunchHandler(options: {
               : Response.json(linkRefusalBody("link_read_rate_limited"), { status: 429, headers });
           signal.throwIfAborted();
           if (launches.size >= MAX_LAUNCHES) return refusal();
-          const handoff = token(),
-            launchHost = `${randomBytes(24).toString("hex")}.${config.appDomain}`;
+          const handoff = token();
           launches.set(launchHost, {
             origin: `https://${launchHost}`,
             publicationId: body.publicationId,
@@ -529,8 +589,11 @@ export function createAppLaunchHandler(options: {
           } else {
             const origin = request.headers.get("origin");
             // The viewer's no-referrer policy makes cross-site form POSTs use Origin: null.
+            // The phone's native code may send none, so only a phone launch accepts that.
             if (
-              (origin !== config.viewerOrigin && origin !== "null") ||
+              (origin !== config.viewerOrigin &&
+                origin !== "null" &&
+                !(origin === null && phoneLaunch(launch))) ||
               request.headers.get("content-type") !== "application/x-www-form-urlencoded" ||
               !launch.handoffHash
             )
@@ -552,7 +615,7 @@ export function createAppLaunchHandler(options: {
             // Consume before awaiting authority or bytes: concurrent redemptions have one winner.
             delete launch.handoffHash;
           }
-          if (launch.rebuilding || !sessionRate.allow(host, now()))
+          if (launch.rebuilding || !sessionRate.allow(rateKey(launch, host), now()))
             return namedMaterial(launch.material) ? unavailable() : refusal();
           if (stagedSlots.size >= 2) {
             const oldestReady = [...stagedSlots].find((value) => value.staged !== undefined);
@@ -629,7 +692,7 @@ export function createAppLaunchHandler(options: {
               : collectionRequest
                 ? collectionRate
                 : sessionRate
-          ).allow(host, now())
+          ).allow(rateKey(launch, host), now())
         )
           return namedMaterial(launch.material) ? unavailable() : refusal();
         if (url.pathname === "/collection" && !namedMaterial(launch.material))

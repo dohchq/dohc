@@ -26,6 +26,13 @@ import {
   sourceFingerprint,
 } from "./build.mjs";
 import {
+  checkClass,
+  expectedTests,
+  flagReading,
+  IOS_UI_CLASSES,
+  IOS_UI_EXCLUSIONS,
+} from "./ios-ui.mjs";
+import {
   changedFiles,
   ciEvidence,
   desktopProofCommand,
@@ -87,7 +94,7 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   );
 });
 
-test("desktop proofs require each restart proof, smoke, onboarding, the agent sign-in, the owner open and the New page Edit link everywhere and the pixel baseline on Windows", () => {
+test("desktop proofs require each restart proof, smoke, onboarding, the agent sign-in, the owner open, the New page Edit link and the two-computer Collection tests everywhere and the pixel baseline on Windows", () => {
   const restart = [
     "@restart-durability-idle-external",
     "@restart-durability-overlapping-typing",
@@ -101,6 +108,8 @@ test("desktop proofs require each restart proof, smoke, onboarding, the agent si
     "@share-link-agent-sign-in",
     "@live-owner-open",
     "@new-page-edit-link",
+    "@two-computer-drag",
+    "@two-computer-conflict",
   ];
   assert.deepEqual(desktopProofTags({ platform: "win32" }), {
     selected: [...everywhere, "@states-page"],
@@ -1407,7 +1416,7 @@ test("artifact identity includes nested file bytes and names", () => {
   }
 });
 
-// The Rust and JavaScript selection. The Android filter has its own test.
+// The Rust and JavaScript selection. The Android, editing-together, and Windows package filters have their own tests.
 const localGates = (files, workflow) => {
   const { rust, js } = selectedGates(files, workflow);
   return { rust, js };
@@ -1424,7 +1433,7 @@ test("gate selection covers root self-host deployment inputs", () => {
   ]) {
     assert.deepEqual(
       selectedGates([file], workflow),
-      { rust: false, js: true, android: false },
+      { rust: false, js: true, android: false, together: false, windows: false },
       file,
     );
   }
@@ -1462,6 +1471,8 @@ test("the Android filter in the workflow selects native module, Expo config, and
     rust: false,
     js: true,
     android: true,
+    together: false,
+    windows: false,
   });
   // The selection reads the filter from the workflow, so a filter change moves it.
   const narrowed = workflow.replace("- 'apps/mobile/app.json'", "- 'apps/mobile/other.json'");
@@ -1475,7 +1486,153 @@ test("a selected Android gate needs CI evidence, because no local run compiles i
     ciEvidence(selectedGates(["apps/mobile/modules/durable-file/android/build.gradle"], workflow)),
     ["Android Kotlin compile"],
   );
-  assert.deepEqual(ciEvidence(selectedGates(["apps/desktop/src/main.ts"], workflow)), []);
+  assert.deepEqual(ciEvidence(selectedGates(["docs/guide.md"], workflow)), []);
+});
+
+test("a selected editing-together check needs CI evidence, because no local run performs it", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+  // The share page and the end-to-end helpers reach this check and not the Windows package.
+  for (const file of ["services/share-web/src/server.ts", "apps/desktop/e2e/helpers/syncRelay.ts"])
+    assert.deepEqual(
+      ciEvidence(selectedGates([file], workflow)),
+      ["editing together", "share page"],
+      file,
+    );
+  // The relay and the desktop's source reach both.
+  for (const file of ["services/sync-relay/src/server.ts", "apps/desktop/src/main.ts"])
+    assert.deepEqual(
+      ciEvidence(selectedGates([file], workflow)),
+      ["editing together", "share page", "Windows package"],
+      file,
+    );
+  assert.deepEqual(ciEvidence(selectedGates(["pnpm-lock.yaml"], workflow)), [
+    "Android Kotlin compile",
+    "editing together",
+    "share page",
+    "Windows package",
+  ]);
+  // The selection reads the filter from the workflow, so a filter change moves it.
+  const narrowed = workflow.replace("- 'apps/desktop/e2e/together/**'", "- 'apps/other/**'");
+  assert.notEqual(narrowed, workflow);
+  const spec = "apps/desktop/e2e/together/stack.ts";
+  assert.equal(selectedGates([spec], workflow).together, true);
+  assert.equal(selectedGates([spec], narrowed).together, false);
+});
+
+test("a selected Windows package check needs CI evidence, because no local run performs it", () => {
+  const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+  // The smoke and the packaging configuration reach this check alone.
+  for (const file of [
+    "tools/perf-profiling/packaged-benchmark.mjs",
+    "apps/desktop/electron-builder.yml",
+  ])
+    assert.deepEqual(ciEvidence(selectedGates([file], workflow)), ["Windows package"], file);
+  assert.deepEqual(ciEvidence(selectedGates(["docs/guide.md"], workflow)), []);
+  // The selection reads the filter from the workflow, so a filter change moves it.
+  const narrowed = workflow.replace("- 'tools/perf-profiling/**'", "- 'tools/other/**'");
+  assert.notEqual(narrowed, workflow);
+  const smoke = "tools/perf-profiling/packaged-benchmark.mjs";
+  assert.equal(selectedGates([smoke], workflow).windows, true);
+  assert.equal(selectedGates([smoke], narrowed).windows, false);
+});
+
+test("the iOS job's selection skips only the Mac's tests and names each that it skips", () => {
+  assert.ok(!IOS_UI_CLASSES.includes("PageAccessibilityTests"), "its only test needs VoiceOver");
+  for (const excluded of Object.keys(IOS_UI_EXCLUSIONS))
+    assert.ok(IOS_UI_CLASSES.includes(excluded.split("/")[0]), excluded);
+  const source =
+    "func testOne() {}\nfunc testVoiceOverSpeaksEachRowOnce() async throws {}\nfunc helper() {}";
+  assert.deepEqual(expectedTests("NoticesAccessibilityTests", source), {
+    expected: ["testOne"],
+    problems: [],
+  });
+  assert.deepEqual(expectedTests("NoticesAccessibilityTests", "func testOne() {}").problems, [
+    "NoticesAccessibilityTests/testVoiceOverSpeaksEachRowOnce is excluded but is not a test",
+  ]);
+  assert.deepEqual(expectedTests("NoticesActionsTests", "").problems, [
+    "NoticesActionsTests has no tests",
+  ]);
+});
+
+test("an iOS class passes only when every expected test reports one ordinary pass", () => {
+  const source = "func testA() {}\nfunc testB() {}";
+  const results = (...cases) => ({
+    testNodes: [
+      {
+        nodeType: "Test Plan",
+        children: [
+          {
+            nodeType: "Unit test bundle",
+            name: "dohcUITests",
+            children: [
+              {
+                nodeType: "Test Suite",
+                name: "NoticesActionsTests",
+                children: cases.map(([name, result]) => ({
+                  nodeType: "Test Case",
+                  name: `${name}()`,
+                  result,
+                  durationInSeconds: 4,
+                  children: [{ nodeType: "Failure Message", name: "ignored" }],
+                })),
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const check = (data, status = 0) =>
+    checkClass({ name: "NoticesActionsTests", source, results: data, status });
+  const passed = check(results(["testA", "Passed"], ["testB", "Passed"]));
+  assert.deepEqual(passed.problems, []);
+  assert.equal(passed.passed, 2);
+  assert.deepEqual(passed.rows[0], {
+    suite: "NoticesActionsTests",
+    name: "testA",
+    result: "Passed",
+    seconds: 4,
+  });
+  for (const [data, status, problem] of [
+    [results(["testA", "Passed"]), 0, "NoticesActionsTests/testB: no result"],
+    [results(["testA", "Passed"], ["testB", "Skipped"]), 0, "NoticesActionsTests/testB: Skipped"],
+    [
+      results(["testA", "Passed"], ["testB", "Expected Failure"]),
+      0,
+      "NoticesActionsTests/testB: Expected Failure",
+    ],
+    [results(["testA", "Passed"], ["testB", "Failed"]), 65, "NoticesActionsTests/testB: Failed"],
+    [
+      results(["testA", "Passed"], ["testB", "Passed"], ["testB", "Passed"]),
+      0,
+      "NoticesActionsTests/testB: 2 results",
+    ],
+    [
+      results(["testA", "Passed"], ["testB", "Passed"], ["testC", "Passed"]),
+      0,
+      "NoticesActionsTests/testC: not selected, reported Passed",
+    ],
+    [results(["testA", "Passed"], ["testB", "Passed"]), 65, "xcodebuild exited 65"],
+    [results(["testA", "Passed"], ["testB", "Passed"]), "", "xcodebuild exited "],
+    [null, 0, "NoticesActionsTests/testA: no result"],
+  ])
+    assert.ok(check(data, status).problems.includes(problem), problem);
+});
+
+test("the iOS job reads build flags from the plain JS bundle", () => {
+  assert.equal(flagReading('const sampleBuild = "1" === "1";', "sampleBuild").state, "on");
+  assert.equal(flagReading("var sampleBuild=!0;", "sampleBuild").state, "on");
+  assert.equal(flagReading('const phoneWrites = undefined === "1";', "phoneWrites").state, "off");
+  assert.equal(flagReading("var phoneWrites=!1;", "phoneWrites").state, "off");
+  // A minified module whose last statement sets the flag ends at the module wrapper, not a semicolon.
+  assert.equal(flagReading("e.sampleBuild=!0},123,[]);", "sampleBuild").state, "on");
+  assert.equal(flagReading("e.phoneWrites=!1},123,[]);", "phoneWrites").state, "off");
+  assert.equal(flagReading('a.phoneWrites=void 0==="1",b=2;', "phoneWrites").state, "off");
+  assert.equal(
+    flagReading('var phoneWrites=!1;var phoneWrites="1"==="1";', "phoneWrites").state,
+    "undetermined",
+  );
+  assert.equal(flagReading("phoneWrites === 1", "phoneWrites").state, "undetermined");
 });
 
 test("gate selection follows workflow inputs, including shared and gate implementation files", () => {
@@ -1484,6 +1641,8 @@ test("gate selection follows workflow inputs, including shared and gate implemen
     rust: false,
     js: false,
     android: false,
+    together: false,
+    windows: false,
   });
   assert.deepEqual(localGates(["apps/desktop/src/main.ts"], workflow), {
     rust: false,
@@ -1750,7 +1909,13 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     assert.equal(report.commit, head);
     assert.equal(report.provenance.status, "PASS");
     assert.equal(report.dirty, false);
-    assert.deepEqual(report.gates, { rust: false, js: false, android: false });
+    assert.deepEqual(report.gates, {
+      rust: false,
+      js: false,
+      android: false,
+      together: false,
+      windows: false,
+    });
     assert.deepEqual(report.ciEvidence, []);
     assert.deepEqual(report.steps, []);
     assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);

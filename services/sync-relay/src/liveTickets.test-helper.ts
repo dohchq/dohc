@@ -285,7 +285,7 @@ export function holderLinkAuthority(
   });
 }
 export const table = "sync_relay_live_session_tickets";
-export const marker = "live-session-tickets-v3";
+export const marker = "live-session-tickets-v4";
 const defaultScope = scope,
   defaultBinding = binding;
 export async function fixture(

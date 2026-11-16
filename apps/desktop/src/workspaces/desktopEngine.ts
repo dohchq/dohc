@@ -1,6 +1,8 @@
 import { installedReaderConfig } from "./installedReaderConfig";
+import { catchUpFromJournal, OwnerJournalPending, type OwnerJournalRead } from "./ownerJournal";
 import {
   reconcileOwnerLiveStops,
+  releaseRetiredOwnerNotes,
   type OwnerLiveStop,
   type OwnerStopRetirementTarget,
 } from "./ownerLiveStop";
@@ -95,6 +97,12 @@ export interface ServerOwnerDelivery {
     /** The server's list of the workspace's hosted documents. `fresh` skips one read before this call. */
     documents(signal: AbortSignal, fresh?: boolean): Promise<unknown>;
     retire(binding: OwnerStopRetirementTarget, signal: AbortSignal): Promise<number | null>;
+    /** A page of a retired note's saves after `after`, for its owner's release. */
+    journal(
+      binding: LiveObjectBinding,
+      after: number,
+      signal: AbortSignal,
+    ): ReturnType<OwnerJournalRead>;
     /**
      * The owner's page read, Try again or confirmed copy of edits the server
      * keeps, by the refusal the owner saw. A page read continues after the
@@ -221,7 +229,7 @@ interface DesktopEngineDependencies<State extends EngineAuthorityState> {
   // The shared notes whose edits wait on this computer for the server, as last read.
   ownerPendingPaths?(workspaceId: string): readonly string[];
   // A Stop the owner-delivery pass sent again finished, as a Stop from the renderer reports.
-  notifyOwnerLiveStopped?(workspaceId: string, objectId: string): void;
+  notifyOwnerLiveStopped?(workspaceId: string, objectId: string, path: string): void;
   launchMarks: Pick<typeof launchMarksImplementation, "daemonReady">;
   desktopMarks: Pick<typeof desktopMarksImplementation, "markOnce">;
   logLaunchMarksOnce(): void;
@@ -424,7 +432,9 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
    * Releases a Stop's queue into the document. For refused edits, a recovery
    * package and a record are written first: once the release commits, the
    * queue is gone, and they keep the notice, its Try again and Save recovery
-   * copy until the file holds the edits, or a recovery copy does.
+   * copy until the file holds the edits, or a recovery copy does. With the
+   * server's `journal`, the saves this computer has not applied come first,
+   * so the release writes every one through `acceptedCursor`.
    */
   async function releaseOwnerLiveStop(
     workspaceId: string,
@@ -433,7 +443,26 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
     binding: LiveObjectBinding,
     acceptedCursor: number,
     signal?: AbortSignal,
+    journal?: OwnerJournalRead,
   ) {
+    if (journal) {
+      const request = { id: 0, workspace: workspaceHandle, deadlineMs: 30_000 };
+      const stop = (await client.ownerYDocStopList(request, signal)).find((row) =>
+        sameBinding(row.binding ?? null, binding),
+      );
+      // Released before the server's last save, the note would wait for Resume.
+      if (
+        stop &&
+        (await catchUpFromJournal({
+          client,
+          workspaceHandle,
+          target: { binding, relayDatabaseNamespace: stop.relayDatabaseNamespace },
+          read: journal,
+          signal: signal ?? AbortSignal.any([]),
+        })) === null
+      )
+        throw new OwnerJournalPending();
+    }
     // Only the queue of the generation this release takes. If the engine refuses
     // to read this document's queue head, the release fails: nothing would keep its edits.
     const kept = (
@@ -696,6 +725,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                               target,
                               acceptedCursor,
                               releaseSignal,
+                              (after, pageSignal) => session.journal(target, after, pageSignal),
                             ),
                           onError: (row, error) => {
                             stopsChanged = true;
@@ -714,6 +744,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                             dependencies.notifyOwnerLiveStopped?.(
                               workspaceId,
                               row.document.objectId,
+                              row.document.currentPath,
                             );
                             if (ownerStopFailures.get(workspaceId)?.delete(row.document.objectId))
                               notifyRenderer({ workspaceId });
@@ -758,9 +789,61 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                       listedOwnerDeliveryPaths(response, documents),
                     );
                     const { documents: rows, diverged } = response as {
-                      documents: { path: string; status: string; reason?: unknown }[];
+                      documents: {
+                        path: string;
+                        status: string;
+                        reason?: unknown;
+                        objectId?: unknown;
+                      }[];
                       diverged?: unknown;
                     };
+                    // Before the open turn, which would host again a note it still holds.
+                    try {
+                      await sessions.run(operation.workspace, async (binding) => {
+                        const client = daemon.currentClient();
+                        if (!(client instanceof EngineClient))
+                          throw new Error("Owner Stop requires the desktop daemon client.");
+                        let released = false;
+                        await releaseRetiredOwnerNotes({
+                          client,
+                          workspaceHandle: binding.workspace,
+                          workspaceId,
+                          signal,
+                          listed: new Set(
+                            rows.flatMap((row) =>
+                              typeof row.objectId === "string" ? [row.objectId] : [],
+                            ),
+                          ),
+                          journal: session.journal,
+                          release: (target, acceptedCursor, releaseSignal) =>
+                            releaseOwnerLiveStop(
+                              workspaceId,
+                              client,
+                              binding.workspace,
+                              target,
+                              acceptedCursor,
+                              releaseSignal,
+                            ),
+                          assertCurrent: () => {
+                            check();
+                            sessions.assertCurrentBinding(operation.workspace, binding);
+                          },
+                          onComplete: (row) => {
+                            released = true;
+                            dependencies.notifyOwnerLiveStopped?.(
+                              workspaceId,
+                              row.document.objectId,
+                              row.document.currentPath,
+                            );
+                          },
+                        });
+                        if (released)
+                          await readQuarantinesAfterPass(workspaceId, client, binding.workspace);
+                      });
+                    } catch (error) {
+                      check();
+                      console.error("[desktop] owner release of retired notes failed:", error);
+                    }
                     try {
                       await ownerOpenTurn(workspaceId, session, rows, listedAt, signal, check);
                     } catch (error) {
@@ -1681,14 +1764,29 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       return dependencies.ownerLiveReleases.list(workspaceId);
     },
     /** A Stop's release, recorded until the file holds any refused edits it took. */
-    releaseOwnerLiveStop(
-      workspace: EngineWorkspace,
+    async releaseOwnerLiveStop(
+      workspace: RegistryEntry,
       binding: LiveObjectBinding,
       acceptedCursor: number,
     ) {
-      return withEngineClient(workspace, (client, handle) =>
-        releaseOwnerLiveStop(workspace.workspaceId, client, handle, binding, acceptedCursor),
-      );
+      // Signed out, the release still runs, and waits if the file is behind.
+      const lifetime = new AbortController();
+      try {
+        const session = await dependencies.serverOwnerDelivery?.connect(workspace, lifetime.signal);
+        return await withEngineClient(workspace, (client, handle) =>
+          releaseOwnerLiveStop(
+            workspace.workspaceId,
+            client,
+            handle,
+            binding,
+            acceptedCursor,
+            session?.signal,
+            session ? (after, signal) => session.journal(binding, after, signal) : undefined,
+          ),
+        );
+      } finally {
+        lifetime.abort();
+      }
     },
     /**
      * Resume clears a document's Stop. A release still owed to the file keeps

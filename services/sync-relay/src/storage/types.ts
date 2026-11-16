@@ -710,6 +710,17 @@ export interface LiveUpdateJournalCommitInput {
   readonly validation: LiveJournalValidation;
   readonly updateBytes: Uint8Array;
   readonly receivedAtMs: number;
+  readonly room?: LiveRoomSave;
+}
+/** A live room's save: several people's edits, committed under the owner's authority. */
+export interface LiveRoomSave {
+  /** Everyone whose taken edits the save holds. */
+  readonly authors: import("@dohc/live-session-contract/live-authorship").LiveAuthorSnapshot;
+  /**
+   * Runs inside the transaction that commits the save, with the save's journal cursor. What it
+   * returns runs once that transaction has committed.
+   */
+  readonly committed: (journalCursor: number) => () => void;
 }
 export type RelayLiveUpdateJournalResult =
   | {
@@ -785,6 +796,10 @@ export interface SyncRelayStorage {
     documents: readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
     nextCursor: string | null;
   };
+  retiredAcceptedCursor(workspaceId: string, objectId: string): number | null;
+  readRetiredJournalPage(
+    input: Parameters<typeof import("./serviceActivationRetirement").readRetiredJournalPage>[1],
+  ): import("./serviceActivationRetirement").RetiredJournalPage | null;
   currentServiceHostWorkspace(
     workspaceId: string,
     includeUndrained?: boolean,
@@ -893,6 +908,10 @@ export interface SyncRelayStorage {
   setServiceHostEnrollmentEnabled(
     input: import("./serviceHostEnrollment").SetServiceHostEnrollmentEnabledInput,
   ): import("./serviceHostEnrollment").ServiceHostEnrollment | null;
+  /** The enrolled documents an active Edit grant on the share covers. */
+  serviceHostEnrollmentsCoveredByShare(
+    shareId: string,
+  ): readonly import("./serviceHostEnrollment").ServiceHostEnrollment[];
   /** Whether an Edit grant of its owner, or the owner's restore that kept its live session, keeps the enrolled document live. */
   serviceHostEnrollmentCovered(
     enrollment: Pick<
@@ -915,6 +934,8 @@ export interface SyncRelayStorage {
   serviceActivationRetirements(
     workspaceId: string,
   ): import("./serviceActivationRetirement").ServiceActivationRetirement[];
+  /** Whether the relay holds a Y.Doc update for the document on main, so some computer has opened it live. */
+  mainLiveLineageExists(document: { workspaceId: string; objectId: string }): boolean;
   /** Whether the document has a restore that has neither resumed nor been declined. */
   serviceRestoreInProgress(document: { workspaceId: string; objectId: string }): boolean;
   serviceActivationRetirementDecision(
@@ -951,6 +972,20 @@ export interface SyncRelayStorage {
     input: import("./pushSubscriptions").BindPushSubscriptionInput,
   ): import("./pushSubscriptions").PushSubscriptionRow;
   removePushSubscription(input: { installationId: string; userId: string }): void;
+  readPushDevice(input: {
+    userId: string;
+    sessionId: string;
+    nowMs: number;
+  }): import("./pushDevices").PushDeviceRow | null;
+  bindPushDevice(
+    input: import("./pushDevices").BindPushDeviceInput,
+  ): import("./pushDevices").PushDeviceRow;
+  removePushDevice(input: { userId: string; sessionId: string; generation: number }): void;
+  fencePushSession(input: import("./pushDevices").PushSessionFence & { expiresAtMs: number }): void;
+  settlePushSessionFence(
+    input: import("./pushDevices").PushSessionFence & { revokedExpiresAtMs: number | null },
+  ): void;
+  sweepExpiredPushDevices(nowMs: number): void;
   postNotice(input: import("./notices").PostNoticeInput): void;
   postAutomationWake(
     input: import("./notices").PostAutomationWakeInput,

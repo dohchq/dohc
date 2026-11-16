@@ -273,6 +273,21 @@ it("records one delivery for overlapping mention, DM, and prior participation; r
   expect(rows(f.storage)).toHaveLength(1);
 });
 
+it("queues only the browser's alert while the same account also has a phone binding", async () => {
+  const f = await fixture();
+  f.storage.bindPushDevice({
+    userId: "alice",
+    sessionId: "session-alice-phone",
+    sessionExpiresAtMs: Date.now() + 1_000_000,
+    token: "ab".repeat(32),
+    environment: "sandbox",
+    topic: "com.example.phone",
+    nowMs: Date.now(),
+  });
+  f.message();
+  expect(rows(f.storage).map((row) => row.installation_id)).toEqual([installationId]);
+});
+
 it("selects a later thread reply, ignores code mentions, names inside file links, self posts, unrelated chats, and supplied recipient lists", async () => {
   const f = await fixture();
   f.append([
@@ -351,7 +366,7 @@ it.each(["revoked", "session", "generation", "account", "message", "expired"])(
     if (reason === "generation") f.bind({ sessionId: "new-session" });
     if (reason === "account") f.bind({ userId: "bob", sessionId: "session-bob" });
     if (reason === "expired")
-      f.storage.replicaViewTx(() =>
+      f.storage.quietTx(() =>
         f.storage.db
           .prepare("UPDATE sync_relay_push_subscriptions SET expires_at_ms = ?")
           .run(Date.now() + 1000),

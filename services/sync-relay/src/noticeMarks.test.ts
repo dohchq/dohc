@@ -58,6 +58,7 @@ async function relay() {
       userId: match[1]!,
       sessionId: rename ?? match[2]!,
       expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind: "desktop",
     } satisfies AccountSession;
   };
   const holdSession = (nth: number) => {
@@ -75,7 +76,7 @@ async function relay() {
     return { reached: waiting, release: () => release() };
   };
   const h = testHandler(storage, {
-    resolveAccountSession,
+    resolvePhoneCapableAccountSession: resolveAccountSession,
     nowMs: () => clock,
     accountOperationRateLimiter: new TokenBucketLimiter(10_000, 1, 16),
   });

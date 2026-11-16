@@ -955,3 +955,63 @@ fn hardlink_reopen_refuses_orphaned_wal_and_original_root_recovers_acknowledged_
     };
     assert_eq!(read.result["text"], "acknowledged before crash");
 }
+
+#[test]
+fn owner_host_entrypoint_answers_a_committed_row_and_keeps_the_connection() {
+    let scratch = ScratchDir::new().unwrap();
+    let root = scratch.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let path = scratch.path().join("owner-host.json");
+    std::fs::write(
+        &path,
+        json!({
+            "ingress": {"aggregateBytes": 600_000_000, "applicationWorkingReserveBytes": 1_000_000, "maxUploads": 2, "uploadDeadlineMs": 30_000},
+            "maxRegistrations": 8,
+            "maxAdoptionBytes": 1_000_000,
+            "maxAdoptionEvents": 100,
+            "maxApplicationsPerSettlement": 100,
+            "ownerOutbox": {"maxPendingBytes": 1_000_000, "maxPendingAgeMs": 600_000},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut owner_host = command(None);
+    owner_host.env("DOHC_ENGINE_OWNER_HOST_CONFIG", &path);
+    let mut daemon = Daemon(owner_host.spawn().unwrap());
+    daemon.send(Envelope::Hello(Hello {
+        protocol_version: PROTOCOL_VERSION,
+        auth_token: "configured-test-secret".into(),
+        capabilities: vec!["blobs".into()],
+        last_session_generation: None,
+        max_frame_bytes: None,
+    }));
+    assert!(matches!(daemon.read(), Envelope::HelloAck(_)));
+    let Envelope::Response(opened) = daemon.request(
+        1,
+        "workspace.open",
+        None,
+        json!({"rootDir": root.to_string_lossy(), "workspaceId": "workspace"}),
+    ) else {
+        panic!("workspace open")
+    };
+    let workspace: dohc_engine_protocol::wire::WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).unwrap();
+    // A row for a note this engine does not hold reaches the method, which
+    // reads it and refuses it; the connection stays open.
+    let row = [0u8, 0];
+    let binding = json!({"workspaceId":"workspace","mainVersionId":"main","objectId":"object","lineageClaimId":"a".repeat(64),"currentPath":"note.md","selectorPaths":["note.md"],"restoreFenceGeneration":0});
+    let reply = daemon.streamed(
+        2,
+        "ydoc.ownerDelivery.putCommittedRow",
+        workspace,
+        json!({"binding":binding,"cursor":1,"streamId":1,"byteLength":row.len(),"digest":dohc_engine_storage::hex_sha256(&row)}),
+        &[(1, &row)],
+    );
+    let Envelope::Error(refused) = reply else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(refused.id, Some(2));
+    let next = daemon.request(3, "engine.ping", None, json!({}));
+    assert!(matches!(next, Envelope::Response(_)), "{next:?}");
+    daemon.close_cleanly();
+}

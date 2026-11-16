@@ -19,15 +19,30 @@ export class UnauthorizedError extends Error {
   }
 }
 
+/**
+ * What kind of sign-in created a session. The server records it in the same
+ * insert that creates the session, and nothing changes it afterwards. It names
+ * what the owner approved, not the hardware that holds the token.
+ */
+export type SessionKind = "phone" | "desktop" | "browser";
+
+/** The session's recorded kind. A session without a known kind is refused. */
+export function sessionKindOf(session: { session: { clientKind?: unknown } }): SessionKind {
+  const kind = session.session.clientKind;
+  if (kind === "phone" || kind === "desktop" || kind === "browser") return kind;
+  throw new UnauthorizedError();
+}
+
 // The production ResolveActor: identity comes only from a validated Better
 // Auth session (Bearer token from the desktop's device-flow login, or a
 // browser cookie) — never from client-supplied ids. Workspace MEMBERSHIP is
 // enforced downstream by the backend's authz (assertWorkspaceMember), which
-// consumes the Actor this returns.
+// consumes the Actor this returns. A phone session reaches no workspace route:
+// the phone works only through the account routes.
 export function createSessionActorResolver(auth: WorkspaceAuth): ResolveActor {
   return async (request, workspaceId) => {
     const session = await auth.api.getSession({ headers: request.headers });
-    if (!session) throw new UnauthorizedError();
+    if (!session || sessionKindOf(session) === "phone") throw new UnauthorizedError();
     return actorFromSession(session, workspaceId);
   };
 }
@@ -37,6 +52,7 @@ export interface AccountSession {
   userId: string;
   sessionId: string;
   expiresAtMs: number;
+  clientKind: SessionKind;
   displayName?: string;
 }
 
@@ -46,7 +62,7 @@ export type ResolveAccountSession = (request: Request) => Promise<AccountSession
 // it: signing out or in again gives a different session id.
 export function accountSessionFrom(session: {
   user: { id: string; name?: string };
-  session: { id: string; userId: string; expiresAt: Date | string | number };
+  session: { id: string; userId: string; expiresAt: Date | string | number; clientKind?: unknown };
 }): AccountSession {
   const expiresAtMs = new Date(session.session.expiresAt).getTime();
   if (
@@ -60,11 +76,28 @@ export function accountSessionFrom(session: {
     userId: session.user.id,
     sessionId: session.session.id,
     expiresAtMs,
+    clientKind: sessionKindOf(session),
     ...(typeof session.user.name === "string" ? { displayName: session.user.name } : {}),
   };
 }
 
+/** Refuses a phone session, like every resolver a route gets by default. */
 export function createAccountSessionResolver(auth: WorkspaceAuth): ResolveAccountSession {
+  const resolve = createPhoneCapableAccountSessionResolver(auth);
+  return async (request) => {
+    const session = await resolve(request);
+    if (session.clientKind === "phone") throw new UnauthorizedError();
+    return session;
+  };
+}
+
+/**
+ * Also accepts a phone session. Only the account routes the phone uses take
+ * this resolver; every other route gets one that refuses phones.
+ */
+export function createPhoneCapableAccountSessionResolver(
+  auth: WorkspaceAuth,
+): ResolveAccountSession {
   return async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });
     if (!session) throw new UnauthorizedError();
@@ -85,9 +118,29 @@ export interface AccountSessions {
   list(userId: string): Promise<AccountSessionSummary[]>;
   /**
    * Deletes one of the account's unexpired sessions while the caller's own is
-   * still current. False when either is missing, expired, or another account's.
+   * still current, and returns when the deleted session would have expired.
+   * Null when either is missing, expired, or another account's.
    */
-  revoke(input: { userId: string; callerSessionId: string; sessionId: string }): Promise<boolean>;
+  revoke(input: {
+    userId: string;
+    callerSessionId: string;
+    sessionId: string;
+  }): Promise<number | null>;
+  /** Whether the account's phone sign-in `sessionId` exists and is unexpired, read afresh on every call. */
+  phoneSessionIsCurrent(input: { userId: string; sessionId: string }): Promise<boolean>;
+  /**
+   * The sessions among these IDs that still exist, read from the table with no
+   * cache, expired ones included. A session missing from the map was deleted.
+   */
+  read(sessionIds: readonly string[]): Promise<Map<string, StoredAccountSession>>;
+}
+
+/** A session as the table holds it now. */
+export interface StoredAccountSession {
+  userId: string;
+  expiresAtMs: number;
+  /** Null when the row's kind is not one the server issues. */
+  clientKind: SessionKind | null;
 }
 
 // Reads Better Auth's session table directly, because its own list returns every session's token.
@@ -105,12 +158,47 @@ export function createPostgresAccountSessions(pool: Pool): AccountSessions {
       }));
     },
     async revoke({ userId, callerSessionId, sessionId }) {
-      const result = await pool.query(
+      const result = await pool.query<{ expiresAt: Date }>(
         `delete from "session" where "id" = $1 and "userId" = $2 and "expiresAt" > now()
-          and exists (select 1 from "session" where "id" = $3 and "userId" = $2 and "expiresAt" > now())`,
+          and exists (select 1 from "session" where "id" = $3 and "userId" = $2 and "expiresAt" > now())
+          returning "expiresAt"`,
         [sessionId, userId, callerSessionId],
       );
+      return result.rows[0]?.expiresAt.getTime() ?? null;
+    },
+    async phoneSessionIsCurrent({ userId, sessionId }) {
+      const result = await pool.query(
+        `select 1 from "session" where "id" = $1 and "userId" = $2 and "clientKind" = 'phone' and "expiresAt" > now()`,
+        [sessionId, userId],
+      );
       return result.rowCount === 1;
+    },
+    async read(sessionIds) {
+      if (sessionIds.length === 0) return new Map();
+      const result = await pool.query<{
+        id: string;
+        userId: string;
+        expiresAt: Date;
+        clientKind: string;
+      }>(
+        'select "id", "userId", "expiresAt", "clientKind" from "session" where "id" = any($1::text[])',
+        [sessionIds],
+      );
+      return new Map(
+        result.rows.map((row) => [
+          row.id,
+          {
+            userId: row.userId,
+            expiresAtMs: row.expiresAt.getTime(),
+            clientKind:
+              row.clientKind === "phone" ||
+              row.clientKind === "desktop" ||
+              row.clientKind === "browser"
+                ? row.clientKind
+                : null,
+          },
+        ]),
+      );
     },
   };
 }

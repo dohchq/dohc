@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   UnauthorizedError,
   type AccountSessions,
@@ -34,7 +34,12 @@ function sessionTable(rows: StoredSession[]): HandlerOverrides {
       (stored) => `Bearer ${stored.token}` === request.headers.get("authorization"),
     );
     if (!row) throw new UnauthorizedError();
-    return { userId: row.userId, sessionId: row.sessionId, expiresAtMs: Number.MAX_SAFE_INTEGER };
+    return {
+      userId: row.userId,
+      sessionId: row.sessionId,
+      expiresAtMs: Number.MAX_SAFE_INTEGER,
+      clientKind: "desktop",
+    };
   };
   const accountSessions: AccountSessions = {
     list: async (userId) => rows.filter((row) => row.userId === userId),
@@ -44,12 +49,19 @@ function sessionTable(rows: StoredSession[]): HandlerOverrides {
         index < 0 ||
         !rows.some((row) => row.sessionId === callerSessionId && row.userId === userId)
       )
-        return false;
+        return null;
       rows.splice(index, 1);
-      return true;
+      return Number.MAX_SAFE_INTEGER;
     },
+    phoneSessionIsCurrent: async ({ userId, sessionId }) =>
+      rows.some((row) => row.userId === userId && row.sessionId === sessionId),
+    read: async () => new Map(),
   };
-  return { resolveAccountSession, accountSessions };
+  return {
+    resolveAccountSession,
+    resolvePhoneCapableAccountSession: resolveAccountSession,
+    accountSessions,
+  };
 }
 
 async function relay() {
@@ -78,8 +90,13 @@ async function relay() {
   ];
   const storage = (await testStorage()) as StorageContext;
   const activity = new DiscussionActivityHub();
-  const h = testHandler(storage, { discussionActivity: activity, ...sessionTable(rows) });
-  return { rows, storage, activity, h };
+  const sockets = { stopSession: vi.fn(), stopPhoneWorkspace: vi.fn() };
+  const h = testHandler(storage, {
+    discussionActivity: activity,
+    ...sessionTable(rows),
+    ownerLiveSockets: () => sockets,
+  });
+  return { rows, storage, activity, h, sockets };
 }
 
 const as = (token: string, init: RequestInit = {}) => {
@@ -187,9 +204,10 @@ describe("revoking a session", () => {
     ]);
   });
 
-  it("signs out the calling session", async () => {
-    const { h } = await relay();
+  it("signs out the calling session and ends its live connections", async () => {
+    const { h, sockets } = await relay();
     expect((await h(revoke("ana-phone", as("token-ana-phone")))).status).toBe(200);
+    expect(sockets.stopSession).toHaveBeenCalledExactlyOnceWith("ana", "ana-phone");
     expect((await h(list(as("token-ana-phone")))).status).toBe(401);
     expect((await h(list(as("token-ana-desktop")))).status).toBe(200);
   });

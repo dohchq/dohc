@@ -1,4 +1,7 @@
+import type { LiveObjectBinding } from "@dohc/workspace-engine-client";
 import { EngineRequestError, type EngineClient } from "@dohc/workspace-engine-client/daemon";
+import { catchUpFromJournal, OwnerJournalPending, type OwnerJournalRead } from "./ownerJournal";
+import { sameBinding } from "./ownerLiveReleases";
 export type OwnerStopRetirementTarget = {
   objectId: string;
   currentPath: string;
@@ -76,11 +79,12 @@ export async function reconcileOwnerLiveStops(options: {
                 ));
           else await options.client.ownerYDocStopRetired(request(), stop.document, options.signal);
         } catch (error) {
-          // Still waiting: a held save applies, or discovery installs a restore
-          // successor, before the next pass retries. The Stop has not finished.
+          // Still waiting: a held save applies, discovery installs a restore
+          // successor, or the server finishes retiring the note, before the next pass retries. The Stop has not finished.
           if (
-            error instanceof EngineRequestError &&
-            ["owner-stop-conflict", "owner-stop-restore-pending"].includes(error.message)
+            error instanceof OwnerJournalPending ||
+            (error instanceof EngineRequestError &&
+              ["owner-stop-conflict", "owner-stop-restore-pending"].includes(error.message))
           )
             return;
           // A release that committed ended the Stop even when it then could not write
@@ -111,5 +115,98 @@ export async function reconcileOwnerLiveStops(options: {
         console.error("[desktop] owner Stop notice failed:", noticeError);
       }
     }
+  }
+}
+
+/**
+ * Releases each note this computer owns that the server no longer hosts and
+ * retired without a Stop, as when its last link ended. Its saves through the
+ * server's last one go into the file, and nothing asks the server to Stop it.
+ * The release ends the Stop with it, so sharing the note again hosts it. A
+ * note that fails is tried again next pass; the rest go on.
+ */
+export async function releaseRetiredOwnerNotes(options: {
+  client: EngineClient;
+  workspaceHandle: string;
+  workspaceId: string;
+  signal: AbortSignal;
+  /** The objects the server lists as hosted, in any state. */
+  listed: ReadonlySet<string>;
+  journal(
+    binding: LiveObjectBinding,
+    after: number,
+    signal: AbortSignal,
+  ): ReturnType<OwnerJournalRead>;
+  /** Releases the note; the engine ends a Stop the relay retired on its own. */
+  release(
+    binding: LiveObjectBinding,
+    acceptedCursor: number,
+    signal: AbortSignal,
+  ): Promise<unknown>;
+  assertCurrent(): void;
+  onComplete?(row: OwnerLiveStop): void;
+}) {
+  const request = () => ({ id: 0, workspace: options.workspaceHandle, deadlineMs: 30_000 });
+  const unlisted = [];
+  let after: Parameters<EngineClient["ownerYDocListDrafts"]>[1]["after"] = null;
+  do {
+    const page = await options.client.ownerYDocListDrafts(
+      request(),
+      { after, limit: 64 },
+      options.signal,
+    );
+    unlisted.push(...page.drafts.filter((draft) => !options.listed.has(draft.binding.objectId)));
+    after = page.next;
+  } while (after);
+  for (const draft of unlisted) {
+    const { binding } = draft;
+    try {
+      await releaseRetiredOwnerNote(draft);
+    } catch (error) {
+      options.signal.throwIfAborted();
+      options.assertCurrent();
+      console.error("[desktop] owner release of a retired note failed:", binding.objectId, error);
+    }
+  }
+  function releaseRetiredOwnerNote(
+    draft: Awaited<ReturnType<EngineClient["ownerYDocListDrafts"]>>["drafts"][number],
+  ) {
+    const { binding } = draft;
+    return withOwnerLiveStopTransition(options.workspaceId, binding.currentPath, async () => {
+      options.signal.throwIfAborted();
+      options.assertCurrent();
+      const existing = (await options.client.ownerYDocStopList(request(), options.signal)).find(
+        (stop) =>
+          stop.document.objectId === binding.objectId &&
+          stop.document.mainVersionId === binding.mainVersionId,
+      );
+      // A Stop this computer asked for finishes in reconcileOwnerLiveStops; a
+      // released one waits for Resume.
+      if (existing && (existing.retirementOwed || existing.state !== "requested")) return;
+      const last = await catchUpFromJournal({
+        client: options.client,
+        workspaceHandle: options.workspaceHandle,
+        target: draft,
+        read: (cursor, signal) => options.journal(binding, cursor, signal),
+        signal: options.signal,
+      });
+      if (last === null) return;
+      options.assertCurrent();
+      const stop =
+        existing ??
+        (await options.client.ownerYDocStopRequest(
+          request(),
+          {
+            mainVersionId: binding.mainVersionId,
+            objectId: binding.objectId,
+            currentPath: binding.currentPath,
+          },
+          options.signal,
+          { retired: true },
+        ));
+      if (!stop.binding || !sameBinding(stop.binding, binding)) return;
+      await options.release(stop.binding, last, options.signal);
+      options.onComplete?.(stop);
+    });
   }
 }

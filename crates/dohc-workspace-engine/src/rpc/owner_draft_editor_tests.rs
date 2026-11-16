@@ -33,6 +33,11 @@ async fn accepted_frame_keeps_edit_when_compaction_fails() {
     accepted_frame_editor_case(EditorCase::CompactionFails).await;
 }
 
+#[tokio::test]
+async fn edit_after_a_frame_the_session_has_not_seen_is_recorded() {
+    accepted_frame_editor_case(EditorCase::Lagging).await;
+}
+
 #[derive(Clone, Copy)]
 enum EditorCase {
     Peer,
@@ -41,6 +46,7 @@ enum EditorCase {
     Quarantined,
     Replay,
     CompactionFails,
+    Lagging,
 }
 
 async fn accepted_frame_editor_case(case: EditorCase) {
@@ -325,6 +331,7 @@ async fn accepted_frame_editor_case(case: EditorCase) {
                 byte_length: update.len(),
                 digest: hex_sha256(&update),
                 host_vector_byte_length: None,
+                rows_through: None,
             },
         ),
         bytes: update,
@@ -352,6 +359,15 @@ async fn accepted_frame_editor_case(case: EditorCase) {
     );
     assert!(events.try_recv().is_err());
     drop(response);
+    if matches!(case, EditorCase::Lagging) {
+        // The session's copy of the binding fell behind the frame. The
+        // binding is unchanged, so the edit still belongs in its draft.
+        for session in crate::lock(&service.sessions).values_mut() {
+            if let Some(draft) = &mut session.owner_draft {
+                draft.revision = 1;
+            }
+        }
+    }
     if matches!(case, EditorCase::Replay) {
         let update = remote.richdoc_append_paragraph("second accepted peer edit");
         let mut next = input.clone();

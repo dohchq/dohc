@@ -108,6 +108,60 @@ async fn native_watcher_create_and_delete_drive_dirty_reconcile_without_dropping
     watcher.stop().expect("stop");
 }
 
+/// Linux reports each open of a watched file or folder, and a scan opens every
+/// folder it walks. A scan that marked the workspace dirty would start the
+/// next scan, without end.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reading_a_workspace_as_a_scan_does_leaves_it_clean() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let ws = Scratch::new();
+    for folder in 0..8 {
+        ws.write(&format!("notes/{folder}/note.md"), b"a note");
+    }
+    let dirty = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&dirty);
+    let mut watcher = NativeWatcher::start_metadata(
+        ws.path().to_path_buf(),
+        Arc::new(move || {
+            counted.fetch_add(1, Ordering::AcqRel);
+        }),
+    )
+    .await
+    .expect("watch start");
+
+    fn read_all(folder: &std::path::Path) {
+        for entry in std::fs::read_dir(folder).expect("read folder") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                read_all(&path);
+            } else {
+                std::fs::read(&path).expect("read file");
+            }
+        }
+    }
+    read_all(ws.path());
+    // The watcher reports a burst once it has been quiet for WATCH_SETTLE, so
+    // three of those is long enough for a report of the reads to arrive.
+    tokio::time::sleep(dohc_engine_files::watch::WATCH_SETTLE * 3).await;
+    assert_eq!(
+        dirty.load(Ordering::Acquire),
+        0,
+        "reading marked the workspace dirty"
+    );
+
+    // The same watcher still reports a write.
+    ws.write("notes/0/new.md", b"new");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while dirty.load(Ordering::Acquire) == 0 {
+        assert!(Instant::now() < deadline, "the write was not reported");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    watcher.stop().expect("stop");
+}
+
 /// Delete-then-recreate the watched root inside the health
 /// poll window. The recreated directory exists (so an existence-only check
 /// would see a healthy directory and do nothing), but the OS watch is still

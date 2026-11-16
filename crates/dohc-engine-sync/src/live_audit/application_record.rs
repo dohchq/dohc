@@ -4,7 +4,7 @@ use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdateMetadata, ApplicationHostCoordinate, LiveAuthorEntry,
     LiveCheckpointAuthorCoverage, LiveUpdateReceipt, LiveUpdateStructRange, MAX_CANCELLED_RESTORES,
     NativeRestoreCancellationReceipt, RelayAcceptedLiveUpdate, RetainedPrefixBody,
-    ServerDerivedLiveUpdateAuthority, validate_checkpoint_coverage,
+    ServerDerivedLiveUpdateAuthority, one_author, validate_checkpoint_coverage,
 };
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use std::cell::RefCell;
@@ -600,7 +600,10 @@ fn is_personal_agent(author: &LiveAuthorEntry) -> bool {
 /// replica records it, from a `service-host:` origin. The relay accepts that
 /// origin only from the host's own credential. From there, a personal agent's
 /// update credits that agent alone, and a checkpoint can credit any personal
-/// agent in its window. Any other update credits no personal agent.
+/// agent in its window. A room's save, under the owner's authority, credits
+/// the owner's own personal agents among the people it names, since the relay
+/// admits a personal agent to a room only on the owner's own connection. Any
+/// other update credits no personal agent.
 fn credits_personal_agents_as_admitted(record: &ParsedRecord, origin_id: &str) -> bool {
     let host = origin_id.starts_with(crate::SERVICE_HOST_ORIGIN_PREFIX);
     match &record.accepted.authority {
@@ -610,6 +613,16 @@ fn credits_personal_agents_as_admitted(record: &ParsedRecord, origin_id: &str) -
                 [LiveAuthorEntry::Agent { agent_id, on_behalf_of: Some(_), .. }]
                     if agent_id == principal_id
             )
+        }
+        ServerDerivedLiveUpdateAuthority::Owner { principal_id }
+            if !one_author(&record.author_snapshot) =>
+        {
+            record.author_snapshot.iter().all(|author| match author {
+                LiveAuthorEntry::Agent { on_behalf_of, .. } if is_personal_agent(author) => {
+                    host && on_behalf_of.as_deref() == Some(principal_id.as_str())
+                }
+                _ => true,
+            }) && (host || !record.coverage_names_personal_agent)
         }
         _ => {
             !record.author_snapshot.iter().any(is_personal_agent)

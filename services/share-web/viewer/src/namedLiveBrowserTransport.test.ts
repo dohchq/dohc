@@ -1037,17 +1037,37 @@ it("pauses a live socket without leaving an automatic reconnect timer", async ()
   await vi.advanceTimersByTimeAsync(20_000);
   expect(f.sockets).toHaveLength(1);
 });
-it("caps automatic reconnect backoff at ten seconds", async () => {
+// A server restart is over in seconds, and the page must be trying when the server is back.
+it("waits at most two seconds between failed attempts for a minute after it was live, then doubles its wait up to ten seconds", async () => {
   const f = await live();
   vi.useFakeTimers();
   f.socket.close();
   let index = 1;
-  for (const delay of [250, 500, 1_000, 2_000, 4_000, 8_000, 10_000, 10_000]) {
+  // The thirtieth two-second wait ends 61.75 s after the page was live. The wait is chosen as the one before
+  // it ends, so it is the first chosen after the minute.
+  const waits = [250, 500, 1_000, ...Array<number>(30).fill(2_000), 4_000, 8_000, 10_000, 10_000];
+  for (const delay of waits) {
     await vi.advanceTimersByTimeAsync(delay - 1);
     expect(f.sockets).toHaveLength(index);
     await vi.advanceTimersByTimeAsync(1);
     const socket = await f.socketAt(index++);
     socket.close();
+  }
+  f.value.disconnect();
+  expect(vi.getTimerCount()).toBe(0);
+});
+it("doubles its wait up to ten seconds from the start when the page was never live", async () => {
+  vi.useFakeTimers();
+  const f = fixture(),
+    connecting = f.value.reconnect();
+  (await f.socketAt(0)).close();
+  await connecting;
+  let index = 1;
+  for (const delay of [250, 500, 1_000, 2_000, 4_000, 8_000, 10_000, 10_000]) {
+    await vi.advanceTimersByTimeAsync(delay - 1);
+    expect(f.sockets).toHaveLength(index);
+    await vi.advanceTimersByTimeAsync(1);
+    (await f.socketAt(index++)).close();
   }
   f.value.disconnect();
   expect(vi.getTimerCount()).toBe(0);

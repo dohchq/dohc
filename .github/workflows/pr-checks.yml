@@ -1,7 +1,8 @@
 # GitHub runners are the default. The global switch or an explicit manual
 # runner_provider=blacksmith selection moves jobs to Blacksmith.
 # The local verifier reads the path filters and tool pins below.
-# Packaging, signing, and update manifests stay in Desktop Release.
+# The Windows package job packs the unpacked app only.
+# Installers, signing, and update manifests stay in Desktop Release.
 name: PR checks
 
 on:
@@ -12,7 +13,7 @@ on:
       gate:
         description: Full gate to run
         type: choice
-        options: [all, js, rust, android]
+        options: [all, js, rust, android, together, windows]
         default: all
       cache:
         description: Build-cache condition for measurement
@@ -57,6 +58,8 @@ jobs:
       js: ${{ steps.filter.outputs.js }}
       rust: ${{ steps.filter.outputs.rust }}
       android: ${{ steps.filter.outputs.android }}
+      together: ${{ steps.filter.outputs.together }}
+      windows: ${{ steps.filter.outputs.windows }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         if: github.event_name == 'pull_request'
@@ -195,6 +198,90 @@ jobs:
               - 'patches/**'
               - 'scripts/verification/**'
               - '.github/workflows/pr-checks.yml'
+            # The editing-together check and the share page's end-to-end tests. Every
+            # path here is also in js, so shared preparation has built the engine and
+            # the share page they start.
+            together:
+              # What a shared note's editors run through: the relay, the share page,
+              # the engine, and the packages they are built from.
+              - 'services/sync-relay/**'
+              - 'services/share-web/**'
+              - 'packages/**'
+              - 'crates/**'
+              - 'vendor/**'
+              - '.cargo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              # The check and what it loads. The desktop's engine capture plays the
+              # note's owner, and the server helpers load the account server's harness.
+              - 'apps/desktop/e2e/together/**'
+              - 'apps/desktop/e2e/helpers/**'
+              - 'apps/desktop/src/**'
+              - 'apps/desktop/scripts/**'
+              - 'apps/desktop/playwright.together.config.ts'
+              - 'apps/desktop/package.json'
+              - 'services/workspace-api/**'
+              # The share page's tests publish and open these apps.
+              - 'examples/trip-poll/**'
+              - 'examples/fundraiser/**'
+              - 'examples/stock-orders/**'
+              # The viewer's build reads this, and one share page test builds the viewer itself.
+              - 'tools/single-react.ts'
+              - 'scripts/verification/**'
+              - 'scripts/lib/**'
+              - 'tools/rust-engine-program/**'
+              # What installs and compiles all of it.
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'patches/**'
+              - '.node-version'
+              - 'tsconfig.base.json'
+              - '.github/workflows/pr-checks.yml'
+            # The Windows package job. It builds the desktop and the engine, packs
+            # the app, and runs the release's packaged smoke against it. The build
+            # reads no end-to-end test and no example app, so neither is here.
+            windows:
+              # What the desktop build compiles and stages: its source and scripts,
+              # the workspace packages, and the two services it bundles.
+              - 'apps/desktop/src/**'
+              - 'apps/desktop/scripts/**'
+              - 'apps/desktop/electron.vite.config.ts'
+              # Vite reads this when it compiles TypeScript.
+              - 'apps/desktop/tsconfig.json'
+              - 'packages/**'
+              - 'services/sync-relay/**'
+              - 'services/sqlite-worker/**'
+              # The renderer's build imports this.
+              - 'tools/single-react.ts'
+              # The engine.
+              - 'crates/**'
+              - 'vendor/**'
+              - '.cargo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              # The engine build and the smoke import the process runner and the
+              # build budget from these.
+              - 'scripts/verification/**'
+              - 'tools/rust-engine-program/**'
+              # The packaging settings, and the icons electron-builder reads.
+              - 'apps/desktop/electron-builder.yml'
+              - 'apps/desktop/build/**'
+              # The smoke and the modules it imports.
+              - 'tools/perf-profiling/**'
+              # What installs and compiles all of it.
+              - '**/package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'patches/**'
+              - '.npmrc'
+              - '.pnpmfile.cjs'
+              - '.pnpmfile.mjs'
+              - '.node-version'
+              - 'tsconfig.base.json'
+              - '.github/workflows/pr-checks.yml'
             # Only the local verifier reads this filter; no job uses it. When
             # the JavaScript gate runs, a change here runs every repository
             # test (pnpm test:repo). Any other change runs only the tests that
@@ -252,7 +339,7 @@ jobs:
   javascript-prepare:
     name: shared preparation
     needs: changes
-    if: (github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'js' || inputs.gate == 'rust')) || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
+    if: (github.event_name == 'workflow_dispatch' && inputs.gate != 'android' && inputs.gate != 'windows') || needs.changes.outputs.js == 'true' || needs.changes.outputs.rust == 'true'
     # Confinement requires Landlock on GitHub's kernel.
     runs-on: ${{ fromJSON('["ubuntu-24.04"]') }}
     timeout-minutes: 30
@@ -732,9 +819,134 @@ jobs:
         working-directory: apps/mobile/android
         run: ./gradlew :chat-composer:compileDebugKotlin :durable-file:compileDebugKotlin --no-daemon --console=plain --stacktrace
 
+  # Headless browsers against a dohc server of its own on the runner. One leg has people edit one
+  # shared note together; the other runs the share page's end-to-end tests. Neither is part of a
+  # gate's time: the job has its own filter and its own limit.
+  together:
+    name: ${{ matrix.suite }}
+    needs: changes
+    if: (github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'together')) || needs.changes.outputs.together == 'true'
+    runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && format('["blacksmith-{0}vcpu-ubuntu-2404"]', inputs.runner_size == '8' && '8' || '4') || '["ubuntu-24.04"]') }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - editing together
+          - share page
+    env:
+      DOHC_CONFINEMENT_SUITES: exclude
+      CARGO_INCREMENTAL: '0'
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile && pnpm --filter @dohc/app-backend-runtime build
+      - name: Install the browser
+        run: pnpm --filter @dohc/desktop exec playwright install chromium
+      # Shared preparation publishes the engine and the share page while it goes on to its own tests.
+      - name: Wait for the prepared engine and share page
+        run: node scripts/verification/wait-preparation.mjs js
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: javascript-prepared-${{ github.run_attempt }}
+          path: ${{ runner.temp }}
+      - name: Unpack the prepared engine and share page
+        run: tar -I zstd -xf "$RUNNER_TEMP/javascript-prepared.tar.zst"
+      - name: Edit together
+        if: matrix.suite == 'editing together'
+        env:
+          DOHC_REQUIRE_ENGINE_E2E: '1'
+        run: pnpm test:together
+      # The viewer is already built, so this starts Playwright without the package's build step.
+      - name: Open and use share links
+        if: matrix.suite == 'share page'
+        working-directory: services/share-web
+        run: node ../../apps/desktop/scripts/run-playwright.mjs --config playwright.config.ts
+      # Words and service output only: traces and screenshots stay on the runner.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && matrix.suite == 'editing together'
+        with:
+          name: editing-together-${{ github.run_attempt }}
+          path: test-results/together-report.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Builds the Windows desktop package and runs the release workflow's packaged smoke against it,
+  # so a change that breaks the package fails here and not in the next nightly. It is not part of
+  # a gate's time: the job has its own filter and its own limit. It receives no secrets.
+  windows:
+    name: Windows package
+    needs: changes
+    if: (github.event_name == 'workflow_dispatch' && (inputs.gate == 'all' || inputs.gate == 'windows')) || needs.changes.outputs.windows == 'true'
+    # Always GitHub's Windows runner, also when Blacksmith is on.
+    runs-on: ${{ fromJSON('["windows-2025"]') }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+          cache: ${{ inputs.cache != 'cold' && 'pnpm' || '' }}
+      - name: Rust toolchain
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add x86_64-pc-windows-msvc
+      # GitHub's Windows image sets TEMP to a short 8.3 path (RUNNER~1), and
+      # tests compare it with the long path dohc resolves it to.
+      - name: Use the runner's temp folder
+        shell: bash
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+        if: inputs.cache != 'cold'
+        with:
+          shared-key: windows-package
+      - name: Build the desktop
+        env:
+          DOHC_DESKTOP_DIST: win-x64
+        run: pnpm build:desktop
+      - name: Build the engine
+        run: pnpm --filter @dohc/desktop run build:engine --target x86_64-pc-windows-msvc
+      - name: Check the package's settings
+        run: pnpm smoke:package:desktop
+      # The unpacked app only: no installer and no signing, which the release owns.
+      - name: Package the unpacked app
+        shell: bash
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: pnpm --filter @dohc/desktop exec electron-builder --publish never --x64 --dir
+      # The same command as the release workflow's Windows packaged smoke.
+      - name: Open and use the packaged app
+        shell: pwsh
+        run: |
+          node tools/perf-profiling/packaged-benchmark.mjs `
+            --binary apps/desktop/release/win-unpacked/dohc.exe `
+            --package-commit '${{ github.sha }}' `
+            --output .agent-artifacts/release-package-smoke `
+            --label candidate --runs 1 --idle-seconds 1 --keystrokes 5 --switches 1
+
   verification:
     name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}
-    needs: [changes, javascript, rust, javascript-prepare, android]
+    needs: [changes, javascript, rust, javascript-prepare, android, together, windows]
     if: ${{ always() && !cancelled() && needs.changes.result != 'skipped' }}
     runs-on: ${{ fromJSON((vars.BLACKSMITH_ENABLED == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runner_provider == 'blacksmith')) && '["blacksmith-2vcpu-ubuntu-2404"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 10
@@ -768,7 +980,7 @@ jobs:
           import { verifyCompletedCloud } from './scripts/verification/cloud-aggregate.mjs';
           const jobs = JSON.parse(process.env.JOBS);
           assert.equal(jobs.changes.result, 'success', 'Gate selection failed');
-          const verdicts = await Promise.allSettled([['js', 'javascript'], ['rust', 'rust'], ['android', 'android']].map(async ([gate, job]) => {
+          const verdicts = await Promise.allSettled([['js', 'javascript'], ['rust', 'rust'], ['android', 'android'], ['together', 'together'], ['windows', 'windows']].map(async ([gate, job]) => {
             if (process.env.EVENT_NAME === 'pull_request') {
               assert.ok(['true', 'false'].includes(jobs.changes.outputs[gate]), `${gate} selection is missing`);
             }
@@ -776,10 +988,11 @@ jobs:
               ? process.env.REQUESTED_GATE === 'all' || process.env.REQUESTED_GATE === gate
               : jobs.changes.outputs[gate] === 'true';
             assert.equal(jobs[job].result, selected ? 'success' : 'skipped', `${gate} gate did not complete as selected`);
-            // Android is one job, so its success is its whole proof.
-            if (selected && gate !== 'android') await verifyCompletedCloud(gate);
+            // Android, editing together, and the Windows package are one job each, so the job's success is its whole proof.
+            if (selected && gate !== 'android' && gate !== 'together' && gate !== 'windows') await verifyCompletedCloud(gate);
           }));
-          const confined = (process.env.EVENT_NAME === 'workflow_dispatch' && process.env.REQUESTED_GATE !== 'android') || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
+          // A manual run of Android or the Windows package alone starts no shared preparation.
+          const confined = (process.env.EVENT_NAME === 'workflow_dispatch' && !['android', 'windows'].includes(process.env.REQUESTED_GATE)) || jobs.changes.outputs.js === 'true' || jobs.changes.outputs.rust === 'true';
           assert.equal(jobs['javascript-prepare'].result, confined ? 'success' : 'skipped', 'shared preparation did not complete as selected');
           const failures = verdicts.filter(verdict => verdict.status === 'rejected').map(verdict => verdict.reason);
           if (failures.length) throw new AggregateError(failures, 'Selected verification gates failed');

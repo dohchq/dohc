@@ -200,6 +200,7 @@ fn replica_upload_ingress_refuses_non_replica_methods_before_parsing() {
         "ydoc.ownerDelivery.applyInitialSync",
         "ydoc.ownerDelivery.enroll",
         "ydoc.ownerDelivery.appendDraft",
+        "ydoc.ownerDelivery.putCommittedRow",
         "liveApplication.bootstrap",
         "liveApplication.adoptOwner",
         "liveApplication.syncOpen",

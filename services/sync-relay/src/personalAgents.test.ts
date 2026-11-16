@@ -13,7 +13,12 @@ import type {
   CredentialFenceListener,
 } from "@dohc/workspace-auth/credentialFence";
 import { CREDENTIAL_FENCE_READ_TIMEOUT_MS } from "@dohc/workspace-auth/credentialFence";
-import { UnauthorizedError, type ResolveAccountSession } from "@dohc/workspace-auth/session";
+import type { WorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
+import {
+  createAccountSessionResolver,
+  UnauthorizedError,
+  type ResolveAccountSession,
+} from "@dohc/workspace-auth/session";
 
 import type { AutomationReplica } from "./automationReplicas";
 import { PERSONAL_WRITE_WORKSPACE_HEADER } from "./collectionWriteRoutes";
@@ -51,6 +56,7 @@ import {
   RELAY_EXCHANGE_KEY,
   reopenTestStorage,
   request,
+  resolveTestAccountSession,
   sequenced,
   SHARE_WEB_ORIGIN,
   storagePath,
@@ -177,7 +183,7 @@ const resolveSession: ResolveAccountSession = async (incoming) => {
   const sessionId = /(?:^|;\s*)session=([^;]+)/u.exec(incoming.headers.get("cookie") ?? "")?.[1];
   const userId = sessionId === undefined ? undefined : SESSIONS[sessionId];
   if (!sessionId || !userId) throw new UnauthorizedError();
-  return { userId, sessionId, expiresAtMs: Number.MAX_SAFE_INTEGER };
+  return { userId, sessionId, expiresAtMs: Number.MAX_SAFE_INTEGER, clientKind: "browser" };
 };
 
 const handlers: Handler[] = [];
@@ -198,6 +204,7 @@ function handler(
     nowMs: () => f.now.value,
     relayExchangeKey: RELAY_EXCHANGE_KEY,
     credentialFence: f.fence,
+    resolvePhoneCapableAccountSession: resolveTestAccountSession,
     // Account sessions live in the same Postgres as the fence.
     resolveAccountSession: async (incoming) => {
       if (f.fence.down) throw new Error("The database is unreachable.");
@@ -644,6 +651,76 @@ describe("families never mix", () => {
     await expectRefused(
       await internal(f, "agent-introspect", { accessToken: String(personalTokens.accessToken) }),
     );
+  });
+
+  it("refuses an approval from the owner's phone session sent as a cookie", async () => {
+    // Better Auth answers for the cookie; the relay's default account resolver judges its kind.
+    const auth = {
+      api: {
+        getSession: async ({ headers }: { headers: Headers }) => {
+          const token = /(?:^|;\s*)session=([^;]+)/u.exec(headers.get("cookie") ?? "")?.[1];
+          const clientKind =
+            token === "owner-phone" ? "phone" : token === "owner-session" ? "browser" : undefined;
+          return clientKind
+            ? {
+                user: { id: OWNER },
+                session: { id: token, userId: OWNER, expiresAt: 8_000_000_000_000, clientKind },
+              }
+            : null;
+        },
+      },
+    } as unknown as WorkspaceAuth;
+    const f = await fixture({ resolveAccountSession: createAccountSessionResolver(auth) });
+    const requestId = await beginRequest(f, await registerClient(f), WS_A);
+    const phone = await allow(f, requestId, { session: "owner-phone" });
+    const unknown = await allow(f, requestId, { session: "nobody" });
+    expect({ status: phone.status, body: await phone.text() }).toEqual({
+      status: unknown.status,
+      body: await unknown.text(),
+    });
+    expect(phone.status).toBe(401);
+    expect((await roster(f)).agents).toEqual([]);
+    await ok(await allow(f, requestId, { session: "owner-session" }));
+  });
+
+  it("lets the owner's phone list, sign out, remove and restore agents, and change nothing else", async () => {
+    const f = await fixture();
+    const signed = await signIn(f);
+    const asPhone = (path: string, init: { method: string; body?: unknown } = { method: "GET" }) =>
+      f.h(
+        new Request(`http://relay.test/sync/personal-agents${path}`, {
+          method: init.method,
+          headers: {
+            authorization: `Bearer phone:${OWNER}`,
+            ...(init.body === undefined ? {} : { "content-type": "application/json" }),
+          },
+          ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+        }),
+      );
+    expect((await ok(await asPhone(""))).agents).toEqual([
+      expect.objectContaining({ agentId: signed.agentId, status: "active" }),
+    ]);
+    for (const [action, body] of [
+      ["reach", { reach: [{ workspaceId: WS_B, level: "comment" }] }],
+      ["name", { name: "Renamed by a phone" }],
+      ["hue", { hue: "teal" }],
+    ] as const)
+      await expectRefused(await asPhone(`/${signed.agentId}/${action}`, { method: "PUT", body }));
+    expect((await roster(f)).agents).toEqual([
+      expect.objectContaining({
+        name: "Helper",
+        reach: [{ workspaceId: WS_A, level: "view" }],
+      }),
+    ]);
+    for (const [action, status] of [
+      ["sign-out", "signed_out"],
+      ["remove", "removed"],
+      ["restore", "signed_out"],
+    ] as const)
+      expect(
+        (await ok(await asPhone(`/${signed.agentId}/${action}`, { method: "POST" }))).agent,
+        action,
+      ).toMatchObject({ status });
   });
 
   it("refuses an agent's token at the owner's routes", async () => {

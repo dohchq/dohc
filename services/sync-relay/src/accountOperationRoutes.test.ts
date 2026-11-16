@@ -61,6 +61,7 @@ const resolveAccountSession: ResolveAccountSession = async (request) => {
     userId: match[1]!,
     sessionId: match[2]!,
     expiresAtMs: Number.MAX_SAFE_INTEGER,
+    clientKind: "desktop",
   } satisfies AccountSession;
 };
 const signedIn = (userId: string, sessionId = "phone") => ({
@@ -216,6 +217,7 @@ async function relay(
   const activity = options.activity ?? new DiscussionActivityHub();
   const h = testHandler(storage, {
     resolveAccountSession: options.resolve ?? resolveAccountSession,
+    resolvePhoneCapableAccountSession: options.resolve ?? resolveAccountSession,
     serverCopies: () => (options.copies === false ? undefined : run.copies),
     ...(options.limiter ? { accountOperationRateLimiter: options.limiter } : {}),
     discussionActivity: activity,
@@ -763,7 +765,11 @@ describe("pages the relay hosts live", () => {
     const engine = new TestEngine();
     seed(engine);
     const run = await serverCopies(f.storage, engine);
-    const h = testHandler(f.storage, { resolveAccountSession, serverCopies: () => run.copies });
+    const h = testHandler(f.storage, {
+      resolveAccountSession,
+      resolvePhoneCapableAccountSession: resolveAccountSession,
+      serverCopies: () => run.copies,
+    });
     const read = async () =>
       await h(op("workspace", "documentRead", { path: "docs/a.md" }, signedIn("owner")));
     const edit = () =>
@@ -1010,7 +1016,11 @@ describe("an account's change feed", () => {
       objectId: "object",
     });
     const run = await serverCopies(f.storage, engine);
-    const h = testHandler(f.storage, { resolveAccountSession, serverCopies: () => run.copies });
+    const h = testHandler(f.storage, {
+      resolveAccountSession,
+      resolvePhoneCapableAccountSession: resolveAccountSession,
+      serverCopies: () => run.copies,
+    });
     const read = await json(
       await h(op("workspace", "documentRead", { path: "docs/a.md" }, signedIn("owner"))),
     );
@@ -1283,19 +1293,22 @@ describe("an account's chat writes through the server's copy", () => {
         );
       else storage.setShowOnPhone({ ownerUserId: "ana", workspaceId: "trip", showOnPhone: false });
     };
+    // The computers' routes and the phone's share one counted check, as one resolver served both before.
+    const resolve: ResolveAccountSession = async (request) => {
+      const session = await resolveAccountSession(request);
+      checks += 1;
+      if (changeAt !== null && checks === changeAt.check) change(changeAt.kind);
+      if (heldCheck !== null && checks === heldCheck.at) {
+        const hold = heldCheck;
+        heldCheck = null;
+        hold.reached();
+        await hold.open;
+      }
+      return signedOut ? { ...session, sessionId: "another" } : session;
+    };
     const h = testHandler(storage, {
-      resolveAccountSession: async (request) => {
-        const session = await resolveAccountSession(request);
-        checks += 1;
-        if (changeAt !== null && checks === changeAt.check) change(changeAt.kind);
-        if (heldCheck !== null && checks === heldCheck.at) {
-          const hold = heldCheck;
-          heldCheck = null;
-          hold.reached();
-          await hold.open;
-        }
-        return signedOut ? { ...session, sessionId: "another" } : session;
-      },
+      resolveAccountSession: resolve,
+      resolvePhoneCapableAccountSession: resolve,
       serverCopies: () => copies,
       accountOperationRateLimiter: options.limiter ?? new TokenBucketLimiter(10_000, 1, 16),
       lookupUserDisplayName: () => name(),

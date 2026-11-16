@@ -17,7 +17,10 @@ import {
 } from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
 import { serveFetchHandler } from "@dohc/service-http";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
-import { createSessionActorResolver } from "@dohc/workspace-auth/session";
+import {
+  createPhoneCapableAccountSessionResolver,
+  createSessionActorResolver,
+} from "@dohc/workspace-auth/session";
 import {
   initializeRelayDeployment,
   openRelayDeployment,
@@ -114,15 +117,16 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     await admin.connect();
     await admin.query(`CREATE SCHEMA "${schema}"`);
     schemaCreated = true;
-    await pool.query(
-      readFileSync(
-        new URL(
-          "../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql",
-          import.meta.url,
+    for (const migration of ["0001_better_auth.sql", "0007_session_client_kind.sql"])
+      await pool.query(
+        readFileSync(
+          new URL(
+            `../../../packages/workspace-postgres/src/db/migrations/${migration}`,
+            import.meta.url,
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-    );
+      );
     const authOptions = {
       pool,
       baseURL: "https://auth.example.test",
@@ -436,7 +440,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
           maxAdmissionBytes: 4000000,
         },
         validate,
-        resolveActor: createSessionActorResolver(relayAuth),
+        resolveAccountSession: createPhoneCapableAccountSessionResolver(relayAuth),
         captureNative,
       });
       closes.push(async () => routes.close());

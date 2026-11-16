@@ -1,11 +1,32 @@
+import { appWords } from "@dohc/interface-words/apps";
 import { workspaceWords } from "@dohc/interface-words/workspace";
 import * as Haptics from "expo-haptics";
-import { Stack, useRouter } from "expo-router";
-import { ChevronRight, File, FileText, Folder, FolderOpen, PenTool } from "lucide-react-native";
-import { Fragment, memo, useCallback, useMemo, useState } from "react";
+import { Stack, useIsFocused, useRouter } from "expo-router";
+import {
+  AppWindow,
+  ChevronRight,
+  File,
+  FileText,
+  Folder,
+  FolderOpen,
+  PenTool,
+  ShieldCheck,
+} from "lucide-react-native";
+import {
+  Fragment,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useAccount } from "../account/AccountProvider";
+import type { AppsState } from "../apps/appStore";
 import { SectionHeader } from "../chats/SectionHeader";
 import { useWorkspaces } from "../chats/Workspaces";
+import { appName, shortVersion, type PhoneApp } from "../server/phoneApps";
 import { views } from "../server/workspaceData";
 import { useTheme } from "../theme";
 import { WorkspaceButton } from "../WorkspaceButton";
@@ -13,9 +34,13 @@ import { EmptyLine, HoldRow, NoWorkspace, RetryRow } from "../workspace/ListStat
 import { useFailureNotice, useView } from "../workspace/useView";
 import { homeRows, type HomeRow } from "./homeModel";
 
+const NO_APPS: AppsState = { apps: null, problem: null, failures: 0 };
+const nothing = () => () => undefined;
+
 // Home in a signed-in build: the open workspace's pages, in the folders that hold them, then its sketches and other files, as the
-// desktop's Home lists them. A page opens to read; a folder opens in place. The phone opens no other kind of file yet,
-// so those rows only name it. The list reads again when the feed reports a file change.
+// desktop's Home lists them, then its published apps, each version under its app. A page opens to read; a folder opens
+// in place; an app's version opens its review. The phone opens no other kind of file yet, so those rows only name it.
+// The list reads again when the feed reports a file change.
 export function ServerHome() {
   const theme = useTheme();
   const { current } = useWorkspaces();
@@ -62,6 +87,21 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
     [router, toggle],
   );
 
+  // The workspace's apps read each time Home shows, and after an approval or a revoke.
+  const theme = useTheme();
+  const { apps } = useAccount();
+  const appsState = useSyncExternalStore(
+    apps?.subscribe ?? nothing,
+    useCallback(() => apps?.state() ?? NO_APPS, [apps]),
+  );
+  const focused = useIsFocused();
+  useEffect(() => {
+    if (focused) void apps?.refresh();
+  }, [focused, apps]);
+  const retryApps = useCallback(() => void apps?.refresh(), [apps]);
+  const appsFailed = appWords.appsFailed(workspace);
+  useFailureNotice(`read:${workspaceId}:apps`, appsFailed, appsState, retryApps);
+
   const pending = state.problem ? <RetryRow label={failed} onRetry={retry} /> : <HoldRow />;
   return (
     <>
@@ -102,7 +142,85 @@ function Files({ workspaceId, workspace }: { workspaceId: string; workspace: str
             ) : null,
           )
         : null}
+      <SectionHeader
+        title={appWords.apps}
+        collapsed={collapsed.has("apps")}
+        unread={false}
+        first={false}
+        onToggle={() => toggle(setCollapsed, "apps")}
+      />
+      {collapsed.has("apps") ? null : !appsState.apps ? (
+        appsState.problem ? (
+          <RetryRow label={appsFailed} onRetry={retryApps} />
+        ) : (
+          <HoldRow />
+        )
+      ) : appsState.apps.length === 0 ? (
+        <EmptyLine text={appWords.noApps} />
+      ) : (
+        appGroups(appsState.apps).map(([root, versions]) => {
+          const name = appName(versions[0]!);
+          if (versions.length === 1)
+            return <AppRow key={root} app={versions[0]!} name={name} label={name} depth={0} />;
+          return (
+            <Fragment key={root}>
+              <View style={[styles.row, styles.app]} accessible accessibilityRole="header">
+                <AppWindow size={18} color={theme.ink} strokeWidth={1.9} />
+                <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
+                  {name}
+                </Text>
+              </View>
+              {versions.map((app) => (
+                <AppRow
+                  key={app.publicationId}
+                  app={app}
+                  name={name}
+                  label={appWords.version(shortVersion(app))}
+                  depth={1}
+                />
+              ))}
+            </Fragment>
+          );
+        })
+      )}
     </>
+  );
+}
+
+/** The apps by identity, their root folder, each with its published versions in the catalog's order. */
+function appGroups(apps: readonly PhoneApp[]) {
+  const groups = new Map<string, PhoneApp[]>();
+  for (const app of apps) groups.set(app.appRoot, [...(groups.get(app.appRoot) ?? []), app]);
+  return [...groups];
+}
+
+/** One version of an app, which opens its review. Alone, it shows its app's name and its version beside it. */
+function AppRow(props: { app: PhoneApp; name: string; label: string; depth: number }) {
+  const { app, name, label, depth } = props;
+  const theme = useTheme();
+  const router = useRouter();
+  const version = appWords.version(shortVersion(app));
+  return (
+    <Pressable
+      onPress={() => router.push({ pathname: "/app-review", params: { id: app.publicationId } })}
+      style={({ pressed }) => [
+        styles.row,
+        styles.app,
+        { paddingLeft: styles.app.paddingLeft + depth * 26 },
+        pressed ? { backgroundColor: theme.panel2 } : null,
+      ]}
+      accessibilityRole="button"
+      accessibilityLabel={[name, version, ...(app.approved ? [appWords.approved] : [])].join(", ")}
+    >
+      {depth === 0 ? <AppWindow size={18} color={theme.ink} strokeWidth={1.9} /> : null}
+      <Text style={[styles.name, { color: theme.ink }]} numberOfLines={1}>
+        {label}
+      </Text>
+      <Text style={[styles.detail, { color: theme.subtle }]} numberOfLines={1}>
+        {depth === 0 ? version : ""}
+      </Text>
+      {app.approved ? <ShieldCheck size={16} color={theme.accent} strokeWidth={2} /> : null}
+    </Pressable>
   );
 }
 
@@ -174,4 +292,5 @@ const styles = StyleSheet.create({
   chevron: { width: 16, alignItems: "center" },
   name: { flexShrink: 1, fontSize: 17 },
   detail: { flex: 1, fontSize: 15, textAlign: "right" },
+  app: { paddingLeft: 32 },
 });

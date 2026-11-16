@@ -17,7 +17,8 @@ export const LIVE_TICKET_LIFETIME_MS = 30_000;
 export interface LiveTicketClaims {
   readonly ticketId: string;
   readonly audience: string;
-  readonly authority: Exclude<ServerDerivedLiveUpdateAuthority, { principalKind: "owner" }>;
+  /** An owner's ticket is for one of the owner's phone sign-ins. */
+  readonly authority: ServerDerivedLiveUpdateAuthority;
   readonly binding: LiveObjectBinding;
   readonly hostEpoch: HostEpoch;
   readonly mintedAtMs: number;
@@ -133,15 +134,19 @@ function claims(record: Record<string, unknown>): LiveTicketClaims {
   const rawBinding = snapshot(record.binding, BINDING_FIELDS);
   rawBinding.selectorPaths = snapshotSelectors(rawBinding.selectorPaths);
   const authority = parseServerDerivedLiveUpdateAuthority(rawAuthority);
-  if (authority.principalKind === "owner")
-    throw new TypeError("Owner authority cannot use a live ticket.");
   const mintedAtMs = time(record.mintedAtMs);
   const expiresAtMs = time(record.expiresAtMs);
+  const lifetimeMs = expiresAtMs - mintedAtMs;
+  // An owner's ticket also ends with the sign-in it was minted for, so it may end sooner.
   if (
     mintedAtMs > Number.MAX_SAFE_INTEGER - LIVE_TICKET_LIFETIME_MS ||
-    expiresAtMs !== mintedAtMs + LIVE_TICKET_LIFETIME_MS
+    (authority.principalKind === "owner"
+      ? lifetimeMs < 1 || lifetimeMs > LIVE_TICKET_LIFETIME_MS
+      : lifetimeMs !== LIVE_TICKET_LIFETIME_MS)
   ) {
-    throw new TypeError("Live-ticket expiry must be exactly 30000 ms after issue.");
+    throw new TypeError(
+      "Live-ticket expiry must be 30000 ms after issue, or sooner for an owner's ticket.",
+    );
   }
   return {
     ticketId: parseLiveUpdateIdentifier(record.ticketId, "ticketId"),

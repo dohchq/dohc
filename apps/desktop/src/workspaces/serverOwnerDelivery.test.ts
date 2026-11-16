@@ -96,6 +96,24 @@ it("rotates one bounded workspace and document pass, and forgets removed workspa
   await owner.stop();
 });
 
+it("moves on to the next document after one whose pass fails", async () => {
+  vi.useFakeTimers();
+  const runPass = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("owner-outbox-frozen"))
+    .mockResolvedValue({ documentCount: 2, acknowledged: false });
+  const owner = startServerOwnerDelivery({
+    workspaceIds: () => ["one"],
+    attemptTimeoutMs: 5000,
+    retryDelayMs: 100,
+    runPass,
+    onError: vi.fn(),
+  });
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(runPass.mock.calls.slice(0, 2).map(([, index]) => index)).toEqual([0, 1]);
+  await owner.stop();
+});
+
 it("aborts and awaits an active pass before stopping, without starting another", async () => {
   vi.useFakeTimers();
   const pending = deferred<{ documentCount: number; acknowledged: boolean }>();

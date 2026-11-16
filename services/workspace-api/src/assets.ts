@@ -363,11 +363,30 @@ if (page === "device") {
     }
   };
   approve.addEventListener("click", () =>
-    decide("/api/auth/device/approve", "Connecting\\u2026", "Your desktop is connected. Return to dohc."),
+    decide(
+      "/api/auth/device/approve",
+      "Connecting\\u2026",
+      document.body.dataset.deviceKind === "phone"
+        ? "Your phone is connected. Return to dohc on your phone."
+        : "Your computer is connected. Return to dohc.",
+    ),
   );
   deny.addEventListener("click", () =>
     decide("/api/auth/device/deny", "Refusing the code\\u2026", "dohc did not connect this device. You can close this page."),
   );
+}
+
+if (page === "device-phone") {
+  byId("sign-out-sign-in").addEventListener("click", async (event) => {
+    event.target.disabled = true;
+    try {
+      await call("/api/auth/sign-out", {});
+      location.assign(document.body.dataset.next);
+    } catch (error) {
+      setStatus("error", error.message);
+      event.target.disabled = false;
+    }
+  });
 }
 
 if (page === "account") {

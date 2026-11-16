@@ -27,10 +27,11 @@ export interface AuthGateway {
     getSession(input: {
       headers: Headers;
     }): Promise<{ user: { name: string; email: string; emailVerified: boolean } } | null>;
+    /** Claims the code for the signed-in account, and says which kind of sign-in it asks for. */
     deviceVerify(input: {
       query: { user_code: string };
       headers: Headers;
-    }): Promise<{ status?: string | null }>;
+    }): Promise<{ status?: string | null; deviceKind: "phone" | "desktop" | null }>;
   };
 }
 
@@ -228,21 +229,31 @@ async function devicePageFor(auth: AuthGateway, request: Request, url: URL): Pro
     );
   }
 
-  let status: string | null | undefined;
+  let verified: Awaited<ReturnType<AuthGateway["api"]["deviceVerify"]>>;
   try {
-    ({ status } = await auth.api.deviceVerify({
+    verified = await auth.api.deviceVerify({
       query: { user_code: userCode },
       headers: request.headers,
-    }));
+    });
   } catch (error) {
+    // A phone's session may read itself but never approve a device.
+    if (isPhoneSessionRefusal(error)) return page(devicePage({ kind: "phone", userCode }), 403);
     const kind = deviceErrorKind(error);
     if (!kind) throw error;
     return page(devicePage({ kind }), 400);
   }
+  const { status, deviceKind } = verified;
   if (status !== "pending") {
     return page(devicePage({ kind: "handled", status: status ?? "unknown" }));
   }
-  return page(devicePage({ kind: "review", userCode, email: session.user.email }));
+  // The kind comes from the stored code, which the token exchange also checks.
+  // A code without one can't be approved.
+  if (!deviceKind) return page(devicePage({ kind: "invalid" }), 400);
+  return page(devicePage({ kind: "review", userCode, email: session.user.email, deviceKind }));
+}
+
+function isPhoneSessionRefusal(error: unknown): boolean {
+  return (error as { body?: { code?: unknown } } | null)?.body?.code === "PHONE_SESSION_REFUSED";
 }
 
 function deviceErrorKind(error: unknown): "expired" | "invalid" | null {

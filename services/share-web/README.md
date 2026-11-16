@@ -440,12 +440,36 @@ Another installation's endpoint, or another account's installation with a differ
 Link holders and signed-out browsers receive 401.
 The trusted relay endpoints are POSTs to `/sync/push/status`, `/sync/push/subscribe`, and `/sync/push/unsubscribe`.
 
+### Alerts on the phone
+
+The phone reaches the relay directly at `/sync/push/devices` with its Bearer phone session. Cookies and computer or browser sessions receive 404.
+Each phone sign-in holds at most one binding, so no request names a device or an account.
+
+- `GET` returns the sign-in's state.
+- `PUT` takes `{token, environment}`: the APNs device token in lowercase hex, and `sandbox` or `production`.
+- `DELETE` takes `{generation}` and removes the binding only while it still has that generation.
+
+Configure both relay values: `DOHC_RELAY_APNS_TOPIC`, the app's bundle ID, and `DOHC_RELAY_APNS_ENVIRONMENTS`, a comma-separated list of the environments phones may register in.
+Partial configuration stops the relay and names each missing value.
+With neither set, every method returns `{ok: true, available: false}`, and `PUT` receives 409.
+Otherwise each returns `{ok: true, available: true, enabled, generation}`. The server never returns a token.
+A token another sign-in holds moves to the caller, and the answer is the same whether it was held or free.
+Revoking the sign-in through the relay and deleting the account end the binding at once. A sign-in revoked through the relay receives 404 on `PUT`, even for a request that was already in flight. A sign-out or password reset through the account server leaves it until the sign-in expires, and the relay never sends to a binding whose sign-in has ended.
+
 
 ## Storage and recovery
 
 The supported Compose deployment runs one `share-web` instance.
-Its viewer sessions live in memory. Restarting it signs viewers out.
-A viewer can open the original share URL again unless the owner reset or ended the link.
+It keeps viewer sessions in memory. With `DOHC_SHARE_WEB_SESSION_SEAL_KEY` set, each browser's session cookie also holds its session, sealed with a key made from that value.
+The value has at least 32 characters and differs from the relay exchange key. The self-host bootstrap generates it, and its upgrade adds it to a configuration that lacks it.
+Without the value, restarting `share-web` signs viewers out.
+After a restart, `share-web` takes each session up again, once, from the cookie an earlier process sealed, so an open share page goes on working. The relay still checks the session on every request.
+Two cases still sign a viewer out at a restart, and the viewer can then open the original share URL again unless the owner reset or ended the link:
+
+- The relay renewed the session and the answer with the new cookie did not reach the browser before the restart.
+- `DOHC_SHARE_WEB_SESSION_SEAL_KEY` changed.
+
+A sealed session cookie is 258 bytes, and a browser sends one for each link it opened in the last week. Node refuses a request whose headers pass 16 KB, which is about 48 such links with their profile cookies.
 Do not run multiple instances because they do not share viewer session state.
 
 The relay stores its database in `dohc_self_host_sync_relay`.

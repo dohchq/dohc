@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   UnauthorizedError,
   type AccountSession,
@@ -28,6 +28,7 @@ const resolveAccountSession: ResolveAccountSession = async (request) => {
     userId: match[1]!,
     sessionId: match[2]!,
     expiresAtMs: Number.MAX_SAFE_INTEGER,
+    clientKind: "desktop",
   } satisfies AccountSession;
 };
 
@@ -50,8 +51,10 @@ const patch = (workspaceId: string, init: RequestInit, body: unknown = { showOnP
 
 async function relay(options: { resolve?: ResolveAccountSession } = {}) {
   const storage = (await testStorage()) as StorageContext;
+  const sockets = { stopSession: vi.fn(), stopPhoneWorkspace: vi.fn() };
   const h = testHandler(storage, {
-    resolveAccountSession: options.resolve ?? resolveAccountSession,
+    resolvePhoneCapableAccountSession: options.resolve ?? resolveAccountSession,
+    ownerLiveSockets: () => sockets,
   });
   await claimWorkspace(h, "ana", "trip");
   await claimWorkspace(h, "ana", "notes");
@@ -61,7 +64,7 @@ async function relay(options: { resolve?: ResolveAccountSession } = {}) {
     replicationEpoch: "epoch",
     streamIdentity: "stream",
   });
-  return { storage, h };
+  return { storage, h, sockets };
 }
 
 describe("the account's workspace list", () => {
@@ -171,6 +174,21 @@ describe("Show on phone", () => {
       canOpen: true,
       showOnPhone: true,
     });
+  });
+
+  it("ends the workspace's phone live connections before it answers a turn off, and leaves them for a turn on", async () => {
+    const { h, sockets } = await relay();
+    let answered = false;
+    const endedBeforeAnswer: boolean[] = [];
+    sockets.stopPhoneWorkspace.mockImplementation(() => endedBeforeAnswer.push(!answered));
+    expect((await h(patch("trip", account("ana")))).status).toBe(200);
+    answered = true;
+    expect(sockets.stopPhoneWorkspace).toHaveBeenCalledExactlyOnceWith("ana", "trip");
+    expect(endedBeforeAnswer).toEqual([true]);
+    expect((await h(patch("trip", account("ana"), { showOnPhone: true }))).status).toBe(200);
+    expect((await h(patch("budget", account("ana")))).status).toBe(404);
+    expect(sockets.stopPhoneWorkspace).toHaveBeenCalledOnce();
+    expect(sockets.stopSession).not.toHaveBeenCalled();
   });
 
   it("ends the account's reason for the server's copy when it turns off, and keeps the automations' reason", async () => {

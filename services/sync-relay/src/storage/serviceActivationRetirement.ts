@@ -5,6 +5,7 @@ import {
 import type { StorageContext } from "./context";
 import { SERVICE_ACTIVATIONS } from "./serviceActivationSchema";
 import { LIVE_JOURNAL_TABLE } from "./schema";
+import { LIVE_ROOM_SAVES } from "./liveRoomEdits";
 
 // The retirement of one exact service activation, recorded on its row when
 // Pause, Stop, the loss of its document's last Edit grant, or a Resume of a
@@ -300,4 +301,103 @@ export function carryServiceActivationRetirement(
       document.lineageClaimId,
       integer(generation),
     );
+}
+
+// A retired activation that no other activation continues. Its accepted cursor no longer moves.
+const RETIRED_TAIL = `a.retired_at_ms IS NOT NULL AND NOT EXISTS(SELECT 1 FROM ${SERVICE_ACTIVATIONS} s
+  WHERE s.relay_database_namespace=a.relay_database_namespace AND s.predecessor_activation_id=a.activation_id)`;
+
+/**
+ * F of the object's last completed retirement, while no activation of it is live again. The owner's
+ * desktop reads the journal through F, then lets go of the note at F.
+ */
+export function retiredAcceptedCursor(
+  storage: StorageContext,
+  workspaceId: string,
+  objectId: string,
+): number | null {
+  const row = storage.db
+    .prepare(`SELECT a.retire_accepted_cursor FROM ${SERVICE_ACTIVATIONS} a
+    WHERE a.workspace_id=? AND a.main_version_id='main' AND a.object_id=? AND ${RETIRED_TAIL}
+      AND NOT EXISTS(SELECT 1 FROM ${SERVICE_ACTIVATIONS} l WHERE l.workspace_id=a.workspace_id
+        AND l.main_version_id='main' AND l.object_id=a.object_id AND l.retired_at_ms IS NULL)
+    ORDER BY a.retired_at_ms DESC LIMIT 1`)
+    .get(workspaceId, objectId);
+  return row ? integer(row.retire_accepted_cursor) : null;
+}
+
+/** One page of a retired note's journal, through F. */
+export interface RetiredJournalPage {
+  readonly acceptedCursor: number;
+  readonly rows: readonly {
+    readonly journalCursor: number;
+    /** On a room save's row, the last room position the save holds. */
+    readonly rowsThrough?: number;
+    readonly updateBytes: Uint8Array;
+  }[];
+  /** Where the next page starts, or null once this page reaches F. */
+  readonly nextAfter: number | null;
+}
+
+// A journal page's most rows, and what each row costs past its update bytes.
+const JOURNAL_PAGE_ROWS = 4096;
+const JOURNAL_ROW_BYTES = 96;
+
+/**
+ * The journal rows of a retired lineage after `after`, through its retirement's F, oldest first and
+ * at most about `budgetBytes` with each row's overhead, always at least one row. Null when no
+ * completed retirement of that lineage at that restore generation is the lineage's last activation.
+ */
+export function readRetiredJournalPage(
+  storage: StorageContext,
+  input: {
+    workspaceId: string;
+    objectId: string;
+    lineageClaimId: string;
+    restoreFenceGeneration: number;
+    after: number;
+    budgetBytes: number;
+  },
+): RetiredJournalPage | null {
+  return storage.readTx(() => {
+    const retired = storage.db
+      .prepare(`SELECT a.retire_accepted_cursor FROM ${SERVICE_ACTIVATIONS} a
+      WHERE a.workspace_id=? AND a.main_version_id='main' AND a.object_id=? AND a.lineage_claim_id=?
+        AND a.retire_restore_generation=? AND ${RETIRED_TAIL}
+      ORDER BY a.retired_at_ms DESC LIMIT 1`)
+      .get(input.workspaceId, input.objectId, input.lineageClaimId, input.restoreFenceGeneration);
+    if (!retired) return null;
+    const acceptedCursor = integer(retired.retire_accepted_cursor);
+    const rows: { journalCursor: number; rowsThrough?: number; updateBytes: Uint8Array }[] = [];
+    let bytes = 0,
+      full = false;
+    // Rows are read as the page takes them, so it holds no more than its budget and one row.
+    for (const row of storage.db
+      .prepare(`SELECT j.journal_cursor,j.update_bytes,s.rows_through
+      FROM ${LIVE_JOURNAL_TABLE} j LEFT JOIN ${LIVE_ROOM_SAVES} s USING(journal_cursor)
+      WHERE j.workspace_id=? AND j.main_version_id='main' AND j.object_id=? AND j.lineage_claim_id=?
+        AND j.journal_cursor>? AND j.journal_cursor<=? ORDER BY j.journal_cursor LIMIT ?`)
+      .iterate(
+        input.workspaceId,
+        input.objectId,
+        input.lineageClaimId,
+        input.after,
+        acceptedCursor,
+        JOURNAL_PAGE_ROWS + 1,
+      )) {
+      const updateBytes = row.update_bytes as Uint8Array,
+        cost = updateBytes.byteLength + JOURNAL_ROW_BYTES;
+      if (rows.length === JOURNAL_PAGE_ROWS || (rows.length && bytes + cost > input.budgetBytes)) {
+        full = true;
+        break;
+      }
+      bytes += cost;
+      rows.push({
+        journalCursor: integer(row.journal_cursor),
+        ...(row.rows_through === null ? {} : { rowsThrough: integer(row.rows_through) }),
+        updateBytes: new Uint8Array(updateBytes),
+      });
+    }
+    return { acceptedCursor, rows, nextAfter: full ? rows.at(-1)!.journalCursor : null };
+  });
 }

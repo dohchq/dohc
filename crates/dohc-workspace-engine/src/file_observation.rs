@@ -11,15 +11,71 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
-type DrainRequest = (
-    CancellationToken,
-    tokio::sync::oneshot::Sender<Result<(), FilesError>>,
-);
+/// What wakes the observation worker. It waits for one of these and keeps no
+/// timer, so a workspace nobody changes costs nothing.
+enum Wake {
+    /// A caller waits for a walk that sees what is on disk now.
+    Drain(
+        CancellationToken,
+        tokio::sync::oneshot::Sender<Result<(), FilesError>>,
+    ),
+    /// The watcher reported a change or lost its watch, or the worker is to stop.
+    Changed,
+}
 
 #[derive(Clone)]
 pub(crate) struct ObservationHandle {
-    requests: std::sync::mpsc::SyncSender<DrainRequest>,
+    requests: std::sync::mpsc::SyncSender<Wake>,
     monitor: WatchMonitor,
+}
+
+/// Serves one watcher: walks once for the reports since its last walk and
+/// once for each drain, until `stopped` or until a walk on the worker's own
+/// token fails.
+///
+/// `stopped` is read after the flag and before each wait, never before the
+/// flag. A watcher that gives up its watch records that first and then raises
+/// the flag, and its report sends a wake only when it raised the flag. So a
+/// lost watch is either read here or wakes the wait. Read before the flag, a
+/// watch given up between the two reads would leave the worker waiting with
+/// nothing left to wake it.
+fn serve(
+    requests: &std::sync::mpsc::Receiver<Wake>,
+    dirty: &AtomicBool,
+    cancel: &CancellationToken,
+    stopped: impl Fn() -> bool,
+    walk: impl Fn(&CancellationToken) -> Result<bool, FilesError>,
+) {
+    loop {
+        // Before each wait, so a report that found the queue full, or a
+        // failed drain, is still walked.
+        if dirty.swap(false, Ordering::AcqRel) && !matches!(walk(cancel), Ok(true)) {
+            return;
+        }
+        if stopped() {
+            return;
+        }
+        match requests.recv() {
+            Ok(Wake::Drain(token, reply)) => {
+                dirty.swap(false, Ordering::AcqRel);
+                let result = walk(&token).and_then(|complete| {
+                    if complete {
+                        Ok(())
+                    } else {
+                        Err(FilesError::ActorUnavailable)
+                    }
+                });
+                if result.is_err() {
+                    // A swap, as every other write of the flag is, so the
+                    // next read of it still follows a watch given up since.
+                    dirty.swap(true, Ordering::AcqRel);
+                }
+                let _ = reply.send(result);
+            }
+            Ok(Wake::Changed) => {}
+            Err(std::sync::mpsc::RecvError) => return,
+        }
+    }
 }
 
 /// Owns the observation worker and its native watcher through a joinable thread.
@@ -118,11 +174,19 @@ impl FileObservation {
                 while !cancel.is_cancelled() {
                     let dirty = Arc::new(AtomicBool::new(true));
                     let watch_dirty = Arc::clone(&dirty);
+                    let (tx, rx) = std::sync::mpsc::sync_channel::<Wake>(256);
+                    let changed = tx.clone();
                     let capture = Arc::clone(&capture);
                     let started = runtime.block_on(NativeWatcher::start_metadata(
                         root.clone(),
                         Arc::new(move || {
-                            watch_dirty.store(true, Ordering::Release);
+                            // One wake for each time the flag is raised, so
+                            // reports never fill the queue that drains share.
+                            // A full queue wakes the worker by itself, and the
+                            // worker reads the flag before each wait.
+                            if !watch_dirty.swap(true, Ordering::AcqRel) {
+                                let _ = changed.try_send(Wake::Changed);
+                            }
                             if let Some((_, files)) = lock(&capture).as_ref() {
                                 files.notify_overflow();
                             }
@@ -132,7 +196,6 @@ impl FileObservation {
                         startup_finished.send_replace(true);
                     }
                     if let Ok(mut watcher) = started {
-                        let (tx, rx) = std::sync::mpsc::sync_channel::<DrainRequest>(256);
                         files.send_replace(Some(ObservationHandle {
                             requests: tx,
                             monitor: watcher.monitor(),
@@ -141,37 +204,19 @@ impl FileObservation {
                         dirty.swap(false, Ordering::AcqRel);
                         if matches!(walker.observe(&root, &cancel), Ok(true)) {
                             failures = 0;
-                            while !cancel.is_cancelled() && !watcher.is_unavailable() {
-                                match rx.recv_timeout(std::time::Duration::from_millis(500)) {
-                                    Ok((token, reply)) => {
-                                        dirty.swap(false, Ordering::AcqRel);
-                                        let result =
-                                            walker.observe(&root, &token).and_then(|complete| {
-                                                if complete {
-                                                    Ok(())
-                                                } else {
-                                                    Err(FilesError::ActorUnavailable)
-                                                }
-                                            });
-                                        if result.is_err() {
-                                            dirty.store(true, Ordering::Release);
-                                        }
-                                        let _ = reply.send(result);
-                                    }
-                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                        if dirty.swap(false, Ordering::AcqRel)
-                                            && !matches!(walker.observe(&root, &cancel), Ok(true))
-                                        {
-                                            break;
-                                        }
-                                    }
-                                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                                }
-                            }
+                            serve(
+                                &rx,
+                                &dirty,
+                                &cancel,
+                                || cancel.is_cancelled() || watcher.is_unavailable(),
+                                |token| walker.observe(&root, token),
+                            );
                         }
                         files.send_replace(None);
                         let _ = watcher.stop();
                     }
+                    // A drain still queued fails now, not after the wait below.
+                    drop(rx);
                     failures = failures.saturating_add(1);
                     runtime.block_on(async { tokio::select! {
                     () = cancel.cancelled() => {},
@@ -244,7 +289,7 @@ impl FileObservation {
         let (reply, response) = tokio::sync::oneshot::channel();
         handle
             .requests
-            .try_send((token.clone(), reply))
+            .try_send(Wake::Drain(token.clone(), reply))
             .map_err(|error| match error {
                 std::sync::mpsc::TrySendError::Full(_) => FilesError::Overloaded,
                 std::sync::mpsc::TrySendError::Disconnected(_) => FilesError::ActorUnavailable,
@@ -269,9 +314,8 @@ impl FileObservation {
     pub(crate) fn request_shutdown(&self) {
         self.cancel.cancel();
         if let Some(handle) = self.files.borrow().as_ref() {
-            // Wake an idle worker so synchronous teardown does not wait for its poll.
-            let (reply, _) = tokio::sync::oneshot::channel();
-            let _ = handle.requests.try_send((self.cancel.clone(), reply));
+            // Wake a waiting worker. A full queue wakes it by itself.
+            let _ = handle.requests.try_send(Wake::Changed);
         }
     }
     pub(crate) fn close_synchronously(&self) {
@@ -318,6 +362,38 @@ mod tests {
             }
         }
     }
+    /// The watcher gives up its watch between two of the worker's steps, while
+    /// the flag is still raised, so its report sends no wake. A worker that
+    /// looked for a lost watch before it read the flag would wait for ever.
+    #[test]
+    fn a_watch_given_up_while_the_flag_is_raised_still_ends_the_wait() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let dirty = AtomicBool::new(true);
+        let (ended, end) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let gave_up = AtomicBool::new(false);
+            serve(
+                &rx,
+                &dirty,
+                &CancellationToken::new(),
+                || {
+                    let lost = gave_up.swap(true, Ordering::AcqRel);
+                    // Right after the worker first looks, the watcher gives up
+                    // and reports as its callback does.
+                    if !lost && !dirty.swap(true, Ordering::AcqRel) {
+                        let _ = tx.try_send(Wake::Changed);
+                    }
+                    lost
+                },
+                |_| Ok(true),
+            );
+            let _ = ended.send(());
+        });
+        // Bounds the failure. A worker that leaves its wait does so at once.
+        end.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the worker left its wait");
+    }
+
     #[tokio::test]
     async fn capture_attaches_without_observation_readiness() {
         let root = dohc_engine_testkit::ScratchDir::new().unwrap();

@@ -725,6 +725,10 @@ impl EngineService {
             accepted_cursor: Option<i64>,
             kept_snapshot: Option<String>,
         }
+        if matches!(action, "pause" | "copyWritten") {
+            let handle = handle.ok_or_else(workspace_unavailable)?;
+            return self.owner_ydoc_pause(ctx, handle, params, action).await;
+        }
         let params: Params = parse(params)?;
         // A release names its relay cut, a Try again only its kept edits.
         if (action == "release") != params.binding.is_some()
@@ -739,7 +743,7 @@ impl EngineService {
             || params
                 .accepted_cursor
                 .is_some_and(|cursor| !(0..=9_007_199_254_740_991).contains(&cursor))
-            || (matches!(action, "request" | "clear" | "retired"))
+            || (matches!(action, "request" | "requestRetired" | "clear" | "retired"))
                 != (params.path.is_some() || params.document.is_some())
             || (params.path.is_some() && params.document.is_some())
         {
@@ -793,71 +797,11 @@ impl EngineService {
                 for facts in &row.record_facts {
                     emit_record_events(&self.events, &open.workspace_id, facts);
                 }
-                let Some(b) = &row.binding else {
-                    continue;
-                };
-                for session in crate::lock(&self.sessions).values_mut() {
-                    if session.workspace == handle
-                        && session.key.object_id == b.object_id
-                        && session.key.version_id == b.main_version_id
-                    {
-                        session.owner_draft = None;
-                    }
-                }
-                self.notify_owner_sessions(&handle, b);
-                let key = dohc_engine_collab::DocKey::new(
-                    &b.workspace_id,
-                    &b.main_version_id,
-                    &b.object_id,
-                )
-                .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-owner-stop-key"))?;
-                let state = open
-                    .actor
-                    .ydoc_open_state(
-                        open.workspace_id.clone(),
-                        now_ms()?,
-                        false,
-                        Some(key.clone()),
-                        b.main_version_id.clone(),
-                        row.document.current_path.clone(),
-                        Some(ContentKind::Richdoc),
-                        cancellation.token(),
-                    )
-                    .await
-                    .map_err(map_runtime)?;
-                let settled = open
-                    .actor
-                    .ydoc_settle(
-                        open.root.clone(),
-                        key,
-                        row.document.current_path.clone(),
-                        ContentKind::Richdoc,
-                        Some(b.lineage_claim_id.clone()),
-                        state.head_blob_sha256,
-                        "owner-live-stop".into(),
-                        Arc::new(self.self_writes.scoped(&open.root)),
-                        now_ms()?,
-                        Arc::new(NoFaults),
-                        cancellation.token(),
-                        None,
-                        None,
-                    )
-                    .await;
-                let settled = match settled {
-                    Ok(outcome) => outcome.settled(),
-                    Err(RuntimeError::MarkdownWriteHeld { .. }) => {
-                        settlement_reasons[index] = Some("markdown-write-held");
-                        continue;
-                    }
-                    Err(error) => return Err(map_runtime(error)),
-                };
-                if settled
-                    .as_ref()
-                    .is_some_and(|s| s.collection_reconcile_required)
-                {
-                    open.request_collection_reconcile();
-                }
-                materialized[index] = settled.is_some_and(|s| s.materialized);
+                let (wrote, reason) = self
+                    .settle_owner_release(&open, &handle, row, &cancellation)
+                    .await?;
+                materialized[index] = wrote;
+                settlement_reasons[index] = reason;
             }
         }
         let mut stops = json!(rows);
@@ -874,6 +818,185 @@ impl EngineService {
             }
         }
         Ok(json!({"stops":stops}))
+    }
+
+    /// Settle a released note from its accepted state, as a release does:
+    /// every session drops its owner draft and resyncs, and the file is
+    /// written. Says whether the file was written, or why not.
+    async fn settle_owner_release(
+        &self,
+        open: &OpenWorkspace,
+        handle: &WorkspaceHandle,
+        row: &dohc_engine_collab::owner_outbox::release::OwnerLiveStop,
+        cancellation: &OperationCancellation,
+    ) -> Result<(bool, Option<&'static str>), WireError> {
+        let Some(b) = &row.binding else {
+            return Ok((false, None));
+        };
+        for session in crate::lock(&self.sessions).values_mut() {
+            if session.workspace == *handle
+                && session.key.object_id == b.object_id
+                && session.key.version_id == b.main_version_id
+            {
+                session.owner_draft = None;
+            }
+        }
+        self.notify_owner_sessions(handle, b);
+        let key =
+            dohc_engine_collab::DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)
+                .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-owner-stop-key"))?;
+        let state = open
+            .actor
+            .ydoc_open_state(
+                open.workspace_id.clone(),
+                now_ms()?,
+                false,
+                Some(key.clone()),
+                b.main_version_id.clone(),
+                row.document.current_path.clone(),
+                Some(ContentKind::Richdoc),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        let settled = open
+            .actor
+            .ydoc_settle(
+                open.root.clone(),
+                key,
+                row.document.current_path.clone(),
+                ContentKind::Richdoc,
+                Some(b.lineage_claim_id.clone()),
+                state.head_blob_sha256,
+                "owner-live-stop".into(),
+                Arc::new(self.self_writes.scoped(&open.root)),
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+                None,
+                None,
+            )
+            .await;
+        let settled = match settled {
+            Ok(outcome) => outcome.settled(),
+            Err(RuntimeError::MarkdownWriteHeld { .. }) => {
+                return Ok((false, Some("markdown-write-held")));
+            }
+            Err(error) => return Err(map_runtime(error)),
+        };
+        if settled
+            .as_ref()
+            .is_some_and(|s| s.collection_reconcile_required)
+        {
+            open.request_collection_reconcile();
+        }
+        Ok((settled.is_some_and(|s| s.materialized), None))
+    }
+
+    /// The pause road's engine half. `pause` keeps what the owner's screen
+    /// showed as the copy's blob and releases the note at A in one
+    /// transaction, then settles it. `copyWritten` records the file on disk.
+    async fn owner_ydoc_pause(
+        &self,
+        ctx: &RequestContext,
+        handle: WorkspaceHandle,
+        params: Value,
+        action: &str,
+    ) -> Result<Value, WireError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Params {
+            binding: Option<dohc_engine_collab::LiveObjectBinding>,
+            main_version_id: Option<String>,
+            object_id: Option<String>,
+            applied_cursor: Option<i64>,
+            row_cursor: Option<i64>,
+            copy_path: String,
+            kept_snapshot: Option<String>,
+        }
+        let params: Params = parse(params)?;
+        let invalid = || WireError::new(ErrorCode::InvalidParams, "invalid-owner-pause-input");
+        let pause = action == "pause";
+        let cursor = |c: Option<i64>| c.is_some_and(|c| (0..=9_007_199_254_740_991).contains(&c));
+        let pause_shape = params.binding.is_some()
+            && cursor(params.applied_cursor)
+            && cursor(params.row_cursor)
+            && params.main_version_id.is_none()
+            && params.object_id.is_none();
+        let written_shape = params.binding.is_none()
+            && params.applied_cursor.is_none()
+            && params.row_cursor.is_none()
+            && params.kept_snapshot.is_none()
+            && params.main_version_id.is_some()
+            && params.object_id.is_some();
+        if !(if pause { pause_shape } else { written_shape })
+            || params.kept_snapshot.as_deref().is_some_and(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
+        {
+            return Err(invalid());
+        }
+        dohc_engine_domain::validate_plaintext_storable_path(&params.copy_path)
+            .map_err(|_| WireError::new(ErrorCode::InvalidParams, "invalid-owner-stop-path"))?;
+        let open = self.open(Some(&handle))?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = self
+            .mutation_session_guard(&open, &cancellation, "owner pause (queued)")
+            .await?;
+        let stop = if let Some(binding) = params.binding {
+            validate_owner_outbox_wire_binding(&binding)?;
+            if binding.workspace_id != open.workspace_id {
+                return Err(workspace_unavailable());
+            }
+            open.actor
+                .owner_ydoc_pause(
+                    dohc_engine_collab::owner_outbox::release::OwnerPauseInput {
+                        binding,
+                        applied_cursor: params.applied_cursor.ok_or_else(invalid)?,
+                        row_cursor: params.row_cursor.ok_or_else(invalid)?,
+                        copy_path: params.copy_path,
+                        kept_snapshot: params.kept_snapshot,
+                        now_ms: now_ms()?,
+                    },
+                    Arc::new(NoFaults),
+                    cancellation.token(),
+                )
+                .await
+                .map_err(map_runtime)?
+                .map_err(map_owner_outbox)?
+        } else {
+            let key = DocKey::new(
+                &open.workspace_id,
+                params.main_version_id.as_deref().ok_or_else(invalid)?,
+                params.object_id.as_deref().ok_or_else(invalid)?,
+            )
+            .map_err(|_| invalid())?;
+            open.actor
+                .owner_ydoc_copy_written(
+                    key,
+                    params.copy_path,
+                    now_ms()?,
+                    Arc::new(NoFaults),
+                    cancellation.token(),
+                )
+                .await
+                .map_err(map_runtime)?
+                .map_err(map_owner_outbox)?
+        };
+        let mut value = json!(stop);
+        if pause {
+            let (wrote, reason) = self
+                .settle_owner_release(&open, &handle, &stop, &cancellation)
+                .await?;
+            value["materialized"] = json!(wrote);
+            if let Some(reason) = reason {
+                value["settlementReason"] = json!(reason);
+            }
+        }
+        Ok(json!({ "stops": [value] }))
     }
 
     pub(super) async fn owner_ydoc_outbox_append(
@@ -1746,7 +1869,7 @@ impl EngineService {
                     .as_ref()
                     .is_some_and(|a| a.actor_kind == dohc_engine_domain::ChangeActorKind::Human),
                 binding: draft.binding.clone(),
-                expected_revision: draft.revision,
+                expected_revision: None,
                 append_key,
                 update,
                 now_ms: now_ms()?,
@@ -2714,6 +2837,9 @@ impl EngineService {
 #[cfg(test)]
 #[path = "owner_draft_editor_tests.rs"]
 mod owner_draft_editor_tests;
+#[cfg(test)]
+#[path = "owner_pause_rpc_tests.rs"]
+mod owner_pause_rpc_tests;
 
 #[cfg(test)]
 #[path = "markdown_resync_tests.rs"]

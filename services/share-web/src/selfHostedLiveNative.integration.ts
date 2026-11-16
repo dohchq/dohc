@@ -25,7 +25,12 @@ import { createEngineClient } from "../../../packages/workspace-engine-client/sr
 import { YdocLiveAdapter } from "../../../packages/workspace-engine-client/src/ydoc/ydocLiveAdapter.js";
 import { serveFetchHandler } from "@dohc/service-http";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
-import { createSessionActorResolver } from "@dohc/workspace-auth/session";
+import {
+  createPhoneCapableAccountSessionResolver,
+  createPostgresAccountSessions,
+  createSessionActorResolver,
+} from "@dohc/workspace-auth/session";
+import { createPhonePages } from "../../sync-relay/src/phonePages.js";
 import {
   initializeRelayDeployment,
   openRelayDeployment,
@@ -399,15 +404,16 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     await admin.connect();
     await admin.query(`CREATE SCHEMA "${schema}"`);
     schemaCreated = true;
-    await pool.query(
-      readFileSync(
-        new URL(
-          "../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql",
-          import.meta.url,
+    for (const migration of ["0001_better_auth.sql", "0007_session_client_kind.sql"])
+      await pool.query(
+        readFileSync(
+          new URL(
+            `../../../packages/workspace-postgres/src/db/migrations/${migration}`,
+            import.meta.url,
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-    );
+      );
     const authOptions = {
       pool,
       baseURL: "https://auth.example.test",
@@ -752,7 +758,7 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       limits: profile.namedLive.transport,
       bounds: profile.namedLive.host,
       validate,
-      resolveActor,
+      resolveAccountSession: createPhoneCapableAccountSessionResolver(relayAuth),
       captureNative,
     });
     closes.push(async () => ownerRoutes.close());
@@ -1781,15 +1787,16 @@ async function openSelfHostProof(name: string) {
     await admin.connect();
     await admin.query(`CREATE SCHEMA "${schema}"`);
     schemaCreated = true;
-    await pool.query(
-      readFileSync(
-        new URL(
-          "../../../packages/workspace-postgres/src/db/migrations/0001_better_auth.sql",
-          import.meta.url,
+    for (const migration of ["0001_better_auth.sql", "0007_session_client_kind.sql"])
+      await pool.query(
+        readFileSync(
+          new URL(
+            `../../../packages/workspace-postgres/src/db/migrations/${migration}`,
+            import.meta.url,
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-    );
+      );
     const auth = createWorkspaceAuth({
       pool,
       baseURL: "https://auth.example.test",
@@ -2244,6 +2251,97 @@ async function openSelfHostProof(name: string) {
       /** The relay storage the running relay opened. */
       get storage() {
         return storage;
+      },
+      /**
+       * A phone sign-in of the owner, and what its page opens reach: the open
+       * as the relay's account route runs it, the redemption its owner
+       * connection makes, and a live edit through the binding it redeemed.
+       */
+      async phone() {
+        const token = (await auth.api.signInEmail({ body: { email: ownerUser.email, password } }))
+          .token;
+        // Email sign-ins are browser sign-ins. Only an approved phone grant issues a phone one, which this proof skips.
+        await pool.query(`UPDATE "session" SET "clientKind"='phone' WHERE token=$1`, [token]);
+        const caller = await createPhoneCapableAccountSessionResolver(auth)(
+          new Request(relayUrl, { headers: { authorization: `Bearer ${token}` } }),
+        );
+        expect(caller.clientKind).toBe("phone");
+        const tickets = createLiveTickets({
+          storage,
+          audience,
+          key: ticketKey,
+          hostReports: createLiveHostReports({
+            storage,
+            captureNative: (...args: Parameters<ReturnType<typeof live>["captureNative"]>) =>
+              live().captureNative(...args),
+          }),
+        });
+        const pages = createPhonePages({
+          storage,
+          history,
+          host: supervisor!,
+          supported: () => true,
+          tickets,
+          sessions: createPostgresAccountSessions(pool),
+          nowMs: Date.now,
+        });
+        const scope = {
+          kind: "owner",
+          workspaceId: "workspace",
+          userId: ownerUser.id,
+          sessionId: caller.sessionId,
+          sessionExpiresAtMs: caller.expiresAtMs,
+        } as const;
+        return {
+          open: (path: string) =>
+            pages.open({
+              caller,
+              workspaceId: "workspace",
+              args: { path },
+              authorize: async () => {},
+              signal: AbortSignal.timeout(30_000),
+            }),
+          redeem: (ticket: string) => tickets.redeem(ticket, scope),
+          /** Submits a live edit through the redeemed binding, as the owner connection does, and answers its ACK. */
+          async edit(
+            binding: Parameters<ReturnType<typeof live>["captureNative"]>[0],
+            key: string,
+            value: string,
+          ) {
+            const host = captureOwnerLiveFrameHost({
+              authenticatedUserId: ownerUser.id,
+              storage,
+              native: await live().captureNative(binding),
+              bounds: profile.namedLive.host,
+              validate,
+            });
+            const doc = new Y.Doc();
+            try {
+              const sync = await host.openSync(
+                Y.encodeStateVector(doc),
+                AbortSignal.timeout(30_000),
+              );
+              try {
+                Y.applyUpdate(doc, sync.missingStateUpdate);
+              } finally {
+                sync.close();
+              }
+              const before = Y.encodeStateVector(doc);
+              doc.getMap("frontmatter").set(key, value);
+              const updateBytes = Y.encodeStateAsUpdate(doc, before);
+              const submitted = await host.submit(
+                { deliveryId: randomUUID(), updateDigest: hash(updateBytes), updateBytes },
+                AbortSignal.timeout(30_000),
+              );
+              if (submitted.result !== "success")
+                throw new Error(`The phone's edit was not accepted: ${JSON.stringify(submitted)}`);
+              return submitted.ack;
+            } finally {
+              host.close();
+              doc.destroy();
+            }
+          },
+        };
       },
       /** Stops the running daemon, as when it loses an engine reply. The supervisor starts another. */
       retire: () => live().close(),
@@ -4475,6 +4573,60 @@ it(
       });
       expect(relayRows()).toEqual(pushed);
       return { origin, numbered, pushed: pushed.map((row) => row.origin_seq), calls };
+    }),
+  120000,
+);
+
+it(
+  "opens a page with live history for the owner's phone, redeems its ticket once, and acknowledges its edit only after the host applied it, and refuses a page with none without enrolling it",
+  () =>
+    withSelfHostProof("self-host-phone-open", async (proof) => {
+      const phone = await proof.phone();
+      // Outside the shared folder, so only the phone's open enrolls it.
+      const page = await proof.ownerDocument("notes/phone.md", "From the phone\n");
+      expect(proof.storage.readServiceHostEnrollment("workspace", "notes/phone.md")).toBeNull();
+      let opened!: Awaited<ReturnType<typeof phone.open>>;
+      await vi.waitFor(
+        async () => {
+          opened = await phone.open("notes/phone.md");
+          expect(opened.status).toBe("ready");
+        },
+        { timeout: 60_000 },
+      );
+      if (opened.status !== "ready") throw new Error("The phone's page did not become ready.");
+      const activated = proof.activation("notes/phone.md")!;
+      expect(opened).toMatchObject({
+        objectId: page.objectId,
+        lineageClaimId: activated.binding.lineageClaimId,
+      });
+      expect(proof.storage.readServiceHostEnrollment("workspace", "notes/phone.md")).toMatchObject({
+        enabled: true,
+        shareId: null,
+        ownerDemand: true,
+      });
+      const redeemed = await phone.redeem(opened.ticket);
+      expect(redeemed?.binding).toEqual(activated.binding);
+      expect(await phone.redeem(opened.ticket)).toBeNull();
+      const ack = await phone.edit(redeemed!.binding, "fromPhone", "typed");
+      expect(proof.journal(page.objectId)).toContainEqual(journaled(ack));
+      // The ACK came after the session host applied the edit.
+      expect(proof.settlement(page.objectId).applied).toBeGreaterThanOrEqual(ack.journalCursor);
+
+      // A page no computer opened live has no lineage to host. The open says so and enrolls nothing.
+      const untouched = await proof.ownerDocument("notes/untouched.md", "Never live\n", {
+        seeded: false,
+      });
+      expect(await phone.open("notes/untouched.md")).toEqual({
+        status: "refused",
+        reason: "live-document-without-lineage",
+      });
+      expect(proof.storage.readServiceHostEnrollment("workspace", "notes/untouched.md")).toBeNull();
+      return {
+        objectId: page.objectId,
+        lineageClaimId: opened.lineageClaimId,
+        ack,
+        untouched: untouched.objectId,
+      };
     }),
   120000,
 );

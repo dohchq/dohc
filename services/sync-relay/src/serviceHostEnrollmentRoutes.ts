@@ -26,11 +26,16 @@ import { badRequest, errorResponse, notFound, RelayError, relayError } from "./e
 import type { JsonValue } from "@dohc/workspace-engine-client";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {
+  parseLiveUpdateDigest,
+  parseLiveUpdateIdentifier,
+} from "@dohc/live-session-contract/live-update-admission";
+import {
   RecoveryCopyRefusal,
   sameKeptEditsIdentity,
   type ServiceKeptEdits,
 } from "./storage/serviceKeptEdits";
 import { ServiceActivationDamaged } from "./storage/serviceActivation";
+import { LiveRoomUnsavedError, type LiveRooms } from "./liveRoom";
 
 export function serviceHostSharePaths(
   storage: SyncRelayStorage,
@@ -116,6 +121,9 @@ export function discoverServiceHostDocuments(
   return page.nextCursor;
 }
 
+const JOURNAL_QUERY = ["objectId", "lineageClaimId", "restoreFenceGeneration", "after"];
+// A journal page's update bytes, past its first row. Rows can each be 20 MiB.
+const JOURNAL_PAGE_BYTES = 4 * 1024 * 1024;
 export function serviceHostEnrollmentRefusals(
   storage: SyncRelayStorage,
   workspaceId: string,
@@ -289,9 +297,12 @@ async function keptEditsAction(
   return { ok: true };
 }
 
-/** The paths the enrollment routes answer: the workspace's live host and the owner's actions on edits the server kept. */
+/**
+ * The paths the enrollment routes answer: the workspace's live host, the owner's actions on edits
+ * the server kept, and a retired note's journal.
+ */
 export const isServiceHostEnrollmentPath = (pathname: string) =>
-  /^\/sync\/[^/]+\/live-host(?:\/kept-edits)?$/.test(pathname);
+  /^\/sync\/[^/]+\/live-host(?:\/kept-edits|\/journal)?$/.test(pathname);
 
 type KeptEditsHost = Pick<
   Awaited<ReturnType<typeof startSelfHostedLiveHost>>,
@@ -491,6 +502,7 @@ export function createServiceHostEnrollmentRoutes(options: {
       Awaited<ReturnType<typeof startSelfHostedLiveHost>>,
       "reconcile" | "unblock" | "keptEdits" | "stop"
     >;
+  rooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
 }) {
   const { storage, history, host } = options;
   const activation = storage.createServiceActivationStore(history),
@@ -541,11 +553,17 @@ export function createServiceHostEnrollmentRoutes(options: {
       if ([retiredPage, refusalPage, keptPage].filter(Boolean).length > 1) throw notFound();
       const keptPath =
         parts.length === 5 && parts[4] === "kept-edits" && request.method === "POST" && !url.search;
+      const journalPath =
+        parts.length === 5 &&
+        parts[4] === "journal" &&
+        request.method === "GET" &&
+        [...url.searchParams.keys()].length === 4 &&
+        JOURNAL_QUERY.every((key) => url.searchParams.getAll(key).length === 1);
       if (
-        (parts.length !== 4 && !keptPath) ||
+        (parts.length !== 4 && !keptPath && !journalPath) ||
         parts[1] !== "sync" ||
         parts[3] !== "live-host" ||
-        (url.search && !retiredPage && !refusalPage && !keptPage) ||
+        (url.search && !retiredPage && !refusalPage && !keptPage && !journalPath) ||
         request.headers.has("cookie") ||
         !/^Bearer [^\s]+$/.test(request.headers.get("authorization") ?? "") ||
         !["GET", "POST", "DELETE"].includes(request.method)
@@ -575,6 +593,42 @@ export function createServiceHostEnrollmentRoutes(options: {
               : undefined,
           ),
         });
+      // A retired note's journal through its retirement's F, for the owner's desktop to catch up on
+      // what it saved there before it lets go of the note.
+      if (journalPath) {
+        const count = (key: string) => {
+          const value = url.searchParams.get(key)!;
+          if (!/^(0|[1-9][0-9]*)$/.test(value) || !Number.isSafeInteger(Number(value)))
+            throw badRequest("Invalid journal page.");
+          return Number(value);
+        };
+        const text = (parse: () => string) => {
+          try {
+            return parse();
+          } catch {
+            throw badRequest("Invalid journal page.");
+          }
+        };
+        const page = storage.readRetiredJournalPage({
+          workspaceId,
+          objectId: text(() => parseLiveUpdateIdentifier(url.searchParams.get("objectId"))),
+          lineageClaimId: text(() => parseLiveUpdateDigest(url.searchParams.get("lineageClaimId"))),
+          restoreFenceGeneration: count("restoreFenceGeneration"),
+          after: count("after"),
+          budgetBytes: JOURNAL_PAGE_BYTES,
+        });
+        if (!page) return response({ ok: false, code: "retirement-not-found" }, 409);
+        return response({
+          ok: true,
+          acceptedCursor: page.acceptedCursor,
+          rows: page.rows.map((row) => ({
+            journalCursor: row.journalCursor,
+            ...(row.rowsThrough === undefined ? {} : { rowsThrough: row.rowsThrough }),
+            update: Buffer.from(row.updateBytes).toString("base64"),
+          })),
+          nextAfter: page.nextAfter,
+        });
+      }
       if (retiredPage) {
         const page = storage.listRetiredServiceHostEnrollments(
           workspaceId,
@@ -588,6 +642,10 @@ export function createServiceHostEnrollmentRoutes(options: {
             objectId: row.objectId,
             status: "retired",
             stopped: row.ownerStop !== null,
+            // F once the retirement finished, the journal cursor the owner's desktop lets go at.
+            ...((cursor) => (cursor === null ? {} : { acceptedCursor: cursor }))(
+              storage.retiredAcceptedCursor(workspaceId, row.objectId),
+            ),
             ...(diverged(row)
               ? { reason: "session-host-diverged" }
               : !changed(row) && storage.hasServiceHostConflictEffect(row)
@@ -714,10 +772,20 @@ export function createServiceHostEnrollmentRoutes(options: {
             ? undefined
             : ((input.objectId as string | undefined) ??
               storage.readServiceHostEnrollment(workspaceId, input.path)?.objectId);
-        const row =
+        const stop = () =>
           objectId === undefined
             ? fence()
-            : await host.stop({ workspaceId, objectId }, fence, request.signal);
+            : host.stop({ workspaceId, objectId }, fence, request.signal);
+        // Stop ends the note's live room, so every edit it took is saved first.
+        const rooms = objectId === undefined ? undefined : options.rooms?.();
+        const row = rooms
+          ? await rooms
+              .saveFirst({ workspaceId, objectId: objectId! }, stop, request.signal)
+              .catch((error: unknown) => {
+                if (error instanceof LiveRoomUnsavedError) return "waiting" as const;
+                throw error;
+              })
+          : await stop();
         if (row === "waiting") throw relayError("edits-pending");
         if (!row) throw notFound();
         // `changed` says whether this request retired the document, as its transaction found the row.
@@ -736,7 +804,7 @@ export function createServiceHostEnrollmentRoutes(options: {
         });
       }
       // `{shareId}` enrolls the share's documents, and with `retry` only those that have no row. `{path}` is the owner's
-      // Resume, and `{path, open: true}` the owner's desktop asking for a document it holds owner edits for.
+      // Resume, and `{path, open: true}` the owner's desktop opening a document, which may enroll it for the first time.
       if (
         Object.keys(input).some((key) => !["path", "shareId", "retry", "open"].includes(key)) ||
         (input.shareId !== undefined && typeof input.shareId !== "string") ||
@@ -790,16 +858,15 @@ export function createServiceHostEnrollmentRoutes(options: {
       let row: ServiceHostEnrollment;
       if (input.open === true) {
         // A refusal is an answer, not an error: the desktop stops asking until its owner opens the document again or Resumes.
-        // Only a retained row refuses, since an owner open never inserts one.
         try {
           row = storage.ensureOwnedLiveDocument({ ...common, intent: "owner-open" });
         } catch (error) {
-          if (!(error instanceof LiveHostingRefusal) || !retained) throw error;
+          if (!(error instanceof LiveHostingRefusal)) throw error;
           return response(
             {
               ok: true,
-              path: retained.path,
-              objectId: retained.objectId,
+              path: retained?.path ?? path,
+              ...(retained ? { objectId: retained.objectId } : {}),
               changed: false,
               ...(error.reason === "paused"
                 ? { status: "paused" }

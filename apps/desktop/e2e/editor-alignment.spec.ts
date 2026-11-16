@@ -160,6 +160,8 @@ async function measureClusters(page: import("@playwright/test").Page) {
       return item.getBoundingClientRect().left - width;
     };
     const cluster = (block: Element | null) => {
+      // A block has its cluster while the pointer is over it.
+      block?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
       let node = block?.previousElementSibling ?? null;
       while (node && !node.classList.contains("dohc-block-affordance"))
         node = node.previousElementSibling;
@@ -378,8 +380,7 @@ test("every block type's text sits on one shared left content edge", async () =>
     });
 
     // There the cluster stacks + above ⋮, and a one-item list's ⋮ runs below
-    // its line, over the next block's hidden cluster. The shown ⋮ takes the
-    // click there.
+    // its line, over the next block. The shown ⋮ takes the click there.
     await page.locator(".dohc-notion-editor > ol:not([start])").hover();
     const handleOnTop = await page.evaluate(() => {
       let node =

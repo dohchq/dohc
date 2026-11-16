@@ -14,6 +14,8 @@ import { pipeline } from "node:stream/promises";
 import { assertPrepared, hashFile, prepare, stagedEnginePath } from "./build.mjs";
 import {
   desktopProofCommand,
+  electronBinary,
+  firstDesktopLaunchCommand,
   passedSpecTitles,
   postgres,
   readSelfHostDeliveryProof,
@@ -92,6 +94,19 @@ export function assertNativeProof(task, result) {
     (task.name && (cases.length !== 1 || result.numPassedTests !== 1))
   )
     throw new Error(`Native proof did not pass: ${task.name ?? task.file}.`);
+}
+
+async function firstDesktopLaunch(output) {
+  const userData = mkdtempSync(join(tmpdir(), "dohc-first-launch-"));
+  try {
+    await run(...firstDesktopLaunchCommand(userData), {
+      log: join(output, "first-desktop-launch.log"),
+      // A launch that never paints ends here with its output, not at the job's limit.
+      timeoutMs: 120_000,
+    });
+  } finally {
+    rmSync(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 }
 
 export async function runJavascript(
@@ -347,6 +362,9 @@ export async function cloudJavascript(part, index = 0) {
       record.assigned = shard.flatMap((group) => group.tasks.map((task) => task.id));
       save();
       process.env.DOHC_QA_OUTPUT = output;
+      // The desktop's unit tests ask for the binary too, in their own process.
+      if (shard.some((group) => group.kind === "desktop" || group.pkg === "@dohc/desktop"))
+        await step("electron binary", async () => void electronBinary());
       let nativeReady = !shard.some((group) => group.native);
       const preparation = nativeReady
         ? Promise.resolve()
@@ -369,6 +387,9 @@ export async function cloudJavascript(part, index = 0) {
                   }),
                 ),
               );
+            // The desktop tests start only once this has ended, so none of them makes the first launch.
+            if (shard.some((group) => group.kind === "desktop"))
+              actions.push(step("first desktop launch", () => firstDesktopLaunch(output)));
             const results = await Promise.allSettled(actions);
             const failure = results.find((result) => result.status === "rejected");
             if (failure) throw failure.reason;

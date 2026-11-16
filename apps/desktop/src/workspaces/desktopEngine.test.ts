@@ -64,6 +64,12 @@ vi.mock("./ownerLiveQuarantine", async (importOriginal) => ({
   retryOwnerLiveQuarantine: quarantineMock.retry,
   readOwnerLiveQueue: quarantineMock.queue,
 }));
+// Stands in for the server's saves of a retired note; ownerLiveStop.test.ts covers the catch-up.
+const journalMock = vi.hoisted(() => ({ catchUp: vi.fn(async (): Promise<number | null> => 0) }));
+vi.mock("./ownerJournal", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./ownerJournal")>()),
+  catchUpFromJournal: journalMock.catchUp,
+}));
 // Use the Linux x64 installation layout on every test host.
 vi.mock("./installedReaderConfig", async (importOriginal) => {
   const { installedReaderConfig } =
@@ -384,6 +390,7 @@ async function quarantinedOwner(
         signal: credentials.signal,
         assertCurrent: server.assertCurrent ?? (() => {}),
         retire: async () => 0,
+        journal: async () => "not-retired" as const,
         refusals: async () => {},
         keptEdits: server.keptEdits ?? unexpectedKeptEdits,
         keptEditsPage: server.keptEditsPage ?? unexpectedKeptEdits,
@@ -1248,6 +1255,7 @@ describe("server owner peer lifecycle", () => {
         signal: credentials.signal,
         assertCurrent() {},
         retire: async () => 0,
+        journal: async () => "not-retired" as const,
         refusals: async () => {},
         keptEdits: unexpectedKeptEdits,
         keptEditsPage: unexpectedKeptEdits,
@@ -1539,6 +1547,10 @@ describe("server owner peer lifecycle", () => {
         expect(await f.engine.start()).toBe(true);
         await vi.waitFor(() => expect(f.engine.ownerLiveStopFailures("owner")).toHaveLength(1));
         expect(f.engine.ownerLiveQuarantines("owner")).toMatchObject([{ recovery: "stopping" }]);
+        // The release first applies the server's saves this computer has not.
+        expect(journalMock.catchUp).toHaveBeenCalledWith(
+          expect.objectContaining({ target: { binding, relayDatabaseNamespace: "namespace" } }),
+        );
         // Written before the release, in case it commits and then fails.
         expect(f.unwritten).toMatchObject([
           { workspaceId: "owner", objectId: "object", reason: "invalid-update" },
@@ -1761,7 +1773,13 @@ describe("server owner peer lifecycle", () => {
         recovery: "unreadable",
       };
       expect(f.engine.ownerLiveQuarantines("owner")).toEqual([row]);
-      await expect(f.engine.releaseOwnerLiveStop(owner, binding, 0)).rejects.toBe(refused);
+      await expect(
+        f.engine.releaseOwnerLiveStop(
+          { ...owner, kind: "personal", mode: "local-first" },
+          binding,
+          0,
+        ),
+      ).rejects.toBe(refused);
       expect(f.client.requests.map((request) => request.method)).not.toContain(
         "ydoc.ownerStop.release",
       );
@@ -2154,6 +2172,7 @@ describe("server owner peer lifecycle", () => {
           signal: credentials.signal,
           assertCurrent() {},
           retire: async () => 0,
+          journal: async () => "not-retired" as const,
           refusals: async () => {},
           keptEdits: unexpectedKeptEdits,
           keptEditsPage: unexpectedKeptEdits,
@@ -2275,6 +2294,7 @@ describe("server owner peer lifecycle", () => {
         signal: credentials.signal,
         assertCurrent() {},
         retire: async () => 0,
+        journal: async () => "not-retired" as const,
         refusals: async () => {},
         keptEdits: unexpectedKeptEdits,
         keptEditsPage: unexpectedKeptEdits,

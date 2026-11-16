@@ -2437,7 +2437,8 @@ const liveResumeResultSchema = z.discriminatedUnion("ok", [
 
 // The Live documents dialog's rows. status is the server's; reason says why a
 // document is not live; canResume says whether Resume can start it again.
-// deferredStop is a Stop that waits for unsent edits. quarantine and the
+// stopped is false on a retired row the server released without its owner's
+// Pause or Stop. deferredStop is a Stop that waits for unsent edits. quarantine and the
 // fields after it describe edits the server refused, as kept-edits does.
 const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
   z
@@ -2455,6 +2456,7 @@ const liveDocumentsResultSchema = z.discriminatedUnion("ok", [
               .strict()
               .optional(),
             canResume: z.boolean(),
+            stopped: z.boolean().optional(),
             deferredStop: z
               .object({ unsentEdits: z.number().int().nonnegative().safe(), editable: z.boolean() })
               .strict()
