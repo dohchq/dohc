@@ -55,6 +55,18 @@ const CAN: Partial<Record<AccessRuleReach, string>> = {
   comment: "comment on",
   edit: "edit",
 };
+// The same, where the place is the whole workspace and goes unsaid.
+const CAN_HERE: Partial<Record<AccessRuleReach, string>> = {
+  view: "view",
+  comment: "comment",
+  edit: "edit",
+};
+/** What a level lets someone do to a folder, or to the workspace for its own rule; undefined for none. */
+const canDo = (reach: AccessRuleReach | null | undefined, folder: string) => {
+  if (!reach) return undefined;
+  const verb = (folder ? CAN : CAN_HERE)[reach];
+  return verb && (folder ? `${verb} ${folder}` : verb);
+};
 
 const whoOf = (who: string) => (who === "members" ? "Members" : who);
 /** A reach with the workspace's member level put in, or null when dohc can't read it. */
@@ -126,20 +138,17 @@ export function accessRuleHoldWords(
 
 /** What members can do in the place once the hold's change takes effect. */
 function changedReach(hold: AccessRuleHold, level: MemberLevel): string {
-  const place = placeOf(hold.folder);
   if (hold.reason === "removed" && hold.fallsBackTo !== null) {
     return `${placeOpening(hold.folder)} now follows ${ruleOfLower(hold.fallsBackTo)}.`;
   }
   if (hold.reason === "removed") {
     // Without a rule anywhere above, every member gets the same level.
-    const can = level === null ? undefined : CAN[level];
-    return can ? `Members can now ${can} ${place}.` : `Members now get the level ${IN_SETTINGS}.`;
+    const can = canDo(level, hold.folder);
+    return can ? `Members can now ${can}.` : `Members now get the level ${IN_SETTINGS}.`;
   }
   const [only] = hold.changes;
-  const reach = only && resolve(only.after, level);
-  const can = reach ? CAN[reach] : undefined;
-  if (hold.changes.length === 1 && only && can)
-    return `${whoOf(only.who)} can now ${can} ${place}.`;
+  const can = only && canDo(resolve(only.after, level), hold.folder);
+  if (hold.changes.length === 1 && only && can) return `${whoOf(only.who)} can now ${can}.`;
   return `${placeOpening(hold.folder)} now follows the new access rule.`;
 }
 
@@ -152,9 +161,11 @@ export function accessRuleDecidedWords(
 ): string {
   if (decision === "restore") {
     const [only] = hold.changes;
-    const reach = only && resolve(only.before, level);
-    const can = hold.changes.length === 1 && only && reach ? CAN[reach] : undefined;
-    const now = can ? ` ${whoOf(only!.who)} can ${can} ${placeOf(hold.folder)}.` : "";
+    const can =
+      hold.changes.length === 1 && only
+        ? canDo(resolve(only.before, level), hold.folder)
+        : undefined;
+    const now = can ? ` ${whoOf(only!.who)} can ${can}.` : "";
     const keptCopy = kept[0] ? ` The rule from outside dohc is saved as a copy of ${kept[0]}.` : "";
     return `Restored ${ruleOfLower(hold.folder)}.${now}${keptCopy}`;
   }

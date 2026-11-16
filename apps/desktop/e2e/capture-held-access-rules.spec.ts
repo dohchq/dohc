@@ -279,9 +279,7 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     // for the workspace's rule waits for nothing now, so its row goes.
     const restored = rows.filter({ hasText: "Restored the workspace's access rule." });
     await expect(restored).toHaveCount(1, { timeout: 30_000 });
-    await expect(restored).toContainText(
-      "Restored the workspace's access rule. Members can view this workspace.",
-    );
+    await expect(restored).toContainText("Restored the workspace's access rule. Members can view.");
     await expect(restored.getByRole("button", { name: "Undo" })).toBeVisible();
     await expect
       .poll(async () => readFile(join(temp.rootPath, "access.yaml"), "utf8"), { timeout: 30_000 })
@@ -372,7 +370,7 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await shoot(page, "removed-root-resolved");
     await resolvedRow.getByRole("button", { name: "Remove rule" }).click();
     const removedDone = rows.filter({
-      hasText: "Removed the workspace's access rule. Members can now comment on this workspace.",
+      hasText: "Removed the workspace's access rule. Members can now comment.",
     });
     await expect(removedDone).toHaveCount(1, { timeout: 30_000 });
     await expect

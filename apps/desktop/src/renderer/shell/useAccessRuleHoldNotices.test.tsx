@@ -508,7 +508,7 @@ describe("useAccessRuleHoldNotices", () => {
     const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
     await waitFor(() =>
       expect(done()).toMatchObject({
-        message: "Removed the workspace's access rule. Members can now comment on this workspace.",
+        message: "Removed the workspace's access rule. Members can now comment.",
       }),
     );
   });
@@ -535,7 +535,7 @@ describe("useAccessRuleHoldNotices", () => {
     const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
     await waitFor(() =>
       expect(done()).toMatchObject({
-        message: "Removed the workspace's access rule. Members can now view this workspace.",
+        message: "Removed the workspace's access rule. Members can now view.",
       }),
     );
   });
