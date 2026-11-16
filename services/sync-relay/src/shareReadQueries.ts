@@ -6,8 +6,10 @@ import {
 import { visibleSharePath } from "@dohc/security-contract/share-selector";
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
 import { createHmac } from "node:crypto";
+import { asRecord } from "@dohc/workspace-core";
 import { COLLECTION_CREATE_ORIGIN_PREFIX, COLLECTION_FILE_ORIGIN_PREFIX } from "./relayLogInputs";
 import {
+  boundaryMove,
   filterOpForShare,
   groupChannelIsOrdinary,
   hasValidShareMomentShape,
@@ -133,68 +135,19 @@ export function createShareReadQueries(
   ): unknown | null => {
     if (row.opKind !== "moment.append") return null;
     if (isGroupSelector(selector) && !groupChannelIsOrdinary(selector, chatResolver)) return null;
-    const fileSelector = fileSideOf(selector);
-    if (!fileSelector) return null;
-    selector = fileSelector;
-    const parsed = parseShareOpPayloadWithReferencedPaths(row.payloadJson);
-    if (!parsed) return null;
-    const { payload } = parsed;
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-      return null;
-    }
-    const record = payload as Record<string, unknown>;
-    if (!hasValidShareMomentShape(record)) return null;
-    if (record.operation !== "rename") return null;
-    const beforePath = record.payloadBeforePath;
-    const afterPath = record.payloadAfterPath;
-    if (typeof beforePath !== "string" || typeof afterPath !== "string") {
-      return null;
-    }
-    const projectedBeforePath = projection.projectPath(beforePath);
-    const projectedAfterPath = projection.projectPath(afterPath);
-
-    if (projectedBeforePath !== null && projectedAfterPath === null) {
-      // Re-run the visible half as a delete so the existing filter validates
-      // its version and before-path, then emits the standard minimal payload.
-      const deletion = filterOpForShare(
-        selector,
-        row.opKind,
-        JSON.stringify({
-          operation: "delete",
-          versionId: record.versionId,
-          path: beforePath,
-          payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
-          payloadBeforePath: beforePath,
-          ...(record.beforePath === beforePath ? { beforePath } : {}),
-        }),
-        chatResolver,
-      );
-      return deletion.allowed ? projection.projectPayload(deletion.payload) : null;
-    }
-
-    if (projectedBeforePath === null && projectedAfterPath !== null) {
-      // The accountless replica never held the private predecessor, so expose
-      // only the visible half as a create. The normal filter validates the
-      // version and after-path and rebuilds the minimal replay payload.
-      const arrival = filterOpForShare(
-        selector,
-        row.opKind,
-        JSON.stringify({
-          operation: "write",
-          versionId: record.versionId,
-          path: afterPath,
-          payloadAfterBlobSha256: record.payloadAfterBlobSha256,
-          payloadAfterPath: afterPath,
-          ...(record.payloadAfterContentKind === "binary"
-            ? { payloadAfterContentKind: "binary" }
-            : {}),
-        }),
-        chatResolver,
-      );
-      return arrival.allowed ? projection.projectPayload(arrival.payload) : null;
-    }
-
-    return null;
+    const files = fileSideOf(selector);
+    const parsed = files && parseShareOpPayloadWithReferencedPaths(row.payloadJson);
+    const record = parsed && asRecord(parsed.payload);
+    if (!files || !record || !hasValidShareMomentShape(record)) return null;
+    // The accountless replica never held what lies outside it, so it gets
+    // only the half it sees.
+    const moved = boundaryMove(
+      files,
+      record,
+      (path) => projection.projectPath(path) !== null,
+      chatResolver,
+    );
+    return moved?.decision.allowed ? projection.projectPayload(moved.decision.payload) : null;
   };
 
   // Below Edit a recipient reads current files only. A moment or fork

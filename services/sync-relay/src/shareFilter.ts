@@ -1300,6 +1300,48 @@ function workspaceChatSide(
   return workspaceGroupReach(selector, channelWireId, chat);
 }
 
+/**
+ * A rename across the edge of what a reader sees, as the half they see: a
+ * delete of the old path, or a write of the new one. The ordinary filter
+ * judges that half. Null when the rename stays on one side.
+ */
+export function boundaryMove(
+  files: ShareSelector,
+  record: Record<string, unknown>,
+  sees: (path: string) => boolean,
+  chat?: ChatShareThreadResolver,
+): { departs: boolean; decision: ShareOpDecision } | null {
+  const before = record.payloadBeforePath,
+    after = record.payloadAfterPath;
+  if (record.operation !== "rename" || typeof before !== "string" || typeof after !== "string")
+    return null;
+  const departs = sees(before);
+  if (departs === sees(after)) return null;
+  const half = departs
+    ? {
+        operation: "delete",
+        versionId: record.versionId,
+        path: before,
+        payloadBeforePath: before,
+        payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
+        ...(record.beforePath === before ? { beforePath: before } : {}),
+      }
+    : {
+        operation: "write",
+        versionId: record.versionId,
+        path: after,
+        payloadAfterPath: after,
+        payloadAfterBlobSha256: record.payloadAfterBlobSha256,
+        ...(record.payloadAfterContentKind === "binary"
+          ? { payloadAfterContentKind: "binary" }
+          : {}),
+      };
+  return {
+    departs,
+    decision: filterOpForShare(files, "moment.append", JSON.stringify(half), chat),
+  };
+}
+
 // The single decision point for what a share recipient may read. Strict
 // allowlist per selector kind. Path/version selector: moment.append (all
 // referenced paths visible, version matches), version.create for the shared
@@ -1331,47 +1373,16 @@ export function filterOpForShare(
     const record = asRecord(payload);
     if (!record || record.versionId !== "main" || !hasValidShareMomentShape(record))
       return { allowed: false };
-    const before = typeof record.payloadBeforePath === "string" ? record.payloadBeforePath : null;
-    const after = typeof record.payloadAfterPath === "string" ? record.payloadAfterPath : null;
-    const beforeVisible = before !== null && pathVisibleThroughShare(files, before);
-    const afterVisible = after !== null && pathVisibleThroughShare(files, after);
-    if (record.operation === "rename" && beforeVisible !== afterVisible) {
-      if (beforeVisible) {
-        const departure = filterOpForShare(
-          files,
-          opKind,
-          JSON.stringify({
-            operation: "delete",
-            versionId: "main",
-            path: before,
-            payloadBeforePath: before,
-            payloadBeforeBlobSha256: record.payloadBeforeBlobSha256,
-          }),
-          chat,
-        );
-        if (departure.allowed)
-          (departure.payload as Record<string, unknown>).payloadBeforeBlobSha256 = null;
-        return departure;
-      }
-      if (typeof record.objectId !== "string" || !selector.reach.objectVisible(record.objectId))
-        return { allowed: false };
-      return filterOpForShare(
-        files,
-        opKind,
-        JSON.stringify({
-          operation: "write",
-          versionId: "main",
-          path: after,
-          payloadAfterPath: after,
-          payloadAfterBlobSha256: record.payloadAfterBlobSha256,
-          payloadAfterContentKind: record.payloadAfterContentKind,
-        }),
-        chat,
-      );
+    const moved = boundaryMove(files, record, (path) => pathVisibleThroughShare(files, path), chat);
+    // A member never learns what a file held after it left their reach.
+    if (moved?.departs) {
+      if (moved.decision.allowed)
+        (moved.decision.payload as Record<string, unknown>).payloadBeforeBlobSha256 = null;
+      return moved.decision;
     }
     if (typeof record.objectId !== "string" || !selector.reach.objectVisible(record.objectId))
       return { allowed: false };
-    return filterOpForShare(files, opKind, payloadJson, chat);
+    return moved ? moved.decision : filterOpForShare(files, opKind, payloadJson, chat);
   }
 
   if (isWorkspaceSelector(selector)) {
