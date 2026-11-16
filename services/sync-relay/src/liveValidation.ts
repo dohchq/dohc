@@ -302,7 +302,7 @@ export function createLiveValidationExecutor(
         if (!settle()) return;
         kill(slot);
         const last = overran.get(input);
-        // A check that started before the last overrun ran beside it, so it leaves that mark be.
+        // A check that started before the last overrun ran beside it, so it leaves that mark in place.
         if (last !== undefined && startedAt < last)
           return reject(new LiveValidatorFailure("LiveCheckOverrun"));
         overran.delete(input);
