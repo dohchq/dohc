@@ -5717,10 +5717,48 @@ fn pad_utf16_into(
     output.push_repeat(' ', width.saturating_sub(utf16_len(value)))
 }
 
+/// Collapses a cell's white space as Tiptap's table renderer does, except in
+/// a code span, where white space is the code's content.
 fn collapse_js_whitespace(value: &str) -> ProjectionResult<String> {
+    let chars: Vec<char> = value.chars().collect();
+    let run_at = |index: usize| chars[index..].iter().take_while(|c| **c == '`').count();
+    // Where each length of backtick run starts, to find a span's end in one
+    // pass. A backslash is literal inside code, so it doesn't stop an end.
+    let mut ends: HashMap<usize, std::collections::VecDeque<usize>> = HashMap::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let run = run_at(index).max(1);
+        if chars[index] == '`' {
+            ends.entry(run).or_default().push_back(index);
+        }
+        index += run;
+    }
     let mut collapsed = ProjectionBuffer::new();
     let mut in_whitespace = false;
-    for character in value.chars() {
+    let mut backslashes = 0usize;
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        if character == '`' && backslashes % 2 == 0 {
+            let run = run_at(index);
+            let starts = ends.entry(run).or_default();
+            while starts.front().is_some_and(|start| *start <= index) {
+                starts.pop_front();
+            }
+            // A run with no end is literal backticks.
+            let to = starts.front().map_or(index, |start| *start) + run;
+            for character in &chars[index..to] {
+                collapsed.push(*character)?;
+            }
+            (index, in_whitespace, backslashes) = (to, false, 0);
+            continue;
+        }
+        backslashes = if character == '\\' {
+            backslashes + 1
+        } else {
+            0
+        };
+        index += 1;
         if is_js_whitespace(character) {
             if !in_whitespace {
                 collapsed.push(' ')?;
@@ -8015,6 +8053,25 @@ mod projection_tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn a_table_cell_keeps_the_white_space_in_its_code() {
+        let save = |markdown: &str| {
+            let doc = Ydoc::wire();
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+                .expect("richdoc rewrite");
+            doc.project(ContentKind::Richdoc)
+                .expect("projection")
+                .content
+        };
+        // The text around the code still collapses; a `\`` opens no span.
+        let written = save("| h |\n|---|\n| `  a  `  x \\`  y  ``b  `  c`` |\n");
+        assert!(
+            written.contains("| `  a  ` x \\` y ``b  `  c`` |"),
+            "{written}"
+        );
+        assert_eq!(save(&written), written);
     }
 
     #[test]
