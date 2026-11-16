@@ -4614,6 +4614,7 @@ export function DesktopWorkspaceShell(props: {
     readRevision: chatsReadRevision,
     directNames: wb.directNames,
     onDirectName: saveDirectName,
+    accountKey: cloudStatus === null ? undefined : (cloudStatus.sessionKey ?? null),
   });
   const selectedChatsNav =
     focusedTabPath && parseTab(focusedTabPath)?.kind === "chat"

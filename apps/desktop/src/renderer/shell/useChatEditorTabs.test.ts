@@ -67,7 +67,7 @@ const thread: ChatsNav = {
   },
 };
 
-const NO_SAVED_NAMES = { directNames: {}, onDirectName: () => {} };
+const NO_SAVED_NAMES = { directNames: {}, onDirectName: () => {}, accountKey: undefined };
 
 // Hidden conversations ask for their unread counts, and direct tabs for the people's names; most tests ignore them.
 const UNREAD_BRIDGE = {
@@ -75,8 +75,6 @@ const UNREAD_BRIDGE = {
   onWorkspaceActivity: () => () => {},
   directConversations: () => new Promise(() => {}),
   onDirectChanged: () => () => {},
-  // Signed in as Ann at start, read from this computer.
-  cloudStatus: () => Promise.resolve({ connected: true, sessionKey: "server#relay#ann" }),
 };
 
 beforeEach(() =>
@@ -567,7 +565,6 @@ describe("chat editor tabs", () => {
       return answer.promise;
     });
     vi.stubGlobal("dohcDesktop", {
-      cloudStatus: UNREAD_BRIDGE.cloudStatus,
       onCloudSessionChanged: () => () => {},
       listChatChannels: vi.fn(() => new Promise(() => {})),
       listChatUnread,
@@ -701,8 +698,10 @@ describe("chat editor tabs", () => {
           paths: [path, home],
           activePaths: [home],
           enabled: true,
+          // Signed in as Ann at start, by the shell's status read.
           directNames,
           onDirectName,
+          accountKey: ann,
         }),
       );
     afterEach(() => listeners.clear());

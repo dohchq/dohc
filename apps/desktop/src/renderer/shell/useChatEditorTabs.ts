@@ -41,6 +41,9 @@ export function useChatEditorTabs(input: {
   // Each open direct tab's saved person name, and where a name the list read is saved.
   directNames: Readonly<Record<string, DirectTabName>>;
   onDirectName: (conversationId: string, account: string, name: string) => void;
+  // The account signed in at start, from the shell's status read: null when
+  // signed out, undefined until it reads.
+  accountKey: string | null | undefined;
 }) {
   const callbacks = useRef(input);
   callbacks.current = input;
@@ -88,23 +91,14 @@ export function useChatEditorTabs(input: {
       refreshSession((value) => value + 1);
     });
   }, [input.workspaceId]);
-  // The account signed in at start, read from this computer, so a saved name shows only to its own account.
-  // A session event that came first already named it.
+  // A saved name shows only to its own account. A session event that came
+  // before the shell's status read already named the account.
+  const startKey = input.accountKey;
   useEffect(() => {
-    if (session.current.key !== undefined) return;
-    let active = true;
-    void bridge()
-      .cloudStatus()
-      .then((status) => {
-        if (!active || session.current.key !== undefined) return;
-        session.current.key = status.sessionKey ?? null;
-        refreshSession((value) => value + 1);
-      })
-      .catch(() => undefined);
-    return () => {
-      active = false;
-    };
-  }, []);
+    if (session.current.key !== undefined || startKey === undefined) return;
+    session.current.key = startKey;
+    refreshSession((value) => value + 1);
+  }, [startKey]);
   const get = useCallback((path: string): ChatEditor => {
     const owner = store.current;
     const existing = owner.entries.get(path);
