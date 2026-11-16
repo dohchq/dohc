@@ -815,6 +815,22 @@ describe("Members page", () => {
     expect(screen.queryByTestId("settings-members-limit")).toBeNull();
   });
 
+  it("says when it saved a new member level, and not for a failed save", async () => {
+    const onLevelSaved = vi.fn();
+    renderMembers({ onLevelSaved });
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockRejectedValueOnce(new Error("relay down"));
+    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
+    await vi.waitFor(() => expect(requests().at(-1)).toEqual({ action: "level", level: "edit" }));
+    expect(onLevelSaved).not.toHaveBeenCalled();
+    bridge.workspaceMembers.mockResolvedValueOnce({
+      status: "ready",
+      view: ownerView({ memberLevel: "edit" }),
+    });
+    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
+    await vi.waitFor(() => expect(onLevelSaved).toHaveBeenCalledOnce());
+  });
+
   it("shows the level spinner without taking room from the control", async () => {
     renderMembers();
     await screen.findByTestId("settings-members-page");
