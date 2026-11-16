@@ -388,10 +388,15 @@ export function useAccessRuleHoldNotices(
         decision: "undo",
         undo: change,
       })
+      // Undoing a Restore can leave members at the level in Members settings,
+      // which may have changed since, with no hold left to read it again.
+      .then(() =>
+        decision === "restore" && usesMemberLevel(hold) ? readLevel(asked) : levelRef.current,
+      )
       .then(
-        () => {
+        (level) => {
           if (currentWorkspace.current !== asked) return;
-          latest.current.showSuccessNotice(accessRuleUndoneWords(hold, decision, levelRef.current));
+          latest.current.showSuccessNotice(accessRuleUndoneWords(hold, decision, level));
         },
         (error: unknown) => {
           if (currentWorkspace.current !== asked) return;

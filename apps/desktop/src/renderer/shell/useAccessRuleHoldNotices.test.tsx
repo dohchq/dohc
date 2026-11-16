@@ -243,6 +243,34 @@ describe("useAccessRuleHoldNotices", () => {
     );
   });
 
+  it("reads the members' level again for Undo of a Restore, after the last hold went", async () => {
+    const h = harness([ROOT_REMOVED], membersAt("view"));
+    await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View, no change"] }));
+    const undo = { path: "access.yaml", text: "", expectedSha256: "b".repeat(64) };
+    h.bridge.decideAccessRule.mockResolvedValueOnce({ heldAccessRules: [], kept: [], undo });
+    act(() => h.errors().runShellErrorAction(h.row("")!.id));
+    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
+    await waitFor(() =>
+      expect(done()).toMatchObject({
+        message: "Restored the workspace's access rule. Members can view.",
+        action: { label: "Undo" },
+      }),
+    );
+    h.list([]);
+    // The owner sets Edit in Members settings, then undoes the Restore.
+    h.bridge.workspaceMembers.mockImplementation(membersAt("edit"));
+    act(() => h.readMemberLevel());
+    act(() => h.errors().runShellErrorAction(done()!.id));
+    await waitFor(() =>
+      expect(
+        h
+          .errors()
+          .shellErrors.filter((error) => error.tone === "success")
+          .at(-1),
+      ).toMatchObject({ message: "Members can now edit." }),
+    );
+  });
+
   it("drops a decision's Undo once dohc holds the folder again, and keeps it for a list from before", async () => {
     const h = harness([WIDENED]);
     await waitFor(() => expect(h.row("team")).toBeDefined());
