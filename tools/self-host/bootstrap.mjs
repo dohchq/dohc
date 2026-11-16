@@ -35,6 +35,7 @@ export function initialSettings({
         "BETTER_AUTH_SECRET",
         "DOHC_RELAY_LINK_KEY",
         "DOHC_RELAY_EXCHANGE_KEY",
+        "DOHC_SHARE_WEB_SESSION_SEAL_KEY",
         "DOHC_SNAPSHOT_KEY",
       ].map((key) => [key, randomBytes(32).toString("base64url")]),
     ),
@@ -73,6 +74,21 @@ export function updateImageSetting(original, image) {
       "Use a single-line DOHC_IMAGE assignment outside quoted multiline values before upgrading.",
     );
   }
+  return updated;
+}
+
+/** Adds the key that seals link sessions to a configuration made before that key existed. */
+export function addSessionSealKey(original, key = randomBytes(32).toString("base64url")) {
+  if (parseEnv(original).DOHC_SHARE_WEB_SESSION_SEAL_KEY) return original;
+  // An empty assignment would be read after the new one, so it is replaced where it stands.
+  const empty = /^[ \t]*(?:export[ \t]+)?DOHC_SHARE_WEB_SESSION_SEAL_KEY[ \t]*=.*$/m;
+  const updated = empty.test(original)
+    ? original.replace(empty, () => `DOHC_SHARE_WEB_SESSION_SEAL_KEY='${key}'`)
+    : `${original}${original.endsWith("\n") ? "" : "\n"}DOHC_SHARE_WEB_SESSION_SEAL_KEY='${key}'\n`;
+  if (parseEnv(updated).DOHC_SHARE_WEB_SESSION_SEAL_KEY !== key)
+    throw new Error(
+      "Add DOHC_SHARE_WEB_SESSION_SEAL_KEY to the configuration by hand, outside quoted multiline values.",
+    );
   return updated;
 }
 
@@ -115,7 +131,7 @@ function main() {
       const errors = validateSettings({ ...settings, DOHC_IMAGE: values.image });
       if (errors.length) throw new Error(errors.join("\n"));
       const original = readFileSync(envFile, "utf8");
-      const updated = updateImageSetting(original, values.image);
+      const updated = addSessionSealKey(updateImageSetting(original, values.image));
       const previous = `${envFile}.previous-${Date.now()}`;
       writeFileSync(previous, original, { flag: "wx", mode: 0o600 });
       console.log(

@@ -43,6 +43,7 @@ const application = createShareWebApplication({
   relayUrl: config.relayUrl,
   publicRelayUrl: config.publicRelayUrl,
   relayExchangeKey: config.relayExchangeKey,
+  sessionSealKey: config.sessionSealKey,
   publicHosts: config.publicHosts,
   internalHosts: config.internalHosts,
   viewerAssetsDir,

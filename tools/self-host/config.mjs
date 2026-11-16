@@ -58,6 +58,15 @@ export function validateSettings(settings) {
     if ((settings[name]?.length ?? 0) < 32)
       errors.push(`${name} must contain at least 32 characters.`);
   }
+  // The upgrade adds this key to a configuration made before it existed. Without it, a share-web restart ends
+  // every open share page.
+  const sealKey = settings.DOHC_SHARE_WEB_SESSION_SEAL_KEY;
+  if (sealKey && (sealKey.length < 32 || /change-me/i.test(sealKey)))
+    errors.push(
+      "Set DOHC_SHARE_WEB_SESSION_SEAL_KEY to the key that bootstrap generated, or to 32 or more random characters.",
+    );
+  if (sealKey && sealKey === settings.DOHC_RELAY_EXCHANGE_KEY)
+    errors.push("DOHC_SHARE_WEB_SESSION_SEAL_KEY must differ from DOHC_RELAY_EXCHANGE_KEY.");
   if (settings.DOHC_POSTGRES_HOST) {
     if (
       !/^(?=.{1,253}$)[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$/.test(

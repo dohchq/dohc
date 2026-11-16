@@ -179,7 +179,8 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
         ),
         name: cookieName,
         secret: cookieValue,
-        valueHasOpaqueShape: /^[A-Za-z0-9_-]{16,}$/u.test(cookieValue),
+        // The session cookie is its token, a dot and the sealed session. The profile cookie is one value.
+        valueHasOpaqueShape: /^[A-Za-z0-9_-]{16,}(\.[A-Za-z0-9_-]{16,})?$/u.test(cookieValue),
       };
     });
     expect(new Set(cookieEvidence.map((cookie) => cookie.secret)).size).toBe(2);

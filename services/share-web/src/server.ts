@@ -27,6 +27,7 @@ import {
 } from "@dohc/workspace-contracts/relay-values";
 import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 import { isSessionDiscriminator } from "./sessionDiscriminator";
+import { createLinkSessionSeal } from "./linkSessionSeal";
 import {
   createNamedLiveBrowserClient,
   type NamedLiveBrowserClientLimits,
@@ -127,6 +128,8 @@ interface ShareWebSession {
   capabilityToken: string;
   expiresAtMs: number;
   createdAtMs: number;
+  /** The session as the browser's cookie should hold it, for a share-web that starts without this one's memory. */
+  sealed?: string;
 }
 
 type RefreshAttempt =
@@ -138,6 +141,8 @@ interface BrowserSession {
   discriminator: string;
   token: string;
   session: ShareWebSession;
+  /** The browser's cookie holds an earlier seal than the session's, because a renewal's answer did not reach it. */
+  staleCookie: boolean;
 }
 
 /**
@@ -219,6 +224,8 @@ export interface CreateShareWebApplicationOptions {
   relayUrl: string;
   publicRelayUrl: string;
   relayExchangeKey?: string;
+  /** Seals link sessions into their cookies, so they outlast a restart. Without it they live in memory alone. */
+  sessionSealKey?: string;
   publicHosts: ReadonlySet<string>;
   internalHosts?: ReadonlySet<string>;
   fetchRelay?: RelayFetch;
@@ -406,6 +413,13 @@ class ShareWebInFlightLimiter {
       inFlightByIdentity.set(identity, remaining);
     }
   }
+}
+
+const SESSION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,}$/u;
+
+/** A seal opens only beside the token and link it was made for. */
+function sessionSealBinding(discriminator: string, token: string): string {
+  return `${discriminator}:${token}`;
 }
 
 function sessionKey(discriminator: string, token: string): string {
@@ -840,18 +854,14 @@ async function completeRelayResponse(relayResponse: Response): Promise<Response>
   });
 }
 
-function sessionCookie(
-  discriminator: string,
-  token: string,
-  expiresAtMs: number,
-  nowMs: number,
-): string {
+function sessionCookie(token: string, session: ShareWebSession, nowMs: number): string {
   const maxAge = Math.max(
     1,
-    Math.ceil((expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS - nowMs) / 1_000),
+    Math.ceil((session.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS - nowMs) / 1_000),
   );
+  const value = session.sealed ? `${token}.${session.sealed}` : token;
   return (
-    `${cookieName(discriminator)}=${token}; Path=/; Max-Age=${maxAge}; ` +
+    `${cookieName(session.discriminator)}=${value}; Path=/; Max-Age=${maxAge}; ` +
     "Secure; HttpOnly; SameSite=Strict"
   );
 }
@@ -1046,6 +1056,7 @@ export function createShareWebApplication({
   relayUrl,
   publicRelayUrl,
   relayExchangeKey,
+  sessionSealKey,
   publicHosts,
   internalHosts,
   fetchRelay: sendToRelay = (request) => fetch(request),
@@ -1148,6 +1159,23 @@ export function createShareWebApplication({
       })
     : undefined;
   const sessions = new ShareWebSessionStore(maxSessions);
+  const sessionSeal = sessionSealKey ? createLinkSessionSeal(sessionSealKey) : undefined;
+  // Names this process in the seals it makes, so it can tell them from an earlier share-web's.
+  const sealedBy = randomBytes(8).toString("base64url");
+  // The sessions this process took up from an earlier share-web's seals. A session is taken up once, so one that
+  // then ends or is put out here stays out, as one made here does. The keys stay for the life of the process: a
+  // browser can hold a later seal of the same session, and an earlier process's seals stop opening a week after
+  // the capability they carry ends (`LINK_SESSION_RENEWAL_GRACE_MS`).
+  const takenUp = new Set<string>();
+  const seal = (token: string, session: ShareWebSession): void => {
+    if (sessionSeal)
+      session.sealed = sessionSeal.seal(sessionSealBinding(session.discriminator, token), {
+        grantId: session.grantId,
+        capabilityToken: session.capabilityToken,
+        expiresAtMs: session.expiresAtMs,
+        sealedBy,
+      });
+  };
   const exchangeRateLimiter = new TokenBucketLimiter(
     EXCHANGE_BUCKET_CAPACITY,
     EXCHANGE_REFILL_PER_SECOND,
@@ -1244,15 +1272,59 @@ export function createShareWebApplication({
       })
     : undefined;
 
+  // Without a seal key the cookie is the session's token. With one it is the token, a dot and the sealed session,
+  // and only a cookie whose seal this deployment made for that token is a session.
   function readBrowserSession(
     discriminator: string,
     cookies: Map<string, string>,
   ): BrowserSession | null {
     if (!isSessionDiscriminator(discriminator)) return null;
-    const token = cookies.get(cookieName(discriminator));
-    if (!token) return null;
-    const session = sessions.get(discriminator, token, nowMs());
-    return session ? { discriminator, token, session } : null;
+    const cookie = cookies.get(cookieName(discriminator));
+    if (!cookie) return null;
+    if (!sessionSeal) {
+      const session = sessions.get(discriminator, cookie, nowMs());
+      return session ? { discriminator, token: cookie, session, staleCookie: false } : null;
+    }
+    const dot = cookie.indexOf(".");
+    if (dot < 0) return null;
+    const token = cookie.slice(0, dot);
+    const sealed = cookie.slice(dot + 1);
+    if (!SESSION_TOKEN_PATTERN.test(token)) return null;
+    const binding = sessionSealBinding(discriminator, token);
+    const known = sessions.get(discriminator, token, nowMs());
+    if (known) {
+      if (sealed === known.sealed)
+        return { discriminator, token, session: known, staleCookie: false };
+      // The seal from before a renewal still names the session, and its browser is owed the newer cookie.
+      return sessionSeal.unseal(binding, sealed)
+        ? { discriminator, token, session: known, staleCookie: true }
+        : null;
+    }
+    // A share-web that has restarted holds no session. A seal an earlier process made carries the one the browser
+    // held, and the relay still decides on every call whether its capability stands.
+    const carried = sessionSeal.unseal(binding, sealed);
+    const key = sessionKey(discriminator, token);
+    if (
+      !carried ||
+      carried.sealedBy === sealedBy ||
+      takenUp.has(key) ||
+      linkDiscriminator(carried.grantId) !== discriminator ||
+      carried.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS < nowMs()
+    )
+      return null;
+    // Past this many, a browser opens its link again, as it did after every restart before seals.
+    if (takenUp.size >= maxSessions) return null;
+    takenUp.add(key);
+    const session: ShareWebSession = {
+      discriminator,
+      grantId: carried.grantId,
+      capabilityToken: carried.capabilityToken,
+      expiresAtMs: carried.expiresAtMs,
+      createdAtMs: nowMs(),
+      sealed,
+    };
+    sessions.set(token, session, nowMs());
+    return { discriminator, token, session, staleCookie: false };
   }
 
   function readSession(request: Request) {
@@ -1344,6 +1416,7 @@ export function createShareWebApplication({
             refreshed.capabilityToken,
             refreshed.expiresAtMs,
           );
+          if (session) seal(authenticated.token, session);
           return session ? { status: "refreshed", session } : { status: "unavailable" };
         } catch {
           return { status: "unavailable" };
@@ -1376,14 +1449,7 @@ export function createShareWebApplication({
     }
     return {
       ok: true,
-      headers: {
-        "set-cookie": sessionCookie(
-          authenticated.discriminator,
-          authenticated.token,
-          attempt.session.expiresAtMs,
-          nowMs(),
-        ),
-      },
+      headers: { "set-cookie": sessionCookie(authenticated.token, attempt.session, nowMs()) },
     };
   }
 
@@ -1417,7 +1483,11 @@ export function createShareWebApplication({
         grantId: authenticated.session.grantId,
         capabilityToken,
         profileSecret,
-        setCookie: refreshed.headers["set-cookie"] ?? null,
+        setCookie:
+          refreshed.headers["set-cookie"] ??
+          (authenticated.staleCookie
+            ? sessionCookie(authenticated.token, authenticated.session, nowMs())
+            : null),
         async currentCapability() {
           await refreshes.get(sessionKey(discriminator, authenticated.token));
           const current = sessions.get(discriminator, authenticated.token, nowMs());
@@ -1462,6 +1532,9 @@ export function createShareWebApplication({
     // for a dead session could overwrite a newer one.
     const answer = (result: Response): Response => {
       if (current()) {
+        // A browser that missed a renewal's cookie gets it again, or its seal would open an ended capability.
+        if (browser?.staleCookie)
+          result.headers.set("set-cookie", sessionCookie(browser.token, browser.session, nowMs()));
         for (const [name, value] of Object.entries(refreshed.headers))
           result.headers.set(name, value);
       }
@@ -2002,7 +2075,7 @@ export function createShareWebApplication({
           if (!exchanged) return refused();
           const discriminator = linkDiscriminator(exchanged.grantId);
           const token = newSessionToken();
-          if (!/^[A-Za-z0-9_-]{16,}$/u.test(token)) return refused();
+          if (!SESSION_TOKEN_PATTERN.test(token)) return refused();
           const cookies = parseCookies(request.headers.get("cookie"));
           const existingProfile = cookies.get(profileCookieName(discriminator));
           const profile =
@@ -2010,22 +2083,17 @@ export function createShareWebApplication({
               ? existingProfile
               : newProfileSecret();
           if (!LINK_SECRET_PATTERN.test(profile)) return refused();
-          sessions.set(
-            token,
-            {
-              discriminator,
-              grantId: exchanged.grantId,
-              capabilityToken: exchanged.capabilityToken,
-              expiresAtMs: exchanged.expiresAtMs,
-              createdAtMs: nowMs(),
-            },
-            nowMs(),
-          );
+          const session: ShareWebSession = {
+            discriminator,
+            grantId: exchanged.grantId,
+            capabilityToken: exchanged.capabilityToken,
+            expiresAtMs: exchanged.expiresAtMs,
+            createdAtMs: nowMs(),
+          };
+          seal(token, session);
+          sessions.set(token, session, nowMs());
           const responseHeaders = new Headers();
-          responseHeaders.append(
-            "set-cookie",
-            sessionCookie(discriminator, token, exchanged.expiresAtMs, nowMs()),
-          );
+          responseHeaders.append("set-cookie", sessionCookie(token, session, nowMs()));
           responseHeaders.append("set-cookie", profileCookie(discriminator, profile));
           return jsonResponse({ ok: true, session: discriminator }, { headers: responseHeaders });
         } catch {

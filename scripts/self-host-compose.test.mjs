@@ -14,6 +14,7 @@ import { parseEnv } from "node:util";
 import test from "node:test";
 import { defineMappingTag, defineScalarTag, defineSequenceTag, load, YAML11_SCHEMA } from "js-yaml";
 import {
+  addSessionSealKey,
   initialSettings,
   privateRouteInstructions,
   updateImageSetting,
@@ -162,6 +163,46 @@ test("upgrade replaces spaced, exported, repeated and unchanged image assignment
     () =>
       updateImageSetting("NOTE='keep\nDOHC_IMAGE=quoted-content\n'\nDOHC_IMAGE=old:v1\n", "new:v2"),
     /outside quoted multiline values/,
+  );
+});
+
+test("share links get their own generated seal key, which an upgrade adds to an older configuration", () => {
+  assert.equal(
+    compose.services["share-web"].environment.DOHC_SHARE_WEB_SESSION_SEAL_KEY,
+    "${DOHC_SHARE_WEB_SESSION_SEAL_KEY:-}",
+  );
+  const generated = settings();
+  assert.match(generated.DOHC_SHARE_WEB_SESSION_SEAL_KEY, /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(generated.DOHC_SHARE_WEB_SESSION_SEAL_KEY, generated.DOHC_RELAY_EXCHANGE_KEY);
+  // A configuration from before the key existed stays valid, and the upgrade then adds the key.
+  assert.deepEqual(
+    validateSettings({ ...generated, DOHC_SHARE_WEB_SESSION_SEAL_KEY: undefined }),
+    [],
+  );
+  for (const invalid of ["change-me", "short", generated.DOHC_RELAY_EXCHANGE_KEY])
+    assert.ok(
+      validateSettings({ ...generated, DOHC_SHARE_WEB_SESSION_SEAL_KEY: invalid }).some((error) =>
+        error.includes("DOHC_SHARE_WEB_SESSION_SEAL_KEY"),
+      ),
+      invalid,
+    );
+
+  const key = "k".repeat(43);
+  for (const older of [
+    "DOHC_IMAGE=old:v1\nBETTER_AUTH_SECRET='preserve-this-value'",
+    "DOHC_IMAGE=old:v1\nDOHC_SHARE_WEB_SESSION_SEAL_KEY=\nBETTER_AUTH_SECRET='preserve-this-value'\n",
+  ]) {
+    const updated = addSessionSealKey(older, key);
+    assert.deepEqual(parseEnv(updated), {
+      ...parseEnv(older),
+      DOHC_SHARE_WEB_SESSION_SEAL_KEY: key,
+    });
+    assert.equal(updated.match(/DOHC_SHARE_WEB_SESSION_SEAL_KEY/g).length, 1);
+    assert.equal(addSessionSealKey(updated), updated);
+  }
+  assert.throws(
+    () => addSessionSealKey("NOTE='keep\nDOHC_SHARE_WEB_SESSION_SEAL_KEY=\n'\n", key),
+    /by hand/,
   );
 });
 
