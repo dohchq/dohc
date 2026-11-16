@@ -11,8 +11,18 @@ type VersionedTextConflictId = string;
 
 export const MAX_VERSIONED_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 
-export function isCaptureRecoveryOrigin(origin: string): boolean {
-  return origin === "capture-recovery" || origin === "capture-recovery-cleared";
+// Text the engine kept on this computer only: typing capture kept when its
+// file changed outside dohc, and text a merge removed unseen.
+const LOCAL_ONLY_KEPT_TEXT_ORIGINS = [
+  "capture-recovery",
+  "capture-recovery-cleared",
+  "merge-removal",
+  "merge-removal-cleared",
+] as const;
+export type LocalOnlyKeptTextOrigin = (typeof LOCAL_ONLY_KEPT_TEXT_ORIGINS)[number];
+
+export function isCaptureRecoveryOrigin(origin: string): origin is LocalOnlyKeptTextOrigin {
+  return (LOCAL_ONLY_KEPT_TEXT_ORIGINS as readonly string[]).includes(origin);
 }
 
 /**
@@ -151,7 +161,7 @@ export interface HistoryOperationsStore {
 // updates, so "ydoc" says how the change arrived, not who made it. Writes
 // take ActorNeutralWriteMetadata, so no write can claim it.
 export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"> {
-  origin: ActorNeutralWriteOrigin | "ydoc" | "capture-recovery" | "capture-recovery-cleared";
+  origin: ActorNeutralWriteOrigin | "ydoc" | LocalOnlyKeptTextOrigin;
 }
 
 /**

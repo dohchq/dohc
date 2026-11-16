@@ -444,8 +444,16 @@ The trusted relay endpoints are POSTs to `/sync/push/status`, `/sync/push/subscr
 ## Storage and recovery
 
 The supported Compose deployment runs one `share-web` instance.
-Its viewer sessions live in memory. Restarting it signs viewers out.
-A viewer can open the original share URL again unless the owner reset or ended the link.
+It keeps viewer sessions in memory. With `DOHC_SHARE_WEB_SESSION_SEAL_KEY` set, each browser's session cookie also holds its session, sealed with a key made from that value.
+The value has at least 32 characters and differs from the relay exchange key. The self-host bootstrap generates it, and its upgrade adds it to a configuration that lacks it.
+Without the value, restarting `share-web` signs viewers out.
+After a restart, `share-web` takes each session up again, once, from the cookie an earlier process sealed, so an open share page goes on working. The relay still checks the session on every request.
+Two cases still sign a viewer out at a restart, and the viewer can then open the original share URL again unless the owner reset or ended the link:
+
+- The relay renewed the session and the answer with the new cookie did not reach the browser before the restart.
+- `DOHC_SHARE_WEB_SESSION_SEAL_KEY` changed.
+
+A sealed session cookie is 258 bytes, and a browser sends one for each link it opened in the last week. Node refuses a request whose headers pass 16 KB, which is about 48 such links with their profile cookies.
 Do not run multiple instances because they do not share viewer session state.
 
 The relay stores its database in `dohc_self_host_sync_relay`.

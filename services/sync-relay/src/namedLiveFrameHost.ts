@@ -3,6 +3,8 @@ import type { StorageContext } from "./storage/context.js";
 import {
   parseAutomationDeclaration,
   parseLiveAuthorContext,
+  type LiveAuthorContext,
+  type LiveAuthorSnapshot,
 } from "@dohc/live-session-contract/live-authorship";
 import { setTimeout as delay } from "node:timers/promises";
 import { createHash } from "node:crypto";
@@ -40,7 +42,12 @@ import type {
 import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.js";
 import type { CapacityLiveAdmissionValidator, LiveCheckTiming } from "./ownerOutboxDelivery.js";
 import type { JournalCutReadTiming } from "./storage/types.js";
-import { asRelayWrite, loopHeldBetween, recordLiveSubmit } from "./relayMainThreadTiming.js";
+import {
+  asRelayWrite,
+  loopHeldBetween,
+  recordLiveSubmit,
+  sampleRelayLoop,
+} from "./relayMainThreadTiming.js";
 import type {
   NamedFrameAppliedUpdate,
   NamedFrameHostSession,
@@ -49,11 +56,23 @@ import type {
 } from "./namedLiveFrameSession.js";
 import type { NamedFrameChanges } from "./liveHostChanges.js";
 import {
+  admitsWorkspaceLiveAuthorship,
   claimsPersonalAgent,
   deriveLiveAuthorSnapshot,
   personalLiveAuthorSnapshot,
   type TrustedLiveAccount,
 } from "./storage/liveAuthorSnapshot.js";
+
+/** What a live room reads from an editor's capture. Each read checks the editor's access first. */
+export interface NamedFrameRoomHost extends NamedFrameHostSession {
+  readonly room: {
+    readonly document: LiveDocumentKey;
+    /** The note as this editor is shown it. */
+    view(): LiveObjectBinding;
+    /** Who an edit from this connection is credited to, or null if it may not claim that. */
+    sender(context: LiveAuthorContext | undefined): LiveAuthorSnapshot | null;
+  };
+}
 import { RelayError } from "./errors.js";
 import { createLogLineCap } from "./logLineCap.js";
 export { createNamedFrameChanges, type NamedFrameChanges } from "./liveHostChanges.js";
@@ -118,15 +137,19 @@ interface SubmitTiming {
   readonly cut: JournalCutReadTiming;
   readonly check: LiveCheckTiming;
 }
-const newSubmitTiming = (startedAt: number): SubmitTiming => ({
-  startedAt,
-  queueMs: 0,
-  waitMs: 0,
-  freshMs: 0,
-  attempts: 0,
-  cut: { queryMs: 0, verifyMs: 0, copyMs: 0 },
-  check: { hopMs: 0, replayMs: 0, projectionMs: 0, workerOtherMs: 0 },
-});
+const newSubmitTiming = (): SubmitTiming => {
+  // A resting loop sampler starts first, so its samples cover this submission from its start.
+  sampleRelayLoop();
+  return {
+    startedAt: performance.now(),
+    queueMs: 0,
+    waitMs: 0,
+    freshMs: 0,
+    attempts: 0,
+    cut: { queryMs: 0, verifyMs: 0, copyMs: 0 },
+    check: { hopMs: 0, replayMs: 0, projectionMs: 0, workerOtherMs: 0 },
+  };
+};
 const SLOW_SUBMIT_MS = 500;
 const RESULT_WORDS: readonly string[] = [
   "success",
@@ -269,7 +292,7 @@ export function captureNamedLiveFrameHost(options: {
   reserveBytes?: (size: number) => () => void;
   validationBudget?: NamedFrameValidationBudget;
   fresh?: PersonalFreshRead;
-}): NamedFrameHostSession & { readonly ticket: RedeemedLiveTicket } {
+}): NamedFrameRoomHost & { readonly ticket: RedeemedLiveTicket } {
   const ticket = parseRedeemedLiveTicket(options.ticket);
   Object.freeze(ticket.binding.selectorPaths);
   Object.freeze(ticket.binding);
@@ -299,7 +322,7 @@ export function captureOwnerLiveFrameHost(options: {
   validate: CapacityLiveAdmissionValidator;
   reserveBytes?: (size: number) => () => void;
   validationBudget?: NamedFrameValidationBudget;
-}): NamedFrameHostSession {
+}): NamedFrameRoomHost {
   const binding = parseLiveObjectBinding(options.native.binding);
   const document = {
     workspaceId: binding.workspaceId,
@@ -335,7 +358,7 @@ function captureLiveFrameHost(options: {
   reserveBytes?: (size: number) => () => void;
   validationBudget?: NamedFrameValidationBudget;
   fresh?: PersonalFreshRead;
-}): NamedFrameHostSession {
+}): NamedFrameRoomHost {
   const binding = parseLiveObjectBinding(options.binding);
   Object.freeze(binding.selectorPaths);
   Object.freeze(binding);
@@ -520,6 +543,10 @@ function captureLiveFrameHost(options: {
         (!trustedAutomation || actor.kind !== "owner" || trustedAutomationPress)
       )
         return { result: "refused", reason: "authority-refused" };
+      // A live room saves on the owner's capture, naming the people whose edits the save holds.
+      const room = input.room;
+      if (room && (actor.kind !== "owner" || trustedAutomation || input.authorContext))
+        return { result: "refused", reason: "authority-refused" };
       // A personal agent's authorship comes from its authority, so any context it sends is ignored.
       const authorContext =
         input.authorContext === undefined || freshRead
@@ -598,6 +625,11 @@ function captureLiveFrameHost(options: {
               suffix: cut.suffix.map((row) => row.bytes),
               candidate: updateBytes,
               retainStateUpdate:
+                (room !== undefined &&
+                  liveAuthorCheckpointAnticipated(
+                    cut.suffix.map((row) => row.metadata),
+                    room.authors,
+                  )) ||
                 (actor.kind === "owner" &&
                   liveAuthorCheckpointAnticipated(
                     cut.suffix.map((row) => row.metadata),
@@ -668,6 +700,7 @@ function captureLiveFrameHost(options: {
               validation,
               updateBytes,
               receivedAtMs: Date.now(),
+              ...(room ? { room } : {}),
             }),
           );
           timing.committedAt = performance.now();
@@ -741,6 +774,36 @@ function captureLiveFrameHost(options: {
     invalidated: lifetime.signal,
     assertCurrent: () => check(),
     close,
+    room: {
+      document,
+      view() {
+        check();
+        return wireBinding!;
+      },
+      sender(context) {
+        check();
+        const authorContext =
+          context === undefined || freshRead ? undefined : parseLiveAuthorContext(context);
+        if (claimsPersonalAgent(authorContext)) return null;
+        const snapshot =
+          authority.principalKind === "personal"
+            ? personalLiveAuthorSnapshot(storage as StorageContext, authority)
+            : deriveLiveAuthorSnapshot(
+                storage as StorageContext,
+                authority,
+                authorContext,
+                trustedAccount,
+              );
+        return admitsWorkspaceLiveAuthorship(
+          storage as StorageContext,
+          document.workspaceId,
+          authority,
+          snapshot,
+        )
+          ? snapshot
+          : null;
+      },
+    },
     async openSync(clientVector, caller): Promise<NamedFrameSync> {
       check(caller);
       if (opened || clientVector.byteLength > bounds.maxClientVectorBytes)
@@ -837,7 +900,7 @@ function captureLiveFrameHost(options: {
       };
     },
     async submit(input, caller) {
-      const timing = newSubmitTiming(performance.now());
+      const timing = newSubmitTiming();
       const answer = await admitSubmission(input, caller, timing);
       reportLiveSubmit(document.objectId, actor.kind, timing, answer, performance.now());
       return answer;

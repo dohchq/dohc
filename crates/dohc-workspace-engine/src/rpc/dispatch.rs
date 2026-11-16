@@ -228,7 +228,10 @@ impl EngineService {
             }));
         }
         if let Some(action) = request.method.strip_prefix("ydoc.ownerStop.") {
-            if !matches!(action, "request" | "release" | "clear" | "list" | "retired") {
+            if !matches!(
+                action,
+                "request" | "release" | "clear" | "list" | "retired" | "pause" | "copyWritten"
+            ) {
                 return Err(WireError::new(
                     ErrorCode::InvalidParams,
                     "invalid-owner-stop-method",
@@ -266,6 +269,12 @@ impl EngineService {
         }
         if request.method == "ydoc.ownerDelivery.openDraft" {
             return self.owner_delivery_open_draft(ctx, request).await;
+        }
+        if request.method == "ydoc.ownerDelivery.pausedCopy" {
+            return self.owner_delivery_paused_copy(ctx, request).await;
+        }
+        if request.method == "ydoc.ownerDelivery.restartRows" {
+            return self.owner_delivery_restart_rows(ctx, request).await;
         }
         if matches!(
             request.method.as_str(),

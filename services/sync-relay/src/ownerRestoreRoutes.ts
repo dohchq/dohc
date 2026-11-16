@@ -5,6 +5,7 @@ import {
   parseLiveUpdateIdentifier,
 } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveRestorePreparation } from "./liveRestorePreparation";
+import type { LiveRooms } from "./liveRoom";
 import type { StopRestoreCancellationOutcome } from "./liveRestoreDelivery";
 import { badRequest, notFound, RelayError, relayError } from "./errors";
 import { ticketRecord } from "./liveTicketInputs";
@@ -59,6 +60,7 @@ function response(value: unknown, code = 200) {
 export function createOwnerRestoreRoutes(options: {
   storage: SyncRelayStorage;
   host(): OwnerRestoreHost | undefined;
+  rooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
   nowMs(): number;
   newId(): string;
   lookupUserEmail?: (userId: string) => Promise<string | null> | string | null;
@@ -265,7 +267,11 @@ export function createOwnerRestoreRoutes(options: {
     ticketRecord(raw, []);
     try {
       if (route.action === "prepare") {
-        storage.advanceStopRestoreFence(lookup!, options.nowMs());
+        // The fence closes the note, so every edit its live room took is saved first.
+        const fence = () => storage.advanceStopRestoreFence(lookup!, options.nowMs());
+        const rooms = options.rooms?.();
+        if (rooms) await rooms.saveFirst(read().document, fence, signal);
+        else fence();
         const result = await host.prepareRestore(lookup!, signal);
         return response({ status: read(), result });
       }

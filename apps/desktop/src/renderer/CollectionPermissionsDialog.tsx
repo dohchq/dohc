@@ -10,7 +10,6 @@ import {
 } from "../ipc/errorWords";
 import { bridge } from "./bridge";
 import { Overlay } from "./Overlay";
-import { CollectionMoveNote } from "./collections/CollectionMoveNote";
 import { inputClass } from "./collections/FieldForm";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
@@ -24,8 +23,6 @@ interface Props {
   onError(fallback: string, cause: unknown, retry?: (() => void) | null): void;
   /** Removes the row in Notices a report with this identity left. */
   onSettled?(identity: string): void;
-  /** A save moved this Collection to the server. */
-  onMoved?(): void;
 }
 type Target = { workspaceId: string; datasetPath: string; expectedDatasetId: string };
 type Change =
@@ -35,7 +32,6 @@ type Change =
       grantId: string;
       person: string;
       operationIds: string[];
-      moveToServer: boolean;
     };
 type Failure = { principalKey?: string; words: string };
 // One row in Notices for this Collection's failed access change, which the next change that succeeds removes,
@@ -55,7 +51,6 @@ async function changeAccess(target: Target, dataset: DatasetDescription, change:
             operationIds: change.operationIds,
             discover: true,
           },
-          ...(change.moveToServer ? { moveToServer: true as const } : {}),
         },
   );
   if (result.kind !== "grant-updated")
@@ -110,7 +105,6 @@ function Permissions({
   onClose,
   onError,
   onSettled,
-  onMoved,
   open,
   failure,
   onFailure,
@@ -131,8 +125,6 @@ function Permissions({
     locked = useRef(false);
   const target: Target = { workspaceId, datasetPath, expectedDatasetId: dataset.datasetId };
   const actions = dataset.operations.filter((operation) => operation.access !== "owner");
-  // Saving moves a Collection on this computer to the server, which its owner agrees to by saving.
-  const moving = place?.kind === "here" ? place.server : null;
   async function load(after?: string) {
     if (!alive.current || locked.current) return;
     const token = ++request.current;
@@ -184,7 +176,6 @@ function Permissions({
           grantId,
           person: recipient?.recipientEmail ?? recipient?.recipientUserId ?? grantId,
           operationIds: selected,
-          moveToServer: moving !== null,
         };
     const run = () => changeAccess(target, dataset, asked);
     locked.current = true;
@@ -194,7 +185,6 @@ function Permissions({
     try {
       await run();
       onSettled?.(changeIdentity(dataset.datasetId));
-      if (asked.principalKey === undefined && asked.moveToServer) onMoved?.();
       if (!alive.current || token !== request.current) return;
       setGrantId("");
       setSelected([]);
@@ -293,14 +283,10 @@ function Permissions({
               </p>
             ) : null}
           </fieldset>
-          {moving ? (
-            <CollectionMoveNote action="Saving" server={moving} />
-          ) : (
-            <p className="m-0 text-[12px] text-muted">
-              Saving replaces this person's allowed actions for this Collection. Source permissions
-              remain separate.
-            </p>
-          )}
+          <p className="m-0 text-[12px] text-muted">
+            Saving replaces this person's allowed actions for this Collection. Source permissions
+            remain separate.
+          </p>
           {/* aria-disabled, not disabled, while busy, so the pressed button keeps focus and can retry. */}
           <div>
             <p
@@ -316,7 +302,7 @@ function Permissions({
               aria-disabled={busy || undefined}
               className="aria-disabled:cursor-wait aria-disabled:opacity-50"
             >
-              {moving ? "Move and save access" : "Save access"}
+              Save access
             </PrimaryButton>
           </div>
         </form>

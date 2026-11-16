@@ -506,6 +506,7 @@ const WORKSPACE_DECODER_CASES: Array<{
       deferredWrites: [],
       keptFiles: [],
       captureRecoveries: [],
+      mergeRemovals: [],
       heldFiles: [],
       outsideChanges: [],
       retainedCopies: { count: 0, bytes: 0 },

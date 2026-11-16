@@ -910,12 +910,14 @@ fn append_local_update(
     actor_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     authors_admitted: bool,
+    elsewhere: Option<FromElsewhere<'_>>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     if let Some(actor_origin_id) = actor_origin_id {
         crate::validate_actor_origin_id(actor_origin_id)?;
     }
     // Dedup before the gate — `blob_seq_in_log`'s doc explains the order.
+    // A redelivered change was looked at when it first merged.
     if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {
         return Ok(AppendOutcome {
             settlement_requested: false,
@@ -928,19 +930,47 @@ fn append_local_update(
     let settlement_requested = !authors_admitted
         && crate::author_coverage::check_admission_in(conn, key, actor_origin_id, attribution)?;
     let base = load_doc_in(conn, key)?;
-    let (_, seq, record_facts) = append_and_index_update(
-        conn,
-        key,
-        marker.content_kind,
-        &base,
-        update,
-        sha,
-        index_frontmatter,
-        actor_origin_id,
-        attribution,
-        None,
-        now_ms,
-    )?;
+    let (seq, record_facts) = match elsewhere {
+        None => {
+            let (_, seq, record_facts) = append_and_index_update(
+                conn,
+                key,
+                marker.content_kind,
+                &base,
+                update,
+                sha,
+                index_frontmatter,
+                actor_origin_id,
+                attribution,
+                None,
+                now_ms,
+            )?;
+            (seq, record_facts)
+        }
+        Some(elsewhere) => {
+            let (projection, deletions) =
+                crate::replay_parity::validate_replay_parity_seeing_deletions(&base, update)?;
+            let appended = append_validated_and_index_update(
+                conn,
+                key,
+                marker.content_kind,
+                &base,
+                Some(&projection),
+                update,
+                sha,
+                index_frontmatter,
+                actor_origin_id,
+                attribution,
+                None,
+                true,
+                now_ms,
+            )?;
+            if let Some(removed) = projection.removed_text(&deletions, &base.state_vector()) {
+                keep_removed_text_in(conn, key, sha, &removed, elsewhere, now_ms)?;
+            }
+            appended
+        }
+    };
     Ok(AppendOutcome {
         settlement_requested,
         seq,
@@ -2576,6 +2606,40 @@ pub(crate) fn record_authorized_update_in_tx(
     authors_admitted: bool,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
+    record_merged_update_in_tx(
+        tx,
+        key,
+        update,
+        index_frontmatter,
+        actor_origin_id,
+        attribution,
+        authors_admitted,
+        None,
+        now_ms,
+    )
+}
+
+/// A live change from someone else, not this engine's own draft. Its merge
+/// keeps, as local History, text it removed that its author never saw.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FromElsewhere<'a> {
+    /// Moment author JSON for the change, when this engine knows who made it.
+    pub(crate) author_json: Option<&'a str>,
+}
+
+/// [`record_authorized_update_in_tx`], for a change `elsewhere` made.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_merged_update_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    update: &[u8],
+    index_frontmatter: bool,
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    authors_admitted: bool,
+    elsewhere: Option<FromElsewhere<'_>>,
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
     validate_update_bytes(update)?;
     let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     let sha = crate::hex_sha256(update);
@@ -2589,8 +2653,55 @@ pub(crate) fn record_authorized_update_in_tx(
         actor_origin_id,
         attribution,
         authors_admitted,
+        elsewhere,
         now_ms,
     )
+}
+
+/// Keep text a merge removed unseen as a History record on this engine only.
+/// The record names the change's author only when the change deleted the line;
+/// text that arrived inside a line an earlier change deleted names nobody.
+/// A note with no saved file yet has nowhere to keep it.
+fn keep_removed_text_in(
+    conn: &Connection,
+    key: &DocKey,
+    update_sha: &str,
+    removed: &crate::ydoc::RemovedText,
+    elsewhere: FromElsewhere<'_>,
+    now_ms: i64,
+) -> Result<(), CollabError> {
+    let domain = |error: dohc_engine_domain::DomainError| CollabError::Corrupt {
+        reason: format!("merge removal record failed: {error}"),
+    };
+    let saved = match dohc_engine_domain::store::recovery_snapshot_in(
+        conn,
+        &key.workspace_id,
+        &key.version_id,
+        &key.object_id,
+    ) {
+        Ok(Some(saved)) => saved,
+        Ok(None) | Err(dohc_engine_domain::DomainError::BinaryHeadNotText) => return Ok(()),
+        Err(error) => return Err(domain(error)),
+    };
+    let identity = format!(
+        "{}\0{}\0{}\0{update_sha}",
+        key.workspace_id, key.version_id, key.object_id
+    );
+    let moment_id = format!(
+        "moment-merge-removal-{}",
+        crate::hex_sha256(identity.as_bytes())
+    );
+    dohc_engine_domain::record_merge_removal_in(
+        conn,
+        &key.workspace_id,
+        &saved,
+        &removed.text,
+        &moment_id,
+        elsewhere.author_json.filter(|_| removed.deleted_by_change),
+        now_ms,
+    )
+    .map_err(domain)?;
+    Ok(())
 }
 
 /// Give an unclaimed rich document the schema version it lacks, in the

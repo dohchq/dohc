@@ -6,7 +6,6 @@ import { atomicCreateFile } from "../atomicReplaceFile";
 import { createTestScratch } from "../workspaces/testTemp";
 import { ipcErrorMessage } from "../renderer/ipcError";
 import { CollectionsRefusalError } from "../workspaces/collectionsHolder";
-import { ServerCollectionsUnavailableError } from "../workspaces/remoteDataset";
 import {
   ReservedWorkspaceIdError,
   stateFolderRefusal,
@@ -1009,38 +1008,6 @@ describe("error words", () => {
         ),
       ),
     ).toBeNull();
-  });
-
-  it("keeps where the Collections are apart from why the server list failed, and reports that list as before", () => {
-    const elsewhere = new CollectionsRefusalError({
-      kind: "elsewhere",
-      computer: { installId: "install-laptop", label: "Laptop" },
-      sameName: false,
-    });
-    const failed = new ServerCollectionsUnavailableError(elsewhere, new TypeError("fetch failed"));
-    expect(failed.elsewhere).toBe(elsewhere);
-    expect(failed.failure).toBe("TypeError: fetch failed");
-    for (const cause of [
-      new TypeError("fetch failed"),
-      new CollectionsRefusalError({ kind: "unclaimed" }),
-      new Error("Your server session changed. Try again."),
-    ]) {
-      expect(
-        readError(new Error(new ServerCollectionsUnavailableError(elsewhere, cause).failure)),
-      ).toEqual(readError(acrossIpc(cause, "desktop:dataset")));
-    }
-    expect(new ServerCollectionsUnavailableError(elsewhere, new Error()).failure).toBe("");
-    const returned = collectionsRefusalError({
-      kind: "server-unavailable",
-      words: elsewhere.message,
-      computer: "Laptop",
-      failure: failed.failure,
-    });
-    expect(readError(returned)).toMatchObject({
-      words: null,
-      cause: `ServerCollectionsUnavailableError: ${failed.message}`,
-    });
-    expect(readCollectionsRefusal(returned)).toBeNull();
   });
 
   it("carries a Collection's reopen wait across IPC as a number beside its code", () => {

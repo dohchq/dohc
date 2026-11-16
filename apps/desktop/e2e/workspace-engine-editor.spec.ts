@@ -152,7 +152,7 @@ async function restoreRestartTyping(
         workspaceId,
       ),
     )
-    .toEqual({ captureRecoveries: [] });
+    .toEqual({ captureRecoveries: [], mergeRemovals: [] });
   await expect(recoveryToast(page)).toHaveCount(0);
   await page.getByTestId("notice-center-toggle").click();
   await expect(

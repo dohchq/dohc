@@ -614,6 +614,8 @@
 
 mod alt;
 pub mod block;
+// dohc: see DOHC-PATCH.md.
+pub mod deleted_content;
 mod block_store;
 pub mod doc;
 mod event;

@@ -272,6 +272,7 @@ export const CHANNELS = {
   findAutomationCollection: "desktop:find-automation-collection",
   collectionAutomationsChanged: "desktop:collection-automations-changed",
   collectionRulesChanged: "desktop:collection-rules-changed",
+  collectionCopyChanged: "desktop:collection-copy-changed",
   // Button fields: main decides who may press and what runs, and tells the
   // pressing window how its run went.
   listAutomationButtons: "desktop:list-automation-buttons",

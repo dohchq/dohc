@@ -263,6 +263,9 @@ export function createNamedDesktopLiveCapture(options: {
         throw error;
       }
       active = true;
+      const stopRemoved = session.onRemovedText(({ text }) => {
+        if (!closed) input.onTextRemoved?.(text);
+      });
       let localTransaction = false;
       // Each update keeps the head null too, so a teammate's change to the source is judged, not left unknown.
       const update = (bytes: Uint8Array) => {
@@ -333,6 +336,7 @@ export function createNamedDesktopLiveCapture(options: {
           }
           closed = true;
           unsubscribe();
+          stopRemoved();
           credentials.signal.removeEventListener("abort", abort);
           session.doc.off("update", update);
           transport.close();

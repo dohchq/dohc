@@ -18,6 +18,7 @@ it("keeps admission limits opaque before a link's operation or file is authorize
   const storage = { unavailable: new AbortController().signal } as SyncRelayStorage;
   const route = createDatasetAppRoutes(host, storage, {
     nowMs: () => 1000,
+    publications: true,
     limits: { participant: { capacity: 1, refillPerSecond: 1 } },
   });
   const auth = { kind: "link" as const, capabilityHash: "cap", profileTokenHash: "profile" };

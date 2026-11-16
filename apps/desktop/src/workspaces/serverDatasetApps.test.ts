@@ -1,0 +1,501 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, expect, it } from "vitest";
+import { openedLocalState } from "../testing/preparedLocalState";
+import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
+import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
+import { unguardedCollections } from "../testing/collectionsHolder";
+import { parseAppPublicationCandidate } from "@dohc/security-contract/app-publication";
+import { AppBackendRuntimeError } from "@dohc/app-backend-runtime";
+import { datasetResponseAction, readDatasetResponse } from "../ipc/readDatasetResponse";
+import { markDatasetServerNotFound } from "../ipc/errorWords";
+import { compileClosedApp } from "./closedAppCompiler";
+import { APP_PUBLICATION_LIMITS } from "./ownerAppPublication";
+import { generateDatasetFormSources } from "./datasetFormGenerator";
+import { createLocalDatasetHost } from "./localDatasetHost";
+import { prepareLocalAppPublication } from "./ownerAppPublication";
+import { sendCollectionsUp } from "./collectionMove";
+import { createServerCollectionsTransport } from "./serverDatasetApps";
+import {
+  definition,
+  id,
+  operationSource,
+  revision,
+  schemaSql,
+  startTestRelay,
+} from "./serverCollectionsTestRelay";
+
+// DOHC_TRIP_TIMES=<round trip ms> also prints how long an app change and a
+// Collection's creation take over a network with that round trip.
+const roundTripMs = Number(process.env.DOHC_TRIP_TIMES ?? 0);
+
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
+
+async function computerWithApp(latencyMs = 0) {
+  const relay = await startTestRelay();
+  cleanups.push(() => relay.close());
+  await relay.activate();
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-server-app-"));
+  cleanups.push(() => rm(workspaceRoot, { recursive: true, force: true }));
+  await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
+  const trips: string[] = [];
+  // Requests the server has answered, and a wait a test can put before a request reaches it.
+  const answered: string[] = [];
+  const gate: { before?: (trip: string) => Promise<void> } = {};
+  const server = createServerCollectionsTransport("w", async (path, body, signal) => {
+    const trip = path.replace(/^\/sync\/w\/[^/]+\/[^/]+\//, "");
+    trips.push(trip);
+    if (latencyMs) await new Promise((resolve) => setTimeout(resolve, latencyMs));
+    await gate.before?.(trip);
+    const response = await fetch(`${relay.origin}${path}`, {
+      method: "POST",
+      headers: { authorization: "Bearer owner", "content-type": "application/json" },
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+    });
+    answered.push(trip);
+    // Read as main's transport reads the server's answer.
+    const value = (await readDatasetResponse(
+      response,
+      datasetResponseAction(path) ?? "describe",
+      new AbortController().signal,
+    )) as { code?: string } | null;
+    if (!response.ok)
+      throw markDatasetServerNotFound(
+        new Error(`${response.status} ${value?.code ?? ""}`),
+        response.status,
+        value,
+      );
+    return value;
+  });
+  const open = async () => {
+    const host = await createLocalDatasetHost({
+      holder: unguardedCollections,
+      localPersonId: () => "person-local",
+      workspaceId: "w",
+      workspaceRoot,
+      compile: createDatasetFixtureCompiler(),
+      collectionsServer: () => server,
+    });
+    cleanups.push(() => host.close());
+    return host;
+  };
+  const host = await open();
+  const files = new Map<string, string>([["data/dataset.json", JSON.stringify(definition)]]);
+  const generated = generateDatasetFormSources({
+    datasetPath: "data/dataset.json",
+    approvedRevision: revision,
+    tableId: id(2),
+    createOperationId: id(5),
+    appRoot: "app",
+    fieldIds: [id(4)],
+  });
+  for (const [path, source] of Object.entries(generated.files)) files.set(`app/${path}`, source);
+  const app = await prepareLocalAppPublication(
+    { workspaceId: "w", appRoot: "app" },
+    {
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      compile: compileClosedApp,
+      signal: new AbortController().signal,
+      assertCurrent() {},
+      resolveDatasetRevision: async () => revision,
+    },
+  );
+  const published = await host.apps.activate(app, new AbortController().signal);
+  const submit = (name: string, authorityRevision = published.authorityRevision) => ({
+    authorityRevision,
+    operation: "add",
+    idempotencyKey: `submit-${name}`,
+    input: { values: { [id(4)]: name } },
+  });
+  const names = async () =>
+    ((await (await relay.computer()).read()).result as Array<{ name: string }>).map(
+      (row) => row.name,
+    );
+  return { relay, server, host, open, app, published, submit, names, trips, answered, gate };
+}
+
+it("approves an app on this computer over a Collection on the workspace's server, and the server runs its changes as that app", async () => {
+  const f = await computerWithApp();
+  expect(
+    await f.host.apps.request(f.published.publicationId, "invoke", f.submit("Alex")),
+  ).toMatchObject({ replayed: false });
+  expect(await f.names()).toEqual(["Alex"]);
+
+  // The server holds the approval: an action outside it is refused there, not only here.
+  await expect(
+    f.server.request(f.published.publicationId, "invoke", {
+      ...f.submit("Blake"),
+      operation: "rename",
+      input: { id: 1, name: "Blake" },
+    }),
+  ).rejects.toThrow(/^40[04]/);
+  expect(await f.names()).toEqual(["Alex"]);
+}, 60_000);
+
+it("tells an app on this computer why the server refused its change", async () => {
+  const f = await computerWithApp();
+  const refused = f.host.apps.request(f.published.publicationId, "invoke", f.submit("Full"));
+  await expect(refused).rejects.toBeInstanceOf(AppBackendRuntimeError);
+  await expect(refused).rejects.toMatchObject({
+    refusal: { code: "full", message: "This list is full." },
+  });
+  expect(await f.names()).toEqual([]);
+}, 60_000);
+
+it("approves an app again after another computer replaces it on the server", async () => {
+  const f = await computerWithApp();
+  await f.server.withdraw(id(1), f.published.publicationId);
+  expect(
+    await f.host.apps.request(f.published.publicationId, "invoke", f.submit("Alex")),
+  ).toMatchObject({ replayed: false });
+  expect(await f.names()).toEqual(["Alex"]);
+}, 60_000);
+
+it("sends one request for an app's change on this computer", async () => {
+  const f = await computerWithApp();
+  f.trips.length = 0;
+  await f.host.apps.request(f.published.publicationId, "invoke", f.submit("Alex"));
+  await f.host.apps.request(f.published.publicationId, "invoke", f.submit("Blake"));
+  expect(f.trips).toEqual(["backend/invoke", "backend/invoke"]);
+}, 60_000);
+
+it("keeps working after another computer approves the same app", async () => {
+  const f = await computerWithApp();
+  // The other computer's approval of the same app, as it sends it to the server.
+  await f.server.approve(
+    parseAppPublicationCandidate(f.app.candidate, APP_PUBLICATION_LIMITS),
+    new AbortController().signal,
+  );
+  expect(
+    await f.host.apps.request(f.published.publicationId, "invoke", f.submit("Alex")),
+  ).toMatchObject({ replayed: false });
+  expect(await f.names()).toEqual(["Alex"]);
+}, 60_000);
+
+it("after a restart, gives the server this computer's approval again before the app's first change", async () => {
+  const f = await computerWithApp();
+  await f.host.close();
+  const reopened = await f.open();
+  expect(
+    await reopened.apps.request(f.published.publicationId, "invoke", f.submit("Casey")),
+  ).toMatchObject({ replayed: false });
+  expect(await f.names()).toEqual(["Casey"]);
+}, 60_000);
+
+it("withdrawing the app on this computer withdraws it on the server", async () => {
+  const f = await computerWithApp();
+  await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  await expect
+    .poll(() =>
+      f.server.request(f.published.publicationId, "invoke", f.submit("Drew", 1)).then(
+        () => "ran",
+        (error: Error) => error.message.slice(0, 3),
+      ),
+    )
+    .toBe("404");
+  expect(await f.names()).toEqual([]);
+}, 60_000);
+
+it("runs no change from an app withdrawn here while the change was on its way, and does not approve it again", async () => {
+  const f = await computerWithApp();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    f.gate.before = async (trip) => {
+      if (trip !== "backend/invoke") return;
+      f.gate.before = undefined;
+      resolve();
+      await new Promise<void>((go) => (release = go));
+    };
+  });
+  const change = f.host.apps.request(f.published.publicationId, "invoke", f.submit("Alex"));
+  change.catch(() => undefined);
+  await held;
+  f.answered.length = 0;
+  await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  // The server takes the withdrawal before the change reaches it.
+  await expect.poll(() => f.answered).toContain("binding");
+  release();
+  await expect(change).rejects.toThrow();
+  expect(await f.names()).toEqual([]);
+  // The server still refuses the app: nothing approved it again.
+  await expect(
+    f.server.request(f.published.publicationId, "invoke", f.submit("Drew", 1)),
+  ).rejects.toThrow(/^404/);
+  expect(await f.names()).toEqual([]);
+}, 60_000);
+
+it("withdraws the app on the server after an approval that was on its way when the owner withdrew it here", async () => {
+  const f = await computerWithApp();
+  await f.host.close();
+  const reopened = await f.open();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    // After a restart, the app's first change gives the server this computer's approval first.
+    f.gate.before = async (trip) => {
+      if (trip !== "binding") return;
+      f.gate.before = undefined;
+      resolve();
+      await new Promise<void>((go) => (release = go));
+    };
+  });
+  f.trips.length = 0;
+  const change = reopened.apps.request(f.published.publicationId, "invoke", f.submit("Alex"));
+  change.catch(() => undefined);
+  await held;
+  f.answered.length = 0;
+  await reopened.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  // A withdrawal sent at once reaches the server before the approval.
+  await expect
+    .poll(
+      () => f.answered.includes("binding") || f.trips.filter((t) => t === "binding").length === 1,
+    )
+    .toBe(true);
+  release();
+  await expect(change).rejects.toThrow();
+  await expect
+    .poll(
+      () =>
+        f.server.request(f.published.publicationId, "invoke", f.submit("Drew", 1)).then(
+          () => "ran",
+          (error: Error) => error.message.slice(0, 3),
+        ),
+      { timeout: 10_000 },
+    )
+    .toBe("404");
+  expect(await f.names()).toEqual([]);
+}, 60_000);
+
+it("withdraws the app on the server after every approval on its way, when two changes approve it again at once", async () => {
+  const f = await computerWithApp();
+  // Another computer replaced the approval, so both changes approve the app again.
+  await f.server.withdraw(id(1), f.published.publicationId);
+  const releases: Array<() => void> = [];
+  f.gate.before = async (trip) => {
+    if (trip !== "binding" || releases.length === 2) return;
+    await new Promise<void>((go) => releases.push(go));
+  };
+  f.trips.length = 0;
+  f.answered.length = 0;
+  const changes = ["Alex", "Blake"].map((name) =>
+    f.host.apps.request(f.published.publicationId, "invoke", f.submit(name)),
+  );
+  for (const change of changes) change.catch(() => undefined);
+  await expect.poll(() => releases.length).toBe(2);
+  await f.host.apps.withdraw(f.published.publicationId, f.published.authorityRevision);
+  const count = (trips: string[]) => trips.filter((trip) => trip === "binding").length;
+  releases[1]!();
+  // A withdrawal sent after the second approval reaches the server before the first.
+  await expect.poll(() => count(f.answered) >= (count(f.trips) === 2 ? 1 : 2)).toBe(true);
+  releases[0]!();
+  for (const change of changes) await expect(change).rejects.toThrow();
+  await expect
+    .poll(
+      () =>
+        f.server.request(f.published.publicationId, "invoke", f.submit("Drew", 1)).then(
+          () => "ran",
+          (error: Error) => error.message.slice(0, 3),
+        ),
+      { timeout: 10_000 },
+    )
+    .toBe("404");
+  expect(await f.names()).toEqual([]);
+}, 60_000);
+
+it("creates a Collection on the workspace's server from rules prepared here, and keeps none of it on this computer", async () => {
+  const f = await computerWithApp();
+  const prepared = await f.host.prepare({
+    descriptorPath: "dataset.json",
+    adapter: sourceCaptureAdapter(
+      new Map([
+        ["dataset.json", JSON.stringify({ ...definition, datasetId: id(9), name: "Second" })],
+        [definition.schemaPath, schemaSql],
+        [definition.operationsPath, operationSource],
+      ]),
+    ),
+  });
+  const approved = await f.host.approve({
+    preparationId: prepared.preparationId,
+    revisionSha256: prepared.revision.revisionSha256,
+  });
+  expect(approved.revisionSha256).toBe(prepared.revision.revisionSha256);
+  const computer = await f.relay.computer();
+  expect((await computer.data.list({})).datasets.map((dataset) => dataset.datasetId)).toEqual([
+    id(1),
+    id(9),
+  ]);
+  expect(f.host.keptDatasetIds()).toEqual([]);
+}, 60_000);
+
+it.runIf(roundTripMs > 0)(
+  "prints how long an app change and a Collection's creation take",
+  async () => {
+    const f = await computerWithApp(roundTripMs);
+    const median = (values: number[]) =>
+      Math.round(values.sort((a, b) => a - b)[Math.floor(values.length / 2)]! * 10) / 10;
+    const changes: number[] = [];
+    f.trips.length = 0;
+    for (let index = 0; index < 20; index++) {
+      const started = performance.now();
+      await f.host.apps.request(f.published.publicationId, "invoke", f.submit(`n${index}`));
+      changes.push(performance.now() - started);
+    }
+    const changeTrips = f.trips.length / 20;
+    const creations: number[] = [];
+    f.trips.length = 0;
+    for (let index = 0; index < 5; index++) {
+      const prepared = await f.host.prepare({
+        descriptorPath: "dataset.json",
+        adapter: sourceCaptureAdapter(
+          new Map([
+            ["dataset.json", JSON.stringify({ ...definition, datasetId: id(20 + index) })],
+            [definition.schemaPath, schemaSql],
+            [definition.operationsPath, operationSource],
+          ]),
+        ),
+      });
+      const started = performance.now();
+      await f.host.approve({
+        preparationId: prepared.preparationId,
+        revisionSha256: prepared.revision.revisionSha256,
+      });
+      creations.push(performance.now() - started);
+    }
+    console.log(
+      JSON.stringify({
+        roundTripMs,
+        appChange: { requests: changeTrips, medianMs: median(changes) },
+        creation: {
+          requests: f.trips.length / 5,
+          trips: f.trips.slice(0, 1),
+          medianMs: median(creations),
+        },
+      }),
+    );
+  },
+  300_000,
+);
+
+it("replays, on the server, an app's change this computer made before the Collection went up", async () => {
+  const relay = await startTestRelay();
+  cleanups.push(() => relay.close());
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-server-app-sent-"));
+  cleanups.push(() => rm(workspaceRoot, { recursive: true, force: true }));
+  await openedLocalState({ workspaceId: "w", rootPath: workspaceRoot });
+  const send = async (path: string, init: RequestInit) => {
+    const response = await fetch(`${relay.origin}${path}`, {
+      ...init,
+      headers: { ...Object.fromEntries(new Headers(init.headers)), authorization: "Bearer owner" },
+      ...(init.body instanceof ReadableStream ? { duplex: "half" as const } : {}),
+    });
+    // Read as main's transport reads the server's answer.
+    const value = (await readDatasetResponse(
+      response,
+      datasetResponseAction(path) ?? "describe",
+      new AbortController().signal,
+    )) as { code?: string } | null;
+    if (!response.ok)
+      throw markDatasetServerNotFound(
+        new Error(`${response.status} ${value?.code ?? ""}`),
+        response.status,
+        value,
+      );
+    return value;
+  };
+  const server = createServerCollectionsTransport("w", (path, body, signal) =>
+    send(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+    }),
+  );
+  let syncing = false;
+  const host = await createLocalDatasetHost({
+    holder: unguardedCollections,
+    localPersonId: () => "person-local",
+    workspaceId: "w",
+    workspaceRoot,
+    compile: createDatasetFixtureCompiler(),
+    collectionsServer: () => (syncing ? server : null),
+  });
+  cleanups.push(() => host.close());
+  const files = new Map<string, string>([
+    ["data/dataset.json", JSON.stringify(definition)],
+    [definition.schemaPath, schemaSql],
+    [definition.operationsPath, operationSource],
+  ]);
+  const prepared = await host.prepare({
+    descriptorPath: "data/dataset.json",
+    adapter: sourceCaptureAdapter(files),
+  });
+  await host.approve({
+    preparationId: prepared.preparationId,
+    revisionSha256: prepared.revision.revisionSha256,
+  });
+  const generated = generateDatasetFormSources({
+    datasetPath: "data/dataset.json",
+    approvedRevision: revision,
+    tableId: id(2),
+    createOperationId: id(5),
+    appRoot: "app",
+    fieldIds: [id(4)],
+  });
+  for (const [path, source] of Object.entries(generated.files)) files.set(`app/${path}`, source);
+  const app = await prepareLocalAppPublication(
+    { workspaceId: "w", appRoot: "app" },
+    {
+      deferredWrites: [],
+      adapter: sourceCaptureAdapter(files),
+      compile: compileClosedApp,
+      signal: new AbortController().signal,
+      assertCurrent() {},
+      resolveDatasetRevision: async () => revision,
+    },
+  );
+  const published = await host.apps.activate(app, new AbortController().signal);
+  const submit = {
+    authorityRevision: published.authorityRevision,
+    operation: "add",
+    idempotencyKey: "submit-before",
+    input: { values: { [id(4)]: "Alex" } },
+  };
+  expect(await host.apps.request(published.publicationId, "invoke", submit)).toMatchObject({
+    replayed: false,
+  });
+
+  const credentials = {
+    serverUrl: relay.origin,
+    relayUrl: relay.origin,
+    email: "owner@example.test",
+    userId: "owner",
+    token: "owner",
+  };
+  const session = { credentials, credentialGeneration: 1 };
+  expect(
+    await sendCollectionsUp({
+      local: host,
+      workspaceId: "w",
+      server: async () => session,
+      currentCredentialGeneration: () => 1,
+      relayStream: (_credentials, path, init) => send(path, init),
+      signal: new AbortController().signal,
+    }),
+  ).toEqual(new Map());
+  syncing = true;
+
+  // A retry of the same change, as after a lost answer, finds the change the server now holds.
+  expect(await host.apps.request(published.publicationId, "invoke", submit)).toMatchObject({
+    replayed: true,
+  });
+  expect(
+    ((await (await relay.computer()).read()).result as Array<{ name: string }>).map(
+      (row) => row.name,
+    ),
+  ).toEqual(["Alex"]);
+}, 60_000);

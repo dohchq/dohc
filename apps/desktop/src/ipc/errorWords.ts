@@ -635,29 +635,12 @@ export const LASTING_COLLECTIONS_REFUSALS: readonly CollectionsRefusalKind[] = [
 /** The control that keeps a workspace's Collections on this computer. */
 export const USE_THIS_COMPUTER = "Use this computer";
 
-/**
- * Where another computer keeps a workspace's Collections, and the two ways
- * on. `others`: this computer lists some of them from its server.
- */
-export function collectionsElsewhereWords(
-  computer: { label: string; sameName: boolean },
-  others = false,
-): string {
+/** Where another computer keeps a workspace's Collections, and the two ways on. */
+export function collectionsElsewhereWords(computer: { label: string; sameName: boolean }): string {
   const where = computer.sameName
     ? `${computer.label}, another installation of dohc with this computer's name`
     : computer.label;
-  return `${others ? "Other" : "These"} Collections are on ${where}. Open this workspace there to use them, or to move them to a server.`;
-}
-
-/**
- * The computer that keeps the Collections this computer doesn't list, whether
- * it lists others, and the sentence that says so. `computer` is null when the
- * error that said so named none.
- */
-export interface CollectionsElsewhere {
-  computer: string | null;
-  others: boolean;
-  words: string;
+  return `These Collections are on ${where}. Open this workspace there to use them, or to move them to a server.`;
 }
 
 /**
@@ -726,10 +709,6 @@ export function readCollectionsRefusal(error: unknown): CollectionsRefusalRead |
 
 /** A list main refused, as the error a report reads it from. */
 export function collectionsRefusalError(refusal: DatasetListRefusal): Error {
-  if (refusal.kind === "server-unavailable")
-    return Object.assign(new Error(`${refusal.words}\n${refusal.failure}`), {
-      name: "ServerCollectionsUnavailableError",
-    });
   return Object.assign(new Error(refusal.words), {
     name: "CollectionsRefusalError",
     code: `${COLLECTIONS_REFUSAL_CODE}${refusal.kind}`,

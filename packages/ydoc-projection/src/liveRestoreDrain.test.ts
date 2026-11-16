@@ -1740,7 +1740,8 @@ type HostedStorage = Parameters<typeof createServiceHostFeed>[0];
 async function pushRestoreSettlement(
   storage: HostedStorage,
   { payload, record }: Pick<ReturnType<typeof restorePublication>, "payload" | "record">,
-  retiring = true,
+  // A retiring note's output stays ordinary while the note stays at its path.
+  relayAdmission?: "departed",
 ) {
   const feed = createServiceHostFeed(storage, { wakeLog() {} }),
     originId = `${SERVICE_HOST_ORIGIN_PREFIX}native`;
@@ -1772,12 +1773,13 @@ async function pushRestoreSettlement(
     }),
   );
   expect(answer.status).toBe(200);
-  expect(
-    storage.fetchLogCoordinate({ workspaceId: "workspace", originId, originSeq: 0 }),
-  ).toMatchObject({
-    ...(retiring ? { relayAdmission: "departed" } : {}),
-    settlementAdmission: { status: "accepted" },
+  const coordinate = storage.fetchLogCoordinate({
+    workspaceId: "workspace",
+    originId,
+    originSeq: 0,
   });
+  expect(coordinate).toMatchObject({ settlementAdmission: { status: "accepted" } });
+  expect(coordinate?.relayAdmission).toBe(relayAdmission);
 }
 function carriedRetirement(
   f: Pick<Awaited<ReturnType<typeof admittedRestoreFixture>>, "admitted" | "document" | "raw">,
@@ -2837,7 +2839,7 @@ it("finishes an admitted restore at its frozen path after its file is renamed", 
         guard() {},
       });
     expect(complete()).toEqual({ status: "pending", reason: "restore" });
-    await pushRestoreSettlement(reopened, publication);
+    await pushRestoreSettlement(reopened, publication, "departed");
     expect(db.prepare("SELECT * FROM sync_relay_object_moments ORDER BY relay_seq").all()).toEqual(
       moments,
     );

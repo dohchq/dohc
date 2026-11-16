@@ -228,6 +228,10 @@ async function harness() {
   const enable = vi.fn<Dependencies["activity"]["enableCloud"]>(async () => {
     steps.push("enable");
   });
+  const sendUp = vi.fn<Dependencies["sendCollectionsUp"]>(async () => {
+    steps.push("collections");
+  });
+  const sendUpLater = vi.fn<Dependencies["sendCollectionsUpLater"]>();
   const notify = vi.fn(() => {
     steps.push("notify");
   });
@@ -369,6 +373,8 @@ async function harness() {
     enrollWorkspaceKeyEnvelope: enroll,
     installWorkspaceDataKey: installDataKey,
     setWorkspaceRemote: setRemote,
+    sendCollectionsUp: sendUp,
+    sendCollectionsUpLater: sendUpLater,
     usableRoot: roots.usableRoot,
     readdir,
     mkdir,
@@ -429,6 +435,8 @@ async function harness() {
     bindRelay,
     setRemote,
     enable,
+    sendUp,
+    sendUpLater,
     notify,
     changing,
     ready,
@@ -767,7 +775,7 @@ describe("registered cloud handlers", () => {
     expect(h.enroll).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: "existing", dataKey: null, passphrase: "phrase" }),
     );
-    expect(h.steps).toEqual(["claim", "enroll", "remote", "enable"]);
+    expect(h.steps).toEqual(["claim", "enroll", "collections", "remote", "enable"]);
   });
 
   it("starts sync only after the remote and its folder record are written, and not when that write fails", async () => {
@@ -789,6 +797,41 @@ describe("registered cloud handlers", () => {
     expect(h.enable).not.toHaveBeenCalled();
   });
 
+  it("sends a Collection made on this computer while the others went up, once the workspace syncs", async () => {
+    const h = await harness();
+    // Where a new Collection goes follows the workspace's remote, as in main.
+    const kept = new Set(["first"]),
+      server = new Set<string>();
+    const make = (id: string) => (h.registry.get("existing")!.remote ? server : kept).add(id);
+    const send = () => {
+      for (const id of kept) server.add(id);
+      kept.clear();
+    };
+    h.sendUp.mockImplementationOnce(async () => {
+      const going = [...kept];
+      make("made-meanwhile");
+      for (const id of going) {
+        server.add(id);
+        kept.delete(id);
+      }
+    });
+    h.sendUpLater.mockImplementation(() => void Promise.resolve().then(send));
+    await h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" });
+    await vi.waitFor(() => expect([...server].sort()).toEqual(["first", "made-meanwhile"]));
+    expect(kept.size).toBe(0);
+  });
+
+  it("doesn't sync a workspace while a Collection this computer keeps can't go to the server", async () => {
+    const h = await harness();
+    const failure = new Error("The server already has this Collection.");
+    h.sendUp.mockRejectedValueOnce(failure);
+    await expect(h.invoke(CHANNELS.cloudEnableSync, { workspaceId: "existing" })).rejects.toBe(
+      failure,
+    );
+    expect(h.setRemote).not.toHaveBeenCalled();
+    expect(h.enable).not.toHaveBeenCalled();
+  });
+
   it("does not start sync for a window that switched workspaces while the remote was written", async () => {
     const h = await harness();
     const started = deferred();
@@ -804,7 +847,7 @@ describe("registered cloud handlers", () => {
     h.retireRenderer();
     held.resolve();
     await expect(result).rejects.toThrow();
-    expect(h.steps).toEqual(["claim", "enroll", "remote"]);
+    expect(h.steps).toEqual(["claim", "enroll", "collections", "remote"]);
     expect(h.enable).not.toHaveBeenCalled();
   });
 

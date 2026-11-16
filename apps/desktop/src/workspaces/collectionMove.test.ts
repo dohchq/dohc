@@ -2,6 +2,7 @@ import { expect, it, vi } from "vitest";
 import { CollectionMoveUnfinishedError } from "../ipc/errorWords";
 import {
   collectionPlace,
+  createCollectionsSendUp,
   finishedTransfer,
   movedTransfer,
   moveCollectionToServer,
@@ -14,43 +15,12 @@ const transfer = <State extends DatasetTransferStatus["state"]>(state: State) =>
     state: State;
   };
 
-it("says where a Collection is, and asks what the server runs only for one with automations", async () => {
-  const runs = vi.fn(async () => "off" as const);
-  const counts = (automations: number) => async () => ({ automations, scheduledAutomations: 0 });
-  await expect(
-    collectionPlace({
-      transfer: transfer("imported"),
-      relayUrl: null,
-      automations: counts(0),
-      runs,
-    }),
-  ).resolves.toEqual({ kind: "server", host: "sync.example.test" });
-  await expect(
-    collectionPlace({ transfer: null, relayUrl: null, automations: counts(2), runs }),
-  ).resolves.toEqual({ kind: "here", server: null });
-  await expect(
-    collectionPlace({
-      transfer: null,
-      relayUrl: "https://sync.example.test/",
-      automations: counts(0),
-      runs,
-    }),
-  ).resolves.toEqual({
-    kind: "here",
-    server: { host: "sync.example.test", runs: null, automations: 0, scheduledAutomations: 0 },
+it("says a Collection is on the server its finished move reached, and otherwise here", () => {
+  expect(collectionPlace(transfer("imported"))).toEqual({
+    kind: "server",
+    host: "sync.example.test",
   });
-  expect(runs).not.toHaveBeenCalled();
-  await expect(
-    collectionPlace({
-      transfer: null,
-      relayUrl: "https://sync.example.test/",
-      automations: counts(2),
-      runs,
-    }),
-  ).resolves.toEqual({
-    kind: "here",
-    server: { host: "sync.example.test", runs: "off", automations: 2, scheduledAutomations: 0 },
-  });
+  expect(collectionPlace(null)).toEqual({ kind: "here" });
 });
 
 function moving(
@@ -339,4 +309,62 @@ it("waits for the move another read resumed while this one asked for the session
     cause: stopped,
   });
   expect(local.transferToShared).toHaveBeenCalledTimes(1);
+});
+
+it("lets a read of a Collection that went up go on while another is still going up", async () => {
+  const looks = new Map<string, number>();
+  let stop!: (error: Error) => void;
+  const stuck = new Promise<never>((_resolve, reject) => (stop = reject));
+  const sendUp = createCollectionsSendUp({
+    open: async () =>
+      ({
+        keptDatasetIds: () => ["a", "b"],
+        // "a" arrives as soon as the send reaches it; "b" waits for a server that doesn't answer.
+        transferStatus(datasetId: string) {
+          const seen = looks.get(datasetId) ?? 0;
+          looks.set(datasetId, seen + 1);
+          return datasetId === "a" && seen > 0 ? transfer("imported") : null;
+        },
+        transferInFlight: () => null,
+        transferToShared() {},
+      }) as never,
+    session: () => ({ server: () => stuck, signal: new AbortController().signal }) as never,
+    reported() {},
+  });
+  const done = sendUp.start();
+  await expect(sendUp.sent("a", new AbortController().signal)).resolves.toBeUndefined();
+  const waiting = new AbortController();
+  const b = sendUp.sent("b", waiting.signal);
+  waiting.abort(Error("closed"));
+  await expect(b).rejects.toThrow("closed");
+  stop(Error("stopped"));
+  await done;
+});
+
+it("starts a send that couldn't open this computer's store once more before a read goes to the server", async () => {
+  const unreadable = Error("The store didn't open.");
+  const store = {
+    keptDatasetIds: () => ["a"],
+    transferStatus: () => null,
+    transferInFlight: () => null,
+    transferToShared() {},
+  } as never;
+  let refuse!: (error: Error) => void;
+  const refused = new Promise<never>((_resolve, reject) => (refuse = reject));
+  const session = () => ({ server: () => refused, signal: new AbortController().signal }) as never;
+  const open = vi.fn(async () => store).mockRejectedValueOnce(unreadable);
+  const sendUp = createCollectionsSendUp({ open, session, reported() {} });
+  await expect(sendUp.start()).rejects.toBe(unreadable);
+  const read = sendUp.sent("a", new AbortController().signal);
+  await vi.waitFor(() => expect(open).toHaveBeenCalledTimes(2));
+  // Only the second send can give the read this server's refusal.
+  refuse(Error("The server refused."));
+  await expect(read).rejects.toThrow("The server refused.");
+
+  // A store that still doesn't open leaves the read to the server, where Collections that went up are.
+  const broken = vi.fn(async () => store).mockRejectedValue(unreadable);
+  const stuck = createCollectionsSendUp({ open: broken, session, reported() {} });
+  await expect(stuck.start()).rejects.toBe(unreadable);
+  await expect(stuck.sent("a", new AbortController().signal)).resolves.toBeUndefined();
+  expect(broken).toHaveBeenCalledTimes(2);
 });

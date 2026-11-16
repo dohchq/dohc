@@ -694,7 +694,9 @@ describe("relayFetchWithTimeout", () => {
 
   it.each([
     ["a read", "GET", `/sync/ws-1/datasets/${crypto.randomUUID()}/replica/capture`],
+    ["a kept copy's history", "POST", `/sync/ws-1/datasets/${crypto.randomUUID()}/replica/page`],
     ["a change", "POST", `/sync/ws-1/datasets/${crypto.randomUUID()}/invoke`],
+    ["an app's change", "POST", `/sync/ws-1/app-publications/${"a".repeat(64)}/backend/invoke`],
     [
       "a recovery import's status",
       "GET",
@@ -705,36 +707,19 @@ describe("relayFetchWithTimeout", () => {
     async (_kind, method, path) => {
       await using server = await silentServer();
       const caller = new AbortController();
-      const request = relayFetchWithTimeout(
-        100,
-        fetch,
-        200,
-      )(server.url(path), {
+      const started = performance.now();
+      const request = relayFetchWithTimeout(100)(server.url(path), {
         method,
         ...(method === "POST" ? { body: "{}" } : {}),
         signal: caller.signal,
       });
       // A network failure, so reads use the kept copy and changes fail as they do offline.
       await expect(request).rejects.toBeInstanceOf(TypeError);
+      // A change waits no longer than a read.
+      expect(performance.now() - started).toBeLessThan(1_000);
       expect(caller.signal.aborted).toBe(false);
     },
   );
-
-  it("waits for a change past the read limit, so the server can finish it", async () => {
-    await using server = await silentServer((_path, response) => {
-      setTimeout(() => response.end('{"ok":true}'), 250);
-    });
-    const response = await relayFetchWithTimeout(
-      100,
-      fetch,
-      2_000,
-    )(server.url(`/sync/ws-1/datasets/${crypto.randomUUID()}/invoke`), {
-      method: "POST",
-      body: "{}",
-      signal: new AbortController().signal,
-    });
-    expect(await response.json()).toEqual({ ok: true });
-  });
 
   it("does not cut off a Collection response whose body takes longer than the limit", async () => {
     await using server = await silentServer((_path, response) => {
@@ -747,6 +732,43 @@ describe("relayFetchWithTimeout", () => {
       { signal: new AbortController().signal },
     );
     expect(await response.json()).toEqual({ rows: [1, 2] });
+  });
+
+  it("gives up on a change whose answer starts and then stops, at the limit", async () => {
+    await using server = await silentServer((_path, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write('{"result":');
+    });
+    const started = performance.now();
+    const response = await relayFetchWithTimeout(100)(
+      server.url(`/sync/ws-1/datasets/${crypto.randomUUID()}/invoke`),
+      { method: "POST", body: "{}", signal: new AbortController().signal },
+    );
+    const stopped = new Promise<never>((_resolve, reject) =>
+      setTimeout(() => reject(new Error("It waited past the limit.")), 1_000),
+    );
+    await expect(Promise.race([response.json(), stopped])).rejects.toBeInstanceOf(TypeError);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  // A file goes up in the request, or a migration runs, before the server
+  // answers. A named recipient's requests keep their earlier limit.
+  it.each([
+    ["upload", `/sync/ws-1/datasets/${crypto.randomUUID()}/upload`],
+    ["approve-migration", `/sync/ws-1/datasets/${crypto.randomUUID()}/approve-migration`],
+    ["file", `/sync/ws-1/datasets/${crypto.randomUUID()}/file`],
+    ["archive", `/sync/ws-1/datasets/${crypto.randomUUID()}/archive`],
+    ["recipient's invoke", `/sync/shares/share-1/datasets/${crypto.randomUUID()}/invoke`],
+  ])("gives a Collection's %s request longer than a read", async (_action, path) => {
+    await using server = await silentServer((_path, response) => {
+      setTimeout(() => response.end("{}"), 250);
+    });
+    const response = await relayFetchWithTimeout(100)(server.url(path), {
+      method: "POST",
+      body: "{}",
+      signal: new AbortController().signal,
+    });
+    expect(response.status).toBe(200);
   });
 
   // The server answers a recovery export once it has prepared the file, and an
@@ -763,11 +785,7 @@ describe("relayFetchWithTimeout", () => {
     await using server = await silentServer((_path, response) => {
       setTimeout(() => response.end("{}"), 250);
     });
-    const response = await relayFetchWithTimeout(
-      100,
-      fetch,
-      100,
-    )(server.url(path), {
+    const response = await relayFetchWithTimeout(100)(server.url(path), {
       method,
       ...(method === "POST" ? { body: "{}" } : {}),
       signal: new AbortController().signal,

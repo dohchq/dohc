@@ -838,7 +838,7 @@ describe("a Data Collection's table", () => {
     expect(sent(invoke, edit)).toHaveLength(4);
   });
 
-  it("keeps a refused change's value on its cell with the reason, and opens the next edit from what was typed", async () => {
+  it("shows the true value on a refused change's cell with the reason, and opens the next edit from what was typed", async () => {
     const refusal = Object.assign(new Error("This record changed. Refresh the table."), {
       code: "operation_refused",
     });
@@ -855,7 +855,8 @@ describe("a Data Collection's table", () => {
     expect(why("Name")).toBe(
       "The Collection refused this change. This record changed. Refresh the table.",
     );
-    expect(cell("Name").textContent).toContain("Alicia");
+    expect(cell("Name").textContent).toContain("Alice");
+    expect(cell("Name").textContent).not.toContain("Alicia");
     expect(onError).toHaveBeenCalledWith("The Collection refused this change.", refusal, null);
     // A refusal is an answer, so nothing offers to send it again.
     expect(within(cell("Name")).queryByRole("button", { name: "Try again" })).toBeNull();
@@ -898,7 +899,7 @@ describe("a Data Collection's table", () => {
     expect(document.activeElement).toBe(input);
   });
 
-  it("keeps a queued change while the Collection is offline, says so on its cell, and sends it once it is back", async () => {
+  it("refuses a change not yet sent when the Collection goes offline, shows the true value with why, and keeps nothing to send later", async () => {
     const first = deferred<{ result: AppBackendJson }>();
     const invoke = vi.fn((request: TransactionalInvoke): Promise<{ result: AppBackendJson }> =>
       request.operationId === read
@@ -907,25 +908,26 @@ describe("a Data Collection's table", () => {
           ? first.promise
           : Promise.resolve({ result: receipt(5, 2) }),
     );
-    const { props, rerender } = setup({ invoke });
+    const { props, rerender, onError } = setup({ invoke });
     await screen.findByText("Alice");
     type("Name", "Alicia");
     type("Name", "Beatrice", 1);
     expect(sent(invoke, edit)).toHaveLength(1);
     rerender(<TransactionalCollectionPage {...props} copy={{ offline: true, savedAtMs: 1 }} />);
-    expect(mark("Name", 1)).toBe("waiting");
-    expect(why("Name", 1)).toBe("Waiting for the Collection to come back online");
+    const offline =
+      "dohc didn't save this change. This Collection is read-only until it is back online.";
+    expect(mark("Name", 1)).toBe("refused");
+    expect(why("Name", 1)).toBe(offline);
+    expect(cell("Name", 1).textContent).toContain("Bea");
+    expect(cell("Name", 1).textContent).not.toContain("Beatrice");
+    expect(onError).toHaveBeenCalledWith(offline, expect.any(Error), null);
     fireEvent.click(cell("Amount"));
     expect(editor()).toBeNull();
+    // The change already sent still ends as the Collection answers.
     await act(async () => first.resolve({ result: receipt() }));
-    expect(sent(invoke, edit)).toHaveLength(1);
     rerender(<TransactionalCollectionPage {...props} copy={{ offline: false, savedAtMs: 2 }} />);
-    await waitFor(() => expect(sent(invoke, edit)).toHaveLength(2));
-    expect(sent(invoke, edit)[1]!.input).toEqual({
-      id: 2,
-      expectedVersion: 4,
-      values: { [name]: "Beatrice" },
-    });
+    await waitFor(() => expect(sent(invoke, read).length).toBeGreaterThan(1));
+    expect(sent(invoke, edit)).toHaveLength(1);
   });
 
   it("keeps changes not sent or not confirmed when its page closes and opens again", async () => {
@@ -1019,7 +1021,8 @@ describe("a Data Collection's table", () => {
       );
       expect(result.onNotice).not.toHaveBeenCalled();
       render(<TransactionalCollectionPage {...result.props} />);
-      await screen.findByText("Alicia");
+      // A refused change shows the true value, with why. One that may have saved shows what was sent.
+      await screen.findByText(failure.message === "Lost reply" ? "Alicia" : "Alice");
       expect(mark("Name")).toBe(failure.message === "Lost reply" ? "unconfirmed" : "refused");
     },
   );
@@ -1752,7 +1755,7 @@ describe("a Data Collection's record panel and forms", () => {
     await waitFor(() => expect([propertyMark("Amount"), mark("Amount")]).toEqual([null, null]));
   });
 
-  it("keeps a refused value on the field and on its cell, with why, until it is dismissed", async () => {
+  it("shows the true value on a refused change's field and cell, with why, until it is dismissed", async () => {
     const invoke = vi.fn(async (request: TransactionalInvoke) => {
       if (request.operationId === read) return { result: page() };
       throw Object.assign(new Error("This record changed. Refresh the table."), {
@@ -1767,7 +1770,9 @@ describe("a Data Collection's record panel and forms", () => {
     expect(within(property("Amount")).getByRole("note").textContent).toContain(
       "The Collection refused this change. This record changed. Refresh the table.",
     );
-    expect(property("Amount").textContent).toContain("9");
+    // The field and its cell show the true value.
+    expect(property("Amount").textContent).toContain("5");
+    expect(property("Amount").textContent).not.toContain("9");
     expect(mark("Amount")).toBe("refused");
     expect(onError).toHaveBeenCalledWith(
       "The Collection refused this change.",

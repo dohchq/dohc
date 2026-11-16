@@ -11,6 +11,25 @@ Choose which approved create operation and public fields the form can use.
 Submissions appear in the same Collection. Private fields remain outside the form's grant.
 If the form includes a related-record field, first [offer choices for it](#offer-choices-for-a-related-record).
 
+### Where the records live
+
+If the workspace syncs with a server, dohc creates the Collection on that server.
+Each of your computers then uses the same records. Giving a person access or publishing an app moves nothing.
+A change shows at once and waits for the server to confirm it. If the server refuses the change, dohc says why and shows the saved value.
+Each computer keeps a copy of the records it opened. Offline, you can read that copy, but dohc refuses changes until the server is reachable again.
+If sync is paused, the Collections stay on the server.
+If the workspace has no server, its Collections stay on one computer.
+
+When you start syncing a workspace, dohc first sends the Collections that computer kept to the server, once.
+If one can't go, the workspace doesn't start syncing, and dohc says why.
+The Collections that went stay on the server, and this computer opens them there.
+One whose send stopped partway finishes going to that server when you open it. The rest stay on this computer until you start syncing again.
+If the server already has a Collection with the same ID, dohc keeps this computer's records and replaces nothing.
+
+To take a Collection off the server, download its recovery export and restore it in a workspace that does not sync.
+dohc refuses a restore in a workspace that syncs.
+See [Export and recover](#export-and-recover).
+
 The desktop compiles Collection actions on Windows x64, Apple silicon Macs, and Linux.
 Opening or publishing an app that uses them requires Windows x64, an Apple silicon Mac running macOS 13.5 or later, or Linux x64 with Linux 5.13 or later and Landlock enabled.
 
@@ -55,9 +74,8 @@ dohc app prepare '{"workspaceId":"WORKSPACE_ID","appRoot":"fundraiser","shareId"
 dohc app approve '{"workspaceId":"WORKSPACE_ID","approvalId":"APPROVAL_ID","candidateDigest":"CANDIDATE_DIGEST"}'
 ```
 
-Before shared writes begin, dohc moves the dataset to the shared host and stops local writes.
-Keep the shared host online while friends submit.
-If the transfer fails, resume it through dohc. Do not create another writer.
+The Collection is already on the workspace's server, so publishing moves nothing.
+Keep the server online while friends submit.
 Dataset records and uploaded files do not require ordinary file-share selectors.
 
 Friends open the share link and launch the app. The browser broker supplies only granted operations and files.
@@ -331,8 +349,8 @@ It receives a new host epoch. Saved sharing grants remain inactive; review and a
 A failed claim can retry with the same identity fields, including after restarting dohc.
 Before claiming, cancel with `dataset discardRecovery` and the returned `transferId`.
 
-To recover onto a clean shared host, first restore locally, then publish the app through the normal sharing flow.
-That transfer stops local writes before the server accepts the dataset. It preserves attachments and retry receipts.
+To recover onto a clean server, restore in a workspace that does not sync, then start syncing it.
+dohc stops changes on this computer before the server accepts the Collection. The transfer keeps attachments and retry receipts.
 The shared target must have neither an existing copy nor a permanent-deletion record for this dataset.
 Recovery never promotes a downloaded replica or replaces a running shared authority.
 

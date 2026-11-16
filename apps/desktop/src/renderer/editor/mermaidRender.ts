@@ -369,6 +369,18 @@ function focusMermaidSource(view: EditorView, blockPos: number): void {
  *  the fence's text has not changed, so nothing renders it again. */
 const paintedResults = new WeakMap<EditorView, Map<string, MermaidRenderResult>>();
 
+/** Each view's watch on its previews, for which of them are near what shows,
+ *  and the watch each preview is under, to end it with the preview. */
+const previewWatches = new WeakMap<EditorView, IntersectionObserver>();
+const watchOfPreview = new WeakMap<Node, IntersectionObserver>();
+
+function watchPreview(view: EditorView, preview: Element): void {
+  const watch = previewWatches.get(view);
+  if (!watch) return;
+  watch.observe(preview);
+  watchOfPreview.set(preview, watch);
+}
+
 function buildMermaidPreviewWidget(id: string): (view: EditorView) => HTMLElement {
   return (view) => {
     const container = document.createElement("div");
@@ -398,6 +410,7 @@ function buildMermaidPreviewWidget(id: string): (view: EditorView) => HTMLElemen
     container.append(canvas, status);
     const painted = paintedResults.get(view)?.get(id);
     if (painted) applyMermaidResult(container, painted);
+    watchPreview(view, container);
     return container;
   };
 }
@@ -434,6 +447,7 @@ function mermaidDecorations(entry: MermaidWidgetEntry, cursorPos: number): Decor
       mermaidId: entry.id,
       ignoreSelection: true,
       stopEvent: () => true,
+      destroy: (preview) => watchOfPreview.get(preview)?.unobserve(preview as Element),
     }),
   ];
 }
@@ -571,17 +585,51 @@ export function makeMermaidPreviewPlugin(render: MermaidRenderFn = renderMermaid
         if (container) applyMermaidResult(container, result);
       });
 
+      // A diagram is drawn once its preview is within a window's height of
+      // what shows. Drawing every diagram of a long note as it opened kept the
+      // app busy for seconds, and the keys typed then waited behind it.
+      // Where nothing can watch, as in a test's DOM, every diagram is near.
+      const near = new Set<string>();
+      const watch =
+        typeof IntersectionObserver === "undefined"
+          ? null
+          : new IntersectionObserver(
+              (changes) => {
+                for (const change of changes) {
+                  const id = (change.target as HTMLElement).dataset.mermaidId;
+                  if (id === undefined) continue;
+                  if (change.isIntersecting) near.add(id);
+                  else near.delete(id);
+                }
+                syncBlocks(editorView);
+              },
+              // The margin of the window, and of the pane that scrolls the note.
+              { rootMargin: "100% 0px", scrollMargin: "100% 0px" } as IntersectionObserverInit,
+            );
+
       function syncBlocks(view: EditorView, options: { force?: boolean } = {}): void {
         const entries = mermaidPreviewKey.getState(view.state)?.entries ?? [];
         const activeIds = new Set<string>();
         for (const entry of entries) {
           activeIds.add(entry.id);
-          scheduler.schedule(entry.id, entry.text, options);
+          if (!watch || near.has(entry.id)) scheduler.schedule(entry.id, entry.text, options);
+          // A diagram away from what shows keeps its old colors until it is
+          // near again: forgetting its source draws it again then.
+          else if (options.force) scheduler.dispose(entry.id);
         }
         // Prune scheduler state for fences deleted since the last sync so
         // timers/lastSource/generation don't accumulate across the session.
         scheduler.prune(activeIds);
         for (const id of painted.keys()) if (!activeIds.has(id)) painted.delete(id);
+        for (const id of near) if (!activeIds.has(id)) near.delete(id);
+      }
+
+      if (watch) {
+        previewWatches.set(editorView, watch);
+        // The previews drawn with the view, before this watch was made.
+        for (const preview of editorView.dom.querySelectorAll(".dohc-mermaid-preview")) {
+          watchPreview(editorView, preview);
+        }
       }
 
       let lastThemeKey = currentThemeName();
@@ -605,6 +653,8 @@ export function makeMermaidPreviewPlugin(render: MermaidRenderFn = renderMermaid
         update: (view) => syncBlocks(view),
         destroy() {
           observer.disconnect();
+          watch?.disconnect();
+          previewWatches.delete(editorView);
           scheduler.disposeAll();
           paintedResults.delete(editorView);
         },

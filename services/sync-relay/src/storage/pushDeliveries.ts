@@ -153,7 +153,7 @@ export interface PushDelivery {
 }
 
 export function claimPushDelivery(storage: StorageContext, nowMs: number): PushDelivery | null {
-  return storage.replicaViewTx(() => {
+  return storage.quietTx(() => {
     const minute = Math.floor(nowMs / 60_000);
     storage.db.prepare("DELETE FROM sync_relay_push_rate WHERE minute < ?").run(minute - 1);
     storage.db
@@ -202,7 +202,7 @@ export function finishPushDelivery(
   outcome: "sent" | "dropped" | "retry",
   nowMs: number,
 ): void {
-  storage.replicaViewTx(() =>
+  storage.quietTx(() =>
     storage.db
       .prepare(`UPDATE ${TABLE} SET state = ?, available_at_ms = ?, lease_token = NULL, lease_until_ms = NULL
     WHERE delivery_id = ? AND lease_token = ? AND state = 'pending'`)

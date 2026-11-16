@@ -125,7 +125,7 @@ impl ActorHandle {
                     let history_covered: bool = tx.query_row(
                         "SELECT EXISTS(SELECT 1 FROM (SELECT operation,payload_before_blob_sha256 FROM moments
                          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
-                         AND metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared')
+                         AND metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared','merge-removal','merge-removal-cleared')
                          ORDER BY moment_order DESC LIMIT 1) m WHERE m.operation='delete' AND m.payload_before_blob_sha256=?4)",
                         params![key.workspace_id,key.version_id,key.object_id,hex_sha256(input.text.as_bytes())], |r|r.get(0))
                         .map_err(StorageError::corrupt_public)?;

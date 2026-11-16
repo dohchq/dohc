@@ -131,6 +131,8 @@ export interface OwnerYDocDeliveryApplyInput extends OwnerYDocDeliveryTarget {
   readonly previousAcceptedCursor: number;
   readonly journalCursor: number;
   readonly updateBytes: Uint8Array;
+  /** A room's save: the last room position it holds, below its journal cursor. */
+  readonly rowsThrough?: number;
 }
 export interface OwnerYDocDeliveryReceipt {
   readonly deliveryId: string;
@@ -185,6 +187,150 @@ function ownerDeliveryPosition(value: unknown): OwnerYDocDeliveryPosition {
   };
 }
 
+/**
+ * A note the engine paused after the server refused it for good. The note
+ * holds the applied frames through `appliedCursor`; what the owner's screen
+ * showed is kept for a copy at `copyPath`, written once `copyWritten`.
+ */
+export interface OwnerYDocPausedStop {
+  readonly appliedCursor: number;
+  readonly rowCursor: number;
+  readonly copyPath: string;
+  readonly copyWritten: boolean;
+}
+
+/** One Stop row as `ydoc.ownerStop.<action>` or a paused copy returns it. */
+function ownerStopRow(row: unknown, action: string) {
+  // Only a release or a pause says whether settlement wrote the file.
+  const optional =
+    action === "release" || action === "pause"
+      ? ["deferred", "keptSnapshot", "materialized", "paused", "settlementReason"]
+      : ["deferred", "keptSnapshot", "paused"];
+  if (
+    !row ||
+    typeof row !== "object" ||
+    Object.keys(row)
+      .filter((key) => !optional.includes(key))
+      .sort()
+      .join() !== "binding,document,relayDatabaseNamespace,retirementOwed,state"
+  )
+    throw new TypeError("Invalid Stop row.");
+  const r = row as {
+    binding: unknown;
+    document: unknown;
+    relayDatabaseNamespace: unknown;
+    retirementOwed: unknown;
+    state: unknown;
+    deferred?: unknown;
+    keptSnapshot?: unknown;
+    materialized?: unknown;
+    paused?: unknown;
+    settlementReason?: unknown;
+  };
+  let paused: OwnerYDocPausedStop | undefined;
+  if (r.paused !== undefined) {
+    const p = r.paused as Record<string, unknown> | null;
+    const cursor = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0;
+    if (
+      !p ||
+      typeof p !== "object" ||
+      Object.keys(p).sort().join() !== "appliedCursor,copyPath,copyWritten,rowCursor" ||
+      !cursor(p.appliedCursor) ||
+      !cursor(p.rowCursor) ||
+      typeof p.copyPath !== "string" ||
+      !validateUserWritePath(p.copyPath).ok ||
+      typeof p.copyWritten !== "boolean" ||
+      r.state !== "released"
+    )
+      throw new TypeError("Invalid paused Stop.");
+    paused = {
+      appliedCursor: p.appliedCursor as number,
+      rowCursor: p.rowCursor as number,
+      copyPath: p.copyPath,
+      copyWritten: p.copyWritten,
+    };
+  }
+  if (r.materialized !== undefined && typeof r.materialized !== "boolean")
+    throw new TypeError("Invalid Stop materialization.");
+  if (
+    r.settlementReason !== undefined &&
+    (r.settlementReason !== "markdown-write-held" ||
+      r.materialized !== false ||
+      r.state !== "released")
+  )
+    throw new TypeError("Invalid Stop settlement reason.");
+  if (
+    r.keptSnapshot !== undefined &&
+    (typeof r.keptSnapshot !== "string" ||
+      !KEPT_SNAPSHOT.test(r.keptSnapshot) ||
+      r.binding === null)
+  )
+    throw new TypeError("Invalid Stop kept edits.");
+  if ((r.state !== "requested" && r.state !== "released") || typeof r.retirementOwed !== "boolean")
+    throw new TypeError("Invalid Stop state.");
+  const d = r.document as {
+    mainVersionId?: unknown;
+    objectId?: unknown;
+    currentPath?: unknown;
+  };
+  if (
+    !d ||
+    Object.keys(d).sort().join() !== "currentPath,mainVersionId,objectId" ||
+    typeof d.currentPath !== "string" ||
+    !validateUserWritePath(d.currentPath).ok
+  )
+    throw new TypeError("Invalid Stop document.");
+  const document = {
+    mainVersionId: parseLiveUpdateIdentifier(d.mainVersionId, "main version"),
+    objectId: parseLiveUpdateIdentifier(d.objectId, "object ID"),
+    currentPath: d.currentPath,
+  };
+  const binding = r.binding === null ? null : parseLiveObjectBinding(r.binding);
+  if (
+    (binding &&
+      (binding.objectId !== document.objectId ||
+        binding.mainVersionId !== document.mainVersionId)) ||
+    (!binding && r.state !== "released")
+  )
+    throw new TypeError("Invalid Stop binding.");
+  let deferred: { unsentEdits: number; editable: boolean } | undefined;
+  if (r.deferred !== undefined) {
+    const d = r.deferred as { unsentEdits: number; editable: boolean };
+    if (
+      !d ||
+      Object.keys(d).sort().join() !== "editable,unsentEdits" ||
+      !Number.isSafeInteger(d.unsentEdits) ||
+      d.unsentEdits < 0 ||
+      typeof d.editable !== "boolean" ||
+      !binding ||
+      r.state !== "released" ||
+      r.retirementOwed
+    )
+      throw new TypeError("Invalid deferred Stop.");
+    deferred = { unsentEdits: d.unsentEdits, editable: d.editable };
+  }
+  return {
+    binding,
+    document,
+    retirementOwed: r.retirementOwed,
+    relayDatabaseNamespace: binding
+      ? parseLiveUpdateIdentifier(r.relayDatabaseNamespace, "relay namespace")
+      : r.relayDatabaseNamespace === ""
+        ? ""
+        : (() => {
+            throw new TypeError("Invalid Stop namespace.");
+          })(),
+    state: r.state,
+    ...(deferred ? { deferred } : {}),
+    ...(paused ? { paused } : {}),
+    ...(typeof r.keptSnapshot === "string" ? { keptSnapshot: r.keptSnapshot } : {}),
+    ...(r.settlementReason === "markdown-write-held"
+      ? { settlementReason: r.settlementReason }
+      : {}),
+    ...(typeof r.materialized === "boolean" ? { materialized: r.materialized } : {}),
+  };
+}
+
 export interface NativeAppliedPosition {
   readonly eventCount: number;
   readonly journalCursor: number;
@@ -225,7 +371,8 @@ interface PrivateLiveOutput {
     | "update"
     | "state"
     | "draft"
-    | "captured";
+    | "captured"
+    | "copy";
   readonly allowEmpty?: boolean;
   wireId?: number;
   started: boolean;
@@ -1136,6 +1283,201 @@ export class EngineClient implements EngineTransport {
     return this.ownerLiveStop(request, "list", {}, signal);
   }
   /**
+   * Shows a collaborator's committed row at `cursor` in the owner's editor.
+   * The note's file takes it only from an applied frame. `reconnect` means
+   * this computer holds no row stream for the binding: restart it.
+   */
+  async ownerYDocPutCommittedRow(
+    request: OwnerYDocDeliveryRequest,
+    input: { binding: LiveObjectBinding; cursor: number; updateBytes: Uint8Array },
+    signal?: AbortSignal,
+  ): Promise<"added" | "unchanged" | "reconnect"> {
+    const binding = parseLiveObjectBinding(input.binding),
+      cursor = input.cursor;
+    if (
+      !Number.isSafeInteger(cursor) ||
+      cursor < 1 ||
+      input.updateBytes.byteLength < 2 ||
+      input.updateBytes.byteLength > MAX_LIVE_UPDATE_BYTES
+    )
+      throw new TypeError("Invalid committed row.");
+    const response = await this.sendLiveUpload(
+      request,
+      "ydoc.ownerDelivery.putCommittedRow",
+      input.updateBytes.byteLength + 3 * 1024 * 1024,
+      () => {
+        const bytes = Buffer.from(input.updateBytes),
+          streamId = this.nextLiveStreamId++;
+        if (!Number.isSafeInteger(streamId))
+          throw new TypeError("Owner stream identifiers exhausted.");
+        const digest = createHash("sha256").update(bytes).digest("hex");
+        return {
+          params: {
+            binding: { ...binding, selectorPaths: [...binding.selectorPaths] },
+            cursor,
+            streamId,
+            byteLength: bytes.length,
+            digest,
+          },
+          streams: [{ streamId, bytes, digest }],
+        };
+      },
+      signal,
+    );
+    const row = response.result as { outcome?: unknown } | null;
+    if (
+      !row ||
+      Object.keys(row).join() !== "outcome" ||
+      (row.outcome !== "added" && row.outcome !== "unchanged" && row.outcome !== "reconnect")
+    )
+      throw new TypeError("Invalid committed row response.");
+    return row.outcome;
+  }
+  /** Drops the binding's committed rows, for a row stream that starts again. */
+  async ownerYDocRestartCommittedRows(
+    request: OwnerYDocDeliveryRequest,
+    binding: LiveObjectBinding,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const parsed = parseLiveObjectBinding(binding);
+    const response = await this.sendLiveUpload(
+      request,
+      "ydoc.ownerDelivery.restartRows",
+      3 * 1024 * 1024,
+      () => ({
+        params: { binding: { ...parsed, selectorPaths: [...parsed.selectorPaths] } },
+        streams: [],
+      }),
+      signal,
+    );
+    const row = response.result;
+    if (!row || typeof row !== "object" || Object.keys(row).length)
+      throw new TypeError("Invalid committed row restart response.");
+  }
+  /**
+   * Pauses a note the server refused for good. The note settles from the
+   * applied frames through `appliedCursor`; the owner's screen, with rows
+   * through `rowCursor`, is kept for a copy at `copyPath`. A note already
+   * paused for this binding answers its saved pause.
+   */
+  async ownerYDocPause(
+    request: OwnerYDocDeliveryRequest,
+    input: {
+      binding: LiveObjectBinding;
+      appliedCursor: number;
+      rowCursor: number;
+      copyPath: string;
+      keptSnapshot?: string;
+    },
+    signal?: AbortSignal,
+  ) {
+    const binding = parseLiveObjectBinding(input.binding);
+    if (
+      !Number.isSafeInteger(input.appliedCursor) ||
+      input.appliedCursor < 0 ||
+      !Number.isSafeInteger(input.rowCursor) ||
+      input.rowCursor < 0 ||
+      !validateUserWritePath(input.copyPath).ok ||
+      (input.keptSnapshot !== undefined && !KEPT_SNAPSHOT.test(input.keptSnapshot))
+    )
+      throw new TypeError("Invalid pause.");
+    const rows = await this.ownerLiveStop(
+      request,
+      "pause",
+      {
+        binding: { ...binding, selectorPaths: [...binding.selectorPaths] },
+        appliedCursor: input.appliedCursor,
+        rowCursor: input.rowCursor,
+        copyPath: input.copyPath,
+        ...(input.keptSnapshot === undefined ? {} : { keptSnapshot: input.keptSnapshot }),
+      },
+      signal,
+    );
+    const row = rows[0];
+    if (
+      rows.length !== 1 ||
+      !row?.paused ||
+      row.materialized === undefined ||
+      JSON.stringify(row.binding) !== JSON.stringify(binding)
+    )
+      throw new TypeError("Invalid pause response.");
+    return { ...row, paused: row.paused, materialized: row.materialized };
+  }
+  /** Records that the paused note's copy is on disk at `copyPath`. */
+  async ownerYDocPausedCopyWritten(
+    request: OwnerYDocDeliveryRequest,
+    document: { mainVersionId: string; objectId: string },
+    copyPath: string,
+    signal?: AbortSignal,
+  ) {
+    if (!validateUserWritePath(copyPath).ok) throw new TypeError("Invalid copy path.");
+    const rows = await this.ownerLiveStop(
+      request,
+      "copyWritten",
+      {
+        mainVersionId: parseLiveUpdateIdentifier(document.mainVersionId, "main version"),
+        objectId: parseLiveUpdateIdentifier(document.objectId, "object ID"),
+        copyPath,
+      },
+      signal,
+    );
+    const row = rows[0];
+    if (
+      rows.length !== 1 ||
+      !row?.paused?.copyWritten ||
+      row.paused.copyPath !== copyPath ||
+      row.document.objectId !== document.objectId ||
+      row.document.mainVersionId !== document.mainVersionId
+    )
+      throw new TypeError("Invalid copy written response.");
+    return { ...row, paused: row.paused };
+  }
+  /**
+   * The paused note's Stop and its copy's bytes. Null bytes when the copy is
+   * empty; null when the document has no paused Stop.
+   */
+  async ownerYDocPausedCopy(
+    request: OwnerYDocDeliveryRequest,
+    document: { mainVersionId: string; objectId: string },
+    signal?: AbortSignal,
+  ): Promise<{
+    stop: ReturnType<typeof ownerStopRow> & { paused: OwnerYDocPausedStop };
+    bytes: Buffer | null;
+  } | null> {
+    const params = {
+      mainVersionId: parseLiveUpdateIdentifier(document.mainVersionId, "main version"),
+      objectId: parseLiveUpdateIdentifier(document.objectId, "object ID"),
+    };
+    const output: PrivateLiveOutput = {
+      status: "copy",
+      allowEmpty: true,
+      maxBytes: MAX_LIVE_UPDATE_BYTES,
+      started: false,
+    };
+    const response = await this.sendLiveUpload(
+      request,
+      "ydoc.ownerDelivery.pausedCopy",
+      MAX_LIVE_UPDATE_BYTES + 3 * 1024 * 1024,
+      () => ({ params, streams: [] }),
+      signal,
+      output,
+    );
+    const row = response.result as Record<string, unknown>;
+    const keys = Object.keys(row).sort().join();
+    if (row.status === "empty" && keys === "status,stop" && row.stop === null) return null;
+    const empty = row.status === "empty" && keys === "status,stop";
+    if (!empty && keys !== "byteLength,digest,status,stop,streamId")
+      throw new TypeError("Invalid paused copy response.");
+    const stop = ownerStopRow(row.stop, "list");
+    if (
+      !stop.paused ||
+      stop.document.objectId !== params.objectId ||
+      stop.document.mainVersionId !== params.mainVersionId
+    )
+      throw new TypeError("Invalid paused copy response.");
+    return { stop: { ...stop, paused: stop.paused }, bytes: empty ? null : output.blob!.bytes };
+  }
+  /**
    * Records who asked to stop or resume live editing of a document, before the
    * desktop acts. Null when `before` already shows the action's result, or
    * while the document has a pending change that a Stop does not replace (a
@@ -1214,114 +1556,7 @@ export class EngineClient implements EngineTransport {
       value.stops.length > 64
     )
       throw new TypeError("Invalid Stop response.");
-    return value.stops.map((row: unknown) => {
-      // Only a release says whether settlement wrote the file.
-      const optional =
-        action === "release"
-          ? ["deferred", "keptSnapshot", "materialized", "settlementReason"]
-          : ["deferred", "keptSnapshot"];
-      if (
-        !row ||
-        typeof row !== "object" ||
-        Object.keys(row)
-          .filter((key) => !optional.includes(key))
-          .sort()
-          .join() !== "binding,document,relayDatabaseNamespace,retirementOwed,state"
-      )
-        throw new TypeError("Invalid Stop row.");
-      const r = row as {
-        binding: unknown;
-        document: unknown;
-        relayDatabaseNamespace: unknown;
-        retirementOwed: unknown;
-        state: unknown;
-        deferred?: unknown;
-        keptSnapshot?: unknown;
-        materialized?: unknown;
-        settlementReason?: unknown;
-      };
-      if (r.materialized !== undefined && typeof r.materialized !== "boolean")
-        throw new TypeError("Invalid Stop materialization.");
-      if (
-        r.settlementReason !== undefined &&
-        (r.settlementReason !== "markdown-write-held" ||
-          r.materialized !== false ||
-          r.state !== "released")
-      )
-        throw new TypeError("Invalid Stop settlement reason.");
-      if (
-        r.keptSnapshot !== undefined &&
-        (typeof r.keptSnapshot !== "string" ||
-          !KEPT_SNAPSHOT.test(r.keptSnapshot) ||
-          r.binding === null)
-      )
-        throw new TypeError("Invalid Stop kept edits.");
-      if (
-        (r.state !== "requested" && r.state !== "released") ||
-        typeof r.retirementOwed !== "boolean"
-      )
-        throw new TypeError("Invalid Stop state.");
-      const d = r.document as {
-        mainVersionId?: unknown;
-        objectId?: unknown;
-        currentPath?: unknown;
-      };
-      if (
-        !d ||
-        Object.keys(d).sort().join() !== "currentPath,mainVersionId,objectId" ||
-        typeof d.currentPath !== "string" ||
-        !validateUserWritePath(d.currentPath).ok
-      )
-        throw new TypeError("Invalid Stop document.");
-      const document = {
-        mainVersionId: parseLiveUpdateIdentifier(d.mainVersionId, "main version"),
-        objectId: parseLiveUpdateIdentifier(d.objectId, "object ID"),
-        currentPath: d.currentPath,
-      };
-      const binding = r.binding === null ? null : parseLiveObjectBinding(r.binding);
-      if (
-        (binding &&
-          (binding.objectId !== document.objectId ||
-            binding.mainVersionId !== document.mainVersionId)) ||
-        (!binding && r.state !== "released")
-      )
-        throw new TypeError("Invalid Stop binding.");
-      let deferred: { unsentEdits: number; editable: boolean } | undefined;
-      if (r.deferred !== undefined) {
-        const d = r.deferred as { unsentEdits: number; editable: boolean };
-        if (
-          !d ||
-          Object.keys(d).sort().join() !== "editable,unsentEdits" ||
-          !Number.isSafeInteger(d.unsentEdits) ||
-          d.unsentEdits < 0 ||
-          typeof d.editable !== "boolean" ||
-          !binding ||
-          r.state !== "released" ||
-          r.retirementOwed
-        )
-          throw new TypeError("Invalid deferred Stop.");
-        deferred = { unsentEdits: d.unsentEdits, editable: d.editable };
-      }
-      return {
-        binding,
-        document,
-        retirementOwed: r.retirementOwed,
-        relayDatabaseNamespace: binding
-          ? parseLiveUpdateIdentifier(r.relayDatabaseNamespace, "relay namespace")
-          : r.relayDatabaseNamespace === ""
-            ? ""
-            : (() => {
-                throw new TypeError("Invalid Stop namespace.");
-              })(),
-        state: r.state,
-        ...(deferred ? { deferred } : {}),
-        ...(typeof r.keptSnapshot === "string" ? { keptSnapshot: r.keptSnapshot } : {}),
-        ...(r.settlementReason === "markdown-write-held"
-          ? { settlementReason: r.settlementReason }
-          : {}),
-        ...(typeof r.materialized === "boolean" ? { materialized: r.materialized } : {}),
-      };
-    });
+    return value.stops.map((row: unknown) => ownerStopRow(row, action));
   }
 
   async ownerYDocEnroll(
@@ -1480,7 +1715,12 @@ export class EngineClient implements EngineTransport {
       (!vector && input.journalCursor === input.previousAcceptedCursor) ||
       input.updateBytes.byteLength < 2 ||
       input.updateBytes.byteLength > MAX_LIVE_UPDATE_BYTES ||
-      (vector && (vector.byteLength < 1 || vector.byteLength > MAX_LIVE_UPDATE_BYTES))
+      (vector && (vector.byteLength < 1 || vector.byteLength > MAX_LIVE_UPDATE_BYTES)) ||
+      (input.rowsThrough !== undefined &&
+        (vector ||
+          !Number.isSafeInteger(input.rowsThrough) ||
+          input.rowsThrough < 1 ||
+          input.rowsThrough >= input.journalCursor))
     )
       throw new TypeError("Invalid owner accepted input.");
     const byteLength = input.updateBytes.byteLength + (vector?.byteLength ?? 0);
@@ -1491,6 +1731,7 @@ export class EngineClient implements EngineTransport {
       previousAcceptedCursor: input.previousAcceptedCursor,
       journalCursor: input.journalCursor,
       hostVectorByteLength: vector?.byteLength ?? null,
+      ...(input.rowsThrough === undefined ? {} : { rowsThrough: input.rowsThrough }),
     };
     const response = await this.sendLiveUpload(
       request,
@@ -2489,6 +2730,8 @@ export class EngineClient implements EngineTransport {
           "ydoc.ownerDelivery.prepareEnrollment",
           "ydoc.ownerDelivery.enroll",
           "ydoc.ownerDelivery.refuseEntry",
+          "ydoc.ownerDelivery.putCommittedRow",
+          "ydoc.ownerDelivery.restartRows",
         ].includes(method) &&
         (!Number.isSafeInteger(request.registrationId) || request.registrationId! < 1)) ||
       !Number.isSafeInteger(request.deadlineMs) ||

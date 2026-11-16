@@ -182,57 +182,6 @@ describe("dataset CLI", () => {
       revision,
     });
   });
-  it("names the server it asked and the computer that keeps the other Collections, apart from an empty list or a failure", async () => {
-    const dataset = {
-      datasetId: id(1),
-      name: "Equipment",
-      revision: 1,
-      revisionSha256: "a".repeat(64),
-      tables: [],
-      operations: [],
-      datasetPath: "equipment/dataset.json",
-    };
-    const elsewhere = {
-      server: "https://relay.example",
-      computer: { label: "Laptop", sameName: false },
-    };
-    const listed = { kind: "list", datasets: [dataset], nextCursor: null, elsewhere };
-    expect(DatasetResult.parse(listed)).toEqual(listed);
-    for (const invalid of [
-      { ...elsewhere, server: "relay" },
-      { ...elsewhere, computer: { label: "", sameName: false } },
-      { ...elsewhere, computer: { label: "Laptop" } },
-      { ...elsewhere, installId: "install-laptop" },
-      { ...elsewhere, computer: { ...elsewhere.computer, installId: "install-laptop" } },
-    ]) {
-      expect(DatasetResult.safeParse({ ...listed, elsewhere: invalid }).success).toBe(false);
-    }
-    const list = (answer: () => Promise<unknown>) =>
-      executeCli({
-        argv: ["dataset", "list", JSON.stringify({ workspaceId: "workspace" }), "--json"],
-        env: {},
-        request: answer,
-      });
-    const server = await list(async () => listed);
-    expect(server.exitCode).toBe(0);
-    expect(JSON.parse(server.stdout)).toMatchObject({ kind: "list", elsewhere });
-    const empty = await list(async () => ({
-      kind: "list",
-      datasets: [],
-      nextCursor: null,
-      elsewhere,
-    }));
-    expect(empty.exitCode).toBe(0);
-    expect(JSON.parse(empty.stdout)).toMatchObject({ datasets: [], elsewhere });
-    const failed = await list(async () => {
-      throw new Error("dohc could not reach the server.");
-    });
-    expect(failed).toEqual({
-      exitCode: 1,
-      stdout: "",
-      stderr: "dohc: dohc could not reach the server.\n",
-    });
-  });
   it.each([false, true])(
     "fails a Collections list this computer can't give (JSON: %s)",
     async (json) => {
@@ -253,42 +202,17 @@ describe("dataset CLI", () => {
         stdout: "",
         stderr: `dohc: ${words}\n`,
       });
-      expect(
-        await list({
-          kind: "server-unavailable",
-          words: "These Collections are on Laptop.",
-          computer: "Laptop",
-          failure: "TypeError: fetch failed",
-        }),
-      ).toEqual({
-        exitCode: 1,
-        stdout: "",
-        stderr: "dohc: These Collections are on Laptop. TypeError: fetch failed\n",
-      });
     },
   );
   it("counts a computer's name in characters, as its record does, and takes a refusal's words at any length", () => {
     // 64 characters outside the BMP: 128 UTF-16 units.
     const name = "🐢".repeat(64),
       longer = `${name}🐢`;
-    const listed = (label: string) => ({
-      kind: "list",
-      datasets: [],
-      nextCursor: null,
-      elsewhere: { server: "https://relay.example", computer: { label, sameName: false } },
-    });
     const refused = (computer: string) => ({
       kind: "collections-refused",
-      refusal: {
-        kind: "server-unavailable",
-        words: `These Collections are on ${computer}.`,
-        computer,
-        failure: "TypeError: fetch failed",
-      },
+      refusal: { kind: "elsewhere", words: `These Collections are on ${computer}.`, computer },
     });
-    expect(DatasetResult.safeParse(listed(name)).success).toBe(true);
     expect(DatasetResult.safeParse(refused(name)).success).toBe(true);
-    expect(DatasetResult.safeParse(listed(longer)).success).toBe(false);
     expect(DatasetResult.safeParse(refused(longer)).success).toBe(false);
     const words = `EACCES: permission denied, realpath '${"C:\\Users\\person\\".repeat(200)}'`;
     expect(

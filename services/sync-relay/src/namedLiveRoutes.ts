@@ -63,6 +63,7 @@ import { personalLiveRefusal } from "./personalLiveDocumentRoutes";
 import { accountDisplayName } from "./accountDisplayName";
 import type { TrustedLiveAccount } from "./storage/liveAuthorSnapshot";
 import { liveEditors } from "./liveEditors.js";
+import type { LiveRooms } from "./liveRoom.js";
 
 export interface NamedLiveRouteLimits {
   readonly maxConnections: number;
@@ -151,13 +152,20 @@ type BrowserRouteOptions = LiveRouteOptions & {
   };
   tickets: ReturnType<typeof createLiveTickets>;
   membership?: Pick<ReturnType<typeof createLiveMembershipRegistry>, "join">;
+  /** Shared notes' live rooms, when they are on. */
+  rooms?: LiveRooms;
   /** Whether the session host cannot continue the document until its owner or operator acts. */
   sessionHostBlocked?: (document: {
     workspaceId: string;
     objectId: string;
   }) => SessionHostBlock | undefined;
 };
-type OwnerRouteOptions = LiveRouteOptions & { kind: "owner"; resolveActor: ResolveActor };
+type OwnerRouteOptions = LiveRouteOptions & {
+  kind: "owner";
+  resolveActor: ResolveActor;
+  /** When on, the owner edits in the note's room and is sent its unsaved edits. */
+  rooms?: LiveRooms;
+};
 /**
  * A personal agent's routes, which share-web calls over the relay exchange
  * key with the agent's bearer: `POST /sync/live/personal-tickets` and the
@@ -808,7 +816,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
         const trustedAccount = await accountSnapshot(actor.userId);
         signal.throwIfAborted();
         check();
-        host = captureOwnerLiveFrameHost({
+        const captured = captureOwnerLiveFrameHost({
           authenticatedUserId: actor.userId,
           trustedAccount,
           storage,
@@ -818,6 +826,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           reserveBytes,
           validationBudget,
         });
+        host = options.rooms ? options.rooms.join(captured, { owner: true }) : captured;
       } else if (options.kind === "personal") {
         // The account's fence, read from Postgres for this open.
         const linkAuthority = options.linkAuthority;
@@ -960,7 +969,7 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           context.kind === "named" ? await accountSnapshot(context.userId) : undefined;
         signal.throwIfAborted();
         check();
-        host = captureNamedLiveFrameHost({
+        const captured = captureNamedLiveFrameHost({
           ticket,
           actor: liveBrowserActor(context),
           ...(trustedAccount ? { trustedAccount } : {}),
@@ -971,6 +980,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions | Perso
           reserveBytes,
           validationBudget,
         });
+        // A browser editor of a shared note edits in the note's room. A desktop keeps its own capture.
+        host = options.rooms && !desktop ? options.rooms.join(captured) : captured;
         host.assertCurrent();
         membership = options.membership?.join({
           ticket,

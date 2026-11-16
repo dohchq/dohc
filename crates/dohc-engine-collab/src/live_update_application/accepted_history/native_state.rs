@@ -258,14 +258,16 @@ impl<'de> Visitor<'de> for CoverageEntry<'_> {
         Ok(author)
     }
 }
-struct Snapshot;
-impl<'de> DeserializeSeed<'de> for Snapshot {
+/// The snapshot admission took, under the same rule: a room's save under the
+/// owner's authority names everyone it holds.
+struct Snapshot<'a>(&'a ServerDerivedLiveUpdateAuthority);
+impl<'de> DeserializeSeed<'de> for Snapshot<'_> {
     type Value = Vec<LiveAuthorEntry>;
     fn deserialize<D: serde::Deserializer<'de>>(self, de: D) -> Result<Self::Value, D::Error> {
         de.deserialize_seq(self)
     }
 }
-impl<'de> Visitor<'de> for Snapshot {
+impl<'de> Visitor<'de> for Snapshot<'_> {
     type Value = Vec<LiveAuthorEntry>;
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("bounded author snapshot")
@@ -273,20 +275,13 @@ impl<'de> Visitor<'de> for Snapshot {
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
         let mut authors = Vec::new();
         while let Some(author) = seq.next_element::<LiveAuthorEntry>()? {
-            if authors.len() == 2 {
+            if authors.len() == crate::author_coverage::MAX_INTERVAL_AUTHORS {
                 return Err(A::Error::custom("snapshot author bound"));
             }
             author.validate().map_err(A::Error::custom)?;
             authors.push(author);
         }
-        if authors.len() == 2
-            && (matches!(
-                authors[0],
-                LiveAuthorEntry::Agent { .. } | LiveAuthorEntry::Automation { .. }
-            ) || !matches!(authors[1], LiveAuthorEntry::Agent { .. }))
-        {
-            return Err(A::Error::custom("snapshot author order"));
-        }
+        admissible_authors(self.0, &authors).map_err(A::Error::custom)?;
         Ok(authors)
     }
 }
@@ -359,7 +354,7 @@ impl<'de> Visitor<'de> for Metadata<'_> {
                     extension = 1;
                 }
                 "authorSnapshot" if extension == 1 => {
-                    let authors = map.next_value_seed(Snapshot)?;
+                    let authors = map.next_value_seed(Snapshot(&self.accepted.authority))?;
                     writer
                         .write_all(b",\"authorSnapshot\":")
                         .map_err(A::Error::custom)?;
@@ -1028,6 +1023,35 @@ mod tests {
             read_json(&json, &"0".repeat(64)).unwrap().evidence_digest,
             next_digest(&"0".repeat(64), 1, &metadata).unwrap()
         );
+    }
+
+    #[test]
+    fn streamed_metadata_reads_a_room_save_naming_everyone_it_holds() {
+        let link = |id: &str| LiveAuthorEntry::Link {
+            public_principal_id: id.into(),
+            label: "Anonymous".into(),
+        };
+        let mut metadata = AdmittedLiveUpdateMetadata {
+            accepted: serde_json::from_str(super::super::tests::ACCEPTED_COMPLETE).unwrap(),
+            first_seen: vec![],
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![link("public_1"), link("public_2"), link("public_3")]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
+        };
+        let previous = "0".repeat(64);
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert_eq!(
+            read_json(&json, &previous).unwrap().evidence_digest,
+            next_digest(&previous, 1, &metadata).unwrap()
+        );
+        metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Link {
+            principal_id: "public_1".into(),
+            grant_id: "grant-1".into(),
+            grant_generation: 1,
+        };
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(read_json(&json, &previous).is_err());
     }
 
     #[test]

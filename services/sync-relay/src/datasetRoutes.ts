@@ -11,6 +11,7 @@ import {
   isDatasetReopenWaitError,
   isDatasetWorkerFailure,
 } from "@dohc/app-backend-runtime/supervisor";
+import { APP_PUBLICATION_MAX_METADATA_BYTES } from "@dohc/security-contract/app-publication";
 import { parseDatasetRevision } from "@dohc/security-contract/dataset";
 import { parseDatasetAttemptRequest } from "@dohc/security-contract/dataset-attempts";
 import {
@@ -38,7 +39,10 @@ export function datasetRequestBytes(action: DatasetRoute["action"]): number {
     ? APP_BACKEND_UPLOAD_REQUEST_BYTES
     : action === "activate" || action === "prepare-migration"
       ? 1024 * 1024
-      : 128 * 1024;
+      : // An app candidate up to its bound, inside the `localApp` wrapper.
+        action === "binding"
+        ? APP_PUBLICATION_MAX_METADATA_BYTES + 1024
+        : 128 * 1024;
 }
 
 /**
@@ -732,13 +736,17 @@ export function createDatasetRoutes(
           );
         }
         if (route.action === "invoke") {
-          const body = record(raw, [
-            "revision",
-            "revisionSha256",
-            "operationId",
-            "input",
-            "idempotencyKey",
-          ]);
+          const body = record(
+            raw,
+            ["revision", "revisionSha256", "operationId", "input", "idempotencyKey"],
+            ["agent"],
+          );
+          const agent = owningAgent(body.agent);
+          if (
+            agent &&
+            (auth.grantId || !storage.workspaceIsOwnedBy(scope.workspaceId, auth.userId))
+          )
+            throw notFound();
           const named = request.headers.get(APP_BACKEND_CATCH_UP_HEADER);
           let after: DatasetCursor | undefined;
           if (named !== null) {
@@ -751,7 +759,7 @@ export function createDatasetRoutes(
             }
             after = cursor(value, scope);
           }
-          const result = await host.invoke(auth, {
+          const result = await host.invoke(agent ? { ...auth, agent } : auth, {
             ...scope,
             revision: positive(body.revision),
             revisionSha256: digest(body.revisionSha256),
@@ -772,6 +780,12 @@ export function createDatasetRoutes(
           return catchUp ? { ...result, catchUp } : result;
         }
         if (route.action === "binding") {
+          // An app the owner approved on their own computer, which runs here as itself.
+          if (raw && typeof raw === "object" && Object.hasOwn(raw, "localApp"))
+            return host.approveLocalApp(auth, {
+              ...scope,
+              candidate: record(raw, ["localApp"]).localApp,
+            });
           const body = record(raw, ["publicationId", "enabled"]);
           if (typeof body.enabled !== "boolean") throw badRequest("Invalid app binding.");
           const input = { ...scope, publicationId: digest(body.publicationId) };
@@ -828,6 +842,18 @@ function pressingActor(value: unknown): DatasetServerPress["by"] {
   return { kind: "agent", originId: text(agent.originId), depth: Number(agent.depth) };
 }
 
+// The owner's agent that makes a change through the owner's session, at its
+// run's chain depth. Provenance only: access is the owner's.
+function owningAgent(value: unknown): { depth: number; agentId?: string } | undefined {
+  if (value === undefined) return undefined;
+  const agent = record(value, ["depth"], ["agentId"]);
+  if (!Number.isSafeInteger(agent.depth) || Number(agent.depth) < 0)
+    throw badRequest("Invalid dataset request.");
+  return agent.agentId === undefined
+    ? { depth: Number(agent.depth) }
+    : { depth: Number(agent.depth), agentId: text(agent.agentId) };
+}
+
 function approvalAgent(value: unknown) {
   try {
     return parseApprovalAgent(value);
@@ -843,6 +869,8 @@ export function createDatasetAppRoutes(
     limits?: Partial<AppBackendAdmissionLimits>;
     nowMs: () => number;
     shareSenderLabel?: (userId: string) => Promise<string>;
+    /** Without app publishing, only an app the owner approved on their own computer runs here. */
+    publications: boolean;
   },
 ) {
   const admit = createAppBackendAdmission(options.limits);
@@ -852,7 +880,7 @@ export function createDatasetAppRoutes(
     auth: AppBackendAuth,
   ): Promise<Response> => {
     const published = host.publication(auth, route.publicationId);
-    if (!published) throw notFound();
+    if (!published || (!options.publications && !published.local)) throw notFound();
     const { authority, workspaceId, datasetId, authorityRevision, capability } = published;
     const get =
       route.action === "descriptor" || route.action === "summary" || route.action === "blob";
@@ -993,9 +1021,17 @@ export function createDatasetAppRoutes(
           return { publicationId: route.publicationId, authorityRevision, datasetId };
         }
         if (route.action !== "invoke") throw notFound();
+        // The owner's computer names the agent that drives an app the owner approved there.
+        let agent: ReturnType<typeof owningAgent>,
+          request: unknown = raw;
+        if (published.local && raw && typeof raw === "object" && Object.hasOwn(raw, "agent")) {
+          const { agent: named, ...rest } = raw as Record<string, unknown>;
+          agent = owningAgent(named);
+          request = rest;
+        }
         let body;
         try {
-          body = parseAppBackendInvokeRequest(raw);
+          body = parseAppBackendInvokeRequest(request);
         } catch {
           throw badRequest("Invalid app operation.");
         }
@@ -1004,7 +1040,7 @@ export function createDatasetAppRoutes(
           (operation) => operation.name === body.operation,
         );
         if (!operation) throw notFound();
-        return host.invoke(auth, {
+        return host.invoke(agent && auth.kind === "named" ? { ...auth, agent } : auth, {
           workspaceId,
           datasetId,
           revision: capability.revision,

@@ -481,6 +481,13 @@ export const CollectionRulesChangedEvent = z.strictObject({
 });
 export type CollectionRulesChangedEvent = z.infer<typeof CollectionRulesChangedEvent>;
 
+// No Collection: the saved Collections list changed.
+export const CollectionCopyChangedEvent = z.strictObject({
+  workspaceId: WORKSPACE_ID,
+  datasetId: z.uuid().optional(),
+});
+export type CollectionCopyChangedEvent = z.infer<typeof CollectionCopyChangedEvent>;
+
 export const RevealWorkspaceFolderPayload = WorkspaceIdPayload.extend({
   recoveryCopies: z.boolean().optional(),
 });
@@ -1812,6 +1819,20 @@ export const CaptureRecoveryStatusResult = z.object({
       deleted: z.boolean(),
     }),
   ),
+  // Text a merged change from elsewhere removed without having seen it,
+  // kept until its notice is dismissed. Each carries the text's start and its whole
+  // length, in UTF-16 units; the History change holds all of it.
+  mergeRemovals: z.array(
+    z.object({
+      momentId: z.string(),
+      versionId: z.string(),
+      objectId: z.string(),
+      path: z.string(),
+      quote: z.string().min(1),
+      length: z.number().int().positive(),
+      authorKnown: z.boolean(),
+    }),
+  ),
 });
 export type CaptureRecoveryStatusResult = z.infer<typeof CaptureRecoveryStatusResult>;
 export const ClearCaptureRecoveryPayload = WorkspaceIdPayload.extend({ momentId: z.string() });
@@ -2094,6 +2115,8 @@ const EngineMomentFields = z.object({
     "ydoc",
     "capture-recovery",
     "capture-recovery-cleared",
+    "merge-removal",
+    "merge-removal-cleared",
   ]),
   authors: z.array(EngineMomentAuthor).min(1).optional(),
   // How each author looks, in the order of `authors`: the same token chats use.
@@ -9005,6 +9028,12 @@ export const EngineYDocSaveStateEvent = z.object({
   // The file changed outside dohc while this session held it. `unsaved` is
   // whether the document had edits no save carried.
   changedOutside: z.object({ unsaved: z.boolean() }).strict().optional(),
+  // Text this device typed that someone else's change removed without having
+  // seen it. It says nothing about the save state, which the event repeats.
+  textRemoved: z
+    .object({ text: z.string().min(1) })
+    .strict()
+    .optional(),
   // A settle failed to write the file, and why when a check can tell. Absent
   // for an edit refusal, an author-capacity refusal, and an error no settle
   // reported.
@@ -9442,6 +9471,9 @@ export interface DohcDesktopBridge
   // A change to a Collection's fields or rules applied, from any window or
   // the CLI: a page that shows that Collection reads it again.
   onCollectionRulesChanged(listener: (event: CollectionRulesChangedEvent) => void): () => void;
+  // This computer's copy of a syncing workspace's Collection, or its saved
+  // Collections list, came up to date from the server: what shows it reads again.
+  onCollectionCopyChanged(listener: (event: CollectionCopyChangedEvent) => void): () => void;
   // A press this window made settled, or waits. Each event names its
   // workspace; a window on another workspace drops it.
   onAutomationRunSettled(listener: (event: AutomationRunSettledEvent) => void): () => void;

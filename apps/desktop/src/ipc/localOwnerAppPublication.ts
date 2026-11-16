@@ -27,7 +27,13 @@ export function createLocalOwnerAppPublicationHandler<
   datasetForWorkspace(
     workspace: Workspace,
     signal: AbortSignal,
-  ): Promise<Pick<LocalDatasetHost, "approvedArtifacts" | "apps">>;
+  ): Promise<Pick<LocalDatasetHost, "apps">>;
+  /** The Collection's approved rules, from wherever the workspace keeps its Collections. */
+  approvedArtifacts(
+    workspace: Workspace,
+    datasetId: string,
+    signal: AbortSignal,
+  ): Promise<{ revision: DatasetRevision; schemaSql: string; active: boolean }>;
   flushCapture(workspace: Workspace): Promise<{ deferredWrites: readonly string[] }>;
   withAdapter<T>(
     workspace: Workspace,
@@ -193,9 +199,12 @@ export function createLocalOwnerAppPublicationHandler<
           compile: deps.compile,
           deferredWrites: capture.deferredWrites,
           resolveDatasetRevision: async (binding) => {
-            const local = await deps.datasetForWorkspace(operation.workspace, operation.signal);
+            const approved = await deps.approvedArtifacts(
+              operation.workspace,
+              binding.datasetId,
+              operation.signal,
+            );
             current();
-            const approved = local.approvedArtifacts(binding.datasetId);
             if (!approved.active) throw new Error("This Collection is unavailable on this device.");
             dataset = approved;
             return approved.revision;

@@ -254,6 +254,9 @@ pub struct WriterDocCache {
     pub reader_resolver: Option<std::sync::Arc<crate::reader_resolver::ReaderResolver>>,
     entries: HashMap<DocKey, CacheEntry>,
     owner_drafts: HashMap<DocKey, crate::owner_outbox::draft::CachedOwnerDraft>,
+    /// Not cached state: rows cannot be rebuilt from the store, so neither
+    /// eviction nor [`Self::clear`] drops them.
+    owner_layers: HashMap<DocKey, crate::owner_outbox::draft::OwnerLayer>,
     /// Keys of currently open live sessions: evicted last. Order-only state —
     /// a leaked pin (a session that never closes cleanly) affects eviction
     /// preference, never correctness.
@@ -294,6 +297,34 @@ impl WriterDocCache {
         key: &DocKey,
     ) -> Option<crate::owner_outbox::draft::CachedOwnerDraft> {
         self.owner_drafts.remove(key)
+    }
+
+    pub(crate) fn owner_layer(
+        &self,
+        key: &DocKey,
+    ) -> Option<&crate::owner_outbox::draft::OwnerLayer> {
+        self.owner_layers.get(key)
+    }
+
+    pub(crate) fn owner_layer_mut(
+        &mut self,
+        key: &DocKey,
+    ) -> &mut crate::owner_outbox::draft::OwnerLayer {
+        self.owner_layers.entry(key.clone()).or_default()
+    }
+
+    /// Drop the note's rows and the draft composed from them.
+    pub fn clear_owner_layer(&mut self, key: &DocKey) {
+        self.owner_layers.remove(key);
+        self.remove(key);
+    }
+
+    /// The relay applied everything through `cursor`; its applied frame now
+    /// carries what those rows held.
+    pub fn drop_owner_rows_through(&mut self, key: &DocKey, cursor: i64) {
+        if let Some(layer) = self.owner_layers.get_mut(key) {
+            layer.drop_through(cursor);
+        }
     }
 
     pub(crate) fn put_owner_draft(

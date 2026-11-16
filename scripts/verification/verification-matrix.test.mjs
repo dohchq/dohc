@@ -425,10 +425,10 @@ function createVerificationFixtures(directory) {
           return {stdout:''};
         }
         const restartTags=['@restart-durability-idle-external','@restart-durability-overlapping-typing','@restart-durability-capture-before-reopen','@restart-durability-person-agent'];
-        const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|'+restartTags.join('|')+'|@self-host-onboarding|@share-link-agent-sign-in|@live-owner-open|@new-page-edit-link'+(fixture.gallery?'|@states-page':''):'@verification-smoke'];
+        const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|'+restartTags.join('|')+'|@self-host-onboarding|@share-link-agent-sign-in|@live-owner-open|@new-page-edit-link|@two-computer-drag|@two-computer-conflict'+(fixture.gallery?'|@states-page':''):'@verification-smoke'];
         assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
         const restartTitles=restartTags.map((tag,index)=>process.env.FIXTURE_FAULT==='restart-missing'||process.env.FIXTURE_FAULT==='restart-one-missing'&&index===3?'unrelated restart spec':tag+' restart proof');
-        const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?restartTitles:[]),...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync','@share-link-agent-sign-in agent sign-in',process.env.FIXTURE_FAULT==='owner-open-missing'?'unrelated owner open spec':'@live-owner-open owner open',process.env.FIXTURE_FAULT==='new-page-link-missing'?'unrelated new page spec':'@new-page-edit-link new page']:[]),...(fixture.gallery?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
+        const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr?restartTitles:[]),...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync','@share-link-agent-sign-in agent sign-in',process.env.FIXTURE_FAULT==='owner-open-missing'?'unrelated owner open spec':'@live-owner-open owner open',process.env.FIXTURE_FAULT==='new-page-link-missing'?'unrelated new page spec':'@new-page-edit-link new page','@two-computer-drag drag','@two-computer-conflict conflict']:[]),...(fixture.gallery?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
         const restartSkipped=process.env.FIXTURE_FAULT==='restart-skipped';
         writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({
           stats:{expected:titles.length-(restartSkipped?1:0),unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'||restartSkipped?1:0},
@@ -532,6 +532,10 @@ test(
             const js = mode === "pr" && job !== "rust";
             // The lockfile is an Android input too. A --job run keeps only its own gate, and Android never runs locally.
             const android = mode === "pr" && !job && (full || changed === "pnpm-lock.yaml");
+            // The lockfile and a package's source both reach the editing-together check, which never runs locally either.
+            const together = mode === "pr" && !job && (full || changed !== undefined);
+            // Both also reach the Windows package check, which never runs locally either.
+            const windows = together;
             // The lockfile is a tooling input; a package's source is not. An empty diff narrows nothing.
             const repositoryTests =
               changed === "packages/fixture/src/index.ts" && !full && !keepGoing
@@ -936,8 +940,12 @@ test(
                 assert.equal(report.provenance.status, "PASS");
                 assert.equal(Boolean(report.build), desktop);
                 assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), js);
-                assert.deepEqual(report.gates, { rust, js, android });
-                assert.deepEqual(report.ciEvidence, android ? ["Android Kotlin compile"] : []);
+                assert.deepEqual(report.gates, { rust, js, android, together, windows });
+                assert.deepEqual(report.ciEvidence, [
+                  ...(android ? ["Android Kotlin compile"] : []),
+                  ...(together ? ["editing together", "share page"] : []),
+                  ...(windows ? ["Windows package"] : []),
+                ]);
                 assert.equal(report.full, full);
                 assert.equal(report.repositoryTests, js ? repositoryTests : undefined);
                 assert.equal(

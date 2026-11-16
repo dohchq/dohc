@@ -14,7 +14,6 @@ import {
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
-  keepCollectionsHere,
   openWorkspaceFromFirstRun,
   seedCloudCredentials,
   seedWorkspaceManifest,
@@ -69,7 +68,6 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
-    await keepCollectionsHere(page, workspaceId);
     await page.keyboard.press("ControlOrMeta+k");
     await page
       .getByTestId("command-palette")

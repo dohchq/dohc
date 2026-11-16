@@ -372,6 +372,86 @@ describe("makeMermaidPreviewPlugin — DOM wiring", () => {
     expect(canvas?.innerHTML).toContain('data-src="graph TD;\nA-->B"');
   });
 
+  /** Stands in for the browser's watch on which previews are near what shows. */
+  function watchPreviews() {
+    const watched = new Set<Element>();
+    let report: IntersectionObserverCallback = () => {};
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(callback: IntersectionObserverCallback) {
+          report = callback;
+        }
+        observe = (preview: Element) => watched.add(preview);
+        unobserve = (preview: Element) => watched.delete(preview);
+        disconnect = () => watched.clear();
+      },
+    );
+    const tell = (target: Element, isIntersecting: boolean) =>
+      report([{ target, isIntersecting } as IntersectionObserverEntry], {} as IntersectionObserver);
+    return {
+      watched,
+      near: (preview: Element) => tell(preview, true),
+      far: (preview: Element) => tell(preview, false),
+    };
+  }
+  const TWO_DIAGRAMS =
+    "```mermaid\ngraph TD;\nA-->B\n```\n\ntext\n\n```mermaid\ngraph TD;\nC-->D\n```";
+  const drawing = async (_id: string, source: string) => ({
+    svg: `<svg data-src="${source}"></svg>`,
+  });
+
+  it("draws a diagram once its preview is near what shows, and no sooner", async () => {
+    vi.useFakeTimers();
+    const { watched, near } = watchPreviews();
+    const render = vi.fn(drawing);
+    try {
+      const editor = makeEditor(TWO_DIAGRAMS, render);
+      const [first, second] = editor.view.dom.querySelectorAll(".dohc-mermaid-preview");
+      expect(watched).toEqual(new Set([first, second]));
+      await vi.advanceTimersByTimeAsync(400);
+      expect(render).not.toHaveBeenCalled();
+
+      near(second!);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(render).toHaveBeenCalledTimes(1);
+      expect(render).toHaveBeenCalledWith(expect.any(String), "graph TD;\nC-->D");
+      expect(second!.querySelector("svg")).not.toBeNull();
+      expect(first!.querySelector("svg")).toBeNull();
+      // Typing elsewhere draws nothing more.
+      editor.commands.insertContentAt(editor.state.doc.content.size, "more");
+      await vi.advanceTimersByTimeAsync(400);
+      expect(render).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("draws a diagram in the new theme's colors when it is next near", async () => {
+    vi.useFakeTimers();
+    const { near, far } = watchPreviews();
+    const render = vi.fn(drawing);
+    try {
+      const editor = makeEditor(TWO_DIAGRAMS, render);
+      const [first] = editor.view.dom.querySelectorAll(".dohc-mermaid-preview");
+      near(first!);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(render).toHaveBeenCalledTimes(1);
+
+      far(first!);
+      document.documentElement.dataset.theme = "dark";
+      await vi.advanceTimersByTimeAsync(400);
+      expect(render).toHaveBeenCalledTimes(1);
+
+      near(first!);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(render).toHaveBeenCalledTimes(2);
+    } finally {
+      delete document.documentElement.dataset.theme;
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("preserves the painted widget (same DOM, stable identity) across an edit above the fence", async () => {
     vi.useFakeTimers();
     const render = vi.fn(async (_id: string, source: string) => ({

@@ -14,6 +14,7 @@ import {
 } from "./namedRecipient";
 import {
   draftNeedsReview,
+  DraftReview,
   NamedDocumentEditor,
   type NamedDocumentSession,
 } from "./NamedDocumentEditor";
@@ -238,20 +239,17 @@ export default function NamedRecipientApp({ grantId }: { grantId: string | null 
             </section>
           )}
           {selection && sessionState && draftNeedsReview(sessionState) ? (
-            <aside className="comments-panel named-draft-recovery" aria-label="Draft recovery">
-              <h2>Review your draft</h2>
-              <p>Your unsynced changes exist only in this tab. Closing or reloading loses them.</p>
-              <p>
-                Copy the changes you want to keep from the editor. Open the current file, then paste
-                and review them.
-              </p>
+            <DraftReview
+              session={selection.session}
+              className="comments-panel named-draft-recovery"
+            >
               <button
                 className="handoff-button secondary"
                 onClick={() => open(selection.objectId, selection.path)}
               >
                 Open current file
               </button>
-            </aside>
+            </DraftReview>
           ) : null}
         </main>
       )}

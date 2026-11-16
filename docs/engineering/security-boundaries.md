@@ -119,8 +119,19 @@ before acknowledgement and settles Markdown through the engine.
 With no host online, shared files remain readable but live editing pauses.
 Automatic device-to-service failover requires fences against competing writers.
 
-Direct Edit requires commit-time grant checks, durable attribution, and stop and
-restore. Restore creates a forward change and preserves legitimate unsynced work.
+Direct Edit checks the sender's grant in full when the relay accepts each edit,
+not again when the edit is saved to the note. An edit accepted before access
+ended is kept. It is saved to the note, or, if the note can no longer take it,
+kept in the copy its owner gets when the note pauses. Each save records who
+sent which edit. Others' edits handed to a reader check its access again at
+most once a second, so a reader whose link session or token expires can receive
+them for up to a second more. Its own edits are refused at once, and access
+removed by hand ends its connection at once.
+
+Direct Edit also requires stop and restore. Before they close the note, stop
+and restore save every edit the relay accepted, or keep it in the note's copy
+when the note pauses.
+Restore creates a forward change and preserves legitimate unsynced work.
 It cannot promise selective removal of one author's interleaved edits or recovery
 of work already deleted before the restore point.
 

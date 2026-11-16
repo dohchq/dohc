@@ -11,6 +11,7 @@ import {
   Keyboard,
   Layers,
   Lock,
+  Merge,
   PenLine,
   Plug,
   RotateCcw,
@@ -148,6 +149,10 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
     case "capture-recovery":
     case "capture-recovery-cleared":
       return "Text kept";
+    // Text a change from elsewhere removed without having seen it.
+    case "merge-removal":
+    case "merge-removal-cleared":
+      return "Text removed";
     default:
       return "Unknown source";
   }
@@ -623,6 +628,8 @@ const ORIGIN_MARKS: Partial<Record<EngineMomentRecord["origin"], LucideIcon>> = 
   restore: RotateCcw,
   "capture-recovery": Keyboard,
   "capture-recovery-cleared": Keyboard,
+  "merge-removal": Merge,
+  "merge-removal-cleared": Merge,
 };
 
 export function OriginMark(props: { moment: CreditedMoment }) {
@@ -762,6 +769,8 @@ const ACTION_ORIGINS = new Set<EngineMomentRecord["origin"]>([
   "restore",
   "capture-recovery",
   "capture-recovery-cleared",
+  "merge-removal",
+  "merge-removal-cleared",
 ]);
 
 // What changed, in one file's History, where the file goes without saying.

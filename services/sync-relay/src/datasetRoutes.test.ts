@@ -7,6 +7,12 @@ import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { type DatasetDefinition } from "@dohc/security-contract/dataset";
 import { resolveAppDatasetCapability } from "@dohc/security-contract/dataset-authorization";
+import {
+  APP_PUBLICATION_MAX_BUNDLE_BYTES,
+  APP_PUBLICATION_MAX_FILES,
+  APP_PUBLICATION_MAX_METADATA_BYTES,
+  type AppPublicationLimits,
+} from "@dohc/security-contract/app-publication";
 import { fixture, limits, pushFile } from "./datasetTestFixture";
 import { createSyncRelayHandler, streamsRequestBody } from "./server";
 import { hashLinkBearer } from "./linkSecurity";
@@ -192,7 +198,11 @@ const schemaSql =
 const operationSource = `globalThis.operations={submit(ctx,input){if(input.fileId)ctx.files.attach(input.fileId);if(!input.name)ctx.refuse('missing_name','A name is required.');ctx.db.execute('INSERT INTO requests VALUES(?,?,?)',[ctx.requestId,input.name,input.fileId??null]);return {accepted:true};},read(ctx){return ctx.db.query('SELECT * FROM requests ORDER BY id');},receipt(ctx,input){const row=ctx.db.query('SELECT receipt FROM requests WHERE receipt=?',[input.fileId])[0];if(!row)ctx.refuse('missing_receipt','Receipt unavailable.');return {fileId:row.receipt};}};`;
 const revision = describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource });
 
-async function httpFixture(maxParticipantsPerGrant?: number) {
+async function httpFixture(
+  maxParticipantsPerGrant?: number,
+  publications = true,
+  hostLimits: AppPublicationLimits = limits,
+) {
   const f = fixture(),
     directory = await mkdtemp(join(tmpdir(), "relay-dataset-routes-"));
   pushFile(f.storage, "dataset-file", null, {
@@ -203,7 +213,7 @@ async function httpFixture(maxParticipantsPerGrant?: number) {
   const host = await f.storage.createDatasetHost({
     publicEditRelease: undefined,
     directory,
-    limits,
+    limits: hostLimits,
     maxParticipantsPerGrant,
     nowMs: () => now,
     onShutdownError(error) {
@@ -229,7 +239,7 @@ async function httpFixture(maxParticipantsPerGrant?: number) {
   const handler = createSyncRelayHandler({
     storage: f.storage,
     datasetHost: host,
-    appPublicationLimits: limits,
+    ...(publications ? { appPublicationLimits: hostLimits } : {}),
     linkKey,
     nowMs: () => 10,
     resolveActor(request, workspaceId) {
@@ -358,6 +368,192 @@ it("exposes bounded owner history and denies helpers, strangers, and malformed c
   expect((await f.http(`${f.path}/history?beforeRevision=0`)).status).toBe(400);
   expect((await f.http(`${f.path}/history?limit=101`)).status).toBe(400);
   expect((await f.http(`${f.path}/history?after=x`)).status).toBe(400);
+});
+
+it("takes the owner's agent on a change it makes, and refuses an agent for anyone else", async () => {
+  const f = await httpFixture();
+  await f.activate();
+  const change = (key: string, agent: unknown) => ({
+    revision: 1,
+    revisionSha256: revision.revisionSha256,
+    operationId: id(5),
+    input: { name: "By an agent" },
+    idempotencyKey: key,
+    agent,
+  });
+  expect(
+    (await f.http(`${f.path}/invoke`, change("agent", { depth: 1, agentId: "a" }))).status,
+  ).toBe(200);
+  for (const agent of [{ depth: -1 }, { depth: 1.5 }, { depth: 1, extra: true }, "a"])
+    expect((await f.http(`${f.path}/invoke`, change("bad", agent))).status).toBe(400);
+  expect(
+    (
+      await f.http(`${f.path}/invoke`, change("helper", { depth: 1 }), {
+        authorization: "Bearer helper",
+      })
+    ).status,
+  ).toBe(404);
+});
+
+it("approves an app on the owner's computer whose candidate is up to the publication metadata bound", async () => {
+  const f = await httpFixture(undefined, true, {
+    maxFiles: APP_PUBLICATION_MAX_FILES,
+    maxMetadataBytes: APP_PUBLICATION_MAX_METADATA_BYTES,
+    maxBundleBytes: APP_PUBLICATION_MAX_BUNDLE_BYTES,
+  });
+  await f.activate();
+  const { candidate: published } = f.storage.readAppPublication({
+    workspaceId: "w",
+    publicationId: f.publicationId,
+    ownerUserId: "owner",
+    limits,
+  });
+  const capability = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      datasetId: id(1),
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationIds: [id(5), id(6)],
+    },
+    revision,
+  );
+  // A candidate of exactly `bytes` serialized bytes, padded through its compiler version.
+  const sized = (bytes: number) => {
+    const base = { ...published, capabilities: [capability] };
+    const version = "v".repeat(
+      bytes - Buffer.byteLength(JSON.stringify(base)) + published.compilerIdentity.version.length,
+    );
+    const candidate = { ...base, compilerIdentity: { ...base.compilerIdentity, version } };
+    expect(Buffer.byteLength(JSON.stringify(candidate))).toBe(bytes);
+    return candidate;
+  };
+  const approve = async (bytes: number) =>
+    (await f.http(`${f.path}/binding`, { localApp: sized(bytes) })).status;
+  expect(await approve(200 * 1024)).toBe(200);
+  expect(await approve(APP_PUBLICATION_MAX_METADATA_BYTES)).toBe(200);
+  // Over the bound the candidate is refused, by its parser and then by the body limit.
+  expect(await approve(APP_PUBLICATION_MAX_METADATA_BYTES + 1)).toBe(400);
+  expect(await approve(APP_PUBLICATION_MAX_METADATA_BYTES + 2 * 1024)).toBe(413);
+});
+
+it("runs an app on the owner's computer as that app, within its approval, for the owner alone", async () => {
+  const f = await httpFixture();
+  await f.activate();
+  const { candidate: published } = f.storage.readAppPublication({
+    workspaceId: "w",
+    publicationId: f.publicationId,
+    ownerUserId: "owner",
+    limits,
+  });
+  const capability = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      datasetId: id(1),
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationIds: [id(5), id(6)],
+    },
+    revision,
+  );
+  const candidate = { ...published, capabilities: [capability] };
+  const appId = createHash("sha256")
+    .update(JSON.stringify(["dohc-local-dataset-app-v1", "w", candidate]))
+    .digest("hex");
+  const register = (as = "owner") =>
+    f.http(`${f.path}/binding`, { localApp: candidate }, { authorization: `Bearer ${as}` });
+  const call = (operation: string, as = "owner", authorityRevision = 1) =>
+    f.http(
+      `w/app-publications/${appId}/backend/invoke`,
+      { authorityRevision, operation, input: { name: "Local" }, idempotencyKey: operation },
+      { authorization: `Bearer ${as}` },
+    );
+  // Not yet approved on the server.
+  expect((await call("submit")).status).toBe(404);
+  for (const as of ["helper", "stranger"]) expect((await register(as)).status).toBe(404);
+  const registered = await register();
+  expect(registered.status).toBe(200);
+  expect(await registered.json()).toEqual({ publicationId: appId, authorityRevision: 1 });
+  expect(await (await call("submit")).json()).toMatchObject({ result: { accepted: true } });
+  // The owner's computer names the agent driving it; a published app can't.
+  const byAgent = (path: string) =>
+    f.http(path, {
+      authorityRevision: 1,
+      operation: "submit",
+      input: { name: "Agent" },
+      idempotencyKey: "agent",
+      agent: { depth: 1 },
+    });
+  expect((await byAgent(`w/app-publications/${appId}/backend/invoke`)).status).toBe(200);
+  expect((await byAgent(`w/app-publications/${f.publish()}/backend/invoke`)).status).toBe(400);
+  // Outside its approval, at a stale approval, or for anyone else, the app reaches nothing.
+  expect((await call("receipt")).status).toBe(404);
+  expect((await call("submit", "owner", 2)).status).toBe(404);
+  for (const as of ["helper", "stranger"]) expect((await call("read", as)).status).toBe(404);
+  // Approving the same app again, as another of the owner's computers does, keeps its approval current.
+  expect(await (await register()).json()).toEqual({ publicationId: appId, authorityRevision: 1 });
+  expect((await call("read")).status).toBe(200);
+  // Another Collection's approval is refused.
+  expect(
+    (
+      await f.http(`${f.path}/binding`, {
+        localApp: { ...candidate, capabilities: [{ ...capability, datasetId: id(9) }] },
+      })
+    ).status,
+  ).toBe(400);
+  expect((await f.http(`${f.path}/binding`, { publicationId: appId, enabled: false })).status).toBe(
+    200,
+  );
+  expect((await call("read")).status).toBe(404);
+  // Approved again after its withdrawal, it runs again.
+  const again = (await (await register()).json()) as { authorityRevision: number };
+  expect((await call("read", "owner", again.authorityRevision)).status).toBe(200);
+});
+
+it("runs an app on the owner's computer on a server that publishes no apps", async () => {
+  const f = await httpFixture(undefined, false);
+  await f.activate();
+  const { candidate: published } = f.storage.readAppPublication({
+    workspaceId: "w",
+    publicationId: f.publicationId,
+    ownerUserId: "owner",
+    limits,
+  });
+  const capability = resolveAppDatasetCapability(
+    {
+      kind: "dataset",
+      datasetId: id(1),
+      revision: 1,
+      revisionSha256: revision.revisionSha256,
+      operationIds: [id(5), id(6)],
+    },
+    revision,
+  );
+  const candidate = { ...published, capabilities: [capability] };
+  const appId = createHash("sha256")
+    .update(JSON.stringify(["dohc-local-dataset-app-v1", "w", candidate]))
+    .digest("hex");
+  expect((await f.http(`${f.path}/binding`, { localApp: candidate })).status).toBe(200);
+  const backend = (publicationId: string, action: string, body: Record<string, unknown>) =>
+    f.http(`w/app-publications/${publicationId}/backend/${action}`, {
+      authorityRevision: 1,
+      operation: "submit",
+      ...body,
+    });
+  expect(
+    await (
+      await backend(appId, "invoke", { input: { name: "Local" }, idempotencyKey: "a" })
+    ).json(),
+  ).toMatchObject({ result: { accepted: true } });
+  // A form reads its pending response before it takes one.
+  expect(await (await backend(appId, "attempt", { action: "get" })).json()).toEqual({
+    attempt: null,
+  });
+  // A published app still reaches nothing here.
+  expect(
+    (await backend(f.publicationId, "invoke", { input: { name: "Shared" }, idempotencyKey: "b" }))
+      .status,
+  ).toBe(404);
 });
 
 it("returns the journal after the owner's kept copy with a change, and to no one else", async () => {

@@ -22,7 +22,6 @@ import { Menu, type MenuItem } from "../ui/Menu";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import { AppMarks } from "./AppsSection";
 import {
-  CollectionsElsewhereRow,
   CollectionsRefusalRow,
   RANGE_KEYS,
   rangeBetween,
@@ -92,7 +91,6 @@ type Section = {
   add?: { label: string; onClick: () => void };
   actions?: MenuItem[];
   body?: ReactNode;
-  after?: ReactNode;
   // The muted line a section with nothing in it shows under its header. It
   // is no stop in the keyboard list; the header's toggle reads it.
   empty?: string;
@@ -223,8 +221,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
     collections.length > 0 ||
     !!explorer.onIncludeArchivedCollections ||
     !!explorer.onRestoreCollection ||
-    !!refusal ||
-    !!explorer.collectionsElsewhere;
+    !!refusal;
   // Apps, Pages and Collections always show in a workspace of your own, each
   // saying when it has nothing. A share view shows only the kinds it holds.
   const appsStatus = apps?.state.status;
@@ -241,12 +238,7 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       onSelect: () => explorer.onIncludeArchivedCollections?.(!archived),
     });
   }
-  if (
-    !refusal &&
-    explorer.onRestoreCollection &&
-    !explorer.shareView &&
-    !explorer.collectionsElsewhere
-  ) {
+  if (!refusal && explorer.onRestoreCollection && !explorer.shareView) {
     collectionActions.push({
       id: "restore",
       label: "Restore from recovery file…",
@@ -341,16 +333,8 @@ export function ExplorerHome(props: ExplorerHomeProps) {
       ) : collectionsUnknown ? (
         holdRow
       ) : undefined,
-      after:
-        !refusal && explorer.collectionsElsewhere ? (
-          <CollectionsElsewhereRow
-            elsewhere={explorer.collectionsElsewhere}
-            onKeep={explorer.onKeepCollections}
-          />
-        ) : undefined,
       ...(!refusal &&
       !collectionsUnknown &&
-      !explorer.collectionsElsewhere &&
       !explorer.onMoreDataCollections &&
       collections.length === 0
         ? { empty: "No Collections yet." }
@@ -907,9 +891,6 @@ export function ExplorerHome(props: ExplorerHomeProps) {
                       </li>
                     ) : null}
                   </ul>
-                ) : null}
-                {section.after ? (
-                  <div className="flex flex-col items-stretch px-1">{section.after}</div>
                 ) : null}
               </>
             ) : null}

@@ -260,6 +260,25 @@ async function fixture(actionAccess?: "helper" | "owner") {
   };
 }
 
+it("starts automations from the owner's agent's change at the agent's chain depth", async () => {
+  const f = await fixture();
+  f.ledger.subscribe(DATASET, f.subscription);
+  await f.host.invoke(
+    { kind: "named", workspaceId: "w", userId: "owner", agent: { depth: 2, agentId: "a" } },
+    {
+      ...rules,
+      workspaceId: "w",
+      operationId: CREATE,
+      input: { values: { [ID]: "record", [NAME]: "By an agent" } },
+      idempotencyKey: "agent",
+    },
+  );
+  expect(f.ledger.next()).toMatchObject({
+    depth: 2,
+    actor: { kind: "agent", depth: 2, agentId: "a" },
+  });
+});
+
 it("uses registered callers, scopes authority, and preserves chain depth and receipts", async () => {
   const f = await fixture();
   f.ledger.subscribe(DATASET, f.subscription);
