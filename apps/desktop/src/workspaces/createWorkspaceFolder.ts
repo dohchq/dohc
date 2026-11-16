@@ -17,11 +17,12 @@ import {
 import { randomUUID } from "node:crypto";
 import { realpathSync, type BigIntStats } from "node:fs";
 import { lstat, mkdir, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
-import { dirname, join, parse } from "node:path";
+import { dirname, join, parse, resolve } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { recordJoined, recordNeverSynced, recordSynced, type Computer } from "./syncHistory";
 import { recordNewCollectionsHolder } from "./collectionsHolder";
 import { identityOf } from "./workspaceTrust";
+import { inDohcFolder } from "./workspaceFiles";
 
 export interface CreatedWorkspace {
   workspaceId: string;
@@ -130,6 +131,8 @@ async function inspectManifest(metadataDir: string): Promise<ManifestState> {
 }
 
 export const FOLDER_CHANGED = "The folder changed while dohc was opening it. Open it again.";
+export const DOHC_FOLDER_REFUSAL =
+  "dohc could not open a folder inside a .dohc folder. Choose another folder.";
 
 // An existing folder is judged before anything is made, so a refused link
 // target gains nothing. Only a missing folder is created, and a file there
@@ -250,10 +253,16 @@ export async function createWorkspaceFolderWithFreshness(input: {
     throw new Error(`Invalid workspace root: ${folderCheck.reason}`);
   }
 
+  // A `.dohc` folder holds a workspace's own records, never a workspace. The
+  // path as given is judged before a missing folder is made, and the real
+  // path after, for a link that leads into one.
+  if (inDohcFolder(resolve(input.rootPath)))
+    throw new WorkspaceFolderRefusalError(DOHC_FOLDER_REFUSAL);
   // Judge the folder a link leads to, not the link: a link to the home folder
   // or a disk is refused like the folder itself. Everything below writes and
   // registers this same real path.
   const rootPath = await realFolderPath(input.rootPath);
+  if (inDohcFolder(rootPath)) throw new WorkspaceFolderRefusalError(DOHC_FOLDER_REFUSAL);
   const folder = await folderAt(rootPath);
   const home = await homeFolder(input.homeDir);
   const rootCheck = validateWorkspaceRootChoice(rootPath, home.path, process.platform);
