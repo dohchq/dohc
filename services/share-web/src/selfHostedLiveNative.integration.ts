@@ -957,11 +957,25 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       )
     ).lastApplied!;
     results.namedAck = ack;
+    // TEMP diagnostic: which step stalls after the owner's pass.
+    const diag = (label: string) =>
+      console.error(
+        `[diag] ${label}`,
+        JSON.stringify({
+          at: Date.now(),
+          state: provider.state(),
+          frontmatter: provider.doc.getMap("frontmatter").toJSON(),
+        }),
+      );
+    const diagTimer = setInterval(() => diag("waiting"), 15_000).unref();
+    diag("owner pass start");
     expect(await runOwnerPass()).toBe("acknowledged");
+    diag("owner pass returned");
     await stateWhen(
       provider,
       () => provider.doc.getMap("frontmatter").get("ownerConcurrent") === "survives-restart",
     );
+    diag("named saw owner edit");
     const beforeIdleCursor = provider.state().lastApplied?.journalCursor ?? 0;
     expect(
       provider.edit(() =>
@@ -975,7 +989,10 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
           (state.lastApplied?.journalCursor ?? 0) > beforeIdleCursor && state.pendingUpdates === 0,
       )
     ).lastApplied!;
+    diag("named edit applied");
     expect(await runOwnerPass()).toBe("empty");
+    diag("idle owner pass returned");
+    clearInterval(diagTimer);
     const accepted = await owner!.ownerYDocPrepareEnrollment(nativeRequest(), target);
     if (accepted.status !== "observed") throw new Error("Owner draft disappeared after restart.");
     const acceptedDraft = await owner!.ownerYDocOpenDraft(nativeRequest(), {

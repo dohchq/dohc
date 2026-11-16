@@ -398,16 +398,9 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       closes.push(() => new Promise<void>((done) => relayHttp.close(() => done())));
       const relayUrl = `http://127.0.0.1:${(relayHttp.address() as { port: number }).port}`;
       let heldFeed: { digest: string; release: Promise<void> } | undefined;
-      let heldCapture: { remaining: number; arrived(): void; release: Promise<void> } | undefined;
       const captureNative = async (
         ...args: Parameters<NonNullable<typeof active>["captureNative"]>
       ): Promise<NamedFrameNativeHost> => {
-        const barrier = heldCapture;
-        if (barrier && --barrier.remaining === 0) {
-          barrier.arrived();
-          await barrier.release;
-          heldCapture = undefined;
-        }
         const native = await active!.captureNative(...args);
         return {
           ...native,
@@ -556,7 +549,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         }
         const outbox = new OwnerYDocOutbox(client, workspaceHandle),
           refusals = new OwnerKnownRefusals();
-        async function pass(): Promise<OwnerYDocDrainResult> {
+        async function pass(onEnrolled?: () => Promise<void>): Promise<OwnerYDocDrainResult> {
           const lifetime = AbortSignal.timeout(deliveryConfig.attemptTimeoutMs);
           let completed!: (result: OwnerYDocDrainResult) => void, failed!: (error: unknown) => void;
           const completion = new Promise<OwnerYDocDrainResult>((resolve, reject) => {
@@ -580,6 +573,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
                 assertCurrent() {
                   expect(storage.unavailable.aborted).toBe(false);
                 },
+                ...(onEnrolled ? { onEnrolled } : {}),
               });
               if (result !== "retry") completed(result);
               return result;
@@ -769,7 +763,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       expect(await first.client.ownerYDocPrepareEnrollment(first.request(), target)).toEqual(
         firstDraft,
       );
-      // Hold the second authenticated capture: enrollment committed, submission has not started.
+      // Hold the pass once enrollment commits, before it submits anything.
       let releaseCapture!: () => void, captureArrived!: () => void;
       const release = new Promise<void>((done) => {
         releaseCapture = done;
@@ -777,9 +771,11 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       const arrived = new Promise<void>((done) => {
         captureArrived = done;
       });
-      heldCapture = { remaining: 2, arrived: captureArrived, release };
       results.stage = "enroll divergent owner B and hold submission";
-      const enrollmentPass = recovered.pass();
+      const enrollmentPass = recovered.pass(async () => {
+        captureArrived();
+        await release;
+      });
       let heldEvidence:
         | { retainedDigest: string; draftDigest: string; push: Record<string, any> }
         | undefined;
@@ -888,7 +884,8 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       const convergedB = await reopened.openDraft();
       expect(render(convergedA.initialUpdate)).toBe(render(convergedB.initialUpdate));
       expect(render(convergedB.initialUpdate)).toContain("Pending across restart");
-      // Delete-only updates do not advance the vector. Containment must still wait for native application.
+      // Delete-only updates do not advance the vector. The relay takes one before its native
+      // application, and the owner's page keeps it until the accepted state holds it.
       Y.applyUpdate(local, convergedB.initialUpdate);
       const beforeDelete = Y.encodeStateVector(local);
       local.getXmlFragment("body").delete(0, local.getXmlFragment("body").length);
@@ -896,49 +893,42 @@ it("preserves and delivers owner drafts across two real native replicas and auth
       expect(Y.encodeStateVector(local)).toEqual(beforeDelete);
       const deleted = await reopened.appendDraft("delete-only", deletion);
       expect((await reopened.outbox.readPending(deleted.outboxId)).entries).toHaveLength(1);
-      let releaseFeed!: () => void, observedReceipt!: () => void;
-      const feedRelease = new Promise<void>((resolve) => {
-        releaseFeed = resolve;
-      });
-      const receiptSeen = new Promise<void>((resolve) => {
-        observedReceipt = resolve;
-      });
-      heldFeed = { digest: deleted.updateDigest, release: feedRelease };
-      const nativeReceiptCheck = reopened.client.ownerYDocIsReceiptApplied.bind(reopened.client);
-      let receiptWhileHeld: unknown;
-      reopened.client.ownerYDocIsReceiptApplied = async (...params) => {
-        const applied = await nativeReceiptCheck(...params);
-        if (params[1].receipt.deliveryId === deleted.deliveryId && !applied) {
-          receiptWhileHeld = params[1].receipt;
-          observedReceipt();
-        }
-        return applied;
+      let releaseFeed!: () => void;
+      heldFeed = {
+        digest: deleted.updateDigest,
+        release: new Promise<void>((resolve) => {
+          releaseFeed = resolve;
+        }),
       };
-      let deliveryFinished = false;
-      const deletionPass = reopened.pass().finally(() => {
-        deliveryFinished = true;
-      });
+      type Receipt = Parameters<typeof reopened.client.ownerYDocIsReceiptApplied>[1]["receipt"];
+      const taken: { receipt?: Receipt } = {};
+      const nativeSend = reopened.client.sendRequest.bind(reopened.client);
+      reopened.client.sendRequest = async (...params) => {
+        if (params[0].method === "ydoc.ownerOutbox.acknowledgeTaken")
+          taken.receipt = (params[0].params as unknown as { receipt: Receipt }).receipt;
+        return nativeSend(...params);
+      };
+      const receiptApplied = (receipt: Receipt) =>
+        reopened.client.ownerYDocIsReceiptApplied(reopened.request(), { ...target, receipt });
+      let receipt: Receipt;
       try {
-        await Promise.race([
-          receiptSeen,
-          deletionPass.then((result) => {
-            throw new Error(`Delete delivery ended before receipt barrier: ${result}`);
-          }),
-        ]);
-        expect(deliveryFinished).toBe(false);
-        expect((await reopened.outbox.readPending(deleted.outboxId)).entries).toHaveLength(1);
-        expect((await reopened.descriptor()).acceptedCursor).toBeLessThan(
-          (receiptWhileHeld as { journalCursor: number }).journalCursor,
-        );
+        expect(await reopened.pass()).toBe("acknowledged");
+        if (!taken.receipt) throw new Error("The relay did not take the deletion.");
+        receipt = taken.receipt;
+        expect(receipt.deliveryId).toBe(deleted.deliveryId);
+        expect((await reopened.outbox.readPending(deleted.outboxId)).entries).toHaveLength(0);
+        expect(await receiptApplied(receipt)).toBe(false);
+        expect(render((await reopened.openDraft()).initialUpdate)).toBe("");
       } finally {
         releaseFeed();
         heldFeed = undefined;
-        reopened.client.ownerYDocIsReceiptApplied = nativeReceiptCheck;
+        reopened.client.sendRequest = nativeSend;
       }
-      expect(await deletionPass).toBe("acknowledged");
       await expectProviderText("", () => first.pass());
       expect(render((await first.openDraft()).initialUpdate)).toBe("");
-      expect((await reopened.outbox.readPending(deleted.outboxId)).entries).toHaveLength(0);
+      expect(await reopened.pass()).toBe("empty");
+      expect(await receiptApplied(receipt)).toBe(true);
+      expect(render((await reopened.openDraft()).initialUpdate)).toBe("");
       const beforeEcho = await first.descriptor();
       const ownerRead = new DatabaseSync(join(first.dir, ".dohc", "engine", "engine.db"), {
         readOnly: true,
@@ -1014,7 +1004,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
         enrollment,
         captured,
         heldEvidence,
-        receiptWhileHeld,
+        takenReceipt: receipt,
         pending: { deliveryId: pending.deliveryId, updateDigest: pending.updateDigest },
         deletion: { deliveryId: deleted.deliveryId, updateDigest: deleted.updateDigest },
         convergedMarkdown: render(convergedB.initialUpdate),
