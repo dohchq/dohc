@@ -496,8 +496,9 @@ pub struct OwnerPauseInput {
     pub binding: LiveObjectBinding,
     /// A: the last applied frame the route sent.
     pub applied_cursor: i64,
-    /// N: the last committed row it sent; A when it sent none. A save can
-    /// cover rows the layer still holds, so N can be below A.
+    /// N: the last row it sent that no save it sent holds; A when there is
+    /// none. Rows and saves share one count, and a save's cursor can sit above
+    /// a row it does not hold, so N can be below A.
     pub row_cursor: i64,
     /// A free name next to the note, chosen by the desktop.
     pub copy_path: String,
@@ -572,7 +573,9 @@ fn pause_in_tx(
         .map_err(|_| OwnerOutboxError::Corrupt)?;
     // The route reconnects and sends again until the note holds A and the
     // rows through N are here.
-    let rows_through_n = input.row_cursor <= input.applied_cursor
+    // Rows and saves share one count, so N == A means no row was sent. A row
+    // below A may not be in that save; only the layer shows it is here.
+    let rows_through_n = input.row_cursor == input.applied_cursor
         || layer.is_some_and(|layer| layer.holds_row(binding, input.row_cursor));
     if observed.accepted_cursor != input.applied_cursor || !rows_through_n {
         return Err(OwnerOutboxError::AcceptedStateIncomplete);
