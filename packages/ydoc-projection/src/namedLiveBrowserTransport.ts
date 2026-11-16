@@ -654,6 +654,7 @@ export function createNamedLiveBrowserTransport<
         };
       },
       onRemovedText: provider.onRemovedText,
+      unsentText: provider.unsentText,
       /** Editors must use this guard before their synchronous Yjs transaction. */
       edit(change: () => void): boolean {
         if (closed || !namedLiveEditable(state())) return false;

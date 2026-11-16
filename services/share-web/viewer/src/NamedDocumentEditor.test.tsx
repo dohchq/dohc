@@ -34,6 +34,7 @@ function session(markdown: string) {
       removed.add(listener);
       return () => void removed.delete(listener);
     },
+    unsentText: () => null,
     remove(text: string) {
       for (const listener of removed) listener({ text, clients: new Set([doc.clientID]) });
     },

@@ -1,6 +1,6 @@
 import { liveConnectionLimitMessage } from "@dohc/live-session-contract/live-connection";
 import { LINK_REFUSALS } from "@dohc/security-contract/link-refusal";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { mountLiveBodyEditor } from "@dohc/ydoc-projection/browser-editor";
 import {
@@ -122,6 +122,89 @@ function RemovedTextNotice({ session }: { session: NamedDocumentSession }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** The page's unsaved words, read again as the note or the session changes. */
+function useUnsentText(session: NamedDocumentSession) {
+  const [unsent, setUnsent] = useState(() => session.unsentText());
+  useEffect(() => {
+    const read = () => setUnsent(session.unsentText());
+    read();
+    session.doc.on("update", read);
+    const unsubscribe = session.subscribe(read);
+    return () => {
+      session.doc.off("update", read);
+      unsubscribe();
+    };
+  }, [session]);
+  return unsent;
+}
+
+/**
+ * The box a page shows when editing stopped with changes it will not send. It quotes the words
+ * those changes typed, so the person can copy them into the current file. `children` are the
+ * page's own actions, such as Open current file.
+ */
+export function DraftReview({
+  session,
+  className,
+  children,
+}: {
+  session: NamedDocumentSession;
+  className: string;
+  children?: ReactNode;
+}) {
+  const unsent = useUnsentText(session);
+  const [copy, setCopy] = useState<"idle" | "copied" | "failed">("idle");
+  const text = unsent?.text ?? "";
+  useEffect(() => setCopy("idle"), [text]);
+  const { quoted, more } = quoteRemovedText(text);
+  const copyText = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopy("copied");
+    } catch {
+      setCopy("failed");
+    }
+  };
+  return (
+    <aside className={className} aria-label="Draft recovery">
+      <h2>Review your draft</h2>
+      {unsent === null ? (
+        <p>Nothing you typed is waiting to be saved.</p>
+      ) : (
+        <>
+          <p>Your unsynced changes exist only in this tab. Closing or reloading loses them.</p>
+          {text !== "" ? (
+            <>
+              <p>Copy what you typed. Open the current file, then paste and review it.</p>
+              <blockquote className="removed-text-quote">{quoted}</blockquote>
+              {more > 0 && (
+                <p>And {more.toLocaleString()} more characters. Copy text copies all of it.</p>
+              )}
+            </>
+          ) : (
+            !unsent.deletes && (
+              <p>They add no text you can copy. Make them again in the current file.</p>
+            )
+          )}
+          {unsent.deletes && (
+            <p>
+              They also delete text. Delete it again in the current file if you still want it gone.
+            </p>
+          )}
+        </>
+      )}
+      <div className="edit-notice-actions">
+        {text !== "" && (
+          <button className="handoff-button secondary" onClick={() => void copyText()}>
+            {copy === "copied" ? "Copied" : copy === "failed" ? "Could not copy" : "Copy text"}
+          </button>
+        )}
+        {children}
+      </div>
+    </aside>
   );
 }
 
