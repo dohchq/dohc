@@ -73,6 +73,7 @@ import {
   parseFrontmatter,
 } from "./markdown/frontmatter";
 import type { BlockNavigationTarget, MarkdownEditorHandle } from "./editor/MarkdownEditor";
+import { scrollToPlace } from "./editor/scrollToPlace";
 import {
   noteBlocks,
   readingPosition,
@@ -1501,7 +1502,7 @@ export function MarkdownView(props: {
           pendingRenderedHeadingIndex
         ];
       if (!target) return false;
-      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      scrollToPlace(target, true);
       setPendingRenderedHeadingIndex(null);
       return true;
     };

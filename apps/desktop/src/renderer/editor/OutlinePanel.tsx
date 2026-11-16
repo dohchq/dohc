@@ -9,7 +9,7 @@ import {
   updateOutline,
   type OutlineHeading,
 } from "./outline";
-import { scrollToPlace } from "./offscreenBlocks";
+import { scrollToPlace } from "./scrollToPlace";
 import { useDebouncedWordCount } from "./wordCount";
 import { prefersReducedMotion } from "../reducedMotion";
 import {

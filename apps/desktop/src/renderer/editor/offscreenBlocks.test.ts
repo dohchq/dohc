@@ -4,7 +4,7 @@ import { splitBlock } from "@tiptap/pm/commands";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { DecorationSet, EditorView } from "@tiptap/pm/view";
-import { makeOffscreenBlocksPlugin, scrollToPlace } from "./offscreenBlocks";
+import { makeOffscreenBlocksPlugin } from "./offscreenBlocks";
 import { doc, paragraph } from "./testDocs";
 
 const views: EditorView[] = [];
@@ -91,119 +91,5 @@ describe("the keys to a note's start and end", () => {
     expect(view.state.selection.head).toBe(1);
     // A plain End stays the browser's: it moves within a line that is laid out.
     expect(press(view, { key: "End" })).toBeFalsy();
-  });
-});
-
-describe("a scroll to a place in the note", () => {
-  /** A target `top` pixels down the window. A scroll to it brings it to 0. */
-  function place(top: number) {
-    const element = window.document.createElement("p");
-    window.document.body.append(element);
-    const at = { top };
-    const scrolls: ScrollIntoViewOptions[] = [];
-    element.scrollIntoView = (options) => {
-      scrolls.push(options as ScrollIntoViewOptions);
-      at.top = 0;
-    };
-    element.getBoundingClientRect = () => ({ top: at.top }) as DOMRect;
-    return { element, scrolls, at };
-  }
-  /** Runs `count` frames, 16 ms apart. False once no frame is waited for. */
-  function frames() {
-    let now = 0;
-    vi.spyOn(performance, "now").mockImplementation(() => now);
-    const queue: FrameRequestCallback[] = [];
-    vi.stubGlobal("requestAnimationFrame", (run: FrameRequestCallback) => queue.push(run));
-    return (count = 1) => {
-      for (let frame = 0; frame < count; frame += 1) {
-        now += 16;
-        queue.shift()?.(now);
-      }
-      return queue.length > 0;
-    };
-  }
-  const FAR = 40_000;
-
-  it("moves smoothly to a target within a window's height, once", () => {
-    const run = frames();
-    const { element, scrolls } = place(window.innerHeight);
-    scrollToPlace(element, true);
-    expect(run()).toBe(false);
-    expect(scrolls).toEqual([{ behavior: "smooth", block: "start" }]);
-  });
-
-  it("reaches a far target at once, and again each time what is drawn around it moves it", () => {
-    const run = frames();
-    const { element, scrolls, at } = place(FAR);
-    scrollToPlace(element, true);
-    expect(scrolls).toEqual([{ behavior: "auto", block: "start" }]);
-    run(3);
-    expect(scrolls).toHaveLength(1);
-    // A diagram above the target draws a few frames after the jump.
-    at.top = 180;
-    run();
-    expect(scrolls).toHaveLength(2);
-    expect(at.top).toBe(0);
-    // It keeps the target in place for a second and a half, then lets go.
-    expect(run(60)).toBe(true);
-    expect(run(40)).toBe(false);
-    at.top = 90;
-    run();
-    expect(scrolls).toHaveLength(2);
-  });
-
-  it("lets a later jump end an earlier one", () => {
-    const run = frames();
-    const far = place(FAR);
-    const near = place(100);
-    scrollToPlace(far.element, false);
-    scrollToPlace(near.element, false);
-    far.at.top = 500;
-    expect(run()).toBe(false);
-    expect(far.scrolls).toHaveLength(1);
-  });
-
-  it("lets go when the person moves the view, and not for a key typed in the find box", () => {
-    const run = frames();
-    const { element, scrolls, at } = place(FAR);
-    const findBox = window.document.createElement("input");
-    const note = window.document.createElement("div");
-    note.className = "ProseMirror";
-    window.document.body.append(findBox, note);
-    const moved = () => {
-      at.top = 300;
-      run();
-      return scrolls.length;
-    };
-
-    scrollToPlace(element, false);
-    findBox.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    expect(moved()).toBe(2);
-    note.dispatchEvent(new KeyboardEvent("keydown", { key: "PageDown", bubbles: true }));
-    expect(moved()).toBe(2);
-
-    at.top = FAR;
-    scrollToPlace(element, false);
-    window.dispatchEvent(new WheelEvent("wheel"));
-    expect(moved()).toBe(3);
-  });
-
-  it("asks a function for the target again each frame", () => {
-    const run = frames();
-    let match = place(FAR);
-    scrollToPlace(() => match.element, false, "nearest");
-    // The editor draws the match again as another element.
-    match = place(250);
-    run();
-    expect(match.scrolls).toEqual([{ behavior: "auto", block: "nearest" }]);
-  });
-
-  it("lets go of a target that left the page", () => {
-    const run = frames();
-    const { element, scrolls } = place(FAR);
-    scrollToPlace(element, false);
-    element.remove();
-    expect(run()).toBe(false);
-    expect(scrolls).toHaveLength(1);
   });
 });

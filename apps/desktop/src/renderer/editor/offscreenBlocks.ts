@@ -18,7 +18,7 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
 //   caret at the front of a skipped block. Those keys set the selection here.
 // - Jumps. A scroll to a far block aims at an estimated place, and the blocks
 //   it brings near the viewport then take their real heights and move the
-//   target. `scrollToPlace` aims again until the target stays.
+//   target. `scrollToPlace` (scrollToPlace.ts) follows it until it stays.
 
 const offscreenBlocksKey = new PluginKey<DecorationSet>("dohc-offscreen-blocks");
 
@@ -86,76 +86,4 @@ export function makeOffscreenBlocksPlugin() {
       }),
     },
   });
-}
-
-/** How long a far jump's target stays where it is before the jump lets go of
- * it. What came into view with it, a diagram or an image, draws within this
- * time and moves what is below it. */
-const SETTLE_MS = 1500;
-
-/** The far jump that is still keeping its target in place. A later jump ends
- * it, and so does the person moving the view. */
-let settling: AbortController | null = null;
-
-/**
- * Scrolls `target` into view, to the top of its scroller or, with `nearest`,
- * only as far as it takes to show it. A target within a window's height is
- * laid out with its neighbours, so it moves smoothly when `smooth` is set. A
- * farther one is reached at once. What came near the viewport with it then
- * takes its real height and can move it, so each frame for a short time looks
- * where the target is and scrolls to it again if it moved.
- *
- * A function as `target` is asked again each frame, for an element the editor
- * may draw again, such as a find match.
- */
-export function scrollToPlace(
-  target: HTMLElement | (() => HTMLElement | null),
-  smooth: boolean,
-  block: "start" | "nearest" = "start",
-): void {
-  settling?.abort();
-  const find = typeof target === "function" ? target : () => target;
-  const first = find();
-  if (!first) return;
-  const { top } = first.getBoundingClientRect();
-  const near = top > -window.innerHeight && top < 2 * window.innerHeight;
-  first.scrollIntoView({ behavior: smooth && near ? "smooth" : "auto", block });
-  if (near) return;
-  const jump = new AbortController();
-  settling = jump;
-  const listen = { capture: true, passive: true, signal: jump.signal };
-  for (const move of ["wheel", "pointerdown"] as const) {
-    window.addEventListener(move, () => jump.abort(), listen);
-  }
-  // A key in the note moves the caret, and the view with it. A key in the find
-  // box asks for the next match, which starts its own jump.
-  window.addEventListener(
-    "keydown",
-    (event) => {
-      if (event.target instanceof Element && event.target.closest(".ProseMirror")) jump.abort();
-    },
-    listen,
-  );
-  let stillSince = performance.now();
-  let last = first.getBoundingClientRect().top;
-  const settle = () => {
-    if (jump.signal.aborted) return;
-    const element = find();
-    if (!element?.isConnected) {
-      jump.abort();
-      return;
-    }
-    // Where it is comes before how long it has been: a frame that waited
-    // behind the drawing of a long note still looks.
-    if (Math.abs(element.getBoundingClientRect().top - last) >= 0.5) {
-      element.scrollIntoView({ behavior: "auto", block });
-      last = element.getBoundingClientRect().top;
-      stillSince = performance.now();
-    } else if (performance.now() - stillSince > SETTLE_MS) {
-      jump.abort();
-      return;
-    }
-    requestAnimationFrame(settle);
-  };
-  requestAnimationFrame(settle);
 }
