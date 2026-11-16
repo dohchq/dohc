@@ -47,6 +47,20 @@ describe("share-web configuration", () => {
       expect(loadShareWebConfig(env).internalHosts).toEqual(new Set(["share-web:1790"]));
     },
   );
+  it("takes a session seal key of 32 or more characters that is not the relay exchange key", () => {
+    const env = { ...accountEnvironment, DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: "x".repeat(32) };
+    expect(loadShareWebConfig(env).sessionSealKey).toBeUndefined();
+    expect(
+      loadShareWebConfig({ ...env, DOHC_SHARE_WEB_SESSION_SEAL_KEY: "s".repeat(32) })
+        .sessionSealKey,
+    ).toBe("s".repeat(32));
+    expect(() =>
+      loadShareWebConfig({ ...env, DOHC_SHARE_WEB_SESSION_SEAL_KEY: "s".repeat(31) }),
+    ).toThrow("DOHC_SHARE_WEB_SESSION_SEAL_KEY must be at least 32 characters.");
+    expect(() =>
+      loadShareWebConfig({ ...env, DOHC_SHARE_WEB_SESSION_SEAL_KEY: "x".repeat(32) }),
+    ).toThrow("must differ from DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY");
+  });
   it("uses the supported self-host live profile while retaining explicit deployment requirements", () => {
     const env = {
       ...accountEnvironment,
