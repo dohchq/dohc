@@ -596,17 +596,19 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.bridge.decideAccessRule).not.toHaveBeenCalled();
     // The row says why, and comes back unread with a toast, so a second
     // press is made on what it shows now.
-    expect(h.row("")!.message).toMatch(
-      /^dohc didn't apply your choice because the members' level changed in Members settings\. Until you choose/,
-    );
-    expect(h.row("")).toMatchObject({ seen: false });
+    expect(h.row("")).toMatchObject({
+      seen: false,
+      lead: "dohc didn't apply your choice because the members' level changed in Members settings.",
+      message: expect.stringMatching(/^Until you choose/),
+      action: { additional: [{ label: "Remove rule" }, { label: "Open Members" }] },
+    });
     expect(h.row("")!.id).not.toBe(first);
     expect(h.errors().shellErrors.filter((error) => error.tone === "success")).toEqual([]);
     // Choosing on the level shown now runs, and says what it did at that level.
     act(() => h.errors().runShellErrorAction(h.row("")!.id, 1));
     await waitFor(() => expect(h.bridge.decideAccessRule).toHaveBeenCalledOnce());
     // The busy row no longer carries the earlier refusal.
-    expect(h.row("")?.message ?? "").not.toContain("didn't apply");
+    expect(h.row("")?.lead).toBeUndefined();
     const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
     await waitFor(() =>
       expect(done()).toMatchObject({
@@ -632,12 +634,52 @@ describe("useAccessRuleHoldNotices", () => {
     act(() => h.readMemberLevel());
     await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View → Edit"] }));
     await act(async () => answerLate({ status: "ready", view: { memberLevel: "comment" } }));
-    await waitFor(() =>
-      expect(h.row("")!.message).toMatch(/^dohc didn't apply your choice because/),
-    );
+    await waitFor(() => expect(h.row("")!.lead).toMatch(/^dohc didn't apply your choice because/));
     expect(h.row("")).toMatchObject({ rows: ["Members: View → Edit"] });
     expect(h.row("")!.action?.busy).toBeUndefined();
     expect(h.bridge.decideAccessRule).not.toHaveBeenCalled();
+  });
+
+  it("says dohc can't read the level, not that it changed, when the press's read fails", async () => {
+    const h = harness([ROOT_REMOVED], membersAt("comment"));
+    await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View → Comment"] }));
+    h.bridge.workspaceMembers.mockImplementation(membersUnread);
+    act(() => h.errors().runShellErrorAction(h.row("")!.id, 1));
+    await waitFor(() =>
+      expect(h.row("")).toMatchObject({
+        rows: ["Members: View → set in Members settings"],
+        lead: "dohc didn't apply your choice because it can't read the members' level now.",
+      }),
+    );
+    expect(h.row("")!.action).toMatchObject({
+      additional: [{ label: "Remove rule" }, { label: "Open Members" }],
+    });
+    expect(h.bridge.decideAccessRule).not.toHaveBeenCalled();
+  });
+
+  it("says what members can do once Undo puts the recorded rule back", async () => {
+    const h = harness([{ ...WIDENED, changes: [WIDENED.changes[0]!] }]);
+    await waitFor(() => expect(h.row("team")).toBeDefined());
+    const undo = {
+      path: "team/access.yaml",
+      text: "members: view\n",
+      expectedSha256: "b".repeat(64),
+    };
+    h.bridge.decideAccessRule.mockResolvedValueOnce({ heldAccessRules: [], kept: [], undo });
+    act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
+    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
+    await waitFor(() => expect(done()).toMatchObject({ message: "Members can now edit team." }));
+    act(() => h.errors().runShellErrorAction(done()!.id));
+    await waitFor(() =>
+      expect(
+        h
+          .errors()
+          .shellErrors.filter((error) => error.tone === "success")
+          .at(-1),
+      ).toMatchObject({
+        message: "The access rule for team is back as it was. Members can view team.",
+      }),
+    );
   });
 
   it("says where the level is set, with Open Members, when dohc can't read it", async () => {

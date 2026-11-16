@@ -98,6 +98,8 @@ export type Notice = {
   // Facts that lead the text, one per line right under the title, such as
   // who reaches a folder at which level.
   rows?: readonly string[];
+  // What just happened to the row, above its rows, read out when it appears.
+  lead?: string;
   actions?: readonly NoticeAction[];
   // Explicit dismissal: rendered as a small X on the notice
   // row. Only notices whose underlying state has a real ack path expose it.
@@ -142,6 +144,7 @@ export interface WorkspaceErrorNotice {
   lastLine?: string;
   paths?: readonly string[];
   rows?: readonly string[];
+  lead?: string;
   // A terminal command the message asks the person to run, shown with its copy.
   command?: string;
   copy?: NoticeCopy;
@@ -315,7 +318,14 @@ type ReachHandlers = Pick<HTMLAttributes<HTMLElement>, "onPointerEnter" | "onFoc
 // A read row of this computer's is remembered by what it says, so one whose
 // words or time change is unread again.
 const localReadKey = (workspaceId: string, notice: Notice): string =>
-  JSON.stringify([workspaceId, notice.id, notice.timeMs ?? null, notice.title, notice.body]);
+  JSON.stringify([
+    workspaceId,
+    notice.id,
+    notice.timeMs ?? null,
+    notice.title,
+    notice.lead ?? null,
+    notice.body,
+  ]);
 
 // Every row keeps this column at its left edge, so unread rows line up and a
 // row that turns read does not move.
@@ -534,6 +544,8 @@ function NoticeText(props: {
   // The title's weight and color.
   titleClass: string;
   body: string;
+  // Shown whole above the rows; no clamp hides it.
+  lead?: string;
   rows?: readonly string[];
   paths?: readonly string[];
   // Off for a body that is already shown whole.
@@ -568,7 +580,7 @@ function NoticeText(props: {
   const { onOpenChange } = props;
   const copy = useDetails({
     copy: props.copy,
-    shown: [props.title, ...rows, props.body, ...paths, props.after],
+    shown: [props.title, props.lead, ...rows, props.body, ...paths, props.after],
     revision: props.revision,
     actionClass: props.actionClass,
     testId: props.copyTestId ?? props.testId,
@@ -639,6 +651,14 @@ function NoticeText(props: {
     ),
     body: (
       <>
+        {props.lead ? (
+          <p
+            data-testid={`${props.testId}-lead`}
+            className="m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-ink"
+          >
+            {props.lead}
+          </p>
+        ) : null}
         {shownRows.length > 0 ? (
           <ul
             data-testid={`${props.testId}-rows`}
@@ -1132,6 +1152,7 @@ export function WorkspaceErrorToast(props: {
         title={error.title ?? message}
         titleClass={error.title ? "font-medium text-ink" : "text-ink"}
         body={error.title ? message : ""}
+        lead={error.lead}
         rows={error.rows}
         paths={error.paths}
         after={error.lastLine}
@@ -1263,6 +1284,7 @@ export function LocalNoticeRow(props: {
         title={notice.title}
         titleClass={props.unread ? "font-medium text-ink" : "text-muted"}
         body={props.note === undefined ? notice.body : ""}
+        lead={props.note === undefined ? notice.lead : undefined}
         rows={props.note === undefined ? notice.rows : undefined}
         paths={props.note === undefined ? notice.paths : undefined}
         clamp={notice.filePaths === undefined}
@@ -1913,6 +1935,7 @@ export function NoticeCenter(props: {
         filePaths: error.filePaths,
         ...(error.paths?.length ? { paths: error.paths } : {}),
         ...(error.rows?.length ? { rows: error.rows } : {}),
+        ...(error.lead ? { lead: error.lead } : {}),
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });
     }
@@ -2252,6 +2275,22 @@ export function NoticeCenter(props: {
     () => allRecoveryRows.filter((row) => row.workspaceId === props.workspaceId),
     [allRecoveryRows, props.workspaceId],
   );
+  // A row's lead that appears while Notices is open is read out once: no
+  // toast shows then, and a row's own text changes silently.
+  const [said, setSaid] = useState("");
+  const leads = useRef(new Map<string, string>());
+  useEffect(() => {
+    const next = new Map<string, string>();
+    let fresh: string | undefined;
+    for (const notice of notices) {
+      if (!notice.lead) continue;
+      next.set(notice.id, notice.lead);
+      if (leads.current.get(notice.id) !== notice.lead) fresh = notice.lead;
+    }
+    leads.current = next;
+    setSaid(open && fresh !== undefined ? fresh : (current) => (open ? current : ""));
+  }, [notices, open]);
+
   const keptTyping = props.keptTyping ?? [];
   const localCount =
     notices.length + (recoveryRows.length > 0 ? 1 : 0) + (keptTyping.length > 0 ? 1 : 0);
@@ -2855,6 +2894,9 @@ export function NoticeCenter(props: {
                   </span>
                 ) : null}
               </header>
+              <p role="status" data-testid="notice-center-said" className="sr-only">
+                {said}
+              </p>
               {localCount === 0 && sentNotices.length === 0 ? (
                 props.sentNoticesLoading ? null : (
                   <div className="flex h-20 items-center justify-center gap-2 px-3 text-subtle">

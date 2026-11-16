@@ -143,6 +143,50 @@ it("keeps Notices open on a step that runs in place, with focus on its row and t
   expect(document.activeElement).toBe(opens("held"));
 });
 
+it("shows a row's lead above its rows and reads it out while Notices is open", async () => {
+  const held: WorkspaceErrorNotice = {
+    id: "held",
+    tone: "warning",
+    title: "The workspace's access rule was removed outside dohc",
+    message: "Until you choose…",
+    rows: ["Members: View → Edit"],
+    atMs: 1,
+    canRetry: false,
+    seen: true,
+    actionLabel: "Restore rule",
+    additionalActionLabels: ["Remove rule"],
+    actionStays: true,
+    noDismiss: true,
+  };
+  const lead =
+    "dohc didn't apply your choice because the members' level changed in Members settings.";
+  const view = renderNotices({ workspaceErrors: [{ ...held, lead: "An earlier lead." }] });
+  await userEvent.click(screen.getByTestId("notice-center-toggle"));
+  const said = () => screen.getByTestId("notice-center-said");
+  // A lead already there when Notices opens is not read out again.
+  expect(said().getAttribute("role")).toBe("status");
+  expect(said().textContent).toBe("");
+  view.rerender(
+    noticeElement({
+      workspaceErrors: [{ ...held, additionalActionLabels: ["Removing…"], actionBusy: 1 }],
+    }),
+  );
+  expect(said().textContent).toBe("");
+  // The choice didn't run: the row comes back, filed again, with its reason.
+  view.rerender(
+    noticeElement({
+      workspaceErrors: [{ ...held, id: "held-2", rows: ["Members: View, no change"], lead }],
+    }),
+  );
+  const row = screen.getByTestId("notice-held-2");
+  const shown = within(row).getByText(lead);
+  expect(
+    shown.compareDocumentPosition(within(row).getByText("Members: View, no change")) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(said().textContent).toBe(lead);
+});
+
 it("opens Notices at the row a request names and moves focus into it", async () => {
   const errors: WorkspaceErrorNotice[] = ["outer", "inner"].map((id) => ({
     id,

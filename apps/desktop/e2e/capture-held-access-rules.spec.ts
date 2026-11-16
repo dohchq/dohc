@@ -396,6 +396,10 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await expect(resolvedRow).toContainText(
       "dohc didn't apply your choice because the members' level changed in Members settings.",
     );
+    // Notices is open, so no toast shows; its status line reads the reason out.
+    await expect(page.getByTestId("notice-center-said")).toHaveText(
+      "dohc didn't apply your choice because the members' level changed in Members settings.",
+    );
     await expect(resolvedRow.getByRole("button", { name: "Remove rule" })).toBeEnabled();
     expect((await status()).heldAccessRules?.map((hold) => hold.folder)).toEqual([""]);
     await expect(rows.filter({ hasText: "Removed the workspace's access rule." })).toHaveCount(0);

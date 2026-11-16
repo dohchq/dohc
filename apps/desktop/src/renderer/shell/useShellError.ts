@@ -144,6 +144,9 @@ export interface ShellError {
   // Short facts the message lists, one per line under it, such as who
   // reaches a folder at which level. Copy details names each a row.
   rows?: readonly string[];
+  // What just happened to the row, such as a choice that didn't run, on its
+  // own line under the title. Notices reads it out when it appears.
+  lead?: string;
   // A terminal command the message asks the person to run, shown with its copy.
   command?: string;
   // Facts for a report, one "label: value" line each, such as the error as
@@ -684,6 +687,7 @@ export function useShellError(
       details?: ReadonlyArray<ErrorDetailField>;
       paths?: readonly string[];
       rows?: readonly string[];
+      lead?: string;
       retry?: ShellError["retry"];
       onDismiss?: () => void;
       action?: ShellError["action"];
@@ -734,6 +738,7 @@ export function useShellError(
           ...(failure.command ? { command: failure.command } : {}),
           ...(failure.paths?.length ? { paths: failure.paths } : {}),
           ...(failure.rows?.length ? { rows: failure.rows } : {}),
+          ...(failure.lead ? { lead: failure.lead } : {}),
           ...(details.length ? { details } : {}),
           ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
           ...(action ? { action } : {}),

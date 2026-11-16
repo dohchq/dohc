@@ -78,13 +78,24 @@ const reachWords = (reach: AccessRuleReach, level: MemberLevel) => {
   return resolved === null || resolved === "workspace" ? IN_SETTINGS : LEVEL[resolved];
 };
 
-/** The place a hold is about, in a sentence: the folder, or this workspace for its own rule. */
 // A refusal that trying again only repeats, such as a moved workspace
 // folder, says what to do instead, so its words replace the row's own.
 const finalWords = (error: unknown): string | null => {
   const read = readError(error);
   return read.canRetry === false && read.mapped ? read.words : null;
 };
+
+/** Why a choice didn't run: the level read at the press differs from the one the row showed. */
+type LevelMove = "changed" | "unreadable" | "readable";
+const LEVEL_MOVED: Record<LevelMove, string> = {
+  changed: "dohc didn't apply your choice because the members' level changed in Members settings.",
+  unreadable: "dohc didn't apply your choice because it can't read the members' level now.",
+  readable: "dohc didn't apply your choice because it can now read the members' level.",
+};
+const levelMove = (shown: MemberLevel, now: MemberLevel): LevelMove =>
+  now === null ? "unreadable" : shown === null ? "readable" : "changed";
+
+/** The place a hold is about, in a sentence: the folder, or this workspace for its own rule. */
 const placeOf = (folder: string) => folder || "this workspace";
 // The same place opening a sentence; a folder keeps its own spelling.
 const placeOpening = (folder: string) => folder || "This workspace";
@@ -196,9 +207,11 @@ export function accessRuleUndoneWords(
   decision: Decision,
   level: MemberLevel,
 ): string {
-  return decision === "restore"
-    ? changedReach(hold, level)
-    : `${ruleOf(hold.folder)} is back as it was.`;
+  if (decision === "restore") return changedReach(hold, level);
+  const [only] = hold.changes;
+  const can =
+    hold.changes.length === 1 && only ? canDo(resolve(only.before, level), hold.folder) : undefined;
+  return `${ruleOf(hold.folder)} is back as it was.${can ? ` ${whoOf(only!.who)} can ${can}.` : ""}`;
 }
 
 /** Where a press on the row goes: a widening opens its rule; a removal reveals its folder. */
@@ -238,7 +251,7 @@ export function useAccessRuleHoldNotices(
   const undoable = useRef(new Map<string, string>());
   // Each hold whose choice didn't run because the level changed, until the
   // owner chooses again.
-  const levelMoved = useRef(new Map<string, string>());
+  const levelMoved = useRef(new Map<string, { held: string; why: LevelMove }>());
   useEffect(() => {
     shown.current = new Map();
     waitingOn.current = new Map();
@@ -311,17 +324,15 @@ export function useAccessRuleHoldNotices(
     quiet = false,
   ): void => {
     const words = accessRuleHoldWords(hold, shownLevel);
-    const moved =
-      levelMoved.current.get(identityOf(hold)) === heldKey(hold)
-        ? "dohc didn't apply your choice because the members' level changed in Members settings. "
-        : "";
+    const moved = levelMoved.current.get(identityOf(hold));
+    const lead = moved?.held === heldKey(hold) ? LEVEL_MOVED[moved.why] : undefined;
     const decide = (decision: Decision) => () => decideRef.current(asked, hold, decision);
     const action: NonNullable<ShellError["action"]> = {
       label: busy === "restore" ? "Restoring…" : "Restore rule",
       run: decide("restore"),
       additional: [
         { label: busy === "accept" ? words.accepting : words.accept, run: decide("accept") },
-        ...(words.openMembers
+        ...(words.openMembers || lead
           ? [{ label: "Open Members", run: () => latest.current.openMembers() }]
           : []),
       ],
@@ -333,7 +344,8 @@ export function useAccessRuleHoldNotices(
       identity: identityOf(hold),
       tone: "warning",
       title: words.title,
-      message: `${moved}${words.message}`,
+      message: words.message,
+      ...(lead ? { lead } : {}),
       ...(words.rows.length ? { rows: words.rows } : {}),
       retry: null,
       noDismiss: true,
@@ -465,7 +477,7 @@ export function useAccessRuleHoldNotices(
         latest.current.clearIdentity(identity);
         return;
       }
-      levelMoved.current.set(identity, heldKey(listed));
+      levelMoved.current.set(identity, { held: heldKey(listed), why: levelMove(shownLevel, now) });
       show(asked, listed, levelRef.current);
     });
   };

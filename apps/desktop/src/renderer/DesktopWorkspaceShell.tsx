@@ -7597,6 +7597,7 @@ export function DesktopWorkspaceShell(props: {
         ...(error.lastLine ? { lastLine: error.lastLine } : {}),
         ...(error.paths ? { paths: error.paths } : {}),
         ...(error.rows ? { rows: error.rows } : {}),
+        ...(error.lead ? { lead: error.lead } : {}),
         ...(error.command ? { command: error.command } : {}),
         ...(error.change
           ? {}
