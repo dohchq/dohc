@@ -22,10 +22,10 @@
 //! A rule cannot commit inside another writer's transaction, so a folder that
 //! needs one refuses the moment and is judged again, with its commit or hold,
 //! when the command ends ([`finish_command`]). So that writers rarely meet
-//! that refusal, capture ([`order_capture`]) and the versioned text and
-//! binary writes, renames, deletes and Duplicate ([`order_writer`]) and Undo
-//! ([`order_undo`]) run [`order_paths`] before their transaction: it commits a
-//! changed rule first. Rollback, merge and conflict resolution run through
+//! that refusal, capture ([`order_capture`]), the versioned text and binary
+//! writes, renames, deletes, Duplicate and live-document settlement
+//! ([`order_writer`]) and Undo ([`order_undo`]) run [`order_paths`] before
+//! their transaction: it commits a changed rule first. Rollback, merge and conflict resolution run through
 //! [`ordered`], which runs the same step over the paths they will change and,
 //! should the check still refuse, judges each folder it refused and runs the
 //! writer again, so their callers never see that refusal either. Capture judges

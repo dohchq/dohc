@@ -1,6 +1,6 @@
 //! A folder's access.yaml reaches the journal before the files it covers, and
 //! a rule changed outside dohc in a way that widens reach waits for its owner.
-use dohc_engine_collab::{ContentKind, DocKey, Regime, ensure_marker, scene_asset_ref};
+use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc, ensure_marker, scene_asset_ref};
 use dohc_engine_domain::{CreateNamedVersion, DomainError, DuplicateFile, VersionedTextStore};
 use dohc_engine_runtime::{
     ACCESS_RULE_WAITS, AccessRuleDecision, ActorHandle, CancellationToken, CaptureIngest,
@@ -2348,6 +2348,114 @@ fn an_undo_placed_after_the_store_moved_places_nothing() {
     assert_eq!(
         std::fs::read_to_string(f.root().join("team/a.md")).unwrap(),
         "alpha"
+    );
+}
+
+impl Fixture {
+    fn open_note(&self, path: &str, now: i64) -> dohc_engine_runtime::YdocOpenState {
+        self.runtime
+            .block_on(self.actor.ydoc_open_state(
+                WS.to_owned(),
+                now,
+                true,
+                None,
+                "main".to_owned(),
+                path.to_owned(),
+                Some(ContentKind::Richdoc),
+                CancellationToken::new(),
+            ))
+            .expect("open the note")
+    }
+
+    fn record_note(
+        &self,
+        state: &dohc_engine_runtime::YdocOpenState,
+        path: &str,
+        update: Vec<u8>,
+        seed: bool,
+    ) {
+        self.runtime
+            .block_on(self.actor.ydoc_record_update(
+                state.key.clone(),
+                path.to_owned(),
+                ContentKind::Richdoc,
+                Regime::LocalOnly,
+                update,
+                None,
+                None,
+                state.lineage_claim_id.clone(),
+                seed,
+                if seed {
+                    state.owner_seed_source.clone()
+                } else {
+                    None
+                },
+                None,
+                20,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            ))
+            .expect("record an update");
+    }
+}
+
+/// A live document's settlement writes its Markdown through dohc. In a
+/// workspace that does not replicate, a folder held for its owner holds the
+/// settlement too, and it records nothing.
+#[test]
+fn a_live_document_under_a_held_folder_settles_nothing_in_a_local_workspace() {
+    const NOTE: &str = "team/note.md";
+    let f = Fixture::local();
+    f.put("team/access.yaml", NOBODY);
+    f.put(NOTE, "seed\n");
+    f.settle();
+    f.capture_ok(&["team/access.yaml", NOTE]);
+    let state = f.open_note(NOTE, 50);
+    let doc = Ydoc::wire();
+    let seed = doc
+        .rewrite_content_to_markdown(ContentKind::Richdoc, "seed")
+        .expect("seed");
+    f.record_note(&state, NOTE, seed, true);
+    let state = f.open_note(NOTE, 51);
+    f.record_note(&state, NOTE, doc.richdoc_append_paragraph("edited"), false);
+    f.put("team/access.yaml", EDIT);
+    f.settle();
+    let before = f.moments();
+    let settled = f
+        .runtime
+        .block_on(f.actor.ydoc_settle(
+            f.root().to_path_buf(),
+            state.key.clone(),
+            NOTE.to_owned(),
+            ContentKind::Richdoc,
+            state.lineage_claim_id.clone(),
+            state.head_blob_sha256.clone(),
+            "held-session".to_owned(),
+            Arc::new(()),
+            52,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+            None,
+        ))
+        .map(drop);
+    // Held, nothing recorded, the file on disk, the hold.
+    let state = (
+        held(&settled, "team"),
+        f.moments() == before,
+        std::fs::read_to_string(f.root().join(NOTE)).unwrap(),
+        f.holds(),
+    );
+    assert_eq!(
+        state,
+        (
+            true,
+            true,
+            "seed\n".to_owned(),
+            vec![("team".to_owned(), "widened".to_owned())]
+        ),
+        "{settled:?}"
     );
 }
 

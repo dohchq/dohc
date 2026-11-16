@@ -1198,6 +1198,7 @@ impl ActorHandle {
         conversion_consent: Option<Arc<MarkdownConversionConsent>>,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
         self.run_draining(token.clone(), move |store, cache| {
+            settle_order(store, &key, &path)?;
             ydoc_settle_on_store(
                 store,
                 cache,
@@ -1243,6 +1244,7 @@ impl ActorHandle {
         conversion_consent: Option<Arc<MarkdownConversionConsent>>,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
         self.run_with_reader_retry(move |store, cache| {
+            settle_order(store, &key, &path)?;
             ydoc_settle_on_store(
                 store,
                 cache,
@@ -3116,6 +3118,18 @@ fn settled_collection_record_reconcile_required(
         TxnOutcome::Committed(required) => Ok(required),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
+}
+
+/// Settlement writes the document's Markdown through dohc, so it is admitted
+/// like any deliberate write: refused once the workspace folder no longer
+/// holds the store, or under a folder held for its owner.
+fn settle_order(store: &mut EngineStore, key: &DocKey, path: &str) -> Result<(), RuntimeError> {
+    super::access_order::order_writer(
+        store,
+        &key.workspace_id,
+        &key.version_id,
+        &[super::access_order::Touch::write(path)],
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
