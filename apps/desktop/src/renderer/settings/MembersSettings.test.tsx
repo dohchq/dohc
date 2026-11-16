@@ -367,6 +367,24 @@ describe("Members page", () => {
     expect(props.onClearError).toHaveBeenCalledWith("settings-members:ws-1:invite");
   });
 
+  it("brings a failed change's notice back when its Try again comes while another change runs", async () => {
+    const { props } = renderMembers();
+    await screen.findByTestId("settings-members-page");
+    bridge.workspaceMembers.mockRejectedValueOnce(new Error("dohc could not send the invite."));
+    await userEvent.type(screen.getByTestId("settings-members-invite-email"), "eve@test{Enter}");
+    const onError = vi.mocked(props.onError!);
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    const retry = onError.mock.calls[0]![2]!;
+    const answer = deferred<MembersResult>();
+    bridge.workspaceMembers.mockReturnValueOnce(answer.promise);
+    await makeAdmin("m-bo");
+    await act(async () => retry());
+    expect(requests().filter((request) => request.action === "invite")).toHaveLength(1);
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(onError.mock.calls[1]![4]).toBe("settings-members:ws-1:invite");
+    await act(async () => answer.resolve({ status: "ready", view: ownerView() }));
+  });
+
   it("shows a failed list in place with Try again, and the cause in a notice", async () => {
     bridge.workspaceMembers.mockRejectedValueOnce(new Error("dohc could not reach your server. Check your connection, then try again."));
     const { props } = renderMembers();

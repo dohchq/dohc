@@ -187,9 +187,14 @@ export function MembersSettings(props: {
       // A failure still reports when closing Settings cut it off; another
       // workspace or account never hears it.
       if (scope.isCurrent(token) || (closed.current && scope.isCutOff(token))) {
-        report.current.onError?.(ipcErrorMessage(cause, FALLBACK[request.action]), cause, async () => {
-          if (scope.isCurrent(token) || closed.current) await run(request);
+        const reportFailure = (): void => report.current.onError?.(ipcErrorMessage(cause, FALLBACK[request.action]), cause, async () => {
+          if (!scope.isCurrent(token) && !closed.current) return;
+          // The shell takes the row back as Try again starts; while another
+          // change runs this one can't, so the notice comes back.
+          if (runningIn.current !== null) return reportFailure();
+          await run(request);
         }, undefined, identity);
+        reportFailure();
       }
       return false;
     }
@@ -593,7 +598,7 @@ export function MembersPage(props: {
       ) : role !== "owner" ? (
         <SettingsSection>
           <SettingRow title="Leave this workspace" testId="settings-members-leave"
-            description="You lose access until someone invites you again.">
+            description="To come back, you need an invite or the invite link.">
             <SecondaryButton data-testid="settings-members-leave-open" disabled={waiting} onClick={() => setConfirm({ kind: "leave" })}>
               {busy("leave") ? "Leaving…" : "Leave"}
             </SecondaryButton>
