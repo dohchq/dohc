@@ -101,6 +101,21 @@ describe("direct message routes", () => {
     }
   });
 
+  it("answers only to a bearer, never to a browser's cookie", async () => {
+    const { h } = await seed();
+    const ana = await member(h, "ana");
+    const conversationId = await sent(h, OWNER, pick(ana), "hi ana");
+    const withCookie = (init: RequestInit = {}): RequestInit => ({
+      ...init, headers: { ...Object.fromEntries(new Headers(init.headers)), cookie: "session=owner" },
+    });
+    expect((await h(request(OWNER, "/sync/direct/conversations", withCookie()))).status).toBe(404);
+    expect((await h(request(OWNER, `/sync/direct/conversations/${conversationId}/messages`, withCookie()))).status).toBe(404);
+    expect((await h(request(OWNER, "/sync/direct/send", withCookie(jsonBody({ conversationId, messageId: "m-cookie", body: "from a page" }))))).status).toBe(404);
+    expect((await h(request(OWNER, `/sync/direct/conversations/${conversationId}/block`, withCookie(jsonBody({ blocked: true }))))).status).toBe(404);
+    expect(await bodies(h, OWNER, conversationId)).toEqual(["hi ana"]);
+    expect(only((await list(h, OWNER)).conversations).person.blocked).toBe(false);
+  });
+
   it("gives two people one conversation, from either side, without any email", async () => {
     const { h } = await seed();
     const ana = await member(h, "ana");

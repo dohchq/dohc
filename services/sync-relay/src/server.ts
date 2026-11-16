@@ -766,7 +766,13 @@ export function createSyncRelayHandler({
     shareWebOrigin,
     discussionActivity,
   });
-  const respondToDirectMessages = createDirectMessageRoutes({ storage, activity: discussionActivity, nowMs, newId, lookupUserDisplayName });
+  const respondToDirectMessages = createDirectMessageRoutes({
+    storage,
+    activity: discussionActivity,
+    nowMs,
+    newId,
+    lookupUserDisplayName,
+  });
   const respondToNamedShareTransport = createNamedShareTransportRoutes(
     storage,
     nowMs,
@@ -1626,6 +1632,19 @@ export function createSyncRelayHandler({
         if (!respondToAccountOperation) throw notFound();
         return await respondToAccountOperation(request, route);
       }
+      const bearerActor = async (workspaceId: string) => {
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? ""))
+          throw notFound();
+        return await resolveActor(
+          new Request(request.url, {
+            headers: { authorization: authorization! },
+            signal: request.signal,
+          }),
+          workspaceId,
+        );
+      };
+      if (isDirectMessageRoute(route)) { return await respondToDirectMessages(request, route, await bearerActor("")); }
       if (
         route.route === "chat-runners" ||
         route.route === "chat-wakes" ||
@@ -1758,11 +1777,6 @@ export function createSyncRelayHandler({
       // the ownership check below, which stays owner-only.
       if (isWorkspaceMemberRoute(route)) {
         return await respondToWorkspaceMembers(request, route, actor);
-      }
-
-      // A conversation belongs to its people, not to a workspace. Storage checks the caller is one of them.
-      if (isDirectMessageRoute(route)) {
-        return await respondToDirectMessages(request, route, actor);
       }
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
