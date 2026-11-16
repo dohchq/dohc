@@ -2,10 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { AccountState, SignIn } from "../server/account";
 import type { ChatWrite } from "../server/chatWrites";
 import { createServerClient } from "../server/client";
-import { createDurableFiles } from "../server/durableFiles";
 import { createOutbox, OutboxError, type Outbox, type OutboxState } from "../server/outbox";
 import { phoneWrites } from "../server/phoneWrites";
-import { durableDisk } from "../server/testDurableDisk";
+import { keptDisk } from "../server/testKeptDisk";
 import { testServer, type Answer } from "../server/testServer";
 import {
   createConversationWrites,
@@ -31,7 +30,6 @@ const SCOPE = { origin: ORIGIN, accountId: "u-1", workspaceId: "ws-1" } as const
 const READY: OutboxState = {
   status: "ready",
   records: [],
-  aside: [],
   unreadable: [],
   deletion: "none",
   unconfirmed: [],
@@ -108,9 +106,9 @@ function fakeOutbox(state: OutboxState = READY, enqueue?: WriteOutbox["enqueue"]
 }
 
 /** The real outbox over a fresh disk, signed in to `server`, with retry waits that never end on their own. */
-function launch(server: Server, disk = durableDisk()): Outbox {
+function launch(server: Server, disk = keptDisk()): Outbox {
   const outbox = createOutbox({
-    files: createDurableFiles(disk.launch()),
+    store: disk.launch(),
     sleep: (_ms, signal) =>
       new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("cut")))),
   });
@@ -457,13 +455,11 @@ describe("answers that wait", () => {
     expect(asked).toEqual([]);
   });
 
-  it("reach no outbox call while a Sign out's delete is owed", async () => {
-    for (const deletion of ["owed", "failed", "failed-unmarked"] as const) {
-      const { outbox, asked } = fakeOutbox({ ...READY, deletion });
-      const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
-      expect(await writes.submit("ws-1", write)).toEqual({ kind: "blocked" });
-      expect(asked).toEqual([]);
-    }
+  it("reach no outbox call while a Sign out's delete has failed", async () => {
+    const { outbox, asked } = fakeOutbox({ ...READY, deletion: "failed" });
+    const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
+    expect(await writes.submit("ws-1", write)).toEqual({ kind: "blocked" });
+    expect(asked).toEqual([]);
   });
 
   it("go to the outbox as the one write the card made", async () => {
@@ -480,15 +476,15 @@ describe("answers that wait", () => {
     const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
     expect(await writes.submit("ws-1", write)).toEqual({ kind: "withheld", operationId: "op-7" });
 
-    const disk = durableDisk();
-    disk.files.set(
-      "m-000000000001",
+    const disk = keptDisk();
+    disk.sql(
+      "INSERT INTO outbox (origin, account_id, record) VALUES (?, 'u-1', ?)",
+      ORIGIN,
       JSON.stringify({
         format: 1,
         ...SCOPE,
         operationId: "op-7",
         messageId: "message-7",
-        sequence: 1,
         dependsOn: null,
         target: { kind: "thread", id: "thread-lane" },
         write,

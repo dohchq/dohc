@@ -11,26 +11,24 @@ import {
 } from "./chatWrites";
 import { ServerError } from "./client";
 import { sleep as timerSleep } from "./deviceFlow";
-import { DurableFileError, type DurableFiles } from "./durableFiles";
+import { StoreError, type KeptStore, type Row, type Sql } from "./keptStore";
 import type { ChatMessage } from "./workspaceReads";
 
 // The phone's outbox: chat writes the person made, kept on disk until the server has them and a read shows them.
 // It is one account-level store beside the read cache, never inside a workspace's store, so switching workspace
 // doesn't touch it.
 //
-// Each write is one record file, named by its sequence number, written through the durable-file module
-// (durableFiles.ts). A counter file, written first, gives each record the next sequence, so order survives a relaunch.
-// Enqueue writes the record withheld, then sendable, and resolves only once the record would survive a crash or power
-// loss. A record whose sendable version couldn't be written stays withheld, on disk and in memory, and is sent only
-// after `retryEnqueue` with the same operation ID, so a relaunch never sends a write the person may have given up on.
-// Nothing here deletes a record except a read that shows its result, `discard`, and Sign out. A record that can't be
-// read, and any other file, is kept aside. Of those, `discard` deletes only an unreadable record, by the handle
-// `state()` gives for it.
+// Each write is one row of kept.db (keptStore.ts). Enqueue gives it the next sequence and inserts it in one
+// transaction, and resolves only once that commit is flushed. A commit that failed may still stand, so the record is
+// written again withheld, and stays withheld in memory: it is sent only after `retryEnqueue` with the same operation
+// ID, so a relaunch never sends a write the person may have given up on. Nothing here deletes a record except a read
+// that shows its result, `discard`, and Sign out. A row that can't be read is kept, and `discard` deletes it only by the
+// handle `state()` gives for it.
 //
 // `discard` deletes one record from this phone. It can't take back a write the server may already have. It first
 // writes a record that may still send as withheld, and keeps it withheld in memory whatever that write and the delete
 // do, so a late answer or a failed discard doesn't send it again in this run. A relaunch can't send it once either the
-// withheld version or the delete is durable. When neither is, discard rejects as `withheld-in-memory`, because a
+// withheld version or the delete is committed. When neither is, discard rejects as `withheld-in-memory`, because a
 // relaunch may send it. It refuses a write that a waiting reply still needs.
 //
 // Only a sign-in with the record's own server and account sends it. Within each account, workspace, and thread or
@@ -40,13 +38,11 @@ import type { ChatMessage } from "./workspaceReads";
 // same operation ID and arguments until it's saved or refused, so it is written at most once. A 401 pauses sending and
 // keeps every record.
 //
-// Sign out, through `signOut`, stops sending and writes a marker. Only then does the account end the sign-in and
-// delete its token; once that has settled, every file goes, and the marker last. A launch that finds the marker
-// finishes the delete before it reads anything, even if the app closed before the token went. If the marker can't be
-// written, every file must go at once, before the token, or Sign out fails, and a phone still signed in stays signed
-// in. From the moment Sign out starts, the delete is owed: nothing sends and nothing is added, whoever signs in, until
-// a try finishes it. `wake` and each sign-in try again once Sign out's own try has ended, and `state()` shows a failed
-// try, so Connect can say so after a 401 has already signed the phone out.
+// Sign out, through `signOut`, stops sending and deletes the rows of the account last signed in, in one commit. Only
+// then does the account end the sign-in and delete its token. If the commit fails, Sign out fails, a phone still
+// signed in stays signed in, and `state()` shows the failure, so Connect can say so after a 401 has already signed the
+// phone out. From the moment Sign out starts until one finishes, nothing sends and nothing is added, whoever signs in.
+// That hold is in memory: a relaunch reads the rows again, and a sign-in to their account sends them.
 //
 // Every disk change runs in one queue. A change checks the outbox's lifetime, which Sign out moves on, after each
 // wait, so a late answer can neither update another account's record nor bring back a deleted one.
@@ -111,25 +107,22 @@ interface OutboxRecord {
 export interface OutboxState {
   /**
    * `locked`: iOS hasn't been unlocked since the phone started, so the records can't be read yet. `failed`: reading
-   * them, or finishing a Sign out's delete, failed. Both try again at the next `wake`.
+   * them failed. Both try again at the next `wake`. `damaged`: kept.db is damaged. Nothing replaces it until the person
+   * deletes it, through `deleteDamaged` or Sign out.
    */
-  readonly status: "loading" | "locked" | "failed" | "ready";
+  readonly status: "loading" | "locked" | "failed" | "damaged" | "ready";
   /** In sequence order. */
   readonly records: readonly OutboxRecord[];
-  /** Files kept aside: records that can't be read, and anything else in the folder. */
-  readonly aside: readonly string[];
   /**
-   * A handle for each record kept aside because it can't be read, for `discard`. The handles change each time the
-   * records are read, and Sign out ends them. They say nothing of the record's account or workspace, which can't be
-   * known.
+   * A handle for each of the last signed-in account's rows that can't be read, for `discard`. The handles change each
+   * time the records are read, and Sign out ends them. They say nothing of the row's workspace, which can't be known.
    */
   readonly unreadable: readonly string[];
   /**
-   * A Sign out's delete: `none` when none is owed. While one is owed, nothing sends and nothing is added. `failed` once
-   * a try has failed, until one finishes it; `failed-unmarked` when its marker isn't on disk either, so a relaunch
-   * would read the records instead of deleting them.
+   * `failed` once a Sign out's delete has failed, until a Sign out finishes. Meanwhile nothing sends and nothing is
+   * added.
    */
-  readonly deletion: "none" | "owed" | "failed" | "failed-unmarked";
+  readonly deletion: "none" | "failed";
   /**
    * The operation IDs of saved reactions that a read since they were saved shows otherwise, as when another device
    * changed them. The server's state may differ from what the record shows, so it needs the person, who can discard
@@ -141,7 +134,7 @@ export interface OutboxState {
 /**
  * Why enqueue didn't resolve, when it isn't a disk error: no account signed in or records not read yet, a write the
  * route would refuse, or `indeterminate`: the record may be on disk, withheld under `operationId`, and `retryEnqueue`
- * sends it as that one operation. `not-deleted`: Sign out couldn't make its delete safe. `has-dependents`: a write
+ * sends it as that one operation. `not-deleted`: Sign out's delete didn't commit. `has-dependents`: a write
  * still waiting in the outbox needs the one `discard` was asked to delete. `withheld-in-memory`: `discard` made neither
  * the withheld record nor its delete durable, so the record under `operationId` sends only after `retryEnqueue` until
  * the app closes, but a relaunch may send it.
@@ -183,7 +176,7 @@ export interface Outbox {
   /**
    * Adds a write for the signed-in account, and resolves once its record is durable. A reply whose `threadId` is null
    * names, in `dependsOn`, the outbox post or send it replies to. A reaction names its message's `thread`. Rejects with
-   * a disk error when nothing was kept, and as `indeterminate` when the record may be kept, withheld.
+   * a StoreError when nothing was kept, and as `indeterminate` when the record may be kept, withheld.
    */
   enqueue(input: {
     readonly workspaceId: string;
@@ -197,16 +190,18 @@ export interface Outbox {
    * Deletes one record from this phone, and resolves once the delete is durable. It doesn't stop a write the server
    * may already have. A record's sender stops, and a record that may still send is written withheld first. It stays
    * withheld in memory when that write or the delete fails, so this run sends it only after `retryEnqueue`. Rejects as
-   * `closed` while the records aren't read or a Sign out's delete is owed, and for a record when no account is signed
-   * in; as `invalid` for another account's record, or a handle `state()` no longer gives; as `has-dependents` while a
+   * `closed` while the records aren't read, Sign out holds the outbox, or no account is signed in; as `invalid` for
+   * another account's record or row, or a handle `state()` no longer gives; as `has-dependents` while a
    * waiting reply needs the record; as `withheld-in-memory` when neither the withheld record nor the delete is durable,
-   * so a relaunch may send it; and otherwise as the disk error when the delete isn't durable. A failed discard keeps
+   * so a relaunch may send it; and otherwise as the StoreError when the delete didn't commit. A failed discard keeps
    * the record in `state()`.
    */
   discard(target: DiscardTarget): Promise<void>;
+  /** Deletes a damaged kept.db, which the person was warned holds every message waiting on this phone, then reads. */
+  deleteDamaged(): Promise<void>;
   /**
-   * What Sign out would delete: messages never sent, withheld or refused, and messages that may still send. Null until
-   * the records are read, so a sheet never says nothing is lost when it can't know.
+   * What Sign out would delete of the last signed-in account's: messages never sent, withheld or refused, and messages
+   * that may still send. Null until the records are read, so a sheet never says nothing is lost when it can't know.
    */
   signOutCounts(): { readonly unsent: number; readonly maySend: number } | null;
   /** A read of the workspace showed these messages: saved records whose result they show are deleted. */
@@ -216,18 +211,13 @@ export interface Outbox {
     messages: readonly ChatMessage[],
   ): void;
   /**
-   * Stops sending and deletes every record, calling `leave` once the delete can't be lost: after the marker lands, or
-   * after the folder is empty. Resolves once the delete is done, or has failed after `leave`. Rejects as
-   * `not-deleted`, without calling `leave`, when neither happened. Either way a delete not done stays owed, and the
-   * outbox closed, until `wake` or a sign-in finishes it.
+   * Stops sending and deletes the last signed-in account's rows, or a damaged kept.db, in one commit, then calls
+   * `leave` and resolves once it has. Rejects as `not-deleted`, without calling `leave`, when the commit fails.
    */
   signOut(leave: () => Promise<void>): Promise<void>;
-  /** Tries again what failed: reading, a Sign out's delete, and dependency changes. Cuts every retry wait short. */
+  /** Tries again what failed: reading, and dependency changes. Cuts every retry wait short. */
   wake(): void;
-  /**
-   * Reads the records, then sends with each sign-in, once any delete Sign out owes has finished. A 401 only pauses.
-   * Returns a stop.
-   */
+  /** Reads the records, then sends with each sign-in. A 401 only pauses. Returns a stop. */
   follow(account: {
     state(): AccountState;
     subscribe(listener: () => void): () => void;
@@ -235,13 +225,18 @@ export interface Outbox {
 }
 
 const FORMAT = 1;
-const COUNTER = "counter";
-/** Written first and deleted last by Sign out's delete. */
-const SIGNING_OUT = "signing-out";
-const RECORD_NAME = /^m-(\d{12})$/;
-const TEMPORARY_NAME = /^[A-Za-z0-9_-]{1,100}\.[0-9a-f]{32}\.tmp$/;
-const nameOf = (sequence: number) => `m-${String(sequence).padStart(12, "0")}`;
-const serialize = (record: OutboxRecord) => JSON.stringify({ format: FORMAT, ...record });
+/** A row's record, without its sequence, which is the row's own. */
+const serialize = ({ sequence: _, ...record }: OutboxRecord) =>
+  JSON.stringify({ format: FORMAT, ...record });
+/** Writes the record's row, replacing any it has. */
+const put = (sql: Sql, record: OutboxRecord) =>
+  sql.run(
+    "INSERT INTO outbox (sequence, origin, account_id, record) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT (sequence) DO UPDATE SET record = excluded.record",
+    [record.sequence, record.origin, record.accountId, serialize(record)],
+  );
+const DELETE_ROW = "DELETE FROM outbox WHERE sequence = ?";
+const uncertain = (error: unknown) => error instanceof StoreError && error.kind === "uncertain";
 const DEPENDENCY_REFUSED: RefusalReason = "The message it replies to wasn't sent";
 const COULD_NOT_SEND: RefusalReason = "Couldn't send";
 
@@ -263,8 +258,9 @@ const unfinished = (record: OutboxRecord) =>
 /** A reply still waiting for the thread its outbox post or send will name. */
 const needsThread = (record: OutboxRecord) =>
   record.write.operation === "reply" && record.write.args.threadId === null;
-const ownedBy = (record: OutboxRecord, account: Pick<SignIn, "origin" | "userId">) =>
-  record.origin === account.origin && record.accountId === account.userId;
+type AccountKey = Pick<SignIn, "origin" | "userId">;
+const ownedBy = (record: Pick<OutboxRecord, "origin" | "accountId">, account: AccountKey | null) =>
+  account !== null && record.origin === account.origin && record.accountId === account.userId;
 const scopeOf = (record: Pick<OutboxRecord, "origin" | "accountId" | "workspaceId">) =>
   JSON.stringify([record.origin, record.accountId, record.workspaceId]);
 const savedThread = (record: OutboxRecord | undefined) =>
@@ -304,7 +300,7 @@ function withThread(
 }
 
 export function createOutbox(options: {
-  readonly files: DurableFiles;
+  readonly store: KeptStore;
   /**
    * Whether the outbox sends anything. Off, it still reads its records, discards and deletes them at Sign out, but no
    * record reaches the server, not even one an earlier build kept. Defaults to on.
@@ -317,7 +313,7 @@ export function createOutbox(options: {
   readonly stalledAfterMs?: number;
   readonly stalledRetryMs?: number;
 }): Outbox {
-  const { files } = options;
+  const { store } = options;
   const sends = options.sends ?? true;
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? timerSleep;
@@ -328,26 +324,16 @@ export function createOutbox(options: {
 
   let status: OutboxState["status"] = "loading";
   const records = new Map<number, OutboxRecord>();
-  let aside: readonly string[] = [];
-  /** Each unreadable record's file name, by the handle `state()` gives for it. */
-  let unreadable = new Map<string, string>();
-  let next = 1;
+  /** Each unreadable row, by the handle `state()` gives for it. */
+  let unreadable = new Map<string, Pick<OutboxRecord, "sequence" | "origin" | "accountId">>();
   /** The outbox's lifetime. Sign out moves it on. */
   let epoch = 0;
   let session: SignIn | null = null;
-  /**
-   * A Sign out's delete hasn't finished, so nothing sends and nothing is added. It's kept in memory, and on disk only
-   * once the marker lands. The limit: if neither the marker nor the delete reached the disk and the app closes, a
-   * relaunch can't tell the records left from ones a 401 kept. It reads them, and a later sign-in to their account
-   * sends them.
-   */
-  let owed = false;
-  /** The owed delete's marker is on disk: its write resolved, or a launch found it. */
-  let marked = false;
-  /** A try at the owed delete failed, and none has finished it since. */
+  /** The account of the latest sign-in in this run, whose rows Sign out deletes, also after a 401. */
+  let lastAccount: AccountKey | null = null;
+  /** A Sign out is under way, or its delete failed and none has finished since: nothing sends or is added. */
+  let held = false;
   let deleteFailed = false;
-  /** The try at the owed delete running now, shared by every call in the same lifetime. */
-  let deleting: { readonly at: number; readonly done: Promise<void> } | null = null;
   const listeners = new Set<() => void>();
   /** The sender of each record being sent, by sequence. */
   const running = new Map<number, AbortController>();
@@ -428,8 +414,8 @@ export function createOutbox(options: {
 
   /**
    * Writes the record's next version, worked out from the current one inside the queue, and keeps it once it's
-   * durable. Resolves false when nothing changed: the record went, the outbox was deleted, `valid` failed, `change`
-   * returned null, or the write failed. After an `unsynced` failure the disk may hold either version; the next change
+   * committed. Resolves false when nothing changed: the record went, the outbox was deleted, `valid` failed, `change`
+   * returned null, or the write failed. After an `uncertain` failure the disk may hold either version; the next change
    * writes over it.
    */
   function commit(
@@ -443,7 +429,7 @@ export function createOutbox(options: {
       const updated = epoch === at && valid() && current ? change(current) : null;
       if (!updated) return false;
       try {
-        await files.write(nameOf(sequence), serialize(updated));
+        await store.transaction((sql) => put(sql, updated));
       } catch {
         return false;
       }
@@ -478,175 +464,43 @@ export function createOutbox(options: {
     });
   }
 
-  /** Reads every record and the counter, unless a Sign out's delete is owed, which it finishes first. */
+  /** Reads every row. */
   function load(): Promise<void> {
     const at = epoch;
     return serial(async () => {
-      if (epoch !== at || owed) return;
-      const found = new Map<number, OutboxRecord>();
-      const kept: string[] = [];
-      let counter = 1;
+      if (epoch !== at) return;
+      let rows: readonly Row[];
       try {
-        const listed = await files.list();
-        if (listed.includes(SIGNING_OUT)) {
-          owed = true;
-          marked = true;
-          changed();
-          return;
-        }
-        const recovery = await files.recover();
-        const unreadable = new Set(recovery.unreadable);
-        kept.push(...recovery.leftovers);
-        const readable = (name: string) =>
-          unreadable.has(name)
-            ? Promise.resolve(null)
-            : files.read(name).catch((error: unknown) => {
-                if (error instanceof DurableFileError && error.kind === "unreadable") return null;
-                throw error;
-              });
-        for (const name of listed) {
-          if (name === COUNTER) {
-            // A counter that can't be read is only a number: the records' names give it again.
-            counter = Math.max(counter, readCounter(await readable(name)));
-            continue;
-          }
-          const match = RECORD_NAME.exec(name);
-          if (!match) {
-            kept.push(name);
-            continue;
-          }
-          const sequence = Number(match[1]);
-          counter = Math.max(counter, sequence + 1);
-          const record = readRecord(await readable(name), sequence);
-          if (record) found.set(sequence, record);
-          else kept.push(name);
-        }
+        rows = await store.read(
+          "SELECT sequence, origin, account_id, record FROM outbox ORDER BY sequence",
+          [],
+        );
       } catch (error) {
         if (epoch !== at) return;
-        status = error instanceof DurableFileError && error.kind === "locked" ? "locked" : "failed";
+        const kind = error instanceof StoreError ? error.kind : null;
+        status = kind === "locked" || kind === "damaged" ? kind : "failed";
         changed();
         return;
       }
       if (epoch !== at) return;
       records.clear();
-      for (const [sequence, record] of found) records.set(sequence, record);
-      aside = kept.sort();
-      unreadable = new Map(
-        aside.filter((name) => RECORD_NAME.test(name)).map((name) => [crypto.randomUUID(), name]),
-      );
-      next = counter;
+      unreadable = new Map();
+      for (const { sequence, origin, account_id: accountId, record } of rows) {
+        if (
+          typeof sequence !== "number" ||
+          typeof origin !== "string" ||
+          typeof accountId !== "string"
+        )
+          continue;
+        const read = readRecord(record, sequence);
+        if (read) records.set(sequence, read);
+        else unreadable.set(crypto.randomUUID(), { sequence, origin, accountId });
+      }
       status = "ready";
       changed();
       reconcile();
       pump();
-    }).then(() => {
-      if (owed && epoch === at) return finishDelete();
     });
-  }
-
-  /**
-   * Removes every file the folder lists except `keep`, and every temporary leftover, trying each even after one fails.
-   * Resolves whether the folder now holds nothing else.
-   */
-  async function clearFolder(keep: string | null): Promise<boolean> {
-    let failed = false;
-    const attempt = (run: () => Promise<void>) =>
-      run().catch(() => {
-        failed = true;
-      });
-    try {
-      for (const name of await files.list())
-        if (name !== keep) await attempt(() => files.remove(name));
-      for (const name of (await files.recover()).leftovers)
-        if (TEMPORARY_NAME.test(name)) await attempt(() => files.removeLeftover(name));
-      return !failed && (await files.list()).every((name) => name === keep);
-    } catch {
-      return false;
-    }
-  }
-
-  /** Removes `name`, present or not, and resolves whether the folder synced after it. */
-  const removed = (name: string) =>
-    files.remove(name).then(
-      () => true,
-      () => false,
-    );
-
-  /**
-   * Makes the owed delete safe to finish later: writes the marker, unless it's on disk already. Without it, a kill would
-   * lose the delete, so every file must go now. Runs in the queue.
-   */
-  async function secure(): Promise<"marked" | "deleted" | "kept"> {
-    if (!marked) {
-      marked = await files.write(SIGNING_OUT, "{}").then(
-        () => true,
-        () => false,
-      );
-      changed();
-    }
-    if (marked) return "marked";
-    // An empty folder may hold deletes an earlier try couldn't sync. Removing the absent marker syncs the folder.
-    return (await clearFolder(null)) && (await removed(SIGNING_OUT)) ? "deleted" : "kept";
-  }
-
-  /** Deletes every file but the marker, then the marker. Runs in the queue. */
-  async function eraseMarked(): Promise<boolean> {
-    if (!(await clearFolder(SIGNING_OUT)) || !(await removed(SIGNING_OUT))) return false;
-    marked = false;
-    return true;
-  }
-
-  function failDelete() {
-    status = "failed";
-    deleteFailed = true;
-    changed();
-  }
-
-  function deleteDone() {
-    owed = false;
-    marked = false;
-    deleteFailed = false;
-    changed();
-  }
-
-  /**
-   * Tries the owed delete in the queue: the marker if it isn't on disk, then every other file, then the marker; or, if
-   * the marker still can't be written, every file at once. Resolves whether it finished. A failure keeps the outbox
-   * closed until the next try.
-   */
-  function erase(at: number): Promise<boolean> {
-    return serial(async () => {
-      if (!owed) return false;
-      const outcome = await secure();
-      if (outcome === "kept" || (outcome === "marked" && !(await eraseMarked()))) {
-        failDelete();
-        return false;
-      }
-      if (epoch !== at) return false;
-      deleteDone();
-      return true;
-    }).catch(() => false);
-  }
-
-  /**
-   * Makes `run` the try at the owed delete that every call in lifetime `at` shares, and reads the empty folder once it
-   * finishes. `run` resolves whether it finished.
-   */
-  function track(at: number, run: Promise<boolean>): Promise<void> {
-    const done: Promise<void> = run
-      .catch(() => false)
-      .then((finished) => {
-        if (deleting?.done === done) deleting = null;
-        if (finished) return load();
-      });
-    deleting = { at, done };
-    return done;
-  }
-
-  /** Tries the owed delete, or shares the try under way. A Sign out that starts meanwhile owns the delete from then. */
-  function finishDelete(): Promise<void> {
-    if (deleting?.at === epoch) return deleting.done;
-    return track(epoch, erase(epoch));
   }
 
   /**
@@ -676,23 +530,27 @@ export function createOutbox(options: {
   }
 
   /**
-   * Deletes saved records in order, in one queued change that stops at the first it can't delete, so a record is never
-   * deleted before the ones listed ahead of it.
+   * Deletes saved records in one commit, up to the first that can't go yet, so a record is never deleted without the
+   * ones listed ahead of it.
    */
   function retire(sequences: readonly number[]) {
     const at = epoch;
     void serial(async () => {
+      const going: number[] = [];
       for (const sequence of sequences) {
-        if (epoch !== at) return;
         const record = records.get(sequence);
         if (record === undefined) continue;
         // Checked here, after every change queued before it, such as a reply accepted meanwhile that needs its thread.
-        if (record.stage !== "saved" || needed(record)) return;
-        await files.remove(nameOf(sequence));
-        if (epoch !== at) return;
-        records.delete(sequence);
-        changed();
+        if (record.stage !== "saved" || needed(record)) break;
+        going.push(sequence);
       }
+      if (epoch !== at || going.length === 0) return;
+      await store.transaction(async (sql) => {
+        for (const sequence of going) await sql.run(DELETE_ROW, [sequence]);
+      });
+      if (epoch !== at) return;
+      for (const sequence of going) records.delete(sequence);
+      changed();
     }).catch(() => undefined);
   }
 
@@ -702,7 +560,7 @@ export function createOutbox(options: {
    * already belongs to that thread's lane.
    */
   function pump() {
-    if (!sends || status !== "ready" || owed) return;
+    if (!sends || status !== "ready" || held) return;
     const ordered = [...records.values()].sort((a, b) => a.sequence - b.sequence);
     const heads = new Map<string, OutboxRecord>();
     const busy = new Set<string>();
@@ -903,38 +761,19 @@ export function createOutbox(options: {
     for (const sender of running.values()) sender.abort();
   }
 
-  /**
-   * Writes a new or retried record withheld, then sendable, so the disk never holds it sendable before enqueue can say
-   * it was kept. A failed withheld write rejects as the disk error, or as `indeterminate` once its rename may stand. A
-   * failed sendable write leaves the withheld record and rejects as `indeterminate`.
-   */
-  async function place(record: OutboxRecord, at: number): Promise<OutboxRecord> {
-    const name = nameOf(record.sequence);
-    const withheld = { ...record, withheld: true };
+  /** Keeps a record withheld in memory after a write that may not stand, and gives the error enqueue rejects with. */
+  function keepWithheld(record: OutboxRecord, at: number): OutboxError {
+    // Signed out meanwhile: the delete queued behind this write removes it.
+    if (epoch !== at) return new OutboxError("closed");
+    records.set(record.sequence, { ...record, withheld: true });
+    changed();
+    return new OutboxError("indeterminate", record.operationId);
+  }
+
+  /** Keeps a record sendable once its row is committed, and starts what can send. */
+  function keep(record: OutboxRecord, at: number): OutboxRecord {
+    if (epoch !== at) throw new OutboxError("closed");
     const sendable = { ...record, withheld: false };
-    const unsynced = (error: unknown) =>
-      error instanceof DurableFileError && error.kind === "unsynced";
-    const keepWithheld = () => {
-      // Signed out meanwhile: the delete queued behind this write removes it.
-      if (epoch !== at) return new OutboxError("closed");
-      records.set(record.sequence, withheld);
-      changed();
-      return new OutboxError("indeterminate", record.operationId);
-    };
-    try {
-      await files.write(name, serialize(withheld));
-    } catch (error) {
-      if (!unsynced(error)) throw error;
-      throw keepWithheld();
-    }
-    if (epoch !== at) throw new OutboxError("closed");
-    try {
-      await files.write(name, serialize(sendable));
-    } catch (error) {
-      // An unsynced write was renamed: the disk holds the sendable record, or the withheld one if a crash reverts it.
-      if (!unsynced(error)) throw keepWithheld();
-    }
-    if (epoch !== at) throw new OutboxError("closed");
     records.set(record.sequence, sendable);
     changed();
     pump();
@@ -946,9 +785,10 @@ export function createOutbox(options: {
       snapshot ??= {
         status,
         records: [...records.values()].sort((a, b) => a.sequence - b.sequence),
-        aside,
-        unreadable: [...unreadable.keys()],
-        deletion: !owed ? "none" : !deleteFailed ? "owed" : marked ? "failed" : "failed-unmarked",
+        unreadable: [...unreadable]
+          .filter(([, row]) => ownedBy(row, lastAccount))
+          .map(([handle]) => handle),
+        deletion: deleteFailed ? "failed" : "none",
         unconfirmed: [...records.values()]
           .filter((record) => unconfirmed.has(record.sequence))
           .map((record) => record.operationId),
@@ -967,7 +807,7 @@ export function createOutbox(options: {
       const write = readChatWrite(input.write);
       const signIn = session;
       const dependsOn = input.dependsOn ?? null;
-      if (status !== "ready" || owed || !signIn || !signIn.isCurrent())
+      if (status !== "ready" || held || !signIn || !signIn.isCurrent())
         return Promise.reject(new OutboxError("closed"));
       const { workspaceId } = input;
       const target = write ? targetOf(write, input.thread) : undefined;
@@ -988,7 +828,7 @@ export function createOutbox(options: {
       const early = target === null ? withThread(write, find(dependsOn, scope)) : null;
       const at = epoch;
       return serial(async () => {
-        if (epoch !== at || status !== "ready" || owed) throw new OutboxError("closed");
+        if (epoch !== at || status !== "ready" || held) throw new OutboxError("closed");
         let accepted = early?.write ?? write;
         let waitsIn = early?.target ?? target;
         if (waitsIn === null) {
@@ -1008,31 +848,45 @@ export function createOutbox(options: {
             waitsIn = binding.target;
           }
         }
-        // A sequence is never reused, even when a write below fails: a gap keeps the order.
-        const sequence = next;
-        next += 1;
-        await files.write(COUNTER, JSON.stringify({ format: FORMAT, next }));
-        if (epoch !== at) throw new OutboxError("closed");
         const operationId = crypto.randomUUID();
-        return place(
-          {
-            origin: signIn.origin,
-            accountId: signIn.userId,
-            workspaceId,
-            operationId,
-            sequence,
-            dependsOn,
-            target: waitsIn,
-            write: accepted,
-            messageId: await derivedMessageId(signIn.userId, workspaceId, operationId, accepted),
-            stage: "queued",
-            attempted: false,
-            withheld: false,
-            pendingSinceMs: null,
-            result: null,
-          },
-          at,
-        );
+        const draft: OutboxRecord = {
+          origin: signIn.origin,
+          accountId: signIn.userId,
+          workspaceId,
+          operationId,
+          sequence: 0,
+          dependsOn,
+          target: waitsIn,
+          write: accepted,
+          messageId: await derivedMessageId(signIn.userId, workspaceId, operationId, accepted),
+          stage: "queued",
+          attempted: false,
+          withheld: false,
+          pendingSinceMs: null,
+          result: null,
+        };
+        // The insert gives the sequence, in the same commit, and SQLite never reuses one, so order survives deletes.
+        const inserted = { sequence: null as number | null };
+        try {
+          const sequence = await store.transaction(async (sql) => {
+            const [row] = await sql.all(
+              "INSERT INTO outbox (origin, account_id, record) VALUES (?, ?, ?) RETURNING sequence",
+              [draft.origin, draft.accountId, serialize(draft)],
+            );
+            if (typeof row?.sequence !== "number")
+              throw new StoreError("failed", "The insert gave no sequence.");
+            inserted.sequence = row.sequence;
+            return row.sequence;
+          });
+          return keep({ ...draft, sequence }, at);
+        } catch (error) {
+          if (inserted.sequence === null || !uncertain(error)) throw error;
+          // The commit may stand, sendable. Writing the row again withheld keeps a relaunch from sending it unasked. If
+          // that fails too, only this run holds it back.
+          const record = { ...draft, sequence: inserted.sequence, withheld: true };
+          await store.transaction((sql) => put(sql, record)).catch(() => undefined);
+          throw keepWithheld(record, at);
+        }
       });
     },
 
@@ -1040,38 +894,42 @@ export function createOutbox(options: {
       const at = epoch;
       return serial(async () => {
         const signIn = session;
-        if (epoch !== at || status !== "ready" || owed || !signIn) throw new OutboxError("closed");
+        if (epoch !== at || status !== "ready" || held || !signIn) throw new OutboxError("closed");
         const record = [...records.values()].find(
           (entry) => entry.operationId === operationId && entry.withheld && ownedBy(entry, signIn),
         );
         if (!record) throw new OutboxError("invalid");
-        return place(record, at);
+        try {
+          await store.transaction((sql) => put(sql, { ...record, withheld: false }));
+        } catch (error) {
+          // A commit that may stand leaves the row sendable or withheld: either is safe to send now.
+          if (!uncertain(error)) throw keepWithheld(record, at);
+        }
+        return keep(record, at);
       });
     },
 
     discard(target) {
       const at = epoch;
       return serial(async () => {
-        if (epoch !== at || status !== "ready" || owed) throw new OutboxError("closed");
+        const signIn = session;
+        if (epoch !== at || status !== "ready" || held || !signIn?.isCurrent())
+          throw new OutboxError("closed");
         if (target.kind === "unreadable") {
-          const name = unreadable.get(target.handle);
-          if (name === undefined) throw new OutboxError("invalid");
-          await files.remove(name);
+          const row = unreadable.get(target.handle);
+          if (row === undefined || !ownedBy(row, signIn)) throw new OutboxError("invalid");
+          await store.transaction((sql) => sql.run(DELETE_ROW, [row.sequence]));
           if (epoch !== at) throw new OutboxError("closed");
           unreadable.delete(target.handle);
-          aside = aside.filter((entry) => entry !== name);
           changed();
           return;
         }
-        const signIn = session;
-        if (!signIn?.isCurrent()) throw new OutboxError("closed");
         const record = [...records.values()].find(
           (entry) => entry.operationId === target.operationId && ownedBy(entry, signIn),
         );
         if (!record) throw new OutboxError("invalid");
         if (waitedFor(record)) throw new OutboxError("has-dependents");
         const { sequence } = record;
-        const file = nameOf(sequence);
         discarding.add(sequence);
         // Its sender stops now, so no answer that comes later is written.
         running.get(sequence)?.abort();
@@ -1081,28 +939,25 @@ export function createOutbox(options: {
           if (unfinished(record)) {
             // Written even when withheld in memory: a failed discard leaves it so with the sendable version on disk.
             const withheld = { ...record, withheld: true };
-            let written: "durable" | "unsynced" | "failed" = "durable";
+            let written: "committed" | "uncertain" | "failed" = "committed";
             try {
-              await files.write(file, serialize(withheld));
+              await store.transaction((sql) => put(sql, withheld));
             } catch (error) {
-              written =
-                error instanceof DurableFileError && error.kind === "unsynced"
-                  ? "unsynced"
-                  : "failed";
+              written = uncertain(error) ? "uncertain" : "failed";
             }
             if (epoch !== at) throw new OutboxError("closed");
             records.set(sequence, withheld);
             changed();
-            // Any failure but `unsynced` left the sendable version.
+            // Any failure but `uncertain` left the sendable version.
             if (written === "failed")
               throw new OutboxError("withheld-in-memory", record.operationId);
-            safe = written === "durable";
+            safe = written === "committed";
           }
           try {
-            await files.remove(file);
+            await store.transaction((sql) => sql.run(DELETE_ROW, [sequence]));
           } catch (error) {
             if (epoch !== at) throw new OutboxError("closed");
-            // A power loss may bring back the sendable version an unsynced withheld write replaced.
+            // The withheld version's commit may not stand, leaving the sendable one.
             throw safe ? error : new OutboxError("withheld-in-memory", record.operationId);
           }
           if (epoch !== at) throw new OutboxError("closed");
@@ -1115,11 +970,20 @@ export function createOutbox(options: {
       });
     },
 
+    deleteDamaged() {
+      const at = epoch;
+      return serial(async () => {
+        if (epoch !== at || status !== "damaged") throw new OutboxError("closed");
+        await store.destroy();
+      }).then(() => load());
+    },
+
     signOutCounts() {
-      if (status !== "ready" || owed) return null;
-      let unsent = unreadable.size;
+      if (status !== "ready" || held) return null;
+      let unsent = [...unreadable.values()].filter((row) => ownedBy(row, lastAccount)).length;
       let maySend = 0;
       for (const record of records.values()) {
+        if (!ownedBy(record, lastAccount)) continue;
         // An answer refused as already answered still published its reply.
         if (record.stage === "refused")
           unsent +=
@@ -1173,43 +1037,51 @@ export function createOutbox(options: {
     signOut(leave) {
       epoch += 1;
       const at = epoch;
+      const account = lastAccount;
+      const damaged = status === "damaged";
       stopSending();
-      records.clear();
-      aside = [];
-      unreadable = new Map();
+      held = true;
+      for (const [sequence, record] of records)
+        if (ownedBy(record, account)) records.delete(sequence);
       observed = null;
       unreachable.clear();
       unconfirmed.clear();
-      owed = true;
       status = "loading";
       changed();
-      const left = serial(async () => {
-        const outcome = await secure();
-        // The records stay on disk, unread, until a later try deletes them.
-        if (outcome === "kept") failDelete();
-        else if (outcome === "deleted" && epoch === at) deleteDone();
-        return outcome;
-      }).then(async (outcome) => {
-        if (outcome === "kept") throw new OutboxError("not-deleted");
-        await leave();
-        return outcome;
-      });
-      // This is the try every call shares until it ends, so the signed-out notice `leave` sends, a sign-in or `wake`
-      // can't delete the records before `leave` has deleted the token.
-      const done = track(
-        at,
-        left.then((outcome) => (outcome === "marked" ? erase(at) : epoch === at)),
+      return serial(async () => {
+        // A damaged file can't be read for its rows. The sheet warned that Sign out deletes any it has.
+        if (damaged) await store.destroy();
+        else if (account)
+          await store.transaction((sql) =>
+            sql.run("DELETE FROM outbox WHERE origin = ? AND account_id = ?", [
+              account.origin,
+              account.userId,
+            ]),
+          );
+      }).then(
+        async () => {
+          await leave();
+          // Held until the sign-in has ended, so nothing is added for the account meanwhile.
+          if (epoch !== at) return;
+          held = false;
+          deleteFailed = false;
+          await load();
+        },
+        () => {
+          if (epoch === at) {
+            deleteFailed = true;
+            void load();
+          }
+          throw new OutboxError("not-deleted");
+        },
       );
-      // Settles after the try has ended, so a `wake` the caller makes next starts a new one.
-      return done.then(() => left).then(() => undefined);
     },
 
     wake() {
       nudge.abort();
       nudge = new AbortController();
       unreachable.clear();
-      if (owed) void finishDelete();
-      else if (status === "locked" || status === "failed") void load();
+      if (status === "locked" || status === "failed") void load();
       else pump();
     },
 
@@ -1219,12 +1091,12 @@ export function createOutbox(options: {
         const signIn = state.status === "signed-in" ? state.signIn : null;
         if (signIn === session) return;
         session = signIn;
+        if (signIn) lastAccount = { origin: signIn.origin, userId: signIn.userId };
         observed = null;
         unreachable.clear();
         stopSending();
-        // A delete Sign out owes finishes before anything sends with this sign-in.
-        if (owed) void finishDelete();
-        else pump();
+        changed();
+        pump();
       };
       take();
       void load();
@@ -1279,15 +1151,6 @@ function shows(record: OutboxRecord, shown: ReadonlyMap<string, ChatMessage>): b
 const count = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
-function readCounter(saved: string | null): number {
-  try {
-    const value: unknown = saved === null ? null : JSON.parse(saved);
-    return isFields(value) && value.format === FORMAT && count(value.next) ? value.next : 1;
-  } catch {
-    return 1;
-  }
-}
-
 const STAGES: ReadonlySet<string> = new Set<OutboxStage>([
   "queued",
   "sending",
@@ -1331,15 +1194,15 @@ function readTarget(value: unknown): Target | null | undefined {
     : undefined;
 }
 
-/** A record as this build writes it, or null for anything else, which is kept aside. */
-function readRecord(saved: string | null, sequence: number): OutboxRecord | null {
+/** A row's record as this build writes it, or null for anything else, which is kept as unreadable. */
+function readRecord(saved: unknown, sequence: number): OutboxRecord | null {
   let value: unknown;
   try {
-    value = saved === null ? null : JSON.parse(saved);
+    value = typeof saved === "string" ? JSON.parse(saved) : null;
   } catch {
     return null;
   }
-  if (!isFields(value) || value.format !== FORMAT || value.sequence !== sequence) return null;
+  if (!isFields(value) || value.format !== FORMAT) return null;
   const write = readChatWrite(value.write);
   const result = readResult(value.result);
   const target = readTarget(value.target);

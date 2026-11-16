@@ -1,3 +1,4 @@
+import { confirmWords } from "@dohc/interface-words/confirmations";
 import { chatWords, noticesWords } from "@dohc/interface-words/notices";
 import { useRouter } from "expo-router";
 import { useCallback, useMemo } from "react";
@@ -10,6 +11,7 @@ import { phoneWrites } from "../server/phoneWrites";
 import { useTheme } from "../theme";
 import { outboxProblem } from "./Composer";
 import { ProblemLine } from "../account/ProblemLine";
+import { confirm } from "../confirm";
 import { blockedBy } from "./conversationWrites";
 import { MessageRow } from "./MessageRow";
 import { recoveryRows, type RecoveryRow } from "./outboxMessages";
@@ -73,6 +75,14 @@ export function OutboxRecovery() {
     return null;
   };
   const empty = state?.status === "ready" && rows.length === 0 && unreadable.length === 0;
+  // The file stays until the person deletes it: nothing replaces a damaged file on its own. A failed delete leaves it
+  // damaged, as the problem above still says.
+  const deleteDamaged = async () => {
+    const message = chatWords.deleteDamagedBody;
+    const title = chatWords.deleteDamagedTitle;
+    if (await confirm({ title, message, confirm: confirmWords.delete, destructive: true }))
+      await outbox.deleteDamaged().catch(() => undefined);
+  };
 
   return (
     <ScrollView
@@ -87,6 +97,11 @@ export function OutboxRecovery() {
           ) : (
             <Text style={[styles.text, { color: theme.muted }]}>{problem.text}</Text>
           )}
+          {state?.status === "damaged" ? (
+            <View style={[styles.actions, styles.damaged]}>
+              <ActionPill label={confirmWords.delete} onPress={() => void deleteDamaged()} />
+            </View>
+          ) : null}
         </View>
       ) : null}
       {empty ? (
@@ -161,4 +176,5 @@ const styles = StyleSheet.create({
   open: { flexDirection: "row", paddingLeft: 62, paddingTop: 6 },
   unreadable: { gap: 6, paddingTop: 14 },
   actions: { flexDirection: "row", gap: 8 },
+  damaged: { paddingTop: 8 },
 });

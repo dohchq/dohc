@@ -733,7 +733,6 @@ export function createSampleOutbox(seed: string | null): WriteOutbox {
       (snapshot ??= {
         status: "ready",
         records,
-        aside: [],
         unreadable: [],
         deletion: "none",
         unconfirmed: [],

@@ -33,9 +33,10 @@ export function lanesOf(context: {
 
 /**
  * Why the composer can't send now, or null when it can. `off`: phone writes are off in this build. `deleting`: a Sign
- * out's delete is owed, so nothing is added. `loading`, `locked` and `failed` are the outbox reading its records.
+ * out's delete failed, so nothing is added. `loading`, `locked`, `failed` and `damaged` are the outbox reading its
+ * records.
  */
-export type Blocked = "off" | "deleting" | "loading" | "locked" | "failed" | null;
+export type Blocked = "off" | "deleting" | "loading" | "locked" | "failed" | "damaged" | null;
 
 export function blockedBy(state: OutboxState, enabled: boolean): Blocked {
   if (!enabled) return "off";

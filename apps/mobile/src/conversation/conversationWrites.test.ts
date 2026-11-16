@@ -3,10 +3,9 @@ import type { FieldChange } from "../../modules/chat-composer";
 import type { AccountState, SignIn } from "../server/account";
 import type { ChatWrite } from "../server/chatWrites";
 import { createServerClient } from "../server/client";
-import { createDurableFiles } from "../server/durableFiles";
 import { createOutbox, OutboxError, type Outbox, type OutboxState } from "../server/outbox";
 import { phoneWrites } from "../server/phoneWrites";
-import { durableDisk } from "../server/testDurableDisk";
+import { keptDisk } from "../server/testKeptDisk";
 import { deferred, testServer, type Answer } from "../server/testServer";
 import {
   blockedBy,
@@ -53,7 +52,7 @@ const fieldReport = (
 });
 
 type Server = ReturnType<typeof testServer>;
-type Disk = ReturnType<typeof durableDisk>;
+type Disk = ReturnType<typeof keptDisk>;
 
 // A thread opened from a Notice's Reply chooses the message the Notice named. If that message is gone by the time the
 // thread's read answers, the reply must never go to the thread's top instead.
@@ -123,7 +122,6 @@ const requests = (server: Server, operation: string) =>
 const READY: OutboxState = {
   status: "ready",
   records: [],
-  aside: [],
   unreadable: [],
   deletion: "none",
   unconfirmed: [],
@@ -188,7 +186,7 @@ function fakeAccount() {
 /** The real outbox over `disk`, signed in to `server`, with retry waits that never end on their own. */
 function launch(disk: Disk, server: Server): Outbox {
   const outbox = createOutbox({
-    files: createDurableFiles(disk.launch()),
+    store: disk.launch(),
     sleep: (_ms, signal) =>
       new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("cut")))),
   });
@@ -223,19 +221,18 @@ describe("the phone writes gate", () => {
 });
 
 describe("blockedBy", () => {
-  it("holds every write while a Sign out's delete is owed, whatever the read says", () => {
-    for (const deletion of ["owed", "failed", "failed-unmarked"] as const)
-      expect(blockedBy({ ...READY, deletion }, true)).toBe("deleting");
+  it("holds every write while a Sign out's delete has failed, whatever the read says", () => {
+    expect(blockedBy({ ...READY, deletion: "failed" }, true)).toBe("deleting");
   });
 
   it("waits for the records to be read", () => {
-    for (const status of ["loading", "locked", "failed"] as const)
+    for (const status of ["loading", "locked", "failed", "damaged"] as const)
       expect(blockedBy({ ...READY, status }, true)).toBe(status);
     expect(blockedBy(READY, true)).toBeNull();
   });
 
-  it("asks the outbox nothing while a delete is owed", async () => {
-    const { outbox, asked } = fakeOutbox({ ...READY, deletion: "owed" });
+  it("asks the outbox nothing while a delete has failed", async () => {
+    const { outbox, asked } = fakeOutbox({ ...READY, deletion: "failed" });
     const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
     expect(await writes.submit("ws-1", send("Hi"))).toEqual({ kind: "blocked" });
     expect(await writes.retry("op-1")).toEqual({ kind: "blocked" });
@@ -288,12 +285,12 @@ describe("a stream's writes", () => {
 
 describe("submit", () => {
   it("keeps the write in the outbox, and says so only once it is durable", async () => {
-    const disk = durableDisk();
+    const disk = keptDisk();
     const server = testServer();
     server.on("POST", "/sync/ws-1/ops/send", SAVED);
     const outbox = launch(disk, server);
     await ready(outbox);
-    const release = disk.holdWrites();
+    const release = disk.holdCommits();
     const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
     let outcome: unknown = null;
     const pending = writes.submit("ws-1", send("Hello")).then((value) => {
@@ -321,10 +318,10 @@ describe("submit", () => {
   });
 
   it("keeps the text when the outbox kept nothing", async () => {
-    const disk = durableDisk();
+    const disk = keptDisk();
     const outbox = launch(disk, testServer());
     await ready(outbox);
-    disk.failWrites = "write";
+    disk.failWrites = /./;
     const writes = createConversationWrites({ outbox, enabled: true, isCurrent: () => true });
     expect(await writes.submit("ws-1", send("Lost"))).toEqual({ kind: "not-kept" });
     expect(outbox.state().records).toEqual([]);
@@ -355,11 +352,12 @@ describe("submit", () => {
 
 describe("Send on a withheld message", () => {
   it("sends the record's own operation and body", async () => {
-    const disk = durableDisk();
+    const disk = keptDisk();
     const server = testServer();
     server.on("POST", "/sync/ws-1/ops/send", SAVED);
-    disk.files.set(
-      "m-000000000001",
+    disk.sql(
+      "INSERT INTO outbox (origin, account_id, record) VALUES (?, 'u-1', ?)",
+      ORIGIN,
       JSON.stringify({
         format: 1,
         origin: ORIGIN,
@@ -367,7 +365,6 @@ describe("Send on a withheld message", () => {
         workspaceId: "ws-1",
         operationId: "op-kept",
         messageId: "message-kept",
-        sequence: 1,
         dependsOn: null,
         target: { kind: "stream", id: "group-1" },
         write: send("Kept text"),
@@ -791,7 +788,7 @@ describe("a reply's write", () => {
   });
 
   it("is sent in the thread the outbox post or send names once it's saved", async () => {
-    const disk = durableDisk();
+    const disk = keptDisk();
     const server = testServer();
     server.on("POST", "/sync/ws-1/ops/send", SAVED);
     server.on(
@@ -820,7 +817,7 @@ describe("a reply's write", () => {
   });
 
   it("can't wait for a post or send the server refused, and keeps the text", async () => {
-    const disk = durableDisk();
+    const disk = keptDisk();
     const server = testServer();
     server.on(
       "POST",
@@ -861,8 +858,8 @@ describe("a reaction", () => {
     expect(asked).toEqual([]);
   });
 
-  it("asks nothing while a Sign out's delete is owed, or for a screen no longer shown", async () => {
-    const owed = recordingOutbox({ ...READY, deletion: "owed" });
+  it("asks nothing while a Sign out's delete has failed, or for a screen no longer shown", async () => {
+    const owed = recordingOutbox({ ...READY, deletion: "failed" });
     expect(
       await createConversationWrites({
         outbox: owed.outbox,

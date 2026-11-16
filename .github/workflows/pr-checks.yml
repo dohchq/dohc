@@ -727,10 +727,10 @@ jobs:
         working-directory: apps/mobile
         run: pnpm exec expo prebuild --platform android --no-install --template ./node_modules/expo/template.tgz
       # Gradle installs the SDK platform, build tools, and NDK that React Native's version catalog names; the runner's
-      # SDK licenses are already accepted.
+      # SDK licenses are already accepted. expo-sqlite is autolinked as its own project.
       - name: Compile the native modules' Kotlin
         working-directory: apps/mobile/android
-        run: ./gradlew :chat-composer:compileDebugKotlin :durable-file:compileDebugKotlin --no-daemon --console=plain --stacktrace
+        run: ./gradlew :chat-composer:compileDebugKotlin :durable-file:compileDebugKotlin :expo-sqlite:compileDebugKotlin --no-daemon --console=plain --stacktrace
 
   verification:
     name: ${{ github.event_name == 'pull_request' && 'PR verification' || 'Manual verification' }}

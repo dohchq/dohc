@@ -255,7 +255,6 @@ describe("the outbox's reactions", () => {
         reacted("👍", "added", { origin: "https://other.example.com" }),
         reacted("👍", "added", { workspaceId: "ws-2" }),
       ],
-      aside: [],
       unreadable: [],
       deletion: "none",
       unconfirmed: [],

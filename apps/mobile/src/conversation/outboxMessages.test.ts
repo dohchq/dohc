@@ -45,7 +45,6 @@ const state = (
 ): OutboxState => ({
   status: "ready",
   records,
-  aside: unreadable,
   unreadable,
   deletion: "none",
   unconfirmed,

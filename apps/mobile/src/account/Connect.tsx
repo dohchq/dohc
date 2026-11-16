@@ -45,11 +45,10 @@ const ADDRESS_PROBLEM = {
 export function Connect() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
-  const { account, state, outbox, deletion } = useAccount();
+  const { account, state, deletion } = useAccount();
   const last = state.status === "signed-out" ? state : null;
-  // A Sign out's delete is owed: no sign-in starts until a try finishes it. Only a failed try shows a problem.
-  const deleteOwed = deletion !== "none";
-  const deleteFailed = deletion === "failed" || deletion === "failed-unmarked";
+  // A Sign out's delete failed: no sign-in starts until Try again, another Sign out, finishes it.
+  const deleteFailed = deletion === "failed";
   const [address, setAddress] = useState(last?.origin ?? "");
   const [phase, setPhase] = useState<Phase>({ kind: "form" });
   const [addressProblem, setAddressProblem] = useState<string | null>(null);
@@ -65,7 +64,7 @@ export function Connect() {
   useEffect(() => () => account.cancelSignIn(), [account]);
 
   async function connect(value = address) {
-    if (deleteOwed) return;
+    if (deleteFailed) return;
     const checked = check(value);
     if ("problem" in checked) {
       setAddressProblem(ADDRESS_PROBLEM[checked.problem]);
@@ -133,8 +132,8 @@ export function Connect() {
         <DohcMark size={40} color={theme.ink} />
         {deleteFailed ? (
           <ProblemLine
-            text={accountWords.signOutDeleteFailed(deletion === "failed-unmarked")}
-            onRetry={() => outbox.wake()}
+            text={accountWords.signOutDeleteFailed}
+            onRetry={() => void account.signOut().catch(() => undefined)}
           />
         ) : null}
         {phase.kind === "code" ? (
@@ -230,7 +229,7 @@ export function Connect() {
             ) : null}
             <Button
               label={busy ? accountWords.connecting : accountWords.connectServer}
-              disabled={busy || deleteOwed}
+              disabled={busy || deleteFailed}
               onPress={() => void connect()}
             />
           </View>
