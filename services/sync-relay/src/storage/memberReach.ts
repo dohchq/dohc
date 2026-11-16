@@ -12,7 +12,7 @@ import {
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { pathCollisionKey } from "../pathCollisionKey";
 import { accountEmail } from "./accountEmails";
-import { accessRuleHistoryFloor, accessRuleSetBefore, currentAccessRuleSet } from "./accessRules";
+import { accessRuleSetBefore, currentAccessRuleSet } from "./accessRules";
 import type { SqliteDb } from "./types";
 
 export interface EvaluatedMemberReach {
@@ -77,10 +77,9 @@ export function memberReach(
             ([folder, rule]) => [folder, rule && rule.people.size === 0 ? rule : null] as const,
           ),
         );
-  const rules = knownRules(current ?? currentAccessRuleSet(db, workspaceId, "main"));
+  const rules = knownRules(current ?? currentAccessRuleSet(db, workspaceId));
   const levelAt = (path: string) => fileLevel(rules, viewer, path);
   const atFolder = (folder: string) => folderLevel(rules, viewer, folder);
-  const floor = accessRuleHistoryFloor(db, workspaceId);
   const parsedRules = new Map<string, AccessRule | null>();
   const objects = new Map<string, { visible: boolean; path: string | null }>();
   const object = (id: string) => {
@@ -101,9 +100,8 @@ export function memberReach(
     if (visible && latest!.path === null && role !== "admin") {
       const seq = Number(latest!.relay_seq);
       visible =
-        seq > floor &&
         fileLevel(
-          knownRules(accessRuleSetBefore(db, workspaceId, "main", seq, parsedRules)),
+          knownRules(accessRuleSetBefore(db, workspaceId, seq, parsedRules)),
           viewer,
           path!,
         ) !== null;

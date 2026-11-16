@@ -1463,7 +1463,7 @@ it("enrolls at a folder's Edit above the member default and ends coverage when t
   context.tx(() =>
     context.db
       .prepare(
-        `INSERT INTO sync_relay_access_rules (workspace_id,version_id,folder,rule_text,from_seq,to_seq) VALUES (?,'main','docs','members: edit',100,NULL)`,
+        `INSERT INTO sync_relay_access_rules (workspace_id,folder,rule_text,from_seq,to_seq) VALUES (?,'docs','members: edit',100,NULL)`,
       )
       .run(scope.workspaceId),
   );

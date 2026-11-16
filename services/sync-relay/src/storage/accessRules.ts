@@ -190,14 +190,13 @@ export function currentAccessRuleSet(db: SqliteDb, workspaceId: string): AccessR
 export function accessRuleSetBefore(
   db: SqliteDb,
   workspaceId: string,
-  versionId: string,
   seq: number,
   parsed = new Map<string, AccessRule | null>(),
 ): AccessRuleSet {
   const rows = db
     .prepare(`SELECT folder, rule_text FROM sync_relay_access_rules
-    WHERE workspace_id = ? AND version_id = ? AND from_seq < ? AND (to_seq IS NULL OR to_seq >= ?)`)
-    .all(workspaceId, versionId, seq, seq);
+    WHERE workspace_id = ? AND from_seq < ? AND (to_seq IS NULL OR to_seq >= ?)`)
+    .all(workspaceId, seq, seq);
   const parse = (text: string) => {
     if (!parsed.has(text)) parsed.set(text, parseAccessRule(text));
     return parsed.get(text)!;

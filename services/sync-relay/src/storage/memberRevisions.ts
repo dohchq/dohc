@@ -68,7 +68,7 @@ export function settleMemberRevisions(db: SqliteDb): void {
   const rulesOf = (workspaceId: string) => {
     let rules = rulesByWorkspace.get(workspaceId);
     if (!rules) {
-      rules = currentAccessRuleSet(db, workspaceId, "main");
+      rules = currentAccessRuleSet(db, workspaceId);
       rulesByWorkspace.set(workspaceId, rules);
     }
     return rules;

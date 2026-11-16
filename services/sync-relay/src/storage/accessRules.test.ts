@@ -5,11 +5,7 @@ import { folderLevel, isAccessRulePath } from "@dohc/security-contract/access-ru
 import { pathCollisionKey as contractCollisionKey } from "@dohc/workspace-contracts/path-floor";
 import { pathCollisionKey } from "../pathCollisionKey";
 import { closeTestStorages, moment, testStorage } from "../testing";
-import {
-  accessRuleHistoryFloor,
-  currentAccessRuleSet,
-  initializeAccessRuleSchema,
-} from "./accessRules";
+import { currentAccessRuleSet, initializeAccessRuleSchema } from "./accessRules";
 import {
   applyCurrentFileOp,
   currentFileStatements,
@@ -139,7 +135,7 @@ describe("the relay's access rule index", () => {
     }
   });
 
-  it("keeps deleted objects hidden if hidden at deletion, and refuses unknown rule history", () => {
+  it("keeps deleted objects hidden if hidden at deletion", () => {
     const r = relay();
     try {
       r.write("Hidden/access.yaml", "");
@@ -147,15 +143,10 @@ describe("the relay's access rule index", () => {
       r.remove("Hidden/note.md");
       r.remove("Hidden/access.yaml");
       r.write("Public/note.md", "hello");
-      const deletion = r.remove("Public/note.md");
+      r.remove("Public/note.md");
       const reach = () => memberReach(r.storageDb, "ws", "sam", "member", "edit");
       expect(reach().objectVisible("o:Hidden/note.md")).toBe(false);
       expect(reach().objectVisible("o:Public/note.md")).toBe(true);
-      r.db.prepare("INSERT INTO sync_relay_access_rule_floors VALUES (?, ?)").run("ws", deletion);
-      expect(reach().objectVisible("o:Public/note.md")).toBe(false);
-      expect(
-        memberReach(r.storageDb, "ws", "admin", "admin", "edit").objectVisible("o:Public/note.md"),
-      ).toBe(true);
     } finally {
       r.db.close();
     }

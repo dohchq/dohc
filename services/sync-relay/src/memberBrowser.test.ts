@@ -1022,7 +1022,7 @@ it("filters member browser feeds and blobs and stops an open download when folde
   context.tx(() =>
     context.db
       .prepare(
-        `INSERT INTO sync_relay_access_rules (workspace_id,version_id,folder,rule_text,from_seq,to_seq) VALUES (?,'main','docs','',100,NULL)`,
+        `INSERT INTO sync_relay_access_rules (workspace_id,folder,rule_text,from_seq,to_seq) VALUES (?,'docs','',100,NULL)`,
       )
       .run(WORKSPACE),
   );

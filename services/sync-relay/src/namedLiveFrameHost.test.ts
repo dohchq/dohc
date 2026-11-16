@@ -1059,7 +1059,7 @@ it("keeps a member's live reads after an Edit drop, refuses submissions, and clo
   context.tx(() =>
     context.db
       .prepare(
-        `INSERT INTO sync_relay_access_rules (workspace_id,version_id,folder,rule_text,from_seq,to_seq) VALUES (?,'main','docs','members: view',100,NULL)`,
+        `INSERT INTO sync_relay_access_rules (workspace_id,folder,rule_text,from_seq,to_seq) VALUES (?,'docs','members: view',100,NULL)`,
       )
       .run(scope.workspaceId),
   );
