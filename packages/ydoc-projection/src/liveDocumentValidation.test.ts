@@ -1419,6 +1419,75 @@ describe("live edit format guard", () => {
     ).toBe(false);
   });
 
+  // Proves: text claimed under ids the note holds in a paragraph, but sent as the body's own, is
+  // refused before Yjs joins it to the paragraph's text.
+  it("refuses a run that Yjs would link into another list, before it joins the run", () => {
+    const note = new Y.Doc();
+    note.clientID = 7;
+    const block = new Y.XmlElement("paragraph");
+    note.getXmlFragment("body").insert(0, [block]);
+    block.insert(0, [new Y.XmlText()]);
+    const page = new Y.Doc();
+    page.clientID = 9;
+    Y.applyUpdate(page, Y.encodeStateAsUpdate(note));
+    const before = Y.encodeStateVector(page);
+    ((page.getXmlFragment("body").get(0) as Y.XmlElement).get(0) as Y.XmlText).insert(0, "abc");
+    Y.applyUpdate(note, Y.encodeStateAsUpdate(page, before));
+    const claim = new Y.Doc();
+    claim.clientID = 9;
+    claim.getText("body").insert(0, "abcdef");
+    const edit = Y.encodeStateAsUpdate(claim);
+    const landed = copyOf(note);
+    Y.applyUpdate(landed, edit);
+    // Yjs counts the run in the body but joins it to the paragraph's text.
+    expect(landed.getXmlFragment("body").length).toBe(4);
+    expect(fits(note, edit)).toBe(false);
+  });
+
+  // Proves: an item the same edit removes is still refused where it would leave a root or key a
+  // note can't have, from a page that collects removed items or one that keeps them.
+  it("refuses a removed item under a root or key a note can't have", () => {
+    const note = markdownToYDoc(markdown);
+    for (const gc of [false, true]) {
+      const page = new Y.Doc({ gc });
+      Y.applyUpdate(page, Y.encodeStateAsUpdate(note));
+      const removed = (edit: (doc: Y.Doc) => void) => {
+        const before = Y.encodeStateVector(page);
+        page.transact(() => edit(page));
+        return Y.encodeStateAsUpdate(page, before);
+      };
+      const root = removed((doc) => {
+        doc.getMap("evil").set("x", 1);
+        doc.getMap("evil").delete("x");
+      });
+      expect(fits(note, root), `root, gc ${gc}`).toBe(false);
+      // A page that reads the body as a map sets a key in it and removes it.
+      const keyed = new Y.Doc({ gc });
+      keyed.transact(() => {
+        keyed.getMap("body").set("x", 1);
+        keyed.getMap("body").delete("x");
+      });
+      expect(fits(note, Y.encodeStateAsUpdate(keyed)), `body key, gc ${gc}`).toBe(false);
+    }
+  });
+
+  // Proves: an empty item, which Yjs takes without moving its editor's clock, is refused.
+  it("refuses an empty item", () => {
+    const note = markdownToYDoc(markdown);
+    const edit = sent(note, (page) => paragraph(page).setAttribute("onclick", "zzzz"));
+    // The value as one item holding one string: its count, the string's type, length and letters.
+    const value = [1, 119, 4, 122, 122, 122, 122];
+    const at = edit.findIndex((_, index) =>
+      value.every((byte, step) => edit[index + step] === byte),
+    );
+    expect(at).toBeGreaterThan(0);
+    const empty = new Uint8Array([...edit.slice(0, at), 0, ...edit.slice(at + value.length)]);
+    const landed = copyOf(note);
+    Y.applyUpdate(landed, empty);
+    expect(Object.hasOwn(paragraph(landed).getAttributes(), "onclick")).toBe(true);
+    expect(fits(note, empty)).toBe(false);
+  });
+
   it("takes an edit that runs on from text the note already holds", () => {
     const note = markdownToYDoc(markdown);
     const page = new Y.Doc();

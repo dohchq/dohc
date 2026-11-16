@@ -861,21 +861,47 @@ type Shared = ReturnType<Y.Doc["get"]>;
 
 /**
  * Applies an edit to `copy`, a copy of the note kept for this check alone, and says whether each
- * item the edit added that the note still shows is a kind of content a note can hold: the three
- * roots, the elements and marks the shared schema has, each element's own attributes, and
- * frontmatter and metadata values, and that each new item sits among items of its own parent.
- * Yjs has placed each item by then, so this reads where it really sits. It checks no values or
- * nesting; the full check at save does that. False when the edit can't be applied whole. After false, `copy` may hold part of the edit, so the caller
- * builds it again.
+ * item the edit added sits among items of its own parent and key, and whether each one the note
+ * still shows is a kind of content a note can hold: the three roots, the elements and marks the
+ * shared schema has, each element's own attributes, and frontmatter and metadata values. Yjs has
+ * placed each item by then, so this reads where it really sits. It checks no values or nesting;
+ * the full check at save does that. False when the edit can't be applied whole. After false,
+ * `copy` may hold part of the edit, so the caller builds it again.
  */
 export function liveEditFitsCopy(copy: Y.Doc, update: Uint8Array): boolean {
-  const before = Y.decodeStateVector(Y.encodeStateVector(copy));
+  try {
+    for (const struct of Y.decodeUpdate(update).structs) {
+      // Yjs takes an empty item without moving its editor's clock, so the check would never read it.
+      if (struct.length < 1) return false;
+      // Yjs makes a root for each name an item gives, even one the same edit removes.
+      if (
+        struct instanceof Y.Item &&
+        typeof struct.parent === "string" &&
+        !PUBLIC_ROOTS.has(struct.parent)
+      )
+        return false;
+    }
+  } catch {
+    return false;
+  }
+  let fits = true;
+  // Read before the change ends: Yjs then joins each new item to the one before it from the same
+  // editor without comparing their parents.
+  const read = (transaction: Y.Transaction) => {
+    if (!placedItemsFit(copy, transaction)) fits = false;
+  };
+  copy.on("beforeObserverCalls", read);
   try {
     Y.applyUpdate(copy, update);
   } catch {
     return false;
+  } finally {
+    copy.off("beforeObserverCalls", read);
   }
-  if (copy.store.pendingStructs !== null || copy.store.pendingDs !== null) return false;
+  return fits && copy.store.pendingStructs === null && copy.store.pendingDs === null;
+}
+
+function placedItemsFit(copy: Y.Doc, transaction: Y.Transaction): boolean {
   const schema = getDohcProseMirrorSchema();
   const roots = new Map<Shared, string>();
   for (const [name, type] of copy.share) roots.set(type, name);
@@ -891,10 +917,10 @@ export function liveEditFitsCopy(copy: Y.Doc, update: Uint8Array): boolean {
     (content instanceof Y.ContentType &&
       !(content.type instanceof Y.XmlHook) &&
       (content.type instanceof Y.Map || content.type instanceof Y.Array));
-  for (const [client, structs] of copy.store.clients) {
-    const from = before.get(client) ?? 0;
-    if (from >= Y.getState(copy.store, client)) continue;
-    // Yjs may join a new item to the one before it, so the first one read can start before `from`.
+  for (const [client, to] of transaction.afterState) {
+    const from = transaction.beforeState.get(client) ?? 0;
+    if (from >= to) continue;
+    const structs = copy.store.clients.get(client)!;
     for (let index = Y.findIndexSS(structs, from); index < structs.length; index += 1) {
       const item = structs[index];
       if (!(item instanceof Y.Item)) continue;
@@ -904,11 +930,18 @@ export function liveEditFitsCopy(copy: Y.Doc, update: Uint8Array): boolean {
       // or key, which puts the item in that list while it still names its own parent.
       for (const near of [item.left, item.right])
         if (near && (near.parent !== type || near.parentSub !== item.parentSub)) return false;
-      // A removed item stays removed, so what it holds never shows.
-      if (item.deleted) continue;
       const parent = roots.get(type) ?? type,
         sub = item.parentSub,
         content = item.content;
+      // A root a note can't have, a key in the body, or a frontmatter or metadata value under no
+      // key stays in the note once removed.
+      if (
+        typeof parent === "string" &&
+        (!PUBLIC_ROOTS.has(parent) || (parent === "body") !== (sub === null))
+      )
+        return false;
+      // A removed item stays removed, so what it holds never shows.
+      if (item.deleted) continue;
       const fits =
         parent === "body"
           ? sub === null && xmlChild(content)
