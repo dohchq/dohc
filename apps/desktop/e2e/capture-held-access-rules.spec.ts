@@ -392,7 +392,7 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     // it would give now.
     await supplyMembers(app, "view");
     await resolvedRow.getByRole("button", { name: "Remove rule" }).click();
-    await expect(resolvedRow).toContainText("Members: View → View", { timeout: 30_000 });
+    await expect(resolvedRow).toContainText("Members: View, no change", { timeout: 30_000 });
     await expect(resolvedRow.getByRole("button", { name: "Remove rule" })).toBeEnabled();
     expect((await status()).heldAccessRules?.map((hold) => hold.folder)).toEqual([""]);
     await expect(rows.filter({ hasText: "Removed the workspace's access rule." })).toHaveCount(0);

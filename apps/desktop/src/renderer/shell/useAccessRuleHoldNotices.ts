@@ -101,10 +101,11 @@ export function accessRuleHoldWords(
 } {
   const place = placeOf(hold.folder);
   const until = `Until you choose, dohc doesn't record or share changes in ${place}.`;
-  const rows = hold.changes.map(
-    (change) =>
-      `${whoOf(change.who)}: ${reachWords(change.before, level)} → ${reachWords(change.after, level)}`,
-  );
+  const rows = hold.changes.map((change) => {
+    const [before, after] = [reachWords(change.before, level), reachWords(change.after, level)];
+    // With the member level read in, a removal can turn out to change nothing.
+    return `${whoOf(change.who)}: ${before === after ? `${before}, no change` : `${before} → ${after}`}`;
+  });
   const openMembers = level === null && usesMemberLevel(hold);
   const hides = hold.unreadable === "on-disk";
   const unreadable =

@@ -526,7 +526,7 @@ describe("useAccessRuleHoldNotices", () => {
     // Another window changed it again before the owner chose.
     h.bridge.workspaceMembers.mockImplementation(membersAt("view"));
     act(() => h.errors().runShellErrorAction(h.row("")!.id, 1));
-    await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View → View"] }));
+    await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View, no change"] }));
     await waitFor(() => expect(h.row("")!.action?.busy).toBeUndefined());
     expect(h.bridge.decideAccessRule).not.toHaveBeenCalled();
     expect(h.errors().shellErrors.filter((error) => error.tone === "success")).toEqual([]);
