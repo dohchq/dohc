@@ -10,6 +10,7 @@ import {
 } from "../../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js";
 import {
   createLiveRooms,
+  LiveRoomBindingEndedError,
   LiveRoomPausedError,
   LiveRoomUnsavedError,
   nextSave,
@@ -80,7 +81,11 @@ function ownerCapture(f: Fixture, engine: Engine = {}): NamedFrameHostSession {
     document: f.input.evidence.document,
     actor: f.actor,
   });
-  if (binding.kind !== "current") throw new Error("The owner's binding is not current.");
+  // As the relay's own saver opens it.
+  if (binding.kind !== "current")
+    throw binding.reason === "stale-document"
+      ? new LiveRoomBindingEndedError()
+      : new Error("The owner's binding is not current.");
   return {
     hostEpoch,
     invalidated: lifetime.signal,
@@ -126,6 +131,12 @@ function ownerCapture(f: Fixture, engine: Engine = {}): NamedFrameHostSession {
       const next = engine.answers?.shift();
       if (next === "retry") return { result: "retry", reason: "host-unavailable" } as never;
       if (next) return { result: "refused", reason: next } as never;
+      // As the journal does once the binding a capture holds is gone.
+      const now = f.storage.resolveCurrentLiveDocumentBinding({
+        document: f.input.evidence.document,
+        actor: f.actor,
+      });
+      if (now.kind !== "current") return { result: "refused", reason: "stale-binding" } as never;
       const { result } = f.storage.commitLiveUpdateJournal({
         ...f.capture(input.updateBytes, input.deliveryId),
         ...(input.room ? { room: input.room } : {}),
@@ -1317,6 +1328,41 @@ it("puts a stopped relay's leftover edits in a copy once their note has failed t
   const copy = new Y.Doc();
   Y.applyUpdate(copy, liveRoomCopy(f, paused!.pauseId));
   expect(copy.getMap("frontmatter").get("title")).toBe("Porto");
+});
+
+it("pauses at once when the owner moves or deletes the note's file, with every unsaved edit in the copy", async () => {
+  // The note's file moves while Ana's edit waits to be saved.
+  const f = note();
+  const a = editor(f, rooms(f), ana);
+  await a.open();
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  f.moment(f.input, 1_000, { path: "docs/moved.md" });
+  a.session.close();
+  await vi.waitFor(() => expect(pauses(f)).toHaveLength(1));
+  const [moved] = pauses(f);
+  expect(moved).toMatchObject({ cause: "refused", refusal: "stale-binding", named: [ana] });
+  expect(unsaved(f)).toEqual([]);
+  const copy = new Y.Doc();
+  Y.applyUpdate(copy, liveRoomCopy(f, moved!.pauseId));
+  expect(copy.getMap("frontmatter").get("title")).toBe("Lisbon");
+
+  // The file is deleted while a stopped relay holds Ben's edit.
+  const g = note();
+  const first = rooms(g, {}, { answers: ["retry", "retry"] });
+  const b = editor(g, first, ben);
+  await b.open();
+  expect((await b.submit(b.change("title", "Porto"))).result).toBe("success");
+  await first.close();
+  g.moment(g.input, 1_000, {
+    path: null,
+    content_kind: null,
+    blob_sha256: null,
+    byte_length: null,
+  });
+  rooms(g);
+  await vi.waitFor(() => expect(pauses(g)).toHaveLength(1));
+  expect(pauses(g)[0]).toMatchObject({ cause: "refused", refusal: "stale-binding", named: [ben] });
+  expect(unsaved(g)).toEqual([]);
 });
 
 it("saves a note's taken edits before a step, and lets editors in, while a lineage it ended is paused", async () => {

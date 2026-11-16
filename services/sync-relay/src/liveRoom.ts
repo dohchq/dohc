@@ -171,8 +171,18 @@ export class LiveRoomUnsavedError extends Error {
   }
 }
 /**
- * What one save came to. A refusal that will not clear by itself pauses the note; the engine
- * busy or restarting, a capture gone stale, or a save that failed, is tried again.
+ * What `openSaver` throws when the owner's binding ended and won't come back by itself, as when
+ * the note's file moved or was deleted. The edits can't be saved, so the note pauses at once.
+ */
+export class LiveRoomBindingEndedError extends Error {
+  constructor() {
+    super("The note's file moved or was deleted, or its live editing ended.");
+  }
+}
+/**
+ * What one save came to. A refusal that will not clear by itself, or a binding that ended, pauses
+ * the note; the engine busy or restarting, a capture gone stale, or a save that failed, is tried
+ * again.
  */
 type SaveOutcome =
   | "saved"
@@ -464,6 +474,8 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
       if (deadline.aborted && !room.lifetime.signal.aborted && room.saver) dropSaver(room);
       if (!committed) {
         log(room, "save failed", { edits: count, error: String(error).slice(0, 200) });
+        if (error instanceof LiveRoomBindingEndedError)
+          return { refusal: "stale-binding", named: senders(room.unsaved) };
         return "retry";
       }
     }
@@ -603,18 +615,23 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
         unopened.delete(key);
       } catch (error) {
         // Edits a stopped relay left go into a copy once their note has failed to open for as
-        // long as saves may fail, as they would in a room that opened. The copy holds the note
-        // as saved under them, so it opens on its own even when their lineage has ended.
+        // long as saves may fail, or at once if its binding ended, as they would in a room that
+        // opened. The copy holds the note as saved under them, so it opens on its own even when
+        // their lineage has ended.
         const left = liveRoomEdits(storage, document);
         if (!left.length) throw error;
+        const ended = error instanceof LiveRoomBindingEndedError;
         const since = unopened.get(key) ?? Date.now();
         unopened.set(key, since);
-        if (Date.now() - since < pauseAfterMs) throw error;
+        if (!ended && Date.now() - since < pauseAfterMs) throw error;
         const copy = Y.mergeUpdates([
           ...liveRoomSavedState(storage, document),
           ...left.map((row) => row.updateBytes),
         ]);
-        if (!pause(room, "failing", null, senders(left), copy)) throw error;
+        const [cause, refusal] = ended
+          ? (["refused", "stale-binding"] as const)
+          : (["failing", null] as const);
+        if (!pause(room, cause, refusal, senders(left), copy)) throw error;
         unopened.delete(key);
         return;
       }
