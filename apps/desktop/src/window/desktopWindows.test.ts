@@ -124,6 +124,8 @@ function fixture(
   let read: Dependencies["readCachedUserSettingsFile"] = async () => structuredClone(stored);
   let ready = true;
   let canInstall = false;
+  let focused: Window | undefined;
+  const offers: Record<string, ReturnType<Dependencies["createOffersFor"]>> = {};
   let rows = [workspace("a"), workspace("b")];
   let retirement: () => Promise<void> = async () => undefined;
   const sessions = new RendererWorkspaceSessionOwner<WebContents>({
@@ -163,6 +165,9 @@ function fixture(
     process: { platform, execPath: "C:\\dohc\\dohc.exe", argv: [] },
     workspaceSummaries: workspaceSummaries ?? vi.fn(() => rows),
     currentUpdateState: vi.fn(() => ({ canInstall })),
+    focusedWindow: () => focused?.native ?? null,
+    createOffersFor: (workspaceId) =>
+      offers[workspaceId] ?? { write: true, folder: true, collection: true },
     stateDir: () => "state",
     readCachedUserSettingsFile: vi.fn((directory) => read(directory)),
     stepWindowZoom: vi.fn(async () => structuredClone(stored)),
@@ -200,6 +205,10 @@ function fixture(
     setCanInstall: (value: boolean) => {
       canInstall = value;
     },
+    setFocused: (value: Window | undefined) => {
+      focused = value;
+    },
+    offers,
     setRetirement: (value: typeof retirement) => {
       retirement = value;
     },
@@ -967,6 +976,50 @@ describe("desktop native menus", () => {
     f.windows.refreshApplicationMenu();
     expect(item(f, "Help", "Restart to update").enabled).toBe(true);
     expect(f.windows.applicationMenuCanInstallUpdate).toBe(true);
+  });
+
+  it("disables File's creates the focused window's workspace refuses, and rebuilds only when they change", async () => {
+    const f = fixture();
+    const member = new Window();
+    const owned = new Window();
+    f.windows.trackWorkspaceWindow(member.native);
+    f.windows.trackWorkspaceWindow(owned.native);
+    await f.sessions.open(
+      member.webContents.native,
+      { workspaceId: "a", attachmentId: Symbol("a") },
+      "document",
+    );
+    await f.sessions.open(
+      owned.webContents.native,
+      { workspaceId: "b", attachmentId: Symbol("b") },
+      "document",
+    );
+    // A member at View, or anyone while another account is signed in.
+    f.offers.a = { write: false, folder: false, collection: false };
+    const creates = () =>
+      ["New page", "New folder", "New collection", "Import files"].map(
+        (label) => item(f, "File", label).enabled,
+      );
+
+    f.setFocused(member);
+    f.windows.refreshApplicationMenuOffers();
+    expect(creates()).toEqual([false, false, false, false]);
+    // What reads stays.
+    expect(item(f, "File", "Export workspace as zip").enabled).toBe(true);
+
+    const built = f.templates.length;
+    f.windows.refreshApplicationMenuOffers();
+    expect(f.templates).toHaveLength(built);
+
+    f.setFocused(owned);
+    f.windows.refreshApplicationMenuOffers();
+    expect(creates()).toEqual([true, true, true, true]);
+
+    // A member at Edit: pages and imports, but no folder or Collection.
+    f.offers.a = { write: true, folder: false, collection: false };
+    f.setFocused(member);
+    f.windows.refreshApplicationMenuOffers();
+    expect(creates()).toEqual([true, false, false, true]);
   });
 
   it("routes commands to the live target and opens recent workspaces through activation", () => {

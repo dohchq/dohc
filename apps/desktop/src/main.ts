@@ -599,7 +599,11 @@ import {
   shareViewIdentityIsIntact,
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
-import { shareViewWriteScopeOf, workspaceWriteRefusal } from "./workspaces/shareWriteGate";
+import {
+  shareViewWriteScopeOf,
+  workspaceCreateOffers,
+  workspaceWriteRefusal,
+} from "./workspaces/shareWriteGate";
 import {
   workspaceSummariesFrom,
   workspaceSummaryFor,
@@ -1380,6 +1384,8 @@ function sendRendererActivity(scope?: WorkspaceActivityScope): void {
     },
     scope,
   });
+  // A level or role change reaches the registry before this ping.
+  refreshApplicationMenuOffers();
 }
 
 // A cloud session transition (login, logout, account switch, or a relay
@@ -1430,6 +1436,14 @@ const desktopWindows = createDesktopWindows({
   createMainWindow,
   // Menu clicks arrive after startup, when the settings owner exists.
   stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step),
+  focusedWindow: () => BrowserWindow.getFocusedWindow(),
+  // The same rule the Explorer menu and the write handlers ask.
+  createOffersFor: (workspaceId) =>
+    workspaceCreateOffers(
+      sharedViewOf(workspaceId),
+      memberRoleOf(workspaceId),
+      otherAccountOf(workspaceId),
+    ),
   preloadArguments,
   afterRendererCrashLoop,
   get rendererWorkspaceSessions(): Pick<
@@ -1453,6 +1467,7 @@ const {
   broadcastUserSettings,
   broadcastAgentColor,
   refreshApplicationMenu,
+  refreshApplicationMenuOffers,
   refreshNativeWorkspaceSurfaces,
   prepareForRendererReload,
   prepareAfterRendererCrash,
@@ -1771,6 +1786,8 @@ const credentialSessionCache = new CredentialSessionCache<CloudSessionCredential
       chatWakeSession(snapshot.credentials, snapshot.generation),
       settled,
     );
+    // Another account signed in, or the joined one back: File follows.
+    refreshApplicationMenuOffers();
     receivedShareCredentialsChanged?.(cachedCredentials, settled);
     if (buttonAccountChanged) {
       personalAgentRoster.accountChanged();
@@ -1883,6 +1900,8 @@ function noticeStore(): NoticeStore {
   return cachedNoticeStore;
 }
 app.on("browser-window-focus", () => void noticeStore().sync());
+// File's create items follow the focused window's workspace.
+app.on("browser-window-focus", () => refreshApplicationMenuOffers());
 
 // A link lands in liveWorkspaceWindow (showOrCreateMainWindow), so that window takes its handoff.
 function takesShareHandoff(window: BrowserWindow | null): boolean {
@@ -10830,6 +10849,7 @@ function registerIpcHandlers(): void {
       workspaceFileOpens.shown(sender, workspaceId);
       workLinkOpens.shown(sender, workspaceId);
       oldWindows.notify();
+      refreshApplicationMenuOffers();
     },
     syncStatusWithOwnedProjection,
     openWorkspaceActivity: async (operation) => {
