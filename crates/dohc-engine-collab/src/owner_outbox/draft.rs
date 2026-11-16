@@ -3444,8 +3444,20 @@ mod tests {
             OwnerRowOutcome::Unchanged
         );
 
-        // After a restart the room sends its unsaved row again.
+        // After a restart, a pause waits until the room sends its unsaved row again.
         restart_committed_rows(&mut cache, &key);
+        let mut input = pause_input(&observed);
+        (input.applied_cursor, input.row_cursor) = (7, 6);
+        assert!(matches!(
+            super::super::release::pause_cached(
+                &mut store,
+                &mut cache,
+                &input,
+                &NoFaults,
+                |tx, pause| pause(tx),
+            ),
+            Err(OwnerOutboxError::AcceptedStateIncomplete)
+        ));
         assert_eq!(put(&store, &mut cache, 6, &second), OwnerRowOutcome::Added);
         let text = shown(&store, &mut cache);
         assert!(text.contains("Saved row") && text.contains("Unsaved row"));
