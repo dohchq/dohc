@@ -40,14 +40,19 @@ pub struct EngineStore {
     flushes: crate::flush::Flushes,
     opening: u64,
     wal_pressure: Arc<crate::checkpoint::WalPressure>,
-    /// Set while this writer, whose open checked the store's pages, is open.
-    /// A read-only store has none.
+    /// Set while this writer, whose open checked the store's pages or left
+    /// them to its page check, is open. A read-only store has none.
     pages_checked: Option<Arc<AtomicBool>>,
+    /// The check of the pages this store's open left unchecked.
+    page_check: Option<crate::page_check::PageCheck>,
 }
 
-/// That a writer's open checked the pages of the store at its path. A
-/// read-only open through it skips that check while the writer stays open,
-/// and checks the pages again once the writer closes.
+/// That a writer's open checked the pages of the store at its path, or left
+/// them to its page check. A read-only open through it skips that check
+/// while the writer stays open, and checks the pages again once the writer
+/// closes. A reader opened while the writer's page check still runs reads
+/// pages nobody has checked yet, as the writer does, and one already open
+/// reads on after the check stops the writer.
 #[derive(Debug)]
 pub struct PagesChecked {
     path: PathBuf,
@@ -147,6 +152,7 @@ impl EngineStore {
             opening: next_opening(),
             wal_pressure: Arc::default(),
             pages_checked: Some(Arc::new(AtomicBool::new(true))),
+            page_check: None,
         })
     }
 
@@ -186,6 +192,7 @@ impl EngineStore {
             opening: next_opening(),
             wal_pressure: Arc::default(),
             pages_checked: Some(Arc::new(AtomicBool::new(true))),
+            page_check: None,
         })
     }
 
@@ -213,6 +220,59 @@ impl EngineStore {
             opening: next_opening(),
             wal_pressure: Arc::default(),
             pages_checked: Some(Arc::new(AtomicBool::new(true))),
+            page_check: None,
+        })
+    }
+
+    /// An actor's open of an owner store, or a passive one, that serves
+    /// before the store's pages are checked. Checking them reads the whole
+    /// file, so the check runs while the store serves, on a connection of its
+    /// own. If it finds damage it marks the store, so the next open checks
+    /// the pages first and refuses it, and then calls `damaged`. The caller
+    /// stops using the store then. `damaged` runs on the check's thread and
+    /// must not wait for this store's owner, which joins that thread when it
+    /// drops the store. A check that cannot finish while the store serves
+    /// marks it too, without calling `damaged`.
+    pub fn open_serving_first(
+        path: &Path,
+        now_ms: i64,
+        root_token: Option<&str>,
+        work: Option<Arc<AtomicU64>>,
+        passive: bool,
+        damaged: crate::page_check::PagesDamaged,
+    ) -> Result<Self, StorageError> {
+        let opened =
+            crate::schema::open_engine_db_serving_first(path, now_ms, root_token, work, passive)?;
+        let flushes = crate::flush::Flushes::for_database(&opened.conn);
+        let wal_pressure = Arc::<crate::checkpoint::WalPressure>::default();
+        let page_check = if opened.pages_unchecked {
+            Some(crate::page_check::PageCheck::start(
+                path,
+                Arc::clone(&wal_pressure),
+                damaged,
+            )?)
+        } else {
+            None
+        };
+        Ok(EngineStore {
+            checkpoint_changes: if passive {
+                0
+            } else {
+                opened.conn.total_changes()
+            },
+            conn: opened.conn,
+            checkpoints: opened.checkpoints,
+            freshly_created: opened.freshly_created,
+            database_path: path.to_path_buf(),
+            #[cfg(feature = "fault-injection")]
+            harness_commits: 0,
+            passive,
+            completed_batch: Arc::default(),
+            flushes,
+            opening: next_opening(),
+            wal_pressure,
+            pages_checked: Some(Arc::new(AtomicBool::new(true))),
+            page_check,
         })
     }
 
@@ -242,6 +302,7 @@ impl EngineStore {
             opening: next_opening(),
             wal_pressure: Arc::default(),
             pages_checked: Some(Arc::new(AtomicBool::new(true))),
+            page_check: None,
         })
     }
 
@@ -262,8 +323,9 @@ impl EngineStore {
         Ok(Self::from_read_only(opened.conn, path, passive))
     }
 
-    /// That this writer's open checked the store's pages, for read-only opens
-    /// made while it stays open. A read-only store has none.
+    /// That this writer's open checked the store's pages, or left them to
+    /// its page check, for read-only opens made while it stays open. A
+    /// read-only store has none.
     pub fn pages_checked(&self) -> Option<PagesChecked> {
         self.pages_checked.as_ref().map(|writer_open| PagesChecked {
             path: self.database_path.clone(),
@@ -312,6 +374,7 @@ impl EngineStore {
             opening: next_opening(),
             wal_pressure: Arc::default(),
             pages_checked: None,
+            page_check: None,
         }
     }
 
@@ -1305,6 +1368,8 @@ impl EngineStore {
 
 impl Drop for EngineStore {
     fn drop(&mut self) {
+        // A check still running says nothing about a store that is closing.
+        self.page_check.take();
         // A reader opened from here on checks the pages, since this writer no
         // longer holds the store.
         if let Some(writer_open) = &self.pages_checked {
@@ -1333,8 +1398,14 @@ mod pages_checked_tests {
     fn damaged_store(root: &ScratchDir) -> PathBuf {
         let db = root.join("engine.db");
         drop(EngineStore::open(&db, 1).unwrap());
+        damage_a_page(&db);
+        db
+    }
+
+    /// Adds a table to the closed store at `db` and damages its one page.
+    fn damage_a_page(db: &Path) {
         let (root_page, page_size) = {
-            let conn = Connection::open(&db).unwrap();
+            let conn = Connection::open(db).unwrap();
             conn.execute_batch(
                 "CREATE TABLE unread_pages (value); INSERT INTO unread_pages VALUES (1);",
             )
@@ -1352,13 +1423,233 @@ mod pages_checked_tests {
             (root_page as u64, page_size as u64)
         };
         use std::io::{Seek, SeekFrom, Write};
-        let mut file = std::fs::OpenOptions::new().write(true).open(&db).unwrap();
+        let mut file = std::fs::OpenOptions::new().write(true).open(db).unwrap();
         // Page type 0 is no b-tree page.
         file.seek(SeekFrom::Start((root_page - 1) * page_size))
             .unwrap();
         file.write_all(&[0]).unwrap();
         file.sync_all().unwrap();
-        db
+    }
+
+    /// Waits for the check of `store`'s pages to end, as closing the store
+    /// would stop it.
+    fn page_check_ended(store: &mut EngineStore) {
+        if let Some(mut check) = store.page_check.take() {
+            check.join();
+        }
+    }
+
+    #[test]
+    fn a_store_serves_before_its_pages_are_checked_and_is_refused_once_the_check_finds_damage() {
+        for passive in [false, true] {
+            let root = ScratchDir::new_named("page-check-later").unwrap();
+            let db = root.join("engine.db");
+            if passive {
+                drop(EngineStore::open_passive(&db, 1, None, None).unwrap());
+            } else {
+                drop(EngineStore::open(&db, 1).unwrap());
+            }
+            damage_a_page(&db);
+            let marker = crate::page_check::check_first_marker(&db);
+            // The open reads no damaged page, so the store serves.
+            let (told, damage) = std::sync::mpsc::channel();
+            let mut store = EngineStore::open_serving_first(
+                &db,
+                2,
+                None,
+                None,
+                passive,
+                Box::new(move || told.send(()).unwrap()),
+            )
+            .unwrap();
+            store
+                .read_with(|conn| {
+                    conn.query_row("SELECT count(*) FROM engine_migrations", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                })
+                .unwrap();
+            damage
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the check reports the damage");
+            page_check_ended(&mut store);
+            assert!(marker.exists());
+            drop(store);
+            // The marked store is checked before it serves, and refused as
+            // an open that checks first refuses it.
+            let never: crate::PagesDamaged = Box::new(|| panic!("no check runs after a refusal"));
+            assert!(matches!(
+                EngineStore::open_serving_first(&db, 3, None, None, passive, never),
+                Err(StorageError::StateCorrupt { .. })
+            ));
+            assert!(marker.exists());
+        }
+    }
+
+    /// Leaves the WAL of the closed store at `db` pressing: longer than a held
+    /// reader may hold, with none of it copied to the main file, and with no
+    /// write to follow. While the second connection keeps its snapshot, no
+    /// checkpoint can copy it.
+    fn pressing_wal(db: &Path) -> (Connection, Connection) {
+        let pinned = Connection::open(db).unwrap();
+        pinned
+            .execute_batch("BEGIN; SELECT count(*) FROM sqlite_schema;")
+            .unwrap();
+        let writer = Connection::open(db).unwrap();
+        // One row fills one page, so this writes more frames than a held reader gives way at.
+        writer
+            .execute_batch(
+                "PRAGMA wal_autocheckpoint=0;
+                 CREATE TABLE filler (body);
+                 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<3500)
+                 INSERT INTO filler SELECT randomblob(4000) FROM n;",
+            )
+            .unwrap();
+        (writer, pinned)
+    }
+
+    /// What a check that must reach no verdict is given, and whether it was called.
+    fn no_verdict() -> (crate::PagesDamaged, Arc<AtomicBool>) {
+        let called = Arc::new(AtomicBool::new(false));
+        let call = Arc::clone(&called);
+        (
+            Box::new(move || call.store(true, Ordering::Release)),
+            called,
+        )
+    }
+
+    fn wait_until(what: &str, holds: impl Fn() -> bool) {
+        let waited = std::time::Instant::now();
+        while !holds() {
+            assert!(
+                waited.elapsed() < std::time::Duration::from_secs(60),
+                "{what}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_page_check_waits_while_the_wal_presses_and_starts_once_it_no_longer_does() {
+        let root = ScratchDir::new_named("page-check-gives-way").unwrap();
+        let db = damaged_store(&root);
+        let (writer, pinned) = pressing_wal(&db);
+        let (told, damage) = std::sync::mpsc::channel();
+        let check = crate::page_check::PageCheck::start(
+            &db,
+            Arc::default(),
+            Box::new(move || told.send(()).unwrap()),
+        )
+        .unwrap();
+        // A check that started would report this small store's damage at once.
+        assert!(
+            damage
+                .recv_timeout(std::time::Duration::from_millis(500))
+                .is_err(),
+            "a check that waits has no verdict"
+        );
+        assert!(!crate::page_check::marked(&db));
+        // The reader ends and nothing writes again. Only the check's own
+        // checkpoint and measurement find that the WAL no longer presses.
+        drop(pinned);
+        damage
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the check starts and reports the damage");
+        drop(check);
+        drop(writer);
+    }
+
+    #[test]
+    fn a_page_check_without_a_verdict_marks_the_store_and_goes_on_until_it_has_one() {
+        let root = ScratchDir::new_named("page-check-unfinished").unwrap();
+        let db = root.join("engine.db");
+        drop(EngineStore::open(&db, 1).unwrap());
+        let (_writer, pinned) = pressing_wal(&db);
+        let (damaged, called) = no_verdict();
+        let mut check = crate::page_check::PageCheck::start(&db, Arc::default(), damaged).unwrap();
+        // The store may never be free to check while it is open, so its next open checks first.
+        wait_until("an unfinished check marks the store", || {
+            crate::page_check::marked(&db)
+        });
+        // The check did not end there. Once the WAL no longer presses it finds the store sound.
+        drop(pinned);
+        wait_until("a check that finishes sound takes its mark away", || {
+            !crate::page_check::marked(&db)
+        });
+        check.join();
+        assert!(!called.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn closing_a_store_stops_a_waiting_page_check_which_leaves_no_mark() {
+        let root = ScratchDir::new_named("page-check-closed").unwrap();
+        let db = damaged_store(&root);
+        let (_writer, _pinned) = pressing_wal(&db);
+        let (damaged, called) = no_verdict();
+        drop(crate::page_check::PageCheck::start(&db, Arc::default(), damaged).unwrap());
+        assert!(!crate::page_check::marked(&db));
+        assert!(!called.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn the_page_check_can_stop_at_every_page_of_a_table() {
+        let root = ScratchDir::new_named("page-check-steps").unwrap();
+        let db = root.join("engine.db");
+        drop(EngineStore::open(&db, 1).unwrap());
+        let steps = |db: &Path| {
+            let asked = Arc::new(AtomicU64::new(0));
+            let counted = Arc::clone(&asked);
+            crate::schema::check_pages_until(db, move || {
+                counted.fetch_add(1, Ordering::Relaxed);
+                false
+            })
+            .unwrap();
+            asked.load(Ordering::Relaxed)
+        };
+        let pages = |db: &Path| -> u64 {
+            let count: i64 = Connection::open(db)
+                .unwrap()
+                .pragma_query_value(None, "page_count", |row| row.get(0))
+                .unwrap();
+            count as u64
+        };
+        let (steps_before, pages_before) = (steps(&db), pages(&db));
+        Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE many_pages (body);
+                 WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2000)
+                 INSERT INTO many_pages SELECT randomblob(3000) FROM n;",
+            )
+            .unwrap();
+        let added = pages(&db) - pages_before;
+        assert!(added >= 2000, "one row fills one page: {added}");
+        // One step in a thousand would ask about twice for these pages.
+        assert!(steps(&db) - steps_before >= added);
+    }
+
+    #[test]
+    fn a_sound_store_passes_its_later_check_and_a_repaired_one_loses_its_marker() {
+        let root = ScratchDir::new_named("page-check-sound").unwrap();
+        let db = root.join("engine.db");
+        let marker = crate::page_check::check_first_marker(&db);
+        let never =
+            || -> crate::PagesDamaged { Box::new(|| panic!("a sound store is not damaged")) };
+        // A fresh store has no pages to wait for.
+        let store = EngineStore::open_serving_first(&db, 1, None, None, false, never()).unwrap();
+        assert!(store.page_check.is_none());
+        drop(store);
+        let mut store =
+            EngineStore::open_serving_first(&db, 2, None, None, false, never()).unwrap();
+        assert!(store.page_check.is_some());
+        page_check_ended(&mut store);
+        assert!(!marker.exists());
+        drop(store);
+        // A marker left by an earlier failure goes once the store checks sound.
+        std::fs::write(&marker, b"").unwrap();
+        let store = EngineStore::open_serving_first(&db, 3, None, None, false, never()).unwrap();
+        assert!(store.page_check.is_none());
+        assert!(!marker.exists());
     }
 
     #[test]

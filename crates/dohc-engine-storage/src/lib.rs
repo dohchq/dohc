@@ -12,6 +12,10 @@
 //!   `busy_timeout`, `foreign_keys = ON`, then the fingerprint fence, then —
 //!   only for an accepted store — WAL, `synchronous`, validate-or-init,
 //!   `quick_check`. A rejected store is left byte-unchanged.
+//! - **An actor's store serves before its pages are checked**
+//!   ([`EngineStore::open_serving_first`]). `quick_check` reads the whole
+//!   file, so it runs while the store serves. A store that fails it stops
+//!   serving and is refused at its next open.
 //! - **The v1-vs-v2 fence.** A database stamped with any schema version other
 //!   than `2` is rejected with [`StorageError::UnsupportedFingerprint`] — never
 //!   auto-migrated, never written over.
@@ -49,6 +53,7 @@ pub mod text;
 
 mod checkpoint;
 pub(crate) mod migration;
+mod page_check;
 pub(crate) mod schema;
 mod search_generation;
 mod sqlite_path;
@@ -89,6 +94,7 @@ pub use materialize::{
     enqueue_job, pending_switch_jobs_in, record_completed_job, stamp_secret_capture_owned,
     upsert_projection_job,
 };
+pub use page_check::PagesDamaged;
 pub use recovery::{PreparedRecovery, RecoveryError, open_for_recovery};
 pub use remote_changes::{count_remote_change_in_tx, remote_changes_applied_in};
 pub use store::{EngineStore, PagesChecked, TxnOutcome};
