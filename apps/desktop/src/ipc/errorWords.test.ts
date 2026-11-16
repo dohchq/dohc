@@ -171,6 +171,10 @@ it.each([
   ["held-change-missing", "There is no held change to drop. Open the note again."],
   ["held-change-conflict", "The note has a conflict. Resolve it before using Drop."],
   ["held-change-undo-stale", "The note changed after Drop. Open History to find the waiting text."],
+  [
+    "workspace-folder-moved",
+    "This workspace's folder moved while dohc had it open. Open the workspace again from where it is now.",
+  ],
 ])("shows %s across Electron without offering a futile retry", (reason, words) => {
   const received = acrossIpc(refusal("INVALID_PARAMS", reason), "desktop:held-note-change");
   expect(readError(received)).toMatchObject({ words, canRetry: false });
