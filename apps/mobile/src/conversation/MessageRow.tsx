@@ -217,7 +217,9 @@ export function LocalFooter({
   const problem = actions.problems.get(mark.operationId);
   const reason =
     state.kind === "withheld"
-      ? chatWords.notSent
+      ? mark.maySendOnReopen
+        ? chatWords.notSentMaySendOnReopen
+        : chatWords.notSent
       : state.kind === "refused"
         ? chatWords.refused(state.reason)
         : state.kind === "missing"
@@ -465,7 +467,9 @@ function ReactionFooter({
           <View key={mark.operationId} style={styles.local}>
             <Text style={[styles.localText, { color: settling ? theme.muted : theme.danger }]}>
               {mark.state.kind === "withheld"
-                ? chatWords.reactionNotSent(emoji)
+                ? mark.maySendOnReopen
+                  ? chatWords.reactionNotSentMaySendOnReopen(emoji)
+                  : chatWords.reactionNotSent(emoji)
                 : mark.state.kind === "stalled"
                   ? chatWords.reactionStillSending(emoji)
                   : mark.state.kind === "saved"

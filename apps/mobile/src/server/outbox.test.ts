@@ -1,6 +1,8 @@
 import { accountWords } from "@dohc/interface-words/account";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import { localMark, localOffers } from "../conversation/outboxMessages";
+import { withLocalReactions } from "../conversation/reactions";
 import {
   createAccount,
   type AccountState,
@@ -537,6 +539,88 @@ describe("enqueue", () => {
     expect(second.outbox.state().records).toEqual([]);
     expect(requests(server, "post")).toHaveLength(0);
     second.stop();
+  });
+
+  it("shows a message its sending mark kept once enqueue resolves, to a subscriber that reads at once", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", path("post"), held);
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+    let latest = outbox.state();
+    const unsubscribe = outbox.subscribe(() => {
+      latest = outbox.state();
+    });
+    const queued = await outbox.enqueue({ workspaceId: "ws-1", write: post("Hello") });
+    const shown = [expect.objectContaining({ operationId: queued.operationId, stage: "sending" })];
+    expect(latest.records).toEqual(shown);
+    expect(outbox.state().records).toEqual(shown);
+    unsubscribe();
+    stop();
+  });
+
+  it.each(["its sending mark", "a commit of its own"])(
+    "says a relaunch may send a write when %s, which makes it sendable, fails yet stands, and keeps Send and Discard",
+    async (confirmedBy) => {
+      const disk = keptDisk();
+      const server = testServer();
+      server.on("POST", path("post"), held);
+      const first = launch(disk, server);
+      await ready(first.outbox);
+      if (confirmedBy === "a commit of its own") {
+        await first.outbox.enqueue({ workspaceId: "ws-1", write: post("Ahead") });
+        await vi.waitFor(() => expect(requests(server, "post")).toHaveLength(1));
+      }
+      const sent = requests(server, "post").length;
+      const sequence = sent + 1;
+      disk.failCommits = { match: /ON CONFLICT/, lands: true };
+      const error = await first.outbox
+        .enqueue({ workspaceId: "ws-1", write: post("Maybe") })
+        .catch((reason: unknown) => reason);
+      disk.failCommits = null;
+      const operationId = error instanceof OutboxError ? error.operationId : null;
+      expect(error).toEqual(new OutboxError("indeterminate", operationId));
+      const kept = record(first.outbox, sequence);
+      expect(kept).toMatchObject({ operationId, withheld: true, maySendOnReopen: true });
+      // The commit stood: the row is sendable, which is what the row's words disclose.
+      expect(onDisk(disk, sequence)).toMatchObject({ withheld: false });
+      expect(onDisk(disk, sequence)).not.toHaveProperty("maySendOnReopen");
+      if (!kept) throw new Error("no record");
+      const mark = localMark(kept);
+      expect(mark).toMatchObject({ state: { kind: "withheld" }, maySendOnReopen: true });
+      expect(localOffers(mark, { sendable: true, discardsPending: false })).toMatchObject({
+        send: true,
+        discard: true,
+      });
+      await settled();
+      expect(requests(server, "post")).toHaveLength(sent);
+
+      // Send commits it again, which settles what the disk holds.
+      await first.outbox.retryEnqueue(operationId ?? "");
+      expect(record(first.outbox, sequence)).not.toHaveProperty("maySendOnReopen");
+      first.stop();
+    },
+  );
+
+  it("says a relaunch may send a reaction whose sending mark fails yet stands", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    server.on("POST", path("react"), held);
+    const { outbox, stop } = launch(disk, server);
+    await ready(outbox);
+    disk.failCommits = { match: /ON CONFLICT/, lands: true };
+    await expect(
+      outbox.enqueue({ workspaceId: "ws-1", write: react(), thread: "thread-x" }),
+    ).rejects.toMatchObject({ kind: "indeterminate" });
+    disk.failCommits = null;
+    const { marks } = withLocalReactions([], outbox.state().records, "message-x");
+    expect(marks).toEqual([
+      expect.objectContaining({
+        emoji: "👍",
+        mark: expect.objectContaining({ state: { kind: "withheld" }, maySendOnReopen: true }),
+      }),
+    ]);
+    stop();
   });
 
   it("refuses with nothing written when no account is signed in, and a reaction without its thread", async () => {
@@ -1516,6 +1600,49 @@ describe("a Sign out that failed", () => {
     expect(requests(server, "post")).not.toContainEqual(
       expect.objectContaining({ operationId: "op-b" }),
     );
+    stop();
+  });
+
+  it("shows A's failure when A's delete waited behind a commit while B signed in and out, and Try again deletes A's rows", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    const posts = answerLater(server, "post");
+    const kept = disk.launch();
+    // The next transaction to start after this is set fails: it is A's delete.
+    let failNext = false;
+    const store: KeptStore = {
+      ...kept,
+      transaction: (body) => {
+        if (!failNext) return kept.transaction(body);
+        failNext = false;
+        return Promise.reject(new StoreError("failed", "disk I/O error"));
+      },
+    };
+    const { outbox, account, stop } = launch(disk, server, { store });
+    await ready(outbox);
+    await outbox.enqueue({ workspaceId: "ws-1", write: post("From A") });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    // A pending answer's commit holds the queue, so A's delete waits behind it.
+    const release = disk.holdCommits();
+    posts[0]?.answer(PENDING);
+    await vi.waitFor(() => expect(disk.waiting()).toBe(1));
+    failNext = true;
+    const signingOutA = account.signOut().catch((reason: unknown) => reason);
+    account.signIn(server, "u-2");
+    const signingOutB = account.signOut();
+    release();
+    expect(await signingOutA).toEqual(new OutboxError("not-deleted"));
+    await signingOutB;
+    expect(outbox.state().deletion).toBe("failed");
+    expect(records(disk)).toEqual([1]);
+    await expect(outbox.enqueue({ workspaceId: "ws-1", write: post("No") })).rejects.toEqual(
+      new OutboxError("closed"),
+    );
+
+    await account.signOut();
+    expect(records(disk)).toEqual([]);
+    await ready(outbox);
+    expect(outbox.state().deletion).toBe("none");
     stop();
   });
 });

@@ -56,6 +56,7 @@ export const localMark = (record: OutboxRecord): LocalMark => ({
   state: localState(record),
   attempted: record.attempted,
   body: bodyOf(record),
+  ...(record.withheld && record.maySendOnReopen ? { maySendOnReopen: true } : {}),
 });
 
 /**

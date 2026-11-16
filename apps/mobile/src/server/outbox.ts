@@ -23,7 +23,8 @@ import type { ChatMessage } from "./workspaceReads";
 // can send at once, or a commit of its own when it waits its turn. Enqueue resolves as kept only once that second
 // commit has returned. When either commit fails, the record stays withheld in memory and enqueue rejects as
 // `indeterminate`: it is sent only after `retryEnqueue` with the same operation ID. A relaunch can send it unasked only
-// when the second commit failed yet stood. Nothing here deletes a record except a read that shows its result,
+// when the second commit failed yet stood; the record then says so (`maySendOnReopen`), until a later commit of it
+// returns. Nothing here deletes a record except a read that shows its result,
 // `discard`, and Sign out. A row that can't be read is kept, and `discard` deletes it only by the handle `state()` gives
 // for it.
 //
@@ -105,6 +106,11 @@ interface OutboxRecord {
   /** When the current run of `pending` answers began. A failed request ends the run. */
   readonly pendingSinceMs: number | null;
   readonly result: OutboxResult | null;
+  /**
+   * In memory only, never written: withheld here, but a commit that made it sendable failed and may still stand, so a
+   * relaunch may send it. Its next committed version ends this.
+   */
+  readonly maySendOnReopen?: true;
 }
 
 export interface OutboxState {
@@ -228,9 +234,13 @@ export interface Outbox {
 }
 
 const FORMAT = 1;
+/** A record as a commit leaves it: what a row holds, with nothing left in doubt. */
+const committed = ({ maySendOnReopen: _, ...record }: OutboxRecord): OutboxRecord => record;
 /** A row's record, without its sequence, which is the row's own. */
-const serialize = ({ sequence: _, ...record }: OutboxRecord) =>
-  JSON.stringify({ format: FORMAT, ...record });
+const serialize = (record: OutboxRecord) => {
+  const { sequence: _, ...row } = committed(record);
+  return JSON.stringify({ format: FORMAT, ...row });
+};
 /** Writes the record's row, replacing any it has. */
 const put = (sql: Sql, record: OutboxRecord) =>
   sql.run(
@@ -266,6 +276,8 @@ const unfinished = (record: OutboxRecord) =>
 const needsThread = (record: OutboxRecord) =>
   record.write.operation === "reply" && record.write.args.threadId === null;
 type AccountKey = Pick<SignIn, "origin" | "userId">;
+const sameAccount = (a: AccountKey | null, b: AccountKey | null) =>
+  a?.origin === b?.origin && a?.userId === b?.userId;
 const ownedBy = (record: Pick<OutboxRecord, "origin" | "accountId">, account: AccountKey | null) =>
   account !== null && record.origin === account.origin && record.accountId === account.userId;
 const scopeOf = (record: Pick<OutboxRecord, "origin" | "accountId" | "workspaceId">) =>
@@ -453,12 +465,17 @@ export function createOutbox(options: {
       if (!updated) return false;
       try {
         await transact((sql) => put(sql, updated));
-      } catch {
+      } catch (error) {
+        // A failed commit that would have made a withheld record sendable may stand, so a relaunch may send it.
+        if (uncertain(error) && epoch === at && current?.withheld && !updated.withheld) {
+          records.set(sequence, { ...current, maySendOnReopen: true });
+          changed();
+        }
         return false;
       }
       // Signed out meanwhile: the delete queued behind this write removes it.
       if (epoch !== at) return false;
-      records.set(sequence, updated);
+      records.set(sequence, committed(updated));
       changed();
       return true;
     });
@@ -763,12 +780,16 @@ export function createOutbox(options: {
     }
   }
 
-  /** Tells enqueue whether a sender's "sending" mark confirmed its record, once. */
-  function settleConfirm(sequence: number, committed: boolean) {
+  /**
+   * Tells enqueue whether a sender's "sending" mark confirmed its record, once. The record stops being hidden, so
+   * `state()` shows it, as the mark's own change couldn't while it was still confirming.
+   */
+  function settleConfirm(sequence: number, marked: boolean) {
     const done = confirming.get(sequence);
     if (!done) return;
     confirming.delete(sequence);
-    done(committed);
+    changed();
+    done(marked);
   }
 
   async function settle(
@@ -798,24 +819,33 @@ export function createOutbox(options: {
     for (const sender of running.values()) sender.abort();
   }
 
-  /** Keeps a record withheld in memory after a write that may not stand, and gives the error enqueue rejects with. */
-  function keepWithheld(record: OutboxRecord, at: number): OutboxError {
+  /**
+   * Keeps a record withheld in memory after a commit that may not stand, and gives the error enqueue rejects with.
+   * `error` is the failure of a commit that would have made it sendable: an uncertain one, or one already marked so,
+   * means a relaunch may send it.
+   */
+  function keepWithheld(record: OutboxRecord, at: number, error: unknown = null): OutboxError {
     confirming.delete(record.sequence);
     // Signed out meanwhile: the delete queued behind this write removes it.
     if (epoch !== at) return new OutboxError("closed");
-    records.set(record.sequence, { ...record, withheld: true });
+    const reopens = uncertain(error) || records.get(record.sequence)?.maySendOnReopen === true;
+    records.set(record.sequence, {
+      ...committed(record),
+      withheld: true,
+      ...(reopens ? { maySendOnReopen: true as const } : {}),
+    });
     changed();
     return new OutboxError("indeterminate", record.operationId);
   }
 
   /** Makes a withheld record sendable in one commit, and keeps it once that commit has returned. Runs in the queue. */
   async function release(record: OutboxRecord, at: number): Promise<OutboxRecord> {
-    const sendable = { ...record, withheld: false };
+    const sendable = committed({ ...record, withheld: false });
     try {
       await transact((sql) => put(sql, sendable));
-    } catch {
+    } catch (error) {
       // A failed commit may still stand. The record then sends this run only after `retryEnqueue`.
-      throw keepWithheld(record, at);
+      throw keepWithheld(record, at, error);
     }
     confirming.delete(record.sequence);
     if (epoch !== at) throw new OutboxError("closed");
@@ -1002,7 +1032,7 @@ export function createOutbox(options: {
               written = uncertain(error) ? "uncertain" : "failed";
             }
             if (epoch !== at) throw new OutboxError("closed");
-            records.set(sequence, withheld);
+            records.set(sequence, written === "committed" ? committed(withheld) : withheld);
             changed();
             // Any failure but `uncertain` left the sendable version.
             if (written === "failed")
@@ -1120,18 +1150,22 @@ export function createOutbox(options: {
         }
       }).then(
         async () => {
+          // Only a Sign out that deleted a failed one's account ends that failure.
+          if (damaged || (owed !== null && sameAccount(owed.account, account))) owed = null;
           await leave();
-          // Held until the sign-in has ended, so nothing is added for the account meanwhile.
+          // Held until the sign-in has ended, so nothing is added for the account meanwhile, and while a failed Sign
+          // out's rows stay.
           if (epoch !== at) return;
-          held = false;
-          owed = null;
+          held = owed !== null;
           await load();
         },
         () => {
-          if (epoch === at) {
-            owed = { account };
-            void load();
-          }
+          // Recorded whatever Sign out has started since: the queue runs each Sign out's delete in order, so none
+          // later can have deleted these rows yet, and one that does ends this.
+          owed = { account };
+          held = true;
+          if (epoch === at) void load();
+          else changed();
           throw new OutboxError("not-deleted");
         },
       );

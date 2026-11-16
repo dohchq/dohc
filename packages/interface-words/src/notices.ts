@@ -83,8 +83,11 @@ export const chatWords = {
   sending: "Sending",
   /** The server has answered "pending" for a long time. It may still be saved. */
   stillSending: "Still sending",
-  /** Kept on the phone, withheld: nothing sends it until Send. */
+  /** Kept on the phone, withheld: nothing sends it until Send, unless `notSentMaySendOnReopen` says otherwise. */
   notSent: "This message has not been sent.",
+  /** Withheld, but the commit that would have made it sendable failed and may still stand. */
+  notSentMaySendOnReopen:
+    "This message has not been sent. It may send if you close dohc and open it again.",
   /** Enqueue failed and nothing was kept: the text stays in the composer. */
   notKept: "dohc could not keep this message on your phone.",
   unlockToSend: "Unlock this phone to send messages",
@@ -150,8 +153,11 @@ export const chatWords = {
   /** A reaction's button: a tap on one that's yours removes it. */
   reaction: (emoji: string, count: number, mine: boolean) =>
     `${mine ? `Remove ${emoji} reaction` : emoji}, ${count} ${count === 1 ? "reaction" : "reactions"}`,
-  /** A reaction kept on the phone, withheld: nothing sends it until Send. */
+  /** A reaction kept on the phone, withheld: nothing sends it until Send, unless the next word says otherwise. */
   reactionNotSent: (emoji: string) => `Your ${emoji} reaction has not been sent.`,
+  /** Withheld, but the commit that would have made it sendable failed and may still stand. */
+  reactionNotSentMaySendOnReopen: (emoji: string) =>
+    `Your ${emoji} reaction has not been sent. It may send if you close dohc and open it again.`,
   /** The server has answered "pending" for a reaction for a long time. It may still be saved. */
   reactionStillSending: (emoji: string) => `Your ${emoji} reaction is still sending.`,
   /** The server refused a reaction, or can't find its message. */

@@ -41,6 +41,8 @@ export interface LocalMark {
   readonly state: LocalState;
   /** A request may have reached the server, so Discard warns that it may still send. */
   readonly attempted: boolean;
+  /** Withheld, but a commit that made it sendable may stand, so reopening the app may send it. */
+  readonly maySendOnReopen?: boolean;
   /** The text as the outbox keeps it, which Send sends and Copy copies. */
   readonly body: string;
 }
