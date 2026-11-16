@@ -1778,21 +1778,6 @@ pub struct AccessRuleDecided {
     /// The rule files from outside dohc that Restore replaced or removed,
     /// each kept as a kept copy of its path.
     pub kept: Vec<String>,
-    /// The ordinary file change that reverses the decision, when the rule
-    /// on each side is at most one text file under one spelling.
-    pub undo: Option<AccessRuleUndo>,
-}
-
-/// A file change through dohc that puts a folder's rule back as it was
-/// before a decision. As a change made through dohc, it commits as written.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AccessRuleUndo {
-    pub path: String,
-    /// The rule to write; `None` deletes the file.
-    pub text: Option<String>,
-    /// The bytes the decision left at `path`; `None` when it left none, so
-    /// the write creates the file.
-    pub expected_sha256: Option<String>,
 }
 
 /// One entry's reach at a held folder: before the change, and now.
@@ -1949,59 +1934,6 @@ fn hold_view(
     Ok(view)
 }
 
-/// The change that reverses `decision` at a folder whose rule dohc
-/// recorded as `committed` and whose rule on disk is `disk`.
-fn undo_of(
-    decision: AccessRuleDecision,
-    committed: Option<&Committed>,
-    disk: &OnDisk,
-) -> Option<AccessRuleUndo> {
-    // The recorded rule: no file, or one text file.
-    let recorded = match committed.map(|committed| &committed.files) {
-        None => None,
-        Some(files) if files.len() == 1 => {
-            let (path, file) = files.iter().next()?;
-            Some((path.clone(), file.text.clone()?, file.sha256.clone()))
-        }
-        Some(_) => return None,
-    };
-    // The rule from outside dohc: no file, or one text file.
-    let outside = match disk.len() {
-        0 => None,
-        1 => {
-            let (path, bytes) = disk.iter().next()?;
-            let text = String::from_utf8(bytes.clone()).ok()?;
-            Some((path.clone(), text, dohc_engine_storage::hex_sha256(bytes)))
-        }
-        _ => return None,
-    };
-    // Undo puts back the side the decision replaced, over the side it kept.
-    let (back, left) = match decision {
-        AccessRuleDecision::Accept => (recorded, outside),
-        AccessRuleDecision::Restore => (outside, recorded),
-    };
-    match (back, left) {
-        (Some((path, text, _)), Some((left_path, _, sha256))) => {
-            (path == left_path).then_some(AccessRuleUndo {
-                path,
-                text: Some(text),
-                expected_sha256: Some(sha256),
-            })
-        }
-        (Some((path, text, _)), None) => Some(AccessRuleUndo {
-            path,
-            text: Some(text),
-            expected_sha256: None,
-        }),
-        (None, Some((path, _, sha256))) => Some(AccessRuleUndo {
-            path,
-            text: None,
-            expected_sha256: Some(sha256),
-        }),
-        (None, None) => None,
-    }
-}
-
 /// What the owner saw in a folder's hold when they decided.
 struct SeenHold<'a> {
     /// The hold's `observed_sha256`.
@@ -2048,10 +1980,7 @@ fn decide_on_store(
     }
     let committed = store
         .read_with(|conn| committed_rule(conn, order.workspace_id, order.version_id, folder))?;
-    let mut decided = AccessRuleDecided {
-        kept: Vec::new(),
-        undo: undo_of(decision, committed.as_ref(), &disk),
-    };
+    let mut decided = AccessRuleDecided::default();
     match decision {
         AccessRuleDecision::Accept => {
             let changes = rule_changes(committed.as_ref(), &disk);
@@ -2118,83 +2047,6 @@ fn outer_rules_settle(
         }
     }
     Ok(())
-}
-
-/// Put back the rule a decision replaced, if the folder's rule is still the
-/// one the decision left, on disk and in the store. As a change the owner
-/// makes through dohc, it commits as written.
-fn undo_on_store(
-    store: &mut EngineStore,
-    order: &Order<'_>,
-    folder: &str,
-    undo: &AccessRuleUndo,
-    self_writes: &dyn super::materialization::SelfWriteRecorder,
-) -> Result<(), RuntimeError> {
-    if !is_access_rule_path(&undo.path) || access_rule_folder(&undo.path) != folder {
-        return Err(RuntimeError::Domain(DomainError::InvalidInput {
-            reason: "an access rule undo names a file that is not the folder's rule",
-        }));
-    }
-    let changed = || RuntimeError::AccessRuleChanged {
-        folder: folder.to_owned(),
-    };
-    // A Version switched since holds other rules on disk.
-    if !version_is_active(store, order)? {
-        return Err(changed());
-    }
-    outer_rules_settle(store, order, folder)?;
-    // A hold here is a rule changed outside dohc since: its notice answers.
-    if store
-        .read_with(|conn| {
-            access_rule_holds::hold_in(conn, order.workspace_id, order.version_id, folder)
-        })?
-        .is_some()
-    {
-        return Err(changed());
-    }
-    let disk = read_disk_rule(order.root, folder).map_err(|()| waits())?;
-    let committed = store
-        .read_with(|conn| committed_rule(conn, order.workspace_id, order.version_id, folder))?;
-    let left = match &undo.expected_sha256 {
-        None => disk.is_empty(),
-        Some(sha256) => {
-            disk.len() == 1
-                && disk
-                    .get(&undo.path)
-                    .is_some_and(|bytes| dohc_engine_storage::hex_sha256(bytes) == *sha256)
-        }
-    };
-    if !left || !rule_changes(committed.as_ref(), &disk).is_empty() {
-        return Err(changed());
-    }
-    let present = disk.get(&undo.path).map(Vec::as_slice);
-    // Commit the rule Undo placed, not what disk holds after: an outside
-    // save that lands since is capture's to judge.
-    let mut requested = OnDisk::new();
-    match (&undo.text, &undo.expected_sha256) {
-        (Some(text), _) => {
-            let bytes = text.as_bytes();
-            place(
-                store,
-                order,
-                UNDO_JOB,
-                &undo.path,
-                &dohc_engine_storage::hex_sha256(bytes),
-                Some(bytes),
-                present,
-                self_writes,
-            )?;
-            requested.insert(undo.path.clone(), bytes.to_vec());
-        }
-        (None, Some(sha256)) => remove_checked(order, &undo.path, sha256)?,
-        (None, None) => return Ok(()),
-    }
-    commit_rule_changes(
-        store,
-        order,
-        folder,
-        rule_changes(committed.as_ref(), &requested),
-    )
 }
 
 /// Keep the rule from outside dohc at `path` as a kept copy before Restore
@@ -2293,55 +2145,8 @@ fn place_rule(
     if let Some(bytes) = disk {
         keep_outside_rule(store, order, path, bytes)?;
     }
-    place(
-        store,
-        order,
-        "access-rule-restore",
-        path,
-        content_sha256,
-        None,
-        disk,
-        self_writes,
-    )
-}
-
-/// The job id prefix of an Undo's placement.
-const UNDO_JOB: &str = "access-rule-undo";
-
-/// Cancel the Undo placements a crash left pending in `workspace_id`. Undo
-/// places its rule and commits it in one command, so between commands a
-/// pending placement is one that never finished. Its bytes are nothing
-/// committed: replayed, or still pending when capture reads them, they
-/// would pass for dohc's own write and commit with no hold.
-pub(super) fn cancel_unfinished_undos(
-    store: &EngineStore,
-    workspace_id: &str,
-    now_ms: i64,
-) -> Result<(), RuntimeError> {
-    let prefix = format!("{UNDO_JOB}_");
-    for job in store.list_pending_materialization_jobs()? {
-        if job.workspace_id == workspace_id && job.job_id.starts_with(&prefix) {
-            store.mark_materialization_cancelled(&job.job_id, now_ms)?;
-        }
-    }
-    Ok(())
-}
-
-/// Place `content_sha256` at `path` over the judged bytes `disk`, adding
-/// `content` to the store first when it may not hold those bytes yet.
-#[allow(clippy::too_many_arguments)]
-fn place(
-    store: &mut EngineStore,
-    order: &Order<'_>,
-    job: &str,
-    path: &str,
-    content_sha256: &str,
-    content: Option<&[u8]>,
-    disk: Option<&[u8]>,
-    self_writes: &dyn super::materialization::SelfWriteRecorder,
-) -> Result<(), RuntimeError> {
     let job_id = format!(
-        "{job}_{}_{}",
+        "access-rule-restore_{}_{}",
         dohc_engine_storage::hex_sha256(path.as_bytes()),
         order.now_ms
     );
@@ -2360,7 +2165,7 @@ fn place(
         now_ms: order.now_ms,
     };
     committed(store.write_with(order.faults, |tx| {
-        for bytes in disk.into_iter().chain(content) {
+        if let Some(bytes) = disk {
             dohc_engine_storage::put_binary_blob(tx, bytes)?;
         }
         dohc_engine_storage::enqueue_job(tx, &spec)
@@ -2375,19 +2180,7 @@ fn place(
         order.faults,
         None,
     );
-    if placed {
-        return Ok(());
-    }
-    // Bytes nothing committed must not wait to replay: capture would take
-    // them for dohc's own. Restore's bytes are the committed rule, so they may.
-    if content.is_some()
-        && store
-            .load_materialization_job(&job_id)?
-            .is_some_and(|job| job.status == dohc_engine_storage::JobStatus::Pending)
-    {
-        store.mark_materialization_cancelled(&job_id, order.now_ms)?;
-    }
-    Err(waits())
+    if placed { Ok(()) } else { Err(waits()) }
 }
 
 /// Remove a rule nothing committed, if it still holds the judged bytes. It
@@ -2515,39 +2308,6 @@ impl ActorHandle {
                 },
                 self_writes.as_ref(),
             )
-        })
-        .await
-    }
-
-    /// Reverse a decision with the change it returned, if the folder's rule
-    /// is still the one the decision left. Otherwise it refuses with
-    /// [`RuntimeError::AccessRuleChanged`] and the rule stays.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn undo_access_rule(
-        &self,
-        workspace_id: String,
-        version_id: String,
-        folder: String,
-        undo: AccessRuleUndo,
-        root: std::path::PathBuf,
-        self_writes: std::sync::Arc<dyn super::materialization::SelfWriteRecorder>,
-        now_ms: i64,
-        faults: std::sync::Arc<dyn FaultInjector>,
-    ) -> Result<(), RuntimeError> {
-        self.run(move |store, _| {
-            begin_command();
-            check_root()?;
-            let leases = LeaseRegistry::new();
-            let order = Order {
-                root: &root,
-                workspace_id: &workspace_id,
-                version_id: &version_id,
-                now_ms,
-                writer: Writer::Deliberate,
-                leases: &leases,
-                faults: faults.as_ref(),
-            };
-            undo_on_store(store, &order, &folder, &undo, self_writes.as_ref())
         })
         .await
     }

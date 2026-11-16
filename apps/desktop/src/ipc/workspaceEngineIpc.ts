@@ -143,7 +143,6 @@ export function createWorkspaceEngineIpc<
         | "clearCaptureRecovery"
         | "retryHeldCapture"
         | "decideAccessRule"
-        | "undoAccessRule"
       >,
     ) => Promise<Result>,
   ): Promise<Result | null>;
@@ -919,24 +918,14 @@ export function createWorkspaceEngineIpc<
                 // A refusal, such as a rule that changed since the owner saw it,
                 // still records the holds the engine now lists, so the Notice
                 // shows the rule as it is.
-                const run =
-                  input.decision === "undo"
-                    ? adapter
-                        .undoAccessRule({
-                          versionId: input.versionId,
-                          folder: input.folder,
-                          ...input.undo,
-                        })
-                        .then(() => ({ kept: [], undo: null }))
-                    : adapter.decideAccessRule(input);
-                const decided = await run.then(
+                const decided = await adapter.decideAccessRule(input).then(
                   (result) => ({ result }),
                   (error: unknown) => ({ error }),
                 );
                 const { heldAccessRules } = await adapter.watcherStatus();
                 dependencies.recordHeldAccessRules(operation.workspace, heldAccessRules);
                 if ("error" in decided) throw decided.error;
-                return { heldAccessRules, kept: decided.result.kept, undo: decided.result.undo };
+                return { heldAccessRules, kept: decided.result.kept };
               });
               if (result === null) throw new Error("The workspace engine is not running.");
               return result;

@@ -45,7 +45,6 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
                 | "capture.retryHeld"
                 | "capture.acceptAccessRule"
                 | "capture.restoreAccessRule"
-                | "capture.undoAccessRule"
                 | "capture.importRecovery"
                 | "versionedText.list"
                 | "versionedText.captureSources"
@@ -784,10 +783,6 @@ impl EngineService {
                     dohc_engine_runtime::AccessRuleDecision::Restore,
                 )
                 .await?
-            }
-            "capture.undoAccessRule" => {
-                self.capture_undo_access_rule(&ctx, request.workspace, request.params)
-                    .await?
             }
             "capture.setAuthor" => {
                 self.capture_set_author(&ctx, request.workspace, request.params)
@@ -1781,7 +1776,6 @@ mod tests {
             "capture.retryHeld",
             "capture.acceptAccessRule",
             "capture.restoreAccessRule",
-            "capture.undoAccessRule",
             "capture.release",
             "capture.renew",
             "capture.setAuthor",

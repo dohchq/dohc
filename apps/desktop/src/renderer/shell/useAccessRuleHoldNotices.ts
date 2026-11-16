@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AccessRuleHold, AccessRuleReach, AccessRuleUndo } from "../../ipc/bridgeContract";
+import type { AccessRuleHold, AccessRuleReach } from "../../ipc/bridgeContract";
 import {
   heldOuterAccessRuleFolder,
   isAccessRuleChangedRefusal,
@@ -189,29 +189,14 @@ export function accessRuleDecidedWords(
         ? canDo(resolve(only.before, level), hold.folder)
         : undefined;
     const now = can ? ` ${whoOf(only!.who)} can ${can}.` : "";
-    const keptCopy = kept[0] ? ` The rule from outside dohc is saved as a copy of ${kept[0]}.` : "";
+    const keptCopy = kept[0]
+      ? ` dohc kept the rule from outside dohc in Notices, where Save copy puts it beside ${kept[0]}.`
+      : "";
     return `Restored ${ruleOfLower(hold.folder)}.${now}${keptCopy}`;
   }
   if (hold.reason === "removed")
     return `Removed ${ruleOfLower(hold.folder)}. ${changedReach(hold, level)}`;
   return changedReach(hold, level);
-}
-
-/**
- * What an Undo left, for its toast. Undo of Restore puts the outside change
- * back, so it says what that change gives; Undo of the change puts back the
- * rule dohc recorded.
- */
-export function accessRuleUndoneWords(
-  hold: AccessRuleHold,
-  decision: Decision,
-  level: MemberLevel,
-): string {
-  if (decision === "restore") return changedReach(hold, level);
-  const [only] = hold.changes;
-  const can =
-    hold.changes.length === 1 && only ? canDo(resolve(only.before, level), hold.folder) : undefined;
-  return `${ruleOf(hold.folder)} is back as it was.${can ? ` ${whoOf(only!.who)} can ${can}.` : ""}`;
 }
 
 /** Where a press on the row goes: a widening opens its rule; a removal reveals its folder. */
@@ -238,24 +223,21 @@ export function useAccessRuleHoldNotices(
     openMembers: () => void;
   } & Pick<
     ReturnType<typeof useShellError>,
-    "reportShellFailure" | "clearIdentity" | "dropNoticeStep" | "showSuccessNotice"
+    "reportShellFailure" | "clearIdentity" | "showSuccessNotice"
   >,
 ) {
-  const { workspaceId, holds, reportShellFailure, clearIdentity, dropNoticeStep } = input;
+  const { workspaceId, holds, reportShellFailure, clearIdentity } = input;
   const currentWorkspace = useRef(workspaceId);
   currentWorkspace.current = workspaceId;
   const shown = useRef(new Map<string, { judged: string; content: string }>());
   // Each row that sent a choice to an outer folder first, by the outer hold.
   const waitingOn = useRef(new Map<string, string>());
-  // Each folder's decision whose toast offers Undo, by the hold it decided.
-  const undoable = useRef(new Map<string, string>());
   // Each hold whose choice didn't run because the level changed, until the
   // owner chooses again.
   const levelMoved = useRef(new Map<string, { held: string; why: LevelMove }>());
   useEffect(() => {
     shown.current = new Map();
     waitingOn.current = new Map();
-    undoable.current = new Map();
     levelMoved.current = new Map();
   }, [workspaceId]);
   const latest = useRef(input);
@@ -374,7 +356,7 @@ export function useAccessRuleHoldNotices(
 
   // An outer folder's rule changed outside dohc too, so the owner chooses
   // for it first; its notice is a press away.
-  const waitFor = (hold: AccessRuleHold, outer: string, what: "choice" | "undo"): void => {
+  const waitFor = (hold: AccessRuleHold, outer: string): void => {
     const waits = waitsOf(identityOf(hold));
     const outerIdentity = identityOf({ versionId: hold.versionId, folder: outer });
     waitingOn.current.set(waits, outerIdentity);
@@ -382,7 +364,7 @@ export function useAccessRuleHoldNotices(
       identity: waits,
       tone: "warning",
       title: `Choose for ${rulePossessive(outer)} first`,
-      message: `dohc didn't apply your ${what} for ${placeOf(hold.folder)}. ${ruleOf(outer)} also changed outside dohc.`,
+      message: `dohc didn't apply your choice for ${placeOf(hold.folder)}. ${ruleOf(outer)} also changed outside dohc.`,
       retry: null,
       action: {
         label: "Show its notice",
@@ -390,64 +372,6 @@ export function useAccessRuleHoldNotices(
         ends: true,
       },
     });
-  };
-
-  const undo = (
-    asked: string,
-    hold: AccessRuleHold,
-    decision: Decision,
-    change: AccessRuleUndo,
-  ): void => {
-    const place = placeOf(hold.folder);
-    void bridge()
-      .decideAccessRule({
-        workspaceId: asked,
-        versionId: hold.versionId,
-        folder: hold.folder,
-        decision: "undo",
-        undo: change,
-      })
-      // Undoing a Restore can leave members at the level in Members settings,
-      // which may have changed since, with no hold left to read it again.
-      .then(() =>
-        decision === "restore" && usesMemberLevel(hold) ? readLevel(asked) : levelRef.current,
-      )
-      .then(
-        (level) => {
-          if (currentWorkspace.current !== asked) return;
-          latest.current.showSuccessNotice(accessRuleUndoneWords(hold, decision, level));
-        },
-        (error: unknown) => {
-          if (currentWorkspace.current !== asked) return;
-          const outer = heldOuterAccessRuleFolder(error);
-          if (outer !== null && outer !== hold.folder) {
-            waitFor(hold, outer, "undo");
-            return;
-          }
-          const title = `dohc could not undo your choice for ${place}`;
-          const details: ShellError["details"] = [["Path", change.path]];
-          if (isAccessRuleChangedRefusal(error)) {
-            // Trying again meets the same changed rule; History holds the earlier one.
-            latest.current.reportShellFailure({
-              title,
-              message: `${ruleOf(hold.folder)} changed since you chose. Its earlier versions are in History.`,
-              cause: error,
-              details,
-              retry: null,
-              action: { label: "Open History", run: latest.current.openHistory, ends: true },
-            });
-            return;
-          }
-          const final = finalWords(error);
-          latest.current.reportShellFailure({
-            title,
-            message: final ?? `${ruleOf(hold.folder)} stays as you chose.`,
-            cause: error,
-            details,
-            retry: final ? null : () => undo(asked, hold, decision, change),
-          });
-        },
-      );
   };
 
   const decide = (asked: string, hold: AccessRuleHold, decision: Decision): void => {
@@ -498,13 +422,11 @@ export function useAccessRuleHoldNotices(
         (decided) => {
           if (currentWorkspace.current !== asked) return;
           const message = accessRuleDecidedWords(hold, decision, decided.kept, now);
-          // Where no file change reverses it, the earlier rule is in History.
-          const step: ShellError["action"] = decided.undo
-            ? { label: "Undo", run: () => undo(asked, hold, decision, decided.undo!), ends: true }
-            : decision === "accept"
+          // The earlier rule stays in History; Restore's says where its copy is.
+          const step: ShellError["action"] =
+            decision === "accept"
               ? { label: "Open History", run: latest.current.openHistory, ends: true }
               : undefined;
-          if (decided.undo) undoable.current.set(identity, heldKey(hold));
           latest.current.showSuccessNotice(
             message,
             undefined,
@@ -526,7 +448,7 @@ export function useAccessRuleHoldNotices(
             return;
           const outer = heldOuterAccessRuleFolder(error);
           if (outer !== null && outer !== hold.folder) {
-            waitFor(hold, outer, "choice");
+            waitFor(hold, outer);
             return;
           }
           const place = placeOf(hold.folder);
@@ -568,13 +490,6 @@ export function useAccessRuleHoldNotices(
     // Notices lists the newest first, so the outer folder files last.
     for (const hold of [...holds].sort((a, b) => depth(b.folder) - depth(a.folder))) {
       const identity = identityOf(hold);
-      // The folder is held again, so an earlier decision's Undo would put
-      // back a rule the owner has not seen since.
-      const decided = undoable.current.get(identity);
-      if (decided !== undefined && decided !== heldKey(hold)) {
-        undoable.current.delete(identity);
-        dropNoticeStep(decidedOf(identity));
-      }
       if (level === undefined && usesMemberLevel(hold)) continue;
       const was = shown.current.get(identity);
       const next = { judged: judgedKey(hold), content: shownContent(hold, level ?? null) };
@@ -589,7 +504,7 @@ export function useAccessRuleHoldNotices(
         was?.judged === next.judged,
       );
     }
-  }, [holds, level, workspaceId, reportShellFailure, clearIdentity, dropNoticeStep]);
+  }, [holds, level, workspaceId, reportShellFailure, clearIdentity]);
 
   return { readMemberLevel };
 }

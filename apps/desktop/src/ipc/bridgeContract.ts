@@ -1655,15 +1655,6 @@ export const AccessRuleHold = z.object({
   fallsBackTo: z.string().nullable(),
 });
 export type AccessRuleReach = z.infer<typeof AccessRuleReach>;
-// The file change that reverses a decision: write `text` over the bytes
-// `expectedSha256` names, create the file when that is null, or delete it
-// when `text` is null.
-export const AccessRuleUndo = z.object({
-  path: z.string().min(1),
-  text: z.string().nullable(),
-  expectedSha256: z.string().min(1).nullable(),
-});
-export type AccessRuleUndo = z.infer<typeof AccessRuleUndo>;
 export type AccessRuleHold = z.infer<typeof AccessRuleHold>;
 export type CaptureHoldsEvent = z.infer<typeof CaptureHoldsEvent>;
 
@@ -1934,32 +1925,19 @@ export const captureRecoveryOperations = {
   },
   // Keeps a held access rule as it is on disk, or puts back the rule dohc
   // last recorded. Refused when the hold is not the active Version's, or when
-  // the rule changed since the hold the owner saw. `undo` reverses a decision
-  // with the change it returned, refused once the folder's rule changed since.
+  // the rule changed since the hold the owner saw.
   decideAccessRule: {
     capabilityId: "capture.access.decide",
     channel: "desktop:decide-access-rule",
-    payload: z.discriminatedUnion("decision", [
-      WorkspaceIdPayload.extend({
-        versionId: z.string().min(1),
-        folder: z.string(),
-        decision: z.enum(["accept", "restore"]),
-        expectedSha256: z.string().min(1).nullable(),
-        expectedReason: z.enum(["widened", "removed"]),
-      }),
-      WorkspaceIdPayload.extend({
-        versionId: z.string().min(1),
-        folder: z.string(),
-        decision: z.literal("undo"),
-        undo: AccessRuleUndo,
-      }),
-    ]),
-    // `kept` names the rule files from outside dohc that Restore kept as kept copies.
-    result: z.object({
-      heldAccessRules: z.array(AccessRuleHold),
-      kept: z.array(z.string()),
-      undo: AccessRuleUndo.nullable(),
+    payload: WorkspaceIdPayload.extend({
+      versionId: z.string().min(1),
+      folder: z.string(),
+      decision: z.enum(["accept", "restore"]),
+      expectedSha256: z.string().min(1).nullable(),
+      expectedReason: z.enum(["widened", "removed"]),
     }),
+    // `kept` names the rule files from outside dohc that Restore kept as kept copies.
+    result: z.object({ heldAccessRules: z.array(AccessRuleHold), kept: z.array(z.string()) }),
     guard: "trusted-sender",
     scope: "workspace",
     handlerCheck: {

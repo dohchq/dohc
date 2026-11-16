@@ -325,32 +325,6 @@ impl Fixture {
             .unwrap();
     }
 
-    fn undo_rule(
-        &self,
-        folder: &str,
-        undo: dohc_engine_runtime::AccessRuleUndo,
-    ) -> Result<(), RuntimeError> {
-        self.undo_rule_with(folder, undo, Arc::new(NoFaults))
-    }
-
-    fn undo_rule_with(
-        &self,
-        folder: &str,
-        undo: dohc_engine_runtime::AccessRuleUndo,
-        faults: Arc<dyn dohc_engine_storage::FaultInjector>,
-    ) -> Result<(), RuntimeError> {
-        self.runtime.block_on(self.actor.undo_access_rule(
-            WS.to_owned(),
-            "main".to_owned(),
-            folder.to_owned(),
-            undo,
-            self.root().to_path_buf(),
-            Arc::new(()),
-            40,
-            faults,
-        ))
-    }
-
     fn decided_at(
         &self,
         folder: &str,
@@ -911,58 +885,6 @@ fn a_held_rules_levels_follow_every_rule_above_it() {
     }
 }
 
-/// Each decision on a one-file rule says the ordinary change that reverses
-/// it: the rule it replaced, over the bytes it left.
-#[test]
-fn a_decision_names_the_change_that_reverses_it() {
-    let sha = |text: &str| Some(dohc_engine_storage::hex_sha256(text.as_bytes()));
-    let undo = |path: &str, text: Option<&str>, expected: Option<String>| {
-        Some(dohc_engine_runtime::AccessRuleUndo {
-            path: path.to_owned(),
-            text: text.map(str::to_owned),
-            expected_sha256: expected,
-        })
-    };
-    for (decision, expected) in [
-        (
-            AccessRuleDecision::Accept,
-            undo("team/access.yaml", Some(VIEW), sha(EDIT)),
-        ),
-        (
-            AccessRuleDecision::Restore,
-            undo("team/access.yaml", Some(EDIT), sha(VIEW)),
-        ),
-    ] {
-        let f = ruled_team();
-        f.put("team/access.yaml", EDIT);
-        f.settle();
-        assert!(held(&f.capture(&["team/a.md"])[0], "team"));
-        let decided = f
-            .decided_on("team", decision, sha(EDIT), "widened")
-            .expect("decide");
-        assert_eq!(decided.undo, expected, "{decision:?} on a widening");
-    }
-    for (decision, expected) in [
-        (
-            AccessRuleDecision::Accept,
-            undo("team/access.yaml", Some(VIEW), None),
-        ),
-        (
-            AccessRuleDecision::Restore,
-            undo("team/access.yaml", None, sha(VIEW)),
-        ),
-    ] {
-        let f = ruled_team();
-        std::fs::remove_file(f.root().join("team/access.yaml")).unwrap();
-        f.settle();
-        assert!(held(&f.capture(&["team/a.md"])[0], "team"));
-        let decided = f
-            .decided_on("team", decision, None, "removed")
-            .expect("decide");
-        assert_eq!(decided.undo, expected, "{decision:?} on a removal");
-    }
-}
-
 impl Fixture {
     /// The kept copies the workspace lists, by path, with their bytes.
     fn kept_copies(&self) -> Vec<(String, String)> {
@@ -1107,79 +1029,6 @@ fn a_decision_on_a_hold_its_version_no_longer_shows_is_refused() {
     );
 }
 
-/// Undo of Allow puts the recorded rule back through the engine, as a change
-/// the owner made through dohc.
-#[test]
-fn undoing_an_accepted_rule_puts_the_recorded_rule_back() {
-    let f = ruled_team();
-    f.put("team/access.yaml", EDIT);
-    f.settle();
-    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
-    let decided = f
-        .decided_on(
-            "team",
-            AccessRuleDecision::Accept,
-            Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes())),
-            "widened",
-        )
-        .expect("accept");
-    let undo = decided.undo.expect("an undo");
-    // Another Version's rules are on disk while it is active.
-    f.activate_feature(true);
-    let refused = f.undo_rule("team", undo.clone());
-    assert!(
-        matches!(&refused, Err(RuntimeError::AccessRuleChanged { .. })),
-        "{refused:?}"
-    );
-    f.activate_feature(false);
-    let before = f.journal();
-    f.undo_rule("team", undo).expect("undo");
-    assert_eq!(
-        std::fs::read_to_string(f.root().join("team/access.yaml")).unwrap(),
-        VIEW
-    );
-    assert_eq!(
-        f.journal()[before.len()..],
-        lines(&["write team/access.yaml"])
-    );
-    f.settle();
-    f.capture_ok(&["team/a.md"]);
-    assert!(f.holds().is_empty());
-}
-
-/// Undo of Restore puts back the rule from outside dohc that Restore
-/// removed. It commits as written, so it widens without a hold.
-#[test]
-fn undoing_a_restore_puts_the_outside_rule_back() {
-    let f = ruled_team();
-    f.put("team/sub/access.yaml", EDIT);
-    f.put("team/sub/b.md", "beta");
-    f.settle();
-    assert!(held(&f.capture(&["team/sub/b.md"])[0], "team/sub"));
-    let decided = f
-        .decided_on(
-            "team/sub",
-            AccessRuleDecision::Restore,
-            Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes())),
-            "widened",
-        )
-        .expect("restore");
-    let before = f.journal();
-    f.undo_rule("team/sub", decided.undo.expect("an undo"))
-        .expect("undo");
-    assert_eq!(
-        std::fs::read_to_string(f.root().join("team/sub/access.yaml")).unwrap(),
-        EDIT
-    );
-    assert_eq!(
-        f.journal()[before.len()..],
-        lines(&["write team/sub/access.yaml"])
-    );
-    f.settle();
-    f.capture_ok(&["team/sub/b.md"]);
-    assert!(f.holds().is_empty());
-}
-
 fn moved<T>(result: &Result<T, RuntimeError>) -> bool {
     matches!(
         result,
@@ -1206,11 +1055,10 @@ fn held_team(replicates: bool) -> Fixture {
 }
 
 /// Once the store leaves the workspace folder while it stays open, a
-/// decision on a held rule and the Undo of one are refused before they keep,
-/// place, remove or commit a rule, or clear the hold, whether or not the
-/// workspace replicates.
+/// decision on a held rule is refused before it keeps, places, removes or
+/// commits a rule, or clears the hold.
 #[test]
-fn a_decision_or_its_undo_after_the_store_moved_changes_nothing() {
+fn a_decision_after_the_store_moved_changes_nothing() {
     let seen = || Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes()));
     let rule = |f: &Fixture| std::fs::read_to_string(f.root().join("team/access.yaml")).unwrap();
     let held_team_still = vec![("team".to_owned(), "widened".to_owned())];
@@ -1247,211 +1095,12 @@ fn a_decision_or_its_undo_after_the_store_moved_changes_nothing() {
                 ));
             }
         }
-        let f = held_team(replicates);
-        let undo = f
-            .decided_on("team", AccessRuleDecision::Accept, seen(), "widened")
-            .expect("accept")
-            .undo
-            .expect("an undo");
-        let before = f.journal();
-        f.move_store_away();
-        let undone = f.undo_rule("team", undo);
-        let stray = f.move_store_back();
-        let state = (moved(&undone), stray, rule(&f), f.journal() == before);
-        if state != (true, Vec::new(), EDIT.to_owned(), true) {
-            wrong.push(format!(
-                "Undo, replicates: {replicates}: {undone:?} {state:?}"
-            ));
-        }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
-/// Undo refuses once the rule changed since the decision, and the rule on
-/// disk stays as it is.
-#[test]
-fn undo_after_the_rule_changed_again_is_refused() {
-    let f = ruled_team();
-    f.put("team/access.yaml", EDIT);
-    f.settle();
-    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
-    let decided = f
-        .decided_on(
-            "team",
-            AccessRuleDecision::Accept,
-            Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes())),
-            "widened",
-        )
-        .expect("accept");
-    f.put("team/access.yaml", NOBODY);
-    let before = f.journal();
-    let refused = f.undo_rule("team", decided.undo.expect("an undo"));
-    assert!(
-        matches!(&refused, Err(RuntimeError::AccessRuleChanged { folder }) if folder == "team"),
-        "{refused:?}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(f.root().join("team/access.yaml")).unwrap(),
-        NOBODY
-    );
-    assert_eq!(f.journal(), before);
-}
-
-/// Undo commits the rule it placed. An outside save that lands before that
-/// commit is capture's to judge, so a widening holds.
-#[test]
-fn an_outside_save_during_an_undo_is_judged_after_it() {
-    struct SaveAfterPlacement(PathBuf);
-    impl dohc_engine_storage::FaultInjector for SaveAfterPlacement {
-        fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
-            if point == dohc_engine_storage::FaultPoint::MaterializeAfterRenameBeforeComplete {
-                std::fs::write(&self.0, EDIT).unwrap();
-            }
-            dohc_engine_storage::FaultAction::Continue
-        }
-    }
-    let f = ruled_team();
-    f.put("team/access.yaml", EDIT);
-    f.settle();
-    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
-    let decided = f
-        .decided_on(
-            "team",
-            AccessRuleDecision::Accept,
-            Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes())),
-            "widened",
-        )
-        .expect("accept");
-    let before = f.journal();
-    f.undo_rule_with(
-        "team",
-        decided.undo.expect("an undo"),
-        Arc::new(SaveAfterPlacement(f.root().join("team/access.yaml"))),
-    )
-    .expect("undo");
-    assert_eq!(
-        f.journal()[before.len()..],
-        lines(&["write team/access.yaml"])
-    );
-    f.settle();
-    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
-    assert_eq!(f.holds(), vec![("team".to_owned(), "widened".to_owned())]);
-}
-
-/// An Undo whose placement fails leaves nothing to replay, so the bytes it
-/// meant to place are judged as a change from outside dohc.
-#[test]
-fn a_failed_undo_leaves_no_placement_to_replay() {
-    struct CrashPlacement;
-    impl dohc_engine_storage::FaultInjector for CrashPlacement {
-        fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
-            if point == dohc_engine_storage::FaultPoint::MaterializeAfterTempWrite {
-                dohc_engine_storage::FaultAction::Crash
-            } else {
-                dohc_engine_storage::FaultAction::Continue
-            }
-        }
-    }
-    let mut f = ruled_team();
-    f.put("team/access.yaml", EDIT);
-    f.settle();
-    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
-    let decided = f
-        .decided_on(
-            "team",
-            AccessRuleDecision::Restore,
-            Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes())),
-            "widened",
-        )
-        .expect("restore");
-    let failed = f.undo_rule_with(
-        "team",
-        decided.undo.expect("an undo"),
-        Arc::new(CrashPlacement),
-    );
-    assert!(waits(&failed), "{failed:?}");
-    f.restart();
-    assert_eq!(
-        std::fs::read_to_string(f.root().join("team/access.yaml")).unwrap(),
-        VIEW
-    );
-    // The owner puts the outside rule back by hand.
-    f.put("team/access.yaml", EDIT);
-    f.settle();
-    assert!(held(&f.capture(&["team/access.yaml"])[0], "team"));
-}
-
-/// A crash between an Undo's placement and its commit leaves the placement
-/// pending, with bytes nothing committed. Opening the workspace cancels it
-/// before replay, so neither replay nor capture takes those bytes for
-/// dohc's own.
-#[test]
-fn an_undo_a_crash_left_pending_is_cancelled_when_the_workspace_opens() {
-    struct CrashPlacement;
-    impl dohc_engine_storage::FaultInjector for CrashPlacement {
-        fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
-            if point == dohc_engine_storage::FaultPoint::MaterializeAfterTempWrite {
-                dohc_engine_storage::FaultAction::Crash
-            } else {
-                dohc_engine_storage::FaultAction::Continue
-            }
-        }
-    }
-    let undo_jobs = |f: &Fixture, status: Option<&str>| -> Vec<String> {
-        let conn = rusqlite::Connection::open(&f.db).unwrap();
-        if let Some(status) = status {
-            conn.execute(
-                "UPDATE materialization_jobs SET status=?1 WHERE job_id LIKE 'access-rule-undo%'",
-                [status],
-            )
-            .unwrap();
-        }
-        conn.prepare(
-            "SELECT status FROM materialization_jobs WHERE job_id LIKE 'access-rule-undo%'",
-        )
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<String>>>()
-        .unwrap()
-    };
-    let mut f = ruled_team();
-    f.put("team/access.yaml", EDIT);
-    f.settle();
-    assert!(held(&f.capture(&["team/a.md"])[0], "team"));
-    let decided = f
-        .decided_on(
-            "team",
-            AccessRuleDecision::Restore,
-            Some(dohc_engine_storage::hex_sha256(EDIT.as_bytes())),
-            "widened",
-        )
-        .expect("restore");
-    let journal = f.journal();
-    let failed = f.undo_rule_with(
-        "team",
-        decided.undo.expect("an undo"),
-        Arc::new(CrashPlacement),
-    );
-    assert!(waits(&failed), "{failed:?}");
-    // The process died before Undo could cancel its placement.
-    assert_eq!(undo_jobs(&f, Some("pending")), ["pending"]);
-    f.restart();
-    assert_eq!(undo_jobs(&f, None), ["cancelled"]);
-    assert_eq!(
-        std::fs::read_to_string(f.root().join("team/access.yaml")).unwrap(),
-        VIEW
-    );
-    assert_eq!(f.journal(), journal);
-    // The owner puts the outside rule back by hand, and it holds again.
-    f.put("team/access.yaml", EDIT);
-    f.settle();
-    assert!(held(&f.capture(&["team/access.yaml"])[0], "team"));
-    assert_eq!(f.journal(), journal);
-}
-
 /// Restoring a folder whose new rule nothing committed removes that rule
-/// from disk and keeps it as a kept copy, so the restore can be undone.
+/// from disk and keeps it as a kept copy the owner can still save.
 #[test]
 fn restoring_an_uncommitted_rule_keeps_its_bytes() {
     let f = ruled_team();

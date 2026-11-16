@@ -315,15 +315,6 @@ async function harness(
       folder: input.folder,
       decided: true as const,
       kept: [`${input.folder}/access.yaml`],
-      undo: {
-        path: `${input.folder}/access.yaml`,
-        text: "members: edit\n",
-        expectedSha256: "c".repeat(64),
-      },
-    })),
-    undoAccessRule: vi.fn<VersionedLiveAdapter["undoAccessRule"]>(async (input) => ({
-      folder: input.folder,
-      undone: true as const,
     })),
     listCollections: vi.fn<VersionedLiveAdapter["listCollections"]>(async () => ({
       collections: [],
@@ -894,7 +885,6 @@ describe("workspace engine IPC registrations", () => {
     ).toEqual({
       heldAccessRules: [],
       kept: ["team/access.yaml"],
-      undo: { path: "team/access.yaml", text: "members: edit\n", expectedSha256: "c".repeat(64) },
     });
     expect(h.adapter.decideAccessRule).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
@@ -942,27 +932,6 @@ describe("workspace engine IPC registrations", () => {
         expectedReason: "removed",
       }),
     ).rejects.toThrow("This workspace is no longer active.");
-    expect(h.adapter.decideAccessRule).toHaveBeenCalledTimes(2);
-    // Undo goes through the engine, not a file write.
-    const undo = {
-      path: "team/access.yaml",
-      text: "members: view\n",
-      expectedSha256: "c".repeat(64),
-    };
-    expect(
-      await bridge.decideAccessRule({
-        workspaceId: "workspace",
-        versionId: "main",
-        folder: "team",
-        decision: "undo",
-        undo,
-      }),
-    ).toEqual({ heldAccessRules: [], kept: [], undo: null });
-    expect(h.adapter.undoAccessRule).toHaveBeenCalledExactlyOnceWith({
-      versionId: "main",
-      folder: "team",
-      ...undo,
-    });
     expect(h.adapter.decideAccessRule).toHaveBeenCalledTimes(2);
   });
   it("retries recovery only for the writable workspace this renderer shows", async () => {

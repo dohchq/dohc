@@ -282,7 +282,7 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     const restored = rows.filter({ hasText: "Restored the workspace's access rule." });
     await expect(restored).toHaveCount(1, { timeout: 30_000 });
     await expect(restored).toContainText("Restored the workspace's access rule. Members can view.");
-    await expect(restored.getByRole("button", { name: "Undo" })).toBeVisible();
+    await expect(restored.getByRole("button", { name: "Open History" })).toHaveCount(0);
     await expect
       .poll(async () => readFile(join(temp.rootPath, "access.yaml"), "utf8"), { timeout: 30_000 })
       .toBe(VIEW);
@@ -299,59 +299,17 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await expect(toggle).toHaveAttribute("aria-expanded", "true");
     await shoot(page, "outcome-in-notices");
 
-    // Allowing says what took effect, and Undo puts the recorded rule back
-    // through the engine.
+    // Allowing says what took effect, and its earlier rule is in History.
     await widenedRow.getByRole("button", { name: "Allow new access" }).click();
     const allowed = rows.filter({ hasText: "Members can now edit team." });
     await expect(allowed).toHaveCount(1, { timeout: 30_000 });
     await expect
       .poll(async () => (await status()).heldAccessRules, { timeout: 30_000 })
       .toEqual([]);
-    await shoot(page, "success-undo");
+    await shoot(page, "success-history");
     expect(await readFile(join(temp.rootPath, "team/access.yaml"), "utf8")).toBe(EDIT);
-    await allowed.getByRole("button", { name: "Undo" }).click();
-    const undone = toasts.filter({ hasText: "The access rule for team is back as it was." });
-    await expect(undone).toHaveCount(1, { timeout: 30_000 });
-    await shoot(page, "undone");
-    await expect
-      .poll(async () => readFile(join(temp.rootPath, "team/access.yaml"), "utf8"), {
-        timeout: 30_000,
-      })
-      .toBe(VIEW);
-    // Undo is dohc's own change, so no new hold follows it.
-    await expect
-      .poll(async () => (await status()).heldAccessRules, { timeout: 30_000 })
-      .toEqual([]);
-
-    // An Undo after the rule changed again is refused. Trying again meets
-    // the same rule, so the refusal points to History instead.
-    await writeFile(join(temp.rootPath, "team/access.yaml"), EDIT);
-    await expect
-      .poll(async () => (await status()).heldAccessRules?.map((hold) => hold.folder), {
-        timeout: 30_000,
-      })
-      .toEqual(["team"]);
-    await openNotices();
-    await widenedRow.getByRole("button", { name: "Allow new access" }).click();
-    await expect(allowed).toHaveCount(1, { timeout: 30_000 });
-    await expect
-      .poll(async () => (await status()).heldAccessRules, { timeout: 30_000 })
-      .toEqual([]);
-    await writeFile(join(temp.rootPath, "team/access.yaml"), "members: comment\n");
-    await allowed.getByRole("button", { name: "Undo" }).click();
-    const undoRefused = page
-      .getByTestId("workspace-shell-error")
-      .filter({ hasText: "dohc could not undo your choice for team" });
-    await expect(undoRefused).toHaveCount(1, { timeout: 30_000 });
-    await expect(undoRefused).toContainText(
-      "The access rule for team changed since you chose. Its earlier versions are in History.",
-    );
-    await expect(undoRefused.getByRole("button", { name: "Try again" })).toHaveCount(0);
-    await expect(undoRefused.getByRole("button", { name: "Open History" })).toBeVisible();
-    await shoot(page, "undo-refused");
-    expect(await readFile(join(temp.rootPath, "team/access.yaml"), "utf8")).toBe(
-      "members: comment\n",
-    );
+    await allowed.getByRole("button", { name: "Open History" }).click();
+    await expect(page.getByTestId("engine-history-list")).toBeVisible({ timeout: 30_000 });
     await openNotices();
     await expect(held).toHaveCount(0);
 
@@ -369,10 +327,7 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     );
     await expect(resolvedRow).not.toContainText("can't read that level");
     expect(await buttonNames(resolvedRow)).toEqual(["Restore rule", "Remove rule"]);
-    // dohc holds the workspace's rule again, so the earlier Restore's Undo
-    // goes. Its words stay.
     await expect(restored).toHaveCount(1);
-    await expect(restored.getByRole("button", { name: "Undo" })).toHaveCount(0);
     await shoot(page, "removed-root-resolved");
 
     // The level changes in Settings after the row showed it. Coming back

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, configure, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AccessRuleHold, AccessRuleUndo } from "../../ipc/bridgeContract";
+import type { AccessRuleHold } from "../../ipc/bridgeContract";
 import { useAccessRuleHoldNotices } from "./useAccessRuleHoldNotices";
 import { useShellError } from "./useShellError";
 
@@ -47,7 +47,7 @@ const ROOT_REMOVED: AccessRuleHold = {
   fallsBackTo: null,
 };
 
-type Decided = { heldAccessRules: AccessRuleHold[]; kept: string[]; undo: AccessRuleUndo | null };
+type Decided = { heldAccessRules: AccessRuleHold[]; kept: string[] };
 
 // The members' level from Members settings, or a failed read.
 const membersAt = (memberLevel: "view" | "comment" | "edit") => async (_input: object) => ({
@@ -63,11 +63,9 @@ function harness(
   members: (input: object) => Promise<unknown> = membersAt("edit"),
 ) {
   const bridge = {
-    // Undo goes through the engine too, so the bridge offers no file write.
     decideAccessRule: vi.fn(async (_input: object): Promise<Decided> => ({
       heldAccessRules: [],
       kept: [],
-      undo: null,
     })),
     workspaceMembers: vi.fn(members),
   };
@@ -87,7 +85,6 @@ function harness(
       openMembers,
       reportShellFailure: errors.reportShellFailure,
       clearIdentity: errors.clearIdentity,
-      dropNoticeStep: errors.dropNoticeStep,
       showSuccessNotice: errors.showSuccessNotice,
     });
     return null;
@@ -188,7 +185,7 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.row("team")!.action).toMatchObject({ additional: [{ label: "Hide from members" }] });
   });
 
-  it("reads as working while a decision runs, then says what took effect with Undo", async () => {
+  it("reads as working while a decision runs, then says what took effect with Open History", async () => {
     const h = harness([WIDENED]);
     await waitFor(() => expect(h.row("team")).toBeDefined());
     let finish!: (decided: Decided) => void;
@@ -209,176 +206,46 @@ describe("useAccessRuleHoldNotices", () => {
     // Neither step runs again while one does.
     act(() => h.errors().runShellErrorAction(h.row("team")!.id));
     expect(h.bridge.decideAccessRule).toHaveBeenCalledOnce();
-    const undo = {
-      path: "team/access.yaml",
-      text: "members: view\n",
-      expectedSha256: "b".repeat(64),
-    };
-    await act(async () => finish({ heldAccessRules: [], kept: [], undo }));
+    await act(async () => finish({ heldAccessRules: [], kept: [] }));
     h.list([]);
     const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
     await waitFor(() =>
       expect(done()).toMatchObject({
         message: "team now follows the new access rule.",
-        action: { label: "Undo", ends: true },
+        action: { label: "Open History", ends: true },
       }),
     );
     act(() => h.errors().runShellErrorAction(done()!.id));
-    await waitFor(() =>
-      expect(h.bridge.decideAccessRule).toHaveBeenLastCalledWith({
-        workspaceId: "ws-a",
-        versionId: "main",
-        folder: "team",
-        decision: "undo",
-        undo,
-      }),
-    );
-    await waitFor(() =>
-      expect(
-        h
-          .errors()
-          .shellErrors.filter((error) => error.tone === "success")
-          .at(-1),
-      ).toMatchObject({ message: "The access rule for team is back as it was." }),
-    );
-  });
-
-  it("reads the members' level again for Undo of a Restore, after the last hold went", async () => {
-    const h = harness([ROOT_REMOVED], membersAt("view"));
-    await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View, no change"] }));
-    const undo = { path: "access.yaml", text: "", expectedSha256: "b".repeat(64) };
-    h.bridge.decideAccessRule.mockResolvedValueOnce({ heldAccessRules: [], kept: [], undo });
-    act(() => h.errors().runShellErrorAction(h.row("")!.id));
-    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
-    await waitFor(() =>
-      expect(done()).toMatchObject({
-        message: "Restored the workspace's access rule. Members can view.",
-        action: { label: "Undo" },
-      }),
-    );
-    h.list([]);
-    // The owner sets Edit in Members settings, then undoes the Restore.
-    h.bridge.workspaceMembers.mockImplementation(membersAt("edit"));
-    act(() => h.readMemberLevel());
-    act(() => h.errors().runShellErrorAction(done()!.id));
-    await waitFor(() =>
-      expect(
-        h
-          .errors()
-          .shellErrors.filter((error) => error.tone === "success")
-          .at(-1),
-      ).toMatchObject({ message: "Members can now edit." }),
-    );
-  });
-
-  it("drops a decision's Undo once dohc holds the folder again, and keeps it for a list from before", async () => {
-    const h = harness([WIDENED]);
-    await waitFor(() => expect(h.row("team")).toBeDefined());
-    const undo = {
-      path: "team/access.yaml",
-      text: "members: view\n",
-      expectedSha256: "b".repeat(64),
-    };
-    h.bridge.decideAccessRule.mockResolvedValueOnce({ heldAccessRules: [], kept: [], undo });
-    act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
-    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
-    await waitFor(() => expect(done()).toMatchObject({ action: { label: "Undo" } }));
-    // A list read before the decision landed still names the same hold.
-    h.list([{ ...WIDENED }]);
-    await waitFor(() => expect(h.row("team")).toBeDefined());
-    expect(done()!.action).toMatchObject({ label: "Undo" });
-    h.list([]);
-    await waitFor(() => expect(h.row("team")).toBeUndefined());
-    h.list([{ ...WIDENED, observedSha256: "c".repeat(64), recordedAtMs: 2 }]);
-    await waitFor(() => expect(h.row("team")).toBeDefined());
-    await waitFor(() => expect(done()!.action).toBeUndefined());
-    expect(done()!.message).toBe("team now follows the new access rule.");
-  });
-
-  it("says an Undo the engine refused points to History, with no Try again", async () => {
-    const h = harness([WIDENED]);
-    await waitFor(() => expect(h.row("team")).toBeDefined());
-    const undo = {
-      path: "team/access.yaml",
-      text: "members: view\n",
-      expectedSha256: "b".repeat(64),
-    };
-    h.bridge.decideAccessRule.mockResolvedValueOnce({ heldAccessRules: [], kept: [], undo });
-    act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
-    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
-    await waitFor(() => expect(done()).toBeDefined());
-    h.bridge.decideAccessRule.mockRejectedValueOnce(
-      new Error(
-        "Error invoking remote method 'desktop:decide-access-rule': DaemonRefusalError [CONFLICT]: access-rule-changed: team",
-      ),
-    );
-    act(() => h.errors().runShellErrorAction(done()!.id));
-    const refused = () =>
-      h
-        .errors()
-        .shellErrors.find((error) => error.title === "dohc could not undo your choice for team");
-    await waitFor(() =>
-      expect(refused()).toMatchObject({
-        message:
-          "The access rule for team changed since you chose. Its earlier versions are in History.",
-        retry: null,
-        action: { label: "Open History" },
-      }),
-    );
-    act(() => h.errors().runShellErrorAction(refused()!.id));
     expect(h.openHistory).toHaveBeenCalledOnce();
   });
 
-  it("names one entry's new reach, the kept copy after Restore, and undoes by creating or deleting the rule", async () => {
+  it("names one entry's new reach, and where Restore kept the rule from outside dohc", async () => {
     const h = harness([{ ...WIDENED, changes: [WIDENED.changes[0]!] }, REMOVED]);
     await waitFor(() => expect(h.errors().shellErrors).toHaveLength(2));
     const success = () => h.errors().shellErrors.filter((error) => error.tone === "success");
-    h.bridge.decideAccessRule.mockResolvedValueOnce({
-      heldAccessRules: [],
-      kept: [],
-      undo: { path: "team/access.yaml", text: null, expectedSha256: "c".repeat(64) },
-    });
     act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
     await waitFor(() =>
-      expect(success()[0]).toMatchObject({ message: "Members can now edit team." }),
-    );
-    act(() => h.errors().runShellErrorAction(success()[0]!.id));
-    await waitFor(() =>
-      expect(h.bridge.decideAccessRule).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          decision: "undo",
-          folder: "team",
-          undo: { path: "team/access.yaml", text: null, expectedSha256: "c".repeat(64) },
-        }),
-      ),
+      expect(success()[0]).toMatchObject({
+        message: "Members can now edit team.",
+        action: { label: "Open History" },
+      }),
     );
 
     h.bridge.decideAccessRule.mockResolvedValueOnce({
       heldAccessRules: [],
       kept: ["team/sub/access.yaml"],
-      undo: { path: "team/sub/access.yaml", text: "members: view\n", expectedSha256: null },
     });
     act(() => h.errors().runShellErrorAction(h.row("team/sub")!.id));
     await waitFor(() =>
       expect(success().at(-1)).toMatchObject({
         message:
-          "Restored the access rule for team/sub. Members can view team/sub. The rule from outside dohc is saved as a copy of team/sub/access.yaml.",
+          "Restored the access rule for team/sub. Members can view team/sub. dohc kept the rule from outside dohc in Notices, where Save copy puts it beside team/sub/access.yaml.",
       }),
     );
-    const restored = success().at(-1)!.id;
-    act(() => h.errors().runShellErrorAction(restored));
-    await waitFor(() =>
-      expect(h.bridge.decideAccessRule).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          decision: "undo",
-          folder: "team/sub",
-          undo: { path: "team/sub/access.yaml", text: "members: view\n", expectedSha256: null },
-        }),
-      ),
-    );
+    expect(success().at(-1)!.action).toBeUndefined();
   });
 
-  it("offers History where no file change undoes a decision", async () => {
+  it("offers History after Remove rule", async () => {
     const h = harness([REMOVED]);
     await waitFor(() => expect(h.row("team/sub")).toBeDefined());
     act(() => h.errors().runShellErrorAction(h.row("team/sub")!.id, 1));
@@ -524,7 +391,7 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.row("team")!.action?.busy).toBeUndefined();
   });
 
-  it("says to open the workspace again when its folder moved, with no Try again, for a choice and its Undo", async () => {
+  it("says to open the workspace again when its folder moved, with no Try again", async () => {
     const moved = () =>
       new Error(
         "Error invoking remote method 'desktop:decide-access-rule': DaemonRefusalError [INVALID_PARAMS]: workspace-folder-moved",
@@ -542,23 +409,6 @@ describe("useAccessRuleHoldNotices", () => {
           (error) => error.title === "dohc could not restore the access rule for team",
         );
     await waitFor(() => expect(chose()).toMatchObject({ message: words, retry: null }));
-
-    const undo = {
-      path: "team/access.yaml",
-      text: "members: view\n",
-      expectedSha256: "b".repeat(64),
-    };
-    h.bridge.decideAccessRule.mockResolvedValueOnce({ heldAccessRules: [], kept: [], undo });
-    act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
-    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
-    await waitFor(() => expect(done()).toBeDefined());
-    h.bridge.decideAccessRule.mockRejectedValueOnce(moved());
-    act(() => h.errors().runShellErrorAction(done()!.id));
-    const undid = () =>
-      h
-        .errors()
-        .shellErrors.find((error) => error.title === "dohc could not undo your choice for team");
-    await waitFor(() => expect(undid()).toMatchObject({ message: words, retry: null }));
   });
 
   it("names the level members get from Members settings, in the rows and what Remove rule did", async () => {
@@ -657,31 +507,6 @@ describe("useAccessRuleHoldNotices", () => {
     expect(h.bridge.decideAccessRule).not.toHaveBeenCalled();
   });
 
-  it("says what members can do once Undo puts the recorded rule back", async () => {
-    const h = harness([{ ...WIDENED, changes: [WIDENED.changes[0]!] }]);
-    await waitFor(() => expect(h.row("team")).toBeDefined());
-    const undo = {
-      path: "team/access.yaml",
-      text: "members: view\n",
-      expectedSha256: "b".repeat(64),
-    };
-    h.bridge.decideAccessRule.mockResolvedValueOnce({ heldAccessRules: [], kept: [], undo });
-    act(() => h.errors().runShellErrorAction(h.row("team")!.id, 1));
-    const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
-    await waitFor(() => expect(done()).toMatchObject({ message: "Members can now edit team." }));
-    act(() => h.errors().runShellErrorAction(done()!.id));
-    await waitFor(() =>
-      expect(
-        h
-          .errors()
-          .shellErrors.filter((error) => error.tone === "success")
-          .at(-1),
-      ).toMatchObject({
-        message: "The access rule for team is back as it was. Members can view team.",
-      }),
-    );
-  });
-
   it("says where the level is set, with Open Members, when dohc can't read it", async () => {
     const h = harness([ROOT_REMOVED], membersUnread);
     await waitFor(() => expect(h.row("")).toBeDefined());
@@ -702,33 +527,6 @@ describe("useAccessRuleHoldNotices", () => {
         message:
           "Removed the workspace's access rule. Members now get the level set in Members settings.",
       }),
-    );
-  });
-
-  it("says what members can now do after an Undo that puts a widening back", async () => {
-    const h = harness([{ ...WIDENED, changes: [WIDENED.changes[0]!] }]);
-    await waitFor(() => expect(h.row("team")).toBeDefined());
-    const undo = {
-      path: "team/access.yaml",
-      text: "members: edit\n",
-      expectedSha256: "b".repeat(64),
-    };
-    h.bridge.decideAccessRule.mockResolvedValueOnce({
-      heldAccessRules: [],
-      kept: ["team/access.yaml"],
-      undo,
-    });
-    act(() => h.errors().runShellErrorAction(h.row("team")!.id));
-    const success = () => h.errors().shellErrors.filter((error) => error.tone === "success");
-    await waitFor(() =>
-      expect(success()[0]).toMatchObject({
-        message:
-          "Restored the access rule for team. Members can view team. The rule from outside dohc is saved as a copy of team/access.yaml.",
-      }),
-    );
-    act(() => h.errors().runShellErrorAction(success()[0]!.id));
-    await waitFor(() =>
-      expect(success().at(-1)).toMatchObject({ message: "Members can now edit team." }),
     );
   });
 

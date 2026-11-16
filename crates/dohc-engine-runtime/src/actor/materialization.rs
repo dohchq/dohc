@@ -149,7 +149,6 @@ impl ActorHandle {
         #[cfg(unix)]
         self.retained_root.set(root_dir.clone());
         self.run(move |store, _cache| {
-            super::access_order::cancel_unfinished_undos(store, &workspace_id, now_ms)?;
             // Open-time replay runs before the files layer starts. The
             // switch path calls the same tolerant per-job executor with a
             // selected durable job set and watcher suppression enabled.

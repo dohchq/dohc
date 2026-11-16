@@ -54,7 +54,6 @@ export const WORKSPACE_METHOD = {
   captureOutsideChanges: "capture.outsideChanges",
   captureAcceptAccessRule: "capture.acceptAccessRule",
   captureRestoreAccessRule: "capture.restoreAccessRule",
-  captureUndoAccessRule: "capture.undoAccessRule",
   captureSetAuthor: "capture.setAuthor",
   captureHold: "capture.hold",
   captureRenew: "capture.renew",
@@ -501,19 +500,6 @@ export type AccessRuleDecisionParams = WorkspaceJsonObject & {
   expectedReason: "widened" | "removed";
 };
 
-/**
- * A decision's `undo`, put back in the Version and folder it was made in.
- * The engine refuses with `access-rule-changed` once the folder's rule is
- * not the one the decision left.
- */
-export type AccessRuleUndoParams = WorkspaceJsonObject & {
-  versionId: string;
-  folder: string;
-  path: string;
-  text: string | null;
-  expectedSha256: string | null;
-};
-
 export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.replicaCut]: WorkspaceJsonObject & {
     selectors: Array<{ versionId: string | null; paths: string[] }>;
@@ -557,7 +543,6 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureOutsideChanges]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.captureAcceptAccessRule]: AccessRuleDecisionParams;
   [WORKSPACE_METHOD.captureRestoreAccessRule]: AccessRuleDecisionParams;
-  [WORKSPACE_METHOD.captureUndoAccessRule]: AccessRuleUndoParams;
   [WORKSPACE_METHOD.captureSetAuthor]: CaptureSetAuthorParams;
   [WORKSPACE_METHOD.captureHold]: WorkspaceJsonObject & { operationId?: string };
   [WORKSPACE_METHOD.captureRenew]: WorkspaceJsonObject & { holdId: string };
@@ -1181,14 +1166,6 @@ const AccessRuleDecidedSchema = mutableStruct({
   folder: Schema.String,
   decided: Schema.Literal(true),
   kept: Schema.mutable(Schema.Array(Schema.String)),
-  /** The file change that reverses the decision: write `text` over `expectedSha256` (create when null), or delete when `text` is null. */
-  undo: Schema.NullOr(
-    mutableStruct({
-      path: Schema.NonEmptyString,
-      text: Schema.NullOr(Schema.String),
-      expectedSha256: Schema.NullOr(Schema.NonEmptyString),
-    }),
-  ),
 });
 
 const NonNegativeIntSchema = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
@@ -1606,10 +1583,6 @@ const WorkspaceResultSchemas = {
   }),
   [WORKSPACE_METHOD.captureAcceptAccessRule]: AccessRuleDecidedSchema,
   [WORKSPACE_METHOD.captureRestoreAccessRule]: AccessRuleDecidedSchema,
-  [WORKSPACE_METHOD.captureUndoAccessRule]: mutableStruct({
-    folder: Schema.String,
-    undone: Schema.Literal(true),
-  }),
   [WORKSPACE_METHOD.captureSetAuthor]: mutableStruct({
     updated: Schema.Literal(true),
   }),

@@ -1175,27 +1175,12 @@ it("decodes folders whose access rule waits for the owner", () => {
     WORKSPACE_METHOD.captureAcceptAccessRule,
     WORKSPACE_METHOD.captureRestoreAccessRule,
   ]) {
-    const decided = {
-      folder: "team",
-      decided: true,
-      kept: ["team/access.yaml"],
-      undo: { path: "team/access.yaml", text: "members: edit\n", expectedSha256: "a".repeat(64) },
-    };
+    const decided = { folder: "team", decided: true, kept: ["team/access.yaml"] };
     expect(decodeWorkspaceResult(method, decided)).toEqual(decided);
-    expect(decodeWorkspaceResult(method, { ...decided, undo: null })).toEqual({
-      ...decided,
-      undo: null,
-    });
-    expect(() =>
-      decodeWorkspaceResult(method, { folder: "team", decided: true, kept: [] }),
-    ).toThrow(ProtocolShapeError);
+    expect(() => decodeWorkspaceResult(method, { folder: "team", decided: true })).toThrow(
+      ProtocolShapeError,
+    );
   }
-  expect(
-    decodeWorkspaceResult(WORKSPACE_METHOD.captureUndoAccessRule, { folder: "team", undone: true }),
-  ).toEqual({ folder: "team", undone: true });
-  expect(() =>
-    decodeWorkspaceResult(WORKSPACE_METHOD.captureUndoAccessRule, { folder: "team" }),
-  ).toThrow(ProtocolShapeError);
 });
 
 it("decodes outside writes waiting for an open document", () => {
