@@ -885,6 +885,32 @@ describe("ChatsView direct messages", () => {
     );
   });
 
+  it("focuses the conversation's composer once its send finishes, when Open conversation came while it sent", async () => {
+    const user = userEvent.setup();
+    signedIn([conversation()]);
+    members([{ memberId: "sam", name: "Sam Rivera" }]);
+    bridgeMock.directResolve.mockResolvedValue({ conversationId: "conversation-sam", person: sam });
+    history([sent(2, "sam", "See you at nine")]);
+    let finishSend: (value: { conversationId: string; seq: number }) => void = () => {};
+    bridgeMock.directSend.mockReturnValueOnce(new Promise((resolve) => (finishSend = resolve)));
+    renderView(vi.fn(), vi.fn(), { variant: "page", initialNav: { level: "direct", conversationId: "conversation-sam" } });
+    const shown = await screen.findByTestId("chats-dm-view");
+    const composer = (await within(shown).findByTestId("chats-dm-composer")) as HTMLTextAreaElement;
+    await user.type(composer, "On my way{Enter}");
+    await waitFor(() => expect(composer.disabled).toBe(true));
+    // New message sits in a tab of its own, so Open conversation goes to the tab already showing Sam.
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page", editorTabPath: chatTabPath({ kind: "new" }), onOpenInTab: vi.fn(), onCloseTab: vi.fn(),
+      initialNav: { level: "direct-new" },
+    });
+    const newMessage = await screen.findByTestId("chats-dm-new");
+    await user.click(await within(newMessage).findByTestId("chats-dm-new-member"));
+    await user.type(within(newMessage).getByTestId("chats-dm-new-composer"), "Lunch?");
+    fireEvent.click(await within(newMessage).findByTestId("chats-dm-new-open-existing"));
+    await act(async () => finishSend({ conversationId: "conversation-sam", seq: 3 }));
+    await waitFor(() => expect(document.activeElement).toBe(within(shown).getByTestId("chats-dm-composer")));
+  });
+
   it("opens the existing conversation when Members' Message names someone already in one", async () => {
     signedIn([conversation()]);
     members([{ memberId: "sam", name: "Sam Rivera" }]);

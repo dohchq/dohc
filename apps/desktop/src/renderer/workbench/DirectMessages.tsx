@@ -503,10 +503,11 @@ function ConversationForAccount(props: ConversationProps) {
     );
   }
 
-  const composerShows = person !== null && shown.status === "ready" && !person.blocked;
+  // A sending composer is disabled and can't take focus, so a hand-over waits for the send to finish.
+  const composerFocusable = person !== null && shown.status === "ready" && !person.blocked && !sending;
   useEffect(() => {
-    if (composerShows && store.takeFocus(conversationId)) composer.current?.focusEnd();
-  }, [composerShows, handedOff, store, conversationId]);
+    if (composerFocusable && store.takeFocus(conversationId)) composer.current?.focusEnd();
+  }, [composerFocusable, handedOff, store, conversationId]);
 
   let footer: ReactNode = null;
   if (person && shown.status === "ready") {
