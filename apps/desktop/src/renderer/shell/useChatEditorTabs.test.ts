@@ -67,10 +67,12 @@ const thread: ChatsNav = {
   },
 };
 
-// Hidden conversations ask for their unread counts; most tests ignore them.
+// Hidden conversations ask for their unread counts, and direct tabs for the people's names; most tests ignore them.
 const UNREAD_BRIDGE = {
   listChatUnread: () => Promise.resolve({ chats: [] }),
   onWorkspaceActivity: () => () => {},
+  directConversations: () => new Promise(() => {}),
+  onDirectChanged: () => () => {},
 };
 
 beforeEach(() =>
@@ -98,6 +100,51 @@ describe("chat editor tabs", () => {
       conversationId: "conversation-1",
     });
     expect(result.current.titles.get(path)).toBe("Direct message");
+  });
+
+  it("names a hidden direct message tab once the list reads, such as when the server comes back", async () => {
+    const list = deferred<unknown>();
+    vi.stubGlobal("dohcDesktop", {
+      ...UNREAD_BRIDGE,
+      onCloudSessionChanged: () => () => {},
+      directConversations: () => list.promise,
+    });
+    const path = chatEditorPath(dm);
+    const home = chatEditorPath({ level: "feed" });
+    const { result } = renderHook(() =>
+      useChatEditorTabs({
+        readRevision: 0,
+        workspaceId: "workspace",
+        agents: NO_AGENTS,
+        onOpen: vi.fn(),
+        paths: [path, home],
+        activePaths: [home],
+        enabled: true,
+      }),
+    );
+    expect(result.current.titles.get(path)).toBe("Direct message");
+    await act(async () =>
+      list.resolve({
+        available: true,
+        viewerId: "viewer",
+        conversations: [
+          {
+            conversationId: "conversation-1",
+            person: { personId: "alice", name: "Alice Moreno", blocked: false },
+            last: {
+              seq: 1,
+              messageId: "m1",
+              authorId: "alice",
+              authorName: "Alice Moreno",
+              body: "Hi",
+              createdAtMs: 0,
+            },
+            unread: 0,
+          },
+        ],
+      }),
+    );
+    await waitFor(() => expect(result.current.titles.get(path)).toBe("Alice Moreno"));
   });
 
   it("does not retry failed hidden restores when the active tab changes", async () => {
@@ -151,15 +198,17 @@ describe("chat editor tabs", () => {
   });
 
   it("purges account state while disabled and restores titles only after the session is ready", async () => {
-    let changeSession: (event: {
-      sessionKey: string;
-      phase: "changing" | "ready";
-    }) => void = () => {};
+    type SessionEvent = { sessionKey: string; phase: "changing" | "ready" };
+    // The tabs and the direct store each follow the session.
+    const sessionListeners = new Set<(event: SessionEvent) => void>();
+    const changeSession = (event: SessionEvent) => {
+      for (const listener of sessionListeners) listener(event);
+    };
     vi.stubGlobal("dohcDesktop", {
       ...UNREAD_BRIDGE,
-      onCloudSessionChanged: (listener: typeof changeSession) => {
-        changeSession = listener;
-        return () => {};
+      onCloudSessionChanged: (listener: (event: SessionEvent) => void) => {
+        sessionListeners.add(listener);
+        return () => sessionListeners.delete(listener);
       },
     });
     const path = chatEditorPath(dm);
@@ -443,6 +492,7 @@ describe("chat editor tabs", () => {
     ];
     const listChatUnread = vi.fn(() => Promise.resolve({ chats }));
     vi.stubGlobal("dohcDesktop", {
+      ...UNREAD_BRIDGE,
       onCloudSessionChanged: () => () => {},
       listChatChannels: vi.fn(() => new Promise(() => {})),
       listChatUnread,

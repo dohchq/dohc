@@ -205,6 +205,35 @@ export function useChatEditorTabs(input: {
       });
     }
   }, [get, input.enabled, pathsKey, input.workspaceId, sessionRevision]);
+  // Nothing about a conversation is saved, so a tab restored while the server is away has no name.
+  // Each one takes the person's name once the list reads, without waiting to be opened.
+  const hasDirectTab = input.paths.some((path) => {
+    const tab = parseTab(path);
+    return tab.kind === "chat" && tab.target.kind === "dm";
+  });
+  useEffect(() => {
+    if (!input.enabled || !hasDirectTab) return;
+    const owner = store.current;
+    const direct = directStore();
+    const name = () => {
+      const state = direct.snapshot();
+      if (state.status !== "ready" || store.current !== owner) return;
+      let named = false;
+      for (const entry of owner.entries.values()) {
+        const nav = entry.nav;
+        if (nav?.level !== "direct") continue;
+        const conversation = state.conversations.find((candidate) => candidate.conversationId === nav.conversationId);
+        const title = conversation ? directPersonName(conversation.person) : undefined;
+        if (title === undefined || nav.title === title) continue;
+        entry.nav = { ...nav, title };
+        named = true;
+      }
+      if (named) render((value) => value + 1);
+    };
+    const stop = direct.subscribe(name);
+    name();
+    return stop;
+  }, [hasDirectTab, input.enabled, input.workspaceId]);
   // A hidden conversation's tab counts its unread messages, as Chats does.
   // One local read per workspace change, and none without a hidden one.
   const [unreadRead, setUnread] = useState({ workspaceId: input.workspaceId, counts: NO_UNREAD });
