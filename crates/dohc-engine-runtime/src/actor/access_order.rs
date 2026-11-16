@@ -1463,6 +1463,16 @@ pub(super) fn order_capture(
     order_paths(store, &order, touches)
 }
 
+/// Whether `error` is a folder's answer to a writer: it waits for its rule,
+/// or is held for its owner.
+pub(super) fn refused(error: &RuntimeError) -> bool {
+    matches!(error, RuntimeError::AccessRuleHeld { .. })
+        || matches!(
+            error,
+            RuntimeError::Sync(SyncError::RetryableState { reason }) if *reason == ACCESS_RULE_WAITS
+        )
+}
+
 pub(super) fn waits() -> RuntimeError {
     signal(|signals| &signals.waits);
     RuntimeError::Sync(SyncError::RetryableState {

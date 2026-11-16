@@ -2559,6 +2559,220 @@ fn a_live_document_under_a_held_folder_settles_nothing_in_a_local_workspace() {
     );
 }
 
+impl Fixture {
+    /// Open the captured `path`, which holds "seed", as a live document, with
+    /// an edit that is not settled yet when `edit` is set.
+    fn live_note(&self, path: &str, edit: bool) -> dohc_engine_runtime::YdocOpenState {
+        let state = self.open_note(path, 50);
+        let doc = Ydoc::wire();
+        let seed = doc
+            .rewrite_content_to_markdown(ContentKind::Richdoc, "seed")
+            .expect("seed");
+        self.record_note(&state, path, seed, true);
+        let state = self.open_note(path, 51);
+        if edit {
+            self.record_note(&state, path, doc.richdoc_append_paragraph("edited"), false);
+        }
+        state
+    }
+
+    /// How many updates the live document at `key` has recorded.
+    fn updates(&self, key: &DocKey) -> i64 {
+        rusqlite::Connection::open(&self.db)
+            .unwrap()
+            .query_row(
+                "SELECT head_update_seq FROM ydoc_docs WHERE workspace_id=?1 \
+                 AND version_id=?2 AND object_id=?3",
+                [&key.workspace_id, &key.version_id, &key.object_id],
+                |row| row.get(0),
+            )
+            .expect("the live document")
+    }
+
+    fn read(&self, path: &str) -> String {
+        std::fs::read_to_string(self.root().join(path)).unwrap()
+    }
+}
+
+/// Reconciling a Collection writes an id into a record file that has none,
+/// first in its live document, then on disk. In a workspace that does not
+/// replicate, a folder held for its owner holds the record, and once the
+/// store left the workspace folder nothing is reconciled. Either way the
+/// document and its file stay as they were.
+#[test]
+fn a_collection_record_is_not_adopted_under_a_held_folder_or_a_moved_store() {
+    const NOTE: &str = "team/a.md";
+    let mut wrong = Vec::new();
+    for moved_store in [false, true] {
+        let f = if moved_store {
+            Fixture::movable()
+        } else {
+            let f = Fixture::local();
+            f.put("team/access.yaml", NOBODY);
+            f
+        };
+        f.put(
+            "team/collection.yaml",
+            "fields:\n  status:\n    type: text\n",
+        );
+        f.put(NOTE, "seed\n");
+        f.settle();
+        let mut paths = vec!["team/collection.yaml", NOTE];
+        if !moved_store {
+            paths.insert(0, "team/access.yaml");
+        }
+        f.capture_ok(&paths);
+        let state = f.live_note(NOTE, false);
+        let (before, updates) = (f.moments(), f.updates(&state.key));
+        if moved_store {
+            f.move_store_away();
+        } else {
+            f.put("team/access.yaml", EDIT);
+            f.settle();
+        }
+        let result = f
+            .runtime
+            .block_on(f.actor.reconcile_collections_guarded(
+                WS.to_owned(),
+                "main".to_owned(),
+                f.root().to_path_buf(),
+                dohc_engine_collab::LeaseRegistry::new(),
+                Arc::new(()),
+                60,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                Arc::new(ExistingRootGuard),
+            ))
+            .map(drop);
+        let stray = if moved_store {
+            f.move_store_back()
+        } else {
+            Vec::new()
+        };
+        // Refused as moved, written where the store was, moments unchanged,
+        // updates unchanged, the file, the holds.
+        let state = (
+            moved(&result),
+            stray,
+            f.moments() == before,
+            f.updates(&state.key) == updates,
+            f.read(NOTE),
+            f.holds(),
+        );
+        let expected = if moved_store {
+            (
+                true,
+                Vec::new(),
+                true,
+                true,
+                "seed\n".to_owned(),
+                Vec::new(),
+            )
+        } else {
+            (
+                false,
+                Vec::new(),
+                true,
+                true,
+                "seed\n".to_owned(),
+                vec![("team".to_owned(), "widened".to_owned())],
+            )
+        };
+        if state != expected || (!moved_store && result.is_err()) {
+            wrong.push(format!("moved {moved_store}: {result:?} {state:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+impl Fixture {
+    /// Record that the live document at `path` owes its save, as a held or
+    /// interrupted settlement leaves it, and return the obligation.
+    fn owe_save(
+        &mut self,
+        state: &dohc_engine_runtime::YdocOpenState,
+        path: &str,
+    ) -> dohc_engine_collab::markdown_write_obligations::Obligation {
+        use dohc_engine_collab::markdown_write_obligations as obligations;
+        self.supervisor.close(&self.db).expect("close");
+        let conn = rusqlite::Connection::open(&self.db).unwrap();
+        obligations::record_in(
+            &conn,
+            &obligations::Obligation {
+                order: 0,
+                key: state.key.clone(),
+                lineage_claim_id: state.lineage_claim_id.clone().unwrap_or_default(),
+                operation_id: "owed-session".to_owned(),
+                kind: obligations::Kind::Session,
+                path: path.to_owned(),
+                retry_inputs: serde_json::json!({
+                    "expectedHeadSha256": state.head_blob_sha256,
+                    "restoreGeneration": null,
+                    "useReader": false,
+                }),
+                held_checkpoint_sha256: None,
+                held_head_sha256: state.head_blob_sha256.clone(),
+                source_sha256: None,
+                settled_head_sha256: None,
+            },
+            52,
+        )
+        .expect("owe the save");
+        let owed = obligations::pending_in(&conn, WS)
+            .expect("owed saves")
+            .pop()
+            .expect("the owed save");
+        drop(conn);
+        self.actor = self.supervisor.open(&self.db, 1).expect("reopen").actor;
+        owed
+    }
+}
+
+/// Markdown recovery retries a save a live document owes. Once the store left
+/// the workspace folder, it writes nothing and the save stays owed.
+#[test]
+fn an_owed_save_recovered_after_the_store_moved_writes_nothing() {
+    const NOTE: &str = "team/note.md";
+    let mut f = Fixture::movable();
+    f.put(NOTE, "seed\n");
+    f.settle();
+    f.capture_ok(&[NOTE]);
+    let state = f.live_note(NOTE, true);
+    let owed = f.owe_save(&state, NOTE);
+    let before = f.moments();
+    f.move_store_away();
+    let recovered = f.runtime.block_on(f.actor.recover_markdown_write(
+        owed,
+        f.root().to_path_buf(),
+        Arc::new(ExistingRootGuard),
+        dohc_engine_collab::LeaseRegistry::new(),
+        Arc::new(()),
+        53,
+        CancellationToken::new(),
+    ));
+    let stray = f.move_store_back();
+    // Refused as moved, written where the store was, moments unchanged, the
+    // file, the save still owed.
+    let owes = dohc_engine_collab::markdown_write_obligations::pending_in(
+        &rusqlite::Connection::open(&f.db).unwrap(),
+        WS,
+    )
+    .expect("owed saves")
+    .len();
+    let state = (
+        moved(&recovered),
+        stray,
+        f.moments() == before,
+        f.read(NOTE),
+        owes,
+    );
+    assert_eq!(
+        state,
+        (true, Vec::new(), true, "seed\n".to_owned(), 1),
+        "{recovered:?}"
+    );
+}
+
 const OP: &str = "dohc-operation:remove-team";
 const COPY: &str = "dohc-operation:copy-rule";
 
