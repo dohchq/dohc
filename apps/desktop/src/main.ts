@@ -618,11 +618,12 @@ import {
 } from "./workspaces/shareViewMarker";
 import {
   joinedByAccount,
+  shareViewWriteLevel,
   shareViewWriteScopeOf,
   workspaceCreateOffers,
   workspaceWriteRefusal,
 } from "./workspaces/shareWriteGate";
-import { shareViewLevels, storedShareViewReach } from "./workspaces/shareViewReach";
+import { storedShareViewReach } from "./workspaces/shareViewReach";
 import {
   workspaceSummariesFrom,
   workspaceSummaryFor,
@@ -6931,15 +6932,9 @@ function shareViewChatPush(
 ): Promise<unknown> | null {
   const view = workspace.shareView;
   const pin = recordedShareSelector(view?.grantedSelector);
-  const highest = shareViewLevels(view).highest;
-  if (
-    !view ||
-    view.ended ||
-    !view.shareId ||
-    pin?.wholeWorkspace !== true ||
-    highest === null ||
-    highest === "view"
-  )
+  const scope = shareViewWriteScopeOf(view, cachedCredentials);
+  const level = scope === null ? null : shareViewWriteLevel(scope, "somewhere");
+  if (!view || !view.shareId || pin?.wholeWorkspace !== true || level === null || level === "view")
     return null;
   return receivedShareEngine
     .relayFor({
@@ -7469,7 +7464,10 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       !marker ||
       !marker.relayUrl ||
       !relayUrlsMatch(marker.relayUrl, credentials.relayUrl) ||
-      shareViewLevels(marker).highest !== "edit" ||
+      shareViewWriteLevel(
+        shareViewWriteScopeOf(marker, credentials) ?? { access: null, ended: true },
+        "somewhere",
+      ) !== "edit" ||
       (marker.grantedSelector.versionId !== null && marker.grantedSelector.versionId !== "main")
     ) {
       throw new SharedDocumentWaitingError({
@@ -7490,7 +7488,13 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       shareId: marker.shareId,
       selector: marker.grantedSelector,
       accessEnded: () => findWorkspace(workspace.workspaceId)?.shareView?.ended === true,
-      levelAt: (path) => shareViewLevels(findWorkspace(workspace.workspaceId)?.shareView).at(path),
+      levelAt: (path) => {
+        const scope = shareViewWriteScopeOf(
+          findWorkspace(workspace.workspaceId)?.shareView,
+          cachedCredentials,
+        );
+        return scope === null ? null : shareViewWriteLevel(scope, { path });
+      },
       isOnline: () => net.isOnline(),
       recordDelivery: (path) =>
         requireEngineSessions()

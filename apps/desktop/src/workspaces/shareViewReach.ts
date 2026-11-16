@@ -51,11 +51,18 @@ export function storedShareViewReach(shareView: unknown): ListedReach | null {
 export function shareViewLevels(shareView: unknown): ShareViewLevels {
   if (!isRecord(shareView) || !shareViewIdentityIsIntact(shareView)) return NO_LEVELS;
   const selector = recordedShareSelector(shareView.grantedSelector);
-  if (selector === null) return NO_LEVELS;
+  return selector === null ? NO_LEVELS : grantLevels(selector, shareView.reach);
+}
+
+/** The levels a readable pinned grant gives with the reach stored beside it, if any. */
+export function grantLevels(
+  selector: NonNullable<ReturnType<typeof recordedShareSelector>>,
+  storedReach: unknown,
+): ShareViewLevels {
   const member = selector.access;
   const reach =
-    selector.wholeWorkspace === true && shareView.reach !== undefined
-      ? parseListedReach(shareView.reach)
+    selector.wholeWorkspace === true && storedReach !== undefined
+      ? parseListedReach(storedReach)
       : undefined;
   // A stored reach that can't be read gives no level, rather than the
   // member level it may have narrowed.

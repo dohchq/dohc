@@ -1397,7 +1397,7 @@ describe("ShareViewFiles", () => {
         rootDir: "unused",
         workspaceId: "unused",
         store: forgedStore,
-        allowLocalJournaling: true,
+        journalsAt: () => true,
         shareId: "unused",
       }),
     ).toThrow("ownership admission is inactive");

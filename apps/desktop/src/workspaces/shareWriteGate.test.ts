@@ -3,7 +3,7 @@ import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import {
   joinedByAccount,
   SHARE_VIEW_EMPTY_FOLDER_REFUSAL,
-  shareViewTakesLocalWrites,
+  shareViewWriteLevel,
   shareViewWriteScopeOf,
   workspaceCreateOffers,
   workspaceWriteRefusal,
@@ -20,27 +20,63 @@ function marker(access: ShareAccess | "unreadable", ended = false) {
   };
 }
 
-describe("shareViewTakesLocalWrites", () => {
-  it("takes writes at edit, and only at edit", () => {
-    const levels: ShareAccess[] = ["view", "comment", "edit"];
-    const takes = levels.filter((access) => shareViewTakesLocalWrites({ access, ended: false }));
-    expect(takes).toEqual(["edit"]);
-  });
+// The rule every local write gate asks: file changes, capture, sending,
+// Collection buttons, chat and the CLI. Each fails in a direction that costs
+// something, so every input is stated.
+describe("shareViewWriteLevel", () => {
+  const PLACES = [{ path: "docs/a.md" }, { folder: "docs" }, "group", "somewhere"] as const;
 
-  it("refuses a damaged grant, which names no level at all", () => {
-    expect(
-      shareViewTakesLocalWrites({ access: null, ended: false }),
-      'an `!== "view"` test reads a damaged grant as writable',
-    ).toBe(false);
-  });
-
-  it("refuses an ended share at every level", () => {
+  it("gives a path share's level at every place", () => {
     for (const access of ["view", "comment", "edit"] as const) {
-      expect(
-        shareViewTakesLocalWrites({ access, ended: true }),
-        `${access}: an ended share takes a write nothing will ever send`,
-      ).toBe(false);
+      for (const place of PLACES)
+        expect(shareViewWriteLevel({ access, ended: false }, place)).toBe(access);
     }
+  });
+
+  it("gives a damaged grant no level, which takes no write", () => {
+    for (const place of PLACES) {
+      expect(
+        shareViewWriteLevel(shareViewWriteScopeOf(marker("unreadable"), null)!, place),
+      ).toBeNull();
+    }
+  });
+
+  it("gives an ended share no level at any place", () => {
+    for (const access of ["view", "comment", "edit"] as const) {
+      for (const place of PLACES) {
+        expect(
+          shareViewWriteLevel({ access, ended: true }, place),
+          `${access}: an ended share takes a write nothing will ever send`,
+        ).toBeNull();
+      }
+    }
+  });
+
+  it("gives a joined workspace each path and folder its listed level, and a Group the member level", () => {
+    const scope = shareViewWriteScopeOf(
+      {
+        shareId: "share-1",
+        recipientUserId: "member-1",
+        grantedSelector: { paths: [], versionId: null, access: "comment", wholeWorkspace: true },
+        reach: {
+          signature: "r",
+          visibilitySignature: "v",
+          rootLevel: "view",
+          folders: [
+            { path: "docs", level: "edit" },
+            { path: "docs/held", level: "comment" },
+          ],
+        },
+      },
+      null,
+    )!;
+    expect(shareViewWriteLevel(scope, { path: "a.md" })).toBe("view");
+    expect(shareViewWriteLevel(scope, { path: "docs/a.md" })).toBe("edit");
+    expect(shareViewWriteLevel(scope, { path: "docs/held/a.md" })).toBe("comment");
+    expect(shareViewWriteLevel(scope, { folder: "" })).toBe("view");
+    expect(shareViewWriteLevel(scope, { folder: "docs" })).toBe("edit");
+    expect(shareViewWriteLevel(scope, "group")).toBe("comment");
+    expect(shareViewWriteLevel(scope, "somewhere")).toBe("edit");
   });
 });
 
@@ -53,7 +89,7 @@ describe("shareViewTakesLocalWrites", () => {
 // The level cannot widen it, and this is the property that matters: an edit
 // share view is refused here exactly as a view share is. The one write a
 // share view admits is routed to the engine through `ShareViewFiles.change`,
-// which asks `shareViewTakesLocalWrites` instead.
+// which asks `shareViewWriteLevel` at each path instead.
 describe("workspaceWriteRefusal", () => {
   it("gives the action that can represent a folder in a shared view", () => {
     expect(SHARE_VIEW_EMPTY_FOLDER_REFUSAL).toBe(
@@ -140,33 +176,19 @@ describe("the joined-account rule", () => {
   const joined = { userId: "recipient-a", relayUrl: "https://relay.test" };
 
   it.each([
-    ["the account that joined", joined, "joined", true, true],
-    [
-      "another account",
-      { userId: "someone-else", relayUrl: "https://relay.test" },
-      "other",
-      false,
-      false,
-    ],
+    ["the account that joined", joined, "joined", true],
+    ["another account", { userId: "someone-else", relayUrl: "https://relay.test" }, "other", false],
     [
       "the same user id on another relay",
       { userId: "recipient-a", relayUrl: "https://other-relay.test" },
       "other",
       false,
-      false,
     ],
-    ["nobody", null, "signed-out", true, false],
+    ["nobody", null, "signed-out", false],
   ] as const)(
-    "with %s signed in, takes local writes and relay actions as the writer allows",
-    (_name, credentials, writer, local, relay) => {
-      const scope = shareViewWriteScopeOf(joinedView, credentials)!;
-      expect(scope.writer).toBe(writer);
-      expect(shareViewTakesLocalWrites(scope)).toBe(local);
-      expect(workspaceCreateOffers(scope, "admin")).toEqual({
-        write: local,
-        folder: local,
-        collection: local,
-      });
+    "with %s signed in, names the writer and takes relay actions as it allows",
+    (_name, credentials, writer, relay) => {
+      expect(shareViewWriteScopeOf(joinedView, credentials)!.writer).toBe(writer);
       expect(joinedByAccount(joinedView, credentials)).toBe(relay);
     },
   );

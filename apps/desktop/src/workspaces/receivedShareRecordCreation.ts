@@ -8,7 +8,7 @@ import type {
   ResolvedShareViewFilesTarget,
 } from "./shareViewFiles";
 import { recordedShareSelector } from "./shareViewRecords";
-import { shareViewLevels } from "./shareViewReach";
+import { shareViewWriteLevel, shareViewWriteScopeOf } from "./shareWriteGate";
 import type { ShareViewSelector } from "./shareViewInfo";
 import type { WorkspaceOperationLease } from "./workspaceAssets";
 import type { CreationPartial } from "@dohc/cli/creation";
@@ -42,16 +42,19 @@ export async function createReceivedShareRecord(
   const { resolved } = host;
   // A joined workspace's grant names the whole workspace and no paths. A new
   // record lands in the Collection's folder, so it takes the level there.
-  const levels = shareViewLevels({
-    shareId: resolved.shareId,
-    recipientUserId: resolved.recipientUserId,
-    grantedSelector: resolved.grantedSelector,
-    ...(resolved.reach === undefined ? {} : { reach: resolved.reach }),
-  });
+  const writes = shareViewWriteScopeOf(
+    {
+      shareId: resolved.shareId,
+      recipientUserId: resolved.recipientUserId,
+      grantedSelector: resolved.grantedSelector,
+      ...(resolved.reach === undefined ? {} : { reach: resolved.reach }),
+    },
+    null,
+  );
   const covers = (grant: ShareViewSelector | null) =>
     grant?.versionId === null &&
     (grant.wholeWorkspace === true
-      ? levels.in(host.collectionPath) === "edit"
+      ? writes !== null && shareViewWriteLevel(writes, { folder: host.collectionPath }) === "edit"
       : grant.access === "edit" &&
         grant.paths.some(
           (root) => host.collectionPath === root || host.collectionPath.startsWith(`${root}/`),

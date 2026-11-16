@@ -3133,7 +3133,7 @@ describe("a joined workspace through the CLI", () => {
     };
     const joined: RegistryEntry = { ...f.joined, shareView };
     f.rows.set("workspace", joined);
-    f.dependencies.sharedViewOf = vi.fn(() => shareViewWriteScopeOf(shareView));
+    f.dependencies.sharedViewOf = vi.fn(() => shareViewWriteScopeOf(shareView, null));
     vi.mocked(f.dependencies.joinedRecords.create).mockResolvedValue({
       path: "tasks/Hidden/b.md",
       recordId: RECORD_ID,

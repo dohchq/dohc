@@ -1,9 +1,9 @@
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import { recordedShareSelector } from "./shareViewRecords";
 import type { ShareViewSelector } from "./shareViewInfo";
-import { shareViewIdentityIsIntact, shareViewIsPresent } from "./shareViewMarker";
-import { shareViewTakesLocalWrites } from "./shareWriteGate";
-import { shareViewLevels, storedShareViewReach } from "./shareViewReach";
+import { shareViewIsPresent } from "./shareViewMarker";
+import { shareViewWriteLevel, shareViewWriteScopeOf } from "./shareWriteGate";
+import { storedShareViewReach } from "./shareViewReach";
 import type { ListedReach } from "@dohc/security-contract/listed-reach";
 
 // The two lanes of share proposals, and the rule that keeps a workspace in
@@ -96,16 +96,10 @@ export function requireShareViewMembership(shareView: unknown): ShareViewProposa
  */
 export function requireShareViewProposalScope(shareView: unknown): ShareViewProposalScope {
   const scope = requireShareViewMembership(shareView);
-  const marker = isRecord(shareView) ? shareView : {};
-  if (
-    !shareViewIdentityIsIntact(marker) ||
-    !shareViewTakesLocalWrites({
-      // A joined workspace sends while any listed folder takes Edit; the
-      // engine and relay judge each change at its own path.
-      access: shareViewLevels(marker).highest,
-      ended: marker.ended === true,
-    })
-  ) {
+  const writes = shareViewWriteScopeOf(shareView, null);
+  // What waits was judged at its own path when it was made, and the relay
+  // judges it again; sending needs Edit somewhere.
+  if (!writes || shareViewWriteLevel(writes, "somewhere") !== "edit") {
     throw new SharedFileReadOnlyError();
   }
   return scope;

@@ -61,11 +61,11 @@ import {
 } from "./shareViewRecords";
 import { SHARE_VIEW_REOPEN_MESSAGE, shareViewIdentityIsIntact } from "./shareViewMarker";
 import {
-  shareViewTakesLocalWrites,
+  shareViewWriteLevel,
+  shareViewWriteScopeOf,
   shareViewWriterOf,
   type ShareViewWriter,
 } from "./shareWriteGate";
-import { shareViewLevels } from "./shareViewReach";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import type { CredentialSessionCache } from "./credentialSessionCache";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
@@ -428,20 +428,8 @@ function writableSelector(target: ActiveShareViewFilesTarget, writer: ShareViewW
   if (target.kind === "standalone" && !shareViewIdentityIsIntact(target)) {
     throw new SharedFileReadOnlyError(SHARE_VIEW_REOPEN_MESSAGE);
   }
-  if (
-    target.kind === "mount" ||
-    !shareViewTakesLocalWrites({
-      access: targetLevels(target).highest,
-      ended: target.ended,
-      writer,
-    })
-  ) {
-    if (writer === "other") throw new SharedFileReadOnlyError(JOINED_BY_ANOTHER_ACCOUNT);
-    const granter = target.granterEmail ?? "the person who shared it";
-    throw new SharedFileReadOnlyError(
-      `This shared view is read-only for you. Ask ${granter} for changes.`,
-    );
-  }
+  if (writer === "other") throw new SharedFileReadOnlyError(JOINED_BY_ANOTHER_ACCOUNT);
+  if (target.kind === "mount") throw new SharedFileReadOnlyError(readOnlyWords(target));
   return selector;
 }
 
@@ -453,19 +441,33 @@ function joinedWorkspace(target: ActiveShareViewFilesTarget): boolean {
   );
 }
 
-function targetLevels(target: ResolvedShareViewFilesTarget) {
-  return shareViewLevels({
-    shareId: target.shareId,
-    recipientUserId: target.recipientUserId,
-    grantedSelector: target.grantedSelector,
-    ...(target.reach === undefined ? {} : { reach: target.reach }),
-  });
+// The levels alone: `writableSelector` checks the signed-in account.
+function targetScope(target: ResolvedShareViewFilesTarget) {
+  return (
+    shareViewWriteScopeOf(
+      {
+        shareId: target.shareId,
+        recipientUserId: target.recipientUserId,
+        grantedSelector: target.grantedSelector,
+        ended: target.ended,
+        ...(target.reach === undefined ? {} : { reach: target.reach }),
+      },
+      null,
+    ) ?? { access: null, ended: true }
+  );
+}
+
+function readOnlyWords(target: ResolvedShareViewFilesTarget): string {
+  return `This shared view is read-only for you. Ask ${target.granterEmail ?? "the person who shared it"} for changes.`;
 }
 
 // The level at the path a change touches: an existing file's current path,
 // or the path a new one takes. The relay decides again when it is sent.
 function assertEditableAt(target: ActiveShareViewFilesTarget, path: string): void {
-  if (targetLevels(target).at(path) === "edit") return;
+  const scope = targetScope(target);
+  if (shareViewWriteLevel(scope, { path }) === "edit") return;
+  if (shareViewWriteLevel(scope, "somewhere") !== "edit")
+    throw new SharedFileReadOnlyError(readOnlyWords(target));
   const granter = target.granterEmail ?? "the person who shared it";
   throw new SharedFileReadOnlyError(`${path} is read-only for you. Ask ${granter} for Edit.`);
 }
@@ -808,6 +810,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
         workspaceId: target.storeWorkspaceId,
         store,
         pinnedSelector: target.grantedSelector,
+        reach: target.reach,
         shareId: target.shareId,
         ended: target.ended,
         paths: divergenceScopes,
@@ -956,6 +959,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
       workspaceId: target.storeWorkspaceId,
       store,
       pinnedSelector: target.grantedSelector,
+      reach: target.reach,
       shareId: target.shareId,
       ended: target.ended,
       workspaceLease: lease,
@@ -969,7 +973,8 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
             rootDir: target.rootPath,
             workspaceId: target.storeWorkspaceId,
             store,
-            allowLocalJournaling: false,
+            // A mount is read-only: every edit is put back.
+            journalsAt: () => false,
             shareId: target.shareId,
           });
 
@@ -1138,6 +1143,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
           workspaceId: target.storeWorkspaceId,
           store: dependencies.openStore(target),
           pinnedSelector: target.grantedSelector,
+          reach: target.reach,
           shareId: target.shareId,
           ended: target.ended,
           workspaceLease: lease,

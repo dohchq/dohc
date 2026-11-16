@@ -23,8 +23,12 @@ import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sha
 import { shareViewIsPresent } from "./shareViewMarker";
 import { logUnlessClosedCopy } from "./shareViewRebuild";
 import { recordedShareSelector } from "./shareViewRecords";
-import { shareViewLevels } from "./shareViewReach";
-import { joinedByAccount } from "./shareWriteGate";
+import {
+  joinedByAccount,
+  shareViewWriteLevel,
+  shareViewWriteScopeOf,
+  type ShareViewWritePlace,
+} from "./shareWriteGate";
 import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
 import { chatFileLinkScope, hasChatFileLink, refuseChatFileLinks } from "./chatFileLinkScope";
@@ -218,13 +222,12 @@ export function createChatWrites(dependencies: {
   function joinedWorkspacePosts(workspace: ChatWorkspace): boolean {
     const view = workspace.shareView;
     const pin = recordedShareSelector(view?.grantedSelector);
-    const highest = shareViewLevels(view).highest;
+    const scope = shareViewWriteScopeOf(view, currentCredentials());
     return (
       !!view &&
-      view.ended !== true &&
       pin?.wholeWorkspace === true &&
-      highest !== null &&
-      highest !== "view"
+      scope !== null &&
+      takesPosts(shareViewWriteLevel(scope, "somewhere"))
     );
   }
 
@@ -262,7 +265,7 @@ export function createChatWrites(dependencies: {
   //
   // The level decides too. A Group takes the member level until Group rules
   // exist. A file's thread takes the level at the file's current path, by
-  // the rule every gate asks (`shareViewLevels`).
+  // the rule every gate asks (`shareViewWriteLevel`).
   async function targetInReach(
     place: ChatWritePlace,
     target: ChatRelayIdentityTarget,
@@ -288,18 +291,23 @@ export function createChatWrites(dependencies: {
     if (!channelId) return false;
     const channels = await place.store.listChannels({ workspaceId: place.workspaceId });
     return (
-      takesPosts(shareViewLevels(findWorkspace(place.workspaceId)?.shareView).member) &&
+      takesPosts(levelOf(place.workspaceId, "group")) &&
       channels.some((channel) => channel.id === channelId && channel.kind === "channel")
     );
   }
 
   const takesPosts = (level: string | null) => level === "comment" || level === "edit";
+  const levelOf = (workspaceId: string, place: ShareViewWritePlace) => {
+    const scope = shareViewWriteScopeOf(
+      findWorkspace(workspaceId)?.shareView,
+      currentCredentials(),
+    );
+    return scope === null ? null : shareViewWriteLevel(scope, place);
+  };
 
   async function fileTakesComments(workspaceId: string, objectId: string): Promise<boolean> {
     const path = await currentPathOf(workspaceId, objectId);
-    return (
-      path !== null && takesPosts(shareViewLevels(findWorkspace(workspaceId)?.shareView).at(path))
-    );
+    return path !== null && takesPosts(levelOf(workspaceId, { path }));
   }
 
   function hasJoinedChannels(workspaceId: string): boolean {

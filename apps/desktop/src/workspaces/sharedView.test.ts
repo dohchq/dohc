@@ -106,7 +106,7 @@ const captureSharedViewLocalDivergence = (
     rootDir,
     workspaceId,
     store,
-    allowLocalJournaling,
+    journalsAt: () => allowLocalJournaling,
     shareId,
     ...options,
   });
@@ -1026,6 +1026,41 @@ describe("shared view refresh", () => {
       });
       expect(await momentIds(store)).toEqual(before);
       expect(await readFile(join(rootDir, path), "utf8")).toBe("granter body");
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("journals an out-of-app edit in a joined workspace only where its listed level is Edit", async () => {
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const relay = new FakeShareRelay();
+    const harness = daemonHarness(relay);
+    relay.addWrite("docs/open.md", "granter body");
+    relay.addWrite("docs/held/kept.md", "granter body");
+    await refreshSharedViewOnce(harness, { rootDir, workspaceId: WORKSPACE, shareId: SHARE_ID });
+    await writeFile(join(rootDir, "docs/open.md"), "member edit", "utf8");
+    await writeFile(join(rootDir, "docs/held/kept.md"), "member edit", "utf8");
+
+    const store = harness.openStore({ workspaceId: WORKSPACE, rootPath: rootDir });
+    try {
+      await expect(
+        captureStandaloneShareViewDivergence({
+          rootDir,
+          workspaceId: WORKSPACE,
+          store,
+          pinnedSelector: { paths: [], versionId: null, access: "edit", wholeWorkspace: true },
+          reach: {
+            signature: "r",
+            visibilitySignature: "v",
+            rootLevel: "edit",
+            folders: [{ path: "docs/held", level: "view" }],
+          },
+          shareId: SHARE_ID,
+          ended: false,
+        }),
+      ).resolves.toEqual({ capturedPaths: 1, repairedPaths: 1, unjournalablePaths: [] });
+      expect(await readFile(join(rootDir, "docs/open.md"), "utf8")).toBe("member edit");
+      expect(await readFile(join(rootDir, "docs/held/kept.md"), "utf8")).toBe("granter body");
     } finally {
       await store.close();
     }
