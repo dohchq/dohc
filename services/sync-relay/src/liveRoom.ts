@@ -984,7 +984,11 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
           if (plan.clients.some((clientId) => clientId === seed))
             return refused("provenance-refused");
           if (!fitsCopy(held, bytes)) return refused("invalid-update");
-          const have = Y.decodeStateVector(Y.encodeStateVector(held.doc));
+          const vector = Y.encodeStateVector(held.doc),
+            have = Y.decodeStateVector(vector);
+          // Only what Yjs takes is kept. The save compares a resent part with what the note holds
+          // and refuses any difference, which the copy, unchanged by it, never shows.
+          const taken = Y.diffUpdate(bytes, vector);
           let written: ReturnType<typeof appendLiveRoomEdit>;
           try {
             written = appendLiveRoomEdit(storage, {
@@ -994,7 +998,7 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
                 clientId,
                 inNote: (have.get(clientId) ?? 0) > 0,
               })),
-              updateBytes: bytes.slice(),
+              updateBytes: taken,
               receivedAtMs: Date.now(),
             });
           } catch (error) {
@@ -1006,12 +1010,12 @@ export function createLiveRooms(options: LiveRoomsOptions): LiveRooms {
             dropCopy(held);
             return refused("provenance-refused");
           }
-          Y.applyUpdate(held.doc, bytes, subscriber);
-          held.bytes += bytes.byteLength;
-          held.unsaved.push({ position: written.position, sender, bytes });
+          Y.applyUpdate(held.doc, taken, subscriber);
+          held.bytes += taken.byteLength;
+          held.unsaved.push({ position: written.position, sender, bytes: taken });
           passOn(
             held,
-            { journalCursor: written.position, updateBytes: bytes },
+            { journalCursor: written.position, updateBytes: taken },
             { taken: true, except: subscriber },
           );
           scheduleSave(held, saveEveryMs);

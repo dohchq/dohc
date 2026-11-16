@@ -1471,6 +1471,51 @@ describe("live edit format guard", () => {
     }
   });
 
+  // Proves: content the save refuses even once removed is refused when the same edit removes it.
+  it("refuses a removed hook or JSON value", () => {
+    const note = markdownToYDoc(markdown);
+    const removed = (edit: (frontmatter: Y.Map<unknown>) => void) => {
+      const page = new Y.Doc({ gc: false });
+      Y.applyUpdate(page, Y.encodeStateAsUpdate(note));
+      const before = Y.encodeStateVector(page);
+      page.transact(() => edit(page.getMap("frontmatter")));
+      return Y.encodeStateAsUpdate(page, before);
+    };
+    const hook = removed((frontmatter) => {
+      frontmatter.set("hook", new Y.XmlHook("h"));
+      frontmatter.delete("hook");
+    });
+    expect(fits(note, hook)).toBe(false);
+    // A value Yjs reads as JSON, an older kind of content, replaced in the same edit.
+    const replaced = removed((frontmatter) => {
+      frontmatter.set("k", "zzzz");
+      frontmatter.set("k", "y");
+    });
+    expect(fits(note, replaced)).toBe(true);
+    // Its first value as one item holding one string: the count, the string's type, length and letters.
+    const any = [1, 119, 4, 122, 122, 122, 122];
+    const at = replaced.findIndex((_, index) =>
+      any.every((byte, step) => replaced[index + step] === byte),
+    );
+    // The item's kind, in the byte before its key and parent: from any (8) to JSON (2).
+    const info = at - 2 - 1 - "frontmatter".length - 1 - 1;
+    expect(replaced[info]).toBe(0x28);
+    const json = new Uint8Array([
+      ...replaced.slice(0, info),
+      0x22,
+      ...replaced.slice(info + 1, at),
+      1,
+      6,
+      ...new TextEncoder().encode('"zzzz"'),
+      ...replaced.slice(at + any.length),
+    ]);
+    const decoded = Y.decodeUpdate(json).structs.find(
+      (struct) => struct instanceof Y.Item && struct.content instanceof Y.ContentJSON,
+    );
+    expect(decoded).toBeDefined();
+    expect(fits(note, json)).toBe(false);
+  });
+
   // Proves: an empty item, which Yjs takes without moving its editor's clock, is refused.
   it("refuses an empty item", () => {
     const note = markdownToYDoc(markdown);

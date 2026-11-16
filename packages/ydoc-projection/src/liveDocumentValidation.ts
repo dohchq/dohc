@@ -874,10 +874,13 @@ export function liveEditFitsCopy(copy: Y.Doc, update: Uint8Array): boolean {
       // Yjs takes an empty item without moving its editor's clock, so the check would never read it.
       if (struct.length < 1) return false;
       // Yjs makes a root for each name an item gives, even one the same edit removes.
+      if (!(struct instanceof Y.Item)) continue;
+      if (typeof struct.parent === "string" && !PUBLIC_ROOTS.has(struct.parent)) return false;
+      // The save refuses these kinds of content even in an item the same edit removes.
+      const content = struct.content;
       if (
-        struct instanceof Y.Item &&
-        typeof struct.parent === "string" &&
-        !PUBLIC_ROOTS.has(struct.parent)
+        content instanceof Y.ContentJSON ||
+        (content instanceof Y.ContentType && content.type instanceof Y.XmlHook)
       )
         return false;
     }

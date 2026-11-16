@@ -1125,6 +1125,28 @@ it("checks an edit on the owner's changes the room took", async () => {
   expect(unsaved(f)).toHaveLength(1);
 });
 
+// Proves: a resent part of an edit the note holds is not kept, so a save never compares a
+// different one with what the note holds.
+it("keeps only the part of an edit that Yjs takes", async () => {
+  const f = note();
+  const room = rooms(f);
+  const a = editor(f, room, ana);
+  await a.open();
+  const sentBefore = Y.encodeStateAsUpdate(a.doc);
+  expect((await a.submit(a.change("title", "Lisbon"))).result).toBe("success");
+  // The same change, by the same editor at the same place, holding other words.
+  const other = new Y.Doc();
+  other.clientID = a.doc.clientID;
+  Y.applyUpdate(other, sentBefore);
+  const start = Y.encodeStateVector(other);
+  other.getMap("frontmatter").set("title", "Porto");
+  const resent = Y.encodeStateAsUpdate(other, start);
+  expect((await a.submit(resent)).result).toBe("success");
+  const rows = unsaved(f);
+  expect(rows).toHaveLength(2);
+  expect(Y.decodeUpdate(rows[1]!.updateBytes).structs).toEqual([]);
+});
+
 it("saves every taken edit before a step that closes the note, taking none until the step ends, then ends the room", async () => {
   const f = note();
   let release!: () => void;
