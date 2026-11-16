@@ -294,6 +294,9 @@ pub(crate) struct OpenedEngineDb {
     pub conn: Connection,
     pub freshly_created: bool,
     pub checkpoints: Option<crate::checkpoint::Checkpoints>,
+    /// The open left the store's pages unchecked, for a check that runs
+    /// while the store serves.
+    pub pages_unchecked: bool,
 }
 
 /// `work`, when given, counts the SQLite work of the open as it runs.
@@ -311,7 +314,7 @@ pub(crate) fn open_engine_db_with_root_token(
     root_token: Option<&str>,
     work: Option<Arc<AtomicU64>>,
 ) -> Result<OpenedEngineDb, StorageError> {
-    open_engine_db_configured(path, now_ms, root_token, work, false, false, None)
+    open_engine_db_configured(path, now_ms, root_token, work, false, false, None, false)
 }
 
 pub(crate) fn store_is_passive(conn: &Connection) -> Result<bool, StorageError> {
@@ -351,7 +354,7 @@ pub(crate) fn open_engine_db_with_store_role(
     work: Option<Arc<AtomicU64>>,
     passive: bool,
 ) -> Result<OpenedEngineDb, StorageError> {
-    open_engine_db_configured(path, now_ms, root_token, work, false, passive, None)
+    open_engine_db_configured(path, now_ms, root_token, work, false, passive, None, false)
 }
 
 /// Migrate an existing store of the given role as an ordinary open does,
@@ -362,7 +365,16 @@ pub(crate) fn open_engine_db_cancellable(
     passive: bool,
     cancelled: Arc<AtomicBool>,
 ) -> Result<OpenedEngineDb, StorageError> {
-    open_engine_db_configured(path, now_ms, None, None, false, passive, Some(cancelled))
+    open_engine_db_configured(
+        path,
+        now_ms,
+        None,
+        None,
+        false,
+        passive,
+        Some(cancelled),
+        false,
+    )
 }
 
 pub(crate) fn open_engine_db_for_actor(
@@ -371,9 +383,28 @@ pub(crate) fn open_engine_db_for_actor(
     root_token: Option<&str>,
     work: Option<Arc<AtomicU64>>,
 ) -> Result<OpenedEngineDb, StorageError> {
-    open_engine_db_configured(path, now_ms, root_token, work, true, false, None)
+    open_engine_db_configured(path, now_ms, root_token, work, true, false, None, false)
 }
 
+/// An actor's open of an owner or passive store that leaves the pages of an
+/// existing store unchecked, for a check that runs while the store serves. A
+/// store whose pages failed such a check is checked here, before it serves.
+pub(crate) fn open_engine_db_serving_first(
+    path: &Path,
+    now_ms: i64,
+    root_token: Option<&str>,
+    work: Option<Arc<AtomicU64>>,
+    passive: bool,
+) -> Result<OpenedEngineDb, StorageError> {
+    open_engine_db_configured(
+        path, now_ms, root_token, work, !passive, passive, None, true,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one open ritual serves every kind of open"
+)]
 fn open_engine_db_configured(
     path: &Path,
     now_ms: i64,
@@ -382,6 +413,7 @@ fn open_engine_db_configured(
     background_checkpoints: bool,
     passive: bool,
     cancelled: Option<Arc<AtomicBool>>,
+    pages_later: bool,
 ) -> Result<OpenedEngineDb, StorageError> {
     // Step 1: "is this file empty?" is our question, not the VFS's.
     reject_undersized_database(path)?;
@@ -409,6 +441,13 @@ fn open_engine_db_configured(
     // before any persistent pragma runs, so the file is left byte-unchanged.
     let disposition = classify_fingerprint(&conn)?;
     crate::migration::refuse_declared_v1_evidence(&conn)?;
+    // A store whose pages failed a check after an earlier open, or whose
+    // check could not finish, is checked before anything is written to it.
+    let marked = pages_later && crate::page_check::marked(path);
+    let checked_first = marked && disposition == Disposition::ExistingV2;
+    if checked_first {
+        integrity_check(&conn)?;
+    }
 
     if disposition == Disposition::ExistingV2 {
         if store_is_passive(&conn)? != passive {
@@ -469,7 +508,17 @@ fn open_engine_db_configured(
     }
 
     validate_v2(&conn)?;
-    integrity_check(&conn)?;
+    // A fresh store has no pages to wait for. A marked store was checked
+    // above, and is checked again only if a migration has written since.
+    let pages_unchecked = pages_later && disposition != Disposition::Fresh && !marked;
+    if !pages_unchecked {
+        if !checked_first || newly_applied > 0 {
+            integrity_check(&conn)?;
+        }
+        if marked {
+            crate::page_check::unmark(path);
+        }
+    }
     stop_counting(&mut conn)?;
     crate::search_generation::install(&mut conn).map_err(StorageError::corrupt)?;
     if let Some(checkpoints) = &checkpoints {
@@ -484,6 +533,7 @@ fn open_engine_db_configured(
         conn,
         checkpoints,
         freshly_created: disposition == Disposition::Fresh,
+        pages_unchecked,
     })
 }
 
@@ -509,7 +559,30 @@ pub(crate) fn open_engine_db_read_only(
         conn,
         freshly_created: false,
         checkpoints: None,
+        pages_unchecked: false,
     })
+}
+
+/// Check the schema and the pages of the existing, current store at `path`
+/// on a read-only connection of its own, stopping once `stop` says so. A
+/// check that stopped fails, and only its caller knows that it stopped.
+///
+/// `stop` is asked at every step. The page check steps once for each b-tree
+/// page, so one step in a thousand could leave the check reading for hundreds
+/// of megabytes after `stop` turned true. SQLite offers no step within a
+/// page's overflow chains or within the list of free pages, and no other way
+/// to stop there, so the check reads each of those to its end.
+pub(crate) fn check_pages_until(
+    path: &Path,
+    stop: impl FnMut() -> bool + Send + 'static,
+) -> Result<(), StorageError> {
+    reject_undersized_database(path)?;
+    let mut conn =
+        crate::open_store(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(StorageError::corrupt)?;
+    conn.progress_handler(1, Some(stop))
+        .map_err(StorageError::corrupt)?;
+    apply_session_pragmas(&conn)?;
+    validate_current(&mut conn, true)
 }
 
 /// The ledger of an existing v2 store that a read-only open may find,
@@ -882,9 +955,10 @@ mod tests {
             dohc_test_scratch::ScratchDir::new_named("passive-checkpoint-opt-in").unwrap();
         let path = scratch.path().join("engine.db");
         for now_ms in [1, 2] {
-            let opened =
-                super::open_engine_db_configured(&path, now_ms, None, None, true, true, None)
-                    .unwrap();
+            let opened = super::open_engine_db_configured(
+                &path, now_ms, None, None, true, true, None, false,
+            )
+            .unwrap();
             assert!(super::store_is_passive(&opened.conn).unwrap());
             assert!(
                 opened.checkpoints.is_none(),
