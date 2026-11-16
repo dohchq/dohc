@@ -15,6 +15,7 @@ import { createCacheRows } from "./cacheRows";
 import { derivedMessageId, type ChatWrite } from "./chatWrites";
 import { createServerClient } from "./client";
 import { StoreError, type KeptStore } from "./keptStore";
+import { clearNoticeListsOnSignInChange } from "./noticeStore";
 import { createOutbox, OutboxError, type Outbox } from "./outbox";
 import { keptDisk, type KeptDisk as Disk } from "./testKeptDisk";
 import { deferred, memoryStore, testServer, type Answer } from "./testServer";
@@ -1806,9 +1807,36 @@ describe("Sign out on disk", () => {
     disk.failCommits = null;
     await account.signOut();
     expect(records(disk)).toEqual([]);
-    // Another account's marks wait for it.
-    expect(noticeRows()).toEqual([{ account_id: "u-2" }, { account_id: "u-2" }]);
+    // Another account's marks wait for it. Every account's list goes.
+    expect(noticeRows()).toEqual([{ account_id: "u-2" }]);
     await vi.waitFor(() => expect(existsSync(disk.cache.path)).toBe(false));
+    stop();
+  });
+
+  it("leaves no account's Notice list text in kept.db or its WAL once Sign out and its sign-in change are done", async () => {
+    const disk = keptDisk();
+    const server = testServer();
+    const kept = disk.launch();
+    const { outbox, account, stop } = launch(disk, server, { store: kept });
+    clearNoticeListsOnSignInChange(account, kept);
+    await ready(outbox);
+    const text = "Private notice 5c1d07";
+    await kept.transaction((sql) =>
+      sql.run("INSERT INTO notice_lists (origin, account_id, rows) VALUES (?, 'u-2', ?)", [
+        ORIGIN,
+        JSON.stringify([{ title: text }]),
+      ]),
+    );
+    const onFile = () =>
+      [disk.path, `${disk.path}-wal`]
+        .filter((file) => existsSync(file))
+        .some((file) => readFileSync(file).includes(text));
+    expect(onFile()).toBe(true);
+    await account.signOut();
+    // After the list clear that the sign-in change queued.
+    await kept.transaction(async () => undefined);
+    expect(disk.sql("SELECT account_id FROM notice_lists")).toEqual([]);
+    expect(onFile()).toBe(false);
     stop();
   });
 

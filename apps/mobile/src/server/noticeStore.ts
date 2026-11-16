@@ -232,6 +232,7 @@ let instances = 0;
 /**
  * Deletes every account's Notice list from kept.db each time the account's sign-in changes: sign-out, a 401, or a new
  * sign-in. The saved sign-in read at launch keeps it, and a launch with none deletes it. Marks stay for their account.
+ * At Sign out this runs after the checkpoint, but finds nothing: Sign out's own commit deleted every list before it.
  */
 export function clearNoticeListsOnSignInChange(
   account: { state(): AccountState; subscribe(listener: () => void): () => void },
@@ -254,7 +255,10 @@ export function createNoticeStore(options: {
   readonly signIn: Pick<SignIn, "client" | "isCurrent" | "origin" | "userId">;
   readonly list: Pick<WorkspaceListStore, "state" | "subscribe">;
   readonly store: Pick<KeptStore, "read" | "transaction">;
-  /** Sign out holds kept.db's rows: nothing is written or sent meanwhile (the outbox's `holding`). */
+  /**
+   * Sign out holds kept.db's rows (the outbox's `holding`): meanwhile this store adds and removes no row, saves no
+   * list, and sends nothing.
+   */
   readonly held?: () => boolean;
   readonly listSaveMs?: number;
   readonly now?: () => number;

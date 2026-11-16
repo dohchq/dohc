@@ -42,8 +42,8 @@ import type { ChatMessage } from "./workspaceReads";
 // keeps every record.
 //
 // Sign out, through `signOut`, stops sending and deletes the rows of the account last signed in, its Notice marks and
-// list too (deleteAccountRows), in one commit, then empties the WAL, whose older frames still hold their text. Only then does the account end the sign-in and delete
-// its token. If the commit fails, Sign out fails, a phone still signed in stays signed in, and `state()` shows the
+// list too (deleteAccountRows), and every other account's Notice list, in one commit. It then empties the WAL, whose
+// older frames still hold their text. Only then does the account end the sign-in and delete its token. If the commit fails, Sign out fails, a phone still signed in stays signed in, and `state()` shows the
 // failure, so Connect can say so after a 401 has already signed the phone out. The next Sign out deletes the rows of
 // every account whose Sign out failed, whoever has signed in since. From the moment Sign out starts until one finishes,
 // and while any failed one's rows stay, nothing sends and
@@ -222,12 +222,15 @@ export interface Outbox {
     messages: readonly ChatMessage[],
   ): void;
   /**
-   * Stops sending and deletes the last signed-in account's rows, its Notice marks and list included, or a damaged
-   * kept.db, in one commit, then calls `leave` and resolves once it has. Rejects as `not-deleted`, without calling
-   * `leave`, when the commit fails.
+   * Stops sending and deletes the last signed-in account's rows, its Notice marks and list included, and every other
+   * account's Notice list, or a damaged kept.db, in one commit. Then it runs a TRUNCATE checkpoint, calls `leave` and
+   * resolves once it has. Rejects as `not-deleted`, without calling `leave`, when the commit or checkpoint fails.
    */
   signOut(leave: () => Promise<void>): Promise<void>;
-  /** Whether Sign out holds kept.db: one under way, or one whose delete failed. Nothing else writes to it meanwhile. */
+  /**
+   * Whether Sign out holds kept.db: one under way, or one whose delete failed. Meanwhile no Notice store adds a row or
+   * saves a list. The list clear that `leave`'s sign-in change runs finds no list left, so it adds no text to the WAL.
+   */
   holding(): boolean;
   /** Tries again what failed: reading, and dependency changes. Cuts every retry wait short. */
   wake(): void;
@@ -1164,6 +1167,9 @@ export function createOutbox(options: {
         else if (accounts.some((account) => account !== null)) {
           await transact(async (sql) => {
             for (const account of accounts) if (account) await deleteAccountRows(sql, account);
+            // Every account's Notice list is a read copy the sign-in change deletes anyway. Deleting it here puts it
+            // before the checkpoint, which then empties its text from the WAL too.
+            await sql.run("DELETE FROM notice_lists", []);
           });
           // The WAL's older frames still hold the deleted text, so Sign out fails until the checkpoint empties it.
           await store.checkpoint();

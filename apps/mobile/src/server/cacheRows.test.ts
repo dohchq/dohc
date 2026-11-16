@@ -108,6 +108,54 @@ describe("a scope's row", () => {
   );
 });
 
+describe("cache.db failing after it opened", () => {
+  const ACCOUNT = JSON.stringify(["https://dohc.example.com", "u-1"]);
+
+  it("answers a failing read with no views and no list", async () => {
+    const disk = keptDisk();
+    const { files } = launch(disk);
+    files.write(SCOPE_A, () => [saved("files", [])]);
+    await files.flush();
+    await files.writeList(ACCOUNT, []);
+    disk.cache.failReads = /SELECT/;
+    await expect(files.read(SCOPE_A)).resolves.toEqual([]);
+    await expect(files.readList(ACCOUNT)).resolves.toBeNull();
+    // Nothing was deleted: the next read that works finds both.
+    disk.cache.failReads = null;
+    await expect(files.read(SCOPE_A)).resolves.toEqual([saved("files", [])]);
+    await expect(files.readList(ACCOUNT)).resolves.toEqual([]);
+  });
+
+  it("settles a flush whose write failed, and the next save works", async () => {
+    const disk = keptDisk();
+    const { files } = launch(disk);
+    disk.cache.failWrites = /INSERT INTO views/;
+    files.write(SCOPE_A, () => [saved("files", [])]);
+    await expect(files.flush()).resolves.toBeUndefined();
+    expect(stored(disk)).toEqual([]);
+    disk.cache.failWrites = null;
+    files.write(SCOPE_A, () => [saved("chats", [])]);
+    await expect(files.flush()).resolves.toBeUndefined();
+    await expect(files.read(SCOPE_A)).resolves.toEqual([saved("chats", [])]);
+  });
+
+  it("deletes cache.db when a write finds it damaged, and the next call starts it empty", async () => {
+    const disk = keptDisk();
+    const { files } = launch(disk);
+    files.write(SCOPE_A, () => [saved("files", [])]);
+    await files.flush();
+    disk.cache.damaged = true;
+    files.write(SCOPE_B, () => [saved("files", [])]);
+    await expect(files.flush()).resolves.toBeUndefined();
+    expect(existsSync(disk.cache.path)).toBe(false);
+    disk.cache.damaged = false;
+    await expect(files.read(SCOPE_A)).resolves.toEqual([]);
+    files.write(SCOPE_B, () => [saved("chats", [])]);
+    await expect(files.flush()).resolves.toBeUndefined();
+    await expect(files.read(SCOPE_B)).resolves.toEqual([saved("chats", [])]);
+  });
+});
+
 describe("saving views", () => {
   it("waits for a new scope's changes to stop, saves them together, and waits no longer than its cap", async () => {
     vi.useFakeTimers();
