@@ -270,10 +270,16 @@ fn read_blocks(
     for (label, definition) in parser.reference_definitions().iter() {
         spans.push(definition.span.clone());
         definitions.entry(label_key(label)).or_insert_with(|| {
-            (
-                definition.dest.to_string(),
-                definition.title.as_deref().unwrap_or("").to_owned(),
-            )
+            let raw = &src[definition.span.clone()];
+            raw.contains('&')
+                .then(|| raw.find("]:").and_then(|at| link_target(&raw[at + 2..])))
+                .flatten()
+                .unwrap_or_else(|| {
+                    (
+                        definition.dest.to_string(),
+                        definition.title.as_deref().unwrap_or("").to_owned(),
+                    )
+                })
         });
     }
     spans.sort_by_key(|span| span.start);
@@ -1232,16 +1238,28 @@ impl<'a> Reader<'a> {
                 link_type,
                 dest_url,
                 title,
-                ..
+                id,
             } => {
                 self.text_block(range.start)?;
                 // The text around a link inside another, such as an autolink,
                 // is the outer link's.
                 self.top().sealed |= !self.links.is_empty();
                 self.saved.push(self.marks.clone());
-                let (href, title) = match link_type {
-                    LinkType::Email => (format!("mailto:{dest_url}"), title.into_string()),
-                    _ => (dest_url.into_string(), title.into_string()),
+                // The editor decodes only some references in a link's target
+                // and title (`link_attribute`), so read them from the source.
+                let raw = match link_type {
+                    LinkType::Inline if self.src[range.clone()].contains('&') => {
+                        inline_link_target(&self.src[range.clone()])
+                    }
+                    LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => {
+                        self.definitions.get(&label_key(&id)).cloned()
+                    }
+                    _ => None,
+                };
+                let (href, title) = match (raw, link_type) {
+                    (Some(raw), _) => raw,
+                    (None, LinkType::Email) => (format!("mailto:{dest_url}"), title.into_string()),
+                    (None, _) => (dest_url.into_string(), title.into_string()),
                 };
                 let title = (!title.is_empty()).then_some(title);
                 self.marks.link = Some((href, title));
@@ -2637,5 +2655,140 @@ fn unescape(text: &str) -> String {
             out.push(character);
         }
     }
+    out
+}
+
+/// An inline link's target and title, from its source.
+fn inline_link_target(source: &str) -> Option<(String, String)> {
+    let bytes = source.as_bytes();
+    let mut depth = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 1,
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return source[index + 1..].strip_prefix('(').and_then(link_target);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// A link target and optional title, as they follow `(` or a definition's
+/// `]:`, read as `link_attribute` reads them.
+fn link_target(text: &str) -> Option<(String, String)> {
+    let text = text.trim_start();
+    let (dest, rest) = if let Some(rest) = text.strip_prefix('<') {
+        let end = rest.find(['>', '\n'])?;
+        (&rest[..end], &rest[end + 1..])
+    } else {
+        let bytes = text.as_bytes();
+        let (mut index, mut parens) = (0, 0usize);
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' => index += 1,
+                b'(' => parens += 1,
+                b')' if parens == 0 => break,
+                b')' => parens -= 1,
+                byte if byte.is_ascii_whitespace() => break,
+                _ => {}
+            }
+            index += 1;
+        }
+        let index = index.min(text.len());
+        (&text[..index], &text[index..])
+    };
+    let rest = rest.trim_start();
+    let close = match rest.as_bytes().first() {
+        Some(b'"') => Some('"'),
+        Some(b'\'') => Some('\''),
+        Some(b'(') => Some(')'),
+        _ => None,
+    };
+    let title = match close {
+        Some(close) => {
+            let inner = &rest[1..];
+            let mut end = None;
+            let mut chars = inner.char_indices();
+            while let Some((at, character)) = chars.next() {
+                if character == '\\' {
+                    chars.next();
+                } else if character == close {
+                    end = Some(at);
+                    break;
+                }
+            }
+            link_attribute(&inner[..end?])
+        }
+        None => String::new(),
+    };
+    Some((link_attribute(dest), title))
+}
+
+/// A link's target or title as the editor reads it: escapes undone, and of
+/// its references only the block escapes the editor's writer uses decoded,
+/// such as `&#35;`. One written encoded once, as `&amp;#35;`, reads as
+/// `&#35;`. Other references stay as written.
+fn link_attribute(text: &str) -> String {
+    const BLOCK_ESCAPES: [u32; 14] = [13, 35, 36, 41, 42, 43, 45, 46, 61, 91, 95, 96, 126, 160];
+    // A block escape's `#N;` at the start of `text`: its length and character.
+    let escape = |text: &str| -> Option<(usize, char)> {
+        let digits = text.strip_prefix('#')?;
+        let end = digits.bytes().take(4).position(|byte| byte == b';')?;
+        let digits = &digits[..end];
+        let code = (!digits.starts_with('0') && digits.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| digits.parse::<u32>().ok())
+            .flatten()
+            .filter(|code| BLOCK_ESCAPES.contains(code))?;
+        Some((end + 2, char::from_u32(code)?))
+    };
+    // An encoded `&` at the start of `text`, as `&amp;` or `&#38;`: its length.
+    let ampersand = |text: &str| -> Option<usize> {
+        if text.starts_with("&amp;") || text.starts_with("&AMP;") {
+            return Some(5);
+        }
+        let rest = text.strip_prefix("&#")?;
+        let (rest, code, most) = match rest.strip_prefix(['x', 'X']) {
+            Some(rest) => (rest, "26;", 4),
+            None => (rest, "38;", 5),
+        };
+        let zeros = rest.len() - rest.trim_start_matches('0').len();
+        (zeros <= most && rest[zeros..].starts_with(code))
+            .then(|| text.len() - rest.len() + zeros + 3)
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while let Some(next) = text[at..].find(['\\', '&']).map(|found| at + found) {
+        out.push_str(&text[at..next]);
+        let rest = &text[next..];
+        let escaped = rest[1..].chars().next().filter(char::is_ascii_punctuation);
+        at = next + 1;
+        if rest.starts_with('\\') {
+            if let Some(escaped) = escaped {
+                out.push(escaped);
+                at += 1;
+            } else {
+                out.push('\\');
+            }
+        } else if let Some((amp, length)) =
+            ampersand(rest).and_then(|amp| escape(&rest[amp..]).map(|(length, _)| (amp, length)))
+        {
+            out.push('&');
+            out.push_str(&rest[amp..amp + length]);
+            at = next + amp + length;
+        } else if let Some((length, character)) = escape(&rest[1..]) {
+            out.push(character);
+            at = next + 1 + length;
+        } else {
+            out.push('&');
+        }
+    }
+    out.push_str(&text[at..]);
     out
 }

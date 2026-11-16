@@ -777,18 +777,44 @@ fn a_dropped_cell_or_definition_keeps_its_words() {
     assert_eq!(texts, ["[qx]: /qa", "[qx]: /qb \"qkept\""]);
 }
 
-/// The editor decodes references in a link's address and title.
+/// A link's address and title read as the editor reads them: of the
+/// references, only the block escapes its writer uses decode. Each expected
+/// value is the editor's reading of the source.
 #[test]
 fn a_link_reads_references_in_its_address_and_title() {
-    for source in [
-        "[qa](https://example.test/a&#35;b \"t&#33;\")\n",
-        "[qa][r]\n\n[r]: https://example.test/a&#35;b \"t&#33;\"\n",
-        "[qa](<https://example.test/a&#35;b> \"t&#33;\")\n",
+    for (source, href, title) in [
+        ("[qa](/a&#35;b \"t&#33;\")\n", "/a#b", "t&#33;"),
+        (
+            "[qa][r]\n\n[r]: /a&#35;&ouml; \"t&#33;&#35;\"\n",
+            "/a#&ouml;",
+            "t&#33;#",
+        ),
+        ("[qa](<a&#35;b c>)\n", "a#b c", ""),
+        (
+            "[qa](/f&ouml; \"title \\\"&quot;\")\n",
+            "/f&ouml;",
+            "title \"&quot;",
+        ),
+        (
+            "[qa](/a&#33;b \"t&#35;&amp;#35;&#160;&#38;x\")\n",
+            "/a&#33;b",
+            "t#&#35;\u{a0}&#38;x",
+        ),
+        (
+            "[qa](/a\\&#35;b \"&#035;&#x23;\")\n",
+            "/a&#35;b",
+            "&#035;&#x23;",
+        ),
+        (
+            "[qa](/a&amp;b \"&#91;&#93;&#96;\")\n",
+            "/a&amp;b",
+            "[&#93;`",
+        ),
     ] {
         let (body, _) = generated::read(source).unwrap();
         let link = &generated::flat(&body, 0)[0]["attrs"]["link"];
-        assert_eq!(link["href"], "https://example.test/a#b", "{source:?}");
-        assert_eq!(link["title"], "t!", "{source:?}");
+        assert_eq!(link["href"], href, "{source:?}");
+        assert_eq!(link["title"].as_str().unwrap_or(""), title, "{source:?}");
     }
 }
 
