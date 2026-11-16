@@ -270,16 +270,10 @@ fn read_blocks(
     for (label, definition) in parser.reference_definitions().iter() {
         spans.push(definition.span.clone());
         definitions.entry(label_key(label)).or_insert_with(|| {
-            let raw = &src[definition.span.clone()];
-            raw.contains('&')
-                .then(|| raw.find("]:").and_then(|at| link_target(&raw[at + 2..])))
-                .flatten()
-                .unwrap_or_else(|| {
-                    (
-                        definition.dest.to_string(),
-                        definition.title.as_deref().unwrap_or("").to_owned(),
-                    )
-                })
+            (
+                definition.dest.to_string(),
+                definition.title.as_deref().unwrap_or("").to_owned(),
+            )
         });
     }
     spans.sort_by_key(|span| span.start);
@@ -297,6 +291,8 @@ fn read_blocks(
         links: Vec::new(),
         image: None,
         annotation: None,
+        seen: 0,
+        skipping: false,
     };
     for (event, range) in parser.into_offset_iter() {
         reader.event(event, range)?;
@@ -328,7 +324,9 @@ enum Kind {
     Cell,
     CodeBlock(String),
     Html,
-    Table(Vec<Alignment>, Vec<(usize, i64)>),
+    /// Alignments, row heights, and where a row with more cells than the
+    /// header cuts it short: the rows kept and the start of the rest.
+    Table(Vec<Alignment>, Vec<(usize, i64)>, Option<(usize, usize)>),
     Row,
 }
 
@@ -425,6 +423,11 @@ struct Reader<'a> {
     links: Vec<(usize, Range<usize>)>,
     image: Option<Image>,
     annotation: Option<Annotation>,
+    /// The source read so far: what is before it is in the document or is
+    /// a definition pulldown-cmark read.
+    seen: usize,
+    /// Whether the rows of a table cut short are being passed over.
+    skipping: bool,
 }
 
 /// A row-height annotation just read: its frame depth, block index,
@@ -574,15 +577,49 @@ impl<'a> Reader<'a> {
     /// Keep each link definition that starts before `upto` as a paragraph
     /// of its source, as the editor does.
     fn flush_definitions(&mut self, upto: usize) {
-        while let Some(span) = self.spans.get(self.next_span).cloned() {
-            if span.start >= upto {
-                break;
-            }
+        let mut spans = Vec::new();
+        while let Some(span) = self
+            .spans
+            .get(self.next_span)
+            .filter(|span| span.start < upto)
+        {
+            spans.push(span.clone());
             self.next_span += 1;
-            let quoted = self
-                .frames
-                .iter()
-                .any(|frame| matches!(frame.kind, Kind::Quote));
+        }
+        // pulldown-cmark keeps the first definition of a label and reads a
+        // later one as nothing. In source it has not read, a line that starts
+        // with `[` after its markers and holds `]:` starts one, and the lines
+        // after it continue it. A task's `[ ]` comes before its paragraph's
+        // start, and holds no `]:`.
+        if upto > self.seen {
+            let (mut at, mut open, mut known) = (self.seen, None, 0);
+            let mut repeated = Vec::new();
+            for line in self.src[self.seen..upto].split('\n') {
+                let range = at..at + line.len();
+                at = range.end + 1;
+                while spans.get(known).is_some_and(|span| span.end <= range.start) {
+                    known += 1;
+                }
+                let content = after_markers(line);
+                if spans.get(known).is_some_and(|span| span.start < range.end)
+                    || content.trim().is_empty()
+                {
+                    repeated.extend(open.take());
+                } else if content.starts_with('[') && content.contains("]:") {
+                    repeated.extend(open.replace(range.end - content.len()..range.end));
+                } else if let Some(open) = &mut open {
+                    open.end = range.end;
+                }
+            }
+            spans.extend(repeated);
+            spans.extend(open);
+            spans.sort_by_key(|span| span.start);
+        }
+        let quoted = self
+            .frames
+            .iter()
+            .any(|frame| matches!(frame.kind, Kind::Quote));
+        for span in spans {
             let text = self.src[span.clone()]
                 .trim_end()
                 .split('\n')
@@ -629,6 +666,7 @@ impl<'a> Reader<'a> {
     /// item's text has no paragraph of its own.
     fn text_block(&mut self, start: usize) -> Result<(), Unreadable> {
         if !self.top().kind.holds_text() {
+            self.flush_definitions(start);
             self.push_frame(Kind::Paragraph { implicit: true }, start)?;
         }
         let frame = self.top();
@@ -723,6 +761,23 @@ impl<'a> Reader<'a> {
     }
 
     fn event(&mut self, event: Event<'a>, range: Range<usize>) -> Result<(), Unreadable> {
+        // The rows of a table cut short are read as text at its end.
+        if self.skipping {
+            if !matches!(event, Event::End(TagEnd::Table)) {
+                return Ok(());
+            }
+            self.skipping = false;
+        }
+        let read = match event {
+            Event::Start(_) => range.start,
+            _ => range.end,
+        };
+        self.read_event(event, range)?;
+        self.seen = self.seen.max(read);
+        Ok(())
+    }
+
+    fn read_event(&mut self, event: Event<'a>, range: Range<usize>) -> Result<(), Unreadable> {
         if self.image.is_some() && matches!(event, Event::DisplayMath(_)) {
             let text = self.unprefixed(&range);
             if let Some(image) = &mut self.image {
@@ -1151,9 +1206,18 @@ impl<'a> Reader<'a> {
             }
             Tag::Table(alignments) => {
                 let heights = self.take_annotation(range.start);
-                self.start_block(Kind::Table(alignments, heights), range.start)?;
+                let cut = self.table_cut(&range, alignments.len());
+                self.start_block(Kind::Table(alignments, heights, cut), range.start)?;
             }
-            Tag::TableHead | Tag::TableRow => self.push_frame(Kind::Row, range.start)?,
+            Tag::TableHead | Tag::TableRow => {
+                let table = self.top();
+                if matches!(table.kind, Kind::Table(_, _, Some((rows, _))) if table.blocks.len() >= rows)
+                {
+                    self.skipping = true;
+                } else {
+                    self.push_frame(Kind::Row, range.start)?;
+                }
+            }
             Tag::TableCell => self.push_frame(Kind::Cell, range.start)?,
             Tag::Emphasis | Tag::Strong | Tag::Strikethrough => {
                 self.text_block(range.start)?;
@@ -1168,28 +1232,16 @@ impl<'a> Reader<'a> {
                 link_type,
                 dest_url,
                 title,
-                id,
+                ..
             } => {
                 self.text_block(range.start)?;
                 // The text around a link inside another, such as an autolink,
                 // is the outer link's.
                 self.top().sealed |= !self.links.is_empty();
                 self.saved.push(self.marks.clone());
-                // The editor keeps references in a link's target and title as
-                // written.
-                let raw = match link_type {
-                    LinkType::Inline if self.src[range.clone()].contains('&') => {
-                        inline_link_target(&self.src[range.clone()])
-                    }
-                    LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => {
-                        self.definitions.get(&label_key(&id)).cloned()
-                    }
-                    _ => None,
-                };
-                let (href, title) = match (raw, link_type) {
-                    (Some(raw), _) => raw,
-                    (None, LinkType::Email) => (format!("mailto:{dest_url}"), title.into_string()),
-                    (None, _) => (dest_url.into_string(), title.into_string()),
+                let (href, title) = match link_type {
+                    LinkType::Email => (format!("mailto:{dest_url}"), title.into_string()),
+                    _ => (dest_url.into_string(), title.into_string()),
                 };
                 let title = (!title.is_empty()).then_some(title);
                 self.marks.link = Some((href, title));
@@ -1231,6 +1283,26 @@ impl<'a> Reader<'a> {
         let blank = after[spaces..].starts_with('\n') || after[spaces..].is_empty();
         let spaces = if blank || spaces > 4 { 1 } else { spaces };
         (before + lead + marker + spaces, blank)
+    }
+
+    /// pulldown-cmark drops a row's cells past the header's count. The
+    /// editor ends the table at a row whose extra cells hold text and reads
+    /// the rest as text: the rows kept, and where the rest starts.
+    fn table_cut(&self, range: &Range<usize>, columns: usize) -> Option<(usize, usize)> {
+        let mut at = range.start;
+        for (index, line) in self.src[range.clone()].split('\n').enumerate() {
+            let cells = row_cells(self.strip_containers(line));
+            if index >= 2
+                && cells
+                    .iter()
+                    .skip(columns)
+                    .any(|cell| !cell.trim().is_empty())
+            {
+                return Some((index - 1, at));
+            }
+            at += line.len() + 1;
+        }
+        None
     }
 
     fn take_annotation(&mut self, table: usize) -> Vec<(usize, i64)> {
@@ -1299,7 +1371,7 @@ impl<'a> Reader<'a> {
             }
             TagEnd::Table => {
                 let frame = self.frames.pop().expect("a table");
-                let Kind::Table(alignments, heights) = frame.kind else {
+                let Kind::Table(alignments, heights, cut) = frame.kind else {
                     unreachable!("a table frame");
                 };
                 let mut rows = frame.blocks;
@@ -1335,6 +1407,18 @@ impl<'a> Reader<'a> {
                     Vec::new(),
                     rows.into_iter().map(Child::Element).collect(),
                 ));
+                if let Some((_, rest)) = cut {
+                    let text = self.src[rest..range.end]
+                        .trim_end_matches('\n')
+                        .split('\n')
+                        .map(|line| self.strip_containers(line))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let depth = self.depth + self.frames.len() - 1;
+                    for block in read_blocks(&text, depth, self.quotes(), &self.definitions)? {
+                        self.push_block(block);
+                    }
+                }
                 self.block_ends(range.end);
             }
             TagEnd::BlockQuote(_) => {
@@ -1677,6 +1761,50 @@ fn strip_quote_marker(line: &str) -> &str {
     }
 }
 
+/// A line without the quote and list markers that start it.
+fn after_markers(line: &str) -> &str {
+    let mut rest = line.trim_start_matches([' ', '\t']);
+    loop {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let marker = match rest.as_bytes().first() {
+            Some(b'>') => Some(&rest[1..]),
+            Some(b'-' | b'*' | b'+') => {
+                Some(&rest[1..]).filter(|after| after.is_empty() || after.starts_with([' ', '\t']))
+            }
+            _ if digits > 0 => rest[digits..]
+                .strip_prefix(['.', ')'])
+                .filter(|after| after.is_empty() || after.starts_with([' ', '\t'])),
+            _ => None,
+        };
+        match marker {
+            Some(after) => rest = after.trim_start_matches([' ', '\t']),
+            None => return rest,
+        }
+    }
+}
+
+/// A table row's cells as pulldown-cmark splits it: at each pipe that no
+/// backslash escapes, without the empty cells outside an edge pipe.
+fn row_cells(row: &str) -> Vec<&str> {
+    let mut cells = Vec::new();
+    let (mut start, mut escaped) = (0, false);
+    for (at, byte) in row.bytes().enumerate() {
+        if byte == b'|' && !escaped {
+            cells.push(&row[start..at]);
+            start = at + 1;
+        }
+        escaped = byte == b'\\' && !escaped;
+    }
+    cells.push(&row[start..]);
+    if cells.first().is_some_and(|cell| cell.trim().is_empty()) {
+        cells.remove(0);
+    }
+    if cells.last().is_some_and(|cell| cell.trim().is_empty()) {
+        cells.pop();
+    }
+    cells
+}
+
 /// `[!type]fold title`, the editor's callout header.
 fn callout_header(line: &str) -> Option<(&str, &'static str, &str)> {
     let rest = line.strip_prefix("[!")?;
@@ -1937,7 +2065,7 @@ fn inline_syntax(pieces: Vec<Piece>, src: &str) -> (Vec<Piece>, bool) {
                 b'[' | b'{' | b'=' | b'+' => rest.get(1) == Some(&bytes[at]),
                 b':' => rest.starts_with(b"://"),
                 b'@' => true,
-                b'w' | b'W' => rest.len() >= 4 && rest[..4].eq_ignore_ascii_case(b"www."),
+                b'w' => rest.starts_with(b"www."),
                 _ => false,
             }
         })
@@ -1987,12 +2115,18 @@ fn nodes_in_text(pieces: Vec<Piece>, unsure: &mut bool) -> Vec<Piece> {
         let (text, marks) = (text.to_owned(), marks.clone());
         let mut from = 0;
         let mut index = 0;
+        // Where a failed scan stopped. A later opener that starts its scan
+        // before that point stops there too, so it fails without a scan.
+        let (mut dead_link, mut dead_atom) = (0, 0);
         while index < text.len() {
             let rest = &text[index..];
-            let found = if rest.starts_with("[[") && !text[..index].ends_with('\\') {
-                wikilink(rest)
-            } else if rest.starts_with("{{atom:") {
-                atom(rest)
+            let found = if rest.starts_with("[[")
+                && index + 2 > dead_link
+                && !text[..index].ends_with('\\')
+            {
+                wikilink(rest).map_err(|stop| dead_link = index + stop).ok()
+            } else if rest.starts_with("{{atom:") && index + "{{atom:".len() > dead_atom {
+                atom(rest).map_err(|stop| dead_atom = index + stop).ok()
             } else {
                 None
             };
@@ -2024,7 +2158,8 @@ fn nodes_in_text(pieces: Vec<Piece>, unsure: &mut bool) -> Vec<Piece> {
     out
 }
 
-fn wikilink(text: &str) -> Option<(usize, Element)> {
+/// A wikilink at the start of `text`, or where its scan stopped.
+fn wikilink(text: &str) -> Result<(usize, Element), usize> {
     let inner_start = 2;
     let mut chars = text[inner_start..].char_indices();
     let mut close = None;
@@ -2033,19 +2168,18 @@ fn wikilink(text: &str) -> Option<(usize, Element)> {
             '\\' => {
                 chars.next();
             }
-            '\n' => return None,
             ']' if text[inner_start + at..].starts_with("]]") => {
                 close = Some(inner_start + at);
                 break;
             }
-            ']' => return None,
+            '\n' | ']' => return Err(inner_start + at),
             _ => {}
         }
     }
-    let close = close?;
+    let close = close.ok_or(text.len())?;
     let inner = &text[inner_start..close];
     if inner.is_empty() {
-        return None;
+        return Err(0);
     }
     let (target, label) = match unescaped(inner, '|') {
         Some(bar) => (
@@ -2058,7 +2192,7 @@ fn wikilink(text: &str) -> Option<(usize, Element)> {
     if let Some(label) = label {
         attrs.push(("label", Any::from(label)));
     }
-    Some((close + 2, element("wikilink", attrs, Vec::new())))
+    Ok((close + 2, element("wikilink", attrs, Vec::new())))
 }
 
 fn unescape_wikilink(value: &str) -> String {
@@ -2074,25 +2208,27 @@ fn unescape_wikilink(value: &str) -> String {
     out
 }
 
-fn atom(text: &str) -> Option<(usize, Element)> {
-    let rest = &text["{{atom:".len()..];
+/// An atom at the start of `text`, or where its scan stopped.
+fn atom(text: &str) -> Result<(usize, Element), usize> {
+    let open = "{{atom:".len();
+    let rest = &text[open..];
     let id_end = rest
         .find(|character: char| character == '}' || character.is_whitespace())
         .unwrap_or(rest.len());
     if id_end == 0 {
-        return None;
+        return Err(0);
     }
-    let params_end = id_end + rest[id_end..].find('}')?;
+    let params_end = id_end + rest[id_end..].find('}').ok_or(text.len())?;
     if !rest[params_end..].starts_with("}}") {
-        return None;
+        return Err(open + params_end);
     }
-    let length = "{{atom:".len() + params_end + 2;
+    let length = open + params_end + 2;
     let attrs = vec![
         ("atomId", Any::from(&rest[..id_end])),
         ("params", Any::from(rest[id_end..params_end].trim())),
         ("source", Any::from(&text[2..length - 2])),
     ];
-    Some((length, element("inlineAtom", attrs, Vec::new())))
+    Ok((length, element("inlineAtom", attrs, Vec::new())))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2312,7 +2448,7 @@ fn bare_links(pieces: Vec<Piece>) -> Vec<Piece> {
                 marks,
                 at: Some(_),
             } if marks.link.is_none() && !marks.code => {
-                (text.contains("://") || text.contains('@') || contains_ignore_case(text, "www."))
+                (text.contains("://") || text.contains('@') || text.contains("www."))
                     .then(|| (text.clone(), marks.clone()))
             }
             _ => None,
@@ -2365,19 +2501,13 @@ fn holds_bare_link(pieces: &[Piece]) -> bool {
             marks,
             at: Some(_),
         } if marks.link.is_none() && !marks.code => {
-            (text.contains("://") || text.contains('@') || contains_ignore_case(text, "www."))
+            (text.contains("://") || text.contains('@') || text.contains("www."))
                 && text
                     .char_indices()
                     .any(|(index, _)| bare_link(text, index).is_some())
         }
         _ => false,
     })
-}
-
-fn contains_ignore_case(text: &str, needle: &str) -> bool {
-    text.as_bytes()
-        .windows(needle.len())
-        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 fn email_local(byte: u8) -> bool {
@@ -2395,9 +2525,11 @@ fn bare_link(text: &str, index: usize) -> Option<(usize, String)> {
         rest.len() >= prefix.len()
             && rest.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
     };
-    let prefix = ["https://", "http://", "ftp://", "www."]
+    // marked matches a scheme in any case, and `www.` only in lower case.
+    let prefix = ["https://", "http://", "ftp://"]
         .into_iter()
-        .find(|prefix| lower(prefix));
+        .find(|prefix| lower(prefix))
+        .or_else(|| rest.starts_with("www.").then_some("www."));
     if let Some(prefix) = prefix {
         let after = &rest[prefix.len()..];
         let host = after
@@ -2415,7 +2547,7 @@ fn bare_link(text: &str, index: usize) -> Option<(usize, String)> {
         if link.len() <= prefix.len() {
             return None;
         }
-        let href = if &rest[..4] == "www." {
+        let href = if prefix == "www." {
             format!("http://{link}")
         } else {
             link.to_owned()
@@ -2463,35 +2595,32 @@ fn bare_link(text: &str, index: usize) -> Option<(usize, String)> {
     Some((length, format!("mailto:{}", &rest[..length])))
 }
 
-/// marked's trailing-punctuation rule for a bare URL.
+/// marked's trailing-punctuation rule for a bare URL. It counts the
+/// parentheses once, so a long run of `)` takes linear time.
 fn backpedal(mut link: &str) -> &str {
+    let mut unclosed = link.matches(')').count() as isize - link.matches('(').count() as isize;
     loop {
-        let before = link;
-        if let Some(last) = link.chars().next_back() {
-            if "?!.,:;*_'\"~".contains(last) {
+        let before = link.len();
+        match link.bytes().next_back() {
+            Some(last) if b"?!.,:;*_'\"~".contains(&last) => link = &link[..link.len() - 1],
+            Some(b')') if unclosed > 0 => {
                 link = &link[..link.len() - 1];
-            } else if last == ')' {
-                let opens = link.matches('(').count();
-                let closes = link.matches(')').count();
-                if closes > opens {
-                    link = &link[..link.len() - 1];
-                }
-            } else if last == ';' {
-                // handled above
+                unclosed -= 1;
+            }
+            _ => {}
+        }
+        // A reference such as `&amp;` at the end goes too.
+        if let Some(name) = link.strip_suffix(';') {
+            let letters = name
+                .bytes()
+                .rev()
+                .take_while(u8::is_ascii_alphanumeric)
+                .count();
+            if letters > 0 && name[..name.len() - letters].ends_with('&') {
+                link = &link[..name.len() - letters - 1];
             }
         }
-        if let Some(amp) = link.rfind('&') {
-            let entity = &link[amp + 1..];
-            if entity.len() > 1
-                && entity.ends_with(';')
-                && entity[..entity.len() - 1]
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric())
-            {
-                link = &link[..amp];
-            }
-        }
-        if link == before {
+        if link.len() == before {
             return link;
         }
     }
@@ -2509,77 +2638,4 @@ fn unescape(text: &str) -> String {
         }
     }
     out
-}
-
-/// An inline link's target and title as written, from its source.
-fn inline_link_target(source: &str) -> Option<(String, String)> {
-    let bytes = source.as_bytes();
-    let mut depth = 0;
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => index += 1,
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    return source[index + 1..].strip_prefix('(').and_then(link_target);
-                }
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    None
-}
-
-/// A link target and optional title, as they follow `(` or a definition's
-/// `]:`, with escapes undone and references kept.
-fn link_target(text: &str) -> Option<(String, String)> {
-    let text = text.trim_start();
-    let (dest, rest) = if let Some(rest) = text.strip_prefix('<') {
-        let end = rest.find(['>', '\n'])?;
-        (&rest[..end], &rest[end + 1..])
-    } else {
-        let bytes = text.as_bytes();
-        let (mut index, mut parens) = (0, 0usize);
-        while index < bytes.len() {
-            match bytes[index] {
-                b'\\' => index += 1,
-                b'(' => parens += 1,
-                b')' if parens == 0 => break,
-                b')' => parens -= 1,
-                byte if byte.is_ascii_whitespace() => break,
-                _ => {}
-            }
-            index += 1;
-        }
-        let index = index.min(text.len());
-        (&text[..index], &text[index..])
-    };
-    let rest = rest.trim_start();
-    let close = match rest.as_bytes().first() {
-        Some(b'"') => Some('"'),
-        Some(b'\'') => Some('\''),
-        Some(b'(') => Some(')'),
-        _ => None,
-    };
-    let title = match close {
-        Some(close) => {
-            let inner = &rest[1..];
-            let mut end = None;
-            let mut chars = inner.char_indices();
-            while let Some((at, character)) = chars.next() {
-                if character == '\\' {
-                    chars.next();
-                } else if character == close {
-                    end = Some(at);
-                    break;
-                }
-            }
-            unescape(&inner[..end?])
-        }
-        None => String::new(),
-    };
-    Some((unescape(dest), title))
 }

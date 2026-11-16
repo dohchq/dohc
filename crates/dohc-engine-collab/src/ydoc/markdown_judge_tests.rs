@@ -52,6 +52,10 @@ mod generated {
         ("unbalanced-underscore", "__qa_ qb", "__qa\nqb_ qc"),
         ("tilde-run", "~~~qa~~", "qw\n~~~qa~~"),
         ("brackets", "[qa] qb", "[qa]\nqb"),
+        // Text pulldown-cmark drops: a cell past the header's count, which
+        // the cell container makes, and a definition's repeat.
+        ("pipe", "qa | qb", "qw\nqa | qb"),
+        ("definition", "[qd]: /qe", "[qd]: /qe\n[qd]: /qf"),
     ];
 
     // Marks, and the constructs that hold text: each wraps each construct,
@@ -214,8 +218,11 @@ mod generated {
     fn leaves(node: &Value, out: &mut Vec<Value>) {
         match node["type"].as_str() {
             Some("xmlText") => {
+                // Join runs of one text only; text in two blocks stays apart.
+                let first = out.len();
                 for item in node["delta"].as_array().into_iter().flatten() {
-                    if let Some(Value::Object(last)) = out.last_mut() {
+                    let joins = out.len() > first;
+                    if let Some(Value::Object(last)) = out.last_mut().filter(|_| joins) {
                         if last.contains_key("insert") && last.get("attrs") == item.get("attrs") {
                             if let (Some(a), Some(b)) =
                                 (last["insert"].as_str(), item["insert"].as_str())
@@ -370,6 +377,11 @@ mod generated {
         assert_eq!(shown.words(), ["q2q3", "q4", "qx", "qy", "qu"]);
         assert_eq!(shown.code, ["q3  q4"]);
         assert!(in_order("**q2*q3**", "q2*q3") && !in_order("q2q3*", "q2*q3"));
+        // Text in two blocks stays two leaves, so skipping the first block
+        // leaves the second whole.
+        let (nested, _) = read("- qr\n  - qa_qb\n").expect("read");
+        let (alone, _) = read("qa_qb\n").expect("read");
+        assert_eq!(flat(&nested, 1), flat(&alone, 0));
     }
 
     /// Whether `found` holds each word of `wanted` as often as `wanted` does,
@@ -696,7 +708,134 @@ fn named_cases() -> Vec<Named> {
             "> qa\n> \\# qb\n",
         ),
         plain("R6-5c escaped # after a line in a list", "- qa\n  \\# qb\n"),
+        plain(
+            "R8-1 table row with more cells than its header",
+            "| qa | qb |\n|---|---|\n| qc | qd | qhidden |\n",
+        ),
+        plain(
+            "R8-2 repeated reference definitions",
+            "Text [qx].\n\n[qx]: /qa\n[qx]: /qb \"qkept\"\n",
+        ),
     ]
+}
+
+/// Text pulldown-cmark drops or reads as nothing: a cell past the header's
+/// count, and each definition of a label after the first.
+#[test]
+fn a_dropped_cell_or_definition_keeps_its_words() {
+    let mut sources: Vec<String> = named_cases()
+        .into_iter()
+        .filter(|case| case.id.starts_with("R8-"))
+        .map(|case| case.source)
+        .collect();
+    sources.extend(
+        [
+            "a | b\n--- | ---\nqc | qd\nqe | qf | qhidden\n",
+            "> | qa | qb |\n> |---|---|\n> | qc | qd | qhidden |\n",
+            "- [ ] qt\n  | qa | qb |\n  |---|---|\n  | qc | qd | qhidden |\n",
+            "| qa | qb |\n|---|---|\n| `qc|qx` | qd |\n",
+            "| qa | qb |\n|---|---|\n| qc | qd | qe |\n|---|---|---|\n| qf | qg | qh |\n",
+            "[qx]: /qa\n[qx]: /qb\n[qx]: /qc\n",
+            "- [qx]: /qa\n- [qx]: /qb\n",
+            "- [ ] qt\n\n  qm\n- [x] qu\n",
+            "- qi\n\n  [qx]: /qa\n  [qx]: /qb\n- qj\n",
+            "> [qx]: /qa\n> [qx]: /qb\n",
+            "> [!note]\n> [qx]: /qa\n> [qx]: /qb\n",
+        ]
+        .map(str::to_owned),
+    );
+    for source in sources {
+        let case = generated::Case {
+            id: String::new(),
+            inline: source.clone(),
+            source: source.clone(),
+            skip: 0,
+            holds_blocks: true,
+            indented: false,
+        };
+        let fails = generated::check(&case, &mut std::collections::HashMap::new());
+        let harm: Vec<_> = fails.iter().filter(|check| HARM.contains(check)).collect();
+        assert!(harm.is_empty(), "{source:?}: {harm:?}");
+    }
+    // The editor ends the table at that row and reads the rest as text, and
+    // keeps each definition as a paragraph of its own.
+    let (body, _) = generated::read("| qa | qb |\n|---|---|\n| qc | qd | qhidden |\n").unwrap();
+    let blocks = body["children"].as_array().unwrap();
+    assert_eq!(blocks[0]["tag"], "table");
+    assert_eq!(blocks[0]["children"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        generated::flat(&blocks[1], 0),
+        [serde_json::json!({"insert": "| qc | qd | qhidden |"})]
+    );
+    let (body, _) = generated::read("[qx]: /qa\n[qx]: /qb \"qkept\"\n").unwrap();
+    let texts: Vec<_> = body["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|block| generated::flat(block, 0)[0]["insert"].clone())
+        .collect();
+    assert_eq!(texts, ["[qx]: /qa", "[qx]: /qb \"qkept\""]);
+}
+
+/// The editor decodes references in a link's address and title.
+#[test]
+fn a_link_reads_references_in_its_address_and_title() {
+    for source in [
+        "[qa](https://example.test/a&#35;b \"t&#33;\")\n",
+        "[qa][r]\n\n[r]: https://example.test/a&#35;b \"t&#33;\"\n",
+        "[qa](<https://example.test/a&#35;b> \"t&#33;\")\n",
+    ] {
+        let (body, _) = generated::read(source).unwrap();
+        let link = &generated::flat(&body, 0)[0]["attrs"]["link"];
+        assert_eq!(link["href"], "https://example.test/a#b", "{source:?}");
+        assert_eq!(link["title"], "t!", "{source:?}");
+    }
+}
+
+/// A long line of one character, or of it as an opener nothing closes, reads
+/// in time that grows no faster than its length.
+#[test]
+fn a_long_line_of_one_character_reads_in_linear_time() {
+    let time = |line: &str| {
+        (0..3)
+            .map(|_| {
+                let doc = Ydoc::wire();
+                let started = std::time::Instant::now();
+                doc.rewrite_content_to_markdown(ContentKind::Richdoc, line)
+                    .unwrap();
+                started.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let mut slow = Vec::new();
+    let mut lines = Vec::new();
+    for character in [
+        "[", "]", "*", "_", "~", "$", "=", "<", "\\", "`", "|", "!", "{",
+    ] {
+        lines.push((character, "alone", "", character.to_owned()));
+        lines.push((character, "opener", "", format!("{character}a ")));
+    }
+    // An address's trailing `)` and `&name;` are trimmed one at a time, and
+    // an atom nothing closes is scanned from each opening.
+    lines.push((")", "after an address", "https://qe.com/", ")".to_owned()));
+    lines.push((
+        "&a;",
+        "after an address",
+        "https://qe.com/",
+        "&a;".to_owned(),
+    ));
+    lines.push(("{{atom:", "alone", "", "{{atom:".to_owned()));
+    for (character, name, start, unit) in lines {
+        let line = |bytes: usize| format!("{start}{}\n", unit.repeat(bytes / unit.len()));
+        let (half, full) = (time(&line(32 * 1024)), time(&line(64 * 1024)));
+        // Twice the length takes about twice the time; a square would take
+        // four times.
+        if full > half * 3 && full > std::time::Duration::from_millis(20) {
+            slow.push(format!("{character:?} {name}: {half:?} then {full:?}"));
+        }
+    }
+    assert!(slow.is_empty(), "{slow:#?}");
 }
 
 /// The sixth review round's findings, each checked as the generated cases
