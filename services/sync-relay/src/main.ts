@@ -19,7 +19,7 @@ import {
   createPostgresCredentialFence,
   type CredentialFence,
 } from "@dohc/workspace-auth/credentialFence";
-import { readPushConfig } from "./pushConfig";
+import { readApnsConfig, readPushConfig } from "./pushConfig";
 import { createPushSender } from "./pushSender";
 import { SIGN_UP_INVITE_PATH, signUpInviteKey } from "@dohc/workspace-auth/signUp";
 import { tmpdir } from "node:os";
@@ -495,6 +495,13 @@ const pushConfig = (() => {
   }
 })();
 const pushVapidPublicKey = pushConfig?.publicKey;
+const apnsConfig = (() => {
+  try {
+    return readApnsConfig(process.env);
+  } catch (error) {
+    fatal(`FATAL: ${error instanceof Error ? error.message : "Invalid APNs configuration."}`);
+  }
+})();
 
 const documentProjection = projectionExecutable
   ? await startEngineProjection({
@@ -662,6 +669,7 @@ const relayApplication = createSyncRelayHandler({
   ...(credentialFence ? { credentialFence } : {}),
   ...(pushVapidPublicKey ? { pushVapidPublicKey } : {}),
   ...(pushConfig ? { pushHosts: pushConfig.hosts } : {}),
+  ...(apnsConfig ? { apnsConfig } : {}),
   resolveUserIdByEmail: (email) => resolveUserIdByEmail(email),
   lookupUserEmail: (userId) => lookupUserEmail(userId),
   lookupUserEmails: async (userIds) => {
@@ -939,7 +947,7 @@ function presentsValidRelayExchangeKey(headers: Headers): boolean {
 
 // Presses from shared views go when their retention ends, whether or not
 // more arrive or any host lists them. Settled phone writes become tombstones,
-// and chat wakes end and go, on the same schedule.
+// chat wakes end and go, and expired phone sign-ins' alerts end, on the same schedule.
 const AUTOMATION_PRESS_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 startRelayMainThreadTiming();
 setInterval(() => {
@@ -947,6 +955,11 @@ setInterval(() => {
     storage.purgeExpiredShareRemovals(Date.now());
   } catch (error) {
     console.error("[sync-relay] share removal prune failed:", serverLogLine(error));
+  }
+  try {
+    storage.sweepExpiredPushDevices(Date.now());
+  } catch (error) {
+    console.error("[sync-relay] phone alert sweep failed:", serverLogLine(error));
   }
   pruneAutomationPresses(storage, Date.now()).catch((error: unknown) => {
     console.error("[sync-relay] automation press prune failed:", serverLogLine(error));

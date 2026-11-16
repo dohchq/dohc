@@ -44,7 +44,11 @@ import { initializeAccountWorkspaceSchema } from "./accountWorkspaces";
 import { initializeOperationRecordSchema } from "./operationRecords";
 import { initializeChatWakeSchema } from "./chatWakes";
 import { initializeCurrentFileKeySchema } from "./currentFiles";
-import { initializePushSchema } from "./pushSchema";
+import {
+  initializePushDeviceSchema,
+  initializePushRevokedSessionSchema,
+  initializePushSchema,
+} from "./pushSchema";
 import { initializePushDeliveries } from "./pushDeliveries";
 import {
   LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
@@ -1671,6 +1675,8 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   initializeChatWakeSchema(db);
   initializePushSchema(db);
   initializePushDeliveries(db);
+  initializePushDeviceSchema(db);
+  initializePushRevokedSessionSchema(db);
   initializeLiveClaimIndex(db);
   initializeServiceHostFeedIndex(db);
   initializeAgentConnectionSchema(db);

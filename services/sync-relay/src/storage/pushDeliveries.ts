@@ -91,7 +91,7 @@ export function recordPushDeliveries(
   const recipients = storage.db
     .prepare(`SELECT p.installation_id, p.account_user_id, p.generation, n.account_name
     FROM sync_relay_push_subscriptions p LEFT JOIN sync_relay_push_installation_names n USING(installation_id)
-    WHERE p.expires_at_ms > ? AND p.account_user_id IN (
+    WHERE p.kind = 'web' AND p.expires_at_ms > ? AND p.account_user_id IN (
       SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ? UNION
       SELECT g.principal_user_id FROM sync_relay_share_grants g JOIN sync_relay_shares s USING(share_id)
       WHERE s.workspace_id = ? AND g.status = 'active' AND g.principal_kind = 'user')`)

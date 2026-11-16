@@ -75,6 +75,31 @@ export type PushStatus =
       fingerprint: string;
     };
 
+// Native alerts for the phone. Each phone sign-in holds at most one binding,
+// so the session is the only key: status (GET), upsert (PUT `{token,
+// environment}`), and removal (DELETE `{generation}`).
+export const PUSH_DEVICES_PATH = "/push/devices";
+
+const APNS_ENVIRONMENTS = ["sandbox", "production"] as const;
+export type ApnsEnvironment = (typeof APNS_ENVIRONMENTS)[number];
+
+export function isApnsEnvironment(value: unknown): value is ApnsEnvironment {
+  return typeof value === "string" && (APNS_ENVIRONMENTS as readonly string[]).includes(value);
+}
+
+// An APNs device token in lowercase hex: 32 to 100 bytes.
+const APNS_TOKEN = /^(?:[0-9a-f]{2}){32,100}$/u;
+
+export function isApnsDeviceToken(value: unknown): value is string {
+  return typeof value === "string" && APNS_TOKEN.test(value);
+}
+
+/** What the server holds for the calling phone sign-in. It never returns the token. */
+export type PushDeviceStatus =
+  | { ok: true; available: false }
+  | { ok: true; available: true; enabled: false; generation: null }
+  | { ok: true; available: true; enabled: true; generation: number };
+
 const STATUS_KEYS = "available,enabled,fingerprint,generation,ok,vapidKeyId,vapidPublicKey";
 
 /** A status exactly as the server sends it; anything else is not one. */

@@ -440,6 +440,22 @@ Another installation's endpoint, or another account's installation with a differ
 Link holders and signed-out browsers receive 401.
 The trusted relay endpoints are POSTs to `/sync/push/status`, `/sync/push/subscribe`, and `/sync/push/unsubscribe`.
 
+### Alerts on the phone
+
+The phone reaches the relay directly at `/sync/push/devices` with its Bearer phone session. Cookies and computer or browser sessions receive 404.
+Each phone sign-in holds at most one binding, so no request names a device or an account.
+
+- `GET` returns the sign-in's state.
+- `PUT` takes `{token, environment}`: the APNs device token in lowercase hex, and `sandbox` or `production`.
+- `DELETE` takes `{generation}` and removes the binding only while it still has that generation.
+
+Configure both relay values: `DOHC_RELAY_APNS_TOPIC`, the app's bundle ID, and `DOHC_RELAY_APNS_ENVIRONMENTS`, a comma-separated list of the environments phones may register in.
+Partial configuration stops the relay and names each missing value.
+With neither set, every method returns `{ok: true, available: false}`, and `PUT` receives 409.
+Otherwise each returns `{ok: true, available: true, enabled, generation}`. The server never returns a token.
+A token another sign-in holds moves to the caller, and the answer is the same whether it was held or free.
+Revoking the sign-in through the relay and deleting the account end the binding at once. A sign-in revoked through the relay receives 404 on `PUT`, even for a request that was already in flight. A sign-out or password reset through the account server leaves it until the sign-in expires, and the relay never sends to a binding whose sign-in has ended.
+
 
 ## Storage and recovery
 

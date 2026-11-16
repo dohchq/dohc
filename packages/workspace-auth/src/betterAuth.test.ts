@@ -575,26 +575,34 @@ describeWithPostgres("an account's sessions", () => {
 
     expect(
       await sessions.revoke({ userId: ana.id, callerSessionId: phoneId!, sessionId: benId! }),
-    ).toBe(false);
+    ).toBeNull();
     expect(await sessionOf(benPhone.token)).toBe(benId);
     expect(
       await sessions.revoke({ userId: ben.id, callerSessionId: phoneId!, sessionId: benId! }),
       "a caller from another account",
-    ).toBe(false);
+    ).toBeNull();
     expect(await sessionOf(benPhone.token)).toBe(benId);
 
+    const expiryOf = async (id: string) =>
+      (
+        await pool.query<{ expiresAt: Date }>('select "expiresAt" from "session" where "id" = $1', [
+          id,
+        ])
+      ).rows[0]!.expiresAt.getTime();
+    const desktopExpiry = await expiryOf(desktopId!);
     expect(
       await sessions.revoke({ userId: ana.id, callerSessionId: phoneId!, sessionId: desktopId! }),
-    ).toBe(true);
+      "the revoked session's expiry",
+    ).toBe(desktopExpiry);
     expect(await sessionOf(anaDesktop.token)).toBeUndefined();
     expect(
       await sessions.revoke({ userId: ana.id, callerSessionId: desktopId!, sessionId: phoneId! }),
       "a signed-out caller",
-    ).toBe(false);
+    ).toBeNull();
 
     expect(
       await sessions.revoke({ userId: ana.id, callerSessionId: phoneId!, sessionId: phoneId! }),
-    ).toBe(true);
+    ).toEqual(expect.any(Number));
     expect(await sessionOf(anaPhone.token)).toBeUndefined();
   });
 
@@ -619,12 +627,12 @@ describeWithPostgres("an account's sessions", () => {
     expect((await sessions.list(user.id)).map((session) => session.sessionId)).toEqual([currentId]);
     expect(
       await sessions.revoke({ userId: user.id, callerSessionId: currentId, sessionId: expiredId }),
-    ).toBe(false);
+    ).toBeNull();
     expect(await exists(expiredId)).toBe(true);
     expect(
       await sessions.revoke({ userId: user.id, callerSessionId: expiredId, sessionId: currentId }),
       "an expired caller",
-    ).toBe(false);
+    ).toBeNull();
     expect(await exists(currentId)).toBe(true);
   });
 });

@@ -215,7 +215,13 @@ export function fenceAccount(
       )
       .run(userId, userId);
     storage.db
+      .prepare("DELETE FROM sync_relay_push_deliveries WHERE account_user_id=?")
+      .run(userId);
+    storage.db
       .prepare("DELETE FROM sync_relay_push_subscriptions WHERE account_user_id=?")
+      .run(userId);
+    storage.db
+      .prepare("DELETE FROM sync_relay_push_revoked_sessions WHERE account_user_id=?")
       .run(userId);
     storage.db
       .prepare("INSERT INTO sync_relay_account_deletions VALUES(?,'fenced',?)")

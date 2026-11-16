@@ -118,9 +118,14 @@ export interface AccountSessions {
   list(userId: string): Promise<AccountSessionSummary[]>;
   /**
    * Deletes one of the account's unexpired sessions while the caller's own is
-   * still current. False when either is missing, expired, or another account's.
+   * still current, and returns when the deleted session would have expired.
+   * Null when either is missing, expired, or another account's.
    */
-  revoke(input: { userId: string; callerSessionId: string; sessionId: string }): Promise<boolean>;
+  revoke(input: {
+    userId: string;
+    callerSessionId: string;
+    sessionId: string;
+  }): Promise<number | null>;
 }
 
 // Reads Better Auth's session table directly, because its own list returns every session's token.
@@ -138,12 +143,13 @@ export function createPostgresAccountSessions(pool: Pool): AccountSessions {
       }));
     },
     async revoke({ userId, callerSessionId, sessionId }) {
-      const result = await pool.query(
+      const result = await pool.query<{ expiresAt: Date }>(
         `delete from "session" where "id" = $1 and "userId" = $2 and "expiresAt" > now()
-          and exists (select 1 from "session" where "id" = $3 and "userId" = $2 and "expiresAt" > now())`,
+          and exists (select 1 from "session" where "id" = $3 and "userId" = $2 and "expiresAt" > now())
+          returning "expiresAt"`,
         [sessionId, userId, callerSessionId],
       );
-      return result.rowCount === 1;
+      return result.rows[0]?.expiresAt.getTime() ?? null;
     },
   };
 }

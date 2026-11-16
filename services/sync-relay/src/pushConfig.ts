@@ -1,5 +1,9 @@
 import { createECDH, createPrivateKey, type KeyObject } from "node:crypto";
 import { isIP } from "node:net";
+import {
+  isApnsEnvironment,
+  type ApnsEnvironment,
+} from "@dohc/workspace-contracts/push-subscriptions";
 import { parsePushVapidPublicKey } from "./pushRoutes";
 import { DEFAULT_PUSH_HOSTS } from "./pushEndpoints";
 
@@ -74,4 +78,28 @@ export function readPushConfig(env: Record<string, string | undefined>): PushCon
   } catch {
     throw new TypeError("Invalid push sender configuration.");
   }
+}
+
+export interface ApnsConfig {
+  topic: string;
+  environments: ReadonlySet<ApnsEnvironment>;
+}
+
+const APNS_NAMES = ["DOHC_RELAY_APNS_TOPIC", "DOHC_RELAY_APNS_ENVIRONMENTS"];
+
+/** The phone's alert topic and the APNs environments it may register in. Both or neither. */
+export function readApnsConfig(env: Record<string, string | undefined>): ApnsConfig | undefined {
+  if (APNS_NAMES.every((name) => env[name] === undefined)) return undefined;
+  const missing = APNS_NAMES.filter((name) => !env[name]);
+  if (missing.length) throw new TypeError(`Missing APNs configuration: ${missing.join(", ")}.`);
+  const topic = env.DOHC_RELAY_APNS_TOPIC!;
+  const environments = env.DOHC_RELAY_APNS_ENVIRONMENTS!.split(",").map((name) => name.trim());
+  if (
+    topic.length > 255 ||
+    !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u.test(topic) ||
+    !environments.every(isApnsEnvironment) ||
+    new Set(environments).size !== environments.length
+  )
+    throw new TypeError(`Invalid APNs configuration: ${APNS_NAMES.join(", ")}.`);
+  return { topic, environments: new Set(environments) };
 }

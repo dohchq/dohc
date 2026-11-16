@@ -103,7 +103,7 @@ async function relay(options: { seedFull?: boolean } = {}) {
     list: async () => [],
     revoke: async ({ sessionId }) => {
       revoked.add(sessionId);
-      return true;
+      return Number.MAX_SAFE_INTEGER;
     },
   };
   const hub = new DiscussionActivityHub();
