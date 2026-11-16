@@ -239,7 +239,7 @@ describe("useAccessRuleHoldNotices", () => {
           .errors()
           .shellErrors.filter((error) => error.tone === "success")
           .at(-1),
-      ).toMatchObject({ message: "team follows its earlier access rule again." }),
+      ).toMatchObject({ message: "The access rule for team is back as it was." }),
     );
   });
 
@@ -529,14 +529,23 @@ describe("useAccessRuleHoldNotices", () => {
     await waitFor(() => expect(h.row("")).toMatchObject({ rows: ["Members: View, no change"] }));
     await waitFor(() => expect(h.row("")!.action?.busy).toBeUndefined());
     expect(h.bridge.decideAccessRule).not.toHaveBeenCalled();
+    // The row says why, and comes back unread with a toast, so a second
+    // press is made on what it shows now.
+    expect(h.row("")!.message).toMatch(
+      /^dohc didn't apply your choice because the members' level changed in Members settings\. Until you choose/,
+    );
+    expect(h.row("")).toMatchObject({ seen: false });
+    expect(h.row("")!.id).not.toBe(first);
     expect(h.errors().shellErrors.filter((error) => error.tone === "success")).toEqual([]);
     // Choosing on the level shown now runs, and says what it did at that level.
     act(() => h.errors().runShellErrorAction(h.row("")!.id, 1));
     await waitFor(() => expect(h.bridge.decideAccessRule).toHaveBeenCalledOnce());
+    // The busy row no longer carries the earlier refusal.
+    expect(h.row("")?.message ?? "").not.toContain("didn't apply");
     const done = () => h.errors().shellErrors.find((error) => error.tone === "success");
     await waitFor(() =>
       expect(done()).toMatchObject({
-        message: "Removed the workspace's access rule. Members can now view.",
+        message: "Removed the workspace's access rule. Members can still view.",
       }),
     );
   });

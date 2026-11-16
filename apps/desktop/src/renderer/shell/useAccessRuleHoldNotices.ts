@@ -145,7 +145,11 @@ function changedReach(hold: AccessRuleHold, level: MemberLevel): string {
   if (hold.reason === "removed") {
     // Without a rule anywhere above, every member gets the same level.
     const can = canDo(level, hold.folder);
-    return can ? `Members can now ${can}.` : `Members now get the level ${IN_SETTINGS}.`;
+    const members = hold.changes.find((change) => change.who === "members");
+    const same = members !== undefined && resolve(members.before, level) === level;
+    return can
+      ? `Members can ${same ? "still" : "now"} ${can}.`
+      : `Members now get the level ${IN_SETTINGS}.`;
   }
   const [only] = hold.changes;
   const can = only && canDo(resolve(only.after, level), hold.folder);
@@ -187,7 +191,7 @@ export function accessRuleUndoneWords(
 ): string {
   return decision === "restore"
     ? changedReach(hold, level)
-    : `${placeOpening(hold.folder)} follows its earlier access rule again.`;
+    : `${ruleOf(hold.folder)} is back as it was.`;
 }
 
 /** Where a press on the row goes: a widening opens its rule; a removal reveals its folder. */
@@ -225,10 +229,14 @@ export function useAccessRuleHoldNotices(
   const waitingOn = useRef(new Map<string, string>());
   // Each folder's decision whose toast offers Undo, by the hold it decided.
   const undoable = useRef(new Map<string, string>());
+  // Each hold whose choice didn't run because the level changed, until the
+  // owner chooses again.
+  const levelMoved = useRef(new Map<string, string>());
   useEffect(() => {
     shown.current = new Map();
     waitingOn.current = new Map();
     undoable.current = new Map();
+    levelMoved.current = new Map();
   }, [workspaceId]);
   const latest = useRef(input);
   latest.current = input;
@@ -291,6 +299,10 @@ export function useAccessRuleHoldNotices(
     quiet = false,
   ): void => {
     const words = accessRuleHoldWords(hold, shownLevel);
+    const moved =
+      levelMoved.current.get(identityOf(hold)) === heldKey(hold)
+        ? "dohc didn't apply your choice because the members' level changed in Members settings. "
+        : "";
     const decide = (decision: Decision) => () => decideRef.current(asked, hold, decision);
     const action: NonNullable<ShellError["action"]> = {
       label: busy === "restore" ? "Restoring…" : "Restore rule",
@@ -309,7 +321,7 @@ export function useAccessRuleHoldNotices(
       identity: identityOf(hold),
       tone: "warning",
       title: words.title,
-      message: words.message,
+      message: `${moved}${words.message}`,
       ...(words.rows.length ? { rows: words.rows } : {}),
       retry: null,
       noDismiss: true,
@@ -412,6 +424,7 @@ export function useAccessRuleHoldNotices(
     const identity = identityOf(hold);
     if (running.current.has(identity)) return;
     running.current.set(identity, decision);
+    levelMoved.current.delete(identity);
     const shownLevel = levelRef.current;
     show(asked, hold, shownLevel, decision);
     // The row's words name the members' level, so the choice runs only on
@@ -426,7 +439,16 @@ export function useAccessRuleHoldNotices(
         return;
       }
       running.current.delete(identity);
-      if (currentWorkspace.current === asked) putBack(asked, identity);
+      if (currentWorkspace.current !== asked) return;
+      // The row comes back unread, with a toast, saying why nothing ran, so
+      // a second press is made on the words it shows now.
+      const listed = latest.current.holds?.find((held) => identityOf(held) === identity);
+      if (!listed) {
+        latest.current.clearIdentity(identity);
+        return;
+      }
+      levelMoved.current.set(identity, heldKey(listed));
+      show(asked, listed, levelRef.current);
     });
   };
 

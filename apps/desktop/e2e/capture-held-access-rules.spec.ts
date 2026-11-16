@@ -310,7 +310,7 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await shoot(page, "success-undo");
     expect(await readFile(join(temp.rootPath, "team/access.yaml"), "utf8")).toBe(EDIT);
     await allowed.getByRole("button", { name: "Undo" }).click();
-    const undone = toasts.filter({ hasText: "team follows its earlier access rule again." });
+    const undone = toasts.filter({ hasText: "The access rule for team is back as it was." });
     await expect(undone).toHaveCount(1, { timeout: 30_000 });
     await shoot(page, "undone");
     await expect
@@ -393,13 +393,16 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
     await supplyMembers(app, "view");
     await resolvedRow.getByRole("button", { name: "Remove rule" }).click();
     await expect(resolvedRow).toContainText("Members: View, no change", { timeout: 30_000 });
+    await expect(resolvedRow).toContainText(
+      "dohc didn't apply your choice because the members' level changed in Members settings.",
+    );
     await expect(resolvedRow.getByRole("button", { name: "Remove rule" })).toBeEnabled();
     expect((await status()).heldAccessRules?.map((hold) => hold.folder)).toEqual([""]);
     await expect(rows.filter({ hasText: "Removed the workspace's access rule." })).toHaveCount(0);
     await shoot(page, "level-changed-before-choice");
     await resolvedRow.getByRole("button", { name: "Remove rule" }).click();
     const removedDone = rows.filter({
-      hasText: "Removed the workspace's access rule. Members can now view.",
+      hasText: "Removed the workspace's access rule. Members can still view.",
     });
     await expect(removedDone).toHaveCount(1, { timeout: 30_000 });
     await expect
