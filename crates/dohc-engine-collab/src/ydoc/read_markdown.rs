@@ -2254,7 +2254,9 @@ fn pairs(pieces: &[Piece], src: &str, delimiter: &str, pair: Pair) -> Vec<(usize
             if !opens {
                 continue;
             }
-            if let Some(close) = closing(src, offset, end, delimiter, pair).filter(|&close| inside(close)) {
+            if let Some(close) =
+                closing(src, offset, end, delimiter, pair).filter(|&close| inside(close))
+            {
                 pairs.push((offset, close));
                 search = close + 2;
             }

@@ -88,6 +88,8 @@ mod generated {
         Container { name: "cell", before: "| qh |\n|---|\n", first: "| ", rest: "", end: " |", two_lines: false, skip: 1 },
         Container { name: "callout", before: "> [!note]\n", first: "> ", rest: "> ", end: "", two_lines: true, skip: 0 },
         Container { name: "heading", before: "", first: "# ", rest: "", end: "", two_lines: false, skip: 0 },
+        Container { name: "indented", before: "", first: " ", rest: "", end: "", two_lines: true, skip: 0 },
+        Container { name: "indented-item", before: "- qr\n\n", first: "   ", rest: "  ", end: "", two_lines: true, skip: 1 },
     ];
 
     pub(super) struct Case {
@@ -98,6 +100,9 @@ mod generated {
         /// Whether the container can hold a block, such as a math block.
         /// A heading or a cell holds one line of text and no blocks.
         pub holds_blocks: bool,
+        /// Whether the first line is indented past its container, which the
+        /// editor keeps as leading spaces.
+        pub indented: bool,
     }
 
     fn wrappings() -> Vec<(String, Vec<usize>)> {
@@ -166,6 +171,7 @@ mod generated {
                                 source,
                                 skip: container.skip,
                                 holds_blocks: container.two_lines,
+                                indented: container.name.starts_with("indented"),
                             });
                         }
                     }
@@ -175,7 +181,7 @@ mod generated {
         cases
     }
 
-    fn read(source: &str) -> Option<(Value, String)> {
+    pub(super) fn read(source: &str) -> Option<(Value, String)> {
         let source = source.to_owned();
         std::panic::catch_unwind(move || {
             let doc = Ydoc::wire();
@@ -237,7 +243,7 @@ mod generated {
         }
     }
 
-    fn flat(body: &Value, skip: usize) -> Vec<Value> {
+    pub(super) fn flat(body: &Value, skip: usize) -> Vec<Value> {
         let mut out = Vec::new();
         leaves(body, &mut out);
         out.into_iter().skip(skip).collect()
@@ -306,6 +312,13 @@ mod generated {
         {
             fails.push("text-lost");
         }
+        let settled = second.to_string();
+        if tokens(&case.inline)
+            .iter()
+            .any(|token| !settled.contains(token.as_str()) || !written.contains(token.as_str()))
+        {
+            fails.push("text-lost-after-save");
+        }
         let reference = plain
             .entry(case.inline.clone())
             .or_insert_with(|| read(&format!("{}\n", case.inline)).map(|(body, _)| flat(&body, 0)))
@@ -320,9 +333,32 @@ mod generated {
                     Some("mathBlock" | "codeBlock" | "horizontalRule" | "rawBlock")
                 )
             });
+            let mut read = flat(&first, case.skip);
+            if case.indented {
+                // The kept indentation is the container's, not the text's.
+                if let Some(Value::Object(leaf)) = read.first_mut() {
+                    if let Some(text) = leaf.get("insert").and_then(Value::as_str) {
+                        let text = text.trim_start_matches(' ').to_owned();
+                        if text.is_empty() {
+                            read.remove(0);
+                        } else {
+                            leaf.insert("insert".to_owned(), Value::from(text));
+                        }
+                    }
+                }
+            }
+            let sealed = |leaves: &[Value]| leaves.iter().any(|leaf| leaf["tag"] == "rawBlock");
             if block && !case.holds_blocks {
                 fails.push("info:holds-no-block");
-            } else if flat(&first, case.skip) != reference {
+            } else if sealed(&flat(&first, 0)) && sealed(&reference) {
+                fails.push("info:both-sealed");
+            } else if sealed(&flat(&first, 0)) {
+                // The container's whole block is kept as its source, where
+                // the paragraph reads live: a cost of the seal's size.
+                fails.push("container-sealed");
+            } else if sealed(&reference) {
+                fails.push("paragraph-sealed");
+            } else if read != reference {
                 fails.push("container-changes-text");
             }
         }
@@ -345,47 +381,273 @@ fn results(
         .collect()
 }
 
-/// Every 40th generated case fails only as listed. Each listed case also
-/// fails on main, where the editor's reader keeps such a note as text, so
-/// none is a regression. A case that starts to pass leaves the list.
-#[test]
-fn a_sample_of_generated_cases_reads_back_as_written() {
-    let known: std::collections::BTreeSet<&str> = include_str!("markdown_judge_known.txt")
-        .lines()
-        .filter(|line| !line.is_empty())
-        .collect();
-    let mut failing = std::collections::BTreeSet::new();
-    for (case, fails, _) in results(generated::cases().into_iter().step_by(40)) {
-        if !fails.is_empty() {
-            failing.insert(format!("{} {}", case.id, fails.join(",")));
+/// Checks that mean harm: the reader refuses the note, text is lost, or the
+/// file never settles. Only a case `markdown_judge_ceilings.txt` names may
+/// fail one.
+const HARM: [&str; 5] = [
+    "read-error",
+    "reread-error",
+    "text-lost",
+    "text-lost-after-save",
+    "keeps-changing",
+];
+
+/// Holds a run's failures to `markdown_judge_ceilings.txt`: no harm outside
+/// the listed cases, and each other check's count exactly at its ceiling, so
+/// a ceiling can only be lowered.
+fn within_ceilings(set: &str, results: &[(generated::Case, Vec<&'static str>, Vec<&'static str>)]) {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut ceilings = BTreeMap::new();
+    let mut listed = BTreeSet::new();
+    for line in include_str!("markdown_judge_ceilings.txt").lines() {
+        let words: Vec<_> = line.split_whitespace().collect();
+        match words.as_slice() {
+            [] => {}
+            [first, ..] if first.starts_with('#') => {}
+            ["harm", id, check] => {
+                listed.insert((id.to_string(), check.to_string()));
+            }
+            [run, check, count] if *run == set => {
+                ceilings.insert(check.to_string(), count.parse::<usize>().expect("a count"));
+            }
+            [_, _, _] => {}
+            _ => panic!("unreadable ceilings line {line:?}"),
         }
     }
-    let new: Vec<_> = failing
-        .iter()
-        .filter(|line| !known.contains(line.as_str()))
-        .collect();
-    let passing: Vec<_> = known
-        .iter()
-        .filter(|line| !failing.contains(**line))
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut harm = Vec::new();
+    for (case, fails, _) in results {
+        for check in fails {
+            if HARM.contains(check) {
+                if !listed.contains(&(case.id.clone(), check.to_string())) {
+                    harm.push(format!("{} {check} {:?}", case.id, case.source));
+                }
+            } else {
+                *counts.entry(check.to_string()).or_default() += 1;
+            }
+        }
+    }
+    let checks: BTreeSet<_> = counts.keys().chain(ceilings.keys()).cloned().collect();
+    let off: Vec<_> = checks
+        .into_iter()
+        .filter_map(|check| {
+            let (count, ceiling) = (
+                counts.get(&check).copied().unwrap_or(0),
+                ceilings.get(&check).copied().unwrap_or(0),
+            );
+            (count != ceiling).then(|| format!("{set} {check} {count} (ceiling {ceiling})"))
+        })
         .collect();
     assert!(
-        new.is_empty() && passing.is_empty(),
-        "new failures {new:#?}\nnow passing {passing:#?}"
+        harm.is_empty() && off.is_empty(),
+        "harm {harm:#?}\ncounts off their ceilings; above one is a regression, below one lowers it: {off:#?}"
     );
 }
 
-/// Writes each case's result as a line of JSON to `DOHC_MARKDOWN_JUDGE_OUT`,
-/// to compare with another build's report.
+/// Every 37th generated case: no harm, and each check's count at its ceiling.
+#[test]
+fn a_sample_of_generated_cases_reads_back_as_written() {
+    // A stride that shares no factor with the container count reaches each.
+    let reached: std::collections::BTreeSet<String> = generated::cases()
+        .into_iter()
+        .step_by(37)
+        .map(|case| case.id.rsplit('/').next().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(reached.len(), 10, "{reached:?}");
+    within_ceilings(
+        "sample",
+        &results(generated::cases().into_iter().step_by(37)),
+    );
+}
+
+/// A CommonMark renderer's reading of a note: its events, with text runs
+/// joined and the white space a renderer drops at a block's edge trimmed.
+fn rendering(source: &str) -> Vec<String> {
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_MATH;
+    let mut out: Vec<String> = Vec::new();
+    let mut text = String::new();
+    let flush = |text: &mut String, out: &mut Vec<String>| {
+        let joined = text.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+        if !joined.is_empty() {
+            out.push(format!("text {joined:?}"));
+        }
+        text.clear();
+    };
+    for event in Parser::new_ext(source, options) {
+        match event {
+            Event::Text(value) => text.push_str(&value),
+            Event::SoftBreak => text.push(' '),
+            other => {
+                flush(&mut text, &mut out);
+                out.push(match other {
+                    Event::Start(Tag::Link {
+                        dest_url, title, ..
+                    }) => format!("link {dest_url:?} {title:?}"),
+                    Event::Start(Tag::Image {
+                        dest_url, title, ..
+                    }) => format!("image {dest_url:?} {title:?}"),
+                    Event::Start(Tag::List(start)) => format!("list {}", start.is_some()),
+                    Event::Start(Tag::Item) => "item".to_owned(),
+                    other => format!("{other:?}"),
+                });
+            }
+        }
+    }
+    flush(&mut text, &mut out);
+    out
+}
+
+struct Named {
+    id: &'static str,
+    source: String,
+    /// Another check this finding needs, given the first reading's body and
+    /// the first write.
+    also: Option<(&'static str, fn(&Value, &str) -> bool)>,
+}
+
+fn named_cases() -> Vec<Named> {
+    let nbsp = '\u{a0}';
+    let plain = |id, source: &str| Named {
+        id,
+        source: source.to_owned(),
+        also: None,
+    };
+    vec![
+        plain("R6-2a indented paragraph", " *qa [[Qn]]*\n"),
+        plain("R6-2b indented item paragraph", "- a\n\n   *qb [[Qn]]*\n"),
+        plain(
+            "R6-1a NBSP line in a quote",
+            &format!("> *qa [[Qn]]*\n> {nbsp}\n> qb\n"),
+        ),
+        plain(
+            "R6-1b NBSP line in a marked formula",
+            &format!("> **$$qa\n> {nbsp}\n> qb$$**\n"),
+        ),
+        plain(
+            "R1 cell code with edge spaces",
+            "| h |\n|---|\n| `  a  ` |\n",
+        ),
+        plain(
+            "R2a reference link after a marked formula",
+            "**$$x$$** [label][ref]\n\n[ref]: /target\n",
+        ),
+        plain(
+            "R2b reference link after marked math",
+            "**$x$** [label][ref]\n\n[ref]: /target\n",
+        ),
+        Named {
+            id: "R3 wikilink holding a mark",
+            source: "[[A *B*]]\n".to_owned(),
+            also: Some(("writes [[A *B*]] as written", |_, written| {
+                written.contains("[[A *B*]]") && !written.contains("\\[[")
+            })),
+        },
+        Named {
+            id: "R6-4 sentence with a path in bold",
+            source: "Edit **~/.bashrc** before you run [[Setup]] and see https://x.co.\n"
+                .to_owned(),
+            also: Some(("reads a live wikilink", |body, _| {
+                body.to_string().contains("\"wikilink\"")
+            })),
+        },
+        plain("R6-6 tag span in a heading formula", "# $$<x>$qx$</x>$$\n"),
+        plain("R6-5a escaped # after a line", "qa\n\\# qb\n"),
+        plain(
+            "R6-5b escaped # after a line in a quote",
+            "> qa\n> \\# qb\n",
+        ),
+        plain("R6-5c escaped # after a line in a list", "- qa\n  \\# qb\n"),
+    ]
+}
+
+/// The sixth review round's findings, each checked as the generated cases
+/// are, and against a CommonMark renderer's reading of the source.
+#[test]
+#[ignore = "a report of the sixth round's findings"]
+fn sixth_round_findings_report() {
+    let mut lines = Vec::new();
+    for case in named_cases() {
+        let mut fails = Vec::new();
+        let Some((first, w1)) = generated::read(&case.source) else {
+            lines.push(format!("{}: FAIL read-error", case.id));
+            continue;
+        };
+        let (second, w2) = generated::read(&w1).expect("reread");
+        if second != first {
+            fails.push("doc-changes".to_owned());
+        }
+        if w2 != w1 {
+            fails.push("second-save-changes".to_owned());
+        }
+        let mut written = w2.clone();
+        for _ in 0..3 {
+            let next = generated::read(&written).expect("reread").1;
+            if next != written {
+                fails.push("keeps-changing".to_owned());
+                break;
+            }
+            written = next;
+        }
+        if rendering(&w1) != rendering(&case.source) {
+            fails.push("renders-differently".to_owned());
+        }
+        if let Some((name, check)) = case.also {
+            if !check(&first, &w1) {
+                fails.push(format!("not: {name}"));
+            }
+        }
+        let verdict = if fails.is_empty() {
+            "pass".to_owned()
+        } else {
+            format!("FAIL {}", fails.join(","))
+        };
+        lines.push(format!("{}: {verdict} | write1 {w1:?}", case.id));
+    }
+    // R6-5: an escaped `#` after a line reads alike in each container.
+    let readings: Vec<_> = ["qa\n\\# qb\n", "> qa\n> \\# qb\n", "- qa\n  \\# qb\n"]
+        .iter()
+        .map(|source| generated::flat(&generated::read(source).expect("read").0, 0))
+        .collect();
+    let alike = readings.windows(2).all(|pair| pair[0] == pair[1]);
+    lines.push(format!(
+        "R6-5 same reading in paragraph, quote and list: {}",
+        if alike { "pass" } else { "FAIL" }
+    ));
+    // R6-3: a line of escapes, 80 KB.
+    let escapes = "\\*".repeat(40_000) + "\n";
+    let started = std::time::Instant::now();
+    generated::read(&escapes).expect("read");
+    lines.push(format!(
+        "R6-3 80 KB line of escapes, read and write: {} ms",
+        started.elapsed().as_millis()
+    ));
+    let report = lines.join("\n");
+    println!("{report}");
+    if let Ok(out) = std::env::var("DOHC_MARKDOWN_NAMED_OUT") {
+        std::fs::write(out, report).unwrap();
+    }
+}
+
+/// Every generated case, held to the full run's ceilings. With
+/// `DOHC_MARKDOWN_JUDGE_OUT` set, also writes each case's result as a line of
+/// JSON there, to compare with another build's report.
 #[test]
 #[ignore = "the full run takes minutes"]
 fn every_generated_case_report() {
-    let out = std::env::var("DOHC_MARKDOWN_JUDGE_OUT").expect("DOHC_MARKDOWN_JUDGE_OUT");
-    let lines: Vec<_> = results(generated::cases().into_iter())
-        .into_iter()
-        .map(|(case, fails, info)| {
-            serde_json::json!({ "id": case.id, "source": case.source, "fails": fails, "info": info })
-                .to_string()
-        })
-        .collect();
-    std::fs::write(out, lines.join("\n")).unwrap();
+    let results = results(generated::cases().into_iter());
+    if let Ok(out) = std::env::var("DOHC_MARKDOWN_JUDGE_OUT") {
+        let lines: Vec<_> = results
+            .iter()
+            .map(|(case, fails, info)| {
+                serde_json::json!({ "id": case.id, "source": case.source, "fails": fails, "info": info })
+                    .to_string()
+            })
+            .collect();
+        std::fs::write(out, lines.join("\n")).unwrap();
+    }
+    within_ceilings("full", &results);
 }

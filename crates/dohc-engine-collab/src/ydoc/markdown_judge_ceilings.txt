@@ -1,0 +1,25 @@
+# The generated judge's ceilings (markdown_judge_tests.rs).
+#
+# A harm line names a case that may fail a harm check (text lost, a file that
+# never settles, a refused read), with its reason in the pull request that
+# listed it. Any other harm fails the judge.
+#
+# A count line is `<run> <check> <count>`, for the gate's sample (`sample`)
+# and the ignored full run (`full`). These checks find a document that
+# changes once on the first save and loses nothing. They are counted, not
+# blockers. A run must meet each count exactly: a higher count is a
+# regression, and a lower one means lowering the line here.
+
+# R6-6: a tag span in a heading formula keeps changing. Main's reader fails
+# it too.
+harm inline-math/1/tight/formula>tag/heading keeps-changing
+
+# doc-changes: the second reading differs from the first.
+# second-save-changes: the second save writes other bytes, then settles.
+# container-changes-text: a container reads its text unlike a paragraph.
+sample container-changes-text 215
+sample doc-changes 603
+sample second-save-changes 49
+full container-changes-text 8369
+full doc-changes 22475
+full second-save-changes 1773
