@@ -2216,7 +2216,7 @@ mod tests {
                     tx.execute("UPDATE ydoc_docs SET content_kind='plaintext'", []).map_err(SyncError::persist)?;
                     // Preserve matching document coverage so the journal's
                     // stored-author validation is the failing boundary.
-                    let seed = Ydoc::wire().plaintext_insert(0, "- \n\n  - b\n - c");
+                    let seed = Ydoc::wire().plaintext_insert(0, &too_deep(""));
                     let sha = dohc_engine_storage::put_binary_blob(tx, &seed).map_err(SyncError::Storage)?;
                     tx.execute("UPDATE ydoc_updates SET update_blob_sha256=?1", [sha]).map_err(SyncError::persist)?;
                 } else if failure == "kind" {

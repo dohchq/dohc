@@ -207,6 +207,26 @@ fn written_unlike_the_source(name: &str) -> bool {
     listed(WRITER_GAPS, name) || listed(WRITTEN_UNLIKE_THE_SOURCE, name)
 }
 
+/// Each word of a body's text and attributes, such as a link's address, but
+/// not of its node names or a link's fixed `rel`, `target` and `class`. A
+/// number alone may be a list's, which is markup.
+fn nested_contract_words<'v>(value: &'v Value, each: &mut impl FnMut(&'v str)) {
+    match value {
+        Value::String(text) => text
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty() && !word.bytes().all(|byte| byte.is_ascii_digit()))
+            .for_each(each),
+        Value::Array(items) => items
+            .iter()
+            .for_each(|item| nested_contract_words(item, each)),
+        Value::Object(fields) => fields
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "type" | "tag" | "rel" | "target" | "class"))
+            .for_each(|(_, field)| nested_contract_words(field, each)),
+        _ => {}
+    }
+}
+
 fn nested_contract_seed(case: &Value) -> Option<Ydoc> {
     use base64::Engine as _;
     let seed = base64::engine::general_purpose::STANDARD
@@ -237,11 +257,21 @@ fn nested_contract_case(case: &Value) {
         assert_eq!(projection, case["canonical"].as_str().unwrap(), "{name}");
     } else if let Some(editor) = nested_contract_seed(case) {
         // The seed holds what the editor's reader reads.
+        let (editor, read) = (nested_contract_body(&editor), nested_contract_body(&doc));
         assert_eq!(
-            nested_contract_body(&editor) == nested_contract_body(&doc),
+            editor == read,
             !listed(READS_UNLIKE_THE_EDITOR, name),
             "{name}: reads like the editor"
         );
+        // A reading unlike the editor's still keeps each of its words.
+        let mut left = HashMap::new();
+        nested_contract_words(&read, &mut |word| *left.entry(word).or_insert(0) += 1);
+        let mut lost = Vec::new();
+        nested_contract_words(&editor, &mut |word| match left.get_mut(word) {
+            Some(count) if *count > 0 => *count -= 1,
+            _ => lost.push(word.to_owned()),
+        });
+        assert!(lost.is_empty(), "{name}: loses {lost:?}");
     }
     if case["exactSource"] == true {
         doc.preserve_folded_markdown_source(source).unwrap();
