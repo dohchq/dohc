@@ -10,6 +10,7 @@ With the variable unset, PR checks and default manual dispatch use GitHub-hosted
 A manual dispatch with `runner_provider=blacksmith` opts that run into Blacksmith while the switch stays off.
 
 Shared preparation stays on GitHub because it also runs the confinement suites.
+The `Windows package` job stays on GitHub too. It always uses GitHub's `windows-2025` runner, and the switch does not move it.
 
 Inspect the switch:
 
@@ -56,7 +57,8 @@ New updates to ready, same-repository PRs now run on Blacksmith.
 Existing PRs need another push, a reopen, or a ready-for-review event to start checks.
 Drafts and forks start no automatic checks. Converting a PR to draft cancels its older run.
 New commits cancel older runs for the same PR.
-There are no automatic main-branch, nightly, Windows, macOS, or release builds in this workflow.
+There are no automatic main-branch, nightly, macOS, or release builds in this workflow.
+Its one Windows job, `Windows package`, runs on GitHub's runner and not on Blacksmith.
 
 Run a manual benchmark from the Actions page, or use:
 
@@ -64,7 +66,7 @@ Run a manual benchmark from the Actions page, or use:
 gh workflow run pr-checks.yml --repo dohchq/dohc --ref main -f gate=all -f runner_provider=blacksmith -f runner_size=4
 ```
 
-The `gate` input accepts `all`, `js`, or `rust`.
+The `gate` input accepts `all`, `js`, `rust`, `android`, `together`, or `windows`.
 The `runner_provider` input accepts `github` (default) or `blacksmith` for a manual opt-in.
 The default does not override `BLACKSMITH_ENABLED=true`.
 The `runner_size` input accepts `4` or `8` vCPUs for manual Blacksmith runs.

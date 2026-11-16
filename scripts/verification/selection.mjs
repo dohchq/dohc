@@ -151,9 +151,15 @@ function gatesFromFilters(files, filters, names) {
   return Object.fromEntries(names.map((name) => [name, matchesFilter(files, filters[name])]));
 }
 
-/** The gates a change selects. Rust and JavaScript also run locally; Android and editing together run only in the PR checks. */
+/** The gates a change selects. Rust and JavaScript also run locally; Android, editing together, and the Windows package run only in the PR checks. */
 export function selectedGates(files, workflow) {
-  return gatesFromFilters(files, workflowFilters(workflow), ["rust", "js", "android", "together"]);
+  return gatesFromFilters(files, workflowFilters(workflow), [
+    "rust",
+    "js",
+    "android",
+    "together",
+    "windows",
+  ]);
 }
 
 /** Whether a change reaches a file that the repository tests read, so the JavaScript gate runs every one of them. */
