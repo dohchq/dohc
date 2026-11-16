@@ -70,6 +70,25 @@ export function snapshotLiveTicketScope(value: unknown): LiveTicketScope {
       fenceEpoch,
     };
   }
+  if (kind === "owner") {
+    const scope = ticketRecord(value, [
+      "kind",
+      "workspaceId",
+      "userId",
+      "sessionId",
+      "sessionExpiresAtMs",
+    ]);
+    const expiresAtMs = scope.sessionExpiresAtMs;
+    if (typeof expiresAtMs !== "number" || !Number.isSafeInteger(expiresAtMs) || expiresAtMs < 0)
+      throw new TypeError("Invalid live-ticket session expiry.");
+    return {
+      kind: "owner",
+      workspaceId: parseLiveUpdateIdentifier(scope.workspaceId, "workspace ID"),
+      userId: parseLiveUpdateIdentifier(scope.userId, "user ID"),
+      sessionId: parseLiveUpdateIdentifier(scope.sessionId, "session ID"),
+      sessionExpiresAtMs: expiresAtMs,
+    };
+  }
   if (kind !== "named" && kind !== "link") throw new TypeError("Invalid live-ticket scope kind.");
   const agent =
     kind === "link" && Object.getOwnPropertyDescriptor(value, "agentConnectionId") !== undefined;

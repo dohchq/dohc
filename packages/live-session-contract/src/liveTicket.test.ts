@@ -153,23 +153,34 @@ describe("live-ticket token representation", () => {
 });
 
 describe("live-ticket authority and coordinates", () => {
-  it("preserves named and link representations without accepting owner authority", () => {
+  it("preserves named and link representations", () => {
     for (const principalKind of ["named", "link"]) {
       const input = claim();
       input.authority.principalKind = principalKind;
       expect(parseLiveTicketClaims(input).authority).toEqual(input.authority);
     }
-    expect(() =>
-      parseLiveTicketClaims({
-        ...claim(),
-        authority: {
-          principalKind: "owner",
-          principalId: "owner-1",
-          grantId: null,
-          grantGeneration: null,
-        },
-      }),
-    ).toThrow(TypeError);
+  });
+
+  it("lets only an owner's ticket end before 30 s, and never after", () => {
+    const owner = {
+      principalKind: "owner",
+      principalId: "owner-1",
+      grantId: null,
+      grantGeneration: null,
+    };
+    const { mintedAtMs } = claim();
+    for (const lifetime of [1, 29_999, 30_000])
+      expect(
+        parseLiveTicketClaims({ ...claim(), authority: owner, expiresAtMs: mintedAtMs + lifetime })
+          .expiresAtMs,
+      ).toBe(mintedAtMs + lifetime);
+    for (const lifetime of [0, -1, 30_001])
+      expect(() =>
+        parseLiveTicketClaims({ ...claim(), authority: owner, expiresAtMs: mintedAtMs + lifetime }),
+      ).toThrow(TypeError);
+    expect(() => parseLiveTicketClaims({ ...claim(), expiresAtMs: mintedAtMs + 29_999 })).toThrow(
+      TypeError,
+    );
   });
 
   it("uses canonical identifier, authority, binding, and epoch bounds", () => {
