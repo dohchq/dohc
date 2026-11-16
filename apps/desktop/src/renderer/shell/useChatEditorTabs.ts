@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { bridge } from "../bridge";
-import { parseTab } from "../workbench/workbenchState";
+import { parseTab, type DirectTabName } from "../workbench/workbenchState";
 import type { ChatsDrafts, ChatsNav } from "../workbench/ChatsView";
 import type { SettingsAgent } from "../workbench/agentChat";
 import { directStore, directPersonName } from "../workbench/directConversations";
@@ -38,6 +38,9 @@ export function useChatEditorTabs(input: {
   agents: readonly SettingsAgent[];
   // Moves when an open conversation marks messages read.
   readRevision: number;
+  // Each open direct tab's saved person name, and where a name the list read is saved.
+  directNames: Readonly<Record<string, DirectTabName>>;
+  onDirectName: (conversationId: string, account: string, name: string) => void;
 }) {
   const callbacks = useRef(input);
   callbacks.current = input;
@@ -85,6 +88,23 @@ export function useChatEditorTabs(input: {
       refreshSession((value) => value + 1);
     });
   }, [input.workspaceId]);
+  // The account signed in at start, read from this computer, so a saved name shows only to its own account.
+  // A session event that came first already named it.
+  useEffect(() => {
+    if (session.current.key !== undefined) return;
+    let active = true;
+    void bridge()
+      .cloudStatus()
+      .then((status) => {
+        if (!active || session.current.key !== undefined) return;
+        session.current.key = status.sessionKey ?? null;
+        refreshSession((value) => value + 1);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
   const get = useCallback((path: string): ChatEditor => {
     const owner = store.current;
     const existing = owner.entries.get(path);
@@ -205,24 +225,44 @@ export function useChatEditorTabs(input: {
       });
     }
   }, [get, input.enabled, pathsKey, input.workspaceId, sessionRevision]);
-  // Nothing about a conversation is saved, so a tab restored while the server is away has no name.
-  // Each one takes the person's name once the list reads, without waiting to be opened.
-  const hasDirectTab = input.paths.some((path) => {
-    const tab = parseTab(path);
-    return tab.kind === "chat" && tab.target.kind === "dm";
-  });
+  // Until the list reads, a direct tab shows the name saved with it, for the account that read it.
+  // Once the list reads, each tab takes the person's name without waiting to be opened, and the saved one follows.
+  const directIds = JSON.stringify(
+    input.paths.flatMap((path) => {
+      const tab = parseTab(path);
+      return tab.kind === "chat" && tab.target.kind === "dm" ? [tab.target.id] : [];
+    }),
+  );
+  const listReady = useRef(false);
   useEffect(() => {
-    if (!input.enabled || !hasDirectTab) return;
+    if (!input.enabled || directIds === "[]") return;
     const owner = store.current;
     const direct = directStore();
+    const open = new Set<string>(JSON.parse(directIds));
     const name = () => {
       const state = direct.snapshot();
-      if (state.status !== "ready" || store.current !== owner) return;
+      if (store.current !== owner) return;
+      if (listReady.current !== (state.status === "ready")) {
+        listReady.current = state.status === "ready";
+        render((value) => value + 1);
+      }
+      if (state.status !== "ready") return;
+      const account = session.current.key;
+      if (account) {
+        for (const conversation of state.conversations) {
+          const { name } = conversation.person;
+          if (name !== null && open.has(conversation.conversationId)) {
+            callbacks.current.onDirectName(conversation.conversationId, account, name);
+          }
+        }
+      }
       let named = false;
       for (const entry of owner.entries.values()) {
         const nav = entry.nav;
         if (nav?.level !== "direct") continue;
-        const conversation = state.conversations.find((candidate) => candidate.conversationId === nav.conversationId);
+        const conversation = state.conversations.find(
+          (candidate) => candidate.conversationId === nav.conversationId,
+        );
         const title = conversation ? directPersonName(conversation.person) : undefined;
         if (title === undefined || nav.title === title) continue;
         entry.nav = { ...nav, title };
@@ -233,7 +273,17 @@ export function useChatEditorTabs(input: {
     const stop = direct.subscribe(name);
     name();
     return stop;
-  }, [hasDirectTab, input.enabled, input.workspaceId]);
+  }, [directIds, input.enabled, input.workspaceId, sessionRevision]);
+  // revision and sessionRevision move with listReady and the account.
+  const directNames = input.directNames;
+  const savedDirectName = useCallback(
+    (conversationId: string): string | undefined => {
+      const account = session.current.key;
+      const saved = directNames[conversationId];
+      return account && !listReady.current && saved?.account === account ? saved.name : undefined;
+    },
+    [directNames, revision, sessionRevision],
+  );
   // A hidden conversation's tab counts its unread messages, as Chats does.
   // One local read per workspace change, and none without a hidden one.
   const [unreadRead, setUnread] = useState({ workspaceId: input.workspaceId, counts: NO_UNREAD });
@@ -310,9 +360,16 @@ export function useChatEditorTabs(input: {
       new Map(
         [...store.current.entries]
           .filter(([, entry]) => entry.nav)
-          .map(([path, entry]) => [path, chatEditorTitle(entry.nav!, input.agents)] as const),
+          .map(([path, entry]) => {
+            const nav = entry.nav!;
+            const saved =
+              nav.level === "direct" && nav.title === undefined
+                ? savedDirectName(nav.conversationId)
+                : undefined;
+            return [path, saved ?? chatEditorTitle(nav, input.agents)] as const;
+          }),
       ),
-    [revision, input.agents, input.workspaceId],
+    [revision, input.agents, input.workspaceId, savedDirectName],
   );
   // An agent's chat tab draws the agent's sparkle, as the sidebar does.
   const glyphs = useMemo(
@@ -324,7 +381,7 @@ export function useChatEditorTabs(input: {
       ),
     [revision, input.workspaceId],
   );
-  return { get, open, titles, glyphs, unread };
+  return { get, open, titles, glyphs, unread, savedDirectName };
 }
 
 const NO_UNREAD: ReadonlyMap<string, number> = new Map();

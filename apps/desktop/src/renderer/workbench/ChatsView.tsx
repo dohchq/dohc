@@ -427,6 +427,8 @@ export function ChatsView(props: {
   onOpenInTab?: (nav: ChatsNav) => void;
   // Closes this page's own tab, such as New message once its conversation opens in a tab of its own.
   onCloseTab?: () => void;
+  // The name saved with a direct conversation's tab, for its header until the list reads.
+  savedDirectName?: (conversationId: string) => string | undefined;
   // Opens a Settings section, for a state whose next step lives there.
   onOpenSettings?: (section: "cloud" | "members") => void;
   // Active editor destination, used by a persistent panel navigator to mark
@@ -3898,6 +3900,7 @@ export function ChatsView(props: {
         variant={variant}
         onBack={variant === "panel" ? goBack : undefined}
         onTitle={setDirectTitle}
+        savedName={props.savedDirectName?.(nav.conversationId)}
         onOpenSettings={props.onOpenSettings}
         onError={props.onError}
         onClearError={props.onClearError}

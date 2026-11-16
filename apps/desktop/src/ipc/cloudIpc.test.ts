@@ -693,6 +693,7 @@ describe("registered cloud handlers", () => {
       email: credentials.email,
       serverUrl: credentials.serverUrl,
       relayUrl: credentials.relayUrl,
+      sessionKey: chatShareSessionKey(credentials),
       workspaceSyncOwned: true,
       workspaceSynced: true,
       workspaceServerUrl: credentials.serverUrl,
@@ -702,7 +703,12 @@ describe("registered cloud handlers", () => {
     h.cache.set({ ...credentials, userId: "other" });
     await expect(
       h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" }),
-    ).resolves.toMatchObject({ workspaceSyncConnected: false });
+    ).resolves.toMatchObject({
+      workspaceSyncConnected: false,
+      sessionKey: chatShareSessionKey({ ...credentials, userId: "other" }),
+    });
+    // An unconfirmed account records nothing, so once it matches again sync
+    // reads on and connected, with no pause saved.
     h.cache.set(credentials);
     await expect(
       h.invoke(CHANNELS.cloudStatus, { workspaceId: "existing" }),

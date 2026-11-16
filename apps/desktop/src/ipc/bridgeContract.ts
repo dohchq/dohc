@@ -58,6 +58,7 @@ import {
   SHARE_ACCESS_VALUES,
   shareAccessRank,
 } from "@dohc/security-contract/share-selector";
+import { isDirectId } from "@dohc/security-contract/direct-messages";
 import { hasEngineIgnoredSegment, WORKSPACE_KINDS, WORKSPACE_MODES } from "@dohc/workspace-core";
 import { z } from "zod";
 import { AGENT_HUES } from "@dohc/workspace-contracts/agent-hues";
@@ -123,6 +124,9 @@ import {
   TAB_KINDS,
   singletonTabIdentity,
   MAX_COLLECTION_VIEWS,
+  MAX_DIRECT_ACCOUNT_CHARS,
+  MAX_DIRECT_NAME_CHARS,
+  MAX_DIRECT_NAMES,
   MAX_EXPANDED_FOLDERS,
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
@@ -4366,6 +4370,8 @@ export type CloudStatusPayload = z.infer<typeof CloudStatusPayload>;
 export const CloudStatusResult = z.object({
   ownPresentation: ActorPresentation.optional(),
   connected: z.boolean(),
+  // The signed-in account (server and user id), as onCloudSessionChanged names it. Read from this computer.
+  sessionKey: z.string().optional(),
   email: z.string().optional(),
   serverUrl: z.string().optional(),
   relayUrl: z.string().optional(),
@@ -7207,6 +7213,21 @@ export const WorkspaceUiState = z
       .max(RECORD_PANEL_MAX_WIDTH)
       .optional()
       .catch(undefined),
+    // Each open direct tab's person name, by conversation id, with the account it was read as.
+    directNames: z
+      .record(
+        z.string().refine(isDirectId),
+        z
+          .object({
+            account: z.string().min(1).max(MAX_DIRECT_ACCOUNT_CHARS),
+            name: z.string().min(1).max(MAX_DIRECT_NAME_CHARS),
+          })
+          .strict(),
+      )
+      .refine((names) => Object.keys(names).length <= MAX_DIRECT_NAMES, {
+        message: "Too many direct tab names.",
+      })
+      .optional(),
   })
   .superRefine((state, context) => {
     const groupIds = new Set<string>();

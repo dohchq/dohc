@@ -402,6 +402,7 @@ import {
   setCollectionActiveView,
   setCollectionOpenRecord,
   setRecordPanelWidth,
+  setDirectTabName,
   setFolderExpanded,
   setExplorerMode,
   setOpenEditorsHeight,
@@ -4596,6 +4597,12 @@ export function DesktopWorkspaceShell(props: {
   // counts the user already cleared until something remounts it.
   const [chatsReadRevision, setChatsReadRevision] = useState(0);
   const [chatsThreadRevision, setChatsThreadRevision] = useState(0);
+  const saveDirectName = useCallback(
+    (conversationId: string, account: string, name: string) => {
+      mutateWb((state) => setDirectTabName(state, conversationId, account, name));
+    },
+    [mutateWb],
+  );
   const chatEditors = useChatEditorTabs({
     workspaceId,
     onOpen: openVirtualTab,
@@ -4604,6 +4611,8 @@ export function DesktopWorkspaceShell(props: {
     enabled: chatsAvailable,
     agents: settingsAgents,
     readRevision: chatsReadRevision,
+    directNames: wb.directNames,
+    onDirectName: saveDirectName,
   });
   const selectedChatsNav =
     focusedTabPath && parseTab(focusedTabPath)?.kind === "chat"
@@ -7426,6 +7435,7 @@ export function DesktopWorkspaceShell(props: {
   );
   const chatsViewProps = {
     workspaceId,
+    savedDirectName: chatEditors.savedDirectName,
     onOpenNavigator: openChatsNavigator,
     onThreadRead: onChatsThreadRead,
     onThreadStarted: onChatsThreadStarted,

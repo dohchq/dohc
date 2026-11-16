@@ -2362,6 +2362,19 @@ describe("workspace UI state IPC contract", () => {
     }
   });
 
+  it("accepts each direct tab's saved name, and refuses a malformed or unbounded map", () => {
+    const directNames = { "c-alice": { account: "https://server##ann", name: "Alice Moreno" } };
+    expect(WorkspaceUiState.parse({ ...validState, directNames }).directNames).toEqual(directNames);
+    for (const bad of [
+      { "c alice": { account: "a", name: "Alice" } },
+      { "c-alice": { account: "a", name: "" } },
+      { "c-alice": { account: "a", name: "Alice", body: "Hi" } },
+      Object.fromEntries(Array.from({ length: 101 }, (_, i) => [`c-${i}`, { account: "a", name: "A" }])),
+    ]) {
+      expect(WorkspaceUiState.safeParse({ ...validState, directNames: bad }).success).toBe(false);
+    }
+  });
+
   it("falls back to Explorer when a saved view no longer exists", () => {
     const parsed = WorkspaceUiState.parse({
       ...validState,

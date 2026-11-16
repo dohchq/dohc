@@ -270,6 +270,8 @@ type ConversationProps = Reporting & {
   onBack?: () => void;
   /** The other person's name, once the list knows it, for the tab. */
   onTitle?: (title: string) => void;
+  /** The name saved with the tab, shown until the list reads. */
+  savedName?: string;
 };
 
 /** One direct conversation, read from the server. */
@@ -366,7 +368,9 @@ function ConversationForAccount(props: ConversationProps) {
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const sendIdentity = `direct-send:${conversationId}`;
-  const name = conversation ? directPersonName(conversation.person) : "Direct message";
+  const name = conversation
+    ? directPersonName(conversation.person)
+    : (!ready && state.status !== "signed-out" && props.savedName) || "Direct message";
   // A send and its Try again name the account that wrote them, so main refuses them once another account signs in.
   const send = useCallback(async (sender: string, body: string, messageId: string, to: string) => {
     if (sendingRef.current) return;

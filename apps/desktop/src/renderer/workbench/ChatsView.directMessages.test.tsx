@@ -201,6 +201,19 @@ describe("ChatsView direct messages", () => {
     expect(await screen.findByTestId("chats-dm-composer")).toBeTruthy();
   });
 
+  it("heads a conversation with the name saved with its tab while the server is away, and the server's name once it answers", async () => {
+    bridgeMock.directConversations.mockRejectedValue(UNREACHABLE("direct-conversations"));
+    const savedDirectName = (conversationId: string) => conversationId === "conversation-sam" ? "Sam" : undefined;
+    renderView(vi.fn(), vi.fn(), { variant: "page", savedDirectName, initialNav: { level: "direct", conversationId: "conversation-sam" } });
+    const failed = await screen.findByTestId("chats-dm-history-retry");
+    expect(screen.getByTestId("chats-dm-title").textContent).toBe("Sam");
+
+    signedIn([conversation()]);
+    history([sent(2, "sam", "See you at nine")]);
+    fireEvent.click(within(failed).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getByTestId("chats-dm-title").textContent).toBe("Sam Rivera"));
+  });
+
   it("shows a history read that fails with Try again", async () => {
     signedIn([conversation()]);
     bridgeMock.directHistory.mockRejectedValueOnce(UNREACHABLE("direct-history"));
