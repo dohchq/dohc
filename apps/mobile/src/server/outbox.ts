@@ -44,8 +44,9 @@ import type { ChatMessage } from "./workspaceReads";
 // Sign out, through `signOut`, stops sending and deletes the rows of the account last signed in, in one commit, then
 // empties the WAL, whose older frames still hold their text. Only then does the account end the sign-in and delete
 // its token. If the commit fails, Sign out fails, a phone still signed in stays signed in, and `state()` shows the
-// failure, so Connect can say so after a 401 has already signed the phone out. The next Sign out deletes that same
-// account's rows, whoever has signed in since. From the moment Sign out starts until one finishes, nothing sends and
+// failure, so Connect can say so after a 401 has already signed the phone out. The next Sign out deletes the rows of
+// every account whose Sign out failed, whoever has signed in since. From the moment Sign out starts until one finishes,
+// and while any failed one's rows stay, nothing sends and
 // nothing is added. That hold is in memory: a relaunch reads the rows again, and a sign-in to their account sends them.
 //
 // Every disk change runs in one queue. A change checks the outbox's lifetime, which Sign out moves on, after each
@@ -107,8 +108,9 @@ interface OutboxRecord {
   readonly pendingSinceMs: number | null;
   readonly result: OutboxResult | null;
   /**
-   * In memory only, never written: withheld here, but a commit that made it sendable failed and may still stand, so a
-   * relaunch may send it. Its next committed version ends this.
+   * In memory only, never written: withheld here, but the disk may hold it sendable, so a relaunch may send it: a
+   * commit that made it sendable failed and may still stand, or a failed Discard left it so. Its next committed version
+   * ends this.
    */
   readonly maySendOnReopen?: true;
 }
@@ -352,8 +354,11 @@ export function createOutbox(options: {
   let lastAccount: AccountKey | null = null;
   /** A Sign out is under way, or its delete failed and none has finished since: nothing sends or is added. */
   let held = false;
-  /** The account whose Sign out delete failed, which the next Sign out deletes, whoever has signed in since. */
-  let owed: { readonly account: AccountKey | null } | null = null;
+  /**
+   * Every account whose Sign out delete failed and no Sign out has deleted since. The next Sign out deletes all of
+   * them, whoever has signed in since.
+   */
+  let owed: readonly (AccountKey | null)[] = [];
   /**
    * Records enqueue has inserted withheld and not yet confirmed, hidden from `state()`. With a function, the record may
    * start sending, and its sender's "sending" mark confirms it, calling it with whether that mark was committed.
@@ -869,7 +874,7 @@ export function createOutbox(options: {
         unreadable: [...unreadable]
           .filter(([, row]) => ownedBy(row, lastAccount))
           .map(([handle]) => handle),
-        deletion: owed ? "failed" : "none",
+        deletion: owed.length > 0 ? "failed" : "none",
         unconfirmed: [...records.values()]
           .filter((record) => unconfirmed.has(record.sequence))
           .map((record) => record.operationId),
@@ -1036,7 +1041,18 @@ export function createOutbox(options: {
               written = uncertain(error) ? "uncertain" : "failed";
             }
             if (epoch !== at) throw new OutboxError("closed");
-            records.set(sequence, written === "committed" ? committed(withheld) : withheld);
+            // Unless this write committed, a row that was or may be sendable may still be, whatever the delete does:
+            // the record keeps saying a relaunch may send it, after the discard's own problem is gone from the screen.
+            const doubted =
+              written !== "committed" && (!record.withheld || record.maySendOnReopen === true);
+            records.set(
+              sequence,
+              written === "committed"
+                ? committed(withheld)
+                : doubted
+                  ? { ...withheld, maySendOnReopen: true }
+                  : withheld,
+            );
             changed();
             // Any failure but `uncertain` left the sendable version.
             if (written === "failed")
@@ -1127,13 +1143,13 @@ export function createOutbox(options: {
     signOut(leave) {
       epoch += 1;
       const at = epoch;
-      // After a failed Sign out, Try again deletes that account's rows, even if another has signed in since.
-      const account = owed ? owed.account : lastAccount;
+      // After failed Sign outs, Try again deletes each of their accounts' rows, even if another has signed in since.
+      const accounts = owed.length > 0 ? owed : [lastAccount];
       const damaged = status === "damaged";
       stopSending();
       held = true;
       for (const [sequence, record] of records)
-        if (ownedBy(record, account)) records.delete(sequence);
+        if (accounts.some((account) => ownedBy(record, account))) records.delete(sequence);
       observed = null;
       unreachable.clear();
       unconfirmed.clear();
@@ -1142,31 +1158,38 @@ export function createOutbox(options: {
       return serial(async () => {
         // A damaged file can't be read for its rows. The sheet warned that Sign out deletes any it has.
         if (damaged) await store.destroy();
-        else if (account) {
-          await transact((sql) =>
-            sql.run("DELETE FROM outbox WHERE origin = ? AND account_id = ?", [
-              account.origin,
-              account.userId,
-            ]),
-          );
+        else if (accounts.some((account) => account !== null)) {
+          await transact(async (sql) => {
+            for (const account of accounts)
+              if (account)
+                await sql.run("DELETE FROM outbox WHERE origin = ? AND account_id = ?", [
+                  account.origin,
+                  account.userId,
+                ]);
+          });
           // The WAL's older frames still hold the deleted text, so Sign out fails until the checkpoint empties it.
           await store.checkpoint();
         }
       }).then(
         async () => {
-          // Only a Sign out that deleted a failed one's account ends that failure.
-          if (damaged || (owed !== null && sameAccount(owed.account, account))) owed = null;
+          // A Sign out ends only the failures whose accounts it deleted.
+          owed = damaged
+            ? []
+            : owed.filter((left) => !accounts.some((account) => sameAccount(left, account)));
           await leave();
           // Held until the sign-in has ended, so nothing is added for the account meanwhile, and while a failed Sign
           // out's rows stay.
           if (epoch !== at) return;
-          held = owed !== null;
+          held = owed.length > 0;
           await load();
         },
         () => {
           // Recorded whatever Sign out has started since: the queue runs each Sign out's delete in order, so none
           // later can have deleted these rows yet, and one that does ends this.
-          owed = { account };
+          owed = [
+            ...owed,
+            ...accounts.filter((account) => !owed.some((left) => sameAccount(left, account))),
+          ];
           held = true;
           if (epoch === at) void load();
           else changed();

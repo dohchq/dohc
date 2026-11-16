@@ -85,7 +85,7 @@ export const chatWords = {
   stillSending: "Still sending",
   /** Kept on the phone, withheld: nothing sends it until Send, unless `notSentMaySendOnReopen` says otherwise. */
   notSent: "This message has not been sent.",
-  /** Withheld, but the commit that would have made it sendable failed and may still stand. */
+  /** Withheld, but the phone's storage may still hold it ready to send, as after a failed commit or Discard. */
   notSentMaySendOnReopen:
     "This message has not been sent. It may send if you close dohc and open it again.",
   /** Enqueue failed and nothing was kept: the text stays in the composer. */
