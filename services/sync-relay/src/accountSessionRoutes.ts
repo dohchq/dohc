@@ -74,12 +74,16 @@ export function createAccountSessionRoutes(options: {
         callerSessionId: caller.sessionId,
         sessionId: route.sessionId,
       });
-      // A revoked session's alerts end before the answer, with every delivery queued for them.
-      storage.settlePushSessionFence({ ...fence, revokedExpiresAtMs });
-      if (revokedExpiresAtMs === null) throw notFound();
-      // Its live connections end before the answer. A feed held under it checks it now, instead of at the end of its hold.
+      if (revokedExpiresAtMs === null) {
+        storage.settlePushSessionFence({ ...fence, revokedExpiresAtMs });
+        throw notFound();
+      }
+      // Its live connections end before the answer, first, since nothing here can fail. A feed held under it checks
+      // it now, instead of at the end of its hold.
       options.sockets.stopSession(caller.userId, route.sessionId);
       options.feedWaits.wakeAccount(caller.userId);
+      // A revoked session's alerts end before the answer, with every delivery queued for them.
+      storage.settlePushSessionFence({ ...fence, revokedExpiresAtMs });
       options.revoked?.(caller.userId, route.sessionId);
       return jsonResponse({ ok: true, sessionId: route.sessionId });
     }
