@@ -151,6 +151,15 @@ describe("direct messages for the signed-in account", () => {
     stop();
   });
 
+  it("takes a newer read's list even when the server's revision went backwards, as after a relay reset", async () => {
+    const h = harness();
+    let answer = { revision: 5, conversations: [conversation(message(2), 1)] };
+    h.routes.set("/sync/direct/conversations", () => Response.json(answer));
+    expect((await h.service.list()).conversations).toHaveLength(1);
+    answer = { revision: 1, conversations: [] };
+    expect((await h.service.list()).conversations).toEqual([]);
+  });
+
   it("tells listeners when the account's revision moves, and stops when nobody listens", async () => {
     const h = harness();
     let revision = 1;

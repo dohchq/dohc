@@ -81,8 +81,10 @@ function refusal(status: number, code: string | null, message: string | null): D
 export function createDirectMessages<Credentials extends DirectAccount>(dependencies: Dependencies<Credentials>) {
   let following: { key: string; stop: AbortController } | null = null;
   let listeners = 0;
-  // The list for one account, at the server's revision. `fresh` while nothing has changed it since the follow loop read it.
-  let listed: (DirectListed & { key: string; revision: number; fresh: boolean }) | null = null;
+  // The list for one account, from the read numbered `read`. `fresh` while nothing has changed it since the follow loop read it.
+  let listed: (DirectListed & { key: string; read: number; fresh: boolean }) | null = null;
+  // Numbers each list read as it starts. A server's revision can go backwards after a reset, so it can't order reads.
+  let reads = 0;
 
   const setListed = (next: typeof listed) => {
     const before = listed;
@@ -125,14 +127,15 @@ export function createDirectMessages<Credentials extends DirectAccount>(dependen
   }
 
   async function readList(credentials: Credentials, fresh: boolean): Promise<DirectListed> {
+    const read = ++reads;
     const answer = parseDirectConversationList(await call(credentials, DIRECT_ROUTES.conversations));
     if (!answer) throw new DirectMessageError("refused", "Your server sent conversations dohc could not read.", null, null, true);
-    const next = { key: accountKey(credentials), viewerId: credentials.userId, conversations: answer.conversations, revision: answer.revision, fresh };
+    const next = { key: accountKey(credentials), viewerId: credentials.userId, conversations: answer.conversations, read, fresh };
     // A read that lands after the account changed does not replace the new account's list.
     const current = await dependencies.credentials().catch(() => null);
     if (!current || accountKey(current) !== next.key) return { viewerId: next.viewerId, conversations: next.conversations };
     // Reads overlap, so answers can arrive out of order. An older one would bring back a Notice already read.
-    if (listed?.key === next.key && listed.revision > next.revision) return { viewerId: listed.viewerId, conversations: listed.conversations };
+    if (listed?.key === next.key && listed.read > next.read) return { viewerId: listed.viewerId, conversations: listed.conversations };
     setListed(next);
     return { viewerId: next.viewerId, conversations: next.conversations };
   }
