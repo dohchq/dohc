@@ -3510,12 +3510,15 @@ export function DesktopWorkspaceShell(props: {
   // needs no capture. Members post in them at Comment and Edit.
   const chatsAvailable = captureAvailable || (membershipView && captureDecided);
   // Why a member cannot post in Groups or comment on files. Main refuses the
-  // same writes.
+  // same writes. While another account is signed in, the level belongs to the
+  // account that joined.
   const membershipPostingClosed = shareViewEnded
     ? shareEndedRefusal
-    : shareAccess === "view"
-      ? "Only people who can comment post here."
-      : undefined;
+    : otherAccountApplies
+      ? "Only the account that joined posts here."
+      : shareAccess === "view"
+        ? "Only people who can comment post here."
+        : undefined;
   const chatsJoinedWorkspace = membershipView
     ? {
         joinedWorkspace: {

@@ -99,6 +99,26 @@ describe("a joined workspace", () => {
     expect(screen.queryByRole("button", { name: "New page" })).toBeNull();
     expect(screen.queryByRole("button", { name: "New folder" })).toBeNull();
     expect(screen.getByRole("button", { name: "Refresh explorer" })).toBeTruthy();
+    expect((await screen.findByTestId("linked-chat-readonly-note")).textContent).toBe("Only the account that joined posts here.");
+    expect(screen.queryByTestId("linked-chat-new")).toBeNull();
+  });
+
+  it("shows no Group composer at Comment while another account is signed in", async () => {
+    const bridge = makeShareBridge();
+    bridge.cloudStatus.mockResolvedValue({ connected: true, email: "lee@dohc.test", serverUrl: "https://cloud.dohc.test", workspaceSynced: true,
+      joinedBySignedInAccount: false });
+    bridge.listChatChannels.mockResolvedValue({ channels: [{
+      id: "launch", name: "Launch team", slug: "launch-team", kind: "channel",
+      createdAtMs: 1, updatedAtMs: 1, threadCount: 1, unreadCount: 0, wireId: "launch",
+    }], fileThreads: [] });
+    bridge.listChannelThreads.mockResolvedValue({ threads: [] });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(shell(bridge, { ...JOINED, shareView: { ...JOINED.shareView!, access: "comment" } }));
+    await waitFor(() => expect(screen.getByTestId("sync-status").textContent).toBe("Another account signed in"));
+    fireEvent.click(await screen.findByTestId("activity-chats"));
+    fireEvent.click(await screen.findByTestId("chats-channel"));
+    expect((await screen.findByTestId("chats-readonly-note")).textContent).toBe("Only the account that joined posts here.");
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
   });
 
   function withGroup(access: "view" | "comment" | "edit", checked: Awaited<ReturnType<ReturnType<typeof makeShareBridge>["checkSharedViewAccess"]>>,
