@@ -16,7 +16,7 @@ use dohc_engine_collab::{DocKey, LeaseRegistry, WriterDocCache};
 use dohc_engine_domain::{
     BinaryHead, BinaryWriteResult, CompareTextFileVersions, DeleteResult, DeleteTextFile,
     DomainError, InbandBinary, InbandText, ListedTextConflict, MergeTextFileFromVersion,
-    MergeTextFileResult, RenameResult, RenameTextFile, ResolveConflictKind, ResolveTextConflict,
+    MergeTextFileResult, RenameResult, RenameTextFile, ResolveTextConflict,
     ResolveTextConflictResult, RollbackTextFileMutation, TextConflict, TextSnapshot,
     VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
     binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
@@ -472,9 +472,7 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<RollbackExecutionResult, RuntimeError> {
         self.run(move |store, cache| {
-            let changes = rollback_changes(store, &input)?;
-            let (workspace, version) = (&input.workspace_id, &input.version_id);
-            access_order::ordered(store, workspace, version, &changes, |store| {
+            access_order::ordered(store, |store| {
                 with_local_file_mutation_cache_reset(cache, || {
                     versioned_text_rollback_on_store(
                         store,
@@ -511,9 +509,7 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<MergeExecutionResult, RuntimeError> {
         self.run(move |store, cache| {
-            let changes = merge_changes(store, &input);
-            let (workspace, version) = (&input.workspace_id, &input.target_version_id);
-            access_order::ordered(store, workspace, version, &changes, |store| {
+            access_order::ordered(store, |store| {
                 with_local_file_mutation_cache_reset(cache, || {
                     versioned_text_merge_on_store(
                         store,
@@ -759,18 +755,16 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<ResolveTextConflictResult, RuntimeError> {
         self.run(move |store, cache| {
-            let (version, changes) = conflict_changes(store, &input)?;
-            let outcome =
-                access_order::ordered(store, &input.workspace_id, &version, &changes, |store| {
-                    conflict_resolve_on_store(
-                        store,
-                        &input,
-                        root_dir.as_deref(),
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
+            let outcome = access_order::ordered(store, |store| {
+                conflict_resolve_on_store(
+                    store,
+                    &input,
+                    root_dir.as_deref(),
+                    &leases,
+                    faults.as_ref(),
+                    &token,
+                )
+            });
             // Resolution can replace or archive a lineage; the tuple probe
             // already misses on every such outcome (the claim id changes or
             // the marker is deleted), but the reset hooks are unconditional.
@@ -882,6 +876,9 @@ pub(super) fn versioned_text_write_with_publication_on_store(
         return Err(RuntimeError::Cancelled);
     }
     dohc_engine_domain::validate_write_input(input).map_err(RuntimeError::from)?;
+    // Link rewrites and Collections call this partway through a command, so
+    // it orders first rather than through `ordered`, whose retry starts the
+    // command's clearances again.
     access_order::order_writer(
         store,
         &input.workspace_id,
@@ -1041,12 +1038,21 @@ fn versioned_binary_write_conditioned_on_store(
         input.now_ms,
         faults,
     )?;
-    access_order::order_writer(
-        store,
-        &input.workspace_id,
-        &input.version_id,
-        &[access_order::Touch::write(&input.path)],
-    )?;
+    access_order::ordered(store, |store| {
+        binary_write_in_one_transaction(store, input, root_dir, conditions, self_writes, faults)
+    })
+}
+
+/// The binary write after its Version exists. It changes nothing outside its
+/// transaction, so [`access_order::ordered`] may run it again.
+fn binary_write_in_one_transaction(
+    store: &mut EngineStore,
+    input: &WriteBinary,
+    root_dir: &std::path::Path,
+    conditions: Option<&WriteConditions>,
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+) -> Result<BinaryWriteExecutionResult, RuntimeError> {
     let outcome = store.write_with(faults, |tx| {
         let fingerprint = conditions.map(WriteConditions::fingerprint);
         let replayed: bool = tx
@@ -1292,15 +1298,18 @@ fn versioned_text_rename_on_store(
     {
         return rename_access_rule_on_store(store, input, root_dir, self_writes, faults, token);
     }
-    access_order::order_writer(
-        store,
-        &input.workspace_id,
-        &input.version_id,
-        &[
-            access_order::Touch::delete(&input.from_path),
-            access_order::Touch::write(&input.to_path),
-        ],
-    )?;
+    access_order::ordered(store, |store| {
+        rename_file_on_store(store, input, root_dir, self_writes, faults)
+    })
+}
+
+fn rename_file_on_store(
+    store: &mut EngineStore,
+    input: &RenameTextFile,
+    root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+) -> Result<RenameResult, RuntimeError> {
     let result = VersionedTextStore::new(store)
         .rename_text_file_with(input, faults, |tx, result| {
             if !result.deduped {
@@ -1506,6 +1515,8 @@ fn versioned_text_delete_on_store(
         .chain(assets.iter().map(String::as_str))
         .map(access_order::Touch::delete)
         .collect();
+    // A checked delete removes the file from disk before the transaction
+    // that journals it, so a refusal must come before that.
     access_order::order_writer(store, &input.workspace_id, &input.version_id, &touches)?;
     if let Some(expected) = expected_sha256 {
         return checked_delete_on_store(
@@ -3357,59 +3368,6 @@ fn conflict_open_on_store(
     }
 }
 
-/// The paths a rollback changes, each with whether it deletes the file: it
-/// removes the moment's file and, when the file existed before the moment,
-/// writes it back where it was then. A rename's earlier path is the one the
-/// moment recorded, else the moment that produced the file's earlier state.
-fn rollback_changes(
-    store: &EngineStore,
-    input: &RollbackTextFileMutation,
-) -> Result<Vec<(String, bool)>, RuntimeError> {
-    let found: Option<(String, Option<String>)> = store.read_with(|conn| {
-        conn.query_row(
-            "SELECT m.path, CASE WHEN m.before_present = 2 THEN COALESCE(m.before_path,              p.path, (SELECT q.path FROM moments q WHERE q.workspace_id = m.workspace_id              AND q.version_id = m.version_id AND q.object_id = m.object_id              AND q.moment_order < m.moment_order ORDER BY q.moment_order DESC LIMIT 1),              m.path) END              FROM moments m LEFT JOIN moments p ON p.workspace_id = m.workspace_id              AND p.moment_id = m.before_latest_moment_id              WHERE m.workspace_id = ?1 AND m.moment_id = ?2 AND m.version_id = ?3",
-            params![
-                input.workspace_id,
-                input.mutation_moment_id,
-                input.version_id
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(StorageError::corrupt_public)
-    })?;
-    let mut changes = match found {
-        None => Vec::new(),
-        Some((path, Some(before))) if before == path => vec![(path, false)],
-        Some((path, Some(before))) => vec![(path, true), (before, false)],
-        Some((path, None)) => vec![(path, true)],
-    };
-    // Rolling back a drawing's delete writes back the assets it deleted.
-    store.read_with(|conn| {
-        let mut assets = conn
-            .prepare_cached(
-                "SELECT asset_path FROM scene_asset_delete_authority_items \
-                 WHERE workspace_id=?1 AND version_id=?2 AND drawing_delete_moment_id=?3",
-            )
-            .map_err(StorageError::corrupt_public)?;
-        for asset in assets
-            .query_map(
-                params![
-                    input.workspace_id,
-                    input.version_id,
-                    input.mutation_moment_id
-                ],
-                |row| row.get(0),
-            )
-            .map_err(StorageError::corrupt_public)?
-        {
-            changes.push((asset.map_err(StorageError::corrupt_public)?, false));
-        }
-        Ok::<_, StorageError>(())
-    })?;
-    Ok(changes)
-}
-
 /// The assets a delete of the drawing at `path` deletes with it, chosen as
 /// [`delete_owned_scene_assets_in_tx`] chooses them. A file that is not a
 /// drawing, by the test it applies, has none.
@@ -3440,48 +3398,6 @@ pub(super) fn scene_asset_paths(
             conn, &key,
         )?)
     })
-}
-
-/// The path a merge changes: it deletes the file when the source version no
-/// longer holds it. A comparison the merge would refuse stands as a write,
-/// and the merge reports the refusal.
-fn merge_changes(store: &mut EngineStore, input: &MergeTextFileFromVersion) -> Vec<(String, bool)> {
-    let deletes = VersionedTextStore::new(store)
-        .compare_text_file_versions(&CompareTextFileVersions {
-            workspace_id: input.workspace_id.clone(),
-            target_version_id: input.target_version_id.clone(),
-            source_version_id: input.source_version_id.clone(),
-            path: input.path.clone(),
-        })
-        .is_ok_and(|comparison| comparison.incoming.is_none());
-    vec![(input.path.clone(), deletes)]
-}
-
-/// The version a resolution writes and the paths it changes, each with
-/// whether it deletes the file. Applying an incoming move deletes the
-/// conflict's path and writes the incoming one. No conflict changes nothing.
-fn conflict_changes(
-    store: &EngineStore,
-    input: &ResolveTextConflict,
-) -> Result<(String, Vec<(String, bool)>), RuntimeError> {
-    let Some(conflict) = store.read_with(|conn| {
-        dohc_engine_domain::load_text_conflict_in_tx(conn, &input.workspace_id, &input.conflict_id)
-    })?
-    else {
-        return Ok((String::new(), Vec::new()));
-    };
-    let path = conflict.path.clone();
-    let changes = match input.resolution {
-        ResolveConflictKind::ApplyIncoming if !conflict.incoming.is_present() => {
-            vec![(path, true)]
-        }
-        ResolveConflictKind::ApplyIncoming if conflict.incoming.path != path => {
-            vec![(path, true), (conflict.incoming.path, false)]
-        }
-        ResolveConflictKind::KeepCurrent if !conflict.current.is_present() => vec![(path, true)],
-        _ => vec![(path, false)],
-    };
-    Ok((conflict.target_version_id, changes))
 }
 
 fn conflict_resolve_on_store(

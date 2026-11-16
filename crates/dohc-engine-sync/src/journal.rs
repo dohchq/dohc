@@ -129,10 +129,19 @@ pub fn workspace_journals_file_moments_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
 ) -> Result<bool, SyncError> {
-    if workspace_replicates_with_relay_in_tx(tx, workspace_id)? {
+    workspace_journals_file_moments(tx, workspace_id)
+}
+
+/// [`workspace_journals_file_moments_in_tx`] for a reader outside a write
+/// transaction.
+pub fn workspace_journals_file_moments(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+) -> Result<bool, SyncError> {
+    if workspace_replicates_with_relay(conn, workspace_id)? {
         return Ok(true);
     }
-    tx.query_row(
+    conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM share_view_file_lane WHERE workspace_id = ?1)",
         [workspace_id],
         |row| row.get(0),

@@ -52,68 +52,64 @@ impl ActorHandle {
     ) -> Result<HistoryOperation, RuntimeError> {
         self.run(move |store, cache| {
             with_local_file_mutation_cache_reset(cache, || {
-                super::access_order::order_writer(
-                    store,
-                    &input.workspace_id,
-                    &input.version_id,
-                    &[super::access_order::Touch::write(&input.to_path)],
-                )?;
                 let policy = crate::search::read_engine_search_policy(&root);
-                let outcome = store.write_with(
-                    faults.as_ref(),
-                    |tx| -> Result<HistoryOperation, RuntimeError> {
-                        dohc_engine_domain::ensure_no_pending_undo_in(tx, &input.workspace_id)?;
-                        let replay: bool = tx
+                super::access_order::ordered(store, |store| {
+                    let outcome = store.write_with(
+                        faults.as_ref(),
+                        |tx| -> Result<HistoryOperation, RuntimeError> {
+                            dohc_engine_domain::ensure_no_pending_undo_in(tx, &input.workspace_id)?;
+                            let replay: bool = tx
                             .query_row(
                                 "SELECT EXISTS(SELECT 1 FROM engine_requests WHERE request_id=?1)",
                                 [format!("duplicate_{}", input.operation_id)],
                                 |r| r.get(0),
                             )
                             .map_err(StorageError::corrupt_public)?;
-                        if !replay {
-                            for path in [&input.from_path, &input.to_path] {
-                                dohc_engine_sync::ensure_no_adopted_owner_under_path(
+                            if !replay {
+                                for path in [&input.from_path, &input.to_path] {
+                                    dohc_engine_sync::ensure_no_adopted_owner_under_path(
+                                        tx,
+                                        &input.workspace_id,
+                                        &input.version_id,
+                                        path,
+                                    )?;
+                                    super::capture::ensure_no_pending_undo_placement(
+                                        tx,
+                                        &input.workspace_id,
+                                        path,
+                                    )?;
+                                }
+                            }
+                            let m = dohc_engine_domain::duplicate_file_in_tx(tx, &input)?;
+                            if !replay {
+                                publish_undo_member(
                                     tx,
                                     &input.workspace_id,
                                     &input.version_id,
-                                    path,
-                                )?;
-                                super::capture::ensure_no_pending_undo_placement(
-                                    tx,
-                                    &input.workspace_id,
-                                    path,
+                                    &policy,
+                                    &m,
+                                    input.now_ms,
+                                    false,
                                 )?;
                             }
-                        }
-                        let m = dohc_engine_domain::duplicate_file_in_tx(tx, &input)?;
-                        if !replay {
-                            publish_undo_member(
-                                tx,
-                                &input.workspace_id,
-                                &input.version_id,
-                                &policy,
-                                &m,
-                                input.now_ms,
-                                false,
-                            )?;
-                        }
-                        Ok(HistoryOperation {
-                            kind: Some("file-duplicate"),
-                            operation_id: input.operation_id.clone(),
-                            version_id: input.version_id.clone(),
-                            moments: dohc_engine_domain::operation_moments_in(
-                                tx,
-                                &input.workspace_id,
-                                &input.version_id,
-                                &input.operation_id,
-                            )?,
-                        })
-                    },
-                )?;
-                match outcome {
-                    TxnOutcome::Committed(result) => Ok(result),
-                    TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
-                }
+                            Ok(HistoryOperation {
+                                kind: Some("file-duplicate"),
+                                operation_id: input.operation_id.clone(),
+                                version_id: input.version_id.clone(),
+                                moments: dohc_engine_domain::operation_moments_in(
+                                    tx,
+                                    &input.workspace_id,
+                                    &input.version_id,
+                                    &input.operation_id,
+                                )?,
+                            })
+                        },
+                    )?;
+                    match outcome {
+                        TxnOutcome::Committed(result) => Ok(result),
+                        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+                    }
+                })
             })
         })
         .await

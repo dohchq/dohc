@@ -1,13 +1,15 @@
 //! A folder's `access.yaml` reaches the journal before the files it covers.
 //!
 //! Members see a folder through its rule, and the relay replays moments in
-//! origin order. Every file moment passes [`check_moment`], which the sync
-//! crate's journal calls before it takes an origin seq, on the actor's one
-//! writer thread. For each folder over the moment's path, from the workspace
-//! root down, the check compares the rule on disk with the rule last
-//! committed there. A folder's rule is every file in exactly that folder whose
-//! name folds to `access.yaml`, as the relay reads it; two of them are one
-//! unreadable rule, which hides the folder.
+//! origin order. Every file moment the journal records passes
+//! [`check_moment`], which the sync crate's journal calls before it takes an
+//! origin seq, on the actor's one writer thread. The journal records file
+//! moments only once the workspace replicates, so a workspace that does not
+//! commits its rules and files as they come and holds nothing. For each folder
+//! over the moment's path, from the workspace root down, the check compares
+//! the rule on disk with the rule last committed there. A folder's rule is
+//! every file in exactly that folder whose name folds to `access.yaml`, as the
+//! relay reads it; two of them are one unreadable rule, which hides the folder.
 //!
 //! - the same rule, or none on either side, clears the folder, as does a
 //!   committed rule that never reached disk (written without publication);
@@ -19,21 +21,20 @@
 //! - a rule still settling, or one that could not be read, makes the writer
 //!   wait ([`ACCESS_RULE_WAITS`]).
 //!
-//! A rule cannot commit inside another writer's transaction, so a folder that
-//! needs one refuses the moment and is judged again, with its commit or hold,
-//! when the command ends ([`finish_command`]). So that writers rarely meet
-//! that refusal, capture ([`order_capture`]), the versioned text and binary
-//! writes, renames, deletes, Duplicate and live-document settlement
-//! ([`order_writer`]) and Undo ([`order_undo`]) run [`order_paths`] before
-//! their transaction: it commits a changed rule first. Rollback, merge and conflict resolution run through
-//! [`ordered`], which runs the same step over the paths they will change and,
-//! should the check still refuse, judges each folder it refused and runs the
-//! writer again, so their callers never see that refusal either. Capture judges
-//! the rule bytes it read itself, so a widening it found is held rather than
-//! committed. A rule moment no step judged commits as written only when its
-//! moment row names an origin other than capture. One read from disk is
-//! refused and judged when the command ends, so a capture path that skips its
-//! step cannot commit a widening.
+//! A rule moment clears its own folder only when its moment row names an
+//! origin other than capture: dohc wrote it on purpose. Any other rule moment
+//! is refused and judged when the command ends, like a folder that needs a
+//! rule committed first, because a rule cannot commit inside another writer's
+//! transaction ([`finish_command`]). So the check alone keeps a widening read
+//! from disk out of the journal.
+//!
+//! Writers that change nothing outside their one transaction run through
+//! [`ordered`], which judges each folder the check refused and runs the writer
+//! again. A writer that changes something first (capture, the versioned text
+//! write's callers, delete, Collection adoption and relation cleanup,
+//! live-document settlement and Undo) runs [`order_paths`] before it starts
+//! instead ([`order_capture`], [`order_writer`], [`order_undo`]), so a
+//! refusal cannot strand that change.
 //!
 //! The check also keeps the order inside one command: a file under a folder
 //! whose rule the command commits waits until that rule's moment, a rule
@@ -340,6 +341,19 @@ pub(super) fn order_undo(
     order_as(store, Writer::Undo, workspace_id, version_id, touches)
 }
 
+/// The workspace folder to order `workspace_id`'s rules under, or `None`
+/// when nothing needs ordering: a store with no workspace, or a workspace
+/// that journals no file moments. Rules order only what the relay replays,
+/// so until the workspace replicates its rules and files commit as they come.
+fn ordering_root(store: &EngineStore, workspace_id: &str) -> Result<Option<PathBuf>, RuntimeError> {
+    let Some(root) = root().map_err(moved)? else {
+        return Ok(None);
+    };
+    let journals = store
+        .read_with(|conn| dohc_engine_sync::workspace_journals_file_moments(conn, workspace_id))?;
+    Ok(journals.then_some(root))
+}
+
 fn order_as(
     store: &mut EngineStore,
     writer: Writer,
@@ -347,7 +361,7 @@ fn order_as(
     version_id: &str,
     touches: &[Touch<'_>],
 ) -> Result<Vec<Result<(), RuntimeError>>, RuntimeError> {
-    let Some(root) = root().map_err(moved)? else {
+    let Some(root) = ordering_root(store, workspace_id)? else {
         return Ok(touches.iter().map(|_| Ok(())).collect());
     };
     let leases = LeaseRegistry::new();
@@ -368,32 +382,16 @@ fn order_as(
 /// waiting in turn.
 const ORDERED_RUNS: usize = 8;
 
-/// Run a writer that cannot name its paths until its transaction reads them.
-/// Its caller predicts them from the store, each with whether the writer
-/// deletes it, and [`order_writer`] runs over those first, in a workspace
-/// that replicates or not. When the commit-point check still refused one of
-/// its moments, judge the refused folders now, which commits a rule that goes
-/// first, and run the writer again, so its caller never sees the refusal. A
-/// folder that waits or is held answers for the writer. The writers journal
-/// inside their one transaction, so a refused run left nothing behind.
+/// Run a writer that changes nothing outside its one transaction. When the
+/// commit-point check refused one of its moments, judge the refused folders
+/// now, which commits a rule that goes first, and run the writer again, so
+/// its caller never sees the refusal. A folder that waits or is held answers
+/// for the writer. A refused run left nothing behind.
 pub(super) fn ordered<R>(
     store: &mut EngineStore,
-    workspace_id: &str,
-    version_id: &str,
-    changes: &[(String, bool)],
     mut work: impl FnMut(&mut EngineStore) -> Result<R, RuntimeError>,
 ) -> Result<R, RuntimeError> {
-    let touches: Vec<Touch<'_>> = changes
-        .iter()
-        .map(|(path, deletes)| {
-            if *deletes {
-                Touch::delete(path)
-            } else {
-                Touch::write(path)
-            }
-        })
-        .collect();
-    order_writer(store, workspace_id, version_id, &touches)?;
+    check_root()?;
     let mut outcome = work(store);
     for _ in 1..ORDERED_RUNS {
         let deferred = CLEARED.with(|cleared| std::mem::take(&mut cleared.borrow_mut().deferred));
@@ -1471,7 +1469,7 @@ pub(super) fn order_capture(
     faults: &dyn FaultInjector,
     touches: &[Touch<'_>],
 ) -> Result<Vec<Result<(), RuntimeError>>, RuntimeError> {
-    let Some(root) = root().map_err(moved)? else {
+    let Some(root) = ordering_root(store, workspace_id)? else {
         return Ok(touches.iter().map(|_| Ok(())).collect());
     };
     let order = Order {

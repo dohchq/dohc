@@ -1037,13 +1037,11 @@ fn moved<T>(result: &Result<T, RuntimeError>) -> bool {
     )
 }
 
-/// A movable workspace whose team folder waits for its owner over a
-/// widened rule.
-fn held_team(replicates: bool) -> Fixture {
+/// A movable, replicating workspace whose team folder waits for its owner
+/// over a widened rule.
+fn held_team() -> Fixture {
     let f = Fixture::movable();
-    if replicates {
-        f.replicate();
-    }
+    f.replicate();
     f.put("team/access.yaml", VIEW);
     f.put("team/a.md", "alpha");
     f.settle();
@@ -1064,36 +1062,32 @@ fn a_decision_after_the_store_moved_changes_nothing() {
     let held_team_still = vec![("team".to_owned(), "widened".to_owned())];
     // Every case runs, so one failure shows them all.
     let mut wrong = Vec::new();
-    for replicates in [true, false] {
-        for decision in [AccessRuleDecision::Accept, AccessRuleDecision::Restore] {
-            let f = held_team(replicates);
-            let before = f.journal();
-            f.move_store_away();
-            let decided = f.decide_on("team", decision, seen(), "widened");
-            let stray = f.move_store_back();
-            // Refused, nothing written where the store was, the rule on disk,
-            // no kept copy, the hold, the journal.
-            let state = (
-                moved(&decided),
-                stray,
-                rule(&f),
-                f.kept_copies(),
-                f.holds(),
-                f.journal() == before,
-            );
-            let refused = (
-                true,
-                Vec::new(),
-                EDIT.to_owned(),
-                Vec::new(),
-                held_team_still.clone(),
-                true,
-            );
-            if state != refused {
-                wrong.push(format!(
-                    "{decision:?}, replicates: {replicates}: {decided:?} {state:?}"
-                ));
-            }
+    for decision in [AccessRuleDecision::Accept, AccessRuleDecision::Restore] {
+        let f = held_team();
+        let before = f.journal();
+        f.move_store_away();
+        let decided = f.decide_on("team", decision, seen(), "widened");
+        let stray = f.move_store_back();
+        // Refused, nothing written where the store was, the rule on disk, no
+        // kept copy, the hold, the journal.
+        let state = (
+            moved(&decided),
+            stray,
+            rule(&f),
+            f.kept_copies(),
+            f.holds(),
+            f.journal() == before,
+        );
+        let refused = (
+            true,
+            Vec::new(),
+            EDIT.to_owned(),
+            Vec::new(),
+            held_team_still.clone(),
+            true,
+        );
+        if state != refused {
+            wrong.push(format!("{decision:?}: {decided:?} {state:?}"));
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
@@ -1675,13 +1669,13 @@ fn edit_on_feature(f: &Fixture) -> Result<(), RuntimeError> {
     })
 }
 
-/// In a workspace that does not replicate, no commit-point check stops a
-/// moment, so rollback, merge and conflict resolution are judged before they
-/// change anything: under a folder held for its owner each is refused and
-/// records nothing. Rolling back a move is judged at both of its paths.
-/// Duplicate is judged at its copy.
+/// Rollback, merge, conflict resolution and Duplicate rely on the
+/// commit-point check alone. Once the workspace replicates, under a folder
+/// held for its owner each is refused and records nothing. Rolling back a
+/// move is held at either of its paths, Duplicate at its copy. A workspace
+/// that does not replicate holds none of them.
 #[test]
-fn writers_without_a_step_of_their_own_are_held_in_a_local_workspace() {
+fn writers_without_a_step_of_their_own_are_held_once_the_workspace_replicates() {
     type Step = fn(&Fixture) -> Result<(), RuntimeError>;
     let cases: [(&str, &str, Step, Step); 5] = [
         (
@@ -1740,21 +1734,34 @@ fn writers_without_a_step_of_their_own_are_held_in_a_local_workspace() {
     ];
     // Every case runs, so one failure shows them all.
     let mut wrong = Vec::new();
-    for (name, folder, prepare, writer) in cases {
-        let f = Fixture::local();
-        let rule = format!("{folder}/access.yaml");
-        f.put(&rule, NOBODY);
-        f.settle();
-        f.capture_ok(&[&rule]);
-        prepare(&f).unwrap_or_else(|error| panic!("{name} setup: {error}"));
-        f.put(&rule, EDIT);
-        f.settle();
-        let before = f.moments();
-        let result = writer(&f);
-        // Held, nothing recorded, the hold.
-        let state = (held(&result, folder), f.moments() == before, f.holds());
-        if state != (true, true, vec![(folder.to_owned(), "widened".to_owned())]) {
-            wrong.push(format!("{name}: {result:?} {state:?}"));
+    for replicates in [true, false] {
+        for (name, folder, prepare, writer) in cases {
+            let f = if replicates {
+                Fixture::new()
+            } else {
+                Fixture::local()
+            };
+            let rule = format!("{folder}/access.yaml");
+            f.put(&rule, NOBODY);
+            f.settle();
+            f.capture_ok(&[&rule]);
+            prepare(&f).unwrap_or_else(|error| panic!("{name} setup: {error}"));
+            f.put(&rule, EDIT);
+            f.settle();
+            let before = f.moments();
+            let result = writer(&f);
+            // Held, nothing recorded, the hold; or done, with no hold.
+            let state = (held(&result, folder), f.moments() == before, f.holds());
+            let expected = if replicates {
+                (true, true, vec![(folder.to_owned(), "widened".to_owned())])
+            } else {
+                (false, false, Vec::new())
+            };
+            if state != expected || (!replicates && result.is_err()) {
+                wrong.push(format!(
+                    "{name}, replicates: {replicates}: {result:?} {state:?}"
+                ));
+            }
         }
     }
     // Nor are they let through once the store left the workspace folder.
@@ -1808,15 +1815,18 @@ const DRAWING: &str = "drawings/d.excalidraw";
 
 /// A local workspace with a drawing and one asset of it, under an `assets`
 /// folder whose committed rule lets nobody in.
-fn drawing_with_ruled_asset() -> Fixture {
-    drawing_with_asset(false).0
+fn drawing_with_ruled_asset(replicates: bool) -> Fixture {
+    drawing_with_asset(false, replicates).0
 }
 
-/// A local workspace with a drawing and one asset of it, and the folder whose
+/// A workspace with a drawing and one asset of it, and the folder whose
 /// committed rule lets nobody in: `assets`, or with `in_owner` the asset's
 /// own folder, where the rule sits beside the asset.
-fn drawing_with_asset(in_owner: bool) -> (Fixture, String) {
+fn drawing_with_asset(in_owner: bool, replicates: bool) -> (Fixture, String) {
     let mut f = Fixture::local();
+    if replicates {
+        f.replicate();
+    }
     if !in_owner {
         f.put("assets/access.yaml", NOBODY);
     }
@@ -1892,8 +1902,9 @@ fn drawing_with_asset(in_owner: bool) -> (Fixture, String) {
 
 /// A drawing's assets sit under `assets/excalidraw/`, outside the drawing's
 /// folder. Deleting a drawing deletes its assets with it, and rolling that
-/// delete back writes them again. In a local workspace, a widened rule over
-/// the assets holds each of these writers, and none records anything.
+/// delete back writes them again. Once the workspace replicates, a widened
+/// rule over the assets holds each of these writers, and none records
+/// anything. A workspace that does not replicate holds none of them.
 #[test]
 fn a_rule_over_a_drawings_assets_holds_its_delete_and_rollback() {
     type Step = fn(&Fixture) -> Result<(), RuntimeError>;
@@ -1924,31 +1935,38 @@ fn a_rule_over_a_drawings_assets_holds_its_delete_and_rollback() {
     ];
     // Every case runs, so one failure shows them all.
     let mut wrong = Vec::new();
-    for (name, prepare, writer) in cases {
-        let f = drawing_with_ruled_asset();
-        prepare(&f).unwrap_or_else(|error| panic!("{name} setup: {error}"));
-        f.put("assets/access.yaml", EDIT);
-        f.settle();
-        let before = f.moments();
-        let result = writer(&f);
-        // Held, nothing recorded, the hold.
-        let state = (held(&result, "assets"), f.moments() == before, f.holds());
-        if state
-            != (
-                true,
-                true,
-                vec![("assets".to_owned(), "widened".to_owned())],
-            )
-        {
-            wrong.push(format!("{name}: {result:?} {state:?}"));
+    for replicates in [true, false] {
+        for (name, prepare, writer) in cases {
+            let f = drawing_with_ruled_asset(replicates);
+            prepare(&f).unwrap_or_else(|error| panic!("{name} setup: {error}"));
+            f.put("assets/access.yaml", EDIT);
+            f.settle();
+            let before = f.moments();
+            let result = writer(&f);
+            // Held, nothing recorded, the hold; or done, with no hold.
+            let state = (held(&result, "assets"), f.moments() == before, f.holds());
+            let expected = if replicates {
+                (
+                    true,
+                    true,
+                    vec![("assets".to_owned(), "widened".to_owned())],
+                )
+            } else {
+                (false, false, Vec::new())
+            };
+            if state != expected || (!replicates && result.is_err()) {
+                wrong.push(format!(
+                    "{name}, replicates: {replicates}: {result:?} {state:?}"
+                ));
+            }
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 /// Deleting a drawing deletes only its own assets, never a rule beside them.
-/// A rule in the asset folder, widened outside dohc, stays held through the
-/// delete, and the delete records nothing.
+/// Once the workspace replicates, a rule in the asset folder, widened outside
+/// dohc, stays held through the delete, and the delete records nothing.
 #[test]
 fn a_rule_beside_a_drawings_assets_stays_held_through_its_delete() {
     type Step = fn(&Fixture) -> Result<(), RuntimeError>;
@@ -1970,7 +1988,7 @@ fn a_rule_beside_a_drawings_assets_stays_held_through_its_delete() {
     // Every case runs, so one failure shows them all.
     let mut wrong = Vec::new();
     for (name, prepare, writer) in cases {
-        let (f, folder) = drawing_with_asset(true);
+        let (f, folder) = drawing_with_asset(true, true);
         prepare(&f).unwrap_or_else(|error| panic!("{name} setup: {error}"));
         let rule = format!("{folder}/access.yaml");
         f.put(&rule, EDIT);
@@ -2149,13 +2167,22 @@ impl Fixture {
     }
 }
 
-/// A live document's settlement writes its Markdown through dohc. In a
-/// workspace that does not replicate, a folder held for its owner holds the
-/// settlement too, and it records nothing.
+/// A live document's settlement writes its Markdown through dohc. Once the
+/// workspace replicates, a folder held for its owner holds the settlement
+/// too, and it records nothing. A workspace that does not replicate settles.
 #[test]
-fn a_live_document_under_a_held_folder_settles_nothing_in_a_local_workspace() {
+fn a_live_document_under_a_held_folder_settles_nothing() {
+    for replicates in [true, false] {
+        live_document_under_a_held_folder(replicates);
+    }
+}
+
+fn live_document_under_a_held_folder(replicates: bool) {
     const NOTE: &str = "team/note.md";
     let f = Fixture::local();
+    if replicates {
+        f.replicate();
+    }
     f.put("team/access.yaml", NOBODY);
     f.put(NOTE, "seed\n");
     f.settle();
@@ -2189,23 +2216,25 @@ fn a_live_document_under_a_held_folder_settles_nothing_in_a_local_workspace() {
             None,
         ))
         .map(drop);
-    // Held, nothing recorded, the file on disk, the hold.
+    // Held, nothing recorded, the file on disk, the hold; or settled, with
+    // no hold.
     let state = (
         held(&settled, "team"),
         f.moments() == before,
         std::fs::read_to_string(f.root().join(NOTE)).unwrap(),
         f.holds(),
     );
-    assert_eq!(
-        state,
+    let expected = if replicates {
         (
             true,
             true,
             "seed\n".to_owned(),
-            vec![("team".to_owned(), "widened".to_owned())]
-        ),
-        "{settled:?}"
-    );
+            vec![("team".to_owned(), "widened".to_owned())],
+        )
+    } else {
+        (false, false, "seed\n\nedited\n".to_owned(), Vec::new())
+    };
+    assert_eq!(state, expected, "replicates: {replicates}: {settled:?}");
 }
 
 impl Fixture {
@@ -2244,10 +2273,10 @@ impl Fixture {
 }
 
 /// Reconciling a Collection writes an id into a record file that has none,
-/// first in its live document, then on disk. In a workspace that does not
-/// replicate, a folder held for its owner holds the record, and once the
-/// store left the workspace folder nothing is reconciled. Either way the
-/// document and its file stay as they were.
+/// first in its live document, then on disk. Once the workspace replicates,
+/// a folder held for its owner holds the record, and once the store left the
+/// workspace folder nothing is reconciled. Either way the document and its
+/// file stay as they were.
 #[test]
 fn a_collection_record_is_not_adopted_under_a_held_folder_or_a_moved_store() {
     const NOTE: &str = "team/a.md";
@@ -2256,7 +2285,7 @@ fn a_collection_record_is_not_adopted_under_a_held_folder_or_a_moved_store() {
         let f = if moved_store {
             Fixture::movable()
         } else {
-            let f = Fixture::local();
+            let f = Fixture::new();
             f.put("team/access.yaml", NOBODY);
             f
         };

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import {
   createRealDaemonLifecycle,
@@ -18,6 +19,24 @@ import {
   seedWorkspaceManifest,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
+
+const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
+  DatabaseSync: new (path: string) => { exec(sql: string): void; close(): void };
+};
+
+// Rules are ordered and held only in a workspace that replicates. No relay
+// runs here, so give the workspace the identity and push state a relay
+// enrolment leaves, as the engine's own tests do.
+function replicate(rootPath: string, workspaceId: string): void {
+  const db = new DatabaseSync(join(rootPath, ".dohc/engine/engine.db"));
+  try {
+    db.exec(`INSERT INTO sync_identity (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms)
+      VALUES ('${workspaceId}', 'origin-local', 'epoch-local', 'stream-local', 1);
+      INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) VALUES ('${workspaceId}', 'origin-local', 0);`);
+  } finally {
+    db.close();
+  }
+}
 
 const VIEW = "members: view\n";
 const EDIT = "members: edit\n";
@@ -162,6 +181,7 @@ test("an access rule changed outside dohc waits for its owner in Notices until t
       await sessions.closeWorkspace(seeded);
       await lifecycle.stop();
     }
+    replicate(temp.rootPath, workspaceId);
 
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
