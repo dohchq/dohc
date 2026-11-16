@@ -207,6 +207,20 @@ export function latestServiceHostDocumentUpdate(
   return row ? Number(row.relay_seq) : 0;
 }
 
+/** Whether the log admitted any Y.Doc update for the document on main, the version a live host hosts. */
+export function mainLiveLineageExists(
+  storage: StorageContext,
+  input: { workspaceId: string; objectId: string },
+): boolean {
+  return (
+    storage.db
+      .prepare(`SELECT 1 FROM sync_relay_log INDEXED BY ${INDEX}
+    WHERE workspace_id=? AND ${OBJECT}=? AND op_kind IN (${KINDS}) AND op_kind='ydoc.update'
+      AND json_extract(payload_json, '$.versionId')='main' AND relay_admission IS NULL LIMIT 1`)
+      .get(input.workspaceId, input.objectId) !== undefined
+  );
+}
+
 /** A retained conflict effect whose parent the hosted feed never serves, even on re-enrollment. */
 export function hasServiceHostConflictEffect(
   storage: StorageContext,
