@@ -10373,6 +10373,7 @@ function registerIpcHandlers(): void {
       await credentialSessionCache.warm(() => cloudLogin().credentials());
       return chatShareSessionKey(cachedCredentials);
     },
+    joinedByAnotherAccount: otherAccountOf,
     // A shared view's press goes to the relay it came from, for this
     // person's own grant; the relay checks the grant again.
     relayPress: async (operation, input) => {

@@ -266,6 +266,7 @@ ${step}`;
       },
       serverCollection: async () => null,
       inspectionAccount: async () => null,
+      joinedByAnotherAccount: () => false,
       inspectionChanged: () => undefined,
       pressWindows: createPressWindows(() => null),
     });
