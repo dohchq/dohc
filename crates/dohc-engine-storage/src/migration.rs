@@ -3737,6 +3737,14 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("live_device_update_covers.sql"),
         sets_user_version: None,
     },
+    // A paused live note keeps what its owner's screen showed in this blob
+    // until its copy is on disk and Resume clears the Stop.
+    Migration {
+        ordinal: 103,
+        id: "v2-owner-live-stop-copy",
+        sql: V2_OWNER_LIVE_STOP_COPY_DDL,
+        sets_user_version: None,
+    },
 ];
 
 /// A lineage keeps its one immutable adoption. Each activation that held the
@@ -4828,6 +4836,10 @@ END;
 
 ";
 
+const V2_OWNER_LIVE_STOP_COPY_DDL: &str = "\
+ALTER TABLE owner_live_stops ADD COLUMN copy_digest TEXT REFERENCES binary_blobs(sha256) ON DELETE RESTRICT;
+";
+
 const V2_OWNER_OUTBOX_DELIVERY_GROUP_DDL: &str = "\
 ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN delivery_group INTEGER;
 CREATE INDEX owner_ydoc_outbox_entries_group_receipt ON owner_ydoc_outbox_entries\
@@ -5704,6 +5716,10 @@ mod tests {
             (
                 "v2-live-device-update-cover",
                 "4b4a83e956cd254979b190b7cb18b343a6ba66ea0a607a097255bb203491d5e0",
+            ),
+            (
+                "v2-owner-live-stop-copy",
+                "63c04db9b3800555a6486b06f1120336843069694fbb1730a92d27e1fef2f593",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

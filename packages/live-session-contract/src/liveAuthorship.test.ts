@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import {
   liveAuthorIdentity,
+  parseAdmittedLiveAuthorSnapshot,
   parseAutomationDeclaration,
   parseLiveAuthorSnapshot,
 } from "./liveAuthorship";
@@ -46,4 +47,22 @@ it.each([
   },
 ])("refuses malformed automation provenance", (value) => {
   expect(() => parseAutomationDeclaration(value)).toThrow();
+});
+
+it("reads a room save's list of everyone it names only under the owner, each once, and no automation in a list", () => {
+  const ana = { kind: "human", humanId: "ana", humanName: "Ana" };
+  const ben = { kind: "human", humanId: "ben", humanName: "Ben" };
+  const link = { kind: "link", publicPrincipalId: "holder", label: "Anonymous" };
+  const owner = { principalKind: "owner" },
+    named = { principalKind: "named" };
+  expect(parseAdmittedLiveAuthorSnapshot([ana, ben, link], owner)).toEqual([ana, ben, link]);
+  expect(parseAdmittedLiveAuthorSnapshot([ana], named)).toEqual([ana]);
+  expect(() => parseAdmittedLiveAuthorSnapshot([ana, ben], named)).toThrow(/Noncanonical/);
+  expect(() => parseLiveAuthorSnapshot([ana, ben])).toThrow(/Noncanonical/);
+  for (const list of [
+    [ana, ben, ana],
+    [ana, { kind: "automation", ...declaration }],
+    [ana, { kind: "unattributed" }],
+  ])
+    expect(() => parseAdmittedLiveAuthorSnapshot(list, owner)).toThrow(/Noncanonical/);
 });

@@ -37,6 +37,8 @@ import {
 } from "./collectionWriteRoutes";
 import { createOwnerRestoreRoutes, type OwnerRestoreHost } from "./ownerRestoreRoutes";
 import { createHeldDocumentRoutes, type HeldDocumentHost } from "./heldDocumentRoutes";
+import type { LiveRooms } from "./liveRoom";
+import { createLiveRoomPauseRoutes } from "./liveRoomPauseRoutes";
 import { randomUUID } from "node:crypto";
 import {
   createNamedLiveBrowserHttp,
@@ -158,6 +160,8 @@ export interface CreateSyncRelayHandlerOptions {
   appBackendAdmissionLimits?: Partial<AppBackendAdmissionLimits>;
   datasetHost?: RelayDatasetHost;
   ownerRestoreHost?: () => OwnerRestoreHost | undefined;
+  // The live rooms, which save a note's taken edits before a restore closes it.
+  liveRooms?: () => Pick<LiveRooms, "saveFirst"> | undefined;
   // The session host's read of what its hosted replicas hold for released retained work.
   heldDocumentHost?: () => HeldDocumentHost | undefined;
   storage: SyncRelayStorage;
@@ -252,6 +256,7 @@ export function createSyncRelayHandler({
   appBackendAdmissionLimits,
   datasetHost,
   ownerRestoreHost = () => undefined,
+  liveRooms = () => undefined,
   heldDocumentHost = () => undefined,
   storage,
   resolveActor,
@@ -776,6 +781,7 @@ export function createSyncRelayHandler({
     dependentGrantSummary,
     namedBrowserInvitation,
     publicEditRelease,
+    liveRooms,
   );
 
   const requireLinkCapability = (request: Request) => {
@@ -1037,11 +1043,13 @@ export function createSyncRelayHandler({
   const respondToOwnerRestore = createOwnerRestoreRoutes({
     storage,
     host: ownerRestoreHost,
+    rooms: liveRooms,
     nowMs,
     newId,
     lookupUserEmail,
   });
   const respondToHeldDocuments = createHeldDocumentRoutes({ storage, host: heldDocumentHost });
+  const respondToLivePauses = createLiveRoomPauseRoutes(storage);
   const respondToOwnerAppPublication = createOwnerAppPublicationRoutes({
     storage,
     limits: appPublicationLimits,
@@ -1386,6 +1394,21 @@ export function createSyncRelayHandler({
         );
         if (actor.workspaceId !== route.workspaceId) throw notFound();
         return await respondToHeldDocuments(request, route, actor.userId);
+      }
+      if (route.route === "live-pauses") {
+        // Desktop and agent credentials only, never ambient browser cookies.
+        const authorization = request.headers.get("authorization");
+        if (request.headers.has("cookie") || !/^Bearer [^\s]+$/.test(authorization ?? ""))
+          throw notFound();
+        const actor = await resolveActor(
+          new Request(request.url, {
+            headers: { authorization: authorization! },
+            signal: request.signal,
+          }),
+          route.workspaceId,
+        );
+        if (actor.workspaceId !== route.workspaceId) throw notFound();
+        return await respondToLivePauses(request, route, actor.userId);
       }
       if (route.route === "automation-host") {
         // Desktop and agent credentials only, never ambient browser cookies.

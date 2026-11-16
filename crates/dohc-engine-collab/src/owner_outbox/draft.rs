@@ -20,6 +20,55 @@ pub struct ObservedOwnerBinding {
 pub struct OwnerDraft {
     pub observed: ObservedOwnerBinding,
     pub doc: Ydoc,
+    /// The doc also holds committed rows the relay has not applied, which
+    /// nothing durable may read.
+    pub layered: bool,
+}
+
+/// Edits the note's room took and has not saved yet, keyed by room position
+/// and held in memory for the owner's screen. They never reach the store; the
+/// room sends its unsaved edits again after a reconnect or a restart. A save
+/// names the last room position it holds, which can be below its own journal
+/// cursor, so rows go only through that position.
+#[derive(Default)]
+pub(crate) struct OwnerLayer {
+    binding: Option<(String, i64)>,
+    rows: std::collections::BTreeMap<i64, (String, Vec<u8>)>,
+    saved_through: i64,
+}
+
+impl OwnerLayer {
+    fn holds(&self, binding: &LiveObjectBinding) -> bool {
+        self.binding.as_ref().is_some_and(|(lineage, generation)| {
+            *lineage == binding.lineage_claim_id && *generation == binding.restore_fence_generation
+        })
+    }
+
+    pub(super) fn holds_row(&self, binding: &LiveObjectBinding, cursor: i64) -> bool {
+        self.holds(binding) && self.rows.contains_key(&cursor)
+    }
+
+    pub(crate) fn drop_through(&mut self, cursor: i64) {
+        self.saved_through = self.saved_through.max(cursor);
+        self.rows.retain(|held, _| *held > cursor);
+    }
+
+    fn unsaved(&self, binding: &LiveObjectBinding) -> Vec<Vec<u8>> {
+        if !self.holds(binding) {
+            return Vec::new();
+        }
+        self.rows.values().map(|(_, bytes)| bytes.clone()).collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerRowOutcome {
+    Added,
+    /// The same row again, or one at or below the last saved room position.
+    Unchanged,
+    /// A different row at a held cursor. Every row is dropped, and the route
+    /// must reopen to send them again.
+    Reconnect,
 }
 
 #[derive(PartialEq, Eq)]
@@ -295,11 +344,12 @@ pub fn open_draft_cached(
 ) -> Result<OwnerDraftSnapshot, OwnerOutboxError> {
     let key = key(binding)?;
     let cached = cache.take_owner_draft(&key);
+    let layer = cache.owner_layer(&key);
     let (snapshot, cached) = store.read_with(|conn| {
         let proof = draft_proof(conn, binding, revision)?;
         let draft = match cached {
             Some(entry) if entry.proof == proof => entry.draft,
-            _ => open_draft_in(conn, binding, revision)?,
+            _ => open_layered_draft_in(conn, binding, revision, layer)?,
         };
         let initial_update = bounded(&draft.doc)?;
         let approx_bytes = initial_update
@@ -335,12 +385,13 @@ pub fn append_draft_cached(
 ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
     let key = key(&input.binding)?;
     let cached = cache.take_owner_draft(&key);
+    let layer = cache.owner_layer(&key);
     let mut retained = None;
     let result = store.write_with(faults, |tx| {
         let proof = draft_proof(tx, &input.binding, input.expected_revision)?;
         let draft = match cached {
             Some(entry) if entry.proof == proof => entry.draft,
-            _ => open_draft_in(tx, &input.binding, input.expected_revision)?,
+            _ => open_layered_draft_in(tx, &input.binding, input.expected_revision, layer)?,
         };
         let (result, encoded_len) = append_prepared_draft_in_tx(
             tx,
@@ -378,6 +429,69 @@ pub fn append_draft_cached(
         Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
         Err(error) => Err(error),
     }
+}
+
+/// An edit the note's room took at room position `cursor`, for the owner's
+/// screen only. A cached draft takes it at once; a rebuilt one composes it from
+/// the layer. One a save already holds changes nothing: a Yjs update applies
+/// once.
+pub fn put_committed_row(
+    store: &EngineStore,
+    cache: &mut crate::WriterDocCache,
+    binding: &LiveObjectBinding,
+    cursor: i64,
+    bytes: Vec<u8>,
+) -> Result<OwnerRowOutcome, OwnerOutboxError> {
+    binding
+        .validate_canonical()
+        .map_err(OwnerOutboxError::InvalidInput)?;
+    if bytes.is_empty()
+        || bytes.len() > crate::limits::MAX_YDOC_UPDATE_BYTES
+        || !(1..=SAFE).contains(&cursor)
+    {
+        return Err(OwnerOutboxError::InvalidInput("invalid committed row"));
+    }
+    Ydoc::validate_update(&bytes).map_err(collab)?;
+    let key = key(binding)?;
+    // Only the note's current binding shows rows.
+    store.read_with(|conn| super::accepted::current(conn, binding).map(|_| ()))?;
+    let digest = hex_sha256(&bytes);
+    let layer = cache.owner_layer_mut(&key);
+    if !layer.holds(binding) {
+        *layer = OwnerLayer {
+            binding: Some((
+                binding.lineage_claim_id.clone(),
+                binding.restore_fence_generation,
+            )),
+            ..OwnerLayer::default()
+        };
+    }
+    if cursor <= layer.saved_through {
+        return Ok(OwnerRowOutcome::Unchanged);
+    }
+    match layer.rows.get(&cursor).map(|(held, _)| *held == digest) {
+        Some(true) => return Ok(OwnerRowOutcome::Unchanged),
+        Some(false) => {
+            restart_committed_rows(cache, &key);
+            return Ok(OwnerRowOutcome::Reconnect);
+        }
+        None => {
+            layer.rows.insert(cursor, (digest, bytes.clone()));
+        }
+    }
+    if let Some(mut cached) = cache.take_owner_draft(&key) {
+        if cached.draft.observed.binding == *binding && cached.draft.doc.apply(&bytes).is_ok() {
+            cached.draft.layered = true;
+            cached.approx_bytes = cached.approx_bytes.saturating_add(bytes.len());
+            cache.put_owner_draft(key, cached);
+        }
+    }
+    Ok(OwnerRowOutcome::Added)
+}
+
+/// The route reopened: it sends every row above its open's cursor again.
+pub fn restart_committed_rows(cache: &mut crate::WriterDocCache, key: &DocKey) {
+    cache.clear_owner_layer(key);
 }
 
 pub(super) fn collab(error: CollabError) -> OwnerOutboxError {
@@ -586,12 +700,41 @@ pub(super) fn read_observed_in(
     .transpose()
 }
 
-/// Replay without refused bytes; never retain a candidate's missing dependencies.
+/// Replay without refused bytes. An entry is retired only when it needs text
+/// this outbox retired: the refused group's, or an entry retired before it.
+/// An entry that waits only on a collaborator's text the relay has committed
+/// but not yet applied stays pending; that text arrives as an applied frame.
 pub(super) fn refuse_dependent_entries_in_tx(
     tx: &rusqlite::Transaction<'_>,
     outbox_id: &str,
     checkpoint_digest: &str,
 ) -> Result<Ydoc, OwnerOutboxError> {
+    use yrs::updates::decoder::Decode;
+    let insertions = |bytes: &[u8]| -> Result<yrs::IdSet, OwnerOutboxError> {
+        Ok(yrs::Update::decode_v1(bytes)
+            .map_err(|_| OwnerOutboxError::Corrupt)?
+            .insertions(true))
+    };
+    let mut retired = yrs::IdSet::default();
+    {
+        let mut stmt = tx.prepare("SELECT terminal_blob_digest FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND terminal_blob_digest IS NOT NULL").map_err(read_sql)?;
+        let digests = stmt
+            .query_map([outbox_id], |row| row.get::<_, String>(0))
+            .map_err(read_sql)?;
+        for digest in digests {
+            retired.merge_with(insertions(&bounded_blob(tx, &digest.map_err(read_sql)?)?)?);
+        }
+    }
+    // A client's clocks integrate in order, so an entry needs every earlier
+    // clock of each client it writes as.
+    let follows_retired = |own: &yrs::IdSet, retired: &yrs::IdSet| {
+        own.iter().any(|(client, ranges)| {
+            let start = ranges.iter().map(|range| range.start).min();
+            retired.iter().any(|(other, gone)| {
+                other == client && gone.iter().any(|range| Some(range.start) < start)
+            })
+        })
+    };
     let entries = {
         let mut stmt = tx.prepare("SELECT sequence,update_digest,byte_length,accepted_receipt_json FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence").map_err(read_sql)?;
         let entries = stmt
@@ -618,10 +761,17 @@ pub(super) fn refuse_dependent_entries_in_tx(
         candidate.apply(&accepted_bytes).map_err(collab)?;
         candidate.apply(&update).map_err(collab)?;
         if candidate.has_pending_dependencies() {
+            // An entry kept pending stays out of the base. A later entry that
+            // builds on it waits on its clocks, which are not retired.
+            let own = insertions(&update)?;
+            if !follows_retired(&own, &retired) && !candidate.waits_on_any(&retired) {
+                continue;
+            }
             if receipt.is_some() {
                 return Err(OwnerOutboxError::ReceiptMismatch);
             }
             tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason='An earlier write was not accepted.' WHERE outbox_id=?1 AND sequence=?2 AND pending=1", params![outbox_id,sequence]).map_err(write_sql)?;
+            retired.merge_with(own);
         } else {
             accepted_bytes = bounded(&candidate)?;
             accepted = candidate;
@@ -635,6 +785,17 @@ pub fn open_draft_in(
     conn: &Connection,
     binding: &LiveObjectBinding,
     expected_revision: i64,
+) -> Result<OwnerDraft, OwnerOutboxError> {
+    open_layered_draft_in(conn, binding, expected_revision, None)
+}
+
+/// The accepted checkpoint, then the layer's rows above it, then the owner's
+/// pending entries: what the owner's screen shows.
+pub(super) fn open_layered_draft_in(
+    conn: &Connection,
+    binding: &LiveObjectBinding,
+    expected_revision: i64,
+    layer: Option<&OwnerLayer>,
 ) -> Result<OwnerDraft, OwnerOutboxError> {
     let observed = read_observed_in(conn, binding)?.ok_or(OwnerOutboxError::NotFound)?;
     if observed.revision != expected_revision {
@@ -654,6 +815,11 @@ pub fn open_draft_in(
     let doc = Ydoc::wire();
     doc.apply(&bounded_blob(conn, &observed.checkpoint_digest)?)
         .map_err(collab)?;
+    let rows = layer.map_or_else(Vec::new, |layer| layer.unsaved(binding));
+    for row in &rows {
+        doc.apply(row).map_err(collab)?;
+    }
+    let layered = !rows.is_empty();
     apply_pending_in(
         conn,
         binding,
@@ -661,7 +827,11 @@ pub fn open_draft_in(
         observed.limits.max_pending_bytes,
         PendingReplay::Draft,
     )?;
-    Ok(OwnerDraft { observed, doc })
+    Ok(OwnerDraft {
+        observed,
+        doc,
+        layered,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -732,7 +902,11 @@ pub(super) fn apply_pending_in(
             }
         }
     }
-    if doc.has_pending_dependencies() {
+    // An owner entry typed into a collaborator's text the relay has not
+    // applied waits for that text. A draft opened without those rows, as after
+    // a restart, still opens; the entry shows when the rows or the applied
+    // frame arrive.
+    if replay == PendingReplay::Checkpoint && doc.has_pending_dependencies() {
         return Err(OwnerOutboxError::ParentMismatch);
     }
     // Indexing reads fields only; it does not persist the merged document.
@@ -800,8 +974,11 @@ fn append_prepared_draft_in_tx(
         return Err(OwnerOutboxError::InvalidInput("invalid draft update size"));
     }
     let epoch = draft.doc.lineage_epoch_tag();
+    // A draft may already wait on rows it does not hold (`apply_pending_in`).
+    // The edit may add no wait of its own.
+    let waits = draft.doc.pending_waits();
     draft.doc.apply(&update).map_err(collab)?;
-    if draft.doc.has_pending_dependencies() || draft.doc.lineage_epoch_tag() != epoch {
+    if draft.doc.pending_waits() != waits || draft.doc.lineage_epoch_tag() != epoch {
         return Err(OwnerOutboxError::ParentMismatch);
     }
     draft
@@ -838,7 +1015,35 @@ fn append_prepared_draft_in_tx(
     let actor = automation_declaration
         .map(|declaration| declaration.automation_id.as_str())
         .or_else(|| agent_declaration.map(|declaration| declaration.agent_id.as_str()));
-    index_frontmatter_in_tx(tx, binding, &draft.doc, actor, attribution.as_ref(), now_ms)?;
+    // The Collection index reads accepted state and the owner's entries,
+    // never the rows. An entry still waiting on rows is indexed when the
+    // applied frame settles it.
+    let unlayered = if draft.layered {
+        let doc = Ydoc::wire();
+        doc.apply(&bounded_blob(tx, &draft.observed.checkpoint_digest)?)
+            .map_err(collab)?;
+        match apply_pending_in(
+            tx,
+            binding,
+            &doc,
+            draft.observed.limits.max_pending_bytes,
+            PendingReplay::Checkpoint,
+        ) {
+            Ok(()) => Some(doc),
+            Err(OwnerOutboxError::Storage(error)) => return Err(OwnerOutboxError::Storage(error)),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let visible = if draft.layered {
+        unlayered.as_ref()
+    } else {
+        Some(&draft.doc)
+    };
+    if let Some(visible) = visible {
+        index_frontmatter_in_tx(tx, binding, visible, actor, attribution.as_ref(), now_ms)?;
+    }
     Ok((result, encoded_len))
 }
 
@@ -2952,6 +3157,621 @@ mod tests {
             .unwrap();
         assert_eq!(after.native_head_sequence, final_state.native_head_sequence);
         assert_eq!(after.revision, final_state.revision);
+    }
+
+    fn projected(doc: &Ydoc) -> String {
+        doc.project(crate::ContentKind::Richdoc).unwrap().content
+    }
+
+    fn snapshot_text(snapshot: &OwnerDraftSnapshot) -> String {
+        let doc = Ydoc::wire();
+        doc.apply(&snapshot.initial_update).unwrap();
+        projected(&doc)
+    }
+
+    fn revision(store: &EngineStore, observed: &ObservedOwnerBinding) -> i64 {
+        store
+            .read_with(|c| read_observed_in(c, &observed.binding))
+            .unwrap()
+            .unwrap()
+            .revision
+    }
+
+    fn stored_text(store: &EngineStore) -> String {
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        store
+            .read_with(|conn| {
+                Ok::<_, OwnerOutboxError>(projected(
+                    &crate::load_doc_in(conn, &key).map_err(collab)?,
+                ))
+            })
+            .unwrap()
+    }
+
+    fn owner_edit(
+        observed: &ObservedOwnerBinding,
+        append_key: &str,
+        update: Vec<u8>,
+    ) -> OwnerDraftAppendInput {
+        OwnerDraftAppendInput {
+            person_edit: true,
+            binding: observed.binding.clone(),
+            expected_revision: 1,
+            append_key: append_key.into(),
+            update,
+            now_ms: 3,
+            agent_declaration: None,
+            agent_run_id: None,
+            automation_declaration: None,
+        }
+    }
+
+    /// The fixture holds a heading and a paragraph, so a collaborator's
+    /// appended paragraph is block 2.
+    const COLLABORATOR_BLOCK: u32 = 2;
+
+    #[test]
+    fn owner_layer_row_shows_in_draft_not_in_file() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&checkpoint).unwrap();
+        let row = collaborator.richdoc_append_paragraph("Committed by a collaborator");
+        assert_eq!(
+            put_committed_row(&store, &mut cache, &observed.binding, 5, row.clone()).unwrap(),
+            OwnerRowOutcome::Added
+        );
+        let shown = open_draft_cached(
+            &store,
+            &mut cache,
+            &observed.binding,
+            revision(&store, &observed),
+        )
+        .unwrap();
+        assert!(snapshot_text(&shown).contains("Committed by a collaborator"));
+        assert!(!stored_text(&store).contains("Committed by a collaborator"));
+
+        // The owner types inside the collaborator's paragraph.
+        let owner = Ydoc::wire();
+        owner.apply(&shown.initial_update).unwrap();
+        let typed = owner
+            .richdoc_insert_text(COLLABORATOR_BLOCK, 0, "Owner says: ")
+            .unwrap();
+        append_draft_cached(
+            &mut store,
+            &mut cache,
+            "workspace",
+            owner_edit(&observed, "typed", typed),
+            &NoFaults,
+        )
+        .unwrap();
+        let shown = open_draft_cached(
+            &store,
+            &mut cache,
+            &observed.binding,
+            revision(&store, &observed),
+        )
+        .unwrap();
+        assert!(snapshot_text(&shown).contains("Owner says: Committed by a collaborator"));
+        assert!(!stored_text(&store).contains("Committed by a collaborator"));
+        let row_digest = hex_sha256(&row);
+        let stored_row = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM binary_blobs WHERE sha256=?1)",
+                    [&row_digest],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(read_sql)
+            })
+            .unwrap();
+        assert!(!stored_row);
+
+        // After a restart the rows are gone: the draft still opens, and the
+        // owner's edit waits in the outbox for them.
+        let restarted = store
+            .read_with(|conn| open_draft_in(conn, &observed.binding, 1))
+            .unwrap();
+        assert!(!projected(&restarted.doc).contains("Committed by a collaborator"));
+        assert!(restarted.doc.has_pending_dependencies());
+
+        // The applied frame writes the collaborator's text to the note, and
+        // the owner's edit joins it on screen.
+        feed(&mut store, &observed, 5, row);
+        cache.remove(&key);
+        cache.drop_owner_rows_through(&key, 5);
+        assert!(stored_text(&store).contains("Committed by a collaborator"));
+        assert!(!stored_text(&store).contains("Owner says: "));
+        let shown = open_draft_cached(
+            &store,
+            &mut cache,
+            &observed.binding,
+            revision(&store, &observed),
+        )
+        .unwrap();
+        assert!(snapshot_text(&shown).contains("Owner says: Committed by a collaborator"));
+    }
+
+    #[test]
+    fn owner_layer_resend_is_noop_and_applied_frame_drops_its_row() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&checkpoint).unwrap();
+        let first = collaborator.richdoc_append_paragraph("First row");
+        let second = collaborator.richdoc_append_paragraph("Second row");
+        let put = |store: &EngineStore, cache: &mut crate::WriterDocCache, cursor, bytes: &[u8]| {
+            put_committed_row(store, cache, &observed.binding, cursor, bytes.to_vec()).unwrap()
+        };
+        assert_eq!(put(&store, &mut cache, 5, &first), OwnerRowOutcome::Added);
+        assert_eq!(put(&store, &mut cache, 6, &second), OwnerRowOutcome::Added);
+        assert_eq!(
+            put(&store, &mut cache, 5, &first),
+            OwnerRowOutcome::Unchanged
+        );
+        let text = snapshot_text(
+            &open_draft_cached(
+                &store,
+                &mut cache,
+                &observed.binding,
+                revision(&store, &observed),
+            )
+            .unwrap(),
+        );
+        assert_eq!(text.matches("First row").count(), 1);
+        assert!(text.contains("Second row"));
+
+        // The applied frame at 5 drops the row at 5 and keeps the one at 6.
+        feed(&mut store, &observed, 5, first.clone());
+        cache.remove(&key);
+        cache.drop_owner_rows_through(&key, 5);
+        assert_eq!(cache.owner_layer(&key).unwrap().rows.len(), 1);
+        assert_eq!(
+            put(&store, &mut cache, 5, &first),
+            OwnerRowOutcome::Unchanged
+        );
+        let text = snapshot_text(
+            &open_draft_cached(
+                &store,
+                &mut cache,
+                &observed.binding,
+                revision(&store, &observed),
+            )
+            .unwrap(),
+        );
+        assert!(text.contains("First row") && text.contains("Second row"));
+
+        // A different row at a held cursor drops every row.
+        let other = collaborator.richdoc_append_paragraph("Not the row at 6");
+        assert_eq!(
+            put(&store, &mut cache, 6, &other),
+            OwnerRowOutcome::Reconnect
+        );
+        assert!(cache.owner_layer(&key).is_none());
+        let text = snapshot_text(
+            &open_draft_cached(
+                &store,
+                &mut cache,
+                &observed.binding,
+                revision(&store, &observed),
+            )
+            .unwrap(),
+        );
+        assert!(!text.contains("Second row"));
+    }
+
+    #[test]
+    fn a_save_drops_only_the_rows_it_holds() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&checkpoint).unwrap();
+        let first = collaborator.richdoc_append_paragraph("Saved row");
+        let second = collaborator.richdoc_append_paragraph("Unsaved row");
+        let put = |store: &EngineStore, cache: &mut crate::WriterDocCache, cursor, bytes: &[u8]| {
+            put_committed_row(store, cache, &observed.binding, cursor, bytes.to_vec()).unwrap()
+        };
+        assert_eq!(put(&store, &mut cache, 5, &first), OwnerRowOutcome::Added);
+        assert_eq!(put(&store, &mut cache, 6, &second), OwnerRowOutcome::Added);
+        let shown = |store: &EngineStore, cache: &mut crate::WriterDocCache| {
+            snapshot_text(
+                &open_draft_cached(store, cache, &observed.binding, revision(store, &observed))
+                    .unwrap(),
+            )
+        };
+
+        // The save's journal cursor, 7, is above the row at 6 it does not hold.
+        feed(&mut store, &observed, 7, first.clone());
+        cache.remove(&key);
+        cache.drop_owner_rows_through(&key, 5);
+        assert!(shown(&store, &mut cache).contains("Unsaved row"));
+        assert_eq!(
+            put(&store, &mut cache, 5, &first),
+            OwnerRowOutcome::Unchanged
+        );
+
+        // After a restart the room sends its unsaved row again.
+        restart_committed_rows(&mut cache, &key);
+        assert_eq!(put(&store, &mut cache, 6, &second), OwnerRowOutcome::Added);
+        let text = shown(&store, &mut cache);
+        assert!(text.contains("Saved row") && text.contains("Unsaved row"));
+    }
+
+    #[test]
+    fn owner_layer_rows_survive_draft_eviction_and_clear_on_binding_change() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        // A budget of zero evicts every cached draft at once.
+        let mut cache = crate::WriterDocCache::with_limits_for_test(16, 0);
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&checkpoint).unwrap();
+        let row = collaborator.richdoc_append_paragraph("Held through eviction");
+        put_committed_row(&store, &mut cache, &observed.binding, 5, row).unwrap();
+        cache.clear();
+        let text = snapshot_text(
+            &open_draft_cached(
+                &store,
+                &mut cache,
+                &observed.binding,
+                revision(&store, &observed),
+            )
+            .unwrap(),
+        );
+        assert!(text.contains("Held through eviction"));
+
+        // Rows of another binding generation are never composed.
+        let mut later = observed.binding.clone();
+        later.restore_fence_generation += 1;
+        assert!(cache.owner_layer(&key).unwrap().unsaved(&later).is_empty());
+        restart_committed_rows(&mut cache, &key);
+        let text = snapshot_text(
+            &open_draft_cached(
+                &store,
+                &mut cache,
+                &observed.binding,
+                revision(&store, &observed),
+            )
+            .unwrap(),
+        );
+        assert!(!text.contains("Held through eviction"));
+    }
+
+    #[test]
+    fn dependent_refusal_retires_only_entries_missing_the_refused_text() {
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let mut cache = crate::WriterDocCache::default();
+        let collaborator = Ydoc::wire();
+        collaborator.apply(&checkpoint).unwrap();
+        let row = collaborator.richdoc_append_paragraph("Collaborator paragraph");
+        put_committed_row(&store, &mut cache, &observed.binding, 5, row).unwrap();
+        let shown = open_draft_cached(
+            &store,
+            &mut cache,
+            &observed.binding,
+            revision(&store, &observed),
+        )
+        .unwrap();
+
+        // One editor: a paragraph the relay refuses, then a word inside it.
+        let editor = Ydoc::wire();
+        editor.apply(&shown.initial_update).unwrap();
+        let refused = editor.richdoc_append_paragraph("Refused paragraph");
+        let builds_on_refused = editor.richdoc_insert_text(3, 0, "More: ").unwrap();
+        // A second editor types into the collaborator's unapplied paragraph.
+        let other = Ydoc::wire();
+        other.apply(&shown.initial_update).unwrap();
+        let inside_collaborator = other
+            .richdoc_insert_text(COLLABORATOR_BLOCK, 0, "Inside: ")
+            .unwrap();
+        let mut appended = Vec::new();
+        for (append_key, update) in [
+            ("refused", refused),
+            ("builds", builds_on_refused),
+            ("inside", inside_collaborator),
+        ] {
+            appended.push(
+                append_draft_cached(
+                    &mut store,
+                    &mut cache,
+                    "workspace",
+                    owner_edit(&observed, append_key, update),
+                    &NoFaults,
+                )
+                .unwrap(),
+            );
+        }
+        let refusal = OwnerOutboxRefuseInput {
+            outbox_id: appended[0].outbox_id.clone(),
+            delivery_id: appended[0].delivery_id.clone(),
+            update_digest: appended[0].update_digest.clone(),
+            reason: "The presser no longer has edit access.".into(),
+        };
+        store
+            .write_with(&NoFaults, |tx| {
+                refuse_entry_in_tx(tx, "workspace", &refusal, 12)
+            })
+            .unwrap();
+        let writes = ["refused", "builds", "inside"].map(|append_key| OwnerDraftWrite {
+            outbox_id: Some(appended[0].outbox_id.clone()),
+            binding: observed.binding.clone(),
+            native_head_sequence: observed.native_head_sequence,
+            append_key: append_key.into(),
+        });
+        assert_eq!(
+            store
+                .read_with(|conn| write_states_in(conn, "workspace", &writes))
+                .unwrap(),
+            ["not-accepted", "not-accepted", "pending"]
+        );
+    }
+
+    /// A held note: the collaborator's committed row at 5, the owner's own
+    /// paragraph, and the owner's words typed into the collaborator's row.
+    fn held_note(
+        store: &mut EngineStore,
+        cache: &mut crate::WriterDocCache,
+        observed: &ObservedOwnerBinding,
+        checkpoint: &[u8],
+    ) {
+        let collaborator = Ydoc::wire();
+        collaborator.apply(checkpoint).unwrap();
+        let row = collaborator.richdoc_append_paragraph("Committed by a collaborator");
+        put_committed_row(store, cache, &observed.binding, 5, row).unwrap();
+        let shown = open_draft_cached(store, cache, &observed.binding, 1).unwrap();
+        let owner = Ydoc::wire();
+        owner.apply(&shown.initial_update).unwrap();
+        let inside = owner
+            .richdoc_insert_text(COLLABORATOR_BLOCK, 0, "Owner says: ")
+            .unwrap();
+        let standalone = owner.richdoc_append_paragraph("Standalone owner paragraph");
+        for (append_key, update) in [("inside", inside), ("standalone", standalone)] {
+            append_draft_cached(
+                store,
+                cache,
+                "workspace",
+                owner_edit(observed, append_key, update),
+                &NoFaults,
+            )
+            .unwrap();
+        }
+    }
+
+    fn pause_input(observed: &ObservedOwnerBinding) -> super::super::release::OwnerPauseInput {
+        super::super::release::OwnerPauseInput {
+            binding: observed.binding.clone(),
+            applied_cursor: 0,
+            row_cursor: 5,
+            copy_path: "owner (unsaved edits).md".into(),
+            kept_snapshot: None,
+            now_ms: 20,
+        }
+    }
+
+    fn entry_count(store: &EngineStore) -> i64 {
+        store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM owner_ydoc_outbox_entries", [], |r| {
+                    r.get(0)
+                })
+                .map_err(read_sql)
+            })
+            .unwrap()
+    }
+
+    fn copy_text(store: &EngineStore) -> Option<String> {
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        store
+            .read_with(|conn| super::super::release::paused_copy_in(conn, &key))
+            .unwrap()
+            .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+    }
+
+    #[test]
+    fn owner_unapplied_entries_are_in_copy_not_note() {
+        use super::super::release;
+        let (_dir, mut store, observed, checkpoint) = fixture();
+        install(&mut store, &observed, &checkpoint);
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let mut cache = crate::WriterDocCache::default();
+        held_note(&mut store, &mut cache, &observed, &checkpoint);
+
+        // Accepted is still at 0, so a pause at A=3 waits for the route.
+        let mut early = pause_input(&observed);
+        early.applied_cursor = 3;
+        assert!(matches!(
+            release::pause_cached(
+                &mut store,
+                &mut cache,
+                &early,
+                &NoFaults,
+                |tx, pause| pause(tx)
+            ),
+            Err(OwnerOutboxError::AcceptedStateIncomplete)
+        ));
+        // So does one whose last row the layer does not hold.
+        let mut missing_row = pause_input(&observed);
+        missing_row.row_cursor = 6;
+        assert!(matches!(
+            release::pause_cached(
+                &mut store,
+                &mut cache,
+                &missing_row,
+                &NoFaults,
+                |tx, pause| pause(tx)
+            ),
+            Err(OwnerOutboxError::AcceptedStateIncomplete)
+        ));
+
+        let stop = release::pause_cached(
+            &mut store,
+            &mut cache,
+            &pause_input(&observed),
+            &NoFaults,
+            |tx, pause| pause(tx),
+        )
+        .unwrap();
+        let paused = stop.paused.clone().unwrap();
+        assert_eq!((paused.applied_cursor, paused.row_cursor), (0, 5));
+        assert!(!paused.copy_written);
+        assert_eq!(
+            (stop.state.as_str(), stop.retirement_owed),
+            ("released", false)
+        );
+        let copy = copy_text(&store).unwrap();
+        assert!(copy.contains("Owner says: Committed by a collaborator"));
+        assert!(copy.contains("Standalone owner paragraph"));
+        let note = stored_text(&store);
+        assert!(!note.contains("Committed by a collaborator"));
+        assert!(!note.contains("Standalone owner paragraph"));
+        assert_eq!(entry_count(&store), 0);
+        assert!(store
+            .read_with(|conn| read_observed_in(conn, &observed.binding))
+            .unwrap()
+            .is_none());
+
+        // The pause, Stop and an ordinary release leave a paused row as it is.
+        assert_eq!(
+            release::pause_cached(
+                &mut store,
+                &mut cache,
+                &pause_input(&observed),
+                &NoFaults,
+                |tx, pause| pause(tx)
+            )
+            .unwrap()
+            .paused,
+            Some(paused.clone())
+        );
+        let stopped = committed(
+            store
+                .write_with(&NoFaults, |tx| release::request_in_tx(tx, &key, 21))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stopped.paused, Some(paused.clone()));
+        let released = committed(
+            store
+                .write_with(&NoFaults, |tx| {
+                    release::release_in_tx(
+                        tx,
+                        &observed.binding,
+                        Some(9),
+                        None,
+                        22,
+                        |_, _, _, _, _| Ok(()),
+                    )
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(released.paused, Some(paused.clone()));
+        assert_eq!(copy_text(&store).unwrap(), copy);
+
+        // The listing shows it until Resume clears it, which frees the copy.
+        let listed = store
+            .read_with(|conn| release::list_requested_in(conn, "workspace"))
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        let written = committed(
+            store
+                .write_with(&NoFaults, |tx| {
+                    release::copy_written_in_tx(tx, &key, "owner (unsaved edits 2).md", 23)
+                })
+                .unwrap(),
+        )
+        .unwrap()
+        .paused
+        .unwrap();
+        assert!(written.copy_written);
+        assert_eq!(written.copy_path, "owner (unsaved edits 2).md");
+        let digest = hex_sha256(copy.as_bytes());
+        committed(
+            store
+                .write_with(&NoFaults, |tx| release::clear_in_tx(tx, &key))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(copy_text(&store).is_none());
+        assert!(!store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM binary_blobs WHERE sha256=?1)",
+                    [&digest],
+                    |r| r.get::<_, bool>(0),
+                )
+                .map_err(read_sql)
+            })
+            .unwrap());
+    }
+
+    #[test]
+    fn paused_road_at_each_kill_point() {
+        use super::super::release;
+        use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
+        struct Crash(FaultPoint);
+        impl FaultInjector for Crash {
+            fn poll(&self, point: FaultPoint) -> FaultAction {
+                if point == self.0 {
+                    FaultAction::Crash
+                } else {
+                    FaultAction::Continue
+                }
+            }
+        }
+        for point in [
+            FaultPoint::StorageBeforePersist,
+            FaultPoint::StorageAfterCommitBeforeAck,
+        ] {
+            let (_dir, mut store, observed, checkpoint) = fixture();
+            install(&mut store, &observed, &checkpoint);
+            let mut cache = crate::WriterDocCache::default();
+            held_note(&mut store, &mut cache, &observed, &checkpoint);
+            assert!(release::pause_cached(
+                &mut store,
+                &mut cache,
+                &pause_input(&observed),
+                &Crash(point),
+                |tx, pause| pause(tx)
+            )
+            .is_err());
+            if point == FaultPoint::StorageBeforePersist {
+                // Still bound, nothing removed, no copy.
+                assert_eq!(entry_count(&store), 2);
+                assert!(copy_text(&store).is_none());
+                assert!(store
+                    .read_with(|conn| read_observed_in(conn, &observed.binding))
+                    .unwrap()
+                    .is_some());
+            } else {
+                assert_eq!(entry_count(&store), 0);
+                assert!(copy_text(&store)
+                    .unwrap()
+                    .contains("Standalone owner paragraph"));
+            }
+            // Running the road again ends paused with one copy holding the
+            // owner's text, never a note holding a row above A.
+            let stop = release::pause_cached(
+                &mut store,
+                &mut cache,
+                &pause_input(&observed),
+                &NoFaults,
+                |tx, pause| pause(tx),
+            )
+            .unwrap();
+            assert!(stop.paused.is_some());
+            let copy = copy_text(&store).unwrap();
+            assert!(copy.contains("Owner says: Committed by a collaborator"));
+            assert!(copy.contains("Standalone owner paragraph"));
+            assert!(!stored_text(&store).contains("Committed by a collaborator"));
+        }
     }
 
     #[test]

@@ -37,6 +37,7 @@ import { LIVE_AUTHOR_CLIENTS } from "./liveAuthorshipSchema";
 import { captureSqliteReadRevisionMatches } from "./readRevision";
 import {
   liveAuthorIdentity,
+  parseAdmittedLiveAuthorSnapshot,
   parseLiveAuthorSnapshot,
   type LiveAuthorSnapshot,
 } from "@dohc/live-session-contract";
@@ -265,6 +266,13 @@ function liveJournalSeedClient(
   }
   return Math.max(1, hash.digest().readUInt32BE(0));
 }
+/** The editor id a note's original content is written under. Nobody may write under it. */
+export function liveJournalSeedClientId(
+  storage: StorageContext,
+  document: LiveDocumentKey,
+): number | null {
+  return liveJournalSeedClient(document, liveJournalSeedSource(storage, document));
+}
 interface DecodedJournalRow {
   admitted: AdmittedLiveUpdate;
   checkpoint: { digest: string; bytes: Uint8Array } | null;
@@ -358,7 +366,7 @@ function journalMetadataWithBinding(
     raw.canonical_version === 2
       ? {
           canonicalVersion: 2 as const,
-          authorSnapshot: journalAuthorSnapshot(raw.author_snapshot_json, snapshots),
+          authorSnapshot: journalAuthorSnapshot(raw.author_snapshot_json, authority, snapshots),
           firstSeenDeletes:
             raw.first_seen_deletes_json === "[]"
               ? []
@@ -388,16 +396,18 @@ function journalMetadataWithBinding(
 }
 function journalAuthorSnapshot(
   value: unknown,
+  authority: { readonly principalKind: string },
   snapshots?: Map<string, LiveAuthorSnapshot>,
 ): LiveAuthorSnapshot {
   journalIntegrity(typeof value === "string");
-  const cached = snapshots?.get(value);
-  // Reuse validation for identical stored bytes only within this SQLite read.
-  // Each row owns its entries so callers cannot change another row's credit.
+  // Reuse validation for identical stored bytes under the same kind of authority only within
+  // this SQLite read. Each row owns its entries so callers cannot change another row's credit.
+  const key = `${authority.principalKind === "owner" ? "owner" : "other"}:${value}`;
+  const cached = snapshots?.get(key);
   if (cached) return cached.map((author) => ({ ...author }));
-  const parsed = parseLiveAuthorSnapshot(JSON.parse(value));
+  const parsed = parseAdmittedLiveAuthorSnapshot(JSON.parse(value), authority);
   snapshots?.set(
-    value,
+    key,
     parsed.map((author) => ({ ...author })),
   );
   return parsed;
@@ -1157,7 +1167,10 @@ function snapshotJournalCut(value: unknown): LiveUpdateJournalCut {
         ...(metadata.canonicalVersion === 2
           ? {
               canonicalVersion: 2 as const,
-              authorSnapshot: parseLiveAuthorSnapshot(copyJournalData(metadata.authorSnapshot)),
+              authorSnapshot: parseAdmittedLiveAuthorSnapshot(
+                copyJournalData(metadata.authorSnapshot),
+                authority,
+              ),
               firstSeenDeletes: journalRanges(metadata.firstSeenDeletes),
               ...(metadata.checkpointCoverage === undefined
                 ? {}
@@ -1570,7 +1583,13 @@ export function appendValidatedLiveJournal(
       sequence >= maximumCursor &&
       sequence < Number.MAX_SAFE_INTEGER,
   );
-  const nextCursor = sequence + 1;
+  // Live rooms number their taken edits from the same rising count, so a room's save is always
+  // above every edit it holds.
+  const roomSequence = storage.db
+    .prepare("SELECT seq FROM sqlite_sequence WHERE name='sync_relay_live_room_edits'")
+    .get();
+  const nextCursor = Math.max(sequence, roomSequence ? authorityInteger(roomSequence.seq) : 0) + 1;
+  journalIntegrity(nextCursor <= Number.MAX_SAFE_INTEGER);
   const predecessor = storage.db
     .prepare(`SELECT relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes FROM ${LIVE_JOURNAL_TABLE}
     WHERE ${JOURNAL_DOCUMENT_WHERE} ORDER BY journal_cursor DESC LIMIT 1`)
@@ -1682,13 +1701,14 @@ export function appendValidatedLiveJournal(
   assertWorkspaceQuota(storage, document.workspaceId, charge);
   onFirstWrite?.();
   const insert = storage.db
-    .prepare(`INSERT INTO ${LIVE_JOURNAL_TABLE}(delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,
+    .prepare(`INSERT INTO ${LIVE_JOURNAL_TABLE}(journal_cursor,delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,
     current_path,selector_paths_json,restore_fence_generation,principal_kind,principal_id,grant_id,grant_generation,
     accepting_host_epoch,received_at_ms,update_bytes,validation_checkpoint_sha256,validation_checkpoint_bytes,
     relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes,restore_operation_id,
     canonical_version,author_context_json,author_snapshot_json,first_seen_deletes_json,checkpoint_coverage_json,seed_first_seen_json)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(
+      nextCursor,
       ...values,
       updateBytes,
       checkpointDigest,
@@ -1764,7 +1784,13 @@ export function commitLiveUpdateJournal(
       "updateBytes",
       "receivedAtMs",
     ],
-    ["trustedAccount", "trustedAutomation", "trustedAutomationPress", "trustedAutomationGrant"],
+    [
+      "trustedAccount",
+      "trustedAutomation",
+      "trustedAutomationPress",
+      "trustedAutomationGrant",
+      "room",
+    ],
   );
   const trustedAccount =
     outer.trustedAccount === undefined
@@ -1848,6 +1874,20 @@ export function commitLiveUpdateJournal(
     (!trustedAutomation || actorKind !== "owner" || trustedAutomationPress)
   )
     return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
+  const room =
+    outer.room === undefined
+      ? undefined
+      : (() => {
+          const save = baselineRecord(outer.room, ["authors", "committed"]);
+          if (typeof save.committed !== "function") throw new TypeError("Invalid live room save.");
+          return {
+            authors: parseAdmittedLiveAuthorSnapshot(save.authors, expectedAuthority),
+            committed: save.committed as (journalCursor: number) => () => void,
+          };
+        })();
+  // A room's save is the room's own write under the owner's authority, never an editor's.
+  if (room && (actorKind !== "owner" || trustedAutomation || rawMetadata.authorContext))
+    return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
   const { token, issued } = captureJournalCut(storage, outer.cutToken);
   const updateBytes = journalBytes(outer.updateBytes),
     receivedAtMs = authorityInteger(outer.receivedAtMs);
@@ -1878,6 +1918,7 @@ export function commitLiveUpdateJournal(
   const refused = (
     result: Exclude<RelayLiveUpdateJournalResult["result"], { kind: "accepted" }>,
   ) => ({ reply: { result, admitted: null } as RelayLiveUpdateJournalResult });
+  let roomCommitted: (() => void) | undefined;
   let committed: {
     reply: RelayLiveUpdateJournalResult;
     row?: DecodedJournalRow;
@@ -2048,7 +2089,26 @@ export function commitLiveUpdateJournal(
       const firstSeenDeletes = validation.evidence.candidate.firstSeenDeletes;
       const clients = [...new Set(firstSeen.map((range) => range.clientId))];
       const bindings: { clientId: number; snapshot: string }[] = [];
-      if (authorSnapshot.length && clients.length) {
+      if (room) {
+        // The room tied each new id to its sender when it took the edit. A save whose ids and
+        // senders don't match is refused, never committed with names dropped.
+        authorSnapshot = room.authors;
+        const named = new Set(authorSnapshot.map(liveAuthorIdentity));
+        for (const clientId of clients) {
+          const prior = storage.db
+            .prepare(
+              `SELECT author_snapshot_json FROM ${LIVE_AUTHOR_CLIENTS} WHERE ${JOURNAL_DOCUMENT_WHERE} AND client_id=?`,
+            )
+            .get(...documentParams(document), clientId);
+          if (
+            !prior ||
+            !parseLiveAuthorSnapshot(JSON.parse(String(prior.author_snapshot_json))).every(
+              (author) => named.has(liveAuthorIdentity(author)),
+            )
+          )
+            return refused({ kind: "refused", reason: "provenance-refused" });
+        }
+      } else if (authorSnapshot.length && clients.length) {
         const encoded = JSON.stringify(authorSnapshot);
         const identities = authorSnapshot.map(liveAuthorIdentity);
         let unbound = 0,
@@ -2079,11 +2139,14 @@ export function commitLiveUpdateJournal(
           bindings.length = 0;
         }
       }
-      authorSnapshot = limitLiveDeclaredAgents(
+      const limited = limitLiveDeclaredAgents(
         read.cut.suffix.map((row) => row.metadata),
         current.authority,
         authorSnapshot,
       );
+      if (room && !isDeepStrictEqual(limited, authorSnapshot))
+        return refused({ kind: "refused", reason: "provenance-refused" });
+      authorSnapshot = limited;
       if (
         !admitsWorkspaceLiveAuthorship(
           storage,
@@ -2159,6 +2222,7 @@ export function commitLiveUpdateJournal(
           .prepare(`UPDATE sync_relay_personal_agents SET last_action_at_ms = MAX(COALESCE(last_action_at_ms, 0), ?)
           WHERE agent_id = ?`)
           .run(receivedAtMs, request.actor.agentId);
+      roomCommitted = room?.committed(admitted.metadata.accepted.receipt.journalCursor);
       return {
         reply: {
           result: {
@@ -2184,6 +2248,7 @@ export function commitLiveUpdateJournal(
       return { result: { kind: "retry", reason: "admission-unavailable" }, admitted: null };
     throw error;
   }
+  roomCommitted?.();
   if (committed.row) verifyJournalRow(committed.row);
   if (committed.advancedCut) verifyJournalCut(committed.advancedCut);
   if (committed.history)

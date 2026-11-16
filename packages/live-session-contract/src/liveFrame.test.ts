@@ -110,6 +110,37 @@ function makeLive(serverLimits = limits, hostEpoch = 1) {
 }
 
 describe("live frame codec", () => {
+  it("carries a room's rows and the last row a save holds, which must be below its cursor", () => {
+    const common = {
+      kind: "begin",
+      transferId: 3,
+      totalBytes: 9,
+      digest: "ab".repeat(32),
+    } as const;
+    const frames: LiveFrame[] = [
+      { ...common, purpose: "applied-update", journalCursor: 19 },
+      { ...common, purpose: "applied-update", journalCursor: 19, rowsThrough: 17 },
+      { ...common, purpose: "room-row", position: 18 },
+    ];
+    for (const frame of frames) {
+      const encoded = encodeLiveFrame(frame, 586);
+      expect(decodeLiveFrame(encoded, 586)).toEqual(frame);
+      for (let index = encoded.length - 7; index < encoded.length; index++)
+        expect(() => decodeLiveFrame(encoded.slice(0, index), 586)).toThrow();
+    }
+    // A plain applied update keeps its old bytes.
+    expect(encodeLiveFrame(frames[1]!, 586).length).toBe(
+      encodeLiveFrame(frames[0]!, 586).length + 8,
+    );
+    for (const rowsThrough of [0, 19, 20])
+      expect(() =>
+        encodeLiveFrame(
+          { ...common, purpose: "applied-update", journalCursor: 19, rowsThrough },
+          586,
+        ),
+      ).toThrow();
+    expect(() => encodeLiveFrame({ ...common, purpose: "room-row", position: 0 }, 586)).toThrow();
+  });
   it("encodes membership as only revision, overflow and fixed-width pseudonyms", () => {
     const frame = {
       kind: "membership",

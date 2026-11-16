@@ -351,7 +351,7 @@ it.each(["revoked", "session", "generation", "account", "message", "expired"])(
     if (reason === "generation") f.bind({ sessionId: "new-session" });
     if (reason === "account") f.bind({ userId: "bob", sessionId: "session-bob" });
     if (reason === "expired")
-      f.storage.replicaViewTx(() =>
+      f.storage.quietTx(() =>
         f.storage.db
           .prepare("UPDATE sync_relay_push_subscriptions SET expires_at_ms = ?")
           .run(Date.now() + 1000),
