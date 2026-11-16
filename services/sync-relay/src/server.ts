@@ -780,6 +780,7 @@ export function createSyncRelayHandler({
     dependentGrantSummary,
     namedBrowserInvitation,
     publicEditRelease,
+    liveRooms,
   );
 
   const requireLinkCapability = (request: Request) => {
