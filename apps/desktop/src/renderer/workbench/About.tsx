@@ -2071,9 +2071,12 @@ export function AboutAccessView(props: {
               {people ? <MemberPeopleList view={people} /> : null}
               {view.answer.rows.length > 0 || people ? null : !empty.only ? (
                 <AboutNote testId="about-access-empty">{empty.words}</AboutNote>
-              ) : view.answer.coverage.complete && view.answer.nextCursor === null ? (
+              ) : !view.answer.coverage.complete || view.answer.nextCursor !== null ? null : view.answer.freshness === "fresh" ? (
                 <OnlyYouRow />
-              ) : null}
+              ) : (
+                // An old listing can't say nobody else has access now: someone may have joined since.
+                <AboutNote testId="about-access-empty">No one else when last checked</AboutNote>
+              )}
               {view.answer.rows.length === 0 ? null : (
                 <>
                   <ul className="m-0 list-none p-0">
