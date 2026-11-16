@@ -34,8 +34,8 @@ afterEach(async () => {
   await Promise.all(pools.splice(0).map((pool) => pool.close()));
   cleanupLiveDeliveryFixtures();
 });
-function fixture() {
-  const pool = createLiveValidationExecutor();
+function fixture(checkTimeLimitMs?: number) {
+  const pool = createLiveValidationExecutor(undefined, undefined, checkTimeLimitMs);
   pools.push(pool);
   const doc = markdownToYDoc("A **shared** document");
   const checkpoint = encodeStateAsUpdate(doc);
@@ -229,8 +229,28 @@ it("fails a job whose child exits abnormally, and replaces the child", async () 
   expect((await validate(input)).kind).toBe("accepted");
 });
 
+it("refuses an edit or settlement check past its time limit, and checks the next edit", async () => {
+  const { pool, input, validate } = fixture(1_000),
+    { checkpoint } = nestedEmphasis(3000);
+  expect(await validate({ ...input, checkpoint })).toEqual({
+    kind: "refused",
+    reason: "capacity-refused",
+    source: "final",
+  });
+  await validate.waitForCapacity!();
+  expect(
+    await pool.normalizeSettlement({
+      document: input.document,
+      currentPath: input.currentPath,
+      checkpoint,
+    }),
+  ).toEqual({ kind: "refused", reason: "capacity-refused", source: "registration-input" });
+  await validate.waitForCapacity!();
+  expect((await validate(input)).kind).toBe("accepted");
+}, 60_000);
+
 it("kills a child at its deadline and keeps its slot until the child exits", async () => {
-  const { pool, input, validate } = fixture(),
+  const { pool, input, validate } = fixture(60_000),
     { checkpoint } = nestedEmphasis(3000);
   const work = { document: input.document, currentPath: input.currentPath, checkpoint };
   const held = new AbortController(),

@@ -505,15 +505,37 @@ function withinElements(root: JSONContent, limit: number): boolean {
   return true;
 }
 
+/** The frontmatter and meta a file's text reads into, without reading its body. */
+export function markdownHeaderToYDoc(markdown: string): Y.Doc {
+  const doc = new Y.Doc();
+  readMarkdownHeader(doc, markdown);
+  return doc;
+}
+
 export function markdownToYDoc(
   markdown: string,
   options: { clientID?: number; reading?: "source" | "projection"; maxElements?: number } = {},
 ): Y.Doc {
-  const usesCrlf = markdown.includes("\r\n");
-  const { meta, body, frontmatterSource } = parseFrontmatter(markdown, usesCrlf);
   const doc = new Y.Doc();
   if (options.clientID !== undefined) doc.clientID = options.clientID;
+  const body = readMarkdownHeader(doc, markdown);
 
+  const bodyFragment = getDohcYDocBodyFragment(doc);
+  const tiptapJson = parseRichdocMarkdown(body, options.reading);
+  // Checked before the Y.Doc is built, which costs far more memory than parsing.
+  if (options.maxElements !== undefined && !withinElements(tiptapJson, options.maxElements)) {
+    doc.destroy();
+    throw new MarkdownCapacityError();
+  }
+  prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment);
+
+  return doc;
+}
+
+/** Writes the frontmatter and meta maps, and returns the body with line feeds only. */
+function readMarkdownHeader(doc: Y.Doc, markdown: string): string {
+  const usesCrlf = markdown.includes("\r\n");
+  const { meta, body, frontmatterSource } = parseFrontmatter(markdown, usesCrlf);
   writeFrontmatterMap(doc.getMap(FRONTMATTER_FIELD), meta);
   writeFrontmatterMap(doc.getMap(META_FIELD), {
     schemaVersion: DOHC_SCHEMA_VERSION,
@@ -525,20 +547,7 @@ export function markdownToYDoc(
   if (frontmatterSource !== undefined) {
     recordFrontmatterSourceItems(doc.getMap(FRONTMATTER_FIELD), doc.getMap(META_FIELD));
   }
-
-  const bodyFragment = getDohcYDocBodyFragment(doc);
-  const tiptapJson = parseRichdocMarkdown(
-    usesCrlf ? body.replaceAll("\r\n", "\n") : body,
-    options.reading,
-  );
-  // Checked before the Y.Doc is built, which costs far more memory than parsing.
-  if (options.maxElements !== undefined && !withinElements(tiptapJson, options.maxElements)) {
-    doc.destroy();
-    throw new MarkdownCapacityError();
-  }
-  prosemirrorJSONToYXmlFragment(schema, tiptapJson, bodyFragment);
-
-  return doc;
+  return usesCrlf ? body.replaceAll("\r\n", "\n") : body;
 }
 
 export function parseRichdocMarkdown(

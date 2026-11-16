@@ -67,3 +67,5 @@ process.on("message", (message) => {
     return { ...steps, workerMs: performance.now() - startedAt };
   }
 });
+// The parent starts a check's time limit only once the child can read it.
+send({ kind: "ready" });

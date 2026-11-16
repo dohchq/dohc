@@ -69,6 +69,8 @@ type Slot = {
   auxiliary: boolean;
   heapExhausted: boolean;
   exited: Promise<void>;
+  /** Settles once the child has started and can read work. */
+  ready: Promise<void>;
 };
 /** The validator threw instead of judging the edit, so the edit is tried again. */
 export class LiveValidatorFailure extends Error {
@@ -78,6 +80,12 @@ export class LiveValidatorFailure extends Error {
   }
 }
 const MAX_LOGGED_VALIDATOR_FAILURES = 1024;
+/**
+ * How long one edit or settlement check may run once its child can read it, several times the
+ * slowest ordinary note. Activation and restore read a note's history, which ordinary use can
+ * make long, so they have none.
+ */
+export const LIVE_CHECK_TIME_LIMIT_MS = 10_000;
 /** Names each validator failure once per document, candidate edit and error class. */
 export function createValidatorFailureLog(
   log: (message: string) => void = (message) => console.error(message),
@@ -106,12 +114,13 @@ export function createValidatorFailureLog(
 }
 /**
  * Two process-wide validation slots, with no retained waiting inputs. Each job
- * runs in a child process: a V8 heap-limit abort ends that child, not the relay.
+ * runs in a child process: a V8 heap-limit abort or a check past its time limit ends that child, not the relay.
  * Activation and restore together hold at most one slot, so live edits always keep the other.
  */
 export function createLiveValidationExecutor(
   heapLimitMb = 512,
   logValidatorFailure = createValidatorFailureLog(),
+  checkTimeLimitMs = LIVE_CHECK_TIME_LIMIT_MS,
 ) {
   const slots = new Set<Slot>();
   const waiters = new Set<() => void>();
@@ -182,7 +191,18 @@ export function createLiveValidationExecutor(
     );
     let exit: () => void = () => {};
     const exited = new Promise<void>((resolve) => (exit = resolve));
-    const slot: Slot = { child, busy: false, auxiliary: false, heapExhausted: false, exited };
+    let started: () => void = () => {};
+    const ready = new Promise<void>((resolve) => (started = resolve));
+    const slot: Slot = {
+      child,
+      busy: false,
+      auxiliary: false,
+      heapExhausted: false,
+      exited,
+      ready,
+    };
+    // The child's first message says it is ready.
+    child.once("message", () => started());
     slots.add(slot);
     const release = () => {
       slots.delete(slot);
@@ -214,7 +234,7 @@ export function createLiveValidationExecutor(
   }
   async function submit<Result>(
     work: LiveValidationWork,
-    heapExhausted: Result,
+    tooLarge: Result,
     signal?: AbortSignal,
   ): Promise<Result | CapacityRetry> {
     signal?.throwIfAborted();
@@ -235,9 +255,11 @@ export function createLiveValidationExecutor(
     hold(slot, true);
     return new Promise<Result>((resolve, reject) => {
       let done = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const settle = () => {
         if (done) return false;
         done = true;
+        clearTimeout(timer);
         signal?.removeEventListener("abort", abort);
         slot.child.off("message", complete);
         slot.child.off("error", fail);
@@ -251,14 +273,20 @@ export function createLiveValidationExecutor(
         reject(error);
       };
       const abort = () => fail(signal!.reason);
+      // A check past its time limit is refused as too large, as a heap-limit abort is.
+      const overrun = () => {
+        if (!settle()) return;
+        kill(slot);
+        resolve(tooLarge);
+      };
       const ended = (code: number | null, exitSignal: NodeJS.Signals | null) => {
         if (!settle()) return;
         // Node exits 134 on Windows where POSIX reports SIGABRT.
-        if ((code === 134 || exitSignal === "SIGABRT") && slot.heapExhausted)
-          resolve(heapExhausted);
+        if ((code === 134 || exitSignal === "SIGABRT") && slot.heapExhausted) resolve(tooLarge);
         else reject(new Error("Live validation worker exited."));
       };
       const complete = (value: unknown) => {
+        if ((value as { kind?: unknown }).kind === "ready") return;
         if (!settle()) return;
         slot.busy = false;
         slot.auxiliary = false;
@@ -270,7 +298,7 @@ export function createLiveValidationExecutor(
         else resolve(value as Result);
         notify();
       };
-      slot.child.once("message", complete);
+      slot.child.on("message", complete);
       slot.child.once("error", fail);
       slot.child.once("close", ended);
       signal?.addEventListener("abort", abort, { once: true });
@@ -284,6 +312,13 @@ export function createLiveValidationExecutor(
       } catch (error) {
         fail(error);
       }
+      if (work.kind === "journal" || work.kind === "settlement")
+        void slot.ready.then(() => {
+          if (done) return;
+          timer = setTimeout(overrun, checkTimeLimitMs);
+          // The busy child keeps the relay alive; the timer need not.
+          timer.unref();
+        });
     });
   }
   function validator(policy: OrderedLiveUpdateCutPolicy): CapacityLiveAdmissionValidator {

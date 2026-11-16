@@ -17,7 +17,7 @@ import {
 import {
   getDohcProseMirrorSchema,
   getDohcYDocFrontmatter,
-  markdownToYDoc,
+  markdownHeaderToYDoc,
   isEmptyShell,
   yDocToMarkdown,
 } from "./import-export.js";
@@ -1075,7 +1075,8 @@ function validatePublicState(
   )
     refuse("invalid-schema");
   if (!zeroStructSeed) {
-    const reimported = markdownToYDoc(projectedMarkdown);
+    // Only the header must read back the same; the body is the canonical projection itself.
+    const reimported = markdownHeaderToYDoc(projectedMarkdown);
     try {
       if (!semanticEqual(frontmatterSnapshot, getDohcYDocFrontmatter(reimported)))
         refuse("invalid-schema");
