@@ -1845,7 +1845,8 @@ export function AccessChecked(props: { testId: string; answer: AccessAnswer; sco
           title={formatChatTime(answer.checkedAtMs).label}
           className="shrink-0 text-[11px] tabular-nums text-subtle"
         >
-          {formatShortTime(answer.checkedAtMs)}
+          {/* Beside "Checked" the time reads on its own. Beside any other state it says what it is. */}
+          {answer.freshness === "fresh" ? "" : "Last checked "}{formatShortTime(answer.checkedAtMs)}
         </time>
       ) : null}
       {props.scope ? (
