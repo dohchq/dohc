@@ -370,7 +370,7 @@ function MemberWorkspace({grantId, account, signingOut, signOutError, onSignOut,
     <button className="handoff-button secondary" type="button" disabled={signingOut} onClick={onSignOut}>{signingOut ? "Signing out…" : "Switch account"}</button>
     {signOutError && <p role="alert">{signOutError}</p>}{kept}
   </StatePage>;
-  if (view.status === "load-failed") return <StatePage icon="alert" failed title="dohc couldn't open this workspace.">
+  if (view.status === "load-failed") return <StatePage icon="alert" failed title="dohc could not open this workspace.">
     <p>Check your connection, then choose Try again.</p>
     <button className="handoff-button secondary" type="button" onClick={() => setAttempt(value => value + 1)}>Try again</button>{kept}
   </StatePage>;
