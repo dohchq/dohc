@@ -230,11 +230,11 @@ export async function createSharedViewsIpcHarness(
     },
   );
   const showsLive = vi.fn<Dependencies["showsLive"]>(() => false);
-  // Main's rebuild of a closed copy. By default the copy holds work of its
-  // member's own, so it stays closed as it was.
+  // Main's rebuild of a closed copy. By default it stops, so the copy stays
+  // closed as it was.
   const rebuild = vi.fn<Dependencies["rebuildShareView"]>(async () => ({
-    kind: "ownWork",
-    kinds: ["moments"],
+    kind: "failed",
+    error: new Error("the engine stopped"),
   }));
   const end = vi.fn<Dependencies["shareViewFiles"]["end"]>(
     async (_lease, target, assertCurrent) => {

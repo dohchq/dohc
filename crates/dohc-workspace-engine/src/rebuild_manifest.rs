@@ -25,7 +25,6 @@ const MANIFEST_TEMP_NAME: &str = "rebuild.json.tmp";
 pub enum RebuildPhase {
     Closed,
     Planned,
-    Saved,
     Swapping,
     Swapped,
     Converged,
@@ -71,6 +70,14 @@ pub struct RebuildPlan {
     pub recovery_folder: Option<String>,
     #[serde(default)]
     pub recovery: Vec<RecoveryItem>,
+    /// The member's deletes and moves the relay never took, which the
+    /// converge undoes.
+    #[serde(default)]
+    pub undone: Vec<UndoneChange>,
+    /// The live draft records the recovery folder holds, which main deletes
+    /// once the rebuild finishes.
+    #[serde(default)]
+    pub saved_drafts: Vec<String>,
     #[serde(default)]
     pub jobs: Vec<PlannedJob>,
     /// The last converge wave that finished, 0 before the first.
@@ -78,12 +85,38 @@ pub struct RebuildPlan {
     pub waves_done: u8,
 }
 
-/// A file the plan moves to the recovery folder.
+/// Where a recovery item comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecoverySource {
+    /// The file at `path` on disk, moved in the first converge wave.
+    #[default]
+    Disk,
+    /// A copy `closed` wrote under the staging folder, moved in `planned`.
+    Saved,
+    /// The old store's `displaced` folder, moved whole in `planned`.
+    Displaced,
+}
+
+/// A delete or move of the member's the converge undoes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoneChange {
+    /// The path the file is back at.
+    pub path: String,
+    /// Where the member had moved it, or `None` for a delete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_to: Option<String>,
+}
+
+/// An item the plan saves in the recovery folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecoveryItem {
     pub number: u32,
-    /// Where the file was, relative to the root.
+    #[serde(default)]
+    pub source: RecoverySource,
+    /// What it was: a path relative to the root, or what the copy holds.
     pub path: String,
     /// Its name in the recovery folder, `<number> <name>`.
     pub destination: String,
@@ -226,10 +259,10 @@ mod tests {
     #[test]
     fn only_phases_before_swapped_hold_the_old_store() {
         use RebuildPhase::*;
-        let held: Vec<_> = [Closed, Planned, Saved, Swapping, Swapped, Converged]
+        let held: Vec<_> = [Closed, Planned, Swapping, Swapped, Converged]
             .into_iter()
             .filter(|phase| phase.holds_old_store())
             .collect();
-        assert_eq!(held, [Closed, Planned, Saved, Swapping]);
+        assert_eq!(held, [Closed, Planned, Swapping]);
     }
 }

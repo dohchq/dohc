@@ -193,8 +193,7 @@ describe("workspace summary changes", () => {
     });
     render(<DesktopRoot />);
     await screen.findByTestId("workspace-shell");
-    const detail =
-      "This copy holds work of your own (moments), so dohc can't update access yet. Nothing in it changed.";
+    const detail = "dohc could not update access: the disk is full.";
     const shareView = {
       shareId: "share",
       granterEmail: null,
@@ -202,7 +201,7 @@ describe("workspace summary changes", () => {
       access: "edit" as const,
       membership: true as const,
       updatingAccess: true as const,
-      updatingAccessStopped: { reason: "ownWork" as const, detail },
+      updatingAccessStopped: { reason: "failed" as const, detail },
     };
     h.replace([{ ...workspace("a"), shareView }, workspace("b")]);
     await act(async () => h.emit({ workspaceId: "a", summaryChanged: true }));

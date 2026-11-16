@@ -1,15 +1,20 @@
 //! `share.view.rebuild`: rebuild a joined copy that closed because the relay
 //! changed which items the member sees.
 //!
+//! Afterwards the disk equals the new store. Everything of the member's the
+//! relay hasn't taken goes to a recovery folder, and their unsent deletes and
+//! moves are undone and listed in its `contents.md`.
+//!
 //! The manifest (`rebuild_manifest`) decides every step, so a call after a
 //! crash continues where the last one stopped:
 //!
-//! - `closed`: settle the old store and check it holds no work of the
-//!   member's own; build a new store from the relay under
-//!   `.dohc/local/rebuild/`; plan how the files on disk converge; write
-//!   `planned`. A copy with own work stays in `closed`.
-//! - `planned`: write the recovery folder's `contents.md`, then `saved`.
-//! - `saved`: make the aside folder empty, then `swapping`.
+//! - `closed`: read the old store's unsent work; build a new store from the
+//!   relay under `.dohc/local/rebuild/`; plan each path on disk against the
+//!   new store; write the copies the plan saves under that folder; write
+//!   `planned`.
+//! - `planned`: move those copies and the old store's `displaced` folder into
+//!   the recovery folder, write its `contents.md`, make the aside folder
+//!   empty, then `swapping`.
 //! - `swapping`: rename the old store aside and the new one into place, as
 //!   the three folders on disk say is left to do, then `swapped`.
 //! - `swapped`: converge the files in three waves, then `converged`.
@@ -17,8 +22,7 @@
 //! `share.view.rebuildFinish` deletes what the rebuild left once main has
 //! stored the new reach, and the manifest last.
 //!
-//! The caller closes every handle on the root first. Only a copy with no own
-//! work is rebuilt here; one with own work waits for the plan that keeps it.
+//! The caller closes every handle on the root first.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Write;
@@ -29,13 +33,14 @@ use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use dohc_engine_runtime::{
-    ActorHandle, RebuildHead, RebuildJob, RelayOperation, RelayOperationOutcome,
+    ActorHandle, RebuildHead, RebuildJob, RebuildUnsent, RelayOperation, RelayOperationOutcome,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::rebuild_manifest::{
-    self, PlannedJob, RebuildManifest, RebuildPhase, RebuildPlan, RecoveryItem,
+    self, PlannedJob, RebuildManifest, RebuildPhase, RebuildPlan, RecoveryItem, RecoverySource,
+    UndoneChange,
 };
 use crate::root_binding::{self, LOCAL_STATE_RELATIVE_PATH};
 use crate::rpc::error::map_runtime;
@@ -45,13 +50,23 @@ use crate::rpc::request::{now_ms, parse};
 use crate::{EngineService, lock};
 
 const STAGING: &str = "rebuild";
+const SAVED: &str = "saved";
 const ASIDE: &str = "rebuild-aside";
 const SHARE_REFRESH: &str = "share-refresh";
 const RECOVERY: &str = "recovery";
 const CONTENTS: &str = "contents.md";
-const LEFT_REACH_UNCHANGED: &str = "left reach, unchanged copy";
+const DISPLACED: &str = "displaced";
 /// The longest name one path part may have, in bytes.
 const MAX_NAME_BYTES: usize = 255;
+
+/// Why an item is in the recovery folder, as `contents.md` says it.
+const WHY_REPLACED: &str = "Your change wasn't sent. The shared version is back in its place.";
+const WHY_HIDDEN: &str = "No longer shared with you.";
+const WHY_NOT_SENT: &str = "Not sent.";
+const WHY_VERSION: &str = "Your newest version, which wasn't sent or on disk.";
+const WHY_CHAT: &str = "Chat messages that weren't sent.";
+const WHY_DRAFT: &str = "Edits in a page you had open, which weren't sent.";
+const WHY_DISPLACED: &str = "Files dohc had set aside before.";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -64,6 +79,17 @@ struct RebuildParams {
     granted_selector: Value,
     /// The relay configuration `workspace.open` takes.
     relay: Value,
+    /// The unsent edits of the live pages main closed for the rebuild.
+    #[serde(default)]
+    live_drafts: Vec<LiveDraft>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LiveDraft {
+    record_id: String,
+    path: String,
+    text: String,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +97,29 @@ struct RebuildParams {
 struct FinishParams {
     root_dir: String,
     rebuild_id: String,
+}
+
+/// A copy `closed` writes under the staging folder: its name and bytes.
+type SavedCopy = (String, Vec<u8>);
+
+/// A section of a saved thread, with the message it shows, if any.
+type ChatSection = (Option<String>, String);
+
+/// What `closed` read from the old store and the disk.
+struct OldRead {
+    heads: Vec<RebuildHead>,
+    unsent: RebuildUnsent,
+    /// The bytes of each unsent version the disk doesn't hold, by hash.
+    version_bytes: BTreeMap<String, Vec<u8>>,
+}
+
+/// What `closed` read from the new store and the disk.
+struct NewRead {
+    heads: Vec<RebuildHead>,
+    /// The hash of each file on disk at a path either store holds.
+    disk: BTreeMap<String, String>,
+    /// The disk hashes whose bytes the new store holds.
+    held: HashSet<String>,
 }
 
 fn failed(code: &'static str) -> WireError {
@@ -91,6 +140,10 @@ fn staging_root(root: &Path) -> PathBuf {
 
 fn staging_store(root: &Path) -> PathBuf {
     live_store(&staging_root(root))
+}
+
+fn saved_copies(root: &Path) -> PathBuf {
+    staging_root(root).join(SAVED)
 }
 
 fn aside(root: &Path) -> PathBuf {
@@ -114,6 +167,13 @@ fn job_id(rebuild_id: &str, wave: u8, path: &str) -> String {
         "rebuild-{rebuild_id}-w{wave}-{}",
         dohc_engine_storage::hex_sha256(path.as_bytes())
     )
+}
+
+/// The hash of the file at `path`, or `None` when no file is there.
+fn disk_sha(root: &Path, path: &str) -> Option<String> {
+    std::fs::read(root.join(path))
+        .ok()
+        .map(|bytes| dohc_engine_storage::hex_sha256(&bytes))
 }
 
 impl EngineService {
@@ -159,43 +219,21 @@ impl EngineService {
                         return Ok(answer);
                     }
                 }
-                RebuildPhase::Planned => {
-                    write_contents(&root, &manifest)?;
-                    write_manifest(
-                        &root,
-                        &RebuildManifest {
-                            phase: RebuildPhase::Saved,
-                            ..manifest
-                        },
-                    )?;
-                }
-                RebuildPhase::Saved => {
-                    let aside = aside(&root);
-                    remove_folder(&aside)
-                        .and_then(|()| std::fs::create_dir(&aside))
-                        .map_err(|_| failed("share-view-rebuild-aside-unavailable"))?;
-                    let existed = local(&root).join(SHARE_REFRESH).exists();
-                    write_manifest(
-                        &root,
-                        &RebuildManifest {
-                            phase: RebuildPhase::Swapping,
-                            share_refresh_existed: Some(existed),
-                            ..manifest
-                        },
-                    )?;
-                }
+                RebuildPhase::Planned => self.rebuild_save(&root, manifest)?,
                 RebuildPhase::Swapping => self.rebuild_swap(&root, manifest).await?,
                 RebuildPhase::Swapped => {
                     self.rebuild_converge(ctx, &root, &params.workspace_id, manifest)
                         .await?;
                 }
                 RebuildPhase::Converged => {
+                    self.rebuild_crash_point("converged")?;
                     let plan = manifest.plan.as_ref();
                     return Ok(json!({
                         "state": "rebuilt",
                         "reach": plan.map(|plan| plan.reach.clone()),
                         "recoveryFolder": plan.and_then(|plan| plan.recovery_folder.clone()),
                         "recovered": plan.map_or(0, |plan| plan.recovery.len()),
+                        "savedDrafts": plan.map(|plan| plan.saved_drafts.clone()).unwrap_or_default(),
                         "asideLeft": aside(&root).exists(),
                     }));
                 }
@@ -274,8 +312,9 @@ impl EngineService {
         Ok(self.open(Some(handle))?.actor.clone())
     }
 
-    /// `closed`: check the old store, build the new one and plan. Answers
-    /// when the rebuild stops here; `None` once `planned` is written.
+    /// `closed`: read the old store, build the new one, plan, and write the
+    /// copies the plan saves. Answers when the rebuild stops here; `None`
+    /// once `planned` is written.
     async fn rebuild_plan(
         &self,
         ctx: &RequestContext,
@@ -293,12 +332,9 @@ impl EngineService {
         let old = self
             .rebuild_open(ctx, root, workspace_id, Some(&manifest.rebuild_id), None)
             .await?;
-        let checked = self.rebuild_check_old(&old, root, workspace_id).await;
+        let read = self.rebuild_read_old(&old, root, params).await;
         self.workspace_close(Some(old)).await?;
-        let (old_heads, kinds) = checked?;
-        if !kinds.is_empty() {
-            return Ok(Some(json!({ "state": "ownWork", "kinds": kinds })));
-        }
+        let old = read?;
 
         // The swap renames the store between these folders, which only
         // works within one filesystem.
@@ -322,9 +358,11 @@ impl EngineService {
                 Some(&params.relay),
             )
             .await?;
-        let built = self.rebuild_build(ctx, &staging, params, &old_heads).await;
+        let built = self
+            .rebuild_build(ctx, &staging, root, params, &old.heads)
+            .await;
         self.workspace_close(Some(staging)).await?;
-        let (new_heads, held) = match built? {
+        let new = match built? {
             Ok(built) => built,
             Err(served) => {
                 remove_folder(&staging_root(root))
@@ -334,7 +372,14 @@ impl EngineService {
         };
         self.rebuild_crash_point("built")?;
 
-        let plan = plan(root, &manifest, &old_heads, &new_heads, &held, params)?;
+        let (plan, copies) = plan(root, &manifest, params, &old, &new)?;
+        let saved = saved_copies(root);
+        std::fs::create_dir_all(&saved)
+            .map_err(|_| failed("share-view-rebuild-staging-unavailable"))?;
+        for (name, bytes) in copies {
+            write_synced(&saved.join(name), &bytes)
+                .map_err(|_| failed("share-view-rebuild-staging-unavailable"))?;
+        }
         write_manifest(
             root,
             &RebuildManifest {
@@ -346,60 +391,55 @@ impl EngineService {
         Ok(None)
     }
 
-    /// The old store's current files, and each kind of own work it holds.
-    async fn rebuild_check_old(
+    /// The old store's current files and the member's work the relay hasn't
+    /// taken, with the bytes of each unsent version the disk doesn't hold.
+    async fn rebuild_read_old(
         &self,
         handle: &WorkspaceHandle,
         root: &Path,
-        workspace_id: &str,
-    ) -> Result<(Vec<RebuildHead>, Vec<String>), WireError> {
+        params: &RebuildParams,
+    ) -> Result<OldRead, WireError> {
         let actor = self.rebuild_actor(handle)?;
-        let mut kinds = actor
-            .rebuild_own_work(workspace_id.to_owned())
-            .await
-            .map_err(map_runtime)?;
-        let displaced = live_store(root).join("displaced");
-        if std::fs::read_dir(&displaced).is_ok_and(|mut entries| entries.next().is_some()) {
-            kinds.push("displaced files".to_owned());
-        }
         let heads = actor
-            .rebuild_main_heads(workspace_id.to_owned())
+            .rebuild_main_heads(params.workspace_id.clone())
             .await
             .map_err(map_runtime)?;
-        // The disk must hold exactly the old store's files: anything else is
-        // an edit capture has not journaled.
-        let mut changed = false;
-        for head in &heads {
-            match std::fs::read(root.join(&head.path)) {
-                Ok(bytes) if dohc_engine_storage::hex_sha256(&bytes) == head.sha256 => {}
-                _ => changed = true,
+        let unsent = actor
+            .rebuild_unsent(params.workspace_id.clone(), params.share_id.clone())
+            .await
+            .map_err(map_runtime)?;
+        let mut version_bytes = BTreeMap::new();
+        for version in &unsent.versions {
+            if disk_sha(root, &version.path).as_deref() == Some(version.sha256.as_str()) {
+                continue;
+            }
+            if let Some(bytes) = actor
+                .rebuild_blob(version.sha256.clone())
+                .await
+                .map_err(map_runtime)?
+            {
+                version_bytes.insert(version.sha256.clone(), bytes);
             }
         }
-        if changed {
-            kinds.push("changed files".to_owned());
-        }
-        let tracked: HashSet<&str> = heads.iter().map(|head| head.path.as_str()).collect();
-        let mut untracked = false;
-        walk_files(root, root, &mut |path| {
-            untracked |= !tracked.contains(path);
+        Ok(OldRead {
+            heads,
+            unsent,
+            version_bytes,
         })
-        .map_err(|_| failed("share-view-rebuild-disk-unreadable"))?;
-        if untracked {
-            kinds.push("new files".to_owned());
-        }
-        Ok((heads, kinds))
     }
 
     /// Pull the share from the start into the staging store. Answers its
-    /// current files and which of the old store's blobs it holds, or the
-    /// revisions the relay served when they differ from the grant's.
+    /// current files, the disk's hash at each path either store holds and
+    /// which of those the new store holds, or the revisions the relay served
+    /// when they differ from the grant's.
     async fn rebuild_build(
         &self,
         ctx: &RequestContext,
         handle: &WorkspaceHandle,
+        root: &Path,
         params: &RebuildParams,
         old_heads: &[RebuildHead],
-    ) -> Result<Result<(Vec<RebuildHead>, HashSet<String>), Value>, WireError> {
+    ) -> Result<Result<NewRead, Value>, WireError> {
         let open = self.open(Some(handle))?;
         Box::pin(self.versions_ensure_main(
             ctx,
@@ -459,12 +499,57 @@ impl EngineService {
             .rebuild_main_heads(params.workspace_id.clone())
             .await
             .map_err(map_runtime)?;
+        let disk: BTreeMap<String, String> = old_heads
+            .iter()
+            .chain(&heads)
+            .map(|head| head.path.as_str())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|path| disk_sha(root, path).map(|sha| (path.to_owned(), sha)))
+            .collect();
         let held = open
             .actor
-            .rebuild_held_blobs(old_heads.iter().map(|head| head.sha256.clone()).collect())
+            .rebuild_held_blobs(disk.values().cloned().collect())
             .await
             .map_err(map_runtime)?;
-        Ok(Ok((heads, held)))
+        Ok(Ok(NewRead { heads, disk, held }))
+    }
+
+    /// `planned`: move the saved copies and the displaced folder into the
+    /// recovery folder, then get the swap ready.
+    fn rebuild_save(&self, root: &Path, mut manifest: RebuildManifest) -> Result<(), WireError> {
+        if let Some(plan) = manifest.plan.as_mut()
+            && let Some(folder) = plan.recovery_folder.as_deref()
+        {
+            let folder = root.join(folder);
+            std::fs::create_dir_all(&folder)
+                .map_err(|_| failed("share-view-rebuild-recovery-unavailable"))?;
+            for item in &mut plan.recovery {
+                let source = match item.source {
+                    RecoverySource::Disk => continue,
+                    _ if item.done => continue,
+                    RecoverySource::Saved => saved_copies(root).join(&item.destination),
+                    RecoverySource::Displaced => live_store(root).join(DISPLACED),
+                };
+                item.found = Some(recover(&source, &folder.join(&item.destination))?);
+                item.done = true;
+                self.rebuild_crash_point("planned")?;
+            }
+        }
+        write_contents(root, &manifest)?;
+        let aside = aside(root);
+        remove_folder(&aside)
+            .and_then(|()| std::fs::create_dir(&aside))
+            .map_err(|_| failed("share-view-rebuild-aside-unavailable"))?;
+        let existed = local(root).join(SHARE_REFRESH).exists();
+        write_manifest(
+            root,
+            &RebuildManifest {
+                phase: RebuildPhase::Swapping,
+                share_refresh_existed: Some(existed),
+                ..manifest
+            },
+        )
     }
 
     /// `swapping`: finish the renames the folders on disk say are left.
@@ -535,7 +620,7 @@ impl EngineService {
         if waves_done < 1 {
             let plan = manifest.plan.clone().unwrap_or_else(empty_plan);
             for (index, item) in plan.recovery.iter().enumerate() {
-                if item.done {
+                if item.done || item.source != RecoverySource::Disk {
                     continue;
                 }
                 let folder = root.join(plan.recovery_folder.as_deref().unwrap_or_default());
@@ -634,33 +719,53 @@ fn empty_plan() -> RebuildPlan {
         reach: Value::Null,
         recovery_folder: None,
         recovery: Vec::new(),
+        undone: Vec::new(),
+        saved_drafts: Vec::new(),
         jobs: Vec::new(),
         waves_done: 0,
     }
 }
 
-/// Each path either store holds is No step, a converge job, or a recovery
-/// move then a write. A file whose bytes the new store can't confirm is never
-/// deleted or replaced in place: it moves to the recovery folder.
+/// Plan each path either store holds by the file on disk there, `d`, and
+/// the new store's file, `n`:
+///
+/// - `d` equals `n`: no step.
+/// - the new store holds `d`'s bytes: write `n`, or delete, where `d` is.
+/// - otherwise `d` moves to the recovery folder, then `n` is written where
+///   no file is.
+///
+/// A path with no file on disk gets `n`. The plan also saves each unsent
+/// version the disk doesn't hold, the unsent chat by thread, the live
+/// drafts and the displaced folder. Answers the plan and the copies to
+/// write, by name, under the staging folder.
 fn plan(
     root: &Path,
     manifest: &RebuildManifest,
-    old_heads: &[RebuildHead],
-    new_heads: &[RebuildHead],
-    held: &HashSet<String>,
     params: &RebuildParams,
-) -> Result<RebuildPlan, WireError> {
-    let old: BTreeMap<&str, &RebuildHead> = old_heads
+    old: &OldRead,
+    new: &NewRead,
+) -> Result<(RebuildPlan, Vec<SavedCopy>), WireError> {
+    let old_heads: BTreeMap<&str, &RebuildHead> = old
+        .heads
         .iter()
         .map(|head| (head.path.as_str(), head))
         .collect();
-    let new: BTreeMap<&str, &RebuildHead> = new_heads
+    let new_heads: BTreeMap<&str, &RebuildHead> = new
+        .heads
         .iter()
         .map(|head| (head.path.as_str(), head))
         .collect();
-    let paths: BTreeSet<&str> = old.keys().chain(new.keys()).copied().collect();
+    let own: HashSet<&str> = old
+        .unsent
+        .versions
+        .iter()
+        .map(|version| version.path.as_str())
+        .collect();
+    let paths: BTreeSet<&str> = old_heads.keys().chain(new_heads.keys()).copied().collect();
     let mut jobs = Vec::new();
-    let mut moves = Vec::new();
+    // What to save: where it comes from, what it was, its name and why.
+    let mut saves: Vec<(RecoverySource, String, String, &str)> = Vec::new();
+    let mut copies = Vec::new();
     let write = |path: &str, sha: &str, preimage: Option<&str>| PlannedJob {
         wave: 3,
         path: path.to_owned(),
@@ -668,74 +773,274 @@ fn plan(
         content_sha256: sha.to_owned(),
         preimage: preimage.map(str::to_owned),
     };
+    let last_part = |path: &str| path.rsplit('/').next().unwrap_or(path).to_owned();
     for path in paths {
-        match (old.get(path), new.get(path)) {
-            (Some(old), Some(new)) if old.sha256 == new.sha256 => {}
-            (Some(old), Some(new)) if held.contains(&old.sha256) => {
-                jobs.push(write(path, &new.sha256, Some(&old.sha256)));
+        let n = new_heads.get(path);
+        match (new.disk.get(path), n) {
+            (Some(d), Some(n)) if *d == n.sha256 => {}
+            (Some(d), Some(n)) if new.held.contains(d) => {
+                jobs.push(write(path, &n.sha256, Some(d)));
             }
-            (Some(_), Some(new)) => {
-                moves.push(path);
-                jobs.push(write(path, &new.sha256, None));
-            }
-            (Some(old), None) if held.contains(&old.sha256) => jobs.push(PlannedJob {
+            (Some(d), None) if new.held.contains(d) => jobs.push(PlannedJob {
                 wave: 1,
                 path: path.to_owned(),
                 delete: true,
-                content_sha256: old.sha256.clone(),
-                preimage: Some(old.sha256.clone()),
+                content_sha256: d.clone(),
+                preimage: Some(d.clone()),
             }),
-            (Some(_), None) => moves.push(path),
-            (None, Some(new)) => jobs.push(write(path, &new.sha256, None)),
+            (Some(d), n) => {
+                let why = if n.is_some() {
+                    WHY_REPLACED
+                } else if !own.contains(path)
+                    && old_heads.get(path).is_some_and(|old| old.sha256 == *d)
+                {
+                    WHY_HIDDEN
+                } else {
+                    WHY_NOT_SENT
+                };
+                saves.push((RecoverySource::Disk, path.to_owned(), last_part(path), why));
+                if let Some(n) = n {
+                    jobs.push(write(path, &n.sha256, None));
+                }
+            }
+            (None, Some(n)) => jobs.push(write(path, &n.sha256, None)),
             (None, None) => {}
         }
     }
-    let recovery_folder = if moves.is_empty() {
-        None
-    } else {
-        Some(make_recovery_folder(root, manifest.closed_at_ms)?)
-    };
-    let recovery = moves
-        .into_iter()
-        .zip(1..)
-        .map(|(path, number)| RecoveryItem {
-            number,
-            path: path.to_owned(),
-            destination: numbered_name(number, path.rsplit('/').next().unwrap_or(path)),
-            reason: LEFT_REACH_UNCHANGED.to_owned(),
-            done: false,
-            found: None,
-        })
-        .collect();
-    Ok(RebuildPlan {
-        reach: params.granted_selector["reach"].clone(),
-        recovery_folder,
-        recovery,
-        jobs,
-        waves_done: 0,
-    })
-}
-
-/// Make `.dohc/local/recovery/<date and time>`, adding `-2`, `-3` and so on
-/// when the name is taken. Answers it relative to the root.
-fn make_recovery_folder(root: &Path, closed_at_ms: i64) -> Result<String, WireError> {
-    let parent = local(root).join(RECOVERY);
-    std::fs::create_dir_all(&parent)
-        .map_err(|_| failed("share-view-rebuild-recovery-unavailable"))?;
-    let stamp = utc_stamp(closed_at_ms);
-    for attempt in 1..1000 {
-        let name = if attempt == 1 {
-            stamp.clone()
-        } else {
-            format!("{stamp}-{attempt}")
-        };
-        match std::fs::create_dir(parent.join(&name)) {
-            Ok(()) => return Ok(format!("{LOCAL_STATE_RELATIVE_PATH}/{RECOVERY}/{name}")),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => break,
+    for version in &old.unsent.versions {
+        let on_disk = new.disk.get(&version.path) == Some(&version.sha256);
+        let shared = new_heads
+            .get(version.path.as_str())
+            .is_some_and(|head| head.sha256 == version.sha256);
+        if on_disk || shared {
+            continue;
+        }
+        if let Some(bytes) = old.version_bytes.get(&version.sha256) {
+            saves.push((
+                RecoverySource::Saved,
+                version.path.clone(),
+                last_part(&version.path),
+                WHY_VERSION,
+            ));
+            copies.push(bytes.clone());
         }
     }
-    Err(failed("share-view-rebuild-recovery-unavailable"))
+    for (title, text) in chat_files(&old.unsent) {
+        saves.push((
+            RecoverySource::Saved,
+            format!("chat: {title}"),
+            format!("chat {}.md", file_safe(&title)),
+            WHY_CHAT,
+        ));
+        copies.push(text.into_bytes());
+    }
+    for draft in &params.live_drafts {
+        let name = last_part(&draft.path);
+        let stem = name.strip_suffix(".md").unwrap_or(&name);
+        saves.push((
+            RecoverySource::Saved,
+            draft.path.clone(),
+            format!("{} (open page).md", file_safe(stem)),
+            WHY_DRAFT,
+        ));
+        copies.push(draft.text.clone().into_bytes());
+    }
+    let displaced = live_store(root).join(DISPLACED);
+    if std::fs::read_dir(&displaced).is_ok_and(|mut entries| entries.next().is_some()) {
+        saves.push((
+            RecoverySource::Displaced,
+            format!(".dohc/engine/{DISPLACED}"),
+            DISPLACED.to_owned(),
+            WHY_DISPLACED,
+        ));
+    }
+    let undone: Vec<UndoneChange> = old
+        .unsent
+        .removals
+        .iter()
+        .filter(|removal| {
+            new_heads.contains_key(removal.path.as_str()) && !new.disk.contains_key(&removal.path)
+        })
+        .map(|removal| UndoneChange {
+            path: removal.path.clone(),
+            moved_to: removal.moved_to.clone(),
+        })
+        .collect();
+
+    let recovery_folder = if saves.is_empty() && undone.is_empty() {
+        None
+    } else {
+        Some(pick_recovery_folder(root, manifest.closed_at_ms)?)
+    };
+    let mut recovery = Vec::new();
+    let mut named = Vec::new();
+    let mut copies = copies.into_iter();
+    for ((source, path, name, why), number) in saves.into_iter().zip(1..) {
+        let destination = numbered_name(number, &name);
+        if source == RecoverySource::Saved {
+            named.push((destination.clone(), copies.next().unwrap_or_default()));
+        }
+        recovery.push(RecoveryItem {
+            number,
+            source,
+            path,
+            destination,
+            reason: why.to_owned(),
+            done: false,
+            found: None,
+        });
+    }
+    Ok((
+        RebuildPlan {
+            reach: params.granted_selector["reach"].clone(),
+            recovery_folder,
+            recovery,
+            undone,
+            saved_drafts: params
+                .live_drafts
+                .iter()
+                .map(|draft| draft.record_id.clone())
+                .collect(),
+            jobs,
+            waves_done: 0,
+        },
+        named,
+    ))
+}
+
+/// One Markdown file per thread with unsent chat: each message with its
+/// author, time, what it replies to, its attachments and decisions.
+fn chat_files(unsent: &RebuildUnsent) -> Vec<(String, String)> {
+    let text = |payload: &Value, key: &str| payload[key].as_str().unwrap_or_default().to_owned();
+    let excerpt = |message: &str| -> String {
+        unsent.messages.get(message).map_or_else(
+            || "a message".to_owned(),
+            |(author, body)| {
+                let line = body.lines().next().unwrap_or_default();
+                let short: String = line.chars().take(80).collect();
+                if short.len() < line.len() {
+                    format!("{author}: \"{short}…\"")
+                } else {
+                    format!("{author}: \"{short}\"")
+                }
+            },
+        )
+    };
+    // Each thread's sections in the order the member wrote them; a message's
+    // attachments and decisions follow it.
+    let mut threads: Vec<(String, Vec<ChatSection>)> = Vec::new();
+    let mut details: Vec<(usize, String, String)> = Vec::new();
+    for (kind, payload) in &unsent.chat {
+        let id = text(payload, "threadId");
+        let index = match threads.iter().position(|(thread, _)| *thread == id) {
+            Some(index) => index,
+            None => {
+                threads.push((id, Vec::new()));
+                threads.len() - 1
+            }
+        };
+        match kind.as_str() {
+            "chat.message.append" => {
+                let at = payload["createdAtMs"]
+                    .as_i64()
+                    .map(utc_time)
+                    .unwrap_or_default();
+                let mut section = format!(
+                    "## {}, {at}\n\n{}\n",
+                    text(payload, "authorDisplayName"),
+                    text(payload, "body")
+                );
+                if let Some(parent) = payload["parentMessageId"].as_str() {
+                    section.push_str(&format!("\nReplying to {}\n", excerpt(parent)));
+                }
+                threads[index]
+                    .1
+                    .push((Some(text(payload, "messageId")), section));
+            }
+            "chat.attachment.add" => {
+                let target = payload["pathHint"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| text(payload, "targetKind"));
+                details.push((
+                    index,
+                    text(payload, "messageId"),
+                    format!("Attached: {target}"),
+                ));
+            }
+            "chat.decision.set" => {
+                let mut line = format!("Decision: {}", text(payload, "state"));
+                if let Some(chosen) = payload["chosenOption"].as_str() {
+                    line.push_str(&format!(", chose \"{chosen}\""));
+                }
+                details.push((index, text(payload, "messageId"), line));
+            }
+            _ => {}
+        }
+    }
+    for (index, message, line) in details {
+        let sections = &mut threads[index].1;
+        match sections
+            .iter_mut()
+            .find(|(id, _)| id.as_deref() == Some(message.as_str()))
+        {
+            Some((_, section)) => section.push_str(&format!("\n{line}\n")),
+            None => sections.push((None, format!("## On {}\n\n{line}\n", excerpt(&message)))),
+        }
+    }
+    threads
+        .into_iter()
+        .filter(|(_, sections)| !sections.is_empty())
+        .map(|(id, sections)| {
+            let title = unsent.thread_titles.get(&id).cloned().unwrap_or(id);
+            let mut text = format!(
+                "# {title}\n\nThese weren't sent before this workspace's access changed.\n"
+            );
+            for (_, section) in sections {
+                text.push('\n');
+                text.push_str(&section);
+            }
+            (title, text)
+        })
+        .collect()
+}
+
+/// A name that works as one path part on every platform.
+fn file_safe(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|char| {
+            if char.is_control() || "/\\:*?\"<>|".contains(char) {
+                ' '
+            } else {
+                char
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_end_matches('.').trim_end();
+    if trimmed.is_empty() {
+        "untitled".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// `.dohc/local/recovery/<date and time>`, adding `-2`, `-3` and so on when
+/// the name is taken, relative to the root. `planned` makes it.
+fn pick_recovery_folder(root: &Path, closed_at_ms: i64) -> Result<String, WireError> {
+    let parent = local(root).join(RECOVERY);
+    let stamp = utc_stamp(closed_at_ms);
+    (1..1000)
+        .map(|attempt| {
+            if attempt == 1 {
+                stamp.clone()
+            } else {
+                format!("{stamp}-{attempt}")
+            }
+        })
+        .find(|name| !parent.join(name).exists())
+        .map(|name| format!("{LOCAL_STATE_RELATIVE_PATH}/{RECOVERY}/{name}"))
+        .ok_or_else(|| failed("share-view-rebuild-recovery-unavailable"))
 }
 
 /// `2026-11-16 11-05 UTC` for a time in Unix milliseconds.
@@ -759,6 +1064,15 @@ fn utc_stamp(ms: i64) -> String {
     )
 }
 
+/// `2026-11-16 11:05 UTC`, for text rather than a file name.
+fn utc_time(ms: i64) -> String {
+    let stamp = utc_stamp(ms);
+    match stamp.rfind('-') {
+        Some(dash) => format!("{}:{}", &stamp[..dash], &stamp[dash + 1..]),
+        None => stamp,
+    }
+}
+
 /// `<number> <name>`, shortened before its extension to fit one path part.
 fn numbered_name(number: u32, name: &str) -> String {
     let prefix = format!("{number:04} ");
@@ -777,9 +1091,9 @@ fn numbered_name(number: u32, name: &str) -> String {
     format!("{prefix}{}{extension}", &stem[..end])
 }
 
-/// Move a file to its recovery destination without replacing anything.
-/// Answers whether there was a file to move. A destination that exists is a
-/// move already done.
+/// Move a file or folder to its recovery destination without replacing
+/// anything. Answers whether there was one to move. A destination that
+/// exists is a move already done.
 fn recover(source: &Path, destination: &Path) -> Result<bool, WireError> {
     if destination.exists() {
         return Ok(true);
@@ -796,6 +1110,12 @@ fn recover(source: &Path, destination: &Path) -> Result<bool, WireError> {
     Ok(true)
 }
 
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
 /// Write the recovery folder's `contents.md` from the manifest.
 fn write_contents(root: &Path, manifest: &RebuildManifest) -> Result<(), WireError> {
     let Some(plan) = manifest.plan.as_ref() else {
@@ -805,13 +1125,16 @@ fn write_contents(root: &Path, manifest: &RebuildManifest) -> Result<(), WireErr
         return Ok(());
     };
     let mut text = format!(
-        "# Saved files\n\nThis workspace's access changed on {}. dohc moved these files here \
-         instead of deleting them.\n\n| Saved as | Was at | Why |\n| --- | --- | --- |\n",
-        utc_stamp(manifest.closed_at_ms)
+        "# Saved files\n\nThis workspace's access changed on {}. dohc saved here what the \
+         server hadn't received from this copy, instead of deleting it.\n",
+        utc_time(manifest.closed_at_ms)
     );
+    if !plan.recovery.is_empty() {
+        text.push_str("\n| Saved as | Was at | Why |\n| --- | --- | --- |\n");
+    }
     for item in &plan.recovery {
         let why = if item.found == Some(false) {
-            format!("{}; the file wasn't found", item.reason)
+            format!("{} It wasn't found.", item.reason)
         } else {
             item.reason.clone()
         };
@@ -820,14 +1143,25 @@ fn write_contents(root: &Path, manifest: &RebuildManifest) -> Result<(), WireErr
             item.destination, item.path, why
         ));
     }
+    if !plan.undone.is_empty() {
+        text.push_str(
+            "\n## Undone\n\nThe server never received these changes, so the files are back where \
+             they were:\n\n",
+        );
+        for change in &plan.undone {
+            match &change.moved_to {
+                Some(moved_to) => {
+                    text.push_str(&format!("- `{moved_to}` moved back to `{}`\n", change.path));
+                }
+                None => text.push_str(&format!("- `{}`, which you deleted\n", change.path)),
+            }
+        }
+    }
     let folder = root.join(folder);
     let temp = folder.join(format!("{CONTENTS}.tmp"));
-    let written = (|| {
-        let mut file = std::fs::File::create(&temp)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        std::fs::rename(&temp, folder.join(CONTENTS))
-    })();
+    let written = std::fs::create_dir_all(&folder)
+        .and_then(|()| write_synced(&temp, text.as_bytes()))
+        .and_then(|()| std::fs::rename(&temp, folder.join(CONTENTS)));
     written.map_err(|_| failed("share-view-rebuild-recovery-unavailable"))
 }
 
@@ -848,29 +1182,6 @@ async fn rename_retrying(from: &Path, to: &Path) -> Result<(), WireError> {
     Err(failed("share-view-rebuild-rename-failed"))
 }
 
-/// Call `found` with every file under `folder`, as a path relative to
-/// `root` with `/` separators. Skips `.dohc` at the root.
-fn walk_files(root: &Path, folder: &Path, found: &mut dyn FnMut(&str)) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(folder)? {
-        let entry = entry?;
-        let path = entry.path();
-        if folder == root && entry.file_name() == ".dohc" {
-            continue;
-        }
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            walk_files(root, &path, found)?;
-        } else if let Ok(relative) = path.strip_prefix(root) {
-            let relative: Vec<String> = relative
-                .components()
-                .map(|part| part.as_os_str().to_string_lossy().into_owned())
-                .collect();
-            found(&relative.join("/"));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -879,6 +1190,7 @@ mod tests {
     fn a_stamp_names_the_utc_minute() {
         assert_eq!(utc_stamp(0), "1970-01-01 00-00 UTC");
         assert_eq!(utc_stamp(1_794_827_100_000), "2026-11-16 11-05 UTC");
+        assert_eq!(utc_time(1_794_827_100_000), "2026-11-16 11:05 UTC");
     }
 
     #[test]
@@ -891,5 +1203,11 @@ mod tests {
             named.starts_with("0001 é") && named.ends_with("é.md"),
             "{named}"
         );
+    }
+
+    #[test]
+    fn a_title_becomes_one_safe_path_part() {
+        assert_eq!(file_safe("Plans: a/b?"), "Plans  a b");
+        assert_eq!(file_safe(" ... "), "untitled");
     }
 }

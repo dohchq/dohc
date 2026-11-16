@@ -10761,6 +10761,10 @@ function registerIpcHandlers(): void {
       const { view, relay } = shareViewRebuildRelay(workspaceId);
       const selector = recordedShareSelector(view.grantedSelector);
       if (selector?.wholeWorkspace !== true) throw new Error("this workspace's record is damaged");
+      // The rebuild saves each draft a live page kept in the recovery folder.
+      const liveDrafts = (
+        await listLiveDraftRecovery(join(stateDir(), "live-draft-recovery"), workspaceId)
+      ).map(({ recordId, path, text }) => ({ recordId, path, text }));
       return parseShareViewRebuildAnswer(
         await shareViewRebuildEngine("share.view.rebuild", {
           rootDir: requireWorkspace(workspaceId).rootPath,
@@ -10769,15 +10773,18 @@ function registerIpcHandlers(): void {
           shareId: view.shareId,
           grantedSelector: engineGrantedSelector(selector, reach) as unknown as JsonValue,
           relay: relayOpenConfiguration(relay) as JsonValue,
+          liveDrafts,
         }),
         reach,
       );
     },
-    finish: async (workspaceId, rebuildId) => {
+    finish: async (workspaceId, rebuildId, savedDrafts) => {
       await shareViewRebuildEngine("share.view.rebuildFinish", {
         rootDir: requireWorkspace(workspaceId).rootPath,
         rebuildId,
       });
+      for (const recordId of savedDrafts)
+        await removeKeptTyping(join(stateDir(), "live-draft-recovery"), workspaceId, recordId);
     },
     install: async (workspaceId, rebuildId, reach) => {
       const view = findWorkspace(workspaceId)?.shareView;

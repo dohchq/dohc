@@ -1,6 +1,6 @@
-//! Store reads and writes a joined copy's rebuild needs: whether the old
-//! store holds work of the member's own, which blobs a store holds, and the
-//! converge waves' materialization jobs, added once by id.
+//! Store reads and writes a joined copy's rebuild needs: the member's work
+//! the relay hasn't taken, which blobs a store holds, and the converge waves'
+//! materialization jobs, added once by id.
 
 use super::ActorHandle;
 use crate::error::RuntimeError;
@@ -9,7 +9,7 @@ use dohc_engine_storage::{
     enqueue_job,
 };
 use rusqlite::{OptionalExtension, params};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// One converge job: write `content_sha256` at the path, or delete the file
 /// there. A delete names the bytes it expects as its content and preimage.
@@ -31,76 +31,172 @@ pub struct RebuildHead {
     pub sha256: String,
 }
 
-/// Each query names one kind of own work, so the answer says what kept the
-/// copy closed. A kind is listed when any row matches.
-const OWN_WORK: &[(&str, &str)] = &[
-    // A moment the relay never served back: the member's edit, captured or
-    // made through dohc, sent or not. A share view's pull records each
-    // served write as `moment-share-<key>` (`replay_share_write`); a pull
-    // into an ordinary replica logs it as imported.
-    (
-        "moments",
-        "SELECT EXISTS (SELECT 1 FROM moments m WHERE m.workspace_id = ?1 \
-         AND m.moment_id NOT LIKE 'moment-share-%' \
-         AND m.moment_id NOT IN (SELECT json_extract(r.payload_json, '$.momentId') \
-           FROM replication_log r WHERE r.workspace_id = ?1 AND r.imported = 1 \
-           AND r.op_kind = 'moment.append' \
-           AND json_extract(r.payload_json, '$.momentId') IS NOT NULL))",
-    ),
-    // An op of this copy's own origin, other than chat the relay already took.
-    (
-        "unsent changes",
-        "SELECT EXISTS (SELECT 1 FROM replication_log r WHERE r.workspace_id = ?1 \
-         AND r.imported = 0 AND NOT (r.op_kind LIKE 'chat.%' AND r.origin_seq <= \
-           COALESCE((SELECT MAX(p.pushed_seq) FROM shared_channel_push_state p \
-             WHERE p.workspace_id = ?1), -1)))",
-    ),
-    (
-        "refused changes",
-        "SELECT EXISTS (SELECT 1 FROM replication_pending_refusals WHERE workspace_id = ?1)",
-    ),
-    (
-        "conflicts",
-        "SELECT EXISTS (SELECT 1 FROM conflicts WHERE workspace_id = ?1)",
-    ),
-    (
-        "unfinished file writes",
-        "SELECT EXISTS (SELECT 1 FROM materialization_jobs WHERE workspace_id = ?1 \
-         AND status IN ('pending', 'conflict'))",
-    ),
-    (
-        "displaced files",
-        "SELECT EXISTS (SELECT 1 FROM materialization_displacements WHERE workspace_id = ?1)",
-    ),
-    (
-        "direct writes",
-        "SELECT EXISTS (SELECT 1 FROM share_direct_write_plan WHERE workspace_id = ?1) \
-         OR EXISTS (SELECT 1 FROM share_direct_write_marks WHERE workspace_id = ?1)",
-    ),
-];
+/// The member's work in the old store that the relay hasn't taken.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RebuildUnsent {
+    /// Own chat ops past the share's confirmed push position, oldest first:
+    /// the op kind and its payload.
+    pub chat: Vec<(String, serde_json::Value)>,
+    /// The titles of the threads the unsent chat names, by thread id.
+    pub thread_titles: BTreeMap<String, String>,
+    /// The author and body of each message the unsent chat replies to or
+    /// decides on, by message id.
+    pub messages: BTreeMap<String, (String, String)>,
+    /// Each file whose newest moment is the member's own and writes it: its
+    /// path and the hash of its bytes.
+    pub versions: Vec<RebuildHead>,
+    /// Own deletes and moves that are each file's newest moment.
+    pub removals: Vec<RebuildRemoval>,
+}
+
+/// A file's newest moment that took it away from `path`: a delete, or a move
+/// to `moved_to`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebuildRemoval {
+    pub path: String,
+    pub moved_to: Option<String>,
+}
+
+const OWN_CHAT: &str = "SELECT r.op_kind, r.payload_json FROM replication_log r \
+     WHERE r.workspace_id = ?1 AND r.imported = 0 \
+     AND r.op_kind IN ('chat.thread.create', 'chat.message.append', 'chat.decision.set', \
+       'chat.attachment.add') \
+     AND r.origin_seq > COALESCE((SELECT p.pushed_seq FROM shared_channel_push_state p \
+       WHERE p.workspace_id = ?1 AND p.share_id = ?2), -1) \
+     ORDER BY r.origin_seq";
+
+/// A moment the relay never served back: a share view's pull records each
+/// served write as `moment-share-<key>` (`replay_share_write`), and a pull
+/// into an ordinary replica logs it as imported.
+const OWN_MOMENT: &str = "m.moment_id NOT LIKE 'moment-share-%' \
+     AND m.moment_id NOT IN (SELECT json_extract(r.payload_json, '$.momentId') \
+       FROM replication_log r WHERE r.workspace_id = ?1 AND r.imported = 1 \
+       AND r.op_kind = 'moment.append' \
+       AND json_extract(r.payload_json, '$.momentId') IS NOT NULL)";
 
 impl ActorHandle {
-    /// The kinds of own work the store holds, empty when it holds none. A
-    /// copy that holds any is not rebuilt by dropping its store.
-    pub async fn rebuild_own_work(
+    /// The member's work the relay hasn't taken: unsent chat for the share,
+    /// and each file whose newest moment is the member's own.
+    pub async fn rebuild_unsent(
         &self,
         workspace_id: String,
-    ) -> Result<Vec<String>, RuntimeError> {
+        share_id: String,
+    ) -> Result<RebuildUnsent, RuntimeError> {
         self.run(move |store, _| {
             store.read_with(|conn| {
-                let mut kinds = Vec::new();
-                for (kind, query) in OWN_WORK {
-                    let held: bool = conn
-                        .query_row(query, [&workspace_id], |row| row.get(0))
-                        .map_err(StorageError::corrupt_public)?;
-                    if held {
-                        kinds.push((*kind).to_owned());
+                let corrupt = StorageError::corrupt_public;
+                let mut unsent = RebuildUnsent::default();
+                let mut statement = conn.prepare(OWN_CHAT).map_err(corrupt)?;
+                let rows = statement
+                    .query_map(params![workspace_id, share_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(corrupt)?;
+                for row in rows {
+                    let (kind, payload) = row.map_err(corrupt)?;
+                    let payload =
+                        serde_json::from_str(&payload).map_err(StorageError::corrupt_public)?;
+                    unsent.chat.push((kind, payload));
+                }
+                let named = |key: &str| -> BTreeSet<String> {
+                    unsent
+                        .chat
+                        .iter()
+                        .filter_map(|(_, payload)| payload[key].as_str().map(str::to_owned))
+                        .collect()
+                };
+                let (threads, parents, decided) = (
+                    named("threadId"),
+                    named("parentMessageId"),
+                    named("messageId"),
+                );
+                for thread in threads {
+                    let title: Option<String> = conn
+                        .query_row(
+                            "SELECT json_extract(payload_json, '$.title') FROM replication_log \
+                             WHERE workspace_id = ?1 AND op_kind = 'chat.thread.create' \
+                             AND json_extract(payload_json, '$.threadId') = ?2 LIMIT 1",
+                            params![workspace_id, thread],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(corrupt)?
+                        .flatten();
+                    if let Some(title) = title {
+                        unsent.thread_titles.insert(thread, title);
                     }
                 }
-                Ok::<_, RuntimeError>(kinds)
+                for message in parents.into_iter().chain(decided) {
+                    let found: Option<(Option<String>, Option<String>)> = conn
+                        .query_row(
+                            "SELECT json_extract(payload_json, '$.authorDisplayName'), \
+                             json_extract(payload_json, '$.body') FROM replication_log \
+                             WHERE workspace_id = ?1 AND op_kind = 'chat.message.append' \
+                             AND json_extract(payload_json, '$.messageId') = ?2 LIMIT 1",
+                            params![workspace_id, message],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
+                        .map_err(corrupt)?;
+                    if let Some((Some(author), Some(body))) = found {
+                        unsent.messages.insert(message, (author, body));
+                    }
+                }
+                let mut statement = conn
+                    .prepare(&format!(
+                        "SELECT m.object_id, m.path, m.operation, \
+                         COALESCE(m.after_blob_sha256, m.after_binary_sha256), \
+                         COALESCE(m.before_path, m.payload_before_path) \
+                         FROM moments m WHERE m.workspace_id = ?1 AND {OWN_MOMENT} \
+                         AND m.moment_order = (SELECT MAX(o.moment_order) FROM moments o \
+                           WHERE o.workspace_id = ?1 AND o.object_id = m.object_id) \
+                         ORDER BY m.path"
+                    ))
+                    .map_err(corrupt)?;
+                let rows = statement
+                    .query_map([&workspace_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ))
+                    })
+                    .map_err(corrupt)?;
+                for row in rows {
+                    let (object_id, path, operation, sha256, before_path) = row.map_err(corrupt)?;
+                    if operation == "delete" {
+                        unsent.removals.push(RebuildRemoval {
+                            path,
+                            moved_to: None,
+                        });
+                        continue;
+                    }
+                    if let Some(from) = before_path.filter(|from| *from != path) {
+                        unsent.removals.push(RebuildRemoval {
+                            path: from,
+                            moved_to: Some(path.clone()),
+                        });
+                    }
+                    if let Some(sha256) = sha256 {
+                        unsent.versions.push(RebuildHead {
+                            path,
+                            object_id,
+                            sha256,
+                        });
+                    }
+                }
+                Ok::<_, RuntimeError>(unsent)
             })
         })
         .await
+    }
+
+    /// A blob's bytes, text or binary, when the store holds it.
+    pub async fn rebuild_blob(&self, sha256: String) -> Result<Option<Vec<u8>>, RuntimeError> {
+        self.run(move |store, _| Ok(store.get_materialization_blob(&sha256)?))
+            .await
     }
 
     /// Every current file on the workspace's main version, by path.

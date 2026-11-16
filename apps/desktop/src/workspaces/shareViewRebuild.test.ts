@@ -43,6 +43,7 @@ function copy(
     notices: [] as ShareViewRebuildNotice[],
     slept: [] as number[],
     builtUnder: [] as Reach[],
+    draftsRemoved: [] as string[],
   };
   const steps: ShareViewRebuildSteps<Reach> = {
     hold: async () => {
@@ -69,9 +70,10 @@ function copy(
       return answer;
     },
     // Like the engine: a rebuild already finished has nothing left to delete.
-    finish: async () => {
+    finish: async (_id, _rebuildId, savedDrafts) => {
       expect(state.manifest).not.toBe("closed");
       state.manifest = "gone";
+      state.draftsRemoved.push(...savedDrafts);
     },
     install: async (_id, rebuildId, reach) => {
       if (state.view.rebuild === rebuildId) state.view = { reach, rebuild: undefined };
@@ -94,11 +96,16 @@ function copy(
   return { state, rebuilds: createShareViewRebuilds(steps) };
 }
 
-const rebuilt = (reach: Reach, recovered = 0): ShareViewRebuildAnswer<Reach> => ({
+const rebuilt = (
+  reach: Reach,
+  recovered = 0,
+  savedDrafts: string[] = [],
+): ShareViewRebuildAnswer<Reach> => ({
   state: "rebuilt",
   reach,
   recoveryFolder: recovered ? ".dohc/local/recovery/2026-11-16 10-00 UTC" : null,
   recovered,
+  savedDrafts,
 });
 
 describe("rebuilding a joined copy", () => {
@@ -143,19 +150,20 @@ describe("rebuilding a joined copy", () => {
     expect(state).toMatchObject({ open: false, held: false, view: { rebuild: "rebuild-1" } });
   });
 
-  it("keeps a copy with own work closed and says why", async () => {
-    const { state, rebuilds } = copy([{ state: "ownWork", kinds: ["moments", "changed files"] }]);
-    await expect(rebuilds.run("w", "rebuild-1")).resolves.toEqual({
-      kind: "ownWork",
-      kinds: ["moments", "changed files"],
-    });
-    expect(state).toMatchObject({
-      open: false,
-      held: false,
-      manifest: "closed",
-      view: { reach: { revision: "r1" }, rebuild: "rebuild-1" },
-    });
-    expect(state.notices).toEqual([{ kind: "ownWork", kinds: ["moments", "changed files"] }]);
+  // The recovery folder holds each live draft the rebuild saved, so main
+  // deletes those drafts only once the engine finished.
+  it("deletes the live drafts the rebuild saved once it finished", async () => {
+    const { state, rebuilds } = copy([
+      rebuilt({ revision: "r2", visibilityRevision: "v2" }, 1, ["draft-1"]),
+    ]);
+    await rebuilds.run("w", "rebuild-1");
+    expect(state).toMatchObject({ manifest: "gone", draftsRemoved: ["draft-1"] });
+  });
+
+  it("keeps the live drafts when the rebuild stops", async () => {
+    const { state, rebuilds } = copy([new Error("share-view-rebuild-filesystems-differ")]);
+    await rebuilds.run("w", "rebuild-1");
+    expect(state.draftsRemoved).toEqual([]);
   });
 
   it("waits for the connection with growing pauses, then finishes", async () => {
@@ -180,7 +188,11 @@ describe("rebuilding a joined copy", () => {
     const { state, rebuilds } = copy([new Removed()]);
     await expect(rebuilds.run("w", "rebuild-1")).resolves.toEqual({ kind: "ended" });
     expect(state).toMatchObject({ open: false, held: false, view: { rebuild: "rebuild-1" } });
-    expect(state.notices).toEqual([{ kind: "clear" }]);
+    expect(state.notices).toEqual([{ kind: "ended" }]);
+    expect(shareViewRebuildStop({ kind: "ended" })).toEqual({
+      reason: "ended",
+      detail: "Your membership ended. What arrived stays in this folder.",
+    });
   });
 
   it("stops on any other failure with the copy closed", async () => {

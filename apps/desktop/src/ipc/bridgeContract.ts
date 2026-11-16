@@ -411,7 +411,7 @@ export const WorkspaceSummary = z.object({
       // Why the update stopped, when it did; Try again starts it again.
       updatingAccessStopped: z
         .object({
-          reason: z.enum(["waiting", "ownWork", "failed"]),
+          reason: z.enum(["waiting", "failed", "ended"]),
           detail: z.string(),
         })
         .optional(),

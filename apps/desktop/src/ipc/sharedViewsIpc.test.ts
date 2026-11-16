@@ -874,15 +874,14 @@ describe("registered received-view handlers", () => {
         reach: stored,
         rebuild: {
           rebuildId: "rebuild-1",
-          stopped: shareViewRebuildStop({ kind: "ownWork", kinds: ["moments"] })!,
+          stopped: shareViewRebuildStop({ kind: "failed", error: new Error("the disk is full.") })!,
         },
       });
       expect(workspaceSummaryFor(h.workspace).shareView).toMatchObject({
         updatingAccess: true,
         updatingAccessStopped: {
-          reason: "ownWork",
-          detail:
-            "This copy holds work of your own (moments), so dohc can't update access yet. Nothing in it changed.",
+          reason: "failed",
+          detail: "dohc could not update access: the disk is full.",
         },
       });
       h.workspace.shareView!.rebuild = { rebuildId: "rebuild-1" };

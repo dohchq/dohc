@@ -36,11 +36,12 @@ pub use actor::{
     ActiveVersionSwitch, ActorHandle, AutomationClaimListener, BinaryWriteExecutionResult,
     CAPTURE_NEW_FILE_LIVE, CaptureBatchReads, CheckpointCycle, CollectionReconciliation,
     HistoryPageRead, LifecycleState, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS,
-    MergeExecutionResult, PostCommitMaterializeOutcome, RebuildHead, RebuildJob,
-    RelayConfiguration, RelayOperation, RelayOperationOutcome, RollbackExecutionResult,
-    SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined, TextWriteExecutionResult,
-    WorkspaceActor, WorkspaceRootGuard, WriteConditions, YdocAppend, YdocCloseMaterialization,
-    YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome, YdocSettlement, YdocWriteState,
+    MergeExecutionResult, PostCommitMaterializeOutcome, RebuildHead, RebuildJob, RebuildRemoval,
+    RebuildUnsent, RelayConfiguration, RelayOperation, RelayOperationOutcome,
+    RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined,
+    TextWriteExecutionResult, WorkspaceActor, WorkspaceRootGuard, WriteConditions, YdocAppend,
+    YdocCloseMaterialization, YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome,
+    YdocSettlement, YdocWriteState,
 };
 #[cfg(unix)]
 pub use actor::{

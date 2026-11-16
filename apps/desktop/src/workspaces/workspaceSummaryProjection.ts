@@ -160,11 +160,11 @@ export function workspaceSummariesFrom(entries: readonly RegistryEntry[]): Works
 
 // Why a joined copy's rebuild stopped, when the record says so readably.
 function rebuildStop(raw: unknown): {
-  updatingAccessStopped?: { reason: "waiting" | "ownWork" | "failed"; detail: string };
+  updatingAccessStopped?: { reason: "waiting" | "failed" | "ended"; detail: string };
 } {
   if (
     !isRecord(raw) ||
-    (raw.reason !== "waiting" && raw.reason !== "ownWork" && raw.reason !== "failed")
+    (raw.reason !== "waiting" && raw.reason !== "failed" && raw.reason !== "ended")
   )
     return {};
   const detail = boundedString(raw.detail, 0, 2_000);

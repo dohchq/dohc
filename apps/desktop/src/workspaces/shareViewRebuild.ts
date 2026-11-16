@@ -13,21 +13,29 @@ import { parseListedReach, type ListedReach } from "@dohc/security-contract/list
 import { isRecord } from "@dohc/workspace-core/records";
 import type { ShareViewRebuildStop } from "./registryStore";
 
+/**
+ * `savedDrafts`: the live draft records the recovery folder now holds, which
+ * main deletes once the rebuild finishes.
+ */
 export type ShareViewRebuildAnswer<Reach> =
-  | { state: "rebuilt"; reach: Reach | null; recoveryFolder: string | null; recovered: number }
-  | { state: "reachMoved" }
-  | { state: "ownWork"; kinds: string[] };
+  | {
+      state: "rebuilt";
+      reach: Reach | null;
+      recoveryFolder: string | null;
+      recovered: number;
+      savedDrafts: string[];
+    }
+  | { state: "reachMoved" };
 
 export type ShareViewRebuildOutcome =
   | { kind: "rebuilt"; recoveryFolder: string | null; recovered: number }
-  | { kind: "ownWork"; kinds: string[] }
   | { kind: "ended" }
   | { kind: "failed"; error: unknown };
 
 export type ShareViewRebuildNotice =
   | { kind: "waiting" }
-  | { kind: "ownWork"; kinds: string[] }
   | { kind: "failed"; error: unknown }
+  | { kind: "ended" }
   | { kind: "recovered"; folder: string; count: number }
   | { kind: "clear" };
 
@@ -41,8 +49,8 @@ export interface ShareViewRebuildSteps<Reach> {
     rebuildId: string,
     reach: Reach,
   ): Promise<ShareViewRebuildAnswer<Reach>>;
-  /** Delete what the engine kept for the rebuild once main stored its reach. */
-  finish(workspaceId: string, rebuildId: string): Promise<void>;
+  /** Delete what the engine kept for the rebuild, and the drafts it saved. */
+  finish(workspaceId: string, rebuildId: string, savedDrafts: readonly string[]): Promise<void>;
   /** Store the reach and clear the view's rebuild, if it is still this one. */
   install(workspaceId: string, rebuildId: string, reach: Reach): Promise<void>;
   notice(workspaceId: string, notice: ShareViewRebuildNotice): void;
@@ -76,10 +84,16 @@ export function createShareViewRebuilds<Reach>(steps: ShareViewRebuildSteps<Reac
             answer = await steps.rebuild(workspaceId, rebuildId, reach);
           } catch (error) {
             if (steps.classify(error) !== "finished") throw error;
-            answer = { state: "rebuilt", reach, recoveryFolder: null, recovered: 0 };
+            answer = {
+              state: "rebuilt",
+              reach,
+              recoveryFolder: null,
+              recovered: 0,
+              savedDrafts: [],
+            };
           }
           if (answer.state === "rebuilt") {
-            await steps.finish(workspaceId, rebuildId);
+            await steps.finish(workspaceId, rebuildId, answer.savedDrafts);
             await steps.install(workspaceId, rebuildId, answer.reach ?? reach);
           }
         } catch (error) {
@@ -91,7 +105,7 @@ export function createShareViewRebuilds<Reach>(steps: ShareViewRebuildSteps<Reac
             continue;
           }
           if (kind === "ended") {
-            steps.notice(workspaceId, { kind: "clear" });
+            steps.notice(workspaceId, { kind: "ended" });
             return { kind: "ended" };
           }
           steps.notice(workspaceId, { kind: "failed", error });
@@ -104,14 +118,10 @@ export function createShareViewRebuilds<Reach>(steps: ShareViewRebuildSteps<Reac
           steps.notice(workspaceId, { kind: "failed", error });
           return { kind: "failed", error };
         }
-        if (answer.state === "ownWork") {
-          steps.notice(workspaceId, { kind: "ownWork", kinds: answer.kinds });
-          return { kind: "ownWork", kinds: answer.kinds };
-        }
         rebuilt = true;
         steps.notice(
           workspaceId,
-          answer.recoveryFolder && answer.recovered > 0
+          answer.recoveryFolder
             ? { kind: "recovered", folder: answer.recoveryFolder, count: answer.recovered }
             : { kind: "clear" },
         );
@@ -221,17 +231,13 @@ export function parseShareViewRebuildAnswer(
 ): ShareViewRebuildAnswer<ListedReach> {
   if (!isRecord(value)) throw new Error("dohc could not read the engine's rebuild answer.");
   if (value.state === "reachMoved") return { state: "reachMoved" };
-  if (
-    value.state === "ownWork" &&
-    Array.isArray(value.kinds) &&
-    value.kinds.every((kind) => typeof kind === "string")
-  ) {
-    return { state: "ownWork", kinds: value.kinds };
-  }
+  const savedDrafts = value.savedDrafts;
   if (
     value.state === "rebuilt" &&
     (value.recoveryFolder === null || typeof value.recoveryFolder === "string") &&
-    typeof value.recovered === "number"
+    typeof value.recovered === "number" &&
+    Array.isArray(savedDrafts) &&
+    savedDrafts.every((id) => typeof id === "string")
   ) {
     const planned = isRecord(value.reach) ? value.reach : null;
     const reach =
@@ -244,6 +250,7 @@ export function parseShareViewRebuildAnswer(
       reach,
       recoveryFolder: value.recoveryFolder,
       recovered: value.recovered,
+      savedDrafts,
     };
   }
   throw new Error("dohc could not read the engine's rebuild answer.");
@@ -254,10 +261,10 @@ export function shareViewRebuildStop(notice: ShareViewRebuildNotice): ShareViewR
   switch (notice.kind) {
     case "waiting":
       return { reason: "waiting", detail: "dohc could not reach the server. It keeps trying." };
-    case "ownWork":
+    case "ended":
       return {
-        reason: "ownWork",
-        detail: `This copy holds work of your own (${notice.kinds.join(", ")}), so dohc can't update access yet. Nothing in it changed.`,
+        reason: "ended",
+        detail: "Your membership ended. What arrived stays in this folder.",
       };
     case "failed": {
       if (notice.error instanceof LivePageUnkeptError)

@@ -266,7 +266,7 @@ export interface ShareViewIdentity {
 }
 
 export interface ShareViewRebuildStop {
-  reason: "waiting" | "ownWork" | "failed";
+  reason: "waiting" | "failed" | "ended";
   detail: string;
 }
 

@@ -244,11 +244,7 @@ mod tests {
             .expect("close");
 
         // Each phase before the swap holds the old store.
-        for phase in [
-            RebuildPhase::Planned,
-            RebuildPhase::Saved,
-            RebuildPhase::Swapping,
-        ] {
+        for phase in [RebuildPhase::Planned, RebuildPhase::Swapping] {
             crate::rebuild_manifest::write_manifest(&root, &manifest("rebuild-1", phase))
                 .expect("phase");
             assert_updating_access(open(&restarted, &root, None).await);
