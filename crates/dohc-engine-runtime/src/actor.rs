@@ -1286,8 +1286,7 @@ fn worker_main(
         open: db_path,
         identity,
     } = paths;
-    if let Err(err) = access_order::install(&named, &identity, root_token.is_some(), access_rules)
-    {
+    if let Err(err) = access_order::install(&named, &identity, root_token.is_some(), access_rules) {
         let _ = startup_tx.send(Err(err));
         return;
     }

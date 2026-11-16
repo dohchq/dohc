@@ -2726,7 +2726,10 @@ mod tests {
         std::fs::write(&elsewhere, b"").unwrap();
         let signals = Arc::new(AccessRuleSignals::default());
         for (store, expected) in [
-            (&named, Ok(Some(std::path::absolute(scratch.path()).unwrap()))),
+            (
+                &named,
+                Ok(Some(std::path::absolute(scratch.path()).unwrap())),
+            ),
             (&elsewhere, Err(WORKSPACE_FOLDER_MOVED)),
         ] {
             let store = EngineDbIdentity::of_existing(store).unwrap();

@@ -1238,12 +1238,14 @@ fn an_undo_a_crash_left_pending_is_cancelled_when_the_workspace_opens() {
             )
             .unwrap();
         }
-        conn.prepare("SELECT status FROM materialization_jobs WHERE job_id LIKE 'access-rule-undo%'")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<String>>>()
-            .unwrap()
+        conn.prepare(
+            "SELECT status FROM materialization_jobs WHERE job_id LIKE 'access-rule-undo%'",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .unwrap()
     };
     let mut f = ruled_team();
     f.put("team/access.yaml", EDIT);
