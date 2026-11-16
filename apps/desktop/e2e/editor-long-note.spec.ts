@@ -56,12 +56,16 @@ async function withLongNote(
   }
 }
 
-/** Whether the middle of the block is inside the window. */
-const shown = (block: Locator) =>
-  block.evaluate((element) => {
+/** Whether the middle of the element is inside the pane that scrolls the note. */
+const shown = (target: Locator) =>
+  target.evaluate((element) => {
+    let pane = document.querySelector('[data-testid="markdown-editor"]');
+    while (pane && !/auto|scroll/.test(getComputedStyle(pane).overflowY)) pane = pane.parentElement;
+    if (!pane) return false;
+    const view = pane.getBoundingClientRect();
     const box = element.getBoundingClientRect();
     const middle = (box.top + box.bottom) / 2;
-    return box.height > 0 && middle >= 0 && middle <= window.innerHeight;
+    return box.height > 0 && middle >= view.top && middle <= view.bottom;
   });
 
 const block = (editor: Locator, tag: string, text: string | RegExp) =>
@@ -101,9 +105,23 @@ test("the caret keys reach and type in blocks of a long note that were never dra
     expect(Number(/\d{3}/.exec(typedIn)?.[0])).toBeGreaterThan(100);
     await expect.poll(() => shown(paged)).toBe(true);
 
+    // Each of the four edits reaches the file, in the paragraph it was typed in.
+    const pagedText = (await paged.textContent()) ?? "";
     await expect
-      .poll(() => readFile(join(temp.rootPath, "long.md"), "utf8"), { timeout: 30_000 })
-      .toMatch(/^# Long note TOP\r?\n[\s\S]*Last line of the note\. END\s*$/);
+      .poll(
+        async () => {
+          const saved = await readFile(join(temp.rootPath, "long.md"), "utf8");
+          const lines = saved.split(/\r?\n/);
+          return {
+            top: lines[0] === "# Long note TOP",
+            line: lines.includes(`${paragraph(40)}!`),
+            page: lines.includes(pagedText),
+            end: saved.trimEnd().endsWith(`${LAST} END`),
+          };
+        },
+        { timeout: 30_000 },
+      )
+      .toEqual({ top: true, line: true, page: true, end: true });
   });
 });
 
@@ -128,14 +146,89 @@ test("find and the outline show a block of a long note that was never drawn", as
   });
 });
 
-/** The median time from a key going down to the second frame after its text shows, over 20 keys. */
-async function keyTime(page: Page, editor: Locator): Promise<number> {
+// What draws around a far match is taller than its estimate, and a diagram
+// among it draws a few frames later. Each moved the match out of the pane.
+test("find shows a match far down a note of code blocks, callouts and tables", async () => {
+  test.setTimeout(180_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "rich.md", contents: largeNote("rich") }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "rich.md");
+    await explorerRow(page, "rich.md").click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor.locator("h2")).toHaveCount(LARGE_NOTE_SECTIONS, { timeout: 120_000 });
+    await editor.locator("p").first().click();
+    const find = page.getByRole("search", { name: "find and replace" });
+    // In a paragraph, in a code block, and in a table, each in another part of the note.
+    for (const text of ["Section 377 keeps", "compute388", "next 201"]) {
+      await page.keyboard.press("ControlOrMeta+f");
+      await find.getByPlaceholder("Find").fill(text);
+      const match = editor.locator(".dohc-find-match--active");
+      await expect(match).toHaveText(text);
+      await expect.poll(() => shown(match)).toBe(true);
+      // A diagram above the match draws up to a second after the jump, and
+      // moved the match out of the pane. It is still shown then.
+      await page.waitForTimeout(1_000);
+      expect(await shown(match)).toBe(true);
+      await page.keyboard.press("Escape");
+    }
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// A diagram is drawn when it comes near what shows. Drawing all of a long
+// note's diagrams as it opened kept the app busy for seconds.
+test("a diagram far down a long note is drawn when the note is brought to it", async () => {
+  test.setTimeout(180_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "rich.md", contents: largeNote("rich") }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "rich.md");
+    await explorerRow(page, "rich.md").click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor.locator("h2")).toHaveCount(LARGE_NOTE_SECTIONS, { timeout: 120_000 });
+    // Every fifth section has a diagram: the first is on screen as the note opens.
+    const diagram = (section: number) =>
+      editor
+        .locator(".dohc-mermaid-preview")
+        .nth(section / 5)
+        .locator("svg");
+    await expect(diagram(0)).toHaveCount(1);
+
+    const outline = page.getByRole("navigation", { name: "Document outline" });
+    await outline.locator(".dohc-outline-rail").hover();
+    await outline.getByRole("button", { name: "Heading 300", exact: true }).click();
+    await expect(diagram(300)).toHaveCount(1);
+    await expect.poll(() => shown(diagram(300))).toBe(true);
+    // One between the two was never near, and stays undrawn.
+    await expect(diagram(150)).toHaveCount(0);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+/**
+ * The time from each of 25 keys going down to the second frame after its text
+ * shows: the median of the last 20, and the first five, which also pay for
+ * what the note draws around a caret placed in it for the first time.
+ */
+async function keyTime(page: Page, editor: Locator): Promise<{ median: number; first: number[] }> {
   const times: number[] = [];
   for (let key = 0; key < 25; key += 1) {
     await editor.evaluate((element) => {
       (window as Window & { keyShown?: Promise<number> }).keyShown = new Promise((resolve) => {
+        // From when the key was pressed, which is before any handler ran.
         let down = 0;
-        element.addEventListener("keydown", () => (down = performance.now()), {
+        element.addEventListener("keydown", (event) => (down = event.timeStamp), {
           once: true,
           capture: true,
         });
@@ -153,10 +246,10 @@ async function keyTime(page: Page, editor: Locator): Promise<number> {
     const shown = await page.evaluate(
       () => (window as Window & { keyShown?: Promise<number> }).keyShown!,
     );
-    // The first keys after a note opens pay for work the rest do not.
-    if (key >= 5) times.push(shown);
+    times.push(shown);
   }
-  return times.sort((a, b) => a - b)[Math.floor(times.length / 2)]!;
+  const later = times.slice(5).sort((a, b) => a - b);
+  return { median: later[Math.floor(later.length / 2)]!, first: times.slice(0, 5) };
 }
 
 test("a key in a note with 400 code blocks, callouts and tables costs little more than in a short note", async () => {
@@ -168,7 +261,13 @@ test("a key in a note with 400 code blocks, callouts and tables costs little mor
       { path: "small.md", contents: largeNote("small") },
       { path: "rich.md", contents: largeNote("rich") },
     ]);
-    desktop = await launchDesktopApp({ workspace: temp });
+    // A program that reads the window through the accessibility tree, as some
+    // on a developer's computer do, keeps the app busy for seconds after a
+    // long note opens, and a key waits behind it. This times the editor alone.
+    desktop = await launchDesktopApp({
+      workspace: temp,
+      switches: ["--disable-renderer-accessibility"],
+    });
     const page = desktop.page;
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await page.emulateMedia({ reducedMotion: "reduce" });
@@ -189,14 +288,14 @@ test("a key in a note with 400 code blocks, callouts and tables costs little mor
     const small = await typeIn("small.md", 12);
     const rich = await typeIn("rich.md", LARGE_NOTE_SECTIONS);
     await test.info().attach("key-times.json", {
-      body: JSON.stringify({ smallMs: small, richMs: rich }),
+      body: JSON.stringify({ small, rich }),
       contentType: "application/json",
     });
     // With controls on every block and every block laid out, a key in this
     // note took ten times as long as in the short one: 138 ms against 13 ms.
     // It now takes 25 to 47 ms against 14 ms. The limit sits between the two, and
     // both notes are timed in one run, so a slower computer moves both.
-    expect(rich).toBeLessThan(3 * small + 40);
+    expect(rich.median).toBeLessThan(3 * small.median + 40);
   } finally {
     // The debug engine took up to 50 s to save this note. The close does not
     // wait for it: the quit reaches its time limit and reports a failed close.

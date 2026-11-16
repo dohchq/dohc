@@ -11,6 +11,7 @@ import type { Editor } from "@tiptap/core";
 import { ChevronDown, ChevronUp, Replace, X } from "lucide-react";
 import { shortcutTitle } from "../../shortcuts/shortcutRegistry";
 import { isComposingKey } from "../ui/keys";
+import { scrollToPlace } from "./offscreenBlocks";
 import {
   buildReplaceActiveTransaction,
   buildReplaceAllTransaction,
@@ -41,7 +42,11 @@ export function FindReplaceBar({ editor }: { editor: Editor | null }) {
 
   useEffect(() => {
     if (!editor || !state.open || state.activeIndex < 0) return;
-    editor.view.dom.querySelector(".dohc-find-match--active")?.scrollIntoView({ block: "nearest" });
+    scrollToPlace(
+      () => editor.view.dom.querySelector<HTMLElement>(".dohc-find-match--active"),
+      false,
+      "nearest",
+    );
   }, [editor, state.open, state.activeIndex]);
 
   if (!editor || !state.open) return null;

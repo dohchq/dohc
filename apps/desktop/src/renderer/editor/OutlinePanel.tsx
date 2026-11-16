@@ -9,7 +9,7 @@ import {
   updateOutline,
   type OutlineHeading,
 } from "./outline";
-import { scrollToBlock } from "./offscreenBlocks";
+import { scrollToPlace } from "./offscreenBlocks";
 import { useDebouncedWordCount } from "./wordCount";
 import { prefersReducedMotion } from "../reducedMotion";
 import {
@@ -204,7 +204,7 @@ export function revealDocPosition(
       clearFlash();
       return;
     }
-    scrollToBlock(target, !prefersReducedMotion());
+    scrollToPlace(target, !prefersReducedMotion());
     const flashTimer = window.setTimeout(clearFlash, 900);
     return () => {
       window.clearTimeout(flashTimer);

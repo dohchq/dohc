@@ -626,11 +626,69 @@ body {
   content-visibility: visible;
 }
 
+/* A block that can skip its layout keeps its children's margins inside it,
+ * where they used to join its own. The last thing nested in a list shared the
+ * list's space-after, so here it gives its own up. This reaches down through
+ * plain lists only: a quote, a callout and a task item keep their children's
+ * margins in already. Each line is one more level of nesting, to six levels;
+ * a list that ends nested deeper sits 12px higher than its space-after. */
+.dohc-notion-editor
+  > :is(ul, ol)
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :last-child,
+.dohc-notion-editor
+  > :is(ul, ol)
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :is(ul, ol):last-child
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :last-child,
+.dohc-notion-editor
+  > :is(ul, ol)
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :is(ul, ol):last-child
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :is(ul, ol):last-child
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :last-child,
+.dohc-notion-editor
+  > :is(ul, ol)
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :is(ul, ol):last-child
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :is(ul, ol):last-child
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :is(ul, ol):last-child
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :last-child,
+.dohc-notion-editor
+  > :is(ul, ol)
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :is(ul, ol):last-child
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :is(ul, ol):last-child
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :is(ul, ol):last-child
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :is(ul, ol):last-child
+  > li:not([data-type="taskItem"], [data-checked]):last-child
+  > :last-child {
+  margin-bottom: 0;
+}
+
 /* The document ends flush to its bottom padding, whichever block trails. Its
  * first block keeps its space-before: in the editor, the block controls'
  * widget comes before it (blockControls.tsx). */
 .dohc-notion-editor > :last-child {
   margin-bottom: 0;
+}
+
+/* A list that ended the document with a nested block's space-after keeps that
+ * space as its own, now that the nested block gave it up. */
+.dohc-notion-editor > :is(ul, ol):last-child:has(
+    > li:not([data-type="taskItem"], [data-checked]):last-child
+      > :is(ul, ol, blockquote, pre, table, .tableWrapper):last-child
+  ) {
+  margin-bottom: 12px;
 }
 
 /* One shared left content edge: the TEXT of every top-level block sits on the
@@ -1187,6 +1245,13 @@ body {
   font-size: 11px;
   font-family: var(--font-mono);
   color: var(--dohc-subtle);
+}
+
+/* The read view draws a code block inside a list. The list, which can skip
+ * its layout, is then what this position is measured against in place of the
+ * document, and the list is as wide as the reading column. */
+.dohc-notion-editor > :is(ul, ol) .dohc-code-block-toolbar {
+  width: calc(100% + 2 * var(--dohc-editor-block-inset));
 }
 
 .dohc-code-block-toolbar-left {

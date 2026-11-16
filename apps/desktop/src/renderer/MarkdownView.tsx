@@ -74,6 +74,12 @@ import {
 } from "./markdown/frontmatter";
 import type { BlockNavigationTarget, MarkdownEditorHandle } from "./editor/MarkdownEditor";
 import {
+  noteBlocks,
+  readingPosition,
+  showReadingPosition,
+  type ReadingPosition,
+} from "./readingPosition";
+import {
   LazyMarkdownEditor,
   preloadMarkdownEditor,
   useLiveEditorSettled,
@@ -198,6 +204,9 @@ export const CHANGED_OUTSIDE_NOTICE = "This file changed outside dohc.";
 // How long the save chip says Reloaded after the document took in a change
 // made outside dohc.
 const RELOADED_SIGN_MS = 4_000;
+// How long the editor's layout is still before it lets go of the block the
+// person was reading.
+const READING_POSITION_HOLD_MS = 1_500;
 
 // A note's content, to tell a reload that took in a change from one that
 // came back the same: its body, and its frontmatter values as the model
@@ -1215,40 +1224,70 @@ export function MarkdownView(props: {
   // above the editor, which is where a frontmatter search hit actually lives.
   const engineDocPaneRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<HTMLDivElement | null>(null);
-  // Where the person is in the read view, as of its last scroll. The editor
-  // that replaces it opens at the same place.
-  const readScroll = useRef<{ key: string | undefined; top: number } | null>(null);
+  // Where the person is in the read view. The editor that replaces it opens at
+  // the same place. `at` names the block at the top of the pane. `top`, the
+  // pane's offset at its last scroll, stands in where no block has a place.
+  const readScroll = useRef<{
+    key: string | undefined;
+    top: number;
+    at: ReadingPosition | null;
+  } | null>(null);
   const engineShown = displayDoc !== null;
+  // The block is read from the read view in the render that brings the editor
+  // in, the last time it is drawn. Its last scroll is too early: the blocks a
+  // scroll brings near the viewport take their real heights in the frames
+  // after it, and move the note under a pane that does not scroll again.
+  const engineWasShown = useRef(engineShown);
+  if (engineShown && !engineWasShown.current && readScroll.current && localDocPaneRef.current) {
+    readScroll.current.at = readingPosition(
+      localDocPaneRef.current,
+      noteBlocks(readDocumentRef.current),
+    );
+  }
+  engineWasShown.current = engineShown;
   useLayoutEffect(() => {
     const handover = readScroll.current;
     readScroll.current = null;
     const pane = engineDocPaneRef.current;
     if (!engineShown || !pane || !handover || handover.key !== props.documentKey) return;
+    const { at } = handover;
     const land = () => {
+      if (at) return showReadingPosition(pane, noteBlocks(pane.querySelector(".ProseMirror")), at);
       if (pane.scrollHeight - pane.clientHeight < handover.top) return false;
       pane.scrollTop = handover.top;
       return true;
     };
-    if (land()) return;
+    if (land() && !at) return;
     // The editor's content can grow after its first frame, as its nodes and
     // images render. The position waits for it, unless the person moves first.
     // Editor controls stop their own presses from bubbling, so presses and
     // keys are caught on their way in.
     const moves = ["wheel", "keydown", "pointerdown"] as const;
+    let release: ReturnType<typeof setTimeout> | undefined;
     const stop = () => {
+      clearTimeout(release);
       observer.disconnect();
       pane.removeEventListener("scroll", stop);
       for (const move of moves) pane.removeEventListener(move, stop, true);
     };
     const observer = new ResizeObserver(() => {
-      if (land()) stop();
+      if (!land()) return;
+      if (!at) return stop();
+      // A block that is reached is held in place while the blocks drawn
+      // around it take their real heights and move it, until the layout has
+      // been still for a while. A count from the first landing would run out
+      // while the editor is still drawing a long note.
+      clearTimeout(release);
+      release = setTimeout(stop, READING_POSITION_HOLD_MS);
     });
     // The editor's wrapper fills the pane, so its document, which grows with
     // the note, is watched as well.
     for (const content of [...Array.from(pane.children), pane.querySelector(".ProseMirror")]) {
       if (content) observer.observe(content);
     }
-    pane.addEventListener("scroll", stop);
+    // Holding a block scrolls the pane, so only a position in pixels takes a
+    // scroll as the person moving.
+    if (!at) pane.addEventListener("scroll", stop);
     for (const move of moves) pane.addEventListener(move, stop, true);
     return stop;
   }, [engineShown, props.documentKey]);
@@ -2657,7 +2696,11 @@ export function MarkdownView(props: {
           data-testid="view-markdown"
           className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
           onScroll={(event) => {
-            readScroll.current = { key: props.documentKey, top: event.currentTarget.scrollTop };
+            readScroll.current = {
+              key: props.documentKey,
+              top: event.currentTarget.scrollTop,
+              at: null,
+            };
           }}
         >
           <TopMatter hidden={props.recordBody}>

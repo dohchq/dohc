@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
+import { LARGE_NOTE_SECTIONS, largeNote } from "./helpers/largeNotes";
 import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
@@ -249,6 +250,214 @@ test("an opening document draws each block where the ready editor draws it", asy
           )
           .toBeLessThanOrEqual(0.5);
       }
+    }
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+/** The first second-level heading at or below the top of the pane, and how far below. */
+async function headingAtTop(page: Page, body: string): Promise<{ text: string; below: number }> {
+  return page.evaluate((selector) => {
+    const pane = document.querySelector('[data-testid="view-markdown"]');
+    const root = pane?.querySelector(selector);
+    if (!pane || !root) throw new Error("document body not drawn");
+    const top = pane.getBoundingClientRect().top;
+    for (const heading of root.querySelectorAll("h2")) {
+      const below = heading.getBoundingClientRect().top - top;
+      if (below >= -1) return { text: heading.textContent ?? "", below: Math.round(below) };
+    }
+    throw new Error("no heading below the top of the pane");
+  }, body);
+}
+
+// A block away from the viewport has only an estimated height (styles.css),
+// and the read view and the editor estimate different blocks. The scroll
+// offset of one names another place in the other, so the place is handed over
+// as a block.
+test("the editor opens at the place the read view was scrolled to", async () => {
+  test.setTimeout(180_000);
+  const temp = await createTempWorkspace();
+  let desktop: LaunchedDesktopApp | null = null;
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "rich.md", contents: largeNote("rich") }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "rich.md");
+
+    await holdDocumentOpens(desktop);
+    await explorerRow(page, "rich.md").click();
+    const pane = page.getByTestId("view-markdown");
+    await expect(pane).toContainText(`Heading ${LARGE_NOTE_SECTIONS - 1}`, { timeout: 60_000 });
+    // A person reads on while the note opens: 40 turns of the wheel.
+    await pane.hover();
+    for (let turn = 0; turn < 40; turn += 1) await page.mouse.wheel(0, 900);
+    const read = ".dohc-notion-editor";
+    // The wheel's scroll runs on, and the blocks it brings near then take
+    // their heights: the place is the one that has stayed for a second.
+    let reading = await headingAtTop(page, read);
+    let stayed = 0;
+    await expect
+      .poll(
+        async () => {
+          const last = reading;
+          reading = await headingAtTop(page, read);
+          stayed = reading.text === last.text && reading.below === last.below ? stayed + 1 : 0;
+          return stayed;
+        },
+        { intervals: [200] },
+      )
+      .toBeGreaterThanOrEqual(5);
+    expect(reading.text).not.toBe("Heading 0");
+
+    await releaseDocumentOpens(desktop);
+    await expect(page.getByTestId("markdown-editor")).toBeVisible({ timeout: 60_000 });
+    const editing = async () => {
+      const at = await headingAtTop(page, '[data-testid="markdown-editor"]');
+      return { text: at.text, moved: Math.abs(at.below - reading.below) > 2 };
+    };
+    await expect.poll(editing).toEqual({ text: reading.text, moved: false });
+    // The blocks drawn around the place take their heights over the next
+    // frames, and a diagram among them a little later. The place stays.
+    await page.waitForTimeout(1_000);
+    expect(await editing()).toEqual({ text: reading.text, moved: false });
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
+// A block that can skip its layout keeps its children's margins inside it and
+// measures their positions against itself (styles.css). These notes hold each
+// nesting that reaches a top-level block's edge. `LAID_OUT` draws them as a
+// note with no skipping does, and nothing may sit anywhere else.
+const LAID_OUT =
+  ".dohc-notion-editor > * { content-visibility: visible !important; contain-intrinsic-size: none !important; }" +
+  // The code toolbar's width in a list, as it is against the document.
+  ".dohc-notion-editor > :is(ul, ol) .dohc-code-block-toolbar { width: calc(min(var(--dohc-editor-measure), 100% - 2 * var(--dohc-editor-gutter)) + 2 * var(--dohc-editor-block-inset)) !important; }";
+
+const FENCE = "```";
+const NESTINGS: Record<string, string> = {
+  "a list that ends three deep": "- Tent\n- Stove\n  - Fuel\n    - Matches",
+  "a list nested in its middle": "- Tent\n  - Poles\n- Stove",
+  "a numbered list that ends nested": "1. One\n2. Two\n   1. Two a\n   2. Two b",
+  "a list of two paragraphs": "- First\n\n  The second paragraph.\n\n- Next item",
+  "a list that ends with a table": "- Item\n\n  | Item | Count |\n  | --- | --- |\n  | Tent | 1 |",
+  "a task list that ends nested": "- [ ] Open\n- [x] Done\n  - [ ] Nested",
+  "a task with a plain list": "- [ ] Open\n  - plain",
+  "a quote that ends with a list": "> Quoted.\n>\n> - A list\n>   - nested",
+  "a callout that ends with a list": "> [!note] Callout\n> Its body.\n>\n> - A list",
+  headings: "## Heading two\n\n### Heading three",
+  "a code block": `${FENCE}ts\nconst bags = 2;\n${FENCE}`,
+  "a table": "| Item | Count |\n| --- | --- |\n| Tent | 1 |",
+  "a rule": "---",
+  "a diagram": `${FENCE}mermaid\ngraph TD\n  A --> B\n${FENCE}`,
+  "three kinds of list": "- a\n  - b\n\n1. c\n   1. d\n\n- [ ] e",
+};
+// The editor does not show these, so the note they are in stays a read view.
+const READ_ONLY_NESTINGS: Record<string, string> = {
+  "a list that ends with code": `- Item\n\n  ${FENCE}ts\n  const bags = 2;\n  ${FENCE}`,
+  "a list that ends with a quote": "- Item\n\n  > Quoted in a list.",
+  "a nested list that ends with code": `- Outer\n  - Inner\n\n    ${FENCE}ts\n    const bags = 2;\n    ${FENCE}`,
+  "a task that ends with code": `- [ ] Task\n\n  ${FENCE}ts\n  const bags = 2;\n  ${FENCE}`,
+};
+const between = (nestings: Record<string, string>) =>
+  `# Nestings\n\n${Object.entries(nestings)
+    .map(([name, body]) => `${body}\n\nAfter ${name}.`)
+    .join("\n\n")}\n`;
+const atEnd = (body: string) => `# Nestings\n\nBefore.\n\n${body}\n`;
+const GEOMETRY_NOTES: { path: string; contents: string; editable: boolean }[] = [
+  { path: "between.md", contents: between(NESTINGS), editable: true },
+  { path: "between-read-only.md", contents: between(READ_ONLY_NESTINGS), editable: false },
+  ...[
+    "a list that ends three deep",
+    "a numbered list that ends nested",
+    "a list that ends with a table",
+    "a task list that ends nested",
+  ].map((name, index) => ({
+    path: `end-${index}.md`,
+    contents: atEnd(NESTINGS[name]!),
+    editable: true,
+  })),
+  ...["a list that ends with code", "a list that ends with a quote"].map((name, index) => ({
+    path: `end-read-only-${index}.md`,
+    contents: atEnd(READ_ONLY_NESTINGS[name]!),
+    editable: false,
+  })),
+];
+
+/** Every element of the note's body that sits elsewhere once `LAID_OUT` applies. */
+async function movedByLayoutSkipping(page: Page, body: string): Promise<string[]> {
+  const measure = () =>
+    page.evaluate((selector) => {
+      const pane = document.querySelector('[data-testid="view-markdown"]');
+      const root = pane?.querySelector(selector);
+      if (!pane || !root) throw new Error("document body not drawn");
+      return [
+        `the pane's scroll height ${pane.scrollHeight}`,
+        ...Array.from(root.querySelectorAll("*"), (element) => {
+          const box = element.getBoundingClientRect();
+          const text = (element.textContent ?? "").replace(/\s+/g, " ").slice(0, 20);
+          const place = [box.left, box.top, box.width, box.height].map((n) => n.toFixed(1));
+          return `${element.tagName.toLowerCase()} "${text}" ${place.join(" ")}`;
+        }),
+      ];
+    }, body);
+  // Until two reads agree, so a diagram and the read view's chunks have drawn.
+  let skipping: string[] = [];
+  await expect
+    .poll(async () => {
+      const last = skipping;
+      skipping = await measure();
+      return skipping.join() === last.join();
+    })
+    .toBe(true);
+  const style = await page.addStyleTag({ content: LAID_OUT });
+  const laidOut = await measure();
+  await style.evaluate((node) => (node as Element).remove());
+  expect(laidOut).toHaveLength(skipping.length);
+  return skipping.flatMap((line, index) =>
+    line === laidOut[index] ? [] : [`${line}, laid out: ${laidOut[index]}`],
+  );
+}
+
+test("no block sits elsewhere because blocks away from the viewport skip their layout", async () => {
+  test.setTimeout(240_000);
+  const temp = await createTempWorkspace();
+  let desktop: LaunchedDesktopApp | null = null;
+  try {
+    await writeWorkspaceFiles(temp, GEOMETRY_NOTES);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { app, page } = desktop;
+    // Tall enough to draw the longest note whole.
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.setSize(1500, 2400);
+    });
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    for (const note of GEOMETRY_NOTES) {
+      await waitForWorkspaceFile(page, workspace.workspaceId, note.path);
+      await holdDocumentOpens(desktop);
+      await explorerRow(page, note.path).click();
+      const read = page.getByTestId("view-markdown").locator(".dohc-notion-editor");
+      await expect(read.locator("h1")).toHaveText("Nestings", { timeout: 60_000 });
+      expect
+        .soft(await movedByLayoutSkipping(page, ".dohc-notion-editor"), `${note.path}, read`)
+        .toEqual([]);
+      await releaseDocumentOpens(desktop);
+      const editor = page.getByTestId("markdown-editor");
+      if (!note.editable) {
+        await expect(page.getByText("This note has parts dohc can't show.")).toBeVisible({
+          timeout: 60_000,
+        });
+        continue;
+      }
+      await expect(editor.locator("h1")).toHaveText("Nestings", { timeout: 60_000 });
+      expect
+        .soft(
+          await movedByLayoutSkipping(page, '[data-testid="markdown-editor"]'),
+          `${note.path}, editor`,
+        )
+        .toEqual([]);
     }
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
