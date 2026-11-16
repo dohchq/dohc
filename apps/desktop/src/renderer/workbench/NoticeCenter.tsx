@@ -95,6 +95,9 @@ export type Notice = {
   lastLine?: string;
   // Paths the body lists, one per line under it.
   paths?: readonly string[];
+  // Facts that lead the text, one per line right under the title, such as
+  // who reaches a folder at which level.
+  rows?: readonly string[];
   actions?: readonly NoticeAction[];
   // Explicit dismissal: rendered as a small X on the notice
   // row. Only notices whose underlying state has a real ack path expose it.
@@ -138,6 +141,7 @@ export interface WorkspaceErrorNotice {
   message: string;
   lastLine?: string;
   paths?: readonly string[];
+  rows?: readonly string[];
   // A terminal command the message asks the person to run, shown with its copy.
   command?: string;
   copy?: NoticeCopy;
@@ -522,13 +526,15 @@ function useDetails(props: {
 // click on clipped text, or Show more, shows all of it in place, wrapped
 // and selectable. Open Details shows it whole too, so Show more never sits
 // beside it. A body with one fact per line shows its first 3 facts whole, so
-// none is cut in half; prose clamps at 3 lines. Paths are facts
-// after the body, each cut in the middle to fit its line until it opens.
+// none is cut in half; prose clamps at 3 lines. Rows are facts before the
+// body and paths are facts after it, each path cut in the middle to fit its
+// line until it opens.
 function NoticeText(props: {
   title: string;
   // The title's weight and color.
   titleClass: string;
   body: string;
+  rows?: readonly string[];
   paths?: readonly string[];
   // Off for a body that is already shown whole.
   clamp?: boolean;
@@ -555,13 +561,14 @@ function NoticeText(props: {
   const [clipped, setClipped] = useState(false);
   const clamp = props.clamp ?? true;
   const lines = props.body ? props.body.split("\n") : [];
+  const rows = props.rows ?? [];
   const paths = props.paths ?? [];
-  const facts = lines.length + paths.length;
+  const facts = rows.length + lines.length + paths.length;
   const byFacts = clamp && facts > 1;
   const { onOpenChange } = props;
   const copy = useDetails({
     copy: props.copy,
-    shown: [props.title, props.body, ...paths, props.after],
+    shown: [props.title, ...rows, props.body, ...paths, props.after],
     revision: props.revision,
     actionClass: props.actionClass,
     testId: props.copyTestId ?? props.testId,
@@ -593,7 +600,12 @@ function NoticeText(props: {
     return () => observer.disconnect();
   }, [open, clamp, byFacts, props.title, props.body]);
   const hidden = clipped || (byFacts && facts > 3);
-  const shownPaths = byFacts && !open ? paths.slice(0, Math.max(0, 3 - lines.length)) : paths;
+  const closed = byFacts && !open;
+  const shownRows = closed ? rows.slice(0, 3) : rows;
+  const shownLines = closed ? lines.slice(0, 3 - shownRows.length) : lines;
+  const shownPaths = closed
+    ? paths.slice(0, Math.max(0, 3 - shownRows.length - shownLines.length))
+    : paths;
   // A click that ends a selection, or the second of a double click, opens nothing.
   const { onOpenRow } = props;
   const openOnClick =
@@ -627,7 +639,21 @@ function NoticeText(props: {
     ),
     body: (
       <>
-        {props.body ? (
+        {shownRows.length > 0 ? (
+          <ul
+            data-testid={`${props.testId}-rows`}
+            data-row-above={open ? "" : undefined}
+            onClick={openRowOnClick}
+            className="m-0 mt-0.5 list-none p-0 text-[11px] leading-snug text-ink"
+          >
+            {shownRows.map((row) => (
+              <li key={row} className={`wrap-anywhere${open ? " select-text" : ""}`}>
+                {row}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {props.body && shownLines.length > 0 ? (
           <p
             ref={bodyRef}
             id={`${id}-body`}
@@ -635,7 +661,7 @@ function NoticeText(props: {
             onClick={openOnClick ?? openRowOnClick}
             className={`m-0 mt-0.5 whitespace-pre-line wrap-anywhere text-[11px] leading-snug text-muted${clamp && !byFacts && !open ? " line-clamp-3" : ""}${pointer}`}
           >
-            {byFacts && !open ? lines.slice(0, 3).join("\n") : props.body}
+            {closed ? shownLines.join("\n") : props.body}
           </p>
         ) : null}
         {shownPaths.length > 0 ? (
@@ -1106,6 +1132,7 @@ export function WorkspaceErrorToast(props: {
         title={error.title ?? message}
         titleClass={error.title ? "font-medium text-ink" : "text-ink"}
         body={error.title ? message : ""}
+        rows={error.rows}
         paths={error.paths}
         after={error.lastLine}
         onOpenChange={setOpen}
@@ -1236,6 +1263,7 @@ export function LocalNoticeRow(props: {
         title={notice.title}
         titleClass={props.unread ? "font-medium text-ink" : "text-muted"}
         body={props.note === undefined ? notice.body : ""}
+        rows={props.note === undefined ? notice.rows : undefined}
         paths={props.note === undefined ? notice.paths : undefined}
         clamp={notice.filePaths === undefined}
         after={props.note === undefined ? notice.lastLine : undefined}
@@ -1884,6 +1912,7 @@ export function NoticeCenter(props: {
         copy: shownCopy(error),
         filePaths: error.filePaths,
         ...(error.paths?.length ? { paths: error.paths } : {}),
+        ...(error.rows?.length ? { rows: error.rows } : {}),
         Icon: error.tone === "success" ? CheckCircle2 : AlertTriangle,
       });
     }

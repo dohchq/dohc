@@ -520,6 +520,43 @@ describe("notice center", () => {
     expect(onDismissWorkspaceError).toHaveBeenCalledWith("shell-error-1");
   });
 
+  it("leads a notice with its rows, right under the title, on the toast and the row", async () => {
+    const user = userEvent.setup();
+    const rows = ["Members: View → Edit", "sam@example.com: No access → Edit"];
+    renderNotices({
+      workspaceErrors: [
+        {
+          id: "shell-error-4",
+          tone: "warning",
+          title: "Access to team was widened outside dohc",
+          message: "Until you choose, dohc does not record or share changes in team.",
+          rows,
+          atMs: 1_000,
+          canRetry: false,
+          seen: false,
+        },
+      ],
+      onHideWorkspaceError: vi.fn(),
+      onDismissWorkspaceError: vi.fn(),
+    });
+    // Title, then each row, then the message.
+    const order = (testId: string) => {
+      const listed = screen.getByTestId(`${testId}-rows`);
+      expect([...listed.querySelectorAll("li")].map((item) => item.textContent)).toEqual(rows);
+      const title = within(listed.parentElement!.parentElement!).getByText(
+        "Access to team was widened outside dohc",
+      );
+      const message = within(listed.parentElement!).getByText(/^Until you choose/);
+      expect(title.compareDocumentPosition(listed) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(
+        listed.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    };
+    order("workspace-shell-toast");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    order("notice-shell-error-4");
+  });
+
   // A retry with no reason raises its toast and row only once it has lasted 15 s.
   const outlastQuietRetry = () => act(() => vi.advanceTimersByTime(15_000));
   const serverUnreachable = {
