@@ -744,7 +744,12 @@ export function ChannelView({
           {/* Text the person wrote before they could no longer post stays theirs to copy, until they discard it. */}
           {draft ? (
             <>
-              <h3 className="chat-unsent-title">dohc kept your unsent message</h3>
+              {/* The same pattern as a page's unsent edits: what and where, then where the text lives. */}
+              <h3 className="chat-unsent-title">
+                <Icon name="triangle-alert" size={14} />
+                <span>{name ? `Unsent message to #${name}` : "Unsent message"}</span>
+              </h3>
+              <p className="chat-unsent-note">Only this tab has it. Copy it before you close it.</p>
               <textarea readOnly value={draft} aria-label="Your unsent message" />
               <div className="chat-unsent-actions">
                 <CopyWork

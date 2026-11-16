@@ -500,7 +500,11 @@ it("says it kept a Group draft the person can no longer post, and brings it back
   await render(); await opened();
   setControlValue(composer(), "Bring sunscreen"); await click("Send");
   await settle(() => groupPanel().textContent?.includes("Only people who can comment post here.") === true);
-  expect(groupPanel().textContent).toContain("dohc kept your unsent message");
+  // The same pattern as a page's unsent edits: a warning mark, what and where, then where the text lives.
+  const title = groupPanel().querySelector(".chat-unsent-title")!;
+  expect(title.textContent).toBe("Unsent message to #plans");
+  expect(title.querySelector(".icon")).not.toBeNull();
+  expect(groupPanel().querySelector(".chat-unsent-note")?.textContent).toBe("Only this tab has it. Copy it before you close it.");
   const stored = () => Object.values(sessionStorage).some(value => value.includes("Bring sunscreen"));
   expect(stored()).toBe(true);
   // Discard takes the text away and leaves a line with Undo, as the kept page edits do.

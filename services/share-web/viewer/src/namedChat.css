@@ -76,7 +76,10 @@
 .chat-read-only p { margin: 0; color: var(--viewer-muted); }
 /* A kept draft reads as quoted text: it can be copied, not edited. */
 .chat-read-only textarea { display: block; width: 100%; min-height: 0; margin-top: 8px; border: 0; border-left: 2px solid var(--viewer-line-strong); border-radius: 0; padding: 2px 0 2px 10px; background: transparent; }
-.chat-unsent-title { margin: 8px 0 0; color: var(--viewer-ink); font-size: 13px; font-weight: 600; }
+.chat-unsent-title { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; color: var(--viewer-ink); font-size: 13px; font-weight: 500; }
+.chat-unsent-title > .icon { flex: none; color: var(--viewer-warning); }
+.chat-unsent-title > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-read-only .chat-unsent-note { margin-top: 4px; font-size: 12px; }
 .chat-unsent-discarded { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--viewer-muted); font-size: 12px; }
 .chat-unsent-discarded p { min-width: 0; flex: 1; margin: 0; }
 .chat-unsent-discarded .handoff-button { padding: 3px 9px; }
