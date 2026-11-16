@@ -101,7 +101,8 @@ test("desktop proofs require each restart proof, smoke, onboarding, the agent si
     "@share-link-agent-sign-in",
     "@live-owner-open",
     "@new-page-edit-link",
-    "@collections-two-instance",
+    "@two-computer-drag",
+    "@two-computer-conflict",
   ];
   assert.deepEqual(desktopProofTags({ platform: "win32" }), {
     selected: [...everywhere, "@states-page"],
