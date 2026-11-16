@@ -871,10 +871,12 @@ describe("registered share proposal handlers", () => {
     }
   });
 
-  it("refuses to send or take back changes while another account is signed in, before relay work", async () => {
+  it("refuses to list, send or take back changes while another account is signed in, before relay work", async () => {
     const h = await harness(); h.recipient(); h.account.other = true;
+    await expect(h.invoke(shareProposalOperations.listMyShareChanges.channel)).rejects.toThrow(JOINED_BY_ANOTHER_ACCOUNT);
     await expect(h.invoke(shareProposalOperations.submitShareChanges.channel)).rejects.toThrow(JOINED_BY_ANOTHER_ACCOUNT);
     await expect(h.invoke(shareProposalOperations.withdrawShareChanges.channel, { workspaceId: "workspace", proposalId: "proposal" })).rejects.toThrow(JOINED_BY_ANOTHER_ACCOUNT);
+    expect(h.listMine).not.toHaveBeenCalled();
     expect(h.reconcile).not.toHaveBeenCalled(); expect(h.submit).not.toHaveBeenCalled(); expect(h.withdraw).not.toHaveBeenCalled();
     h.account.other = false;
     await expect(h.invoke(shareProposalOperations.withdrawShareChanges.channel, { workspaceId: "workspace", proposalId: "proposal" })).resolves.toEqual({ state: "withdrawn" });

@@ -662,6 +662,7 @@ export function createShareProposalsIpc<Operation extends WorkspaceOperation>(de
       requireShareViewMembership,
       async (operation) => {
         const scope = operation.resolve();
+        refuseAnotherAccount(scope.workspaceId);
         const proposals = await listMyShareProposals({
           relay: scope.relay,
           shareId: scope.shareId,
