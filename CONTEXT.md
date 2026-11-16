@@ -171,7 +171,7 @@ A person with the Member workspace role in a workspace someone else owns. A memb
 _Avoid_: guest, collaborator, teammate, Group member
 
 **Workspace role**:
-A person's standing in a workspace: Owner, Admin, or Member. The owner adds and removes admins; admins manage members and access rules and moderate. Planned, not built yet.
+A person's standing in a workspace: Owner, Admin, or Member. The owner adds and removes admins and sets folder access rules; admins manage members and Group access rules and moderate. Planned, not built yet.
 _Avoid_: permission, rank, moderator
 
 **Member level**:

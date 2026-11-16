@@ -6,7 +6,7 @@ status: accepted
 
 This records a planned design from [the workspace members plan](../plans/workspace-members.md). None of it is built yet.
 
-An access rule decides which members reach a folder or a Group. We keep a folder's rule in an `access.yaml` file inside that folder. The owner edits it like any file. An admin changes it through the relay's checked write path that `collection.yaml` uses (see [direct Collection writes](../security-boundaries.md#direct-collection-writes-stay-narrow)). Members never see the file. It names people by a verified account email.
+An access rule decides which members reach a folder or a Group. We keep a folder's rule in an `access.yaml` file inside that folder. Only the owner changes it, and edits it like any file. Admins read it; members never see it. It names people by account email, and only a verified email matches a person.
 
 Folders have no lasting id. A rule kept anywhere else would have to follow a folder by its path. If someone renamed the folder outside dohc, for example in File Explorer, the rule would stop matching and the folder would open to every member. A file inside the folder moves with it, whatever renames it. The rule also stays a plain file the owner can read, back up, and export, which AGENTS.md commitment 1 asks for.
 
@@ -16,11 +16,12 @@ A Group's rule is saved on the Group, by the Group's lasting id. A Group is not 
 
 - **The relay holds the rules and dohc gives folders lasting ids.** Rules would follow renames, but the engine would need folder identity first. That is more work than the members feature needs, and the rules would only be readable through dohc.
 - **The relay holds the rules by path, and dohc updates them when it renames a folder.** Rejected. A rename outside dohc would show a restricted folder to every member.
+- **The relay holds the rules, changed through one operation, and the folder holds a marker file with the rule's id.** The marker follows a rename, and a missing or unknown marker leaves the folder restricted. The engine would not need to hold half-written rule files, and no second parser would run on the owner's computer. Not chosen in November 2026: editing the file would no longer change access, a change would need a connection, and the rule file pieces were already built. Reconsider it if admins must change folder rules.
 
 ## Consequences
 
 - Access fails closed. If `access.yaml` cannot be read, members lose access to its folder, and the owner and admins still reach it.
-- The relay takes a rule from the owner's log or from an admin's write on the checked path. An admin's change takes effect when the relay commits it. The relay alone vouches for the writer's role, so the owner's computer accepts `access.yaml` on that path. A member's write never changes a rule: a member cannot create, change, or delete an `access.yaml` file, directly or through a change proposal.
+- The relay takes a rule only from the owner's log. No other writer changes a rule: an admin or member cannot create, change, or delete an `access.yaml` file, directly or through a change proposal.
 - The owner's computer sends a folder's `access.yaml` with or before the folder's other files, so a restricted folder is never briefly visible to members.
 - An agent or tool the owner runs can change a rule by editing the file. History records that change like any other.
 - Moving a folder keeps its own rule. Moving a file or a folder without a rule into another folder gives it that folder's rule.
