@@ -103,6 +103,14 @@ test("@server-idle with nobody connected, a server's workspace watchers wake und
     // The observer waits for its watcher. When it polled, it woke twice a second.
     expect(wakes(/^dohc-file-obser/u).length).toBeGreaterThan(0);
     for (const perSecond of wakes(/^dohc-file-obser/u)) expect(perSecond).toBeLessThan(0.5);
+    // The relay's automations ask the live host's engine for its claim ledger, and expire its history when the
+    // workspace opens. A call that engine does not admit is refused and logged each time the relay makes it.
+    const refused = server
+      .relay()
+      .diagnostics()
+      .stderr.split("\n")
+      .filter((line) => line.includes("(code FORBIDDEN"));
+    expect(refused).toEqual([]);
   } finally {
     await server.close();
   }
