@@ -49,9 +49,9 @@ function sessionTable(rows: StoredSession[]): HandlerOverrides {
         index < 0 ||
         !rows.some((row) => row.sessionId === callerSessionId && row.userId === userId)
       )
-        return false;
+        return null;
       rows.splice(index, 1);
-      return true;
+      return Number.MAX_SAFE_INTEGER;
     },
     phoneSessionIsCurrent: async ({ userId, sessionId }) =>
       rows.some((row) => row.userId === userId && row.sessionId === sessionId),

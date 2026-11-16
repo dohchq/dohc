@@ -62,7 +62,7 @@ const sessions: AccountSessions = {
       createdAtMs: 0,
       userAgent: null,
     })),
-  revoke: async () => true,
+  revoke: async () => 8_000_000_000_000,
   phoneSessionIsCurrent: async () => true,
   read: async () => new Map(),
 };

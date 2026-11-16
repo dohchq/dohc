@@ -26,6 +26,9 @@ import { createLinkAppPublicationRoutes } from "./linkAppPublicationRoutes";
 import { createLinkAppCollectionRoutes, type AppCollectionPolicy } from "./appCollectionRoutes";
 import { createNamedRecipientChat } from "./namedRecipientChat";
 import { createPushRoutes } from "./pushRoutes";
+import { createPushDeviceRoutes } from "./pushDeviceRoutes";
+import { PUSH_DEVICES_PATH } from "@dohc/workspace-contracts/push-subscriptions";
+import type { ApnsConfig } from "./pushConfig";
 import { createNamedRecipientDocuments } from "./namedRecipientDocuments";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import {
@@ -185,6 +188,8 @@ export interface CreateSyncRelayHandlerOptions {
   // This server's VAPID public key. Absent means alerts are unavailable here.
   pushVapidPublicKey?: string;
   pushHosts?: ReadonlySet<string>;
+  // The phone's APNs topic and environments. Absent means phone alerts are unavailable here.
+  apnsConfig?: ApnsConfig;
   nowMs?: () => number;
   // A clock that only moves forward, for idle windows. Defaults to performance.now().
   elapsedMs?: () => number;
@@ -280,6 +285,7 @@ export function createSyncRelayHandler({
   credentialFence,
   pushVapidPublicKey,
   pushHosts,
+  apnsConfig,
   nowMs = () => Date.now(),
   elapsedMs,
   resolveUserIdByEmail,
@@ -674,6 +680,7 @@ export function createSyncRelayHandler({
           resolveAccountSession: resolvePhoneCapableAccountSession,
           sessions: accountSessions,
           feedWaits: { wakeAccount: wakeAccountWaits },
+          nowMs,
           sockets: ownerSockets,
           revoked: (userId, sessionId) => phoneApps.end({ userId, sessionId }),
         })
@@ -759,6 +766,15 @@ export function createSyncRelayHandler({
           },
         })
       : undefined;
+  // The phone's own route, outside share-web: a Bearer phone session only.
+  const pushDevices = resolvePhoneCapableAccountSession
+    ? createPushDeviceRoutes({
+        storage,
+        resolveAccountSession: resolvePhoneCapableAccountSession,
+        apns: apnsConfig,
+        nowMs,
+      })
+    : undefined;
 
   const { respondToShareProposals, respondToWorkspaceProposals } = createProposalRoutes(
     storage,
@@ -1159,6 +1175,9 @@ export function createSyncRelayHandler({
       }
       if (pathname.startsWith("/sync/named-chat/")) {
         return namedChat ? await namedChat(request) : errorResponse(notFound());
+      }
+      if (pathname === `/sync${PUSH_DEVICES_PATH}`) {
+        return pushDevices ? await pushDevices(request) : errorResponse(notFound());
       }
       if (pathname.startsWith("/sync/push/")) {
         return push ? await push(request) : errorResponse(notFound());

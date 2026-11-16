@@ -148,6 +148,7 @@ import * as publicationStorage from "./storage/publications";
 import * as appCollectionStorage from "./storage/appCollections";
 import * as noticeStorage from "./storage/notices";
 import * as pushStorage from "./storage/pushSubscriptions";
+import * as pushDeviceStorage from "./storage/pushDevices";
 import * as automationHostStorage from "./storage/automationHosts";
 import * as automationWorkspaceStorage from "./storage/automationWorkspaces";
 import * as accountWorkspaceStorage from "./storage/accountWorkspaces";
@@ -1105,6 +1106,36 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   removePushSubscription(input: { installationId: string; userId: string }): void {
     pushStorage.removePushSubscription(this, input);
+  }
+
+  readPushDevice(input: {
+    userId: string;
+    sessionId: string;
+    nowMs: number;
+  }): pushDeviceStorage.PushDeviceRow | null {
+    return this.readTx(() => pushDeviceStorage.readPushDevice(this, input));
+  }
+
+  bindPushDevice(input: pushDeviceStorage.BindPushDeviceInput): pushDeviceStorage.PushDeviceRow {
+    return pushDeviceStorage.bindPushDevice(this, input);
+  }
+
+  removePushDevice(input: { userId: string; sessionId: string; generation: number }): void {
+    pushDeviceStorage.removePushDevice(this, input);
+  }
+
+  fencePushSession(input: pushDeviceStorage.PushSessionFence & { expiresAtMs: number }): void {
+    pushDeviceStorage.fencePushSession(this, input);
+  }
+
+  settlePushSessionFence(
+    input: pushDeviceStorage.PushSessionFence & { revokedExpiresAtMs: number | null },
+  ): void {
+    pushDeviceStorage.settlePushSessionFence(this, input);
+  }
+
+  sweepExpiredPushDevices(nowMs: number): void {
+    pushDeviceStorage.sweepExpiredPushDevices(this, nowMs);
   }
 
   postNotice(input: noticeStorage.PostNoticeInput): void {

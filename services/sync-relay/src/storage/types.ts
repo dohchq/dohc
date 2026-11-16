@@ -972,6 +972,20 @@ export interface SyncRelayStorage {
     input: import("./pushSubscriptions").BindPushSubscriptionInput,
   ): import("./pushSubscriptions").PushSubscriptionRow;
   removePushSubscription(input: { installationId: string; userId: string }): void;
+  readPushDevice(input: {
+    userId: string;
+    sessionId: string;
+    nowMs: number;
+  }): import("./pushDevices").PushDeviceRow | null;
+  bindPushDevice(
+    input: import("./pushDevices").BindPushDeviceInput,
+  ): import("./pushDevices").PushDeviceRow;
+  removePushDevice(input: { userId: string; sessionId: string; generation: number }): void;
+  fencePushSession(input: import("./pushDevices").PushSessionFence & { expiresAtMs: number }): void;
+  settlePushSessionFence(
+    input: import("./pushDevices").PushSessionFence & { revokedExpiresAtMs: number | null },
+  ): void;
+  sweepExpiredPushDevices(nowMs: number): void;
   postNotice(input: import("./notices").PostNoticeInput): void;
   postAutomationWake(
     input: import("./notices").PostAutomationWakeInput,

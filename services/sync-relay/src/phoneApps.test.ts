@@ -121,7 +121,10 @@ async function relay() {
     reached = () => {};
   const sessions: AccountSessions = {
     list: async () => [],
-    revoke: async ({ sessionId }) => revoked.add(sessionId).size > 0,
+    revoke: async ({ sessionId }) => {
+      revoked.add(sessionId);
+      return Number.MAX_SAFE_INTEGER;
+    },
     phoneSessionIsCurrent: async ({ sessionId }) => !revoked.has(sessionId),
     read: async () => new Map(),
   };

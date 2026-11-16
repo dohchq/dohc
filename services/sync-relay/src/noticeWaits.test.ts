@@ -103,7 +103,7 @@ async function relay(options: { seedFull?: boolean } = {}) {
     list: async () => [],
     revoke: async ({ sessionId }) => {
       revoked.add(sessionId);
-      return true;
+      return Number.MAX_SAFE_INTEGER;
     },
     phoneSessionIsCurrent: async ({ sessionId }) => !revoked.has(sessionId),
     read: async () => new Map(),

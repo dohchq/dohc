@@ -4,7 +4,7 @@ import { accountIsFenced } from "./accountDeletion";
 import { SyncRelayConflictError } from "./errors";
 import { PUSH_GENERATIONS, PUSH_SUBSCRIPTIONS } from "./pushSchema";
 
-// Installations with alerts on, per account. Bounds what one account can store.
+// Browser installations and phone sign-ins with alerts on, per account. Bounds what one account can store.
 export const PUSH_INSTALLATIONS_PER_ACCOUNT = 20;
 
 export interface PushSubscriptionRow {
@@ -60,7 +60,7 @@ export function readPushSubscription(
   return row ? rowFrom(row) : null;
 }
 
-function nextGeneration(storage: StorageContext): number {
+export function nextGeneration(storage: StorageContext): number {
   const row = storage.db
     .prepare(`UPDATE ${PUSH_GENERATIONS} SET last_generation = last_generation + 1
     WHERE singleton = 1 RETURNING last_generation`)
@@ -163,8 +163,8 @@ export function bindPushSubscription(
       return readPushSubscription(storage, input.installationId)!;
     }
     const generation = nextGeneration(storage);
-    db.prepare(`INSERT INTO ${PUSH_SUBSCRIPTIONS} (installation_id, account_user_id, session_id, endpoint, p256dh, auth,
-      vapid_key_id, generation, created_at_ms, updated_at_ms, expires_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    db.prepare(`INSERT INTO ${PUSH_SUBSCRIPTIONS} (kind, installation_id, account_user_id, session_id, endpoint, p256dh, auth,
+      vapid_key_id, generation, created_at_ms, updated_at_ms, expires_at_ms) VALUES ('web', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       input.installationId,
       input.userId,
       input.sessionId,
