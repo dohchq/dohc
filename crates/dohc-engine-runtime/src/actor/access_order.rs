@@ -30,8 +30,10 @@
 //! should the check still refuse, judges each folder it refused and runs the
 //! writer again, so their callers never see that refusal either. Capture judges
 //! the rule bytes it read itself, so a widening it found is held rather than
-//! committed. A rule moment no step judged is a change made through dohc and
-//! commits as written.
+//! committed. A rule moment no step judged commits as written only when its
+//! moment row names an origin other than capture. One read from disk is
+//! refused and judged when the command ends, so a capture path that skips its
+//! step cannot commit a widening.
 //!
 //! The check also keeps the order inside one command: a file under a folder
 //! whose rule the command commits waits until that rule's moment, a rule
@@ -42,6 +44,7 @@ use super::ActorHandle;
 use crate::EngineDbIdentity;
 use crate::error::RuntimeError;
 use dohc_engine_collab::LeaseRegistry;
+use dohc_engine_domain::store::CAPTURE_ORIGIN;
 use dohc_engine_domain::{CaptureIngest, CaptureIngestBinary, CaptureRetire, DomainError};
 use dohc_engine_files::access_rules::{
     ACCESS_RULE_FILE, AccessRule, ReachBefore, access_rule_folder, is_access_rule_path, is_rule_of,
@@ -52,7 +55,7 @@ use dohc_engine_files::materialize::{PublicationTarget, read_publication_target}
 use dohc_engine_storage::access_rule_holds::{self, AccessRuleHold};
 use dohc_engine_storage::{EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome};
 use dohc_engine_sync::SyncError;
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -540,27 +543,51 @@ fn check_moment(
     {
         return Err(refuse("access-rule-renamed"));
     }
-    if let Some(source) = source.filter(|_| operation == "rename") {
-        admit(tx, &root, workspace_id, version, source, true)?;
-    }
-    admit(
-        tx,
-        &root,
-        workspace_id,
+    let moment = Moment {
+        workspace: workspace_id,
         version,
-        path,
-        operation == "delete",
-    )
+        id: text("momentId"),
+    };
+    if let Some(source) = source.filter(|_| operation == "rename") {
+        admit(tx, &root, &moment, source, true)?;
+    }
+    admit(tx, &root, &moment, path, operation == "delete")
+}
+
+/// The moment the check is admitting.
+struct Moment<'a> {
+    workspace: &'a str,
+    version: &'a str,
+    id: Option<&'a str>,
+}
+
+impl Moment<'_> {
+    /// Whether the moment came from anything but capture. The payload names
+    /// capture and Y.Doc settlement alike as a local file, so the row says.
+    fn made_through_dohc(&self, tx: &Transaction<'_>) -> Result<bool, SyncError> {
+        let Some(id) = self.id else {
+            return Ok(false);
+        };
+        let origin: Option<String> = tx
+            .query_row(
+                "SELECT metadata_origin FROM moments WHERE workspace_id=?1 AND moment_id=?2",
+                params![self.workspace, id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| SyncError::Storage(StorageError::corrupt_public(error)))?;
+        Ok(origin.is_some_and(|origin| origin != CAPTURE_ORIGIN))
+    }
 }
 
 fn admit(
     tx: &Transaction<'_>,
     root: &Path,
-    workspace: &str,
-    version: &str,
+    moment: &Moment<'_>,
     path: &str,
     deletes: bool,
 ) -> Result<(), SyncError> {
+    let (workspace, version) = (moment.workspace, moment.version);
     let own_rule = is_access_rule_path(path).then(|| access_rule_folder(path));
     if dohc_engine_sync::replaying_history() {
         // Enrolment puts committed history in order itself, rules first.
@@ -568,8 +595,7 @@ fn admit(
         if own_rule.is_none() {
             for folder in folders_of(path) {
                 if clearance(workspace, version, folder).is_none() {
-                    let clearance =
-                        judge_in_tx(tx, root, workspace, version, folder, false, deletes)?;
+                    let clearance = judge_in_tx(tx, root, moment, folder, false, deletes)?;
                     set(workspace, version, folder, clearance);
                 }
             }
@@ -589,8 +615,7 @@ fn admit(
         let clearance = match clearance(workspace, version, folder) {
             Some(clearance) => clearance,
             None => {
-                let clearance =
-                    judge_in_tx(tx, root, workspace, version, folder, is_rule, deletes)?;
+                let clearance = judge_in_tx(tx, root, moment, folder, is_rule, deletes)?;
                 set(workspace, version, folder, clearance);
                 clearance
             }
@@ -623,31 +648,35 @@ fn admit(
 fn judge_in_tx(
     tx: &Transaction<'_>,
     root: &Path,
-    workspace: &str,
-    version: &str,
+    moment: &Moment<'_>,
     folder: &str,
     is_rule: bool,
     deletes: bool,
 ) -> Result<Clearance, SyncError> {
-    if is_rule {
-        // Only a change made through dohc journals a rule unjudged.
-        return Ok(if deletes {
-            Clearance::RuleLast
-        } else {
-            Clearance::RuleFirst
-        });
-    }
-    let scope = Scope {
-        root,
-        workspace_id: workspace,
-        version_id: version,
-        writer: Writer::Capture,
-    };
-    let plan = judge_folder(tx, &scope, folder, &[], !deletes, &[]).map_err(sync_error)?;
-    let reason = match plan {
-        Plan::Verdict(Verdict::Clear(clearance)) => return Ok(clearance),
-        Plan::Verdict(Verdict::Held { .. } | Verdict::Refused { .. }) => ACCESS_RULE_HELD,
-        Plan::Verdict(Verdict::Waits) | Plan::CommitRule(_) => ACCESS_RULE_WAITS,
+    let (workspace, version) = (moment.workspace, moment.version);
+    let reason = if is_rule {
+        // A rule made through dohc commits as written. One from disk is
+        // already in this transaction, so it is judged when the command ends.
+        if moment.made_through_dohc(tx)? {
+            return Ok(if deletes {
+                Clearance::RuleLast
+            } else {
+                Clearance::RuleFirst
+            });
+        }
+        ACCESS_RULE_WAITS
+    } else {
+        let scope = Scope {
+            root,
+            workspace_id: workspace,
+            version_id: version,
+            writer: Writer::Capture,
+        };
+        match judge_folder(tx, &scope, folder, &[], !deletes, &[]).map_err(sync_error)? {
+            Plan::Verdict(Verdict::Clear(clearance)) => return Ok(clearance),
+            Plan::Verdict(Verdict::Held { .. } | Verdict::Refused { .. }) => ACCESS_RULE_HELD,
+            Plan::Verdict(Verdict::Waits) | Plan::CommitRule(_) => ACCESS_RULE_WAITS,
+        }
     };
     CLEARED.with(|cleared| {
         let mut cleared = cleared.borrow_mut();
@@ -947,13 +976,7 @@ fn committed_rule(
             )
             .map_err(StorageError::corrupt_public)?
             .query_row(
-                params![
-                    workspace,
-                    version,
-                    path,
-                    file.sha256,
-                    dohc_engine_domain::store::CAPTURE_ORIGIN
-                ],
+                params![workspace, version, path, file.sha256, CAPTURE_ORIGIN],
                 |row| row.get::<_, bool>(0),
             )
             .map_err(StorageError::corrupt_public)?;
@@ -2748,6 +2771,134 @@ mod tests {
                 "delete dev/access.yaml",
             ]
         );
+    }
+
+    /// A replicating workspace store under its workspace folder, with the
+    /// commit-point check installed.
+    fn replicating_store(scratch: &dohc_engine_testkit::ScratchDir) -> EngineStore {
+        use dohc_engine_domain::VersionedTextStore;
+        let db = dohc_engine_testkit::engine_db_path(scratch).unwrap();
+        let mut store = EngineStore::open(&db, 1).unwrap();
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO sync_identity (workspace_id, origin_id, replication_epoch, \
+                 stream_identity, created_at_ms) VALUES ('ws', 'origin', 'epoch', 'stream', 1); \
+                 INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) \
+                 VALUES ('ws', 'origin', 0);",
+            )
+            .unwrap();
+        let identity = EngineDbIdentity::of_existing(&db).unwrap();
+        install(&db, &identity, true, Arc::new(AccessRuleSignals::default())).unwrap();
+        store
+    }
+
+    /// Put `text` at `path` under `root` and make the folder look settled.
+    fn put_settled(root: &Path, path: &str, text: &str) {
+        let absolute = root.join(path);
+        std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        std::fs::write(&absolute, text).unwrap();
+        let then =
+            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(60));
+        filetime::set_file_mtime(&absolute, then).unwrap();
+        filetime::set_file_mtime(absolute.parent().unwrap(), then).unwrap();
+    }
+
+    /// Capture's ingest, without the ordering step capture runs before it.
+    fn ingest_rule(store: &mut EngineStore, text: &str) -> Result<(), RuntimeError> {
+        let input = CaptureIngest {
+            workspace_id: "ws".to_owned(),
+            version_id: "main".to_owned(),
+            path: "team/access.yaml".to_owned(),
+            text: text.to_owned(),
+            metadata_origin: CAPTURE_ORIGIN.to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 10,
+            request_id: None,
+            claim_foreign_head: true,
+        };
+        super::super::capture::capture_ingest_unordered_on_store(
+            store,
+            &input,
+            &super::super::capture::CaptureIndexing::Skip,
+            &LeaseRegistry::new(),
+            &NoFaults,
+            &CancellationToken::new(),
+        )
+        .map(drop)
+    }
+
+    fn rule_writes(store: &EngineStore) -> usize {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM replication_log WHERE op_kind='moment.append' \
+                     AND json_extract(payload_json,'$.path')='team/access.yaml'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(StorageError::corrupt_public)
+            })
+            .unwrap()
+            .try_into()
+            .unwrap()
+    }
+
+    /// A rule capture recorded from disk with no ordering step is judged at
+    /// the commit point, as a file under it is. Capture's own step is not
+    /// what keeps a widening from members: a path that skips it is refused,
+    /// and the widening waits for the owner.
+    #[test]
+    fn a_widened_rule_captured_without_a_step_holds_at_the_commit_point() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let root = std::path::absolute(scratch.path()).unwrap();
+        let mut store = replicating_store(&scratch);
+        put_settled(&root, "team/access.yaml", "members: view\n");
+        put_settled(&root, "team/a.md", "alpha");
+        // Capture's own step judges the first rule, which then commits.
+        begin_command();
+        order_capture(
+            &mut store,
+            "ws",
+            "main",
+            10,
+            &LeaseRegistry::new(),
+            &NoFaults,
+            &[Touch::observed("team/access.yaml", b"members: view\n")],
+        )
+        .unwrap()
+        .into_iter()
+        .collect::<Result<(), _>>()
+        .unwrap();
+        ingest_rule(&mut store, "members: view\n").unwrap();
+        finish_command(&mut store);
+        assert_eq!(rule_writes(&store), 1);
+
+        put_settled(&root, "team/access.yaml", "members: edit\n");
+        begin_command();
+        let ingested = ingest_rule(&mut store, "members: edit\n").is_ok();
+        finish_command(&mut store);
+        let holds = store
+            .read_with(|conn| access_rule_holds::list_in(conn, "ws"))
+            .unwrap()
+            .into_iter()
+            .map(|hold| (hold.folder, hold.reason))
+            .collect::<Vec<_>>();
+        // Refused, the widening not journaled, the folder held.
+        assert_eq!(
+            (ingested, rule_writes(&store), holds),
+            (
+                false,
+                1,
+                vec![("team".to_owned(), access_rule_holds::WIDENED.to_owned())]
+            )
+        );
+        ROOT.with(|cell| *cell.borrow_mut() = None);
     }
 
     /// The workspace folder still holds the store only while the store's
