@@ -16,6 +16,7 @@ export function MoreMenu(props: {
   testId?: string;
   width?: number;
   topLayer?: boolean;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -24,6 +25,7 @@ export function MoreMenu(props: {
       testId={props.testId}
       {...(props.width !== undefined ? { width: props.width } : {})}
       {...(props.topLayer ? { topLayer: true } : {})}
+      {...(props.disabled ? { disabled: true } : {})}
       open={open}
       onOpenChange={setOpen}
       items={props.items.map((item) => ({ ...item, id: item.label }))}

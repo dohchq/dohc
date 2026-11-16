@@ -8,7 +8,7 @@ import type { CloudStatusResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import type { CloudSettings } from "./CloudSyncSettings";
 import { JOINED_WORKSPACE_LIMIT } from "../joinedWorkspaceLimit";
-import { MembersSettings, membersGate } from "./MembersSettings";
+import { LEVEL_WORDS, MembersSettings, membersGate } from "./MembersSettings";
 
 const person = (overrides: Partial<WorkspacePerson> & Pick<WorkspacePerson, "memberId">): WorkspacePerson => ({
   role: "member", state: "active", name: null, email: null, invitedAtMs: 1, joinedAtMs: 2, removedAtMs: null, ...overrides,
@@ -199,107 +199,50 @@ describe("Members page", () => {
     expect(screen.getByTestId("settings-members-page").dataset.viewerRole).toBe("member");
   });
 
-  it("marks only the row whose change is running", async () => {
+  it("runs one change at a time: every control waits, and only the control that started it shows it running", async () => {
     renderMembers();
     await screen.findByTestId("settings-members-page");
     const answer = deferred<MembersResult>();
     bridge.workspaceMembers.mockReturnValueOnce(answer.promise);
     await makeAdmin("m-bo");
+    expect(requests().at(-1)).toEqual({ action: "role", person: "m-bo", role: "admin" });
     expect(within(row("m-bo")).getByTestId("settings-members-row-busy")).toBeTruthy();
     expect(row("m-bo").getAttribute("aria-busy")).toBe("true");
-    expect(within(row("m-ana")).getByTestId("settings-members-row-menu")).toBeTruthy();
-    expect(requests().at(-1)).toEqual({ action: "role", person: "m-bo", role: "admin" });
+    expect(row("m-ana").getAttribute("aria-busy")).toBeNull();
+    const waiting = () => [
+      within(row("m-ana")).getByTestId("settings-members-row-menu"),
+      within(row("m-cy")).getByTestId("settings-members-row-menu"),
+      within(row("m-dee")).getByRole("button", { name: "Let back in" }),
+      screen.getByRole("switch", { name: "Invite link" }),
+      screen.getByTestId("settings-members-link-reset"),
+      ...screen.getAllByRole("radio"),
+      screen.getByTestId("settings-members-invite-send"),
+      screen.getByTestId("settings-members-end-open"),
+    ].map((control) => (control as HTMLButtonElement).disabled || control.getAttribute("aria-disabled") === "true");
+    expect(waiting().every(Boolean)).toBe(true);
+    expect(screen.queryByTestId("settings-members-level-busy")).toBeNull();
+    // A control pressed meanwhile sends nothing.
+    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
+    expect(requests()).toEqual([{ action: "list" }, { action: "role", person: "m-bo", role: "admin" }]);
+
     await act(async () => answer.resolve({ status: "ready", view: ownerView({ people: [owner, ana, { ...bo, role: "admin" }, cy, dee] }) }));
     expect(within(row("m-bo")).queryByTestId("settings-members-row-busy")).toBeNull();
     expect(within(row("m-bo")).getByTestId("settings-members-role").textContent).toBe("Admin");
+    expect(waiting().some(Boolean)).toBe(false);
   });
 
-  it("keeps the newest change when an older answer arrives last", async () => {
+  it("shows the view a change answers, without reading the page again", async () => {
     renderMembers();
     await screen.findByTestId("settings-members-page");
-    const first = deferred<MembersResult>();
-    const second = deferred<MembersResult>();
-    bridge.workspaceMembers.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    bridge.workspaceMembers.mockResolvedValueOnce({ status: "ready", view: ownerView({ memberLevel: "edit", inviteLink: { enabled: false, url: null } }) });
     await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
-    await makeAdmin("m-bo");
-    const final = ownerView({ memberLevel: "edit", people: [owner, ana, { ...bo, role: "admin" }, cy, dee] });
-    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: final }));
-    await act(async () => second.resolve({ status: "ready", view: final }));
-    await act(async () => first.resolve({ status: "ready", view: ownerView({ memberLevel: "edit" }) }));
-    expect(within(row("m-bo")).getByTestId("settings-members-role").textContent).toBe("Admin");
+    // The answer also shows a change made elsewhere: the link went off.
+    await vi.waitFor(() => expect(screen.getByRole("switch", { name: "Invite link" }).getAttribute("aria-checked")).toBe("false"));
+    expect(screen.getByTestId("settings-members-level-words").textContent).toBe(LEVEL_WORDS.edit);
+    expect(requests()).toEqual([{ action: "list" }, { action: "level", level: "edit" }]);
   });
 
-  it("reads the page again after changes overlap, so it settles on what the server holds", async () => {
-    const linkOff = { inviteLink: { enabled: false, url: null } };
-    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: ownerView(linkOff) }));
-    renderMembers();
-    await screen.findByTestId("settings-members-page");
-    const link = deferred<MembersResult>();
-    const level = deferred<MembersResult>();
-    bridge.workspaceMembers.mockReturnValueOnce(link.promise).mockReturnValueOnce(level.promise);
-    await userEvent.click(screen.getByRole("switch", { name: "Invite link" }));
-    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
-    // The server ran the level change first, then turned the link on.
-    const both = ownerView({ memberLevel: "edit" });
-    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: both }));
-    await act(async () => level.resolve({ status: "ready", view: ownerView({ ...linkOff, memberLevel: "edit" }) }));
-    await act(async () => link.resolve({ status: "ready", view: both }));
-    expect(requests().at(-1)).toEqual({ action: "list" });
-    expect(await screen.findByTestId("settings-members-link-url")).toBeTruthy();
-    expect(screen.getByRole("switch", { name: "Invite link" }).getAttribute("aria-checked")).toBe("true");
-  });
-
-  it("keeps a newer change's view when the reread after overlapping changes fails last", async () => {
-    const linkOff = { inviteLink: { enabled: false, url: null } };
-    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: ownerView(linkOff) }));
-    const { props } = renderMembers();
-    await screen.findByTestId("settings-members-page");
-    const link = deferred<MembersResult>();
-    const level = deferred<MembersResult>();
-    const reread = deferred<MembersResult>();
-    bridge.workspaceMembers.mockReturnValueOnce(link.promise).mockReturnValueOnce(level.promise).mockReturnValueOnce(reread.promise);
-    await userEvent.click(screen.getByRole("switch", { name: "Invite link" }));
-    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
-    const both = ownerView({ memberLevel: "edit" });
-    await act(async () => level.resolve({ status: "ready", view: both }));
-    await act(async () => link.resolve({ status: "ready", view: both }));
-    expect(requests().at(-1)).toEqual({ action: "list" });
-    // The page stays usable while it reads again, and a later change lands first.
-    const promoted = ownerView({ memberLevel: "edit", people: [owner, ana, { ...bo, role: "admin" }, cy, dee] });
-    bridge.workspaceMembers.mockImplementationOnce(async () => ({ status: "ready", view: promoted }));
-    await makeAdmin("m-bo");
-    expect(within(row("m-bo")).getByTestId("settings-members-role").textContent).toBe("Admin");
-    await act(async () => reread.reject(new Error("dohc could not reach your server. Check your connection, then try again.")));
-    expect(screen.queryByTestId("settings-members-failed")).toBeNull();
-    expect(within(row("m-bo")).getByTestId("settings-members-role").textContent).toBe("Admin");
-    expect(props.onError).not.toHaveBeenCalled();
-  });
-
-  it("still reads the page again after overlapping changes when a change from another workspace answers last", async () => {
-    const linkOff = { inviteLink: { enabled: false, url: null } };
-    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: ownerView(linkOff) }));
-    const { rerender } = renderMembers();
-    await screen.findByTestId("settings-members-page");
-    const old = deferred<MembersResult>();
-    bridge.workspaceMembers.mockReturnValueOnce(old.promise);
-    await userEvent.click(screen.getByRole("switch", { name: "Invite link" }));
-    rerender({ workspaceId: "ws-2" });
-    await screen.findByTestId("settings-members-page");
-    const link = deferred<MembersResult>();
-    const level = deferred<MembersResult>();
-    bridge.workspaceMembers.mockReturnValueOnce(link.promise).mockReturnValueOnce(level.promise);
-    await userEvent.click(screen.getByRole("switch", { name: "Invite link" }));
-    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
-    const both = ownerView({ workspaceId: "ws-2", memberLevel: "edit" });
-    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: both }));
-    await act(async () => link.resolve({ status: "ready", view: both }));
-    await act(async () => level.resolve({ status: "ready", view: ownerView({ ...linkOff, workspaceId: "ws-2", memberLevel: "edit" }) }));
-    await act(async () => old.resolve({ status: "ready", view: ownerView() }));
-    expect(requests().at(-1)).toEqual({ action: "list" });
-    expect(await screen.findByTestId("settings-members-link-url")).toBeTruthy();
-  });
-
-  it("still reads the page again when a change from an earlier visit to this workspace answers last", async () => {
+  it("frees the controls when a change from an earlier visit to this workspace answers late", async () => {
     const linkOff = { inviteLink: { enabled: false, url: null } };
     bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: ownerView(linkOff) }));
     const { rerender } = renderMembers();
@@ -315,33 +258,16 @@ describe("Members page", () => {
     const linkSwitch = screen.getByRole("switch", { name: "Invite link" });
     expect(linkSwitch.getAttribute("aria-checked")).toBe("false");
     expect((linkSwitch as HTMLButtonElement).disabled).toBe(false);
-    const link = deferred<MembersResult>();
-    const level = deferred<MembersResult>();
-    bridge.workspaceMembers.mockReturnValueOnce(link.promise).mockReturnValueOnce(level.promise);
-    await userEvent.click(screen.getByRole("switch", { name: "Invite link" }));
-    await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
-    const both = ownerView({ memberLevel: "edit" });
-    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: both }));
-    await act(async () => link.resolve({ status: "ready", view: both }));
-    await act(async () => level.resolve({ status: "ready", view: ownerView({ ...linkOff, memberLevel: "edit" }) }));
-    await act(async () => old.resolve({ status: "ready", view: ownerView(linkOff) }));
-    expect(requests().at(-1)).toEqual({ action: "list" });
-    expect(await screen.findByTestId("settings-members-link-url")).toBeTruthy();
-  });
-
-  it("keeps saying the account left when a change overlapped Leave", async () => {
-    bridge.workspaceMembers.mockImplementation(async () => ({ status: "ready", view: adminView() }));
-    renderMembers();
-    await screen.findByTestId("settings-members-page");
     const level = deferred<MembersResult>();
     bridge.workspaceMembers.mockReturnValueOnce(level.promise);
     await userEvent.click(screen.getByRole("radio", { name: "Edit" }));
-    bridge.workspaceMembers.mockImplementation(async ({ request }) => request.action === "leave" ? { status: "done" } : { status: "refused" });
-    await userEvent.click(screen.getByTestId("settings-members-leave-open"));
-    await userEvent.click(screen.getByTestId("settings-members-confirm"));
-    await act(async () => level.resolve({ status: "ready", view: adminView() }));
-    expect(requests().at(-1)).toEqual({ action: "list" });
-    expect((await screen.findByTestId("settings-members-left")).textContent).toBe("You left Community.");
+    // The old change answering does not free the new one's controls or paint.
+    await act(async () => old.resolve({ status: "ready", view: ownerView() }));
+    expect((screen.getByRole("switch", { name: "Invite link" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByTestId("settings-members-link-url")).toBeNull();
+    await act(async () => level.resolve({ status: "ready", view: ownerView({ ...linkOff, memberLevel: "edit" }) }));
+    expect((screen.getByRole("switch", { name: "Invite link" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByTestId("settings-members-level-words").textContent).toBe(LEVEL_WORDS.edit);
   });
 
   it("warns that copies stay before removing someone, and removes only on confirm", async () => {
@@ -471,16 +397,9 @@ describe("Members page", () => {
   });
 
   it("ends membership after saying it cannot be undone, then says it ended over the owner alone", async () => {
-    // After End, the relay lists the owner alone, with the link off and no name.
+    // End answers the owner alone, with the link off.
     const after = ownerView({ workspaceName: "Community", people: [owner], inviteLink: { enabled: false, url: null } });
-    let ended = false;
-    bridge.workspaceMembers.mockImplementation(async ({ request }) => {
-      if (request.action === "end") {
-        ended = true;
-        return { status: "done" };
-      }
-      return { status: "ready", view: ended ? after : ownerView() };
-    });
+    bridge.workspaceMembers.mockImplementation(async ({ request }) => ({ status: "ready", view: request.action === "list" ? ownerView() : after }));
     const { props } = renderMembers();
     await userEvent.click(await screen.findByTestId("settings-members-end-open"));
     const confirm = screen.getByTestId("settings-members-confirm-end").textContent;
@@ -492,7 +411,7 @@ describe("Members page", () => {
     expect(notice.textContent).toContain("invite them by email or turn on the invite link.");
     expect(document.activeElement).toBe(notice);
     await vi.waitFor(() => expect(within(screen.getByTestId("settings-members-people")).getAllByTestId("settings-members-row")).toHaveLength(1));
-    expect(requests()).toEqual([{ action: "list" }, { action: "end" }, { action: "list" }]);
+    expect(requests()).toEqual([{ action: "list" }, { action: "end" }]);
     expect(screen.queryByTestId("settings-members-end")).toBeNull();
     expect(screen.queryByTestId("settings-members-alone")).toBeNull();
     expect(props.onError).not.toHaveBeenCalled();

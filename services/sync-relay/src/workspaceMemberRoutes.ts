@@ -93,7 +93,7 @@ export function hashWorkspaceInviteToken(token: string, key: string | Uint8Array
 }
 
 type MemberRouteStorage = Pick<SyncRelayStorage,
-  | "readWorkspaceMembers" | "workspaceRoleOf" | "inviteWorkspaceMember" | "setWorkspaceMemberLevel" | "setWorkspaceMemberRole"
+  | "readWorkspaceMembers" | "inviteWorkspaceMember" | "setWorkspaceMemberLevel" | "setWorkspaceMemberRole"
   | "removeWorkspaceMember" | "letWorkspaceMemberBackIn" | "leaveWorkspace" | "endWorkspaceMembership"
   | "changeWorkspaceInviteLink" | "previewWorkspaceJoin" | "joinWorkspace">;
 
@@ -141,7 +141,7 @@ export function createWorkspaceMemberRoutes(options: {
     const people = await Promise.all(shown.map(async (entry): Promise<WorkspacePerson> => ({
       memberId: entry.memberId,
       role: entry.role,
-      state: entry.state === "invited" ? "invited" : entry.state === "active" ? "active" : "removed",
+      state: entry.state,
       name: entry.userId === null ? null : await accountDisplayName(options.lookupUserDisplayName, entry.userId),
       email: !manages ? null : entry.userId === null ? entry.email : await lookupEmail(entry.userId),
       invitedAtMs: entry.invitedAtMs,
@@ -159,18 +159,10 @@ export function createWorkspaceMemberRoutes(options: {
     };
   };
 
-  // The view awaits name and email lookups, and the caller's role can change
-  // meanwhile. Re-read it afterwards and build once more if it moved.
   const respondWithView = async (workspaceId: string, userId: string) => {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const snapshot = storage.readWorkspaceMembers(workspaceId, userId);
-      if (!snapshot) throw notFound();
-      const body = await view(snapshot);
-      const now = storage.workspaceRoleOf(workspaceId, userId);
-      if (!now) throw notFound();
-      if (now.role === snapshot.viewer.role) return jsonResponse(body, 200, { "cache-control": "private, no-store" });
-    }
-    throw notFound();
+    const snapshot = storage.readWorkspaceMembers(workspaceId, userId);
+    if (!snapshot) throw notFound();
+    return jsonResponse(await view(snapshot), 200, { "cache-control": "private, no-store" });
   };
 
   const settle = (result: MemberChangeResult, workspaceId: string) => {
@@ -264,7 +256,7 @@ export function createWorkspaceMemberRoutes(options: {
         // An account being deleted counts as no account: its address gets an email invite.
         if (!result.ok && result.reason === "account-unavailable" && resolved !== null) result = invite(null);
         settle(result, workspaceId);
-        return jsonResponse({ ok: true, memberId: (result as { memberId: string }).memberId }, 200, { "cache-control": "no-store" });
+        return respondWithView(workspaceId, userId);
       }
       case "members-level": {
         if (!isShareAccessValue(input.level)) throw badRequest('level must be "view", "comment", or "edit"');
@@ -301,7 +293,7 @@ export function createWorkspaceMemberRoutes(options: {
         return jsonResponse({ ok: true }, 200, { "cache-control": "no-store" });
       case "members-end":
         settle(storage.endWorkspaceMembership({ workspaceId, actorUserId: userId, nowMs }), workspaceId);
-        return jsonResponse({ ok: true }, 200, { "cache-control": "no-store" });
+        return respondWithView(workspaceId, userId);
     }
   };
 }

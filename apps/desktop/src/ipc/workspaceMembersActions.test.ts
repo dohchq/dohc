@@ -111,15 +111,11 @@ describe("workspace members actions", () => {
     await expect(pending).rejects.toThrow(MEMBERS_INACTIVE_MESSAGE);
   });
 
-  it("invites with the folder's name, then answers the fresh list", async () => {
+  it("invites with the folder's name and answers the view the relay returns, without listing again", async () => {
     const h = harness();
-    h.relay.mockResolvedValueOnce(json({ ok: true, memberId: "m-bo" }));
     await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "invite", email: " bo@test " } }))
-      .resolves.toMatchObject({ status: "ready" });
-    expect(calls(h.relay)).toEqual([
-      'POST /sync/ws-1/members/invites {"email":"bo@test","workspaceName":"Community"}',
-      "GET /sync/ws-1/members",
-    ]);
+      .resolves.toEqual({ status: "ready", view: view() });
+    expect(calls(h.relay)).toEqual(['POST /sync/ws-1/members/invites {"email":"bo@test","workspaceName":"Community"}']);
   });
 
   it("sends each change to its route and answers the view the relay returns", async () => {
@@ -152,9 +148,7 @@ describe("workspace members actions", () => {
 
     await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "level", level: "view" } });
     await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "remove", person: "m-ana" } });
-    h.relay.mockResolvedValueOnce(json({ ok: true, memberId: "m-bo" }));
     await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "invite", email: "bo@test" } });
-    h.relay.mockResolvedValueOnce(json({ ok: true }));
     await h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "end" } });
     expect(h.sharesChanged.mock.calls).toEqual([["ws-1"], ["ws-1"], ["ws-1"], ["ws-1"]]);
   });
@@ -188,10 +182,13 @@ describe("workspace members actions", () => {
       .resolves.toMatchObject({ status: "ready", view: { workspaceName: "Community" } });
   });
 
-  it("answers done after leaving or ending membership", async () => {
+  it("answers the owner's view after ending membership, and done after leaving", async () => {
     const h = harness();
-    h.relay.mockImplementation(async () => json({ ok: true }));
-    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "end" } })).resolves.toEqual({ status: "done" });
+    const alone = view({ workspaceName: "", inviteLink: { enabled: false, url: null }, people: [view().people[0]!] });
+    h.relay.mockResolvedValueOnce(json(alone));
+    await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "end" } }))
+      .resolves.toEqual({ status: "ready", view: { ...alone, workspaceName: "Community" } });
+    h.relay.mockResolvedValueOnce(json({ ok: true }));
     await expect(h.bridge.workspaceMembers({ workspaceId: "ws-1", request: { action: "leave" } })).resolves.toEqual({ status: "done" });
     expect(calls(h.relay)).toEqual(["POST /sync/ws-1/members/end {}", "POST /sync/ws-1/members/leave {}"]);
   });

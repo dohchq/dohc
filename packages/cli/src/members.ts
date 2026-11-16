@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  MAX_MEMBER_EMAIL_CHARS, MEMBER_STATES, WORKSPACE_ROLES, withinWorkspaceSeats,
+  MAX_MEMBER_EMAIL_CHARS, MEMBER_STATES, WORKSPACE_ROLES,
   type InviteLinkAction, type WorkspaceMembersView,
 } from "@dohc/security-contract/workspace-members";
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
@@ -55,16 +55,33 @@ const WorkspacePersonSchema = z.object({
   invitedAtMs: time,
   joinedAtMs: time,
   removedAtMs: time,
-}).strict();
+}).strict().refine(
+  (person) => (person.role === "owner") === (person.memberId === "owner") && (person.role !== "owner" || person.state === "active"),
+  "Only the owner's entry is the owner, and it is active.",
+);
 
+const InviteLinkSchema = z.object({ enabled: z.boolean(), url: z.string().url().max(4096).nullable() }).strict()
+  .refine((link) => link.enabled === (link.url !== null), "An invite link has a URL exactly while it is on.");
+
+/**
+ * The relay's Members answer. A view that breaks a rule is unreadable, never
+ * a narrower answer: the owner and admins get the invite link, and a member
+ * sees only active people and no emails.
+ */
 const WorkspaceMembersViewSchema = z.object({
   workspaceId: z.string().min(1).max(256),
   workspaceName: z.string().max(1024),
   viewer: z.object({ memberId: z.string().min(1).max(256), role: z.enum(WORKSPACE_ROLES) }).strict(),
   memberLevel: level,
-  inviteLink: z.object({ enabled: z.boolean(), url: z.string().url().max(4096).nullable() }).strict().nullable(),
-  people: z.array(WorkspacePersonSchema).refine(withinWorkspaceSeats),
-}).strict() satisfies z.ZodType<WorkspaceMembersView>;
+  inviteLink: InviteLinkSchema.nullable(),
+  people: z.array(WorkspacePersonSchema),
+}).strict().refine(
+  (view) => (view.viewer.role !== "member") === (view.inviteLink !== null),
+  "Only the owner and admins get the invite link.",
+).refine(
+  (view) => view.viewer.role !== "member" || view.people.every((person) => person.email === null && person.state === "active"),
+  "A member sees only active people and no emails.",
+) satisfies z.ZodType<WorkspaceMembersView>;
 
 export const MembersResult = z.discriminatedUnion("status", [
   // The workspace's people as the relay answered them for this account.
@@ -72,7 +89,7 @@ export const MembersResult = z.discriminatedUnion("status", [
   // The relay lists no Members page for this account: membership ended, the
   // account was removed, or the workspace was never shared with members.
   z.object({ status: z.literal("refused") }).strict(),
-  // Leave or end membership finished. There is no page left to show.
+  // Leave finished. This account has no page left to show.
   z.object({ status: z.literal("done") }).strict(),
 ]);
 export type MembersResult = z.infer<typeof MembersResult>;

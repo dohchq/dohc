@@ -423,8 +423,7 @@ const ROLE_WORDS = { owner: "Owner", admin: "Admin", member: "Member" } as const
 // removed accounts, each with the id the other verbs take.
 function renderMembers(result: CliResultByVerb["members"]): string {
   if (result.status === "refused") throw new DohcCliError(MEMBERS_REFUSED);
-  if (result.status === "done")
-    return "Membership ended. Members and admins no longer have access. Copies already on their computers stay.";
+  if (result.status === "done") return "You left this workspace.";
   const { view } = result;
   const row = (person: (typeof view.people)[number]) =>
     [

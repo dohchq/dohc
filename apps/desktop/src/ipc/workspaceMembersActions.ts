@@ -1,6 +1,4 @@
-import {
-  parseWorkspaceMembersView, WORKSPACE_MEMBER_ROUTES, type WorkspaceMembersView,
-} from "@dohc/security-contract/workspace-members";
+import { WORKSPACE_MEMBER_ROUTES } from "@dohc/security-contract/workspace-members";
 import { MembersResult, type MembersRequest } from "@dohc/cli/members";
 import { assertOriginalWorkspace, createOwnerRelayShareOperation } from "./ownerRelayShareHandler";
 
@@ -99,21 +97,22 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
         return { status: response.status, data };
       };
 
-      const readView = (data: unknown): WorkspaceMembersView => {
-        const view = parseWorkspaceMembersView(data);
-        if (!view || view.workspaceId !== workspaceId) {
-          throw new Error(`dohc could not read Members from your server. Try again.`);
+      const ready = (data: unknown): MembersResult => {
+        const parsed = MembersResult.safeParse({ status: "ready", view: data });
+        if (!parsed.success || parsed.data.status !== "ready" || parsed.data.view.workspaceId !== workspaceId) {
+          throw new Error("dohc could not read Members from your server. Try again.");
         }
+        const { view } = parsed.data;
         // With no membership, as before the first invite or after End
         // membership, the relay has no name for the workspace.
-        return view.workspaceName ? view : { ...view, workspaceName };
+        return { status: "ready", view: view.workspaceName ? view : { ...view, workspaceName } };
       };
 
       const list = async (): Promise<MembersResult> => {
         const { status, data } = await call(route(WORKSPACE_MEMBER_ROUTES.view, workspaceId));
         if (status === 403 || status === 404) return { status: "refused" };
         if (status !== 200) throw failure("list", status);
-        return MembersResult.parse({ status: "ready", view: readView(data) });
+        return ready(data);
       };
 
       // An email names an invite or a person; anything else is a member id
@@ -135,29 +134,14 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
       const change = async (path: string, body: unknown): Promise<MembersResult> => {
         const { status, data } = await call(path, body);
         changed(status);
-        return MembersResult.parse({ status: "ready", view: readView(data) });
-      };
-
-      const finish = async (path: string): Promise<MembersResult> => {
-        const { status, data } = await call(path, {});
-        changed(status);
-        if (typeof data !== "object" || data === null || (data as { ok?: unknown }).ok !== true) {
-          throw new Error("dohc could not read your server's answer. Reload Members to check what changed.");
-        }
-        return { status: "done" };
+        return ready(data);
       };
 
       switch (request.action) {
         case "list":
           return list();
-        case "invite": {
-          const { status, data } = await call(route(WORKSPACE_MEMBER_ROUTES.invite, workspaceId), { email: request.email, workspaceName });
-          changed(status);
-          if (typeof data !== "object" || data === null || (data as { ok?: unknown }).ok !== true) {
-            throw new Error("dohc could not read your server's answer. Reload Members to check whether the invite was sent.");
-          }
-          return list();
-        }
+        case "invite":
+          return change(route(WORKSPACE_MEMBER_ROUTES.invite, workspaceId), { email: request.email, workspaceName });
         case "level":
           // The name lets the relay start the membership when there is none.
           return change(route(WORKSPACE_MEMBER_ROUTES.level, workspaceId), { level: request.level, workspaceName });
@@ -170,10 +154,16 @@ export function createWorkspaceMembersActions<Workspace extends MembersWorkspace
         case "link":
           return change(route(WORKSPACE_MEMBER_ROUTES.inviteLink, workspaceId),
             request.change === "turn-off" ? { action: request.change } : { action: request.change, workspaceName });
-        case "leave":
-          return finish(route(WORKSPACE_MEMBER_ROUTES.leave, workspaceId));
+        case "leave": {
+          const { status, data } = await call(route(WORKSPACE_MEMBER_ROUTES.leave, workspaceId), {});
+          changed(status);
+          if (typeof data !== "object" || data === null || (data as { ok?: unknown }).ok !== true) {
+            throw new Error("dohc could not read your server's answer. Reload Members to check whether you left.");
+          }
+          return { status: "done" };
+        }
         case "end":
-          return finish(route(WORKSPACE_MEMBER_ROUTES.end, workspaceId));
+          return change(route(WORKSPACE_MEMBER_ROUTES.end, workspaceId), {});
       }
     }, assertMembersWorkspace, { allowPaused: true });
   };

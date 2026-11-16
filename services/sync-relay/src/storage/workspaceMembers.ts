@@ -1,7 +1,8 @@
-import { randomUUID } from "node:crypto";
 import {
   DEFAULT_MEMBER_LEVEL,
   MAX_WORKSPACE_MEMBERS,
+  memberMay,
+  type MemberAction,
   type MemberLevel,
   type WorkspaceRole,
 } from "@dohc/security-contract/workspace-members";
@@ -18,14 +19,9 @@ import { forgetReplicaCurrentViewCaches } from "../replicaCurrentViewReads";
 // through their member entry. The owner is the workspace's owner
 // (`sync_relay_workspaces.owner_user_id`) and has no entry.
 //
-// Storage holds the entries and grants together:
-// - An active grant on the share needs an entry with that grant: an active
-//   entry for its account, or an invited entry for its email, at the access
-//   the entry's role gives (Edit for an admin, the member level otherwise).
-// - An entry cannot leave, be removed, take another grant, or be deleted while
-//   its grant is still active.
-// The relay revokes the grant first and changes the entry second, in one
-// transaction.
+// Authorization honours a grant on that share only while an active entry
+// holds it at the access the entry's role gives (Edit for an admin, the
+// member level otherwise), so a grant and entry that disagree give no access.
 
 const MARKER = "workspace-members-v1";
 const MEMBERSHIPS = "sync_relay_workspace_memberships";
@@ -33,16 +29,6 @@ const MEMBERS = "sync_relay_workspace_members";
 const INVITE_LINKS = "sync_relay_workspace_invite_links";
 export const WORKSPACE_NAME_MAX_CHARS = 160;
 export const WORKSPACE_SHARE_SELECTOR_JSON = '{"kind":"workspace"}';
-
-const consistentGrant = `NEW.parent_grant_id IS NULL AND EXISTS (
-    SELECT 1 FROM ${MEMBERS} AS m JOIN ${MEMBERSHIPS} AS ms ON ms.workspace_id = m.workspace_id
-    WHERE ms.share_id = NEW.share_id AND m.grant_id = NEW.grant_id
-      AND ((NEW.principal_kind = 'user' AND m.state = 'active' AND m.user_id = NEW.principal_user_id)
-        OR (NEW.principal_kind = 'email' AND m.state = 'invited' AND m.email = NEW.principal_email))
-      AND NEW.access = CASE m.role WHEN 'admin' THEN 'edit' ELSE ms.member_level END)`;
-const onWorkspaceShare = `NEW.status = 'active' AND EXISTS (SELECT 1 FROM ${MEMBERSHIPS} WHERE share_id = NEW.share_id)`;
-const grantStillActive = (grantId: string) =>
-  `EXISTS (SELECT 1 FROM sync_relay_share_grants WHERE grant_id = ${grantId} AND status = 'active')`;
 
 const SCHEMA = {
   [MEMBERSHIPS]: `CREATE TABLE ${MEMBERSHIPS} (
@@ -59,13 +45,13 @@ const SCHEMA = {
   user_id TEXT,
   email TEXT CHECK (email IS NULL OR length(email) BETWEEN 1 AND 320),
   role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
-  state TEXT NOT NULL CHECK (state IN ('invited', 'active', 'left', 'removed')),
+  state TEXT NOT NULL CHECK (state IN ('invited', 'active', 'removed')),
   invited_at_ms INTEGER,
   joined_at_ms INTEGER,
   ended_at_ms INTEGER,
   CHECK ((state = 'invited') = (user_id IS NULL)),
   CHECK (state <> 'invited' OR email IS NOT NULL),
-  CHECK ((state IN ('left', 'removed')) = (ended_at_ms IS NOT NULL)),
+  CHECK ((state = 'removed') = (ended_at_ms IS NOT NULL)),
   CHECK (state <> 'active' OR joined_at_ms IS NOT NULL)
 ) STRICT`,
   idx_sync_relay_workspace_members_account: `CREATE UNIQUE INDEX idx_sync_relay_workspace_members_account
@@ -88,20 +74,6 @@ const SCHEMA = {
     SELECT 1 FROM sync_relay_shares AS s JOIN sync_relay_workspaces AS w ON w.workspace_id = s.workspace_id
     WHERE s.share_id = NEW.share_id AND s.workspace_id = NEW.workspace_id
       AND s.selector_json = '${WORKSPACE_SHARE_SELECTOR_JSON}' AND s.granter_user_id = w.owner_user_id); END`,
-  sync_relay_workspace_member_grant_insert: `CREATE TRIGGER sync_relay_workspace_member_grant_insert
-  BEFORE INSERT ON sync_relay_share_grants WHEN ${onWorkspaceShare} BEGIN
-  SELECT RAISE(ABORT, 'workspace share grant needs a matching member entry') WHERE NOT (${consistentGrant}); END`,
-  sync_relay_workspace_member_grant_update: `CREATE TRIGGER sync_relay_workspace_member_grant_update
-  BEFORE UPDATE ON sync_relay_share_grants WHEN ${onWorkspaceShare} BEGIN
-  SELECT RAISE(ABORT, 'workspace share grant needs a matching member entry') WHERE NOT (${consistentGrant}); END`,
-  sync_relay_workspace_member_ends: `CREATE TRIGGER sync_relay_workspace_member_ends
-  BEFORE UPDATE ON ${MEMBERS}
-  WHEN (NEW.state IN ('left', 'removed') OR NEW.grant_id <> OLD.grant_id) AND ${grantStillActive("OLD.grant_id")} BEGIN
-  SELECT RAISE(ABORT, 'revoke the member grant before ending the entry'); END`,
-  sync_relay_workspace_member_deleted: `CREATE TRIGGER sync_relay_workspace_member_deleted
-  BEFORE DELETE ON ${MEMBERS}
-  WHEN EXISTS (SELECT 1 FROM ${MEMBERSHIPS} WHERE workspace_id = OLD.workspace_id) AND ${grantStillActive("OLD.grant_id")} BEGIN
-  SELECT RAISE(ABORT, 'revoke the member grant before deleting the entry'); END`,
 } as const;
 
 const normalize = (sql: string) => sql.trim().replace(/;$/u, "").replace(/\s+/gu, " ");
@@ -130,7 +102,7 @@ export function initializeWorkspaceMemberSchema(db: SqliteDb): void {
   db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(MARKER, Date.now());
 }
 
-export type StoredMemberState = "invited" | "active" | "left" | "removed";
+export type StoredMemberState = "invited" | "active" | "removed";
 
 export interface WorkspaceMembershipRow {
   workspaceId: string;
@@ -172,7 +144,6 @@ export interface WorkspaceMembersSnapshot {
   ownerUserId: string;
   membership: WorkspaceMembershipRow | null;
   viewer: { role: WorkspaceRole; memberId: string };
-  /** Invited, active, and removed entries. People who left are not listed. */
   members: WorkspaceMemberRow[];
   inviteLink: WorkspaceInviteLinkRow | null;
 }
@@ -247,8 +218,7 @@ function ownerOf(storage: StorageContext, workspaceId: string): string | null {
 
 /**
  * Whether a grant on a workspace share belongs to an active entry at the
- * access its role gives. Authorization asks this for every workspace grant,
- * on top of the triggers that keep the two in step.
+ * access its role gives. Authorization asks this for every workspace grant.
  */
 export function workspaceMemberGrantIsCurrent(storage: StorageContext, shareId: string, grantId: string): boolean {
   return !!storage.db.prepare(
@@ -281,7 +251,7 @@ export function readWorkspaceMembers(storage: StorageContext, workspaceId: strin
     const membership = getWorkspaceMembership(storage, workspaceId);
     const members = membership
       ? storage.db.prepare(
-        `SELECT * FROM ${MEMBERS} WHERE workspace_id = ? AND state <> 'left'
+        `SELECT * FROM ${MEMBERS} WHERE workspace_id = ?
          ORDER BY CASE state WHEN 'active' THEN 0 WHEN 'invited' THEN 1 ELSE 2 END,
            CASE role WHEN 'admin' THEN 0 ELSE 1 END, COALESCE(joined_at_ms, invited_at_ms, ended_at_ms), member_id`,
       ).all(workspaceId).map(rowToMember)
@@ -312,7 +282,17 @@ export type MemberChangeRefusal =
 export type MemberChangeResult<T = Record<never, never>> = ({ ok: true } & T) | { ok: false; reason: MemberChangeRefusal };
 
 const refuse = (reason: MemberChangeRefusal) => ({ ok: false as const, reason });
-const manages = (role: WorkspaceRole) => role === "owner" || role === "admin";
+
+/** Runs a change in one transaction, for a caller whose role allows `action`. */
+function asActor<T>(storage: StorageContext, workspaceId: string, userId: string, action: MemberAction,
+  change: (actor: { role: WorkspaceRole; memberId: string }) => MemberChangeResult<T>): MemberChangeResult<T> {
+  return storage.tx(() => {
+    const actor = workspaceRoleOf(storage, workspaceId, userId);
+    if (!actor) return refuse("not-found");
+    if (!memberMay(actor.role, action)) return refuse("forbidden");
+    return change(actor);
+  });
+}
 
 function accessFor(membership: WorkspaceMembershipRow, role: "admin" | "member"): MemberLevel {
   return role === "admin" ? "edit" : membership.memberLevel;
@@ -372,21 +352,6 @@ function queueAddedNotice(storage: StorageContext, grantId: string, nowMs: numbe
   ).run(grantId, Math.trunc(nowMs));
 }
 
-/** Gives an account's existing entry a fresh grant: a return after leaving, or Let back in. */
-function rejoin(storage: StorageContext, membership: WorkspaceMembershipRow, entry: WorkspaceMemberRow, input: {
-  grantId: string; userId: string; nowMs: number; invited: boolean;
-}): void {
-  storage.db.prepare(
-    `UPDATE ${MEMBERS} SET grant_id = ?, role = 'member', state = 'active', joined_at_ms = ?, ended_at_ms = NULL,
-       invited_at_ms = CASE WHEN ? THEN ? ELSE invited_at_ms END
-     WHERE member_id = ?`,
-  ).run(input.grantId, Math.trunc(input.nowMs), input.invited ? 1 : 0, Math.trunc(input.nowMs), entry.memberId);
-  insertShareGrant(storage, grantFor({
-    grantId: input.grantId, shareId: membership.shareId, access: accessFor(membership, "member"), nowMs: input.nowMs,
-    principal: { kind: "user", userId: input.userId },
-  }));
-}
-
 export function inviteWorkspaceMember(storage: StorageContext, input: {
   workspaceId: string;
   actorUserId: string;
@@ -398,59 +363,38 @@ export function inviteWorkspaceMember(storage: StorageContext, input: {
   newGrantId: () => string;
   newShareId: () => string;
   nowMs: number;
-}): MemberChangeResult<{ memberId: string }> {
-  return storage.tx(() => {
-    const actor = workspaceRoleOf(storage, input.workspaceId, input.actorUserId);
-    if (!actor) return refuse("not-found");
-    if (!manages(actor.role)) return refuse("forbidden");
+}): MemberChangeResult {
+  return asActor(storage, input.workspaceId, input.actorUserId, "invite", () => {
     const ownerUserId = ownerOf(storage, input.workspaceId)!;
-    if (input.recipientUserId === ownerUserId) return refuse("already-member");
-    if (input.recipientUserId !== null && accountIsFenced(storage, input.recipientUserId)) return refuse("account-unavailable");
+    const recipient = input.recipientUserId;
+    if (recipient === ownerUserId) return refuse("already-member");
+    if (recipient !== null && accountIsFenced(storage, recipient)) return refuse("account-unavailable");
     const membership = ensureMembership(storage, { ...input, ownerUserId });
     if (!membership) return refuse("name-required");
     const nowMs = Math.trunc(input.nowMs);
-    if (input.recipientUserId !== null) {
-      const existing = memberByAccount(storage, input.workspaceId, input.recipientUserId);
+    if (recipient !== null) {
+      const existing = memberByAccount(storage, input.workspaceId, recipient);
       if (existing?.state === "active") return refuse("already-member");
       if (existing?.state === "removed") return refuse("removed");
-      if (seatsTaken(storage, input.workspaceId) >= MAX_WORKSPACE_MEMBERS) return refuse("full");
-      const grantId = input.newGrantId();
-      if (existing) {
-        rejoin(storage, membership, existing, { grantId, userId: input.recipientUserId, nowMs, invited: true });
-        queueAddedNotice(storage, grantId, nowMs);
-        forgetReplicaCurrentViewCaches(storage, input.workspaceId);
-        return { ok: true, memberId: existing.memberId };
-      }
-      const memberId = input.newMemberId();
-      storage.db.prepare(
-        `INSERT INTO ${MEMBERS} (member_id, workspace_id, grant_id, user_id, email, role, state, invited_at_ms, joined_at_ms)
-         VALUES (?, ?, ?, ?, NULL, 'member', 'active', ?, ?)`,
-      ).run(memberId, input.workspaceId, grantId, input.recipientUserId, nowMs, nowMs);
-      insertShareGrant(storage, grantFor({
-        grantId, shareId: membership.shareId, access: accessFor(membership, "member"), nowMs,
-        principal: { kind: "user", userId: input.recipientUserId },
-      }));
-      queueAddedNotice(storage, grantId, nowMs);
-      forgetReplicaCurrentViewCaches(storage, input.workspaceId);
-      return { ok: true, memberId };
+    } else if (storage.db.prepare(
+      `SELECT 1 FROM ${MEMBERS} WHERE workspace_id = ? AND state = 'invited' AND email = ?`,
+    ).get(input.workspaceId, input.email)) {
+      return refuse("already-invited");
     }
-    const pending = storage.db.prepare(
-      `SELECT member_id FROM ${MEMBERS} WHERE workspace_id = ? AND state = 'invited' AND email = ?`,
-    ).get(input.workspaceId, input.email);
-    if (pending) return refuse("already-invited");
     if (seatsTaken(storage, input.workspaceId) >= MAX_WORKSPACE_MEMBERS) return refuse("full");
-    const memberId = input.newMemberId();
     const grantId = input.newGrantId();
     storage.db.prepare(
-      `INSERT INTO ${MEMBERS} (member_id, workspace_id, grant_id, user_id, email, role, state, invited_at_ms)
-       VALUES (?, ?, ?, NULL, ?, 'member', 'invited', ?)`,
-    ).run(memberId, input.workspaceId, grantId, input.email, nowMs);
+      `INSERT INTO ${MEMBERS} (member_id, workspace_id, grant_id, user_id, email, role, state, invited_at_ms, joined_at_ms)
+       VALUES (?, ?, ?, ?, ?, 'member', ?, ?, ?)`,
+    ).run(input.newMemberId(), input.workspaceId, grantId, recipient, recipient === null ? input.email : null,
+      recipient === null ? "invited" : "active", nowMs, recipient === null ? null : nowMs);
     insertShareGrant(storage, grantFor({
       grantId, shareId: membership.shareId, access: accessFor(membership, "member"), nowMs,
-      principal: { kind: "email", email: input.email },
+      principal: recipient === null ? { kind: "email", email: input.email } : { kind: "user", userId: recipient },
     }));
     queueAddedNotice(storage, grantId, nowMs);
-    return { ok: true, memberId };
+    if (recipient !== null) forgetReplicaCurrentViewCaches(storage, input.workspaceId);
+    return { ok: true };
   });
 }
 
@@ -473,10 +417,7 @@ export function setWorkspaceMemberLevel(storage: StorageContext, input: {
   workspaceId: string; actorUserId: string; level: MemberLevel;
   workspaceName: string | undefined; newShareId: () => string; nowMs: number;
 }): MemberChangeResult {
-  return storage.tx(() => {
-    const actor = workspaceRoleOf(storage, input.workspaceId, input.actorUserId);
-    if (!actor) return refuse("not-found");
-    if (!manages(actor.role)) return refuse("forbidden");
+  return asActor(storage, input.workspaceId, input.actorUserId, "level", () => {
     const before = ensureMembership(storage, { ...input, ownerUserId: ownerOf(storage, input.workspaceId)!, nowMs: Math.trunc(input.nowMs) });
     if (!before) return refuse("name-required");
     if (before.memberLevel === input.level) return { ok: true };
@@ -490,47 +431,48 @@ export function setWorkspaceMemberLevel(storage: StorageContext, input: {
   });
 }
 
+/** The entry `memberId` names, while it is invited or active. */
+function currentEntry(storage: StorageContext, workspaceId: string, memberId: string) {
+  const membership = getWorkspaceMembership(storage, workspaceId);
+  const entry = membership && memberById(storage, workspaceId, memberId);
+  return membership && entry && (entry.state === "active" || entry.state === "invited") ? { membership, entry } : null;
+}
+
 export function setWorkspaceMemberRole(storage: StorageContext, input: {
   workspaceId: string; actorUserId: string; memberId: string; role: "admin" | "member";
 }): MemberChangeResult {
-  return storage.tx(() => {
-    const actor = workspaceRoleOf(storage, input.workspaceId, input.actorUserId);
-    if (!actor) return refuse("not-found");
-    if (actor.role !== "owner") return refuse("forbidden");
-    const membership = getWorkspaceMembership(storage, input.workspaceId);
-    const entry = membership && memberById(storage, input.workspaceId, input.memberId);
-    if (!membership || !entry || (entry.state !== "active" && entry.state !== "invited")) return refuse("not-found");
-    if (entry.role === input.role) return { ok: true };
-    storage.db.prepare(`UPDATE ${MEMBERS} SET role = ? WHERE member_id = ?`).run(input.role, entry.memberId);
-    retuneGrants(storage, membership, [{ ...entry, role: input.role }]);
+  return asActor(storage, input.workspaceId, input.actorUserId, "role", () => {
+    const found = currentEntry(storage, input.workspaceId, input.memberId);
+    if (!found) return refuse("not-found");
+    if (found.entry.role === input.role) return { ok: true };
+    storage.db.prepare(`UPDATE ${MEMBERS} SET role = ? WHERE member_id = ?`).run(input.role, found.entry.memberId);
+    retuneGrants(storage, found.membership, [{ ...found.entry, role: input.role }]);
     return { ok: true };
   });
 }
 
-function endEntry(storage: StorageContext, membership: WorkspaceMembershipRow, entry: WorkspaceMemberRow, state: "left" | "removed", nowMs: number): void {
+/**
+ * Revokes an entry's grant. A removed account keeps its entry, so it cannot
+ * rejoin through the link. Any other entry, an unclaimed invite or a person
+ * who leaves, is deleted; a person who comes back gets a new entry.
+ */
+function endEntry(storage: StorageContext, membership: WorkspaceMembershipRow, entry: WorkspaceMemberRow, remove: boolean, nowMs: number): void {
   revokeShareGrantInTransaction(storage, { shareId: membership.shareId, grantId: entry.grantId, revokedAtMs: nowMs });
-  if (entry.state === "invited") {
-    // An invite nobody claimed has no account to keep out, so it goes.
+  if (remove && entry.state === "active") {
+    storage.db.prepare(`UPDATE ${MEMBERS} SET state = 'removed', ended_at_ms = ? WHERE member_id = ?`).run(Math.trunc(nowMs), entry.memberId);
+  } else {
     storage.db.prepare(`DELETE FROM ${MEMBERS} WHERE member_id = ?`).run(entry.memberId);
-    return;
   }
-  storage.db.prepare(`UPDATE ${MEMBERS} SET state = ?, ended_at_ms = ? WHERE member_id = ?`)
-    .run(state, Math.trunc(nowMs), entry.memberId);
 }
 
 export function removeWorkspaceMember(storage: StorageContext, input: {
   workspaceId: string; actorUserId: string; memberId: string; nowMs: number;
 }): MemberChangeResult {
-  return storage.tx(() => {
-    const actor = workspaceRoleOf(storage, input.workspaceId, input.actorUserId);
-    if (!actor) return refuse("not-found");
-    if (!manages(actor.role)) return refuse("forbidden");
-    const membership = getWorkspaceMembership(storage, input.workspaceId);
-    const entry = membership && memberById(storage, input.workspaceId, input.memberId);
-    if (!membership || !entry || (entry.state !== "active" && entry.state !== "invited")) return refuse("not-found");
-    // Only the owner removes an admin. An admin removes members and invites.
-    if (entry.role === "admin" && actor.role !== "owner") return refuse("forbidden");
-    endEntry(storage, membership, entry, "removed", input.nowMs);
+  return asActor(storage, input.workspaceId, input.actorUserId, "remove", (actor) => {
+    const found = currentEntry(storage, input.workspaceId, input.memberId);
+    if (!found) return refuse("not-found");
+    if (!memberMay(actor.role, "remove", found.entry.role)) return refuse("forbidden");
+    endEntry(storage, found.membership, found.entry, true, input.nowMs);
     return { ok: true };
   });
 }
@@ -538,40 +480,42 @@ export function removeWorkspaceMember(storage: StorageContext, input: {
 export function letWorkspaceMemberBackIn(storage: StorageContext, input: {
   workspaceId: string; actorUserId: string; memberId: string; newGrantId: () => string; nowMs: number;
 }): MemberChangeResult {
-  return storage.tx(() => {
-    const actor = workspaceRoleOf(storage, input.workspaceId, input.actorUserId);
-    if (!actor) return refuse("not-found");
-    if (!manages(actor.role)) return refuse("forbidden");
+  return asActor(storage, input.workspaceId, input.actorUserId, "letBackIn", () => {
     const membership = getWorkspaceMembership(storage, input.workspaceId);
     const entry = membership && memberById(storage, input.workspaceId, input.memberId);
     if (!membership || !entry || entry.state !== "removed" || entry.userId === null) return refuse("not-found");
     if (accountIsFenced(storage, entry.userId)) return refuse("account-unavailable");
     if (seatsTaken(storage, input.workspaceId) >= MAX_WORKSPACE_MEMBERS) return refuse("full");
+    const nowMs = Math.trunc(input.nowMs);
     const grantId = input.newGrantId();
-    rejoin(storage, membership, entry, { grantId, userId: entry.userId, nowMs: input.nowMs, invited: false });
-    queueAddedNotice(storage, grantId, input.nowMs);
+    storage.db.prepare(
+      `UPDATE ${MEMBERS} SET grant_id = ?, role = 'member', state = 'active', joined_at_ms = ?, ended_at_ms = NULL WHERE member_id = ?`,
+    ).run(grantId, nowMs, entry.memberId);
+    insertShareGrant(storage, grantFor({
+      grantId, shareId: membership.shareId, access: accessFor(membership, "member"), nowMs,
+      principal: { kind: "user", userId: entry.userId },
+    }));
+    queueAddedNotice(storage, grantId, nowMs);
     forgetReplicaCurrentViewCaches(storage, input.workspaceId);
     return { ok: true };
   });
 }
 
+/** Leaving deletes the caller's entry. The owner has no entry, so cannot leave. */
 export function leaveWorkspace(storage: StorageContext, input: { workspaceId: string; userId: string; nowMs: number }): MemberChangeResult {
   return storage.tx(() => {
     const actor = workspaceRoleOf(storage, input.workspaceId, input.userId);
     if (!actor) return refuse("not-found");
     if (actor.role === "owner") return refuse("forbidden");
     const membership = getWorkspaceMembership(storage, input.workspaceId)!;
-    endEntry(storage, membership, memberById(storage, input.workspaceId, actor.memberId)!, "left", input.nowMs);
+    endEntry(storage, membership, memberById(storage, input.workspaceId, actor.memberId)!, false, input.nowMs);
     return { ok: true };
   });
 }
 
 /** Ends membership for everyone: every grant is revoked and the membership, its entries, and its link are gone. */
 export function endWorkspaceMembership(storage: StorageContext, input: { workspaceId: string; actorUserId: string; nowMs: number }): MemberChangeResult {
-  return storage.tx(() => {
-    const actor = workspaceRoleOf(storage, input.workspaceId, input.actorUserId);
-    if (!actor) return refuse("not-found");
-    if (actor.role !== "owner") return refuse("forbidden");
+  return asActor(storage, input.workspaceId, input.actorUserId, "end", () => {
     const membership = getWorkspaceMembership(storage, input.workspaceId);
     if (!membership) return { ok: true };
     revokeShareInTransaction(storage, membership.shareId, input.nowMs);
@@ -590,10 +534,7 @@ export function changeWorkspaceInviteLink(storage: StorageContext, input: {
   mint: (generation: number) => MintedInviteSecret;
   nowMs: number;
 }): MemberChangeResult {
-  return storage.tx(() => {
-    const actor = workspaceRoleOf(storage, input.workspaceId, input.actorUserId);
-    if (!actor) return refuse("not-found");
-    if (!manages(actor.role)) return refuse("forbidden");
+  return asActor(storage, input.workspaceId, input.actorUserId, "link", () => {
     const nowMs = Math.trunc(input.nowMs);
     const ownerUserId = ownerOf(storage, input.workspaceId)!;
     const membership = input.action === "turn-on"
@@ -682,18 +623,14 @@ export function joinWorkspace(storage: StorageContext, input: {
     if (seatsTaken(storage, membership.workspaceId) >= MAX_WORKSPACE_MEMBERS) return { ok: false, reason: "full" };
     const nowMs = Math.trunc(input.nowMs);
     const grantId = input.newGrantId();
-    if (entry) {
-      rejoin(storage, membership, entry, { grantId, userId: input.userId, nowMs, invited: false });
-    } else {
-      storage.db.prepare(
-        `INSERT INTO ${MEMBERS} (member_id, workspace_id, grant_id, user_id, email, role, state, joined_at_ms)
-         VALUES (?, ?, ?, ?, NULL, 'member', 'active', ?)`,
-      ).run(input.newMemberId(), membership.workspaceId, grantId, input.userId, nowMs);
-      insertShareGrant(storage, grantFor({
-        grantId, shareId: membership.shareId, access: accessFor(membership, "member"), nowMs,
-        principal: { kind: "user", userId: input.userId },
-      }));
-    }
+    storage.db.prepare(
+      `INSERT INTO ${MEMBERS} (member_id, workspace_id, grant_id, user_id, email, role, state, joined_at_ms)
+       VALUES (?, ?, ?, ?, NULL, 'member', 'active', ?)`,
+    ).run(input.newMemberId(), membership.workspaceId, grantId, input.userId, nowMs);
+    insertShareGrant(storage, grantFor({
+      grantId, shareId: membership.shareId, access: accessFor(membership, "member"), nowMs,
+      principal: { kind: "user", userId: input.userId },
+    }));
     forgetReplicaCurrentViewCaches(storage, membership.workspaceId);
     return joined;
   });
@@ -713,10 +650,9 @@ export function dropEndedWorkspaceInvitesInTransaction(storage: StorageContext, 
 
 /**
  * Binds the email invites for `email` to `userId`, inside the transaction
- * that claims that email's share grants. Run before the grant claim: the
- * grant triggers then find each entry already active. An account that
- * already has an entry in the workspace keeps that entry and the invite
- * ends, so a removed account stays removed.
+ * that claims that email's share grants. An account that already has an
+ * entry in the workspace keeps that entry and the invite ends, so a removed
+ * account stays removed.
  */
 export function claimWorkspaceInvitesInTransaction(storage: StorageContext, email: string, userId: string, nowMs: number): void {
   dropEndedWorkspaceInvitesInTransaction(storage, email);
@@ -724,17 +660,8 @@ export function claimWorkspaceInvitesInTransaction(storage: StorageContext, emai
     `SELECT * FROM ${MEMBERS} WHERE state = 'invited' AND email = ?`,
   ).all(email).map(rowToMember);
   for (const invite of invites) {
-    const membership = getWorkspaceMembership(storage, invite.workspaceId)!;
-    const owner = ownerOf(storage, invite.workspaceId);
-    const existing = memberByAccount(storage, invite.workspaceId, userId);
-    if (owner === userId || existing) {
-      revokeShareGrantInTransaction(storage, { shareId: membership.shareId, grantId: invite.grantId, revokedAtMs: nowMs });
-      storage.db.prepare(`DELETE FROM ${MEMBERS} WHERE member_id = ?`).run(invite.memberId);
-      if (existing?.state === "left") {
-        const grantId = randomUUID();
-        rejoin(storage, membership, existing, { grantId, userId, nowMs, invited: true });
-        queueAddedNotice(storage, grantId, nowMs);
-      }
+    if (ownerOf(storage, invite.workspaceId) === userId || memberByAccount(storage, invite.workspaceId, userId)) {
+      endEntry(storage, getWorkspaceMembership(storage, invite.workspaceId)!, invite, false, nowMs);
       continue;
     }
     storage.db.prepare(

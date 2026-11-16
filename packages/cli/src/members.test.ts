@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { executeCli } from "./index";
 import { CLI_PROTOCOL_VERSION, cliRequestSchema, parseCliResult } from "./protocol";
 import { parseCliArguments } from "./args";
-import { MAX_WORKSPACE_MEMBERS } from "@dohc/security-contract/workspace-members";
 
 const view = {
   workspaceId: "ws-1", workspaceName: "Community",
@@ -26,7 +25,6 @@ describe("dohc members", () => {
     [["admin", "m-ana"], { action: "role", person: "m-ana", role: "admin" }],
     [["member", "m-ana"], { action: "role", person: "m-ana", role: "member" }],
     [["let-back-in", "m-cy"], { action: "letBackIn", person: "m-cy" }],
-    [["link", "show"], { action: "list" }],
     [["link", "on"], { action: "link", change: "turn-on" }],
     [["link", "off"], { action: "link", change: "turn-off" }],
     [["link", "reset"], { action: "link", change: "reset" }],
@@ -39,7 +37,8 @@ describe("dohc members", () => {
     [["invite"], "Provide an email address."],
     [["invite", "not-an-email"], "Enter an email address."],
     [["level", "owner"], "Choose view, comment, or edit."],
-    [["link", "maybe"], "Choose show, on, off, or reset."],
+    [["link", "maybe"], "Choose on, off, or reset."],
+    [["link", "show"], "Choose on, off, or reset."],
     [["remove"], "Provide a member id or an email."],
     [["end"], "Run dohc members end --everyone to confirm."],
     [["list", "extra"], "members list does not accept"],
@@ -87,12 +86,36 @@ describe("dohc members", () => {
 
   it("pins results to the contract", () => {
     expect(parseCliResult("members", { status: "done" })).toEqual({ status: "done" });
-    const person = (n: number, state: string) => ({ ...view.people[1]!, memberId: `m-${state}-${n}`, role: "member", state, removedAtMs: state === "removed" ? 4 : null });
-    const full = [view.people[0]!, ...Array.from({ length: MAX_WORKSPACE_MEMBERS }, (_, n) => person(n, "active"))];
-    const removed = Array.from({ length: 5 }, (_, n) => person(n, "removed"));
-    expect(parseCliResult("members", { status: "ready", view: { ...view, people: [...full, ...removed] } })).toMatchObject({ status: "ready" });
-    expect(() => parseCliResult("members", { status: "ready", view: { ...view, people: [...full, person(0, "invited")] } })).toThrow();
+    expect(parseCliResult("members", { status: "ready", view })).toMatchObject({ status: "ready" });
     expect(() => parseCliResult("members", { status: "ready", view: { ...view, token: "secret" } })).toThrow();
     expect(() => parseCliResult("members", { status: "refused", view })).toThrow();
+  });
+
+  const owner = view.people[0]!;
+  const sam = { memberId: "m1", role: "member", state: "active", name: "Sam", email: null, invitedAtMs: 2, joinedAtMs: 3, removedAtMs: null };
+  const memberView = { workspaceId: "w1", workspaceName: "Community", viewer: { memberId: "m1", role: "member" }, memberLevel: "comment", inviteLink: null };
+  const ready = (value: unknown) => () => parseCliResult("members", { status: "ready", view: value });
+
+  it("reads a member's view", () => {
+    expect(ready({ ...memberView, people: [{ ...owner, email: null }, sam] })()).toMatchObject({ view: { people: [{ name: "Ice" }, { name: "Sam" }] } });
+  });
+
+  it("refuses a member's view that carries emails, invites, or the invite link", () => {
+    expect(ready({ ...memberView, people: [owner] })).toThrow();
+    expect(ready({ ...memberView, people: [{ ...sam, state: "invited" }] })).toThrow();
+    expect(ready({ ...memberView, inviteLink: { enabled: false, url: null }, people: [] })).toThrow();
+  });
+
+  it("refuses a manager's view without the invite link", () => {
+    expect(ready({ ...view, inviteLink: null })).toThrow();
+  });
+
+  it("refuses an owner entry that is not the owner, an inactive owner, a link that disagrees with itself, and an unreadable level", () => {
+    expect(ready({ ...view, people: [{ ...sam, memberId: "owner" }] })).toThrow();
+    expect(ready({ ...view, people: [{ ...owner, memberId: "m-x" }] })).toThrow();
+    expect(ready({ ...view, people: [{ ...owner, state: "removed" }] })).toThrow();
+    expect(ready({ ...view, inviteLink: { enabled: true, url: null } })).toThrow();
+    expect(ready({ ...view, inviteLink: { enabled: false, url: "https://share.test/join#token" } })).toThrow();
+    expect(ready({ ...view, memberLevel: "Edit" })).toThrow();
   });
 });

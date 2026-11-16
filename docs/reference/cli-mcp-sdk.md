@@ -1160,12 +1160,12 @@ With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, wo
 #### `dohc members link`
 
 ```sh
-dohc members link <show|on|off|reset> [options]
+dohc members link <on|off|reset> [options]
 ```
 
-Show the invite link, turn it on or off, or reset it.
+Turn the invite link on or off, or reset it.
 
-Anyone with the link who signs in becomes a member. Turning it off or resetting it removes no one who already joined. Reset stops the old link working.
+Anyone with the link who signs in becomes a member. Turning it off or resetting it removes no one who already joined. Reset stops the old link working. dohc members list shows the link.
 
 With `--json`, prints `{ schemaVersion, status: "ready", view: { workspaceId, workspaceName, viewer, memberLevel, inviteLink, people } }` or `{ schemaVersion, status: "refused" }` or `{ schemaVersion, status: "done" }`.
 

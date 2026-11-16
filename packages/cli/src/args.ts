@@ -2220,15 +2220,15 @@ export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = withDeclar
         parse: input => personRequest(input, "letBackIn", "members let-back-in"),
       },
       link: {
-        capabilityId: "members.link.change", summary: "Show the invite link, turn it on or off, or reset it.", operands: "<show|on|off|reset>",
-        notes: ["Anyone with the link who signs in becomes a member. Turning it off or resetting it removes no one who already joined. Reset stops the old link working."],
+        capabilityId: "members.link.change", summary: "Turn the invite link on or off, or reset it.", operands: "<on|off|reset>",
+        notes: ["Anyone with the link who signs in becomes a member. Turning it off or resetting it removes no one who already joined. Reset stops the old link working.",
+          "dohc members list shows the link."],
         parse: input => {
           const [change, ...extra] = input.operands; noExtraArgs(extra, "members link");
-          if (change === "show") return { verb: "members", request: { action: "list" } };
           if (change === "on") return { verb: "members", request: { action: "link", change: "turn-on" } };
           if (change === "off") return { verb: "members", request: { action: "link", change: "turn-off" } };
           if (change === "reset") return { verb: "members", request: { action: "link", change: "reset" } };
-          return fail("Choose show, on, off, or reset.");
+          return fail("Choose on, off, or reset.");
         },
       },
       end: {

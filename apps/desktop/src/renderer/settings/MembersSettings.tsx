@@ -2,7 +2,7 @@ import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useSt
 import { CircleCheck, CloudOff, LoaderCircle, LogIn, LogOut, Mail, RotateCcw, Search, ShieldCheck, ShieldOff, UserMinus, UserX } from "lucide-react";
 import { actorHueSlot } from "@dohc/workspace-contracts/actor-presentation";
 import {
-  memberPermissions,
+  memberMay,
   type MemberLevel,
   type WorkspaceMembersView,
   type WorkspacePerson,
@@ -82,9 +82,8 @@ type Load =
   | { status: "refused" }
   | { status: "left"; workspaceName: string };
 
-// What a running action is for: a person's row, or one of the page's controls.
-type PendingKey = string;
-const keyOf = (request: MembersRequest): PendingKey => {
+// What a running change is for: a person's row, or one of the page's controls.
+const keyOf = (request: MembersRequest): string => {
   switch (request.action) {
     case "role":
     case "remove":
@@ -136,49 +135,32 @@ export function MembersSettings(props: {
   report.current = { onError: props.onError, onClearError: props.onClearError };
 
   const [load, setLoad] = useState<{ key: string; load: Load } | null>(null);
-  const [pending, setPending] = useState<{ key: string; items: ReadonlyMap<PendingKey, MembersRequest> } | null>(null);
-  // A change still running from an earlier visit cannot clear its own entry,
-  // so a switch drops them all.
-  useEffect(() => setPending(null), [scopeKey]);
+  // One change runs at a time. Its controls wait, and the view it answers is
+  // what the page shows. The token is the scope it runs in.
+  const [running, setRunning] = useState<MembersRequest | null>(null);
+  const runningIn = useRef<number | null>(null);
+  useEffect(() => {
+    runningIn.current = null;
+    setRunning(null);
+  }, [scopeKey]);
   const [attempt, setAttempt] = useState(0);
   // The owner ended membership here. The page says so above what it lists
   // next, until another change goes through.
   const [ended, setEnded] = useState<string | null>(null);
-  // Views apply in the order their requests went out, so an older answer that
-  // arrives late cannot undo a newer change.
-  const issued = useRef(0);
-  const applied = useRef(0);
-  // Changes still running since the page last switched workspace or account,
-  // and whether two ran at once. The server may run overlapping changes in
-  // either order, so the page reads itself again once they all answer.
-  const changes = useRef<{ token: number; running: number; overlapped: boolean }>({ token: -1, running: 0, overlapped: false });
   const listIdentity = `settings-members:${workspaceId}`;
-
-  const showView = (key: string, order: number, view: WorkspaceMembersView) => {
-    if (order < applied.current) return;
-    applied.current = order;
-    setLoad({ key, load: { status: "ready", view } });
-  };
 
   useEffect(() => {
     if (scopeKey === null) return;
     const token = scope.current();
-    const order = ++issued.current;
-    // A page that lists people, or says this account left, keeps showing it while it reads again.
-    setLoad((current) => (current?.key === scopeKey && (current.load.status === "ready" || current.load.status === "left") ? current : { key: scopeKey, load: { status: "loading" } }));
+    setLoad({ key: scopeKey, load: { status: "loading" } });
     bridge().workspaceMembers({ workspaceId, request: { action: "list" } }).then(
       (result) => {
         if (!scope.isCurrent(token)) return;
         report.current.onClearError?.(listIdentity);
-        if (result.status === "ready") showView(scopeKey, order, result.view);
-        // A page that says this account left keeps saying so.
-        else if (order >= applied.current) {
-          setLoad((current) => (current?.key === scopeKey && current.load.status === "left" ? current : { key: scopeKey, load: { status: "refused" } }));
-        }
+        setLoad({ key: scopeKey, load: result.status === "ready" ? { status: "ready", view: result.view } : { status: "refused" } });
       },
       (cause: unknown) => {
-        // A newer change's view already answers this read.
-        if (!scope.isCurrent(token) || order < applied.current) return;
+        if (!scope.isCurrent(token)) return;
         const message = ipcErrorMessage(cause, FALLBACK.list);
         setLoad({ key: scopeKey, load: { status: "failed", message } });
         report.current.onError?.(message, cause, async () => setAttempt((count) => count + 1), undefined, listIdentity);
@@ -190,31 +172,14 @@ export function MembersSettings(props: {
   const run = useCallback(async (request: MembersRequest): Promise<boolean> => {
     if (scopeKey === null) return false;
     const token = scope.current();
-    const order = ++issued.current;
-    const key = keyOf(request);
-    const identity = `settings-members:${workspaceId}:${key}`;
-    if (changes.current.token !== token) changes.current = { token, running: 0, overlapped: false };
-    const counter = changes.current;
-    if (counter.running > 0) counter.overlapped = true;
-    counter.running += 1;
-    setPending((current) => {
-      const items = new Map(current?.key === scopeKey ? current.items : []);
-      items.set(key, request);
-      return { key: scopeKey, items };
-    });
+    if (runningIn.current === token) return false;
+    runningIn.current = token;
+    setRunning(request);
+    const identity = `settings-members:${workspaceId}:${keyOf(request)}`;
     const settle = () => {
-      counter.running -= 1;
-      if (counter.running === 0 && counter.overlapped) {
-        counter.overlapped = false;
-        if (scope.isCurrent(token)) setAttempt((count) => count + 1);
-      }
-      if (!scope.isCurrent(token)) return;
-      setPending((current) => {
-        if (current?.key !== scopeKey || !current.items.has(key)) return current;
-        const items = new Map(current.items);
-        items.delete(key);
-        return { key: scopeKey, items };
-      });
+      if (runningIn.current !== token) return;
+      runningIn.current = null;
+      setRunning(null);
     };
     let result: MembersResult;
     try {
@@ -233,35 +198,26 @@ export function MembersSettings(props: {
     settle();
     if (!scope.isCurrent(token)) return true;
     report.current.onClearError?.(identity);
-    if (request.action !== "end") setEnded((current) => (current === scopeKey ? null : current));
-    if (result.status === "ready") showView(scopeKey, order, result.view);
+    setEnded(request.action === "end" && result.status === "ready" ? scopeKey : null);
+    if (result.status === "ready") setLoad({ key: scopeKey, load: { status: "ready", view: result.view } });
     else if (result.status === "refused") setLoad({ key: scopeKey, load: { status: "refused" } });
-    else if (request.action === "leave") {
-      applied.current = order;
+    else {
       setLoad((current) => ({
         key: scopeKey,
-        load: { status: "left", workspaceName: current?.load.status === "ready" ? current.load.view.workspaceName : props.workspaceName },
+        load: { status: "left", workspaceName: current?.key === scopeKey && current.load.status === "ready" ? current.load.view.workspaceName : props.workspaceName },
       }));
-    } else {
-      // Ended: the people this page listed are gone, so it shows none of
-      // them while it reads the owner's page again.
-      applied.current = order;
-      setEnded(scopeKey);
-      setLoad({ key: scopeKey, load: { status: "loading" } });
-      setAttempt((count) => count + 1);
     }
     return true;
   }, [scopeKey, workspaceId, props.workspaceName]);
 
   const shown = load?.key === scopeKey ? load.load : { status: "loading" as const };
-  const shownPending = pending?.key === scopeKey ? pending.items : EMPTY_PENDING;
 
   return (
     <div data-testid="settings-members">
       <MembersGateView gate={gate} cloud={props.cloud} onOpenSync={props.onOpenSync}>
         <MembersLoadView
           load={shown}
-          pending={shownPending}
+          running={running}
           workspaceName={props.workspaceName}
           ended={ended !== null && ended === scopeKey}
           onRetry={() => setAttempt((count) => count + 1)}
@@ -272,8 +228,6 @@ export function MembersSettings(props: {
     </div>
   );
 }
-
-const EMPTY_PENDING: ReadonlyMap<PendingKey, MembersRequest> = new Map();
 
 function MembersGateView(props: { gate: MembersGate; cloud: CloudSettings | undefined; onOpenSync: () => void; children: ReactNode }) {
   const { gate, cloud } = props;
@@ -342,7 +296,7 @@ function GateState(props: {
 
 export function MembersLoadView(props: {
   load: Load;
-  pending: ReadonlyMap<PendingKey, MembersRequest>;
+  running: MembersRequest | null;
   workspaceName: string;
   // Membership ended from this page, and nothing has changed since.
   ended?: boolean;
@@ -382,7 +336,7 @@ function MembersLoadState(props: Parameters<typeof MembersLoadView>[0]) {
         </div>
       );
     case "ready":
-      return <MembersPage view={load.view} pending={props.pending} ended={props.ended} run={props.run} />;
+      return <MembersPage view={load.view} running={props.running} ended={props.ended} run={props.run} />;
   }
 }
 
@@ -446,13 +400,14 @@ type Confirm =
 /** The page for a view the relay answered. The states page and tests draw it too. */
 export function MembersPage(props: {
   view: WorkspaceMembersView;
-  pending: ReadonlyMap<PendingKey, MembersRequest>;
+  // The change running now. Every control waits for it.
+  running: MembersRequest | null;
   ended?: boolean | undefined;
   run: (request: MembersRequest) => Promise<boolean>;
 }) {
-  const { view, pending, run } = props;
-  const can = memberPermissions(view.viewer.role);
-  const manages = view.viewer.role !== "member";
+  const { view, running, run } = props;
+  const role = view.viewer.role;
+  const manages = role !== "member";
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [query, setQuery] = useState("");
   const deferredQuery = useDeferredValue(query);
@@ -483,25 +438,24 @@ export function MembersPage(props: {
   const nothingMatches = needle !== "" && shown.active.length + shown.invited.length + shown.removed.length === 0;
   const alone = groups.active.length === 1 && groups.invited.length === 0 && groups.removed.length === 0;
 
-  const busy = (key: PendingKey) => pending.has(key);
-  const pendingLevel = pending.get("level");
-  const pendingLink = pending.get("link");
-  const level = pendingLevel?.action === "level" ? pendingLevel.level : view.memberLevel;
-  const linkOn = pendingLink?.action === "link" ? pendingLink.change !== "turn-off" : (view.inviteLink?.enabled ?? false);
+  const waiting = running !== null;
+  const busy = (key: string) => running !== null && keyOf(running) === key;
+  const level = running?.action === "level" ? running.level : view.memberLevel;
+  const linkOn = running?.action === "link" ? running.change !== "turn-off" : (view.inviteLink?.enabled ?? false);
 
   const rowMenu = (person: WorkspacePerson): MoreMenuItem[] => {
     if (person.memberId === view.viewer.memberId || person.role === "owner") return [];
     if (person.state === "invited") {
-      return can.removeMembers ? [{ label: "Remove invite", danger: true, onSelect: () => void run({ action: "remove", person: person.memberId }) }] : [];
+      return memberMay(role, "remove", person.role) ? [{ label: "Remove invite", danger: true, onSelect: () => void run({ action: "remove", person: person.memberId }) }] : [];
     }
     if (person.state !== "active") return [];
     const items: MoreMenuItem[] = [];
-    if (can.setAdmins) {
+    if (memberMay(role, "role")) {
       items.push(person.role === "admin"
         ? { label: "Make member", onSelect: () => void run({ action: "role", person: person.memberId, role: "member" }) }
         : { label: "Make admin", onSelect: () => setConfirm({ kind: "admin", person }) });
     }
-    if (person.role === "admin" ? can.removeAdmins : can.removeMembers) {
+    if (memberMay(role, "remove", person.role)) {
       items.push({ label: "Remove from workspace", danger: true, onSelect: () => setConfirm({ kind: "remove", person }) });
     }
     return items;
@@ -514,6 +468,7 @@ export function MembersPage(props: {
           <InviteRow
             people={view.people}
             busy={busy("invite")}
+            disabled={waiting}
             onInvite={(email) => run({ action: "invite", email })}
           />
           <SettingRow
@@ -528,7 +483,7 @@ export function MembersPage(props: {
                   label="Invite link"
                   checked={linkOn}
                   busy={busy("link")}
-                  disabled={busy("link")}
+                  disabled={waiting}
                   onChange={(on) => void run({ action: "link", change: on ? "turn-on" : "turn-off" })}
                 />
               </span>
@@ -543,7 +498,7 @@ export function MembersPage(props: {
                   </CopyField>
                 </div>
                 {view.inviteLink.enabled ? (
-                  <SecondaryButton size="row" data-testid="settings-members-link-reset" disabled={busy("link")} onClick={() => setConfirm({ kind: "reset" })}>
+                  <SecondaryButton size="row" data-testid="settings-members-link-reset" disabled={waiting} onClick={() => setConfirm({ kind: "reset" })}>
                     Reset link
                   </SecondaryButton>
                 ) : null}
@@ -572,7 +527,7 @@ export function MembersPage(props: {
                 label="Member level"
                 testId="settings-members-level-control"
                 value={level}
-                disabled={busy("level")}
+                disabled={waiting}
                 options={[
                   { value: "view", label: "View" },
                   { value: "comment", label: "Comment" },
@@ -614,7 +569,7 @@ export function MembersPage(props: {
       <PeopleGroup title="People" count={groups.active.length} shown={shown.active} testId="settings-members-people" first={!filtering}>
         {(person) => (
           <PersonRow key={person.memberId} person={person} viewer={view.viewer.memberId} showEmail={manages} actions={manages}
-            busy={busy(`person:${person.memberId}`)} menu={rowMenu(person)} />
+            busy={busy(`person:${person.memberId}`)} disabled={waiting} menu={rowMenu(person)} />
         )}
       </PeopleGroup>
       {alone && manages && !props.ended ? (
@@ -627,15 +582,15 @@ export function MembersPage(props: {
           <PeopleGroup title="Invites" count={groups.invited.length} shown={shown.invited} testId="settings-members-invites">
             {(person) => (
               <PersonRow key={person.memberId} person={person} viewer={view.viewer.memberId} showEmail actions
-                busy={busy(`person:${person.memberId}`)} menu={rowMenu(person)} />
+                busy={busy(`person:${person.memberId}`)} disabled={waiting} menu={rowMenu(person)} />
             )}
           </PeopleGroup>
           <PeopleGroup title="Removed" count={groups.removed.length} shown={shown.removed} testId="settings-members-removed">
             {(person) => (
               <PersonRow key={person.memberId} person={person} viewer={view.viewer.memberId} showEmail actions
-                busy={busy(`person:${person.memberId}`)} menu={[]}
+                busy={busy(`person:${person.memberId}`)} disabled={waiting} menu={[]}
                 action={
-                  <SecondaryButton size="row" data-testid="settings-members-let-back-in" disabled={busy(`person:${person.memberId}`)}
+                  <SecondaryButton size="row" data-testid="settings-members-let-back-in" disabled={waiting}
                     onClick={() => void run({ action: "letBackIn", person: person.memberId })}>
                     Let back in
                   </SecondaryButton>
@@ -645,20 +600,20 @@ export function MembersPage(props: {
         </>
       ) : null}
 
-      {can.endForEveryone && !alone ? (
+      {memberMay(role, "end") && !alone ? (
         <SettingsSection>
           <SettingRow title="End membership" testId="settings-members-end"
             description="Everyone except you loses access, and this can't be undone. Your workspace stays on this computer.">
-            <SecondaryButton data-testid="settings-members-end-open" disabled={busy("end")} onClick={() => setConfirm({ kind: "end" })}>
+            <SecondaryButton data-testid="settings-members-end-open" disabled={waiting} onClick={() => setConfirm({ kind: "end" })}>
               {busy("end") ? "Ending…" : "End membership"}
             </SecondaryButton>
           </SettingRow>
         </SettingsSection>
-      ) : can.leave ? (
+      ) : role !== "owner" ? (
         <SettingsSection>
           <SettingRow title="Leave this workspace" testId="settings-members-leave"
             description="You lose access until someone invites you again.">
-            <SecondaryButton data-testid="settings-members-leave-open" disabled={busy("leave")} onClick={() => setConfirm({ kind: "leave" })}>
+            <SecondaryButton data-testid="settings-members-leave-open" disabled={waiting} onClick={() => setConfirm({ kind: "leave" })}>
               {busy("leave") ? "Leaving…" : "Leave"}
             </SecondaryButton>
           </SettingRow>
@@ -727,6 +682,7 @@ function displayName(person: WorkspacePerson): string {
 function InviteRow(props: {
   people: readonly WorkspacePerson[];
   busy: boolean;
+  disabled: boolean;
   onInvite: (email: string) => Promise<boolean>;
 }) {
   const [email, setEmail] = useState("");
@@ -757,7 +713,7 @@ function InviteRow(props: {
           className="flex max-w-md flex-col gap-2"
           onSubmit={(event) => {
             event.preventDefault();
-            if (props.busy) return;
+            if (props.disabled) return;
             const problem = check(email);
             setError(problem);
             if (problem) {
@@ -791,7 +747,7 @@ function InviteRow(props: {
               onBlur={() => setError(email.trim() ? check(email) : null)}
               className="h-8 min-w-0 flex-1 rounded-md border border-line bg-bg px-2.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink aria-invalid:border-danger"
             />
-            <PrimaryButton type="submit" data-testid="settings-members-invite-send" disabled={props.busy} className="shrink-0">
+            <PrimaryButton type="submit" data-testid="settings-members-invite-send" disabled={props.disabled} className="shrink-0">
               {props.busy ? "Inviting…" : "Invite"}
             </PrimaryButton>
           </div>
@@ -835,6 +791,8 @@ function PersonRow(props: {
   viewer: string;
   showEmail: boolean;
   busy: boolean;
+  // Another change is running, so this row's controls wait.
+  disabled: boolean;
   menu: readonly MoreMenuItem[];
   // Whether the list has row actions, so a row without one keeps the column.
   actions: boolean;
@@ -884,7 +842,7 @@ function PersonRow(props: {
           <LoaderCircle size={14} aria-hidden className="animate-spin text-subtle" />
         </span>
       ) : props.menu.length > 0 ? (
-        <MoreMenu label={`Actions for ${title}`} items={props.menu} testId="settings-members-row-menu" width={184} topLayer />
+        <MoreMenu label={`Actions for ${title}`} items={props.menu} testId="settings-members-row-menu" width={184} topLayer disabled={props.disabled} />
       ) : props.action || !props.actions ? null : (
         <span aria-hidden className="size-6 shrink-0" />
       )}

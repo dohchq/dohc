@@ -1,5 +1,5 @@
 import { GENERAL_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
-import { parseWorkspaceMembersView, type WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
+import type { WorkspaceMembersView } from "@dohc/security-contract/workspace-members";
 import { afterEach, describe, expect, it } from "vitest";
 import { DiscussionActivityHub } from "./discussionActivity";
 import { fenceAccount, initializeAccountDeletion, purgeAccountRows } from "./storage/accountDeletion";
@@ -112,18 +112,21 @@ async function invite(h: SyncRelayHandler, as: string, email: string, workspaceN
   return post(h, as, `/sync/${WORKSPACE}/members/invites`, { email, ...(workspaceName === null ? {} : { workspaceName }) });
 }
 
+/** Invites an account and answers its member id, from the view the invite answers. */
 async function invited(h: SyncRelayHandler, userId: string, as = OWNER): Promise<string> {
   const response = await invite(h, as, `${userId}@dohc.test`);
   expect(response.status, await response.clone().text()).toBe(200);
-  return (await json(response)).memberId as string;
+  return memberIdOf(await response.json() as WorkspaceMembersView, userId)!;
+}
+
+function memberIdOf(view: WorkspaceMembersView, userId: string): string | undefined {
+  return view.people.find((person) => person.name === `Name ${userId}`)?.memberId;
 }
 
 async function membersView(h: SyncRelayHandler, as: string): Promise<WorkspaceMembersView> {
   const response = await h(request(as, `/sync/${WORKSPACE}/members`));
   expect(response.status, await response.clone().text()).toBe(200);
-  const view = parseWorkspaceMembersView(await response.json());
-  expect(view).not.toBeNull();
-  return view!;
+  return await response.json() as WorkspaceMembersView;
 }
 
 /** The workspace share a person received, or undefined. */
@@ -180,7 +183,7 @@ async function code(response: Response): Promise<unknown> {
 async function inviteLink(h: SyncRelayHandler, as: string, action: string): Promise<string | null> {
   const response = await post(h, as, `/sync/${WORKSPACE}/members/invite-link`, { action, workspaceName: "Community" });
   expect(response.status, await response.clone().text()).toBe(200);
-  const url = parseWorkspaceMembersView(await response.json())!.inviteLink!.url;
+  const url = (await response.json() as WorkspaceMembersView).inviteLink!.url;
   if (url === null) return null;
   expect(url.startsWith(`${SHARE_WEB_ORIGIN}/join#`)).toBe(true);
   return url.slice(`${SHARE_WEB_ORIGIN}/join#`.length);
@@ -317,7 +320,7 @@ describe("what a member reaches", () => {
     const response = await h(request("ana", "/sync/notices"));
     expect(response.status).toBe(200);
     const titles = ((await json(response)).notices as Array<{ title: string }>).map((row) => row.title);
-    expect(titles.some((title) => /added you to Community$/u.test(title))).toBe(true);
+    expect(titles.some((title) => title.endsWith("added you to Community"))).toBe(true);
   });
 
   it("names the owner to a member without the owner's email", async () => {
@@ -427,36 +430,6 @@ describe("who may change members", () => {
     expect((await post(h, "ana", `/sync/${WORKSPACE}/members/level`, { level: "edit" })).status).toBe(404);
   });
 
-  it("answers with the role the caller holds after its lookups, not the one it started with", async () => {
-    let hold: { release: () => void; started: boolean } | null = null;
-    const { h } = await seed({ overrides: {
-      lookupUserEmail: async (userId: string) => {
-        const held = hold;
-        if (held && !held.started) {
-          held.started = true;
-          await new Promise<void>((resolve) => { held.release = resolve; });
-        }
-        return `${userId}@dohc.test`;
-      },
-    } });
-    const ana = await invited(h, "ana");
-    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "admin" })).status).toBe(200);
-    expect(await inviteLink(h, OWNER, "turn-on")).not.toBeNull();
-
-    const gate = { release: () => undefined, started: false };
-    hold = gate;
-    const pending = h(request("ana", `/sync/${WORKSPACE}/members`));
-    await expect.poll(() => gate.started).toBe(true);
-    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/${ana}/role`, { role: "member" })).status).toBe(200);
-    gate.release();
-    const response = await pending;
-    expect(response.status).toBe(200);
-    const view = parseWorkspaceMembersView(await response.json())!;
-    expect(view.viewer.role).toBe("member");
-    expect(view.inviteLink).toBeNull();
-    expect(view.people.every((person) => person.email === null)).toBe(true);
-  });
-
   it("refuses browser cookies from any origin but the share site", async () => {
     const { h } = await seed();
     await invited(h, "ana");
@@ -515,14 +488,25 @@ describe("the invite link", () => {
     expect(await workspaceShare(h, "cara")).toMatchObject({ access: "comment" });
   });
 
-  it("lets a person who left join again through the link", async () => {
+  it("forgets a person who leaves, and lets them back as a new member through the link or an invite", async () => {
     const { h } = await seed();
     const token = await inviteLink(h, OWNER, "turn-on");
     expect((await join(h, "cara", token!)).status).toBe(200);
+    const first = memberIdOf(await membersView(h, OWNER), "cara")!;
     expect((await post(h, "cara", `/sync/${WORKSPACE}/members/leave`)).status).toBe(200);
     expect(await workspaceShare(h, "cara")).toBeUndefined();
+    expect((await membersView(h, OWNER)).people.map((person) => person.memberId)).toEqual(["owner"]);
+    expect((await h(request("cara", `/sync/${WORKSPACE}/members`))).status).toBe(404);
     expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/leave`)).status).toBe(403);
+
     expect((await join(h, "cara", token!)).status).toBe(200);
+    expect(await workspaceShare(h, "cara")).toMatchObject({ access: "comment" });
+    const second = memberIdOf(await membersView(h, OWNER), "cara")!;
+    expect(second).not.toBe(first);
+
+    expect((await post(h, "cara", `/sync/${WORKSPACE}/members/leave`)).status).toBe(200);
+    const third = await invited(h, "cara");
+    expect([first, second]).not.toContain(third);
     expect(await workspaceShare(h, "cara")).toMatchObject({ access: "comment" });
   });
 });
@@ -564,7 +548,9 @@ describe("ending access", () => {
     await invited(h, "ana");
     const shareId = await shareIdOf(h, "ana");
     const token = await inviteLink(h, OWNER, "turn-on");
-    expect((await post(h, OWNER, `/sync/${WORKSPACE}/members/end`)).status).toBe(200);
+    const ended = await post(h, OWNER, `/sync/${WORKSPACE}/members/end`);
+    expect(ended.status).toBe(200);
+    expect((await ended.json() as WorkspaceMembersView).people.map((person) => person.memberId)).toEqual(["owner"]);
     expect((await pull(h, "ana", shareId)).status).toBe(404);
     expect(await workspaceShare(h, "ana")).toBeUndefined();
     expect((await h(request("ana", `/sync/${WORKSPACE}/members`))).status).toBe(404);
@@ -606,6 +592,21 @@ describe("account deletion", () => {
     expect(people.map((person) => person.name)).toEqual(["Name owner", "Name ben", null]);
     expect(people[2]).toMatchObject({ state: "invited", email: "carl@elsewhere.example" });
     expect(await workspaceShare(h, "ben")).toMatchObject({ access: "comment" });
+  });
+
+  it("ends a member's access as soon as their account is fenced, through the check on their entry", async () => {
+    const { h, storage } = await seed();
+    await invited(h, "ana");
+    const shareId = await shareIdOf(h, "ana");
+    const context = storage as unknown as StorageContext;
+    initializeAccountDeletion(context, KEY);
+    fenceAccount(context, KEY, "ana", "ana@dohc.test");
+    // Her entry still reads active until the purge; her grant authorizes nothing.
+    expect(context.db.prepare("SELECT state FROM sync_relay_workspace_members WHERE user_id = 'ana'").get()).toEqual({ state: "active" });
+    expect((await pull(h, "ana", shareId)).status).toBe(404);
+    expect((await h(request("ana", `/sync/${WORKSPACE}/members`))).status).toBe(404);
+    expect(storage.workspaceMemberGrantIsCurrent(shareId,
+      String(context.db.prepare("SELECT grant_id FROM sync_relay_workspace_members WHERE user_id = 'ana'").get()!.grant_id))).toBe(false);
   });
 
   it("ends every member's access when the owner's account is deleted", async () => {
