@@ -195,9 +195,7 @@ describe("workspace members actions", () => {
         workspaceId: "owner-ws",
         viewer: { memberId: "m-kai", role: "admin" },
       });
-      h.relay
-        .mockResolvedValueOnce(json({ ok: true, memberId: "m-new" }))
-        .mockResolvedValueOnce(json(adminView));
+      h.relay.mockResolvedValueOnce(json(adminView));
       await expect(
         h.bridge.workspaceMembers({
           workspaceId: "ws-1",
@@ -206,7 +204,6 @@ describe("workspace members actions", () => {
       ).resolves.toEqual({ status: "ready", view: adminView });
       expect(calls(h.relay)).toEqual([
         `POST /sync/owner-ws/members/invites ${JSON.stringify({ email: "new@test", workspaceName: "Community" })}`,
-        "GET /sync/owner-ws/members",
       ]);
     });
 

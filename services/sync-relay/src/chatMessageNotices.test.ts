@@ -74,7 +74,8 @@ async function seed() {
       .find(row => (row.selector as { kind?: string }).kind === "workspace")!.shareId as string;
     // Opening the joined workspace checks access, as the member's computer does.
     expect((await h(request(userId, `/sync/shares/${shareId}/access`))).status).toBe(200);
-    const memberId = (invited.status === 200 ? (await json(invited)).memberId : null) as string;
+    const memberId = ((await json(invited)).people as Array<{ memberId: string; email: string | null }>)
+      .find((person) => person.email === `${userId}@dohc.test`)!.memberId;
     return {
       shareId,
       memberId,

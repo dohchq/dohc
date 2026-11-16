@@ -67,7 +67,8 @@ async function fixture(level: "view" | "comment" | "edit" = "comment") {
   const planSha = await ownerWrite(relay, "trip/plan.md", "# Plan\n\nLeave at nine.");
   const invite = await relay(request(OWNER, `/sync/${WORKSPACE}/members/invites`, jsonBody({ email: "sam@dohc.test", workspaceName: "Trip" })));
   expect(invite.status, await invite.clone().text()).toBe(200);
-  const memberId = (await json(invite)).memberId as string;
+  const memberId = ((await json(invite)).people as Array<{ memberId: string; email: string | null }>)
+    .find((person) => person.email === "sam@dohc.test")!.memberId;
   if (level !== "comment") {
     const changed = await relay(request(OWNER, `/sync/${WORKSPACE}/members/level`, jsonBody({ level })));
     expect(changed.status, await changed.clone().text()).toBe(200);

@@ -104,7 +104,8 @@ function post(h: SyncRelayHandler, as: string, path: string, body: Record<string
 async function member(h: SyncRelayHandler, storage: SyncRelayStorage, userId: string) {
   const invite = await post(h, OWNER, `/sync/${WORKSPACE}/members/invites`, { email: `${userId}@dohc.test`, workspaceName: "Community" });
   expect(invite.status, await invite.clone().text()).toBe(200);
-  const memberId = (await json(invite)).memberId as string;
+  const memberId = ((await json(invite)).people as Array<{ memberId: string; email: string | null }>)
+    .find((person) => person.email === `${userId}@dohc.test`)!.memberId;
   const shares = await json(await h(request(userId, "/sync/shares")));
   const shareId = (shares.received as Array<Record<string, unknown>>)
     .find(row => (row.selector as { kind?: string }).kind === "workspace")!.shareId as string;
