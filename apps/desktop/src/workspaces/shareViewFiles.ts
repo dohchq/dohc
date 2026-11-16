@@ -61,6 +61,8 @@ import {
 } from "./shareViewRecords";
 import { SHARE_VIEW_REOPEN_MESSAGE, shareViewIdentityIsIntact } from "./shareViewMarker";
 import { shareViewTakesLocalWrites } from "./shareWriteGate";
+import { joinedByAccount } from "../ipc/workspaceMembersActions";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
 import { isEngineTransportFailure } from "./shareViewEngineFailure";
 import { resolveEngineFileTargets } from "./resolveEngineFiles";
 import { createShareViewFileChanges } from "./shareViewFileChanges";
@@ -253,7 +255,23 @@ export interface ShareViewFiles {
 
 export type ShareViewFilesStore = CaptureVersionedTextStore;
 
+/** The signed-in account, as main's credential cache holds it. */
+export interface ShareViewAccount {
+  userId: string;
+  relayUrl?: string;
+}
+
 export interface ShareViewFilesDependencies {
+  /**
+   * The account signed in now, or null when none is. A joined workspace takes
+   * changes only from the account that joined, so `change` asks before it
+   * starts and again just before it commits. `settle` waits for the
+   * credential cache, so a load's passing null never admits a change.
+   */
+  signedInAccount: {
+    settle(): Promise<void>;
+    current(): ShareViewAccount | null;
+  };
   stateFor?(target: ResolvedShareViewFilesTarget): ShareViewFilesState;
   /** Synchronous and registry-derived. It is called again after lifecycle wait. */
   resolveTarget(target: ShareViewFilesTarget): ResolvedShareViewFilesTarget | null;
@@ -402,6 +420,31 @@ function writableSelector(target: ActiveShareViewFilesTarget) {
     );
   }
   return selector;
+}
+
+// A joined workspace's level belongs to the account that joined, so another
+// account signed in changes nothing, as the renderer's other-account state
+// shows. Signed out, a change stays on this computer until that account is
+// back, as the renderer offers.
+function assertJoinedAccount(
+  target: ActiveShareViewFilesTarget,
+  account: ShareViewAccount | null,
+): void {
+  if (
+    target.kind !== "standalone" ||
+    target.ended ||
+    account === null ||
+    recordedShareSelector(target.grantedSelector)?.wholeWorkspace !== true
+  ) {
+    return;
+  }
+  const joined = {
+    ...(target.relayUrl ? { relayUrl: target.relayUrl } : {}),
+    ...(target.recipientUserId ? { recipientUserId: target.recipientUserId } : {}),
+  };
+  if (!joinedByAccount(joined, account)) {
+    throw new SharedFileReadOnlyError(JOINED_BY_ANOTHER_ACCOUNT);
+  }
 }
 
 function assertPathWithinGrant(
@@ -720,6 +763,8 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
     change: ShareViewFileChange,
     selector: NonNullable<ReturnType<typeof recordedShareSelector>>,
     owner: ShareViewFilesOwnerCapability,
+    // Asked again before each commit: an await can pass while the account changes.
+    assertAdmitted: () => void,
   ): Promise<ShareViewFileChangeOutcome> {
     const lifecycle = createShareViewLifecycle(owner);
     if (change.kind === "save" || change.kind === "create") {
@@ -760,6 +805,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
             text: change.text,
             expectedContentHash: change.expectedContentHash,
             shareViewStore: storeResolver,
+            assertAdmitted,
           });
           break;
         case "create":
@@ -767,6 +813,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
             relativePath: change.path,
             initialText: change.initialText,
             shareViewStore: storeResolver,
+            assertAdmitted,
           });
           break;
         case "move":
@@ -774,12 +821,14 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
             fromPath: change.fromPath,
             toPath: change.toPath,
             shareViewStore: storeResolver,
+            assertAdmitted,
           });
           break;
         case "delete":
           value = await fileChanges.deletePath({
             relativePath: change.path,
             shareViewStore: storeResolver,
+            assertAdmitted,
           });
           break;
         case "import":
@@ -788,6 +837,7 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
             screenAgainstRoots: change.screenAgainstRoots,
             targetDir: change.targetDir,
             shareViewStore: storeResolver,
+            assertAdmitted,
             assertPathAllowed: (path) => assertPathWithinGrant(selector, path),
           });
           break;
@@ -1207,9 +1257,14 @@ export function createShareViewFiles(dependencies: ShareViewFilesDependencies): 
         assertLease(lease, target);
         assertActiveTarget(target);
         const selector = writableSelector(target);
-        return withOwnerCapability(lease, target, (owner) =>
-          applyChange(lease, target, change, selector, owner),
-        );
+        await dependencies.signedInAccount.settle();
+        const assertAdmitted = () =>
+          assertJoinedAccount(target, dependencies.signedInAccount.current());
+        assertAdmitted();
+        return withOwnerCapability(lease, target, (owner) => {
+          assertAdmitted();
+          return applyChange(lease, target, change, selector, owner, assertAdmitted);
+        });
       });
     },
 

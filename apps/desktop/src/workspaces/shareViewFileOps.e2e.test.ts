@@ -5,8 +5,12 @@ import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { type CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
+import { JOINED_BY_ANOTHER_ACCOUNT } from "../ipc/joinedAccountWords";
+import { readSharedViewProjectionDebt } from "./sharedView";
+import type { ShareViewAccount, ShareViewFileChange } from "./shareViewFiles";
 import {
   engine,
+  JOINED_RELAY_URL,
   SHARE_ID,
   harness,
   seedSharedFiles,
@@ -221,6 +225,108 @@ describe("share-view file operations through the real store", () => {
         "a create that journals over an occupied path destroys the recipient's own file",
       ).resolves.toBe("mine\n");
       expect(replicationLogRows(view.rootPath)).toBe(journalBefore);
+    },
+    60_000,
+  );
+  it.skipIf(engine.missing)(
+    "refuses a joined workspace's changes while another account is signed in",
+    async () => {
+      const view = await harness("dohc-share-other-account-", "edit");
+      const text = "granter\n";
+      await seedSharedFiles(view, [{ path: "docs/note.md", text }]);
+      const joinedAccount: ShareViewAccount = { userId: "recipient-a", relayUrl: JOINED_RELAY_URL };
+      const otherAccount: ShareViewAccount = { userId: "someone-else", relayUrl: JOINED_RELAY_URL };
+      let signedIn: ShareViewAccount | null = otherAccount;
+      const hash = createHash("sha256").update(text).digest("hex");
+      const changes: ShareViewFileChange[] = [
+        { kind: "save", path: "docs/note.md", text: "other account\n", expectedContentHash: hash },
+        { kind: "create", path: "docs/new.md", initialText: "new\n" },
+        { kind: "move", fromPath: "docs/note.md", toPath: "docs/moved.md" },
+        { kind: "delete", path: "docs/note.md" },
+      ];
+      const unchanged = async (why: string) => {
+        expect(await storePaths(view), why).toEqual(["docs/note.md"]);
+        const main = await view.store.ensureMainVersion({ workspaceId: view.workspaceId });
+        expect(
+          (
+            await view.store.readTextFile({
+              workspaceId: view.workspaceId,
+              versionId: main.id,
+              path: "docs/note.md",
+            })
+          )?.text,
+          why,
+        ).toBe(text);
+        expect(replicationLogRows(view.rootPath), why).toBe(journalBefore);
+        await expect(readFile(join(view.rootPath, "docs", "note.md"), "utf8"), why).resolves.toBe(
+          text,
+        );
+        expect(await exists(join(view.rootPath, "docs", "new.md")), why).toBe(false);
+        expect(await exists(join(view.rootPath, "docs", "moved.md")), why).toBe(false);
+        expect(
+          [...(await readSharedViewProjectionDebt(view.rootPath, SHARE_ID)).pendingPaths],
+          why,
+        ).toEqual([]);
+      };
+      // Settle first, so the projection holds the seeded file and the journal
+      // count below starts from it.
+      await settleShareViewThroughOwner(view, view.store);
+      const journalBefore = replicationLogRows(view.rootPath);
+
+      const owner = shareViewFilesOwner(view, view.store, { account: () => signedIn });
+      for (const change of changes) {
+        await expect(
+          withStaleSensitiveWorkspaceOperation(view.rootPath, (lease) =>
+            owner.files.change(lease, owner.requested, change),
+          ),
+          `a ${change.kind} under another account`,
+        ).rejects.toThrow(JOINED_BY_ANOTHER_ACCOUNT);
+        await unchanged(`a ${change.kind} under another account`);
+      }
+
+      // The joined account starts the change, and another signs in while it
+      // reads the store: the change still commits nothing.
+      let reads = 0;
+      const switching = new Proxy(view.store, {
+        get(target, property, receiver) {
+          const value = Reflect.get(target, property, receiver) as unknown;
+          if (typeof value !== "function") return value;
+          return (...args: unknown[]) => {
+            if (
+              property === "ensureMainVersion" &&
+              signedIn === joinedAccount &&
+              (reads += 1) === 1
+            )
+              signedIn = otherAccount;
+            return (value as (...inner: unknown[]) => unknown).apply(target, args);
+          };
+        },
+      });
+      const switched = shareViewFilesOwner(view, switching, { account: () => signedIn });
+      for (const change of changes) {
+        signedIn = joinedAccount;
+        reads = 0;
+        await expect(
+          withStaleSensitiveWorkspaceOperation(view.rootPath, (lease) =>
+            switched.files.change(lease, switched.requested, change),
+          ),
+          `a ${change.kind} after another account signed in`,
+        ).rejects.toThrow(JOINED_BY_ANOTHER_ACCOUNT);
+        expect(reads, "the switch came after the change started").toBe(1);
+        await unchanged(`a ${change.kind} after another account signed in`);
+      }
+
+      // Back as the account that joined, the same save commits and journals.
+      signedIn = joinedAccount;
+      await expect(
+        withStaleSensitiveWorkspaceOperation(view.rootPath, (lease) =>
+          owner.files.change(lease, owner.requested, changes[0]!),
+        ),
+      ).resolves.toMatchObject({ status: "committed" });
+      expect(replicationLogRows(view.rootPath)).toBeGreaterThan(journalBefore);
+      await expect(readFile(join(view.rootPath, "docs", "note.md"), "utf8")).resolves.toBe(
+        "other account\n",
+      );
     },
     60_000,
   );

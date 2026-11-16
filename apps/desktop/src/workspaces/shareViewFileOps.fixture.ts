@@ -31,6 +31,7 @@ import { readLocalStateFrom } from "./workspaceLocalState";
 import {
   createShareViewFiles,
   type ResolvedShareViewFilesTarget,
+  type ShareViewAccount,
   type ShareViewFileChange,
   type ShareViewFileChangeValue,
 } from "./shareViewFiles";
@@ -187,9 +188,14 @@ export function scope(harnessed: Harness) {
   };
 }
 
+export const JOINED_RELAY_URL = "https://relay.example";
+
 export function shareViewFilesOwner(
   harnessed: Pick<Harness, "workspaceId" | "rootPath">,
   store: CaptureVersionedTextStore,
+  // A joined workspace: the whole workspace at Edit, joined by recipient-a on
+  // JOINED_RELAY_URL, with `account` as the account signed in now.
+  joined?: { account: () => ShareViewAccount | null },
 ) {
   const requested = {
     kind: "standalone" as const,
@@ -203,16 +209,20 @@ export function shareViewFilesOwner(
     shareId: SHARE_ID,
     recipientUserId: "recipient-a",
     granterEmail: "granter@example.com",
-    grantedSelector: {
-      paths: ["docs"],
-      versionId: null,
-      access: "edit" as const,
-    },
+    grantedSelector: joined
+      ? { paths: [], versionId: null, access: "edit" as const, wholeWorkspace: true }
+      : {
+          paths: ["docs"],
+          versionId: null,
+          access: "edit" as const,
+        },
+    ...(joined ? { relayUrl: JOINED_RELAY_URL } : {}),
     ended: false,
   };
   return {
     requested,
     files: createShareViewFiles({
+      signedInAccount: { settle: async () => undefined, current: joined?.account ?? (() => null) },
       resolveTarget: (candidate) =>
         candidate.kind === requested.kind && candidate.workspaceId === requested.workspaceId
           ? resolved

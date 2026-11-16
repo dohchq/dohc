@@ -7853,6 +7853,10 @@ function createShareViewFilesForOperation(operation: DesktopWorkspaceOperation):
         rootPath: target.rootPath,
         ...(target.attachmentId ? { attachmentId: target.attachmentId } : {}),
       }),
+    signedInAccount: {
+      settle: () => warmCredentialCache(),
+      current: () => cachedCredentials,
+    },
     resolveRelay: async (target) => {
       await warmCredentialCache().catch(() => undefined);
       const credentials = cachedCredentials;

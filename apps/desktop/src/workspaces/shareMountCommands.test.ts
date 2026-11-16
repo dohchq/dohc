@@ -80,6 +80,7 @@ async function withLiveMountOwner<T>(
 ): Promise<T> {
   let settled: { ok: true; value: T } | { ok: false; error: unknown } | undefined;
   const files = createShareViewFiles({
+    signedInAccount: { settle: async () => undefined, current: () => null },
     resolveTarget: () => null,
     openStore: () => {
       throw new Error("Live owner test reached the store.");
@@ -1150,6 +1151,7 @@ it("reconciles a revoked mount even when missing-pin detail lookup returns 404",
     localStateOpenAt: async () => ({ current: () => true }),
   });
   const files = createShareViewFiles({
+    signedInAccount: { settle: async () => undefined, current: () => null },
     resolveTarget: () => preparedTarget({ rootPath: mountRoot }),
     openStore: () =>
       ({
@@ -1238,6 +1240,7 @@ async function mountOnDisk(
     localStateOpenAt: async () => ({ current: () => true }),
   });
   const files = createShareViewFiles({
+    signedInAccount: { settle: async () => undefined, current: () => null },
     resolveTarget: () => preparedTarget({ rootPath: mountRoot }),
     openStore: () =>
       ({

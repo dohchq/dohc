@@ -320,7 +320,9 @@ const unusedReconcilePorts: Pick<
   | "assertProjectionRoot"
   | "createMount"
   | "removeMount"
+  | "signedInAccount"
 > = {
+  signedInAccount: { settle: async () => undefined, current: () => null },
   resolveRelay: async () => null,
   pull: async () => {
     throw new Error("Unexpected pull");
@@ -1421,6 +1423,7 @@ describe("ShareViewFiles", () => {
         text: "forged\n",
         expectedContentHash: "not-the-current-hash",
         shareViewStore: () => store,
+        assertAdmitted: () => undefined,
       }),
     ).rejects.toThrow("ownership admission is inactive");
     expect(store.ensureMainVersion).not.toHaveBeenCalled();
@@ -1588,6 +1591,7 @@ describe("ShareViewFiles", () => {
         text: "stale write\n",
         expectedContentHash: "not-current",
         shareViewStore: () => staleStore,
+        assertAdmitted: () => undefined,
       }),
     ).rejects.toThrow("ownership admission is inactive");
     expect(staleStore.ensureMainVersion).not.toHaveBeenCalled();
