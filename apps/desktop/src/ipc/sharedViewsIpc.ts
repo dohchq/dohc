@@ -615,6 +615,16 @@ export function registerSharedViewsIpcHandlers<
           stopClose();
         }
       }
+    } else {
+      // Another account's refresh would capture disk edits into this share
+      // under the wrong session. Signed out, the local refresh still runs.
+      const view = requireWorkspace(input.workspaceId).shareView;
+      const credentials = currentCredentials();
+      if (view && !view.ended && credentials && shareViewIdentityIsIntact(view) &&
+        (!view.relayUrl || !credentials.relayUrl || credentials.userId !== view.recipientUserId ||
+          !relayUrlsMatch(credentials.relayUrl, view.relayUrl))) {
+        return { ok: false, probed: true, changedPaths: 0, errorKind: "unauthorized", errorMessage: "Sign in to the account that received this share." };
+      }
     }
     clearCache(event.sender);
     return withRendererWorkspaceOperation(

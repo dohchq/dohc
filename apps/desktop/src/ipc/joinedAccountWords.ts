@@ -9,6 +9,9 @@ export function joinedByAnother(email: string | null | undefined): string {
 /** Why main refuses a joined workspace's write or read under another account. */
 export const JOINED_BY_ANOTHER_ACCOUNT = joinedByAnother(null);
 
+/** Why main refuses a joined workspace's change that the signed-in session changed under. */
+export const SESSION_CHANGED = "Your server session changed. Try again.";
+
 /** Whether a failure is main's refusal of an account other than the one that joined. */
 export function isJoinedByAnotherAccount(error: unknown): boolean {
   const text = error instanceof Error ? error.message : typeof error === "string" ? error : "";

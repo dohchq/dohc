@@ -799,6 +799,7 @@ import {
 import {
   createShareViewFiles,
   ShareViewFilesState,
+  signedInAccountFrom,
   type ShareViewFiles,
   type ShareViewFilesTarget,
 } from "./workspaces/shareViewFiles";
@@ -7853,10 +7854,7 @@ function createShareViewFilesForOperation(operation: DesktopWorkspaceOperation):
         rootPath: target.rootPath,
         ...(target.attachmentId ? { attachmentId: target.attachmentId } : {}),
       }),
-    signedInAccount: {
-      settle: () => warmCredentialCache(),
-      current: () => cachedCredentials,
-    },
+    signedInAccount: signedInAccountFrom(credentialSessionCache, warmCredentialCache),
     resolveRelay: async (target) => {
       await warmCredentialCache().catch(() => undefined);
       const credentials = cachedCredentials;
@@ -9399,6 +9397,7 @@ function registerIpcHandlers(): void {
     cloudLogin,
     clearCachedCredentials,
     refreshCredentialCache,
+    holdCredentialSessionChange: () => credentialSessionCache.holdChange(),
     warmCredentialCache,
     currentCredentials: () => cachedCredentials,
     localInstallationId,

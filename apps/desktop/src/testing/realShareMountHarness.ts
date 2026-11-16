@@ -75,7 +75,7 @@ export function createRealShareMountHarness(input: {
     logError,
   });
   const files: ShareViewFiles = createShareViewFiles({
-    signedInAccount: { settle: async () => undefined, current: () => null },
+    signedInAccount: { settle: async () => undefined, current: () => ({ account: null, generation: 0, changing: false }) },
     resolveTarget: (target) => resolveRegisteredShareViewFilesTarget(workspace, target),
     openStore: (target) =>
       received.storeFor({

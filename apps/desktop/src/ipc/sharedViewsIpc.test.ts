@@ -984,12 +984,10 @@ describe("registered received-view handlers", () => {
         workspaceId: "existing",
         trigger,
       });
-      if (trigger === "background") {
-        expect(result).toMatchObject({ ok: false, errorKind: "unauthorized" });
-        expect(h.storeFor).not.toHaveBeenCalled();
-        expect(h.reconcile).not.toHaveBeenCalled();
-      }
-      // The pull itself skips another account's share (main's resolveRelay).
+      // Neither refresh reaches the reconcile, which would capture disk edits.
+      expect(result).toMatchObject({ ok: false, errorKind: "unauthorized" });
+      expect(h.storeFor).not.toHaveBeenCalled();
+      expect(h.reconcile).not.toHaveBeenCalled();
       expect(h.fetchInfo).not.toHaveBeenCalled();
       expect(h.recordIdentity).not.toHaveBeenCalled();
       expect(h.setView).not.toHaveBeenCalled();
@@ -1018,14 +1016,24 @@ describe("registered received-view handlers", () => {
     expect(h.notify).not.toHaveBeenCalled();
   });
 
-  it("skips metadata and edit identity on another relay while retaining the local refresh path", async () => {
+  it("refuses a refresh signed in on another relay before metadata, edit identity and the local refresh", async () => {
     const h = await harness();
     h.cache.set({ ...credentials, relayUrl: "https://other.example.test" });
     await expect(
       h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" }),
-    ).resolves.toEqual(outcome);
+    ).resolves.toMatchObject({ ok: false, errorKind: "unauthorized" });
     expect(h.fetchInfo).not.toHaveBeenCalled();
     expect(h.recordIdentity).not.toHaveBeenCalled();
+    expect(h.reconcile).not.toHaveBeenCalled();
+  });
+
+  it("keeps the local refresh path while signed out", async () => {
+    const h = await harness();
+    h.cache.clear();
+    await expect(
+      h.invoke(sharedViewAccessOperations.refreshSharedView.channel, { workspaceId: "existing" }),
+    ).resolves.toEqual(outcome);
+    expect(h.fetchInfo).not.toHaveBeenCalled();
     expect(h.reconcile).toHaveBeenCalledOnce();
   });
 

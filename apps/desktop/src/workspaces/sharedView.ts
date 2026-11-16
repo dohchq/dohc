@@ -1738,6 +1738,9 @@ async function captureSharedViewLocalDivergence(
     allowLocalJournaling: boolean;
     shareId: string;
     beforeCaptureWrite?: (path: string) => Promise<void>;
+    // Asked right before each store write or delete, after capture's awaits.
+    // It throws when the write may no longer land, such as under another account.
+    assertWriteAdmitted?: () => void;
     paths?: readonly string[];
     preservedPaths?: readonly string[] | null;
     bestEffort?: boolean;
@@ -1753,6 +1756,7 @@ async function captureSharedViewLocalDivergence(
     allowLocalJournaling,
     shareId,
     beforeCaptureWrite,
+    assertWriteAdmitted,
     paths,
     preservedPaths = [],
     bestEffort = false,
@@ -2079,6 +2083,7 @@ async function captureSharedViewLocalDivergence(
         return;
       case "write-store":
         if (action.beforeWrite) await beforeCaptureWrite?.(path);
+        assertWriteAdmitted?.();
         await writeDiskContentToStore({
           store,
           workspaceId,
@@ -2088,6 +2093,7 @@ async function captureSharedViewLocalDivergence(
         });
         return;
       case "delete-store":
+        assertWriteAdmitted?.();
         await store.deleteTextFile({
           workspaceId,
           versionId: main.id,
@@ -2373,6 +2379,7 @@ async function captureStandaloneShareViewDivergence(
     preservedPaths?: readonly string[] | null;
     bestEffort?: boolean;
     workspaceLease?: WorkspaceOperationLease;
+    assertWriteAdmitted?: () => void;
   },
   records: ShareViewRecords,
   recoverCollisionRecord = false,
@@ -2394,6 +2401,7 @@ async function captureStandaloneShareViewDivergence(
       preservedPaths: input.preservedPaths,
       bestEffort: input.bestEffort,
       workspaceLease: input.workspaceLease,
+      assertWriteAdmitted: input.assertWriteAdmitted,
     },
     records,
     recoverCollisionRecord,

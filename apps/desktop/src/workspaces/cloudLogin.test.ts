@@ -8,6 +8,7 @@ import {
   type InvalidSessionMarker,
 } from "./cloudLogin";
 import { deferred } from "../testing/deferred";
+import { CredentialSessionCache } from "./credentialSessionCache";
 
 function memoryStore(): CloudLoginStore & {
   saved: CloudCredentials | null;
@@ -725,6 +726,7 @@ describe("completed cloud login session", () => {
     const relayCloseFailure = new Error("relay close failed");
 
     const transition = adoptCompletedCloudLoginSession({
+      holdSessionChange: () => () => undefined,
       clearCachedCredentials() {
         steps.push("clear credentials");
         cachedCredentials = null;
@@ -776,6 +778,7 @@ describe("completed cloud login session", () => {
 
     await expect(
       adoptCompletedCloudLoginSession({
+        holdSessionChange: () => () => undefined,
         clearCachedCredentials() {},
         async stopEngines() {
           throw new Error("cleanup failed");
@@ -803,6 +806,7 @@ describe("completed cloud login session", () => {
     let reconciled = false;
 
     const transition = adoptCompletedCloudLoginSession({
+      holdSessionChange: () => () => undefined,
       clearCachedCredentials() {},
       async stopEngines() {
         throw cleanupFailure;
@@ -824,11 +828,71 @@ describe("completed cloud login session", () => {
     expect(reconciled).toBe(false);
   });
 
+  // The clear leaves the cache empty while the incoming account is already
+  // saved. A joined workspace's change waits on `changeSettled`, so that
+  // interim must hold until the new account is in the cache.
+  it("holds the session change from the clear until the new account is adopted", async () => {
+    const cache = new CredentialSessionCache<{ userId: string }>();
+    cache.set({ userId: "usr_old" });
+    let releaseStop!: () => void;
+    const stopping = new Promise<void>((resolve) => { releaseStop = resolve; });
+    let stopStarted!: () => void;
+    const stopStart = new Promise<void>((resolve) => { stopStarted = resolve; });
+    const transition = adoptCompletedCloudLoginSession({
+      holdSessionChange: () => cache.holdChange(),
+      clearCachedCredentials: () => cache.clear(),
+      async stopEngines() {
+        stopStarted();
+        await stopping;
+      },
+      async closeRelayTransportWorkspaces() {},
+      refreshCredentialCache: () => cache.refresh(async () => ({ userId: "usr_new" })),
+      reconcileCloud() {},
+      notifySessionChanging() {},
+      notifyCloudSessionChanged() {},
+    });
+    await stopStart;
+    expect(cache.snapshot().credentials).toBeNull();
+    expect(cache.changing).toBe(true);
+    let settledAs: string | null | undefined;
+    const waiting = cache.changeSettled().then(() => {
+      settledAs = cache.snapshot().credentials?.userId ?? null;
+    });
+    await Promise.resolve();
+    expect(settledAs).toBeUndefined();
+    releaseStop();
+    await transition;
+    await waiting;
+    expect(settledAs).toBe("usr_new");
+    expect(cache.changing).toBe(false);
+  });
+
+  it("ends the session change when the transition fails", async () => {
+    const cache = new CredentialSessionCache<{ userId: string }>();
+    await expect(
+      adoptCompletedCloudLoginSession({
+        holdSessionChange: () => cache.holdChange(),
+        clearCachedCredentials: () => cache.clear(),
+        async stopEngines() {},
+        async closeRelayTransportWorkspaces() {},
+        async refreshCredentialCache() {
+          throw new Error("refresh failed");
+        },
+        reconcileCloud() {},
+        notifySessionChanging() {},
+        notifyCloudSessionChanged() {},
+      }),
+    ).rejects.toMatchObject({});
+    expect(cache.changing).toBe(false);
+    await cache.changeSettled();
+  });
+
   it("reports a reconciliation failure after refreshing credentials", async () => {
     const reconcileFailure = new Error("reconcile failed");
 
     await expect(
       adoptCompletedCloudLoginSession({
+        holdSessionChange: () => () => undefined,
         clearCachedCredentials() {},
         async stopEngines() {},
         async closeRelayTransportWorkspaces() {},

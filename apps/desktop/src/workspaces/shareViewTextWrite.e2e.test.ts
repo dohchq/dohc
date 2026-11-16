@@ -176,7 +176,7 @@ function shareViewFilesOwner(input: {
     ended: false,
   };
   const files = createShareViewFiles({
-    signedInAccount: { settle: async () => undefined, current: () => null },
+    signedInAccount: { settle: async () => undefined, current: () => ({ account: null, generation: 0, changing: false }) },
     resolveTarget: (candidate) =>
       candidate.kind === requested.kind && candidate.workspaceId === requested.workspaceId
         ? resolved

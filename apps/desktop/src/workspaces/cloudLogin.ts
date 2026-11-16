@@ -77,6 +77,9 @@ export interface CloudLogin {
 }
 
 export interface CompletedCloudLoginSessionOptions {
+  // Held from the clear until the new credentials are adopted or the
+  // transition fails, so the cleared interim never reads as a sign-out.
+  holdSessionChange(): () => void;
   clearCachedCredentials(): void;
   stopEngines(): Promise<void>;
   closeRelayTransportWorkspaces(): Promise<void>;
@@ -96,11 +99,13 @@ export interface CompletedCloudLoginSessionOptions {
 export async function adoptCompletedCloudLoginSession(
   options: CompletedCloudLoginSessionOptions,
 ): Promise<void> {
-  options.clearCachedCredentials();
-  options.notifySessionChanging();
+  const release = options.holdSessionChange();
   try {
+    options.clearCachedCredentials();
+    options.notifySessionChanging();
     await adoptCredentialTransition(options);
   } finally {
+    release();
     options.notifyCloudSessionChanged();
   }
 }

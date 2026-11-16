@@ -104,7 +104,7 @@ async function fixture(mode: "local" | "standalone" | "mount" = "local") {
     ),
   };
   const shareViewFiles = createShareViewFiles({
-    signedInAccount: { settle: async () => undefined, current: () => null },
+    signedInAccount: { settle: async () => undefined, current: () => ({ account: null, generation: 0, changing: false }) },
     resolveTarget: (target) => resolveRegisteredShareViewFilesTarget(workspace, target),
     openStore: () => store as unknown as ShareViewFilesStore,
     resolveRelay: async () => null,

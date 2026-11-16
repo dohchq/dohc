@@ -391,7 +391,7 @@ async function applyOwnedShareViewChange(
     ended: scope.ended ?? false,
   };
   const files = createShareViewFiles({
-    signedInAccount: { settle: async () => undefined, current: () => null },
+    signedInAccount: { settle: async () => undefined, current: () => ({ account: null, generation: 0, changing: false }) },
     resolveTarget: () => resolved,
     openStore: () => scope.shareViewStore(),
     resolveRelay: async () => null,

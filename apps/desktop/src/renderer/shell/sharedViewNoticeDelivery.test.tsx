@@ -259,7 +259,10 @@ it("keeps the burst after a changed probe and delivers a failure after six secon
     ended: false,
   };
   const files = createShareViewFiles({
-    signedInAccount: { settle: async () => undefined, current: () => null },
+    signedInAccount: {
+      settle: async () => undefined,
+      current: () => ({ account: null, generation: 0, changing: false }),
+    },
     resolveTarget: () => target,
     openStore: () => daemon.openStore(target),
     resolveRelay: async () => daemon.relay,
