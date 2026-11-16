@@ -295,7 +295,6 @@ fn read_blocks(
         marks: Marks::default(),
         saved: Vec::new(),
         links: Vec::new(),
-        written_dollar: None,
         image: None,
         annotation: None,
     };
@@ -424,8 +423,6 @@ struct Reader<'a> {
     saved: Vec<Marks>,
     /// Each open link's piece count and source.
     links: Vec<(usize, Range<usize>)>,
-    /// The second backslash of a `\$\$` the writer writes at a line's start.
-    written_dollar: Option<usize>,
     image: Option<Image>,
     annotation: Option<Annotation>,
 }
@@ -642,19 +639,9 @@ impl<'a> Reader<'a> {
     }
 
     fn push_piece(&mut self, piece: Piece, source: &Range<usize>) {
-        // A node can't keep a mark or a link around it. The writer moves
-        // italic, bold and strike into a link's text and keeps a `*` or `~`
-        // there as it is.
-        let unsure = match &piece {
-            Piece::Node(node) => holds_no_marks(node) && !self.marks.writes_as(&Marks::default()),
-            Piece::Text { text, marks, .. } => {
-                marks.link.is_some()
-                    && !marks.code
-                    && (((marks.italic || marks.bold) && text.contains('*'))
-                        || (marks.strike && text.contains('~')))
-            }
-            _ => false,
-        };
+        // A node can't keep a mark or a link around it.
+        let unsure = matches!(&piece, Piece::Node(node)
+            if holds_no_marks(node) && !self.marks.writes_as(&Marks::default()));
         let frame = self.top();
         frame.sealed |= unsure;
         frame.pieces.push(piece);
@@ -928,47 +915,12 @@ impl<'a> Reader<'a> {
             let value = &source[..1];
             let in_cell = matches!(self.top().kind, Kind::Cell);
             let piece_range = range.start..range.start + 1;
-            // The writer escapes text that starts a line where it could open
-            // a block, so that escape reads as the character, as it writes
-            // it back.
-            let backslash = range.start - 1;
-            let line_start = self.line_start(backslash);
-            let starts_line = if first {
-                covered >= backslash
-            } else {
-                covered <= line_start
-                    && self
-                        .strip_containers(&src[line_start..backslash])
-                        .is_empty()
-            };
-            let line_end = src[range.start..]
-                .find('\n')
-                .map_or(src.len(), |newline| range.start + newline);
-            let at_start = starts_line && !matches!(self.top().kind, Kind::Heading(_));
-            let line = &src[range.start..line_end];
-            // `$$` takes a backslash before each `$`.
-            let dollars = at_start
-                && line.starts_with("$\\$")
-                && super::leading_markdown_block_escape_index(&format!("$${}", &line[3..]))
-                    == Some((0, true));
-            if dollars {
-                self.written_dollar = Some(backslash + 2);
-            }
-            let writes_escape = dollars
-                || self.written_dollar == Some(backslash)
-                || (at_start
-                    && super::leading_markdown_block_escape_index(line) == Some((0, false)));
             // The editor reads an escape in a link's text, and a table
             // cell's escaped bar, as the character.
-            if (in_cell && value == "|") || !self.links.is_empty() || writes_escape {
+            if (in_cell && value == "|") || !self.links.is_empty() {
                 self.push_text(value, None, &piece_range);
             } else {
                 let marks = self.marks.clone();
-                // The writer moves white space beside the escape out of the
-                // mark around it.
-                let spaced = src[..range.start - 1].ends_with(char::is_whitespace)
-                    || src[range.start + 1..].starts_with(char::is_whitespace);
-                self.top().sealed |= spaced && !marks.writes_as(&Marks::default());
                 self.push_piece(
                     Piece::Escaped {
                         value: value.to_owned(),
@@ -1578,21 +1530,13 @@ impl<'a> Reader<'a> {
     /// Where no math block can stand (`math` false), such as in a heading or
     /// a cell, a `$$` span is sealed as its source.
     fn inline_pieces(&self, frame: Frame, trailing: Option<Piece>, math: bool) -> Vec<Piece> {
-        let cell = matches!(frame.kind, Kind::Cell);
         let lead = frame
             .content
             .map_or(Vec::new(), |(index, _)| frame.pieces[..index].to_vec());
         let mut pieces = frame.pieces;
         pieces.extend(trailing.clone());
         tag_span_references(&mut pieces, &frame.brackets);
-        let (mut pieces, mut unsure) = inline_syntax(merge(pieces), self.src);
-        // A `[` just before a link's text, once the writer moves the marks
-        // between them into the link, could read as a wikilink's `[[`.
-        unsure |= pieces.windows(2).any(|pair| {
-            matches!(pair, [Piece::Text { text, marks, .. }, Piece::Text { marks: next, .. }]
-                if text.ends_with('[') && marks.link.is_none() && next.link.is_some())
-        });
-        unsure |= delimiter_beside_mark(&pieces);
+        let (mut pieces, unsure) = inline_syntax(merge(pieces), self.src);
         if !math {
             pieces = pieces
                 .into_iter()
@@ -1601,25 +1545,6 @@ impl<'a> Reader<'a> {
                     piece => piece,
                 })
                 .collect();
-        }
-        if cell {
-            // The writer drops a space that starts or ends code in a cell.
-            unsure |= pieces.iter().any(|piece| {
-                matches!(piece, Piece::Text { text, marks, .. } if marks.code
-                    && (text.starts_with(char::is_whitespace) || text.ends_with(char::is_whitespace)))
-            });
-            // The writer escapes text that starts a cell as if it started a
-            // line, where it could open a block.
-            let start: String = pieces
-                .iter()
-                .map_while(|piece| match piece {
-                    Piece::Text { text, marks, .. } if marks.writes_as(&Marks::default()) => {
-                        Some(text.as_str())
-                    }
-                    _ => None,
-                })
-                .collect();
-            unsure |= super::leading_markdown_block_escape_index(&start).is_some();
         }
         let Some((_, start)) = frame.content.filter(|_| frame.sealed || unsure) else {
             return pieces;
@@ -2022,36 +1947,6 @@ fn inline_syntax(pieces: Vec<Piece>, src: &str) -> (Vec<Piece>, bool) {
 
 /// Whether the document drops the marks around this node, which the source
 /// shows on it.
-/// Whether a `*`, `_` or `~` outside code sits just beside where a mark
-/// starts or ends, also at the block's edges. It joins the delimiter run the
-/// writer writes there, or the writer escapes it.
-fn delimiter_beside_mark(pieces: &[Piece]) -> bool {
-    let styled = |marks: &Marks| {
-        (
-            marks.italic,
-            marks.bold,
-            marks.strike,
-            marks.highlight,
-            marks.underline,
-        )
-    };
-    let none = Marks::default();
-    let side = |index: Option<usize>| match index.and_then(|index| pieces.get(index)) {
-        Some(Piece::Text { text, marks, .. }) => {
-            (styled(marks), (!marks.code).then_some(text.as_str()))
-        }
-        _ => (styled(&none), None),
-    };
-    let delimiter = ['*', '_', '~'];
-    (0..=pieces.len()).any(|index| {
-        let (before, end) = side(index.checked_sub(1));
-        let (after, start) = side(Some(index));
-        before != after
-            && (end.is_some_and(|text| text.ends_with(delimiter))
-                || start.is_some_and(|text| text.starts_with(delimiter)))
-    })
-}
-
 fn holds_no_marks(node: &Element) -> bool {
     matches!(node.tag, "wikilink" | "inlineAtom" | "mathInline" | "image")
 }
@@ -2203,7 +2098,7 @@ fn paired(pieces: Vec<Piece>, src: &str, pair: Pair, unsure: &mut bool) -> Vec<P
         Pair::Highlight => "==",
         Pair::Underline => "++",
     };
-    let pairs = pairs(&pieces, src, delimiter, pair, unsure);
+    let pairs = pairs(&pieces, src, delimiter, pair);
     if pairs.is_empty() {
         return pieces;
     }
@@ -2215,10 +2110,6 @@ fn paired(pieces: Vec<Piece>, src: &str, pair: Pair, unsure: &mut bool) -> Vec<P
     let mut out = Vec::with_capacity(pieces.len() + cuts.len());
     let mut next = 0;
     let mut inside = false;
-    // Whether the piece before, inside this pair, is an escape, and whether
-    // it is text ending in white space.
-    let mut escape_before = false;
-    let mut space_before = false;
     for piece in pieces {
         for piece in split(piece, &cuts) {
             let at = match &piece {
@@ -2226,32 +2117,15 @@ fn paired(pieces: Vec<Piece>, src: &str, pair: Pair, unsure: &mut bool) -> Vec<P
                 _ => None,
             };
             match pairs.get(next) {
-                Some(&(open, _)) if !inside && at == Some(open) => {
-                    inside = true;
-                    escape_before = false;
-                    space_before = false;
-                }
+                Some(&(open, _)) if !inside && at == Some(open) => inside = true,
                 Some(&(_, close)) if inside && at == Some(close) => {
                     inside = false;
                     next += 1;
                 }
                 _ if inside => {
-                    let escape = matches!(&piece, Piece::Escaped { .. });
-                    let (starts, ends) = match &piece {
-                        Piece::Text { text, .. } => (
-                            text.starts_with(char::is_whitespace),
-                            text.ends_with(char::is_whitespace),
-                        ),
-                        _ => (false, false),
-                    };
-                    // A node or a formula can't keep the mark, and the writer
-                    // moves white space beside an escape out of it.
+                    // A node or a formula can't keep the mark.
                     *unsure |= matches!(&piece, Piece::DisplayMath { .. })
-                        || matches!(&piece, Piece::Node(node) if holds_no_marks(node))
-                        || (escape && space_before)
-                        || (escape_before && starts);
-                    escape_before = escape;
-                    space_before = ends;
+                        || matches!(&piece, Piece::Node(node) if holds_no_marks(node));
                     out.push(mark(piece, src, pair));
                 }
                 _ => out.push(piece),
@@ -2331,16 +2205,8 @@ fn mark(mut piece: Piece, src: &str, pair: Pair) -> Piece {
 }
 
 /// The source offsets of each delimiter pair, in order. Each pair is found
-/// after the one before it closes. Also whether a delimiter could open but
-/// pairs with none of the later ones, or an underline starts or ends with
-/// white space, which the document can't hold as written.
-fn pairs(
-    pieces: &[Piece],
-    src: &str,
-    delimiter: &str,
-    pair: Pair,
-    unsure: &mut bool,
-) -> Vec<(usize, usize)> {
+/// after the one before it closes.
+fn pairs(pieces: &[Piece], src: &str, delimiter: &str, pair: Pair) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
     let Some(end) = pieces.iter().rev().find_map(|piece| match piece {
         Piece::Text {
@@ -2388,15 +2254,9 @@ fn pairs(
             if !opens {
                 continue;
             }
-            match closing(src, offset, end, delimiter, pair) {
-                Some(close) if inside(close) => {
-                    *unsure |= pair == Pair::Underline
-                        && (src[offset + 2..].starts_with(char::is_whitespace)
-                            || src[..close].ends_with(char::is_whitespace));
-                    pairs.push((offset, close));
-                    search = close + 2;
-                }
-                _ => *unsure |= src[offset + 2..end.max(offset + 2)].contains(delimiter),
+            if let Some(close) = closing(src, offset, end, delimiter, pair).filter(|&close| inside(close)) {
+                pairs.push((offset, close));
+                search = close + 2;
             }
         }
     }
